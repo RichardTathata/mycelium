@@ -457,6 +457,41 @@ pub enum CommitError {
         /// The group this node is not in.
         group: Arc<str>,
     },
+    /// **A safety-sensitive proposal named no electorate group, so nothing was proposed** (post-360
+    /// plan row P2, `docs/design/consensus-electorate.md` §8). The node requires
+    /// (`consensus_require_electorate`) that a lock, a leader election, a consistent write — any
+    /// exclusive outcome — be decided by a group with an electorate declaration, and this proposal's
+    /// scope was the whole cluster (`group: None`) or a group with none. A refusal: declare the
+    /// electorate (`/gateway/govern/electorate`), or name one (`consensus_electorate`).
+    ElectorateNotGoverned {
+        /// The slot.
+        slot: Arc<str>,
+        /// The group proposed to, or `None` for the whole cluster.
+        group: Option<Arc<str>>,
+    },
+    /// **The electorate moved: this proposal's epoch is not the acceptors'** (P2). A refusal; nothing was
+    /// decided by this proposal. Re-read the electorate and retry.
+    ElectorateStale {
+        /// The slot.
+        slot: Arc<str>,
+        /// The electorate group.
+        group: Arc<str>,
+        /// This proposer's epoch.
+        epoch: u64,
+        /// The epoch a member of its electorate reported.
+        seen_epoch: u64,
+    },
+    /// **The electorate and what this node sees disagree, so nothing was proposed** (P2) — a roster that
+    /// differs from the epoch's members, an invalid step, a cross-group proposal over an electorate
+    /// group, or a `consensus_electorate` that disagrees with the fleet's. `detail` says which.
+    ElectorateMismatch {
+        /// The slot.
+        slot: Arc<str>,
+        /// The group concerned, if one.
+        group: Option<Arc<str>>,
+        /// What disagreed.
+        detail: Arc<str>,
+    },
 }
 
 impl std::fmt::Display for CommitError {
@@ -486,6 +521,23 @@ impl std::fmt::Display for CommitError {
             CommitError::NotAMember { slot, group } => write!(
                 f,
                 "not a member: slot {slot} belongs to group {group}, whose roster does not hold this node — nothing was proposed"
+            ),
+            CommitError::ElectorateNotGoverned { slot, group: Some(group) } => write!(
+                f,
+                "electorate not governed: slot {slot} is safety-sensitive and group {group} has no electorate declaration — nothing was proposed"
+            ),
+            CommitError::ElectorateStale { slot, group, epoch, seen_epoch } => write!(
+                f,
+                "electorate stale: slot {slot} on group {group} was proposed at epoch {epoch}, and a member answered for epoch {seen_epoch} — nothing was decided"
+            ),
+            CommitError::ElectorateMismatch { slot, group, detail } => write!(
+                f,
+                "electorate mismatch: slot {slot}{} — {detail}; nothing was proposed",
+                group.as_deref().map(|g| format!(" on group {g}")).unwrap_or_default()
+            ),
+            CommitError::ElectorateNotGoverned { slot, group: None } => write!(
+                f,
+                "electorate not governed: slot {slot} is safety-sensitive and the whole cluster is not an electorate group — nothing was proposed"
             ),
         }
     }

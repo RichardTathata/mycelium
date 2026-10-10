@@ -1146,6 +1146,25 @@ pub struct GossipConfig {
     #[serde(default)]
     pub profile: Option<String>,
 
+    /// **A safety-sensitive proposal requires an electorate group** (post-360 plan row P2,
+    /// `docs/design/consensus-electorate.md` §8). When `true`, a lock, a leader election, a consistent
+    /// write — any proposal marked `ConsensusConfig::safety_sensitive`, or in the `lock/`, `leader/`,
+    /// `consistent/` slot families — whose scope is not a group with an electorate declaration
+    /// (`sys/govern/electorate/{group}`) is refused `ElectorateNotGoverned` before anything is sent.
+    /// `false` (default) runs it as before and counts it. Resolves the guarantee `cons.safety_profile`,
+    /// which `secure-single-domain` rev 3 requires. Env `GOSSIP_CONSENSUS_REQUIRE_ELECTORATE`.
+    #[serde(default)]
+    pub consensus_require_electorate: bool,
+
+    /// **The electorate group the cluster-scoped exclusive verbs decide in** — `distributed_lock`,
+    /// `LockService`, `consistent_set`, `/gateway/overlay/lock/acquire`, `/gateway/overlay/consistent/set`
+    /// and the `/gateway/overlay/log/group/subscribe` claim. `None` (default) proposes to the whole
+    /// cluster, as before. A **group name, never node identities**: which nodes are in it is governance
+    /// (D1). This node must be a member to propose (`NotAMember` otherwise). Env
+    /// `GOSSIP_CONSENSUS_ELECTORATE`; `validate()` refuses an empty name or one with `/`.
+    #[serde(default)]
+    pub consensus_electorate: Option<String>,
+
     /// Outbound egress allow-policy (WS3). Default: empty = allow all. Set
     /// `allow_hosts` to constrain which external hosts the substrate may reach
     /// (the MCP bridge, LLM backends, probes, the federation client, OIDC, object stores,
@@ -1292,6 +1311,8 @@ impl Default for GossipConfig {
             control_min_peers_heard:       1,
             domain_profile:                DomainProfile::Open,
             profile:                       None,
+            consensus_require_electorate:  false,
+            consensus_electorate:          None,
             egress:                        EgressPolicy::default(),
             oidc:                          None,
             tls:                           None,
@@ -1416,6 +1437,13 @@ impl GossipConfig {
             return Err(GossipError::InvalidField {
                 field: "control_min_peers_heard",
                 reason: "must be ≥ 1: a view that heard nobody is not a view".into(),
+            });
+        }
+        if let Some(g) = &self.consensus_electorate
+            && (g.is_empty() || g.contains('/')) {
+            return Err(GossipError::InvalidField {
+                field: "consensus_electorate",
+                reason: format!("{g:?}: a group name, non-empty and without '/'"),
             });
         }
         // Scopes match exactly, or the single wildcard "*". A *family* wildcard such as `llm:*`
@@ -1917,6 +1945,13 @@ impl GossipConfig {
         }
         if let Ok(v) = env::var("GOSSIP_PROFILE") {
             self.profile = Some(v);
+        }
+        if let Ok(v) = env::var("GOSSIP_CONSENSUS_REQUIRE_ELECTORATE") {
+            self.consensus_require_electorate = matches!(v.trim(), "1" | "true" | "yes" | "on");
+        }
+        if let Ok(v) = env::var("GOSSIP_CONSENSUS_ELECTORATE") {
+            let v = v.trim();
+            self.consensus_electorate = (!v.is_empty()).then(|| v.to_string());
         }
         if let Ok(v) = env::var("GOSSIP_DOMAIN_PROFILE") {
             self.domain_profile = v.parse().map_err(|reason| GossipError::InvalidField {

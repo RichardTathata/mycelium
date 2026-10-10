@@ -425,6 +425,29 @@ its leader). The body names the group; join it and retry — `POST /gateway/mesh
 {"ok": false, "error": "not_a_member", "group": "G", "detail": "…"}
 ```
 
+## A lock or an election was refused: `electorate_not_governed`
+
+`POST /gateway/overlay/elect`, `/overlay/lock/acquire` or `/overlay/consistent/set` answering **403
+`electorate_not_governed`** means this node requires an **electorate group** for an exclusive outcome
+(`consensus_require_electorate`, required by `secure-single-domain` rev 4) and the scope was not one — `"group"` names
+an undeclared group, or is `null` for the whole cluster. Nothing was proposed. Declare the group
+(`POST /gateway/govern/electorate {"group":"G"}`, `govern:write`, from a member, every member running the consensus
+listener), and for the lock and consistent-write routes mark one group `"exclusive_default": true`; this node must be
+a member of it ([guide 04 § Discovery is not an electorate](../guide/04-consensus.md#discovery-is-not-an-electorate)).
+
+```json
+{"ok": false, "error": "electorate_not_governed", "group": null, "detail": "…"}
+```
+
+**409 `electorate_mismatch`** — the electorate and this node's view disagree; `detail` says how. Most often the group
+roster differs from the epoch's members (`GET /gateway/govern` lists each electorate's `epoch` and `members`;
+`GET /gateway/mesh/group?group=G` the roster): a node joined or left without a declared step — declare the one-member
+step, or undo the move. `mycelium::electorate_roster_mismatches` counts these. **409 `electorate_stale`** — a member
+holds a later epoch than this proposer; retry. **409 `step_too_large`** from `/gateway/govern/electorate` — the roster is
+more than one member from the electorate: move one node, declare, repeat. A rising
+`mycelium_electorate_records_refused_total` means an electorate record arrived that did not come through the step
+protocol — a forgery, or a write by hand.
+
 ## An election was refused: `electorate_unavailable`
 
 `POST /gateway/overlay/elect` answering **409 `electorate_unavailable`** means the node **did not

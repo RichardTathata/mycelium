@@ -108,6 +108,7 @@
 //! | `sys/govern/fleet`                  | Tuning governor — the fleet tuning intent, written through `POST /gateway/govern/tuning` (`src/agent/tuning_governor.rs`, `GOVERN_FLEET_KEY`) |
 //! | `sys/govern/membership/{group}`     | Membership governor — one evaporating `MembershipIntent` per governed group, written through `POST /gateway/govern/membership` (`src/agent/membership_governor.rs`, `MEMBERSHIP_PREFIX`) |
 //! | `consensus/committed/{slot}`        | Consensus — committed slot state                             |
+//! | `consensus/electorate-cert/{group}/{epoch}` | Electorate certificates (P2) — the signed votes that decided an electorate step `electorate/{group}/{epoch}` (whose value is the `ElectorateDecl` under `consensus/committed/`); written by the step's proposer; a node adopts an epoch only when it verifies (`src/agent/electorate.rs`, `ELECTORATE_CERT_PREFIX`) |
 //! | `consensus/ballot/{slot}`           | Consensus — ballot tracking; kept across commits so ballots stay monotonic (2.30.0) |
 //! | `consensus/decided/{slot}`          | Consensus — the ballot the slot's latest commit was decided at (u64 LE); a floor below which acceptors refuse (2.30.0) |
 //! | `consensus/lease/{slot}`            | Consensus — epoch-lease window (u64 LE ms); written when `ConsensusConfig::committed_lease_secs` is set; expiry is evaluated read-side |
@@ -128,6 +129,7 @@
 //! | `sys/identity/{node}`              | mTLS — 32-byte Ed25519 verifying key history (current‖retained); written at startup by TLS-enabled nodes |
 //! | `sys/identity-proof/{node}`        | identity-auth Phase 2 — `signer_key(32)‖sig(64)` authenticating the identity entry; peers accept a key only if the proof chains to a trusted key (`tls`) |
 //! | `sys/consensus-accepted/{node}/{slot}` | the acceptor's durable record — its promise and acceptance, `0x02‖promised‖promised_to‖accepted_ballot‖digest‖value?` (2.30.0; the pre-2.30.0 40-byte `ballot‖digest` still reads), so a restart cannot break a promise or vote twice at one ballot; self-owned, kept after commit (`consensus`) |
+//! | `sys/consensus-slot-group/{node}/{slot}` | Which electorate group a slot this node answered for belongs to (P2's drain reports a group's slots from it); written on stable storage the first time, self-owned (`kv_ns::CONSENSUS_SLOT_GROUP`) |
 //! | `sys/identity-signed/{node}`       | identity-auth Phase 3b — the **sealed** record: `version(1)‖history‖proof(96)` in ONE entry, so keys and proof can never arrive apart; preferred by readers, and the only form accepted under `require_identity_proofs` (`tls`) |
 //! | `sys/caller-context/{node}`        | v3 item 7 — the node strips + verifies the `GatewayCaller` envelope on its RPC receive path (value `b"1"`, the envelope version); a secure-profile gateway dispatches only to nodes carrying it. Written at start by every node; self-owned (`sys/` tripwire) |
 //! | `sys/membership/removed/{node}`    | closure plan C5 — an operator-signed `SignedMemberRemoval` for `{node}` (JSON), written by the node that accepted it so the removal reaches every member by gossip as well as by direct offer. Verified on ingest; a forged entry has no effect. The removed node's own `sys/` tripwire may count it |
@@ -355,6 +357,7 @@ pub use agent::{
 };
 // Elastic group sizing (Track 2a).
 pub use agent::{MembershipAction, MembershipIntent, MEMBERSHIP_INTENT_TTL_MS, MEMBERSHIP_PREFIX};
+pub use agent::{electorate_records_refused, ElectorateDecl, ElectorateError, ELECTORATE_CERT_PREFIX, ELECTORATE_SLOT_PREFIX, SAFETY_SLOT_FAMILIES};
 // Legible Emergence — fleet diagnostics as data (localize · explain · diagnose). `localize`
 // (`fleet_snapshot`) and `diagnose` (`fleet_diagnosis`) are node-local reads exposed here;
 // `explain` is intentionally gateway-only (`GET /gateway/explain`) — it is a cross-node `sys.explain`
@@ -407,7 +410,7 @@ pub use persistence::DataAtRestCipher;
 pub use persistence::OwnershipLock;
 pub use locality::LocalityPreference;
 #[cfg(feature = "consensus")]
-pub use consensus::{ConsensusConfig, ConsensusListenerHandle, ConsensusResult, GroupQuorum, consensus_kind, consensus_ns};
+pub use consensus::{ConsensusConfig, ConsensusListenerHandle, ConsensusResult, GroupQuorum, consensus_kind, consensus_ns, electorate_roster_mismatches};
 pub use mycelium_core::error::GossipError;
 // The contracts axis' receipt vocabulary (item 1 PR 2) — what an acknowledgement proves, by rung.
 pub use mycelium_core::receipt::{

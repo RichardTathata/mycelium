@@ -66,9 +66,22 @@ counted from each proposer's view, so intersection across a roster change is not
 `consensus/`, and do not make a named node set "the consensus nodes". Enforced today: `resolve_electorate`
 (`src/agent/helpers.rs`, empty or below `MembershipIntent.min` → `ElectorateUnavailable`), `NotAMember` (above), and
 the gateway's `governed_group` refusal on `/gateway/mesh/group` with `/gateway/govern/group` as the audited route
-(`src/agent/http.rs`, `is_governed_group`). Not enforced: an embedded `join_group` or `grp/` write moves a governed
-group by LWW; the opt-in membership governor moves it toward its band; nothing *requires* a governed group for a
-safety-sensitive proposal (post-360 row P2, not built). Also not built: leased-by-default leadership (C1 —
+(`src/agent/http.rs`, `is_governed_group`). **Since P2 (2026-10-10, decision record §8):** an
+**electorate group** (`src/agent/electorate.rs`) is pinned by member identity and epoch: each epoch is a consensus
+decision on `electorate/{group}/{epoch}` — genesis by every member named, a step (one member) by a strict majority of
+the epoch before — certified under `consensus/electorate-cert/`, adopted only when the certificate verifies
+(`ConsensusEngine::electorate_view`). The proposer's door (`electorate_door`) refuses a roster that differs from the
+member set by identity (`ElectorateMismatch`, roster tripwire), counts promises and votes only from the members, and
+holds the quorum at a strict majority; every Prepare/Propose names the epoch and digest (`PrepareIn`/`ProposeIn`), and
+an acceptor (`electorate_admits`) answers only its own — refusing `StaleElectorate` otherwise, and refusing the epoch
+before a step it has promised (the fence) — every claim made inside a `compute` on the group's fence key
+(`claim_gated`), so a step's promise and an ordinary claim are ordered on one key. A step **drains** the epoch it
+leaves: its `StepPrepareAck`s report every slot of the group (`sys/consensus-slot-group/` indexes them, durably) and
+its proposer runs each to completion at the old epoch (`DrainPrepare`/`DrainPropose`, committing nothing) before
+proposing the step — so single-decree safety per slot holds across any number of one-member steps, a chosen-never-
+committed value included (decision record §8.3; bounded at 256 open slots / 4 MiB a report, refused before any fence rises by name past it). The governor
+and the emergent watcher leave an electorate group alone. An embedded `grp/` write is refused at the next proposal,
+not prevented. Also not built: leased-by-default leadership (C1 —
 `elect_leader` proposes with `ConsensusConfig::default()`, `committed_lease_secs: None`, so it commits permanently) and
 collection of acceptor memory (C2 — see the paragraph above); versioned electorates with joint consensus are a later
 plan.

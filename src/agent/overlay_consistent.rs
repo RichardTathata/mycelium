@@ -27,6 +27,15 @@ pub enum ConsistencyError {
     /// vote would be one the electorate does not contain. Nothing was decided; join the group
     /// first. See `ConsensusResult::NotAMember`.
     NotAMember { group: Arc<str> },
+    /// **This exclusive verb named no electorate group**, and the node requires one
+    /// (`consensus_require_electorate`) — `group: None` is the whole cluster. Nothing was decided.
+    /// See `ConsensusResult::ElectorateNotGoverned`.
+    ElectorateNotGoverned { group: Option<Arc<str>> },
+    /// **The electorate moved under this call** (P2): a member answered for another epoch. Nothing was
+    /// decided. See `ConsensusResult::ElectorateStale`.
+    ElectorateStale { group: Arc<str>, epoch: u64, seen_epoch: u64 },
+    /// **The electorate and this node's view disagree** (P2) — see `ConsensusResult::ElectorateMismatch`.
+    ElectorateMismatch { group: Option<Arc<str>>, detail: Arc<str> },
 }
 
 impl std::fmt::Display for ConsistencyError {
@@ -47,6 +56,16 @@ impl std::fmt::Display for ConsistencyError {
             Self::NotAMember { group } =>
                 write!(f, "not a member: this node is not in the roster of group {group}, so it \
                            may not propose to it — join the group first"),
+            Self::ElectorateNotGoverned { group: Some(group) } =>
+                write!(f, "electorate not governed: group {group} has no electorate declaration, and \
+                           this node requires one for an exclusive outcome"),
+            Self::ElectorateStale { group, epoch, seen_epoch } =>
+                write!(f, "electorate stale: group {group} proposed at epoch {epoch}, a member holds epoch {seen_epoch}"),
+            Self::ElectorateMismatch { group, detail } =>
+                write!(f, "electorate mismatch{}: {detail}", group.as_deref().map(|g| format!(" on group {g}")).unwrap_or_default()),
+            Self::ElectorateNotGoverned { group: None } =>
+                write!(f, "electorate not governed: the whole cluster is not an electorate group, and \
+                           this node requires one for an exclusive outcome (set `consensus_electorate`)"),
         }
     }
 }

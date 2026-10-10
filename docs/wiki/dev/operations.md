@@ -33,12 +33,13 @@ the *diagnosis* agrees across nodes, while each keeps its own `view_confidence`)
   against this node *as built and configured*: `enforced` · `not_configured` (the setting or attachment
   named) · `not_in_build` (the feature named) · `not_applicable` (the role fact named — a node with no
   `http_port` does not fail a gateway guarantee) · `not_verifiable_here` (external prerequisites: network
-  confinement, clock sync, the consensus profile — listed, never counted). The same report is logged as
+  confinement, clock sync — listed, never counted; the consensus profile was one until P2 made it the node-enforced
+  `cons.safety_profile`). The same report is logged as
   one block at `start()`, after validation and before traffic (the G13 boundary); an attachment made
   after that is counted (`late_attachments`) and warned about. The strongest sentence it says is *node
   requirements satisfied*, never *deployment verified*. `ConfinementReport` is now a view over it.
   **Profiles (I3):** `GossipConfig::profile` / `GOSSIP_PROFILE` selects `dev` (nothing required, said
-  loudly) or `secure-single-domain` (rev 3, unreleased — eighteen ids pinned by `the_secure_profiles_required_set_is_pinned`; rev 3 added `gw.exposed_closed` (plan P1); rev 2 (v2.21.0) added `id.ca_key_off_node` and `persist.unreadable_refused`, announced in v2.20.0 per G12);
+  loudly) or `secure-single-domain` (rev 4, unreleased — nineteen ids pinned by `the_secure_profiles_required_set_is_pinned`; rev 4 added `cons.safety_profile` (`consensus_require_electorate`, plan P2), rev 3 `gw.exposed_closed` (plan P1); rev 2 (v2.21.0) added `id.ca_key_off_node` and `persist.unreadable_refused`, announced in v2.20.0 per G12);
   under a profile `start()` refuses by name when a required guarantee is not `enforced` or
   `not_applicable` (`guarantee::check`), an unknown required id refuses, and an unknown name fails
   `validate()`. The report carries the profile, its revision and its required set.

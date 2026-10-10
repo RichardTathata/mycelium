@@ -76,6 +76,88 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`mycelium::OwnershipLock`** — the core's exclusive-ownership lock on `<file>.lock` (held by the KV WAL and the
   node-local journals), re-exported so a companion's own log refuses a second owner the same way. The tuple space
   and the blackboard take it on their WALs (row C, above). Additive.
+- **A consensus electorate is a governed group, pinned by identity and epoch** (post-360 plan row P2;
+  `docs/design/consensus-electorate.md` §8, revised after #601's adversarial review). An **electorate group**'s
+  electorate is an `ElectorateDecl { group, epoch, members, exclusive_default }`, and every epoch is a consensus
+  decision on `electorate/{group}/{epoch}`: **genesis** names the roster and is decided by every member it names; a
+  **step** adds or removes one member and is decided by a strict majority of the epoch before it — two concurrent
+  steps are one slot, a non-member's step is refused at its door and by every acceptor. Each commit carries a
+  certificate of the deciding votes (`consensus/electorate-cert/`, signed under `[tls]`), and a node adopts an epoch
+  only when it verifies: a record written straight into the store is not adopted and is counted
+  (`mycelium::electorate_records_refused`). `GossipAgent::declare_electorate(group, exclusive_default)` /
+  `POST /gateway/govern/electorate` (`govern:write`, audited only when a step is decided; `409 step_too_large`,
+  `403 not_a_member`, `409 not_decided`) proposes the next epoch from the roster. A proposal to an electorate group
+  is refused `ElectorateMismatch` unless the roster equals the epoch's members **by identity** (counted:
+  `mycelium::electorate_roster_mismatches`); promises and votes count only from the members; the quorum is a strict
+  majority whatever `quorum_size` or opacity say; and every Prepare/Propose names the epoch and digest
+  (`ConsensusMsg::PrepareIn`/`ProposeIn`, appended — wire v12): an acceptor answers only its own epoch, refusing
+  `StaleElectorate` otherwise and refusing the epoch before a step it has accepted, so a proposer two steps behind
+  cannot gather a quorum from current members (`ElectorateStale`). The governor and the emergent watcher leave an
+  electorate group alone; `/gateway/mesh/group` refuses it `403 governed_group`. **`consensus_require_electorate`**
+  (env `GOSSIP_CONSENSUS_REQUIRE_ELECTORATE`, default off) refuses a **safety-sensitive** proposal —
+  `ConsensusConfig::safety_sensitive`, or `lock/`, `leader/`, `consistent/`, `electorate/` — outside an electorate
+  group, **`ConsensusResult::ElectorateNotGoverned`** (`403 electorate_not_governed`); off, it runs as before, counted.
+  The cluster-scoped exclusive verbs — `distributed_lock`, `LockService`, `consistent_set`, the lock, consistent and
+  log-claim routes, `mycelium-commitment`'s linearizable award, `set_capability_authz_via_consensus` — decide in the
+  group marked `exclusive_default` (a fleet record), via the new `ConsensusHandle::exclusive_propose[_receipt]`;
+  `consensus_electorate` only restates it, and a disagreeing setting is refused. A cross-group proposal naming an
+  electorate group is refused; the gateway's cross-group route takes `safety_sensitive`. `cons.safety_profile` (rev 2)
+  is node-enforced and **`secure-single-domain` rev 4** requires it (rev 3 is P1's `gw.exposed_closed`). **What holds:** single-decree safety per slot
+  across any number of one-member steps — **drain before step** (round 2 of #601's review): a step's promise fences its
+  acceptor and answers with a `StepPrepareAck` reporting every slot of the group (indexed durably under
+  `sys/consensus-slot-group/`); the step's proposer runs each reported slot to completion at the old epoch
+  (`DrainPrepare`/`DrainPropose`, committing nothing) before proposing the step, so a value chosen and never committed
+  survives any number of steps. Every claim — promise or acceptance, an acceptor's or the proposer's own — is made
+  inside a `compute` on the group's fence key, so a proposer fenced mid-ballot stops (`ElectorateStale`). A
+  fleet-exclusive slot (`lock/`, `consistent/`, `capauthz/`, a commitment award) is decided only in the fleet's
+  electorate and `leader/{g}` only in `g`; every acceptor refuses a cluster-scoped exclusive slot once a group is
+  marked; a refusal moves a proposal only from a member; a refused certificate is not re-verified; the electorate list
+  is rescanned only when it changed. A declaration with nothing to decide completes a pending step (`200`, `"adopted"`,
+  audited). **Bounded:** 256 open slots of a group per member, 4 MiB of values a report — past it the step is refused
+  `ElectorateError::DrainRefused` (`409 drain_refused`). **Not claimed:** genesis is not ordered against a disjoint
+  genesis; without `[tls]` the certificate is unauthenticated; the marking of the fleet's default is not itself a
+  cluster-scoped decision (decision record §8.5 says why the profile closes that window instead). **Round 3:** a
+  committed slot is drained like any other (the drain takes no shortcut on a commit it can see); the drain report is
+  taken before the promise, counts only open slots (finished ones are collected from the index), carries values of
+  any size up to 4 MiB a report (a value known only by digest is fetched from its commit record), and an acceptor
+  that cannot deliver it answers `StepRefused` instead of promising — so an over-bound step raises no fence; a step
+  proposer whose drain is refused sends `StepAbort`, releasing the fence of every member that promised without
+  accepting (decision record §8.4 argues why that is safe); the slot index is per `(group, slot)` and an acceptor that
+  has accepted a genesis refuses untagged proposals on the group until it is adopted; the fence gate only decides,
+  the claim runs after it; a cross-group proposal never decides an exclusive slot. Seen failing first in round 3, each
+  on a toggle: `a_committed_slot_is_drained_like_any_other` (the commit shortcut restored: `Some(b"w-other")`),
+  `a_large_committed_value_does_not_wedge_the_group` (values capped at 4 KiB, no commit fetch: `DrainRefused
+  ("drain_blocked: …")`), `a_refused_step_releases_its_fence` (no `StepAbort`: `ElectorateStale { epoch: 1,
+  seen_epoch: 2 }`), `finished_slots_do_not_count_against_the_drain_bound` (finished slots counted:
+  `drain_too_large: more than 256 open slots`), `a_cross_group_proposal_does_not_decide_an_exclusive_slot` (no
+  cross-group check: `Committed { slot: "lock/x" }`). Seen failing first in
+  round 2, each on a toggle of its mechanism: `a_proposer_fenced_mid_ballot_does_not_complete_at_the_old_epoch` (gate
+  ignoring the fence: `Committed { slot: "work/x", value: b"old-epoch" }` after the step's promise),
+  `a_value_chosen_two_steps_ago_is_carried_by_the_drain` (drain off: `Some(b"w-other")` over the chosen `v`),
+  `a_declaration_completes_a_pending_step` (no completion: the epoch stayed 1, the group fenced), and
+  `an_electorate_certificate_verifies_under_tls` (votes counted without their signer: the forged epoch 3 adopted).
+  Seen failing first, each
+  on a toggle of the mechanism it pins: `a_swap_without_a_declared_step_is_refused` (count rule: `Committed` on
+  {A,B,D}), `chained_steps_refuse_a_stale_proposer` (no epoch check: A answered epoch 1), `votes_from_outside_the_
+  electorate_are_not_counted` (filter unwired, and separately the quorum floor removed: `Committed` on forged votes),
+  `a_cross_group_proposal_does_not_decide_for_an_electorate_group`, `a_forged_electorate_record_is_not_adopted` and
+  `an_electorate_certificate_verifies_under_tls` (certificate unchecked: the forged epoch adopted),
+  `a_local_electorate_setting_that_disagrees_with_the_fleet_is_refused` (the lock decided locally); and against the
+  unfixed code `a_safety_sensitive_proposal_is_decided_only_by_an_electorate_group`, `the_governor_and_the_watcher_
+  leave_an_electorate_group_alone`, `an_exclusive_outcome_at_the_gateway_needs_an_electorate_group` and the
+  guarantee and profile pins. `two_concurrent_steps_cannot_both_commit_and_a_non_member_cannot_step` pins a property
+  single-decree consensus already gives; it was not seen failing. **Upgrade notes:** `ConsensusResult`
+  (`#[non_exhaustive]`), `CommitError` and `ConsistencyError` gain `ElectorateNotGoverned`, `ElectorateStale` and
+  `ElectorateMismatch` — a `_` arm must fail closed; `ConsensusConfig` and `GossipConfig` gained fields (an
+  exhaustive literal breaks); a node under `profile = "secure-single-domain"` must set
+  `consensus_require_electorate = true` or it will not start, and then a lock or an election on the whole cluster or
+  an undeclared group is refused — declare the electorates and mark one `exclusive_default`; a `mycelium-commitment`
+  award and a capability-authz policy now decide where the locks do; **rolling upgrade:** an electorate whose members
+  are not all on this release times out rather than commits (the new messages are ignored by older nodes), and a
+  pre-P2 node still proposes the exclusive verbs to the whole cluster — mark an `exclusive_default` group only once
+  every node runs this release; **a group-scoped proposal for a `lock/`, `consistent/`, `capauthz/` or commitment-award
+  slot is refused on any group but the fleet's exclusive electorate, and `leader/{g}` on any group but `g`**
+  (`ElectorateMismatch`); `ElectorateError` gained `DrainRefused`; the HTTP declaration answers `"adopted"`.
 - **The KV namespace table is a gate now, not a lint item.** `scripts/check-kv-namespaces.sh` enumerates every
   KV prefix production code uses — slash-bearing `const`/`static` `&str` literals whatever their name, `format!`
   key heads, and the first literal of a KV call (`set*`, `get`, `delete*`, `scan_*`, `subscribe*`, `kv_*`,

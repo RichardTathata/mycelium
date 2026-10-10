@@ -500,10 +500,11 @@ leader, a single writer, anything a second holder would corrupt:
 
 | Setting | Required value | Why |
 |---|---|---|
-| `quorum_size` | a strict majority of the **fixed** voter set, stated explicitly | a derived quorum shrinks with the view |
-| `use_trust_slices` | `true`, with **every** voter calling `declare_trust` with the **same** set | the tally then counts only votes from the fixed *eligible* set (`consensus.rs`, pinned by `test_trust_slice_filters_votes`) |
-| `count_opaque_as_absent` | `false` | a partition that reads as "everyone else is opaque" must not become a smaller quorum |
-| membership | **fixed for the life of the slot**; drain and re-form to change it | there is no versioned electorate or transition protocol |
+| the electorate | an **electorate group** — `declare_electorate(group, exclusive_default)` / `POST /gateway/govern/electorate` — and `consensus_require_electorate = true` on every proposer (`secure-single-domain` rev 4 requires it); one group marked `exclusive_default` for the cluster-scoped locks | since P2 (2026-10-10) the electorate is pinned by **member identity and epoch**, each epoch a consensus decision of the one before it; acceptors answer only their own epoch, and a safety-sensitive proposal anywhere else is refused (`ElectorateNotGoverned`) — named as a **group**, never as node identities in configuration ([decision record §8](design/consensus-electorate.md#8-p2s-design--the-electorate-group)) |
+| `quorum_size` | `0`, or a strict majority of the members | for an electorate group the engine raises a smaller quorum to a strict majority of the epoch's members |
+| `use_trust_slices` | optional | the epoch's member set is the vote filter; a declared slice only narrows it. Before P2 this row required identical `declare_trust` sets on every voter — node identities as the electorate's name |
+| `count_opaque_as_absent` | `false` (ignored for an electorate group) | a partition that reads as "everyone else is opaque" must not become a smaller quorum; on an electorate group the engine does not reduce the quorum for opacity |
+| membership | changed **one member at a time**: move the node, then declare — a step decided by the current electorate; the group decides nothing in between | the governor and the emergent watcher do not move an electorate group; a step of more than one member is refused. Each step drains the epoch it leaves first, so safety per slot holds across any number of steps (decision record §8.3); a step whose drain exceeds its bound is refused by name |
 | the effect | fenced **at the resource** with the commit's token | winning is not the grant; exclusivity is enforced by refusing a stale token |
 
 Outside that profile — automatic sizing, slices off, opacity reduction on, voters joining and
@@ -517,10 +518,23 @@ of the whole protocol. Those are roadmap; the profile above is what ships.
 [`design/consensus-electorate.md`](design/consensus-electorate.md), adopted 2026-10-10). Gossip
 membership, capability groups and emergent groups are dynamic; the electorate for a safety-sensitive
 decision is a fixed set for the life of that decision, and quorum intersection is its property, not
-discovery's. What the code enforces today: an empty or below-floor roster is refused
-(`ElectorateUnavailable`), a proposer outside the group is refused (`NotAMember`), and the gateway
-moves a governed group's membership only through `/gateway/govern/group` (`govern:write`, audited).
-What it does not: an embedded `join_group` or a `grp/` write still moves a governed group by LWW, and
-nothing *requires* a governed group for a safety-sensitive proposal — that is post-360 plan row
-**P2**, not built. Versioned electorates with joint-consensus transitions are a later plan, not
+discovery's. What the code enforces: an empty or below-floor roster is refused
+(`ElectorateUnavailable`), a proposer outside the group is refused (`NotAMember`), the gateway
+moves a governed group's membership only through `/gateway/govern/group` (`govern:write`, audited),
+and — since post-360 plan row **P2** — a node with `consensus_require_electorate` refuses a
+safety-sensitive proposal outside an **electorate group**, pinned by member identity and epoch, each
+change a one-member step decided by the electorate before it. What it does not: an embedded
+`join_group` or a `grp/` write still moves a group's roster by LWW — for an electorate group the next
+proposal refuses the mismatch rather than counting it (detection, not prevention). A step drains the
+epoch it leaves — every slot its promise quorum reports is run to completion before the step is
+proposed — so a chosen value survives any number of steps, committed or not; the drain is bounded and
+a step past the bound is refused by name. **Drain proposals (`DrainPrepare`/`DrainPropose`) are answered from
+any member, fenced or not** — that is what lets a step carry the epoch it leaves; it is safe under the crash-fault
+assumption this design makes (a drain only re-proposes what the step's promise quorum reported), and it is an unfenced
+path a *compromised* member could use to decide a slot at the old epoch: outside the claim, like every Byzantine
+member. **A forged electorate record** — a
+`consensus/committed/electorate/…` entry or certificate written straight into the store — is not
+adopted unless its certificate holds the signed votes of a majority of the previous epoch's members
+(under `[tls]`), and is counted (`mycelium::electorate_records_refused`); `sys/govern/electorate/`
+is not read. Versioned electorates with joint-consensus transitions are a later plan, not
 built; a consensus *service* (a fixed tier of nodes everyone must reach) is rejected.

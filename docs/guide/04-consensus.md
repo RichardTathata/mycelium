@@ -155,17 +155,64 @@ Two capabilities that are easy to conflate, and Mycelium keeps apart **by design
   [supported profile](../threat-model.md#7-safety-sensitive-agreement-the-supported-profile).
   Quorum intersection is a property of that set, never of discovery converging.
 
-A group's roster serves as the electorate only while you hold it still. What the code enforces
-today: a roster this node cannot see, or one below a fresh `MembershipIntent.min`, is refused
+A group's roster serves as the electorate only while you hold it still. What the code enforces:
+a roster this node cannot see, or one below a fresh `MembershipIntent.min`, is refused
 (`ElectorateUnavailable`); a proposer outside the group is refused (`NotAMember`); and a
 **governed group** — one under a live membership intent — moves only through
 `POST`/`DELETE /gateway/govern/group` (`govern:write`, audited), while `/gateway/mesh/group` refuses
-it `403 governed_group`. What it does not enforce yet: an embedded `mesh().join_group` or a write to
-`grp/` from Rust still moves a governed group's roster, a node running `start_membership_governor`
-still joins and leaves it toward the intent's band, and nothing *requires* a governed group for a
-safety-sensitive proposal (post-360 plan row P2, not built). So for exclusive work: form the group,
-hold its membership still for the life of the slot, use a governed group so a change is a named and
-audited act, and fence at the resource.
+it `403 governed_group`.
+
+**An electorate group** (post-360 plan row P2) is the governed group made fixed — by identity and by
+epoch, and changed only by its own agreement. Declare it from its roster:
+
+```rust
+// every member joined first (mesh().join_group / POST /gateway/govern/group), each running the listener
+let e = agent.declare_electorate("ledger-council", true).await?;   // or POST /gateway/govern/electorate
+assert_eq!(e.epoch, 1);                                              // {"group":"ledger-council","exclusive_default":true}
+```
+
+The first declaration is **genesis**: the roster this node sees becomes the member set, and every
+member must accept it. After that each declaration is a **step** — the next epoch, the roster as the
+member set — which must differ from the current electorate by **one** member (`StepTooLarge`
+otherwise) and is decided by a strict majority of the **current** members. Two members stepping at
+once are one decision: at most one commits. Each epoch's record carries a certificate of the votes
+that decided it, and a node adopts an epoch only when the certificate verifies — a record written
+straight into the store is not adopted (`electorate_records_refused` counts it).
+
+From genesis on: the membership governor does not roll on the group and the emergent watcher does
+not join or leave it; a proposal to it is **refused unless the roster equals the epoch's members by
+identity** (`ElectorateMismatch`, counted by `electorate_roster_mismatches` — a swap included, and an
+embedded `join_group` or `grp/` write is refused at the next proposal, not prevented); promises and
+votes count only from the members; the quorum is at least a strict majority, whatever `quorum_size`
+or opacity say; and every member answers only a proposal naming its own epoch — a proposer that has
+not learned a step is refused by those that have (`ElectorateStale`), and a member that has accepted
+a step stops answering the epoch before it. So a change is: move one node
+(`/gateway/govern/group`), then declare — and the group decides nothing in between.
+
+**What that guarantees, exactly.** A step **drains** the epoch it leaves: its promise fences every
+member that gives it, each answers with what it holds for the group's slots, and the step's proposer
+runs each reported slot to completion at the old epoch before it proposes the step. So every value
+that may have been chosen — **committed or not** — is held by a majority of each epoch in turn, and a
+proposer at any later epoch adopts it: single-decree safety per slot across any number of one-member
+steps. Within an epoch at most one value commits; a proposer at a superseded epoch cannot complete. The
+drain is bounded — 256 open slots of a group per member, 4 MiB of values — and past it the step is
+refused by name (`DrainRefused`, `409 drain_refused`) and the electorate does not move
+([decision record §8.3](../design/consensus-electorate.md#83-exactly-what-holds--and-why-drain-before-step)).
+
+**Requiring it.** Set `consensus_require_electorate = true` (env `GOSSIP_CONSENSUS_REQUIRE_ELECTORATE`;
+the `secure-single-domain` profile requires it, rev 4). A **safety-sensitive** proposal — flagged
+`ConsensusConfig::safety_sensitive`, or in the `lock/`, `leader/`, `consistent/` families that
+`distributed_lock`, `LockService`, `elect_leader`, `consistent_set` and their gateway routes use — is
+then refused `ElectorateNotGoverned` (gateway `403 electorate_not_governed`) unless its scope is an
+electorate group. The cluster-scoped exclusive verbs (locks, `consistent_set`, the log claim,
+`mycelium-commitment`'s award, `set_capability_authz_via_consensus`) decide in the group marked
+`exclusive_default` — a fleet record, so every node agrees; `consensus_electorate` may only restate
+it, and a node whose setting disagrees refuses them by name. Those slots have one home: a `lock/`,
+`consistent/`, `capauthz/`, commitment-award or log-claim slot proposed on any other group — and a
+`leader/{g}` slot on any group but `g` — is refused `ElectorateMismatch`. The proposer must be a member, so a lock
+is taken by an electorate member (a non-member asks through a member's gateway). Off — the default —
+nothing changes, and such a proposal is counted (`mycelium_consensus_ungoverned_safety_total`). So for
+exclusive work: declare the electorate, require it, and fence at the resource.
 
 Consensus here is a **protocol run by whichever nodes are in the group**, never a service: no
 deployment shape makes a named node set "the consensus nodes". Versioned electorates with

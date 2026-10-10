@@ -41,20 +41,20 @@ this page is the index + the gate.
 - ☐ **Read the node's guarantee report first.** Every item in this section that is a *node setting* is
   one line of `GET /gateway/guarantees` (scope `fleet:read`), and of the block the node logs at start:
   `enforced`, or why not — `not_configured` names the setting, `not_in_build` names the feature,
-  `not_applicable` names the role fact. What the node cannot see (network confinement, clock sync, the
-  consensus profile) is listed as `not_verifiable_here` and is yours to evidence. A report whose
+  `not_applicable` names the role fact. What the node cannot see (network confinement, clock sync) is
+  listed as `not_verifiable_here` and is yours to evidence. A report whose
   `late_attachments` is non-zero was logged before something was attached; the route recomputes live.
   → [`src/agent/guarantee.rs`](../../src/agent/guarantee.rs), plan [`guarantees-and-rule-catalogue.md`](../plans/guarantees-and-rule-catalogue.md)
 - ☐ **Start under the `secure-single-domain` profile** (`profile = "secure-single-domain"` or
   `GOSSIP_PROFILE`). The node then **refuses to start** unless each of these resolves `enforced` (or
   `not_applicable` to its role), and names every one that does not, with what is missing and where to
-  read — rev 3 (unreleased; rev 2 was v2.21.0's seventeen, rev 1 v2.19.0's fifteen): `mesh.tls` · `id.proofs_required` ·
+  read — rev 4 (unreleased; rev 3 added `gw.exposed_closed`, rev 2 was v2.21.0's seventeen, rev 1 v2.19.0's fifteen): `mesh.tls` · `id.proofs_required` ·
   `gw.not_open` · `gw.exposed_closed` · `gw.tls` ·
   `gw.caller_profile` · `ae.authorised_at_seam` · `ae.recorded_before_dispatch` · `prov.enforcement` ·
   `a2a.admission` · `authz.execution_authority` · `authz.durable_epochs` · `audit.chain` ·
   `egress.allow_list` · `persist.configured` · `persist.sync_mode` · `persist.unreadable_refused` ·
-  `id.ca_key_off_node`. It needs a `compliance` + `tls` build (anything less reads `not_in_build` and
-  refuses). **Rev 3's addition** is `gw.exposed_closed` (with `gw.not_open` at rev 2). **Upgrade note:** rev 3
+  `id.ca_key_off_node` · `cons.safety_profile`. It needs a `compliance` + `tls` build (anything less reads `not_in_build` and
+  refuses). **Rev 4's addition** is `cons.safety_profile` (below); **rev 3's** is `gw.exposed_closed` (with `gw.not_open` at rev 2). **Upgrade note:** rev 3
   refuses one node rev 2 admitted — a gateway whose only credential was a blank `gateway_auth_token`, which
   `gw.not_open` rev 1 read as enforced (`validate()` now refuses a blank token in every profile; set a real
   secret). Otherwise an open gateway already failed `gw.not_open`, and the new id names the waiver when
@@ -65,8 +65,14 @@ this page is the index + the gate.
   --node <ip:port> --out <dir>` on the issuer's host, then `[tls] cert_pem` + `key_pem` on the node with
   `ca-cert.pem` (never `ca-key.pem`) in its `auto_cert_dir` → [cert-rotation.md § Issuing node
   certificates off-node](cert-rotation.md). A node that re-signs its own certificate with the CA key at
-  start refuses to start under the profile, naming `id.ca_key_off_node`. **What it does not cover, by
-  construction:** the external prerequisites — network confinement, clock sync, the consensus profile —
+  start refuses to start under the profile, naming `id.ca_key_off_node`. **Rev 3's addition is a setting too:**
+  `cons.safety_profile` is `consensus_require_electorate = true` — a lock, a leader election or a consistent
+  write is then refused (`electorate_not_governed`) unless an **electorate group** decides it: declare each
+  with `POST /gateway/govern/electorate` (`govern:write`, every member running the consensus listener), mark the one
+  the cluster-scoped locks use `"exclusive_default": true` — only once every node runs P2 — and change an electorate
+  one member at a time, letting decided commits reach the group between steps →
+  [guide 04 § Discovery is not an electorate](../guide/04-consensus.md). **What it does not cover, by
+  construction:** the external prerequisites — network confinement, clock sync —
   which the report lists as `not_verifiable_here` and this checklist owns; and the at-rest cipher and
   the audit sink, which the report shows and this revision does not require. The whole set, with each
   guarantee's resolution under four reference configurations, is the generated
