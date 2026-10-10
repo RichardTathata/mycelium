@@ -255,23 +255,33 @@ What a single participant can hold of a node's transport is bounded, and each bo
 setting or constant with a counter (`SystemStats`, `docs/operations/metrics.md`):
 
 - **Accept path** — the TLS accept is under `handshake_timeout_ms` (`src/agent/tasks.rs`
-  `run_listener_task`), then the read loop gives the first frame the same bound and an established
-  connection `inbound_idle_timeout_secs` (`mycelium-core/src/connection.rs`). A closed socket returns
+  `run_listener_task`), then the read loop gives the first frame's **first byte** the same bound and
+  an established connection `inbound_idle_timeout_secs` between frames (`mycelium-core/src/connection.rs`).
+- **Progress, not frames** — a frame in flight, either direction, is under `StallGuard`
+  (`mycelium-core/src/stall.rs`): no byte for `peer_stall_timeout_ms`, or below
+  `peer_min_rate_bytes_per_sec` past it, and the connection goes. **Do not bound a whole frame by a
+  fixed time** — a frame is up to 10 MB, and #602's review found the first version cutting a slow
+  but healthy link mid-frame on every attempt, so a late joiner on it never bootstrapped. A closed socket returns
   its `max_connections` permit. `validate()` keeps `inbound_idle_timeout_secs` above
   `writer_idle_timeout_secs` — **do not lower it below the fleet's writer idle**: the reader closing a
   link first costs the writer's next frame.
-- **Outbound writer** — connect + TLS under `handshake_timeout_ms`, each write and flush under
-  `peer_write_timeout_ms`, and shutdown/eviction interrupt both (`mycelium-core/src/writer.rs`). They
+- **Outbound writer** — connect + TLS under `handshake_timeout_ms`, each batch of writes and its
+  flush under the progress bound, and shutdown/eviction interrupt both (`mycelium-core/src/writer.rs`). They
   were polled only between frames, so a peer that accepts and never reads parked the task.
 - **Anti-entropy replies** — at most one per peer in flight: a `ReplySlot` (`mycelium-core/src/bounds.rs`)
   is held by every frame of a reply via `Bytes::from_owner` and released when the last is written or
   dropped. The per-connection cooldown alone was reset by a reconnect.
-- **Admission fill** — `SignalHandlers::fill_ratio` is the **least** full open subscriber, not the most:
-  one stalled SSE/serve/`signal_rx` subscriber loses its own signals (`signal_handler_drops`) instead of
-  holding its kind at 1.0 for every subscriber. Do not put the MAX back — load-shed is for a kind whose
-  *every* subscriber is full.
+- **Admission fill** — `SignalHandlers::fill_ratio` is the **least** full open **work-bearing**
+  subscriber (handlers, `rpc_rx`, the serve stream), not the most: one stalled subscriber loses its own
+  signals (`signal_handler_drops`) instead of holding its kind at 1.0 for every subscriber. SSE streams
+  register as **taps** (`register_tap`) and never count, so a fast observer cannot hide a saturated
+  worker (#602's review). Do not put the MAX back — load-shed is for a kind whose *every* worker is full.
 - **Sender log** — at most `SIGNAL_LOG_MAX_KINDS` (4096) sender-chosen kinds, each keeping one entry per
-  sender up to `SIGNAL_LOG_MAX_SENDERS_PER_KIND` (1024); a kind with a local handler is always tracked.
+  sender up to `SIGNAL_LOG_MAX_SENDERS_PER_KIND` (1024). At either bound the least recently seen go, an
+  eighth per pass (constant cost per insert) — never a kind with a local handler or one that was queried
+  (`quorum*`, `last_signal`). Refusing new kinds instead made a flood a false negative for `quorum`.
+  `sys/quorum/` evidence rate-limit entries are bounded with it, and no evidence is written for a kind
+  the log could not track.
 - **Serve loops end** — `RpcRequestRx::recv` selects on shutdown (its sender lives in the handler table
   the receiver's own `Arc<TaskCtx>` keeps alive, so the channel never closed); a stopped, dropped agent
   frees its `TaskCtx` (`a_stopped_agent_frees_its_task_context`).
@@ -279,7 +289,7 @@ setting or constant with a counter (`SystemStats`, `docs/operations/metrics.md`)
 The deadlines are real-socket timers outside the replay kernel, admitted in
 `docs/design/replay-nondeterminism-inventory.md` §2.4. What is **not** bounded: per-source
 connection counts (a plaintext mesh is open to whoever reaches the port), and `sys/quorum/` evidence
-keys for tracked kinds, which nothing collects. Gates: `src/resource_bounds_tests.rs`,
+keys for tracked kinds, which nothing collects (no worse than any KV key a peer may write). Gates: `src/resource_bounds_tests.rs`,
 `mycelium-core/src/signal.rs` `bound_tests`, `writer.rs` `a_peer_that_never_reads_*`.
 
 ## `subscribe_log_group` is single-active — do NOT turn it into a load-balanced work queue (#149)

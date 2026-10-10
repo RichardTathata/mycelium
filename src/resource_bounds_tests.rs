@@ -160,3 +160,87 @@ async fn a_stalled_subscriber_does_not_stop_admission_for_another() {
     a.shutdown().await;
     b.shutdown().await;
 }
+
+/// Frames `msg` as `write_frame` would and trickles it onto `s` in `chunk`-byte pieces, `gap` apart.
+async fn trickle(s: &mut TcpStream, msg: &WireMessage, chunk: usize, gap: Duration, stop_after: Option<usize>) {
+    use tokio::io::AsyncWriteExt;
+    let mut framed = Vec::new();
+    write_frame(&mut framed, &wire_to_bytes(msg)).await.unwrap();
+    for (i, piece) in framed.chunks(chunk).enumerate() {
+        if stop_after.is_some_and(|n| i >= n) { return; }
+        // A write error means the node closed the connection; the caller's assertion says why.
+        if s.write_all(piece).await.is_err() || s.flush().await.is_err() { return; }
+        tokio::time::sleep(gap).await;
+    }
+}
+
+fn big_data(key: &str, len: usize) -> WireMessage {
+    let origin = NodeId::new("127.0.0.1", 9).unwrap();
+    WireMessage::Data(crate::framing::make_gossip_update(
+        &origin, 1, Arc::from(key), Bytes::from(vec![5u8; len]), false, &crate::hlc::Hlc::new(),
+    ))
+}
+
+/// The adversarial review of #602, finding 1: the first frame on a connection had to arrive *whole*
+/// within `handshake_timeout_ms`, so a large frame (an anti-entropy chunk is up to ~10 MB) on a slow
+/// but healthy link was cut mid-body. A frame that keeps making progress must be read however long
+/// it takes as a whole.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_large_first_frame_trickling_steadily_is_read_past_the_handshake_bound() {
+    let px = alloc_port();
+    let mut cx = GossipConfig { bind_port: px, ..Default::default() };
+    cx.handshake_timeout_ms = 400;
+    let x = GossipAgent::new(NodeId::new("127.0.0.1", px).unwrap(), cx);
+    x.start().await.unwrap();
+    let mut s = TcpStream::connect(("127.0.0.1", px)).await.unwrap();
+    // 256 KiB in 32 pieces 40 ms apart: ~1.3 s in all, never more than 40 ms without a byte.
+    trickle(&mut s, &big_data("bounds/trickled", 256 * 1024), 8 * 1024 + 1, Duration::from_millis(40), None).await;
+    assert!(
+        until(Duration::from_secs(5), || x.kv().get("bounds/trickled").is_some()).await,
+        "a frame making steady progress must be read even when it takes longer than handshake_timeout_ms",
+    );
+    x.shutdown().await;
+}
+
+/// The other half of finding 1: a frame that stops mid-body is still closed — by the progress bound,
+/// and counted as a stalled frame, not as a socket that never spoke.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_frame_that_stalls_mid_body_is_closed_and_counted_apart() {
+    let px = alloc_port();
+    let mut cx = GossipConfig { bind_port: px, ..Default::default() };
+    cx.peer_stall_timeout_ms = 300;
+    let x = GossipAgent::new(NodeId::new("127.0.0.1", px).unwrap(), cx);
+    x.start().await.unwrap();
+    let mut s = TcpStream::connect(("127.0.0.1", px)).await.unwrap();
+    trickle(&mut s, &big_data("bounds/stalled", 64 * 1024), 8 * 1024, Duration::from_millis(20), Some(3)).await;
+    let mut buf = [0u8; 16];
+    let r = tokio::time::timeout(Duration::from_secs(5), s.read(&mut buf)).await;
+    assert!(matches!(r, Ok(Ok(0)) | Ok(Err(_))), "a frame stalled mid-body must be closed; got {r:?}");
+    assert_eq!(x.system_stats().inbound_frames_stalled, 1);
+    assert_eq!(x.system_stats().inbound_connections_timed_out, 0, "it spoke; it is not silence");
+    assert!(x.kv().get("bounds/stalled").is_none());
+    x.shutdown().await;
+}
+
+/// The adversarial review of #602, findings 4 and 5: admission sheds a kind when every subscriber
+/// that bears work is full — and a tap (an SSE observer) reading fast does not hide that. The tap is
+/// also the witness: it receives exactly what admission let through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_kind_whose_every_worker_is_full_sheds_while_a_tap_reads() {
+    let px = alloc_port();
+    let x = GossipAgent::new(NodeId::new("127.0.0.1", px).unwrap(), GossipConfig { bind_port: px, ..Default::default() });
+    x.start().await.unwrap();
+    let kind: Arc<str> = Arc::from("bounds.shed");
+    let _worker = x.mesh().signal_rx_with_capacity(Arc::clone(&kind), 8); // never read
+    let mut tap = x.task_ctx_for_tests().signal_handlers.register_tap(Arc::clone(&kind), 1024);
+    const N: usize = 200;
+    let mut seen = 0usize;
+    for i in 0..N {
+        let _ = x.mesh().emit("bounds.shed", SignalScope::Cluster, Bytes::from(format!("{i}")));
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        while tap.try_recv().is_ok() { seen += 1; }
+    }
+    assert!(seen >= 8, "the worker's first eight were admitted; the tap saw {seen}");
+    assert!(seen < N / 4, "with its only worker full the kind must shed; the tap saw {seen} of {N}");
+    x.shutdown().await;
+}

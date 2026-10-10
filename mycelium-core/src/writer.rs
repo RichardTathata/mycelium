@@ -31,8 +31,9 @@ pub struct WriterTiming {
     pub idle:    Duration,
     /// TCP connect + TLS handshake (`handshake_timeout_ms`).
     pub connect: Duration,
-    /// One `write_frame`, or one flush (`peer_write_timeout_ms`).
-    pub write:   Duration,
+    /// The progress bound on each batch of writes and its flush (`peer_stall_timeout_ms`,
+    /// `peer_min_rate_bytes_per_sec`) — progress, not whole frames (#602's review, finding 1).
+    pub stall:   crate::stall::StallBound,
 }
 
 impl WriterTiming {
@@ -41,7 +42,7 @@ impl WriterTiming {
         Self {
             idle:    Duration::from_secs(cfg.writer_idle_timeout_secs),
             connect: Duration::from_millis(cfg.handshake_timeout_ms),
-            write:   Duration::from_millis(cfg.peer_write_timeout_ms),
+            stall:   crate::stall::StallBound::from_config(cfg),
         }
     }
 
@@ -78,7 +79,7 @@ pub async fn run_peer_writer(
     peer_dropped: Arc<AtomicU64>,
     tls: Option<Arc<NodeTls>>,
 ) {
-    let mut conn: Option<BufWriter<GossipStream>> = None;
+    let mut conn: Option<BufWriter<crate::stall::StallGuard<GossipStream>>> = None;
     // Stores (fail_time, actual_backoff) where actual_backoff is jittered so
     // simultaneous reconnects after a partition don't all fire at the same instant.
     // (when it failed, how long to wait) — monotonic nanoseconds from the clock seam, so a replay
@@ -161,7 +162,7 @@ pub async fn run_peer_writer(
                     }
                     // 16 KB buffer coalesces a full burst of small gossip frames into
                     // one or two kernel write calls; explicit flush sends after drain.
-                    conn = Some(BufWriter::with_capacity(16_384, gs));
+                    conn = Some(BufWriter::with_capacity(16_384, crate::stall::StallGuard::new(gs)));
                     last_fail = None;
                 }
                 Ok(Err(e)) => {
@@ -196,30 +197,30 @@ pub async fn run_peer_writer(
                 Err(_) => Err(()),
             }
         };
-        // Each write and the flush are bounded by `timing.write` (row B): a peer that accepts and
-        // never reads fills the socket buffers and used to park this task in a write forever —
-        // with its channel, and every anti-entropy reply queued on it, behind it. Shutdown and
-        // eviction interrupt the writes too; before, they were polled only between frames.
-        let write_bound = timing.write;
-        let bounded = |res: Result<Result<(), crate::error::GossipError>, ttime::error::Elapsed>| match res {
-            Ok(r)  => r,
-            Err(_) => Err(crate::error::GossipError::Io(std::io::Error::new(
-                std::io::ErrorKind::TimedOut, "peer write timed out"))),
-        };
+        // The writes and the flush must make progress (row B; #602's review, finding 1): a peer that
+        // accepts and never reads fills the socket buffers and used to park this task in a write
+        // forever — with its channel, and every anti-entropy reply queued on it, behind it. The bound
+        // is on progress (`peer_stall_timeout_ms` without a byte, or below the rate floor), not on a
+        // whole frame, so a large frame to a slow but healthy peer still crosses. Shutdown and eviction
+        // interrupt the writes too; before, they were polled only between frames.
+        let stall = timing.stall;
         let write = async {
             let c = conn.as_mut().expect("infallible: conn is Some while loop body runs; only set None after break");
+            c.get_mut().arm(Some(stall));
             let mut wrote_any = false;
-            match frame_fits(&peer, bounded(ttime::timeout(write_bound, write_frame(c, &data)).await)) {
+            match frame_fits(&peer, write_frame(c, &data).await) {
                 Ok(sent)  => wrote_any |= sent,
                 Err(())   => return false,
             }
             while let Ok(more) = rx.try_recv() {
-                match frame_fits(&peer, bounded(ttime::timeout(write_bound, write_frame(c, &more)).await)) {
+                match frame_fits(&peer, write_frame(c, &more).await) {
                     Ok(sent) => wrote_any |= sent,
                     Err(())  => return false,
                 }
             }
-            !wrote_any || matches!(ttime::timeout(write_bound, c.flush()).await, Ok(Ok(())))
+            let ok = !wrote_any || c.flush().await.is_ok();
+            c.get_mut().arm(None);
+            ok
         };
         let write_ok = tokio::select! { biased;
             _ = shutdown_rx.wait_for(|v| *v) => break,
@@ -647,7 +648,7 @@ mod tests {
         let writers: papaya::HashMap<NodeId, WriterEntry> = papaya::HashMap::new();
         let (sd, _sd_rx) = watch::channel(false);
         let sd = Arc::new(sd);
-        let timing = WriterTiming { idle: Duration::ZERO, connect: Duration::from_secs(5), write: Duration::from_secs(60) };
+        let timing = WriterTiming { idle: Duration::ZERO, connect: Duration::from_secs(5), stall: crate::stall::StallBound { stall: Duration::from_secs(60), min_rate: 0 } };
         let tx = get_or_spawn_writer(&peer, &writers, 4096, Duration::from_millis(100), timing,
                                      &sd, &Arc::new(AtomicU64::new(0)), None).unwrap();
         flood(&tx).await;
@@ -664,7 +665,7 @@ mod tests {
         let writers: papaya::HashMap<NodeId, WriterEntry> = papaya::HashMap::new();
         let (sd, _sd_rx) = watch::channel(false);
         let sd = Arc::new(sd);
-        let timing = WriterTiming { idle: Duration::ZERO, connect: Duration::from_secs(5), write: Duration::from_secs(60) };
+        let timing = WriterTiming { idle: Duration::ZERO, connect: Duration::from_secs(5), stall: crate::stall::StallBound { stall: Duration::from_secs(60), min_rate: 0 } };
         let tx = get_or_spawn_writer(&peer, &writers, 4096, Duration::from_millis(100), timing,
                                      &sd, &Arc::new(AtomicU64::new(0)), None).unwrap();
         flood(&tx).await;
@@ -683,7 +684,7 @@ mod tests {
         let writers: papaya::HashMap<NodeId, WriterEntry> = papaya::HashMap::new();
         let (sd, _sd_rx) = watch::channel(false);
         let sd = Arc::new(sd);
-        let timing = WriterTiming { idle: Duration::ZERO, connect: Duration::from_secs(5), write: Duration::from_millis(300) };
+        let timing = WriterTiming { idle: Duration::ZERO, connect: Duration::from_secs(5), stall: crate::stall::StallBound { stall: Duration::from_millis(300), min_rate: 0 } };
         let tx = get_or_spawn_writer(&peer, &writers, 4096, Duration::from_secs(30), timing,
                                      &sd, &Arc::new(AtomicU64::new(0)), None).unwrap();
         flood(&tx).await;
@@ -694,6 +695,52 @@ mod tests {
         assert_eq!(tx.capacity(), tx.max_capacity(), "the queue behind a stalled write must drain");
         let dropped = writers.pin().get(&peer).unwrap().dropped.load(Ordering::Relaxed);
         assert!(dropped > 0, "the frames behind the stalled write are dropped and counted");
+        let _ = sd.send(true);
+    }
+
+    /// The adversarial review of #602, finding 1: the old `peer_write_timeout_ms` bounded each *whole* frame,
+    /// so a 10 MB frame needed ≥ 2.8 Mbit/s and a large value to a slow but healthy peer was dropped
+    /// on every attempt. A peer that keeps reading, however slowly, must receive the frame: ~5 s for
+    /// the frame here, against a 2 s no-progress bound (the receiver's 16 KiB window makes TCP's
+    /// persist timer pause the sender for a few hundred ms at a time, so the bound is not tighter).
+    /// Seen failing first with the whole-frame bound at 300 ms: received 939 745 of 4 194 309 bytes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_slow_reader_that_keeps_reading_receives_a_large_frame() {
+        use tokio::io::AsyncReadExt;
+        // A small receive buffer so the kernel cannot absorb the frame on the reader's behalf.
+        let sock = tokio::net::TcpSocket::new_v4().unwrap();
+        sock.set_recv_buffer_size(16 * 1024).unwrap();
+        sock.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let l = sock.listen(16).unwrap();
+        let peer = id(l.local_addr().unwrap().port());
+        let received = Arc::new(AtomicU64::new(0));
+        let r = Arc::clone(&received);
+        let _reader = tokio::spawn(async move {
+            let (mut s, _) = l.accept().await.unwrap();
+            let mut buf = vec![0u8; 16 * 1024];
+            loop {
+                match s.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => { r.fetch_add(n as u64, Ordering::Relaxed); }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await; // ≈ 800 KB/s
+            }
+        });
+        let writers: papaya::HashMap<NodeId, WriterEntry> = papaya::HashMap::new();
+        let (sd, _sd_rx) = watch::channel(false);
+        let sd = Arc::new(sd);
+        let timing = WriterTiming { idle: Duration::ZERO, connect: Duration::from_secs(5), stall: crate::stall::StallBound { stall: Duration::from_secs(2), min_rate: 0 } };
+        let tx = get_or_spawn_writer(&peer, &writers, 16, Duration::from_secs(30), timing,
+                                     &sd, &Arc::new(AtomicU64::new(0)), None).unwrap();
+        let frame_len = 4 * 1024 * 1024;
+        tx.send(Bytes::from(vec![1u8; frame_len])).await.unwrap();
+        let want = (frame_len + 5) as u64;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while received.load(Ordering::Relaxed) < want && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(received.load(Ordering::Relaxed), want,
+                   "a reader making steady progress must receive the whole frame");
         let _ = sd.send(true);
     }
 }

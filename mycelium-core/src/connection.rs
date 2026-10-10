@@ -19,7 +19,7 @@ use std::{
     time::Duration,
 };
 use crate::stream::GossipStream;
-use tokio::{io::BufReader, sync::watch};
+use tokio::{io::{AsyncBufReadExt, BufReader}, sync::watch};
 use tracing::{error, warn};
 
 /// `sys/` sub-prefixes whose node-id segment immediately follows the prefix.
@@ -188,7 +188,8 @@ pub async fn handle_connection(
     let sys_violations  = Arc::clone(&task_ctx.sys_namespace_violations);
     let wal             = task_ctx.wal.get().cloned();
     let tls             = task_ctx.tls.get().cloned();
-    let mut socket = BufReader::with_capacity(8_192, socket);
+    let mut socket = BufReader::with_capacity(8_192, crate::stall::StallGuard::new(socket));
+    let frame_progress = crate::stall::StallBound::from_config(&task_ctx.config);
     let mut shutdown_rx = shutdown.subscribe();
     // BytesMut: recv_buf.split().freeze() at TTL_OFFSET is O(1) for zero-copy forwarding.
     let mut recv_buf: BytesMut = BytesMut::with_capacity(2_048);
@@ -230,15 +231,19 @@ pub async fn handle_connection(
 
     loop {
         let silence_bound = if spoke { idle_bound } else { Some(first_frame_bound) };
-        // read_frame returns FrameVersion so we can select the right decoder.
-        // The never-type of break expressions coerces to FrameVersion, allowing
-        // break directly inside the select! arms. `biased` keeps the bound off the hot path: a
-        // frame already buffered is read before the silence arm is ever polled, so no timer is
-        // armed for it.
-        let frame_version: FrameVersion = tokio::select! { biased;
-            result = read_frame(&mut socket, &mut recv_buf) => match result {
-                Ok(v)                              => v,
-                Err(e) if is_connection_closed(&e) => break,
+        // Two waits per frame (row B; #602's review, finding 1). First the frame's **first byte**,
+        // under the silence bound — `handshake_timeout_ms` for a connection's first frame,
+        // `inbound_idle_timeout_secs` after it. `fill_buf` consumes nothing, and `biased` keeps this
+        // off the hot path: a frame already buffered never arms a timer. Then the rest of the frame
+        // under the progress bound only, so a large frame on a slow link is read however long it
+        // takes as a whole, while a stall mid-frame is closed and counted apart from silence.
+        let arrived = tokio::select! { biased;
+            r = async { socket.fill_buf().await.map(|b| !b.is_empty()) } => match r {
+                Ok(true)  => true,
+                Ok(false) => break, // closed between frames
+                Err(e) if matches!(e.kind(),
+                    std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::BrokenPipe) => break,
                 Err(e) => { warn!("Read error from {}: {}", peer_addr, e); break; }
             },
             _ = shutdown_rx.wait_for(|v| *v) => break,
@@ -249,15 +254,34 @@ pub async fn handle_connection(
                     Some(d) => tokio::time::sleep(d).await,
                     None    => std::future::pending().await,
                 }
-            } => {
-                task_ctx.transport_bounds.count_inbound_timeout();
-                tracing::debug!(
-                    from = %peer_addr, first_frame = !spoke,
-                    "closing a silent inbound connection (handshake_timeout_ms / inbound_idle_timeout_secs)"
-                );
-                break;
-            }
+            } => false,
         };
+        if !arrived {
+            task_ctx.transport_bounds.count_inbound_timeout();
+            tracing::debug!(
+                from = %peer_addr, first_frame = !spoke,
+                "closing a silent inbound connection (handshake_timeout_ms / inbound_idle_timeout_secs)"
+            );
+            break;
+        }
+        socket.get_mut().arm(Some(frame_progress));
+        // read_frame returns FrameVersion so we can select the right decoder.
+        // The never-type of break expressions coerces to FrameVersion, allowing
+        // break directly inside the select! arms.
+        let frame_version: FrameVersion = tokio::select! { biased;
+            result = read_frame(&mut socket, &mut recv_buf) => match result {
+                Ok(v)                              => v,
+                Err(GossipError::Io(e)) if crate::stall::is_stall(&e) => {
+                    task_ctx.transport_bounds.count_frame_stalled();
+                    tracing::debug!(from = %peer_addr, "closing an inbound connection stalled mid-frame: {e}");
+                    break;
+                }
+                Err(e) if is_connection_closed(&e) => break,
+                Err(e) => { warn!("Read error from {}: {}", peer_addr, e); break; }
+            },
+            _ = shutdown_rx.wait_for(|v| *v) => break,
+        };
+        socket.get_mut().arm(None);
         spoke = true;
 
         // Inbound rate limiting: drop frames from a flooding peer. The effective limit is the

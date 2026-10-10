@@ -887,7 +887,13 @@ mod tests {
         done()
     }
 
-    /// The tripwire on a node whose COMMIT queue is held `fill` full by a subscriber that never reads (0.0 = none).
+    /// The tripwire on a node with a second COMMIT subscriber that never reads, held `fill` full (0.0 = none).
+    ///
+    /// Before row B (2.32) admission rolled against the fullest subscriber, so this stalled subscriber shed the
+    /// listener's COMMITs too and the case exercised the tripwire under shedding. Since then a subscriber that
+    /// never reads loses only its own copies: this case now checks that a stalled co-subscriber does not keep a
+    /// forged COMMIT from the listener. Shedding itself — every worker of a kind full — is exercised directly by
+    /// `resource_bounds_tests::a_kind_whose_every_worker_is_full_sheds_while_a_tap_reads` (#602's review, finding 5).
     async fn tripwire_case(fill_to: f32) {
         use crate::consensus::{consensus_kind, encode_consensus_msg, ConsensusConfig, ConsensusMsg, ConsensusResult};
         use crate::signal::SignalScope;

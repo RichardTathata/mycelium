@@ -38,17 +38,21 @@ pub const SENDER_LOG_WINDOW: Duration = Duration::from_secs(600);
 
 /// Most distinct signal kinds the sender log and the last-seen table hold at once (row B,
 /// post-360 hardening). A kind is chosen by whoever sends the frame, so without a bound a peer
-/// emitting random kinds grew both tables by one entry per kind, each kept for the whole
-/// `signal_window_secs`. Past the bound a **new** kind is not recorded — counted in
-/// `SystemStats::signal_log_kinds_refused` — unless this node has a handler registered for it;
-/// kinds already tracked keep being recorded. The GC trims kinds whose window has passed.
+/// emitting random kinds grew both tables by one entry per kind. At the bound the least-recently
+/// seen kinds make room, an eighth of the bound per pass (`SystemStats::signal_log_kinds_evicted`) —
+/// except kinds this node subscribes to or has queried (`quorum*`, `last_signal`), which are never
+/// evicted; a new kind is refused (`signal_log_kinds_refused`) only when every tracked kind is
+/// exempt and it is not (#602's review, finding 3: refusing new kinds made a flood a false
+/// negative for `quorum`).
 pub const SIGNAL_LOG_MAX_KINDS: usize = 4096;
 
 /// Most distinct senders one kind's sender log holds (row B). The log keeps each sender's
 /// **latest** signal only — a quorum counts distinct senders, so earlier entries from the same
-/// sender never changed an answer — and past the bound the sender heard from longest ago is
-/// dropped. Worst case for the whole log: `SIGNAL_LOG_MAX_KINDS × SIGNAL_LOG_MAX_SENDERS_PER_KIND`
-/// entries, reached only by forged senders across forged kinds.
+/// sender never changed an answer — and past the bound the senders heard from longest ago go, an
+/// eighth of the bound per pass, so an active sender stays and an insert costs constant time
+/// amortised. Forged senders can still displace quiet real ones by out-pacing them; a quorum over
+/// forgeable senders was already forgeable. Worst case for the whole log:
+/// `SIGNAL_LOG_MAX_KINDS × SIGNAL_LOG_MAX_SENDERS_PER_KIND` entries.
 pub const SIGNAL_LOG_MAX_SENDERS_PER_KIND: usize = 1024;
 
 /// Scope of a signal — determines which nodes **act** on it.
@@ -153,6 +157,26 @@ impl Boundary {
 type SenderEntries = ahash::AHashMap<u64, (NodeId, Instant)>;
 type SenderLog = PapayaMap<Arc<str>, Arc<Mutex<SenderEntries>>>;
 
+/// A total order on monotonic stamps, through the clock seam (`mono_before`).
+fn mono_order(a: &Instant, b: &Instant) -> std::cmp::Ordering {
+    if crate::sim_seam::mono_before(a, b) { std::cmp::Ordering::Less }
+    else if crate::sim_seam::mono_before(b, a) { std::cmp::Ordering::Greater }
+    else { std::cmp::Ordering::Equal }
+}
+
+/// Removes the `n` entries heard from longest ago, in one pass.
+fn evict_oldest_senders(log: &mut SenderEntries, n: usize) {
+    let mut by_age: Vec<(u64, Instant)> = log.iter().map(|(h, (_, t))| (*h, *t)).collect();
+    let n = n.min(by_age.len());
+    if n == 0 { return; }
+    if n < by_age.len() {
+        by_age.select_nth_unstable_by(n - 1, |a, b| mono_order(&a.1, &b.1));
+    }
+    for (h, _) in by_age.into_iter().take(n) {
+        log.remove(&h);
+    }
+}
+
 // ── SignalHandlers sub-types ──────────────────────────────────────────────────
 //
 // SignalHandlers used to bundle five concerns into one struct (handler-table
@@ -180,14 +204,16 @@ struct FilteredSender {
     /// `None` = accept all senders. `Some(ids)` = accept only listed senders.
     filter: Option<Arc<[NodeId]>>,
     tx:     mpsc::Sender<Signal>,
+    /// An observer (an SSE stream) rather than a subscriber that bears work: never counted in fill.
+    tap:    bool,
 }
 
 impl FilteredSender {
     fn unfiltered(tx: mpsc::Sender<Signal>) -> Self {
-        Self { filter: None, tx }
+        Self { filter: None, tx, tap: false }
     }
     fn filtered(tx: mpsc::Sender<Signal>, trusted: Arc<[NodeId]>) -> Self {
-        Self { filter: Some(trusted), tx }
+        Self { filter: Some(trusted), tx, tap: false }
     }
     fn is_closed(&self) -> bool { self.tx.is_closed() }
 }
@@ -208,6 +234,10 @@ impl HandlerTable {
     fn new() -> Self { Self { map: PapayaMap::new(), drops: std::sync::atomic::AtomicU64::new(0) } }
 
     fn register_with_capacity(&self, kind: Arc<str>, cap: usize) -> mpsc::Receiver<Signal> {
+        self.register_as(kind, cap, false)
+    }
+
+    fn register_as(&self, kind: Arc<str>, cap: usize, tap: bool) -> mpsc::Receiver<Signal> {
         let (tx, rx) = mpsc::channel(cap);
         // papaya re-invokes the closure when the entry changes concurrently
         // (another registration, or closed-sender eviction in
@@ -215,7 +245,7 @@ impl HandlerTable {
         // clone the sender per invocation. A single-use `slot.take()` here
         // panicked on the retry (M2 Run-18 sweep finding; regression test:
         // `concurrent_same_kind_signal_registration_does_not_panic`).
-        let fs = FilteredSender::unfiltered(tx);
+        let fs = FilteredSender { tap, ..FilteredSender::unfiltered(tx) };
         self.map.pin().compute(kind, |existing| -> papaya::Operation<Arc<Vec<FilteredSender>>, ()> {
             match existing {
                 None => papaya::Operation::Insert(Arc::new(vec![fs.clone()])),
@@ -252,7 +282,8 @@ impl HandlerTable {
     }
 
     /// How full this kind's subscribers are, for admission and opacity: the **least** full open
-    /// subscriber's fill (row B, finding 25). It was the *most* full, so one subscriber that stopped
+    /// subscriber's fill among those that bear work — taps (SSE streams) are not counted, so a fast
+    /// observer cannot hide a saturated worker (#602's review, finding 4) — (row B, finding 25). It was the *most* full, so one subscriber that stopped
     /// reading — an SSE client, a serve stream — held its kind at 1.0 and the boundary admitted
     /// nothing of that kind for any subscriber on the node. A full subscriber now loses its own
     /// copies (dropped and counted in `deliver_to_handlers`); the kind sheds only when *every*
@@ -261,7 +292,7 @@ impl HandlerTable {
         let guard = self.map.pin();
         let Some(senders) = guard.get(kind.as_ref()) else { return 0.0 };
         let mut min_ratio: Option<f32> = None;
-        for fs in senders.iter().filter(|fs| !fs.is_closed()) {
+        for fs in senders.iter().filter(|fs| !fs.tap && !fs.is_closed()) {
             let ratio = 1.0_f32 - fs.tx.capacity() as f32 / fs.tx.max_capacity() as f32;
             min_ratio = Some(min_ratio.map_or(ratio, |m| m.min(ratio)));
         }
@@ -334,8 +365,13 @@ struct SignalLog {
     last_seen:         PapayaMap<Arc<str>, Instant>,
     sender_log:        SenderLog,
     sender_log_window: Duration,
-    /// New kinds not tracked because the log was full (row B).
+    /// New kinds not tracked because every tracked kind was exempt from eviction (row B).
     kinds_refused:     std::sync::atomic::AtomicU64,
+    /// Kinds evicted, least recently seen first, to make room for a new one (#602's review, finding 3).
+    kinds_evicted:     std::sync::atomic::AtomicU64,
+    /// Kinds someone asked about (`quorum*`, `last_signal`): exempt from eviction, like a kind with a
+    /// handler. Bounded by [`SIGNAL_LOG_MAX_KINDS`]; past it a new query pins nothing.
+    queried:           PapayaMap<Arc<str>, ()>,
 }
 
 impl SignalLog {
@@ -345,23 +381,84 @@ impl SignalLog {
             sender_log: PapayaMap::new(),
             sender_log_window,
             kinds_refused: std::sync::atomic::AtomicU64::new(0),
+            kinds_evicted: std::sync::atomic::AtomicU64::new(0),
+            queried:       PapayaMap::new(),
         }
     }
 
-    /// The per-kind entry for `kind`, creating it when the log has room — or when `admit_new`, which
-    /// [`SignalHandlers::deliver`] sets for a kind this node has a handler for. `None` = not tracked
-    /// (counted in `kinds_refused`). The bound is soft by the number of concurrent first sightings.
-    fn entries_for(&self, kind: &Arc<str>, admit_new: bool) -> Option<Arc<Mutex<SenderEntries>>> {
-        let guard = self.sender_log.pin();
-        if let Some(existing) = guard.get(kind.as_ref()) {
+    /// Marks `kind` as asked about, exempting it from eviction.
+    fn pin(&self, kind: &str) {
+        let q = self.queried.pin();
+        if !q.contains_key(kind) && q.len() < SIGNAL_LOG_MAX_KINDS {
+            q.insert(Arc::from(kind), ());
+        }
+    }
+
+    /// Whether the log tracks `kind` now (it was delivered, or seeded from `sys/quorum/`).
+    fn tracks(&self, kind: &str) -> bool {
+        self.last_seen.pin().contains_key(kind) || self.sender_log.pin().contains_key(kind)
+    }
+
+    /// Whether a kind the log does not track could only be admitted by eviction (evidence for it is
+    /// not written — #602's review, finding 2). Seeded kinds live in the sender log without a
+    /// last-seen stamp (`last_signal` stays a delivery fact), so both tables count.
+    fn at_capacity(&self) -> bool {
+        self.last_seen.pin().len().max(self.sender_log.pin().len()) >= SIGNAL_LOG_MAX_KINDS
+    }
+
+    /// Evicts, in one pass, up to an eighth of the cap's worth of the least-recently-seen kinds that
+    /// are not exempt (a handler, a query, or `keep`). One scan per `SIGNAL_LOG_MAX_KINDS / 8` new kinds,
+    /// so the cost per insert is constant. Returns how many went.
+    fn evict_kinds(&self, keep: &str, subscribed: &dyn Fn(&str) -> bool) -> usize {
+        let seen = self.last_seen.pin();
+        let log = self.sender_log.pin();
+        let queried = self.queried.pin();
+        let evictable = |k: &Arc<str>| k.as_ref() != keep && !subscribed(k) && !queried.contains_key(k.as_ref());
+        let mut candidates: Vec<(Arc<str>, Instant)> = seen.iter()
+            .filter(|(k, _)| evictable(k))
+            .map(|(k, t)| (Arc::clone(k), *t))
+            .collect();
+        // Seeded kinds with no delivery yet: aged by their newest entry.
+        for (k, entries) in log.iter() {
+            if seen.contains_key(k.as_ref()) || !evictable(k) { continue; }
+            if let Some(t) = entries.lock().values().map(|(_, t)| *t).max_by(mono_order) {
+                candidates.push((Arc::clone(k), t));
+            }
+        }
+        let n = (SIGNAL_LOG_MAX_KINDS / 8).max(1).min(candidates.len());
+        if n == 0 { return 0; }
+        if n < candidates.len() {
+            candidates.select_nth_unstable_by(n - 1, |a, b| mono_order(&a.1, &b.1));
+        }
+        for (k, _) in candidates.into_iter().take(n) {
+            seen.remove(&k);
+            log.remove(&k);
+        }
+        self.kinds_evicted.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        metrics::counter!("gossip_signal_log_kinds_evicted_total").increment(n as u64);
+        n
+    }
+
+    /// The per-kind entry for `kind`, creating it when the log has room. At the cap the least-recently
+    /// seen kinds that nobody subscribes to or queries make room (#602's review, finding 3 — refusing
+    /// the new kind turned a memory bound into a false negative for `quorum`); only when every tracked
+    /// kind is exempt is a new one refused, unless `subscribed(kind)`. `None` = not tracked (counted).
+    /// The bound is soft by the number of concurrent first sightings.
+    fn entries_for(&self, kind: &Arc<str>, subscribed: &dyn Fn(&str) -> bool) -> Option<Arc<Mutex<SenderEntries>>> {
+        if let Some(existing) = self.sender_log.pin().get(kind.as_ref()) {
             return Some(Arc::clone(existing));
         }
-        if !admit_new && guard.len() >= SIGNAL_LOG_MAX_KINDS {
-            self.kinds_refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            #[cfg(feature = "metrics")]
-            metrics::counter!("gossip_signal_log_kinds_refused_total").increment(1);
-            return None;
+        if !self.tracks(kind) && self.at_capacity() {
+            let exempt = subscribed(kind) || self.queried.pin().contains_key(kind.as_ref());
+            if self.evict_kinds(kind, subscribed) == 0 && !exempt {
+                self.kinds_refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                #[cfg(feature = "metrics")]
+                metrics::counter!("gossip_signal_log_kinds_refused_total").increment(1);
+                return None;
+            }
         }
+        let guard = self.sender_log.pin();
         let new_arc = Arc::new(Mutex::new(SenderEntries::default()));
         let mut result: Option<Arc<Mutex<SenderEntries>>> = None;
         guard.compute(Arc::clone(kind), |existing| match existing {
@@ -372,42 +469,27 @@ impl SignalLog {
     }
 
     /// Records that a signal of `kind` from `sender` was seen at `now`, in both `last_seen` and the
-    /// sender history — when the kind is tracked (see [`entries_for`](Self::entries_for)). Keeps the
-    /// sender's latest entry only; past [`SIGNAL_LOG_MAX_SENDERS_PER_KIND`] it first drops entries
-    /// older than the window, then the sender heard from longest ago.
-    fn record(&self, kind: &Arc<str>, sender: NodeId, now: Instant, admit_new: bool) {
-        let Some(arc) = self.entries_for(kind, admit_new) else { return };
-        {
-            let seen = self.last_seen.pin();
-            if admit_new || seen.contains_key(kind.as_ref()) || seen.len() < SIGNAL_LOG_MAX_KINDS {
-                seen.insert(Arc::clone(kind), now);
-            }
-        }
-        let window = self.sender_log_window;
+    /// sender history — when the kind is tracked (see [`entries_for`](Self::entries_for)). Keeps each
+    /// sender's latest entry only; past [`SIGNAL_LOG_MAX_SENDERS_PER_KIND`] an eighth of the cap's
+    /// worth of the senders heard from longest ago go in one pass, so an active sender stays and the
+    /// cost per insert is constant (#602's review, finding 3).
+    fn record(&self, kind: &Arc<str>, sender: NodeId, now: Instant, subscribed: &dyn Fn(&str) -> bool) {
+        let Some(arc) = self.entries_for(kind, subscribed) else { return };
+        self.last_seen.pin().insert(Arc::clone(kind), now);
         let mut log = arc.lock();
         log.insert(sender.id_hash(), (sender, now));
         if log.len() > SIGNAL_LOG_MAX_SENDERS_PER_KIND {
-            log.retain(|_, (_, t)| crate::sim_seam::mono_elapsed(t) < window);
-            while log.len() > SIGNAL_LOG_MAX_SENDERS_PER_KIND {
-                let oldest = log.iter()
-                    .min_by(|a, b| {
-                        if crate::sim_seam::mono_before(&a.1.1, &b.1.1) { std::cmp::Ordering::Less }
-                        else { std::cmp::Ordering::Greater }
-                    })
-                    .map(|(h, _)| *h);
-                match oldest {
-                    Some(h) => { log.remove(&h); }
-                    None => break,
-                }
-            }
+            evict_oldest_senders(&mut log, (SIGNAL_LOG_MAX_SENDERS_PER_KIND / 8).max(1));
         }
     }
 
     fn last_signal(&self, kind: &str) -> Option<Instant> {
+        self.pin(kind);
         self.last_seen.pin().get(kind).copied()
     }
 
     fn quorum(&self, kind: &str, min_senders: usize, window: Duration) -> bool {
+        self.pin(kind);
         let Some(arc) = self.sender_log.pin().get(kind).map(Arc::clone) else { return false };
         let log = arc.lock();
         // One entry per sender (keyed by `id_hash`), so a count of fresh entries is a count of
@@ -428,6 +510,7 @@ impl SignalLog {
         min_senders:   usize,
         window:        Duration,
     ) -> bool {
+        self.pin(kind);
         let Some(arc) = self.sender_log.pin().get(kind).map(Arc::clone) else { return false };
         let log = arc.lock();
         let mut distinct = 0usize;
@@ -449,7 +532,7 @@ impl SignalLog {
             .unwrap_or_else(Instant::now);
         // Seeds come from `sys/quorum/` records, whose kinds were chosen by senders too: the same
         // bound applies.
-        let Some(arc) = self.entries_for(&kind, false) else { return };
+        let Some(arc) = self.entries_for(&kind, &|_| false) else { return };
         let mut log = arc.lock();
         if log.len() >= SIGNAL_LOG_MAX_SENDERS_PER_KIND && !log.contains_key(&sender.id_hash()) {
             return;
@@ -461,9 +544,9 @@ impl SignalLog {
         }
     }
 
-    /// Evicts sender-log entries older than `window` and drops kinds whose log becomes empty. Under
-    /// pressure — the last-seen table at [`SIGNAL_LOG_MAX_KINDS`] — also drops last-seen stamps
-    /// older than `window`; below it `last_signal` keeps answering for any kind ever seen, as before.
+    /// Evicts sender-log entries older than `window` and drops kinds whose log becomes empty.
+    /// `last_seen` (the kind table) is bounded by eviction at insert, not here, so `last_signal` keeps
+    /// answering for a kind until it is evicted.
     fn trim(&self, window: Duration) {
         let cutoff = Instant::now().checked_sub(window);
         let fresh = |t: &Instant| cutoff.is_none_or(|c| crate::sim_seam::mono_before(&c, t));
@@ -480,16 +563,6 @@ impl SignalLog {
         let guard = self.sender_log.pin();
         for kind in to_remove {
             guard.remove(&kind);
-        }
-        let seen = self.last_seen.pin();
-        if seen.len() >= SIGNAL_LOG_MAX_KINDS {
-            let stale: Vec<Arc<str>> = seen.iter()
-                .filter(|(_, t)| !fresh(t))
-                .map(|(k, _)| Arc::clone(k))
-                .collect();
-            for k in stale {
-                seen.remove(&k);
-            }
         }
     }
 }
@@ -538,10 +611,24 @@ impl QuorumEvidence {
     fn new() -> Self { Self { quorum_written: PapayaMap::new() } }
 
     fn payload(&self, kind: &Arc<str>, sender: &NodeId) -> Option<(Arc<str>, Bytes)> {
+        // Bounded with the log (#602's review, finding 2): an entry only rate-limits a write within
+        // the last second, so older ones are dropped when the table is full; past that, the write is
+        // skipped rather than the table grown.
+        let now = Instant::now();
+        {
+            let held = self.quorum_written.pin();
+            if held.len() >= SIGNAL_LOG_MAX_KINDS {
+                let stale: Vec<Arc<str>> = held.iter()
+                    .filter(|(_, last)| crate::sim_seam::mono_span(last, &now) > Duration::from_secs(1))
+                    .map(|(k, _)| Arc::clone(k))
+                    .collect();
+                for k in stale { held.remove(&k); }
+                if held.len() >= SIGNAL_LOG_MAX_KINDS { return None; }
+            }
+        }
         let quorum_key: Arc<str> = Arc::from(
             format!("{}{}/{}", kv_ns::QUORUM, kind, sender).as_str()
         );
-        let now = Instant::now();
         let should_write = self.quorum_written.pin()
             .get(&quorum_key)
             .map(|last| crate::sim_seam::mono_span(last, &now) > Duration::from_secs(1))
@@ -608,6 +695,19 @@ impl SignalHandlers {
         self.handlers.register_with_capacity(kind, cap)
     }
 
+    /// Registers a **tap** for `kind`: an observer that receives what is admitted — an SSE stream to
+    /// a dashboard — and does no work the node is responsible for. A tap loses its own signals when
+    /// full and never counts toward the kind's fill (#602's review, finding 4): admission and opacity
+    /// read the subscribers that bear work, so a fast tap cannot hide a saturated worker.
+    pub fn register_tap(&self, kind: Arc<str>, cap: usize) -> mpsc::Receiver<Signal> {
+        self.handlers.register_as(kind, cap, true)
+    }
+
+    /// `sys/quorum/` evidence rate-limit entries held (tests and diagnostics).
+    pub fn evidence_entries(&self) -> usize {
+        self.evidence.quorum_written.pin().len()
+    }
+
     /// Returns a receiver that only delivers signals whose `sender` is in `trusted`.
     /// An empty `trusted` list is equivalent to `register` — no filter overhead.
     pub fn register_from(
@@ -643,8 +743,7 @@ impl SignalHandlers {
         let now = Instant::now();
         // A kind this node subscribes to is always tracked; a kind only a sender chose is tracked
         // while the log has room (row B).
-        let subscribed = self.handlers.has_kind(&signal.kind);
-        self.log.record(&signal.kind, signal.sender.clone(), now, subscribed);
+        self.log.record(&signal.kind, signal.sender.clone(), now, &|k| self.handlers.has_kind(k));
         if self.suppression.is_suppressed_at(&signal.kind, now) {
             #[cfg(feature = "metrics")]
             metrics::counter!("gossip_signals_rejected_total").increment(1);
@@ -670,9 +769,15 @@ impl SignalHandlers {
         self.handlers.drops.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// New kinds the sender log declined to track because it held [`SIGNAL_LOG_MAX_KINDS`].
+    /// New kinds the sender log declined to track because it held [`SIGNAL_LOG_MAX_KINDS`] kinds and
+    /// every one was exempt from eviction (subscribed or queried).
     pub fn log_kinds_refused(&self) -> u64 {
         self.log.kinds_refused.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Kinds the sender log evicted, least recently seen first, to make room for new ones.
+    pub fn log_kinds_evicted(&self) -> u64 {
+        self.log.kinds_evicted.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Returns when this node last admitted a signal of `kind`, or `None` if never.
@@ -733,6 +838,10 @@ impl SignalHandlers {
         kind:   &Arc<str>,
         sender: &NodeId,
     ) -> Option<(Arc<str>, Bytes)> {
+        // No KV evidence for a kind the log could not track (#602's review, finding 2).
+        if !self.log.tracks(kind) && self.log.at_capacity() {
+            return None;
+        }
         self.evidence.payload(kind, sender)
     }
 }
@@ -1488,7 +1597,8 @@ mod bound_tests {
             "{} kinds tracked after {} random kinds; the bound is {SIGNAL_LOG_MAX_KINDS}",
             h.log_kinds_tracked(), SIGNAL_LOG_MAX_KINDS * 3,
         );
-        assert!(h.log_kinds_refused() >= (SIGNAL_LOG_MAX_KINDS * 2) as u64, "refusals are counted");
+        assert!(h.log_kinds_evicted() >= (SIGNAL_LOG_MAX_KINDS * 2) as u64, "evictions are counted");
+        assert_eq!(h.log_kinds_refused(), 0, "nothing is exempt, so nothing is refused");
     }
 
     #[test]
@@ -1561,5 +1671,104 @@ mod bound_tests {
             h.deliver(&sig("solo", id(1)));
         }
         assert_eq!(h.fill_ratio(&kind), 1.0);
+    }
+
+    /// #602's review, finding 2: `quorum_written` was the sender log's unbounded twin — one entry per
+    /// `(kind, sender)` ever seen, and a `sys/quorum/` KV write for every kind, tracked or not.
+    #[test]
+    fn quorum_evidence_stays_bounded_with_the_log() {
+        let h = SignalHandlers::new(Duration::from_secs(600));
+        for i in 0..SIGNAL_LOG_MAX_KINDS * 3 {
+            let k: Arc<str> = Arc::from(format!("rand.{i}"));
+            h.deliver(&sig(&k, id(1)));
+            let _ = h.quorum_evidence_payload(&k, &id(1));
+        }
+        assert!(h.evidence_entries() <= SIGNAL_LOG_MAX_KINDS,
+                "{} evidence entries after {} random kinds", h.evidence_entries(), SIGNAL_LOG_MAX_KINDS * 3);
+    }
+
+    /// Finding 2, second half: a kind the log could not track writes no KV evidence.
+    #[test]
+    fn a_kind_the_log_refuses_writes_no_evidence() {
+        let h = SignalHandlers::new(Duration::from_secs(600));
+        let mut keep = Vec::new();
+        for i in 0..SIGNAL_LOG_MAX_KINDS {
+            let k: Arc<str> = Arc::from(format!("sub.{i}"));
+            keep.push(h.register(Arc::clone(&k))); // every tracked kind is subscribed: none evictable
+            h.deliver(&sig(&k, id(1)));
+        }
+        let stray: Arc<str> = Arc::from("stray");
+        h.deliver(&sig(&stray, id(2)));
+        assert!(h.quorum_evidence_payload(&stray, &id(2)).is_none());
+    }
+
+    /// Finding 3: refusing new kinds at the cap turned the memory bound into a false negative — a
+    /// kind first seen after 4096 random ones could never reach a quorum.
+    #[test]
+    fn a_kind_first_seen_after_a_flood_is_still_tracked() {
+        let h = SignalHandlers::new(Duration::from_secs(600));
+        for i in 0..SIGNAL_LOG_MAX_KINDS + 10 {
+            h.deliver(&sig(&format!("rand.{i}"), id(1)));
+        }
+        h.deliver(&sig("late.kind", id(2)));
+        assert!(h.quorum("late.kind", 1, Duration::from_secs(60)), "least-recently-seen kinds make room");
+        assert!(h.log_kinds_tracked() <= SIGNAL_LOG_MAX_KINDS);
+    }
+
+    /// Finding 3, the exemption: a kind someone queries is not evicted by a flood.
+    #[test]
+    fn a_queried_kind_survives_a_flood() {
+        let h = SignalHandlers::new(Duration::from_secs(600));
+        h.deliver(&sig("watched", id(1)));
+        assert!(h.quorum("watched", 1, Duration::from_secs(60)));
+        for i in 0..SIGNAL_LOG_MAX_KINDS * 3 {
+            h.deliver(&sig(&format!("rand.{i}"), id(2)));
+        }
+        assert!(h.quorum("watched", 1, Duration::from_secs(60)), "a queried kind is exempt from eviction");
+        assert!(h.last_signal("watched").is_some());
+    }
+
+    /// Finding 3, senders: an active sender stays; forged ones heard from longer ago go first.
+    #[test]
+    fn an_active_sender_outlives_older_forged_ones() {
+        let h = SignalHandlers::new(Duration::from_secs(600));
+        for p in 0..SIGNAL_LOG_MAX_SENDERS_PER_KIND as u16 {
+            h.deliver(&sig("k", id(10_000 + p)));
+        }
+        h.deliver(&sig("k", id(1)));
+        for p in 0..200u16 {
+            h.deliver(&sig("k", id(20_000 + p)));
+        }
+        assert!(h.log_entries("k") <= SIGNAL_LOG_MAX_SENDERS_PER_KIND);
+        let members: AHashSet<u64> = [id(1).id_hash()].into_iter().collect();
+        assert!(h.quorum_for_group("k", &members, 1, Duration::from_secs(60)));
+    }
+
+    /// Finding 4: under the least-full rule a fast passive tap hid a saturated worker, so the kind
+    /// never shed. Taps do not count toward fill.
+    #[test]
+    fn a_fast_tap_does_not_hide_a_saturated_worker() {
+        let h = SignalHandlers::new(Duration::from_secs(600));
+        let kind: Arc<str> = Arc::from("work");
+        let _worker = h.register_with_capacity(Arc::clone(&kind), 4);
+        let mut tap = h.register_tap(Arc::clone(&kind), 256);
+        for _ in 0..4 {
+            h.deliver(&sig("work", id(1)));
+            while tap.try_recv().is_ok() {}
+        }
+        assert_eq!(h.fill_ratio(&kind), 1.0, "the only worker is full: the kind is full");
+    }
+
+    /// A kind with only a tap has no work to shed.
+    #[test]
+    fn a_kind_with_only_a_full_tap_is_not_full() {
+        let h = SignalHandlers::new(Duration::from_secs(600));
+        let kind: Arc<str> = Arc::from("watch.only");
+        let _tap = h.register_tap(Arc::clone(&kind), 2);
+        for _ in 0..4 {
+            h.deliver(&sig("watch.only", id(1)));
+        }
+        assert_eq!(h.fill_ratio(&kind), 0.0);
+        assert!(h.handler_drops() >= 2, "the tap's own losses are counted");
     }
 }

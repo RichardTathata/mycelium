@@ -116,6 +116,13 @@ alias_pattern() {
   # The bare `use tokio::time;` line itself is not counted — it enables nothing on its own.
   local time_aliases
   time_aliases=$(grep -oE '^use tokio::time as [a-z_][a-z0-9_]*' "$file" 2>/dev/null | awk '{print $5}' || true)
+  # ...and `time as <alias>` inside a grouped import — `use tokio::{…, time as ttime, …}`, on one line
+  # or on its own line. `writer.rs` spells it that way, and its timer sites were invisible to this
+  # check until the adversarial review of #602 (2026-10-10) found five new ones it had not counted;
+  # an inventory row then claimed they were "already in the alias count", which was false. A
+  # `std::{time as X}` alias is caught too, which is correct: `X::Instant` is the wall's monotonic clock.
+  time_aliases="$time_aliases"$'\n'"$(grep -E '^[[:space:]]+time as [a-z_][a-z0-9_]*[[:space:]]*,?[[:space:]]*$|^use [a-z_]+::\{.*[[:space:],{]time as [a-z_][a-z0-9_]*' "$file" 2>/dev/null \
+    | grep -oE 'time as [a-z_][a-z0-9_]*' | awk '{print $3}' || true)"
   if grep -qE '^use tokio::time;|^use tokio::time::\{[[:space:]]*self|^use tokio::\{.*[[:space:],{]time([[:space:],}]|::\{[[:space:]]*self)|^[[:space:]]+time,[[:space:]]*$' "$file" 2>/dev/null; then
     time_aliases="$time_aliases"$'\n'"time"
   fi

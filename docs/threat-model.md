@@ -155,10 +155,12 @@ is itself a crown jewel (Boundary A).
 - **Availability attacks** beyond the documented gossip backpressure/opacity
   mechanisms and the transport bounds of 2.32 (row B of the post-360 hardening plan): a
   socket that connects and says nothing is closed after `handshake_timeout_ms`, a silent
-  established one after `inbound_idle_timeout_secs`; a peer that never reads cannot park
-  a writer past `peer_write_timeout_ms` or hold more than one anti-entropy reply; a
-  stalled subscriber loses its own signals rather than its kind's admission; the signal
-  log holds at most 4096 sender-chosen kinds. These bound what **one** socket, peer or
+  established one after `inbound_idle_timeout_secs`; a frame in flight must keep moving
+  (`peer_stall_timeout_ms`) above a bandwidth floor (`peer_min_rate_bytes_per_sec`), in
+  both directions, so a peer that never reads cannot park a writer or hold more than one
+  anti-entropy reply; a stalled subscriber loses its own signals rather than its kind's
+  admission; the signal log holds at most 4096 sender-chosen kinds, evicting the least
+  recently seen. These bound what **one** socket, peer or
   kind can hold — they are not a defence against many: on a plaintext mesh anyone who can
   reach the port can open `max_connections` sockets and speak once each per idle bound,
   and per-source limits are not built.

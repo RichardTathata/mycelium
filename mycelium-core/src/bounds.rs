@@ -9,7 +9,8 @@
 //! [`bytes::Bytes::from_owner`]) and released when the last of them has been written or dropped, so
 //! a peer has **at most one** reply in flight — queued, being written, or waiting on the writer —
 //! and a request that arrives while it is answered is skipped and counted. The writer's own write
-//! timeout (`peer_write_timeout_ms`) is what guarantees a held slot is released.
+//! progress bound (`peer_stall_timeout_ms`, `peer_min_rate_bytes_per_sec`) is what guarantees a held
+//! slot is released.
 
 use crate::node_id::NodeId;
 use bytes::Bytes;
@@ -23,9 +24,13 @@ use std::sync::{
 #[derive(Default)]
 pub struct TransportBounds {
     /// Inbound gossip connections this node closed because a bound elapsed: the TLS handshake or
-    /// the first frame did not arrive within `handshake_timeout_ms`, or an established connection
+    /// the first frame's first byte did not arrive within `handshake_timeout_ms`, or an established connection
     /// was silent for `inbound_idle_timeout_secs`. See `SystemStats::inbound_connections_timed_out`.
     pub inbound_timed_out: AtomicU64,
+    /// Inbound gossip connections closed because a frame **in progress** stalled: no byte for
+    /// `peer_stall_timeout_ms`, or below `peer_min_rate_bytes_per_sec` (#602's review, finding 1) —
+    /// counted apart from `inbound_timed_out`, which is silence between frames.
+    pub inbound_frames_stalled: AtomicU64,
     /// `StateRequest`s this node did not answer because a reply to the same peer was still in
     /// flight. See `SystemStats::anti_entropy_replies_skipped`.
     pub anti_entropy_replies_skipped: AtomicU64,
@@ -52,6 +57,13 @@ impl TransportBounds {
     /// Whether a reply to `peer` is in flight (tests and diagnostics).
     pub fn reply_in_flight(&self, peer: &NodeId) -> bool {
         self.replying_to.pin().contains_key(peer)
+    }
+
+    /// Counts one inbound connection closed because a frame in progress stalled.
+    pub fn count_frame_stalled(&self) {
+        self.inbound_frames_stalled.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        metrics::counter!("gossip_inbound_frames_stalled_total").increment(1);
     }
 
     /// Counts one inbound connection closed by a handshake, first-frame or idle bound.

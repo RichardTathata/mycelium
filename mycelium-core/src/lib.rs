@@ -40,6 +40,7 @@ pub mod removal;
 pub mod schema_handle;
 pub mod seen;
 pub mod signal;
+pub mod stall;
 pub mod store;
 pub mod stream;
 pub mod swim;

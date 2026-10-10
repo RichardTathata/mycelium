@@ -749,14 +749,15 @@ pub struct GossipConfig {
     /// interval, so actively-pinged (fan-out) writers stay warm while idle ones close.
     pub writer_idle_timeout_secs: u64,
     /// Milliseconds a gossip connection may take to become useful, in both directions (row B,
-    /// post-360 hardening, 2026-10-10). **Inbound:** the TLS handshake and the first frame after it
-    /// must arrive within this bound, or the socket is closed and its `max_connections` permit
-    /// returned — before this bound `max_connections` idle sockets that never spoke held every
-    /// permit forever, and no peer could connect. **Outbound:** the writer's TCP connect plus its
-    /// TLS handshake; past it the attempt fails like a refused connect (reconnect backoff).
+    /// post-360 hardening, 2026-10-10). **Inbound:** the TLS handshake, then the first byte of the
+    /// first frame, must each arrive within this bound, or the socket is closed and its
+    /// `max_connections` permit returned — before this bound `max_connections` idle sockets that never
+    /// spoke held every permit forever. The rest of that frame is under the progress bound
+    /// (`peer_stall_timeout_ms`, `peer_min_rate_bytes_per_sec`), not this one: a large first frame on
+    /// a slow link is read however long it takes while it keeps moving (#602's review, finding 1).
+    /// **Outbound:** the writer's TCP connect plus its TLS handshake; past it the attempt fails like a
+    /// refused connect (reconnect backoff).
     ///
-    /// A healthy peer's writer connects lazily *on* a frame and writes it at once, so the first
-    /// frame follows the handshake by microseconds; the default leaves two orders of magnitude.
     /// Validated `1..=600_000`. Default `10_000`. Env: `GOSSIP_HANDSHAKE_TIMEOUT_MS`.
     pub handshake_timeout_ms: u64,
     /// Seconds an established inbound gossip connection may stay silent before this node closes it
@@ -768,13 +769,22 @@ pub struct GossipConfig {
     /// connection the *reader* closes costs the writer's next frame. `0` = never close (the
     /// pre-2.32 behaviour). Default `300`. Env: `GOSSIP_INBOUND_IDLE_TIMEOUT_SECS`.
     pub inbound_idle_timeout_secs: u64,
-    /// Milliseconds the outbound writer may spend writing one frame, or flushing, to a peer (row B).
-    /// Past it the connection is treated as failed — frames queued behind it are dropped during the
-    /// reconnect backoff, as on any write failure — so a peer that accepts and never reads cannot
-    /// park the writer, its channel, or the anti-entropy replies queued for it. Shutdown and
-    /// eviction now also interrupt a writer mid-write. Validated `1..=600_000`. Default `30_000`
-    /// (a 10 MB frame at ~350 kB/s). Env: `GOSSIP_PEER_WRITE_TIMEOUT_MS`.
-    pub peer_write_timeout_ms: u64,
+    /// Milliseconds a frame in progress may go without a byte moved, in either direction (row B;
+    /// #602's review, finding 1). The reader arms it from a frame's first byte to its last; the writer
+    /// for each batch it writes and flushes. Past it the connection is closed (inbound, counted in
+    /// `SystemStats::inbound_frames_stalled`) or fails like any write error (outbound — queued frames
+    /// are dropped during the reconnect backoff). Shutdown and eviction interrupt a writer mid-write
+    /// regardless. It bounds **progress, not frames**: a 10 MB frame on a slow but healthy link
+    /// crosses as long as bytes keep moving. Validated `1..=600_000`. Default `15_000`.
+    /// Env: `GOSSIP_PEER_STALL_TIMEOUT_MS`.
+    pub peer_stall_timeout_ms: u64,
+    /// The bandwidth floor, in bytes per second, a frame in progress must keep once
+    /// `peer_stall_timeout_ms` has passed since it started: a frame that has moved fewer than
+    /// `floor × (elapsed − peer_stall_timeout_ms)` bytes is treated as stalled. This is what stops a
+    /// peer from holding a socket by trickling a byte per stall window. Default `8192` (64 kbit/s, so
+    /// a 10 MB frame may take ~21 min); `0` = no floor, only the no-progress bound.
+    /// Env: `GOSSIP_PEER_MIN_RATE_BYTES_PER_SEC`.
+    pub peer_min_rate_bytes_per_sec: u64,
     /// When `true`, gossip shards apply scope-aware forwarding for Signal frames:
     /// Group-scoped signals are forwarded only to known group members (plus up to
     /// `epidemic_extra_peers` random non-members for epidemic coverage), and
@@ -1288,7 +1298,8 @@ impl Default for GossipConfig {
             writer_idle_timeout_secs: 30,
             handshake_timeout_ms: 10_000,
             inbound_idle_timeout_secs: 300,
-            peer_write_timeout_ms: 30_000,
+            peer_stall_timeout_ms: 15_000,
+            peer_min_rate_bytes_per_sec: 8192,
             group_aware_forwarding: true,
             epidemic_extra_peers:   3,
             health_check_max_jitter_ms: 0,
@@ -1597,7 +1608,7 @@ impl GossipConfig {
             });
         }
         for (field, v) in [("handshake_timeout_ms", self.handshake_timeout_ms),
-                           ("peer_write_timeout_ms", self.peer_write_timeout_ms)] {
+                           ("peer_stall_timeout_ms", self.peer_stall_timeout_ms)] {
             if v == 0 || v > 600_000 {
                 return Err(GossipError::InvalidField {
                     field,
@@ -1867,8 +1878,11 @@ impl GossipConfig {
         if let Ok(v) = env::var("GOSSIP_INBOUND_IDLE_TIMEOUT_SECS") {
             self.inbound_idle_timeout_secs = v.parse().map_err(GossipError::Parse)?;
         }
-        if let Ok(v) = env::var("GOSSIP_PEER_WRITE_TIMEOUT_MS") {
-            self.peer_write_timeout_ms = v.parse().map_err(GossipError::Parse)?;
+        if let Ok(v) = env::var("GOSSIP_PEER_STALL_TIMEOUT_MS") {
+            self.peer_stall_timeout_ms = v.parse().map_err(GossipError::Parse)?;
+        }
+        if let Ok(v) = env::var("GOSSIP_PEER_MIN_RATE_BYTES_PER_SEC") {
+            self.peer_min_rate_bytes_per_sec = v.parse().map_err(GossipError::Parse)?;
         }
         if let Ok(v) = env::var("GOSSIP_MAX_ACTIVE_CONNECTIONS") {
             self.max_active_connections = v.parse().map_err(GossipError::Parse)?;

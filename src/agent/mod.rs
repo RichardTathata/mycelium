@@ -432,17 +432,29 @@ pub struct SystemStats {
     pub rpc_reply_sender_mismatches: u64,
 
     /// Cumulative inbound gossip connections this node closed because a bound elapsed (row B,
-    /// post-360 hardening): the TLS handshake and first frame did not arrive within
+    /// post-360 hardening): the TLS handshake, or the first byte of the first frame, did not arrive within
     /// `handshake_timeout_ms`, or an established connection was silent for
     /// `inbound_idle_timeout_secs`. Each returned its `max_connections` permit. A steady rate with
     /// healthy peers suggests `inbound_idle_timeout_secs` is not above the fleet's
     /// `writer_idle_timeout_secs`; a burst names sockets that connect and never speak.
     pub inbound_connections_timed_out: u64,
 
+    /// Cumulative inbound gossip connections closed because a frame **in progress** stalled — no byte
+    /// for `peer_stall_timeout_ms`, or fewer than `peer_min_rate_bytes_per_sec` over the frame
+    /// (#602's review, finding 1). Counted apart from
+    /// [`inbound_connections_timed_out`](Self::inbound_connections_timed_out), which is silence
+    /// between frames. Rising with a healthy peer means the link is slower than the floor.
+    pub inbound_frames_stalled: u64,
+
     /// Cumulative `StateRequest`s this node did not answer because its anti-entropy reply to the
     /// same peer was still in flight — queued for, or being written to, that peer (row B). At most
-    /// one reply per peer is in flight; the requester asks again on its next anti-entropy tick.
-    /// Rising for one peer means that peer is not reading.
+    /// one reply per peer is in flight. **When the requester asks again depends on its failure
+    /// detector** (#602's review, finding 7): with SWIM on (the default) it re-syncs each forwarding
+    /// peer once per resync cooldown, so a skipped request is retried; with SWIM off a node sends a
+    /// `StateRequest` only on first contact and when a bootstrap peer re-enters its active set, so a
+    /// skipped one is **not** retried until such an event. What it misses is bounded by the reply
+    /// still in flight, which carries the same divergent buckets as of its own request. Rising for
+    /// one peer means that peer is not reading.
     pub anti_entropy_replies_skipped: u64,
 
     /// Cumulative signals dropped because a local subscriber's channel was full — the subscriber's
@@ -450,9 +462,15 @@ pub struct SystemStats {
     /// other subscriber; it drops its own copies, counted here.
     pub signal_handler_drops: u64,
 
-    /// Cumulative new signal kinds the sender log declined to track because it already held
-    /// [`SIGNAL_LOG_MAX_KINDS`](mycelium_core::signal::SIGNAL_LOG_MAX_KINDS) kinds (row B). Kinds
-    /// with a local handler are always tracked. Non-zero means some sender is inventing kinds.
+    /// Cumulative signal kinds the sender log evicted, least recently seen first, to make room at
+    /// [`SIGNAL_LOG_MAX_KINDS`](mycelium_core::signal::SIGNAL_LOG_MAX_KINDS) (row B; #602's review).
+    /// Kinds with a local handler or that were queried are never evicted. Non-zero means some sender
+    /// is inventing kinds, or the fleet uses more kinds than the bound.
+    pub signal_log_kinds_evicted: u64,
+
+    /// Cumulative new signal kinds the sender log refused because every tracked kind was exempt
+    /// from eviction (subscribed or queried). Non-zero means this node subscribes to or queries more
+    /// kinds than [`SIGNAL_LOG_MAX_KINDS`](mycelium_core::signal::SIGNAL_LOG_MAX_KINDS).
     pub signal_log_kinds_refused: u64,
 }
 
@@ -2058,3 +2076,9 @@ pub(crate) fn gateway_member_keys(
     }
 }
 
+
+#[cfg(test)]
+impl GossipAgent {
+    /// The task context, for crate tests outside `agent` (`resource_bounds_tests`).
+    pub(crate) fn task_ctx_for_tests(&self) -> &Arc<TaskCtx> { &self.task_ctx }
+}
