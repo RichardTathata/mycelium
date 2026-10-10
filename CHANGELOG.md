@@ -512,7 +512,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `a blank token in gateway_scoped_tokens must refuse at validate(), got Ok(())`;
   `resolve_token_never_matches_an_empty_presented_bearer` — `"" must not authenticate`, left
   `Some(("token:gw-1/legacy", ["*"]))`. New guarantee **`gw.exposed_closed`** (`not_applicable` on loopback, `not_configured` under the waiver),
-  required by **`secure-single-domain` rev 3** — which refuses no node rev 2 admitted, but names the waiver. The demo
+  required by **`secure-single-domain` rev 3**, which refuses one node rev 2 admitted — a gateway whose only credential was a blank `gateway_auth_token`, which `gw.not_open` rev 1 read as enforced (and which `validate()` now refuses in every profile) — and otherwise names the waiver when `gateway_allow_unauthenticated` is set (an upgrade note, below). The demo
   nodes that bind `0.0.0.0` with no credential (`three_node_demo` — the Docker and Kubernetes demo image —
   and `federation_node`) set the opt-in, with a comment saying why. Seen failing first:
   `an_exposed_gateway_with_no_credential_refuses_to_start` — `0.0.0.0 with no credential (token None) must refuse to

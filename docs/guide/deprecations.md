@@ -537,8 +537,7 @@ who could reach the port. Loopback is `127.0.0.0/8`, `::1` and an IPv4-mapped lo
 whitespace-only `gateway_auth_token` (including `GOSSIP_GATEWAY_AUTH_TOKEN=""`), or a `token` in any
 `gateway_scoped_tokens` / `gateway_named_tokens` entry — on every address and in every profile; such a node used to
 start and, over HTTP/2, admit an empty bearer. Under
-`profile = "secure-single-domain"` the profile is **rev 3**, which adds `gw.exposed_closed`: it refuses no node rev 2
-admitted, but names the waiver when `gateway_allow_unauthenticated` is set.
+`profile = "secure-single-domain"` the profile is **rev 3**, which adds `gw.exposed_closed` (with `gw.not_open` at rev 2): it refuses one node rev 2 admitted — a gateway whose only credential was a blank `gateway_auth_token`, which `gw.not_open` rev 1 read as enforced (and which `validate()` now refuses in every profile) — and otherwise names the waiver when `gateway_allow_unauthenticated` is set.
 
 **Will the compiler tell me?** No — a start-time refusal. `GossipConfig` gained a field
 (`gateway_allow_unauthenticated`), so an exhaustive struct literal breaks; `..Default::default()` is unaffected.

@@ -54,8 +54,11 @@ this page is the index + the gate.
   `a2a.admission` · `authz.execution_authority` · `authz.durable_epochs` · `audit.chain` ·
   `egress.allow_list` · `persist.configured` · `persist.sync_mode` · `persist.unreadable_refused` ·
   `id.ca_key_off_node`. It needs a `compliance` + `tls` build (anything less reads `not_in_build` and
-  refuses). **Rev 3's addition** is `gw.exposed_closed`: it refuses no node rev 2 admitted (an open
-  gateway already failed `gw.not_open`) but names the waiver when `gateway_allow_unauthenticated` is set.
+  refuses). **Rev 3's addition** is `gw.exposed_closed` (with `gw.not_open` at rev 2). **Upgrade note:** rev 3
+  refuses one node rev 2 admitted — a gateway whose only credential was a blank `gateway_auth_token`, which
+  `gw.not_open` rev 1 read as enforced (`validate()` now refuses a blank token in every profile; set a real
+  secret). Otherwise an open gateway already failed `gw.not_open`, and the new id names the waiver when
+  `gateway_allow_unauthenticated` is set.
   **Rev 2's two additions are settings, not attachments:** `persist.unreadable_refused` is the
   default (`[persistence] on_unreadable = "refuse"`), and `id.ca_key_off_node` holds only for a node
   started from a certificate **issued where the CA key lives** — `mycelium tls issue --ca-dir <ca>

@@ -266,10 +266,12 @@ pub const SECURE_SINGLE_DOMAIN: Profile = Profile {
     // node — and `persist.unreadable_refused` (`persistence.on_unreadable = "refuse"`, the default).
     // Rev 1 could not require the first: until v2.20.0 the TLS init re-signed the node cert with
     // the CA key at every start and minted a CA where the key was absent.
-    // Rev 3 (plan `post-360-hardening.md` row P1): `gw.exposed_closed`. It refuses no node rev 2
-    // admitted — `gw.not_open` already refused every open gateway — but it names the waiver
-    // (`gateway_allow_unauthenticated`) when a node sets it, which G12 lets a MINOR add because a
-    // deployment meets it by configuration.
+    // Rev 3 (plan `post-360-hardening.md` row P1): `gw.exposed_closed`, with `gw.not_open` at rev 2.
+    // Upgrade note: rev 3 refuses one node rev 2 admitted — a gateway whose only credential was a
+    // blank `gateway_auth_token`, which `gw.not_open` rev 1 read as enforced (and which `validate()`
+    // now refuses in every profile). Otherwise an open gateway already failed `gw.not_open`, and the
+    // new id names the waiver (`gateway_allow_unauthenticated`) when a node sets it. G12 lets a MINOR
+    // add it: a deployment meets it by configuration (a real secret; the opt-in unset).
     revision: 3,
     required: &[
         "mesh.tls",
@@ -675,7 +677,7 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
         // Plan `post-360-hardening.md` row P1: the open gateway is refused where it is reachable. Loopback
         // is the role fact that makes it moot; the opt-in is the one way past it, and reads unmet.
         g("gw.exposed_closed", 1, "gateway", Node,
-          "a gateway bound beyond loopback requires a credential — `start()` refuses an open one unless explicitly waived",
+          "a gateway bound beyond loopback requires a credential — `start()` refuses an open one unless explicitly waived; on a credentialed node `/health`, `/ready`, `/stats`, `/metrics`, `/bulk/{id}` and the A2A descriptor stay public, `/a2a` admits an anonymous caller, and a merged router's paths outside `/gateway/` are not gated",
           "`gateway_auth_token`, or (`compliance`) a token table or `[oidc]`, on any non-loopback `http_addr`; `gateway_allow_unauthenticated` unset",
           &["GossipAgent::start", "guarantee::gateway_exposure"], "docs/operations/production-readiness.md",
           // Loopback is a role fact only where a gateway can run: a gateway-free build reads

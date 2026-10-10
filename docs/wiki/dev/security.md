@@ -576,7 +576,7 @@ predicate `gw.not_open`, `gw.exposed_closed` and `start()` read; `gateway_auth` 
 `resolve_token_never_matches_an_empty_presented_bearer`, both seen failing first. No HTTP/2 end-to-end test: the
 unit test on `resolve_token` covers the empty string whichever transport delivers it. Visible as
 guarantee `gw.exposed_closed` (`not_applicable` on loopback, `not_configured` under the waiver), required by
-`secure-single-domain` **rev 3** — which refuses no node rev 2 admitted, but names the waiver. In-repo, the two
+`secure-single-domain` **rev 3**, which refuses one node rev 2 admitted — a gateway whose only credential was a blank `gateway_auth_token`, which `gw.not_open` rev 1 read as enforced (and which `validate()` now refuses in every profile) — and otherwise names the waiver when `gateway_allow_unauthenticated` is set (the review's finding 2: an earlier draft said *refuses no node rev 2 admitted*, which the blank-token change made false). The demos' own `0.0.0.0` listeners — `three_node_demo`'s chat UI and dashboard, `llm_agent`'s UI, `federation_node`'s control port, `confined_fleet_node`'s operator port — are application code beside the library and outside this check; `docker/docker-compose.yml` publishes the waived gateways on the host's loopback only. In-repo, the two
 demo nodes that bind `0.0.0.0` with no credential (`three_node_demo`, `federation_node`) set the opt-in with a
 comment; `confined_fleet_node` carries named tokens. Pinned by `an_exposed_gateway_with_no_credential_refuses_to_start`
 (seen failing first: it started, `Ok(())`) and `an_exposed_gateway_starts_with_a_credential_on_loopback_or_with_the_opt_in`.

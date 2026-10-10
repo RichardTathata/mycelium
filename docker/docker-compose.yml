@@ -24,6 +24,13 @@
 #   http://localhost:8080        # chat UI
 #   http://localhost:8080/mesh   # live tool list + model name
 #   http://localhost:8090        # mesh dashboard (nodes, tools, TCP peers)
+#
+# What is exposed: each node's Mycelium gateway (container port 8300) runs with NO credential
+# under `gateway_allow_unauthenticated` (examples/three_node_demo.rs) — open to the compose network,
+# and published on the HOST'S LOOPBACK ONLY (`127.0.0.1:830x`), never on the host's other
+# interfaces. The chat UI (8080), the dashboard (8090) and Ollama (11434) are the demo's own
+# listeners, not the library's gateway, and are published on every host interface as before.
+# To close the gateways, set GOSSIP_GATEWAY_AUTH_TOKEN on the mycelium services.
 
 services:
 
@@ -85,7 +92,7 @@ services:
       MYCELIUM_PEERS:     "tool-b:57000,llm:57000,mgmt:57000,tool-sf:57000,tool-book:57000"
       RUST_LOG:           "info,mycelium=info"
     ports:
-      - "8300:8300"
+      - "127.0.0.1:8300:8300"
     networks:
       - mesh
     restart: unless-stopped
@@ -109,7 +116,7 @@ services:
       MYCELIUM_PEERS:     "tool-a:57000,llm:57000,mgmt:57000,tool-sf:57000,tool-book:57000"
       RUST_LOG:           "info,mycelium=info"
     ports:
-      - "8301:8300"
+      - "127.0.0.1:8301:8300"
     networks:
       - mesh
     restart: unless-stopped
@@ -159,7 +166,7 @@ services:
       MYCELIUM_PEERS:     "tool-a:57000,tool-b:57000,mgmt:57000"
       RUST_LOG:           "warn"
     ports:
-      - "8303:8300"
+      - "127.0.0.1:8303:8300"
     networks:
       - mesh
     depends_on:
@@ -186,7 +193,7 @@ services:
       MYCELIUM_PEERS:     "tool-a:57000,tool-b:57000,mgmt:57000"
       RUST_LOG:           "warn"
     ports:
-      - "8304:8300"
+      - "127.0.0.1:8304:8300"
     networks:
       - mesh
     depends_on:
@@ -216,7 +223,7 @@ services:
       OLLAMA_BASE_URL:    "http://ollama:11434/v1"
       VERIFIER_MODEL:     "llama3.1:8b"
     ports:
-      - "8305:8300"
+      - "127.0.0.1:8305:8300"
     networks:
       - mesh
     depends_on:
@@ -250,7 +257,7 @@ services:
       CHAT_PORT:          "8080"
     ports:
       - "8080:8080"   # chat UI — open http://localhost:8080
-      - "8302:8300"   # Mycelium gateway (optional, for inspection)
+      - "127.0.0.1:8302:8300"   # Mycelium gateway (optional, for inspection)
     networks:
       - mesh
     depends_on:

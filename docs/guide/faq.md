@@ -115,9 +115,11 @@ don't want that dependency.
 - **Call `shutdown()`.** Companions with background curators/loops (e.g. the wiki)
   hold task cycles; drop alone won't stop them. See
   [14-patterns-and-pitfalls.md](14-patterns-and-pitfalls.md).
-- **The gateway has no auth by default.** The HTTP gateway is for trusted networks
-  unless you put mTLS / a proxy in front — see guide [09-security.md](09-security.md)
-  and [operations](../operations/README.md).
+- **The gateway has no auth by default — on loopback.** With no credential the HTTP gateway
+  serves only a loopback `http_addr`; a non-loopback one (`0.0.0.0`, a LAN address) refuses to
+  start unless you set a credential or the explicit `gateway_allow_unauthenticated` opt-in
+  (unreleased). Put mTLS / a proxy in front on untrusted networks — see guide
+  [09-security.md](09-security.md) and [operations](../operations/README.md).
 - **Rolling upgrades are wire-version gated.** One version step per rollout
   (`WIRE_VERSION`/`PREV_WIRE_VERSION`); mixed clusters spanning two steps won't
   talk. See guide [13-cluster-topology.md](13-cluster-topology.md).
