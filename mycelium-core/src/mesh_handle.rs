@@ -264,6 +264,8 @@ impl MeshHandle {
 
     /// Returns the age of the most recently seen evidence of `kind` in `sys/quorum/`.
     pub fn last_signal_persistent(&self, kind: &str) -> Option<Duration> {
+        // Asking about a kind makes this node keep its evidence for it (2.32, #602's re-review).
+        self.ctx.signal_handlers.pin_kind(kind);
         use std::time::{SystemTime, UNIX_EPOCH};
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)

@@ -38,8 +38,9 @@ operator's working set.
 | `writer_idle_timeout_secs` | `30` | `GOSSIP_WRITER_IDLE_TIMEOUT_SECS` | s |
 | `inbound_idle_timeout_secs` | `300` (must exceed `writer_idle_timeout_secs`; `0` = never) | `GOSSIP_INBOUND_IDLE_TIMEOUT_SECS` | s |
 | `handshake_timeout_ms` | `10_000` | `GOSSIP_HANDSHAKE_TIMEOUT_MS` | ms |
-| `peer_stall_timeout_ms` | `15_000` (no byte moved within a frame) | `GOSSIP_PEER_STALL_TIMEOUT_MS` | ms |
-| `peer_min_rate_bytes_per_sec` | `8192` (the bandwidth floor past the first stall window; `0` = none) | `GOSSIP_PEER_MIN_RATE_BYTES_PER_SEC` | B/s |
+| `peer_read_stall_timeout_ms` | `60_000` (no byte received within a frame) | `GOSSIP_PEER_READ_STALL_TIMEOUT_MS` | ms |
+| `peer_write_stall_timeout_ms` | `600_000` (no byte accepted by the peer; outlasts a 329 s worst-case chunk apply into an fsync WAL) | `GOSSIP_PEER_WRITE_STALL_TIMEOUT_MS` | ms |
+| `peer_min_rate_bytes_per_sec` | `0` (off; a per-connection read floor — size it ≤ link ÷ concurrent senders if set) | `GOSSIP_PEER_MIN_RATE_BYTES_PER_SEC` | B/s |
 | `swim_failure_detector` | `true` | `GOSSIP_SWIM_FAILURE_DETECTOR` | bool |
 | `swim_udp_port` | same as `bind_port` | `GOSSIP_SWIM_UDP_PORT` | port |
 | `swim_probe_interval_ms` | `500` | `GOSSIP_SWIM_PROBE_INTERVAL_MS` | ms |

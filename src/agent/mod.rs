@@ -440,11 +440,16 @@ pub struct SystemStats {
     pub inbound_connections_timed_out: u64,
 
     /// Cumulative inbound gossip connections closed because a frame **in progress** stalled — no byte
-    /// for `peer_stall_timeout_ms`, or fewer than `peer_min_rate_bytes_per_sec` over the frame
+    /// for `peer_read_stall_timeout_ms`, or below `peer_min_rate_bytes_per_sec` (off by default) over the frame
     /// (#602's review, finding 1). Counted apart from
     /// [`inbound_connections_timed_out`](Self::inbound_connections_timed_out), which is silence
     /// between frames. Rising with a healthy peer means the link is slower than the floor.
     pub inbound_frames_stalled: u64,
+
+    /// Cumulative outbound writer connections failed because the peer accepted no byte for
+    /// `peer_write_stall_timeout_ms` (#602's re-review). Queued frames to that peer were dropped
+    /// during the reconnect backoff. Rising for one peer means it is not reading.
+    pub outbound_stalls: u64,
 
     /// Cumulative `StateRequest`s this node did not answer because its anti-entropy reply to the
     /// same peer was still in flight — queued for, or being written to, that peer (row B). At most

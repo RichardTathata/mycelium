@@ -481,6 +481,8 @@ impl KvHandle {
     /// log, this reads `sys/quorum/{kind}/` from the KV store — durable across restarts.
     pub fn quorum_persistent(&self, kind: &str, window: Duration) -> usize {
         use crate::signal::kv_ns;
+        // Asking about a kind makes this node keep its evidence for it (2.32, #602's re-review).
+        self.ctx.signal_handlers.pin_kind(kind);
         let prefix   = format!("{}{}/", kv_ns::QUORUM, kind);
         let now_ms   = SystemTime::now()
             .duration_since(UNIX_EPOCH).unwrap_or_default()

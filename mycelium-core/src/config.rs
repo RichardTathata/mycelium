@@ -753,7 +753,7 @@ pub struct GossipConfig {
     /// first frame, must each arrive within this bound, or the socket is closed and its
     /// `max_connections` permit returned — before this bound `max_connections` idle sockets that never
     /// spoke held every permit forever. The rest of that frame is under the progress bound
-    /// (`peer_stall_timeout_ms`, `peer_min_rate_bytes_per_sec`), not this one: a large first frame on
+    /// (`peer_read_stall_timeout_ms`, `peer_min_rate_bytes_per_sec`), not this one: a large first frame on
     /// a slow link is read however long it takes while it keeps moving (#602's review, finding 1).
     /// **Outbound:** the writer's TCP connect plus its TLS handshake; past it the attempt fails like a
     /// refused connect (reconnect backoff).
@@ -769,21 +769,33 @@ pub struct GossipConfig {
     /// connection the *reader* closes costs the writer's next frame. `0` = never close (the
     /// pre-2.32 behaviour). Default `300`. Env: `GOSSIP_INBOUND_IDLE_TIMEOUT_SECS`.
     pub inbound_idle_timeout_secs: u64,
-    /// Milliseconds a frame in progress may go without a byte moved, in either direction (row B;
-    /// #602's review, finding 1). The reader arms it from a frame's first byte to its last; the writer
-    /// for each batch it writes and flushes. Past it the connection is closed (inbound, counted in
-    /// `SystemStats::inbound_frames_stalled`) or fails like any write error (outbound — queued frames
-    /// are dropped during the reconnect backoff). Shutdown and eviction interrupt a writer mid-write
-    /// regardless. It bounds **progress, not frames**: a 10 MB frame on a slow but healthy link
-    /// crosses as long as bytes keep moving. Validated `1..=600_000`. Default `15_000`.
-    /// Env: `GOSSIP_PEER_STALL_TIMEOUT_MS`.
-    pub peer_stall_timeout_ms: u64,
-    /// The bandwidth floor, in bytes per second, a frame in progress must keep once
-    /// `peer_stall_timeout_ms` has passed since it started: a frame that has moved fewer than
-    /// `floor × (elapsed − peer_stall_timeout_ms)` bytes is treated as stalled. This is what stops a
-    /// peer from holding a socket by trickling a byte per stall window. Default `8192` (64 kbit/s, so
-    /// a 10 MB frame may take ~21 min); `0` = no floor, only the no-progress bound.
-    /// Env: `GOSSIP_PEER_MIN_RATE_BYTES_PER_SEC`.
+    /// Milliseconds a frame being **received** may go without a byte arriving (row B; #602's review
+    /// and re-review). Armed from a frame's first byte to its last — never while the link is idle
+    /// between frames, and never while this node applies what it read — so it measures the remote
+    /// sender alone. Past it the connection is closed (`SystemStats::inbound_frames_stalled`): a peer
+    /// that sends one byte and stops holds its `max_connections` permit this long and no longer.
+    /// Validated `1..=3_600_000`. Default `60_000`. Env: `GOSSIP_PEER_READ_STALL_TIMEOUT_MS`.
+    pub peer_read_stall_timeout_ms: u64,
+    /// Milliseconds a batch being **sent** may go without a byte accepted by the peer (row B; #602's
+    /// re-review, finding 3). Longer than the read bound on purpose: a receiver does not read while it
+    /// applies a frame, and applying one ~10 MB anti-entropy chunk into a WAL that fsyncs each append
+    /// was **measured at 329 s** (70 000 × 64 B entries; 41.8 s for 9 000 × 1 KiB; 0.78 s for
+    /// 152 × 64 KiB — a developer Mac, 2026-10-10, `worst_case_chunk_apply_with_an_fsync_wal`), so a
+    /// shorter bound would cut a healthy peer mid-bootstrap on every attempt. Past it the connection
+    /// fails like any write error (`SystemStats::outbound_stalls`). What it costs: a peer that accepts
+    /// and never reads parks **its own** writer (and its one anti-entropy reply) this long — nothing
+    /// else waits on it, and shutdown or eviction interrupt it at once. Validated `1..=3_600_000`.
+    /// Default `600_000`. Env: `GOSSIP_PEER_WRITE_STALL_TIMEOUT_MS`.
+    pub peer_write_stall_timeout_ms: u64,
+    /// A bandwidth floor, bytes per second, on frames being **received**: once
+    /// `peer_read_stall_timeout_ms` has passed since a frame started, it must have moved at least
+    /// `floor × (elapsed − peer_read_stall_timeout_ms)` bytes. **`0` (the default) disables it**
+    /// (#602's re-review, finding 2): the floor is per connection, so a joiner whose link is shared by
+    /// its senders — eight peers on 512 kbit/s give each under 8 KiB/s — would cut every one of them.
+    /// Without it, a peer can hold one socket by trickling a byte per read-stall window (one byte per
+    /// minute per held permit at the default); set it, sized to `link ÷ concurrent senders`, where that
+    /// matters more than slow links. Not applied to writes: a sender cannot tell a slow link from a
+    /// receiver applying what it read. Env: `GOSSIP_PEER_MIN_RATE_BYTES_PER_SEC`.
     pub peer_min_rate_bytes_per_sec: u64,
     /// When `true`, gossip shards apply scope-aware forwarding for Signal frames:
     /// Group-scoped signals are forwarded only to known group members (plus up to
@@ -1298,8 +1310,9 @@ impl Default for GossipConfig {
             writer_idle_timeout_secs: 30,
             handshake_timeout_ms: 10_000,
             inbound_idle_timeout_secs: 300,
-            peer_stall_timeout_ms: 15_000,
-            peer_min_rate_bytes_per_sec: 8192,
+            peer_read_stall_timeout_ms: 60_000,
+            peer_write_stall_timeout_ms: 600_000,
+            peer_min_rate_bytes_per_sec: 0,
             group_aware_forwarding: true,
             epidemic_extra_peers:   3,
             health_check_max_jitter_ms: 0,
@@ -1607,12 +1620,13 @@ impl GossipConfig {
                 reason: "cannot be zero".into(),
             });
         }
-        for (field, v) in [("handshake_timeout_ms", self.handshake_timeout_ms),
-                           ("peer_stall_timeout_ms", self.peer_stall_timeout_ms)] {
-            if v == 0 || v > 600_000 {
+        for (field, v, max) in [("handshake_timeout_ms", self.handshake_timeout_ms, 600_000),
+                                ("peer_read_stall_timeout_ms", self.peer_read_stall_timeout_ms, 3_600_000),
+                                ("peer_write_stall_timeout_ms", self.peer_write_stall_timeout_ms, 3_600_000)] {
+            if v == 0 || v > max {
                 return Err(GossipError::InvalidField {
                     field,
-                    reason: format!("must be in 1..=600000 ms, got {v}"),
+                    reason: format!("must be in 1..={max} ms, got {v}"),
                 });
             }
         }
@@ -1878,8 +1892,11 @@ impl GossipConfig {
         if let Ok(v) = env::var("GOSSIP_INBOUND_IDLE_TIMEOUT_SECS") {
             self.inbound_idle_timeout_secs = v.parse().map_err(GossipError::Parse)?;
         }
-        if let Ok(v) = env::var("GOSSIP_PEER_STALL_TIMEOUT_MS") {
-            self.peer_stall_timeout_ms = v.parse().map_err(GossipError::Parse)?;
+        if let Ok(v) = env::var("GOSSIP_PEER_READ_STALL_TIMEOUT_MS") {
+            self.peer_read_stall_timeout_ms = v.parse().map_err(GossipError::Parse)?;
+        }
+        if let Ok(v) = env::var("GOSSIP_PEER_WRITE_STALL_TIMEOUT_MS") {
+            self.peer_write_stall_timeout_ms = v.parse().map_err(GossipError::Parse)?;
         }
         if let Ok(v) = env::var("GOSSIP_PEER_MIN_RATE_BYTES_PER_SEC") {
             self.peer_min_rate_bytes_per_sec = v.parse().map_err(GossipError::Parse)?;

@@ -189,7 +189,7 @@ pub async fn handle_connection(
     let wal             = task_ctx.wal.get().cloned();
     let tls             = task_ctx.tls.get().cloned();
     let mut socket = BufReader::with_capacity(8_192, crate::stall::StallGuard::new(socket));
-    let frame_progress = crate::stall::StallBound::from_config(&task_ctx.config);
+    let frame_progress = crate::stall::StallBound::read_from_config(&task_ctx.config);
     let mut shutdown_rx = shutdown.subscribe();
     // BytesMut: recv_buf.split().freeze() at TTL_OFFSET is O(1) for zero-copy forwarding.
     let mut recv_buf: BytesMut = BytesMut::with_capacity(2_048);
@@ -470,14 +470,14 @@ pub async fn handle_connection(
                     });
                     if let Some(tx) = crate::writer::get_or_spawn_writer(
                         &sender, &peer_writers, task_ctx.hot.writer_depth(), backoff,
-                        writer_timing, &shutdown, &kv_state.dropped_frames, tls.clone(),
+                        &writer_timing, &shutdown, &kv_state.dropped_frames, tls.clone(),
                     ) {
                         // A dropped pong looks to the peer exactly like a dead node, so the drop
                         // is worth replaying rather than re-provoking.
                         let _ = crate::sim_seam::chan_try_send("writer/pong", &tx, pong);
                     }
                     let bucket_hashes = crate::store::store_bucket_hashes(&kv_state);
-                    request_state(&sender, &peer_writers, task_ctx.hot.writer_depth(), backoff, writer_timing, &shutdown, &node_id, &kv_state.hash_acc, &kv_state.dropped_frames, bucket_hashes, tls.clone());
+                    request_state(&sender, &peer_writers, task_ctx.hot.writer_depth(), backoff, &writer_timing, &shutdown, &node_id, &kv_state.hash_acc, &kv_state.dropped_frames, bucket_hashes, tls.clone());
                 }
             }
 
@@ -515,7 +515,7 @@ pub async fn handle_connection(
                     let data: Bytes = crate::bounds::hold_slot(crate::codec::wire_to_bytes(
                         &WireMessage::StateResponse { entries: vec![] }), &slot);
                     drop(slot);
-                    if let Some(tx) = get_or_spawn_writer(&sender, &peer_writers, task_ctx.hot.writer_depth(), backoff, writer_timing, &shutdown, &kv_state.dropped_frames, tls.clone()) {
+                    if let Some(tx) = get_or_spawn_writer(&sender, &peer_writers, task_ctx.hot.writer_depth(), backoff, &writer_timing, &shutdown, &kv_state.dropped_frames, tls.clone()) {
                         tokio::spawn(async move {
                             if tx.send(data).await.is_err() {
                                 tracing::error!("Fast-path StateResponse writer for {} has exited", sender);
@@ -605,7 +605,7 @@ pub async fn handle_connection(
                 // because StateRequest is only sent on first contact; there is
                 // no automatic retry. Wrap in spawn so the connection handler
                 // is not blocked waiting for the writer to drain.
-                if let Some(tx) = get_or_spawn_writer(&sender, &peer_writers, task_ctx.hot.writer_depth(), backoff, writer_timing, &shutdown, &kv_state.dropped_frames, tls.clone()) {
+                if let Some(tx) = get_or_spawn_writer(&sender, &peer_writers, task_ctx.hot.writer_depth(), backoff, &writer_timing, &shutdown, &kv_state.dropped_frames, tls.clone()) {
                     tokio::spawn(async move {
                         for data in frames {
                             if tx.send(data).await.is_err() {

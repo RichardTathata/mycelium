@@ -9,7 +9,7 @@
 //! [`bytes::Bytes::from_owner`]) and released when the last of them has been written or dropped, so
 //! a peer has **at most one** reply in flight — queued, being written, or waiting on the writer —
 //! and a request that arrives while it is answered is skipped and counted. The writer's own write
-//! progress bound (`peer_stall_timeout_ms`, `peer_min_rate_bytes_per_sec`) is what guarantees a held
+//! progress bound (`peer_write_stall_timeout_ms`) is what guarantees a held
 //! slot is released.
 
 use crate::node_id::NodeId;
@@ -28,9 +28,12 @@ pub struct TransportBounds {
     /// was silent for `inbound_idle_timeout_secs`. See `SystemStats::inbound_connections_timed_out`.
     pub inbound_timed_out: AtomicU64,
     /// Inbound gossip connections closed because a frame **in progress** stalled: no byte for
-    /// `peer_stall_timeout_ms`, or below `peer_min_rate_bytes_per_sec` (#602's review, finding 1) —
+    /// `peer_read_stall_timeout_ms`, or below `peer_min_rate_bytes_per_sec` (#602's review, finding 1) —
     /// counted apart from `inbound_timed_out`, which is silence between frames.
     pub inbound_frames_stalled: AtomicU64,
+    /// Outbound writer connections failed because the peer accepted no byte for
+    /// `peer_write_stall_timeout_ms` (#602's re-review, finding 9). See `SystemStats::outbound_stalls`.
+    pub outbound_stalls: Arc<AtomicU64>,
     /// `StateRequest`s this node did not answer because a reply to the same peer was still in
     /// flight. See `SystemStats::anti_entropy_replies_skipped`.
     pub anti_entropy_replies_skipped: AtomicU64,

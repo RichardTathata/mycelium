@@ -264,7 +264,7 @@ pub(super) async fn run_gossip_shard(
                 e.clone()
             } else {
                 let Some(t) = get_or_spawn_writer(
-                    peer, &peer_writers, hot.writer_depth(), backoff, idle_timeout, &shutdown_tx, &dropped_frames, tls.clone(),
+                    peer, &peer_writers, hot.writer_depth(), backoff, &idle_timeout, &shutdown_tx, &dropped_frames, tls.clone(),
                 ) else { continue; };
                 let e = (t, writer_stream("forward", peer));
                 sender_cache.insert(peer.clone(), e.clone());
@@ -280,7 +280,7 @@ pub(super) async fn run_gossip_shard(
                     debug!("Peer writer for {} closed; respawning and retrying", peer);
                     sender_cache.remove(peer);
                     let Some(new_tx) = get_or_spawn_writer(
-                        peer, &peer_writers, hot.writer_depth(), backoff, idle_timeout, &shutdown_tx, &dropped_frames, tls.clone(),
+                        peer, &peer_writers, hot.writer_depth(), backoff, &idle_timeout, &shutdown_tx, &dropped_frames, tls.clone(),
                     ) else { continue; };
                     sender_cache.insert(peer.clone(), (new_tx.clone(), Arc::clone(&stream)));
                     // The retry is a second event on the *same* stream: same peer, same logical
@@ -623,7 +623,7 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
         for peer in &bootstrap_set {
             if *peer == node_id { continue; }
             if let Some(tx) = mycelium_core::writer::get_or_spawn_writer(
-                peer, &peer_writers, hot.writer_depth(), backoff, idle_timeout,
+                peer, &peer_writers, hot.writer_depth(), backoff, &idle_timeout,
                 &shutdown_tx, &dropped_frames, tls.clone(),
             ) {
                 let _ = mycelium_core::sim_seam::chan_try_send("writer/hello", &tx, hello.clone());
@@ -633,7 +633,7 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
         // re-pulled; an empty store yields an all-zero digest ⇒ responder full-dumps.
         let digest = crate::store::store_bucket_hashes(&kv_state);
         for peer in &bootstrap_set {
-            request_state(peer, &peer_writers, hot.writer_depth(), backoff, idle_timeout, &shutdown_tx, &node_id, &hash_acc, &dropped_frames, digest.clone(), tls.clone());
+            request_state(peer, &peer_writers, hot.writer_depth(), backoff, &idle_timeout, &shutdown_tx, &node_id, &hash_acc, &dropped_frames, digest.clone(), tls.clone());
         }
     }
 
@@ -728,7 +728,7 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
                             let digest = crate::store::store_bucket_hashes(&kv_state);
                             for peer in reconnect_peers {
                                 request_state(peer, &peer_writers, hot.writer_depth(), backoff,
-                                    idle_timeout, &shutdown_tx, &node_id, &hash_acc,
+                                    &idle_timeout, &shutdown_tx, &node_id, &hash_acc,
                                     &dropped_frames, digest.clone(), tls.clone());
                             }
                         }
@@ -839,7 +839,7 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
                         let digest = crate::store::store_bucket_hashes(&kv_state);
                         for peer in due_peers {
                             request_state(peer, &peer_writers, hot.writer_depth(), backoff,
-                                idle_timeout, &shutdown_tx, &node_id, &hash_acc,
+                                &idle_timeout, &shutdown_tx, &node_id, &hash_acc,
                                 &dropped_frames, digest.clone(), tls.clone());
                             last_anti_entropy.insert(peer.clone(), now);
                         }
@@ -849,7 +849,7 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
                     let digest = crate::store::store_bucket_hashes(&kv_state);
                     for peer in &added {
                         request_state(peer, &peer_writers, hot.writer_depth(), backoff,
-                            idle_timeout, &shutdown_tx, &node_id, &hash_acc,
+                            &idle_timeout, &shutdown_tx, &node_id, &hash_acc,
                             &dropped_frames, digest.clone(), tls.clone());
                     }
                 }
@@ -868,7 +868,7 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
                             e.clone()
                         } else {
                             let Some(t) = get_or_spawn_writer(
-                                peer, &peer_writers, hot.writer_depth(), backoff, idle_timeout, &shutdown_tx, &dropped_frames, tls.clone(),
+                                peer, &peer_writers, hot.writer_depth(), backoff, &idle_timeout, &shutdown_tx, &dropped_frames, tls.clone(),
                             ) else { continue; };
                             let e = (t, writer_stream("ping", peer));
                             ping_sender_cache.insert(peer.clone(), e.clone());
@@ -883,7 +883,7 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
                                 debug!("Peer writer for {} closed; respawning for ping retry", peer);
                                 ping_sender_cache.remove(peer);
                                 let Some(new_tx) = get_or_spawn_writer(
-                                    peer, &peer_writers, hot.writer_depth(), backoff, idle_timeout, &shutdown_tx, &dropped_frames, tls.clone(),
+                                    peer, &peer_writers, hot.writer_depth(), backoff, &idle_timeout, &shutdown_tx, &dropped_frames, tls.clone(),
                                 ) else { continue; };
                                 ping_sender_cache.insert(peer.clone(), (new_tx.clone(), Arc::clone(&stream)));
                                 if mycelium_core::sim_seam::chan_try_send(&stream, &new_tx, ping_data.clone())

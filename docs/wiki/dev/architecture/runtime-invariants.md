@@ -258,8 +258,11 @@ setting or constant with a counter (`SystemStats`, `docs/operations/metrics.md`)
   `run_listener_task`), then the read loop gives the first frame's **first byte** the same bound and
   an established connection `inbound_idle_timeout_secs` between frames (`mycelium-core/src/connection.rs`).
 - **Progress, not frames** — a frame in flight, either direction, is under `StallGuard`
-  (`mycelium-core/src/stall.rs`): no byte for `peer_stall_timeout_ms`, or below
-  `peer_min_rate_bytes_per_sec` past it, and the connection goes. **Do not bound a whole frame by a
+  (`mycelium-core/src/stall.rs`): no byte for `peer_read_stall_timeout_ms` (60 s) receiving or
+  `peer_write_stall_timeout_ms` (600 s) sending — the writer's bound must outlast the peer's **apply**
+  of a chunk, measured at 329 s into an fsync WAL (`configuration.md`) — and the read floor
+  `peer_min_rate_bytes_per_sec` is off by default (per connection, it cuts a joiner whose link its
+  senders share). Read and write bounds differ on purpose; do not merge them. **Do not bound a whole frame by a
   fixed time** — a frame is up to 10 MB, and #602's review found the first version cutting a slow
   but healthy link mid-frame on every attempt, so a late joiner on it never bootstrapped. A closed socket returns
   its `max_connections` permit. `validate()` keeps `inbound_idle_timeout_secs` above
@@ -278,10 +281,12 @@ setting or constant with a counter (`SystemStats`, `docs/operations/metrics.md`)
   worker (#602's review). Do not put the MAX back — load-shed is for a kind whose *every* worker is full.
 - **Sender log** — at most `SIGNAL_LOG_MAX_KINDS` (4096) sender-chosen kinds, each keeping one entry per
   sender up to `SIGNAL_LOG_MAX_SENDERS_PER_KIND` (1024). At either bound the least recently seen go, an
-  eighth per pass (constant cost per insert) — never a kind with a local handler or one that was queried
-  (`quorum*`, `last_signal`). Refusing new kinds instead made a flood a false negative for `quorum`.
-  `sys/quorum/` evidence rate-limit entries are bounded with it, and no evidence is written for a kind
-  the log could not track.
+  eighth per pass, one evictor at a time, and a scan that finds nothing evictable buys the next eighth
+  of insertions without one — never a kind with a local **worker** (an SSE tap is not one) or one queried
+  within the window (pins lapse). Refusing new kinds instead made a flood a false negative for `quorum`.
+  **`sys/quorum/` evidence is written only for a kind with a local worker or a live query pin** (the
+  `*_persistent` reads pin), so a random-kind flood writes no KV keys; the rate-limit table never
+  suppresses an exempt kind's evidence.
 - **Serve loops end** — `RpcRequestRx::recv` selects on shutdown (its sender lives in the handler table
   the receiver's own `Arc<TaskCtx>` keeps alive, so the channel never closed); a stopped, dropped agent
   frees its `TaskCtx` (`a_stopped_agent_frees_its_task_context`).

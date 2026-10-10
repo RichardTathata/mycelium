@@ -602,7 +602,8 @@ impl GossipAgent {
             intern_keys:     self.config.intern_keys,
             intern_max_keys: self.config.intern_max_keys,
             max_peers:           self.config.max_peers,
-            writer_timing:       mycelium_core::writer::WriterTiming::from_config(&self.config),
+            writer_timing:       mycelium_core::writer::WriterTiming::from_config(&self.config)
+                .counting(Arc::clone(&self.task_ctx.transport_bounds.outbound_stalls)),
             peer_list_tx:        self.peer_list_tx.clone(),
         };
         let lctx = ListenerContext {
@@ -633,7 +634,8 @@ impl GossipAgent {
             self_locality:   self.self_locality(),
             peer_localities: Arc::clone(&self.kv_state.peer_localities),
             backoff:         Duration::from_secs(self.task_ctx.hot.reconnect_backoff_secs(self.config.reconnect_backoff_secs)),
-            idle_timeout:    mycelium_core::writer::WriterTiming::from_config(&self.config),
+            idle_timeout:    mycelium_core::writer::WriterTiming::from_config(&self.config)
+                .counting(Arc::clone(&self.task_ctx.transport_bounds.outbound_stalls)),
             max_forwarding_peers:   self.config.max_forwarding_peers,
             group_aware_forwarding: self.config.group_aware_forwarding,
             epidemic_extra_peers:   self.config.epidemic_extra_peers,
@@ -719,7 +721,8 @@ impl GossipAgent {
             signal_handlers: Arc::clone(&self.task_ctx.signal_handlers),
             interval_secs:           self.config.health_check_interval_secs,
             backoff:                 Duration::from_secs(self.task_ctx.hot.reconnect_backoff_secs(self.config.reconnect_backoff_secs)),
-            idle_timeout:            mycelium_core::writer::WriterTiming::from_config(&self.config),
+            idle_timeout:            mycelium_core::writer::WriterTiming::from_config(&self.config)
+                .counting(Arc::clone(&self.task_ctx.transport_bounds.outbound_stalls)),
             peer_eviction_intervals: self.config.peer_eviction_intervals,
             ping_peer_sample_size:   self.config.ping_peer_sample_size,
             max_active_connections:  self.config.max_active_connections,

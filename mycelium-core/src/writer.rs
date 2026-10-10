@@ -23,17 +23,20 @@ use tracing::{debug, warn};
 const STATE_REQ_CHAN: &str = "writer/state-request";
 
 /// The time bounds one peer writer runs under (row B, post-360 hardening): how long it may sit idle,
-/// how long a connect plus TLS handshake may take, and how long one frame's write or a flush may
-/// take. Built from [`GossipConfig`](crate::config::GossipConfig) by [`WriterTiming::from_config`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// how long a connect plus TLS handshake may take, and the progress bound its writes and flushes run
+/// under. Built from [`GossipConfig`](crate::config::GossipConfig) by [`WriterTiming::from_config`].
+#[derive(Clone, Debug)]
 pub struct WriterTiming {
     /// Idle eviction (`writer_idle_timeout_secs`); zero = never.
     pub idle:    Duration,
     /// TCP connect + TLS handshake (`handshake_timeout_ms`).
     pub connect: Duration,
-    /// The progress bound on each batch of writes and its flush (`peer_stall_timeout_ms`,
-    /// `peer_min_rate_bytes_per_sec`) — progress, not whole frames (#602's review, finding 1).
+    /// The progress bound on each batch of writes and its flush (`peer_write_stall_timeout_ms`) —
+    /// progress, not whole frames (#602's review, finding 1).
     pub stall:   crate::stall::StallBound,
+    /// Where an expired progress bound is counted (`SystemStats::outbound_stalls`); `None` counts
+    /// nothing (tests).
+    pub stalls:  Option<Arc<AtomicU64>>,
 }
 
 impl WriterTiming {
@@ -42,8 +45,15 @@ impl WriterTiming {
         Self {
             idle:    Duration::from_secs(cfg.writer_idle_timeout_secs),
             connect: Duration::from_millis(cfg.handshake_timeout_ms),
-            stall:   crate::stall::StallBound::from_config(cfg),
+            stall:   crate::stall::StallBound::write_from_config(cfg),
+            stalls:  None,
         }
+    }
+
+    /// Counts expired progress bounds into `stalls`.
+    pub fn counting(mut self, stalls: Arc<AtomicU64>) -> Self {
+        self.stalls = Some(stalls);
+        self
     }
 
     /// The defaults' connect and write bounds with the given idle timeout.
@@ -185,7 +195,7 @@ pub async fn run_peer_writer(
         // drop that frame with a warn and keep going. Treating it as a write failure
         // (pre-2026-07-02 behaviour) tore down a healthy connection and dropped every
         // queued frame behind one oversized payload.
-        let frame_fits = |peer: &NodeId, res: Result<(), crate::error::GossipError>| -> Result<bool, ()> {
+        let frame_fits = |peer: &NodeId, res: Result<(), crate::error::GossipError>| -> Result<bool, bool> {
             match res {
                 Ok(())                                                => Ok(true),
                 Err(crate::error::GossipError::FrameTooLarge { size, limit }) => {
@@ -194,41 +204,45 @@ pub async fn run_peer_writer(
                     warn!("Dropping oversized frame to {} ({} B > {} B limit); connection kept", peer, size, limit);
                     Ok(false)
                 }
-                Err(_) => Err(()),
+                Err(crate::error::GossipError::Io(e)) => Err(crate::stall::is_stall(&e)),
+                Err(_) => Err(false),
             }
         };
         // The writes and the flush must make progress (row B; #602's review, finding 1): a peer that
         // accepts and never reads fills the socket buffers and used to park this task in a write
         // forever — with its channel, and every anti-entropy reply queued on it, behind it. The bound
-        // is on progress (`peer_stall_timeout_ms` without a byte, or below the rate floor), not on a
+        // is on progress (`peer_write_stall_timeout_ms` without a byte accepted), not on a
         // whole frame, so a large frame to a slow but healthy peer still crosses. Shutdown and eviction
         // interrupt the writes too; before, they were polled only between frames.
         let stall = timing.stall;
+        // `Ok(())` written; `Err(stalled)` failed — `stalled` when the progress bound fired.
         let write = async {
             let c = conn.as_mut().expect("infallible: conn is Some while loop body runs; only set None after break");
             c.get_mut().arm(Some(stall));
             let mut wrote_any = false;
-            match frame_fits(&peer, write_frame(c, &data).await) {
-                Ok(sent)  => wrote_any |= sent,
-                Err(())   => return false,
-            }
+            wrote_any |= frame_fits(&peer, write_frame(c, &data).await)?;
             while let Ok(more) = rx.try_recv() {
-                match frame_fits(&peer, write_frame(c, &more).await) {
-                    Ok(sent) => wrote_any |= sent,
-                    Err(())  => return false,
-                }
+                wrote_any |= frame_fits(&peer, write_frame(c, &more).await)?;
             }
-            let ok = !wrote_any || c.flush().await.is_ok();
+            if wrote_any {
+                c.flush().await.map_err(|e| crate::stall::is_stall(&e))?;
+            }
             c.get_mut().arm(None);
-            ok
+            Ok::<(), bool>(())
         };
-        let write_ok = tokio::select! { biased;
+        let written = tokio::select! { biased;
             _ = shutdown_rx.wait_for(|v| *v) => break,
             _ = peer_shutdown_rx.wait_for(|v| *v) => break,
-            ok = write => ok,
+            r = write => r,
         };
 
-        if !write_ok {
+        if let Err(stalled) = written {
+            if stalled {
+                if let Some(ref n) = timing.stalls { n.fetch_add(1, Ordering::Relaxed); }
+                #[cfg(feature = "metrics")]
+                metrics::counter!("gossip_outbound_stalls_total").increment(1);
+                warn!("Write to {} made no progress within {:?} (peer_write_stall_timeout_ms)", peer, stall.stall);
+            }
             conn = None;
             // +1 for the frame that caused the write failure (already dequeued, never sent).
             let dropped = rx.len() + 1;
@@ -282,7 +296,7 @@ pub fn get_or_spawn_writer(
     writers: &papaya::HashMap<NodeId, WriterEntry>,
     chan_depth: usize,
     backoff: Duration,
-    timing: WriterTiming,
+    timing: &WriterTiming,
     shutdown_tx: &Arc<watch::Sender<bool>>,
     dropped_frames: &Arc<AtomicU64>,
     tls: Option<Arc<NodeTls>>,
@@ -328,7 +342,7 @@ pub fn get_or_spawn_writer(
         peer.clone(),
         rx,
         backoff,
-        timing,
+        timing.clone(),
         shutdown_tx.subscribe(),
         peer_shutdown_rx,
         Arc::clone(dropped_frames),
@@ -431,7 +445,7 @@ pub fn request_state(
     peer_writers: &papaya::HashMap<NodeId, WriterEntry>,
     writer_depth: usize,
     backoff: Duration,
-    timing: WriterTiming,
+    timing: &WriterTiming,
     shutdown_tx: &Arc<watch::Sender<bool>>,
     sender: &NodeId,
     hash_acc: &AtomicU64,
@@ -648,8 +662,8 @@ mod tests {
         let writers: papaya::HashMap<NodeId, WriterEntry> = papaya::HashMap::new();
         let (sd, _sd_rx) = watch::channel(false);
         let sd = Arc::new(sd);
-        let timing = WriterTiming { idle: Duration::ZERO, connect: Duration::from_secs(5), stall: crate::stall::StallBound { stall: Duration::from_secs(60), min_rate: 0 } };
-        let tx = get_or_spawn_writer(&peer, &writers, 4096, Duration::from_millis(100), timing,
+        let timing = WriterTiming { idle: Duration::ZERO, connect: Duration::from_secs(5), stall: crate::stall::StallBound { stall: Duration::from_secs(60), min_rate: 0 }, stalls: None };
+        let tx = get_or_spawn_writer(&peer, &writers, 4096, Duration::from_millis(100), &timing,
                                      &sd, &Arc::new(AtomicU64::new(0)), None).unwrap();
         flood(&tx).await;
         let ah = writers.pin().get(&peer).unwrap().abort_handle.clone().unwrap();
@@ -665,8 +679,8 @@ mod tests {
         let writers: papaya::HashMap<NodeId, WriterEntry> = papaya::HashMap::new();
         let (sd, _sd_rx) = watch::channel(false);
         let sd = Arc::new(sd);
-        let timing = WriterTiming { idle: Duration::ZERO, connect: Duration::from_secs(5), stall: crate::stall::StallBound { stall: Duration::from_secs(60), min_rate: 0 } };
-        let tx = get_or_spawn_writer(&peer, &writers, 4096, Duration::from_millis(100), timing,
+        let timing = WriterTiming { idle: Duration::ZERO, connect: Duration::from_secs(5), stall: crate::stall::StallBound { stall: Duration::from_secs(60), min_rate: 0 }, stalls: None };
+        let tx = get_or_spawn_writer(&peer, &writers, 4096, Duration::from_millis(100), &timing,
                                      &sd, &Arc::new(AtomicU64::new(0)), None).unwrap();
         flood(&tx).await;
         let ah = writers.pin().get(&peer).unwrap().abort_handle.clone().unwrap();
@@ -684,8 +698,9 @@ mod tests {
         let writers: papaya::HashMap<NodeId, WriterEntry> = papaya::HashMap::new();
         let (sd, _sd_rx) = watch::channel(false);
         let sd = Arc::new(sd);
-        let timing = WriterTiming { idle: Duration::ZERO, connect: Duration::from_secs(5), stall: crate::stall::StallBound { stall: Duration::from_millis(300), min_rate: 0 } };
-        let tx = get_or_spawn_writer(&peer, &writers, 4096, Duration::from_secs(30), timing,
+        let stalls = Arc::new(AtomicU64::new(0));
+        let timing = WriterTiming { idle: Duration::ZERO, connect: Duration::from_secs(5), stall: crate::stall::StallBound { stall: Duration::from_millis(300), min_rate: 0 }, stalls: Some(Arc::clone(&stalls)) };
+        let tx = get_or_spawn_writer(&peer, &writers, 4096, Duration::from_secs(30), &timing,
                                      &sd, &Arc::new(AtomicU64::new(0)), None).unwrap();
         flood(&tx).await;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -695,14 +710,16 @@ mod tests {
         assert_eq!(tx.capacity(), tx.max_capacity(), "the queue behind a stalled write must drain");
         let dropped = writers.pin().get(&peer).unwrap().dropped.load(Ordering::Relaxed);
         assert!(dropped > 0, "the frames behind the stalled write are dropped and counted");
+        assert!(stalls.load(Ordering::Relaxed) >= 1, "the expired progress bound is counted as an outbound stall");
         let _ = sd.send(true);
     }
 
     /// The adversarial review of #602, finding 1: the old `peer_write_timeout_ms` bounded each *whole* frame,
     /// so a 10 MB frame needed ≥ 2.8 Mbit/s and a large value to a slow but healthy peer was dropped
     /// on every attempt. A peer that keeps reading, however slowly, must receive the frame: ~5 s for
-    /// the frame here, against a 2 s no-progress bound (the receiver's 16 KiB window makes TCP's
-    /// persist timer pause the sender for a few hundred ms at a time, so the bound is not tighter).
+    /// the frame here, against a 5 s no-progress bound — loosened from 2 s after #602's re-review
+    /// called it timing-sensitive: the receiver's 16 KiB window makes TCP's persist timer pause the
+    /// sender for hundreds of ms at a time, and a loaded CI box stretches that.
     /// Seen failing first with the whole-frame bound at 300 ms: received 939 745 of 4 194 309 bytes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_slow_reader_that_keeps_reading_receives_a_large_frame() {
@@ -729,13 +746,13 @@ mod tests {
         let writers: papaya::HashMap<NodeId, WriterEntry> = papaya::HashMap::new();
         let (sd, _sd_rx) = watch::channel(false);
         let sd = Arc::new(sd);
-        let timing = WriterTiming { idle: Duration::ZERO, connect: Duration::from_secs(5), stall: crate::stall::StallBound { stall: Duration::from_secs(2), min_rate: 0 } };
-        let tx = get_or_spawn_writer(&peer, &writers, 16, Duration::from_secs(30), timing,
+        let timing = WriterTiming { idle: Duration::ZERO, connect: Duration::from_secs(5), stall: crate::stall::StallBound { stall: Duration::from_secs(5), min_rate: 0 }, stalls: None };
+        let tx = get_or_spawn_writer(&peer, &writers, 16, Duration::from_secs(30), &timing,
                                      &sd, &Arc::new(AtomicU64::new(0)), None).unwrap();
         let frame_len = 4 * 1024 * 1024;
         tx.send(Bytes::from(vec![1u8; frame_len])).await.unwrap();
         let want = (frame_len + 5) as u64;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         while received.load(Ordering::Relaxed) < want && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }

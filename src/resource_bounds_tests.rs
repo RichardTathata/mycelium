@@ -208,7 +208,7 @@ async fn a_large_first_frame_trickling_steadily_is_read_past_the_handshake_bound
 async fn a_frame_that_stalls_mid_body_is_closed_and_counted_apart() {
     let px = alloc_port();
     let mut cx = GossipConfig { bind_port: px, ..Default::default() };
-    cx.peer_stall_timeout_ms = 300;
+    cx.peer_read_stall_timeout_ms = 300;
     let x = GossipAgent::new(NodeId::new("127.0.0.1", px).unwrap(), cx);
     x.start().await.unwrap();
     let mut s = TcpStream::connect(("127.0.0.1", px)).await.unwrap();
@@ -242,5 +242,91 @@ async fn a_kind_whose_every_worker_is_full_sheds_while_a_tap_reads() {
     }
     assert!(seen >= 8, "the worker's first eight were admitted; the tap saw {seen}");
     assert!(seen < N / 4, "with its only worker full the kind must shed; the tap saw {seen} of {N}");
+    x.shutdown().await;
+}
+
+/// The measurement behind `peer_write_stall_timeout_ms`'s default (#602's re-review, finding 3): how long a
+/// node takes to apply one worst-case anti-entropy chunk — ~10 MB, every entry appended to a WAL
+/// that fsyncs each append (`sync_mode = "flush"`) — during which it does not read, so the sender's
+/// writer sees no progress. Run by hand: `cargo test --lib worst_case_chunk_apply -- --ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "a measurement, not a check; its result is recorded in docs/reference/configuration.md"]
+async fn worst_case_chunk_apply_with_an_fsync_wal() {
+    use crate::config::{OnUnreadable, PersistenceConfig, SyncMode};
+    use crate::framing::SyncEntry;
+    for (entries, size) in [(152usize, 64 * 1024usize), (9_000, 1024), (70_000, 64)] {
+        let px = alloc_port();
+        let dir = std::env::temp_dir().join(format!("mycelium-chunk-apply-{px}"));
+        let mut cfg = GossipConfig { bind_port: px, ..Default::default() };
+        cfg.persistence = Some(PersistenceConfig {
+            base_path: dir.clone(), sync_mode: SyncMode::Flush,
+            snapshot_wal_threshold: 1_000_000, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse,
+        });
+        let x = GossipAgent::new(NodeId::new("127.0.0.1", px).unwrap(), cfg);
+        x.start().await.unwrap();
+        let hlc = crate::hlc::Hlc::new();
+        let batch: Vec<SyncEntry> = (0..entries).map(|i| SyncEntry {
+            key: Arc::from(format!("chunk/{i}")), value: Bytes::from(vec![9u8; size]),
+            timestamp: hlc.tick(), is_tombstone: false,
+        }).collect();
+        let frame = wire_to_bytes(&WireMessage::StateResponse { entries: batch });
+        let mut s = TcpStream::connect(("127.0.0.1", px)).await.unwrap();
+        let started = std::time::Instant::now();
+        write_frame(&mut s, &frame).await.unwrap();
+        let last = format!("chunk/{}", entries - 1);
+        assert!(until(Duration::from_secs(600), || x.kv().get(&last).is_some()).await);
+        println!("chunk of {entries} x {size} B ({} B framed): applied with fsync WAL in {:?}",
+                 frame.len(), started.elapsed());
+        x.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// #602's re-review, finding 9: the one-byte-then-trickle attack on an agent. With the rate floor
+/// set, a peer that starts a frame and then sends a byte per 100 ms — never silent long enough for
+/// the no-progress bound — is closed by the floor and counted as a stalled frame. (With the floor
+/// off, the default, the same trickle holds the socket; `configuration.md` states that cost.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_one_byte_trickle_is_closed_by_the_rate_floor() {
+    use tokio::io::AsyncWriteExt;
+    let px = alloc_port();
+    let mut cx = GossipConfig { bind_port: px, ..Default::default() };
+    cx.peer_read_stall_timeout_ms = 300;
+    cx.peer_min_rate_bytes_per_sec = 10_000;
+    let x = GossipAgent::new(NodeId::new("127.0.0.1", px).unwrap(), cx);
+    x.start().await.unwrap();
+    let mut s = TcpStream::connect(("127.0.0.1", px)).await.unwrap();
+    let mut framed = Vec::new();
+    write_frame(&mut framed, &wire_to_bytes(&big_data("bounds/trickle", 4096))).await.unwrap();
+    let mut closed = false;
+    for b in framed.iter().take(100) {
+        if s.write_all(std::slice::from_ref(b)).await.is_err() || s.flush().await.is_err() { closed = true; break; }
+        tokio::time::sleep(Duration::from_millis(100)).await; // never 300 ms silent; ~10 B/s
+    }
+    if !closed {
+        let mut buf = [0u8; 8];
+        closed = matches!(tokio::time::timeout(Duration::from_secs(2), s.read(&mut buf)).await, Ok(Ok(0)) | Ok(Err(_)));
+    }
+    assert!(closed, "a trickle below the floor must be closed");
+    assert!(until(Duration::from_secs(2), || x.system_stats().inbound_frames_stalled >= 1).await);
+    x.shutdown().await;
+}
+
+/// And with the floor off (the default), one byte then silence still closes — by the no-progress bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_byte_then_silence_is_closed_with_the_floor_off() {
+    use tokio::io::AsyncWriteExt;
+    let px = alloc_port();
+    let mut cx = GossipConfig { bind_port: px, ..Default::default() };
+    cx.peer_read_stall_timeout_ms = 300;
+    assert_eq!(cx.peer_min_rate_bytes_per_sec, 0);
+    let x = GossipAgent::new(NodeId::new("127.0.0.1", px).unwrap(), cx);
+    x.start().await.unwrap();
+    let mut s = TcpStream::connect(("127.0.0.1", px)).await.unwrap();
+    s.write_all(&[0u8]).await.unwrap();
+    let mut buf = [0u8; 8];
+    let r = tokio::time::timeout(Duration::from_secs(3), s.read(&mut buf)).await;
+    assert!(matches!(r, Ok(Ok(0)) | Ok(Err(_))), "one byte then silence must close; got {r:?}");
+    assert_eq!(x.system_stats().inbound_frames_stalled, 1);
     x.shutdown().await;
 }

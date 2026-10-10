@@ -6,7 +6,8 @@
 //! attempt and the data never crossed. What a stalled peer and a slow one differ in is **progress**,
 //! so that is what [`StallGuard`] bounds, while it is armed:
 //!
-//! - **no progress** — no byte moved for `stall`;
+//! - **no progress** — no byte moved for `stall` (`peer_read_stall_timeout_ms` reading,
+//!   `peer_write_stall_timeout_ms` writing);
 //! - **a rate floor** — once `stall` has passed since arming, fewer than `min_rate` bytes per second
 //!   moved over the time beyond it (`moved < min_rate × (elapsed − stall)`), checked at each progress.
 //!   This is what stops a peer from holding a socket by trickling one byte per window; `0` disables it.
@@ -29,23 +30,29 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 /// The progress bound a [`StallGuard`] enforces while armed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StallBound {
-    /// Longest time without a byte moved (`peer_stall_timeout_ms`).
+    /// Longest time without a byte moved.
     pub stall:    Duration,
     /// Rate floor in bytes per second past the first `stall` (`peer_min_rate_bytes_per_sec`); `0` = none.
     pub min_rate: u64,
 }
 
 impl StallBound {
-    /// The bound `cfg` states.
-    pub fn from_config(cfg: &crate::config::GossipConfig) -> Self {
+    /// The bound on frames being received: `peer_read_stall_timeout_ms` and the optional floor.
+    pub fn read_from_config(cfg: &crate::config::GossipConfig) -> Self {
         Self {
-            stall:    Duration::from_millis(cfg.peer_stall_timeout_ms),
+            stall:    Duration::from_millis(cfg.peer_read_stall_timeout_ms),
             min_rate: cfg.peer_min_rate_bytes_per_sec,
         }
     }
+
+    /// The bound on batches being sent: `peer_write_stall_timeout_ms`, no floor (a sender cannot tell
+    /// a slow link from a receiver applying what it read).
+    pub fn write_from_config(cfg: &crate::config::GossipConfig) -> Self {
+        Self { stall: Duration::from_millis(cfg.peer_write_stall_timeout_ms), min_rate: 0 }
+    }
 }
 
-const NO_PROGRESS: &str = "peer made no progress within peer_stall_timeout_ms";
+const NO_PROGRESS: &str = "peer made no progress within its stall bound";
 const BELOW_FLOOR: &str = "peer moved bytes below peer_min_rate_bytes_per_sec";
 
 /// Whether `e` is a [`StallGuard`] expiry.
@@ -201,5 +208,25 @@ mod tests {
         let mut g = StallGuard::new(rx);
         let mut buf = [0u8; 1];
         assert!(tokio::time::timeout(Duration::from_millis(200), g.read_exact(&mut buf)).await.is_err());
+    }
+}
+
+#[cfg(test)]
+mod default_tests {
+    use super::*;
+
+    /// #602's re-review, findings 2 and 3: the defaults cut healthy peers. A per-connection floor of
+    /// 8 KiB/s tripped every sender of a joiner whose link is shared by eight peers at 512 kbit/s, and a
+    /// 15 s no-progress bound on the writer was shorter than a peer's apply of one anti-entropy chunk
+    /// into an fsync WAL (measured 2026-10-10 on a developer Mac: 41.8 s for 9 000 × 1 KiB, 329 s for
+    /// 70 000 × 64 B). The defaults must not cut either.
+    #[test]
+    fn the_defaults_do_not_cut_a_shared_link_or_a_slow_apply() {
+        let cfg = crate::config::GossipConfig::default();
+        let r = StallBound::read_from_config(&cfg);
+        assert_eq!(r.min_rate, 0, "no per-connection rate floor by default");
+        assert!(r.stall >= Duration::from_secs(60), "{:?}", r.stall);
+        let w = StallBound::write_from_config(&cfg);
+        assert!(w.stall >= Duration::from_secs(600), "the writer must outlast a 329 s chunk apply; got {:?}", w.stall);
     }
 }
