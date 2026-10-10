@@ -180,7 +180,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     host_agent.node_id().clone(), entry.provides.namespace.clone(),
                     host_agent.kv(), host_agent.mesh())
         .with_protected_kinds(host_agent.config().protected_rpc_kinds.iter().cloned());
-                let instance = match WasmHost::new().and_then(|h| h.provision(&mesh, &entry.artifact, state)) {
+                // Instantiation runs the guest's start-up code: on the blocking pool, like every call.
+                let id = entry.artifact;
+                let provisioned = tokio::task::spawn_blocking(move || {
+                    WasmHost::new().and_then(|h| h.provision(&mesh, &id, state))
+                })
+                .await
+                .unwrap_or_else(|e| Err(mycelium_wasm_host::WasmHostError::Instantiate(format!("guest thread: {e}"))));
+                let instance = match provisioned {
                     Ok(i) => i,
                     Err(e) => {
                         eprintln!("[tool-host] provision failed ({e}) — retrying");
@@ -201,12 +208,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 _tool_handle = Some(host_agent.mcp().register_mcp_tool(TOOL, schema, move |args| {
                     let inst = Arc::clone(&inst);
                     async move {
-                        let out = {
-                            let mut i = inst.lock().unwrap();
-                            i.invoke("invoke", args.to_string().into_bytes())
-                                .map_err(|e| format!("host: {e}"))?
-                                .map_err(|e| format!("component: {e}"))?
-                        };
+                        // The guest runs on the blocking pool, never on a runtime worker.
+                        let payload = args.to_string().into_bytes();
+                        let out = tokio::task::spawn_blocking(move || {
+                            inst.lock().unwrap().invoke("invoke", payload)
+                        })
+                        .await
+                        .map_err(|e| format!("guest thread: {e}"))?
+                        .map_err(|e| format!("host: {e}"))?
+                        .map_err(|e| format!("component: {e}"))?;
                         serde_json::from_slice::<serde_json::Value>(&out)
                             .map_err(|e| format!("bad component json: {e}"))
                     }

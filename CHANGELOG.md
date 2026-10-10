@@ -155,7 +155,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `call_deadline_ms` (an exhaustive struct literal breaks; `..Default::default()` is unaffected); a guest call
   that legitimately runs longer than 5 s is now stopped — raise `call_deadline_ms` or call
   `with_call_deadline(None)`; `Instance::invoke` is still synchronous, so an embedder that calls it from
-  async code should move it to `spawn_blocking` as the serve loop now does.
+  async code should move it to `spawn_blocking` as the serve loop now does — the co-op `catalog`,
+  `catalog_viz` and `mcp_toolgrowth` demos now do, instantiation included.
 - **The SDKs reach a gateway over TLS** (`mycelium-py` **0.2.9**, `mycelium-ts` **0.2.3**,
   `langgraph-checkpoint-mycelium` **0.3.2**). Every client built its base URL as `http://{host}:{port}` — eight
   Python handles, five TypeScript clients and the checkpointer; only `A2aClient` took a full URL — so a gateway

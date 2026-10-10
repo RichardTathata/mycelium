@@ -593,8 +593,9 @@ replaced from the install's compiled component, so a trap-inducing payload costs
 Cranelift compile. Why: before this, a stem with no fuel declared ran guests unmetered on the async
 task — one looping call pinned a worker for ever, and a payload that trapped bought a full compile per
 request. The epoch ticker is a thread per host (wall time, outside the replay seams — the inventory
-records it). `Instance::invoke` stays synchronous: an embedder that calls it from async code (the co-op
-`catalog`/`catalog_viz`/`mcp_toolgrowth` demos do) still blocks its own worker for up to the deadline.
+records it). `Instance::invoke` stays synchronous: an embedder calling it from async code moves it to
+`spawn_blocking` as the serve loop does — the co-op `catalog`, `catalog_viz` and `mcp_toolgrowth` demos,
+which call it directly, do (instantiation included).
 
 ## `unsafe` — denied in every library crate (2026-10-10, post-360 P3)
 

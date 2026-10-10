@@ -153,7 +153,8 @@ host (`mycelium-wasm-epoch`, holding a weak engine reference so it ends with the
 between `d` and `d + 10 ms` after it starts. The serve loop runs each guest call — and install's
 compile, instantiation and `describe` — on `tokio::task::spawn_blocking`, so a long call holds a
 blocking-pool thread, never a runtime worker; `Instance::invoke` itself stays synchronous, and an
-embedder calling it from async code should do the same. A trapped instance is replaced from the
+embedder calling it from async code does the same (the co-op `catalog`, `catalog_viz` and
+`mcp_toolgrowth` demos show the pattern). A trapped instance is replaced from the
 install's **compiled** component (`WasmHost::compiles()` counts compiles), so a payload that makes a
 guest trap no longer buys a full compile per request. Gates: `a_guest_call_past_its_deadline_is_stopped_by_name`
 (`tests/e2e.rs`), `a_long_guest_call_does_not_block_another_task_on_a_current_thread_runtime`,
