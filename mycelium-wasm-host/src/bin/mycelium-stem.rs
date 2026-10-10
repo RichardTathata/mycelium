@@ -168,7 +168,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let egress = agent.egress_policy().clone();
                     let store = Arc::new(mycelium_wasm_host::ObjectStoreFetcher::from_url(l, egress.clone())?);
                     let stage_dir = stage_dir.clone().map(std::path::PathBuf::from).unwrap_or_else(|| std::env::temp_dir().join("mycelium-librarian-stage"));
-                    let staged = Arc::new(mycelium_wasm_host::DiskStagedSource::open(Arc::clone(&store) as Arc<_>, &stage_dir)?);
+                    let staged = Arc::new(mycelium_wasm_host::DiskStagedSource::open(Arc::clone(&store) as Arc<_>, &stage_dir)?
+                        .with_max_stage_bytes(mycelium_wasm_host::DEFAULT_MAX_STAGE_BYTES));
                     let manifest_url = manifest_source.clone().unwrap_or_else(|| l.clone());
                     let manifest_store: Arc<dyn mycelium_wasm_host::ManifestSource> =
                         Arc::new(mycelium_wasm_host::ObjectStoreFetcher::from_url(&manifest_url, egress)?);
@@ -180,8 +181,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         loop {
                             tick.tick().await;
                             if let Ok(m) = mirror_store.read_manifest().await {
-                                let ids: Vec<_> = m.entries().iter().map(|e| e.artifact).collect();
-                                mirror_staged.stage_all(&ids).await;
+                                // Each under its entry's size hint and the stage's ceiling: the
+                                // store's size answer is bounded before a byte is pulled.
+                                let wanted: Vec<_> = m.entries().iter().map(|e| (e.artifact, e.size_bytes)).collect();
+                                for (id, size_hint) in wanted {
+                                    let _ = mirror_staged.stage_artifact_bounded(&id, size_hint).await;
+                                }
                             }
                         }
                     });

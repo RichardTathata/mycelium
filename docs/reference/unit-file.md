@@ -204,6 +204,15 @@ placement_root       = "/var/lib/mycelium/artifacts"
 That key is the public half of the test seed `42…42` (`make stem-keys`). It is a fixture. Use your
 own publisher's key.
 
+**What a hosted component may emit.** A WASM component this host installs reaches the mesh only through
+its `mesh.emit` import, and the host confines it (rule `host.emit_admission`): a component providing
+`{ns}/{name}` may emit only kinds under `comp/{ns}/…`, and never a protected RPC kind — `mcp.invoke`,
+`skill.invoke`, `llm.invoke`, or one the node lists in `protected_rpc_kinds` — because an emit from
+inside the node's process would reach that kind's handlers unframed, past the door that checks
+authority. A refused emit is dropped, logged and counted as
+`mycelium_wasm_host_emits_refused_total{reason}` (`protected_kind`, `foreign_kind`, `malformed`). There is
+no unit-file field to grant a component further kinds; that is `HostState::with_emit_kinds` in code.
+
 ## `[[presence]]`
 
 Keep between `min_providers` and `max_providers` live providers of a filter across the fleet,

@@ -167,7 +167,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host = WasmHost::new()?;
     let state = HostState::new(
         installer.node_id(), entry.provides.namespace.clone(),
-        installer.agent.kv(), installer.agent.mesh());
+        installer.agent.kv(), installer.agent.mesh())
+        .with_protected_kinds(installer.agent.config().protected_rpc_kinds.iter().cloned());
     let mut instance = host.provision(&*mesh_source, &entry.artifact, state)
         .expect("provision (fetch from cache + verify + instantiate)");
 
@@ -247,7 +248,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let late_state = HostState::new(
         late.node_id(), late_entry.provides.namespace.clone(),
-        late.agent.kv(), late.agent.mesh());
+        late.agent.kv(), late.agent.mesh())
+        .with_protected_kinds(late.agent.config().protected_rpc_kinds.iter().cloned());
     let mut late_instance = WasmHost::new()?
         .provision(&late_source, &late_entry.artifact, late_state)
         .expect("late node provisions from peer-cached bytes");

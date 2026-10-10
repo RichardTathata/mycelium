@@ -349,6 +349,19 @@ pub struct DiskStagedSource {
     max_stage_bytes: u64,
 }
 
+/// How one staging attempt ended ([`DiskStagedSource::try_stage`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StageOutcome {
+    /// The artifact is in the stage, verified (now, or already).
+    Staged,
+    /// No holder answered for it — nothing was attempted. Not a failure: a catalogue line can
+    /// gossip ahead of the bytes.
+    NoHolder,
+    /// An attempt was made and refused or failed (size past the ceiling, a failed piece, a hash
+    /// mismatch); nothing partial is kept.
+    Failed,
+}
+
 /// The most one artifact stages by default: 64 GiB — above the largest model blob the stem
 /// examples place, and a bound rather than none, so a holder answering `artifact.size` with
 /// `u64::MAX` is refused before the stage writes toward it. `DiskStagedSource::with_max_stage_bytes`
@@ -399,18 +412,26 @@ impl DiskStagedSource {
     /// a ranking hint outside the signature, so it bounds the pull without being trusted for
     /// anything else: the hash still decides what is kept.
     pub async fn stage_artifact_bounded(&self, id: &ArtifactId, size_hint: u64) -> bool {
+        self.try_stage(id, size_hint).await == StageOutcome::Staged
+    }
+
+    /// [`stage_artifact_bounded`](Self::stage_artifact_bounded), saying why not: no holder
+    /// answered for `id` yet ([`StageOutcome::NoHolder`] — nothing was attempted) is told apart
+    /// from an attempt that failed ([`StageOutcome::Failed`]), so a caller backing off retries
+    /// can back off only the second.
+    pub async fn try_stage(&self, id: &ArtifactId, size_hint: u64) -> StageOutcome {
         use sha2::{Digest, Sha256};
         use tokio::io::AsyncWriteExt;
 
         if self.stage.size(id).is_some() {
-            return true;
+            return StageOutcome::Staged;
         }
         let total = match self.fetcher.size(id).await {
             Ok(Some(n)) => n,
-            Ok(None) => return false,
+            Ok(None) => return StageOutcome::NoHolder,
             Err(e) => {
                 tracing::warn!(artifact = %id, %e, "cannot stage: size unknown");
-                return false;
+                return StageOutcome::Failed;
             }
         };
         let ceiling = if size_hint > 0 { size_hint.min(self.max_stage_bytes) } else { self.max_stage_bytes };
@@ -418,7 +439,7 @@ impl DiskStagedSource {
             tracing::warn!(artifact = %id, total, ceiling, size_hint, max_stage_bytes = self.max_stage_bytes,
                 "cannot stage: the holder's size reply is past the ceiling — refused before any byte");
             metrics::counter!("mycelium_artifact_stage_refused_total", "reason" => "size_past_ceiling").increment(1);
-            return false;
+            return StageOutcome::Failed;
         }
         static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let tmp = self.stage.dir().join(format!(
@@ -455,17 +476,17 @@ impl DiskStagedSource {
         .await;
         match result {
             Ok(()) => match tokio::fs::rename(&tmp, self.stage.dir().join(id.to_hex())).await {
-                Ok(()) => true,
+                Ok(()) => StageOutcome::Staged,
                 Err(e) => {
                     tracing::warn!(artifact = %id, %e, "staged bytes verified but could not be placed");
                     let _ = tokio::fs::remove_file(&tmp).await;
-                    false
+                    StageOutcome::Failed
                 }
             },
             Err(e) => {
                 tracing::warn!(artifact = %id, %e, "staging failed — nothing kept");
                 let _ = tokio::fs::remove_file(&tmp).await;
-                false
+                StageOutcome::Failed
             }
         }
     }

@@ -43,6 +43,9 @@ pub enum ConfinementError {
     /// A signal kind outside the component's namespace (`comp/{namespace}/…`) and not listed for
     /// it by the host.
     ForeignKind,
+    /// The component's namespace is empty or contains `/`, so its `comp/{namespace}/…` family
+    /// would overlap another namespace's; such a component emits nothing.
+    MalformedNamespace,
 }
 
 impl std::fmt::Display for ConfinementError {
@@ -53,6 +56,7 @@ impl std::fmt::Display for ConfinementError {
             Self::Traversal => write!(f, "`..` traversal escapes the component subtree"),
             Self::ProtectedKind => write!(f, "protected RPC kind: a component may not emit work that has its own door"),
             Self::ForeignKind => write!(f, "signal kind outside the component's namespace and not listed for it"),
+            Self::MalformedNamespace => write!(f, "component namespace is empty or contains `/`: its signal family would overlap another's"),
         }
     }
 }
@@ -78,7 +82,8 @@ pub fn confine_key(node: &NodeId, namespace: &str, rel_key: &str) -> Result<Stri
     Ok(format!("{COMPONENT_KV_PREFIX}{node}/{namespace}/{rel_key}"))
 }
 
-/// May a component in `namespace` emit signal `kind`? Allowed: a kind under
+/// May a component in `namespace` emit signal `kind`? A namespace that is empty or contains `/`
+/// emits nothing (its family would overlap another namespace's). Allowed: a kind under
 /// `comp/{namespace}/…`, or one of `listed` (kinds the host granted this component — never a
 /// protected one, so a grant cannot open the door). Refused first and always: a kind in
 /// [`mycelium::BUILTIN_PROTECTED_RPC_KINDS`] or in `protected` (the node's
@@ -88,6 +93,9 @@ pub fn confine_key(node: &NodeId, namespace: &str, rel_key: &str) -> Result<Stri
 pub fn confine_kind(namespace: &str, kind: &str, listed: &[String], protected: &[String]) -> Result<(), ConfinementError> {
     if kind.is_empty() {
         return Err(ConfinementError::Empty);
+    }
+    if namespace.is_empty() || namespace.contains('/') {
+        return Err(ConfinementError::MalformedNamespace);
     }
     if mycelium::BUILTIN_PROTECTED_RPC_KINDS.contains(&kind) || protected.iter().any(|k| k == kind) {
         return Err(ConfinementError::ProtectedKind);
@@ -143,6 +151,18 @@ mod tests {
         // A host-listed kind is allowed...
         let listed = vec!["agent.state".to_string()];
         assert_eq!(confine_kind("nlp", "agent.state", &listed, none), Ok(()));
+    }
+
+    /// A namespace with a `/` (or none at all) would share another namespace's `comp/` family —
+    /// `a` emitting `comp/a/b/x` is `a/b`'s kind — so such a namespace emits nothing. Seen failing
+    /// first: `a/b` emitted `comp/a/b/x`.
+    #[test]
+    fn a_namespace_with_a_slash_or_none_emits_nothing() {
+        let none: &[String] = &[];
+        assert_eq!(confine_kind("a/b", "comp/a/b/x", none, none), Err(ConfinementError::MalformedNamespace));
+        assert_eq!(confine_kind("", "comp//x", none, none), Err(ConfinementError::MalformedNamespace));
+        assert_eq!(confine_kind("a/b", "listed.kind", &["listed.kind".to_string()], none), Err(ConfinementError::MalformedNamespace));
+        assert_eq!(confine_kind("a", "comp/a/x", none, none), Ok(()));
     }
 
     #[test]

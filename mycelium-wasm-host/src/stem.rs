@@ -328,11 +328,7 @@ impl Stem {
                 let cache_agent = Arc::clone(&agent);
                 let ticker = tokio::spawn(async move {
                     let mut cache_cap: Option<CapabilityReg> = None;
-                    // A stage that failed is not retried every tick: the n-th consecutive failure
-                    // waits 2^min(n,6) ticks (at most 64) before the next attempt. Counted in
-                    // ticks, so it needs no clock of its own.
-                    let mut stage_failures: std::collections::HashMap<crate::artifact::ArtifactId, u32> =
-                        std::collections::HashMap::new();
+                    let mut backoff = StageBackoff::default();
                     let mut ticks: u64 = 0;
                     loop {
                         if *stop_rx.borrow_and_update() {
@@ -344,17 +340,13 @@ impl Stem {
                             // check, no request) — a component whole, a blob in ranges, each
                             // bounded by the entry's size hint and the stage's ceiling.
                             let wanted: Vec<_> = prov.catalog().entries().iter().map(|e| (e.artifact, e.size_bytes)).collect();
-                            stage_failures.retain(|id, _| wanted.iter().any(|(w, _)| w == id));
+                            backoff.retain(|id| wanted.iter().any(|(w, _)| w == id));
                             for (id, size_hint) in wanted {
-                                let failures = stage_failures.get(&id).copied().unwrap_or(0);
-                                if failures > 0 && !ticks.is_multiple_of(1u64 << failures.min(6)) {
+                                if !backoff.due(&id, ticks) {
                                     continue;
                                 }
-                                if m.stage_artifact_bounded(&id, size_hint).await {
-                                    stage_failures.remove(&id);
-                                } else {
-                                    *stage_failures.entry(id).or_insert(0) += 1;
-                                }
+                                let outcome = m.try_stage(&id, size_hint).await;
+                                backoff.record(id, outcome, ticks);
                             }
                             // Once the stage holds something, say so: a peer holder, not the
                             // library of record.
@@ -433,8 +425,75 @@ impl Drop for Stem {
     }
 }
 
+/// The stem tick's retry discipline for staging. A failed stage is not retried every tick: after
+/// the n-th consecutive failure the next attempt is due `2^min(n,6)` ticks after the failure
+/// (2, 4, … at most 64). No holder answering is not a failure — nothing was attempted, and a
+/// catalogue line can gossip ahead of its bytes — so it is retried on the next tick. Counted in
+/// ticks, so it needs no clock of its own.
+#[derive(Default)]
+struct StageBackoff {
+    /// Per id: consecutive failures, and the tick the next attempt is due.
+    failures: std::collections::HashMap<crate::artifact::ArtifactId, (u32, u64)>,
+}
+
+impl StageBackoff {
+    fn retain(&mut self, keep: impl Fn(&crate::artifact::ArtifactId) -> bool) {
+        self.failures.retain(|id, _| keep(id));
+    }
+
+    fn due(&self, id: &crate::artifact::ArtifactId, tick: u64) -> bool {
+        self.failures.get(id).is_none_or(|&(_, next)| tick >= next)
+    }
+
+    fn record(&mut self, id: crate::artifact::ArtifactId, outcome: crate::http_source::StageOutcome, tick: u64) {
+        use crate::http_source::StageOutcome::*;
+        match outcome {
+            Staged => {
+                self.failures.remove(&id);
+            }
+            NoHolder => {}
+            Failed => {
+                let e = self.failures.entry(id).or_insert((0, 0));
+                e.0 = e.0.saturating_add(1);
+                e.1 = tick.saturating_add(1u64 << e.0.min(6));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// A catalogue line can gossip ahead of its bytes: no holder answering is not a failed stage
+    /// and must not push the next attempt out; a real failure backs off, the wait doubling per
+    /// consecutive failure up to 64 ticks, counted from the failure. Seen failing first: a
+    /// `NoHolder` outcome was counted and the id skipped on the next tick.
+    #[test]
+    fn a_missing_holder_is_not_a_failed_stage_and_a_failure_backs_off_from_the_failure() {
+        use crate::http_source::StageOutcome::*;
+        let id = crate::artifact::ArtifactId::of(b"named before its bytes arrive");
+        let mut b = StageBackoff::default();
+
+        // No holder yet: retried on the very next tick, however long it lasts.
+        for t in 0..10 {
+            assert!(b.due(&id, t), "tick {t}: a missing holder must not delay the next attempt");
+            b.record(id, NoHolder, t);
+        }
+        // A failure at tick 11 waits two ticks from 11, not to the next multiple of two.
+        b.record(id, Failed, 11);
+        assert!(!b.due(&id, 12));
+        assert!(b.due(&id, 13), "the first failure waits 2 ticks from the failure");
+        b.record(id, Failed, 13);
+        assert!(!b.due(&id, 16));
+        assert!(b.due(&id, 17), "the second waits 4");
+        // The wait is capped at 64 ticks.
+        for t in [17u64, 100, 200, 300, 400, 500, 600] { b.record(id, Failed, t); }
+        assert!(!b.due(&id, 663));
+        assert!(b.due(&id, 664), "capped at 64 ticks");
+        // A success clears it.
+        b.record(id, Staged, 664);
+        assert!(b.due(&id, 665));
+    }
     use super::*;
     use crate::catalog::{InstallableEntry, Manifest, MANIFEST_FILE};
     use crate::librarian::{spawn_librarian, LibrarianConfig};

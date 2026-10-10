@@ -178,7 +178,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // 4. Instantiate the arrived component: the converter's code is now on this node.
                 let state = HostState::new(
                     host_agent.node_id().clone(), entry.provides.namespace.clone(),
-                    host_agent.kv(), host_agent.mesh());
+                    host_agent.kv(), host_agent.mesh())
+        .with_protected_kinds(host_agent.config().protected_rpc_kinds.iter().cloned());
                 let instance = match WasmHost::new().and_then(|h| h.provision(&mesh, &entry.artifact, state)) {
                     Ok(i) => i,
                     Err(e) => {

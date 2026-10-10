@@ -549,3 +549,23 @@ handler had named *who may change an electorate* an open question since 2026-09-
 membership intent, because an election runs over any group and the intent is the operator's statement that this
 group's population is governed. Which membership *version* an election counts stays open.
 
+## The wasm host's doors (2026-10-10, PR #586)
+
+Two invariants, each a refusal rather than a tripwire because the wasm host is the one place the
+substrate prevents (the guest is foreign code in the node's process — `mycelium-wasm-host/src/lib.rs`):
+
+- **A guest's emit is confined.** `mesh.emit` admits only `comp/{namespace}/…` or a host-listed kind,
+  never a protected RPC kind (`mycelium::is_protected_kind`: the built-ins plus `protected_rpc_kinds`) and
+  nothing from a namespace that is empty or contains `/` — `confine_kind` in
+  `mycelium-wasm-host/src/confine.rs`, rule `host.emit_admission`. Why: a self-originated request reaches
+  `rpc_rx` unframed and is treated as a plain member call (no mandate, no evaluator), so an unconfined emit
+  of `mcp.invoke` walked past every door that checks authority for it. The protected-kind predicate is one
+  ungated function every door asks (`src/agent/mod.rs`); a new door must ask it too.
+- **A `[hosts]` table names its provenance policy.** Empty `trusted_publishers` is refused at load
+  (`NodeCapabilityConfig::validate`) unless `accept_unsigned = true` says otherwise on purpose — the 2.18.1
+  rule: a setting a node cannot be seen to mean is refused, not run silently. The provisioner's own
+  predicate (`provenance_ok`) still reads an empty list as *admit all*; the refusal lives at the unit file.
+
+Beside them, bounds rather than refusals: a component's linear memory (`DEFAULT_MEMORY_LIMIT_BYTES`), a
+stage's pull (`DEFAULT_MAX_STAGE_BYTES` and the entry's `size_bytes`), and a shadow install never bridged
+as an MCP tool. Not built: a unit-file field for extra emit kinds or the memory cap.

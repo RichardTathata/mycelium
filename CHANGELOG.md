@@ -206,7 +206,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   note:** `HostState::emit` returns `Result<(), ConfinementError>` and `ConfinementError` gained
   `ProtectedKind` and `ForeignKind` (an exhaustive `match` breaks); a component that emitted a kind
   outside `comp/{namespace}/…` is now refused — list the kind with `with_emit_kinds` if it is not
-  protected work.
+  protected work. **Granting such a kind is code-only for now:** nothing in the runtime or the unit file
+  calls `with_emit_kinds`, so a component installed by a provisioner or a stem emits only under its own
+  namespace; a `[hosts]` field naming extra emit kinds is follow-up work. A namespace that is empty or
+  contains `/` emits nothing (`ConfinementError::MalformedNamespace`), since its `comp/` family would
+  overlap another namespace's — seen failing first: `a_namespace_with_a_slash_or_none_emits_nothing`
+  (`a/b` emitted `comp/a/b/x`). The coop examples that build a `HostState` by hand
+  (`catalog`, `catalog_viz`, `mcp_toolgrowth`) pass the node's `protected_rpc_kinds` too.
 - **A shadow-lane `tool/*` proposal is no longer registered as a live MCP tool.** D20 promises the
   shadow lane *takes no demand*, and the provisioner kept that for capability resolution (a shadow is
   advertised as `{name}.shadow`, never under the incumbent's filter) — but the WASM runtime bridged
@@ -217,8 +223,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   shadow-safe (`while_live` resolves `{ns}/{name}`, which a shadow never advertises). Seen failing
   first: `a_shadow_lane_tool_proposal_is_not_registered_as_an_mcp_tool_until_accepted`
   (`mycelium-wasm-host/src/provisioner.rs` — the shadow registered `tools/echo.shadow/{node}`).
-  **Upgrade note:** `RuntimeCtx` gained `shadow` (an exhaustive literal breaks). **Not changed:** a
-  shadow *blob*'s `[[activation]]` still runs — activation is placement, not demand.
+  **Upgrade note:** `RuntimeCtx` gained `shadow` (an exhaustive literal breaks). **Unchanged, and
+  stated because an earlier draft of this entry said otherwise:** a shadow *blob*'s `[[activation]]`
+  does **not** run — the entry is renamed `{name}.shadow` before install and the activation hook
+  matches declarations on the renamed name, so it finds none (`no_declaration`); the shadow is placed,
+  not activated.
 - **A `[hosts]` table with no `trusted_publishers` refuses at start, instead of installing anything any
   peer publishes.** `Provisioner::provenance_ok` admitted every entry when the trusted list was empty,
   `validate()` checked only the subset rules, and the stem started without a word (the reference said
@@ -243,7 +252,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   signature and bounds the pull without being trusted for anything else — the hash still decides what
   is kept) is refused before any range is requested, counted as
   `mycelium_artifact_stage_refused_total{reason="size_past_ceiling"}`; the stem's tick stages each
-  entry under its hint and backs a failed stage off by `2^min(n,6)` ticks. Seen failing first:
+  entry under its hint and backs a failed stage off — the next attempt `2^min(n,6)` ticks after the n-th
+  consecutive failure (2, 4, … 64), while no holder answering yet is not a failure and is retried on
+  the next tick (`DiskStagedSource::try_stage` → `StageOutcome::{Staged, NoHolder, Failed}`; seen failing
+  first: `a_missing_holder_is_not_a_failed_stage_and_a_failure_backs_off_from_the_failure`, a `NoHolder`
+  outcome skipped the next tick). `mycelium-stem`'s librarian-over-store mirror stages each manifest
+  entry under its hint and the ceiling as well. Seen failing first:
   `a_size_reply_past_the_ceiling_is_refused_before_any_byte_is_written` (`mycelium-wasm-host/src/http_source.rs`
   — one range was requested against a size of `u64::MAX`). **Upgrade note:** `StemOptions` gained
   `max_stage_bytes` (an exhaustive literal breaks; `..Default::default()` is unaffected). **Not built:** a

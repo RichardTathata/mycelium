@@ -63,7 +63,7 @@ pub use confine::{confine_key, confine_kind, ConfinementError, COMPONENT_KV_PREF
 pub use host::{HostState, Instance, Request, Response, WasmHost, WasmHostError, DEFAULT_MEMORY_LIMIT_BYTES};
 pub use http_source::{
     BlobFetcher, DiskStagedSource, HttpLibrarySource, PrefetchingSource, RangedBlobFetcher,
-    DEFAULT_MAX_IN_MEMORY_BYTES, DEFAULT_MAX_STAGE_BYTES, DEFAULT_RANGE_CHUNK_BYTES,
+    StageOutcome, DEFAULT_MAX_IN_MEMORY_BYTES, DEFAULT_MAX_STAGE_BYTES, DEFAULT_RANGE_CHUNK_BYTES,
 };
 pub use librarian::{
     librarian_filter, spawn_librarian, LibrarianConfig, LibrarianHandle, ManifestSource, LIBRARIAN_NAME,

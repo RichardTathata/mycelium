@@ -335,7 +335,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host = WasmHost::new()?;
     let state_host = HostState::new(
         installer.node_id(), entry.provides.namespace.clone(),
-        installer.agent.kv(), installer.agent.mesh());
+        installer.agent.kv(), installer.agent.mesh())
+        .with_protected_kinds(installer.agent.config().protected_rpc_kinds.iter().cloned());
     let mut instance = host.provision(&*installer_source, &entry.artifact, state_host)
         .expect("provision (fetch from cache + verify + instantiate)");
 
@@ -533,7 +534,8 @@ async fn story_loop(
         let late_out = if late_pulled {
             let late_state = HostState::new(
                 late.node_id(), namespace.to_string(),
-                late.agent.kv(), late.agent.mesh());
+                late.agent.kv(), late.agent.mesh())
+        .with_protected_kinds(late.agent.config().protected_rpc_kinds.iter().cloned());
             match late_host.provision(late_source, &entry.artifact, late_state) {
                 Ok(mut inst) => inst
                     .invoke("invoke", b"late-route".to_vec())
