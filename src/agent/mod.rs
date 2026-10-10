@@ -398,7 +398,11 @@ pub struct SystemStats {
     /// from a node the call was **not sent to** — ignored, never claimed (the real reply still
     /// arrives). Before this counter the reply interceptor claimed on nonce alone, so a peer that
     /// learned a nonce could pre-empt the legitimate reply and the caller timed out. A non-zero
-    /// value names a forging peer (or a nonce reuse) to investigate — detection, not prevention.
+    /// value names a misbehaving or misrouted peer (or a nonce reuse) to investigate — detection, not
+    /// prevention. **What it does not see:** a signal's `sender` is written by the emitter and
+    /// relayed, not authenticated per signal, so a peer that writes the expected target's id as its
+    /// sender passes the claim and is not counted. The check closes the accidental case — a stray or
+    /// late reply from another node — not a forger who knows both the nonce and the target.
     pub rpc_reply_sender_mismatches: u64,
 }
 
@@ -483,8 +487,9 @@ pub(crate) struct TaskCtx {
     /// Replies that matched a pending call's nonce but came from a node the call was not sent to
     /// (`SystemStats::rpc_reply_sender_mismatches`). Each is ignored, not claimed: before this
     /// counter existed the interceptor claimed on nonce alone and the oneshot was consumed either
-    /// way, so a peer that learned a nonce could make the real reply undeliverable. A non-zero value
-    /// names a peer forging replies — or a wire-level nonce reuse — to investigate.
+    /// way, so a peer that learned a nonce could make the real reply undeliverable. `sender` is
+    /// emitter-written (see `SystemStats::rpc_reply_sender_mismatches`), so this closes the
+    /// accidental case, not a forger that writes the target's id.
     pub(crate) rpc_reply_sender_mismatches: Arc<AtomicU64>,
 
     // ── Layer III — Consensus ────────────────────────────────────────────────────
@@ -1009,7 +1014,9 @@ impl GossipAgent {
                     // alone, a reply from any node that learned the nonce consumed the oneshot —
                     // `await_nonce_reply` then dropped it on sender mismatch, so the caller timed
                     // out although the provider answered. Such a reply is counted and ignored;
-                    // the pending call stays pending for the sender it was sent to.
+                    // the pending call stays pending for the sender it was sent to. `sig.sender` is
+                    // emitter-written and relayed, so this stops a stray or mismatched reply, not a
+                    // forger that writes the target's id as its sender.
                     if sig.payload.len() >= 8
                         && (sig.kind.as_ref() == signal_kind::RPC_RESULT
                             || sig.kind.as_ref() == signal_kind::BULK_RESULT)

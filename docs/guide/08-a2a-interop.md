@@ -23,7 +23,8 @@ capabilities, or the mesh topology.
 > `-32004`, naming the rule. Task ids are caller-chosen, so they are enumerable; before this any
 > client could read another caller's completed artifact or cancel its task by naming the id. An
 > anonymous caller has no identity to match: its task is answered only on the `tasks/send` response
-> or the `tasks/sendSubscribe` stream that created it (both carry the full result).
+> or the `tasks/sendSubscribe` stream that created it (both carry the full result). The id is reserved before the dispatch, so two senders racing
+> one new id cannot both run, and only after a federation credential is authorised.
 
 ```mermaid
 sequenceDiagram

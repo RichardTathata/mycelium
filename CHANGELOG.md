@@ -263,6 +263,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   serve stream is unaffected; one that answered on another agent's behalf (a different bearer) now gets 403 — open
   the stream and respond under one credential (`deprecations.md` §23). `SystemStats` gained a field (an exhaustive
   literal breaks).
+- **The adversarial review's findings on #587** (rule 4), each fixed before merge. (F1) Two serve streams of one
+  principal on one kind both receive each request, so the second replica's `rpc/respond` got `403 unserved_request`
+  and both SDKs raise it, killing that replica's loop: a repeat answer from the same principal is now `200
+  {"ok": true, "duplicate": true}`, dropped and counted (`/stats` `rpc_respond_duplicates`); the first record of a
+  request is never reset by a second stream. Seen failing first: `a_replicated_serve_loop_answers_idempotently`
+  (`[200, 403]`). (F2) The 300 s answer window assumed every door waits at most 300 s: `/gateway/llm/call` clamps
+  `timeout_ms` to it; an in-process `rpc_call`'s bound is stated. Seen failing first (clamp toggled off):
+  `the_llm_door_timeout_is_clamped_to_the_gateway_ceiling`. (F3) The `(nonce, sender)` claim closes the accidental
+  case, not a forger who writes the target's id — `sender` is emitter-written; said so in `SystemStats`, §23 and
+  lock-order row 2. (F4) `mycelium-agentfacts`' two `/.well-known/agent-facts*` routes are listed
+  (`COMPANION_PUBLIC_PATHS`, rbac.md); the public-surface test is renamed for what it checks and checks mounting by
+  405 (it failed in a build without `metrics`, whose `/metrics` answers 404 by design). (F5) The A2A owner check and
+  the insert straddled the dispatch: the id is now reserved atomically before it (a pending entry removed on any
+  failure). Seen failing first: `two_principals_racing_one_task_id_dispatch_once` (the skill ran twice, both
+  completed). (F6) The reservation runs after the federation authorisation; `-32001`/`-32004` stay distinct, stated.
+  (F7) Both SSE doors refuse `rpc.result` and `bulk.result`. Seen failing first: `sse_doors_refuse_reply_kinds`
+  (`/signals/rpc.result` answered 200). (F8) rbac.md states what a `mesh:serve` stream sees. (F9) The served-request
+  TTL sweep runs every 1 024 inserts or at the cap, not per request. (F10) The tuple-space crate's manifest comment.
+  The `gw_llm_stream` label that failed `llm`-without-`tls` clippy is gone (a helper with an early return).
 
 ### Added
 - **A companion's gateway door can act as the HTTP client, under the evaluator** — the public API
