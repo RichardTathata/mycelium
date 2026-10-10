@@ -539,7 +539,7 @@ cfg.profile = Some("secure-single-domain".into());   // or GOSSIP_PROFILE=secure
 `start()` then returns `Err(InvalidField { field: "profile", .. })` naming each guarantee the profile
 requires that is not `enforced` (or `not_applicable` to this node's role), what is missing and where to
 read; `dev` (the default) requires nothing and the startup log says so. The required set is
-`mycelium::SECURE_SINGLE_DOMAIN_PROFILE` (rev 3: eighteen ids — rev 3 added `gw.exposed_closed`, unreleased), `mycelium::check_profile` runs it against
+`mycelium::SECURE_SINGLE_DOMAIN_PROFILE` (rev 3: eighteen ids — rev 3 added `gw.exposed_closed`, 2.32.0), `mycelium::check_profile` runs it against
 any report, and `profile_named` resolves a name. The profile needs a `compliance` + `tls` build and — since
 rev 2 — a node certificate **issued off-node**, so the fleet CA's key is on no node:
 

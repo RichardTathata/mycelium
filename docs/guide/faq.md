@@ -118,7 +118,7 @@ don't want that dependency.
 - **The gateway has no auth by default — on loopback.** With no credential the HTTP gateway
   serves only a loopback `http_addr`; a non-loopback one (`0.0.0.0`, a LAN address) refuses to
   start unless you set a credential or the explicit `gateway_allow_unauthenticated` opt-in
-  (unreleased). Put mTLS / a proxy in front on untrusted networks — see guide
+  (since 2.32.0). Put mTLS / a proxy in front on untrusted networks — see guide
   [09-security.md](09-security.md) and [operations](../operations/README.md).
 - **Rolling upgrades are wire-version gated.** One version step per rollout
   (`WIRE_VERSION`/`PREV_WIRE_VERSION`); mixed clusters spanning two steps won't

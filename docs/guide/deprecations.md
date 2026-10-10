@@ -43,7 +43,13 @@ the notice.
 | 20 | `/gateway/mesh/group` on a governed group | 2.29.0 | `/gateway/govern/group` (`govern:write`) | No — HTTP 403 `governed_group` |
 | 21 | consensus without a prepare phase (a mixed fleet) | 2.30.0 | upgrade a quorum of each group's acceptors; handle `Superseded` | No — wire behaviour; `Timeout` until a quorum is upgraded |
 | 22 | an alert keyed on one consensus-timeout `reason`; a second stop signal that waits; an untyped lost write | 2.31.0 | match the new reason set (§22); allow the grace period; catch `SupersededError` | No — a metric label, an exit code, a Python subclass |
-| 26 | an open gateway on a non-loopback `http_addr` | unreleased | a credential (`gateway_auth_token`, a token table or `[oidc]`), a loopback `http_addr`, or `gateway_allow_unauthenticated = true` | No — `start()` refuses, `InvalidField { field: "http_addr" }` |
+| 23 | a bare (untagged) identity proof or consensus signature | 2.32.0 (accepted until the next MINOR) | the tagged form every 2.32 node writes — upgrade the fleet | No — counted (`identity_untagged_proofs`, `consensus_untagged_signatures`); an upgraded proposer times out until a quorum is upgraded |
+| 24 | a group proposal from a node outside the group's roster | 2.32.0 | join the group first | No — `#[non_exhaustive]` enums gain `NotAMember`; HTTP 403 `not_a_member` |
+| 25 | protected kinds on the SSE doors; `rpc/respond` for a request not yours; another identity's A2A task; `/api/tuple`; a policy-free LLM door | 2.32.0 | the decision trace or evidence journal; one bearer per serve loop; the creating bearer; `/gateway/tuple/overview` | No — HTTP 403 / 404 and JSON-RPC `-32004`; `SystemStats` and `RouteError` grow (an exhaustive literal or `match` breaks) |
+| 26 | an open gateway on a non-loopback `http_addr` | 2.32.0 | a credential (`gateway_auth_token`, a token table or `[oidc]`), a loopback `http_addr`, or `gateway_allow_unauthenticated = true` | No — `start()` refuses, `InvalidField { field: "http_addr" }` |
+| 27 | an unbounded, unconfined hosted WASM call; a `[hosts]` table with no `trusted_publishers` | 2.32.0 | `[hosts].call_deadline_ms`; `with_emit_kinds`; `accept_unsigned = true` on purpose | Partly — `WasmHostError`, `InvocationOutcome`, `ConfinementError` gain variants; `HostsDecl`, `StemOptions`, `RuntimeCtx` gain fields |
+| 28 | a WAL append after a failed one; a corrupt companion WAL record; `sync_mode = "os"` under the secure profile; two new consensus-timeout reasons | 2.32.0 | read the receipt; move a corrupt WAL aside; `sync_mode = "flush"`; alert on the new reasons | No — `Err`/refusal at open/start; `SystemStats` gains fields (an exhaustive literal breaks) |
+| 29 | fractional SDK timeouts; raw path segments; TypeScript `scatterGather` waiting for every target | 2.32.0 (`mycelium-py` 0.2.10, `mycelium-ts` 0.2.4, checkpointer 0.3.3) | whole seconds; pass `minOk: targets.length` to wait for all | No — values rounded up, bad ones refused by name |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -426,7 +432,7 @@ persistence). Existing
 
 **What changes.** An identity proof is a signature over `mycelium.identity/proof/1 ‖ len ‖ history`, and a
 consensus payload's signature is over `mycelium.consensus/msg/1 ‖ len ‖ bytes`; before 2.32.0 both were bare
-signatures over the bytes themselves, which let one be presented as the other (CHANGELOG, Unreleased § Fixed). The
+signatures over the bytes themselves, which let one be presented as the other (CHANGELOG, 2.32.0 § Fixed). The
 frames are unchanged — wire **v12** — so this is a rolling-upgrade allowance, not a wire bump:
 
 - **A 2.32 node accepts the bare form of both for one release**, and counts each acceptance
@@ -468,7 +474,7 @@ everywhere.
 `ConsensusResult::NotAMember { slot, group }`, `CommitError::NotAMember { slot, group }`,
 `ConsistencyError::NotAMember { group }`, and **403 `not_a_member`** from `POST /gateway/overlay/elect` and every
 gateway route that reaches a group proposal — where it used to run, counting the proposer's own vote toward a
-quorum drawn from a roster it was not in (CHANGELOG, Unreleased § Fixed). `cluster_propose` is unaffected.
+quorum drawn from a roster it was not in (CHANGELOG, 2.32.0 § Fixed). `cluster_propose` is unaffected.
 
 **Will the compiler tell me?** Only if you matched without a `_` arm — all three enums are `#[non_exhaustive]`
 (§13), so an exhaustive `match` inside this crate's dependants already needed one. **That arm must fail closed:**
@@ -478,7 +484,7 @@ a refusal read as a commit is the class of bug `ElectorateUnavailable` ended, on
 `/gateway/govern/group` (`govern:write`) for a governed group. A client that elected a leader for a group its
 node had not joined was never electing anything the group's members agreed to.
 
-## 25. The gateway's doors answer only what they were asked by whom (unreleased)
+## 25. The gateway's doors answer only what they were asked by whom (2.32.0)
 
 **What changes.**
 - **The signal SSE streams refuse a protected kind.** `GET /signals/{kind}` and `GET /gateway/signal/sse/{kind}`
@@ -513,6 +519,10 @@ node had not joined was never electing anything the group's members agreed to.
   answers 404. It sat outside the gateway's auth boundary and answered without a bearer.
 - **`/gateway/llm/call` and `/gateway/llm/stream` run the action evaluator**: a denial is `403 policy` on `/call`
   and an in-stream `{"type": "error", "error": "policy"}` on `/stream`. Inert without an evaluator attached.
+- **The OIDC key refresh is single-flight and rate-limited.** A token whose `kid` the node has not seen forces at
+  most one JWKS refresh per 30 s (`JWKS_REFRESH_COOLDOWN`), and the fetch has a 10 s deadline; inside the cooldown
+  such a token is refused without a fetch. After an IdP key rotation, tokens under the new key can therefore be
+  refused for **up to 30 s** if an unknown `kid` was seen just before.
 
 **Will the compiler tell me?** `SystemStats` gained a field, so an exhaustive struct literal breaks, and an
 exhaustive `match` on `mycelium_reason::RouteError` needs the `Refused` arm; otherwise no — HTTP status codes and
@@ -526,7 +536,7 @@ duplicate. One that split serving and responding across two credentials must use
 `tasks/get` sends it under the same bearer as its `tasks/send`; an anonymous one reads the result it was already
 given. A dashboard reading `/api/tuple` reads `/gateway/tuple/overview` with a `tuple:read` bearer.
 
-## 26. A gateway off loopback needs a credential (unreleased)
+## 26. A gateway off loopback needs a credential (2.32.0)
 
 **What changes.** A node whose gateway binds a **non-loopback** `http_addr` — `0.0.0.0`, `::`, a LAN or pod
 address — with **no credential model** (no `gateway_auth_token`, no `gateway_named_tokens` /
@@ -548,3 +558,100 @@ credential, and any blank token (an empty env variable included — unset it ins
 Docker network, a demo), set `gateway_allow_unauthenticated = true` or `GOSSIP_GATEWAY_ALLOW_UNAUTHENTICATED=1`;
 the node then warns once at start, and its guarantee report reads `gw.exposed_closed: not_configured`. The
 environment variable is a strict boolean: a value other than `true/false/1/0/yes/no` is refused.
+
+## 27. Hosted WASM components are bounded in time and memory, confined on the mesh, and installed only from named publishers (2.32.0)
+
+**What changes.**
+- **Every guest call and instantiation has a wall-clock deadline**, `DEFAULT_CALL_DEADLINE` (5 s), metered or not and
+  whoever signed the entry; past it the call ends `WasmHostError::DeadlineExceeded { deadline_ms }` /
+  `InvocationOutcome::DeadlineExceeded` (counter outcome `deadline_exceeded`). Set it per host with
+  `[hosts].call_deadline_ms` or `WasmHost::with_call_deadline` (`0` is refused by name; `with_call_deadline(None)`
+  removes it). The serve loop and install run the guest on `spawn_blocking`; a trapped instance is re-instantiated
+  from the compiled component rather than recompiled.
+- **A component's linear memory is capped** at `DEFAULT_MEMORY_LIMIT_BYTES` (256 MiB; `HostState::with_memory_limit`
+  per instance): a grow past it is answered no, and an initial allocation past it refuses instantiation.
+- **`mesh.emit` is confined**: a component emits only under `comp/{namespace}/…` or a kind the host listed
+  (`HostState::with_emit_kinds`), and never a protected kind (`mcp.invoke`, `skill.invoke`, `llm.invoke`, the node's
+  `protected_rpc_kinds`). A refused emit is dropped, logged and counted
+  (`mycelium_wasm_host_emits_refused_total{reason}`) — the WIT signature has no error channel.
+- **A `[hosts]` table with no `trusted_publishers` refuses to load** (`hosts.trusted_publishers`); it used to install
+  anything any peer published. `[hosts] accept_unsigned = true` keeps the old behaviour on purpose, and warns once.
+- **A shadow-lane `tool/*` proposal is not an MCP tool** until it is accepted (it used to appear in `tools/list`).
+- **The staging pull is bounded before its first byte** by the stage's ceiling (`DEFAULT_MAX_STAGE_BYTES`, 64 GiB;
+  `StemOptions::max_stage_bytes`) and the entry's `size_bytes` hint; a failed stage backs off.
+
+**Will the compiler tell me?** Partly. `WasmHostError` and `InvocationOutcome` each gain a variant and neither is
+`#[non_exhaustive]`, so an exhaustive `match` needs the arm; `ConfinementError` gains `ProtectedKind`, `ForeignKind`
+and `MalformedNamespace`, and `HostState::emit` now returns `Result`; `HostsDecl` (`call_deadline_ms`), `StemOptions`
+(`max_stage_bytes`) and `RuntimeCtx` (`shadow`) gain fields, so an exhaustive struct literal breaks
+(`..Default::default()` is unaffected). The deadline, the memory cap, the emit refusal and the `[hosts]` refusal are
+runtime behaviour.
+
+**Migration.** A guest call that legitimately runs past 5 s: raise `call_deadline_ms`. An embedder calling
+`Instance::invoke` (still synchronous) from async code: move it to `spawn_blocking`, as the serve loop now does. A
+component that emitted a kind outside its namespace: list the kind with `with_emit_kinds` if it is not protected work
+(code-only for now — no unit-file field yet). A unit file with `[hosts]` and no publishers: add the publisher keys, or
+`accept_unsigned = true` if unsigned installs are what you mean.
+
+## 28. Durability: a failed append is not followed, a corrupt companion record refuses the open, and consensus records its answers first (2.32.0)
+
+**What changes.**
+- **A failed KV WAL append poisons the writer** until a snapshot repairs the file: every later append is answered
+  `Err` (`LocalDurability::Failed` on the receipt path) or counted in `dropped_appends()`, and `/health` carries a
+  `persistence` block (`wal_refusing_appends`, `reason`, `dropped_appends`). It used to acknowledge the next record
+  behind a torn frame, and the next restart refused (or quarantined) the WAL.
+- **The companion WALs (`mycelium-tuple-space`, `mycelium-blackboard`)** poison the same way; a corrupt record with
+  data after it **refuses the open** (`InvalidData`, naming the file and the byte) — so the node does not become
+  primary, and an Auto-mode node withdraws its candidacy — where every later record used to be truncated silently;
+  a second store on one `wal_path` is refused (`WouldBlock`), with a `<wal_path>.lock` file beside each WAL; a
+  secondary now syncs and compacts its WAL too; a compacted WAL may end in a lone `Ack` (older builds replay it as
+  a no-op).
+- **`persist.sync_mode` reads `not_configured` under `sync_mode = "os"`**, which is buffered like `async`, so a
+  `secure-single-domain` node running it refuses to start.
+- **The audit chain continues across a restart** with `[persistence]`: the head resumes after the longest verified
+  prefix of the node's own stream, where a restarted node used to re-seal seq 0 over its genesis record. An exporter
+  sees sequence numbers continue rather than restart.
+- **Consensus records an acceptor's promise and vote before it answers** (a forced `fdatasync` per answer); one that
+  cannot is not sent. `mycelium_consensus_timeouts_total{reason}` gains **`unrecorded`** (this node could not make its
+  answer durable) and **`ballot_exhausted`** (the slot's decided floor is at the ballot ceiling — a forged floor,
+  counted on `consensus_decided_floor_anomalies`).
+
+**Will the compiler tell me?** `SystemStats` gains three fields (`consensus_decided_floor_anomalies`,
+`consensus_ballot_space_exhausted`, `rpc_reply_sender_mismatches`), so an exhaustive struct literal breaks; the rest is
+runtime behaviour.
+
+**Migration.** Treat a `Failed` receipt as *not durable* and alert on `wal_refusing_appends`. A companion WAL that
+refuses its open holds a corrupt record before its last: move the file aside to start empty (there is no
+`on_unreadable = "quarantine"` counterpart), and do not delete a `.lock` file while a node runs. A secure-profile node
+on `sync_mode = "os"`: set `flush`. An alert keyed on a consensus-timeout `reason` (§22): add `unrecorded` — read the
+node's `/health` `persistence` block when it fires — and `ballot_exhausted`.
+
+## 29. The SDKs send whole seconds and one path segment per value; TypeScript `scatterGather` waits for one reply (2.32.0)
+
+**What changes** (`mycelium-py` 0.2.9 → 0.2.10, `mycelium-ts` 0.2.3 → 0.2.4, `langgraph-checkpoint-mycelium` 0.3.2 →
+0.3.3).
+- **Every client takes a scheme** (`scheme="https"` / `{ scheme: "https" }`, default `http`) and Python and the
+  checkpointer a CA file (`ca_file=`); **the checkpointer sends a bearer** (`token=`, then `MYCELIUM_GATEWAY_TOKEN`)
+  and needs `kv:read`, `kv:write`, `llm:read` **and `llm:write`**. Additive.
+- **Timeouts, leases and TTLs travel as whole seconds, rounded up** (never below 1; a tuple `take`'s `0` stays the
+  poll) — the gateway reads an integer, so a fraction used to be replaced by the route's default, refused 422, or
+  truncated to a zero-second park. A negative, non-finite or past-`u64` value is refused by name (`ValueError` /
+  `Error`) before any request.
+- **A caller-supplied path segment is percent-encoded as one segment**, and a segment that cannot travel as one —
+  `.`, `..`, empty, a lone surrogate — is refused before any request; the checkpointer reads such a row's blob id as
+  `corrupt` (`IncompleteCheckpoint`) and never fetches it.
+- **TypeScript:** a lost consistent write throws `SupersededError` (`status` 409); **`scatterGather` with no `minOk`
+  waits for one reply and 10 s**, the gateway's and the Python SDK's default, where it waited for every target and
+  5 s; `scatterGather([])` with no `minOk` now rejects with a `TimeoutError` at once (the gateway's 504) where it
+  resolved `[]`.
+- **A mailbox stream is at-most-once across a drop** (the gateway tombstones each event as it enters the stream's
+  queue); the docs said at-least-once. No SSE stream resumes after a drop — the gateway has no resume point.
+
+**Will the compiler tell me?** No — the TypeScript `SupersededError` still extends `Error`, and the rest is values
+and runtime refusals.
+
+**Migration.** A TypeScript caller that relied on hearing from every target passes `{ minOk: targets.length }`, and
+one that may pass an empty target list passes `{ minOk: 0 }` or skips the call. A caller that passed a fractional
+timeout gets the next whole second. A caller whose ids legitimately contain `/` now reaches the route it named; one
+that used `.` or `..` as an id must choose another. A checkpointer behind a token-protected gateway sets `token=`
+(or the environment variable) and grants `llm:write`.

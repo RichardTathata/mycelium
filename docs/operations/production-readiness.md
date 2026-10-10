@@ -48,7 +48,7 @@ this page is the index + the gate.
 - ☐ **Start under the `secure-single-domain` profile** (`profile = "secure-single-domain"` or
   `GOSSIP_PROFILE`). The node then **refuses to start** unless each of these resolves `enforced` (or
   `not_applicable` to its role), and names every one that does not, with what is missing and where to
-  read — rev 3 (unreleased; rev 2 was v2.21.0's seventeen, rev 1 v2.19.0's fifteen): `mesh.tls` · `id.proofs_required` ·
+  read — rev 3 (2.32.0; rev 2 was v2.21.0's seventeen, rev 1 v2.19.0's fifteen): `mesh.tls` · `id.proofs_required` ·
   `gw.not_open` · `gw.exposed_closed` · `gw.tls` ·
   `gw.caller_profile` · `ae.authorised_at_seam` · `ae.recorded_before_dispatch` · `prov.enforcement` ·
   `a2a.admission` · `authz.execution_authority` · `authz.durable_epochs` · `audit.chain` ·
@@ -74,7 +74,7 @@ this page is the index + the gate.
   nothing required, and the log says it is not a production profile.
 - ☐ **Gateway is not open** — the HTTP gateway has **no auth by default**, and serves that open gateway
   **only on loopback**: a non-loopback `http_addr` (`0.0.0.0`, `::`, a LAN address) with no credential
-  model **refuses to start**, naming `http_addr` (unreleased; plan `post-360-hardening.md` row P1),
+  model **refuses to start**, naming `http_addr` (2.32.0; plan `post-360-hardening.md` row P1),
   unless `gateway_allow_unauthenticated = true` — the explicit insecure opt-in, which warns once at start
   and reads `not_configured` on `gw.exposed_closed`, so this profile refuses it. **Check that no
   production node sets it.** Set `gateway_auth_token`, or front it with the OIDC/OAuth2 ACLs. **Token tables and `[oidc]` need a
