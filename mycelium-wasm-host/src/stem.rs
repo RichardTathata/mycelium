@@ -713,10 +713,13 @@ mod tests {
             while_live: None, api_key: literal.map(str::to_string), api_key_env: env.map(str::to_string),
             max_tokens: None, temperature: None,
         };
-        // The crate is `#![deny(unsafe_code)]` (post-360 P3); this test's one env write is its only
-        // `unsafe`. SAFETY: edition 2024 marks `set_var` unsafe because another thread may read
-        // the environment concurrently; the variable is unique to this test and set once, before
-        // any reader of it runs, and nothing in this crate's tests removes or rewrites it.
+        // The crate is `#![deny(unsafe_code)]` (post-360 P3); this env write is its only `unsafe`.
+        // SAFETY — the hazard, stated honestly: edition 2024 marks `set_var` unsafe because a
+        // concurrent read of the environment from ANY thread (a C `getenv` in another test, e.g.
+        // inside name resolution) can observe it mid-update, and no lock here prevents that; Rust's
+        // own `std::env` calls are serialised by std's internal lock, so the residual race is a libc
+        // `getenv` on another test thread. Tolerated because this is test code (the worst outcome is
+        // a crashed test run), the variable is unique to this test and written once.
         #[allow(unsafe_code)]
         unsafe { std::env::set_var("MYCELIUM_TEST_SERVE_KEY_SET_7F", "sk-test-7f"); }
         assert_eq!(resolve_serve_key(&decl(None, None)).unwrap(), None, "no key: none sent");

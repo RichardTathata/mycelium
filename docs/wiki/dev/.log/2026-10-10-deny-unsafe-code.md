@@ -7,3 +7,7 @@
   `dev/companions/onboarding-checklist.md` (a new companion carries the attribute),
   `docs/operations/data-erasure.md` (what `destroy` wipes), `docs/analysis/ratings.md` (an addendum to
   Run 62, whose dim-8 row quoted the old count).
+- The adversarial review of #596: a test through `destroy` (a test-only hook in `wipe`), `install_key`
+  wipes the key it replaces (seen failing first), every un-wiped copy listed with `Zeroizing` storage as
+  the path, `set_test_env` takes the lock guard and its SAFETY lines name the libc-`getenv` hazard, the
+  census scoped to library crates with `examples/conway.rs` named.

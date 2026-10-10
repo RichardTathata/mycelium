@@ -36,10 +36,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and `mycelium-tuple-space` had it; the substrate did not, and it held the workspace's one production `unsafe`:
   `SubjectKeyRegistry::destroy`'s hand-rolled `write_volatile` wipe of a DEK (`erasure.rs`). That is now
   `zeroize::Zeroize` (already in the tree under `tls` through `ed25519-dalek` and `rustls`; a direct optional
-  dependency of core under `tls`, one lockfile line), with `wipe_zeroes_every_dek_byte` pinning that the key is
-  cleared. What remains is test code, each under one scoped `#[allow(unsafe_code)]` with its `SAFETY:` comment:
-  core's env-var mutation in one helper (`config.rs` `set_test_env`, replacing four allows) and one `set_var` in a
-  wasm-host test (edition 2024 makes both unsafe). Added to `mycelium-sim`, `-blackboard`, `-wiki`, `-wasm-host`
+  dependency of core under `tls`, one lockfile line), with `destroy_wipes_the_key_it_removes` pinning that the key
+  `destroy` removes is cleared. `install_key` over an existing subject now wipes the key it replaces (it was
+  dropped un-wiped; seen failing first: `install_key_wipes_the_key_it_replaces`, `left: []`). The copies no wipe
+  reaches — `decrypt_for`'s and `encrypt_for`'s stack copies, ring's key schedule, the registry on drop — are
+  listed in the module doc and `docs/operations/data-erasure.md`, with `Zeroizing<[u8; 32]>` storage as the path
+  to closing them. What remains is test code, each under one scoped `#[allow(unsafe_code)]` with its `SAFETY:` comment:
+  core's env-var mutation in one helper (`config.rs` `set_test_env`, replacing four allows; it takes the
+  `env_test_lock()` guard as a parameter) and one `set_var` in a wasm-host test (edition 2024 makes both unsafe;
+  the comments name the residual hazard, a libc `getenv` on another test thread). `examples/conway.rs` still uses
+  `unsafe` and is outside the library crates the attribute covers. Added to `mycelium-sim`, `-blackboard`, `-wiki`, `-wasm-host`
   (its `bindgen!` output compiles under it), `-agentfacts`, `-reason`, `-guardrails`, `-effects`, `-commitment`
   and the coop examples library; not to `loom-spike` or `mycelium-gateway-free-tests`, whose libraries are
   empty. Seen failing first: the attribute alone failed core's build, `error: usage of an \`unsafe\` block

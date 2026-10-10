@@ -592,10 +592,18 @@ blackboard, wiki, wasm-host, agentfacts, reason, guardrails, effects, commitment
 `unsafe` remains**; the DEK wipe in `SubjectKeyRegistry::destroy` was the last (a `write_volatile` loop),
 and is `zeroize` now (`wipe` in `mycelium-core/src/erasure.rs`, pinned by `wipe_zeroes_every_dek_byte`).
 The `unsafe` left is test-only, edition 2024's `std::env::set_var`/`remove_var`, each under one scoped
-`#[allow(unsafe_code)]` with its `SAFETY:` line: core's `set_test_env` (`config.rs` tests, callers hold
-`env_test_lock()`) and one wasm-host test (`stem.rs`, a variable unique to it). The census grep:
+`#[allow(unsafe_code)]` with its `SAFETY:` line: core's `set_test_env` (`config.rs` tests; it takes the
+`env_test_lock()` guard as a parameter) and one wasm-host test (`stem.rs`, a variable unique to it). The
+SAFETY lines name the real hazard — a libc `getenv` on another test thread, which no test lock prevents —
+and why test code tolerates it. The census covers **library crates**:
 `grep -rn 'unsafe' --include='*.rs' src mycelium-*/src examples/coop/src` minus comments and messages.
+Outside it, `examples/conway.rs` (a root example binary, for `libc`) is the one example that uses
+`unsafe`; `examples/conway-gpu` is outside the workspace.
 
-The wipe's limit is the module doc's: it clears the copy `destroy` removes from the map; bytes a
-`HashMap` move or an earlier `encrypt_for` copy left in freed memory are not reached, which is why KMS
-custody, not this helper, is the erasure boundary (`docs/operations/data-erasure.md`).
+The wipe's limit is the module doc's (*Copies the wipe does not reach*, `mycelium-core/src/erasure.rs`):
+`destroy` wipes the key it removes and `install_key` the key it replaces
+(`destroy_wipes_the_key_it_removes`, `install_key_wipes_the_key_it_replaces`, through a test-only hook in
+`wipe`); `decrypt_for`'s local copy, the copy `get_or_create` returns, ring's expanded key schedule, every
+live key when the registry drops, and bytes a map leaves in freed memory are not wiped. `Zeroizing<[u8; 32]>`
+storage is the path to closing all but ring's; until then KMS custody is the erasure boundary
+(`docs/operations/data-erasure.md`).

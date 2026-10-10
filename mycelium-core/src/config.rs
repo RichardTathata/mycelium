@@ -2338,17 +2338,17 @@ mod tests {
     fn the_control_bound_and_named_tokens_come_from_the_environment() {
         let _lock = env_test_lock();
         let vars = ["GOSSIP_CONTROL_MAX_STALENESS_MS", "GOSSIP_CONTROL_MIN_PEERS_HEARD", "GOSSIP_GATEWAY_NAMED_TOKENS"];
-        let _guards: Vec<EnvGuard> = vars.iter().map(|v| EnvGuard(v, std::env::var(v).ok())).collect();
-        set_test_env(vars[0], Some("90000"));
-        set_test_env(vars[1], Some("3"));
-        set_test_env(vars[2], Some("ci-bot|s3cr3t|mcp:invoke;skill-server|t0k3n|mesh:serve"));
+        let _guards: Vec<EnvGuard> = vars.iter().map(|v| EnvGuard(&_lock, v, std::env::var(v).ok())).collect();
+        set_test_env(&_lock, vars[0], Some("90000"));
+        set_test_env(&_lock, vars[1], Some("3"));
+        set_test_env(&_lock, vars[2], Some("ci-bot|s3cr3t|mcp:invoke;skill-server|t0k3n|mesh:serve"));
         let mut cfg = GossipConfig::default();
         cfg.apply_env_overrides().expect("well-formed overrides apply");
         assert_eq!((cfg.control_max_staleness_ms, cfg.control_min_peers_heard), (90_000, 3));
         assert_eq!(cfg.gateway_named_tokens.len(), 2);
         assert_eq!(cfg.gateway_named_tokens[1].scopes, vec!["mesh:serve".to_string()]);
 
-        set_test_env(vars[2], Some("ci-bot|s3cr3t"));
+        set_test_env(&_lock, vars[2], Some("ci-bot|s3cr3t"));
         let err = GossipConfig::default().apply_env_overrides().expect_err("a malformed entry refuses");
         assert!(format!("{err}").contains("gateway_named_tokens"), "{err}");
     }
@@ -2445,23 +2445,29 @@ mod tests {
         ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Restores (or removes) an env var on drop. Hold `env_test_lock()` for the
-    /// guard's whole lifetime.
-    struct EnvGuard(&'static str, Option<String>);
-    impl Drop for EnvGuard {
+    /// Restores (or removes) an env var on drop. Borrows the `env_test_lock()` guard, so the
+    /// borrow checker keeps the lock held for the guard's whole lifetime.
+    struct EnvGuard<'a>(&'a std::sync::MutexGuard<'static, ()>, &'static str, Option<String>);
+    impl Drop for EnvGuard<'_> {
         fn drop(&mut self) {
-            set_test_env(self.0, self.1.as_deref());
+            set_test_env(self.0, self.1, self.2.as_deref());
         }
     }
 
     /// Sets (`Some`) or removes (`None`) a process env var — the crate's one `unsafe` site, test
-    /// code only. The crate is `#![deny(unsafe_code)]` (post-360 P3); edition 2024 makes
-    /// `set_var`/`remove_var` unsafe because another thread may read the environment at the same
-    /// time, so every caller must hold `env_test_lock()` for as long as the value matters.
+    /// code only (the crate is `#![deny(unsafe_code)]`, post-360 P3). It takes the
+    /// `env_test_lock()` guard as a parameter, so a caller must hold a lock guard to reach it (the type
+    /// admits any `Mutex<()>` guard; every caller passes `env_test_lock()`'s).
     #[allow(unsafe_code)]
-    fn set_test_env(var: &str, value: Option<&str>) {
-        // SAFETY: every caller holds env_test_lock(), which serialises the tests that touch the
-        // environment; no non-test code in this crate writes it.
+    fn set_test_env(_held: &std::sync::MutexGuard<'_, ()>, var: &str, value: Option<&str>) {
+        // SAFETY — the hazard, stated honestly: edition 2024 makes `set_var`/`remove_var` unsafe
+        // because a concurrent read of the environment from ANY thread (a C `getenv`, e.g. inside
+        // name resolution or time-zone lookup) can observe the environment mid-update. The lock
+        // serialises only the tests that take it; Rust's own `std::env` reads and writes are
+        // serialised against each other by std's internal lock, so the residual race is a libc
+        // `getenv` on another test thread. That is tolerated here because it is test code (the
+        // worst outcome is a crashed test run, never production state) and no production path in
+        // this crate writes the environment.
         unsafe {
             match value {
                 Some(v) => std::env::set_var(var, v),
@@ -2474,8 +2480,8 @@ mod tests {
     fn apply_env_overrides_sets_field() {
         let _lock = env_test_lock();
         let var = "GOSSIP_MAX_SEEN_ENTRIES";
-        let _guard = EnvGuard(var, std::env::var(var).ok());
-        set_test_env(var, Some("12345"));
+        let _guard = EnvGuard(&_lock, var, std::env::var(var).ok());
+        set_test_env(&_lock, var, Some("12345"));
         let mut cfg = GossipConfig::default();
         cfg.apply_env_overrides().expect("apply_env_overrides must not fail");
         assert_eq!(cfg.max_seen_entries, 12345);
@@ -2543,10 +2549,10 @@ mod tests {
     fn apply_env_overrides_rejects_malformed_value_with_typed_error() {
         let _lock = env_test_lock();
         let var = "GOSSIP_BIND_PORT";
-        let _guard = EnvGuard(var, std::env::var(var).ok());
+        let _guard = EnvGuard(&_lock, var, std::env::var(var).ok());
 
         for bad in ["not-a-port", "99999999", "-1", ""] {
-            set_test_env(var, Some(bad));
+            set_test_env(&_lock, var, Some(bad));
             let mut cfg = GossipConfig::default();
             let before = cfg.bind_port;
             match cfg.apply_env_overrides() {
