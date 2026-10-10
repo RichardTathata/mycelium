@@ -4,7 +4,7 @@
 
 Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Where you configure an enforcement point, it checks authority before work runs and records what it decided; a recorded run replays.
 
-For teams running fleets of AI agents: nodes find and install the capabilities they need, coordinate with no central controller, and — where you configure it — check authority before work runs and keep a record of what they decided.
+For teams running fleets of AI agents: generic nodes find and install the capabilities they need, coordinate with no central controller, and — where you configure it — check authority before work runs and keep a record of what they decided.
 
 ## What do you want to do?
 
