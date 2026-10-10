@@ -209,6 +209,12 @@ impl Stem {
                 let metered = h.fuel_per_call.is_some() || h.operator_fuel_per_call.is_some();
                 let host = if metered { WasmHost::metered() } else { WasmHost::new() }
                     .map_err(|e| StemError(format!("wasm host: {e}")))?;
+                // Row D: every call is bounded in wall-clock time, metered or not —
+                // `[hosts].call_deadline_ms`, or the host's DEFAULT_CALL_DEADLINE.
+                let host = match h.call_deadline_ms {
+                    Some(ms) => host.with_call_deadline(Some(std::time::Duration::from_millis(ms))),
+                    None => host,
+                };
                 // Zero-gaps Z3: the mesh path stages to disk through the same `DiskStagedSource` an
                 // object store fills — a component in one pull, a blob past the frame cap in ranges —
                 // under `<placement_root>/stage` (or `stage_dir`), so nothing pulled lives in memory

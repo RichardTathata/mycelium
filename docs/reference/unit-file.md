@@ -189,6 +189,7 @@ Present only for a unit that runs a provisioner. These are the provisioner's own
 | `fuel_per_call` | integer | absent | Fuel budget, in wasm instructions, for each call into an entry signed by an agent (a trusted key not in `operator_publishers`). `0` is refused. |
 | `operator_publishers` | array of strings | empty | The operator's own keys. Each must also be in `trusted_publishers`; refused otherwise, and refused when `trusted_publishers` is empty. |
 | `operator_fuel_per_call` | integer | absent (unbounded) | Fuel budget for entries signed by an operator key. `0` is refused. |
+| `call_deadline_ms` | integer | absent (the host's `5000`) | Wall-clock bound, in milliseconds, on each call into a hosted component (and on its instantiation), whoever signed it: a call past it is interrupted and recorded as *deadline exceeded*. Unlike fuel it needs no metering and applies to the operator's entries too. `0` is refused. |
 | `trusted_reviewers` | array of strings | empty | Reviewer keys whose acceptance promotes a proposed entry from the shadow lane to a real load. Empty means a proposed entry never loads for real here. |
 
 ```toml

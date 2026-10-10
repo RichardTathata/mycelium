@@ -134,6 +134,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `src/consensus.rs:1146`).
 
 ### Fixed
+- **A hosted WASM guest call is bounded in time, runs off the async workers, and a trap no longer recompiles**
+  (`mycelium-wasm-host`, plan row D). Before: the wasmtime engine had no epoch interruption, so a stem that
+  declared no fuel ran every guest unmetered, and the serve loop called the guest *on its async task* — one
+  looping call pinned a runtime worker for ever (on a current-thread runtime, the whole node); and a trapped
+  instance was replaced by **recompiling the component from its bytes**, so a payload that made a guest trap
+  bought a full Cranelift compile per request. Now every engine has epoch interruption and every call — and
+  every instantiation — gets a wall-clock deadline, `DEFAULT_CALL_DEADLINE` (5 s), metered or not and whoever
+  signed the entry (`WasmHost::with_call_deadline`, `[hosts].call_deadline_ms`; `0` refused by name), ending
+  in `WasmHostError::DeadlineExceeded { deadline_ms }` and `InvocationOutcome::DeadlineExceeded` (counter
+  outcome `deadline_exceeded`); the serve loop runs each call, and install runs compile, instantiation and
+  `describe`, on `spawn_blocking`; and a trapped instance is replaced from the install's compiled component
+  (`WasmHost::compiles()`). The epoch is advanced by one thread per host every 10 ms — wall time, outside the
+  replay seams, recorded in the nondeterminism inventory. Seen failing first:
+  `a_guest_call_past_its_deadline_is_stopped_by_name` (`the call returned within its bound: Timeout`),
+  `a_long_guest_call_does_not_block_another_task_on_a_current_thread_runtime` (`the heartbeat stalled for
+  564.882459ms during a 565.106292ms guest call`), `a_trapping_guest_called_repeatedly_compiles_once`
+  (`left: 4, right: 1`). **Upgrade notes:** `WasmHostError` and `InvocationOutcome` each gain a variant
+  (neither is `#[non_exhaustive]`, so an exhaustive `match` needs an arm); `HostsDecl` gains
+  `call_deadline_ms` (an exhaustive struct literal breaks; `..Default::default()` is unaffected); a guest call
+  that legitimately runs longer than 5 s is now stopped — raise `call_deadline_ms` or call
+  `with_call_deadline(None)`; `Instance::invoke` is still synchronous, so an embedder that calls it from
+  async code should move it to `spawn_blocking` as the serve loop now does.
 - **The SDKs reach a gateway over TLS** (`mycelium-py` **0.2.9**, `mycelium-ts` **0.2.3**,
   `langgraph-checkpoint-mycelium` **0.3.2**). Every client built its base URL as `http://{host}:{port}` — eight
   Python handles, five TypeScript clients and the checkpointer; only `A2aClient` took a full URL — so a gateway

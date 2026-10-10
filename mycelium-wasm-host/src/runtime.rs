@@ -53,6 +53,9 @@ pub enum InvocationOutcome {
     HostError(String),
     /// Stopped at its fuel budget (D19).
     FuelExhausted { budget: u64 },
+    /// Interrupted at its wall-clock deadline (row D: `WasmHost::with_call_deadline`,
+    /// `[hosts].call_deadline_ms`).
+    DeadlineExceeded { deadline_ms: u64 },
 }
 
 /// One entry of the runtime's invocation log: which artifact, serving which capability, published
@@ -270,13 +273,15 @@ pub trait ArtifactRuntime: Send + Sync {
 /// by invoking the component's `handle` export and replying with its output.
 /// What the serve loop needs to replace a trapped instance: a trap poisons a component instance
 /// (wasmtime refuses to re-enter it), so a call stopped at its budget would otherwise leave a
-/// dead install behind an advertised capability. The loop instantiates afresh from the verified
-/// bytes; the guest's in-memory state is lost with the instance (its KV subtree is not — that
-/// lives in the node's store), and the record names the stop.
+/// dead install behind an advertised capability. The loop instantiates afresh from the install's
+/// **compiled** component — never recompiling the bytes (row D: a payload that makes a guest trap
+/// would otherwise buy a full Cranelift compile per request); the guest's in-memory state is lost
+/// with the instance (its KV subtree is not — that lives in the node's store), and the record
+/// names the stop.
 struct Reinstantiate {
-    host:   Arc<WasmHost>,
-    bytes:  Vec<u8>,
-    budget: Option<u64>,
+    host:      Arc<WasmHost>,
+    component: wasmtime::component::Component,
+    budget:    Option<u64>,
 }
 
 /// What one serve loop knows about the install it serves: the record's identity and the means to
@@ -291,64 +296,99 @@ struct Served {
 }
 
 impl Served {
+    fn record(&self, outcome: InvocationOutcome) -> InvocationRecord {
+        InvocationRecord { artifact: self.artifact, provides: self.provides.clone(), signer: self.signer.clone(), outcome }
+    }
+
     fn fresh(&self, agent: &GossipAgent) -> Result<Instance, WasmHostError> {
         let state = HostState::new(agent.node_id().clone(), self.ns.clone(), agent.kv(), agent.mesh())
             .with_protected_kinds(agent.config().protected_rpc_kinds.iter().cloned());
-        self.again.host.instantiate_with_fuel(&self.again.bytes, state, self.again.budget)
+        self.again.host.instantiate_compiled(&self.again.component, state, self.again.budget)
     }
-}
 
-async fn serve_loop(agent: Arc<GossipAgent>, mut instance: Instance, mut rx: mycelium::RpcRequestRx, served: Served) {
-    let Served { log, artifact, provides, signer, .. } = &served;
-    let (artifact, provides) = (*artifact, provides.clone());
-    while let Some(req) = rx.recv().await {
-        let payload = req.payload().to_vec();
-        // NB: wasm execution is synchronous and blocks this task for its duration — fine for
-        // short handlers; a fuel budget bounds a runaway one (D19), epoch limits + spawn_blocking
-        // stay a follow-up.
+    /// One call, on a blocking thread (see [`serve_loop`]): invoke, and when the call trapped,
+    /// replace the poisoned instance. `None` for the instance ⇒ it could not be replaced and the
+    /// serve task stops (the provisioner's probe withdraws and reinstalls).
+    fn call(&self, agent: &GossipAgent, mut instance: Instance, payload: Vec<u8>) -> (Option<Instance>, Vec<u8>, InvocationOutcome) {
         let (result, outcome): (Vec<u8>, InvocationOutcome) = match instance.invoke("invoke", payload) {
             Ok(Ok(out)) => (out, InvocationOutcome::Completed),
             Ok(Err(e)) => (format!("component-error: {e}").into_bytes(), InvocationOutcome::ComponentError(e)),
-            Err(WasmHostError::FuelExhausted { budget }) => (
-                format!("host-error: {}", WasmHostError::FuelExhausted { budget }).into_bytes(),
-                InvocationOutcome::FuelExhausted { budget },
-            ),
+            Err(e @ WasmHostError::FuelExhausted { budget }) => {
+                (format!("host-error: {e}").into_bytes(), InvocationOutcome::FuelExhausted { budget })
+            }
+            Err(e @ WasmHostError::DeadlineExceeded { deadline_ms }) => {
+                (format!("host-error: {e}").into_bytes(), InvocationOutcome::DeadlineExceeded { deadline_ms })
+            }
             Err(e) => (format!("host-error: {e}").into_bytes(), InvocationOutcome::HostError(e.to_string())),
         };
-        if matches!(outcome, InvocationOutcome::FuelExhausted { .. } | InvocationOutcome::HostError(_)) {
-            // The trapped instance cannot be entered again: replace it, or stop serving so the
-            // provisioner's probe withdraws and reinstalls (restart ≡ provisioning).
-            match served.fresh(&agent) {
-                Ok(fresh) => {
-                    tracing::info!(%artifact, provides = %provides, "trapped instance replaced with a fresh one");
-                    instance = fresh;
-                }
-                Err(e) => {
-                    tracing::error!(%artifact, provides = %provides, error = %e,
-                        "could not replace the trapped instance — the serve task stops; the probe will withdraw the install");
-                    agent.service().rpc_respond(&req, result);
-                    record_invocation(log, InvocationRecord { artifact, provides, signer: signer.clone(), outcome });
-                    return;
-                }
+        if matches!(outcome, InvocationOutcome::Completed | InvocationOutcome::ComponentError(_)) {
+            return (Some(instance), result, outcome);
+        }
+        // The trapped instance cannot be entered again: replace it, or stop serving so the
+        // provisioner's probe withdraws and reinstalls (restart ≡ provisioning).
+        drop(instance);
+        match self.fresh(agent) {
+            Ok(fresh) => {
+                tracing::info!(artifact = %self.artifact, provides = %self.provides, "trapped instance replaced with a fresh one");
+                (Some(fresh), result, outcome)
+            }
+            Err(e) => {
+                tracing::error!(artifact = %self.artifact, provides = %self.provides, error = %e,
+                    "could not replace the trapped instance — the serve task stops; the probe will withdraw the install");
+                (None, result, outcome)
             }
         }
+    }
+}
+
+/// Row D: guest code runs **off the runtime's worker threads** — each call (and the replacement of
+/// a trapped instance, which runs the guest's start-up code) goes to `spawn_blocking`, the instance
+/// moving there and back. One call at a time per install, as before (a store is single-threaded);
+/// the serve task itself only awaits. A call is bounded by the host's deadline, so a blocking
+/// thread is held for at most that long — including after an uninstall aborts this task mid-call.
+async fn serve_loop(agent: Arc<GossipAgent>, instance: Instance, mut rx: mycelium::RpcRequestRx, served: Served) {
+    let served = Arc::new(served);
+    let mut slot = Some(instance);
+    while let Some(req) = rx.recv().await {
+        let Some(instance) = slot.take() else { return };
+        let payload = req.payload().to_vec();
+        let (a, s) = (Arc::clone(&agent), Arc::clone(&served));
+        let (next, result, outcome) = match tokio::task::spawn_blocking(move || s.call(&a, instance, payload)).await {
+            Ok(done) => done,
+            Err(e) => {
+                // A panic inside the host (not a guest trap, which is an `Err`): the instance went
+                // with it, so stop serving and let the probe withdraw the install.
+                tracing::error!(artifact = %served.artifact, provides = %served.provides, error = %e,
+                    "the guest call's thread failed — the serve task stops; the probe will withdraw the install");
+                let outcome = InvocationOutcome::HostError(format!("guest call thread: {e}"));
+                agent.service().rpc_respond(&req, format!("host-error: guest call thread: {e}").into_bytes());
+                record_invocation(&served.log, served.record(outcome));
+                return;
+            }
+        };
         let label = match &outcome {
             InvocationOutcome::Completed => "completed",
             InvocationOutcome::ComponentError(_) => "component_error",
             InvocationOutcome::HostError(_) => "host_error",
             InvocationOutcome::FuelExhausted { .. } => "fuel_exhausted",
+            InvocationOutcome::DeadlineExceeded { .. } => "deadline_exceeded",
         };
         metrics::counter!("mycelium_artifact_invocations_total", "outcome" => label).increment(1);
-        if let InvocationOutcome::FuelExhausted { budget } = &outcome {
-            tracing::warn!(%artifact, provides = %provides, budget, "hosted component stopped at its fuel budget");
+        match &outcome {
+            InvocationOutcome::FuelExhausted { budget } => {
+                tracing::warn!(artifact = %served.artifact, provides = %served.provides, budget, "hosted component stopped at its fuel budget");
+            }
+            InvocationOutcome::DeadlineExceeded { deadline_ms } => {
+                tracing::warn!(artifact = %served.artifact, provides = %served.provides, deadline_ms, "hosted component stopped at its call deadline");
+            }
+            _ => {}
         }
-        record_invocation(log, InvocationRecord {
-            artifact,
-            provides: provides.clone(),
-            signer: signer.clone(),
-            outcome,
-        });
+        record_invocation(&served.log, served.record(outcome));
         agent.service().rpc_respond(&req, result);
+        match next {
+            Some(i) => slot = Some(i),
+            None => return,
+        }
     }
 }
 
@@ -400,16 +440,17 @@ impl ArtifactRuntime for WasmComponentRuntime {
         ctx: RuntimeCtx,
         progress: ProgressFn,
     ) -> Result<Box<dyn Installed>, InstallError> {
-        let state = HostState::new(
-            ctx.agent.node_id().clone(),
-            entry.provides.namespace.clone(),
-            ctx.agent.kv(),
-            ctx.agent.mesh(),
-        )
-        .with_protected_kinds(ctx.agent.config().protected_rpc_kinds.iter().cloned());
+        let make_state = {
+            let (agent, ns) = (Arc::clone(&ctx.agent), entry.provides.namespace.clone());
+            move || {
+                HostState::new(agent.node_id().clone(), ns.clone(), agent.kv(), agent.mesh())
+                    .with_protected_kinds(agent.config().protected_rpc_kinds.iter().cloned())
+            }
+        };
         // Components are small (well under the mesh frame cap): pull + verify + instantiate in
         // one step. Chunked/ranged pulls with incremental progress are the blob runtime's job.
-        // The verified bytes are kept so a trapped instance can be replaced (see `Reinstantiate`).
+        // The compiled component is kept so a trapped instance can be replaced without recompiling
+        // (see `Reinstantiate`).
         let bytes = source
             .fetch(&entry.artifact)
             .ok_or_else(|| WasmHostError::Fetch(format!("no source holds artifact {}", entry.artifact)))?;
@@ -418,10 +459,6 @@ impl ArtifactRuntime for WasmComponentRuntime {
             Some(p) => p.budget_for(&entry.signer),
             None => self.host.fuel_per_call(),
         };
-        #[allow(unused_mut)]
-        let mut instance = self.host.instantiate_with_fuel(&bytes, state, budget)?;
-        progress(entry.size_bytes, entry.size_bytes);
-
         // Zero-gaps Z4 (D4): a `tool/*` component may describe itself — kind `describe` answering
         // `{"description", "inputSchema"}` — and then the MCP tool carries the component's own schema
         // rather than the bridge's generic one. A component that does not answer (an error, or no
@@ -430,15 +467,39 @@ impl ArtifactRuntime for WasmComponentRuntime {
         // arrives, and the shadow lane takes none until a listed reviewer accepts the entry.
         #[cfg(feature = "gateway")]
         let bridge_tool = entry.provides.namespace.as_ref() == "tool" && !ctx.shadow;
+        #[cfg(not(feature = "gateway"))]
+        let bridge_tool = false;
+
+        // Row D: compile, instantiate (the guest's start-up code) and the `describe` call all run off
+        // the runtime's workers. The compiled component is kept for replacing a trapped instance.
+        let host = Arc::clone(&self.host);
+        let (component, instance, describe_out) = tokio::task::spawn_blocking(move || {
+            let component = host.compile(&bytes)?;
+            let mut instance = host.instantiate_compiled(&component, make_state(), budget)?;
+            let describe_out = if bridge_tool {
+                match instance.invoke("describe", b"{}".to_vec()) {
+                    Ok(Ok(out)) => Some(out),
+                    // A trapped `describe` poisons the instance; serve from a fresh one.
+                    Ok(Err(_)) => None,
+                    Err(_) => {
+                        instance = host.instantiate_compiled(&component, make_state(), budget)?;
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            Ok::<_, WasmHostError>((component, instance, describe_out))
+        })
+        .await
+        .map_err(|e| InstallError::Host(format!("install thread: {e}")))??;
+        progress(entry.size_bytes, entry.size_bytes);
+        #[cfg(not(feature = "gateway"))]
+        let _ = describe_out;
         #[cfg(feature = "gateway")]
-        let described: Option<serde_json::Value> = if bridge_tool {
-            match instance.invoke("describe", b"{}".to_vec()) {
-                Ok(Ok(out)) => serde_json::from_slice::<serde_json::Value>(&out).ok().filter(|v| v.get("inputSchema").is_some()),
-                _ => None,
-            }
-        } else {
-            None
-        };
+        let described: Option<serde_json::Value> = describe_out
+            .and_then(|out| serde_json::from_slice::<serde_json::Value>(&out).ok())
+            .filter(|v| v.get("inputSchema").is_some());
 
         // Register the inbound serve handler *before* returning, so the advertisement the
         // provisioner makes on success always finds a live RPC receiver.
@@ -453,7 +514,7 @@ impl ArtifactRuntime for WasmComponentRuntime {
             provides,
             signer: entry.signer.clone(),
             ns: entry.provides.namespace.clone(),
-            again: Reinstantiate { host: Arc::clone(&self.host), bytes: bytes.to_vec(), budget },
+            again: Reinstantiate { host: Arc::clone(&self.host), component, budget },
         };
         let serve = tokio::spawn(serve_loop(Arc::clone(&ctx.agent), instance, rx, served));
         #[cfg(feature = "gateway")]
