@@ -198,7 +198,7 @@ impl LockGuard {
         // never decided, so the next acquirer adopted this guard's value from the acceptors' memory
         // and handed the lock back to its old holder (K1); and a late COMMIT re-stamped the entry
         // over the tombstone (K3). The record names the ballot that ended and is never collected.
-        let _ = crate::consensus::release_decision(&self.ctx, &slot, &self.value, self.ballot);
+        let _ = crate::consensus::release_decision_try(&self.ctx, &slot, &self.value, self.ballot);
     }
 }
 

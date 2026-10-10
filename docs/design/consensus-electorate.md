@@ -75,12 +75,13 @@ privileged node. So:
 - **No deployment shape, configuration default or document may make a named node set the place agreement happens.**
   Whichever nodes participate in a group run the protocol; roles form per ballot and dissolve when the decision
   completes; the state is ordinary keys and signals; Layers I and II know nothing of it.
-- **Roles and outputs decay.** Leadership is to be leased by default and acceptor state collected once its decision is
-  over (rows C1, C2). **Neither is built**: today `elect_leader` commits permanently (it proposes with
-  `ConsensusConfig::default()`, `src/agent/consensus_handle.rs:645`, whose `committed_lease_secs` is `None`,
-  `src/consensus.rs:177`), and acceptor memory (`AcceptorMemory`, `src/consensus.rs:2283`, durable under
-  `sys/consensus-accepted/`) is never collected — it grows with slots
-  ([runtime-invariants](../wiki/dev/architecture/runtime-invariants.md)).
+- **Roles and outputs decay.** Leadership is leased by default and acceptor state is collected once its decision is
+  over (rows C1, C2 — **delivered**, PR #600). `elect_leader` commits on a 30 s lease (`DEFAULT_LEADER_LEASE`,
+  `src/agent/overlay_consistent.rs`), renewed by calling again; `release_leadership` steps down; permanence is
+  `LeaderTerm::Permanent`, by explicit opt-in. Each consensus listener's collector (`run_acceptor_collector`,
+  `src/consensus.rs`) collects acceptor state whose decision ended at a ballot `e` and that promises nothing above
+  `e`, after the decided floor is on stable storage at `e` — the exact condition is in
+  [runtime-invariants](../wiki/dev/architecture/runtime-invariants.md). A permanent decision's state is kept.
 
 ## 3. What is enforced today
 
@@ -117,13 +118,13 @@ Each line is something the code does today; the citations are to `main` at `0123
 
 ## 4. What is planned, and what is a later plan
 
-### 4.1 In the post-360 plan — *not built*
+### 4.1 In the post-360 plan
 
-| Row | Promise (quoted from the plan) |
-|---|---|
-| **P2** | "safety-sensitive consensus (the threat model §7 supported profile) requires a governed group, whose membership moves only through a governance route; the secure profile checks it; the electorate is named as a group, never as node identities" |
-| **C1** | "`elect_leader` is lease-based by default with a release path (permanence stays available, opt-in)" |
-| **C2** | "acceptor state is collected once its decision or lease is over, without weakening the promise a live slot depends on" |
+| Row | Promise (quoted from the plan) | State |
+|---|---|---|
+| **P2** | "safety-sensitive consensus (the threat model §7 supported profile) requires a governed group, whose membership moves only through a governance route; the secure profile checks it; the electorate is named as a group, never as node identities" | *not built* |
+| **C1** | "`elect_leader` is lease-based by default with a release path (permanence stays available, opt-in)" | delivered (#600): `DEFAULT_LEADER_LEASE`, `release_leadership`, `LeaderTerm::Permanent`; gateway `ttl_secs` / `permanent` and `DELETE /gateway/overlay/elect/{group}` |
+| **C2** | "acceptor state is collected once its decision or lease is over, without weakening the promise a live slot depends on" | delivered (#600): `ConsensusEngine::collect_finished`, bounded per tick, on its own task |
 
 ### 4.2 A later plan — *not built, not scheduled*
 

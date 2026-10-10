@@ -69,14 +69,22 @@ above `max(decided, ended)` (`ConsensusEngine::floor`). The older reading stays 
 older than row A: the decision is over only when this node holds the committed entry and it is not live (`decided`
 and `committed` gossip separately, so filtering on the floor alone hid a commit that had not yet arrived — second
 review, M1). A lifecycle record for a different value than the entry held describes another decision and is
-ignored: the entry reads live, which refuses rather than admits.
+not taken as its end — but neither does it make the entry permanent (LWW can pair the two for good: the
+adversarial review of #600, finding 1): the entry reads live for the record's window measured from the entry's own
+timestamp, or `MISMATCH_RELEASED_WINDOW_MS` (30 s) for a release record. A COMMIT **below the record's ballot** is
+stale whatever its value (`commit_is_stale`'s `record` argument), and `release_decision` refuses when the record
+names another value or a higher decided ballot is known, so a lapsed guard cannot release over a newer holder's
+record.
 
-**Collection (C2), the exact condition.** On each consensus listener's tick (`ACCEPTOR_COLLECT_INTERVAL_MS`, 60 s,
-through the timer seam), `ConsensusEngine::collect_finished` collects a slot's acceptor state when (1) its
+**Collection (C2), the exact condition.** On the acceptor collector's tick (`run_acceptor_collector`, a task beside
+each consensus listener, `ACCEPTOR_COLLECT_INTERVAL_MS` = 60 s through the timer seam, at most
+`ACCEPTOR_COLLECT_BUDGET` = 64 slots a tick so its fsyncs never delay a vote), `ConsensusEngine::collect_finished`
+collects a slot's acceptor state when (1) its
 lifecycle record says the decision ended at ballot `e`, (2) the state promises nothing above `e` — a promise
 above `e` belongs to a ballot that may be in flight and is kept — re-checked inside the removal's
-compare-and-set, and (3) the decided floor has first been raised to `e` on stable storage, so every ballot the
-forgotten state refused is still refused by the floor. The durable record's tombstone and `persist_acceptor`'s
+compare-and-set, and (3) the decided floor is first on stable storage at `e` or above — raised by `record_decided`, or, when the floor
+was received by gossip (which reaches the WAL only with the next snapshot), re-appended with `append_sync`
+(`persist_floor`) — so every ballot the forgotten state refused is still refused by the floor. The durable record's tombstone and `persist_acceptor`'s
 writes are serialised by `TaskCtx::acceptor_records` (lock-order row 56), so a promise recorded while a
 collection runs is written after the tombstone and wins. A permanent decision never ends, so its state is kept;
 so is a slot whose record predates row A, or that never committed. "Lapsed" is read on the node's causal clock —

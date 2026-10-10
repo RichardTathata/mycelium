@@ -195,16 +195,35 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and — against stubs of the new API — `elect_leader_is_leased_by_default` (`left: None, right: Some(30000)`),
   `a_dead_leaders_lease_lapses_and_a_new_election_succeeds`, `acceptor_state_is_collected_once_its_decision_is_over`
   (`nothing was collected`). Wire **v12** unchanged — no message changes; the record's first 8 bytes are still the
-  window. **Upgrade notes:** (1) **`elect_leader` is no longer permanent**: a leader that does not call again within
-  30 s is no longer reported, and another node may be elected — renew by calling again (every ~10 s), or ask for
-  `LeaderTerm::Permanent`; a slot already committed permanently before the upgrade stays permanent until its leader
-  calls `release_leadership`. The SDKs' `elect_leader` reaches the gateway route, so it is leased too. (2) Mixed
-  fleet: a node older than 2.32.0 reads a lifecycle record as its 8-byte window — a release is a window of 0, so it
-  sees the lock released; it measures a lease from the committed entry rather than the record (a few ms earlier);
-  it still releases by tombstones, and a lock it released whose tombstones were collected can be re-committed once
-  to its old holder by an upgraded acquirer, for one TTL. (3) `LockGuard` gained a private field (no public change);
-  `TaskCtx` gained `acceptor_records`. **Not built:** the SDKs expose no `release_leadership` verb (row G's surface);
-  a node that proposes without running a consensus listener does not collect its acceptor state.
+  window. **The adversarial review's findings, fixed in the same PR:** a lifecycle record naming another value than
+  the committed entry no longer makes the entry live for ever — it reads live for the record's window measured from
+  the entry (30 s, `MISMATCH_RELEASED_WINDOW_MS`, for a release record), a COMMIT below the record's ballot is stale
+  whatever its value, and a release refuses when the record names another value or a higher decided ballot is known
+  (seen failing first: `a_stale_guards_release_cannot_overwrite_a_newer_holders_record` — the release replaced B's
+  record; `a_late_commit_below_the_records_ballot_is_stale` — re-stamped; `a_record_ahead_of_its_commit_reads_bounded`
+  — "read live for ever"; `release_refuses_when_a_newer_decision_is_known`); `release_leadership` is `async` and
+  durable (`append_sync`) before it returns `true` (`a_released_leadership_survives_a_crash`, seen failing); a
+  permanent slot with no `decided` key (written before 2.30.0) is released at the ballot this node's acceptor memory
+  holds, not 0 (`a_release_without_a_floor_names_the_committed_ballot`, seen failing with `left: 0`); collection runs
+  on its own task, at most 64 slots a tick (`collection_is_bounded_per_tick`, seen failing with `left: 70`), and puts
+  a gossip-received floor on stable storage before relying on it. **Upgrade notes:** (1) **`elect_leader` is no
+  longer permanent**: a leader that does not call again within 30 s is no longer reported, and another node may be
+  elected — renew by calling again (every ~10 s), or ask for `LeaderTerm::Permanent`; a slot already committed
+  permanently before the upgrade stays permanent until its leader calls `release_leadership`. The SDKs'
+  `elect_leader` reaches the gateway route, so it is leased too. `release_leadership` returns `true` once its
+  release is durable — a renewal already in flight from the same node can still re-elect it, so stop renewing first.
+  (2) **Mixed fleet — upgrade every node of a fleet that uses locks or leases.** A node older than 2.32.0 reads a
+  lifecycle record as its 8-byte window: a release is a window of 0, so it sees the lock released, and it measures a
+  lease from the committed entry rather than the record (a few ms earlier). It still releases by tombstones, so a lock
+  it released whose tombstones were collected can be re-committed once to its old holder by an upgraded acquirer, for
+  one TTL. And it has none of the K3 fix: a late COMMIT it re-stamps wins LWW over the newer holder's `committed`
+  fleet-wide, after which every upgraded node pairs the old value with the newer holder's record — the old value reads
+  live for up to one window (30 s for a release record), the newer holder's commit is lost, and its guard still
+  claims a lock the fleet no longer shows it holding (fence on the token). (3) `LockGuard` (a private field) and
+  `TaskCtx` each gained a field; `ConsensusListenerHandle` gained a private field. **Not built:** the SDKs expose no
+  `release_leadership` verb (row G's surface); a node that proposes without running a consensus listener does not
+  collect its acceptor state; `release_leadership` is not serialised against a concurrent renewal by the same node
+  (documented instead).
 - **The SDKs reach a gateway over TLS** (`mycelium-py` **0.2.9**, `mycelium-ts` **0.2.3**,
   `langgraph-checkpoint-mycelium` **0.3.2**). Every client built its base URL as `http://{host}:{port}` — eight
   Python handles, five TypeScript clients and the checkpointer; only `A2aClient` took a full URL — so a gateway

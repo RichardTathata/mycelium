@@ -627,9 +627,16 @@ c.elect_leader_with("ledger", LeaderTerm::Permanent).await?;          // permane
 `release_leadership` writes the slot's lifecycle record as *released at the ballot it was decided at*:
 every node reads the group as leaderless, and the next election sets the old leader's acceptance aside
 instead of re-electing it from the acceptors' memory. A permanent leadership has the release path too;
-what it lacks is a lapse. Over HTTP: `POST /gateway/overlay/elect` takes `ttl_secs` (default 30) or
-`"permanent": true`, and `DELETE /gateway/overlay/elect/{group}` steps the gateway's node down
-(`consensus:write`).
+what it lacks is a lapse. `release_leadership` is awaited and returns `true` once the release is **on stable
+storage**; it returns `false`, writing nothing, when this node is not the live leader, when the slot's lifecycle
+record names a newer decision, or when a newer decided ballot is known. `true` is not a promise to stay out of
+office: an `elect_leader` renewal this node already has in flight commits above the released ballot and makes it
+leader again — stop renewing before releasing.
+
+Over HTTP: `POST /gateway/overlay/elect` takes `ttl_secs` (default 30, clamped to 1–3600) or `"permanent": true`,
+and `DELETE /gateway/overlay/elect/{group}` steps the gateway's node down (`200 {"ok": true}` once durable, `404
+not_leader` otherwise). Both need `consensus:write`, which is **node-wide**: any principal holding it can step this
+node down from any group it leads, or make its leadership permanent.
 
 #### Ordered Durable Log (`append` / `scan_log` / `subscribe_log`)
 

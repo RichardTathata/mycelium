@@ -4301,15 +4301,20 @@ async fn gw_overlay_elect(
 
 /// `DELETE /gateway/overlay/elect/{group}` — this node steps down as `group`'s leader (row A, C1).
 ///
-/// Returns `{"ok": true}` when this node was the live leader and its leadership is now released,
-/// `404 not_leader` when the live leader this node sees is not itself (nothing is written).
+/// Returns `{"ok": true}` when this node was the live leader and its release is on stable storage;
+/// `404 not_leader` when nothing was released — the live leader this node sees is not itself, the
+/// slot's lifecycle record names a newer decision, or the release did not reach the WAL.
+///
+/// **Who may call it:** any principal holding `consensus:write` may step **this node** down from any
+/// group it leads, and — through `POST /gateway/overlay/elect` — elect it with any `ttl_secs` or
+/// `"permanent": true`. The scope is node-wide, not per group (`rbac.md`).
 #[cfg(feature = "consensus")]
 async fn gw_overlay_elect_release(
     Path(group): Path<String>,
     State(ctx):  State<Arc<HttpCtx>>,
 ) -> impl IntoResponse {
     let value = Bytes::from(ctx.agent_ctx.node_id.to_string().into_bytes());
-    if crate::consensus::release_decision(&ctx.agent_ctx, &format!("leader/{group}"), &value, 0) {
+    if crate::consensus::release_decision_durable(&ctx.agent_ctx, &format!("leader/{group}"), &value).await {
         Json(json!({ "ok": true })).into_response()
     } else {
         (StatusCode::NOT_FOUND, Json(json!({ "ok": false, "error": "not_leader" }))).into_response()

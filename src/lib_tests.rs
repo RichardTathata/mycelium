@@ -5324,6 +5324,88 @@ async fn an_acceptors_record_survives_a_crash_without_a_snapshot() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// **Review of #600, finding 5: a released leadership is on disk when `release_leadership` returns.**
+/// A permanent leadership has no lease to fall back on, so a release a crash forgets restores it.
+#[cfg(all(unix, feature = "consensus"))]
+#[tokio::test]
+async fn a_released_leadership_survives_a_crash() {
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let base = std::env::temp_dir().join(format!("mycelium-release-wal-{port}"));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join(id.to_string()).join("kv");
+    let mut cfg = GossipConfig::auto();
+    cfg.bind_port = port;
+    cfg.persistence = Some(r2_persistence(&base));
+    let a = GossipAgent::new(id.clone(), cfg.clone());
+    a.start().await.unwrap();
+    a.mesh().join_group("perm");
+    a.consensus().elect_leader_with("perm", crate::LeaderTerm::Permanent).await.expect("elects");
+    assert!(a.consensus().release_leadership("perm").await);
+    // The crash, at the instant the call returned.
+    let crash = base.join("crash");
+    std::fs::create_dir_all(&crash).unwrap();
+    for f in ["snapshot.bin", "wal.bin"] {
+        if dir.join(f).exists() { std::fs::copy(dir.join(f), crash.join(f)).unwrap(); }
+    }
+    let mut released = false;
+    mycelium_core::persistence::replay(&crash, None, |e| {
+        if &*e.key == "consensus/lease/leader/perm" && !e.is_tombstone
+            && matches!(crate::consensus::decode_lease_record(&e.value),
+                        Some(crate::consensus::LeaseRecord::Lifecycle { released: true, .. })) {
+            released = true;
+        }
+    }).await.expect("the crashed files replay");
+    assert!(released, "the release was not on disk when release_leadership returned");
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// **Review of #600, finding 8: the gateway's election routes** — `ttl_secs`, `permanent`, and
+/// `DELETE /gateway/overlay/elect/{group}` (stepping down; `404 not_leader` when this node is not it).
+#[cfg(all(feature = "consensus", feature = "gateway"))]
+#[tokio::test]
+async fn the_gateway_elects_on_a_lease_and_steps_down() {
+    let gossip_port = alloc_port();
+    let http_port   = alloc_port();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = gossip_port;
+    cfg.http_port = Some(http_port);
+    let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
+    agent.start().await.expect("start");
+    let _l = agent.consensus().start_consensus_listener(ConsensusConfig::default());
+    agent.mesh().join_group("gw-lease");
+    agent.mesh().join_group("gw-perm");
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{http_port}");
+    for _ in 0..40 {
+        if client.get(format!("{base}/health")).send().await.is_ok_and(|r| r.status().is_success()) { break; }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let lease = |slot: &str| agent.task_ctx.kv_state.store.pin()
+        .get(format!("consensus/lease/{slot}").as_str()).and_then(|e| e.data.clone())
+        .and_then(|b| crate::consensus::decode_lease_record(&b));
+
+    let r = client.post(format!("{base}/gateway/overlay/elect"))
+        .json(&serde_json::json!({"group": "gw-lease", "ttl_secs": 7})).send().await.expect("elect");
+    assert_eq!(r.status(), 200, "{:?}", r.text().await);
+    assert!(matches!(lease("leader/gw-lease"), Some(crate::consensus::LeaseRecord::Lifecycle { ms: 7000, released: false, .. })));
+
+    let r = client.post(format!("{base}/gateway/overlay/elect"))
+        .json(&serde_json::json!({"group": "gw-perm", "permanent": true})).send().await.expect("elect");
+    assert_eq!(r.status(), 200);
+    assert!(lease("leader/gw-perm").is_none(), "a permanent election carries no lease");
+
+    let r = client.delete(format!("{base}/gateway/overlay/elect/gw-lease")).send().await.expect("release");
+    assert_eq!(r.status(), 200);
+    assert!(agent.consensus().consensus_get("leader/gw-lease").is_none(), "released leadership reads as none");
+    let r = client.delete(format!("{base}/gateway/overlay/elect/gw-lease")).send().await.expect("release");
+    assert_eq!(r.status(), 404, "this node is no longer the leader");
+    let body: serde_json::Value = r.json().await.expect("json");
+    assert_eq!(body["error"], "not_leader");
+    agent.shutdown().await;
+}
+
 /// **Realignment repairs R7** (found by A2's configuration audit, 2026-10-05). A persistence
 /// directory that cannot be created used to be a warning: `start()` logged it and ran **in memory**,
 /// so every write was lost on the next restart — while the guarantee report, resolved from the
