@@ -259,15 +259,20 @@ setting or constant with a counter (`SystemStats`, `docs/operations/metrics.md`)
   an established connection `inbound_idle_timeout_secs` between frames (`mycelium-core/src/connection.rs`).
 - **Progress, not frames** — a frame in flight, either direction, is under `StallGuard`
   (`mycelium-core/src/stall.rs`): no byte for `peer_read_stall_timeout_ms` (60 s) receiving or
-  `peer_write_stall_timeout_ms` (60 s) sending — the writer's bound must outlast the peer's **apply**
-  of a chunk: 329 s into an fsync WAL with one fsync per entry, 3.4 s once anti-entropy is
-  group-committed (§Persistence; `configuration.md`). The read floor `peer_min_rate_bytes_per_sec`
+  `peer_write_stall_timeout_ms` sending — derived from `sync_mode` (300 s under `flush`, where a
+  batch waits behind a snapshot, 7.8 s per GiB measured; 60 s otherwise) — the writer's bound must
+  outlast the peer's **apply** of a chunk: 329 s into an fsync WAL with one fsync per entry, 3.4 s once
+  anti-entropy is group-committed (§Persistence; `configuration.md`). Replica sync answers no
+  `Persisted` while a chunk is applied but unbatched (`TransportBounds::ae_unbatched`). The read floor `peer_min_rate_bytes_per_sec`
   defaults to 1 KiB/s — per connection, so a joiner needs senders × floor of link. Do not ungroup the
   anti-entropy WAL without revisiting the write bound.
-- **Preemption at `max_connections`** — a newcomer at the cap closes the inbound connection whose last
-  *complete* frame is oldest, if at least `handshake_timeout_ms` old (`TransportBounds::preempt_oldest`).
-  That is what reaches a trickle inside a frame and a tiny frame every idle period; the quiet floor is
-  what keeps a connect flood off a talking peer. **Do not bound a whole frame by a
+- **Preemption at `max_connections`** — a newcomer at the cap first completes TLS and a valid first frame
+  (`connection::read_first_frame`, without a permit; 16 may wait), then closes the inbound connection whose
+  last *complete* frame is oldest — older than `writer_idle_timeout_secs + handshake_timeout_ms`, not
+  mid-frame, at most one per `handshake_timeout_ms` (`TransportBounds::preempt_oldest`). **Do not lower the
+  quiet threshold below the writer idle bound:** with SWIM on there are no TCP pings, so an honest inbound
+  link sits quiet up to `writer_idle_timeout_secs` — round 3's 10 s threshold let a flood displace honest
+  peers. Off when `writer_idle_timeout_secs = 0`. **Do not bound a whole frame by a
   fixed time** — a frame is up to 10 MB, and #602's review found the first version cutting a slow
   but healthy link mid-frame on every attempt, so a late joiner on it never bootstrapped. A closed socket returns
   its `max_connections` permit. `validate()` keeps `inbound_idle_timeout_secs` above

@@ -111,6 +111,9 @@ pub enum WalMsg {
     AppendBatch {
         entries: Vec<SyncEntry>,
         ack:     Option<oneshot::Sender<io::Result<()>>>,
+        /// The batch's place in the queued-record count, given back when the message is dropped —
+        /// after the writer has written it, or with the channel (#602's round 4, finding 6).
+        queued:  QueuedRecords,
     },
     TriggerSnapshot {
         ack: oneshot::Sender<io::Result<()>>,
@@ -155,6 +158,22 @@ pub struct WalHandle {
     /// `Some(reason)` while the writer refuses appends after a failed write (see `WriterState`),
     /// published by the writer so `/health` can say so. A `watch` channel, not a lock field.
     refusing: tokio::sync::watch::Receiver<Option<String>>,
+    /// Records queued in `AppendBatch` messages not yet written (#602's round 4, finding 6). A batch
+    /// that would take this past the channel's depth is dropped and counted, so the channel holds at
+    /// most its depth in messages **plus** its depth in batched records.
+    queued_records: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// Records a queued [`WalMsg::AppendBatch`] holds against the handle's record bound; returned on drop.
+pub struct QueuedRecords {
+    n:       u64,
+    counter: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl Drop for QueuedRecords {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(self.n, std::sync::atomic::Ordering::AcqRel);
+    }
 }
 
 impl WalHandle {
@@ -225,19 +244,32 @@ impl WalHandle {
     /// record a peer holds and this node does not.
     pub async fn append_batch(&self, entries: Vec<SyncEntry>) -> io::Result<()> {
         if entries.is_empty() { return Ok(()); }
+        let n = entries.len() as u64;
+        let cap = self.tx.max_capacity() as u64;
+        let prior = self.queued_records.fetch_add(n, std::sync::atomic::Ordering::AcqRel);
+        let queued = QueuedRecords { n, counter: std::sync::Arc::clone(&self.queued_records) };
+        if prior.saturating_add(n) > cap && prior > 0 {
+            // Past the record bound: dropped and counted, as a full channel drops an append. A batch
+            // larger than the bound on its own goes through when nothing else is queued.
+            drop(queued);
+            self.dropped_appends.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+            return match self.sync_mode {
+                SyncMode::Flush => Err(io::Error::new(io::ErrorKind::WouldBlock, "WAL batch queue full")),
+                SyncMode::Async | SyncMode::Os => Ok(()),
+            };
+        }
         match self.sync_mode {
             SyncMode::Flush => {
                 let (tx, rx) = oneshot::channel();
                 self.tx
-                    .send(WalMsg::AppendBatch { entries, ack: Some(tx) })
+                    .send(WalMsg::AppendBatch { entries, ack: Some(tx), queued })
                     .await
                     .map_err(|_| writer_gone())?;
                 rx.await.unwrap_or_else(|_| Err(writer_gone()))
             }
             SyncMode::Async | SyncMode::Os => {
-                let n = entries.len() as u64;
                 let verdict = crate::sim_seam::chan_try_send(
-                    WAL_CHAN, &self.tx, WalMsg::AppendBatch { entries, ack: None });
+                    WAL_CHAN, &self.tx, WalMsg::AppendBatch { entries, ack: None, queued });
                 if !matches!(verdict, crate::sim_seam::ChanVerdict::Sent) {
                     self.dropped_appends.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
                 }
@@ -337,7 +369,8 @@ impl WalHandle {
     #[cfg(test)]
     pub(crate) fn from_parts(tx: mpsc::Sender<WalMsg>, sync_mode: SyncMode) -> Self {
         let (_keep, refusing) = tokio::sync::watch::channel(None);
-        Self { tx, sync_mode, dropped_appends: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)), refusing }
+        Self { tx, sync_mode, dropped_appends: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)), refusing,
+               queued_records: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)) }
     }
 
     /// Stop the writer: it takes its final snapshot, releases the WAL's ownership lock and exits.
@@ -631,7 +664,8 @@ fn spawn_wal_writer_inner(
     let (tx, rx) = mpsc::channel::<WalMsg>(channel_depth);
     let dropped_appends = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let (refusing_tx, refusing) = tokio::sync::watch::channel(None);
-    let handle = WalHandle { tx, sync_mode, dropped_appends: std::sync::Arc::clone(&dropped_appends), refusing };
+    let handle = WalHandle { tx, sync_mode, dropped_appends: std::sync::Arc::clone(&dropped_appends), refusing,
+                             queued_records: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)) };
 
     tokio::spawn(wal_writer_task(
         rx,
@@ -845,7 +879,7 @@ async fn wal_writer_task(
                             wal_entry_count = 0;
                         }
                     }
-                    Some(WalMsg::AppendBatch { entries, ack }) => {
+                    Some(WalMsg::AppendBatch { entries, ack, queued: _queued }) => {
                         let n = entries.len() as u64;
                         if let Some(reason) = state.poison.clone() {
                             for _ in 0..n { state.refuse(&dropped_appends); }
@@ -1350,6 +1384,22 @@ mod persist_tests {
         drop(pinned);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #602's round 4, finding 6: in `Async`/`Os` the channel bounded **messages**, and one batch is
+    /// one message — a channel of N could hold N whole chunks. Batched records now count against the
+    /// channel's depth too: past it a batch is dropped and counted, as a full channel drops an append.
+    #[tokio::test]
+    async fn async_batches_are_bounded_in_records() {
+        let (tx, _rx) = mpsc::channel::<WalMsg>(1000);
+        let h = WalHandle::from_parts(tx, SyncMode::Async);
+        let batch = |n: usize| (0..n).map(|i| SyncEntry {
+            key: Arc::from(format!("k{i}")), value: bytes::Bytes::new(), timestamp: 1, is_tombstone: true,
+        }).collect::<Vec<_>>();
+        for _ in 0..3 {
+            h.append_batch(batch(500)).await.unwrap();
+        }
+        assert_eq!(h.dropped_appends(), 500, "the third 500-record batch exceeds a 1000-record queue");
     }
 
     /// Group commit (#602's round 3, finding 3): a batch lays its records out exactly as successive

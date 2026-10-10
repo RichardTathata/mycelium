@@ -44,7 +44,7 @@ the notice.
 | 21 | consensus without a prepare phase (a mixed fleet) | 2.30.0 | upgrade a quorum of each group's acceptors; handle `Superseded` | No — wire behaviour; `Timeout` until a quorum is upgraded |
 | 22 | an alert keyed on one consensus-timeout `reason`; a second stop signal that waits; an untyped lost write | 2.31.0 | match the new reason set (§22); allow the grace period; catch `SupersededError` | No — a metric label, an exit code, a Python subclass |
 | 26 | an open gateway on a non-loopback `http_addr` | unreleased | a credential (`gateway_auth_token`, a token table or `[oidc]`), a loopback `http_addr`, or `gateway_allow_unauthenticated = true` | No — `start()` refuses, `InvalidField { field: "http_addr" }` |
-| 27 | `sys/quorum/` evidence from every node that relays a kind | unreleased | subscribe to the kind (a worker) or query it — `quorum_persistent(kind, window)` pins it for the window | No — fewer keys under `sys/quorum/` |
+| 30 | `sys/quorum/` evidence from every node that relays a kind | unreleased | subscribe to the kind (a worker) or query it — `quorum_persistent(kind, window)` pins it for the window | No — fewer keys under `sys/quorum/` |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -550,7 +550,7 @@ Docker network, a demo), set `gateway_allow_unauthenticated = true` or `GOSSIP_G
 the node then warns once at start, and its guarantee report reads `gw.exposed_closed: not_configured`. The
 environment variable is a strict boolean: a value other than `true/false/1/0/yes/no` is refused.
 
-## 27. Quorum evidence is written by nodes that care about a kind (unreleased)
+## 30. Quorum evidence is written by nodes that care about a kind (unreleased)
 
 **What changes.** `sys/quorum/{kind}/{sender}` — the evidence `quorum_persistent`, `last_signal_persistent` and a
 `watch`'s fallback read — used to be written by **every** node that admitted a signal of that kind, for every
@@ -563,9 +563,11 @@ only when:
   `signal_window_secs`; `quorum_persistent(kind, window)` pins it for `max(window, signal_window_secs)`;
   `last_signal_persistent` for one `signal_window_secs`. A `watch` renews its pin on every poll.
 
-Per kind, evidence keys are written for at most 1024 senders (`SIGNAL_LOG_MAX_SENDERS_PER_KIND`); across kinds,
-at most 4096 writes a second — past either bound the write is skipped and counted
-(`gossip_quorum_evidence_skipped_total`).
+Per kind, a node remembers at most 1024 senders it has written evidence for (`SIGNAL_LOG_MAX_SENDERS_PER_KIND`);
+past that the sender written longest ago gives way, so a kind never stops writing. Across kinds, at most 4096
+distinct `(kind, sender)` writes a second — past that the write is skipped and counted
+(`gossip_quorum_evidence_skipped_total`). A kind with no worker whose pin has lapsed forgets its senders at the
+next GC tick.
 
 **Who notices.**
 - **An observer outside a group.** A node reading `quorum_persistent("k", …)` for a kind its *members* emit used to
@@ -574,8 +576,8 @@ at most 4096 writes a second — past either bound the write is skipped and coun
   first query on (its own reads pin the kind).
 - **A poller slower than its window.** A reader polling `quorum_persistent` less often than its pin lasts sees a gap
   between pins; the pin lasts at least the window it asks about, so polling within that window keeps it.
-- **More than 1024 senders on one kind**, or more than 4096 distinct `(kind, sender)` evidence writes in one
-  second: the excess is not recorded.
+- **More than 4096 distinct `(kind, sender)` evidence writes in one second**: the excess is not recorded for that
+  second (each sender's next signal, a second later, is).
 
 **Will the compiler tell me?** No — fewer keys under `sys/quorum/`.
 

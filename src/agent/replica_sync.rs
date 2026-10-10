@@ -178,6 +178,13 @@ pub(crate) async fn answer(ctx: &TaskCtx, q: &Query) -> Answer {
             if wal.dropped_appends() > 0 {
                 return Answer::Failed;
             }
+            // Anti-entropy is group-committed (#602's round 3): a chunk's records are in the store
+            // before their WAL batch is enqueued, and a sync now would not cover them. While any
+            // chunk is in that window this node does not claim the rung; the origin re-asks until its
+            // deadline (round 4, finding 4).
+            if ctx.transport_bounds.ae_unbatched.load(std::sync::atomic::Ordering::Acquire) > 0 {
+                return Answer::Failed;
+            }
             match wal.sync().await {
                 Ok(()) => Answer::Persisted,
                 Err(_) => Answer::Failed,
@@ -313,5 +320,38 @@ mod tests {
         }
         assert_eq!(decode_answer(&[]), None, "an empty reply is not an answer");
         assert_eq!(decode_answer(&[9]), None, "an unknown tag is not an answer");
+    }
+
+    /// #602's round 4, finding 4: with anti-entropy group-committed, a chunk's records sit in the store
+    /// before their WAL batch is enqueued; `answer` synced the WAL and said `Persisted` for them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_record_applied_but_not_yet_batched_is_not_answered_persisted() {
+        use crate::config::{OnUnreadable, PersistenceConfig, SyncMode};
+        use crate::{GossipAgent, GossipConfig, NodeId};
+        let port = crate::test_util::alloc_port();
+        let dir = std::env::temp_dir().join(format!("mycelium-unbatched-{port}"));
+        let mut cfg = GossipConfig { bind_port: port, ..Default::default() };
+        cfg.persistence = Some(PersistenceConfig {
+            base_path: dir.clone(), sync_mode: SyncMode::Flush,
+            snapshot_wal_threshold: 1_000, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse,
+        });
+        let agent = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
+        agent.start().await.unwrap();
+        assert!(agent.kv().set("rs/k", Bytes::from_static(b"v")));
+        let ctx = agent.task_ctx_for_tests();
+        let entry = ctx.kv_state.store.pin().get("rs/k").cloned().unwrap();
+        let q = Query {
+            stamp: entry.timestamp,
+            content_hash: content_hash("rs/k", entry.data.as_deref().unwrap(), false),
+            key: Arc::from("rs/k"),
+        };
+        assert_eq!(answer(ctx, &q).await, Answer::Persisted, "precondition");
+        ctx.transport_bounds.ae_unbatched.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        assert_ne!(answer(ctx, &q).await, Answer::Persisted,
+                   "while a chunk is applied but unbatched, durability is not established");
+        ctx.transport_bounds.ae_unbatched.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(answer(ctx, &q).await, Answer::Persisted);
+        agent.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

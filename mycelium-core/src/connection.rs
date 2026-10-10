@@ -172,10 +172,62 @@ pub struct ConnContext {
     pub inbound_slot: Option<Arc<crate::bounds::InboundSlot>>,
 }
 
+/// The reader an inbound connection is served from: buffered, under the progress bound.
+pub type InboundReader = BufReader<crate::stall::StallGuard<GossipStream>>;
+
+/// Wraps an accepted stream for [`handle_connection_from`] / [`read_first_frame`].
+pub fn inbound_reader(socket: GossipStream) -> InboundReader {
+    BufReader::with_capacity(8_192, crate::stall::StallGuard::new(socket))
+}
+
+/// Reads and checks a newcomer's first frame — its first byte within `handshake_timeout_ms`, the
+/// rest under the read progress bound — and returns it decoded-able, for a newcomer that must prove
+/// itself before it may preempt a connection at `max_connections` (#602's round 4, findings 1–2: a
+/// bare connect, or on a TLS mesh a non-member's SYN, preempted members' quiet links). `Err` if the
+/// frame is late, stalls, or does not decode.
+pub async fn read_first_frame(
+    reader: &mut InboundReader,
+    cfg:    &crate::config::GossipConfig,
+) -> Result<(FrameVersion, BytesMut), GossipError> {
+    let first = Duration::from_millis(cfg.handshake_timeout_ms);
+    // A real-socket deadline, like the read loop's silence arm (inventory §2.4).
+    match tokio::time::timeout(first, reader.fill_buf()).await {
+        Ok(Ok(b)) if !b.is_empty() => {}
+        Ok(Ok(_)) => return Err(GossipError::Io(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "closed before a frame"))),
+        Ok(Err(e)) => return Err(GossipError::Io(e)),
+        Err(_) => return Err(GossipError::Io(std::io::Error::new(std::io::ErrorKind::TimedOut, "no frame within handshake_timeout_ms"))),
+    }
+    reader.get_mut().arm(Some(crate::stall::StallBound::read_from_config(cfg)));
+    let mut buf = BytesMut::with_capacity(2_048);
+    let v = read_frame(reader, &mut buf).await;
+    reader.get_mut().arm(None);
+    let v = v?;
+    let decodes = if v == FrameVersion::Current {
+        crate::codec::decode_wire(&buf).is_ok()
+    } else {
+        crate::codec::decode_wire_v11(&buf).is_ok()
+    };
+    if !decodes {
+        return Err(GossipError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "first frame does not decode")));
+    }
+    Ok((v, buf))
+}
+
 pub async fn handle_connection(
     socket: GossipStream,
     peer_addr: SocketAddr,
     ctx: ConnContext,
+) -> Result<(), GossipError> {
+    handle_connection_from(inbound_reader(socket), peer_addr, ctx, None).await
+}
+
+/// [`handle_connection`] over a reader already set up, with an optional first frame already read and
+/// checked by [`read_first_frame`].
+pub async fn handle_connection_from(
+    socket: InboundReader,
+    peer_addr: SocketAddr,
+    ctx: ConnContext,
+    mut first_frame: Option<(FrameVersion, BytesMut)>,
 ) -> Result<(), GossipError> {
     let ConnContext {
         task_ctx, peers, shutdown, peer_writers, backoff, n_shards,
@@ -198,7 +250,7 @@ pub async fn handle_connection(
     let sys_violations  = Arc::clone(&task_ctx.sys_namespace_violations);
     let wal             = task_ctx.wal.get().cloned();
     let tls             = task_ctx.tls.get().cloned();
-    let mut socket = BufReader::with_capacity(8_192, crate::stall::StallGuard::new(socket));
+    let mut socket = socket;
     let frame_progress = crate::stall::StallBound::read_from_config(&task_ctx.config);
     let mut shutdown_rx = shutdown.subscribe();
     // BytesMut: recv_buf.split().freeze() at TTL_OFFSET is O(1) for zero-copy forwarding.
@@ -240,72 +292,82 @@ pub async fn handle_connection(
     let mut spoke = false;
 
     loop {
-        // A large frame grew the buffer (doubling, up to ~16 MiB for a 10 MB frame); give it back
-        // before waiting on the next one rather than holding it for the connection's life (#602's
-        // round 3, Q4). Frames forwarded zero-copy were split off and own their bytes.
-        if recv_buf.capacity() > 1 << 20 {
-            recv_buf = BytesMut::with_capacity(2_048);
-        }
-        let silence_bound = if spoke { idle_bound } else { Some(first_frame_bound) };
-        // Two waits per frame (row B; #602's review, finding 1). First the frame's **first byte**,
-        // under the silence bound — `handshake_timeout_ms` for a connection's first frame,
-        // `inbound_idle_timeout_secs` after it. `fill_buf` consumes nothing, and `biased` keeps this
-        // off the hot path: a frame already buffered never arms a timer. Then the rest of the frame
-        // under the progress bound only, so a large frame on a slow link is read however long it
-        // takes as a whole, while a stall mid-frame is closed and counted apart from silence.
-        let arrived = tokio::select! { biased;
-            r = async { socket.fill_buf().await.map(|b| !b.is_empty()) } => match r {
-                Ok(true)  => true,
-                Ok(false) => break, // closed between frames
-                Err(e) if matches!(e.kind(),
-                    std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
-                    | std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::BrokenPipe) => break,
-                Err(e) => { warn!("Read error from {}: {}", peer_addr, e); break; }
-            },
-            _ = shutdown_rx.wait_for(|v| *v) => break,
-            _ = preempted() => {
-                tracing::debug!(from = %peer_addr, "inbound connection preempted at max_connections");
-                break;
+        // A connection admitted by preemption arrives with its first frame already read and checked
+        // (#602's round 4): process it before reading another.
+        let frame_version: FrameVersion = if let Some((v, buf)) = first_frame.take() {
+            recv_buf = buf;
+            v
+        } else {
+            // A large frame grew the buffer (doubling, up to ~16 MiB for a 10 MB frame); give it back
+            // before waiting on the next one rather than holding it for the connection's life (#602's
+            // round 3, Q4). Frames forwarded zero-copy were split off and own their bytes.
+            if recv_buf.capacity() > 1 << 20 {
+                recv_buf = BytesMut::with_capacity(2_048);
             }
-            _ = async {
-                match silence_bound {
-                    // A real-socket deadline: outside the replay kernel's coverage, like the
-                    // socket it bounds (inventory §2.4, row B).
-                    Some(d) => tokio::time::sleep(d).await,
-                    None    => std::future::pending().await,
-                }
-            } => false,
-        };
-        if !arrived {
-            task_ctx.transport_bounds.count_inbound_timeout();
-            tracing::debug!(
-                from = %peer_addr, first_frame = !spoke,
-                "closing a silent inbound connection (handshake_timeout_ms / inbound_idle_timeout_secs)"
-            );
-            break;
-        }
-        socket.get_mut().arm(Some(frame_progress));
-        // read_frame returns FrameVersion so we can select the right decoder.
-        // The never-type of break expressions coerces to FrameVersion, allowing
-        // break directly inside the select! arms.
-        let frame_version: FrameVersion = tokio::select! { biased;
-            result = read_frame(&mut socket, &mut recv_buf) => match result {
-                Ok(v)                              => v,
-                Err(GossipError::Io(e)) if crate::stall::is_stall(&e) => {
-                    task_ctx.transport_bounds.count_frame_stalled();
-                    tracing::debug!(from = %peer_addr, "closing an inbound connection stalled mid-frame: {e}");
+            let silence_bound = if spoke { idle_bound } else { Some(first_frame_bound) };
+            // Two waits per frame (row B; #602's review, finding 1). First the frame's **first byte**,
+            // under the silence bound — `handshake_timeout_ms` for a connection's first frame,
+            // `inbound_idle_timeout_secs` after it. `fill_buf` consumes nothing, and `biased` keeps this
+            // off the hot path: a frame already buffered never arms a timer. Then the rest of the frame
+            // under the progress bound only, so a large frame on a slow link is read however long it
+            // takes as a whole, while a stall mid-frame is closed and counted apart from silence.
+            let arrived = tokio::select! { biased;
+                r = async { socket.fill_buf().await.map(|b| !b.is_empty()) } => match r {
+                    Ok(true)  => true,
+                    Ok(false) => break, // closed between frames
+                    Err(e) if matches!(e.kind(),
+                        std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::BrokenPipe) => break,
+                    Err(e) => { warn!("Read error from {}: {}", peer_addr, e); break; }
+                },
+                _ = shutdown_rx.wait_for(|v| *v) => break,
+                _ = preempted() => {
+                    tracing::debug!(from = %peer_addr, "inbound connection preempted at max_connections");
                     break;
                 }
-                Err(e) if is_connection_closed(&e) => break,
-                Err(e) => { warn!("Read error from {}: {}", peer_addr, e); break; }
-            },
-            _ = shutdown_rx.wait_for(|v| *v) => break,
-            _ = preempted() => {
-                tracing::debug!(from = %peer_addr, "inbound connection preempted mid-frame at max_connections");
+                _ = async {
+                    match silence_bound {
+                        // A real-socket deadline: outside the replay kernel's coverage, like the
+                        // socket it bounds (inventory §2.4, row B).
+                        Some(d) => tokio::time::sleep(d).await,
+                        None    => std::future::pending().await,
+                    }
+                } => false,
+            };
+            if !arrived {
+                task_ctx.transport_bounds.count_inbound_timeout();
+                tracing::debug!(
+                    from = %peer_addr, first_frame = !spoke,
+                    "closing a silent inbound connection (handshake_timeout_ms / inbound_idle_timeout_secs)"
+                );
                 break;
             }
+            socket.get_mut().arm(Some(frame_progress));
+            if let Some(slot) = &inbound_slot { slot.set_in_frame(true); }
+            // read_frame returns FrameVersion so we can select the right decoder.
+            // The never-type of break expressions coerces to FrameVersion, allowing
+            // break directly inside the select! arms.
+            let v: FrameVersion = tokio::select! { biased;
+                result = read_frame(&mut socket, &mut recv_buf) => match result {
+                    Ok(v)                              => v,
+                    Err(GossipError::Io(e)) if crate::stall::is_stall(&e) => {
+                        task_ctx.transport_bounds.count_frame_stalled();
+                        tracing::debug!(from = %peer_addr, "closing an inbound connection stalled mid-frame: {e}");
+                        break;
+                    }
+                    Err(e) if is_connection_closed(&e) => break,
+                    Err(e) => { warn!("Read error from {}: {}", peer_addr, e); break; }
+                },
+                _ = shutdown_rx.wait_for(|v| *v) => break,
+                _ = preempted() => {
+                    tracing::debug!(from = %peer_addr, "inbound connection preempted mid-frame at max_connections");
+                    break;
+                }
+            };
+            socket.get_mut().arm(None);
+            if let Some(slot) = &inbound_slot { slot.set_in_frame(false); }
+            v
         };
-        socket.get_mut().arm(None);
         if let Some(slot) = &inbound_slot { slot.frame_completed(); }
         spoke = true;
 
@@ -648,6 +710,17 @@ pub async fn handle_connection(
                 // then the chunk goes to the WAL as one batch — one fsync under `Flush` rather than one
                 // per entry, which made a chunk of tiny entries take minutes while this loop did not read.
                 let mut batch: Vec<SyncEntry> = if wal.is_some() { Vec::with_capacity(entries.len()) } else { Vec::new() };
+                // Replica sync must not answer `Persisted` while these are applied but unbatched
+                // (#602's round 4, finding 4): raised before the first apply, lowered once the batch
+                // is enqueued (`Async`/`Os`) or synced (`Flush`) — on every exit, by the guard.
+                struct Unbatched<'a>(&'a std::sync::atomic::AtomicU64);
+                impl Drop for Unbatched<'_> {
+                    fn drop(&mut self) { self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel); }
+                }
+                let _unbatched = wal.is_some().then(|| {
+                    task_ctx.transport_bounds.ae_unbatched.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    Unbatched(&task_ctx.transport_bounds.ae_unbatched)
+                });
                 for entry in entries {
                     // Absorb the remote HLC stamp so our clock dominates anything
                     // anti-entropy hands us, even on a fresh restart where the

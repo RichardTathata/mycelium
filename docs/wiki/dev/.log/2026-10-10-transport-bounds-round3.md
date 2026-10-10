@@ -11,5 +11,5 @@
   guard on the evictor flag; scan credit lapses with the earliest pin; the read buffer shrinks after a
   large frame.
 - Pages: `dev/architecture/runtime-invariants.md` (transport bounds; §Persistence group commit);
-  `docs/guide/deprecations.md` §27; `configuration.md`, `metrics.md`, `tuning.md`, `threat-model.md` §4,
+  `docs/guide/deprecations.md` §30; `configuration.md`, `metrics.md`, `tuning.md`, `threat-model.md` §4,
   the replay inventory.

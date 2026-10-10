@@ -180,24 +180,36 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     frames* — the first inbound frame by `handshake_timeout_ms`, each outbound one by a `peer_write_timeout_ms` —
     so a 10 MB anti-entropy chunk or value on a slow but healthy link was cut mid-frame on every attempt and a
     late joiner there never bootstrapped. A frame being received must move a byte every
-    `peer_read_stall_timeout_ms` (60 s); a batch being sent, every `peer_write_stall_timeout_ms` (60 s), which
-    must outlast the receiver's apply of a chunk, since a receiver does not read while it applies. **The receiver's
+    `peer_read_stall_timeout_ms` (60 s); a batch being sent, every `peer_write_stall_timeout_ms` (derived from
+    `sync_mode`: 300 s under `flush`, 60 s otherwise), which must outlast the receiver's apply of a chunk — and
+    under `flush` a WAL snapshot the batch waits behind, measured at 0.47 s / 2.0 s / 7.8 s for a 64 MiB / 256 MiB /
+    1 GiB store (`snapshot_of_a_large_store`; round 4, Q-c). **The receiver's
     WAL is now group-committed per anti-entropy chunk** (`WalHandle::append_batch`: every entry applied to the
     store first, then one write and one fsync), because one fsync per entry made the worst chunk take minutes.
     Measured (`worst_case_chunk_apply_with_an_fsync_wal`, `sync_mode = "flush"`, debug build, developer Mac):
     before, 0.78 s for 152 × 64 KiB, 41.8 s for 9 000 × 1 KiB, **329 s** for 70 000 × 64 B; after, 0.06 s, 0.20 s,
     1.6 s, and **3.4 s** for the worst chunk a sender can build (~145 000 tombstones; 2.7 s under `async`) — the
-    60 s default is ~17× that (#602's round 3, finding 3). A read floor, `peer_min_rate_bytes_per_sec`, defaults
+    60 s non-`flush` bound is ~17× that (#602's round 3, finding 3). While a chunk is applied but not yet batched,
+    replica sync does not answer `Persisted` (round 4, finding 4; seen failing first:
+    `a_record_applied_but_not_yet_batched_is_not_answered_persisted` — *assertion `left != right` failed*), and
+    in `async`/`os` batched records count against the WAL channel's depth (round 4, finding 6; seen failing first:
+    `async_batches_are_bounded_in_records` — *left: 0, right: 500*). A read floor, `peer_min_rate_bytes_per_sec`, defaults
     to **1 KiB/s** after the stall window — per connection, so a joiner needs senders × floor of link (8 senders,
     64 kbit/s); the first default, 8 KiB/s, cut every sender to a joiner whose 512 kbit/s link eight peers
-    shared (re-review, finding 2). **Preemption at `max_connections`** (round 3, finding 1): at the cap a
-    newcomer closes the inbound connection whose last *complete* frame is oldest, if at least
-    `handshake_timeout_ms` old, and takes its permit (`inbound_connections_preempted`) — the two cheap ways to
-    hold every permit, a trickle inside a frame and a tiny complete frame every idle period, each leave a last
-    frame that ages; a connect flood cannot preempt a peer that talks more often than that. Seen failing first:
-    `a_trickle_inside_a_frame_does_not_hold_the_permits` — *a healthy peer must get a permit from connections that
-    complete no frame*; `tiny_complete_frames_do_not_hold_the_permits` — *…from connections that only keep
-    themselves alive* (`a_connect_flood_never_preempts_a_talking_peer` is the guard). Mid-frame stalls are counted apart: `inbound_frames_stalled`, `outbound_stalls`. A
+    shared (re-review, finding 2). **Preemption at `max_connections`** (rounds 3–4): at the cap a newcomer first completes
+    its TLS handshake and a valid first frame (16 may wait to prove themselves), and only then may it close the
+    inbound connection whose last complete frame is oldest — older than `writer_idle_timeout_secs +
+    handshake_timeout_ms` (40 s by default), not mid-frame, at most one per `handshake_timeout_ms`; off when
+    `writer_idle_timeout_secs = 0` (`inbound_connections_preempted`). Round 3 preempted at TCP accept with a
+    `handshake_timeout_ms` threshold, which let a bare connect — on a TLS mesh a non-member's SYN — close a
+    member's link, and with SWIM on (no TCP pings) let a flood displace honest links quiet 10–30 s. The residual,
+    stated in the threat model: on a plaintext mesh an attacker that took slots from free permits and talks on
+    each more often than the threshold keeps them; `max_connections_per_source` (opt-in, default off) is the
+    remaining mitigation. Seen failing first: `a_flood_of_silent_connects_preempts_nothing` — *a connection that
+    has completed no frame may not preempt*; `honest_peers_quiet_within_the_window_are_never_preempted` —
+    *bounds/window/1 lost* (round 3's `a_trickle_inside_a_frame_does_not_hold_the_permits` /
+    `tiny_complete_frames_do_not_hold_the_permits` failed first against round 2; the trickle is now the floor's,
+    `a_one_byte_trickle_is_closed_by_the_rate_floor`). Mid-frame stalls are counted apart: `inbound_frames_stalled`, `outbound_stalls`. A
     header no longer reserves the 10 MB it claims; the buffer grows as bytes arrive (re-review, finding 8; seen
     failing first: `a_header_claiming_a_large_frame_does_not_reserve_it_upfront` — *reserved 10485759 bytes for 15
     received*); a buffer grown past 1 MiB by a large frame is given back before the next (round 3, Q4). Defaults
@@ -224,21 +236,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     — *least-recently-seen kinds make room*). Only a kind with a local **worker** is exempt — an SSE tap is not
     one — and a query pin lapses one window after the last query (at least the window the caller asked about); one
     evictor runs at a time, cleared by a drop guard, and a scan that finds nothing evictable buys the next eighth of
-    insertions without one, until the earliest pin it saw lapses (re-review, findings 4–6; round 3, finding 5 and
-    Q2–Q3: a recorder whose log the evictor removed under it writes again, so no stamp is left without its log;
+    insertions without one, until the earliest pin it saw lapses (re-review, findings 4–6; round 3 Q2–Q3; round
+    4, finding 5: the evictor and the recorder act on a kind under its log's lock, the evictor removing only the log
+    it saw and only if the stamp is unchanged, so a record lands whole or in a fresh log, and one that loses the
+    race sixteen times is counted, not silently dropped;
     seen failing first: `a_tap_does_not_exempt_its_kind_from_eviction`, `a_query_pin_expires`,
     `eviction_scans_are_amortised_when_most_kinds_are_exempt` — *2000 scans for 2000 new kinds*). **Behaviour
     change — `sys/quorum/` evidence:** it is written only for a kind this node has a worker subscribed to or has
     asked about within the window (`quorum*`, `last_signal`, and `quorum_persistent` / `last_signal_persistent`,
     which now pin the kind — `quorum_persistent(kind, window)` for at least `window`), so a random-kind flood
-    writes no KV keys; and per kind, evidence is written for at most 1024 senders, across kinds at most 4096
+    writes no KV keys; per kind a node remembers at most 1024 senders it wrote evidence for, the oldest by last
+    write giving way (round 4, finding 3: the set used to only grow, so after 1024 senders ever a kind wrote no
+    more; a kind with no worker and a lapsed pin forgets its set; seen failing first:
+    `an_evidence_sender_set_slides`, `a_lapsed_kinds_evidence_set_is_pruned`); across kinds at most 4096
     writes a second — past either the write is skipped and counted (`gossip_quorum_evidence_skipped_total`), so a
     forged-sender flood on a worked kind is never written at line rate (review finding 2, re-review 1, round 3
     finding 2; seen failing first: `quorum_evidence_stays_bounded_with_the_log` — *12288 evidence entries after
     12288 random kinds*; `a_random_kind_flood_writes_no_evidence`; `one_kinds_evidence_is_bounded_by_the_sender_cap`
     — *3072 evidence keys for one kind*; `evidence_writes_are_bounded_per_kind_and_by_the_table` — *12192
     evidence writes*). A node that only relays a kind no longer contributes evidence for it — see the upgrade
-    notes and `deprecations.md` §27. Keys already written stay — nothing collects `sys/quorum/`.
+    notes and `deprecations.md` §30. Keys already written stay — nothing collects `sys/quorum/`.
     Seen failing first: `the_signal_log_stays_bounded_under_random_kinds` — *12288 kinds tracked after 12288
     random kinds*; `one_kind_stays_bounded_under_random_senders` — *3072 entries for one kind*.
   - **A stopped agent leaked its whole context.** `RpcRequestRx::recv` said it returns `None` at shutdown and did
@@ -257,10 +274,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is open to whoever reaches the port), and `sys/quorum/` keys already written, which nothing collects. A peer that accepts and never reads holds its
   one anti-entropy reply — up to one chunk's frames — until the write bound expires (round 3, Q1). **Upgrade
   notes:** **`sys/quorum/` evidence is written only by nodes with a worker on the kind or a recent query of it**
-  (`deprecations.md` §27): an observer outside a group that reads `quorum_persistent` for a kind its members emit
+  (`deprecations.md` §30): an observer outside a group that reads `quorum_persistent` for a kind its members emit
   sees evidence only from nodes that subscribe to or ask about it, itself included from its first query; a
-  poller slower than its window sees gaps; more than 1024 senders on one kind are not all recorded; `GossipConfig` gained `handshake_timeout_ms`, `inbound_idle_timeout_secs`,
-  `peer_read_stall_timeout_ms`, `peer_write_stall_timeout_ms`, `peer_min_rate_bytes_per_sec` and `SystemStats` eight fields (an exhaustive struct literal breaks; `..Default::default()` is unaffected);
+  poller slower than its window sees gaps (its pin lasts at least the window it asks for); **preemption at
+  `max_connections`** may close an inbound link quiet longer than `writer_idle_timeout_secs +
+  handshake_timeout_ms` when a proven newcomer needs the slot (raise `max_connections` if your fleet keeps many
+  quiet inbound links); **the read floor defaults to 1 KiB/s** after `peer_read_stall_timeout_ms` (a joiner
+  needs senders × floor of link — set `peer_min_rate_bytes_per_sec = 0` on very thin shared links); **the write
+  stall bound is 60 s, or 300 s under `flush`** (`peer_write_stall_timeout_ms = 0`, derived) — set it higher for
+  a `flush` node whose snapshot takes longer (~7.6 s per GiB measured); `GossipConfig` gained `handshake_timeout_ms`, `inbound_idle_timeout_secs`,
+  `peer_read_stall_timeout_ms`, `peer_write_stall_timeout_ms`, `peer_min_rate_bytes_per_sec` `max_connections_per_source` and `SystemStats` eight fields (an exhaustive struct literal breaks; `..Default::default()` is unaffected);
   `validate()` refuses `inbound_idle_timeout_secs` at or below a non-zero `writer_idle_timeout_secs`, so a
   config that raised `writer_idle_timeout_secs` to 300 s or more must raise the inbound bound with it (or set it
   to `0`); `mycelium_core::writer::{run_peer_writer, get_or_spawn_writer, request_state}` take a `WriterTiming` (by reference for

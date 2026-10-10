@@ -48,7 +48,19 @@ impl StallBound {
     /// The bound on batches being sent: `peer_write_stall_timeout_ms`, no floor (a sender cannot tell
     /// a slow link from a receiver applying what it read).
     pub fn write_from_config(cfg: &crate::config::GossipConfig) -> Self {
-        Self { stall: Duration::from_millis(cfg.peer_write_stall_timeout_ms), min_rate: 0 }
+        Self { stall: Duration::from_millis(write_stall_ms(cfg)), min_rate: 0 }
+    }
+}
+
+/// `peer_write_stall_timeout_ms`, with `0` resolved from `sync_mode` (#602's round 4, Q-c): under
+/// `flush` an anti-entropy batch waits behind the WAL writer, which may be taking a snapshot.
+pub fn write_stall_ms(cfg: &crate::config::GossipConfig) -> u64 {
+    match cfg.peer_write_stall_timeout_ms {
+        0 => match cfg.persistence.as_ref().map(|p| p.sync_mode) {
+            Some(crate::config::SyncMode::Flush) => 300_000,
+            _ => 60_000,
+        },
+        ms => ms,
     }
 }
 
@@ -231,5 +243,12 @@ mod default_tests {
         let w = StallBound::write_from_config(&cfg);
         // Round 3: with group commit the worst chunk applies in 3.4 s (debug build); 329 s before it.
         assert!(w.stall >= Duration::from_secs(34), "the writer must outlast a 3.4 s chunk apply with margin; got {:?}", w.stall);
+        // Round 4: under `flush` a batch waits behind a snapshot (7.8 s for 1 GiB, measured).
+        let mut flush = crate::config::GossipConfig::default();
+        flush.persistence = Some(crate::config::PersistenceConfig {
+            base_path: std::path::PathBuf::from("/nonexistent"), sync_mode: crate::config::SyncMode::Flush,
+            snapshot_wal_threshold: 1_000, snapshot_interval_secs: 60, on_unreadable: Default::default(),
+        });
+        assert_eq!(StallBound::write_from_config(&flush).stall, Duration::from_secs(300));
     }
 }

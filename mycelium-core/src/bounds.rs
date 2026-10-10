@@ -35,6 +35,10 @@ pub struct TransportBounds {
     /// whose last complete frame is oldest (#602's round 3, finding 1). See
     /// `SystemStats::inbound_connections_preempted`.
     pub inbound_preempted: AtomicU64,
+    /// Anti-entropy chunks applied to the store whose WAL batch has not been enqueued yet (#602's
+    /// round 4, finding 4). While non-zero, replica sync does not answer `Persisted`: a record the
+    /// store holds may not have a WAL record behind it yet.
+    pub ae_unbatched: AtomicU64,
     /// Outbound writer connections failed because the peer accepted no byte for
     /// `peer_write_stall_timeout_ms` (#602's re-review, finding 9). See `SystemStats::outbound_stalls`.
     pub outbound_stalls: Arc<AtomicU64>,
@@ -48,12 +52,19 @@ pub struct TransportBounds {
     /// Live inbound connections and when each last completed a frame (#602's round 3, finding 1).
     inbound: Arc<papaya::HashMap<u64, Arc<InboundSlot>>>,
     next_inbound: AtomicU64,
+    /// When the last preemption happened (mono ns; 0 = never), for the rate limit.
+    last_preempt_ns: AtomicU64,
+    /// Inbound connections per source address — kept only when `max_connections_per_source` is set.
+    per_source: Arc<papaya::HashMap<std::net::IpAddr, Arc<AtomicU64>>>,
 }
 
 /// One inbound connection's standing for preemption: when it last **completed** a frame (monotonic
 /// ns; its accept until it does), and the signal that closes it.
 pub struct InboundSlot {
     last_frame_ns: AtomicU64,
+    /// A frame is being read: never a victim (#602's round 4, Q-a) — a slow frame is the progress
+    /// bound's and the floor's business, not preemption's.
+    in_frame:      std::sync::atomic::AtomicBool,
     close:         tokio::sync::Notify,
 }
 
@@ -63,9 +74,37 @@ impl InboundSlot {
         self.last_frame_ns.store(crate::sim_seam::mono_now_ns(), Ordering::Relaxed);
     }
 
+    /// Marks whether a frame is being read.
+    pub fn set_in_frame(&self, v: bool) {
+        self.in_frame.store(v, Ordering::Relaxed);
+    }
+
     /// Resolves when this connection has been chosen for preemption.
     pub async fn preempted(&self) {
         self.close.notified().await;
+    }
+}
+
+/// One connection's place under the per-source cap; given back when dropped.
+pub struct SourceGuard {
+    ip:  std::net::IpAddr,
+    map: Option<Arc<papaya::HashMap<std::net::IpAddr, Arc<AtomicU64>>>>,
+}
+
+impl Drop for SourceGuard {
+    fn drop(&mut self) {
+        let Some(map) = &self.map else { return };
+        let map = map.pin();
+        if let Some(c) = map.get(&self.ip)
+            && c.fetch_sub(1, Ordering::AcqRel) == 1
+        {
+            // Last one from this source: drop the entry if it is still at zero, so the table holds
+            // only sources with a connection.
+            map.compute(self.ip, |e| match e {
+                Some((_, c)) if c.load(Ordering::Acquire) == 0 => papaya::Operation::Remove,
+                _ => papaya::Operation::Abort(()),
+            });
+        }
     }
 }
 
@@ -84,34 +123,66 @@ impl Drop for InboundRegistration {
 }
 
 impl TransportBounds {
+    /// Admits one more inbound connection from `ip` under an opt-in per-source cap (`0` = off), and
+    /// returns the guard that gives the slot back. `None` = the source is at its cap (#602's round 4).
+    pub fn admit_source(&self, ip: std::net::IpAddr, cap: usize) -> Option<SourceGuard> {
+        if cap == 0 {
+            return Some(SourceGuard { ip, map: None });
+        }
+        let map = self.per_source.pin();
+        let count = match map.get(&ip) {
+            Some(c) => Arc::clone(c),
+            None => {
+                let fresh = Arc::new(AtomicU64::new(0));
+                let mut held = None;
+                map.compute(ip, |e| match e {
+                    Some((_, c)) => { held = Some(Arc::clone(c)); papaya::Operation::Abort(()) }
+                    None => { held = Some(Arc::clone(&fresh)); papaya::Operation::Insert(Arc::clone(&fresh)) }
+                });
+                held.expect("compute sets it on both arms")
+            }
+        };
+        if count.fetch_add(1, Ordering::AcqRel) >= cap as u64 {
+            count.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
+        Some(SourceGuard { ip, map: Some(Arc::clone(&self.per_source)) })
+    }
+
     /// Registers an inbound connection accepted now.
     pub fn register_inbound(&self) -> InboundRegistration {
         let id = self.next_inbound.fetch_add(1, Ordering::Relaxed);
         let slot = Arc::new(InboundSlot {
             last_frame_ns: AtomicU64::new(crate::sim_seam::mono_now_ns()),
+            in_frame:      std::sync::atomic::AtomicBool::new(false),
             close:         tokio::sync::Notify::new(),
         });
         self.inbound.pin().insert(id, Arc::clone(&slot));
         InboundRegistration { id, map: Arc::clone(&self.inbound), slot }
     }
 
-    /// Preemption at the permit cap (#602's round 3, finding 1). Closes the inbound connection whose
-    /// last **complete** frame is oldest — counting a connection that has completed none from its
-    /// accept — provided that frame is at least `min_quiet` old, and returns whether one was chosen.
-    ///
-    /// Why this rule: the two cheap ways to hold every permit were a trickle inside a frame (never
-    /// silent for the stall bound) and a tiny complete frame every idle period; both leave a last
-    /// complete frame that ages, while a peer doing real work completes frames all the time. The
-    /// `min_quiet` floor (`handshake_timeout_ms`) is what keeps a connect flood from preempting a
-    /// talking peer: a fresh connection completes nothing and never outranks one that spoke within it.
-    /// A healthy peer's writer closes its own idle link after `writer_idle_timeout_secs`, so a link
-    /// quieter than `min_quiet` but not yet closed is the one honest peer that can be preempted; its
-    /// writer reconnects on its next frame. One O(connections) scan per newcomer at the cap.
-    pub fn preempt_oldest(&self, min_quiet: std::time::Duration) -> bool {
+    /// Preemption at the permit cap (#602's rounds 3–4). Closes the inbound connection whose last
+    /// complete frame is oldest, provided that frame is at least `min_quiet` old and the connection is
+    /// not mid-frame, and returns whether one was chosen — at most one per `min_interval` across the
+    /// listener (hysteresis, round 4 Q-b). The caller is a newcomer that has **already completed its
+    /// handshake and a valid first frame** (round 4, finding 2: preempting at accept let a bare connect
+    /// close a member's link), and `min_quiet` is `writer_idle_timeout_secs + handshake_timeout_ms`
+    /// (finding 1): an honest inbound link quiet that long is one whose remote writer has idle-closed
+    /// it or is about to, so preemption never takes a link an honest peer is still using. What it
+    /// cannot take: an attacker link that talks more often than `min_quiet` — it holds the slot it got
+    /// from a free permit; that residual is stated in the threat model, and the opt-in per-source cap
+    /// (`max_connections_per_source`) is the remaining mitigation.
+    pub fn preempt_oldest(&self, min_quiet: std::time::Duration, min_interval: std::time::Duration) -> bool {
         let now = crate::sim_seam::mono_now_ns();
+        let interval = min_interval.as_nanos().min(u64::MAX as u128) as u64;
+        let last = self.last_preempt_ns.load(Ordering::Relaxed);
+        if last != 0 && now.saturating_sub(last) < interval {
+            return false;
+        }
         let min_quiet = min_quiet.as_nanos().min(u64::MAX as u128) as u64;
         let map = self.inbound.pin();
         let victim = map.iter()
+            .filter(|(_, slot)| !slot.in_frame.load(Ordering::Relaxed))
             .map(|(id, slot)| (*id, slot.last_frame_ns.load(Ordering::Relaxed)))
             .filter(|(_, last)| now.saturating_sub(*last) >= min_quiet)
             .min_by_key(|(_, last)| *last);
@@ -120,6 +191,7 @@ impl TransportBounds {
         // registration drop finds nothing to remove.
         let Some(slot) = map.remove(&id).cloned() else { return false };
         slot.close.notify_one();
+        self.last_preempt_ns.store(now.max(1), Ordering::Relaxed);
         self.inbound_preempted.fetch_add(1, Ordering::Relaxed);
         #[cfg(feature = "metrics")]
         metrics::counter!("gossip_inbound_connections_preempted_total").increment(1);

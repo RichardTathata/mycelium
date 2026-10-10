@@ -36,10 +36,11 @@ operator's working set.
 | `max_concurrent_bulk_handlers` | `64` | `GOSSIP_MAX_CONCURRENT_BULK_HANDLERS` | tasks |
 | `gossip_shards` | CPU count (≤16) | — | shards |
 | `writer_idle_timeout_secs` | `30` | `GOSSIP_WRITER_IDLE_TIMEOUT_SECS` | s |
+| `max_connections_per_source` | `0` (off; an opt-in cap per source IP — a NAT shares one) | `GOSSIP_MAX_CONNECTIONS_PER_SOURCE` | connections |
 | `inbound_idle_timeout_secs` | `300` (must exceed `writer_idle_timeout_secs`; `0` = never) | `GOSSIP_INBOUND_IDLE_TIMEOUT_SECS` | s |
 | `handshake_timeout_ms` | `10_000` | `GOSSIP_HANDSHAKE_TIMEOUT_MS` | ms |
 | `peer_read_stall_timeout_ms` | `60_000` (no byte received within a frame) | `GOSSIP_PEER_READ_STALL_TIMEOUT_MS` | ms |
-| `peer_write_stall_timeout_ms` | `60_000` (no byte accepted by the peer; ~17× the 3.4 s worst-case group-committed chunk apply) | `GOSSIP_PEER_WRITE_STALL_TIMEOUT_MS` | ms |
+| `peer_write_stall_timeout_ms` | `0` = from `sync_mode`: 300 s under `flush` (a batch can wait behind a snapshot: 7.8 s per GiB measured), 60 s otherwise | `GOSSIP_PEER_WRITE_STALL_TIMEOUT_MS` | ms |
 | `peer_min_rate_bytes_per_sec` | `1024` (a per-connection read floor; a joiner needs senders × floor of link — 8 senders, 64 kbit/s; `0` = off) | `GOSSIP_PEER_MIN_RATE_BYTES_PER_SEC` | B/s |
 | `swim_failure_detector` | `true` | `GOSSIP_SWIM_FAILURE_DETECTOR` | bool |
 | `swim_udp_port` | same as `bind_port` | `GOSSIP_SWIM_UDP_PORT` | port |

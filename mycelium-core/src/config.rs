@@ -580,8 +580,19 @@ pub struct GossipConfig {
     /// Initial TTL applied to locally-originated gossip messages.
     /// Each hop decrements this by one; a message with TTL 1 is not forwarded.
     pub default_ttl: u8,
-    /// Maximum number of concurrent inbound TCP connections.
+    /// Maximum number of concurrent inbound TCP connections. At the cap a newcomer that has completed
+    /// its handshake and a valid first frame may **preempt** the inbound connection whose last
+    /// complete frame is oldest — if that is older than `writer_idle_timeout_secs +
+    /// handshake_timeout_ms`, the connection is not mid-frame, and no preemption happened within the
+    /// last `handshake_timeout_ms` (#602's rounds 3–4; `SystemStats::inbound_connections_preempted`).
+    /// With `writer_idle_timeout_secs = 0` preemption is off. Up to 16 newcomers at a time wait at the
+    /// cap to prove themselves, beyond this limit.
     pub max_connections: usize,
+    /// Opt-in cap on concurrent inbound connections **per source IP address** (#602's round 4): the
+    /// remaining mitigation for an attacker that holds the slots it got from free permits by talking
+    /// more often than the preemption threshold. `0` (the default) = no cap — a NAT or a host running
+    /// several nodes shares one address. Env: `GOSSIP_MAX_CONNECTIONS_PER_SOURCE`.
+    pub max_connections_per_source: usize,
     /// Depth of each per-peer outbound MPSC channel (a ring buffer, not a semaphore).
     /// **When full, gossip frames are silently dropped** — the failure is indistinguishable
     /// from network packet loss unless `system_stats().dropped_frames` is monitored.
@@ -777,15 +788,17 @@ pub struct GossipConfig {
     /// Validated `1..=3_600_000`. Default `60_000`. Env: `GOSSIP_PEER_READ_STALL_TIMEOUT_MS`.
     pub peer_read_stall_timeout_ms: u64,
     /// Milliseconds a batch being **sent** may go without a byte accepted by the peer (row B; #602's
-    /// re-review finding 3, round 3 finding 3). A receiver does not read while it applies a frame, so
-    /// this must outlast the slowest healthy apply of one anti-entropy chunk. With the receiver's WAL
-    /// group-committed per chunk (one fsync, `WalHandle::append_batch`) that was **measured at 3.4 s**
-    /// for the worst chunk a sender can build — ~145 000 tombstones, `sync_mode = "flush"`, a debug
-    /// build on a developer Mac, 2026-10-10 (`worst_case_chunk_apply_with_an_fsync_wal`; 1.6 s for
-    /// 70 000 × 64 B, 0.2 s for 9 000 × 1 KiB). Before group commit the same 70 000 entries took 329 s,
-    /// one fsync each. The default leaves ~17× margin. Past it the connection fails like any write
-    /// error (`SystemStats::outbound_stalls`); shutdown or eviction interrupt it at once. Validated
-    /// `1..=3_600_000`. Default `60_000`. Env: `GOSSIP_PEER_WRITE_STALL_TIMEOUT_MS`.
+    /// re-review finding 3, rounds 3–4). A receiver does not read while it applies a frame, so this must
+    /// outlast the slowest healthy apply of one anti-entropy chunk — and, under `sync_mode = "flush"`,
+    /// a WAL snapshot the batch waits behind. Measured on a developer Mac (debug build, 2026-10-10):
+    /// the worst chunk a sender can build (~145 000 tombstones) applies in **3.4 s** with the WAL
+    /// group-committed (`worst_case_chunk_apply_with_an_fsync_wal`; 329 s for 70 000 × 64 B before it),
+    /// and a snapshot takes **0.47 s / 2.0 s / 7.8 s** for a 64 MiB / 256 MiB / 1 GiB store
+    /// (`snapshot_of_a_large_store`, ~7.6 s per GiB). **`0` (the default) derives it from
+    /// `sync_mode`:** `300_000` under `flush` (a snapshot of ~38 GiB plus the worst chunk), `60_000`
+    /// otherwise (`async`/`os` never wait on the writer: the batch is enqueued). Past it the connection
+    /// fails like any write error (`SystemStats::outbound_stalls`); shutdown or eviction interrupt it at
+    /// once. Validated `0..=3_600_000`. Env: `GOSSIP_PEER_WRITE_STALL_TIMEOUT_MS`.
     pub peer_write_stall_timeout_ms: u64,
     /// A bandwidth floor, bytes per second, on frames being **received**: once
     /// `peer_read_stall_timeout_ms` has passed since a frame started, it must have moved at least
@@ -1278,6 +1291,7 @@ impl Default for GossipConfig {
             membership_cooldown_secs:   None,
             default_ttl: 5,
             max_connections: 1024,
+            max_connections_per_source: 0,
             writer_channel_depth: 1024,
             max_forwarding_peers: i64::MAX as usize,
             reconnect_backoff_secs: 5,
@@ -1311,7 +1325,7 @@ impl Default for GossipConfig {
             handshake_timeout_ms: 10_000,
             inbound_idle_timeout_secs: 300,
             peer_read_stall_timeout_ms: 60_000,
-            peer_write_stall_timeout_ms: 60_000,
+            peer_write_stall_timeout_ms: 0,
             peer_min_rate_bytes_per_sec: 1024,
             group_aware_forwarding: true,
             epidemic_extra_peers:   3,
@@ -1622,7 +1636,7 @@ impl GossipConfig {
         }
         for (field, v, max) in [("handshake_timeout_ms", self.handshake_timeout_ms, 600_000),
                                 ("peer_read_stall_timeout_ms", self.peer_read_stall_timeout_ms, 3_600_000),
-                                ("peer_write_stall_timeout_ms", self.peer_write_stall_timeout_ms, 3_600_000)] {
+                                ("peer_write_stall_timeout_ms", self.peer_write_stall_timeout_ms.max(1), 3_600_000)] {
             if v == 0 || v > max {
                 return Err(GossipError::InvalidField {
                     field,
@@ -1829,6 +1843,9 @@ impl GossipConfig {
         }
         if let Ok(v) = env::var("GOSSIP_MAX_CONNECTIONS") {
             self.max_connections = v.parse().map_err(GossipError::Parse)?;
+        }
+        if let Ok(v) = env::var("GOSSIP_MAX_CONNECTIONS_PER_SOURCE") {
+            self.max_connections_per_source = v.parse().map_err(GossipError::Parse)?;
         }
         if let Ok(v) = env::var("GOSSIP_WRITER_CHANNEL_DEPTH") {
             self.writer_channel_depth = v.parse().map_err(GossipError::Parse)?;
