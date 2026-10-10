@@ -4639,6 +4639,78 @@ async fn test_sys_namespace_tripwire_flags_foreign_self_owned_write() {
     b.shutdown_with_timeout(Duration::from_secs(5)).await;
 }
 
+/// **The adversarial review of #591, finding 1: anti-entropy repair is not a violation.** Three
+/// nodes commit a few cluster slots, so each holds every voter's `sys/consensus-accepted/` record
+/// and every node's `sys/caller-context/`. Then C restarts with the same id and no persistence: it
+/// rewrites its caller-context at start, and anti-entropy hands it back its old one and every
+/// acceptor record it wrote before — its own records, repaired. The tripwire counted each of those
+/// (the review measured 62 over 30 commits; this test, 1 per slot plus the caller-context) and
+/// must count none: `sys_namespace_violations` stays 0 on every node.
+#[cfg(feature = "consensus")]
+#[tokio::test]
+async fn anti_entropy_repair_after_a_restart_is_not_a_namespace_violation() {
+    let ports = [alloc_port(), alloc_port(), alloc_port()];
+    let id = |p: u16| NodeId::new("127.0.0.1", p).unwrap();
+    let mk = |port: u16, boots: Vec<NodeId>| {
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.bootstrap_peers = boots;
+        cfg.reconnect_backoff_secs = 1;
+        cfg.health_check_interval_secs = 1;
+        Arc::new(GossipAgent::new(id(port), cfg))
+    };
+    let a = mk(ports[0], vec![]);
+    let b = mk(ports[1], vec![id(ports[0])]);
+    let c = mk(ports[2], vec![id(ports[0])]);
+    for n in [&a, &b, &c] { n.start().await.unwrap(); }
+    let _la = a.consensus().start_consensus_listener(ConsensusConfig::default());
+    let _lb = b.consensus().start_consensus_listener(ConsensusConfig::default());
+    let lc = c.consensus().start_consensus_listener(ConsensusConfig::default());
+    let mut peered = false;
+    for _ in 0..200 {
+        if [&a, &b, &c].iter().all(|n| n.peers().len() >= 2) { peered = true; break; }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(peered, "the three nodes did not peer");
+
+    const SLOTS: usize = 5;
+    for i in 0..SLOTS {
+        let res = a.consensus().cluster_propose(&format!("repair/{i}"), Bytes::from_static(b"v"), ConsensusConfig::default()).await;
+        assert!(matches!(res, ConsensusResult::Committed { .. }), "slot {i}: {res:?}");
+    }
+    // C's own acceptor records must have reached A before C goes away — they are what comes back.
+    let c_record = |i: usize| format!("sys/consensus-accepted/{}/repair/{i}", id(ports[2]));
+    let mut held = false;
+    for _ in 0..200 {
+        if (0..SLOTS).all(|i| a.kv().get(&c_record(i)).is_some()) { held = true; break; }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(held, "A never received C's acceptor records");
+
+    drop(lc);
+    c.shutdown_with_timeout(Duration::from_secs(5)).await;
+    drop(c);
+    let c2 = mk(ports[2], vec![id(ports[0])]);
+    c2.start().await.unwrap();
+    let _lc2 = c2.consensus().start_consensus_listener(ConsensusConfig::default());
+
+    // The repair happened: the restarted C holds its own pre-restart records again.
+    let mut repaired = false;
+    for _ in 0..300 {
+        if (0..SLOTS).all(|i| c2.kv().get(&c_record(i)).is_some()) { repaired = true; break; }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(repaired, "anti-entropy did not hand C its acceptor records back");
+    // Let any straggling entries land before reading the counters.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    for (name, n) in [("A", &a), ("B", &b), ("C", &c2)] {
+        assert_eq!(n.system_stats().sys_namespace_violations, 0,
+                   "{name} counted anti-entropy repair as a namespace violation");
+    }
+
+    for n in [&a, &b, &c2] { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
+}
+
 // ── WS2 audit trail — agent-level writer + chain verification ─────────────
 
 /// WS2 increment 2: a node seals events into its own hash-chained audit stream

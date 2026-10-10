@@ -57,7 +57,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`sys_namespace_violations`) now also covers `sys/consensus-accepted/{node}/…` — the acceptor's durable promise and
   acceptance, which only that node's `persist_acceptor` writes and `prewarm_accepted` restores, so a peer writing
   ours is forging a promise we never made — and the identity record's other two forms, `sys/identity-signed/{node}`
-  and `sys/identity-proof/{node}`, written only by the node itself. Seen failing first:
+  and `sys/identity-proof/{node}`, written only by the node itself. **And it counts only a write that changed
+  what this node holds and that this node did not write** — a gossip frame from another originator, or an
+  anti-entropy entry that replaced a value it held with a different one — for all eight prefixes: anti-entropy
+  handing a node its own records back after a restart used to count each one (the adversarial review of #591
+  measured 62 over 30 commits; the pre-existing prefixes counted 1). Seen failing first:
+  `anti_entropy_repair_after_a_restart_is_not_a_namespace_violation` (C counted 5) and
+  `connection::tests::anti_entropy_repair_of_my_own_record_is_not_counted`; and, for the prefixes:
   `test_sys_namespace_tripwire_flags_foreign_self_owned_write` (B did not flag A's write to
   `sys/consensus-accepted/{B}/slot-x`) and `connection::tests::flags_remote_write_to_each_self_owned_prefix`.
   And `consensus/decided/{slot}`, which any committer writes and so is not self-owned, gets a Layer III tripwire:

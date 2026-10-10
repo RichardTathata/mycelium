@@ -359,7 +359,11 @@ pub struct SystemStats {
     /// Cumulative count of inbound (remote) writes to a `sys/` key this node
     /// owns — `sys/identity/{self}`, `sys/identity-signed/{self}`, `sys/identity-proof/{self}`,
     /// `sys/load/{self}`, `sys/role/{self}`, `sys/tuple/{self}/…`, `sys/caller-context/{self}` and
-    /// `sys/consensus-accepted/{self}/…`. Only the named node should ever originate these;
+    /// `sys/consensus-accepted/{self}/…`. Only the named node should ever originate these.
+    /// Counted only when the inbound write **changed what this node held** and this node did not
+    /// write it: a gossip frame from another originator, or an anti-entropy entry that replaced a
+    /// value this node held with a different one — never anti-entropy handing this node its own
+    /// record back (a restart without persistence; since 2026-10-10, the adversarial review of #591);
     /// a remote write to one is a namespace-ownership violation.
     ///
     /// **Detection, not prevention** (mirrors [`commit_conflicts`](Self::commit_conflicts)):

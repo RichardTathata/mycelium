@@ -41,7 +41,10 @@ Four layers, all additive/opt-in (`src/agent/rbac.rs`, gateway middleware in
    `node_level_routes_honour_scoped_tokens` (`src/agent/http.rs`).
 4. **`sys/` namespace tripwire (core, feature-free):** inbound writes naming *self* under
    `sys/identity|identity-signed|identity-proof|load|role|tuple|caller-context|consensus-accepted/{node}`
-   → `warn!` + `sys_namespace_violations` (the acceptor record and the two other identity forms since
+   → `warn!` + `sys_namespace_violations`, **only when the write changed what this node held and this
+   node did not write it** (`counts_as_foreign_write`: a frame whose originator hash is another node's,
+   or an anti-entropy entry that replaced a value it held — anti-entropy repairing its own record after
+   a restart never counts; the adversarial review of #591 measured 62 false counts before) (the acceptor record and the two other identity forms since
    2026-10-10: each is written only by its own node — `persist_acceptor`, the start/rotation identity
    writers). Detection only — never make it a write guard. `consensus/decided/{slot}` is written by
    whichever node commits, so it has its own tripwire in Layer III instead (`ConsensusEngine::decided_floor`
