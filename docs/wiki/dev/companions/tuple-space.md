@@ -30,7 +30,17 @@ Design: `docs/plans/mycelium-tuple-space.md`. Key facts:
   failure** — require one positive observation before treating absence as evaporation.
 - **Durability:** single-lock hot path (no waiter/store TOCTOU); WAL with indivisible
   `Complete` records; compaction bumps a WAL *epoch* so a secondary's byte-offset cursor
-  can't dangle. **A joining secondary backfills** (2026-07-10): live replication only ships
+  can't dangle. **WAL integrity (row C, 2026-10-10)** — the core's rules, mirrored in
+  `store.rs` `WalWriter`: `OwnershipLock` on `<wal>.lock` (one owner); a failed append sets
+  `WalInner::poison` and every later append is refused until `compact` (which
+  `wants_compaction` then asks for) or a reopen; `scan_frame` tells a torn final frame
+  (truncated, file + dir synced) from a corrupt one with data after it (open refused,
+  `InvalidData`); compaction folds the log itself (`fold_wal`, never a memory snapshot — a
+  put appends before it applies) and installs with `sync_data → rename → fsync_parent`. Limit: no checksum, so
+  a length prefix corrupted past EOF reads as torn. **Maintenance runs on every WAL
+  holder** (`spawn_wal_maintenance`, from `init_store`) — a primary-only repair left a
+  poisoned secondary refusing every mirrored record (#597 review); a refused mirror apply
+  sets `mirror_gap` and the backfill re-drains. Compaction keeps the id high-water mark. **A joining secondary backfills** (2026-07-10): live replication only ships
   records put while the secondary is present, so a late joiner drives the paginated
   `wal_replay` RPC at join (WAL-backed primary → WAL pages; transient primary → *state
   chunks*: live items as `Put` records, id-cursor pagination; `apply_records` dedupes overlap

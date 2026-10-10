@@ -343,6 +343,7 @@ pub(crate) fn spawn_mirror_handlers(bb: &Arc<Blackboard>) -> Vec<tokio::task::Jo
     vec![tokio::spawn(async move {
         while let Some(req) = rx.recv().await {
             let p = req.payload();
+            me.note_primary_seen(req.sender());
             me.apply_replicated(&p);
             me.agent().service().rpc_respond(&req, Bytes::from_static(&[ST_OK]));
         }
@@ -358,14 +359,22 @@ impl Blackboard {
                 let mut off = 1;
                 if let Some(f) = get_fact(p, &mut off)
                     && self.mark_mirrored(f.id)
-                    && let Err(e) = store.post_with_id(f.id, f.attributes, f.payload)
                 {
-                    tracing::error!(error = %e, "blackboard: mirror post failed");
+                    let id = f.id;
+                    if let Err(e) = store.post_with_id(id, f.attributes, f.payload) {
+                        self.note_mirror_gap(id, &e);
+                    }
                 }
             }
             Some(&REP_ACK) => {
                 if let Some(b) = p.get(1..9).and_then(|s| <[u8; 8]>::try_from(s).ok()) {
-                    let _ = store.discard(u64::from_le_bytes(b));
+                    let id = u64::from_le_bytes(b);
+                    self.note_mirror_ack(id);
+                    // A refused `Ack` record leaves the fact live in the log (not counted): a restart
+                    // re-queues it — at-least-once, never a loss.
+                    if let Err(e) = store.discard(id) {
+                        tracing::error!(id, error = %e, "blackboard: mirror ack not logged");
+                    }
                 }
             }
             _ => {}

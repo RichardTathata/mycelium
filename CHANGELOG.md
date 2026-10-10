@@ -73,6 +73,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `test-overlay` help comment on its own target; the deck's rolling-upgrade note restated per 2.30.0.
 
 ### Added
+- **`mycelium::OwnershipLock`** — the core's exclusive-ownership lock on `<file>.lock` (held by the KV WAL and the
+  node-local journals), re-exported so a companion's own log refuses a second owner the same way. The tuple space
+  and the blackboard take it on their WALs (row C, above). Additive.
 - **The KV namespace table is a gate now, not a lint item.** `scripts/check-kv-namespaces.sh` enumerates every
   KV prefix production code uses — slash-bearing `const`/`static` `&str` literals whatever their name, `format!`
   key heads, and the first literal of a KV call (`set*`, `get`, `delete*`, `scan_*`, `subscribe*`, `kv_*`,
@@ -491,6 +494,80 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `with_no_keys_a_failed_fetch_is_retried_after_the_short_backoff` (still refused after the back-off),
   `keys_past_the_ttl_are_refreshed` (no refresh). `a_rotated_key_is_accepted_after_the_cooldown` and
   `a_failed_refresh_keeps_the_previous_keys` pin behaviour that already held.
+- **The companion WALs (tuple space, blackboard): a failed append no longer strands later records, a corrupt record
+  refuses the open, one owner per file, and compaction survives a power loss** (post-360 hardening row C). Both
+  writers carried on after a failed `write_all`, so the next acknowledged record landed behind the torn frame, and the
+  next open read the torn frame's length over it, called the lot a torn tail and **truncated every later record
+  silently** — and any undecodable record, torn or not, ended replay the same way. Now a failed append **poisons the
+  writer** (every later append refused by name) until a compaction rewrites the log from the live state — the
+  maintenance tick asks for one at once — or a reopen truncates the torn tail; at open, a frame the file ends inside
+  is still a crash's torn tail and is truncated (now synced, file and directory), while a whole frame that does not
+  decode, or bytes that are no record, **with data after it refuses the open** (`InvalidData`, naming the file and
+  the byte; the file untouched). Each WAL takes the core's `OwnershipLock` on `<wal>.lock`, so a second store on one
+  path is refused with `WouldBlock`. Compaction installs its file in the core snapshot's order — temp file synced,
+  renamed, **directory synced**: the tuple space skipped the directory sync, the blackboard both syncs
+  (`std::fs::write` + `rename`). And compaction now **folds the log itself** under the WAL lock instead of
+  snapshotting memory: a write appends and *then* applies to memory, so a compaction landing between the two
+  rewrote a log without a record already acknowledged, and a crash after it lost the record; the log holds every
+  acknowledged record and no append interleaves under the lock, so the rewrite loses none (the tuple space's
+  compaction also stops taking stage and in-flight locks inside the WAL lock). Not done: a length prefix corrupted to run past the end of the file still reads as
+  a torn tail (the format has no checksum), and there is no `on_unreadable = "quarantine"` counterpart — move the
+  file aside to start empty. Seen failing first, in both crates: `a_failed_append_never_strands_a_later_acknowledged_put`
+  / `_post` (`left: [0]`, `right: [0, 2]` — the put after the failure was acknowledged and gone at reopen),
+  `a_corrupt_middle_record_refuses_the_open_and_leaves_the_file` (the open succeeded), `a_second_owner_of_the_wal_is_refused`
+  (the second open succeeded), `compaction_syncs_the_directory_after_the_rename` (`no dir.sync in ["tmp.write",
+  "tmp.sync", "rename"]`) / `compaction_syncs_the_temp_file_and_the_directory` (`no tmp.sync in ["tmp.write",
+  "rename"]`), `a_compaction_between_append_and_apply_keeps_the_acknowledged_put` (`left: None`, `right: Some(0)`) /
+  `_post` (`left: []`, `right: [0]`). **Upgrade notes:** a WAL holding a corrupt record before its last now refuses `TupleStore`/`BoardStore`
+  construction — so the node does not become primary — where it used to start with the later records gone; a second
+  store on one `wal_path` (in one process or two) is refused; a `<wal_path>.lock` file appears beside each WAL (do not
+  delete it while a node runs — the lock is the OS's and goes with its holder).
+  **The PR's adversarial review (#597) found a regression and six more, all fixed here.** The poison was cleared only
+  by compaction, and only the primary ran it — so a **secondary** whose WAL failed once refused every later mirrored
+  record, and the replicate paths had already marked each id seen, so no re-delivery applied it: a failover lost
+  everything after the error (before the PR, only the failing record). Now WAL maintenance (the periodic sync, and the
+  repairing compaction) runs on **every node that holds a WAL**, primary or secondary; a mirrored record whose append
+  is refused is forgotten as seen and the mirror drains the primary again (`apply_records`, the blackboard's
+  replicate handler and initial sync); a mirror's `remove_queued` no longer counts an ack whose record was refused
+  (the blackboard's `discard` already did not; it is now logged). Also: an Auto-mode node whose store refuses to
+  open logs the error (file and byte) and **withdraws its candidacy**, where it logged nothing useful and stayed on
+  the ring to be elected again; a valid kind byte followed only by zeros (a zero-extended partial append) is a torn
+  tail, not corruption — and the limit beside it is stated: a torn frame whose missing body was zero-filled can
+  decode into a phantom record; a repair that keeps failing **backs off** (1, 2, 4 … 64 ticks), and a failing sync no
+  longer skips it; the compaction temp file is `<wal_path>.compact`, named after the whole file (it was derived from
+  the stem, so `x.a` and `x.b` shared one); and compaction keeps the **id high-water mark** — a lone `Ack` for the
+  highest id when that id was acked away — so a restart never reissues an acknowledged id (open fenced `next_id` from
+  the highest id left). Seen failing first, in both crates: `a_poisoned_mirror_repairs_and_keeps_every_later_record`
+  (`left: 0`, `right: 4` / `left: []`, `right: [0, 1, 2, 3]`), `an_auto_node_whose_wal_refuses_withdraws_its_candidacy`
+  (still advertised), `a_valid_kind_followed_by_zeros_is_a_torn_tail` (refused as corrupt), `a_failing_repair_backs_off`
+  (`20 attempts in 20 ticks`), `the_compaction_temp_file_is_named_after_the_whole_wal_file` (`IsADirectory` at the
+  stem's name), `a_restart_never_reuses_an_acked_id` (`left: 0`, `right: 3`); the tuple space's
+  `the_repair_runs_even_when_the_sync_fails` and `a_refused_mirror_ack_is_not_counted` (`left: 1`, `right: 0`). Added
+  as pins (they held): the repair path end to end, a known kind whose body does not decode, an ack racing a
+  compaction, the blackboard's refused `discard`. **Further upgrade notes:** a secondary now syncs its WAL
+  periodically and compacts it; a compacted WAL may end in a lone `Ack` (older builds replay it as a no-op); a temp
+  file left by a crashed compaction under the old name (`<stem>.compact`, `<stem>.wal.compact`) is not removed.
+  **A second review (the re-review of #597) found the re-drain could resurrect, and four more; fixed.** A tuple-space
+  re-drain restarts from offset 0 and an applied `Ack` had forgotten its id, so a primary compacting between drain
+  chunks (the `Ack` gone, the `Put` already re-delivered) left an acked item live in the mirror; each mirror now keeps
+  a bounded memory of the ids it saw acked (100 000, oldest forgotten first) and never re-applies one — the blackboard
+  too, where a snapshot racing a live `Ack` did the same. No re-drain or re-sync while the mirror's own WAL refuses
+  appends (it re-fetched the primary's whole log every tick). A promotion with a refused record pending replays the
+  old primary's log **from the start** (the tuple space; the heartbeat cursor cannot cover a record refused before
+  it), or first re-syncs from the primary the mirror last heard from (the blackboard), and says so when that fails.
+  A compaction failing **after its rename** poisons the writer — it went on appending to the unlinked old file. Every
+  failing compaction backs off, poisoned or not, capped near 10 s (50 ticks of 200 ms; 10 of 1 s on the blackboard,
+  which was a 64 s ceiling). An `init_store` racing `shutdown` aborts the maintenance task it starts, which otherwise
+  outlived the space and held the WAL's lock. Seen failing first, in both crates unless named:
+  `a_redrain_never_resurrects_an_acked_item` (`left: [1, 0]`, `right: [1]`) / the blackboard's
+  `an_ack_before_its_post_does_not_resurrect_the_fact` (`left: [0, 1]`, `right: [1]`), `no_redrain_while_the_mirror_wal_refuses`
+  / `no_resync_…`, `a_promotion_with_a_pending_gap_replays_from_the_start` (`left: (3, 999)`, `right: (0, 0)`) /
+  `…_syncs_from_the_last_primary` (`left: None`), `a_failure_after_the_rename_poisons_the_writer`,
+  `a_failing_compaction_backs_off_even_when_not_poisoned` (`20 attempts in 20 ticks`),
+  `the_repair_back_off_is_capped_near_ten_seconds` (`65 ticks between repair attempts`),
+  `a_store_opened_after_shutdown_does_not_pin_the_wal`. Pins that held: `the_backfill_redrains_a_refused_record` /
+  `the_mirror_resyncs_a_refused_fact` (two nodes, the loop re-draining on `mirror_gap`) and
+  `the_high_water_mark_survives_two_compactions_and_a_restart`.
 
 ### Security
 - **An open gateway is refused off loopback** (plan `post-360-hardening.md` row P1). With no credential model the

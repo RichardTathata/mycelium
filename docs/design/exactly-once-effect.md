@@ -56,7 +56,7 @@ so the deferred decision is now **made with both implementations in hand**.
 
 | User | Status | In-flight mechanism |
 |---|---|---|
-| **Tuple space** (`TupleStore`) | shipped | `Inflight.taken_at_ms: u64` — **wall-clock ms**, **WAL-persisted** (in `Record::Take`) and written into the cross-node advisory `tuple/inflight/{id}` visibility key. Also feeds `inflight_by_stage` (metrics), `inflight_snapshot` (compaction), and keyed dispatch. Exactly-once that is *persisted + cross-node*. |
+| **Tuple space** (`TupleStore`) | shipped | `Inflight.taken_at_ms: u64` — **wall-clock ms**, **WAL-persisted** (in `Record::Take`) and written into the cross-node advisory `tuple/inflight/{id}` visibility key. Also feeds `inflight_by_stage` (metrics) and keyed dispatch; compaction carries an item's latest `Take` from the log itself (since row C, 2026-10-10, it folds the log rather than snapshotting the in-flight set). Exactly-once that is *persisted + cross-node*. |
 | **Blackboard** (`BoardStore`) | shipped | `Inflight.claimed_at: Instant` — **monotonic, in-process only**, no timestamp in the WAL `Claim` record. Exactly-once whose in-flight *deadline* is in-process. |
 | **Mailbox** (Actor/Event) | shipped | A genuinely different mechanism — KV + HLC keys + drain-then-tombstone; no in-flight claim/WAL/requeue. |
 | **Supervision (M14)** | not built | — |
@@ -67,7 +67,8 @@ in-flight timestamp is **wall-clock-ms + persisted + cross-node** (it lives in W
 gossiped visibility key precisely because its exactly-once spans nodes and restarts), whereas the
 blackboard's is a **monotonic `Instant` + in-process** deadline. A shared `InflightTracker<T>` would
 have to be generic over the clock, and the tuple space additionally reaches into its in-flight set
-through three crate-specific surfaces (`inflight_by_stage`, `inflight_snapshot`, keyed dispatch).
+through crate-specific surfaces (`inflight_by_stage`, keyed dispatch; `inflight_snapshot`, a third, went
+with row C's log-folded compaction).
 Forcing a shared overlay over a ~15-line kernel would couple two crates with **divergent evolution**
 (a change for the tuple space's persisted/cross-node needs would ripple into the blackboard's
 in-process path) — the exact failure mode the Rule of Three exists to prevent, just on the

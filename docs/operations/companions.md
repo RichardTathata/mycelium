@@ -45,6 +45,22 @@ left blank. The obligations every companion owes are the
   appends (default **500**) plus a ~1 s safety sync and on shutdown. Format v2 (reads v1 for rolling
   upgrade; refuses a *newer* format rather than truncating). No WAL **and** no secondary ⇒ a primary
   crash is total loss.
+- **WAL integrity (both companions, since row C of the post-360 hardening).** One owner per `wal_path` —
+  a second store on the same path, in this process or another, is refused with `WouldBlock` naming the
+  file (the lock is `<wal_path>.lock`; do not delete it — the OS releases it with its holder). A failed
+  append (`ENOSPC`, `EIO`) **poisons the writer**: every later write is refused by name until a
+  maintenance tick's compaction rewrites the log, or a restart truncates the torn tail. Maintenance runs
+  on **every node holding a WAL**, primary or secondary (a compaction that keeps failing backs off to
+  one try per ~10 s); a mirrored record refused meanwhile is re-fetched from the primary once the WAL is
+  repaired (never while it still refuses), a promotion with one pending replays the old primary from the
+  start (tuple space) or re-syncs from it first (blackboard), and a mirror never re-applies an item it saw
+  acked. An Auto-mode node whose store refuses to open logs why and withdraws its candidacy. At open, a file ending *inside* its last record is a crash's torn tail and is truncated; a
+  record that is all there and does not decode, **with data after it**, refuses the open (`InvalidData`,
+  file and byte named, file untouched) — the node does not become primary. Move the file aside to start
+  empty; there is no quarantine switch. Compaction rewrites the log from the log itself (never from
+  memory, so a write in flight is never left out) into `<wal_path>.compact`, syncs it, renames it, then
+  syncs the directory, so it survives a power loss; it keeps the id high-water mark, so a restart never
+  reissues an acked id.
 - **Un-acked work re-queues.** `worker_timeout_secs` (default **300**): an item taken but not
   `complete`d within the window is re-queued (at-least-once); the scan runs every 30 s. Set it above
   your longest task — too low duplicates work, too high slows recovery of a dead worker's item.
@@ -80,7 +96,8 @@ left blank. The obligations every companion owes are the
 - **Teardown.** `shutdown()` aborts tasks and retracts caps but **does not fsync the WAL** — the
   periodic 1 s sync is the last durability point, so a clean shutdown can lose up to ~1 s (plus up to
   `checkpoint_every` un-synced appends) of tail. Reopen truncates a torn tail cleanly — bounded
-  freshness loss, not corruption. For hard-durability teardown, quiesce writers ~2 s before shutdown.
+  freshness loss, not corruption; a corrupt record with data after it refuses the open instead (the WAL
+  integrity rules above apply to the blackboard as written). For hard-durability teardown, quiesce writers ~2 s before shutdown.
 
 ## mycelium-wiki — durable curated canon
 

@@ -240,6 +240,42 @@ impl Default for BoardConfig {
     }
 }
 
+/// How many acked fact ids a mirror remembers (oldest forgotten first): enough to cover the window
+/// in which a snapshot taken before an ack can arrive after it.
+const MIRROR_ACKED_MEMORY: usize = 100_000;
+
+/// The mirror's id bookkeeping, under the one `mirrored` lock.
+#[derive(Default)]
+pub(crate) struct MirrorIndex {
+    /// Fact ids applied to this mirror.
+    seen: HashSet<u64>,
+    /// Ids this mirror saw acked (bounded by `MIRROR_ACKED_MEMORY`), in arrival order.
+    acked: HashSet<u64>,
+    acked_order: std::collections::VecDeque<u64>,
+}
+
+impl MirrorIndex {
+    fn admit(&mut self, id: u64) -> bool {
+        !self.acked.contains(&id) && self.seen.insert(id)
+    }
+
+    fn ack(&mut self, id: u64) {
+        if self.acked.insert(id) {
+            self.acked_order.push_back(id);
+            if self.acked_order.len() > MIRROR_ACKED_MEMORY
+                && let Some(oldest) = self.acked_order.pop_front()
+            {
+                self.acked.remove(&oldest);
+            }
+        }
+        self.seen.remove(&id);
+    }
+
+    fn forget(&mut self, id: u64) {
+        self.seen.remove(&id);
+    }
+}
+
 /// An agent-backed board: posting/reading/claiming over a coordinator-free primary discovered on the
 /// capability ring, with emergent secondary failover. Construct after `agent.start()`.
 pub struct Blackboard {
@@ -251,7 +287,16 @@ pub struct Blackboard {
     primary_reg: parking_lot::Mutex<Option<CapabilityReg>>,
     role_reg: parking_lot::Mutex<Option<CapabilityReg>>,
     /// Mirror dedup: fact ids already applied (a replicated Post may arrive twice).
-    mirrored: parking_lot::Mutex<HashSet<u64>>,
+    mirrored: parking_lot::Mutex<MirrorIndex>,
+    /// The primary this mirror last heard from (a replicate, a snapshot), for the promotion-time sync
+    /// when a refused fact is pending.
+    last_primary: parking_lot::Mutex<Option<NodeId>>,
+    /// Set by `shutdown` before it drains the tasks, so an `init_store` racing it aborts the
+    /// maintenance task it starts instead of leaving it to hold the store (and the WAL's lock).
+    shutting_down: AtomicBool,
+    /// Set when a mirrored fact could not be applied (its WAL append was refused): the mirror re-syncs
+    /// from the primary, so the fact is re-delivered once the WAL is repaired.
+    mirror_gap: AtomicBool,
     tasks: parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
@@ -266,7 +311,10 @@ impl Blackboard {
             is_secondary: AtomicBool::new(false),
             primary_reg: parking_lot::Mutex::new(None),
             role_reg: parking_lot::Mutex::new(None),
-            mirrored: parking_lot::Mutex::new(HashSet::new()),
+            mirrored: parking_lot::Mutex::new(MirrorIndex::default()),
+            last_primary: parking_lot::Mutex::new(None),
+            shutting_down: AtomicBool::new(false),
+            mirror_gap: AtomicBool::new(false),
             tasks: parking_lot::Mutex::new(Vec::new()),
         });
         match bb.cfg.role {
@@ -289,15 +337,41 @@ impl Blackboard {
     }
 
     fn init_store(&self) -> Result<(), BlackboardError> {
-        let mut g = self.store.lock();
-        if g.is_none() {
-            let store = if self.cfg.persist {
-                BoardStore::persistent(&self.cfg.wal_path, self.cfg.checkpoint_every)?
-            } else {
-                BoardStore::transient()
+        let created = {
+            let mut g = self.store.lock();
+            if g.is_some() {
+                return Ok(());
             }
-            .with_high_watermark(self.cfg.high_watermark);
-            *g = Some(Arc::new(store));
+            let store = Arc::new(
+                if self.cfg.persist {
+                    BoardStore::persistent(&self.cfg.wal_path, self.cfg.checkpoint_every)?
+                } else {
+                    BoardStore::transient()
+                }
+                .with_high_watermark(self.cfg.high_watermark),
+            );
+            *g = Some(Arc::clone(&store));
+            store
+        };
+        // WAL maintenance runs wherever a WAL does — a mirror's too (#597 review, finding 1): the
+        // compaction that repairs a writer poisoned by a failed append, and the periodic sync. It ran
+        // on the primary only, so a secondary's poisoned WAL refused every later mirrored fact.
+        if self.cfg.persist {
+            let h = tokio::spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_secs(1));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    tick.tick().await;
+                    let s = Arc::clone(&created);
+                    let _ = tokio::task::spawn_blocking(move || s.maintenance_tick()).await;
+                }
+            });
+            let mut tasks = self.tasks.lock();
+            if self.shutting_down.load(Ordering::SeqCst) {
+                h.abort(); // `shutdown` already drained the tasks; nothing else would stop this one
+            } else {
+                tasks.push(h);
+            }
         }
         Ok(())
     }
@@ -318,8 +392,61 @@ impl Blackboard {
     fn store_expect(&self) -> Arc<BoardStore> {
         self.store().expect("serving role requires a store")
     }
+    /// Whether a mirrored `Post` for `id` should be applied: not already applied, and never seen
+    /// acked — a re-sync's snapshot racing a live `Ack` must not resurrect the fact (#597 re-review).
     pub(crate) fn mark_mirrored(&self, id: u64) -> bool {
-        self.mirrored.lock().insert(id)
+        self.mirrored.lock().admit(id)
+    }
+
+    /// A mirrored `Ack` for `id`: remembered, so a later `Post` for it is not applied.
+    pub(crate) fn note_mirror_ack(&self, id: u64) {
+        self.mirrored.lock().ack(id);
+    }
+
+    /// Whether the mirror should re-sync from the primary now.
+    /// Not while this mirror's WAL refuses appends: every fact would be refused again and the
+    /// primary's whole board re-fetched per tick (#597 re-review, finding 2). The gap waits.
+    fn should_resync(&self) -> bool {
+        if self.store().is_some_and(|s| s.wal_refusing()) {
+            return false;
+        }
+        self.mirror_gap.swap(false, Ordering::AcqRel)
+    }
+
+    /// The node a promotion should sync from first: the primary this mirror last heard from, when a
+    /// refused fact is pending — it may still answer (a graceful step-down, a blip), and otherwise
+    /// the refused fact is lost with it (#597 re-review, finding 3).
+    fn promotion_sync_target(&self) -> Option<NodeId> {
+        if !self.mirror_gap.load(Ordering::Acquire) {
+            return None;
+        }
+        self.last_primary.lock().clone()
+    }
+
+    /// Remember the primary this mirror last heard from.
+    pub(crate) fn note_primary_seen(&self, node: &NodeId) {
+        *self.last_primary.lock() = Some(node.clone());
+    }
+
+    /// A mirrored fact's WAL append was refused: forget it was seen, so a re-delivery applies it,
+    /// and ask the mirror to re-sync from the primary.
+    pub(crate) fn note_mirror_gap(&self, id: u64, e: &BlackboardError) {
+        tracing::error!(id, error = %e, "blackboard: mirror fact refused; it is re-fetched once the WAL is repaired");
+        self.mirrored.lock().forget(id);
+        self.mirror_gap.store(true, Ordering::Release);
+    }
+
+    /// The store refused to open (a corrupt WAL, a second owner, an unreadable file): say why — the
+    /// error names the file and, for corruption, the byte — and withdraw the candidacy, so the ring
+    /// does not keep electing a node that cannot serve (#597 review, finding 2).
+    fn withdraw_after_store_refusal(&self, e: &BlackboardError) {
+        tracing::error!(
+            ns = %self.cfg.namespace,
+            wal = %self.cfg.wal_path.display(),
+            error = %e,
+            "blackboard: the store refused to open; withdrawing the candidacy and staying client"
+        );
+        *self.role_reg.lock() = None;
     }
 
     // ── Role assumption ──────────────────────────────────────────────────────
@@ -348,26 +475,6 @@ impl Blackboard {
                     for id in store2.requeue_expired(timeout) {
                         tracing::warn!(id, "blackboard: re-queued expired in-flight claim");
                     }
-                }
-            }));
-        }
-
-        // Checkpoint + compaction, off the hot path.
-        {
-            let store2 = Arc::clone(&store);
-            tasks.push(tokio::spawn(async move {
-                let mut tick = tokio::time::interval(Duration::from_secs(1));
-                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                loop {
-                    tick.tick().await;
-                    let s = Arc::clone(&store2);
-                    let _ = tokio::task::spawn_blocking(move || {
-                        let _ = s.sync();
-                        if s.wants_compaction() {
-                            let _ = s.compact();
-                        }
-                    })
-                    .await;
                 }
             }));
         }
@@ -408,7 +515,17 @@ impl Blackboard {
                     }
                     if me.sync_from_primary().await {
                         tracing::info!(ns = %me.cfg.namespace, "blackboard: initial mirror sync drained");
-                        return;
+                        // Drained once. Stay, to re-sync whenever a mirrored fact was refused
+                        // (`mirror_gap`), so it is re-delivered after the WAL repairs.
+                        loop {
+                            tick.tick().await;
+                            if me.is_primary() {
+                                return;
+                            }
+                            if me.should_resync() {
+                                break;
+                            }
+                        }
                     }
                     // Unreachable / partial: retry next tick.
                 }
@@ -457,6 +574,15 @@ impl Blackboard {
                         tracing::warn!(ns = %me.cfg.namespace, ticks = ORPHAN_GRACE_TICKS,
                             "blackboard: no primary ever seen within the orphan grace — promoting");
                     }
+                    if let Some(old) = me.promotion_sync_target() {
+                        if me.sync_from(old).await {
+                            me.mirror_gap.store(false, Ordering::Release);
+                            tracing::info!(ns = %me.cfg.namespace, "blackboard: re-synced a pending gap before promoting");
+                        } else {
+                            tracing::error!(ns = %me.cfg.namespace,
+                                "blackboard: promoting with a mirror gap the old primary could not fill — facts refused by this mirror's WAL may be missing");
+                        }
+                    }
                     me.become_primary();
                     return;
                 }
@@ -485,8 +611,9 @@ impl Blackboard {
 
         loop {
             if !self.resolve_role("primary").is_empty() {
-                if self.init_store().is_ok() {
-                    self.become_secondary();
+                match self.init_store() {
+                    Ok(()) => self.become_secondary(),
+                    Err(e) => self.withdraw_after_store_refusal(&e),
                 }
                 return;
             }
@@ -498,8 +625,9 @@ impl Blackboard {
             let self_id = self.agent.node_id().to_string();
             match mycelium::election::elect(&ring, &candidates) {
                 Some(winner) if winner.to_string() == self_id => {
-                    if self.init_store().is_ok() {
-                        self.become_primary();
+                    match self.init_store() {
+                        Ok(()) => self.become_primary(),
+                        Err(e) => self.withdraw_after_store_refusal(&e),
                     }
                     return;
                 }
@@ -513,6 +641,12 @@ impl Blackboard {
     /// transient-unresolvable primary cannot leave a partial mirror (audit 2026-07-15 pass 3).
     async fn sync_from_primary(self: &Arc<Self>) -> bool {
         let Ok(primary) = self.resolve_primary() else { return false };
+        self.sync_from(primary).await
+    }
+
+    /// One snapshot RPC to `primary`, applied into the mirror.
+    async fn sync_from(self: &Arc<Self>, primary: NodeId) -> bool {
+        self.note_primary_seen(&primary);
         let kind = rpc::rpc_kind(&self.cfg.namespace, "snapshot");
         let Ok(resp) = self
             .agent
@@ -527,7 +661,10 @@ impl Blackboard {
         };
         for f in facts {
             if self.mark_mirrored(f.id) {
-                let _ = store.post_with_id(f.id, f.attributes, f.payload);
+                let id = f.id;
+                if let Err(e) = store.post_with_id(id, f.attributes, f.payload) {
+                    self.note_mirror_gap(id, &e);
+                }
             }
         }
         true // a full snapshot (possibly empty) was applied — the mirror is now complete
@@ -707,6 +844,7 @@ impl Blackboard {
 
     /// Abort background tasks and retract advertisements.
     pub async fn shutdown(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
         for h in self.tasks.lock().drain(..) {
             h.abort();
         }
@@ -715,4 +853,240 @@ impl Blackboard {
         self.is_primary.store(false, Ordering::Release);
         self.is_secondary.store(false, Ordering::Release);
     }
+}
+
+#[cfg(test)]
+mod wal_role_tests {
+    use super::*;
+    use crate::store::BoardStore;
+    use mycelium::GossipConfig;
+
+    async fn agent() -> Arc<GossipAgent> {
+        let port = mycelium::test_util::alloc_port();
+        let cfg = GossipConfig { bind_port: port, ..Default::default() };
+        let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+        agent.start().await.unwrap();
+        agent
+    }
+
+    fn temp_wal(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("mbb-role-{}-{name}.log", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    fn fact(id: u64) -> Fact {
+        Fact {
+            id,
+            attributes: BTreeMap::from([("kind".to_string(), "surplus".to_string())]),
+            payload: Bytes::from(vec![id as u8; 64]),
+        }
+    }
+
+    /// #597 review, finding 1 (a regression the PR introduced): a secondary's WAL poisoned by one
+    /// failed append was never repaired — only the primary ran compaction — and the replicate handler
+    /// had already marked each refused id mirrored, so no re-delivery applied it: failover lost every
+    /// fact after the error. The mirror must repair, and a re-delivery must land, in memory and in the
+    /// log.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_poisoned_mirror_repairs_and_keeps_every_later_record() {
+        let path = temp_wal("poisoned-mirror");
+        let bb = Blackboard::new(
+            agent().await,
+            BoardConfig {
+                namespace: Arc::from("poisoned-mirror"),
+                role: BoardRole::Secondary,
+                persist: true,
+                wal_path: path.clone(),
+                cap_refresh: Duration::from_millis(300),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let store = bb.store().unwrap();
+        store.inject_append_fault();
+        for id in 0..4 {
+            bb.apply_replicated(&rpc::enc_replicate_post(&fact(id)));
+        }
+        for _ in 0..50 {
+            if !store.wal_poisoned() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        // The re-delivery (a re-sent replicate, or the re-sync a gap triggers).
+        for id in 0..4 {
+            bb.apply_replicated(&rpc::enc_replicate_post(&fact(id)));
+        }
+        let mut ids: Vec<u64> = store.read(&Predicate::new()).iter().map(|f| f.id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![0, 1, 2, 3], "every fact is in the mirror");
+        bb.shutdown().await;
+        drop(store);
+        drop(bb);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 review, finding 2: in Auto mode an elected node whose WAL refuses to open logged nothing
+    /// and kept advertising its candidacy, so the ring elected it again and never got a primary.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_auto_node_whose_wal_refuses_withdraws_its_candidacy() {
+        let path = temp_wal("auto-refused");
+        let mut bytes = b"MBBWAL".to_vec();
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.push(99);
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(&[1, 2, 3, 4, 5, 6]);
+        std::fs::write(&path, &bytes).unwrap();
+        let bb = Blackboard::new(
+            agent().await,
+            BoardConfig {
+                namespace: Arc::from("auto-refused"),
+                role: BoardRole::Auto,
+                persist: true,
+                wal_path: path.clone(),
+                cap_refresh: Duration::from_millis(300),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        for _ in 0..50 {
+            if bb.role_reg.lock().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(bb.role_reg.lock().is_some(), "the node advertises its candidacy first");
+        let mut withdrawn = false;
+        for _ in 0..60 {
+            if bb.role_reg.lock().is_none() {
+                withdrawn = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(withdrawn, "the candidacy is withdrawn when the store refuses");
+        assert!(!bb.is_primary() && !bb.is_secondary());
+        bb.shutdown().await;
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn mirror_cfg(ns: &str, persist: bool, path: PathBuf) -> BoardConfig {
+        BoardConfig {
+            namespace: Arc::from(ns),
+            role: BoardRole::Secondary,
+            persist,
+            wal_path: path,
+            cap_refresh: Duration::from_millis(300),
+            ..Default::default()
+        }
+    }
+
+    /// #597 re-review, finding 1 (the board's form): an `Ack` that arrives before the snapshot carrying
+    /// its fact (a re-sync racing live replication) found nothing to discard, and the snapshot's `Post`
+    /// then resurrected the acked fact in the mirror.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_ack_before_its_post_does_not_resurrect_the_fact() {
+        let bb = Blackboard::new(agent().await, mirror_cfg("ack-first", false, temp_wal("unused"))).await.unwrap();
+        bb.apply_replicated(&rpc::enc_replicate_post(&fact(1)));
+        bb.apply_replicated(&rpc::enc_replicate_ack(0));
+        bb.apply_replicated(&rpc::enc_replicate_post(&fact(0)));
+        let ids: Vec<u64> = bb.store().unwrap().read(&Predicate::new()).iter().map(|f| f.id).collect();
+        assert_eq!(ids, vec![1], "the acked fact stays acked in the mirror");
+        bb.shutdown().await;
+    }
+
+    /// #597 re-review, finding 2: no re-sync while the mirror's WAL refuses appends.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_resync_while_the_mirror_wal_refuses() {
+        let path = temp_wal("no-resync-poisoned");
+        let bb = Blackboard::new(agent().await, mirror_cfg("no-resync", true, path.clone())).await.unwrap();
+        let store = bb.store().unwrap();
+        store.set_compact_fault(true);
+        store.inject_append_fault();
+        assert!(store.post_with_id(0, BTreeMap::new(), Bytes::from("x")).is_err());
+        bb.mirror_gap.store(true, Ordering::Release);
+        assert!(!bb.should_resync(), "no re-sync while the WAL refuses appends");
+        assert!(bb.mirror_gap.load(Ordering::Acquire), "the gap waits for the repair");
+        store.set_compact_fault(false);
+        bb.shutdown().await;
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 re-review, finding 3 (the board's form): a promotion with a gap pending first syncs from the
+    /// primary this mirror last heard from, which may still answer (a graceful step-down, a blip).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_promotion_with_a_pending_gap_syncs_from_the_last_primary() {
+        let bb = Blackboard::new(agent().await, mirror_cfg("gap-promotion", false, temp_wal("unused2"))).await.unwrap();
+        let old = NodeId::new("127.0.0.1", 1).unwrap();
+        bb.note_primary_seen(&old);
+        assert_eq!(bb.promotion_sync_target(), None, "no gap, no extra sync");
+        bb.mirror_gap.store(true, Ordering::Release);
+        assert_eq!(bb.promotion_sync_target(), Some(old), "a gap syncs from the last primary first");
+        bb.shutdown().await;
+    }
+
+    /// #597 re-review, finding 6: `init_store` racing `shutdown` started a maintenance task nothing
+    /// aborted, which held the store and so the WAL's ownership lock.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_store_opened_after_shutdown_does_not_pin_the_wal() {
+        let path = temp_wal("init-after-shutdown");
+        let mut cfg = mirror_cfg("late-init", true, path.clone());
+        cfg.role = BoardRole::Client;
+        let bb = Blackboard::new(agent().await, cfg).await.unwrap();
+        bb.shutdown().await;
+        bb.init_store().unwrap();
+        drop(bb);
+        let mut reopened = false;
+        for _ in 0..30 {
+            if BoardStore::persistent(&path, 1).is_ok() {
+                reopened = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(reopened, "the WAL's lock is released once the board is gone");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 re-review, finding 7: the mirror's sync loop re-syncs on `mirror_gap` — a primary and a
+    /// mirror, one injected append failure on the mirror, the refused fact arriving by the re-sync.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_mirror_resyncs_a_refused_fact() {
+        let a = agent().await;
+        let port = mycelium::test_util::alloc_port();
+        let cfg = GossipConfig {
+            bind_port: port,
+            bootstrap_peers: vec![a.node_id().clone()],
+            ..Default::default()
+        };
+        let b = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+        b.start().await.unwrap();
+        let path = temp_wal("resync-loop");
+        let mut pcfg = mirror_cfg("resync-loop", false, temp_wal("unused3"));
+        pcfg.role = BoardRole::Primary;
+        let primary = Blackboard::new(a, pcfg).await.unwrap();
+        let mirror = Blackboard::new(b, mirror_cfg("resync-loop", true, path.clone())).await.unwrap();
+        let mstore = mirror.store().unwrap();
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        mstore.inject_append_fault();
+        let id = primary.post(fact(7).attributes, Bytes::from("refused-then-resynced")).await.unwrap();
+        let mut arrived = false;
+        for _ in 0..100 {
+            if mstore.read(&Predicate::new()).iter().any(|f| f.id == id) {
+                arrived = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(arrived, "fact {id} reached the mirror by the re-sync");
+        mirror.shutdown().await;
+        primary.shutdown().await;
+        drop(mstore);
+        let _ = std::fs::remove_file(&path);
+    }
+
 }

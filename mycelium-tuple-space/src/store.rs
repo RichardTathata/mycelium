@@ -12,15 +12,17 @@
 //! acquired in this order (release in reverse):
 //!
 //! 1. `WalInner` — held across the whole compaction rewrite; appends are
-//!    short. Compaction acquires stage/inflight locks *inside* the WAL lock
-//!    to snapshot live items.
+//!    short. Compaction folds the log itself under it and takes no other lock
+//!    (row C: a snapshot of memory could miss a record appended but not yet
+//!    applied), so today no path nests the WAL lock with another.
 //! 2. `StageInner` — the put/take hot-path lock; never held across `await`.
 //! 3. `inflight` — leaf lock. `dispatch` and `take` acquire it while holding
 //!    a `StageInner` lock (stage → inflight), never the reverse.
 //!
 //! No path holds a stage or inflight lock while *waiting* for the WAL lock
-//! (appends happen after the stage guard is dropped), so the WAL-first order
-//! used by compaction cannot deadlock against the hot path.
+//! (appends happen after the stage guard is dropped), and compaction no longer
+//! takes a stage or inflight lock inside the WAL lock, so the two families
+//! never nest.
 
 use bytes::Bytes;
 use parking_lot::Mutex;
@@ -205,6 +207,16 @@ impl TupleStore {
         Ok(store)
     }
 
+    /// Test seam: the window between a write's two steps — its WAL append and its in-memory apply,
+    /// in whichever order the write takes them. A test arms `COMPACT_BETWEEN` to run a compaction
+    /// exactly there, on this thread.
+    #[cfg(test)]
+    fn between_append_and_apply(&self) {
+        if COMPACT_BETWEEN.with(|c| c.replace(false)) {
+            self.compact_now().expect("the interleaved compaction");
+        }
+    }
+
     fn stage(&self, name: &str) -> Arc<StageState> {
         let map = self.stages.pin();
         if let Some(s) = map.get(name) {
@@ -233,6 +245,8 @@ impl TupleStore {
                 key: None,
             })?;
         }
+        #[cfg(test)]
+        self.between_append_and_apply();
         state.put_total.fetch_add(1, Ordering::Relaxed);
         let hot = self.dispatch(&state, Arc::from(stage), id, payload)?;
         if hot {
@@ -488,6 +502,8 @@ impl TupleStore {
         match removed {
             None => Err(TupleError::NotFound),
             Some(_) => {
+                #[cfg(test)]
+                self.between_append_and_apply();
                 if let Some(wal) = &self.wal {
                     wal.append(&Record::Ack { id })?;
                     wal.note_acked();
@@ -624,8 +640,13 @@ impl TupleStore {
             state.depth.fetch_sub(removed as u32, Ordering::Relaxed);
             if let Some(wal) = &self.wal {
                 drop(g);
-                let _ = wal.append(&Record::Ack { id });
-                wal.note_acked();
+                // Count the terminal record only when the log has it. A refused one (a poisoned
+                // writer) leaves the item live in the log: a restart re-queues it — at-least-once,
+                // never a loss.
+                match wal.append(&Record::Ack { id }) {
+                    Ok(()) => wal.note_acked(),
+                    Err(e) => tracing::error!(id, error = %e, "tuple-space: mirror ack not logged"),
+                }
             }
             true
         } else {
@@ -728,14 +749,6 @@ impl TupleStore {
         out
     }
 
-    pub(crate) fn inflight_snapshot(&self) -> Vec<(u64, Inflight)> {
-        self.inflight
-            .lock()
-            .iter()
-            .map(|(k, v)| (*k, v.clone()))
-            .collect()
-    }
-
     pub(crate) fn stage_states(&self) -> Vec<(Arc<str>, Arc<StageState>)> {
         let map = self.stages.pin();
         map.iter()
@@ -753,44 +766,12 @@ impl TupleStore {
         self.wal.as_ref().is_some_and(WalWriter::wants_compaction)
     }
 
-    /// Rewrites the WAL to contain only live items (queued + in-flight) and
-    /// atomically swaps it in. Holds the WAL lock for the duration; appends
-    /// block but the in-memory hot path does not.
+    /// Rewrites the WAL to contain only live items (queued + in-flight), folded from
+    /// the log itself, and atomically swaps it in. Holds the WAL lock for the duration
+    /// and no other; appends block but the in-memory hot path does not.
     pub(crate) fn compact_now(&self) -> io::Result<()> {
         let Some(wal) = &self.wal else { return Ok(()) };
-        wal.compact(|| {
-            let mut live: Vec<Record> = Vec::new();
-            for (name, state) in self.stage_states() {
-                let g = state.inner.lock();
-                for (id, payload, _) in &g.entries {
-                    live.push(Record::Put {
-                        id: *id,
-                        stage: Arc::clone(&name),
-                        payload: payload.clone(),
-                        key: None,
-                    });
-                }
-                // Keyed queued items are preserved under their key (M13 / G1b).
-                for (key, (id, payload, _)) in &g.keyed_entries {
-                    live.push(Record::Put {
-                        id: *id,
-                        stage: Arc::clone(&name),
-                        payload: payload.clone(),
-                        key: Some(Arc::clone(key)),
-                    });
-                }
-            }
-            for (id, item) in self.inflight_snapshot() {
-                live.push(Record::Put {
-                    id,
-                    stage: Arc::clone(&item.stage),
-                    payload: item.payload.clone(),
-                    key: item.key.clone(),
-                });
-                live.push(Record::Take { id, taken_at_ms: item.taken_at_ms });
-            }
-            live
-        })
+        wal.compact()
     }
 
     /// `(epoch, head)` of the WAL, or `(0, 0)` for a transient store.
@@ -867,6 +848,47 @@ impl TupleStore {
         }
     }
 
+    /// One maintenance pass: the periodic sync, then a compaction when one is wanted.
+    /// Each step runs whatever the other did: a failing sync must not keep a poisoned writer from its
+    /// repair. The first error is returned.
+    pub(crate) fn maintenance_tick(&self, force: bool) -> io::Result<()> {
+        let synced = self.checkpoint_if_due(force);
+        let compacted = if self.wants_compaction() { self.compact_now() } else { Ok(()) };
+        synced.and(compacted)
+    }
+
+    /// Test seams over the WAL: inject the next append's failure; make every compaction / sync fail
+    /// while set; read the poison and the terminal-record count.
+    #[cfg(test)]
+    pub(crate) fn inject_append_fault(&self) {
+        self.wal.as_ref().unwrap().fault.store(true, Ordering::SeqCst);
+    }
+    #[cfg(test)]
+    pub(crate) fn set_compact_fault(&self, on: bool) {
+        self.wal.as_ref().unwrap().compact_fault.store(on, Ordering::SeqCst);
+    }
+    #[cfg(test)]
+    pub(crate) fn set_sync_fault(&self, on: bool) {
+        self.wal.as_ref().unwrap().sync_fault.store(on, Ordering::SeqCst);
+    }
+    /// True while the WAL refuses appends (poisoned by a failed write, until a compaction repairs
+    /// it). `false` for a transient store.
+    pub(crate) fn wal_refusing(&self) -> bool {
+        self.wal.as_ref().is_some_and(|w| w.inner.lock().poison.is_some())
+    }
+    #[cfg(test)]
+    pub(crate) fn wal_poisoned(&self) -> bool {
+        self.wal_refusing()
+    }
+    #[cfg(test)]
+    pub(crate) fn set_post_rename_fault(&self, on: bool) {
+        self.wal.as_ref().unwrap().post_rename_fault.store(on, Ordering::SeqCst);
+    }
+    #[cfg(test)]
+    pub(crate) fn wal_acked_count(&self) -> u64 {
+        self.wal.as_ref().unwrap().inner.lock().acked
+    }
+
     /// Fsync the WAL when the ops threshold is reached, or unconditionally
     /// when `force` is set (periodic 1 s safety sync, shutdown). Cheap no-op
     /// when nothing is pending.
@@ -898,6 +920,9 @@ const WAL_MAGIC: &[u8; 6] = b"MTSWAL";
 const WAL_VERSION: u16 = 2;
 const PREV_WAL_VERSION: u16 = 1;
 const WAL_HEADER_LEN: u64 = 8; // magic + u16 LE version
+
+/// The back-off ceiling for a failing compaction, in maintenance ticks: 50 × 200 ms ≈ 10 s.
+const MAX_COMPACTION_SKIP: u32 = 50;
 
 fn wal_header() -> [u8; WAL_HEADER_LEN as usize] {
     let mut h = [0u8; WAL_HEADER_LEN as usize];
@@ -1056,6 +1081,16 @@ impl Record {
 struct WalInner {
     file: File,
     path: PathBuf,
+    /// `Some(reason)` after a failed append: part of a frame may be on disk, so the file's end is
+    /// unknown and nothing may be appended behind it (row C, mirroring the core WAL's `WriterState`).
+    /// Every append is refused by name until a compaction rewrites the file from the live state —
+    /// or a reopen truncates the torn tail.
+    poison: Option<String>,
+    /// Consecutive failed compactions, and the `wants_compaction` calls still to decline before the
+    /// next attempt — a compaction that keeps failing (a repair or not) backs off (2, 4 … up to
+    /// `MAX_COMPACTION_SKIP` ticks) rather than rereading the whole log on every tick.
+    repair_failures: u32,
+    repair_skip: u32,
     file_len: u64,
     ops_since_sync: u64,
     /// Live put-side records (Put + the new half of Complete).
@@ -1071,6 +1106,36 @@ pub(crate) struct WalWriter {
     inner: Mutex<WalInner>,
     checkpoint_every: u64,
     file_len_shadow: AtomicU64,
+    /// One owner per WAL file: the core's lock on `<wal>.lock`, held for the writer's lifetime.
+    _lock: mycelium::OwnershipLock,
+    /// Test seam: when set, the next append writes part of its frame and fails — the shape a full
+    /// disk or a pulled cable produces, which the production path cannot be made to produce on demand.
+    #[cfg(test)]
+    fault: std::sync::atomic::AtomicBool,
+    /// Test seams: while set, every compaction / every sync fails.
+    #[cfg(test)]
+    compact_fault: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    sync_fault: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    post_rename_fault: std::sync::atomic::AtomicBool,
+}
+
+// Test seam: the storage steps compaction takes, in order, on this thread (compaction is synchronous,
+// so the test that runs it reads its own trace). Production records nothing.
+#[cfg(test)]
+thread_local! {
+    static FS_TRACE: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+thread_local! {
+    static COMPACT_BETWEEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn fs_trace(_op: &'static str) {
+    #[cfg(test)]
+    FS_TRACE.with(|t| t.borrow_mut().push(_op));
 }
 
 impl WalWriter {
@@ -1087,6 +1152,9 @@ impl WalWriter {
         {
             std::fs::create_dir_all(parent)?;
         }
+        // Ownership first, repair second, writes last — the core journal's order. A second store on
+        // this path, in this process or another, is refused with `WouldBlock` naming the file.
+        let lock = mycelium::OwnershipLock::acquire(path)?;
         let mut file = OpenOptions::new()
             .read(true)
             .create(true)
@@ -1134,52 +1202,31 @@ impl WalWriter {
             }
         }
 
-        struct ItemState {
-            stage: Arc<str>,
-            payload: Bytes,
-            acked: bool,
-            key: Option<Arc<str>>,
-        }
-        let mut items: BTreeMap<u64, ItemState> = BTreeMap::new();
-        let mut total = 0u64;
-        let mut acked = 0u64;
-        let mut offset = WAL_HEADER_LEN as usize;
-        while offset < data.len() {
-            match Record::decode(&data[offset..]) {
-                None => break, // truncated tail from a mid-append crash
-                Some((rec, consumed)) => {
-                    offset += consumed;
-                    match rec {
-                        Record::Put { id, stage, payload, key } => {
-                            total += 1;
-                            items.insert(id, ItemState { stage, payload, acked: false, key });
-                        }
-                        // Take alone never terminates an item: taken-but-unacked
-                        // re-queues as abandoned.
-                        Record::Take { .. } => {}
-                        Record::Ack { id } => {
-                            acked += 1;
-                            if let Some(it) = items.get_mut(&id) {
-                                it.acked = true;
-                            }
-                        }
-                        Record::Complete { old_id, new_id, stage, payload, key } => {
-                            acked += 1;
-                            total += 1;
-                            if let Some(it) = items.get_mut(&old_id) {
-                                it.acked = true;
-                            }
-                            items.insert(new_id, ItemState { stage, payload, acked: false, key });
-                        }
-                    }
-                }
-            }
-        }
+        let Folded { items, total, acked, end: offset, high_water } = fold_wal(&data).map_err(|offset| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} holds a corrupt record at byte {offset} with data after it; refusing to \
+                     open (the records after it cannot be trusted, and truncating would discard \
+                     them silently). The file is untouched: move it aside to start empty, or \
+                     restore it",
+                    path.display()
+                ),
+            )
+        })?;
         if offset < data.len() {
-            // Drop the corrupt/truncated tail so future appends start clean.
+            // Drop the torn tail so the next append lands where every reader will find it, and make
+            // the truncation as durable as the file (a crash must not resurrect the torn bytes).
             file.set_len(offset as u64)?;
+            file.sync_all()?;
+            fsync_parent(path)?;
+            tracing::warn!(
+                wal = %path.display(),
+                dropped_bytes = data.len() - offset,
+                "tuple-space: truncated a torn final record left by a crash mid-append"
+            );
         }
-        let max_id = items.keys().next_back().copied();
+        let max_id = high_water;
         let live: Vec<(u64, Arc<str>, Bytes, Option<Arc<str>>)> = items
             .into_iter()
             .filter(|(_, it)| !it.acked)
@@ -1190,6 +1237,9 @@ impl WalWriter {
             inner: Mutex::new(WalInner {
                 file,
                 path: path.to_path_buf(),
+                poison: None,
+                repair_failures: 0,
+                repair_skip: 0,
                 file_len,
                 ops_since_sync: 0,
                 total,
@@ -1198,6 +1248,15 @@ impl WalWriter {
             }),
             checkpoint_every,
             file_len_shadow: AtomicU64::new(file_len),
+            _lock: lock,
+            #[cfg(test)]
+            fault: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            compact_fault: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            sync_fault: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            post_rename_fault: std::sync::atomic::AtomicBool::new(false),
         };
         Ok((writer, live, max_id))
     }
@@ -1206,7 +1265,31 @@ impl WalWriter {
         let mut buf = Vec::with_capacity(64);
         rec.encode(&mut buf);
         let mut g = self.inner.lock();
-        g.file.write_all(&buf).map_err(TupleError::Io)?;
+        if let Some(reason) = &g.poison {
+            return Err(TupleError::Io(io::Error::other(format!(
+                "the tuple-space WAL refuses appends after a failed write ({reason}) until a compaction \
+                 rewrites it or a reopen truncates the torn tail"
+            ))));
+        }
+        #[cfg(test)]
+        let written = if self.fault.swap(false, Ordering::SeqCst) {
+            let _ = g.file.write_all(&buf[..buf.len().min(5)]);
+            Err(io::Error::other("injected write failure after a partial frame"))
+        } else {
+            g.file.write_all(&buf)
+        };
+        #[cfg(not(test))]
+        let written = g.file.write_all(&buf);
+        if let Err(e) = written {
+            // Part of the frame may be on disk; nothing may follow it.
+            tracing::error!(
+                error = %e,
+                "tuple-space: a WAL append failed; every later append is refused until a compaction \
+                 rewrites the log (the next maintenance tick tries one)"
+            );
+            g.poison = Some(e.to_string());
+            return Err(TupleError::Io(e));
+        }
         g.file_len += buf.len() as u64;
         g.ops_since_sync += 1;
         if matches!(rec, Record::Put { .. } | Record::Complete { .. }) {
@@ -1221,8 +1304,14 @@ impl WalWriter {
     }
 
     fn wants_compaction(&self) -> bool {
-        let g = self.inner.lock();
-        g.total > 0 && g.acked * 2 > g.total
+        let mut g = self.inner.lock();
+        // The last compaction failed and the back-off has not run out.
+        if g.repair_skip > 0 {
+            g.repair_skip -= 1;
+            return false;
+        }
+        // A poisoned writer is repaired by the rewrite, so it wants one.
+        g.poison.is_some() || (g.total > 0 && g.acked * 2 > g.total)
     }
 
     fn file_len(&self) -> u64 {
@@ -1232,6 +1321,10 @@ impl WalWriter {
     /// Fsync when the ops threshold is reached, or when `force` is set and
     /// any appends are pending.
     fn sync_if_due(&self, force: bool) -> io::Result<()> {
+        #[cfg(test)]
+        if self.sync_fault.load(Ordering::SeqCst) {
+            return Err(io::Error::other("injected sync failure"));
+        }
         let mut g = self.inner.lock();
         let due = g.ops_since_sync >= self.checkpoint_every
             || (force && g.ops_since_sync > 0);
@@ -1242,13 +1335,79 @@ impl WalWriter {
         Ok(())
     }
 
-    /// Rewrites the log with the records produced by `snapshot`, atomically
-    /// swapping the new file in. `snapshot` runs while the WAL lock is held
-    /// so no append can interleave with the rewrite.
-    fn compact(&self, snapshot: impl FnOnce() -> Vec<Record>) -> io::Result<()> {
-        let mut g = self.inner.lock();
-        let live = snapshot();
-        let tmp_path = g.path.with_extension("compact");
+    /// Rewrites the log to hold only its live items — **folded from the log itself**, under the WAL
+    /// lock, never from memory — and atomically swaps the new file in.
+    ///
+    /// Row C: a write appends to the WAL and then applies to memory, so a compaction that snapshot
+    /// memory could land between the two and rewrite a log without a record whose append had
+    /// already been acknowledged. The log holds every acknowledged record by definition, and no
+    /// append interleaves while the lock is held, so the rewrite loses none. A record applied to
+    /// memory *before* its append (take, ack, requeue) appends to the new file after this returns.
+    /// Only the bytes up to `file_len` are folded, so a poisoned writer's torn frame is left behind.
+    fn compact(&self) -> io::Result<()> {
+        let mut guard = self.inner.lock();
+        let result = self.compact_locked(&mut guard);
+        match &result {
+            Ok(()) => {
+                guard.repair_failures = 0;
+                guard.repair_skip = 0;
+            }
+            Err(e) => {
+                guard.repair_failures = guard.repair_failures.saturating_add(1);
+                guard.repair_skip = (1u32 << guard.repair_failures.min(6)).min(MAX_COMPACTION_SKIP);
+                tracing::warn!(
+                    error = %e,
+                    failures = guard.repair_failures,
+                    poisoned = guard.poison.is_some(),
+                    "tuple-space: the compaction failed; backing off {} ticks",
+                    guard.repair_skip
+                );
+            }
+        }
+        result
+    }
+
+    fn compact_locked(&self, g: &mut WalInner) -> io::Result<()> {
+        #[cfg(test)]
+        if self.compact_fault.load(Ordering::SeqCst) {
+            return Err(io::Error::other("injected compaction failure"));
+        }
+        let mut data = vec![0u8; g.file_len as usize];
+        g.file.seek(SeekFrom::Start(0))?;
+        g.file.read_exact(&mut data)?;
+        let folded = fold_wal(&data).map_err(|offset| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} holds a corrupt record at byte {offset}; compaction refuses to rewrite over it",
+                    g.path.display()
+                ),
+            )
+        })?;
+        let mut live: Vec<Record> = Vec::new();
+        let mut highest_live = None;
+        for (id, it) in folded.items.into_iter().filter(|(_, it)| !it.acked) {
+            live.push(Record::Put { id, stage: it.stage, payload: it.payload, key: it.key });
+            if let Some(taken_at_ms) = it.taken_at_ms {
+                live.push(Record::Take { id, taken_at_ms });
+            }
+            highest_live = Some(id);
+        }
+        // The id high-water mark survives the rewrite (#597 review, finding 7): when the highest id
+        // the log ever held was acked away, a lone `Ack` for it is kept, so the next open fences
+        // `next_id` past it and a restart never reissues an acknowledged id. A lone `Ack` names no
+        // item, so replay — this build's or an older one's — changes nothing else for it.
+        if let Some(hw) = folded.high_water
+            && highest_live.is_none_or(|h| h < hw)
+        {
+            live.push(Record::Ack { id: hw });
+        }
+        // Named after the whole WAL file, so two WALs sharing a stem never share a temp file.
+        let tmp_path = {
+            let mut name = g.path.as_os_str().to_owned();
+            name.push(".compact");
+            PathBuf::from(name)
+        };
         let mut tmp = File::create(&tmp_path)?;
         let mut buf = Vec::new();
         buf.extend_from_slice(&wal_header());
@@ -1260,15 +1419,45 @@ impl WalWriter {
             rec.encode(&mut buf);
         }
         tmp.write_all(&buf)?;
+        fs_trace("tmp.write");
         tmp.sync_data()?;
+        fs_trace("tmp.sync");
         std::fs::rename(&tmp_path, &g.path)?;
-        let file = OpenOptions::new().read(true).append(true).open(&g.path)?;
+        fs_trace("rename");
+        // From here the new log is at `path` and `g.file` is the old, unlinked one: any failure must
+        // poison the writer, or appends would go on landing in a file no restart will read
+        // (#597 re-review, finding 5). A later compaction folds `g.file` — the old file, which holds
+        // every record — and installs again.
+        let path = g.path.clone();
+        let installed = (|| -> io::Result<File> {
+            #[cfg(test)]
+            if self.post_rename_fault.load(Ordering::SeqCst) {
+                return Err(io::Error::other("injected failure after the rename"));
+            }
+            // The rename is durable only once the directory is: without this a power loss can bring
+            // back the old log — the core snapshot's install order (`sync_data → rename → fsync_dir`).
+            fsync_parent(&path)?;
+            fs_trace("dir.sync");
+            OpenOptions::new().read(true).append(true).open(&path)
+        })();
+        let file = match installed {
+            Ok(file) => file,
+            Err(e) => {
+                tracing::error!(error = %e, "tuple-space: compaction failed after its rename; appends are refused until a compaction succeeds");
+                g.poison = Some(format!("compaction failed after its rename: {e}"));
+                return Err(e);
+            }
+        };
         g.file = file;
         g.file_len = buf.len() as u64;
         g.ops_since_sync = 0;
         g.total = total;
         g.acked = 0;
         g.epoch += 1;
+        // The torn frame went with the old file; appends resume behind the rewritten log.
+        if let Some(reason) = g.poison.take() {
+            tracing::info!(%reason, "tuple-space: a compaction rewrote the WAL after a failed append; appends resume");
+        }
         self.file_len_shadow.store(g.file_len, Ordering::Relaxed);
         Ok(())
     }
@@ -1347,6 +1536,132 @@ impl WalWriter {
             done: next >= head,
         })
     }
+}
+
+/// One item's state as the log records it.
+struct ItemState {
+    stage: Arc<str>,
+    payload: Bytes,
+    acked: bool,
+    key: Option<Arc<str>>,
+    /// The latest `Take` for the item, if any (kept by compaction; replay re-queues it regardless).
+    taken_at_ms: Option<u64>,
+}
+
+/// A WAL image folded to its items: what open replays and compaction rewrites.
+struct Folded {
+    items: BTreeMap<u64, ItemState>,
+    /// Put-side records (Put + the new half of Complete).
+    total: u64,
+    /// Terminal records (Ack + the old half of Complete).
+    acked: u64,
+    /// Where the complete records end — short of the image's end only for a torn final frame.
+    end: usize,
+    /// The highest item id any record names, acked or live — what `next_id` is fenced past.
+    high_water: Option<u64>,
+}
+
+/// Fold a whole WAL image (header included) record by record. `Err(offset)` names a corrupt record
+/// with data after it; a torn final frame ends the fold at `end`.
+fn fold_wal(data: &[u8]) -> Result<Folded, usize> {
+    let mut items: BTreeMap<u64, ItemState> = BTreeMap::new();
+    let mut total = 0u64;
+    let mut acked = 0u64;
+    let mut high_water: Option<u64> = None;
+    let mut offset = WAL_HEADER_LEN as usize;
+    while offset < data.len() {
+        match scan_frame(&data[offset..]) {
+            // The image ends inside this frame: a crash mid-append. Nothing in it was acknowledged
+            // (a failed append poisons the writer, so nothing lands behind it).
+            Frame::Torn => break,
+            Frame::Corrupt => return Err(offset),
+            Frame::Record(rec, consumed) => {
+                offset += consumed;
+                let named = match &rec {
+                    Record::Put { id, .. } | Record::Take { id, .. } | Record::Ack { id } => *id,
+                    Record::Complete { old_id, new_id, .. } => (*old_id).max(*new_id),
+                };
+                high_water = high_water.max(Some(named));
+                match rec {
+                    Record::Put { id, stage, payload, key } => {
+                        total += 1;
+                        items.insert(id, ItemState { stage, payload, acked: false, key, taken_at_ms: None });
+                    }
+                    // Take alone never terminates an item: taken-but-unacked re-queues as abandoned.
+                    Record::Take { id, taken_at_ms } => {
+                        if let Some(it) = items.get_mut(&id) {
+                            it.taken_at_ms = Some(taken_at_ms);
+                        }
+                    }
+                    // Counted only when it terminates an item the log holds: the lone `Ack` a
+                    // compaction keeps for the high-water mark is not a terminal record.
+                    Record::Ack { id } => {
+                        if let Some(it) = items.get_mut(&id) {
+                            acked += 1;
+                            it.acked = true;
+                        }
+                    }
+                    Record::Complete { old_id, new_id, stage, payload, key } => {
+                        acked += 1;
+                        total += 1;
+                        if let Some(it) = items.get_mut(&old_id) {
+                            it.acked = true;
+                        }
+                        items.insert(new_id, ItemState { stage, payload, acked: false, key, taken_at_ms: None });
+                    }
+                }
+            }
+        }
+    }
+    Ok(Folded { items, total, acked, end: offset, high_water })
+}
+
+/// What a WAL image holds at a record boundary — the difference between a crash and corruption
+/// (row C, after the core's `WalEnd`).
+enum Frame {
+    /// A whole record, and the bytes it took.
+    Record(Record, usize),
+    /// The image ends inside this record: a crash mid-append. Everything before it is good.
+    Torn,
+    /// A record that is all there and does not decode, or bytes that are not a record at all, with
+    /// data after them. Nothing after it can be trusted — and nothing after it may be truncated away.
+    Corrupt,
+}
+
+fn scan_frame(data: &[u8]) -> Frame {
+    if let Some((rec, n)) = Record::decode(data) {
+        return Frame::Record(rec, n);
+    }
+    if !(REC_PUT..=REC_COMPLETE_KEYED).contains(&data[0]) {
+        // Not the start of any record this build writes. Zeros only (preallocation after a crash)
+        // read as a torn tail, as in the core; anything else is corruption.
+        return if data.iter().any(|b| *b != 0) { Frame::Corrupt } else { Frame::Torn };
+    }
+    // A valid kind byte and nothing but zeros after it: a partial append the filesystem zero-extended
+    // in a crash (#597 review, finding 3) — torn, like the core's zeroed prefix.
+    if data.len() < 5 || data[1..].iter().all(|b| *b == 0) {
+        return Frame::Torn;
+    }
+    let body_len = u32::from_le_bytes(data[1..5].try_into().expect("four length bytes")) as usize;
+    // A length the image cannot supply is a torn tail; a whole body that does not decode is not.
+    // What this cannot see, for want of a checksum: a length prefix corrupted to run past the end of
+    // the file reads as torn; and a torn frame whose missing body was zero-filled can *decode* — a
+    // phantom record (an `Ack` of id 0, a `Put` with a zeroed payload) replayed as if written. That
+    // is why a failed append poisons the writer rather than relying on this scan.
+    if body_len.saturating_add(5) > data.len() { Frame::Torn } else { Frame::Corrupt }
+}
+
+/// Fsync the directory holding `path`, so a rename or a truncation survives a power loss the way
+/// the file's bytes do. Honoured by ext4 / XFS / btrfs; a no-op on non-Unix platforms.
+fn fsync_parent(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        let parent = if parent.as_os_str().is_empty() { Path::new(".") } else { parent };
+        File::open(parent)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 /// Decodes a raw record stream (as served by `wal_read_chunk`) back into
@@ -1945,6 +2260,387 @@ mod tests {
             let store = TupleStore::persistent(&path, 10_000, 500).unwrap();
             assert_eq!(store.depth(Some("s"))[0].depth, 6);
         }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Row C (post-360 hardening): a failed append leaves part of a frame on disk. The writer used
+    /// to carry on, so the next acknowledged put landed *behind* the torn frame, and the next open
+    /// read the torn frame's length over it, called the lot a torn tail and truncated it — an
+    /// acknowledged put silently gone. Every put that returned `Ok` must survive a reopen.
+    #[tokio::test]
+    async fn a_failed_append_never_strands_a_later_acknowledged_put() {
+        let path = temp_wal("failed-append");
+        let mut acked = Vec::new();
+        {
+            let store = TupleStore::persistent(&path, 1, 500).unwrap();
+            acked.push(store.put("s", b("before")).unwrap());
+            store.wal.as_ref().unwrap().fault.store(true, Ordering::SeqCst);
+            assert!(store.put("s", Bytes::from(vec![7u8; 200])).is_err(), "the injected failure is reported");
+            // After the failure, a put either is refused or survives the reopen — never both Ok and lost.
+            if let Ok(id) = store.put("s", b("after")) {
+                acked.push(id);
+            }
+        }
+        let store = TupleStore::persistent(&path, 1, 500)
+            .expect("a torn final frame is a crash's signature: truncated, not refused");
+        let mut got = Vec::new();
+        while let Ok((id, _)) = store.take("s", Duration::from_millis(20)).await {
+            got.push(id);
+        }
+        assert_eq!(got, acked, "every acknowledged put survives the reopen");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Row C: a complete frame that does not decode, with records after it, is corruption — not a
+    /// crash. The open used to stop there and truncate, discarding every later record silently. It
+    /// must refuse by name and leave the file untouched.
+    #[tokio::test]
+    async fn a_corrupt_middle_record_refuses_the_open_and_leaves_the_file() {
+        let path = temp_wal("corrupt-middle");
+        {
+            let store = TupleStore::persistent(&path, 1, 500).unwrap();
+            store.put("s", b("first")).unwrap();
+        }
+        let mut bytes = std::fs::read(&path).unwrap();
+        // A whole frame of an unknown kind, then a good record after it.
+        bytes.push(99);
+        bytes.extend_from_slice(&8u32.to_le_bytes());
+        bytes.extend_from_slice(&[0xAB; 8]);
+        Record::Put { id: 1, stage: Arc::from("s"), payload: b("second"), key: None }.encode(&mut bytes);
+        std::fs::write(&path, &bytes).unwrap();
+        let err = TupleStore::persistent(&path, 1, 500).err().expect("a corrupt middle record refuses the open");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains(&path.display().to_string()), "the refusal names the file: {err}");
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "a refused open leaves the file as it was");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Row C: a write appends to the WAL and *then* applies to memory. A compaction that rewrote the
+    /// log from memory, landing between the two, wrote a log without the record — and the put was
+    /// still acknowledged, so a crash after that compaction lost it. The acknowledged put must
+    /// survive a reopen whatever compaction ran in that window.
+    #[tokio::test]
+    async fn a_compaction_between_append_and_apply_keeps_the_acknowledged_put() {
+        let path = temp_wal("compact-window");
+        let id = {
+            let store = TupleStore::persistent(&path, 1, 500).unwrap();
+            COMPACT_BETWEEN.with(|c| c.set(true));
+            let id = store.put("s", b("in-the-window")).unwrap();
+            assert!(!COMPACT_BETWEEN.with(|c| c.get()), "the compaction ran in the window");
+            id
+        };
+        let store = TupleStore::persistent(&path, 1, 500).unwrap();
+        let got = store.take("s", Duration::from_millis(50)).await.map(|(id, _)| id);
+        assert_eq!(got.ok(), Some(id), "the acknowledged put survives the compaction and the reopen");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 review, finding 7: compaction drops acked records, and open fenced `next_id` from the
+    /// highest id *left*, so a restart reissued an acknowledged id — and a late duplicate ack for the
+    /// old item acked a different one.
+    #[tokio::test]
+    async fn a_restart_never_reuses_an_acked_id() {
+        let path = temp_wal("id-high-water");
+        {
+            let store = TupleStore::persistent(&path, 1, 500).unwrap();
+            for i in 0..3 {
+                store.put("s", Bytes::from(format!("{i}"))).unwrap();
+            }
+            for _ in 0..3 {
+                let (id, _) = store.take("s", Duration::from_millis(50)).await.unwrap();
+                store.ack(id).unwrap();
+            }
+            store.compact_now().unwrap();
+        }
+        let store = TupleStore::persistent(&path, 1, 500).unwrap();
+        assert_eq!(store.put("s", b("next")).unwrap(), 3, "the next id is past every id the log ever held");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 review, finding 3: a valid kind byte followed by zeros is what a crash leaves when the
+    /// filesystem zero-extends a partial append — a torn tail, not corruption.
+    #[tokio::test]
+    async fn a_valid_kind_followed_by_zeros_is_a_torn_tail() {
+        let path = temp_wal("zero-tail");
+        {
+            let store = TupleStore::persistent(&path, 1, 500).unwrap();
+            store.put("s", b("kept")).unwrap();
+        }
+        let mut bytes = std::fs::read(&path).unwrap();
+        let good = bytes.len();
+        bytes.push(REC_PUT);
+        bytes.extend_from_slice(&[0u8; 12]);
+        std::fs::write(&path, &bytes).unwrap();
+        let store = TupleStore::persistent(&path, 1, 500).expect("a zero-filled tail is torn, not corrupt");
+        assert_eq!(store.depth(Some("s"))[0].depth, 1);
+        assert_eq!(std::fs::metadata(&path).unwrap().len() as usize, good, "the torn tail is truncated");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 review, finding 6: a whole frame of a known kind whose body does not decode, with a record
+    /// after it, refuses the open (the unknown-kind case is the other test).
+    #[tokio::test]
+    async fn a_known_kind_whose_body_does_not_decode_refuses_the_open() {
+        let path = temp_wal("bad-body");
+        {
+            let store = TupleStore::persistent(&path, 1, 500).unwrap();
+            store.put("s", b("first")).unwrap();
+        }
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.push(REC_PUT);
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        bytes.extend_from_slice(&[1, 2, 3]);
+        Record::Put { id: 1, stage: Arc::from("s"), payload: b("second"), key: None }.encode(&mut bytes);
+        std::fs::write(&path, &bytes).unwrap();
+        let err = TupleStore::persistent(&path, 1, 500).err().expect("refused");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 review, finding 6: the repair path end to end — a failed append, the refusal after it, a
+    /// compaction, appends resuming, and a reopen holding every acknowledged put.
+    #[tokio::test]
+    async fn a_compaction_repairs_a_poisoned_wal_and_appends_resume() {
+        let path = temp_wal("repair");
+        let (a, c) = {
+            let store = TupleStore::persistent(&path, 1, 500).unwrap();
+            let a = store.put("s", b("a")).unwrap();
+            store.inject_append_fault();
+            assert!(store.put("s", b("lost")).is_err());
+            assert!(store.put("s", b("refused")).is_err(), "poisoned");
+            assert!(store.wants_compaction(), "a poisoned writer asks for the repair");
+            store.compact_now().unwrap();
+            assert!(!store.wal_poisoned());
+            let c = store.put("s", b("c")).unwrap();
+            (a, c)
+        };
+        let store = TupleStore::persistent(&path, 1, 500).unwrap();
+        let mut got = Vec::new();
+        while let Ok((id, _)) = store.take("s", Duration::from_millis(20)).await {
+            got.push(id);
+        }
+        assert_eq!(got, vec![a, c]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 review, finding 6: a memory-first write (an ack) racing a compaction — the compaction runs
+    /// after the in-memory removal and before the WAL append — is not lost: the ack lands in the
+    /// rewritten log.
+    #[tokio::test]
+    async fn an_ack_racing_a_compaction_is_kept() {
+        let path = temp_wal("ack-window");
+        {
+            let store = TupleStore::persistent(&path, 1, 500).unwrap();
+            store.put("s", b("x")).unwrap();
+            let (id, _) = store.take("s", Duration::from_millis(50)).await.unwrap();
+            COMPACT_BETWEEN.with(|c| c.set(true));
+            store.ack(id).unwrap();
+            assert!(!COMPACT_BETWEEN.with(|c| c.get()), "the compaction ran in the window");
+        }
+        let store = TupleStore::persistent(&path, 1, 500).unwrap();
+        assert!(store.depth(Some("s")).iter().all(|d| d.depth == 0), "the acked item does not come back");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 review, finding 1: a mirror's `remove_queued` dropped the append's result and counted the
+    /// ack anyway, so the writer's accounting claimed a terminal record the log never received.
+    #[tokio::test]
+    async fn a_refused_mirror_ack_is_not_counted() {
+        let path = temp_wal("mirror-ack");
+        let store = TupleStore::persistent(&path, 1, 500).unwrap();
+        store.put_with_id("s", 5, b("x"), None).unwrap();
+        store.inject_append_fault();
+        assert!(store.remove_queued("s", 5));
+        assert_eq!(store.wal_acked_count(), 0, "a refused ack record is not counted");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 review, finding 4: a repair that keeps failing reread the whole log on every tick. It
+    /// backs off.
+    #[tokio::test]
+    async fn a_failing_repair_backs_off() {
+        let path = temp_wal("repair-backoff");
+        let store = TupleStore::persistent(&path, 1, 500).unwrap();
+        store.inject_append_fault();
+        assert!(store.put("s", b("x")).is_err());
+        store.set_compact_fault(true);
+        let mut attempts = 0;
+        for _ in 0..20 {
+            if store.wants_compaction() {
+                attempts += 1;
+                assert!(store.compact_now().is_err());
+            }
+        }
+        assert!(attempts <= 5, "{attempts} attempts in 20 ticks");
+        store.set_compact_fault(false);
+        let mut repaired = false;
+        for _ in 0..200 {
+            store.maintenance_tick(false).ok();
+            if !store.wal_poisoned() {
+                repaired = true;
+                break;
+            }
+        }
+        assert!(repaired, "the back-off ends: a later tick repairs");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 review, finding 4: the maintenance tick returned at a failed sync before it reached the
+    /// repair, so a disk that fails syncs kept the writer poisoned.
+    #[tokio::test]
+    async fn the_repair_runs_even_when_the_sync_fails() {
+        let path = temp_wal("repair-sync-fails");
+        let store = TupleStore::persistent(&path, 1, 500).unwrap();
+        store.inject_append_fault();
+        assert!(store.put("s", b("x")).is_err());
+        store.set_sync_fault(true);
+        assert!(store.maintenance_tick(true).is_err(), "the sync failure is still reported");
+        assert!(!store.wal_poisoned(), "and the repair ran");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 review, finding 5: the compaction temp file was named by replacing the WAL's extension, so
+    /// two WALs sharing a stem (`x.a`, `x.b`) shared one temp path outside either's ownership lock.
+    #[tokio::test]
+    async fn the_compaction_temp_file_is_named_after_the_whole_wal_file() {
+        let dir = std::env::temp_dir().join(format!("mts-stem-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Occupy the stem-derived name: a directory there makes a temp file of that name impossible.
+        std::fs::create_dir_all(dir.join("x.compact")).unwrap();
+        let store = TupleStore::persistent(&dir.join("x.a"), 1, 500).unwrap();
+        store.put("s", b("x")).unwrap();
+        store.compact_now().expect("the temp path is the WAL's own, not its stem's");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #597 re-review, finding 5: a compaction failing *after* its rename left the writer appending to
+    /// the old, unlinked file — every later acknowledged record gone at restart — and unpoisoned.
+    #[tokio::test]
+    async fn a_failure_after_the_rename_poisons_the_writer() {
+        let path = temp_wal("post-rename");
+        let (a, c) = {
+            let store = TupleStore::persistent(&path, 1, 500).unwrap();
+            let a = store.put("s", b("a")).unwrap();
+            store.set_post_rename_fault(true);
+            assert!(store.compact_now().is_err());
+            assert!(store.wal_poisoned(), "an error after the rename poisons the writer");
+            assert!(store.put("s", b("refused")).is_err());
+            store.set_post_rename_fault(false);
+            store.compact_now().unwrap();
+            let c = store.put("s", b("c")).unwrap();
+            (a, c)
+        };
+        let store = TupleStore::persistent(&path, 1, 500).unwrap();
+        let mut got = Vec::new();
+        while let Ok((id, _)) = store.take("s", Duration::from_millis(20)).await {
+            got.push(id);
+        }
+        assert_eq!(got, vec![a, c]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 re-review, finding 4: a compaction failing on an *unpoisoned* writer was retried every
+    /// tick, rereading the whole log each time. It backs off too.
+    #[tokio::test]
+    async fn a_failing_compaction_backs_off_even_when_not_poisoned() {
+        let path = temp_wal("unpoisoned-backoff");
+        let store = TupleStore::persistent(&path, 1, 500).unwrap();
+        for _ in 0..2 {
+            store.put("s", b("x")).unwrap();
+            let (id, _) = store.take("s", Duration::from_millis(50)).await.unwrap();
+            store.ack(id).unwrap();
+        }
+        store.set_compact_fault(true);
+        let mut attempts = 0;
+        for _ in 0..20 {
+            if store.wants_compaction() {
+                attempts += 1;
+                assert!(store.compact_now().is_err());
+            }
+        }
+        assert!(attempts <= 5, "{attempts} attempts in 20 ticks");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 re-review, finding 4: the back-off is capped near ten seconds of ticks (200 ms each), not
+    /// left to grow to a minute of refused appends.
+    #[tokio::test]
+    async fn the_repair_back_off_is_capped_near_ten_seconds() {
+        let path = temp_wal("backoff-cap");
+        let store = TupleStore::persistent(&path, 1, 500).unwrap();
+        store.inject_append_fault();
+        assert!(store.put("s", b("x")).is_err());
+        store.set_compact_fault(true);
+        let mut last = None;
+        let mut widest = 0;
+        for tick in 0..600u32 {
+            if store.wants_compaction() {
+                let _ = store.compact_now();
+                if let Some(prev) = last {
+                    widest = widest.max(tick - prev);
+                }
+                last = Some(tick);
+            }
+        }
+        assert!(widest <= 51, "{widest} ticks between repair attempts");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 re-review, finding 7: the id high-water mark across two compactions and restarts.
+    #[tokio::test]
+    async fn the_high_water_mark_survives_two_compactions_and_a_restart() {
+        let path = temp_wal("hw-twice");
+        {
+            let store = TupleStore::persistent(&path, 1, 500).unwrap();
+            for _ in 0..3 {
+                store.put("s", b("x")).unwrap();
+                let (id, _) = store.take("s", Duration::from_millis(50)).await.unwrap();
+                store.ack(id).unwrap();
+            }
+            store.compact_now().unwrap();
+        }
+        {
+            let store = TupleStore::persistent(&path, 1, 500).unwrap();
+            assert_eq!(store.put("s", b("y")).unwrap(), 3);
+            let (id, _) = store.take("s", Duration::from_millis(50)).await.unwrap();
+            store.ack(id).unwrap();
+            store.compact_now().unwrap();
+            store.compact_now().unwrap();
+        }
+        let store = TupleStore::persistent(&path, 1, 500).unwrap();
+        assert_eq!(store.put("s", b("z")).unwrap(), 4, "past both compactions and both restarts");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Row C: one owner per WAL file. Two stores on one path used to replay, append and compact the
+    /// same file, each over the other.
+    #[tokio::test]
+    async fn a_second_owner_of_the_wal_is_refused() {
+        let path = temp_wal("second-owner");
+        let first = TupleStore::persistent(&path, 1, 500).unwrap();
+        let err = TupleStore::persistent(&path, 1, 500).err().expect("a second owner is refused");
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock, "{err}");
+        drop(first);
+        TupleStore::persistent(&path, 1, 500).expect("the lock is released with its owner");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Row C: compaction installs its file the way the core installs a snapshot — the temp file's
+    /// bytes synced, renamed into place, then the **directory** synced, without which the rename
+    /// (and so the compaction) may not survive a power loss.
+    #[tokio::test]
+    async fn compaction_syncs_the_directory_after_the_rename() {
+        let path = temp_wal("compact-durable");
+        let store = TupleStore::persistent(&path, 1, 500).unwrap();
+        store.put("s", b("x")).unwrap();
+        FS_TRACE.with(|t| t.borrow_mut().clear());
+        store.compact_now().unwrap();
+        let trace = FS_TRACE.with(|t| t.borrow().clone());
+        let pos = |op: &str| trace.iter().position(|o| *o == op).unwrap_or_else(|| panic!("no {op} in {trace:?}"));
+        assert!(pos("tmp.write") < pos("tmp.sync"), "{trace:?}");
+        assert!(pos("tmp.sync") < pos("rename"), "{trace:?}");
+        assert!(pos("rename") < pos("dir.sync"), "the directory sync makes the rename durable: {trace:?}");
         let _ = std::fs::remove_file(&path);
     }
 
