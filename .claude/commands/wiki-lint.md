@@ -30,7 +30,11 @@ For every wiki-page claim that cites code, confirm the code still says it. Minim
   from the field grep (the 2026-07-02 lint found `SenderLog` exactly this way). Diff both
   against the table's rows — grouped rows list every field name, so the diff is by name.
   Any undeclared site = a finding (this drift shipped once — analysis Run 28, calibration
-  ledger 2026-07-02).
+  ledger 2026-07-02). **And read the acquisition sites of every row that makes a behavioural claim** —
+  *held across X*, *released before Y*, *never nested with row N*, *single-flight* — and diff the table's
+  prose (lock flavours, sanctioned `tokio::sync` exceptions) against its own Type column: row 17 claimed its
+  write guard was held across the JWKS fetch for single-flight, and the code had fetched before locking since
+  the row was written, through every name-only pass (ledger 2026-10-10).
 - **Watch-channel RMW sweep** (the `borrow()`+`send()` lost-update family —
   [lock-free-and-atomics](docs/wiki/dev/concurrency/lock-free-and-atomics.md) rule: mutate watch
   state only inside `send_modify`/`send_if_modified`): grep the workspace for watch senders read
@@ -68,7 +72,13 @@ For every wiki-page claim that cites code, confirm the code still says it. Minim
   `kv_set`/`publish_*` call sites, incl. companions) and confirm every live prefix has a
   row. The 2026-07-07 lint found NINE missing (`svc/ log/ clog/ lock/ prompts/ skills/
   installable/ comp/ wiki/`) — the front-door reserved list had inherited the same gap
-  because it was only ever diffed against this table, not against code.
+  because it was only ever diffed against this table, not against code. **Enumerate every
+  slash-bearing `&str` constant** in production code across all crates (`const X: &str = "seg/…"`,
+  whatever the constant's name — `_KEY`, `_PREFIX`, `_NS` alike) plus the `format!("seg/…")` keys at write
+  sites, and **classify each**: a table row, or a non-key (a replay-seam stream, a channel name, a schema tag such
+  as `ae/journal`, `knowledge/records`, `mycelium.*/1`). An unclassified constant is the finding — the 10-09 pass
+  counted only `kv_ns`/`consensus_ns` and missed four governor keys (`sys/config/`, `sys/govern/…`) that had no
+  row since June, the fifth miss in this area (ledger 2026-10-10).
 - **Endpoint/feature lists** (`docs/wiki/dev/operations.md`): spot-check against
   `src/agent/http.rs` routes and `Cargo.toml` features. **And every URL a runbook or guide chapter tells an
   operator to call** — `grep -rnoE '(GET|POST|DELETE|PUT) /[A-Za-z0-9_/{}%.:-]+' docs/operations docs/guide
@@ -78,7 +88,9 @@ For every wiki-page claim that cites code, confirm the code still says it. Minim
   ledger 2026-09-06). When in doubt, probe it with a test — the router, not the doc, is canon. **A brace list of
   routes (`govern/{timing,tuning,…}`) is a set**: diff it against every router route with that prefix
   (`grep '.route("/govern/' src/agent/http.rs`), not member by member — checking each listed member exists let
-  `/profile` go missing from 2026-09-18 and `/topology-override` from its first day (ledger 2026-10-07).
+  `/profile` go missing from 2026-09-18 and `/topology-override` from its first day (ledger 2026-10-07). A brace
+  list under a **companion** prefix (`/gateway/reason/…`, `/gateway/wiki/…`) is diffed against that companion's
+  router (`mycelium-<crate>/src/http.rs`) — the reason façade sat off its list for five weeks (ledger 2026-10-10).
 - **CI-gate list** (`docs/wiki/dev/testing/testing.md`): diff the documented gate block against the
   *actual* `run:` steps in `.github/workflows/*.yml`. A page that lists the *clippy* of a crate's
   tests can imply coverage CI doesn't provide — `mycelium-core`'s whole suite was clippy-compiled but
@@ -101,11 +113,21 @@ For every wiki-page claim that cites code, confirm the code still says it. Minim
   sub-handle names; the `Cargo.toml` feature flags — **as a set**: derive the `[features]` names from the
   manifest and confirm each is named on the page or deliberately omitted (`default`, `fuzz-internals`'s
   warning); checking only that the *named* flags exist let `compliance` go unmentioned from 2.3.0 to
-  2.25.0 (ledger 2026-10-06); **the install snippet's `tag = "…"` pins are the newest tag
+  2.25.0 (ledger 2026-10-06) — and the same set diff runs on **every** page that enumerates the features
+  (`dev/operations.md` § Feature gates omitted `sim`, ledger 2026-10-10); **the install snippet's `tag = "…"` pins are the newest tag
   on each line** (`git tag -l 'v*' | sort -V | tail -1`; `git tag -l 'mycelium-<crate>-*'`). A mismatch = a finding (fix the doc) —
   and since 2026-09-26 the pin is also a **release-runbook anchor** (`RELEASING.md` §6), so a pin found stale here means
   a release skipped that step, which is a second finding to record. The
   *linking* front-doors (the FAQ's routing tables) need only the dead-link check in §3.
+
+- **Closed-set claims are enumerations.** A sentence of the form *the one / the only / every / no other* on
+  `runtime-invariants.md`, `lock-order.md` or `security.md` closes over a class of code sites: grep the code for
+  every site of that class and diff — `runtime-invariants.md` called #162 *the one legitimate termination* for two
+  weeks after C5 added the removed-member drop at four sites in `connection.rs` (ledger 2026-10-10). And where a page
+  restates a code list that implements a property (*self-owned*, *protected*, *reserved*), diff the list against
+  every declaration of that property in the code too, not only against the page: the tripwire's
+  `SELF_OWNED_SYS_PREFIXES` omits `sys/consensus-accepted/`, which its own `kv_ns` doc calls strictly self-owned —
+  a code gap to report, not a page edit.
 
 Numbers the wiki deliberately does NOT pin (test counts, dep counts) are exempt — the
 convention is "run the suite for the live total".
@@ -116,8 +138,9 @@ Pages contradicted by work merged since the last lint: check each section's `.lo
 against `git log --oneline --since=<last lint>` — merged PRs with durable knowledge but no
 ingest entry indicate a stale or missing page. ✅-shipped items still described as
 pending/planned = a finding. **Every "unreleased" marker** on a live page (`grep -rn "unreleased" docs/wiki docs/guide
-docs/operations docs/design`, minus `.log/` and `history.md`'s dated section headings, which are records like a `.log` entry) is checked against the PR it names: `git tag --contains <merge sha>`
-non-empty means it shipped, and the marker is a finding — two survived v2.26.0's release (ledger 2026-10-07).
+docs/operations docs/design docs/plans`, minus `.log/` and `history.md`'s dated section headings, which are records like a `.log` entry) is checked against the PR it names: `git tag --contains <merge sha>`
+non-empty means it shipped, and the marker is a finding — two survived v2.26.0's release (ledger 2026-10-07). `docs/plans`
+was missing from this grep until 2026-10-10, though a swept root since 2026-09-24 (ledger 2026-10-10).
 
 ## 3. Orphans & dead links
 

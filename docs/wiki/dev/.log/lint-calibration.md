@@ -376,3 +376,60 @@ Entry format:
   the claim is **scoped**, not the sweep extended — "workspace-wide" now means the library crates on the page, in
   CLAUDE.md and on the proof page; demo state is outside the claim and outside the lint by statement.
 
+
+- 2026-10-10 (full pass, with the 360 review's findings): **§1 lock-order table — a row's behavioural claim never
+  checked, false since the row was written.** Row 17 said `OidcVerifier::cache`'s write guard is *deliberately held
+  across the JWKS fetch so refresh is single-flight*, and justified the one sanctioned `tokio::sync` lock with it;
+  `cached_keys` (`src/agent/oidc.rs:178-196`) has fetched before taking the guard since WS4 (`6baa0521`). Every
+  lock-order pass since the wiki was adopted diffed the table's *field names* against the grep and declared it
+  complete; none read an acquisition site. The same paragraph's scope notes contradicted the table itself ("every
+  companion lock is a `parking_lot` leaf" beside `std::sync` rows 20–23 and 32–36; "`tokio::sync` banned except row
+  17" beside row 37's `tokio::sync::Mutex`). Found by the 360 review (2026-10-09); confirmed and fixed this pass —
+  the page was wrong, not the code (nothing relies on single-flight for correctness; whether to add it is a design
+  decision, reported). Sharpening (folded into §1): a row that makes a behavioural claim — *held across X*,
+  *released before Y*, *never nested with row N*, *single-flight* — is checked at its acquisition sites, and the
+  table's prose (flavour, sanctioned exceptions) is diffed against the table's own Type column.
+- 2026-10-10 (same): **§1 lock-order completeness — `examples/coop` outside the sweep.** Seven demo locks the
+  "full workspace" claim covered and no grep reached (the 360 review). Recorded by #582's own ledger entry (pending
+  merge), which scopes the claim rather than extending the sweep; not duplicated here.
+- 2026-10-10 (same): **§1 — a closed-set claim on an invariants page, never enumerated.** `runtime-invariants.md`
+  called #162's self-target drop *"the one legitimate termination"* while `mycelium-core/src/connection.rs` drops a
+  removed member's frames (`is_node_removed` / `is_hash_removed`, four sites) since C5 (#421, 2026-09-26) — through
+  five passes (10-02 → 10-09) whose identifier sweep found every name on the page present. A sentence of the form
+  *the one / the only / every / no other* is an enumeration of code sites, and nothing diffed it. Found by the 360
+  review; fixed in #582 (pending merge). Sharpening (folded into §1): for each closed-set claim on
+  `runtime-invariants.md`, `lock-order.md` and `security.md`, grep the code for every site of the class it closes
+  over and diff.
+- 2026-10-10 (same, a scope gap rather than a miss): **§1 — a page checked against a code list, the list never
+  checked against the code's own ownership claims.** `security.md` names the five `SELF_OWNED_SYS_PREFIXES` exactly
+  as `mycelium-core/src/connection.rs:30` does, so every pass called it accurate; but `kv_ns::CONSENSUS_ACCEPTED`'s
+  doc (`signal.rs`) calls `sys/consensus-accepted/{node}/{slot}` *strictly self-owned* and the tripwire does not
+  watch it. The page is right about the code and the code is short of its own contract — reported as a code gap,
+  not patched into the page. Sharpening (folded into §1): where a page restates a code list that implements a
+  property (self-owned, protected, reserved), diff the list against every declaration of that property in the code
+  as well (`grep -n "self-owned" mycelium-core/src/signal.rs`).
+- 2026-10-10: **§1 KV-namespace table — the fifth miss in one area: four governor keys absent since June.**
+  `sys/config/{param}` (`ClusterTuner`, 2026-06-18), `sys/govern/timing`, `sys/govern/fleet` and
+  `sys/govern/membership/{group}` (the governors, 2026-06-18 → 21) had no row in `src/lib.rs`, through every pass
+  since the 2026-07-07 prefix diff — the 10-09 pass counted only `kv_ns` and `consensus_ns` constants, and the
+  07-20 sharpening's `(PREFIX|_NS)` grep catches two of the four (`TIMING_INTENT_KEY` and `GOVERN_FLEET_KEY` are
+  `_KEY`). Found by this pass deriving every `const …: &str = "seg/…"` in production code across all crates.
+  Sharpening (structural, folded into §1): the sweep enumerates **every** slash-bearing `&str` constant and
+  `format!("seg/…")` key in production code and classifies each — a KV row, or a replay-seam stream / channel /
+  schema tag (`ae/journal`, `knowledge/records`, `mycelium.*/1`) that is not a key; an unclassified constant is
+  the finding. Five misses in one area say this belongs in `scripts/check-kv-namespaces.sh` as a gate with a
+  non-key allow-list, as the front-door half became one on 2026-09-24 — recorded as a user decision.
+- 2026-10-10: **§1 feature set — the 10-06 sharpening applied to one page of two.** `dev/operations.md` § Feature
+  gates enumerates the manifest's features and omitted `sim` (added 2.8.0) while saying which test-only features it
+  left out deliberately. The 10-06 rule ("derive the `[features]` set, account for every name") was written for
+  `building-on-mycelium.md` and run only there. Sharpening (folded into §1): every page that enumerates the
+  feature set is diffed — `building-on-mycelium.md` and `dev/operations.md` today.
+- 2026-10-10: **§1 brace-listed routes — a companion router outside the set diff.** `companions.md`'s
+  `/gateway/reason/{blob,trace,route}` omitted the OpenAI façade `/gateway/reason/v1/{chat/completions,models}`
+  (0.6.0, 2026-09-04), through the 10-07 and 10-09 passes that diffed brace lists against `src/agent/http.rs` only.
+  Sharpening (folded into §1): a brace list under a companion prefix is diffed against that companion's router
+  (`mycelium-reason/src/http.rs`, `mycelium-wiki/src/http.rs`, …).
+- 2026-10-10: **§2 "unreleased" sweep — `docs/plans/` not in its roots.** `boundary-h-closure.md` called C2's API
+  *unreleased* two weeks after 2.15.0 shipped it; the 10-07 sharpening's grep named `docs/wiki docs/guide
+  docs/operations docs/design`, although the 2026-09-24 entry had made `docs/plans/` a swept root for §2.
+  Sharpening (folded into §2): the grep includes `docs/plans`.

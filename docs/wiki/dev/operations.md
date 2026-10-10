@@ -104,6 +104,17 @@ Not tracked: `rpc_call` (no task), `scatter_gather` (local JoinSet), per-request
 handlers (semaphore-bounded, visible as `active_bulk_handlers`). Unbounded growth ⇒ suspect
 a per-peer writer not exiting on disconnect.
 
+## Stopping a node (`mycelium::shutdown`, 2.31.0)
+
+The node binary, `mycelium-stem` and the long-running examples stop through one handler,
+`ShutdownSignal` (`src/shutdown.rs` — its module doc is canon): **SIGINT or SIGTERM** (`docker stop`, a pod stop),
+**installed when constructed** — before the bind, awaited after, because a handler registered only when the wait
+begins leaves startup to the default action, which kills — and a **second signal exits at once** with `128 +
+signal` (130 / 143). That forced exit is SIGKILL-equivalent: no destructors, unsynced WAL records lost, on-disk
+state repaired at the next start. **Do not create one in an interactive program** — a handler nobody awaits
+swallows Ctrl-C; the node binary skips it under `-i`. Gates: `tests/shutdown_signal.rs`,
+`mycelium-wasm-host/tests/stem_shutdown.rs`.
+
 ## Feature gates
 
 `cli` (default; tracing-subscriber for binaries) · `gateway` (default; disable for embedded: `default-features = false` — gossip, KV, signals,
@@ -111,7 +122,8 @@ consensus, typed handles all remain) · `consensus` (default; drop for minimal e
 consensus-free node still *forwards* PROPOSE/VOTE/COMMIT) · `tls` · `metrics` · `a2a` ·
 `llm` · `otel` (OTEL span export from `SkillRunner`) · `compliance` (= gateway+tls).
 `mycelium-core` builds standalone (≈48 deps vs ≈140). (`fuzz-internals` / `test-util` are
-test-only, deliberately not listed here.)
+test-only, and `sim` — the replay seams, `mycelium_core::sim_seam` routed through `mycelium-sim` — is for recording
+and replay, never a shipped build; all three deliberately not listed above.)
 
 ## Framing discipline
 

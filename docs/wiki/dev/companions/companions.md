@@ -94,7 +94,8 @@ via wasm-host).
   audit-chain anchoring under `compliance`), ③ **artifact-aware resume** (`require_model` demand half;
   install half is wasm-host's `model_deploy`). Plus a content-addressed **blob tier**
   (`FsBlobStore`/`MeshBlobStore`/`spawn_blob_server`, ≤ 8 MiB v1) + `/gateway/reason/{blob,trace,route}`
-  routes (`route` is the load-aware routing surface, #132). Zero core changes, zero new locks. **Python tier** (separate packages): the
+  routes (`route` is the load-aware routing surface, #132; the OpenAI-compatible façade `/gateway/reason/v1/{chat/completions,models}`
+  joined in 0.6.0, below — `mycelium-reason/src/http.rs` holds the whole set). Zero core changes, zero new locks. **Python tier** (separate packages): the
   **`langgraph-checkpoint-mycelium`** `BaseCheckpointSaver` (index rows in KV `ckpt/`/`ckptw/`,
   payloads in the blob tier, cross-node `StateGraph` resume proven in CI; **0.1.1, 2026-09-05:**
   `alist` selects rows on the async client — a pure window/filter core with sync + async drivers,
