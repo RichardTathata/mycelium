@@ -2569,6 +2569,7 @@ pub(crate) fn consensus_signing_message(bytes: &[u8]) -> Vec<u8> {
 /// first cut answered everything tagged, which dropped a 2.32 acceptor out of every un-upgraded
 /// proposer's rounds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(feature = "tls"), allow(dead_code))] // `Untagged` is only ever verified under `tls`
 pub(crate) enum SignatureForm { Tagged, Untagged }
 
 /// Verifies `sig` over `msg_bytes` against any key in `keys`: the tagged form first, then the

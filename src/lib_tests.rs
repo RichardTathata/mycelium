@@ -8897,6 +8897,7 @@ mod identity_proof_default {
     /// consensus message — bare — which is also what a 2.31 node's identity proof looks like;
     /// with proofs required, neither is a proof any more. Seen failing on the unfixed code: A's
     /// key entered `peer_keys[V]`.
+    #[cfg(feature = "consensus")]
     #[test]
     fn a_signed_consensus_answer_is_not_an_identity_proof() {
         use crate::agent::helpers::{encode_sealed_identity, parse_identity_keys, resolve_identity_record};
@@ -9006,6 +9007,7 @@ mod identity_proof_default {
     /// **The consensus side of the same window.** A payload is signed under its own tag now, and a
     /// bare signature — a 2.31 node's — still verifies for one release, told apart so it can be
     /// counted. A signature under the identity tag, or any other, is neither.
+    #[cfg(feature = "consensus")]
     #[test]
     fn a_consensus_signature_verifies_tagged_first_and_bare_for_one_release() {
         use crate::consensus::{consensus_signing_message, verify_consensus_signature, SignatureForm};
