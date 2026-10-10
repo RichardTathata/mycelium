@@ -190,15 +190,16 @@ pub enum RpcError {
 
 /// Registers a one-shot receiver in `ctx.rpc_pending` and awaits the first
 /// reply signal whose correlation nonce (first 8 bytes of payload, LE) matches
-/// `nonce` and whose sender matches `target`.
+/// `nonce` **and** whose sender is `target` — the reply interceptor claims on
+/// both, so a reply from any other node leaves the registration in place
+/// (counted in `SystemStats::rpc_reply_sender_mismatches`).
 ///
 /// Registration happens synchronously in the first poll — before any yield
 /// point — so it is safe to call `emit_signal` immediately before this
 /// without missing a co-located reply.
 ///
 /// Returns `Some(payload)` with the 8-byte nonce prefix stripped, or `None`
-/// on timeout (including sender mismatch, which is astronomically rare with
-/// 64-bit nonces).
+/// on timeout.
 pub(crate) async fn await_nonce_reply(
     ctx:      &TaskCtx,
     nonce:    u64,
@@ -206,7 +207,7 @@ pub(crate) async fn await_nonce_reply(
     deadline: tokio::time::Instant,
 ) -> Option<Bytes> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    ctx.rpc_pending.lock().unwrap_or_else(|e| e.into_inner()).insert(nonce, tx);
+    ctx.rpc_pending.lock().unwrap_or_else(|e| e.into_inner()).insert(nonce, (target.clone(), tx));
     let result = match tokio::time::timeout_at(deadline, rx).await {
         Ok(Ok(sig)) if sig.sender == *target => Some(sig.payload.slice(8..)),
         _ => None,

@@ -274,13 +274,30 @@ impl RequestPrincipal {
 
 // ── Auth layer → dispatch ────────────────────────────────────────────────────
 
-/// What the gateway auth layer resolved for one HTTP request. Crate-private on purpose: the
-/// only constructors are the auth middleware paths in `http.rs`.
+/// What the gateway auth layer resolved for one HTTP request: the principal and the authority
+/// granted for the request. **Constructed only by the auth middleware in `http.rs`** — the fields
+/// are crate-private, so a companion can read it (axum's `Extension<ResolvedPrincipal>` on a route
+/// merged with `with_http_routes`) and hand it on (`ServiceHandle::rpc_call_as`,
+/// `GossipAgent::gateway_preflight`), never make one up.
 #[cfg(any(feature = "gateway", test))]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ResolvedPrincipal {
+pub struct ResolvedPrincipal {
     pub(crate) principal: String,
     pub(crate) scopes: Vec<String>,
+}
+
+#[cfg(any(feature = "gateway", test))]
+impl ResolvedPrincipal {
+    /// The issuer-qualified principal (`token:{issuer}/{name}`, `oidc:{issuer}/{subject}`, …), or
+    /// [`PRINCIPAL_ANONYMOUS`].
+    pub fn principal(&self) -> &str {
+        &self.principal
+    }
+    /// The scopes granted for this request: the credential's, intersected with what the route
+    /// required.
+    pub fn scopes(&self) -> &[String] {
+        &self.scopes
+    }
 }
 
 #[cfg(any(feature = "gateway", test))]
@@ -339,8 +356,9 @@ fn sender_promises_envelopes(ctx: &TaskCtx, sender: &NodeId) -> bool {
 
 /// Why a gateway dispatch was refused before (or while) reaching the provider.
 #[cfg(any(feature = "gateway", test))]
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum GatewayDispatchError {
+pub enum GatewayDispatchError {
     /// The provider replied nothing in time.
     Rpc(RpcError),
     /// Secure profile, but no caller context reached the dispatch site — a handler outside the
@@ -357,7 +375,7 @@ pub(crate) enum GatewayDispatchError {
 #[cfg(any(feature = "gateway", test))]
 impl GatewayDispatchError {
     /// JSON-RPC error code for the MCP / A2A surfaces.
-    pub(crate) fn json_rpc_code(&self) -> i32 {
+    pub fn json_rpc_code(&self) -> i32 {
         match self {
             GatewayDispatchError::Rpc(_) => -32000,
             GatewayDispatchError::MissingContext => -32020,
@@ -367,7 +385,7 @@ impl GatewayDispatchError {
     }
 
     /// Short machine-readable reason for JSON bodies and metrics.
-    pub(crate) fn reason(&self) -> &'static str {
+    pub fn reason(&self) -> &'static str {
         match self {
             GatewayDispatchError::Rpc(_) => "timeout",
             GatewayDispatchError::MissingContext => "caller_context_missing",
@@ -396,6 +414,9 @@ impl std::fmt::Display for GatewayDispatchError {
         }
     }
 }
+
+#[cfg(any(feature = "gateway", test))]
+impl std::error::Error for GatewayDispatchError {}
 
 /// The one dispatch path for every gateway-originated RPC.
 ///

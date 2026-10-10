@@ -95,6 +95,29 @@ impl ServiceHandle {
         super::rpc::rpc_call_framed(&self.ctx, target, kind.into(), framed, timeout).await
     }
 
+    /// [`rpc_call`](Self::rpc_call) **on a gateway client's behalf** — the one dispatch every
+    /// gateway door uses, for a route a companion mounts with `with_http_routes`.
+    ///
+    /// `caller` is what the auth layer resolved for the HTTP request (axum's
+    /// `Extension<ResolvedPrincipal>`). Under `gateway_caller_profile = secure` the call carries the
+    /// client's signed caller context, so the provider's `request_principal` is
+    /// `Client(<the bearer's principal>)` — never this node; with no context to carry it is refused
+    /// (`GatewayDispatchError::MissingContext`) rather than dispatched as the node. Under `legacy` it
+    /// is a bare frame, as `rpc_call` was before item 7. A protected kind through this path still
+    /// needs [`GossipAgent::gateway_preflight`](crate::GossipAgent::gateway_preflight) first, as
+    /// `/mcp` and `/a2a` run it.
+    #[cfg(feature = "gateway")]
+    pub async fn rpc_call_as(
+        &self,
+        caller:  Option<&super::gateway_caller::ResolvedPrincipal>,
+        target:  NodeId,
+        kind:    impl Into<Arc<str>>,
+        payload: impl Into<Bytes>,
+        timeout: Duration,
+    ) -> Result<Bytes, super::gateway_caller::GatewayDispatchError> {
+        super::gateway_caller::gateway_rpc_call(&self.ctx, caller, target, kind.into(), payload.into(), timeout).await
+    }
+
     /// Sends a reply to an incoming RPC request.
     ///
     /// Echoes the correlation nonce from `request` back to the caller and emits

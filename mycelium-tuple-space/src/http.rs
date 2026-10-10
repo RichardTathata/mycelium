@@ -1,6 +1,8 @@
 //! HTTP gateway endpoints (`gateway` feature): the five tuple operations
-//! under `/gateway/tuple/*` plus the cluster-wide `/api/tuple` monitoring
-//! aggregation. Register with the agent's embedded gateway:
+//! under `/gateway/tuple/*` plus the cluster-wide `/gateway/tuple/overview`
+//! monitoring aggregation (`tuple:read`; it was `/api/tuple`, outside the
+//! gateway's auth boundary and therefore public, until 2.32.0 — the old path
+//! answers 404). Register with the agent's embedded gateway:
 //!
 //! ```rust,ignore
 //! let ts = TupleSpace::new(Arc::clone(&agent), cfg).await?;
@@ -37,7 +39,9 @@ impl TupleSpace {
             .route("/gateway/tuple/complete", post(gw_complete))
             .route("/gateway/tuple/ack", post(gw_ack))
             .route("/gateway/tuple/depth", get(gw_depth))
-            .route("/api/tuple", get(api_tuple))
+            // Under `/gateway/` so the library's bearer-then-scope boundary covers it (`tuple:read`);
+            // mounted at `/api/tuple` it answered without a credential.
+            .route("/gateway/tuple/overview", get(gw_overview))
             .with_state(self)
     }
 }
@@ -218,9 +222,9 @@ async fn gw_depth(
     }
 }
 
-/// Aggregates every `sys/tuple/{node}/{ns}/…` key in the local gossip view
-/// into one cluster-wide monitoring document (all namespaces, all nodes).
-async fn api_tuple(State(ts): State<Arc<TupleSpace>>) -> Response {
+/// `GET /gateway/tuple/overview` — aggregates every `sys/tuple/{node}/{ns}/…` key in the local
+/// gossip view into one cluster-wide monitoring document (all namespaces, all nodes).
+async fn gw_overview(State(ts): State<Arc<TupleSpace>>) -> Response {
     // node → ns → (role, wal_bytes, stage → metric → value, pressure set)
     type StageMap = BTreeMap<String, BTreeMap<String, Value>>;
     #[derive(Default)]

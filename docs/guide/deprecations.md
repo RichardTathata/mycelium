@@ -477,3 +477,50 @@ a refusal read as a commit is the class of bug `ElectorateUnavailable` ended, on
 `/gateway/govern/group` (`govern:write`) for a governed group. A client that elected a leader for a group its
 node had not joined was never electing anything the group's members agreed to.
 
+## 25. The gateway's doors answer only what they were asked by whom (unreleased)
+
+**What changes.**
+- **The signal SSE streams refuse a protected kind.** `GET /signals/{kind}` and `GET /gateway/signal/sse/{kind}`
+  answer `403 {"error": "protected_kind"}` for `mcp.invoke`, `skill.invoke`, `llm.invoke` and anything in
+  `protected_rpc_kinds` — the body the raw routes have sent since 2.15.0. They used to stream every such request's
+  frame (caller envelope, carried mandate, nonce) to any `mesh:read` holder. They refuse `rpc.result` and
+  `bulk.result` the same way: a reply nobody claimed (late, or misrouted) used to stream to them.
+- **`POST /gateway/rpc/respond` answers only a request your own `rpc/serve` stream delivered**: another principal's
+  request, a nonce never streamed, or one older than the gateway's 300 s window is `403 {"error":
+  "unserved_request"}` and nothing is emitted. The first answer is delivered; **a repeat from the same principal is
+  `200 {"ok": true, "duplicate": true}`** and dropped (counted, `/stats` `rpc_respond_duplicates`) — so replicated
+  serve loops under one bearer, which all receive each request, keep running. Any `mesh:serve` holder used to be
+  able to answer any in-flight call by nonce. The 300 s window is the gateway's RPC ceiling: every gateway door
+  waits at most that long (`/gateway/llm/call`'s `timeout_ms` is now clamped to it); an **in-process**
+  `rpc_call` to an SDK-served kind with a longer timeout gets no reply past 300 s. On the mesh side a reply that
+  carries a pending call's nonce from a node the call was not sent to is ignored and counted
+  (`SystemStats::rpc_reply_sender_mismatches`, `/stats`); it used to consume the pending call and time the caller
+  out. The sender is written by the emitter, so this closes the accidental case — a stray or late reply — not a
+  peer that writes the target's id as its sender.
+- **`mycelium-reason` 0.8.0: the façade routes act as the HTTP client.** `POST /gateway/reason/route` and
+  `/gateway/reason/v1/chat/completions` carry the resolved principal to the provider and run the gateway's action
+  preflight; a denial is `403` (`{"error": "policy"}` / OpenAI `permission_error`). Under the secure profile a
+  provider without a caller-context marker at the gateway is failed over rather than called as the node.
+- **An A2A task belongs to the identity that created it.** `tasks/get` and `tasks/cancel` answer only the bearer's
+  principal that sent the task, and a `tasks/send` / `tasks/sendSubscribe` under an id another identity owns is
+  refused — `-32004` — after any federation authorisation and before anything is dispatched (the id is reserved
+  atomically, so two senders racing one new id cannot both run). An anonymous caller's task is answered only on the
+  response (or stream) that created it. Any client used to be able to read or cancel any task by its caller-chosen
+  id. `-32001` (not found) and `-32004` (another identity's) stay distinct: a send under a taken id must be refused
+  anyway, so hiding existence on `get` would buy nothing.
+- **`mycelium-tuple-space`: `GET /api/tuple` is `GET /gateway/tuple/overview`**, behind `tuple:read`; the old path
+  answers 404. It sat outside the gateway's auth boundary and answered without a bearer.
+- **`/gateway/llm/call` and `/gateway/llm/stream` run the action evaluator**: a denial is `403 policy` on `/call`
+  and an in-stream `{"type": "error", "error": "policy"}` on `/stream`. Inert without an evaluator attached.
+
+**Will the compiler tell me?** `SystemStats` gained a field, so an exhaustive struct literal breaks, and an
+exhaustive `match` on `mycelium_reason::RouteError` needs the `Refused` arm; otherwise no — HTTP status codes and
+JSON-RPC error codes.
+
+**Migration.** A reader subscribed to a protected kind should read the decision trace (`mycelium explain`) or the
+evidence journal instead; nothing in the SDKs subscribed to one by default. An SDK agent that serves and responds
+under one bearer (every SDK does) needs nothing — replicas included: the losing replica's answer is accepted as a
+duplicate. One that split serving and responding across two credentials must use one. Alert on
+`rpc_reply_sender_mismatches > 0`: it names a misbehaving or misrouted peer (not every forger — see above). An A2A client that polls
+`tasks/get` sends it under the same bearer as its `tasks/send`; an anonymous one reads the result it was already
+given. A dashboard reading `/api/tuple` reads `/gateway/tuple/overview` with a `tuple:read` bearer.

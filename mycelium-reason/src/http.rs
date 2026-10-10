@@ -38,15 +38,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use axum::Json;
 use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::{Extension, Json};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use serde::Deserialize;
 use serde_json::json;
 
-use mycelium::{CapFilter, GossipAgent};
+use mycelium::{CapFilter, GossipAgent, ResolvedPrincipal};
 
 use crate::blob::{BlobId, BlobMiss, FsBlobStore, MAX_BLOB_BYTES, MeshBlobStore};
 use crate::route::{InferenceRouter, ModelQuery, RouteError, Routed, RouterConfig};
@@ -118,6 +118,10 @@ fn error_json(status: StatusCode, error: &str) -> Response {
     (status, Json(json!({ "error": error }))).into_response()
 }
 
+/// The two routed doors, as they are named in every evidence record they produce.
+const ENFORCEMENT_POINT_ROUTE: &str = "gateway:reason/route";
+const ENFORCEMENT_POINT_CHAT: &str = "gateway:reason/v1/chat/completions";
+
 /// `PUT /gateway/reason/blob` — raw body in, `{"id":"<hex>"}` out. 413 over the ceiling.
 async fn gw_blob_put(State(s): State<ReasonState>, body: bytes::Bytes) -> Response {
     if body.len() > MAX_BLOB_BYTES {
@@ -174,12 +178,21 @@ async fn gw_trace_get(State(s): State<ReasonState>, Path(run_id): Path<String>) 
 /// Success → `200 {"output","model_used","tokens_used","provider":"<node>","attempt"}`.
 /// No live provider → `404 {"error":"no_provider"}`; every candidate failed →
 /// `502 {"error":"exhausted","detail":"<per-node failures>"}`.
-async fn gw_route(State(s): State<ReasonState>, Json(body): Json<RouteBody>) -> Response {
+/// `POST /gateway/reason/route`. The call is routed **for the HTTP client**: the principal the
+/// gateway's auth layer resolved travels into the dispatch (`InferenceRouter::call_as`), so the
+/// provider sees the client as the caller — not this node — and the gateway's action preflight
+/// runs; a refusal is `403 {"error": "policy", …}` with the same `data` `/mcp` sends.
+async fn gw_route(
+    State(s): State<ReasonState>,
+    caller: Option<Extension<ResolvedPrincipal>>,
+    Json(body): Json<RouteBody>,
+) -> Response {
+    let caller = caller.map(|Extension(c)| c);
     let query = ModelQuery::new(body.model);
     // Record a trace only when the caller supplied a run_id (rung 5); otherwise the
     // route is untraced, exactly as before.
     let recorder = body.run_id.map(|id| TraceRecorder::new(Arc::clone(&s.agent), id));
-    match s.router.call(&query, &body.input, &body.context, recorder.as_ref()).await {
+    match s.router.call_as(caller.as_ref(), ENFORCEMENT_POINT_ROUTE, &query, &body.input, &body.context, recorder.as_ref()).await {
         Ok(routed) => Json(json!({
             "output": routed.output,
             "model_used": routed.model_used,
@@ -189,6 +202,11 @@ async fn gw_route(State(s): State<ReasonState>, Json(body): Json<RouteBody>) -> 
         }))
         .into_response(),
         Err(RouteError::NoProvider) => error_json(StatusCode::NOT_FOUND, "no_provider"),
+        Err(RouteError::Refused { code, reason, message, data }) => (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "policy", "reason": reason, "code": code, "detail": message, "data": data })),
+        )
+            .into_response(),
         Err(e @ RouteError::Exhausted(_)) => {
             (StatusCode::BAD_GATEWAY, Json(json!({ "error": "exhausted", "detail": e.to_string() })))
                 .into_response()
@@ -334,7 +352,16 @@ fn chat_completion_sse(id: &str, created: u64, routed: &Routed) -> String {
 /// statuses its clients map: `400 invalid_request_error` (no user message), `404
 /// model_not_found` (no live provider), `502 server_error/exhausted` (every candidate
 /// failed).
-async fn gw_openai_chat(State(s): State<ReasonState>, Json(body): Json<ChatRequest>) -> Response {
+///
+/// Routed **for the HTTP client** like `/route` (the resolved principal travels into the dispatch
+/// and the action preflight runs); a refusal is `403 permission_error/policy`, with the gateway's
+/// `data` object beside the OpenAI envelope under `mycelium`.
+async fn gw_openai_chat(
+    State(s): State<ReasonState>,
+    caller: Option<Extension<ResolvedPrincipal>>,
+    Json(body): Json<ChatRequest>,
+) -> Response {
+    let caller = caller.map(|Extension(c)| c);
     let Some((input, context)) = messages_to_skill_call(&body.messages) else {
         return openai_error(
             StatusCode::BAD_REQUEST,
@@ -346,7 +373,7 @@ async fn gw_openai_chat(State(s): State<ReasonState>, Json(body): Json<ChatReque
     };
     let query = ModelQuery::new(body.model.clone());
     let recorder = body.run_id.map(|id| TraceRecorder::new(Arc::clone(&s.agent), id));
-    match s.router.call(&query, &input, &context, recorder.as_ref()).await {
+    match s.router.call_as(caller.as_ref(), ENFORCEMENT_POINT_CHAT, &query, &input, &context, recorder.as_ref()).await {
         Ok(routed) => {
             let id = completion_id();
             let created = unix_now();
@@ -368,6 +395,14 @@ async fn gw_openai_chat(State(s): State<ReasonState>, Json(body): Json<ChatReque
             "model_not_found",
             Some("model"),
         ),
+        Err(RouteError::Refused { code, reason, message, data }) => (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": { "message": message, "type": "permission_error", "code": "policy", "param": null },
+                "mycelium": { "reason": reason, "code": code, "data": data },
+            })),
+        )
+            .into_response(),
         Err(e @ RouteError::Exhausted(_)) => {
             openai_error(StatusCode::BAD_GATEWAY, e.to_string(), "server_error", "exhausted", None)
         }

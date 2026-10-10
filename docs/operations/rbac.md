@@ -72,9 +72,9 @@ scope **or** `"*"`. Unmapped routes require `admin` (deny-by-default).
 | `cap:read` / `cap:write` | capability resolve, shard owner / advertise, drop; `POST /gateway/units/declare` (an SDK agent's unit file, under one handle) is `cap:write` |
 | `fleet:read` | `GET /gateway/fleet`, `/gateway/explain`, `/gateway/diagnose` (legible emergence) and `GET /gateway/guarantees` (the startup report, recomputed live) |
 | `govern:read` / `govern:write` | `GET /gateway/govern` / `POST /gateway/govern/{tuning,timing,membership,profile,topology-override,group}` (and `DELETE /gateway/govern/group`) — the governors' admission contract and the control profile ladder (`control-profiles.md`) |
-| *(none)* — `/a2a` | **No scope is required on this route.** Auth is *optional*: a federation credential names the partner; a bearer resolves to a principal but its **scopes are dropped**; nothing presented is anonymous. Authority here comes from an `ActionEvaluator`, not the scope table — and with no evaluator attached an anonymous caller reaches skill dispatch. `with_a2a()` warns in that configuration |
-| `mesh:serve` | the RPC serve stream (`/gateway/rpc/serve/{kind}`) and `/gateway/rpc/respond`: **serving without the power to call**. Added 2026-09-25 (closure plan C1). The one-release window that admitted a `mesh:read` or `mesh:write` token here closed in 2.18.2: such a token now gets `403 {"required_scope": "mesh:serve"}` — reissue it |
-| `mesh:read` / `mesh:write` | signal SSE (`/gateway/signal/sse/{kind}` **and** the node-level `/signals/{kind}`), mailbox subscribe, demand / signal emit, rpc call, scatter, **group membership of a plain group** (`GET`/`POST`/`DELETE /gateway/mesh/group` — a node joins or leaves *itself*; there is no verb for enrolling another node; a group under a membership intent refuses these **403** `governed_group` — its membership moves through `/gateway/govern/group` under `govern:write`, 2.29.0) |
+| *(none)* — `/a2a` | **No scope is required on this route.** Auth is *optional*: a federation credential names the partner; a bearer resolves to a principal but its **scopes are dropped**; nothing presented is anonymous. Authority here comes from an `ActionEvaluator`, not the scope table — and with no evaluator attached an anonymous caller reaches skill dispatch. `with_a2a()` warns in that configuration. Since 2.32.0 a task is **owned by the identity that created it**: `tasks/get`, `tasks/cancel` and a re-send under an existing id answer only that principal (`-32004` otherwise; an anonymous task is answered only on the response that created it) |
+| `mesh:serve` | the RPC serve stream (`/gateway/rpc/serve/{kind}`) and `/gateway/rpc/respond`: **serving without the power to call**. Since 2.32.0 `rpc/respond` is also bound to the request: it answers only a nonce *this principal's own* serve stream delivered and has not yet answered (`403 unserved_request` otherwise) — the scope alone bound neither a kind nor a request, so any holder could pre-empt any in-flight call by nonce. A repeat answer from the same principal (a replicated serve loop) is `200 {"duplicate": true}` and dropped. Added 2026-09-25 (closure plan C1). The one-release window that admitted a `mesh:read` or `mesh:write` token here closed in 2.18.2: such a token now gets `403 {"required_scope": "mesh:serve"}` — reissue it |
+| `mesh:read` / `mesh:write` | signal SSE (`/gateway/signal/sse/{kind}` **and** the node-level `/signals/{kind}` — never a protected kind, which both refuse `403 protected_kind` since 2.32.0), mailbox subscribe, demand / signal emit, rpc call, scatter, **group membership of a plain group** (`GET`/`POST`/`DELETE /gateway/mesh/group` — a node joins or leaves *itself*; there is no verb for enrolling another node; a group under a membership intent refuses these **403** `governed_group` — its membership moves through `/gateway/govern/group` under `govern:write`, 2.29.0) |
 | `consensus:read` / `consensus:write` | overlay log scan, consistent get, **`/consensus/{*slot}` inspection** / consistent set, lock, elect, log append, cross-group propose — consistent set refuses every owned-namespace key as the KV routes do (403 `protected_key`), and log append/compact refuse a stream under `cn/`, `wiki/` or `reason/` (403 `protected_stream`) |
 | `mcp:invoke` | `POST /mcp` — the MCP JSON-RPC bridge (`initialize`, `tools/list`, `tools/call`) |
 | `llm:read` / `llm:write` / `llm:invoke` | prompt get/list / prompt put,delete / llm call,stream |
@@ -82,10 +82,10 @@ scope **or** `"*"`. Unmapped routes require `admin` (deny-by-default).
 | `identity:write` | key revocation (`POST /gateway/identity/revoke`) |
 | `federation:read` / `federation:invoke` | federation's **consumer** side (item 2 row 11): `GET /gateway/federation/domain`, `/partners`, `/catalog/{domain}` / `POST /gateway/federation/connect`, `/call`. Split because they are different powers — reading which partners exist is operator information; `connect` and `call` spend this domain's credential on a partner's gateway, under the caller's own name |
 | `*` | everything (the legacy `gateway_auth_token` is equivalent) |
-| `llm:read` / `llm:write` / `llm:invoke` (companion) | `mycelium-reason`: trace, blob GET, `/v1/models` / blob PUT / `/reason/route`, `/reason/v1/chat/completions` |
+| `llm:read` / `llm:write` / `llm:invoke` (companion) | `mycelium-reason`: trace, blob GET, `/v1/models` / blob PUT / `/reason/route`, `/reason/v1/chat/completions` — both routed **as the client** since 0.8.0 (the provider's `request_principal` is the bearer's principal under the secure profile) and behind the action evaluator (`403 policy`), as `/gateway/llm/call` is |
 | `wiki:read` / `wiki:write` | `mycelium-wiki`: `/wiki/read`, `/wiki/query` / `/wiki/propose`, `/wiki/ingest` |
 | `board:read` / `board:write` | `mycelium-blackboard`: `/bb/read`, `/bb/depth` / `/bb/post`, `claim`, `ack`, `release` |
-| `tuple:read` / `tuple:write` | `mycelium-tuple-space`: `/tuple/depth` / `put`, `take`, `take_by_key`, `complete`, `ack` |
+| `tuple:read` / `tuple:write` | `mycelium-tuple-space`: `/tuple/depth`, `/tuple/overview` (the cluster-wide monitoring document — `/api/tuple` until 2.32.0, which sat outside the gateway prefix and answered without a bearer; the old path is 404) / `put`, `take`, `take_by_key`, `complete`, `ack` |
 | `artifact:publish` | `mycelium-wasm-host` (feature `gateway`, plan A3): `POST /gateway/artifacts/publish` — one **already-signed** catalogue line, verified against the node's `[hosts].trusted_publishers` and written to `installable/`. Its own family, not `kv:write`, because it is a narrower power with a check the raw KV route does not make; since 2.27.0 the raw KV routes refuse `installable/` (`kv:write` reached it before), and the defence that holds in every case — including a peer writing through Layer I — is still the provisioner's `require_provenance` |
 | `admin` | the deny-by-default fallback for any route not in the table — including any companion path not listed above |
 
@@ -124,14 +124,33 @@ scope **or** `"*"`. Unmapped routes require `admin` (deny-by-default).
 refused there `403` with `{"error": "protected_kind", "kind": …, "message": …}` naming the door to use, whatever the
 token's scopes and whether or not `compliance` is built. Before this, a client with `mesh:write` could send
 `mcp.invoke` or `skill.invoke` straight to a provider and skip the action evaluator and mandate checks that `/mcp`
-and `/a2a` run. The SDKs raise `ProtectedKindError`.
+and `/a2a` run. The SDKs raise `ProtectedKindError`. **The two signal streams refuse a protected kind the same way**
+(`/signals/{kind}`, `/gateway/signal/sse/{kind}`; since 2.32.0): a `mesh:read` holder cannot *observe* protected work.
+The streams register on the handler table `rpc/serve` and the native MCP tools register on, and a signal fans to every
+receiver, so opening `/signals/mcp.invoke` read every tool call's whole frame — the caller envelope, the carried mandate
+and possession proof, the correlation nonce — while the raw routes refused to send that kind. They refuse the
+reply kinds `rpc.result` and `bulk.result` too: a reply the caller did not claim (late, or misrouted) fell through to
+them, carrying tool and LLM output.
+
+**What a `mesh:serve` stream sees** (by design): `GET /gateway/rpc/serve/{kind}` streams every request of that kind
+this node receives — for a protected kind (`mcp.invoke`, …) the whole frame, caller envelope and carried mandate
+included, after the provider check (C3) has admitted it. That is the serving agent's job: it is the provider, and the
+provider is where the mandate is verified. Grant `mesh:serve` only to the agents that serve those kinds.
 
 **Public, never scope-gated** (M16 edge criterion): `/health`, `/ready`, `/stats`, `/metrics`,
 the A2A descriptor (`/.well-known/agent.json`), `POST /a2a` (an A2A peer needs no Mycelium
 credential — but a bearer *presented* on it is resolved, and an unrecognised one is 401; §7), and
 `GET /bulk/{id}` — a **capability URL**: the 64-bit random per-call nonce is the credential, and
 the serving peer fetches it node-to-node with no shared bearer. **That is the whole public
-surface**; the routing code asserts the same list.
+surface the library mounts**; the routing code holds the same list (`http::PUBLIC_PATHS`) and the test
+`every_listed_public_path_is_mounted_and_public_and_gated_paths_are_not` checks it against a running gateway
+with a bearer set: each listed path is mounted and answers without one, and the gated routes — the library's,
+the node-level three and a merged companion route — answer 401. **It cannot find a public route nobody
+listed** (axum does not enumerate a router's routes): that stays a review rule. **Companions add two**, listed
+in `http::COMPANION_PUBLIC_PATHS`: `mycelium-agentfacts`' `GET /.well-known/agent-facts.json` and
+`GET /.well-known/agent-facts/domain.json` — a signed facts document and its domain record, read by peers with
+no Mycelium credential. A companion route outside the prefixes above is public by construction (the note above),
+which is why `mycelium-tuple-space`'s overview moved under `/gateway/`.
 
 ---
 

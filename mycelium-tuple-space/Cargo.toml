@@ -12,7 +12,7 @@ categories = ["network-programming", "asynchronous"]
 
 [features]
 default = []
-# HTTP gateway endpoints (/gateway/tuple/*, /api/tuple) registered onto the
+# HTTP gateway endpoints (/gateway/tuple/*, incl. /gateway/tuple/overview) registered onto the
 # Mycelium embedded gateway via GossipAgent::with_http_routes.
 gateway = ["mycelium/gateway", "dep:axum", "dep:serde", "dep:serde_json", "dep:base64"]
 # Prometheus /metrics on the node's gateway — so the Ops Console Metrics tab populates for the

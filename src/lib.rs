@@ -308,6 +308,13 @@ pub use agent::{
     PreflightRefusal, RecordKind, ReferenceEvaluator, Rule, Verdict, AE_EVIDENCE_SCHEMA,
     AE_REFERENCE_SCHEMA,
 };
+/// What a companion's gateway door needs to act **as the HTTP client, under the evaluator**, the
+/// way `/mcp` and `/a2a` do: the auth layer's resolved principal (read, never constructed),
+/// `ServiceHandle::rpc_call_as`, and `GossipAgent::gateway_preflight` /
+/// `gateway_record_execution` (inert without `tls`). Added for `mycelium-reason`'s façade, which
+/// dispatched protected `llm.invoke` as the node.
+#[cfg(feature = "gateway")]
+pub use agent::{GatewayDispatchError, GatewayPreflight, GatewayRefusal, ResolvedPrincipal};
 /// AE4's contract fixtures — what the seam requires of *any* evaluator behind it. Public because
 /// its whole purpose is to be run against an evaluator this repository did not write: fixtures an
 /// adopter cannot see cannot hold their replacement evaluator to anything.

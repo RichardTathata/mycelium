@@ -208,6 +208,7 @@ impl GossipAgent {
             cap_authz_violations: self.task_ctx.cap_authz_violations.load(Ordering::Relaxed),
             schema_mismatch: self.task_ctx.schema_mismatch.load(Ordering::Relaxed),
             rate_limited_senders: mycelium_core::rate::throttled_sender_count(&self.task_ctx.core),
+            rpc_reply_sender_mismatches: self.task_ctx.rpc_reply_sender_mismatches.load(Ordering::Relaxed),
         }
     }
 

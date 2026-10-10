@@ -170,6 +170,10 @@ pub use action_evaluator::{
     MappingStatus, PreflightRefusal, RecordKind, ReferenceEvaluator, Rule, Verdict,
     AE_EVIDENCE_SCHEMA, AE_REFERENCE_SCHEMA,
 };
+#[cfg(feature = "gateway")]
+pub use gateway_caller::{GatewayDispatchError, ResolvedPrincipal};
+#[cfg(feature = "gateway")]
+pub use http::{GatewayPreflight, GatewayRefusal};
 pub use gateway_caller::{
     CallerAttestation, CallerError, GatewayCaller, RequestPrincipal,
     CALLER_CONTEXT_VERSION, PRINCIPAL_ANONYMOUS,
@@ -389,7 +393,22 @@ pub struct SystemStats {
     /// unless `rate_observation_enabled`. A node-local decision on shared evidence — never a cluster
     /// eviction. A sustained non-zero value names an abusive sender to investigate.
     pub rate_limited_senders: u64,
+
+    /// Cumulative `rpc.result` / `bulk.result` signals that carried a pending call's nonce but came
+    /// from a node the call was **not sent to** — ignored, never claimed (the real reply still
+    /// arrives). Before this counter the reply interceptor claimed on nonce alone, so a peer that
+    /// learned a nonce could pre-empt the legitimate reply and the caller timed out. A non-zero
+    /// value names a misbehaving or misrouted peer (or a nonce reuse) to investigate — detection, not
+    /// prevention. **What it does not see:** a signal's `sender` is written by the emitter and
+    /// relayed, not authenticated per signal, so a peer that writes the expected target's id as its
+    /// sender passes the claim and is not counted. The check closes the accidental case — a stray or
+    /// late reply from another node — not a forger who knows both the nonce and the target.
+    pub rpc_reply_sender_mismatches: u64,
 }
+
+/// The in-flight RPC/bulk correlation map: nonce → (the node the call was sent to, the waiting
+/// oneshot). Only a reply from that node claims the entry.
+pub(crate) type RpcPending = Arc<std::sync::Mutex<std::collections::HashMap<u64, (crate::node_id::NodeId, tokio::sync::oneshot::Sender<crate::signal::Signal>)>>>;
 
 // The old 22-field `TaskCtx` God Object has been split (ROADMAP §v2.0 M1): `CoreCtx`
 // (the Layers I+II infrastructure bundle) and `ReplyInterceptor` now live in the
@@ -460,10 +479,18 @@ pub(crate) struct TaskCtx {
     /// Bulk-transport adapter: staging map, HTTP port, pooled HTTP client.
     pub(crate) bulk_transport: Arc<bulk::BulkTransport>,
     /// In-flight RPC/bulk correlation map for O(1) reply dispatch.
-    /// Key: correlation nonce (first 8 bytes of result payload, LE).
+    /// Key: correlation nonce (first 8 bytes of result payload, LE). Value: the node the call was
+    /// sent to — the only sender whose reply may claim it — and the waiting oneshot.
     /// The connection handler's fast-path removes the entry and fires the
     /// oneshot instead of fanning out through signal_handlers.
-    pub(crate) rpc_pending: Arc<std::sync::Mutex<std::collections::HashMap<u64, tokio::sync::oneshot::Sender<crate::signal::Signal>>>>,
+    pub(crate) rpc_pending: RpcPending,
+    /// Replies that matched a pending call's nonce but came from a node the call was not sent to
+    /// (`SystemStats::rpc_reply_sender_mismatches`). Each is ignored, not claimed: before this
+    /// counter existed the interceptor claimed on nonce alone and the oneshot was consumed either
+    /// way, so a peer that learned a nonce could make the real reply undeliverable. `sender` is
+    /// emitter-written (see `SystemStats::rpc_reply_sender_mismatches`), so this closes the
+    /// accidental case, not a forger that writes the target's id.
+    pub(crate) rpc_reply_sender_mismatches: Arc<AtomicU64>,
 
     // ── Layer III — Consensus ────────────────────────────────────────────────────
     /// Cumulative commit-conflict detections (see `SystemStats::commit_conflicts`).
@@ -941,8 +968,8 @@ impl GossipAgent {
         // RPC/bulk reply correlation map. Created here so the core-level reply
         // interceptor can capture it; the same Arc is shared into `TaskCtx`
         // (Layer III) where `rpc_call` registers and awaits oneshots.
-        let rpc_pending: Arc<std::sync::Mutex<std::collections::HashMap<u64, tokio::sync::oneshot::Sender<crate::signal::Signal>>>> =
-            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let rpc_pending: RpcPending = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let rpc_reply_sender_mismatches = Arc::new(AtomicU64::new(0));
         let core_ctx = Arc::new(CoreCtx {
             node_id:         node_id.clone(),
             // WS-C M9: snapshot the hot-tunable subset from the (M8-derived) config.
@@ -977,10 +1004,19 @@ impl GossipAgent {
             },
             reply_interceptor: Some({
                 let rp = Arc::clone(&rpc_pending);
+                let mismatches = Arc::clone(&rpc_reply_sender_mismatches);
                 Arc::new(move |sig: &Signal| -> bool {
                     // Claim correlated rpc.result / bulk.result: the nonce is the
                     // first 8 LE bytes of the payload. On hit, fire the oneshot and
                     // signal "claimed" so the fan-out is skipped.
+                    //
+                    // A claim needs the nonce **and** the sender the call was sent to. On nonce
+                    // alone, a reply from any node that learned the nonce consumed the oneshot —
+                    // `await_nonce_reply` then dropped it on sender mismatch, so the caller timed
+                    // out although the provider answered. Such a reply is counted and ignored;
+                    // the pending call stays pending for the sender it was sent to. `sig.sender` is
+                    // emitter-written and relayed, so this stops a stray or mismatched reply, not a
+                    // forger that writes the target's id as its sender.
                     if sig.payload.len() >= 8
                         && (sig.kind.as_ref() == signal_kind::RPC_RESULT
                             || sig.kind.as_ref() == signal_kind::BULK_RESULT)
@@ -989,9 +1025,22 @@ impl GossipAgent {
                             sig.payload[..8].try_into()
                                 .expect("RPC/bulk result nonce occupies first 8 bytes; payload length checked"),
                         );
-                        if let Some(tx) = rp.lock().unwrap_or_else(|e| e.into_inner()).remove(&call_nonce) {
-                            let _ = tx.send(sig.clone());
-                            return true;
+                        let mut pending = rp.lock().unwrap_or_else(|e| e.into_inner());
+                        match pending.get(&call_nonce) {
+                            Some((expected, _)) if *expected == sig.sender => {
+                                if let Some((_, tx)) = pending.remove(&call_nonce) {
+                                    let _ = tx.send(sig.clone());
+                                }
+                                return true;
+                            }
+                            Some((expected, _)) => {
+                                tracing::warn!(
+                                    nonce = call_nonce, from = %sig.sender, expected = %expected,
+                                    "rpc reply for a pending call from a node it was not sent to; ignored"
+                                );
+                                mismatches.fetch_add(1, Ordering::Relaxed);
+                            }
+                            None => {}
                         }
                     }
                     false
@@ -1011,6 +1060,7 @@ impl GossipAgent {
                 config.max_concurrent_bulk_handlers,
             )),
             rpc_pending: Arc::clone(&rpc_pending),
+            rpc_reply_sender_mismatches,
             commit_conflicts: Arc::new(AtomicU64::new(0)),
             commit_conflict_slots: Arc::new(papaya::HashMap::new()),
             event_ring: Arc::new(emergent::EventRing::default()),

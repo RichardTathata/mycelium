@@ -100,6 +100,89 @@ struct HttpCtx {
     /// JWT bearers against the IdP JWKS and maps groups to gateway scopes.
     #[cfg(feature = "compliance")]
     oidc:            Option<Arc<super::oidc::OidcVerifier>>,
+    /// Requests streamed to SDK agents: `(sender, nonce, principal)` → when it was streamed and
+    /// whether it has been answered. `gw_rpc_serve` records one when it streams a request to the
+    /// principal that opened the stream (first record wins — a second stream of the same principal
+    /// on the same kind does not reset it); `gw_rpc_respond` answers only a request recorded for the
+    /// responding principal, once, and accepts a repeat from that principal idempotently (#587 F1:
+    /// replicated serve loops). Bounded: entries older than `SERVED_RPC_TTL_MS` are evicted every
+    /// `SERVED_RPC_SWEEP_EVERY` inserts or when the map reaches `SERVED_RPC_CAP`, and past the cap
+    /// the oldest goes. Lock-order row 55 — leaf, µs (amortised).
+    served_rpcs:     Mutex<ServedRpcs>,
+    /// Repeat answers to an already-answered request, accepted and dropped (`/stats`
+    /// `rpc_respond_duplicates`): a replicated serve loop's losing replica.
+    rpc_respond_duplicates: std::sync::atomic::AtomicU64,
+}
+
+/// Longest a streamed request stays answerable: the gateway's own RPC ceiling. Every gateway door
+/// waits at most this long (`rpc/call`, `scatter` and `overlay/emit_reliable` clamp `timeout_secs` to
+/// 300; `/gateway/llm/call` clamps `timeout_ms` through `gateway_rpc_timeout_ms`; `/gateway/llm/stream`
+/// waits 30 s). An **in-process** `ServiceHandle::rpc_call` names its own timeout and is not bounded
+/// by this: a request it sends to an SDK agent stays answerable through `rpc/respond` for 300 s, and
+/// a longer in-process wait gets no reply after that — use 300 s as the ceiling for SDK-served kinds.
+const SERVED_RPC_TTL_MS: u64 = 300_000;
+/// Hard cap on streamed requests remembered at once; past it the oldest are evicted.
+const SERVED_RPC_CAP: usize = 65_536;
+/// TTL eviction runs once per this many inserts (and whenever the cap is reached), not per insert.
+const SERVED_RPC_SWEEP_EVERY: u64 = 1_024;
+
+/// [`HttpCtx::served_rpcs`]'s contents.
+#[derive(Default)]
+struct ServedRpcs {
+    /// `(sender, nonce, principal)` → `(streamed at ms, answered)`.
+    map: HashMap<(crate::node_id::NodeId, u64, String), (u64, bool)>,
+    inserts: u64,
+}
+
+/// What `rpc/respond` may do with a request.
+#[derive(Debug, PartialEq, Eq)]
+enum ServedAnswer {
+    /// Streamed to this principal and not yet answered: answer it (now marked answered).
+    First,
+    /// Already answered by this principal: accept and drop.
+    Duplicate,
+    /// Never streamed to this principal, or past the window: refuse.
+    Unserved,
+}
+
+/// A gateway door's RPC wait, clamped to the gateway ceiling (`SERVED_RPC_TTL_MS`) — the window in
+/// which a streamed request stays answerable. Every gateway door waits at most this long.
+#[cfg(any(feature = "llm", test))]
+fn gateway_rpc_timeout_ms(ms: u64) -> Duration {
+    Duration::from_millis(ms.clamp(1, SERVED_RPC_TTL_MS))
+}
+
+/// `gw_rpc_serve`'s record: this `principal` was handed the request `(sender, nonce)` now. A record
+/// that already exists is kept as it is (a second replica's stream must not un-answer it).
+fn record_served_rpc(ctx: &HttpCtx, sender: &crate::node_id::NodeId, nonce: u64, principal: &str) {
+    let now = ctx.agent_ctx.hlc.decision_now_ms();
+    let mut served = ctx.served_rpcs.lock().unwrap_or_else(|e| e.into_inner());
+    served.inserts = served.inserts.wrapping_add(1);
+    if served.inserts.is_multiple_of(SERVED_RPC_SWEEP_EVERY) || served.map.len() >= SERVED_RPC_CAP {
+        served.map.retain(|_, (at, _)| now.saturating_sub(*at) <= SERVED_RPC_TTL_MS);
+    }
+    if served.map.len() >= SERVED_RPC_CAP
+        && let Some(oldest) = served.map.iter().min_by_key(|(_, (at, _))| *at).map(|(k, _)| k.clone())
+    {
+        served.map.remove(&oldest);
+    }
+    served.map.entry((sender.clone(), nonce, principal.to_string())).or_insert((now, false));
+}
+
+/// `gw_rpc_respond`'s check: was `(sender, nonce)` streamed to `principal`, within the window, and
+/// is this the first answer?
+fn answer_served_rpc(ctx: &HttpCtx, sender: &crate::node_id::NodeId, nonce: u64, principal: &str) -> ServedAnswer {
+    let now = ctx.agent_ctx.hlc.decision_now_ms();
+    let mut served = ctx.served_rpcs.lock().unwrap_or_else(|e| e.into_inner());
+    match served.map.get_mut(&(sender.clone(), nonce, principal.to_string())) {
+        Some((at, _)) if now.saturating_sub(*at) > SERVED_RPC_TTL_MS => ServedAnswer::Unserved,
+        Some((_, answered)) if *answered => ServedAnswer::Duplicate,
+        Some((_, answered)) => {
+            *answered = true;
+            ServedAnswer::First
+        }
+        None => ServedAnswer::Unserved,
+    }
 }
 
 /// One gateway-advertised capability. In-process advertisers get liveness
@@ -211,6 +294,8 @@ pub(super) async fn run_http_server(
         prometheus,
         #[cfg(feature = "compliance")]
         oidc,
+        served_rpcs:  Mutex::new(ServedRpcs::default()),
+        rpc_respond_duplicates: std::sync::atomic::AtomicU64::new(0),
     });
 
     // ── Language-bridge gateway routes (optionally auth-protected) ────────────
@@ -320,7 +405,7 @@ pub(super) async fn run_http_server(
     let app = Router::new()
         // Library endpoints — public by the M16 edge criterion: what a probe, load balancer or
         // scraper needs with no credential. This list and /bulk are the WHOLE public surface
-        // (docs/operations/rbac.md) — anything else goes behind `gateway_auth`.
+        // (docs/operations/rbac.md, `PUBLIC_PATHS`) — anything else goes behind `gateway_auth`.
         .route("/health",               get(health_handler))
         .route("/ready",                get(ready_handler))
         .route("/stats",                get(stats_handler))
@@ -369,6 +454,10 @@ pub(super) async fn run_http_server(
     };
 
     let listener = prepared.listener;
+    // The one place the public surface is stated in code; the test
+    // `the_public_surface_is_exactly_the_documented_list` holds the router to it.
+    info!(public_paths = ?PUBLIC_PATHS, companion_public_paths = ?COMPANION_PUBLIC_PATHS,
+          "gateway: the paths answered without a credential (the companions' only when mounted)");
 
     // Native gateway TLS (SOC 2 WS-A): when GossipConfig::gateway_tls is set, serve HTTPS
     // over a hand-rolled tokio-rustls accept loop; otherwise the plain axum::serve path. The
@@ -385,6 +474,32 @@ pub(super) async fn run_http_server(
         .await
         .map_err(|e| std::io::Error::other(e.to_string()))
 }
+
+/// **The whole public surface** — every path a gateway answers with no credential, as
+/// `docs/operations/rbac.md` lists it (M16 edge criterion: what a probe, load balancer or scraper
+/// needs; the A2A descriptor and `/a2a`, which an A2A peer reaches without a Mycelium credential;
+/// `/bulk/{id}`, a capability URL). The router above mounts exactly these outside `gateway_auth`;
+/// `the_public_surface_is_exactly_the_documented_list` asserts it against a running gateway. A
+/// companion route mounted outside `/gateway/`, `/a2a`, `/federation/` is public by construction
+/// and belongs here or under the prefix — never silently elsewhere.
+pub(crate) const PUBLIC_PATHS: &[&str] = &[
+    "/health",
+    "/ready",
+    "/stats",
+    "/metrics",
+    "/bulk/{corr_id}",
+    "/.well-known/agent.json",
+    "/a2a",
+];
+
+/// Public paths **companions** mount through `with_http_routes`, outside the gated prefixes — public
+/// by construction, listed here and in rbac.md so the public surface is written down in one place.
+/// The library does not mount them; each companion's own tests serve them. `mycelium-agentfacts`'
+/// signed agent-facts document and its domain record (read by peers with no Mycelium credential).
+pub(crate) const COMPANION_PUBLIC_PATHS: &[&str] = &[
+    "/.well-known/agent-facts.json",
+    "/.well-known/agent-facts/domain.json",
+];
 
 /// Resolve the gateway's rustls `ServerConfig` from `GatewayTlsConfig`: an operator-supplied
 /// cert/key PEM pair, or (both `None`) the node identity cert built with no client-cert demand.
@@ -672,21 +787,27 @@ async fn federation_path_auth(_ctx: Arc<HttpCtx>, request: Request, next: Next) 
 /// only set it behave exactly as before); a named token (`gateway_named_tokens`, `compliance`) is
 /// `token:{issuer}/{name}`; a positional token (`gateway_scoped_tokens`) is `token:{issuer}/#{i}` —
 /// the list position, which reordering moves, so prefer named tokens. Never the secret.
+///
+/// Comparison is constant-time in the secret's bytes (`subtle::ConstantTimeEq`): `==` returns at
+/// the first differing byte, which leaks the length of the matching prefix to a timing observer.
+/// Lengths still differ in time, as in every constant-time string compare.
 fn resolve_token(cfg: &crate::config::GossipConfig, issuer: &str, presented: &str) -> Option<(String, Vec<String>)> {
+    use subtle::ConstantTimeEq as _;
+    let same = |secret: &str| bool::from(secret.as_bytes().ct_eq(presented.as_bytes()));
     if let Some(legacy) = cfg.gateway_auth_token.as_deref()
-        && presented == legacy
+        && same(legacy)
     {
         return Some((gateway_caller::legacy_token_principal(issuer), vec!["*".to_string()]));
     }
     #[cfg(feature = "compliance")]
     {
         for t in &cfg.gateway_named_tokens {
-            if t.token == presented {
+            if same(&t.token) {
                 return Some((gateway_caller::named_token_principal(issuer, &t.name), t.scopes.clone()));
             }
         }
         for (i, t) in cfg.gateway_scoped_tokens.iter().enumerate() {
-            if t.token == presented {
+            if same(&t.token) {
                 return Some((gateway_caller::positional_token_principal(issuer, i), t.scopes.clone()));
             }
         }
@@ -810,6 +931,7 @@ fn required_scope(method: &axum::http::Method, matched_path: &str) -> &'static s
         "/gateway/artifacts/publish" => "artifact:publish",
         //   mycelium-tuple-space → `tuple:*`.
         "/gateway/tuple/depth"       => "tuple:read",
+        "/gateway/tuple/overview"    => "tuple:read",
         "/gateway/tuple/put"         => "tuple:write",
         "/gateway/tuple/take"        => "tuple:write",
         "/gateway/tuple/take_by_key" => "tuple:write",
@@ -986,6 +1108,9 @@ async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoResponse {
         "governance_unaudited": ctx.agent_ctx.governance_unaudited
             .load(std::sync::atomic::Ordering::Relaxed),
         "rate_limited_senders": mycelium_core::rate::throttled_sender_count(&ctx.agent_ctx.core),
+        "rpc_reply_sender_mismatches": ctx.agent_ctx.rpc_reply_sender_mismatches
+            .load(std::sync::atomic::Ordering::Relaxed),
+        "rpc_respond_duplicates": ctx.rpc_respond_duplicates.load(std::sync::atomic::Ordering::Relaxed),
         // Legible-Emergence Phase 1 (emergent detectors). The conflict gauge is always present
         // (0 unless the detector loop is running); `view_confidence` — the RT1/RT2 "this is a
         // per-node estimate, not fleet truth" header — is attached only when detectors are enabled.
@@ -1814,7 +1939,14 @@ async fn gw_govern_membership(
 async fn signal_sse_handler(
     Path(kind):  Path<String>,
     State(ctx):  State<Arc<HttpCtx>>,
-) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+) -> Response {
+    // Observing protected work is refused like sending it (closure plan C1, the SSE half): this
+    // stream registers on the same table `rpc/serve` and the native MCP tools register on, and a
+    // signal fans to every receiver — so a `mesh:read` holder would read each protected request's
+    // whole frame (caller envelope, carried mandate and possession proof, correlation nonce).
+    if let Some(refused) = refuse_unobservable_kind(&ctx.agent_ctx.config, &kind) {
+        return refused;
+    }
     let rx = ctx.agent_ctx.signal_handlers.register_with_capacity(
         std::sync::Arc::from(kind.as_str()),
         256,
@@ -1832,12 +1964,12 @@ async fn signal_sse_handler(
             "nonce":       sig.nonce,
             "payload":     payload_b64,
         });
-        Ok(Event::default()
+        Ok::<_, Infallible>(Event::default()
             .event(sig.kind.as_ref())
             .data(data.to_string()))
     });
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
 }
 
 /// JSON-RPC 2.0 handler for the MCP protocol (`POST /mcp`).
@@ -2405,7 +2537,12 @@ async fn gw_signal_emit(
 async fn gw_signal_sse(
     Path(kind):  Path<String>,
     State(ctx):  State<Arc<HttpCtx>>,
-) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+) -> Response {
+    // Closure plan C1, the SSE half: a protected kind can be observed no more than it can be sent
+    // on a raw route (see `signal_sse_handler`).
+    if let Some(refused) = refuse_unobservable_kind(&ctx.agent_ctx.config, &kind) {
+        return refused;
+    }
     let rx = ctx.agent_ctx.signal_handlers.register_with_capacity(
         Arc::from(kind.as_str()),
         256,
@@ -2420,12 +2557,12 @@ async fn gw_signal_sse(
             "payload_b64": payload_b64,
             "nonce":       sig.nonce,
         });
-        Ok(Event::default()
+        Ok::<_, Infallible>(Event::default()
             .event(sig.kind.as_ref())
             .data(data.to_string()))
     });
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
 }
 
 /// `GET /gateway/demand?ns=X&name=Y`
@@ -2486,6 +2623,31 @@ pub(crate) use super::is_protected_kind;
 ///
 /// A protected kind is refused `403` with the door to use instead. It is refused whatever the
 /// token's scopes (the legacy token holds `*`), and whether or not `compliance` is built in.
+///
+/// The two signal SSE doors (`/signals/{kind}`, `/gateway/signal/sse/{kind}`) refuse it too: they
+/// register on the same handler table the serve routes and the native MCP tools use, and a signal
+/// fans to every receiver, so observing a protected kind is reading every protected request's frame.
+/// The signal SSE doors' refusal: a protected kind (as on the raw routes), or an RPC reply kind
+/// (`rpc.result`, `bulk.result`). A reply the interceptor did not claim — late, or from a node the
+/// call was not sent to — falls through to the handler table, so streaming the reply kinds handed
+/// tool and LLM output to any `mesh:read` holder (#587 F7). Same body as the raw routes' refusal.
+fn refuse_unobservable_kind(cfg: &crate::config::GossipConfig, kind: &str) -> Option<axum::response::Response> {
+    use crate::signal::signal_kind::{BULK_RESULT, RPC_RESULT};
+    if kind == RPC_RESULT || kind == BULK_RESULT {
+        warn!(kind, "gateway: an RPC reply kind refused on a signal stream");
+        return Some((
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "ok": false,
+                "error": "protected_kind",
+                "kind": kind,
+                "message": format!("`{kind}` carries RPC replies and is not observable on a signal stream; a reply reaches only its caller"),
+            })),
+        ).into_response());
+    }
+    refuse_protected_kind(cfg, kind)
+}
+
 fn refuse_protected_kind(cfg: &crate::config::GossipConfig, kind: &str) -> Option<axum::response::Response> {
     if !is_protected_kind(cfg, kind) {
         return None;
@@ -2582,6 +2744,128 @@ pub(crate) enum Preflight {
 /// The MCP tool-call route, as it is named in every piece of evidence it produces.
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(crate) const ENFORCEMENT_POINT_MCP: &str = "gateway:mcp/tools/call";
+
+/// What the gateway's action preflight decided for a route a **companion** mounts
+/// (`with_http_routes`) — [`GossipAgent::gateway_preflight`]'s answer, carried back to
+/// [`GossipAgent::gateway_record_execution`] once the dispatch has happened.
+///
+/// Opaque on purpose: it exists so a companion's door runs the same preflight `/mcp`, `/a2a` and
+/// `/gateway/llm/call` run — evaluator, mandate assessment, evidence record — without the
+/// evaluator types, which are only built with `tls`. Without `tls` every preflight is inert.
+pub struct GatewayPreflight {
+    #[cfg(feature = "tls")]
+    inner: Preflight,
+}
+
+/// A preflight refusal in the shape every gateway door answers with: the JSON-RPC code, the
+/// machine-readable reason, the sentence, and the `data` object (`reason`, `policy_revision`,
+/// `checked`, …).
+#[derive(Clone, Debug)]
+pub struct GatewayRefusal {
+    /// The JSON-RPC error code (`-32030` for a denial, …), as `/mcp` sends it.
+    pub code: i32,
+    /// `action_denied`, `not_established`, `evidence_not_recorded`, … — never prose.
+    pub reason: String,
+    /// The refusal as a sentence.
+    pub message: String,
+    /// The `error.data` object `/mcp` and `/a2a` send.
+    pub data: serde_json::Value,
+}
+
+impl GatewayPreflight {
+    /// `Some` when the dispatch must not happen. `None`: proceed (permitted, or no evaluator is
+    /// attached), then report the outcome with
+    /// [`GossipAgent::gateway_record_execution`].
+    pub fn refusal(&self) -> Option<GatewayRefusal> {
+        #[cfg(feature = "tls")]
+        if let Preflight::Refuse(r) = &self.inner {
+            return Some(GatewayRefusal {
+                code: r.json_rpc_code(),
+                reason: r.reason().to_string(),
+                message: r.to_string(),
+                data: r.error_data(),
+            });
+        }
+        None
+    }
+
+    /// `true` when no evaluator is attached (or none can be in this build): nothing was decided
+    /// and nothing will be recorded.
+    pub fn is_inert(&self) -> bool {
+        #[cfg(feature = "tls")]
+        return matches!(self.inner, Preflight::Inert);
+        #[cfg(not(feature = "tls"))]
+        true
+    }
+}
+
+impl crate::GossipAgent {
+    /// The action preflight a gateway door runs **between the auth layer and the dispatch**, for a
+    /// route a companion mounts. The same function `/mcp`, `/a2a` and `/gateway/llm/call` call:
+    /// inert unless an evaluator is attached (`with_action_evaluator`); with one, the envelope is
+    /// built from `caller` (the auth layer's principal and granted scopes, never the request body),
+    /// `operation` (`llm.invoke`, …), `resource` (`prompt:llm/{model}@{provider}`, …) and the
+    /// `arguments` the policy declared, a presented mandate (`params._meta.mandate`) is assessed,
+    /// and the decision is recorded under `enforcement_point` (name your route:
+    /// `gateway:reason/route`). A refusal is answered to the client and nothing is dispatched; a
+    /// permit is followed by the dispatch (`ServiceHandle::rpc_call_as`) and then
+    /// [`gateway_record_execution`](Self::gateway_record_execution).
+    ///
+    /// A companion door that dispatches a protected kind without this walks around the evaluator
+    /// — the enforcement point that can be bypassed by choosing a different door is not one.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn gateway_preflight(
+        &self,
+        caller: Option<&ResolvedPrincipal>,
+        operation: &str,
+        resource: &str,
+        arguments: &serde_json::Value,
+        params: &serde_json::Value,
+        enforcement_point: &str,
+    ) -> GatewayPreflight {
+        #[cfg(feature = "tls")]
+        {
+            GatewayPreflight {
+                inner: ae_preflight(&self.task_ctx, caller, operation, resource, arguments, params, enforcement_point).await,
+            }
+        }
+        #[cfg(not(feature = "tls"))]
+        {
+            let _ = (caller, operation, resource, arguments, params, enforcement_point);
+            GatewayPreflight {}
+        }
+    }
+
+    /// Record what became of a dispatch [`gateway_preflight`](Self::gateway_preflight) permitted:
+    /// a reply is `completed` (or `failed`, when it is a JSON object with an `error`), a refusal
+    /// before sending is `none`, a timeout or transport error is `unknown` — never a negative.
+    /// Nothing is recorded for an inert or refused preflight.
+    pub async fn gateway_record_execution(
+        &self,
+        preflight: &GatewayPreflight,
+        dispatched: &Result<Bytes, GatewayDispatchError>,
+    ) {
+        #[cfg(feature = "tls")]
+        {
+            use super::action_evaluator::Execution;
+            let mut observed = observed_execution(dispatched);
+            if observed == Execution::Completed && dispatched.as_ref().is_ok_and(|b| reply_reports_failure(b)) {
+                observed = Execution::Failed;
+            }
+            ae_record_execution(&self.task_ctx, &preflight.inner, observed).await;
+        }
+        #[cfg(not(feature = "tls"))]
+        {
+            let _ = (preflight, dispatched);
+        }
+    }
+}
+
+/// The two LLM doors — the ones `refuse_protected_kind` sends `llm.invoke` to.
+#[cfg(all(feature = "gateway", feature = "tls", feature = "llm"))]
+pub(crate) const ENFORCEMENT_POINT_LLM_CALL: &str = "gateway:llm/call";
+#[cfg(all(feature = "gateway", feature = "tls", feature = "llm"))]
+pub(crate) const ENFORCEMENT_POINT_LLM_STREAM: &str = "gateway:llm/stream";
 
 /// The A2A route. Gated on `a2a` as well: it is referenced only from that module, and an item
 /// alive in a build that never uses it is the feature-gated dead-code trap CI checks for.
@@ -3255,21 +3539,31 @@ fn kv_write(ctx: &Arc<TaskCtx>, key: Arc<str>, value: Bytes, tombstone: bool) ->
 ///
 /// Streams requests as `{"nonce_hex": "…", "sender": "IP:PORT", "payload_b64": "…"}`.
 /// The receiver must call `POST /gateway/rpc/respond` with the same `nonce_hex` and
-/// `sender` to complete the round-trip.
+/// `sender` to complete the round-trip — **the same principal** that opened this stream: each
+/// streamed request is recorded against it (`record_served_rpc`), and `rpc/respond` answers
+/// nothing else. `mesh:serve` alone bound neither a kind nor a request, so any holder could
+/// answer any in-flight call it learned a nonce for.
 async fn gw_rpc_serve(
     Path(kind):  Path<String>,
     State(ctx):  State<Arc<HttpCtx>>,
+    caller: Option<Extension<ResolvedPrincipal>>,
 ) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
     let rx = ctx.agent_ctx.signal_handlers.register_with_capacity(
         Arc::from(kind.as_str()),
         256,
     );
+    let principal: Arc<str> = Arc::from(
+        caller.map(|Extension(c)| c.principal).unwrap_or_else(|| gateway_caller::PRINCIPAL_ANONYMOUS.to_string()).as_str(),
+    );
 
+    let http_ctx = Arc::clone(&ctx);
     let agent_ctx = Arc::clone(&ctx.agent_ctx);
     // Async, because closure plan C3's provider check runs the action preflight (and its journal
     // write) before a request is streamed to the SDK agent that serves it.
     let stream = futures_util::StreamExt::filter_map(ReceiverStream::new(rx), move |sig: crate::signal::Signal| {
       let agent_ctx = Arc::clone(&agent_ctx);
+      let http_ctx = Arc::clone(&http_ctx);
+      let principal = Arc::clone(&principal);
       async move {
         use base64::Engine as _;
         if sig.payload.len() < 8 { return None; }
@@ -3302,6 +3596,8 @@ async fn gw_rpc_serve(
                 return None;
             }
         }
+        // Handed to this principal: the only one `rpc/respond` will take an answer from.
+        record_served_rpc(&http_ctx, req.sender(), req.nonce(), &principal);
         let payload_b64 = base64::engine::general_purpose::STANDARD.encode(req.payload());
         let mut data = json!({
             "nonce_hex":   format!("{:016x}", req.nonce()),
@@ -3323,9 +3619,13 @@ async fn gw_rpc_serve(
 /// `POST /gateway/rpc/respond` — send a reply to an in-flight RPC request.
 ///
 /// Body: `{"nonce_hex": "…", "sender": "IP:PORT", "result_b64": "…"}`.
-/// Returns `{"ok": true}`.
+/// Returns `{"ok": true}`. Only a request that `rpc/serve` streamed to **this principal** and
+/// that is not yet answered is accepted; anything else — another principal's request, a nonce never
+/// streamed, a second answer, one past the gateway's RPC ceiling — is `403 unserved_request` and
+/// nothing is emitted or released.
 async fn gw_rpc_respond(
     State(ctx): State<Arc<HttpCtx>>,
+    caller: Option<Extension<ResolvedPrincipal>>,
     Json(body):  Json<serde_json::Value>,
 ) -> impl IntoResponse {
     use base64::Engine as _;
@@ -3351,6 +3651,30 @@ async fn gw_rpc_respond(
     } else {
         Bytes::new()
     };
+
+    // The request must have been handed to this principal on its own serve stream. Before this
+    // check, `mesh:serve` bound to neither a kind nor a request: any holder could answer — and
+    // pre-empt — any in-flight call whose nonce it learned, and release its parked admission.
+    let principal = caller.map(|Extension(c)| c.principal)
+        .unwrap_or_else(|| gateway_caller::PRINCIPAL_ANONYMOUS.to_string());
+    match answer_served_rpc(&ctx, &sender, nonce, &principal) {
+        ServedAnswer::First => {}
+        // A replicated serve loop: every replica of this principal received the request and the
+        // first answer was delivered. The repeat is accepted and dropped — never a second
+        // `rpc.result` — so the losing replica's loop is not killed by an error (#587 F1).
+        ServedAnswer::Duplicate => {
+            ctx.rpc_respond_duplicates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Json(json!({ "ok": true, "duplicate": true })).into_response();
+        }
+        ServedAnswer::Unserved => {
+            warn!(nonce = %nonce_hex, %sender, %principal, "rpc/respond: refused — not a request this principal was handed");
+            return (StatusCode::FORBIDDEN, Json(json!({
+                "ok": false,
+                "error": "unserved_request",
+                "message": "rpc/respond answers only a request your own rpc/serve stream delivered, within the gateway's 300 s window",
+            }))).into_response();
+        }
+    }
 
     // Closure plan C4: the SDK agent has replied, so the call is no longer in flight.
     #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -4521,6 +4845,10 @@ struct LlmCallBody {
     context:    std::collections::HashMap<String, String>,
     #[serde(default = "default_timeout_ms")]
     timeout_ms: u64,
+    /// `_meta.mandate` / `_meta.operation_id`, as on `/mcp`: a presented mandate is assessed by the
+    /// preflight and carried to the provider.
+    #[serde(default, rename = "_meta")]
+    meta: serde_json::Value,
 }
 
 #[cfg(feature = "llm")]
@@ -4536,7 +4864,7 @@ async fn gw_llm_call(
     let caller = caller.map(|Extension(c)| c);
     use crate::signal::signal_kind;
 
-    let timeout = std::time::Duration::from_millis(body.timeout_ms);
+    let timeout = gateway_rpc_timeout_ms(body.timeout_ms);
     let filter  = CapFilter::new(body.ns.as_str(), body.name.as_str());
     let providers = resolve_cap_providers(&ctx.agent_ctx.kv_state, &filter);
 
@@ -4559,15 +4887,53 @@ async fn gw_llm_call(
         "context": body.context,
     });
     let payload = Bytes::from(req.to_string().into_bytes());
+    let params = serde_json::json!({ "_meta": body.meta });
+    let resource = format!("prompt:{}/{}@{target}", body.ns, body.name);
 
-    match gateway_caller::gateway_rpc_call(
+    // AE slice: the same evaluator preflight `/mcp` and `/a2a` run. This is the door the raw routes
+    // send `llm.invoke` to, so a policy denying it was walked around by choosing this door.
+    #[cfg(feature = "tls")]
+    let preflight = ae_preflight(
+        &ctx.agent_ctx,
+        caller.as_ref(),
+        signal_kind::LLM_INVOKE,
+        &resource,
+        &serde_json::json!({ "input": body.input, "context": body.context }),
+        &params,
+        ENFORCEMENT_POINT_LLM_CALL,
+    )
+    .await;
+    #[cfg(feature = "tls")]
+    if let Preflight::Refuse(refusal) = &preflight {
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({
+                "error": "policy", "detail": refusal.to_string(), "data": refusal.error_data(),
+            })),
+        )
+            .into_response();
+    }
+
+    let dispatched = gateway_caller::gateway_rpc_call_with_mandate(
         &ctx.agent_ctx,
         caller.as_ref(),
         target,
         Arc::from(signal_kind::LLM_INVOKE),
         payload,
         timeout,
-    ).await {
+        gateway_caller::presented_mandate(&params),
+        Some(&resource),
+    ).await;
+    #[cfg(feature = "tls")]
+    {
+        use super::action_evaluator::Execution;
+        let mut observed = observed_execution(&dispatched);
+        if observed == Execution::Completed && dispatched.as_ref().is_ok_and(|b| reply_reports_failure(b)) {
+            observed = Execution::Failed;
+        }
+        ae_record_execution(&ctx.agent_ctx, &preflight, observed).await;
+    }
+    match dispatched {
         Ok(reply) => {
             let v: serde_json::Value = serde_json::from_slice(&reply)
                 .unwrap_or_else(|_| serde_json::json!({"error":"parse_error","detail":""}));
@@ -4596,6 +4962,9 @@ struct LlmStreamBody {
     input:   String,
     #[serde(default)]
     context: std::collections::HashMap<String, String>,
+    /// As on `/gateway/llm/call`.
+    #[serde(default, rename = "_meta")]
+    meta: serde_json::Value,
 }
 
 #[cfg(feature = "llm")]
@@ -4607,7 +4976,6 @@ async fn gw_llm_stream(
     use axum::response::sse::Event;
     let caller = caller.map(|Extension(c)| c);
     use crate::capability::CapFilter;
-    use crate::signal::signal_kind;
     use futures_util::stream;
 
     // v1: buffer full response via RPC, emit as single "done" event.
@@ -4624,41 +4992,87 @@ async fn gw_llm_stream(
             let data = serde_json::json!({"type":"error","error":"no_provider"}).to_string();
             Event::default().data(data)
         }
-        Some((target, _)) => {
-            let req = serde_json::json!({
-                "prompt":  format!("{}/{}", body.ns, body.name),
-                "input":   body.input,
-                "context": body.context,
-            });
-            let payload = Bytes::from(req.to_string().into_bytes());
-            match gateway_caller::gateway_rpc_call(
-                &ctx.agent_ctx,
-                caller.as_ref(),
-                target,
-                Arc::from(signal_kind::LLM_INVOKE),
-                payload,
-                timeout,
-            ).await {
-                Ok(reply) => {
-                    let v: serde_json::Value = serde_json::from_slice(&reply)
-                        .unwrap_or_else(|_| serde_json::json!({"error":"parse_error"}));
-                    let output = v["output"].as_str().unwrap_or("").to_owned();
-                    let data = serde_json::json!({"type":"done","output":output}).to_string();
-                    Event::default().data(data)
-                }
-                Err(GatewayDispatchError::Rpc(_)) => {
-                    let data = serde_json::json!({"type":"error","error":"timeout"}).to_string();
-                    Event::default().data(data)
-                }
-                Err(e) => {
-                    let data = serde_json::json!({"type":"error","error":e.reason(),"detail":e.to_string()}).to_string();
-                    Event::default().data(data)
-                }
-            }
-        }
+        Some((target, _)) => llm_stream_event(&ctx, caller.as_ref(), body, target, timeout).await,
     };
 
     Sse::new(stream::once(async move { Ok::<_, std::convert::Infallible>(event) }))
+}
+
+/// `/gateway/llm/stream`'s one event for a resolved provider: the preflight, the dispatch, the record.
+/// A refusal or failure is an in-stream `{"type":"error",…}` event (the status line is already sent).
+#[cfg(feature = "llm")]
+async fn llm_stream_event(
+    ctx: &Arc<HttpCtx>,
+    caller: Option<&ResolvedPrincipal>,
+    body: LlmStreamBody,
+    target: crate::node_id::NodeId,
+    timeout: std::time::Duration,
+) -> axum::response::sse::Event {
+    use axum::response::sse::Event;
+    use crate::signal::signal_kind;
+    let req = serde_json::json!({
+        "prompt":  format!("{}/{}", body.ns, body.name),
+        "input":   body.input,
+        "context": body.context,
+    });
+    let payload = Bytes::from(req.to_string().into_bytes());
+    let params = serde_json::json!({ "_meta": body.meta });
+    let resource = format!("prompt:{}/{}@{target}", body.ns, body.name);
+    // The same preflight as `/gateway/llm/call`; a refusal is the stream's one event.
+    #[cfg(feature = "tls")]
+    let preflight = ae_preflight(
+        &ctx.agent_ctx,
+        caller,
+        signal_kind::LLM_INVOKE,
+        &resource,
+        &serde_json::json!({ "input": body.input, "context": body.context }),
+        &params,
+        ENFORCEMENT_POINT_LLM_STREAM,
+    )
+    .await;
+    #[cfg(feature = "tls")]
+    if let Preflight::Refuse(refusal) = &preflight {
+        let data = serde_json::json!({
+            "type": "error", "error": "policy", "detail": refusal.to_string(), "data": refusal.error_data(),
+        }).to_string();
+        return Event::default().data(data);
+    }
+    let dispatched = gateway_caller::gateway_rpc_call_with_mandate(
+        &ctx.agent_ctx,
+        caller,
+        target,
+        Arc::from(signal_kind::LLM_INVOKE),
+        payload,
+        timeout,
+        gateway_caller::presented_mandate(&params),
+        Some(&resource),
+    ).await;
+    #[cfg(feature = "tls")]
+    {
+        use super::action_evaluator::Execution;
+        let mut observed = observed_execution(&dispatched);
+        if observed == Execution::Completed && dispatched.as_ref().is_ok_and(|b| reply_reports_failure(b)) {
+            observed = Execution::Failed;
+        }
+        ae_record_execution(&ctx.agent_ctx, &preflight, observed).await;
+    }
+    match dispatched {
+        Ok(reply) => {
+            let v: serde_json::Value = serde_json::from_slice(&reply)
+                .unwrap_or_else(|_| serde_json::json!({"error":"parse_error"}));
+            let output = v["output"].as_str().unwrap_or("").to_owned();
+            let data = serde_json::json!({"type":"done","output":output}).to_string();
+            Event::default().data(data)
+        }
+        Err(GatewayDispatchError::Rpc(_)) => {
+            let data = serde_json::json!({"type":"error","error":"timeout"}).to_string();
+            Event::default().data(data)
+        }
+        Err(e) => {
+            let data = serde_json::json!({"type":"error","error":e.reason(),"detail":e.to_string()}).to_string();
+            Event::default().data(data)
+        }
+    }
 }
 
 // ── Federation: the consumer side (item 2 row 11) ────────────────────────────
@@ -6259,6 +6673,60 @@ mod tests {
         agent.shutdown().await;
     }
 
+    /// **What this checks, and what it cannot** (#587 F4): with a bearer configured, every path in
+    /// `PUBLIC_PATHS` is **mounted** (an unsupported method answers 405, whatever the handler does
+    /// — `/metrics` answers 404 by design in a build without `metrics`) and **public** (its own
+    /// method never answers 401); the gated routes — the library's own, the node-level three, and a
+    /// route a companion merged under `/gateway/` — answer 401 without it. It **cannot** find a
+    /// public route nobody listed: axum does not enumerate a router's routes, and a companion's
+    /// router is not built here. Companion public paths are listed in `COMPANION_PUBLIC_PATHS` and
+    /// rbac.md, and a new route outside the gated prefixes is a review rule, as rbac.md says.
+    #[cfg(feature = "a2a")]
+    #[tokio::test]
+    async fn every_listed_public_path_is_mounted_and_public_and_gated_paths_are_not() {
+        let gossip_port = alloc_port();
+        let http_port   = alloc_port();
+        let id  = NodeId::new("127.0.0.1", gossip_port).unwrap();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.gateway_auth_token = Some("secret".into());
+        let agent = Arc::new(GossipAgent::new(id, cfg).with_a2a());
+        async fn ok() -> &'static str { "ok" }
+        agent.with_http_routes(axum::Router::new().route("/gateway/app/protected", axum::routing::get(ok)));
+        agent.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{http_port}");
+
+        for path in super::PUBLIC_PATHS {
+            let concrete = path.replace("{corr_id}", "0");
+            let r = if *path == "/a2a" {
+                client.post(format!("{base}{concrete}")).json(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tasks/get","params":{"id":"x"}})).send().await.unwrap()
+            } else {
+                client.get(format!("{base}{concrete}")).send().await.unwrap()
+            };
+            assert_ne!(r.status(), 401, "{path} is public: it never demands the bearer");
+            // Mounted: a method the route does not take answers 405 from the router, never 404.
+            let r = client.delete(format!("{base}{concrete}")).send().await.unwrap();
+            assert_eq!(r.status(), 405, "{path} is mounted");
+        }
+        for (method, path) in [
+            ("GET", "/gateway/kv/keys"), ("GET", "/gateway/app/protected"), ("GET", "/signals/probe"),
+            ("POST", "/mcp"), ("GET", "/gateway/tuple/overview"),
+        ] {
+            let req = if method == "GET" { client.get(format!("{base}{path}")) } else { client.post(format!("{base}{path}")).json(&serde_json::json!({})) };
+            let status = req.send().await.unwrap().status();
+            // `/gateway/tuple/overview` is a companion route this node does not mount: a 404 from
+            // the router proves nothing public answered there either.
+            assert!(status == 401 || (path == "/gateway/tuple/overview" && status == 404),
+                "{method} {path} is gated: {status}");
+        }
+        #[cfg(feature = "consensus")]
+        assert_eq!(client.get(format!("{base}/consensus/x")).send().await.unwrap().status(), 401);
+        agent.shutdown().await;
+    }
+
     /// Scoped tokens on the node-level routes (compliance): `/mcp` needs `mcp:invoke`,
     /// `/signals/{kind}` needs `mesh:read`; a token outside the family is refused 403 naming
     /// the required scope; the wildcard admits everything.
@@ -6371,6 +6839,55 @@ mod tests {
         agent.shutdown().await;
     }
 
+    /// **The SSE doors streamed every protected RPC request to a `mesh:read` holder.** Both signal
+    /// streams registered a receiver for whatever kind the path named — the same table `rpc/serve`
+    /// and the native MCP tools register on, fanned to every receiver — so a `mesh:read` token could
+    /// open `/signals/mcp.invoke` and read each tool call's whole frame (`payload_b64`: the caller
+    /// envelope, the carried mandate and possession proof, the correlation nonce) while the raw
+    /// routes refused to *send* that kind. Observing protected work is refused with the same body
+    /// the raw routes use; an ordinary kind still streams. Seen failing first: both doors answered
+    /// 200 for `mcp.invoke`.
+    #[cfg(feature = "compliance")]
+    #[tokio::test]
+    async fn sse_doors_refuse_protected_kinds() {
+        use axum::http::header::AUTHORIZATION;
+
+        let gossip_port = alloc_port();
+        let http_port   = alloc_port();
+        let id  = NodeId::new("127.0.0.1", gossip_port).unwrap();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.protected_rpc_kinds = vec!["depot.dispatch".into()];
+        cfg.gateway_scoped_tokens = vec![
+            crate::GatewayToken { token: "mesh-tok".into(), scopes: vec!["mesh:read".into()] },
+        ];
+        let agent = Arc::new(GossipAgent::new(id.clone(), cfg));
+        agent.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{http_port}");
+
+        for kind in ["mcp.invoke", "skill.invoke", "llm.invoke", "depot.dispatch"] {
+            for path in [format!("/signals/{kind}"), format!("/gateway/signal/sse/{kind}")] {
+                let r = client.get(format!("{base}{path}")).header(AUTHORIZATION, "Bearer mesh-tok")
+                    .send().await.unwrap();
+                assert_eq!(r.status(), 403, "{path}: a mesh:read holder cannot observe protected work");
+                let v: serde_json::Value = r.json().await.unwrap();
+                assert_eq!(v["error"], "protected_kind", "{path} names the refusal: {v}");
+                assert_eq!(v["kind"], kind, "{path}: {v}");
+            }
+        }
+        // The plant: an ordinary kind still streams on both doors.
+        for path in ["/signals/repair.request", "/gateway/signal/sse/repair.request"] {
+            let r = client.get(format!("{base}{path}")).header(AUTHORIZATION, "Bearer mesh-tok")
+                .send().await.unwrap();
+            assert_eq!(r.status(), 200, "{path}: an ordinary kind streams");
+            drop(r);
+        }
+        agent.shutdown().await;
+    }
+
     /// **Closure plan C1, the scope split.** `mesh:serve` serves and responds, and cannot call; a
     /// `mesh:write` or `mesh:read` token is refused on the serve routes — the one-release
     /// compatibility window from 2.15.0 is closed. A token with neither is refused too.
@@ -6403,7 +6920,12 @@ mod tests {
         drop(r);
         let r = client.post(format!("{base}/gateway/rpc/respond")).header(AUTHORIZATION, "Bearer serve-tok")
             .json(&respond).send().await.unwrap();
-        assert_eq!(r.status(), 200, "mesh:serve responds");
+        // The scope admits the route; the handler then refuses a nonce this principal was never
+        // handed (`rpc_respond_answers_only_a_request_this_principal_was_handed`) — 403 from the
+        // handler, not the 403 `required_scope` the scope layer sends.
+        assert_eq!(r.status(), 403, "mesh:serve reaches the handler, which refuses an unserved nonce");
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["error"], "unserved_request", "{v}");
         let r = client.post(format!("{base}/gateway/rpc/call")).header(AUTHORIZATION, "Bearer serve-tok")
             .json(&serde_json::json!({"target": id.to_string(), "method": "echo", "timeout_secs": 1}))
             .send().await.unwrap();
@@ -6425,6 +6947,223 @@ mod tests {
         let v: serde_json::Value = r.json().await.unwrap();
         assert_eq!(v["required_scope"], "mesh:serve");
         agent.shutdown().await;
+    }
+
+    /// **`mesh:serve` bound to neither a kind nor a request: `rpc/respond` could answer any in-flight
+    /// RPC by nonce.** The route took `nonce_hex` and `sender` from the body with nothing binding them
+    /// to a request this principal's serve stream was handed, so any `mesh:serve` holder could pre-empt
+    /// any call it learned a nonce for (and release its parked admission). Now a request streamed on
+    /// `rpc/serve` is recorded against the principal that opened the stream, and `rpc/respond` answers
+    /// only a nonce that principal was handed — another principal, or a nonce never streamed, is
+    /// refused `403 unserved_request` and nothing is emitted. Seen failing first: the other principal's
+    /// reply answered 200 and the caller received it.
+    #[cfg(feature = "compliance")]
+    #[tokio::test]
+    async fn rpc_respond_answers_only_a_request_this_principal_was_handed() {
+        use axum::http::header::AUTHORIZATION;
+        use futures_util::StreamExt as _;
+
+        let gossip_port = alloc_port();
+        let http_port   = alloc_port();
+        let id  = NodeId::new("127.0.0.1", gossip_port).unwrap();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.gateway_scoped_tokens = vec![
+            crate::GatewayToken { token: "serve-1".into(), scopes: vec!["mesh:serve".into()] },
+            crate::GatewayToken { token: "serve-2".into(), scopes: vec!["mesh:serve".into()] },
+        ];
+        let agent = Arc::new(GossipAgent::new(id.clone(), cfg));
+        agent.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{http_port}");
+
+        // Principal 1 serves `work`.
+        let resp = client.get(format!("{base}/gateway/rpc/serve/work")).header(AUTHORIZATION, "Bearer serve-1")
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel::<serde_json::Value>();
+        tokio::spawn(async move {
+            let mut body = resp.bytes_stream();
+            let mut buf = String::new();
+            let mut seen_tx = Some(seen_tx);
+            while let Some(Ok(chunk)) = body.next().await {
+                buf.push_str(&String::from_utf8_lossy(&chunk));
+                if let Some(line) = buf.lines().find_map(|l| l.strip_prefix("data:"))
+                    && let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim())
+                    && let Some(tx) = seen_tx.take()
+                {
+                    let _ = tx.send(v);
+                }
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // A member calls `work`; the request is streamed to principal 1.
+        let caller = {
+            let agent = Arc::clone(&agent);
+            let id = id.clone();
+            tokio::spawn(async move {
+                agent.service().rpc_call(id, "work", b"go".to_vec(), Duration::from_secs(8)).await
+            })
+        };
+        let streamed = tokio::time::timeout(Duration::from_secs(5), seen_rx).await
+            .expect("the request was streamed").expect("stream open");
+        let nonce_hex = streamed["nonce_hex"].as_str().unwrap().to_string();
+        let sender = streamed["sender"].as_str().unwrap().to_string();
+
+        // Principal 2 holds `mesh:serve` too, but was never handed this request.
+        let forged = serde_json::json!({"nonce_hex": nonce_hex, "sender": sender, "result_b64": "Zm9yZ2Vk"});
+        let r = client.post(format!("{base}/gateway/rpc/respond")).header(AUTHORIZATION, "Bearer serve-2")
+            .json(&forged).send().await.unwrap();
+        assert_eq!(r.status(), 403, "another principal cannot answer a request it was not handed");
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["error"], "unserved_request", "{v}");
+
+        // A nonce nobody was handed, from the serving principal itself.
+        let unknown = serde_json::json!({"nonce_hex": "00000000000000ff", "sender": sender, "result_b64": ""});
+        let r = client.post(format!("{base}/gateway/rpc/respond")).header(AUTHORIZATION, "Bearer serve-1")
+            .json(&unknown).send().await.unwrap();
+        assert_eq!(r.status(), 403, "a nonce never streamed is refused");
+
+        // The principal that was handed the request answers it, and the caller gets that reply.
+        let real = serde_json::json!({"nonce_hex": nonce_hex, "sender": sender, "result_b64": "ZG9uZQ=="});
+        let r = client.post(format!("{base}/gateway/rpc/respond")).header(AUTHORIZATION, "Bearer serve-1")
+            .json(&real).send().await.unwrap();
+        assert_eq!(r.status(), 200, "the serving principal answers");
+        let reply = caller.await.unwrap();
+        assert_eq!(reply.as_deref().ok(), Some(&b"done"[..]), "the caller received the served reply: {reply:?}");
+
+        // Answered once: a second answer from the same principal is accepted idempotently and dropped
+        // (#587 F1), and another principal is still refused.
+        let r = client.post(format!("{base}/gateway/rpc/respond")).header(AUTHORIZATION, "Bearer serve-1")
+            .json(&real).send().await.unwrap();
+        assert_eq!(r.status(), 200, "a duplicate answer from the serving principal is idempotent");
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["duplicate"], true, "{v}");
+        let r = client.post(format!("{base}/gateway/rpc/respond")).header(AUTHORIZATION, "Bearer serve-2")
+            .json(&real).send().await.unwrap();
+        assert_eq!(r.status(), 403, "another principal is refused after the answer too");
+        agent.shutdown().await;
+    }
+
+    /// **#587 F1: replicated serve loops.** Two serve streams of one principal on one kind both
+    /// receive each request (a signal fans to every receiver), so both replicas answer. The first
+    /// answer is delivered; the second used to get `403 unserved_request`, which both SDKs raise —
+    /// killing the losing replica's serve loop. It is now `200 {"ok": true, "duplicate": true}`, the
+    /// reply dropped (never a second `rpc.result`) and counted (`rpc_respond_duplicates` on `/stats`).
+    /// Seen failing first: the second replica's answer was 403.
+    #[cfg(feature = "compliance")]
+    #[tokio::test]
+    async fn a_replicated_serve_loop_answers_idempotently() {
+        use axum::http::header::AUTHORIZATION;
+        use futures_util::StreamExt as _;
+
+        let gossip_port = alloc_port();
+        let http_port   = alloc_port();
+        let id  = NodeId::new("127.0.0.1", gossip_port).unwrap();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.gateway_scoped_tokens = vec![
+            crate::GatewayToken { token: "serve-1".into(), scopes: vec!["mesh:serve".into()] },
+        ];
+        let agent = Arc::new(GossipAgent::new(id.clone(), cfg));
+        agent.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{http_port}");
+
+        // Two replicas of one agent: same bearer, same kind.
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            let resp = client.get(format!("{base}/gateway/rpc/serve/work")).header(AUTHORIZATION, "Bearer serve-1")
+                .send().await.unwrap();
+            assert_eq!(resp.status(), 200);
+            let (tx, rx) = tokio::sync::oneshot::channel::<serde_json::Value>();
+            tokio::spawn(async move {
+                let mut body = resp.bytes_stream();
+                let mut buf = String::new();
+                let mut tx = Some(tx);
+                while let Some(Ok(chunk)) = body.next().await {
+                    buf.push_str(&String::from_utf8_lossy(&chunk));
+                    if let Some(line) = buf.lines().find_map(|l| l.strip_prefix("data:"))
+                        && let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim())
+                        && let Some(tx) = tx.take()
+                    {
+                        let _ = tx.send(v);
+                    }
+                }
+            });
+            seen.push(rx);
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let caller = {
+            let (agent, id) = (Arc::clone(&agent), id.clone());
+            tokio::spawn(async move { agent.service().rpc_call(id, "work", b"go".to_vec(), Duration::from_secs(8)).await })
+        };
+        let mut answers = Vec::new();
+        for (i, rx) in seen.into_iter().enumerate() {
+            let v = tokio::time::timeout(Duration::from_secs(5), rx).await.expect("streamed").expect("open");
+            let body = serde_json::json!({"nonce_hex": v["nonce_hex"], "sender": v["sender"],
+                                          "result_b64": if i == 0 { "Zmlyc3Q=" } else { "c2Vjb25k" }});
+            let r = client.post(format!("{base}/gateway/rpc/respond")).header(AUTHORIZATION, "Bearer serve-1")
+                .json(&body).send().await.unwrap();
+            answers.push(r.status());
+        }
+        assert_eq!(answers, vec![200, 200], "both replicas' answers are accepted");
+        let reply = caller.await.unwrap();
+        assert_eq!(reply.as_deref().ok(), Some(&b"first"[..]), "the first answer is the one delivered: {reply:?}");
+        let stats: serde_json::Value = client.get(format!("{base}/stats")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(stats["rpc_respond_duplicates"], 1, "the dropped answer is counted: {stats}");
+        agent.shutdown().await;
+    }
+
+    /// **#587 F7: the SSE doors streamed RPC replies.** A reply the interceptor did not claim — late,
+    /// or from a node the call was not sent to — falls through to the handler table, so
+    /// `/signals/rpc.result` streamed tool and LLM output to any `mesh:read` holder. Both doors now
+    /// refuse `rpc.result` and `bulk.result` as they refuse a protected kind. Seen failing first:
+    /// `/signals/rpc.result` answered 200.
+    #[cfg(feature = "compliance")]
+    #[tokio::test]
+    async fn sse_doors_refuse_reply_kinds() {
+        use axum::http::header::AUTHORIZATION;
+        let gossip_port = alloc_port();
+        let http_port   = alloc_port();
+        let id  = NodeId::new("127.0.0.1", gossip_port).unwrap();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.gateway_scoped_tokens = vec![
+            crate::GatewayToken { token: "mesh-tok".into(), scopes: vec!["mesh:read".into()] },
+        ];
+        let agent = Arc::new(GossipAgent::new(id, cfg));
+        agent.start().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{http_port}");
+        for kind in ["rpc.result", "bulk.result"] {
+            for path in [format!("/signals/{kind}"), format!("/gateway/signal/sse/{kind}")] {
+                let r = client.get(format!("{base}{path}")).header(AUTHORIZATION, "Bearer mesh-tok")
+                    .send().await.unwrap();
+                assert_eq!(r.status(), 403, "{path}: replies are not observable");
+                let v: serde_json::Value = r.json().await.unwrap();
+                assert_eq!(v["error"], "protected_kind", "{path}: {v}");
+            }
+        }
+        agent.shutdown().await;
+    }
+
+    /// **#587 F2.** The served-request window (`SERVED_RPC_TTL_MS`) assumes no gateway door waits
+    /// longer; `/gateway/llm/call` took `timeout_ms` unclamped. Seen failing first (the clamp toggled
+    /// off): `llm_call_timeout(u64::MAX)` was ~584 million years.
+    #[test]
+    fn the_llm_door_timeout_is_clamped_to_the_gateway_ceiling() {
+        use super::{gateway_rpc_timeout_ms, SERVED_RPC_TTL_MS};
+        assert_eq!(gateway_rpc_timeout_ms(u64::MAX), Duration::from_millis(SERVED_RPC_TTL_MS));
+        assert_eq!(gateway_rpc_timeout_ms(0), Duration::from_millis(1));
+        assert_eq!(gateway_rpc_timeout_ms(30_000), Duration::from_secs(30));
     }
 
     /// Routes merged via `with_http_routes` sit behind the same auth boundary as the
@@ -7894,6 +8633,81 @@ mod gateway_caller_tests {
         }
 
         g.shutdown().await;
+    }
+
+    /// **`/gateway/llm/call` and `/gateway/llm/stream` ran no action preflight.** The raw routes send
+    /// `llm.invoke` to these two doors (`refuse_protected_kind` names `/gateway/llm/call`), yet neither
+    /// consulted the evaluator `/mcp` and `/a2a` consult: a policy denying `llm.invoke` was walked
+    /// around by choosing this door. Both now run `ae_preflight` under their own enforcement points,
+    /// carry a presented mandate (`_meta.mandate`) to the provider, and record the outcome; a denial
+    /// is `403 {"error": "policy", …}` on `/call` and an in-stream `{"type": "error", "error":
+    /// "policy", …}` on `/stream`, and the provider is never reached. Seen failing first: `/call`
+    /// answered 200 and the provider ran.
+    #[cfg(all(feature = "llm", feature = "tls"))]
+    #[tokio::test]
+    async fn the_llm_doors_run_the_action_preflight() {
+        use crate::capability::Capability;
+        use crate::{ReferenceEvaluator, Rule};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let gossip_port = alloc_port();
+        let http_port = alloc_port();
+        let cert_dir = std::env::temp_dir().join(format!("ae-llm-doors-{http_port}"));
+        let _ = std::fs::remove_dir_all(&cert_dir);
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.tls = Some(crate::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+        let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
+        let me = agent.node_id().clone();
+        let resource = format!("prompt:llm/echo@{me}");
+        agent.with_action_evaluator(Arc::new(
+            ReferenceEvaluator::new("rev-llm-doors")
+                .with_catalogue("cat-test", "1")
+                .map_action("llm.invoke", resource.clone())
+                .prohibit(Rule::new("*", "llm.invoke", resource)),
+        ));
+        agent.start().await.unwrap();
+        let _reg = agent.capabilities().advertise_capability(Capability::new("llm", "echo"), Duration::from_secs(30));
+        let reached = Arc::new(AtomicUsize::new(0));
+        {
+            let (agent, reached) = (Arc::clone(&agent), Arc::clone(&reached));
+            let mut rx = agent.service().rpc_rx(crate::signal::signal_kind::LLM_INVOKE);
+            tokio::spawn(async move {
+                while let Some(req) = rx.recv().await {
+                    reached.fetch_add(1, Ordering::SeqCst);
+                    agent.service().rpc_respond(&req, br#"{"output":"ran"}"#.to_vec());
+                }
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{http_port}");
+        let r = client.post(format!("{base}/gateway/llm/call"))
+            .json(&serde_json::json!({"ns": "llm", "name": "echo", "input": "x"}))
+            .send().await.unwrap();
+        assert_eq!(r.status(), 403, "/gateway/llm/call: the evaluator's denial is answered");
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["error"], "policy", "{v}");
+        assert_eq!(v["data"]["reason"], "action_denied", "{v}");
+        assert_eq!(v["data"]["policy_revision"], "rev-llm-doors", "{v}");
+
+        let r = client.post(format!("{base}/gateway/llm/stream"))
+            .json(&serde_json::json!({"ns": "llm", "name": "echo", "input": "x"}))
+            .send().await.unwrap();
+        assert_eq!(r.status(), 200, "SSE commits its status line before the body");
+        let text = r.text().await.unwrap();
+        let data = text.lines().find_map(|l| l.strip_prefix("data:")).expect("one event").trim();
+        let v: serde_json::Value = serde_json::from_str(data).unwrap();
+        assert_eq!(v["type"], "error", "{v}");
+        assert_eq!(v["error"], "policy", "/gateway/llm/stream: the denial is the stream's one event: {v}");
+        assert_eq!(v["data"]["reason"], "action_denied", "{v}");
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(reached.load(Ordering::SeqCst), 0, "the provider was never reached through either door");
+        agent.shutdown().await;
+        let _ = std::fs::remove_dir_all(&cert_dir);
     }
 }
 

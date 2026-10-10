@@ -186,6 +186,111 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `a_non_member_cannot_propose_to_a_group_on_either_surface` (B committed `leader/members-only` = B).
   **Upgrade note:** three `#[non_exhaustive]` enums gain a variant — a `_` arm must fail closed, as the enums'
   docs already require (`docs/guide/deprecations.md` §24).
+- **`mycelium-reason`'s façade dispatched protected `llm.invoke` as the node.** `POST /gateway/reason/route` and
+  `/gateway/reason/v1/chat/completions` never read the principal the gateway's auth layer resolved and called
+  `rpc_call` — the node's own action — so under `gateway_caller_profile = secure` the provider saw `node:{gateway}`
+  as the caller, not the HTTP client (`gw.caller_profile`'s promise held on `/gateway/llm/call` and not here), and
+  no action evaluator was consulted. Both routes now carry the resolved principal into the router's dispatch
+  (`InferenceRouter::call_as` → `rpc_call_as`) and run the gateway's preflight per attempt under
+  `gateway:reason/route` / `gateway:reason/v1/chat/completions`; a denial is `403` (`{"error": "policy", …}` on
+  `/route`, `permission_error`/`policy` with a `mycelium.data` block on the OpenAI envelope) and the provider is never
+  reached. `mycelium-reason` **0.8.0** (`RouteError` gained `Refused`; `call_as` is new; `call` is unchanged and
+  remains the node's own in-process action). Seen failing first: `the_facade_dispatches_as_the_http_client_not_the_node`
+  (the provider saw `node:127.0.0.1:…`) and `the_facade_runs_the_action_preflight` (both doors answered 200 and the
+  provider ran). **Upgrade note:** under the secure profile a provider whose `sys/caller-context` marker has not
+  reached the gateway is now refused for a façade call (`provider_without_caller_context`, failed over) instead of
+  being called as the node — the same rule `/gateway/llm/call` has; an exhaustive `match` on `RouteError` needs the
+  new arm.
+- **Public `/a2a` `tasks/get` and `tasks/cancel` had no owner check.** Task ids are caller-chosen on `tasks/send`,
+  so they are enumerable, and both methods looked an id up with no caller: any client — any bearer, or none — could
+  read another caller's completed artifact or cancel its task by naming the id. The Phase-C audit (2026-09-20)
+  closed this for federated credentials only. A task now records the principal that created it (`A2aTask::owner`)
+  and `tasks/get` / `tasks/cancel` answer **only that identity**; another principal, or an anonymous caller (no
+  identity to match), is refused `-32004` naming the rule, and a `tasks/send` or `tasks/sendSubscribe` under an id
+  another identity owns is refused before any dispatch. Every reader of the task map enumerated
+  (`grep -n "\.tasks" src/agent/a2a.rs`: the two inserts, `get`, `cancel`, the eviction sweep). Seen failing first:
+  `a_task_is_readable_and_cancellable_only_by_the_identity_that_created_it` (the second principal read the first's
+  task). **Upgrade note:** an A2A client that polls `tasks/get` must send it under the same bearer as its
+  `tasks/send`; an anonymous client gets its result on the `tasks/send` response or the `sendSubscribe` stream, which
+  already carry it (`deprecations.md` §25).
+- **`mycelium-tuple-space`'s `GET /api/tuple` answered without a bearer.** The gateway's auth boundary is a path
+  prefix, and the cluster-wide tuple overview (every node's role, WAL bytes, per-stage depth and pressure) was
+  mounted outside it. It is now `GET /gateway/tuple/overview` behind `tuple:read`; `/api/tuple` answers 404 (the
+  router no longer mounts it — an unauthenticated redirect would have nowhere honest to point). `rbac.md`'s claim
+  that *the routing code asserts* the public list is now true: `http::PUBLIC_PATHS` holds it and
+  `the_public_surface_is_exactly_the_documented_list` probes a running gateway. Seen failing first:
+  `the_overview_sits_behind_the_gateway_bearer` (the old path answered 200 with no bearer). **Upgrade note:** a
+  dashboard or the integration scenario reading `/api/tuple` must read `/gateway/tuple/overview` with a
+  `tuple:read` (or legacy) bearer (`deprecations.md` §25).
+- **`/gateway/llm/call` and `/gateway/llm/stream` ran no action preflight.** The raw routes refuse `llm.invoke` and
+  name `/gateway/llm/call` as its door, yet neither door consulted the evaluator `/mcp` and `/a2a` consult — a policy
+  denying `llm.invoke` was walked around by choosing it. Both now run `ae_preflight` under `gateway:llm/call` /
+  `gateway:llm/stream`, carry a presented `_meta.mandate` to the provider with the resource
+  (`prompt:{ns}/{name}@{provider}`) and record the outcome; a denial is `403 {"error": "policy", …}` on `/call` and
+  the stream's one event `{"type": "error", "error": "policy", …}` on `/stream`. Inert without an evaluator. Seen
+  failing first: `the_llm_doors_run_the_action_preflight` (`/call` answered 200 and the provider ran).
+- **Bearer comparison is constant-time.** `resolve_token` compared a presented bearer with `==`, whose early exit
+  leaks the length of the matching prefix to a timing observer; it now uses `subtle::ConstantTimeEq` (already in
+  the tree under `ed25519-dalek`). No behaviour change; the existing auth tests cover it.
+- **The signal SSE doors streamed every protected RPC request to a `mesh:read` holder.** `/signals/{kind}` and
+  `/gateway/signal/sse/{kind}` registered a receiver for whatever kind the path named — the same handler table
+  `rpc/serve` and the native MCP tools register on, fanned to every receiver — so a `mesh:read` token could open
+  `/signals/mcp.invoke` and read each tool call's whole frame (`payload_b64`: the caller envelope, the carried mandate
+  and possession proof, the correlation nonce) while the raw routes refused to *send* that kind (closure plan C1).
+  Both streams now refuse a protected kind with the raw routes' own body, `403 {"error": "protected_kind", …}`,
+  whatever the token holds; an ordinary kind still streams. Added to the C7 bypass matrix. Seen failing first:
+  `sse_doors_refuse_protected_kinds` (both doors answered 200 for `mcp.invoke`). **Upgrade note:** a dashboard or
+  SDK reader subscribed to `mcp.invoke`, `skill.invoke`, `llm.invoke` or a configured `protected_rpc_kinds` entry
+  now gets 403 at open; read the decision trace or the evidence journal instead (`deprecations.md` §25).
+- **`mesh:serve` bound to neither a kind nor a request: `rpc/respond` could pre-empt any in-flight RPC by nonce.**
+  Two defects, one door. (a) The reply interceptor claimed a pending call's oneshot on **nonce match alone**, and
+  `await_nonce_reply` then dropped the reply on sender mismatch — so the oneshot was consumed either way, and a peer
+  that learned a nonce could make the legitimate reply undeliverable (the caller timed out although the provider
+  answered). The interceptor now claims only when the nonce **and** the node the call was sent to match
+  (`TaskCtx::rpc_pending` carries the target); a nonce-only match from another sender is counted in
+  `SystemStats::rpc_reply_sender_mismatches` (also on `/stats`) and ignored, and the real reply still arrives.
+  (b) `POST /gateway/rpc/respond` took `nonce_hex` and `sender` from the body with nothing binding them to a request
+  this principal's serve stream was handed, so any `mesh:serve` holder could answer any call it learned a nonce for —
+  and release its parked cohort admission. A request streamed on `rpc/serve` is now recorded against the principal
+  that opened the stream (`HttpCtx::served_rpcs`, lock-order row 55, 300 s TTL, capped), and `rpc/respond` answers
+  only a nonce that principal was handed and has not yet answered: anything else is `403 {"error":
+  "unserved_request"}` and nothing is emitted. Both doors added to the C7 bypass matrix. Entry points enumerated by
+  `grep -rn "rpc_pending\|release_parked" src/`: `await_nonce_reply` (the one writer, for `rpc_call` and
+  `bulk_call`), the interceptor (the one reader), `gw_rpc_respond` (the one `release_parked` caller). Seen failing
+  first: `a_forged_reply_from_the_wrong_sender_does_not_consume_the_pending_call` (`Err(Timeout)` where `Ok("real")`
+  was expected) and `rpc_respond_answers_only_a_request_this_principal_was_handed` (the other principal's reply
+  answered 200 and the caller received it). **Upgrade note:** an SDK agent that answers with a nonce from its own
+  serve stream is unaffected; one that answered on another agent's behalf (a different bearer) now gets 403 — open
+  the stream and respond under one credential (`deprecations.md` §25). `SystemStats` gained a field (an exhaustive
+  literal breaks).
+- **The adversarial review's findings on #587** (rule 4), each fixed before merge. (F1) Two serve streams of one
+  principal on one kind both receive each request, so the second replica's `rpc/respond` got `403 unserved_request`
+  and both SDKs raise it, killing that replica's loop: a repeat answer from the same principal is now `200
+  {"ok": true, "duplicate": true}`, dropped and counted (`/stats` `rpc_respond_duplicates`); the first record of a
+  request is never reset by a second stream. Seen failing first: `a_replicated_serve_loop_answers_idempotently`
+  (`[200, 403]`). (F2) The 300 s answer window assumed every door waits at most 300 s: `/gateway/llm/call` clamps
+  `timeout_ms` to it; an in-process `rpc_call`'s bound is stated. Seen failing first (clamp toggled off):
+  `the_llm_door_timeout_is_clamped_to_the_gateway_ceiling`. (F3) The `(nonce, sender)` claim closes the accidental
+  case, not a forger who writes the target's id — `sender` is emitter-written; said so in `SystemStats`, §25 and
+  lock-order row 2. (F4) `mycelium-agentfacts`' two `/.well-known/agent-facts*` routes are listed
+  (`COMPANION_PUBLIC_PATHS`, rbac.md); the public-surface test is renamed for what it checks and checks mounting by
+  405 (it failed in a build without `metrics`, whose `/metrics` answers 404 by design). (F5) The A2A owner check and
+  the insert straddled the dispatch: the id is now reserved atomically before it (a pending entry removed on any
+  failure). Seen failing first: `two_principals_racing_one_task_id_dispatch_once` (the skill ran twice, both
+  completed). (F6) The reservation runs after the federation authorisation; `-32001`/`-32004` stay distinct, stated.
+  (F7) Both SSE doors refuse `rpc.result` and `bulk.result`. Seen failing first: `sse_doors_refuse_reply_kinds`
+  (`/signals/rpc.result` answered 200). (F8) rbac.md states what a `mesh:serve` stream sees. (F9) The served-request
+  TTL sweep runs every 1 024 inserts or at the cap, not per request. (F10) The tuple-space crate's manifest comment.
+  The `gw_llm_stream` label that failed `llm`-without-`tls` clippy is gone (a helper with an early return).
+
+### Added
+- **A companion's gateway door can act as the HTTP client, under the evaluator** — the public API
+  `mycelium-reason`'s façade needed and nothing had: `ResolvedPrincipal` (the auth layer's resolved principal, read
+  from axum's `Extension` on a route merged with `with_http_routes`; fields crate-private, so it is never
+  constructed outside the auth layer), `ServiceHandle::rpc_call_as` (the gateway dispatch, carrying the client's
+  caller context), `GossipAgent::gateway_preflight` / `gateway_record_execution` (the preflight `/mcp`, `/a2a` and
+  `/gateway/llm/call` run, opaque `GatewayPreflight` / `GatewayRefusal`, inert without `tls`) and
+  `GatewayDispatchError` (`#[non_exhaustive]`). All under `gateway`; additive.
 
 ### Security
 - **A hosted WASM component's `mesh.emit` is confined.** The host forwarded any kind a component

@@ -4,12 +4,12 @@
 # node-a runs the ts13 tuple space as primary, node-b as secondary mirror.
 # Tests the cross-node properties unit tests cannot cover:
 #
-#   (I)   Primary capability is discoverable cluster-wide (/api/tuple role)
+#   (I)   Primary capability is discoverable cluster-wide (/gateway/tuple/overview role)
 #   (II)  put on node-a / take on node-b — client ops route via RPC to the
 #         primary, ids preserved, payloads round-trip through base64
 #   (III) In-flight accounting — taken-not-acked items show as inflight in
 #         depth, and terminal acks clear them
-#   (IV)  Monitoring aggregation — /api/tuple reports both roles and the
+#   (IV)  Monitoring aggregation — /gateway/tuple/overview reports both roles and the
 #         put/take counters
 #   (V)   Empty take times out with 408 (the blocking-pull contract)
 set -euo pipefail
@@ -53,7 +53,7 @@ TAKE_MAX=20        # > 6 + TAKE_PARK + 5
 b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
 
 # ── Phase I: primary discoverable ────────────────────────────────────────────
-# Note on what this proves, and what it does not. `/api/tuple` is aggregated from the gossiped
+# Note on what this proves, and what it does not. `/gateway/tuple/overview` is aggregated from the gossiped
 # `sys/tuple/{node}/{ns}/role` records the metrics writer publishes each tick. Those records
 # carry no freshness stamp and are never cleared on shutdown — unlike the backpressure pheromone
 # the *same* loop stamps with `written_at_ms` and evaporates after 3× its cadence — and they
@@ -64,13 +64,13 @@ b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
 # role record is recorded as a separate finding against the monitoring endpoint.
 primary_visible() {
     local role
-    role=$(curl -s --max-time 3 "${H_A}/api/tuple" 2>/dev/null \
+    role=$(curl -s --max-time 3 "${H_A}/gateway/tuple/overview" 2>/dev/null \
         | jq -r '.nodes[] | select(.ns=="'"$NS"'") | select(.role=="primary") | .role' \
         2>/dev/null | head -1)
     [ "$role" = "primary" ]
 }
 poll_until 30 primary_visible || {
-    printf 'FAIL: ts13 primary not visible in /api/tuple within 30s\n' >&2
+    printf 'FAIL: ts13 primary not visible in /gateway/tuple/overview within 30s\n' >&2
     false
 }
 
@@ -142,10 +142,10 @@ poll_until 15 inflight_after || {
     false
 }
 
-# ── Phase IV: /api/tuple aggregation shows both roles and the counters ──────
+# ── Phase IV: /gateway/tuple/overview aggregation shows both roles and the counters ──────
 counters_visible() {
     local doc puts takes secondary
-    doc=$(curl -s --max-time 3 "${H_A}/api/tuple" 2>/dev/null) || return 1
+    doc=$(curl -s --max-time 3 "${H_A}/gateway/tuple/overview" 2>/dev/null) || return 1
     puts=$(echo "$doc" | jq -r '[.nodes[] | select(.ns=="'"$NS"'") | select(.role=="primary")
         | .stages[] | select(.stage=="s13-work") | .put_total][0] // 0')
     takes=$(echo "$doc" | jq -r '[.nodes[] | select(.ns=="'"$NS"'") | select(.role=="primary")
@@ -155,7 +155,7 @@ counters_visible() {
     [ "$puts" -ge 10 ] && [ "$takes" -ge 10 ] && [ "$secondary" -ge 1 ]
 }
 poll_until 30 counters_visible || {
-    printf 'FAIL: /api/tuple never showed primary counters and a secondary\n' >&2
+    printf 'FAIL: /gateway/tuple/overview never showed primary counters and a secondary\n' >&2
     false
 }
 

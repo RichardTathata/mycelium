@@ -299,12 +299,18 @@ pub enum RouteError {
     NoProvider,
     /// Every attempted candidate failed; per-node error strings in attempt order.
     Exhausted(Vec<(NodeId, String)>),
+    /// The gateway's action preflight refused the call for the HTTP client it was routed for
+    /// ([`InferenceRouter::call_as`]): nothing was dispatched. The fields are what every gateway
+    /// door answers with — the JSON-RPC `code`, the machine-readable `reason` (`action_denied`,
+    /// `not_established`, …), the sentence, and the `data` object (`policy_revision`, `checked`, …).
+    Refused { code: i32, reason: String, message: String, data: serde_json::Value },
 }
 
 impl fmt::Display for RouteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RouteError::NoProvider => write!(f, "no provider for the requested model"),
+            RouteError::Refused { reason, message, .. } => write!(f, "refused by policy ({reason}): {message}"),
             RouteError::Exhausted(fails) => {
                 write!(f, "all {} attempted provider(s) failed: ", fails.len())?;
                 let mut first = true;
@@ -354,6 +360,15 @@ impl Drop for Reservation<'_> {
         }
         metrics::gauge!("mycelium_reason_route_inflight").decrement(1.0);
     }
+}
+
+/// Whose action a routed call is: the node's own (`call`) or a gateway client's (`call_as`).
+/// The marker keeps the lifetime in use in a build without `gateway`, whose variant carries it.
+#[derive(Clone, Copy)]
+enum Dispatch<'a> {
+    AsNode(std::marker::PhantomData<&'a ()>),
+    #[cfg(feature = "gateway")]
+    ForClient { caller: Option<&'a mycelium::ResolvedPrincipal>, enforcement_point: &'a str },
 }
 
 impl InferenceRouter {
@@ -475,8 +490,47 @@ impl InferenceRouter {
     /// `max_attempts`, one RPC per candidate, failing over on error replies and RPC
     /// timeouts. When `trace` is given, the route decision is recorded once and each
     /// attempt as an `llm_call` event.
+    ///
+    /// **This node's own action**: the RPC is framed as the node (`ServiceHandle::rpc_call`),
+    /// which is right for an embedder routing in-process. A gateway door routing *for an HTTP
+    /// client* uses [`call_as`](Self::call_as), so the provider sees the client as the caller and
+    /// the gateway's action preflight runs.
     pub async fn call(
         &self,
+        q: &ModelQuery,
+        input: &str,
+        context: &HashMap<String, String>,
+        trace: Option<&TraceRecorder>,
+    ) -> Result<Routed, RouteError> {
+        self.call_inner(Dispatch::AsNode(std::marker::PhantomData), q, input, context, trace).await
+    }
+
+    /// [`call`](Self::call) **for a gateway client**: the one way a route a companion mounts
+    /// dispatches protected `llm.invoke`. `caller` is what the gateway's auth layer resolved for
+    /// the HTTP request (axum's `Extension<ResolvedPrincipal>`); `enforcement_point` names the
+    /// route in every evidence record (`gateway:reason/route`). Per attempt, the gateway's action
+    /// preflight runs for `llm.invoke` on `prompt:llm/{model}@{provider}` — a refusal is
+    /// [`RouteError::Refused`] and nothing is dispatched; a permit is dispatched with the client's
+    /// caller context (`ServiceHandle::rpc_call_as`: under `gateway_caller_profile = secure` the
+    /// provider's `request_principal` is `Client(<the bearer's principal>)`, never this node) and
+    /// its outcome recorded. Before this the façade called `rpc_call`, so the provider saw the
+    /// gateway node as the caller and no evaluator was consulted.
+    #[cfg(feature = "gateway")]
+    pub async fn call_as(
+        &self,
+        caller: Option<&mycelium::ResolvedPrincipal>,
+        enforcement_point: &str,
+        q: &ModelQuery,
+        input: &str,
+        context: &HashMap<String, String>,
+        trace: Option<&TraceRecorder>,
+    ) -> Result<Routed, RouteError> {
+        self.call_inner(Dispatch::ForClient { caller, enforcement_point }, q, input, context, trace).await
+    }
+
+    async fn call_inner(
+        &self,
+        dispatch: Dispatch<'_>,
         q: &ModelQuery,
         input: &str,
         context: &HashMap<String, String>,
@@ -520,14 +574,52 @@ impl InferenceRouter {
                 self.cfg.failover_timeout
             };
             let started = std::time::Instant::now();
-            let reply = {
+            let reply: Result<Bytes, String> = {
                 // Reserved for exactly the attempt: the guard drops when the reply (or the
                 // timeout) comes back, whether or not we fail over.
                 let _reservation = reservation;
-                self.agent
-                    .service()
-                    .rpc_call(node.clone(), signal_kind::LLM_INVOKE, payload.clone(), per_attempt_timeout)
-                    .await
+                match dispatch {
+                    Dispatch::AsNode(_) => self
+                        .agent
+                        .service()
+                        .rpc_call(node.clone(), signal_kind::LLM_INVOKE, payload.clone(), per_attempt_timeout)
+                        .await
+                        .map_err(|e| e.to_string()),
+                    #[cfg(feature = "gateway")]
+                    Dispatch::ForClient { caller, enforcement_point } => {
+                        // The same preflight `/mcp`, `/a2a` and `/gateway/llm/call` run, between the
+                        // auth layer and the dispatch; a refusal is answered and nothing is sent.
+                        let preflight = self
+                            .agent
+                            .gateway_preflight(
+                                caller,
+                                signal_kind::LLM_INVOKE,
+                                &format!("prompt:llm/{}@{node}", q.model),
+                                &serde_json::json!({ "input": input, "context": context }),
+                                &serde_json::Value::Null,
+                                enforcement_point,
+                            )
+                            .await;
+                        if let Some(r) = preflight.refusal() {
+                            if let Some(t) = trace {
+                                t.llm_call(node, false, 0, 0, Some(&r.message));
+                            }
+                            return Err(RouteError::Refused {
+                                code: r.code,
+                                reason: r.reason,
+                                message: r.message,
+                                data: r.data,
+                            });
+                        }
+                        let dispatched = self
+                            .agent
+                            .service()
+                            .rpc_call_as(caller, node.clone(), signal_kind::LLM_INVOKE, payload.clone(), per_attempt_timeout)
+                            .await;
+                        self.agent.gateway_record_execution(&preflight, &dispatched).await;
+                        dispatched.map_err(|e| e.to_string())
+                    }
+                }
             };
             let duration_ms = started.elapsed().as_millis() as u64;
 
@@ -555,7 +647,7 @@ impl InferenceRouter {
                     }
                     Err(e) => format!("undecodable reply: {e}"),
                 },
-                Err(e) => e.to_string(),
+                Err(e) => e,
             };
             if let Some(t) = trace {
                 t.llm_call(node, false, 0, duration_ms, Some(&err));

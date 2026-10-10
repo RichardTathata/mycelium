@@ -224,7 +224,9 @@ there for one release with a warning; **since 2.18.2 it is refused** — `403 {"
 `signal/emit`, `mailbox/deliver`, `shard/emit`, `overlay/emit_reliable`) answer **`403 {"error":
 "protected_kind"}`** for `mcp.invoke`, `skill.invoke` and `llm.invoke` (plus anything in
 `protected_rpc_kinds` / `GOSSIP_PROTECTED_RPC_KINDS`): those kinds go through `/mcp`, `/a2a` or
-`/gateway/llm`, where the evaluator and mandate checks run. A Dev who hits either learns why here
+`/gateway/llm`, where the evaluator and mandate checks run. The two signal streams (`/signals/{kind}`,
+`/gateway/signal/sse/{kind}`) answer the same `403` for a protected kind since 2.32.0 — a `mesh:read`
+token cannot observe protected work, which would be every such request's frame, mandate included. A Dev who hits either learns why here
 rather than from the operator runbook ([rbac.md §2](../operations/rbac.md)).
 
 **4. The `sys/` namespace tripwire** (core — on without `compliance`). A remote
