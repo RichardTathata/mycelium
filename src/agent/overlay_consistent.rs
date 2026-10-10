@@ -23,6 +23,10 @@ pub enum ConsistencyError {
     /// this node's view is partial. An explicit one-member group still elects; what is refused is
     /// inferring authority from absence. See `ConsensusResult::ElectorateUnavailable`.
     ElectorateUnavailable { observed_members: usize, declared_min: usize },
+    /// **This node is not in the group's roster**, so it may not propose to the group — its own
+    /// vote would be one the electorate does not contain. Nothing was decided; join the group
+    /// first. See `ConsensusResult::NotAMember`.
+    NotAMember { group: Arc<str> },
 }
 
 impl std::fmt::Display for ConsistencyError {
@@ -40,6 +44,9 @@ impl std::fmt::Display for ConsistencyError {
             Self::ElectorateUnavailable { observed_members, declared_min } =>
                 write!(f, "no electorate: this node sees {observed_members} member(s) but the \
                            group declares at least {declared_min} — the view is partial"),
+            Self::NotAMember { group } =>
+                write!(f, "not a member: this node is not in the roster of group {group}, so it \
+                           may not propose to it — join the group first"),
         }
     }
 }

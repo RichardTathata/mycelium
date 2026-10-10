@@ -421,3 +421,59 @@ allow the grace period if the orderly shutdown matters (the stem's trace and its
 persistence). Existing
 `except httpx.HTTPStatusError` handlers keep catching a lost write; catch `SupersededError` to tell it apart.
 
+## 23. Identity proofs and consensus signatures are domain-tagged: the bare form is accepted for one release (2.32.0)
+
+**What changes.** An identity proof is a signature over `mycelium.identity/proof/1 ‖ len ‖ history`, and a
+consensus payload's signature is over `mycelium.consensus/msg/1 ‖ len ‖ bytes`; before 2.32.0 both were bare
+signatures over the bytes themselves, which let one be presented as the other (CHANGELOG, Unreleased § Fixed). The
+frames are unchanged — wire **v12** — so this is a rolling-upgrade allowance, not a wire bump:
+
+- **A 2.32 node accepts the bare form of both for one release**, and counts each acceptance
+  (`mycelium_identity_untagged_proofs_total`, `mycelium_consensus_untagged_signatures_total`; `GET /stats`
+  `identity_untagged_proofs`, `consensus_untagged_signatures`; a warning per identity proof). These count
+  **validations, not peers**: the identity watcher re-validates every record on every `sys/identity*` change, so
+  one un-upgraded peer raises the identity counter repeatedly. The identity allowance holds **only while
+  `require_identity_proofs` is off**. With the flag on, a bare proof is refused like an unsealed one: that flag
+  already requires the whole fleet to write proofs, and a bare signature over 32-aligned bytes is what any other
+  signing path could have produced.
+- **Consensus, 2.31 proposer → 2.32 acceptors: works.** A 2.32 acceptor answers in the signature form of the
+  request it verified, so a bare `Prepare`/`Propose` gets a bare `PrepareAck`, `Promise`/`Nack` or vote, which the
+  2.31 proposer verifies; its rounds, lease renewals included, complete.
+- **Consensus, 2.32 proposer → 2.31 acceptors: times out.** A 2.31 node verifies bare only, so it drops a 2.32
+  proposer's `Prepare`/`Propose`/`Commit` as *bad signature*; until a quorum of the group's acceptors is upgraded,
+  an upgraded proposer times out (`ConsensusResult::Timeout`) rather than commits, and a 2.31 learner takes the
+  committed value from anti-entropy rather than the COMMIT. The same shape as §21.
+- **Identity, at a 2.31 verifier: a 2.32 peer's proof does not verify.** The tagged proof takes the *present but
+  not verifying* branch: the keys are **not merged**, `identity_anchor_conflicts` increments, and the identity
+  watcher re-raises it on every `sys/identity*` event for every 2.32 peer. Expect an un-upgraded node's
+  `identity_anchor_conflicts` to **climb for the whole window** — it is not a poisoning signal there. A 2.32
+  peer's handshake key still enters that node's `peer_keys` through the TLS anchor (`record_peer_anchor`), so
+  directly connected peers stay verifiable; a 2.32 peer's **rotated** keys do not enter until the node upgrades,
+  so do not rotate a 2.32 node's identity while 2.31 nodes must verify it.
+
+**Will the compiler tell me?** No — it is signing behaviour; the API is unchanged. `sign_with_identity` is
+unchanged too, but its doc now states the contract it always needed: the caller tags its own message.
+
+**Migration.** Upgrade the fleet before relying on consensus from upgraded proposers, with
+`require_identity_proofs` off until every node is on 2.32.0 (the flag's own rule), and without rotating a 2.32
+node's identity while 2.31 nodes remain. Watch the two counters on upgraded nodes: a value still rising means a
+peer still signs the old way; and read `identity_anchor_conflicts` on un-upgraded nodes as the window's noise
+until they are upgraded. **The allowance closes in the next MINOR**, after which a bare signature is refused
+everywhere.
+
+## 24. `ConsensusResult`, `CommitError` and `ConsistencyError` gain `NotAMember` (2.32.0)
+
+**What changes.** A group proposal from a node that is not in the group's roster is refused by name —
+`ConsensusResult::NotAMember { slot, group }`, `CommitError::NotAMember { slot, group }`,
+`ConsistencyError::NotAMember { group }`, and **403 `not_a_member`** from `POST /gateway/overlay/elect` and every
+gateway route that reaches a group proposal — where it used to run, counting the proposer's own vote toward a
+quorum drawn from a roster it was not in (CHANGELOG, Unreleased § Fixed). `cluster_propose` is unaffected.
+
+**Will the compiler tell me?** Only if you matched without a `_` arm — all three enums are `#[non_exhaustive]`
+(§13), so an exhaustive `match` inside this crate's dependants already needed one. **That arm must fail closed:**
+a refusal read as a commit is the class of bug `ElectorateUnavailable` ended, one door over.
+
+**Migration.** Join the group before proposing to it — `mesh().join_group(..)`, `POST /gateway/mesh/group`, or
+`/gateway/govern/group` (`govern:write`) for a governed group. A client that elected a leader for a group its
+node had not joined was never electing anything the group's members agreed to.
+

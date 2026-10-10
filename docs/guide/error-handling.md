@@ -92,6 +92,7 @@ pub enum ConsistencyError {
     Superseded,                     // the slot was decided for another caller's value
     TopologyUnsatisfied,            // quorum met but Hard topology gate failed
     ElectorateUnavailable { observed_members: usize, declared_min: usize }, // no electorate: nothing decided
+    NotAMember { group: Arc<str> }, // this node is not in the group's roster: nothing proposed (2.32.0)
 }
 ```
 
@@ -108,6 +109,8 @@ pub enum ConsistencyError {
   smaller than a fresh `MembershipIntent { min }` declares, so no electorate could be established and nothing
   was decided. Join the group — `POST /gateway/mesh/group`, or `/gateway/govern/group` (`govern:write`) for a group under a membership intent — or wait for the roster to converge (`GET /gateway/mesh/group?group=G`); do not
   read it as a refusal of the value.
+- `NotAMember` — this node is not in the group's roster, so it did not propose: its own vote would be one the
+  electorate does not contain. Join the group (the same routes as above); nothing was decided.
 - `TopologyUnsatisfied` — quorum has the right headcount but the Hard topology
   policy (e.g. "must span two racks") was not satisfied. Retry is unlikely to
   help unless nodes rejoin from the missing segments. If availability matters more than the spread
@@ -282,6 +285,7 @@ match agent.consensus().consistent_set("seq/head", &b"v2"[..]).await {
     Err(ConsistencyError::Timeout { .. })    => { /* retry */ }
     Err(ConsistencyError::TopologyUnsatisfied) => { /* alert ops */ }
     Err(ConsistencyError::ElectorateUnavailable { .. }) => { /* join the group / wait for the roster; nothing decided */ }
+    Err(ConsistencyError::NotAMember { .. })     => { /* join the group; nothing proposed */ }
     Err(_)                                   => { /* #[non_exhaustive]: an unknown error is not a commit */ }
 }
 ```

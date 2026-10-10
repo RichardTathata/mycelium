@@ -74,7 +74,9 @@ sequenceDiagram
 ## What a successful election means
 
 **An election needs an electorate.** A group whose roster this node cannot see — unknown, or one
-nobody joined — is **refused** (`ElectorateUnavailable`), not decided alone. Join the group first:
+nobody joined — is **refused** (`ElectorateUnavailable`), not decided alone. **And the proposer must be in it**: a
+node that is not in the group's roster is refused by name (`NotAMember`, 2.32.0) rather than counting its own vote
+toward a quorum the roster does not contain. Join the group first:
 
 ```rust
 agent.mesh().join_group("my-group");            // embedded

@@ -274,6 +274,19 @@ pub enum ConsensusResult {
         /// declared. `observed_members < declared_min` means this node's view is partial.
         declared_min: usize,
     },
+    /// **This node is not in the group's roster, so it may not propose to the group.**
+    ///
+    /// A proposer counts its own promise and its own vote, and the quorum it needs is computed
+    /// from the roster — which, until 2.32.0, it need not have been in. A stranger's self-vote is
+    /// a vote the electorate does not contain: on a one-member group it decided alone, and on a
+    /// larger group two strangers with disjoint acceptors could each reach quorum, since the
+    /// quorums need not intersect in a member. Refused by name at the engine's door, before
+    /// anything leaves, so nothing is in flight; `cluster_propose` has no roster and is unaffected.
+    /// Join the group first — `mesh().join_group`, or `/gateway/govern/group` for a governed one.
+    NotAMember {
+        slot:  Arc<str>,
+        group: Arc<str>,
+    },
 
     /// Quorum size was met but the Hard topology gate was not satisfied — too
     /// few distinct domains at `spread_depth`. The proposal is **not** committed.
@@ -704,16 +717,25 @@ impl ConsensusEngine {
 
     /// Applies a KV update from within a consensus task.
     /// Uses `try_send` for gossip dispatch — dropped frames recovered via anti-entropy.
+    /// **Not handed to the WAL**: a record that must survive a restart goes through
+    /// [`kv_set_returning`](Self::kv_set_returning) and [`persist_sync`](Self::persist_sync).
     fn kv_set(&self, key: String, value: Bytes) {
+        let _ = self.kv_set_returning(key, value);
+    }
+
+    /// [`kv_set`](Self::kv_set), returning the applied update so the caller can WAL-append the
+    /// exact entry — apply to the store first, then hand the record to the WAL, never the reverse.
+    fn kv_set_returning(&self, key: String, value: Bytes) -> GossipUpdate {
         let tc  = &self.task_ctx;
         let upd = make_gossip_update(&tc.node_id, tc.default_ttl, Arc::from(key.as_str()), value, false, &tc.hlc);
         apply_and_notify(&tc.kv_state, &upd);
         let tls = tc.tls.get().map(std::sync::Arc::as_ref);
-        let msg = make_kv_wire_msg(upd, tc.node_id.id_hash(), tls);
+        let msg = make_kv_wire_msg(upd.clone(), tc.node_id.id_hash(), tls);
         dispatch_gossip_try_send(
             &tc.gossip_txs, msg,
             tc.node_id.id_hash(), ForwardHint::All, &tc.kv_state.dropped_frames,
         );
+        upd
     }
 
     /// The ballot this slot's most recent commit was decided at, as this node knows it; `0` when
@@ -731,18 +753,34 @@ impl ConsensusEngine {
         present && self.live_committed(slot).is_none()
     }
 
-    /// Records that `slot` was decided at `ballot`, never lowering what is recorded.
-    fn record_decided(&self, slot: &str, ballot: u64) {
-        if ballot > self.decided_floor(slot) {
-            self.kv_set(format!("{}{}", consensus_ns::DECIDED, slot), encode_ballot(ballot));
-        }
+    /// Records that `slot` was decided at `ballot`, never lowering what is recorded — on stable
+    /// storage (`persist_sync`): the floor is what makes acceptors refuse a ballot at or below a
+    /// decision after a restart, so a floor a restart forgets is a decision a stale proposal can
+    /// re-open. Returns whether it reached the WAL (`true` when nothing changed or nothing was
+    /// promised).
+    async fn record_decided(&self, slot: &str, ballot: u64) -> bool {
+        if ballot <= self.decided_floor(slot) { return true; }
+        let upd = self.kv_set_returning(format!("{}{}", consensus_ns::DECIDED, slot), encode_ballot(ballot));
+        self.persist_sync(slot, &upd, "decided ballot").await
     }
 
     /// Writes `ballot` to the slot's shared ballot key unless a higher one is already there, so
-    /// proposers drawing their next ballot start above it.
+    /// proposers drawing their next ballot start above it. Handed to the WAL fire-and-forget
+    /// (`append_try`): the key is a liveness aid — a proposer that restarts without it draws a
+    /// ballot an acceptor's promise refuses, and moves up — so it is not worth an fsync per ballot.
     async fn raise_ballot(&self, ballot_key: &str, ballot: u64) {
         if ballot > self.read_ballot(ballot_key) {
-            self.set_async(ballot_key, encode_ballot(ballot)).await;
+            let upd = self.set_async(ballot_key, encode_ballot(ballot)).await;
+            self.wal_try(&upd);
+        }
+    }
+
+    /// Hands an applied update to the WAL fire-and-forget (`append_try`) — the ballot key's rung,
+    /// from the proposer's `raise_ballot` and the voter's write alike (the voter's used to reach no
+    /// WAL at all; the adversarial review of #585, F7).
+    fn wal_try(&self, upd: &GossipUpdate) {
+        if let Some(wal) = self.task_ctx.wal.get() {
+            wal.append_try(sync_entry_from(upd));
         }
     }
 
@@ -754,30 +792,45 @@ impl ConsensusEngine {
     /// reads *after* its change, and re-reads after writing — if the state moved meanwhile, the
     /// newer one is written again, so the record cannot be left behind a vote or promise that has
     /// already left. Bounded: a slot changing faster than four writes is written as of the last.
-    fn persist_acceptor(&self, slot: &Arc<str>) {
+    ///
+    /// **On stable storage before this returns `true`** (`persist_sync`, a forced `fdatasync`):
+    /// the record is what `prewarm_accepted` restores at the next start, and until 2.32.0 it was
+    /// applied to the store and gossiped but never handed to the WAL, so a node that crashed after
+    /// promising or voting restarted with no memory of it — `lib_tests::
+    /// an_acceptors_record_survives_a_crash_without_a_snapshot`. Every caller refuses to let the
+    /// promise or vote leave on `false`: an unrecorded acceptance is one a restart lets this node
+    /// contradict. `true` when there is nothing to record or nothing was promised (no WAL).
+    async fn persist_acceptor(&self, slot: &Arc<str>) -> bool {
         let key = accepted_key(&self.task_ctx.node_id, slot);
         let read = || self.task_ctx.consensus_accepted.pin().get(slot).map(encode_acceptor);
         let mut current = read();
+        let mut written: Option<GossipUpdate> = None;
         for _ in 0..4 {
-            let Some(bytes) = current else { return };
-            self.kv_set(key.clone(), bytes.clone());
+            let Some(bytes) = current else { break };
+            written = Some(self.kv_set_returning(key.clone(), bytes.clone()));
             let after = read();
-            if after.as_ref() == Some(&bytes) { return; }
+            if after.as_ref() == Some(&bytes) { break; }
             current = after;
+        }
+        match written {
+            Some(upd) => self.persist_sync(slot, &upd, "acceptor record (promise, acceptance)").await,
+            None => true,
         }
     }
 
     /// Tombstones `key` in the KV store and gossips the deletion.
-    fn kv_delete(&self, key: &str) {
+    /// Returns the applied tombstone so the caller can hand it to the WAL.
+    fn kv_delete(&self, key: &str) -> GossipUpdate {
         let tc  = &self.task_ctx;
         let upd = make_gossip_update(&tc.node_id, tc.default_ttl, Arc::from(key), Bytes::new(), true, &tc.hlc);
         apply_and_notify(&tc.kv_state, &upd);
         let tls = tc.tls.get().map(std::sync::Arc::as_ref);
-        let msg = make_kv_wire_msg(upd, tc.node_id.id_hash(), tls);
+        let msg = make_kv_wire_msg(upd.clone(), tc.node_id.id_hash(), tls);
         dispatch_gossip_try_send(
             &tc.gossip_txs, msg,
             tc.node_id.id_hash(), ForwardHint::All, &tc.kv_state.dropped_frames,
         );
+        upd
     }
 
     /// Like `kv_set` but awaits channel capacity (used by the proposer).
@@ -851,10 +904,24 @@ impl ConsensusEngine {
 
     /// Wraps `bytes` in a `SignedConsensusMsg` when TLS is active; returns
     /// `bytes` unchanged when TLS is disabled (zero overhead on the non-TLS path).
+    /// The signature is over [`consensus_signing_message`] of `bytes` — domain-tagged — while
+    /// `msg_bytes` carries `bytes` as they are, so the frame is unchanged (wire v12).
     fn sign_payload(&self, bytes: Bytes) -> Bytes {
+        self.sign_payload_as(bytes, SignatureForm::Tagged)
+    }
+
+    /// [`sign_payload`](Self::sign_payload) in the given form: `Untagged` signs the payload bare,
+    /// as a 2.31 node does, for an answer to a request that arrived bare (see [`SignatureForm`]).
+    /// Only an acceptor's answers take `Untagged`; a proposer's own messages are always tagged.
+    fn sign_payload_as(&self, bytes: Bytes, form: SignatureForm) -> Bytes {
+        #[cfg(not(feature = "tls"))]
+        let _ = form;
         #[cfg(feature = "tls")]
         if let Some(tls) = self.task_ctx.tls.get() {
-            let sig = crate::tls::sign_bytes(&tls.signing_key(), &bytes);
+            let sig = match form {
+                SignatureForm::Tagged => crate::tls::sign_bytes(&tls.signing_key(), &consensus_signing_message(&bytes)),
+                SignatureForm::Untagged => crate::tls::sign_bytes(&tls.signing_key(), &bytes),
+            };
             let signed = SignedConsensusMsg {
                 msg_bytes:  bytes.clone(),
                 signer:     self.task_ctx.node_id.clone(),
@@ -870,6 +937,12 @@ impl ConsensusEngine {
     /// Decodes `payload` as a `ConsensusMsg`, verifying its Ed25519 signature
     /// first when TLS is enabled. Returns `None` on bad signature or decode failure.
     fn decode_verify(&self, payload: &Bytes) -> Option<ConsensusMsg> {
+        self.decode_verify_form(payload).map(|(msg, _)| msg)
+    }
+
+    /// [`decode_verify`](Self::decode_verify), also saying which [`SignatureForm`] verified — so an
+    /// acceptor can answer in the same form. Without TLS every message reads as `Tagged`.
+    fn decode_verify_form(&self, payload: &Bytes) -> Option<(ConsensusMsg, SignatureForm)> {
         #[cfg(feature = "tls")]
         if self.task_ctx.tls.get().is_some() {
             let signed: SignedConsensusMsg =
@@ -901,11 +974,24 @@ impl ConsensusEngine {
                     key_set.retain(|k| !revoked.contains(k));
                 }
             }
-            if key_set.is_empty()
-                || !key_set.iter().any(|k| crate::tls::verify_bytes(k, &signed.msg_bytes, &signed.signature))
-            {
-                tracing::warn!("dropping consensus msg: bad/unknown signature from {}", signed.signer);
-                return None;
+            let form = verify_consensus_signature(&key_set, &signed.msg_bytes, &signed.signature);
+            match form {
+                Some(SignatureForm::Tagged) => {}
+                Some(SignatureForm::Untagged) => {
+                    // A peer not yet on 2.32.0. One release, counted — see `SignatureForm`.
+                    UNTAGGED_CONSENSUS_SIGNATURES_ACCEPTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    #[cfg(feature = "metrics")]
+                    metrics::counter!("mycelium_consensus_untagged_signatures_total").increment(1);
+                    tracing::debug!(
+                        signer = %signed.signer,
+                        "accepted an untagged (pre-2.32.0) consensus signature; this allowance closes \
+                         in the next MINOR (docs/guide/deprecations.md §23)"
+                    );
+                }
+                None => {
+                    tracing::warn!("dropping consensus msg: bad/unknown signature from {}", signed.signer);
+                    return None;
+                }
             }
             let msg = decode_consensus_msg(&signed.msg_bytes)?;
             // Bind the message's CLAIMED authority to the VERIFIED signer. The signature proves only
@@ -920,9 +1006,9 @@ impl ConsensusEngine {
                 );
                 return None;
             }
-            return Some(msg);
+            return Some((msg, form?));
         }
-        decode_consensus_msg(payload)
+        decode_consensus_msg(payload).map(|msg| (msg, SignatureForm::Tagged))
     }
 
     // ── Proposer ─────────────────────────────────────────────────────────────
@@ -968,6 +1054,20 @@ impl ConsensusEngine {
     ) -> ConsensusResult {
         let ballot_key = format!("{}{}", consensus_ns::BALLOT, &*slot);
         let commit_key = format!("{}{}", consensus_ns::COMMITTED, &*slot);
+
+        // **A proposer counts itself, so it must be in the roster it counts itself toward.** The
+        // promise and the vote below are inserted for this node unconditionally; the quorum came
+        // from the group's roster. Checked here, at the one door both the library and the gateway
+        // reach (`ConsensusHandle::group_propose`, `http::overlay_group_propose`), so no caller can
+        // reach the counting for a group this node has not joined. A cluster proposal has no
+        // roster: every node is in it. `cross_propose` never counts itself (its claim is a gate).
+        if let SignalScope::Group(group) = &scope {
+            let my_key = format!("{}{}", grp_prefix(group), self.task_ctx.node_id);
+            if self.get(&my_key).is_none() {
+                tracing::warn!(slot = %slot, group = %group, "consensus: refusing to propose to a group this node is not in");
+                return ConsensusResult::NotAMember { slot, group: Arc::clone(group) };
+            }
+        }
 
         // The value this proposer is currently carrying. It starts as the caller's, and is
         // **replaced** by any higher-balloted accepted value an acceptor reports — accepted-value
@@ -1100,6 +1200,7 @@ impl ConsensusEngine {
                     last = LastAttempt::Contended;
                     Some(seen)
                 }
+                Phase1::Unrecorded => return self.unrecorded(slot, _attempt + 1, quorum_size),
             };
             if let Some(floor) = retry_floor {
                 ballot_retry_pause(config.ballot_retry_jitter_ms).await;
@@ -1135,7 +1236,9 @@ impl ConsensusEngine {
             // Durable before the proposal leaves, for the same reason the voter records before its
             // vote leaves: a proposal is an acceptance, and an acceptance a restart forgets is one
             // this node can contradict.
-            self.persist_acceptor(&slot);
+            if !self.persist_acceptor(&slot).await {
+                return self.unrecorded(slot, _attempt + 1, quorum_size);
+            }
 
             self.raise_ballot(&ballot_key, ballot).await;
 
@@ -1385,6 +1488,7 @@ impl ConsensusEngine {
                     last = LastAttempt::Contended;
                     Some(seen)
                 }
+                Phase1::Unrecorded => return self.unrecorded(slot, _attempt + 1, 0),
             };
             if let Some(floor) = retry_floor {
                 ballot_retry_pause(config.ballot_retry_jitter_ms).await;
@@ -1407,7 +1511,9 @@ impl ConsensusEngine {
                 ballot = ballot.max(self.read_ballot(&ballot_key)) + 1;
                 continue;
             }
-            self.persist_acceptor(&slot);
+            if !self.persist_acceptor(&slot).await {
+                return self.unrecorded(slot, _attempt + 1, 0);
+            }
             self.raise_ballot(&ballot_key, ballot).await;
 
             let propose_msg = ConsensusMsg::Propose {
@@ -1479,9 +1585,9 @@ impl ConsensusEngine {
                                 self.sign_payload(encode_consensus_msg(&commit_msg)),
                             ).await;
                             let committed_upd = self.set_async(&commit_key, value.clone()).await;
-                            let persisted = self.persist_committed(&slot, &committed_upd).await
-                                & self.write_lease(&slot, lease_ms).await;
-                            self.record_decided(&slot, ballot);
+                            let persisted = self.persist_sync(&slot, &committed_upd, "committed slot").await
+                                & self.write_lease(&slot, lease_ms).await
+                                & self.record_decided(&slot, ballot).await;
                             return ConsensusResult::Committed { slot, value: value.clone(), ballot, persisted };
                         }
                     }
@@ -1571,7 +1677,7 @@ impl ConsensusEngine {
                 if let Some((b, a)) = acc { reports.push((b, a.digest(), a.value())); }
             }
         }
-        self.persist_acceptor(slot);
+        if !self.persist_acceptor(slot).await { return Phase1::Unrecorded; }
         let mut promisers: AHashSet<NodeId> = AHashSet::new();
         promisers.insert(me.clone());
 
@@ -1688,9 +1794,9 @@ impl ConsensusEngine {
             Arc::from(consensus_kind::COMMIT), scope.clone(), self.sign_payload(encode_consensus_msg(&commit)),
         ).await;
         let committed_upd = self.set_async(commit_key, value.clone()).await;
-        let persisted = self.persist_committed(slot, &committed_upd).await
-            & self.write_lease(slot, lease_ms).await;
-        self.record_decided(slot, ballot);
+        let persisted = self.persist_sync(slot, &committed_upd, "committed slot").await
+            & self.write_lease(slot, lease_ms).await
+            & self.record_decided(slot, ballot).await;
         Some(ConsensusResult::Committed {
             slot:   Arc::clone(slot),
             value:  value.clone(),
@@ -1699,24 +1805,36 @@ impl ConsensusEngine {
         })
     }
 
-    /// Forces the committed-slot record to stable storage (`append_sync` —
-    /// `fdatasync` in every `SyncMode`). Returns `false` on failure, which the
-    /// commit surfaces as `Committed { persisted: false }` rather than swallowing:
-    /// the cluster commit already happened (COMMIT emitted, value applied), so the
-    /// honest report is "committed, not locally durable". `true` when persistence
-    /// is not configured — no promise was made.
-    async fn persist_committed(&self, slot: &Arc<str>, upd: &crate::framing::GossipUpdate) -> bool {
+    /// Forces an already-applied record to stable storage (`append_sync` — `fdatasync` in every
+    /// `SyncMode`); `what` names it in the log. Returns `false` on failure, which a commit
+    /// surfaces as `Committed { persisted: false }` rather than swallowing: the cluster commit
+    /// already happened (COMMIT emitted, value applied), so the honest report is "committed, not
+    /// locally durable" — and which an acceptor answers by **not answering** (`persist_acceptor`).
+    /// `true` when persistence is not configured — no promise was made.
+    async fn persist_sync(&self, slot: &str, upd: &crate::framing::GossipUpdate, what: &str) -> bool {
         let Some(wal) = self.task_ctx.wal.get() else { return true; };
         match wal.append_sync(sync_entry_from(upd)).await {
             Ok(()) => true,
             Err(e) => {
                 tracing::error!(
                     slot = %slot, error = %e,
-                    "consensus: committed slot did not reach stable storage on this node",
+                    "consensus: {what} did not reach stable storage on this node",
                 );
                 false
             }
         }
+    }
+
+    /// The attempt ends here: this node's own acceptor record did not reach stable storage, so
+    /// nothing left this node and nothing can be in flight. Reported as a `Timeout` with reason
+    /// `unrecorded` — the attempt was not made — rather than retried against a failing disk.
+    fn unrecorded(&self, slot: Arc<str>, ballots_tried: u32, quorum_required: usize) -> ConsensusResult {
+        #[cfg(feature = "metrics")]
+        {
+            metrics::counter!("mycelium_consensus_timeouts_total", "reason" => "unrecorded").increment(1);
+            metrics::counter!("mycelium_consensus_unrecorded_total", "role" => "proposer").increment(1);
+        }
+        ConsensusResult::Timeout { slot, ballots_tried, votes_last_ballot: 0, quorum_required }
     }
 
     /// Writes (or clears) the epoch-lease window for `slot` at commit time.
@@ -1733,23 +1851,17 @@ impl ConsensusEngine {
         match lease_ms {
             Some(ms) => {
                 let upd = self.set_async(&lease_key, encode_lease_ms(ms)).await;
-                let Some(wal) = self.task_ctx.wal.get() else { return true; };
-                match wal.append_sync(sync_entry_from(&upd)).await {
-                    Ok(()) => true,
-                    Err(e) => {
-                        tracing::error!(
-                            slot = %slot, error = %e,
-                            "consensus: lease for committed slot did not reach stable storage on this node",
-                        );
-                        false
-                    }
-                }
+                self.persist_sync(slot, &upd, "lease for committed slot").await
             }
             None => {
+                // The tombstone is on the same footing as the lease it clears: a restart that
+                // replayed the old lease without it would expire the permanent commit.
                 if self.get(&lease_key).is_some() {
-                    self.kv_delete(&lease_key);
+                    let upd = self.kv_delete(&lease_key);
+                    self.persist_sync(slot, &upd, "lease tombstone for committed slot").await
+                } else {
+                    true
                 }
-                true
             }
         }
     }
@@ -1966,6 +2078,9 @@ enum Phase1 {
     Refused(u64),
     /// No quorum promised within the timeout; carries how many acceptors **other than this node** did.
     Short(usize),
+    /// This node's own promise did not reach stable storage, so the attempt stops before anything
+    /// leaves: a promise a restart forgets is one this node can break.
+    Unrecorded,
 }
 
 /// Outcome of `ConsensusEngine::collect_one_ballot`.
@@ -2419,18 +2534,105 @@ pub(crate) struct SignedConsensusMsg {
     pub signature: Vec<u8>,
 }
 
+/// The domain tag a consensus message is signed under.
+#[cfg(feature = "tls")]
+pub(crate) const CONSENSUS_MSG_DOMAIN: &[u8] = b"mycelium.consensus/msg/1";
+
+/// The message a node signs for a consensus payload: `mycelium.consensus/msg/1 ‖ len(u32 LE) ‖
+/// bytes`. The payload used to be signed bare, and a `PrepareAck` or `Promise` carries a
+/// proposer-chosen value back, so a signed answer was a signature over bytes another node shaped —
+/// which the identity proof, also bare over `32 × N` bytes, accepted as a proof of whatever keys
+/// those bytes held. The identity proof now requires its own tag (`helpers::identity_proof_message`),
+/// which closes that on its own; this tag is defence in depth, so no consensus signature verifies
+/// as anything but a consensus signature. The frame is unchanged: `msg_bytes` carries the payload
+/// bare, only the signed message gains the prefix.
+#[cfg(feature = "tls")]
+pub(crate) fn consensus_signing_message(bytes: &[u8]) -> Vec<u8> {
+    let mut out = CONSENSUS_MSG_DOMAIN.to_vec();
+    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(bytes);
+    out
+}
+
+/// Which form a verified consensus signature took.
+///
+/// `Untagged` is the pre-2.32.0 form — a bare signature over the payload — accepted for **one
+/// release** so a fleet can upgrade node by node (a 2.31 acceptor's votes still count at a 2.32
+/// proposer, and a 2.31 proposer's proposals are still answered); counted in
+/// [`untagged_consensus_signatures_accepted`] and closed in the next MINOR
+/// (`docs/guide/deprecations.md` §23). A 2.31 node cannot verify a tagged signature, so while any
+/// node is un-upgraded a 2.32 proposer's messages are dropped there — the same shape as 2.30.0's
+/// `Prepare` window.
+/// An acceptor **answers in the form of the request it verified** (`sign_payload_as`): a 2.31
+/// proposer verifies bare only, so its bare `Prepare`/`Propose` gets a bare answer and its rounds
+/// complete; a tagged request gets a tagged answer. Found by the adversarial review of #585 — the
+/// first cut answered everything tagged, which dropped a 2.32 acceptor out of every un-upgraded
+/// proposer's rounds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(feature = "tls"), allow(dead_code))] // `Untagged` is only ever verified under `tls`
+pub(crate) enum SignatureForm { Tagged, Untagged }
+
+/// Verifies `sig` over `msg_bytes` against any key in `keys`: the tagged form first, then the
+/// untagged one. `None` when neither verifies, or when there is no key to verify against.
+#[cfg(feature = "tls")]
+pub(crate) fn verify_consensus_signature(keys: &[[u8; 32]], msg_bytes: &[u8], sig: &[u8]) -> Option<SignatureForm> {
+    if keys.is_empty() { return None; }
+    let tagged = consensus_signing_message(msg_bytes);
+    if keys.iter().any(|k| crate::tls::verify_bytes(k, &tagged, sig)) {
+        return Some(SignatureForm::Tagged);
+    }
+    if keys.iter().any(|k| crate::tls::verify_bytes(k, msg_bytes, sig)) {
+        return Some(SignatureForm::Untagged);
+    }
+    None
+}
+
+/// Answers this node's acceptor **withheld** because its record did not reach the WAL — a prepare
+/// not acked, a proposal not voted (`persist_acceptor`). Beside the proposer's own
+/// `mycelium_consensus_timeouts_total{reason="unrecorded"}`; both also count on
+/// `mycelium_consensus_unrecorded_total{role}`. Non-zero means this node's disk is refusing the
+/// fsync a promise needs, and it is silently absent from every round it is asked into.
+#[cfg(feature = "consensus")]
+static ACCEPTOR_ANSWERS_UNRECORDED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many answers this node's acceptor withheld because its record did not reach the WAL.
+#[cfg(feature = "consensus")]
+#[cfg_attr(not(feature = "gateway"), allow(dead_code))] // read by the gateway's stats route
+pub(crate) fn acceptor_answers_unrecorded() -> u64 {
+    ACCEPTOR_ANSWERS_UNRECORDED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Consensus signatures this process accepted in the untagged (pre-2.32.0) form — see
+/// [`SignatureForm`]. Non-zero means a peer is not yet upgraded.
+#[cfg(feature = "tls")]
+static UNTAGGED_CONSENSUS_SIGNATURES_ACCEPTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many untagged consensus signatures this process has accepted under the mixed-fleet allowance.
+#[cfg(feature = "tls")]
+#[cfg_attr(not(feature = "gateway"), allow(dead_code))] // read by the gateway's stats route
+pub(crate) fn untagged_consensus_signatures_accepted() -> u64 {
+    UNTAGGED_CONSENSUS_SIGNATURES_ACCEPTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 // ── Voter task ───────────────────────────────────────────────────────────────
 
 /// Answers a [`Prepare`](ConsensusMsg::Prepare): promise and report, or refuse and say what was
-/// promised. The promise is **recorded before the answer leaves** — applied to the store and handed
-/// to the WAL, the same rung a vote's record reaches (not an fsync) — because a proposer chooses its
-/// value on the strength of it, and a restart must not let this node break it.
+/// promised. The promise is **on stable storage before the answer leaves** — applied to the store,
+/// then handed to the WAL and fsynced (`persist_acceptor`), the same rung a vote's record and a
+/// commit reach — because a proposer chooses its value on the strength of it, and a restart must
+/// not let this node break it. Until 2.32.0 this said "handed to the WAL" and was not: the record
+/// was applied and gossiped only. A promise that does not reach the WAL is **not answered**, and
+/// the withheld answer is counted (`acceptor_answers_unrecorded`). The answer is signed in `form`,
+/// the form the prepare arrived in — see [`SignatureForm`].
 #[cfg(feature = "consensus")]
-fn answer_prepare(ctx: &ConsensusEngine, slot: Arc<str>, ballot: u64, proposer: NodeId) {
+async fn answer_prepare(ctx: &ConsensusEngine, slot: Arc<str>, ballot: u64, proposer: NodeId, form: SignatureForm) {
     let floor = ctx.decided_floor(&slot);
     match prepare_slot(&ctx.task_ctx.consensus_accepted, &slot, ballot, proposer.id_hash(), floor) {
         PrepareOutcome::Promised(acc) => {
-            ctx.persist_acceptor(&slot);
+            if !ctx.persist_acceptor(&slot).await {
+                note_answer_unrecorded(&slot, ballot, "not answering the prepare");
+                return;
+            }
             let ack = ConsensusMsg::PrepareAck {
                 slot:            Arc::clone(&slot),
                 ballot,
@@ -2443,7 +2645,7 @@ fn answer_prepare(ctx: &ConsensusEngine, slot: Arc<str>, ballot: u64, proposer: 
             ctx.emit(
                 Arc::from(consensus_kind::VOTE),
                 SignalScope::Individual(proposer),
-                ctx.sign_payload(encode_consensus_msg(&ack)),
+                ctx.sign_payload_as(encode_consensus_msg(&ack), form),
             );
         }
         PrepareOutcome::Refused { promised, accepted } => {
@@ -2456,10 +2658,19 @@ fn answer_prepare(ctx: &ConsensusEngine, slot: Arc<str>, ballot: u64, proposer: 
             ctx.emit(
                 Arc::from(consensus_kind::NACK),
                 SignalScope::Individual(proposer),
-                ctx.sign_payload(encode_consensus_msg(&refusal)),
+                ctx.sign_payload_as(encode_consensus_msg(&refusal), form),
             );
         }
     }
+}
+
+/// An acceptor's record did not reach the WAL, so its answer is withheld: counted and warned.
+#[cfg(feature = "consensus")]
+fn note_answer_unrecorded(slot: &str, ballot: u64, what: &str) {
+    ACCEPTOR_ANSWERS_UNRECORDED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(feature = "metrics")]
+    metrics::counter!("mycelium_consensus_unrecorded_total", "role" => "acceptor").increment(1);
+    tracing::warn!(slot = %slot, ballot, "consensus: acceptor record not on stable storage; {what}");
 }
 
 /// Background voter task — processes incoming consensus signals and emits
@@ -2491,7 +2702,10 @@ pub(crate) async fn run_consensus_listener(
     loop {
         tokio::select! { biased;
             _ = &mut cancel                  => break,
-            _ = shutdown_rx.wait_for(|v| *v) => break,
+            // The `watch::Ref` is dropped inside the block: the arms below await (the acceptor's
+            // record is fsynced before it answers), and a `select!` output holding the guard would
+            // make this future `!Send`.
+            _ = async { let _ = shutdown_rx.wait_for(|v| *v).await; } => break,
             Some(sig) = rx_propose.recv() => {
                 // Silent abstain: overloaded node neither votes nor nacks.
                 // max_abstain_ballots > 0 caps how many ballots can be skipped in a row.
@@ -2505,13 +2719,14 @@ pub(crate) async fn run_consensus_listener(
                 }
                 consecutive_abstains = 0;
 
-                let (slot, ballot, value, proposer) = match ctx.decode_verify(&sig.payload) {
-                    Some(ConsensusMsg::Prepare { slot, ballot, proposer }) => {
-                        answer_prepare(&ctx, slot, ballot, proposer);
+                // `form` is how the request was signed; every answer below is signed the same way.
+                let (slot, ballot, value, proposer, form) = match ctx.decode_verify_form(&sig.payload) {
+                    Some((ConsensusMsg::Prepare { slot, ballot, proposer }, form)) => {
+                        answer_prepare(&ctx, slot, ballot, proposer, form).await;
                         continue;
                     }
-                    Some(ConsensusMsg::Propose { slot, ballot, value, proposer }) =>
-                        (slot, ballot, value, proposer),
+                    Some((ConsensusMsg::Propose { slot, ballot, value, proposer }, form)) =>
+                        (slot, ballot, value, proposer, form),
                     _ => continue,
                 };
                 // Claim this node's single vote at this ballot. Refuses a stale ballot OR an
@@ -2545,26 +2760,34 @@ pub(crate) async fn run_consensus_listener(
                     ctx.emit(
                         Arc::from(consensus_kind::NACK),
                         SignalScope::Individual(proposer.clone()),
-                        ctx.sign_payload(encode_consensus_msg(&promise)),
+                        ctx.sign_payload_as(encode_consensus_msg(&promise), form),
                     );
                     // And the legacy refusal, for a proposer that predates `Promise`.
                     let nack = ConsensusMsg::Nack { slot, seen_ballot: local };
                     ctx.emit(
                         Arc::from(consensus_kind::NACK),
                         SignalScope::Individual(proposer),
-                        ctx.sign_payload(encode_consensus_msg(&nack)),
+                        ctx.sign_payload_as(encode_consensus_msg(&nack), form),
                     );
                 } else {
                     // **Durable before the vote leaves.** A vote that reaches a proposer while this
                     // node's acceptance is unrecorded is exactly the memory a restart would lose —
                     // the proposer counts it, the node forgets it, and after a restart the node can
                     // vote again at the same ballot for another value. Same ordering rule as
-                    // "apply to the store, then hand the record to the WAL", one layer up.
-                    ctx.persist_acceptor(&slot);
-                    ctx.kv_set(
+                    // "apply to the store, then hand the record to the WAL", one layer up — and
+                    // fsynced, so "durable" means the disk, not the store. An acceptance that does
+                    // not reach the WAL is not voted; the claim stays, and a re-sent proposal for
+                    // the same value re-claims it idempotently.
+                    if !ctx.persist_acceptor(&slot).await {
+                        note_answer_unrecorded(&slot, ballot, "not voting");
+                        continue;
+                    }
+                    // The shared ballot key, at the same rung the proposer's `raise_ballot` gives it.
+                    let ballot_upd = ctx.kv_set_returning(
                         format!("{}{}", consensus_ns::BALLOT, &*slot),
                         encode_ballot(ballot),
                     );
+                    ctx.wal_try(&ballot_upd);
                     // Always emit VoteWithLocality (carrying None when locality is
                     // unspecified). Topology gates only count voters that arrived
                     // via this variant — Soft policies and gate-less proposals
@@ -2581,7 +2804,7 @@ pub(crate) async fn run_consensus_listener(
                     ctx.emit(
                         Arc::from(consensus_kind::VOTE),
                         sig.scope.clone(),
-                        ctx.sign_payload(encode_consensus_msg(&bound)),
+                        ctx.sign_payload_as(encode_consensus_msg(&bound), form),
                     );
                     // And the legacy form, so a proposer predating `VoteForValue` still sees a
                     // vote it understands. It is unbound and therefore unsafe to count — which is
@@ -2596,7 +2819,7 @@ pub(crate) async fn run_consensus_listener(
                     ctx.emit(
                         Arc::from(consensus_kind::VOTE),
                         sig.scope,
-                        ctx.sign_payload(encode_consensus_msg(&vote)),
+                        ctx.sign_payload_as(encode_consensus_msg(&vote), form),
                     );
                 }
             }
@@ -2665,11 +2888,16 @@ pub(crate) async fn run_consensus_listener(
                 // The acceptor's memory is **kept**: erasing it here dropped promises, and a delayed
                 // lower-ballot proposal could then commit a second value (2026-10-08 review). What a
                 // commit changes is the floor — a ballot at or below it is refused from now on.
+                // The committed value itself is replicated state anti-entropy re-supplies from any
+                // peer, and its absence after a restart reads as "not yet arrived" (`decision_over`
+                // is false, so a late COMMIT at the decided ballot re-applies and one below it is
+                // refused by the floor) — so it stays on the gossip path. The **floor** is this
+                // node's own refusal memory and reaches the WAL (`record_decided`).
                 ctx.kv_set(
                     format!("{}{}", consensus_ns::COMMITTED, &*slot),
                     value,
                 );
-                ctx.record_decided(&slot, ballot);
+                let _ = ctx.record_decided(&slot, ballot).await;
             }
         }
     }

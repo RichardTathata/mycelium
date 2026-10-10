@@ -77,6 +77,28 @@ the same gate. Alg-confusion-safe (asymmetric-only allowlist *before* key select
 iss/aud/exp checked; JWKS cached with refresh-on-unknown-kid. Human-operator auth, not agent
 identity.
 
+## Every signature the substrate verifies is domain-tagged (2026-10-09, 2.32.0)
+
+The identity proof was a bare signature over the key history (`32 × N` bytes, nothing more) and a consensus
+payload was signed bare too; a `PrepareAck`/`Promise` carries the **proposer's** `accepted_value` back, so a
+member could have a victim sign a value embedding the member's key at a 32-byte boundary, publish that signed
+answer as `sys/identity-signed/V`, and be merged into V's key set through V's own trusted key — then sign as V.
+Now: an identity proof signs `mycelium.identity/proof/1 ‖ u32 len ‖ history`
+(`helpers::identity_proof_message`), a consensus payload `mycelium.consensus/msg/1 ‖ u32 len ‖ bytes`
+(`consensus::consensus_signing_message`), beside the mandate's `mycelium.mandate/possession/1`; frames are
+unchanged (wire v12). `GossipAgent::sign_with_identity` signs what it is given, so its doc states the contract:
+the caller owns the message's domain. **Mixed fleet, one release:** the bare form of both is accepted and counted
+(`/stats` `identity_untagged_proofs`, `consensus_untagged_signatures`), the identity one **only with
+`require_identity_proofs` off** — under the flag a bare proof is what any signing path could have produced. A
+2.32 acceptor **answers in the form of the request it verified** (`SignatureForm`, `sign_payload_as`), so a 2.31
+proposer's rounds complete; a 2.31 node cannot verify a tagged signature, so a 2.32 proposer times out at
+un-upgraded acceptors, and a 2.31 verifier counts every 2.32 peer's proof as an `identity_anchor_conflicts`
+hit, re-raised on every `sys/identity*` event, with the peer's handshake key still anchored
+(`docs/guide/deprecations.md` §23 has every direction). The counters count validations, not peers. The tagging
+covers the identity proof and the consensus payload only: KV `SignedData`, role claims and audit records are
+still untagged (`what-is-proven.md`). Tests: `a_signed_consensus_answer_is_not_an_identity_proof`,
+`an_acceptor_answers_in_the_signature_form_of_the_request`, seen failing first.
+
 ## The identity-proof window, and a diagnosis that was wrong (2026-09-24)
 
 `require_identity_proofs` defaults to **`false`**. Set it and an identity entry this node cannot

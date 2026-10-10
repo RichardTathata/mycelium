@@ -48,7 +48,15 @@ An attacker who controls one node process (RCE, stolen host) gains:
 
 - **Its own identity key** → can sign anything *as that node*: KV writes, its own
   role claim, its own audit records, consensus votes. Cannot forge *other* nodes'
-  signatures (those keys never leave their hosts).
+  signatures (those keys never leave their hosts) — and cannot **re-purpose** a consensus
+  signature as an identity proof: the identity proof is signed under `mycelium.identity/proof/1`
+  and a consensus payload under `mycelium.consensus/msg/1`, so neither reads as the other. Before
+  2.32.0 both were bare, and a victim's signed consensus answer, carrying proposer-chosen bytes,
+  could be published as the victim's identity proof (CHANGELOG, 2.32.0). KV `SignedData`, role
+  claims and audit records are still signed over untagged canonical bytes — a residual recorded in
+  `docs/operations/what-is-proven.md`; none of them can begin with the identity tag (a KV update's
+  second word is the signer's own id hash, a serialized record's first word a small length), so the
+  proof side stays closed.
 - **Read of all replicated KV state** that reached this node via gossip — i.e. the
   twin state. This is the worst single-node outcome: the map is replicated, so one
   node sees (much of) it.

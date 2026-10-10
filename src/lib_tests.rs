@@ -5146,6 +5146,80 @@ async fn a_torn_wal_tail_is_repaired_at_start_before_the_first_acknowledged_appe
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// **An acceptor's record reaches the WAL before its answer leaves.** The record
+/// (`sys/consensus-accepted/{node}/{slot}`) was applied to the store and gossiped, never handed to
+/// the WAL — only the committed slot and its lease were — so a node that crashed after promising or
+/// voting restarted with no memory of it: `prewarm_accepted` reads the store the snapshot and WAL
+/// restore, and neither held the record. The promise a proposer chose its value on was gone, and the
+/// node could vote again at the same ballot for another value — the restart case the in-memory
+/// `acceptor_memory_survives_a_restart` modelled with an encode/decode round trip and nothing on disk.
+///
+/// **The crash is modelled as R2's is**: copy the files while the node runs, replay the copy, then
+/// restart over the copy. An orderly `shutdown()` cannot show this — it snapshots the *store*, which
+/// held the record whatever the WAL said. Seen failing first: the replay held
+/// `consensus/committed/leader/solo` and not the acceptor's record.
+#[cfg(all(unix, feature = "consensus"))]
+#[tokio::test]
+async fn an_acceptors_record_survives_a_crash_without_a_snapshot() {
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let base = std::env::temp_dir().join(format!("mycelium-acceptor-wal-{port}"));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join(id.to_string()).join("kv");
+    let mut cfg = GossipConfig::auto();
+    cfg.bind_port = port;
+    cfg.persistence = Some(r2_persistence(&base));
+
+    let a = GossipAgent::new(id.clone(), cfg.clone());
+    a.start().await.unwrap();
+    // A one-member group: this node is the whole electorate, so its own promise and acceptance are
+    // the record under test, written on the proposer's path (the voter's path writes the same way).
+    a.mesh().join_group("solo");
+    let res = a.consensus()
+        .group_propose("solo", "leader/solo", Bytes::from_static(b"me"), ConsensusConfig::default())
+        .await;
+    assert!(matches!(res, ConsensusResult::Committed { .. }), "{res:?}");
+    let slot: Arc<str> = Arc::from("leader/solo");
+    let live = a.task_ctx.consensus_accepted.pin().get(&slot).cloned().expect("the acceptor holds the slot");
+    assert!(live.promised >= 1, "{live:?}");
+    let key = crate::consensus::accepted_key(&id, &slot);
+
+    // The crash: what is on disk now, with the node still running, is all a restart would have.
+    let crash = base.join("crash");
+    std::fs::create_dir_all(&crash).unwrap();
+    for f in ["snapshot.bin", "wal.bin"] {
+        if dir.join(f).exists() { std::fs::copy(dir.join(f), crash.join(f)).unwrap(); }
+    }
+    let mut replayed = Vec::new();
+    mycelium_core::persistence::replay(&crash, None, |e| replayed.push(e.key.to_string()))
+        .await
+        .expect("the crashed files replay");
+    assert!(replayed.iter().any(|k| k == "consensus/committed/leader/solo"), "the commit is on disk: {replayed:?}");
+    assert!(replayed.iter().any(|k| k == &key), "the acceptor's record is reachable after a crash: {replayed:?}");
+    a.shutdown().await;
+
+    // Restart over what the crash left — not over the orderly shutdown's snapshot.
+    for f in ["snapshot.bin", "wal.bin"] {
+        let _ = std::fs::remove_file(dir.join(f));
+        if crash.join(f).exists() { std::fs::copy(crash.join(f), dir.join(f)).unwrap(); }
+    }
+    let b = GossipAgent::new(id, cfg);
+    b.start().await.unwrap();
+    let restored = b.task_ctx.consensus_accepted.pin().get(&slot).cloned();
+    assert!(
+        restored.as_ref().is_some_and(|s| s.promised >= live.promised),
+        "prewarm_accepted restores the promise from the WAL: {restored:?} (live was {live:?})",
+    );
+    // And the restored node keeps it: a lower ballot from another proposer is refused.
+    assert!(
+        !crate::consensus::claim_vote(&b.task_ctx.consensus_accepted, &slot, live.promised - 1,
+                                      &Bytes::from_static(b"other"), 0xBEEF, 0),
+        "a ballot below the restored promise is refused",
+    );
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// **Realignment repairs R7** (found by A2's configuration audit, 2026-10-05). A persistence
 /// directory that cannot be created used to be a warning: `start()` logged it and ran **in memory**,
 /// so every write was lost on the next restart — while the guarantee report, resolved from the
@@ -8594,7 +8668,7 @@ fn a_mandate_identifier_from_the_wire_is_never_empty() {
 #[cfg(feature = "tls")]
 mod identity_proof_default {
     use super::*;
-    use crate::agent::helpers::{encode_identity_proof, validate_and_merge_identity};
+    use crate::agent::helpers::{encode_identity_proof, identity_proof_message, validate_and_merge_identity};
     use ed25519_dalek::{Signer, SigningKey};
 
     fn keys() -> papaya::HashMap<NodeId, Vec<[u8; 32]>> {
@@ -8644,7 +8718,7 @@ mod identity_proof_default {
         let sk = SigningKey::from_bytes(&[51u8; 32]);
         let vk = sk.verifying_key().to_bytes();
         let history = vk.to_vec();
-        let sig = sk.sign(&history).to_bytes();
+        let sig = sk.sign(&identity_proof_message(&history)).to_bytes();
         let sealed = crate::agent::helpers::encode_sealed_identity(
             &history, &encode_identity_proof(&vk, &sig));
 
@@ -8681,7 +8755,7 @@ mod identity_proof_default {
         let sk = SigningKey::from_bytes(&[52u8; 32]);
         let vk = sk.verifying_key().to_bytes();
         let history = vk.to_vec();
-        let legacy_proof = encode_identity_proof(&vk, &sk.sign(&history).to_bytes());
+        let legacy_proof = encode_identity_proof(&vk, &sk.sign(&identity_proof_message(&history)).to_bytes());
 
         // A *valid* pair — the point is that validity is not the issue; arrival is.
         let (h, proof) = crate::agent::helpers::resolve_identity_record(
@@ -8703,7 +8777,7 @@ mod identity_proof_default {
         let sk = SigningKey::from_bytes(&[53u8; 32]);
         let vk = sk.verifying_key().to_bytes();
         let history = vk.to_vec();
-        let legacy_proof = encode_identity_proof(&vk, &sk.sign(&history).to_bytes());
+        let legacy_proof = encode_identity_proof(&vk, &sk.sign(&identity_proof_message(&history)).to_bytes());
 
         let (h, proof) = crate::agent::helpers::resolve_identity_record(
             None, &history, Some(&legacy_proof), /* require */ false);
@@ -8727,7 +8801,7 @@ mod identity_proof_default {
         let a_vk = attacker.verifying_key().to_bytes();
         let history = a_vk.to_vec();
         let sealed = crate::agent::helpers::encode_sealed_identity(
-            &history, &encode_identity_proof(&a_vk, &attacker.sign(&history).to_bytes()));
+            &history, &encode_identity_proof(&a_vk, &attacker.sign(&identity_proof_message(&history)).to_bytes()));
 
         let (h, proof) = crate::agent::helpers::resolve_identity_record(
             Some(&sealed), &history, None, true);
@@ -8747,7 +8821,7 @@ mod identity_proof_default {
         let sk = SigningKey::from_bytes(&[56u8; 32]);
         let vk = sk.verifying_key().to_bytes();
         let history = vk.to_vec();
-        let good = encode_sealed_identity(&history, &encode_identity_proof(&vk, &sk.sign(&history).to_bytes()));
+        let good = encode_sealed_identity(&history, &encode_identity_proof(&vk, &sk.sign(&identity_proof_message(&history)).to_bytes()));
         assert!(parse_sealed_identity(&good).is_some(), "the round trip holds");
 
         let mut wrong_version = good.clone();
@@ -8777,7 +8851,7 @@ mod identity_proof_default {
         let vk = sk.verifying_key().to_bytes();
         let history = vk.to_vec();
         // Self-signed: the signer is one of the keys in its own published history.
-        let sig = sk.sign(&history).to_bytes();
+        let sig = sk.sign(&identity_proof_message(&history)).to_bytes();
         let proof = encode_identity_proof(&vk, &sig);
 
         let (pk, anchor, counter) = (keys(), anchors(), std::sync::atomic::AtomicU64::new(0));
@@ -8795,7 +8869,7 @@ mod identity_proof_default {
         let usurper = SigningKey::from_bytes(&[44u8; 32]);
         let u_vk = usurper.verifying_key().to_bytes();
         let u_history = u_vk.to_vec();
-        let u_sig = usurper.sign(&u_history).to_bytes();
+        let u_sig = usurper.sign(&identity_proof_message(&u_history)).to_bytes();
         let u_proof = encode_identity_proof(&u_vk, &u_sig);
         validate_and_merge_identity(
             &pk, &anchor, &counter, &stranger, &u_history, &[u_vk], Some(&u_proof), true,
@@ -8805,6 +8879,150 @@ mod identity_proof_default {
             "an unchained key never joins an established set — this is the poisoning case",
         );
         assert_eq!(counter.load(Ordering::SeqCst), 1, "and that one IS flagged");
+    }
+
+    /// **A signature a node makes for any other purpose must never be an identity proof.**
+    ///
+    /// The proof was a bare signature over the key history, and a history is `32 × N` bytes and
+    /// nothing more. Consensus signed its serialized `ConsensusMsg` bare too, and a `PrepareAck`
+    /// carries the **proposer's** bytes back (`accepted_value`). So a member A proposes a value
+    /// that embeds A's own key at a 32-byte boundary, V accepts it, A prepares a higher ballot, V
+    /// answers with the value — signed as V — and A publishes V's signed answer as
+    /// `sys/identity-signed/V`: a sealed record whose "history" is the answer and whose proof is
+    /// V's own signature over it. The verifier chained it through V's trusted key and merged every
+    /// 32-byte chunk, A's key among them; A could then sign as V.
+    ///
+    /// The proof is now a signature over `mycelium.identity/proof/1 ‖ len ‖ history`, which no
+    /// other signing path produces. The answer below is signed the way a 2.31 node signs a
+    /// consensus message — bare — which is also what a 2.31 node's identity proof looks like;
+    /// with proofs required, neither is a proof any more. Seen failing on the unfixed code: A's
+    /// key entered `peer_keys[V]`.
+    #[cfg(feature = "consensus")]
+    #[test]
+    fn a_signed_consensus_answer_is_not_an_identity_proof() {
+        use crate::agent::helpers::{encode_sealed_identity, parse_identity_keys, resolve_identity_record};
+        use crate::consensus::{encode_consensus_msg, ConsensusMsg};
+
+        let victim = NodeId::new("127.0.0.1", 7120).unwrap();
+        let v_sk = SigningKey::from_bytes(&[60u8; 32]);
+        let v_vk = v_sk.verifying_key().to_bytes();
+        let a_vk = SigningKey::from_bytes(&[61u8; 32]).verifying_key().to_bytes();
+
+        // V's answer to A's prepare, carrying the value A proposed. The value is A's to choose.
+        let ack = |value: Vec<u8>| ConsensusMsg::PrepareAck {
+            slot: Arc::from("leader/g"), ballot: 2, voter: victim.clone(),
+            accepted_ballot: 1, accepted_digest: Some([0u8; 32]),
+            accepted_value: Some(Bytes::from(value)), committed_digest: None,
+        };
+        // Where the value lands in the encoding, found with a marker rather than assumed.
+        let marker = vec![0xABu8; 64];
+        let probe = encode_consensus_msg(&ack(marker.clone()));
+        let at = probe.windows(64).position(|w| w == &marker[..]).expect("the value is carried verbatim");
+        let base = probe.len() - 64;
+        // Lead so A's key sits on a 32-byte boundary; tail so the whole answer is 32-aligned.
+        let lead = (32 - at % 32) % 32;
+        let mut value = vec![0u8; lead];
+        value.extend_from_slice(&a_vk);
+        let pad = (32 - (base + value.len()) % 32) % 32;
+        value.extend(std::iter::repeat_n(0u8, pad));
+        let blob = encode_consensus_msg(&ack(value));
+        assert_eq!(blob.len() % 32, 0, "the answer reads as whole keys");
+        let chunks = parse_identity_keys(&blob);
+        assert!(chunks.contains(&a_vk), "and A's key is one of them");
+
+        // What V signs as a consensus participant, published by A as V's sealed identity record.
+        let v_sig = v_sk.sign(&blob).to_bytes();
+        let sealed = encode_sealed_identity(&blob, &encode_identity_proof(&v_vk, &v_sig));
+
+        // V is established at this node, so the record chains through a trusted key.
+        let (pk, anchor, counter) = (keys(), anchors(), std::sync::atomic::AtomicU64::new(0));
+        pk.pin().insert(victim.clone(), vec![v_vk]);
+        let (h, proof) = resolve_identity_record(Some(&sealed), &[], None, /* require */ true);
+        assert_eq!(h, &blob[..], "the sealed record is the one validated");
+        validate_and_merge_identity(&pk, &anchor, &counter, &victim, h, &chunks, proof, true);
+        assert!(
+            !pk.pin().get(&victim).is_some_and(|v| v.contains(&a_vk)),
+            "A's key must not enter peer_keys[V]: a consensus signature is not an identity proof",
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), 1, "and the attempt is counted");
+    }
+
+    /// **The one-release allowance, pinned.** A proof signed the pre-2.32.0 way — bare, over the
+    /// history — is still accepted while `require_identity_proofs` is **off**, so a fleet upgrades
+    /// node by node; it is counted so an operator can see which peers still sign that way. With the
+    /// flag on it is refused: that posture says every proof must be one, and a bare signature over
+    /// 32-aligned bytes is what any other signing path could have made (the test above). The
+    /// allowance closes in the next MINOR (`docs/guide/deprecations.md` §23); when it does, the
+    /// first half of this test flips and should be rewritten, not kept passing.
+    #[test]
+    fn an_untagged_proof_is_accepted_only_while_proofs_are_not_required() {
+        use crate::agent::helpers::untagged_identity_proofs_accepted;
+        let node = NodeId::new("127.0.0.1", 7121).unwrap();
+        let sk = SigningKey::from_bytes(&[62u8; 32]);
+        let vk = sk.verifying_key().to_bytes();
+        let history = vk.to_vec();
+        let old_form = encode_identity_proof(&vk, &sk.sign(&history).to_bytes());
+
+        let before = untagged_identity_proofs_accepted();
+        let (pk, anchor, counter) = (keys(), anchors(), std::sync::atomic::AtomicU64::new(0));
+        validate_and_merge_identity(&pk, &anchor, &counter, &node, &history, &[vk], Some(&old_form), false);
+        assert!(pk.pin().get(&node).is_some_and(|v| v.contains(&vk)), "flag off: a 2.31 peer's proof still establishes it");
+        assert_eq!(counter.load(Ordering::SeqCst), 0, "not a conflict");
+        assert!(untagged_identity_proofs_accepted() > before, "but counted, so the operator can see the un-upgraded peer");
+
+        let (pk, anchor, counter) = (keys(), anchors(), std::sync::atomic::AtomicU64::new(0));
+        validate_and_merge_identity(&pk, &anchor, &counter, &node, &history, &[vk], Some(&old_form), true);
+        assert!(pk.pin().get(&node).is_none(), "flag on: only a tagged proof is a proof");
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+        // And the tagged form is what the flag accepts.
+        let new_form = encode_identity_proof(&vk, &sk.sign(&identity_proof_message(&history)).to_bytes());
+        let (pk, anchor, counter) = (keys(), anchors(), std::sync::atomic::AtomicU64::new(0));
+        validate_and_merge_identity(&pk, &anchor, &counter, &node, &history, &[vk], Some(&new_form), true);
+        assert!(pk.pin().get(&node).is_some_and(|v| v.contains(&vk)));
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    /// **The allowance is no quieter than an unsigned forgery** (the adversarial review of #585,
+    /// F4a). With the flag off, a bare proof signed by the victim's own key — the forged answer of
+    /// the test above — merged on `signer_trusted` without the anchor tripwire, so in a CA-anchored
+    /// fleet it was silent where an unsigned forgery trips `identity_anchor_conflicts`. The bare
+    /// branch now runs the same tripwire. Seen failing first: the counter stayed at 0.
+    #[test]
+    fn a_bare_proof_under_the_allowance_still_trips_the_anchor_tripwire() {
+        let victim = NodeId::new("127.0.0.1", 7122).unwrap();
+        let v_sk = SigningKey::from_bytes(&[65u8; 32]);
+        let v_vk = v_sk.verifying_key().to_bytes();
+        let a_vk = SigningKey::from_bytes(&[66u8; 32]).verifying_key().to_bytes();
+        let mut history = v_vk.to_vec();
+        history.extend_from_slice(&a_vk);
+        // V's key is CA-anchored (a direct connection), and the bare proof is V's own signature.
+        let (pk, anchor, counter) = (keys(), anchors(), std::sync::atomic::AtomicU64::new(0));
+        anchor.pin().insert(victim.clone(), std::collections::HashSet::from([v_vk]));
+        let bare = encode_identity_proof(&v_vk, &v_sk.sign(&history).to_bytes());
+        validate_and_merge_identity(&pk, &anchor, &counter, &victim, &history, &[v_vk, a_vk], Some(&bare), false);
+        assert_eq!(counter.load(Ordering::SeqCst), 1, "a key the anchor does not hold trips the tripwire, bare proof or none");
+    }
+
+    /// **The consensus side of the same window.** A payload is signed under its own tag now, and a
+    /// bare signature — a 2.31 node's — still verifies for one release, told apart so it can be
+    /// counted. A signature under the identity tag, or any other, is neither.
+    #[cfg(feature = "consensus")]
+    #[test]
+    fn a_consensus_signature_verifies_tagged_first_and_bare_for_one_release() {
+        use crate::consensus::{consensus_signing_message, verify_consensus_signature, SignatureForm};
+        let sk = SigningKey::from_bytes(&[63u8; 32]);
+        let vk = sk.verifying_key().to_bytes();
+        let other = SigningKey::from_bytes(&[64u8; 32]).verifying_key().to_bytes();
+        let payload = b"a serialized ConsensusMsg";
+        let tagged = sk.sign(&consensus_signing_message(payload)).to_bytes();
+        let bare = sk.sign(payload).to_bytes();
+        let as_identity = sk.sign(&identity_proof_message(payload)).to_bytes();
+        assert_eq!(verify_consensus_signature(&[other, vk], payload, &tagged), Some(SignatureForm::Tagged));
+        assert_eq!(verify_consensus_signature(&[vk], payload, &bare), Some(SignatureForm::Untagged), "2.31's form, for one release");
+        assert_eq!(verify_consensus_signature(&[vk], payload, &as_identity), None, "a signature under another tag is not a consensus signature");
+        assert_eq!(verify_consensus_signature(&[other], payload, &tagged), None);
+        assert_eq!(verify_consensus_signature(&[], payload, &tagged), None, "no key, no verification");
     }
 }
 
@@ -9611,6 +9829,199 @@ async fn an_unjoined_group_refuses_to_elect_on_both_surfaces() {
     assert_eq!(body["observed_members"], 0, "{body}");
 
     agent.shutdown().await;
+}
+
+/// **A node that is not in a group's roster may not propose to it.**
+///
+/// A proposer counted its own promise and its own vote unconditionally, while the quorum it needed
+/// was computed from the group's roster — which it need not be in. So a stranger to a one-member
+/// group `{A}` had a quorum of one and satisfied it alone: it chose a leader for the group without
+/// a member voting, from a node the group's members never admitted. On a larger group the same
+/// arithmetic lets two strangers with disjoint acceptors each reach quorum — a stranger's self-vote
+/// is a vote the roster does not contain, so the two quorums need not intersect.
+///
+/// Both surfaces refuse by name now: `ConsensusResult::NotAMember` from the library, and
+/// `403 not_a_member` from the gateway's election route, which proposed `leader/{group}` for any
+/// group a client named. Seen failing first: B committed `leader/members-only` = B.
+#[cfg(all(feature = "consensus", feature = "gateway"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_non_member_cannot_propose_to_a_group_on_either_surface() {
+    let port_a = alloc_port();
+    let port_b = alloc_port();
+    let http_b = alloc_port();
+    let id_a = NodeId::new("127.0.0.1", port_a).unwrap();
+    let id_b = NodeId::new("127.0.0.1", port_b).unwrap();
+    let mut cfg_a = GossipConfig::default();
+    cfg_a.bind_port = port_a;
+    cfg_a.bootstrap_peers = vec![id_b.clone()];
+    cfg_a.health_check_max_jitter_ms = 50;
+    let mut cfg_b = GossipConfig::default();
+    cfg_b.bind_port = port_b;
+    cfg_b.bootstrap_peers = vec![id_a.clone()];
+    cfg_b.health_check_max_jitter_ms = 50;
+    cfg_b.http_port = Some(http_b);
+    let a = GossipAgent::new(id_a, cfg_a);
+    let b = GossipAgent::new(id_b.clone(), cfg_b);
+    a.start().await.unwrap();
+    b.start().await.unwrap();
+    let _la = a.consensus().start_consensus_listener(ConsensusConfig::default());
+    let _lb = b.consensus().start_consensus_listener(ConsensusConfig::default());
+    poll_until(|| !a.peers().is_empty() && !b.peers().is_empty(), 2_000).await;
+
+    // A is the whole roster; B is a stranger to the group, and can see that it is.
+    a.mesh().join_group("members-only");
+    let prefix = crate::signal::grp_prefix("members-only");
+    poll_until(|| !b.kv().scan_prefix(&prefix).is_empty(), 5_000).await;
+
+    let cfg = ConsensusConfig {
+        phase1_timeout: Duration::from_millis(300),
+        max_ballots:    1,
+        ..ConsensusConfig::default()
+    };
+    let res = b.consensus()
+        .group_propose("members-only", "leader/members-only", Bytes::from_static(b"stranger"), cfg.clone())
+        .await;
+    // Seen failing first as `!matches!(res, Committed { .. })`: B committed `leader/members-only` = B.
+    match res {
+        ConsensusResult::NotAMember { ref group, ref slot } => {
+            assert_eq!(&**group, "members-only", "the refusal names the group");
+            assert_eq!(&**slot, "leader/members-only");
+        }
+        other => panic!("a stranger must be refused by name, got {other:?}"),
+    }
+    assert!(
+        b.consensus().consensus_get("leader/members-only").is_none(),
+        "and nothing was committed",
+    );
+    // The receipt verb and the election verb translate it, each as a refusal — never a timeout.
+    match b.consensus().group_propose_receipt("members-only", "leader/members-only", Bytes::from_static(b"stranger"), cfg).await {
+        Err(crate::CommitError::NotAMember { group, .. }) => assert_eq!(&*group, "members-only"),
+        other => panic!("expected CommitError::NotAMember, got {other:?}"),
+    }
+    match b.consensus().elect_leader_receipt("members-only").await {
+        Err(crate::ConsistencyError::NotAMember { group }) => assert_eq!(&*group, "members-only"),
+        other => panic!("expected ConsistencyError::NotAMember, got {other:?}"),
+    }
+    // And the member itself still elects: the roster is explicit, so solo authority is legitimate.
+    let own = a.consensus().elect_leader_receipt("members-only").await.expect("the member elects");
+    assert_eq!(own.leader, *a.node_id());
+
+    // The gateway's election route proposes `leader/{group}` for any group a client names.
+    let client = reqwest::Client::new();
+    let health = format!("http://127.0.0.1:{http_b}/health");
+    for _ in 0..40 {
+        if client.get(&health).send().await.is_ok_and(|r| r.status().is_success()) { break; }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let r = client.post(format!("http://127.0.0.1:{http_b}/gateway/overlay/elect"))
+        .json(&serde_json::json!({"group": "members-only"}))
+        .send().await.expect("elect request");
+    assert_eq!(r.status(), 403, "an authority refusal, like governed_group");
+    let body: serde_json::Value = r.json().await.expect("json body");
+    assert_eq!(body["error"], "not_a_member", "{body}");
+    assert_eq!(body["group"], "members-only", "{body}");
+
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **An acceptor answers in the signature form of the request it verified** (the adversarial
+/// review of #585, F1). A 2.31 proposer verifies bare signatures only, so an acceptor that answered
+/// every request tagged dropped out of every un-upgraded proposer's rounds — the opposite of what
+/// the allowance promised. Now a bare-signed `Prepare` or `Propose` gets a bare-signed answer while
+/// the allowance is open, and a tagged one a tagged answer. Driven through the running listener,
+/// the way a frame from the network arrives. Seen failing first: the ack to a bare prepare
+/// verified as `Tagged`.
+#[cfg(all(feature = "tls", feature = "consensus"))]
+#[tokio::test]
+async fn an_acceptor_answers_in_the_signature_form_of_the_request() {
+    use crate::config::TlsConfig;
+    use crate::consensus::{
+        consensus_kind, consensus_signing_message, encode_consensus_msg, verify_consensus_signature,
+        ConsensusMsg, SignatureForm, SignedConsensusMsg,
+    };
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let cert_dir = std::env::temp_dir().join(format!("myc-reply-form-{port}"));
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+    let a = GossipAgent::new(id.clone(), cfg);
+    a.start().await.unwrap();
+    let _listener = a.consensus().start_consensus_listener(ConsensusConfig::default());
+    let tls = Arc::clone(a.task_ctx.tls.get().expect("tls identity"));
+    let my_key = tls.verifying_key_bytes();
+    let mut acks = a.task_ctx.signal_handlers.register_with_capacity(Arc::from(consensus_kind::VOTE), 8);
+
+    // A prepare as a proposer of each era signs it, addressed to this node as the acceptor.
+    let send = |ballot: u64, form: SignatureForm| {
+        let bytes = encode_consensus_msg(&ConsensusMsg::Prepare { slot: Arc::from("reply-form"), ballot, proposer: id.clone() });
+        let message = match form {
+            SignatureForm::Tagged => consensus_signing_message(&bytes),
+            SignatureForm::Untagged => bytes.to_vec(),
+        };
+        let signed = SignedConsensusMsg {
+            msg_bytes: bytes,
+            signer: id.clone(),
+            signature: crate::tls::sign_bytes(&tls.signing_key(), &message).to_vec(),
+        };
+        mycelium_core::ops::emit_signal(
+            &a.task_ctx, Arc::from(consensus_kind::PROPOSE), SignalScope::Individual(id.clone()),
+            Bytes::from(mycelium_core::serde_fixint::to_vec(&signed).unwrap()),
+        );
+    };
+    let form_of = |payload: &Bytes| {
+        let signed: SignedConsensusMsg = mycelium_core::serde_fixint::from_slice(payload).expect("a signed answer");
+        verify_consensus_signature(&[my_key], &signed.msg_bytes, &signed.signature)
+    };
+
+    send(3, SignatureForm::Untagged);
+    let ack = tokio::time::timeout(Duration::from_secs(5), acks.recv()).await.expect("answered").expect("open");
+    assert_eq!(form_of(&ack.payload), Some(SignatureForm::Untagged),
+               "a 2.31 proposer verifies bare only: the answer to its bare prepare is bare");
+
+    send(4, SignatureForm::Tagged);
+    let ack = tokio::time::timeout(Duration::from_secs(5), acks.recv()).await.expect("answered").expect("open");
+    assert_eq!(form_of(&ack.payload), Some(SignatureForm::Tagged), "a tagged request is answered tagged");
+
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+/// **An acceptor that cannot record its promise counts the answer it withheld** (the adversarial
+/// review of #585, F5). The WAL writer is stopped under a running listener, so the fsync a promise
+/// needs fails; the prepare goes unanswered — and `consensus_acceptor_unrecorded` says so, where
+/// before only a warning did. Seen failing first with the increment absent: the counter stayed 0.
+#[cfg(all(unix, feature = "consensus"))]
+#[tokio::test]
+async fn an_unrecorded_promise_is_counted_as_well_as_withheld() {
+    use crate::consensus::{acceptor_answers_unrecorded, consensus_kind, encode_consensus_msg, ConsensusMsg};
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let base = std::env::temp_dir().join(format!("mycelium-unrecorded-{port}"));
+    let _ = std::fs::remove_dir_all(&base);
+    let mut cfg = GossipConfig::auto();
+    cfg.bind_port = port;
+    cfg.persistence = Some(r2_persistence(&base));
+    let a = GossipAgent::new(id.clone(), cfg);
+    a.start().await.unwrap();
+    let _listener = a.consensus().start_consensus_listener(ConsensusConfig::default());
+    let mut acks = a.task_ctx.signal_handlers.register_with_capacity(Arc::from(consensus_kind::VOTE), 8);
+    // The disk goes away under the acceptor: the writer stops, so every forced append fails.
+    a.task_ctx.wal.get().expect("persistence configured").shutdown().await;
+
+    let before = acceptor_answers_unrecorded();
+    let bytes = encode_consensus_msg(&ConsensusMsg::Prepare { slot: Arc::from("unrecorded"), ballot: 1, proposer: id.clone() });
+    mycelium_core::ops::emit_signal(&a.task_ctx, Arc::from(consensus_kind::PROPOSE), SignalScope::Individual(id.clone()), bytes);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), acks.recv()).await.is_err(),
+        "a promise that did not reach the WAL is not answered",
+    );
+    assert_eq!(acceptor_answers_unrecorded(), before + 1, "and the withheld answer is counted");
+
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// **Boundary H P1 gate — issuer binding on live nodes.** Two TLS members, A and B.

@@ -448,6 +448,15 @@ pub enum CommitError {
         /// How many were required.
         required: usize,
     },
+    /// **This node is not in the group's roster, so nothing was proposed.** A proposer counts its
+    /// own vote toward a quorum drawn from the roster; a vote from outside it is one the electorate
+    /// does not contain. A refusal, never a `DeliveryUnknown`: join the group first.
+    NotAMember {
+        /// The slot.
+        slot: Arc<str>,
+        /// The group this node is not in.
+        group: Arc<str>,
+    },
 }
 
 impl std::fmt::Display for CommitError {
@@ -473,6 +482,10 @@ impl std::fmt::Display for CommitError {
             CommitError::TopologyUnsatisfied { slot, distinct, required } => write!(
                 f,
                 "slot {slot}: {distinct} distinct failure domains answered, {required} required"
+            ),
+            CommitError::NotAMember { slot, group } => write!(
+                f,
+                "not a member: slot {slot} belongs to group {group}, whose roster does not hold this node — nothing was proposed"
             ),
         }
     }

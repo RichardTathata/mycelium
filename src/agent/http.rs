@@ -961,7 +961,7 @@ async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoResponse {
     let task_count = ctx.agent_ctx.task_handles
         .lock().unwrap_or_else(|e| e.into_inner())
         .len();
-    Json(json!({
+    let mut body = json!({
         "node_id":       ctx.agent_ctx.node_id.to_string(),
         "cluster_name":  ctx.agent_ctx.config.cluster_name,
         "store_entries": kv.store.pin().len(),
@@ -1006,7 +1006,40 @@ async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoResponse {
             .then(|| super::emergent::compute_opaque_node_pct(&ctx.agent_ctx)),
         "view_confidence": ctx.agent_ctx.config.emergent_detectors_enabled
             .then(|| super::emergent::compute_view_confidence(&ctx.agent_ctx)),
-    }))
+    });
+    for (name, value) in feature_gated_counters() {
+        body[name] = json!(value);
+    }
+    Json(body)
+}
+
+/// The `/stats` counters that exist only in some builds — each present exactly when the code that
+/// increments it is compiled, so a reader never sees a `0` for a counter this build cannot raise.
+/// Returned as a list (possibly empty) so the caller's loop is the same in every build.
+fn feature_gated_counters() -> Vec<(&'static str, u64)> {
+    // The 2.32.0 mixed-fleet allowance: signature validations accepted in the bare (pre-2.32.0)
+    // form. Still rising means a peer not yet upgraded; the allowance closes in the next MINOR
+    // (`deprecations.md` §23).
+    let identity_untagged: Option<(&'static str, u64)> = {
+        #[cfg(feature = "tls")]
+        { Some(("identity_untagged_proofs", crate::agent::helpers::untagged_identity_proofs_accepted())) }
+        #[cfg(not(feature = "tls"))]
+        { None }
+    };
+    let consensus_untagged: Option<(&'static str, u64)> = {
+        #[cfg(all(feature = "tls", feature = "consensus"))]
+        { Some(("consensus_untagged_signatures", crate::consensus::untagged_consensus_signatures_accepted())) }
+        #[cfg(not(all(feature = "tls", feature = "consensus")))]
+        { None }
+    };
+    // Answers this node's acceptor withheld because its promise or acceptance did not reach the WAL.
+    let acceptor_unrecorded: Option<(&'static str, u64)> = {
+        #[cfg(feature = "consensus")]
+        { Some(("consensus_acceptor_unrecorded", crate::consensus::acceptor_answers_unrecorded())) }
+        #[cfg(not(feature = "consensus"))]
+        { None }
+    };
+    [identity_untagged, consensus_untagged, acceptor_unrecorded].into_iter().flatten().collect()
 }
 
 /// `GET /gateway/audit` — query the tamper-evident audit trail (compliance, scope
@@ -3682,6 +3715,7 @@ fn commit_error_response(err: crate::CommitError) -> axum::response::Response {
             (StatusCode::CONFLICT, Json(json!({ "ok": false, "error": "superseded" }))).into_response(),
         CommitError::TopologyUnsatisfied { .. } =>
             (StatusCode::CONFLICT, Json(json!({ "ok": false, "error": "topology_unsatisfied" }))).into_response(),
+        CommitError::NotAMember { group, .. } => not_a_member_response(&group),
         // `CommitError` is `#[non_exhaustive]` in `mycelium-core`: a refusal this build does not
         // name is still a refusal, and its `Display` says what it is.
         other => (StatusCode::CONFLICT, Json(json!({ "ok": false, "error": other.to_string() }))).into_response(),
@@ -3833,6 +3867,7 @@ async fn gw_overlay_lock_acquire(
             "observed_members": observed_members,
             "declared_min": declared_min,
         }))).into_response(),
+        crate::consensus::ConsensusResult::NotAMember { group, .. } => not_a_member_response(&group),
     }
 }
 
@@ -3911,7 +3946,24 @@ async fn gw_overlay_elect(
                 "this node sees fewer members than the group declares; its view is partial"
             },
         }))).into_response(),
+        // This node is not in the group: it may not elect a leader for it, least of all itself.
+        crate::consensus::ConsensusResult::NotAMember { group, .. } => not_a_member_response(&group),
     }
+}
+
+/// **403 `not_a_member`**: this node is not in the named group's roster, so it did not propose.
+/// A proposer counts its own vote toward a quorum drawn from the roster; from outside it that vote
+/// is one the electorate does not contain (`ConsensusResult::NotAMember`). An authority refusal,
+/// so 403 like `governed_group`, not the 409 of a roster that could not be established.
+#[cfg(feature = "consensus")]
+fn not_a_member_response(group: &str) -> axum::response::Response {
+    (StatusCode::FORBIDDEN, Json(json!({
+        "ok": false,
+        "error": "not_a_member",
+        "group": group,
+        "detail": "this node is not in the group's roster, so it may not propose to it — join the \
+                   group first (POST /gateway/mesh/group, or /gateway/govern/group for a governed one)",
+    }))).into_response()
 }
 
 // ── Overlay: ordered log ──────────────────────────────────────────────────────
@@ -5384,7 +5436,7 @@ mod tests {
         let m_key = m_sk.verifying_key().to_bytes();
         let mut history = v_key.to_vec();
         history.extend_from_slice(&m_key);
-        let m_sig = m_sk.sign(&history).to_bytes();
+        let m_sig = m_sk.sign(&crate::agent::helpers::identity_proof_message(&history)).to_bytes();
         let bad_proof = crate::agent::helpers::encode_identity_proof(&m_key, &m_sig);
         let kv_keys = [v_key, m_key];
         crate::agent::helpers::validate_and_merge_identity(
@@ -5399,7 +5451,7 @@ mod tests {
         let v2_key = v2_sk.verifying_key().to_bytes();
         let mut hist2 = v2_key.to_vec();
         hist2.extend_from_slice(&v_key);
-        let good_sig = v_sk.sign(&hist2).to_bytes();       // signed by the prior key
+        let good_sig = v_sk.sign(&crate::agent::helpers::identity_proof_message(&hist2)).to_bytes(); // signed by the prior key
         let good_proof = crate::agent::helpers::encode_identity_proof(&v_key, &good_sig);
         crate::agent::helpers::validate_and_merge_identity(
             &peer_keys, &anchor_keys, &conflicts, &victim, &hist2, &[v2_key, v_key], Some(&good_proof), false);

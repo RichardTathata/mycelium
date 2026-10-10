@@ -25,6 +25,27 @@ PROPOSE/COMMIT receivers *before* spawning the voter task. Registration inside t
 first poll silently dropped proposals racing startup (single-node tests self-quorum and never
 notice). Keep it synchronous through any refactor.
 
+**The acceptor's record and the decided floor are on stable storage before the answer leaves** (2.32.0). Until
+then `persist_acceptor` and `record_decided` wrote through the consensus task's `kv_set` — store + gossip, no WAL —
+so a crash after a promise or a vote restarted the node with no memory of it; `prewarm_accepted` reads what the
+snapshot and WAL restore, and only the committed slot and lease were there. Now `kv_set_returning` + `persist_sync`
+(`append_sync`, fsynced) on every acceptor path — the voter's `answer_prepare` and vote, the proposer's own promise
+and claim in `prepare_phase`, `propose_inner`, `cross_propose_inner` — and the floor at every commit and at the
+learner; on failure the acceptor **does not answer** and a proposer returns `Timeout { reason = unrecorded }`. The
+test is a crash copy of the files, as R2's (`an_acceptors_record_survives_a_crash_without_a_snapshot`): an orderly
+`shutdown()` snapshots the *store* and cannot show the gap. Still on the gossip-only path, deliberately: the
+learner's `consensus/committed/` re-stamp (anti-entropy re-supplies it; absent reads as *not yet arrived*) and
+`LockGuard`'s release tombstones (bounded by the lease, which is on disk).
+
+**A proposer counts itself only toward a roster it is in** (2.32.0). `propose_inner` inserts this node into its
+promisers and voters unconditionally, and the quorum it needs is the caller's reading of `grp/{group}/`; so the
+engine's door refuses a `SignalScope::Group` proposal when `grp/{group}/{self}` is absent (`ConsensusResult::
+NotAMember`, 403 `not_a_member` at the gateway). A stranger's self-vote is one the electorate does not contain:
+on a one-member group it decided alone, on a larger one two strangers with disjoint acceptors each reached quorum.
+The check is at the engine, not the callers, so every door — `ConsensusHandle::group_propose`, the gateway's
+`overlay_group_propose` (`/overlay/elect`) — reaches it. `cluster_propose` has no roster; `cross_propose` never
+counts itself. Test: `a_non_member_cannot_propose_to_a_group_on_either_surface`, seen failing first.
+
 **Acceptor memory is never erased — not on commit, not to bound storage** (2.30.0, #575). The record under
 `sys/consensus-accepted/{node}/{slot}` holds the acceptor's **promise** as well as its acceptance, and it outlives
 the commit. It used to be deleted when a slot committed, to keep the prefix bounded; that dropped promises, so a
