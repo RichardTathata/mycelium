@@ -249,6 +249,64 @@ per-peer writer drops a `FrameTooLarge` frame *without* tearing down the connect
 `test_oversized_value_is_rejected_outright_and_cluster_stays_healthy`. History: analysis
 Run 28 Finding 1 (`docs/analysis/ratings.md`).
 
+## Transport bounds: one socket, peer or kind holds a bounded share (2026-10-10, row B)
+
+What a single participant can hold of a node's transport is bounded, and each bound is a named
+setting or constant with a counter (`SystemStats`, `docs/operations/metrics.md`):
+
+- **Accept path** — the TLS accept is under `handshake_timeout_ms` (`src/agent/tasks.rs`
+  `run_listener_task`), then the read loop gives the first frame's **first byte** the same bound and
+  an established connection `inbound_idle_timeout_secs` between frames (`mycelium-core/src/connection.rs`).
+- **Progress, not frames** — a frame in flight, either direction, is under `StallGuard`
+  (`mycelium-core/src/stall.rs`): no byte for `peer_read_stall_timeout_ms` (60 s) receiving or
+  `peer_write_stall_timeout_ms` sending — derived from `sync_mode` (300 s under `flush`, where a
+  batch waits behind a snapshot, 7.8 s per GiB measured; 60 s otherwise) — the writer's bound must
+  outlast the peer's **apply** of a chunk: 329 s into an fsync WAL with one fsync per entry, 3.4 s once
+  anti-entropy is group-committed (§Persistence; `configuration.md`). Replica sync answers no
+  `Persisted` while a chunk is applied but unbatched (`TransportBounds::ae_unbatched`). The read floor `peer_min_rate_bytes_per_sec`
+  defaults to 1 KiB/s — per connection, so a joiner needs senders × floor of link. Do not ungroup the
+  anti-entropy WAL without revisiting the write bound.
+- **Preemption at `max_connections`** — a newcomer at the cap first completes TLS and a valid first frame
+  (`connection::read_first_frame`, without a permit; 16 may wait), then closes the inbound connection whose
+  last *complete* frame is oldest — older than `writer_idle_timeout_secs + handshake_timeout_ms`, not
+  mid-frame, at most one per `handshake_timeout_ms` (`TransportBounds::preempt_oldest`). **Do not lower the
+  quiet threshold below the writer idle bound:** with SWIM on there are no TCP pings, so an honest inbound
+  link sits quiet up to `writer_idle_timeout_secs` — round 3's 10 s threshold let a flood displace honest
+  peers. Off when `writer_idle_timeout_secs = 0`. **Do not bound a whole frame by a
+  fixed time** — a frame is up to 10 MB, and #602's review found the first version cutting a slow
+  but healthy link mid-frame on every attempt, so a late joiner on it never bootstrapped. A closed socket returns
+  its `max_connections` permit. `validate()` keeps `inbound_idle_timeout_secs` above
+  `writer_idle_timeout_secs` — **do not lower it below the fleet's writer idle**: the reader closing a
+  link first costs the writer's next frame.
+- **Outbound writer** — connect + TLS under `handshake_timeout_ms`, each batch of writes and its
+  flush under the progress bound, and shutdown/eviction interrupt both (`mycelium-core/src/writer.rs`). They
+  were polled only between frames, so a peer that accepts and never reads parked the task.
+- **Anti-entropy replies** — at most one per peer in flight: a `ReplySlot` (`mycelium-core/src/bounds.rs`)
+  is held by every frame of a reply via `Bytes::from_owner` and released when the last is written or
+  dropped. The per-connection cooldown alone was reset by a reconnect.
+- **Admission fill** — `SignalHandlers::fill_ratio` is the **least** full open **work-bearing**
+  subscriber (handlers, `rpc_rx`, the serve stream), not the most: one stalled subscriber loses its own
+  signals (`signal_handler_drops`) instead of holding its kind at 1.0 for every subscriber. SSE streams
+  register as **taps** (`register_tap`) and never count, so a fast observer cannot hide a saturated
+  worker (#602's review). Do not put the MAX back — load-shed is for a kind whose *every* worker is full.
+- **Sender log** — at most `SIGNAL_LOG_MAX_KINDS` (4096) sender-chosen kinds, each keeping one entry per
+  sender up to `SIGNAL_LOG_MAX_SENDERS_PER_KIND` (1024). At either bound the least recently seen go, an
+  eighth per pass, one evictor at a time, and a scan that finds nothing evictable buys the next eighth
+  of insertions without one — never a kind with a local **worker** (an SSE tap is not one) or one queried
+  within the window (pins lapse). Refusing new kinds instead made a flood a false negative for `quorum`.
+  **`sys/quorum/` evidence is written only for a kind with a local worker or a live query pin** (the
+  `*_persistent` reads pin), so a random-kind flood writes no KV keys; the rate-limit table never
+  suppresses an exempt kind's evidence.
+- **Serve loops end** — `RpcRequestRx::recv` selects on shutdown (its sender lives in the handler table
+  the receiver's own `Arc<TaskCtx>` keeps alive, so the channel never closed); a stopped, dropped agent
+  frees its `TaskCtx` (`a_stopped_agent_frees_its_task_context`).
+
+The deadlines are real-socket timers outside the replay kernel, admitted in
+`docs/design/replay-nondeterminism-inventory.md` §2.4. What is **not** bounded: per-source
+connection counts (a plaintext mesh is open to whoever reaches the port), and `sys/quorum/` evidence
+keys for tracked kinds, which nothing collects (no worse than any KV key a peer may write). Gates: `src/resource_bounds_tests.rs`,
+`mycelium-core/src/signal.rs` `bound_tests`, `writer.rs` `a_peer_that_never_reads_*`.
+
 ## `subscribe_log_group` is single-active — do NOT turn it into a load-balanced work queue (#149)
 
 Two different patterns keep getting conflated because the word "consumer group" (and the S11
@@ -323,6 +381,12 @@ ack first, and the writer runs its threshold snapshot **in the same poll as the 
 — so the store scan lacked the acknowledged write and step 4 (WAL truncation) erased its only
 copy. Do not "restore" WAL-first ordering for a durability-before-visibility feel: the sync path
 never had it, and the snapshot is taken from the store.
+**Anti-entropy is group-committed** (2.32, #602's round 3): a `StateResponse` chunk's entries are all
+applied first, then handed over as one `WalHandle::append_batch` — one write and, under `Flush`, one
+`fdatasync` — rather than one awaited fsync per entry (a chunk of ~150 000 tiny entries took minutes
+while the read loop did not read). The order rule holds per chunk; what widens is the crash window
+inside one chunk, whose records anti-entropy re-sends. Receipt-bearing writes (`set_with_receipt`,
+`append_sync`, consensus) are untouched — only the anti-entropy path batches, and its acks are ignored.
 
 **2. The snapshot merges the WAL tail before truncating.** `do_snapshot` reads `wal.bin` (every
 record since the last truncation) and folds it into the store scan under the store's own

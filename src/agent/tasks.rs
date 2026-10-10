@@ -95,6 +95,7 @@ pub(super) async fn run_listener_task(mut listener: TcpListener, lctx: ListenerC
     let ListenerContext { conn, conn_sem, listener_alive, max_conn, addr, tcp_backlog, tls } = lctx;
     let mut shutdown_rx = conn.shutdown.subscribe();
     let mut conn_set: JoinSet<()> = JoinSet::new();
+    let probation = Arc::new(Semaphore::new(PROBATION_SLOTS));
     let mut retry_delay = false;
     let mut need_restart = false;
     listener_alive.fetch_add(1, Ordering::Relaxed);
@@ -139,28 +140,24 @@ pub(super) async fn run_listener_task(mut listener: TcpListener, lctx: ListenerC
                         if let Err(e) = socket.set_nodelay(true) {
                             warn!("set_nodelay failed for {}: {}", peer_addr, e);
                         }
+                        let cfg = &conn.task_ctx.config;
+                        let Some(source) = conn.task_ctx.transport_bounds
+                            .admit_source(peer_addr.ip(), cfg.max_connections_per_source) else {
+                            debug!("max_connections_per_source reached for {}; dropping", peer_addr.ip());
+                            continue;
+                        };
                         match Arc::clone(&conn_sem).try_acquire_owned() {
                             Ok(permit) => {
-                                let ctx = conn.clone();
-                                let tls = tls.clone();
-                                conn_set.spawn(async move {
-                                    let _permit = permit;
-                                    let gs = tls_accept(socket, &tls).await;
-                                    match gs {
-                                        Ok(gs) => {
-                                            if let Err(e) = handle_connection(gs, peer_addr, ctx).await {
-                                                warn!("Connection error from {}: {}", peer_addr, e);
-                                            }
-                                        }
-                                        Err(e) => {
-                                            warn!("TLS accept from {}: {}", peer_addr, e);
-                                        }
-                                    }
-                                });
+                                conn_set.spawn(serve_inbound(permit, source, socket, peer_addr, conn.clone(), tls.clone()));
                             }
-                            Err(_) => {
-                                warn!("Connection limit ({}) reached, dropping {}", max_conn, peer_addr);
-                            }
+                            Err(_) => match Arc::clone(&probation).try_acquire_owned() {
+                                // At the cap the newcomer proves itself first — handshake and a valid
+                                // first frame — and only then may it preempt (#602's round 4).
+                                Ok(probe) => {
+                                    conn_set.spawn(probation_inbound(probe, Arc::clone(&conn_sem), source, socket, peer_addr, conn.clone(), tls.clone()));
+                                }
+                                Err(_) => warn!("Connection limit ({}) reached and {} newcomers already waiting; dropping {}", max_conn, PROBATION_SLOTS, peer_addr),
+                            },
                         }
                     }
                     Err(e) => {
@@ -204,7 +201,7 @@ pub(super) struct GossipShardContext {
     pub(super) peer_localities: Arc<papaya::HashMap<NodeId, LocalityPath>>,
     // policy knobs
     pub(super) backoff:                Duration,
-    pub(super) idle_timeout:           Duration,
+    pub(super) idle_timeout:           mycelium_core::writer::WriterTiming,
     pub(super) max_forwarding_peers:   usize,
     pub(super) group_aware_forwarding: bool,
     pub(super) epidemic_extra_peers:   usize,
@@ -251,7 +248,7 @@ pub(super) async fn run_gossip_shard(
                 e.clone()
             } else {
                 let Some(t) = get_or_spawn_writer(
-                    peer, &peer_writers, hot.writer_depth(), backoff, idle_timeout, &shutdown_tx, &dropped_frames, tls.clone(),
+                    peer, &peer_writers, hot.writer_depth(), backoff, &idle_timeout, &shutdown_tx, &dropped_frames, tls.clone(),
                 ) else { continue; };
                 let e = (t, writer_stream("forward", peer));
                 sender_cache.insert(peer.clone(), e.clone());
@@ -267,7 +264,7 @@ pub(super) async fn run_gossip_shard(
                     debug!("Peer writer for {} closed; respawning and retrying", peer);
                     sender_cache.remove(peer);
                     let Some(new_tx) = get_or_spawn_writer(
-                        peer, &peer_writers, hot.writer_depth(), backoff, idle_timeout, &shutdown_tx, &dropped_frames, tls.clone(),
+                        peer, &peer_writers, hot.writer_depth(), backoff, &idle_timeout, &shutdown_tx, &dropped_frames, tls.clone(),
                     ) else { continue; };
                     sender_cache.insert(peer.clone(), (new_tx.clone(), Arc::clone(&stream)));
                     // The retry is a second event on the *same* stream: same peer, same logical
@@ -550,7 +547,7 @@ pub(super) struct HealthMonitorContext {
     // policy knobs
     pub(super) interval_secs:            u64,
     pub(super) backoff:                  Duration,
-    pub(super) idle_timeout:             Duration,
+    pub(super) idle_timeout:             mycelium_core::writer::WriterTiming,
     pub(super) peer_eviction_intervals:  u64,
     pub(super) ping_peer_sample_size:    usize,
     pub(super) max_active_connections:   usize,
@@ -610,7 +607,7 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
         for peer in &bootstrap_set {
             if *peer == node_id { continue; }
             if let Some(tx) = mycelium_core::writer::get_or_spawn_writer(
-                peer, &peer_writers, hot.writer_depth(), backoff, idle_timeout,
+                peer, &peer_writers, hot.writer_depth(), backoff, &idle_timeout,
                 &shutdown_tx, &dropped_frames, tls.clone(),
             ) {
                 let _ = mycelium_core::sim_seam::chan_try_send("writer/hello", &tx, hello.clone());
@@ -620,7 +617,7 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
         // re-pulled; an empty store yields an all-zero digest ⇒ responder full-dumps.
         let digest = crate::store::store_bucket_hashes(&kv_state);
         for peer in &bootstrap_set {
-            request_state(peer, &peer_writers, hot.writer_depth(), backoff, idle_timeout, &shutdown_tx, &node_id, &hash_acc, &dropped_frames, digest.clone(), tls.clone());
+            request_state(peer, &peer_writers, hot.writer_depth(), backoff, &idle_timeout, &shutdown_tx, &node_id, &hash_acc, &dropped_frames, digest.clone(), tls.clone());
         }
     }
 
@@ -715,7 +712,7 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
                             let digest = crate::store::store_bucket_hashes(&kv_state);
                             for peer in reconnect_peers {
                                 request_state(peer, &peer_writers, hot.writer_depth(), backoff,
-                                    idle_timeout, &shutdown_tx, &node_id, &hash_acc,
+                                    &idle_timeout, &shutdown_tx, &node_id, &hash_acc,
                                     &dropped_frames, digest.clone(), tls.clone());
                             }
                         }
@@ -826,7 +823,7 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
                         let digest = crate::store::store_bucket_hashes(&kv_state);
                         for peer in due_peers {
                             request_state(peer, &peer_writers, hot.writer_depth(), backoff,
-                                idle_timeout, &shutdown_tx, &node_id, &hash_acc,
+                                &idle_timeout, &shutdown_tx, &node_id, &hash_acc,
                                 &dropped_frames, digest.clone(), tls.clone());
                             last_anti_entropy.insert(peer.clone(), now);
                         }
@@ -836,7 +833,7 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
                     let digest = crate::store::store_bucket_hashes(&kv_state);
                     for peer in &added {
                         request_state(peer, &peer_writers, hot.writer_depth(), backoff,
-                            idle_timeout, &shutdown_tx, &node_id, &hash_acc,
+                            &idle_timeout, &shutdown_tx, &node_id, &hash_acc,
                             &dropped_frames, digest.clone(), tls.clone());
                     }
                 }
@@ -855,7 +852,7 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
                             e.clone()
                         } else {
                             let Some(t) = get_or_spawn_writer(
-                                peer, &peer_writers, hot.writer_depth(), backoff, idle_timeout, &shutdown_tx, &dropped_frames, tls.clone(),
+                                peer, &peer_writers, hot.writer_depth(), backoff, &idle_timeout, &shutdown_tx, &dropped_frames, tls.clone(),
                             ) else { continue; };
                             let e = (t, writer_stream("ping", peer));
                             ping_sender_cache.insert(peer.clone(), e.clone());
@@ -870,7 +867,7 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
                                 debug!("Peer writer for {} closed; respawning for ping retry", peer);
                                 ping_sender_cache.remove(peer);
                                 let Some(new_tx) = get_or_spawn_writer(
-                                    peer, &peer_writers, hot.writer_depth(), backoff, idle_timeout, &shutdown_tx, &dropped_frames, tls.clone(),
+                                    peer, &peer_writers, hot.writer_depth(), backoff, &idle_timeout, &shutdown_tx, &dropped_frames, tls.clone(),
                                 ) else { continue; };
                                 ping_sender_cache.insert(peer.clone(), (new_tx.clone(), Arc::clone(&stream)));
                                 if mycelium_core::sim_seam::chan_try_send(&stream, &new_tx, ping_data.clone())
@@ -1156,6 +1153,105 @@ pub(super) async fn run_gc_task(ctx: GcContext) {
     if !*shutdown_rx.borrow() {
         error!("GC task exited unexpectedly; tombstone expiry and subscription eviction have stopped");
     }
+}
+
+/// Newcomers that may wait at `max_connections` to prove themselves (handshake + a valid first
+/// frame) before preempting a quiet connection — beyond `max_connections`, bounded here.
+const PROBATION_SLOTS: usize = 16;
+
+/// Serves one accepted inbound connection holding `permit`: registers it for preemption, bounds the
+/// TLS handshake (row B), then runs the read loop. Everything is released when this returns.
+async fn serve_inbound(
+    permit: tokio::sync::OwnedSemaphorePermit,
+    source: mycelium_core::bounds::SourceGuard,
+    socket: tokio::net::TcpStream,
+    peer_addr: SocketAddr,
+    mut ctx: ConnContext,
+    tls: Option<Arc<NodeTls>>,
+) {
+    let _permit = permit;
+    let _source = source;
+    let registration = ctx.task_ctx.transport_bounds.register_inbound();
+    ctx.inbound_slot = Some(Arc::clone(&registration.slot));
+    let handshake = Duration::from_millis(ctx.task_ctx.config.handshake_timeout_ms);
+    // The handshake is bounded (row B): before, a socket that connected and never completed TLS held
+    // its permit for as long as it stayed open. A real-socket deadline, outside the replay kernel like
+    // the socket (inventory §2.4).
+    let gs = tokio::select! {
+        r = time::timeout(handshake, tls_accept(socket, &tls)) => match r {
+            Ok(Ok(gs)) => gs,
+            Ok(Err(e)) => { warn!("TLS accept from {}: {}", peer_addr, e); return; }
+            Err(_) => {
+                ctx.task_ctx.transport_bounds.count_inbound_timeout();
+                debug!("TLS accept from {} timed out after {:?} (handshake_timeout_ms)", peer_addr, handshake);
+                return;
+            }
+        },
+        _ = registration.slot.preempted() => return,
+    };
+    if let Err(e) = handle_connection(gs, peer_addr, ctx).await {
+        warn!("Connection error from {}: {}", peer_addr, e);
+    }
+    drop(registration);
+}
+
+/// A newcomer at `max_connections` (#602's round 4). It completes the TLS handshake and delivers a
+/// valid first frame **before** it holds a permit — a bare connect, or a non-member that cannot finish
+/// mTLS, preempts nothing. Then it takes a permit that has come free, or preempts one quiet connection
+/// (`TransportBounds::preempt_oldest`: quieter than `writer_idle_timeout_secs + handshake_timeout_ms`,
+/// not mid-frame, at most one per `handshake_timeout_ms`; off when `writer_idle_timeout_secs = 0`) and
+/// waits for its permit; otherwise it is dropped.
+async fn probation_inbound(
+    probe: tokio::sync::OwnedSemaphorePermit,
+    sem: Arc<Semaphore>,
+    source: mycelium_core::bounds::SourceGuard,
+    socket: tokio::net::TcpStream,
+    peer_addr: SocketAddr,
+    mut ctx: ConnContext,
+    tls: Option<Arc<NodeTls>>,
+) {
+    let cfg = &ctx.task_ctx.config;
+    let handshake = Duration::from_millis(cfg.handshake_timeout_ms);
+    let gs = match time::timeout(handshake, tls_accept(socket, &tls)).await {
+        Ok(Ok(gs)) => gs,
+        Ok(Err(e)) => { debug!("TLS accept from {} (at the cap): {}", peer_addr, e); return; }
+        Err(_) => { ctx.task_ctx.transport_bounds.count_inbound_timeout(); return; }
+    };
+    let mut reader = mycelium_core::connection::inbound_reader(gs);
+    let first = match mycelium_core::connection::read_first_frame(&mut reader, cfg).await {
+        Ok(f) => f,
+        Err(e) => {
+            ctx.task_ctx.transport_bounds.count_inbound_timeout();
+            debug!("newcomer {} at the cap did not deliver a valid first frame: {}", peer_addr, e);
+            return;
+        }
+    };
+    let permit = match Arc::clone(&sem).try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => {
+            let preemptible = cfg.writer_idle_timeout_secs > 0
+                && ctx.task_ctx.transport_bounds.preempt_oldest(
+                    Duration::from_secs(cfg.writer_idle_timeout_secs) + handshake, handshake);
+            if !preemptible {
+                debug!("Connection limit reached; {} proved itself but no connection was quiet long enough", peer_addr);
+                return;
+            }
+            match time::timeout(handshake, sem.acquire_owned()).await {
+                Ok(Ok(p)) => p,
+                _ => { warn!("{} preempted a connection but its permit did not return in time", peer_addr); return; }
+            }
+        }
+    };
+    drop(probe);
+    let _permit = permit;
+    let _source = source;
+    let registration = ctx.task_ctx.transport_bounds.register_inbound();
+    registration.slot.frame_completed();
+    ctx.inbound_slot = Some(Arc::clone(&registration.slot));
+    if let Err(e) = mycelium_core::connection::handle_connection_from(reader, peer_addr, ctx, Some(first)).await {
+        warn!("Connection error from {}: {}", peer_addr, e);
+    }
+    drop(registration);
 }
 
 /// Upgrades a plain `TcpStream` to a `GossipStream` by performing a TLS server

@@ -153,7 +153,26 @@ is itself a crown jewel (Boundary A).
   scope and audit records intent, but a member authorized for X can do X.
 - **Egress on the not-yet-gated paths** (LLM/probe/A2A) — network-layer control.
 - **Availability attacks** beyond the documented gossip backpressure/opacity
-  mechanisms.
+  mechanisms and the transport bounds of 2.32 (row B of the post-360 hardening plan): a
+  socket that connects and says nothing is closed after `handshake_timeout_ms`, a silent
+  established one after `inbound_idle_timeout_secs`; a frame in flight must keep moving
+  (`peer_read_stall_timeout_ms` receiving, `peer_write_stall_timeout_ms` sending) and, when
+  received, keep 1 KiB/s past the stall window (`peer_min_rate_bytes_per_sec`); at
+  `max_connections` a newcomer that has completed its handshake and a valid first frame may
+  **preempt** the connection whose last complete frame is oldest — if older than
+  `writer_idle_timeout_secs + handshake_timeout_ms`, not mid-frame, at most one per
+  `handshake_timeout_ms` — so a connection that holds a permit by going quiet gives it up,
+  while a bare connect (on a TLS mesh, a non-member's SYN) preempts nothing and an honest
+  link its writer still uses is never chosen. A peer that never reads cannot park a writer
+  or hold more than one anti-entropy reply; a stalled subscriber loses its own signals
+  rather than its kind's admission; the signal log holds at most 4096 sender-chosen kinds,
+  evicting the least recently seen; `sys/quorum/` evidence is written only for kinds this
+  node works on or asks about, bounded per kind and per second. **The residual, exactly:**
+  on a plaintext mesh, an attacker that took slots from free permits and talks on each more
+  often than `writer_idle_timeout_secs + handshake_timeout_ms` (40 s by default — a tiny
+  frame per slot per 40 s) holds those slots; preemption cannot tell it from a peer. The
+  remaining mitigation is the opt-in per-source cap, `max_connections_per_source` (off by
+  default, since a NAT shares an address); per-identity limits on a TLS mesh are not built.
 - **Key custody** — Mycelium provides hooks; the KMS/HSM and rotation are the
   operator's.
 
