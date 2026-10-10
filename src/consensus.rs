@@ -1146,7 +1146,9 @@ impl ConsensusEngine {
 
         // Above the slot's decided ballot too: the ballot key is no longer reset at commit, but it is
         // gossiped and may lag what this node knows was decided.
-        let mut ballot = self.read_ballot(&ballot_key).max(self.decided_floor(&slot)) + 1;
+        let Some(mut ballot) = next_ballot(self.read_ballot(&ballot_key).max(self.decided_floor(&slot))) else {
+            return self.ballots_exhausted(slot, 0, quorum_size);
+        };
         let mut votes_last_ballot: usize = 0;
         // How the latest attempt ended — what a timeout is labelled by (doc-coverage run 22, gap 3).
         let mut last = LastAttempt::None;
@@ -1245,7 +1247,10 @@ impl ConsensusEngine {
             };
             if let Some(floor) = retry_floor {
                 ballot_retry_pause(config.ballot_retry_jitter_ms).await;
-                ballot = floor.max(self.read_ballot(&ballot_key)).max(ballot) + 1;
+                let Some(next) = next_ballot(floor.max(self.read_ballot(&ballot_key)).max(ballot)) else {
+                    return self.ballots_exhausted(slot, _attempt + 1, quorum_size);
+                };
+                ballot = next;
                 continue;
             }
             last = LastAttempt::Vote;
@@ -1271,7 +1276,10 @@ impl ConsensusEngine {
                 // Already committed to a different value at this ballot. Cannot win here; move up
                 // rather than emit a proposal we are not entitled to support.
                 last = LastAttempt::Contended;
-                ballot = ballot.max(self.read_ballot(&ballot_key)) + 1;
+                let Some(next) = next_ballot(ballot.max(self.read_ballot(&ballot_key))) else {
+                    return self.ballots_exhausted(slot, _attempt + 1, quorum_size);
+                };
+                ballot = next;
                 continue;
             }
             // Durable before the proposal leaves, for the same reason the voter records before its
@@ -1368,7 +1376,10 @@ impl ConsensusEngine {
             }
 
             ballot_retry_pause(config.ballot_retry_jitter_ms).await;
-            ballot = nack_ballot.max(self.read_ballot(&ballot_key)).max(ballot) + 1;
+            let Some(next) = next_ballot(nack_ballot.max(self.read_ballot(&ballot_key)).max(ballot)) else {
+                return self.ballots_exhausted(slot, _attempt + 1, quorum_size);
+            };
+            ballot = next;
         }
 
         // After exhausting max_ballots: prefer TopologyUnsatisfied over Timeout
@@ -1492,7 +1503,9 @@ impl ConsensusEngine {
             Arc::from(consensus_kind::NACK), 64,
         );
 
-        let mut ballot = self.read_ballot(&ballot_key).max(self.decided_floor(&slot)) + 1;
+        let Some(mut ballot) = next_ballot(self.read_ballot(&ballot_key).max(self.decided_floor(&slot))) else {
+            return self.ballots_exhausted(slot, 0, 0);
+        };
         let mut last = LastAttempt::None;
 
         for _attempt in 0..config.max_ballots {
@@ -1533,7 +1546,10 @@ impl ConsensusEngine {
             };
             if let Some(floor) = retry_floor {
                 ballot_retry_pause(config.ballot_retry_jitter_ms).await;
-                ballot = floor.max(self.read_ballot(&ballot_key)).max(ballot) + 1;
+                let Some(next) = next_ballot(floor.max(self.read_ballot(&ballot_key)).max(ballot)) else {
+                    return self.ballots_exhausted(slot, _attempt + 1, 0);
+                };
+                ballot = next;
                 continue;
             }
             last = LastAttempt::Vote;
@@ -1549,7 +1565,10 @@ impl ConsensusEngine {
             let floor = self.decided_floor(&slot);
             if !claim_vote(&self.task_ctx.consensus_accepted, &slot, ballot, &value, self.task_ctx.node_id.id_hash(), floor) {
                 last = LastAttempt::Contended;
-                ballot = ballot.max(self.read_ballot(&ballot_key)) + 1;
+                let Some(next) = next_ballot(ballot.max(self.read_ballot(&ballot_key))) else {
+                    return self.ballots_exhausted(slot, _attempt + 1, 0);
+                };
+                ballot = next;
                 continue;
             }
             if !self.persist_acceptor(&slot).await {
@@ -1669,7 +1688,10 @@ impl ConsensusEngine {
                     adopted_from = ab;
                     value = v;
                 }
-            ballot = nack_ballot.max(self.read_ballot(&ballot_key)).max(ballot) + 1;
+            let Some(next) = next_ballot(nack_ballot.max(self.read_ballot(&ballot_key)).max(ballot)) else {
+                return self.ballots_exhausted(slot, _attempt + 1, 0);
+            };
+            ballot = next;
         }
 
         let votes_last_ballot: usize = group_states.values().map(|gs| gs.accepts).sum();
@@ -1869,6 +1891,22 @@ impl ConsensusEngine {
     /// The attempt ends here: this node's own acceptor record did not reach stable storage, so
     /// nothing left this node and nothing can be in flight. Reported as a `Timeout` with reason
     /// `unrecorded` — the attempt was not made — rather than retried against a failing disk.
+    /// The proposal ends here: the slot's next ballot would be above `u64::MAX` — its decided floor
+    /// or ballot key is at the ceiling, which no history of a slot reaches by drawing one ballot per
+    /// attempt, and a forged `consensus/decided/` entry does (the floor tripwire counts that). Until
+    /// 2026-10-10 the draw was `… + 1`: a panic in a build with overflow checks — under the release
+    /// profile's `panic = "abort"`, the node — and a wrap to ballot 0, refused below the floor,
+    /// without them. A `Timeout`, named `ballot_exhausted` on the timeout metric and counted on
+    /// [`ballot_space_exhausted`], with one `warn!`.
+    fn ballots_exhausted(&self, slot: Arc<str>, ballots_tried: u32, quorum_required: usize) -> ConsensusResult {
+        BALLOT_SPACE_EXHAUSTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        metrics::counter!("mycelium_consensus_timeouts_total", "reason" => "ballot_exhausted").increment(1);
+        tracing::warn!(slot = %slot, "consensus: the slot's ballot space is exhausted (the next ballot would \
+            exceed u64::MAX — a decided floor or ballot key at the ceiling); the proposal ends here");
+        ConsensusResult::Timeout { slot, ballots_tried, votes_last_ballot: 0, quorum_required }
+    }
+
     fn unrecorded(&self, slot: Arc<str>, ballots_tried: u32, quorum_required: usize) -> ConsensusResult {
         #[cfg(feature = "metrics")]
         {
@@ -2193,6 +2231,14 @@ fn signer_authorized(msg: &ConsensusMsg, signer: &NodeId) -> bool {
 #[cfg(feature = "consensus")]
 pub(crate) fn accepted_key(node: &NodeId, slot: &str) -> String {
     format!("{}{}/{}", mycelium_core::signal::kv_ns::CONSENSUS_ACCEPTED, node, slot)
+}
+
+/// The ballot after `above`, or `None` when `above` is `u64::MAX` — every ballot draw goes through
+/// here, so the ballot space ends in a named refusal ([`ConsensusEngine::ballots_exhausted`]) rather
+/// than an overflow.
+#[cfg(feature = "consensus")]
+pub(crate) fn next_ballot(above: u64) -> Option<u64> {
+    above.checked_add(1)
 }
 
 /// How far a decided floor may sit above every ballot this node has observed for its slot before
@@ -2655,6 +2701,19 @@ pub(crate) fn verify_consensus_signature(keys: &[[u8; 32]], msg_bytes: &[u8], si
 /// fsync a promise needs, and it is silently absent from every round it is asked into.
 #[cfg(feature = "consensus")]
 static ACCEPTOR_ANSWERS_UNRECORDED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Proposals this process ended because the slot's ballot space is exhausted — the next ballot
+/// would be above `u64::MAX` (a decided floor or ballot key at the ceiling) — see
+/// [`next_ballot`]. Counted beside `mycelium_consensus_timeouts_total{reason="ballot_exhausted"}`.
+#[cfg(feature = "consensus")]
+static BALLOT_SPACE_EXHAUSTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many proposals this process ended because the slot's ballot space is exhausted.
+#[cfg(feature = "consensus")]
+#[cfg_attr(not(feature = "gateway"), allow(dead_code))] // read by the gateway's stats route
+pub(crate) fn ballot_space_exhausted() -> u64 {
+    BALLOT_SPACE_EXHAUSTED.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// How many answers this node's acceptor withheld because its record did not reach the WAL.
 #[cfg(feature = "consensus")]

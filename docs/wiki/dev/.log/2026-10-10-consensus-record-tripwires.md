@@ -12,5 +12,8 @@
   `TaskCtx::decided_floor_anomaly_slots` (a `papaya::HashSet`, no lock-order row); surfaced as
   `SystemStats::consensus_decided_floor_anomalies`, `/stats` and `mycelium_consensus_decided_floor_anomalies_total`.
   Refusal unchanged.
-- Found on the way, not changed: the proposer's draw `max(ballot key, floor) + 1` overflows at a `u64::MAX` floor.
+- Found on the way and fixed in its own commit: the proposers' eight ballot draws `max(ballot key, floor) + 1`
+  overflowed at a `u64::MAX` floor (a panic under overflow checks; release is `panic = "abort"`). Every draw now
+  goes through `next_ballot` (`checked_add`); no ballot left ends the proposal as a `Timeout` named
+  `ballot_exhausted` (`/stats` `consensus_ballot_space_exhausted`). The acceptor side only compares.
 - Pages: `dev/security.md` (the tripwire item); ops `metrics.md`, `observability.md`.

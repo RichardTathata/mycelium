@@ -68,8 +68,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `mycelium_consensus_decided_floor_anomalies_total`) with one `warn!`. Detection only: the floor is still obeyed
   and the refusal is unchanged. Seen failing first: `a_forged_decided_floor_is_counted_and_still_obeyed` (the
   count stayed 0). **Upgrade note:** `SystemStats` gained a field (an exhaustive struct literal breaks).
-  **Not changed:** a proposer on such a slot draws `max(ballot key, floor) + 1`, which overflows at `u64::MAX` —
-  a panic in a debug build, a wrap to ballot 0 (refused) in release.
+- **A slot whose decided floor is `u64::MAX` no longer overflows the proposer.** Both proposers (group/cluster
+  and cross-group) drew every ballot as `max(ballot key, floor) + 1` — eight sites — which overflows at the
+  ceiling: a panic in any build with overflow checks, and the release profile is `panic = "abort"`, so such a
+  build lost the node; without overflow checks a wrap to ballot 0, refused below the floor. Every draw now goes
+  through `next_ballot` (`checked_add`), and a slot with no ballot left ends the proposal as a `Timeout` named
+  `ballot_exhausted` on `mycelium_consensus_timeouts_total`, counted on `/stats`
+  `consensus_ballot_space_exhausted`, with one `warn!`. A floor one below the ceiling still commits at
+  `u64::MAX`. The acceptor side only compares ballots and had no arithmetic to fix. Seen failing first:
+  `a_floor_at_the_ballot_ceiling_is_refused_by_name_not_overflowed` (`attempt to add with overflow` at
+  `src/consensus.rs:1146`).
 
 ### Fixed
 - **The SDKs reach a gateway over TLS** (`mycelium-py` **0.2.9**, `mycelium-ts` **0.2.3**,

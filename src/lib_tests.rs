@@ -10100,6 +10100,50 @@ async fn a_forged_decided_floor_is_counted_and_still_obeyed() {
     a.shutdown().await;
 }
 
+/// **A slot whose decided floor is `u64::MAX` cannot take a new ballot, and says so** (2026-10-10).
+/// Both proposers drew `max(ballot key, floor) + 1`, which overflows there: a panic in any build with
+/// overflow checks (and the release profile is `panic = "abort"`, so such a build loses the node), a
+/// wrap to ballot 0 — refused below the floor — without them. Now the draw is checked: the group
+/// proposal and the cross-group proposal each end as a `Timeout` named `ballot_exhausted`
+/// (`consensus_ballot_space_exhausted`), and a slot below the ceiling still commits.
+/// Seen failing first: `attempt to add with overflow` in `ConsensusEngine::propose`.
+#[cfg(feature = "consensus")]
+#[tokio::test]
+async fn a_floor_at_the_ballot_ceiling_is_refused_by_name_not_overflowed() {
+    use crate::consensus::ballot_space_exhausted;
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    let a = GossipAgent::new(id.clone(), cfg);
+    a.start().await.unwrap();
+    let _listener = a.consensus().start_consensus_listener(ConsensusConfig::default());
+    a.mesh().join_group("solo");
+    let mut fast = ConsensusConfig::default();
+    fast.phase1_timeout = Duration::from_millis(200);
+    fast.max_ballots = 2;
+
+    for slot in ["ceiling/group", "ceiling/cross"] {
+        let _ = a.kv().set(format!("consensus/decided/{slot}"), Bytes::copy_from_slice(&u64::MAX.to_le_bytes()));
+    }
+    let before = ballot_space_exhausted();
+    let res = a.consensus().group_propose("solo", "ceiling/group", Bytes::from_static(b"v"), fast.clone()).await;
+    assert!(matches!(res, ConsensusResult::Timeout { .. }), "group proposal: {res:?}");
+    assert_eq!(ballot_space_exhausted(), before + 1, "the group proposal is refused by name");
+
+    let groups = vec![crate::consensus::GroupQuorum { group: "solo".into(), quorum: 0.5, veto: false }];
+    let res = a.consensus().cross_group_propose("ceiling/cross", Bytes::from_static(b"v"), groups, fast.clone()).await;
+    assert!(matches!(res, ConsensusResult::Timeout { .. }), "cross-group proposal: {res:?}");
+    assert_eq!(ballot_space_exhausted(), before + 2, "the cross-group proposal is refused by name");
+
+    // Control: a floor one below the ceiling leaves exactly one ballot, and the slot commits at it.
+    let _ = a.kv().set("consensus/decided/ceiling/last", Bytes::copy_from_slice(&(u64::MAX - 1).to_le_bytes()));
+    let res = a.consensus().group_propose("solo", "ceiling/last", Bytes::from_static(b"v"), ConsensusConfig::default()).await;
+    assert!(matches!(res, ConsensusResult::Committed { ballot: u64::MAX, .. }), "the last ballot is usable: {res:?}");
+
+    a.shutdown().await;
+}
+
 /// **Boundary H P1 gate — issuer binding on live nodes.** Two TLS members, A and B.
 ///
 /// 1. A signs a knowledge record as itself; B attributes it to A as `Current` on the member path,

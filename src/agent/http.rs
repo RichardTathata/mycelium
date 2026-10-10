@@ -1165,7 +1165,14 @@ fn feature_gated_counters() -> Vec<(&'static str, u64)> {
         #[cfg(not(feature = "consensus"))]
         { None }
     };
-    [identity_untagged, consensus_untagged, acceptor_unrecorded].into_iter().flatten().collect()
+    // Proposals ended because the slot's next ballot would exceed u64::MAX (a floor at the ceiling).
+    let ballot_exhausted: Option<(&'static str, u64)> = {
+        #[cfg(feature = "consensus")]
+        { Some(("consensus_ballot_space_exhausted", crate::consensus::ballot_space_exhausted())) }
+        #[cfg(not(feature = "consensus"))]
+        { None }
+    };
+    [identity_untagged, consensus_untagged, acceptor_unrecorded, ballot_exhausted].into_iter().flatten().collect()
 }
 
 /// `GET /gateway/audit` — query the tamper-evident audit trail (compliance, scope
