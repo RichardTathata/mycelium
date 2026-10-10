@@ -26,6 +26,7 @@ knowledge/heads       # knowledge/durable.rs HEADS_STREAM: the head-checkpoint j
 # ── consensus slot names (the key is consensus/{committed,ballot,decided,lease}/{slot}, which has rows)
 consistent/           # consensus_handle.rs + http.rs: the overlay-consistent KV write's slot
 leader/               # consensus_handle.rs + http.rs: the leader-election slot
+electorate/           # electorate.rs: the electorate step slot `electorate/{group}/{epoch}` (P2) — a slot name; its value lives under consensus/committed/
 capauthz/             # agent/mod.rs: the cluster-proposed capability-authz policy's slot (sys/capauthz/ has its own row)
 
 # ── election ring names and governor actuator names (inputs to rendezvous / the control contract)

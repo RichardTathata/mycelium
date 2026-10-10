@@ -107,8 +107,8 @@
 //! | `sys/govern/timing`                 | Timing governor — the fleet timing intent (evaporating soft state; local-wins), written through `POST /gateway/govern/timing` (`src/agent/timing_governor.rs`, `TIMING_INTENT_KEY`) |
 //! | `sys/govern/fleet`                  | Tuning governor — the fleet tuning intent, written through `POST /gateway/govern/tuning` (`src/agent/tuning_governor.rs`, `GOVERN_FLEET_KEY`) |
 //! | `sys/govern/membership/{group}`     | Membership governor — one evaporating `MembershipIntent` per governed group, written through `POST /gateway/govern/membership` (`src/agent/membership_governor.rs`, `MEMBERSHIP_PREFIX`) |
-//! | `sys/govern/electorate/{group}`     | Electorate declarations (P2) — one `ElectorateDecl { group, size }` per electorate group; does not evaporate; written through `GossipAgent::declare_electorate` / `POST /gateway/govern/electorate` (`src/agent/electorate.rs`, `ELECTORATE_PREFIX`) |
 //! | `consensus/committed/{slot}`        | Consensus — committed slot state                             |
+//! | `consensus/electorate-cert/{group}/{epoch}` | Electorate certificates (P2) — the signed votes that decided an electorate step `electorate/{group}/{epoch}` (whose value is the `ElectorateDecl` under `consensus/committed/`); written by the step's proposer; a node adopts an epoch only when it verifies (`src/agent/electorate.rs`, `ELECTORATE_CERT_PREFIX`) |
 //! | `consensus/ballot/{slot}`           | Consensus — ballot tracking; kept across commits so ballots stay monotonic (2.30.0) |
 //! | `consensus/decided/{slot}`          | Consensus — the ballot the slot's latest commit was decided at (u64 LE); a floor below which acceptors refuse (2.30.0) |
 //! | `consensus/lease/{slot}`            | Consensus — epoch-lease window (u64 LE ms); written when `ConsensusConfig::committed_lease_secs` is set; expiry is evaluated read-side |
@@ -356,7 +356,7 @@ pub use agent::{
 };
 // Elastic group sizing (Track 2a).
 pub use agent::{MembershipAction, MembershipIntent, MEMBERSHIP_INTENT_TTL_MS, MEMBERSHIP_PREFIX};
-pub use agent::{ElectorateDecl, ElectorateError, ELECTORATE_PREFIX, SAFETY_SLOT_FAMILIES};
+pub use agent::{electorate_records_refused, ElectorateDecl, ElectorateError, ELECTORATE_CERT_PREFIX, ELECTORATE_SLOT_PREFIX, SAFETY_SLOT_FAMILIES};
 // Legible Emergence — fleet diagnostics as data (localize · explain · diagnose). `localize`
 // (`fleet_snapshot`) and `diagnose` (`fleet_diagnosis`) are node-local reads exposed here;
 // `explain` is intentionally gateway-only (`GET /gateway/explain`) — it is a cross-node `sys.explain`
@@ -409,7 +409,7 @@ pub use persistence::DataAtRestCipher;
 pub use persistence::OwnershipLock;
 pub use locality::LocalityPreference;
 #[cfg(feature = "consensus")]
-pub use consensus::{ConsensusConfig, ConsensusListenerHandle, ConsensusResult, GroupQuorum, consensus_kind, consensus_ns};
+pub use consensus::{ConsensusConfig, ConsensusListenerHandle, ConsensusResult, GroupQuorum, consensus_kind, consensus_ns, electorate_roster_mismatches};
 pub use mycelium_core::error::GossipError;
 // The contracts axis' receipt vocabulary (item 1 PR 2) — what an acknowledgement proves, by rung.
 pub use mycelium_core::receipt::{

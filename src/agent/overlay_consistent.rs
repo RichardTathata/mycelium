@@ -31,6 +31,11 @@ pub enum ConsistencyError {
     /// (`consensus_require_electorate`) — `group: None` is the whole cluster. Nothing was decided.
     /// See `ConsensusResult::ElectorateNotGoverned`.
     ElectorateNotGoverned { group: Option<Arc<str>> },
+    /// **The electorate moved under this call** (P2): a member answered for another epoch. Nothing was
+    /// decided. See `ConsensusResult::ElectorateStale`.
+    ElectorateStale { group: Arc<str>, epoch: u64, seen_epoch: u64 },
+    /// **The electorate and this node's view disagree** (P2) — see `ConsensusResult::ElectorateMismatch`.
+    ElectorateMismatch { group: Option<Arc<str>>, detail: Arc<str> },
 }
 
 impl std::fmt::Display for ConsistencyError {
@@ -45,9 +50,6 @@ impl std::fmt::Display for ConsistencyError {
             Self::ElectorateUnavailable { observed_members: 0, .. } =>
                 write!(f, "no electorate: the group roster is empty (unknown or unjoined group) — \
                            an election needs members, and absence is not authority"),
-            Self::ElectorateUnavailable { observed_members, declared_min } if observed_members > declared_min =>
-                write!(f, "no electorate: this node sees {observed_members} member(s) but the \
-                           electorate declares {declared_min} — a member joined outside the declaration"),
             Self::ElectorateUnavailable { observed_members, declared_min } =>
                 write!(f, "no electorate: this node sees {observed_members} member(s) but the \
                            group declares at least {declared_min} — the view is partial"),
@@ -57,6 +59,10 @@ impl std::fmt::Display for ConsistencyError {
             Self::ElectorateNotGoverned { group: Some(group) } =>
                 write!(f, "electorate not governed: group {group} has no electorate declaration, and \
                            this node requires one for an exclusive outcome"),
+            Self::ElectorateStale { group, epoch, seen_epoch } =>
+                write!(f, "electorate stale: group {group} proposed at epoch {epoch}, a member holds epoch {seen_epoch}"),
+            Self::ElectorateMismatch { group, detail } =>
+                write!(f, "electorate mismatch{}: {detail}", group.as_deref().map(|g| format!(" on group {g}")).unwrap_or_default()),
             Self::ElectorateNotGoverned { group: None } =>
                 write!(f, "electorate not governed: the whole cluster is not an electorate group, and \
                            this node requires one for an exclusive outcome (set `consensus_electorate`)"),

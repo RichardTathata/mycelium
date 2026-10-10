@@ -145,10 +145,11 @@ fence the effect at the resource. Today the code refuses an empty or below-floor
 proposer outside the group, and lets the gateway move a *governed* group's membership only through
 an audited governance route; and, since post-360 plan row P2, a node that sets
 `consensus_require_electorate` (the `secure-single-domain` profile requires it) refuses a lock, a
-leader election or any safety-sensitive proposal unless an **electorate group** decides it — a group
-declared by governance with a fixed size, never resized by the membership governor, refused while its
-roster disagrees with the declaration. Versioned electorates with joint-consensus transitions are a
-later plan.
+leader election or any safety-sensitive proposal unless an **electorate group** decides it — one
+pinned by member identity and epoch, changed only by one-member steps the electorate itself decides,
+never resized by the membership governor, refused while its roster differs from the member set. That
+gives single-decree safety per slot within an epoch and across one step; a decision two or more steps
+old rests on its commit record. Versioned electorates with state transfer are a later plan.
 The decision and its reasons: [design/consensus-electorate.md](../design/consensus-electorate.md);
 the how-to: [04-consensus.md § Discovery is not an electorate](04-consensus.md#discovery-is-not-an-electorate).
 

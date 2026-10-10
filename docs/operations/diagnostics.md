@@ -431,13 +431,22 @@ its leader). The body names the group; join it and retry — `POST /gateway/mesh
 `electorate_not_governed`** means this node requires an **electorate group** for an exclusive outcome
 (`consensus_require_electorate`, required by `secure-single-domain` rev 3) and the scope was not one — `"group"` names
 an undeclared group, or is `null` for the whole cluster. Nothing was proposed. Declare the group
-(`POST /gateway/govern/electorate {"group":"G","size":N}`, `govern:write`), and for the lock and consistent-write
-routes set `consensus_electorate = "G"` on the node, which must be a member of `G`
-([guide 04 § Discovery is not an electorate](../guide/04-consensus.md#discovery-is-not-an-electorate)).
+(`POST /gateway/govern/electorate {"group":"G"}`, `govern:write`, from a member, every member running the consensus
+listener), and for the lock and consistent-write routes mark one group `"exclusive_default": true`; this node must be
+a member of it ([guide 04 § Discovery is not an electorate](../guide/04-consensus.md#discovery-is-not-an-electorate)).
 
 ```json
 {"ok": false, "error": "electorate_not_governed", "group": null, "detail": "…"}
 ```
+
+**409 `electorate_mismatch`** — the electorate and this node's view disagree; `detail` says how. Most often the group
+roster differs from the epoch's members (`GET /gateway/govern` lists each electorate's `epoch` and `members`;
+`GET /gateway/mesh/group?group=G` the roster): a node joined or left without a declared step — declare the one-member
+step, or undo the move. `mycelium::electorate_roster_mismatches` counts these. **409 `electorate_stale`** — a member
+holds a later epoch than this proposer; retry. **409 `step_too_large`** from `/gateway/govern/electorate` — the roster is
+more than one member from the electorate: move one node, declare, repeat. A rising
+`mycelium_electorate_records_refused_total` means an electorate record arrived that did not come through the step
+protocol — a forgery, or a write by hand.
 
 ## An election was refused: `electorate_unavailable`
 
@@ -465,13 +474,6 @@ decide**, deliberately. Two shapes, and the body tells you which:
   partial**. Before v2.15.1 that intent never expired on this reader. Wait for the
   roster to converge (check `GET /gateway/mesh/group` on each node), or investigate why members are
   missing — a partition, or nodes that have not joined yet.
-
-- **`observed_members` not equal to `declared_min` on an electorate group** (P2) — the group has an electorate
-  declaration (`GET /gateway/govern` or `agent.electorate(G)`), and `declared_min` is its declared **size**, which is
-  exact. Fewer is a partial view, as above. **More** means a member joined outside the declaration — an embedded
-  `join_group` or a `grp/` write, which the gateway cannot see — or a node was moved through `/gateway/govern/group`
-  and the size not yet re-declared. Find the extra member (`GET /gateway/mesh/group?group=G`), and either remove it or
-  re-declare: `POST /gateway/govern/electorate {"group":"G","size":N}` (`govern:write`; one member per step).
 
 **This is not a fault to route around.** Before 2026-09-24 the same call returned a leader: an
 empty roster counted as one member with a quorum of one, satisfied by the proposer's own vote, so

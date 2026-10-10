@@ -436,9 +436,7 @@ pub enum CommitError {
         slot: Arc<str>,
         /// Members visible to this node. `0` = unknown or unjoined group.
         observed_members: usize,
-        /// The floor a fresh `MembershipIntent` declares, or `0` when none is declared. For an
-        /// electorate group it is the declared size, which is exact: more members than it is refused
-        /// too (a member joined outside the declaration).
+        /// The floor a fresh `MembershipIntent` declares, or `0` when none is declared.
         declared_min: usize,
     },
     /// The group's topology requirement was not met, so no commit was attempted.
@@ -471,6 +469,29 @@ pub enum CommitError {
         /// The group proposed to, or `None` for the whole cluster.
         group: Option<Arc<str>>,
     },
+    /// **The electorate moved: this proposal's epoch is not the acceptors'** (P2). A refusal; nothing was
+    /// decided by this proposal. Re-read the electorate and retry.
+    ElectorateStale {
+        /// The slot.
+        slot: Arc<str>,
+        /// The electorate group.
+        group: Arc<str>,
+        /// This proposer's epoch.
+        epoch: u64,
+        /// The epoch a member of its electorate reported.
+        seen_epoch: u64,
+    },
+    /// **The electorate and what this node sees disagree, so nothing was proposed** (P2) — a roster that
+    /// differs from the epoch's members, an invalid step, a cross-group proposal over an electorate
+    /// group, or a `consensus_electorate` that disagrees with the fleet's. `detail` says which.
+    ElectorateMismatch {
+        /// The slot.
+        slot: Arc<str>,
+        /// The group concerned, if one.
+        group: Option<Arc<str>>,
+        /// What disagreed.
+        detail: Arc<str>,
+    },
 }
 
 impl std::fmt::Display for CommitError {
@@ -488,12 +509,6 @@ impl std::fmt::Display for CommitError {
                 "slot {slot}: no electorate — the group roster is empty (unknown or unjoined \
                  group); an election needs members, and absence is not authority"
             ),
-            CommitError::ElectorateUnavailable { slot, observed_members, declared_min }
-                if observed_members > declared_min => write!(
-                f,
-                "slot {slot}: no electorate — {observed_members} member(s) visible but the electorate \
-                 declares {declared_min}; a member joined outside the declaration"
-            ),
             CommitError::ElectorateUnavailable { slot, observed_members, declared_min } => write!(
                 f,
                 "slot {slot}: no electorate — {observed_members} member(s) visible but the group \
@@ -510,6 +525,15 @@ impl std::fmt::Display for CommitError {
             CommitError::ElectorateNotGoverned { slot, group: Some(group) } => write!(
                 f,
                 "electorate not governed: slot {slot} is safety-sensitive and group {group} has no electorate declaration — nothing was proposed"
+            ),
+            CommitError::ElectorateStale { slot, group, epoch, seen_epoch } => write!(
+                f,
+                "electorate stale: slot {slot} on group {group} was proposed at epoch {epoch}, and a member answered for epoch {seen_epoch} — nothing was decided"
+            ),
+            CommitError::ElectorateMismatch { slot, group, detail } => write!(
+                f,
+                "electorate mismatch: slot {slot}{} — {detail}; nothing was proposed",
+                group.as_deref().map(|g| format!(" on group {g}")).unwrap_or_default()
             ),
             CommitError::ElectorateNotGoverned { slot, group: None } => write!(
                 f,

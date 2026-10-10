@@ -6,7 +6,7 @@
   does not evaporate; the governor skips it (`membership_governor::converge`), the emergent watcher defers to it
   (`governor_owned_groups`), `is_governed_group` counts it; a size step is at most one member.
 - The engine's door (`propose_inner`, `cross_propose_inner`, `src/consensus.rs`) holds an electorate group's roster to
-  its declared size (`ElectorateUnavailable`, which can now carry `observed > declared_min`), counts votes only from that
+  its declared size, counts votes only from that
   roster (`electorate_vote_filter` — tension (b): the group names the electorate, a trust slice only narrows it) and
   raises the quorum to a strict majority. With `consensus_require_electorate` a safety-sensitive proposal (flag, or the
   `lock/`·`leader/`·`consistent/` families) anywhere else is `ElectorateNotGoverned` (403 `electorate_not_governed`).
@@ -17,3 +17,5 @@
   rev 3). Outside the wiki: the decision record (§3 table, residual, §4.1, §5, §7, new §8), threat model §7, guide 04,
   guide 20, the FAQ, error-handling, diagnostics, production-readiness, configuration reference, `what-is-proven.md`,
   philosophy, `src/lib.rs` namespace table, the guarantee catalogue golden, CHANGELOG.
+- **Superseded the same day** by `2026-10-10-p2-electorate-epochs.md`: the count-based design above was found unsafe
+  by #601's review and replaced.

@@ -67,14 +67,17 @@ counted from each proposer's view, so intersection across a roster change is not
 (`src/agent/helpers.rs`, empty or below `MembershipIntent.min` → `ElectorateUnavailable`), `NotAMember` (above), and
 the gateway's `governed_group` refusal on `/gateway/mesh/group` with `/gateway/govern/group` as the audited route
 (`src/agent/http.rs`, `is_governed_group`). **Since P2 (2026-10-10, decision record §8):** an
-**electorate group** (`sys/govern/electorate/{group}`, `src/agent/electorate.rs`) is a governed group made fixed — its
-declaration does not evaporate, the membership governor and the emergent watcher leave it alone, its size moves one
-member per declaration — and the engine's door in `propose_inner` holds its roster to the declared size (refused
-`ElectorateUnavailable` otherwise), counts votes only from that roster (`electorate_vote_filter`) and raises the
-quorum to a strict majority; with `consensus_require_electorate` a safety-sensitive proposal (flagged, or in `lock/`,
-`leader/`, `consistent/`) anywhere else is refused `ElectorateNotGoverned`. Not enforced: an embedded `join_group` or
-`grp/` write still moves a group by LWW — for an electorate group the next proposal refuses the mismatch (detection,
-not prevention); the governor still moves an ordinary governed group toward its band. Also not built: leased-by-default leadership (C1 —
+**electorate group** (`src/agent/electorate.rs`) is pinned by member identity and epoch: each epoch is a consensus
+decision on `electorate/{group}/{epoch}` — genesis by every member named, a step (one member) by a strict majority of
+the epoch before — certified under `consensus/electorate-cert/`, adopted only when the certificate verifies
+(`ConsensusEngine::electorate_view`). The proposer's door (`electorate_door`) refuses a roster that differs from the
+member set by identity (`ElectorateMismatch`, roster tripwire), counts promises and votes only from the members, and
+holds the quorum at a strict majority; every Prepare/Propose names the epoch and digest (`PrepareIn`/`ProposeIn`), and
+an acceptor (`electorate_admits`) answers only its own — refusing `StaleElectorate` otherwise, and refusing the epoch
+before a step it has accepted (the fence). The governor and the emergent watcher leave an electorate group alone.
+What holds: single-decree safety per slot within an epoch and across one step. What does not: a decision two or more
+steps old rests on its commit record (state transfer would close it); an embedded `grp/` write is refused at the next
+proposal, not prevented. Also not built: leased-by-default leadership (C1 —
 `elect_leader` proposes with `ConsensusConfig::default()`, `committed_lease_secs: None`, so it commits permanently) and
 collection of acceptor memory (C2 — see the paragraph above); versioned electorates with joint consensus are a later
 plan.

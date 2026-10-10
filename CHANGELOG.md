@@ -76,41 +76,55 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`mycelium::OwnershipLock`** — the core's exclusive-ownership lock on `<file>.lock` (held by the KV WAL and the
   node-local journals), re-exported so a companion's own log refuses a second owner the same way. The tuple space
   and the blackboard take it on their WALs (row C, above). Additive.
-- **A consensus electorate is a governed group** (post-360 plan row P2; `docs/design/consensus-electorate.md` §8).
-  An **electorate group** is a group with a governance declaration — `GossipAgent::declare_electorate(group, size)` /
-  `retire_electorate`, or `POST`/`DELETE /gateway/govern/electorate` (`govern:write`, audited), stored at
-  `sys/govern/electorate/{group}` — naming the electorate as a group and its size, never node identities. The
-  declaration does not evaporate; the membership governor does not roll on the group (not even for a drain) and the
-  emergent watcher neither joins nor leaves it; `/gateway/mesh/group` refuses it `403 governed_group`; a re-declaration
-  moves the size one member at most (`409 step_too_large`). At the engine's door, which the library and the gateway
-  both reach, a proposal to an electorate group is refused `ElectorateUnavailable` unless the roster holds **exactly**
-  the declared size — fewer is a partial view, more is a member that joined outside the declaration (an embedded
-  `join_group` or `grp/` write, refused at the next proposal rather than prevented, so Layer I learns no rule); votes
-  are counted only from that roster, a trust slice only narrowing it; and the quorum is at least a strict majority of
-  the size. **`consensus_require_electorate`** (env `GOSSIP_CONSENSUS_REQUIRE_ELECTORATE`, default off) makes a
-  **safety-sensitive** proposal — `ConsensusConfig::safety_sensitive`, or a slot in `lock/`, `leader/`, `consistent/`
-  (`distributed_lock`, `LockService`, `elect_leader*`, `consistent_set`, `/gateway/overlay/{lock/acquire, elect,
-  consistent/set}`, and the `/gateway/overlay/log/group/subscribe` claim, now flagged) — whose scope is the cluster or
-  an undeclared group answer **`ConsensusResult::ElectorateNotGoverned`** (`CommitError::` / `ConsistencyError::
-  ElectorateNotGoverned`, gateway `403 electorate_not_governed`) before anything is sent; off, it runs as before and is
-  counted (`mycelium_consensus_ungoverned_safety_total`). **`consensus_electorate`** (env
-  `GOSSIP_CONSENSUS_ELECTORATE`) names the electorate group the cluster-scoped verbs (locks, `consistent_set`, the log
-  claim) propose to. The guarantee **`cons.safety_profile`** (rev 2) is node-enforced — `enforced` on the setting,
-  `not_applicable` without `consensus` — and **`secure-single-domain` rev 3** requires it (met by configuration, G12).
-  Versioned electorates with joint-consensus transitions stay a later plan. Seen failing first:
-  `a_safety_sensitive_proposal_is_decided_only_by_an_electorate_group` (the ungoverned `leader/council` returned
-  `Committed`), `an_electorate_groups_roster_is_held_to_its_declaration` (a roster one larger than the declaration was
-  proposed to: `Timeout { quorum_required: 2 }`), `the_governor_and_the_watcher_leave_an_electorate_group_alone` (the
-  governor drained the member), `an_exclusive_outcome_at_the_gateway_needs_an_electorate_group` (`/overlay/elect`
-  answered 200), `the_consensus_safety_profile_resolves_on_the_electorate_requirement` (`ExternalPrerequisite`), and
-  the profile's pinned set (rev 2). **Upgrade notes:** `ConsensusResult` (`#[non_exhaustive]`), `CommitError` and
-  `ConsistencyError` gain `ElectorateNotGoverned` — a `_` arm must fail closed; `ConsensusConfig` and `GossipConfig`
-  gained fields (an exhaustive struct literal breaks; `..Default::default()` is unaffected); a node under
-  `profile = "secure-single-domain"` must set `consensus_require_electorate = true` or it will not start — and then a
-  lock or an election on the whole cluster or an undeclared group is refused, so declare each electorate group and set
-  `consensus_electorate` for the locks, whose proposer must be a member of it; `ElectorateUnavailable` can now report
-  `observed_members > declared_min` (an electorate group's roster larger than its declaration); an
-  `/overlay/log/group/subscribe` claim is safety-sensitive and follows `consensus_electorate`.
+- **A consensus electorate is a governed group, pinned by identity and epoch** (post-360 plan row P2;
+  `docs/design/consensus-electorate.md` §8, revised after #601's adversarial review). An **electorate group**'s
+  electorate is an `ElectorateDecl { group, epoch, members, exclusive_default }`, and every epoch is a consensus
+  decision on `electorate/{group}/{epoch}`: **genesis** names the roster and is decided by every member it names; a
+  **step** adds or removes one member and is decided by a strict majority of the epoch before it — two concurrent
+  steps are one slot, a non-member's step is refused at its door and by every acceptor. Each commit carries a
+  certificate of the deciding votes (`consensus/electorate-cert/`, signed under `[tls]`), and a node adopts an epoch
+  only when it verifies: a record written straight into the store is not adopted and is counted
+  (`mycelium::electorate_records_refused`). `GossipAgent::declare_electorate(group, exclusive_default)` /
+  `POST /gateway/govern/electorate` (`govern:write`, audited only when a step is decided; `409 step_too_large`,
+  `403 not_a_member`, `409 not_decided`) proposes the next epoch from the roster. A proposal to an electorate group
+  is refused `ElectorateMismatch` unless the roster equals the epoch's members **by identity** (counted:
+  `mycelium::electorate_roster_mismatches`); promises and votes count only from the members; the quorum is a strict
+  majority whatever `quorum_size` or opacity say; and every Prepare/Propose names the epoch and digest
+  (`ConsensusMsg::PrepareIn`/`ProposeIn`, appended — wire v12): an acceptor answers only its own epoch, refusing
+  `StaleElectorate` otherwise and refusing the epoch before a step it has accepted, so a proposer two steps behind
+  cannot gather a quorum from current members (`ElectorateStale`). The governor and the emergent watcher leave an
+  electorate group alone; `/gateway/mesh/group` refuses it `403 governed_group`. **`consensus_require_electorate`**
+  (env `GOSSIP_CONSENSUS_REQUIRE_ELECTORATE`, default off) refuses a **safety-sensitive** proposal —
+  `ConsensusConfig::safety_sensitive`, or `lock/`, `leader/`, `consistent/`, `electorate/` — outside an electorate
+  group, **`ConsensusResult::ElectorateNotGoverned`** (`403 electorate_not_governed`); off, it runs as before, counted.
+  The cluster-scoped exclusive verbs — `distributed_lock`, `LockService`, `consistent_set`, the lock, consistent and
+  log-claim routes, `mycelium-commitment`'s linearizable award, `set_capability_authz_via_consensus` — decide in the
+  group marked `exclusive_default` (a fleet record), via the new `ConsensusHandle::exclusive_propose[_receipt]`;
+  `consensus_electorate` only restates it, and a disagreeing setting is refused. A cross-group proposal naming an
+  electorate group is refused; the gateway's cross-group route takes `safety_sensitive`. `cons.safety_profile` (rev 2)
+  is node-enforced and **`secure-single-domain` rev 3** requires it. **What holds:** single-decree safety per slot
+  within an epoch and across one step. **Not claimed:** a decision two or more steps old rests on its commit record,
+  not quorum intersection (state transfer at the step — the versioned-electorates plan — would close it); genesis is
+  not ordered against a disjoint genesis; without `[tls]` the certificate is unauthenticated. Seen failing first, each
+  on a toggle of the mechanism it pins: `a_swap_without_a_declared_step_is_refused` (count rule: `Committed` on
+  {A,B,D}), `chained_steps_refuse_a_stale_proposer` (no epoch check: A answered epoch 1), `votes_from_outside_the_
+  electorate_are_not_counted` (filter unwired, and separately the quorum floor removed: `Committed` on forged votes),
+  `a_cross_group_proposal_does_not_decide_for_an_electorate_group`, `a_forged_electorate_record_is_not_adopted` and
+  `an_electorate_certificate_verifies_under_tls` (certificate unchecked: the forged epoch adopted),
+  `a_local_electorate_setting_that_disagrees_with_the_fleet_is_refused` (the lock decided locally); and against the
+  unfixed code `a_safety_sensitive_proposal_is_decided_only_by_an_electorate_group`, `the_governor_and_the_watcher_
+  leave_an_electorate_group_alone`, `an_exclusive_outcome_at_the_gateway_needs_an_electorate_group` and the
+  guarantee and profile pins. `two_concurrent_steps_cannot_both_commit_and_a_non_member_cannot_step` pins a property
+  single-decree consensus already gives; it was not seen failing. **Upgrade notes:** `ConsensusResult`
+  (`#[non_exhaustive]`), `CommitError` and `ConsistencyError` gain `ElectorateNotGoverned`, `ElectorateStale` and
+  `ElectorateMismatch` — a `_` arm must fail closed; `ConsensusConfig` and `GossipConfig` gained fields (an
+  exhaustive literal breaks); a node under `profile = "secure-single-domain"` must set
+  `consensus_require_electorate = true` or it will not start, and then a lock or an election on the whole cluster or
+  an undeclared group is refused — declare the electorates and mark one `exclusive_default`; a `mycelium-commitment`
+  award and a capability-authz policy now decide where the locks do; **rolling upgrade:** an electorate whose members
+  are not all on this release times out rather than commits (the new messages are ignored by older nodes), and a
+  pre-P2 node still proposes the exclusive verbs to the whole cluster — mark an `exclusive_default` group only once
+  every node runs this release.
 - **The KV namespace table is a gate now, not a lint item.** `scripts/check-kv-namespaces.sh` enumerates every
   KV prefix production code uses — slash-bearing `const`/`static` `&str` literals whatever their name, `format!`
   key heads, and the first literal of a KV call (`set*`, `get`, `delete*`, `scan_*`, `subscribe*`, `kv_*`,

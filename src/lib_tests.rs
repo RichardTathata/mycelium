@@ -159,6 +159,8 @@ fn spawn_handler(
         decided_floor_anomalies_unrecorded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         #[cfg(feature = "consensus")]
         consensus_verified_ballots: Arc::new(papaya::HashMap::new()),
+        electorates: Arc::new(papaya::HashMap::new()),
+        electorate_refused: Arc::new(papaya::HashSet::new()),
         ballot_space_exhausted: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         event_ring: Arc::new(crate::agent::emergent::EventRing::default()),
         governed_group_conflicts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1223,6 +1225,8 @@ async fn test_subscribe_notified_via_gossip() {
             decided_floor_anomalies_unrecorded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             #[cfg(feature = "consensus")]
             consensus_verified_ballots: Arc::new(papaya::HashMap::new()),
+            electorates: Arc::new(papaya::HashMap::new()),
+            electorate_refused: Arc::new(papaya::HashSet::new()),
             ballot_space_exhausted: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             event_ring: Arc::new(crate::agent::emergent::EventRing::default()),
             governed_group_conflicts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -11936,37 +11940,66 @@ async fn a_federation_client_refuses_an_endpoint_the_egress_policy_denies() {
 
 // ── P2: a consensus electorate is a governed group ─────────────────────────────────────────────
 
+/// `n` started agents, fully meshed, each running the consensus listener; returns once every node
+/// has a peer (a structural poll, never a fixed sleep). `tweak` adjusts each node's config.
+#[cfg(feature = "consensus")]
+async fn electorate_mesh(n: usize, tweak: impl Fn(&mut GossipConfig)) -> (Vec<GossipAgent>, Vec<crate::ConsensusListenerHandle>) {
+    let ports: Vec<u16> = (0..n).map(|_| alloc_port()).collect();
+    let ids: Vec<NodeId> = ports.iter().map(|p| NodeId::new("127.0.0.1", *p).unwrap()).collect();
+    let mut agents = Vec::new();
+    for i in 0..n {
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = ports[i];
+        cfg.bootstrap_peers = ids.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, id)| id.clone()).collect();
+        cfg.health_check_max_jitter_ms = 50;
+        tweak(&mut cfg);
+        agents.push(GossipAgent::new(ids[i].clone(), cfg));
+    }
+    for a in &agents { a.start().await.unwrap(); }
+    let listeners = agents.iter().map(|a| a.consensus().start_consensus_listener(ConsensusConfig::default())).collect();
+    poll_until(|| agents.iter().all(|a| a.peers().len() + 1 >= n), 5_000).await;
+    (agents, listeners)
+}
+
+/// Every agent's view of `group`'s roster holds exactly `members` (a structural readiness poll).
+#[cfg(feature = "consensus")]
+async fn roster_converges(agents: &[GossipAgent], group: &str, members: &[&GossipAgent]) {
+    let want = crate::agent::electorate::sorted_members(members.iter().map(|a| a.node_id().clone()).collect());
+    let prefix = crate::signal::grp_prefix(group);
+    poll_until(|| agents.iter().all(|a| {
+        let seen: Vec<NodeId> = a.kv().scan_prefix(&prefix).into_iter()
+            .filter_map(|(k, _)| k.strip_prefix(prefix.as_str()).and_then(|r| r.parse().ok())).collect();
+        crate::agent::electorate::sorted_members(seen) == want
+    }), 10_000).await;
+}
+
+/// Every agent holds `group`'s electorate at `epoch` (the commit and its certificate both arrived).
+#[cfg(feature = "consensus")]
+async fn epoch_converges(agents: &[GossipAgent], group: &str, epoch: u64) {
+    poll_until(|| agents.iter().all(|a| a.electorate(group).is_some_and(|d| d.epoch == epoch)), 10_000).await;
+}
+
 /// **A safety-sensitive proposal is decided only by an electorate group** (post-360 plan row P2,
 /// `docs/design/consensus-electorate.md` §8). On a node that requires it, a leader election, a lock,
 /// a consistent write — or any proposal flagged `safety_sensitive` — whose scope is the whole cluster
-/// or a group with no electorate declaration is refused by name, `ElectorateNotGoverned`, before
-/// anything is sent; the receipt and overlay verbs translate it. An ordinary proposal is untouched.
-/// Once the group is declared an electorate, the same election commits, and the cluster-scoped lock
-/// takes its electorate from `consensus_electorate` — a group name, never node identities.
-/// Seen failing first: before the door, `elect_leader_receipt("council")` on the ungoverned group
-/// returned `Ok(Leadership { basis: Decided, .. })`.
+/// or a group with no electorate is refused by name, `ElectorateNotGoverned`, before anything is sent.
+/// An ordinary proposal is untouched. Once the group is declared — its genesis decided by its one
+/// member — the same election commits, and with the group marked the fleet's `exclusive_default` the
+/// cluster-scoped lock and consistent write decide there, while a cluster-scoped exclusive slot is
+/// refused `ElectorateMismatch`: one place per fleet. Seen failing first (2026-10-10, c9131839's
+/// review): `elect_leader_receipt("council")` on the ungoverned group returned `Decided`.
 #[cfg(feature = "consensus")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_safety_sensitive_proposal_is_decided_only_by_an_electorate_group() {
-    let port = alloc_port();
-    let id = NodeId::new("127.0.0.1", port).unwrap();
-    let mut cfg = GossipConfig::default();
-    cfg.bind_port = port;
-    cfg.consensus_require_electorate = true;
-    cfg.consensus_electorate = Some("council".into());
-    let a = GossipAgent::new(id.clone(), cfg);
-    a.start().await.unwrap();
-    let _listener = a.consensus().start_consensus_listener(ConsensusConfig::default());
+    let (agents, _l) = electorate_mesh(1, |c| c.consensus_require_electorate = true).await;
+    let a = &agents[0];
     a.mesh().join_group("council");
-    let prefix = crate::signal::grp_prefix("council");
-    poll_until(|| !a.kv().scan_prefix(&prefix).is_empty(), 2_000).await;
+    roster_converges(&agents, "council", &[a]).await;
     let quick = ConsensusConfig { phase1_timeout: Duration::from_millis(300), max_ballots: 1, ..ConsensusConfig::default() };
 
-    // The group exists and this node is in it, but nothing declares it an electorate.
     match a.consensus().group_propose("council", "leader/council", Bytes::from_static(b"me"), quick.clone()).await {
         ConsensusResult::ElectorateNotGoverned { ref slot, group: Some(ref g) } => {
-            assert_eq!(&**slot, "leader/council");
-            assert_eq!(&**g, "council", "the refusal names the group");
+            assert_eq!((&**slot, &**g), ("leader/council", "council"), "the refusal names the slot and the group");
         }
         other => panic!("a leader slot on an ungoverned group must be refused by name, got {other:?}"),
     }
@@ -11979,100 +12012,333 @@ async fn a_safety_sensitive_proposal_is_decided_only_by_an_electorate_group() {
         Err(crate::CommitError::ElectorateNotGoverned { group: Some(g), .. }) => assert_eq!(&*g, "council"),
         other => panic!("a flagged proposal outside the slot families is safety-sensitive too, got {other:?}"),
     }
-    // The cluster is discovery, never an electorate.
-    match a.consensus().cluster_propose("lock/raw", Bytes::from_static(b"x"), quick.clone()).await {
-        ConsensusResult::ElectorateNotGoverned { group: None, .. } => {}
-        other => panic!("a cluster-scoped lock slot must be refused, got {other:?}"),
-    }
-    // The configured electorate is undeclared, so the lock and the consistent write are refused, naming it.
     match a.consensus().distributed_lock("door", Duration::from_secs(5)).await {
-        Err(crate::ConsistencyError::ElectorateNotGoverned { group: Some(g) }) => assert_eq!(&*g, "council"),
-        other => panic!("expected the lock refused on the undeclared electorate, got {other:?}"),
+        Err(crate::ConsistencyError::ElectorateNotGoverned { group: None }) => {}
+        other => panic!("with no fleet electorate the lock is a cluster proposal, refused: {other:?}"),
     }
     match a.consensus().consistent_set("cfg/k", Bytes::from_static(b"v")).await {
-        Err(crate::ConsistencyError::ElectorateNotGoverned { group: Some(g) }) => assert_eq!(&*g, "council"),
-        other => panic!("expected the consistent write refused, got {other:?}"),
+        Err(crate::ConsistencyError::ElectorateNotGoverned { group: None }) => {}
+        other => panic!("and the consistent write: {other:?}"),
     }
-    assert!(a.consensus().consensus_get("leader/council").is_none(), "and nothing was committed");
-    // An ordinary proposal is not an exclusive outcome, and is untouched.
+    assert!(a.consensus().consensus_get("leader/council").is_none(), "nothing was committed");
     assert!(matches!(
         a.consensus().group_propose("council", "work/ordinary", Bytes::from_static(b"o"), quick.clone()).await,
         ConsensusResult::Committed { .. }
-    ));
+    ), "an ordinary proposal is not an exclusive outcome, and is untouched");
 
-    // Declared: the same election commits, decided by the one-member electorate.
-    a.declare_electorate("council", 1).expect("a first declaration");
+    // Genesis, decided by its one member and marked the fleet's exclusive default.
+    let e1 = a.declare_electorate("council", true).await.expect("a genesis");
+    assert_eq!((e1.epoch, e1.members.clone(), e1.exclusive_default), (1, vec![a.node_id().clone()], true));
+    assert_eq!(a.declare_electorate("council", true).await.unwrap(), e1, "declaring the same electorate decides nothing");
     let won = a.consensus().elect_leader_receipt("council").await.expect("an electorate group elects");
-    assert_eq!(won.leader, id);
-    assert_eq!(won.basis, crate::LeadershipBasis::Decided);
-    let guard = a.consensus().distributed_lock("door", Duration::from_secs(5)).await
-        .expect("the lock is decided in the configured electorate");
-    drop(guard);
+    assert_eq!((won.leader.clone(), won.basis), (a.node_id().clone(), crate::LeadershipBasis::Decided));
+    drop(a.consensus().distributed_lock("door", Duration::from_secs(5)).await.expect("the lock decides in the fleet's electorate"));
     a.consensus().consistent_set("cfg/k", Bytes::from_static(b"v")).await.expect("and the consistent write");
-    a.shutdown_with_timeout(Duration::from_secs(5)).await;
+    match a.consensus().cluster_propose("lock/raw", Bytes::from_static(b"x"), quick).await {
+        ConsensusResult::ElectorateMismatch { group: Some(g), .. } => assert_eq!(&*g, "council"),
+        other => panic!("a cluster-scoped exclusive slot is refused while the fleet decides them in council: {other:?}"),
+    }
+    agents[0].shutdown_with_timeout(Duration::from_secs(5)).await;
 }
 
-/// **An electorate group's roster is held to its declaration.** A member written outside governance —
-/// here an embedded `grp/` write, the residual the gateway cannot see — makes the roster disagree with
-/// the declared size, and every proposal to the group is refused `ElectorateUnavailable` rather than
-/// counted against a roster governance never agreed. Re-declaring the size (one member at a time)
-/// restores it, with a quorum that is a strict majority of the declared size. Seen failing first: with
-/// a foreign member written, `group_propose("council", "leader/council", ..)` was attempted against the
-/// ungoverned roster — `Timeout { quorum_required: 2, .. }` — rather than refused.
+/// **The fleet's exclusive electorate is a fleet record, not a node setting** (#601's review, finding 2). A node
+/// whose `consensus_electorate` names a group the fleet has not marked refuses its exclusive verbs by name rather
+/// than decide them somewhere the rest of the fleet does not. Seen failing first: the lock decided in the locally
+/// named group.
 #[cfg(feature = "consensus")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_electorate_groups_roster_is_held_to_its_declaration() {
-    let port = alloc_port();
-    let id = NodeId::new("127.0.0.1", port).unwrap();
-    let mut cfg = GossipConfig::default();
-    cfg.bind_port = port;
-    let a = GossipAgent::new(id.clone(), cfg);
-    a.start().await.unwrap();
-    let _listener = a.consensus().start_consensus_listener(ConsensusConfig::default());
-    a.mesh().join_group("council");
-    let prefix = crate::signal::grp_prefix("council");
-    poll_until(|| a.kv().scan_prefix(&prefix).len() == 1, 2_000).await;
-    a.declare_electorate("council", 1).unwrap();
-    assert_eq!(a.declare_electorate("council", 3), Err(crate::ElectorateError::StepTooLarge { from: 1, to: 3 }));
-    let quick = ConsensusConfig { phase1_timeout: Duration::from_millis(300), max_ballots: 1, ..ConsensusConfig::default() };
+async fn a_local_electorate_setting_that_disagrees_with_the_fleet_is_refused() {
+    let (agents, _l) = electorate_mesh(1, |c| c.consensus_electorate = Some("mine".into())).await;
+    let a = &agents[0];
+    a.mesh().join_group("mine");
+    roster_converges(&agents, "mine", &[a]).await;
+    a.declare_electorate("mine", false).await.expect("a genesis, not marked the fleet's default");
+    match a.consensus().distributed_lock("door", Duration::from_secs(5)).await {
+        Err(crate::ConsistencyError::ElectorateMismatch { group: None, detail }) =>
+            assert!(detail.contains("mine") && detail.contains("no electorate group is marked"), "{detail}"),
+        other => panic!("a local electorate the fleet does not name must be refused, got {other:?}"),
+    }
+    a.declare_electorate("mine", true).await.expect("a step that marks it the fleet's default");
+    drop(a.consensus().distributed_lock("door", Duration::from_secs(5)).await.expect("now the setting restates the fleet"));
+    agents[0].shutdown_with_timeout(Duration::from_secs(5)).await;
+}
 
-    // A member nobody governed: an embedded write to `grp/council/…`.
-    let stranger = NodeId::new("127.0.0.1", alloc_port()).unwrap();
-    assert!(a.kv().set(format!("{prefix}{stranger}"), Bytes::from_static(b"1")));
-    poll_until(|| a.kv().scan_prefix(&prefix).len() == 2, 2_000).await;
-    match a.consensus().group_propose("council", "leader/council", Bytes::from_static(b"me"), quick.clone()).await {
-        ConsensusResult::ElectorateUnavailable { observed_members: 2, declared_min: 1, .. } => {}
-        other => panic!("a roster larger than the declaration must be refused, got {other:?}"),
-    }
-    match a.consensus().group_propose("council", "work/any", Bytes::from_static(b"w"), quick.clone()).await {
-        ConsensusResult::ElectorateUnavailable { .. } => {}
-        other => panic!("every proposal to an electorate group is held to the declaration, got {other:?}"),
-    }
-    assert!(a.consensus().consensus_get("leader/council").is_none());
+/// **An electorate is pinned by identity, not by count** (#601's review, finding 1a). Genesis {A,B,C}; D joins the
+/// roster and C leaves, with no declared step — the count matches again, the identities do not. A proposal is
+/// refused `ElectorateMismatch` and counted on the roster tripwire, never decided by {A,B,D}; D, in the roster but
+/// not the electorate, may not propose at all; and declaring the swap is refused as two changes. Seen failing first:
+/// under c9131839's count rule the proposal was attempted against {A,B,D}.
+#[cfg(feature = "consensus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_swap_without_a_declared_step_is_refused() {
+    let (agents, _l) = electorate_mesh(4, |_| {}).await;
+    let (a, b, c, d) = (&agents[0], &agents[1], &agents[2], &agents[3]);
+    for n in [a, b, c] { n.mesh().join_group("council"); }
+    roster_converges(&agents, "council", &[a, b, c]).await;
+    a.declare_electorate("council", false).await.expect("genesis, every member accepting");
+    epoch_converges(&agents, "council", 1).await;
 
-    // Re-declared at 2: the roster matches, and the quorum is a strict majority of 2 — the absent
-    // member's vote is needed, so the proposal cannot commit on this node's vote alone.
-    a.declare_electorate("council", 2).unwrap();
-    let explicit_one = ConsensusConfig { quorum_size: 1, ..quick.clone() };
-    match a.consensus().group_propose("council", "work/majority", Bytes::from_static(b"w"), explicit_one).await {
-        ConsensusResult::Timeout { quorum_required: 2, .. } => {}
-        other => panic!("an explicit quorum below a strict majority of the electorate is raised, got {other:?}"),
+    d.mesh().join_group("council");
+    c.mesh().leave_group("council");
+    roster_converges(&agents, "council", &[a, b, d]).await;
+    let before = crate::electorate_roster_mismatches();
+    let quick = ConsensusConfig { phase1_timeout: Duration::from_millis(500), max_ballots: 1, ..ConsensusConfig::default() };
+    match a.consensus().group_propose("council", "leader/council", Bytes::from_static(b"a"), quick.clone()).await {
+        ConsensusResult::ElectorateMismatch { group: Some(g), detail, .. } => {
+            assert_eq!(&*g, "council");
+            assert!(detail.contains("roster differs"), "{detail}");
+        }
+        other => panic!("a swapped roster must be refused, got {other:?}"),
     }
-    // The stranger removed: the roster is now smaller than the declaration — a partial view, refused.
-    assert!(a.kv().delete(format!("{prefix}{stranger}")));
-    poll_until(|| a.kv().scan_prefix(&prefix).len() == 1, 2_000).await;
+    assert!(crate::electorate_roster_mismatches() > before, "the roster tripwire counted it");
     assert!(matches!(
-        a.consensus().group_propose("council", "work/after", Bytes::from_static(b"w"), quick).await,
-        ConsensusResult::ElectorateUnavailable { observed_members: 1, declared_min: 2, .. }
-    ));
+        d.consensus().group_propose("council", "leader/council", Bytes::from_static(b"d"), quick).await,
+        ConsensusResult::NotAMember { .. }
+    ), "a roster member outside the electorate may not propose");
+    assert!(matches!(a.declare_electorate("council", false).await, Err(crate::ElectorateError::StepTooLarge { changed: 2, .. })));
+    assert!(agents.iter().all(|n| n.consensus().consensus_get("leader/council").is_none()), "nothing was decided");
+    for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
+}
+
+/// **Chained steps cannot decide two values** (#601's review, finding 1b). Genesis {A,B,C}, then 3→4 (D) and 4→5 (E),
+/// each a decision of the epoch before it. A proposer two steps behind — epoch 1, quorum 2 of {A,B,C} — names its
+/// epoch, and A and B, which hold epoch 3, refuse it (`StaleElectorate`), so it cannot gather {A,B} while the current
+/// electorate decides on {C,D,E}. An acceptor that accepted a step but has not learned it committed refuses the epoch
+/// before it too (the fence). And a proposal at the current epoch commits with a majority of five. Seen failing first:
+/// under c9131839's count rule A and B answered the epoch-1 proposer.
+#[cfg(feature = "consensus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn chained_steps_refuse_a_stale_proposer() {
+    let (agents, _l) = electorate_mesh(5, |_| {}).await;
+    let (a, b, c, d, e) = (&agents[0], &agents[1], &agents[2], &agents[3], &agents[4]);
+    for n in [a, b, c] { n.mesh().join_group("council"); }
+    roster_converges(&agents, "council", &[a, b, c]).await;
+    let e1 = a.declare_electorate("council", false).await.expect("genesis");
+    epoch_converges(&agents, "council", 1).await;
+    d.mesh().join_group("council");
+    roster_converges(&agents, "council", &[a, b, c, d]).await;
+    let e2 = b.declare_electorate("council", false).await.expect("3 → 4, decided by the epoch-1 electorate");
+    assert_eq!((e2.epoch, e2.members.len()), (2, 4));
+    epoch_converges(&agents, "council", 2).await;
+    e.mesh().join_group("council");
+    roster_converges(&agents, "council", &[a, b, c, d, e]).await;
+    let e3 = d.declare_electorate("council", false).await.expect("4 → 5, decided by the epoch-2 electorate — D is a member now");
+    assert_eq!((e3.epoch, e3.members.len()), (3, 5));
+    epoch_converges(&agents, "council", 3).await;
+
+    // C proposing as of epoch 1: A and B answer for epoch 3 only.
+    let scope = SignalScope::Group(Arc::from("council"));
+    for acceptor in [a, b] {
+        let engine = crate::agent::electorate::engine(&acceptor.task_ctx);
+        assert_eq!(
+            engine.electorate_admits(&scope, "leader/council", Some((1, e1.digest())), c.node_id(), Some(&Bytes::from_static(b"c"))),
+            Err((3, e3.digest())),
+            "{} refuses the stale epoch, naming its own", acceptor.node_id(),
+        );
+        // A legacy (untagged) proposal on an electorate group is refused the same way.
+        assert_eq!(engine.electorate_admits(&scope, "leader/council", None, c.node_id(), None), Err((3, e3.digest())));
+        assert_eq!(engine.electorate_admits(&scope, "leader/council", Some((3, e3.digest())), c.node_id(), None), Ok(()));
+    }
+    // And end to end, through the listeners: C's epoch-1 prepare reaches the group, and every answer from A and
+    // B is a refusal naming epoch 3 — no promise.
+    {
+        use crate::consensus::{consensus_kind, decode_consensus_msg, encode_consensus_msg, ConsensusMsg};
+        let mut naks = c.task_ctx.signal_handlers.register_with_capacity(Arc::from(consensus_kind::NACK), 32);
+        let mut acks = c.task_ctx.signal_handlers.register_with_capacity(Arc::from(consensus_kind::VOTE), 32);
+        let prepare = ConsensusMsg::PrepareIn {
+            slot: Arc::from("leader/council"), ballot: 7, proposer: c.node_id().clone(), epoch: 1, electorate: e1.digest(),
+        };
+        mycelium_core::ops::emit_signal(&c.task_ctx, Arc::from(consensus_kind::PROPOSE), scope.clone(),
+            crate::agent::electorate::engine(&c.task_ctx).sign_payload(encode_consensus_msg(&prepare)));
+        let mut refused_by = std::collections::HashSet::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while refused_by.len() < 2 && tokio::time::Instant::now() < deadline {
+            tokio::select! {
+                Some(sig) = naks.recv() => if let Some(ConsensusMsg::StaleElectorate { voter, epoch, .. }) = decode_consensus_msg(&sig.payload) {
+                    assert_eq!(epoch, 3, "{voter} names its own epoch");
+                    if voter == *a.node_id() || voter == *b.node_id() { refused_by.insert(voter); }
+                },
+                Some(sig) = acks.recv() => if let Some(ConsensusMsg::PrepareAck { voter, .. }) = decode_consensus_msg(&sig.payload) {
+                    panic!("{voter} promised an epoch-1 prepare while holding epoch 3");
+                },
+                _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+            }
+        }
+        assert_eq!(refused_by.len(), 2, "A and B both refused the stale proposer by name");
+    }
+    // The fence: an acceptor that has accepted the step out of epoch 3 no longer answers epoch 3.
+    let next = crate::agent::electorate::step_slot("council", 4);
+    assert!(crate::consensus::claim_vote(&a.task_ctx.consensus_accepted, &Arc::from(next.as_str()), 1,
+        &Bytes::from_static(b"some step"), b.node_id().id_hash(), 0));
+    let engine = crate::agent::electorate::engine(&a.task_ctx);
+    assert_eq!(engine.electorate_admits(&scope, "leader/council", Some((3, e3.digest())), c.node_id(), None),
+        Err((4, e3.digest())), "fenced: a step out of epoch 3 is accepted here");
+    // B is not fenced, and the current electorate decides: a majority of five, C proposing at epoch 3.
+    let quick = ConsensusConfig { phase1_timeout: Duration::from_millis(1500), max_ballots: 3, ..ConsensusConfig::default() };
+    match c.consensus().group_propose("council", "work/after", Bytes::from_static(b"w"), quick).await {
+        ConsensusResult::Committed { .. } => {}
+        other => panic!("the current electorate decides (A fenced, B..E answering): {other:?}"),
+    }
+    for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
+}
+
+/// **A step is a decision of the current electorate** (#601's review, finding 1). Two members proposing different
+/// one-member steps at once cannot both commit — they are one slot — and every node adopts the same epoch 2. A node
+/// outside the electorate is refused before it proposes a step, and every acceptor refuses one it names as proposer.
+/// Seen failing first: under c9131839 a declaration was an unconditional LWW write, so both "steps" took effect.
+#[cfg(feature = "consensus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_concurrent_steps_cannot_both_commit_and_a_non_member_cannot_step() {
+    let (agents, _l) = electorate_mesh(5, |_| {}).await;
+    let (a, b, c, d, e) = (&agents[0], &agents[1], &agents[2], &agents[3], &agents[4]);
+    for n in [a, b, c] { n.mesh().join_group("council"); }
+    roster_converges(&agents, "council", &[a, b, c]).await;
+    let e1 = a.declare_electorate("council", false).await.expect("genesis");
+    epoch_converges(&agents, "council", 1).await;
+    let step = |extra: &GossipAgent| crate::ElectorateDecl {
+        group: "council".into(), epoch: 2, exclusive_default: false,
+        members: crate::agent::electorate::sorted_members(
+            [a, b, c, extra].iter().map(|n| n.node_id().clone()).collect()),
+    };
+    let (with_d, with_e) = (step(d), step(e));
+    let (ra, rb) = tokio::join!(
+        crate::agent::electorate::propose_step(&a.task_ctx, Some(&e1), &with_d),
+        crate::agent::electorate::propose_step(&b.task_ctx, Some(&e1), &with_e),
+    );
+    let own = |r: &ConsensusResult| matches!(r, ConsensusResult::Committed { .. });
+    assert!(!(own(&ra) && own(&rb)), "two different steps both committed: {ra:?} / {rb:?}");
+    poll_until(|| agents.iter().all(|n| n.electorate("council").is_some_and(|v| v.epoch == 2))
+        || !(own(&ra) || own(&rb)), 10_000).await;
+    let views: Vec<_> = agents.iter().filter_map(|n| n.electorate("council")).filter(|v| v.epoch == 2).collect();
+    assert!(views.windows(2).all(|w| w[0] == w[1]), "every node holds the same epoch 2: {views:?}");
+
+    // D, outside the epoch it would step from, is refused at its own door and at every acceptor.
+    let cur = a.electorate("council").unwrap();
+    let mut from_d = cur.clone();
+    from_d.epoch += 1;
+    from_d.members.retain(|m| m != c.node_id());
+    if !cur.contains(d.node_id()) {
+        assert!(matches!(crate::agent::electorate::propose_step(&d.task_ctx, Some(&cur), &from_d).await,
+            ConsensusResult::NotAMember { .. } | ConsensusResult::ElectorateMismatch { .. }));
+        let scope = SignalScope::Group(Arc::from("council"));
+        let engine = crate::agent::electorate::engine(&a.task_ctx);
+        let slot = crate::agent::electorate::step_slot("council", from_d.epoch);
+        assert!(engine.electorate_admits(&scope, &slot, Some((cur.epoch, cur.digest())), d.node_id(), Some(&from_d.encode())).is_err(),
+            "an acceptor refuses a step whose proposer is not a member");
+    }
+    for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
+}
+
+/// **The vote filter is wired** (#601's review, finding 8): a proposal on an electorate group counts promises and votes
+/// only from the epoch's members. Genesis {A,B}; B's listener is stopped, so a quorum of two cannot form honestly; D,
+/// outside the electorate, forges promises and votes for A's proposal at every ballot it could draw. A does not commit.
+/// The proposal also asks for an explicit quorum of one with opacity reduction on: an electorate's quorum is a strict
+/// majority of its members whatever the caller asks (finding 3). Seen failing first, with the door's filter unwired
+/// (`electorate_vote_filter(trust_set, None)`) and the quorum floor removed: A committed.
+#[cfg(feature = "consensus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn votes_from_outside_the_electorate_are_not_counted() {
+    use crate::consensus::{consensus_kind, encode_consensus_msg, value_digest, ConsensusMsg};
+    let (agents, mut listeners) = electorate_mesh(3, |_| {}).await;
+    let (a, b, d) = (&agents[0], &agents[1], &agents[2]);
+    for n in [a, b] { n.mesh().join_group("pair"); }
+    roster_converges(&agents, "pair", &[a, b]).await;
+    a.declare_electorate("pair", false).await.expect("genesis {A,B}");
+    epoch_converges(&agents, "pair", 1).await;
+    drop(listeners.remove(1)); // B stops answering
+
+    let value = Bytes::from_static(b"forged-quorum");
+    let forger = crate::agent::electorate::engine(&d.task_ctx);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (dctx, aid, v, halt) = (Arc::clone(&d.task_ctx), a.node_id().clone(), value.clone(), Arc::clone(&stop));
+    let forging = tokio::spawn(async move {
+        while !halt.load(std::sync::atomic::Ordering::Relaxed) {
+            for ballot in 1..=8u64 {
+                for msg in [
+                    ConsensusMsg::PrepareAck { slot: Arc::from("work/w"), ballot, voter: dctx.node_id.clone(),
+                        accepted_ballot: 0, accepted_digest: None, accepted_value: None, committed_digest: None },
+                    ConsensusMsg::VoteForValue { slot: Arc::from("work/w"), ballot, voter: dctx.node_id.clone(),
+                        value_digest: value_digest(&v), locality: None },
+                ] {
+                    mycelium_core::ops::emit_signal(&dctx, Arc::from(consensus_kind::VOTE),
+                        SignalScope::Individual(aid.clone()), forger.sign_payload(encode_consensus_msg(&msg)));
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    });
+    // An explicit quorum of one, and opacity reduction on: neither shrinks an electorate's strict majority (#601's
+    // review, finding 3) — without the floor, A's own vote would have decided.
+    let quick = ConsensusConfig {
+        phase1_timeout: Duration::from_millis(400), max_ballots: 3, quorum_size: 1, count_opaque_as_absent: true,
+        ..ConsensusConfig::default()
+    };
+    let res = a.consensus().group_propose("pair", "work/w", value, quick).await;
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = forging.await;
+    assert!(!matches!(res, ConsensusResult::Committed { .. }), "a non-member's forged promises and votes were counted: {res:?}");
+    for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
+}
+
+/// **An electorate group decides only through its own epoch** (#601's review, finding 8): a cross-group proposal that
+/// names one is refused `ElectorateMismatch`, and a safety-sensitive cross-group proposal over plain groups is
+/// refused `ElectorateNotGoverned` on a node that requires an electorate. Seen failing first: the cross-group
+/// proposal over the electorate group committed.
+#[cfg(feature = "consensus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cross_group_proposal_does_not_decide_for_an_electorate_group() {
+    let (agents, _l) = electorate_mesh(1, |c| c.consensus_require_electorate = true).await;
+    let a = &agents[0];
+    for g in ["council", "plain"] { a.mesh().join_group(g); }
+    roster_converges(&agents, "council", &[a]).await;
+    roster_converges(&agents, "plain", &[a]).await;
+    a.declare_electorate("council", false).await.expect("genesis");
+    let gq = |g: &str| crate::GroupQuorum { group: g.into(), quorum: 0.5, veto: false };
+    let quick = ConsensusConfig { phase1_timeout: Duration::from_millis(300), max_ballots: 1, ..ConsensusConfig::default() };
+    match a.consensus().cross_group_propose("work/x", Bytes::from_static(b"x"), vec![gq("plain"), gq("council")], quick.clone()).await {
+        ConsensusResult::ElectorateMismatch { group: Some(g), .. } => assert_eq!(&*g, "council"),
+        other => panic!("a cross-group proposal over an electorate group must be refused, got {other:?}"),
+    }
+    let flagged = ConsensusConfig { safety_sensitive: true, ..quick };
+    match a.consensus().cross_group_propose("work/y", Bytes::from_static(b"y"), vec![gq("plain")], flagged).await {
+        ConsensusResult::ElectorateNotGoverned { group: Some(g), .. } => assert_eq!(&*g, "plain"),
+        other => panic!("a safety-sensitive cross-group proposal is never an electorate, got {other:?}"),
+    }
     a.shutdown_with_timeout(Duration::from_secs(5)).await;
 }
 
-/// **Nothing resizes an electorate group but governance** (P2's tension (a), *governed is not fixed*). The
-/// membership governor does not roll on it — not even to honour a drain naming this node, which it obeys
-/// on an ordinary group in the same pass — and the emergent watcher does not auto-join it on a capability
-/// match it acts on for an undeclared group. Seen failing first: the governor drained this node out of
-/// `council`, and the watcher joined `council2`.
+/// **A forged electorate record does not change the electorate** (#601's review, finding 5). A committed
+/// `electorate/{group}/{epoch}` entry written straight into the store — no step, no certificate, or a certificate
+/// that does not verify — is not adopted, and is counted once. Seen failing first: under c9131839 a KV write to
+/// `sys/govern/electorate/{group}` was the electorate.
+#[cfg(feature = "consensus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_forged_electorate_record_is_not_adopted() {
+    let (agents, _l) = electorate_mesh(1, |_| {}).await;
+    let a = &agents[0];
+    a.mesh().join_group("council");
+    roster_converges(&agents, "council", &[a]).await;
+    let e1 = a.declare_electorate("council", false).await.expect("genesis");
+    let stranger = NodeId::new("127.0.0.1", alloc_port()).unwrap();
+    let forged = crate::ElectorateDecl {
+        group: "council".into(), epoch: 2, exclusive_default: false,
+        members: crate::agent::electorate::sorted_members(vec![a.node_id().clone(), stranger.clone()]),
+    };
+    let before = crate::electorate_records_refused();
+    assert!(a.kv().set(format!("consensus/committed/{}", crate::agent::electorate::step_slot("council", 2)), forged.encode()));
+    assert!(a.kv().set(crate::agent::electorate::cert_key("council", 2), mycelium_core::serde_fixint::to_vec(&vec![Bytes::from_static(b"not a vote")]).unwrap()));
+    poll_until(|| a.kv().get(&crate::agent::electorate::cert_key("council", 2)).is_some(), 2_000).await;
+    assert_eq!(a.electorate("council"), Some(e1), "the forged epoch is not adopted");
+    assert!(crate::electorate_records_refused() > before, "and it is counted");
+    a.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// **Nothing resizes an electorate group but a decided step** (P2's tension (a), *governed is not fixed*). The
+/// membership governor does not roll on it — not even to honour a drain naming this node, which it obeys on an
+/// ordinary group in the same pass — and the emergent watcher does not auto-join it on a capability match it acts
+/// on for an undeclared group. Seen failing first: the governor drained this node out of `council`, and the
+/// watcher joined `council2`.
+#[cfg(feature = "consensus")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_governor_and_the_watcher_leave_an_electorate_group_alone() {
     use crate::capability::{Capability, CapFilter, CapabilityGroupDef};
@@ -12085,11 +12351,15 @@ async fn the_governor_and_the_watcher_leave_an_electorate_group_alone() {
     let a = GossipAgent::new(id.clone(), cfg);
     a.start().await.unwrap();
     let in_group = |g: &str| a.groups().iter().any(|x| x.as_ref() == g);
+
+    // The watcher: `council2` is an electorate whose one member then left it; `open` is an ordinary group.
+    a.mesh().join_group("council2");
+    poll_until(|| in_group("council2"), 2_000).await;
+    a.declare_electorate("council2", false).await.expect("genesis {A}");
+    a.mesh().leave_group("council2");
+    poll_until(|| !in_group("council2"), 2_000).await;
     let _cap = a.capabilities().advertise_capability(Capability::new("svc", "voter"), Duration::from_secs(60));
     let def = || CapabilityGroupDef { filter: CapFilter::new("svc", "voter"), topology_policy: None, provides: vec![], requires: vec![] };
-
-    // The watcher: `council2` is declared before its capability group exists; `open` is not.
-    a.declare_electorate("council2", 1).unwrap();
     let _g2 = a.capabilities().define_capability_group("council2", def(), Duration::from_secs(60));
     let _go = a.capabilities().define_capability_group("open", def(), Duration::from_secs(60));
     poll_until(|| in_group("open"), 5_000).await;
@@ -12098,7 +12368,7 @@ async fn the_governor_and_the_watcher_leave_an_electorate_group_alone() {
     let _gc = a.capabilities().define_capability_group("council", def(), Duration::from_secs(60));
     let _gp = a.capabilities().define_capability_group("pool", def(), Duration::from_secs(60));
     poll_until(|| in_group("council") && in_group("pool"), 5_000).await;
-    a.declare_electorate("council", 1).unwrap();
+    a.declare_electorate("council", false).await.expect("genesis {A}");
     for g in ["council", "pool"] {
         let _ = a.publish_membership_intent(crate::MembershipIntent::new(g, 0, None).with_drain(vec![id.clone()]));
     }
@@ -12107,4 +12377,50 @@ async fn the_governor_and_the_watcher_leave_an_electorate_group_alone() {
     assert!(in_group("council"), "the governor drained an electorate group's member");
     assert!(!in_group("council2"), "the watcher auto-joined an electorate group");
     a.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// **Under `[tls]` the certificate is signatures** (#601's review, finding 5): a genesis and a step decided over
+/// authenticated consensus messages are adopted on every node — each verifies the deciding votes' signatures,
+/// the proposer's own included — and a record whose certificate carries a signed vote from outside the deciding
+/// electorate is not.
+#[cfg(all(feature = "consensus", feature = "tls"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_electorate_certificate_verifies_under_tls() {
+    let cert_dir = std::env::temp_dir().join(format!("myc-electorate-tls-{}", alloc_port()));
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    let dir = cert_dir.clone();
+    let (agents, _l) = electorate_mesh(3, move |c| {
+        c.reconnect_backoff_secs = 1;
+        c.health_check_interval_secs = 1;
+        c.tls = Some(TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() });
+    }).await;
+    let (a, b, c) = (&agents[0], &agents[1], &agents[2]);
+    for n in [a, b] { n.mesh().join_group("council"); }
+    roster_converges(&agents, "council", &[a, b]).await;
+    a.declare_electorate("council", false).await.expect("a signed genesis");
+    epoch_converges(&agents, "council", 1).await;
+    c.mesh().join_group("council");
+    roster_converges(&agents, "council", &[a, b, c]).await;
+    let e2 = b.declare_electorate("council", false).await.expect("a signed step");
+    epoch_converges(&agents, "council", 2).await;
+
+    // A forged epoch 3 that drops A, certified by C's genuine signature on it — but C alone is not a majority of
+    // epoch 2, and a vote's signer must be in the deciding electorate: not adopted.
+    let mut forged = e2.clone();
+    forged.epoch = 3;
+    forged.members.retain(|m| m != a.node_id());
+    let slot = crate::agent::electorate::step_slot("council", 3);
+    let vote = crate::consensus::ConsensusMsg::VoteForValue {
+        slot: Arc::from(slot.as_str()), ballot: 1, voter: c.node_id().clone(),
+        value_digest: crate::consensus::value_digest(&forged.encode()), locality: None,
+    };
+    let signed = crate::agent::electorate::engine(&c.task_ctx).sign_payload(crate::consensus::encode_consensus_msg(&vote));
+    assert!(c.kv().set(crate::agent::electorate::cert_key("council", 3), mycelium_core::serde_fixint::to_vec(&vec![signed]).unwrap()));
+    assert!(c.kv().set(format!("consensus/committed/{slot}"), forged.encode()));
+    poll_until(|| agents.iter().all(|n| n.kv().get(&format!("consensus/committed/{slot}")).is_some()), 5_000).await;
+    for n in &agents {
+        assert_eq!(n.electorate("council").map(|d| d.epoch), Some(2), "{} adopted a forged epoch", n.node_id());
+    }
+    for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
+    let _ = std::fs::remove_dir_all(&cert_dir);
 }

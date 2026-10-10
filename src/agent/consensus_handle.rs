@@ -81,6 +81,8 @@ pub(crate) fn receipt_from(
             Err(CommitError::ElectorateUnavailable { slot, observed_members, declared_min }),
         ConsensusResult::NotAMember { slot, group } => Err(CommitError::NotAMember { slot, group }),
         ConsensusResult::ElectorateNotGoverned { slot, group } => Err(CommitError::ElectorateNotGoverned { slot, group }),
+        ConsensusResult::ElectorateStale { slot, group, epoch, seen_epoch } => Err(CommitError::ElectorateStale { slot, group, epoch, seen_epoch }),
+        ConsensusResult::ElectorateMismatch { slot, group, detail } => Err(CommitError::ElectorateMismatch { slot, group, detail }),
         ConsensusResult::Superseded { slot, ballot } => Err(CommitError::Superseded { slot, ballot }),
         ConsensusResult::TopologyUnsatisfied { slot, distinct_domains, domains_required, .. } => {
             Err(CommitError::TopologyUnsatisfied {
@@ -481,18 +483,36 @@ impl ConsensusHandle {
                 Err(ConsistencyError::ElectorateUnavailable { observed_members, declared_min }),
             ConsensusResult::NotAMember { group, .. } => Err(ConsistencyError::NotAMember { group }),
             ConsensusResult::ElectorateNotGoverned { group, .. } => Err(ConsistencyError::ElectorateNotGoverned { group }),
+            ConsensusResult::ElectorateStale { group, epoch, seen_epoch, .. } => Err(ConsistencyError::ElectorateStale { group, epoch, seen_epoch }),
+            ConsensusResult::ElectorateMismatch { group, detail, .. } => Err(ConsistencyError::ElectorateMismatch { group, detail }),
         }
     }
 
-    /// Where the cluster-scoped exclusive verbs (`consistent_set`, `distributed_lock`) decide: the
-    /// electorate group named by `consensus_electorate` when one is configured, the whole cluster
-    /// otherwise (P2, `docs/design/consensus-electorate.md` §8). Their slots are in the
-    /// safety-sensitive families, so on a node that requires an electorate the cluster path is refused.
-    async fn exclusive_propose(&self, slot: &str, value: Bytes, config: ConsensusConfig) -> ConsensusResult {
-        match self.ctx.config.consensus_electorate.as_deref() {
-            Some(group) => self.group_propose(group, slot, value, config).await,
-            None => self.cluster_propose(slot, value, config).await,
+    /// **Propose an exclusive outcome where the fleet decides them** — marked safety-sensitive, and decided
+    /// in the cluster-scoped exclusive verbs' electorate (`consistent_set`, `distributed_lock` use it): the fleet's
+    /// exclusive-default electorate group when one is declared — a fleet record, so every node agrees —
+    /// the whole cluster otherwise (P2, `docs/design/consensus-electorate.md` §8). A local
+    /// `consensus_electorate` that disagrees with the fleet is refused `ElectorateMismatch`.
+    pub async fn exclusive_propose(&self, slot: &str, value: Bytes, config: ConsensusConfig) -> ConsensusResult {
+        let config = ConsensusConfig { safety_sensitive: true, ..config };
+        match crate::agent::electorate::exclusive_electorate(&self.ctx) {
+            Ok(Some(group)) => self.group_propose(&group, slot, value, config).await,
+            Ok(None) => self.cluster_propose(slot, value, config).await,
+            Err(detail) => ConsensusResult::ElectorateMismatch {
+                slot: Arc::from(slot), group: None, detail: Arc::from(detail.as_str()),
+            },
         }
+    }
+
+    /// [`exclusive_propose`](Self::exclusive_propose), answering with a receipt — what a companion deciding an
+    /// exclusive outcome uses (`mycelium-commitment`'s linearizable award, P2).
+    pub async fn exclusive_propose_receipt(
+        &self,
+        slot:   &str,
+        value:  Bytes,
+        config: ConsensusConfig,
+    ) -> Result<crate::CommitReceipt, crate::CommitError> {
+        receipt_from(self.exclusive_propose(slot, value, config).await, &self.ctx)
     }
 
     /// Read the latest ballot-committed value for `key` visible to this node.
@@ -597,6 +617,8 @@ impl ConsensusHandle {
                 Err(ConsistencyError::ElectorateUnavailable { observed_members, declared_min }),
             ConsensusResult::NotAMember { group, .. } => Err(ConsistencyError::NotAMember { group }),
             ConsensusResult::ElectorateNotGoverned { group, .. } => Err(ConsistencyError::ElectorateNotGoverned { group }),
+            ConsensusResult::ElectorateStale { group, epoch, seen_epoch, .. } => Err(ConsistencyError::ElectorateStale { group, epoch, seen_epoch }),
+            ConsensusResult::ElectorateMismatch { group, detail, .. } => Err(ConsistencyError::ElectorateMismatch { group, detail }),
         }
     }
 
@@ -688,6 +710,8 @@ impl ConsensusHandle {
                 Err(ConsistencyError::ElectorateUnavailable { observed_members, declared_min }),
             ConsensusResult::NotAMember { group, .. } => Err(ConsistencyError::NotAMember { group }),
             ConsensusResult::ElectorateNotGoverned { group, .. } => Err(ConsistencyError::ElectorateNotGoverned { group }),
+            ConsensusResult::ElectorateStale { group, epoch, seen_epoch, .. } => Err(ConsistencyError::ElectorateStale { group, epoch, seen_epoch }),
+            ConsensusResult::ElectorateMismatch { group, detail, .. } => Err(ConsistencyError::ElectorateMismatch { group, detail }),
         }
     }
 

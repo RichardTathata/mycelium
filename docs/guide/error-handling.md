@@ -115,9 +115,15 @@ pub enum ConsistencyError {
 - `ElectorateNotGoverned` (P2) — the node requires an **electorate group** for an exclusive outcome
   (`consensus_require_electorate`) and this safety-sensitive proposal's scope was the whole cluster (`group: None`)
   or a group with no electorate declaration. Nothing was proposed. Declare the group (`declare_electorate`,
-  `POST /gateway/govern/electorate`) and, for the cluster-scoped lock and consistent verbs, set `consensus_electorate`.
-  Over HTTP **403** `electorate_not_governed`. On an electorate group, `ElectorateUnavailable` with `observed_members`
-  above `declared_min` means a member joined outside the declaration.
+  `POST /gateway/govern/electorate`) and, for the cluster-scoped lock and consistent verbs, mark one group
+  `exclusive_default`. Over HTTP **403** `electorate_not_governed`.
+- `ElectorateStale` (P2) — a member of the proposal's electorate holds a later epoch: the electorate stepped and this
+  proposer had not learned it. Nothing was decided by this proposal; retry, which reads the new epoch. **409**
+  `electorate_stale`.
+- `ElectorateMismatch` (P2) — the electorate and this node's view disagree: the roster differs from the epoch's
+  members (a node joined or left without a declared step — declare, or undo it), a step that is not one member, a
+  cross-group proposal over an electorate group, or a `consensus_electorate` that disagrees with the fleet's
+  exclusive default. `detail` says which; nothing was proposed. **409** `electorate_mismatch`.
 - `TopologyUnsatisfied` — quorum has the right headcount but the Hard topology
   policy (e.g. "must span two racks") was not satisfied. Retry is unlikely to
   help unless nodes rejoin from the missing segments. If availability matters more than the spread

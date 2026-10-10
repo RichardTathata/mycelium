@@ -277,8 +277,8 @@
       "revision": 2,
       "subsystem": "consensus",
       "kind": "node_enforced",
-      "promise": "an exclusive outcome — a lock, a leader, a consistent write, any proposal marked safety-sensitive — is decided only by an electorate group: a group named by a governance declaration, held to its declared size, whose votes are counted only from its roster",
-      "needs": "`consensus_require_electorate = true`; the electorates themselves declared (`/gateway/govern/electorate`), and `consensus_electorate` naming one for the cluster-scoped verbs. The effect is still the caller's to fence at the resource with the commit's token",
+      "promise": "an exclusive outcome — a lock, a leader, a consistent write, a commitment award, a capability-authz policy, any proposal marked safety-sensitive — is decided only by an electorate group: one pinned by member identity and epoch, whose steps are its own consensus decisions, and whose acceptors answer only for their own epoch",
+      "needs": "`consensus_require_electorate = true`; the electorates declared (`/gateway/govern/electorate`), one marked `exclusive_default` for the cluster-scoped verbs. Safety per slot holds across steps one member apart; a value two or more steps old is protected by its commit record, not by quorum intersection (docs/design/consensus-electorate.md §8). The effect is still the caller's to fence at the resource",
       "enforcement_points": [
         "consensus::propose (the engine's door)",
         "consensus::cross_propose"

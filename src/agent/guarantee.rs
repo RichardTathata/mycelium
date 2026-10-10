@@ -937,8 +937,8 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
         // proposal and nothing validated it; the engine's door now refuses a safety-sensitive proposal outside an
         // electorate group when the node requires one.
         g("cons.safety_profile", 2, "consensus", Node,
-          "an exclusive outcome — a lock, a leader, a consistent write, any proposal marked safety-sensitive — is decided only by an electorate group: a group named by a governance declaration, held to its declared size, whose votes are counted only from its roster",
-          "`consensus_require_electorate = true`; the electorates themselves declared (`/gateway/govern/electorate`), and `consensus_electorate` naming one for the cluster-scoped verbs. The effect is still the caller's to fence at the resource with the commit's token",
+          "an exclusive outcome — a lock, a leader, a consistent write, a commitment award, a capability-authz policy, any proposal marked safety-sensitive — is decided only by an electorate group: one pinned by member identity and epoch, whose steps are its own consensus decisions, and whose acceptors answer only for their own epoch",
+          "`consensus_require_electorate = true`; the electorates declared (`/gateway/govern/electorate`), one marked `exclusive_default` for the cluster-scoped verbs. Safety per slot holds across steps one member apart; a value two or more steps old is protected by its commit record, not by quorum intersection (docs/design/consensus-electorate.md §8). The effect is still the caller's to fence at the resource",
           &["consensus::propose (the engine's door)", "consensus::cross_propose"], "docs/design/consensus-electorate.md",
           |_| if cfg!(feature = "consensus") { None } else { Some("built without `consensus`: this node proposes nothing") },
           |c| if c.config.consensus_require_electorate { Resolution::Enforced } else {

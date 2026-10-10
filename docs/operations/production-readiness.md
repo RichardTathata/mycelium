@@ -68,8 +68,10 @@ this page is the index + the gate.
   start refuses to start under the profile, naming `id.ca_key_off_node`. **Rev 3's addition is a setting too:**
   `cons.safety_profile` is `consensus_require_electorate = true` — a lock, a leader election or a consistent
   write is then refused (`electorate_not_governed`) unless an **electorate group** decides it: declare each
-  with `POST /gateway/govern/electorate` (`govern:write`), and name the one the cluster-scoped locks use with
-  `consensus_electorate` → [guide 04 § Discovery is not an electorate](../guide/04-consensus.md). **What it does not cover, by
+  with `POST /gateway/govern/electorate` (`govern:write`, every member running the consensus listener), mark the one
+  the cluster-scoped locks use `"exclusive_default": true` — only once every node runs P2 — and change an electorate
+  one member at a time, letting decided commits reach the group between steps →
+  [guide 04 § Discovery is not an electorate](../guide/04-consensus.md). **What it does not cover, by
   construction:** the external prerequisites — network confinement, clock sync —
   which the report lists as `not_verifiable_here` and this checklist owns; and the at-rest cipher and
   the audit sink, which the report shows and this revision does not require. The whole set, with each
