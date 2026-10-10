@@ -26,11 +26,13 @@ the hot path — pooling them would only starve request/response traffic.
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import ssl
 import threading
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any, AsyncIterator, Iterator, Optional
+from urllib.parse import quote
 
 import httpx
 
@@ -109,6 +111,37 @@ def base_url(host: str, port: int, scheme: str = "http") -> str:
     if not isinstance(scheme, str) or scheme.lower() not in SCHEMES:
         raise ValueError(f"scheme must be one of {SCHEMES}, not {scheme!r}")
     return f"{scheme.lower()}://{bracket_host(host)}:{port}"
+
+
+def path_segment(value: object) -> str:
+    """``value`` percent-encoded as **one** URL path segment (0.2.10).
+
+    Every caller- or row-supplied value that becomes a path segment — a signal kind, a prompt's
+    ``ns``/``name``, a run id, a blob id, a federation domain, a handle id — goes through here, so a
+    ``/`` cannot add a segment and a ``?`` or ``#`` cannot start a query or fragment. The gateway
+    percent-decodes the segment back. Before 0.2.10 these were interpolated raw; ``mycelium-ts`` and
+    the checkpointer's own key segments already encoded.
+
+    A value of ``.`` or ``..`` raises :class:`ValueError` before any request: a URL parser resolves it
+    as a dot segment — encoded too (the WHATWG URL standard reads ``%2e%2e`` as ``..``, so a proxy or
+    ``mycelium-ts`` would) — and the request would reach a different route. No gateway route takes one
+    as a name.
+    """
+    text = str(value)
+    if text in (".", ".."):
+        raise ValueError(f"{text!r} cannot travel as a URL path segment: it is resolved as a dot segment")
+    return quote(text, safe="")
+
+
+def whole_seconds(secs: float, *, floor: int = 1) -> int:
+    """A timeout the gateway reads as ``u64`` seconds: a fraction rounds **up**, never below ``floor``
+    (0.2.10; ``mycelium-ts``'s ``wholeSeconds``).
+
+    ``rpc/call`` and ``scatter`` read ``as_u64()`` and silently replaced a fraction with their default
+    (30 s, 10 s) while this client waited ``t + 5``; ``emit_reliable`` and ``wiki/ingest`` refused it 422.
+    The tuple ``take`` routes pass ``floor=0`` — there ``0`` is the documented poll.
+    """
+    return max(floor, math.ceil(secs))
 
 
 def bracket_host(host: str) -> str:

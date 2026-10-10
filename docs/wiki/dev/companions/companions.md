@@ -111,6 +111,15 @@ via wasm-host).
   `IncompleteCheckpoint` (retriable) where a checkpoint's rows and blobs have not all converged, instead of
   reading it as absent or smaller (`.log/2026-10-05-ts-sdk-contract.md`,
   `.log/2026-10-05-checkpoint-incomplete.md`).
+  **The SDKs' edges (post-360 row G, 2026-10-10 — py 0.2.10, ts 0.2.4, checkpointer 0.3.3):** one rule per
+  language for what goes on the wire — `timeout_secs` in whole seconds rounded up (`mycelium._pool.whole_seconds`,
+  `mycelium-ts/src/wire.ts`; the tuple `take` keeps `0`, its poll) and a caller- or row-supplied value as **one**
+  percent-encoded path segment (`path_segment` / `pathSegment`), with `.`/`..` refused before any request because a
+  URL parser resolves them even encoded; the checkpointer's blob id from a peer-writable row is the case that
+  mattered (`../../kv/keys?prefix=` reached `/gateway/kv/keys` with the saver's bearer). `mycelium-ts` gained
+  `SupersededError` and `scatterGather`'s defaults became the gateway's (`minOk` 1, 10 s). **SSE reconnect is not
+  built:** no gateway SSE route sends an event id or reads `Last-Event-ID`, so there is no resume point; guide 10
+  says what each stream loses on a drop (`.log/2026-10-10-sdk-edges.md`).
   **Why a blob is missing (with 2.26.0, #542 — `mycelium-reason` 0.7.0, checkpointer 0.3.0):**
   `MeshBlobStore::fetch` returns a `BlobMiss` — `NotFound` / `Unavailable` / `Corrupt`, corrupt only when every
   copy currently on offer fails its address — and the route answers 404 / 503 / 502 with the reason in its body;

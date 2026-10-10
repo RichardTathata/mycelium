@@ -35,7 +35,7 @@ from typing import Optional
 
 import httpx
 
-from ._pool import ClientPool, PoolOwner, base_url
+from ._pool import ClientPool, PoolOwner, base_url, whole_seconds
 
 
 class Wiki(PoolOwner):
@@ -95,15 +95,17 @@ class Wiki(PoolOwner):
         r.raise_for_status()
         return r.json()
 
-    async def ingest(self, reference: str, timeout_secs: int = 60) -> dict:
+    async def ingest(self, reference: str, timeout_secs: float = 60) -> dict:
         """Submit a staged batch's claim-check *reference* for bulk ingest (council-substrate
         Phase 4). The payload never rides the request — the batch is staged in the curator's
         ``BatchSource`` (S3 in the council deployment); the curator fetches, applies the whole
         batch atomically through its write gate, publishes, and returns the summary:
         ``{"summary": {"applied": n, "refused": n, "findings": [...]}}``. Sizing contract:
-        a batch = one meeting."""
-        payload = {"group": self._group, "reference": reference, "timeout_secs": timeout_secs}
-        async with self._pool.asy(timeout=timeout_secs + 15.0) as c:
+        a batch = one meeting. ``timeout_secs`` is sent in whole seconds, a fraction rounded up (0.2.10:
+        the route reads an integer and refused a fraction 422)."""
+        secs = whole_seconds(timeout_secs)
+        payload = {"group": self._group, "reference": reference, "timeout_secs": secs}
+        async with self._pool.asy(timeout=secs + 15.0) as c:
             r = await c.post("/gateway/wiki/ingest", json=payload)
         r.raise_for_status()
         return r.json()

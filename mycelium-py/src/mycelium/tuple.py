@@ -39,7 +39,7 @@ import asyncio
 import base64
 from typing import Any, Optional
 
-from ._pool import ClientPool, PoolOwner, base_url
+from ._pool import ClientPool, PoolOwner, base_url, whole_seconds
 
 
 class TupleBackpressureError(Exception):
@@ -120,16 +120,20 @@ class TupleSpace(PoolOwner):
         """Blocking claim. Returns ``(item_id, payload)``.
 
         Raises :class:`TimeoutError` when no item arrives in time. The HTTP
-        request blocks server-side for up to ``timeout_secs``.
+        request blocks server-side for up to ``timeout_secs``, in whole seconds: a
+        fraction rounds **up** (``0.3`` parks for 1 s), and ``0`` is a poll that
+        answers at once. Before 0.2.10 a fraction was truncated, so ``0 < t < 1``
+        parked for zero seconds.
         """
         # Pooled with a per-borrow timeout: park decides, not the transport.
         # This is the worker hot loop — a fresh client per take() is exactly
         # the per-call-connection regression the pool exists to prevent.
-        async with self._pool.asy(timeout=timeout_secs + 5.0) as c:
+        secs = whole_seconds(timeout_secs, floor=0)
+        async with self._pool.asy(timeout=secs + 5.0) as c:
             r = await c.post("/gateway/tuple/take", json={
                 "ns": self._ns,
                 "stage": stage,
-                "timeout_secs": int(timeout_secs),
+                "timeout_secs": secs,
             })
         if r.status_code == 408:
             raise TimeoutError(f"no item on stage {stage!r} within {timeout_secs}s")
@@ -161,13 +165,15 @@ class TupleSpace(PoolOwner):
     ) -> tuple[int, bytes]:
         """Blocking keyed claim (M13): claims the item on ``stage`` whose
         correlation key is ``key``, or parks until it arrives. Returns
-        ``(item_id, payload)``; raises :class:`TimeoutError` on timeout."""
-        async with self._pool.asy(timeout=timeout_secs + 5.0) as c:
+        ``(item_id, payload)``; raises :class:`TimeoutError` on timeout. ``timeout_secs``
+        rounds up to whole seconds, as :meth:`take` does."""
+        secs = whole_seconds(timeout_secs, floor=0)
+        async with self._pool.asy(timeout=secs + 5.0) as c:
             r = await c.post("/gateway/tuple/take_by_key", json={
                 "ns": self._ns,
                 "stage": stage,
                 "key": key,
-                "timeout_secs": int(timeout_secs),
+                "timeout_secs": secs,
             })
         if r.status_code == 408:
             raise TimeoutError(f"no item keyed {key!r} on stage {stage!r} within {timeout_secs}s")

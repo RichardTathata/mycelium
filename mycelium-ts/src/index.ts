@@ -1,4 +1,10 @@
-export { MyceliumAgent, ProtectedKeyError, ProtectedKindError, ProtectedStreamError } from "./agent";
+export {
+  MyceliumAgent,
+  ProtectedKeyError,
+  ProtectedKindError,
+  ProtectedStreamError,
+  SupersededError,
+} from "./agent";
 export {
   CapabilityHandle,
   UnitHandle,

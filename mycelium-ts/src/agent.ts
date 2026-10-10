@@ -3,6 +3,7 @@ import { parseLossless, stringifyLossless, toBigInt } from "./json";
 import { Federation } from "./federation";
 import { Artifacts } from "./artifacts";
 import { authHeaders, baseUrl, resolveToken, type AuthOptions } from "./auth";
+import { pathSegment, wholeSeconds } from "./wire";
 import {
   KvReceipt,
   CapabilityHandle,
@@ -22,14 +23,6 @@ function b64(buf: Buffer | Uint8Array): string {
 
 function fromb64(s: string): Buffer {
   return Buffer.from(s, "base64");
-}
-
-/**
- * A timeout the gateway reads as `u64` seconds: a fraction rounds up, never below 1. Sending `0.3`
- * was refused with 422 before the request was looked at.
- */
-function wholeSeconds(secs: number): number {
-  return Math.max(1, Math.ceil(secs));
 }
 
 /**
@@ -92,6 +85,24 @@ export class ProtectedStreamError extends Error {
   constructor(public readonly stream: string, message: string) {
     super(message);
     this.name = "ProtectedStreamError";
+  }
+}
+
+/**
+ * A consensus write that did not commit **your** value: the slot was decided for another (HTTP 409
+ * `{"ok": false, "error": "superseded"}`, substrate 2.30.0+ — the normal answer to a concurrent loser).
+ *
+ * Thrown by `consistentSet`, `crossGroupPropose`, `distributedLock` and `electLeader` (0.2.4; the Python
+ * SDK's `SupersededError` since 0.2.8). Before, these threw a plain `Error` naming the status, which a
+ * caller could tell apart from a topology refusal only by reading the message. Read the decided value
+ * with `consistentGet`. A timeout (504, a `TimeoutError`) and the other 409s — `topology_unsatisfied` —
+ * stay what they were: a timeout does not mean the value lost.
+ */
+export class SupersededError extends Error {
+  readonly status = 409;
+  constructor(message = "the slot was decided for another value (409 superseded)") {
+    super(message);
+    this.name = "SupersededError";
   }
 }
 
@@ -178,6 +189,11 @@ export class MyceliumAgent {
       if (body.error === "protected_stream") {
         throw new ProtectedStreamError(subject.stream ?? "", body.message ?? "protected stream");
       }
+    }
+    if (resp.status === 409) {
+      let body: { error?: string } = {};
+      try { body = JSON.parse(text) ?? {}; } catch { /* not JSON: fall through */ }
+      if (body.error === "superseded") throw new SupersededError();
     }
     // 504 is the gateway's answer to an expired deadline (`rpc/call`, `scatter`): a
     // `TimeoutError`, as the README promises and the Python SDK raises — not a generic failure.
@@ -273,11 +289,11 @@ export class MyceliumAgent {
     return new CapabilityHandle(
       handleId,
       async () => {
-        await this._delete(`/gateway/capability/${handleId}`);
+        await this._delete(`/gateway/capability/${pathSegment(handleId)}`);
       },
       options.leaseSecs !== undefined
         ? async () => {
-            await this._post(`/gateway/capability/${handleId}/heartbeat`, {});
+            await this._post(`/gateway/capability/${pathSegment(handleId)}/heartbeat`, {});
           }
         : undefined,
     );
@@ -308,11 +324,11 @@ export class MyceliumAgent {
     return new UnitHandle(
       handleId,
       async () => {
-        await this._delete(`/gateway/capability/${handleId}`);
+        await this._delete(`/gateway/capability/${pathSegment(handleId)}`);
       },
       options.leaseSecs !== undefined
         ? async () => {
-            await this._post(`/gateway/capability/${handleId}/heartbeat`, {});
+            await this._post(`/gateway/capability/${pathSegment(handleId)}/heartbeat`, {});
           }
         : undefined,
       data.principal,
@@ -381,7 +397,7 @@ export class MyceliumAgent {
    * Async generator yielding admitted signals of `kind` as SSE events.
    */
   async *onSignal(kind: string): AsyncGenerator<Signal> {
-    const url = this._sseUrl(`/gateway/signal/sse/${encodeURIComponent(kind)}`);
+    const url = this._sseUrl(`/gateway/signal/sse/${pathSegment(kind)}`);
     yield* sseStream<Signal>({ url, headers: this.auth }, (data, event) => {
       const raw = parseLossless(data) as {
         kind?: string; sender: string; payload_b64: string; nonce: number | string;
@@ -512,7 +528,7 @@ export class MyceliumAgent {
    * `rpcRespond`). A serving agent should not hold `mesh:write`, which also opens `rpcCall`.
    */
   async *rpcServe(kind: string): AsyncGenerator<RpcRequest> {
-    const url = this._sseUrl(`/gateway/rpc/serve/${encodeURIComponent(kind)}`);
+    const url = this._sseUrl(`/gateway/rpc/serve/${pathSegment(kind)}`);
     yield* sseStream<RpcRequest>({ url, headers: this.auth }, (data, event) => {
       const raw = JSON.parse(data) as {
         kind?: string; nonce_hex: string; sender: string; payload_b64: string;
@@ -542,6 +558,11 @@ export class MyceliumAgent {
   /**
    * Fan-out RPC to multiple targets; waits for at least `minOk` replies.
    * Throws `TimeoutError` if the threshold is not met.
+   *
+   * `minOk` defaults to **1** — the gateway's own default and the Python SDK's: the call returns at the
+   * first reply and the other targets are cancelled. Pass `minOk: targets.length` to wait for every
+   * target. `timeoutSecs` defaults to 10, the gateway's. Before 0.2.4 this SDK alone defaulted to every
+   * target and 5 s.
    */
   async scatterGather(
     targets: string[],
@@ -554,9 +575,9 @@ export class MyceliumAgent {
       // `gw_scatter` reads `method`; this sent `kind`, and every call was refused 400 (sweep 2026-10-06).
       method,
       payload_b64: b64(payload),
-      min_ok: options.minOk ?? targets.length,
+      min_ok: options.minOk ?? 1,
       // Whole seconds: the gateway reads `as_u64()`, and a fraction became its 10 s default silently.
-      timeout_secs: wholeSeconds(options.timeoutSecs ?? 5),
+      timeout_secs: wholeSeconds(options.timeoutSecs ?? 10),
     }) as { ok: boolean; replies?: Array<{ sender: string; result_b64: string }>; error?: string };
     if (!data.ok) throw Object.assign(new Error("scatter_gather timeout"), { name: "TimeoutError" });
     return (data.replies ?? []).map((r) => ({
@@ -584,7 +605,7 @@ export class MyceliumAgent {
    * Events are delivered in HLC-causal order and tombstoned on delivery.
    */
   async *mailbox(kind: string): AsyncGenerator<MailboxEvent> {
-    const url = this._sseUrl(`/gateway/mailbox/${encodeURIComponent(kind)}`);
+    const url = this._sseUrl(`/gateway/mailbox/${pathSegment(kind)}`);
     yield* sseStream<MailboxEvent>({ url, headers: this.auth }, (data) => {
       const raw = JSON.parse(data) as {
         kind: string; sender: string; payload_b64: string;
@@ -637,7 +658,7 @@ export class MyceliumAgent {
     }) as { guard_id: string; token: string };
     const guardId = data.guard_id;
     return new LockGuard(guardId, toBigInt(data.token), async () => {
-      await this._delete(`/gateway/overlay/lock/${guardId}`);
+      await this._delete(`/gateway/overlay/lock/${pathSegment(guardId)}`);
     });
   }
 
@@ -789,7 +810,7 @@ export class MyceliumAgent {
    */
   async shardFor(ns: string, name: string, key: string): Promise<string> {
     const resp = await fetch(
-      `${this.base}/gateway/shard/${encodeURIComponent(ns)}/${encodeURIComponent(name)}?key=${encodeURIComponent(key)}`,
+      `${this.base}/gateway/shard/${pathSegment(ns)}/${pathSegment(name)}?key=${encodeURIComponent(key)}`,
       { headers: this.auth },
     );
     if (resp.status === 404) throw new Error(`no providers for ${ns}/${name}`);

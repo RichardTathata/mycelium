@@ -1,4 +1,5 @@
 import { authHeaders, baseUrl, resolveToken, type AuthOptions } from "./auth";
+import { pathSegment } from "./wire";
 /**
  * mycelium/prompt_skill — TypeScript client for LLM Prompt Skills.
  *
@@ -144,7 +145,7 @@ export class PromptSkillClient {
    * Returns `null` if the key does not exist.
    */
   async get(ns: string, name: string): Promise<PromptTemplate | null> {
-    const resp = await this.fetch(`/gateway/prompts/${ns}/${name}`, {
+    const resp = await this.fetch(`/gateway/prompts/${pathSegment(ns)}/${pathSegment(name)}`, {
       ignoreNotFound: true,
     });
     if (resp.status === 404) return null;
@@ -160,7 +161,7 @@ export class PromptSkillClient {
    * immediately without restarting any skill handler.
    */
   async updatePrompt(ns: string, name: string, template: PromptTemplate): Promise<void> {
-    await this.fetch(`/gateway/prompts/${ns}/${name}`, {
+    await this.fetch(`/gateway/prompts/${pathSegment(ns)}/${pathSegment(name)}`, {
       method: "PUT",
       body: JSON.stringify(templateToWire(template)),
       headers: { "Content-Type": "application/json" },
@@ -174,7 +175,7 @@ export class PromptSkillClient {
    * expire (within 30 s).
    */
   async deletePrompt(ns: string, name: string): Promise<void> {
-    await this.fetch(`/gateway/prompts/${ns}/${name}`, { method: "DELETE" });
+    await this.fetch(`/gateway/prompts/${pathSegment(ns)}/${pathSegment(name)}`, { method: "DELETE" });
   }
 
   // ── Skill invocation ───────────────────────────────────────────────────────

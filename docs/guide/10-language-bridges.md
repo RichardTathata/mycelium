@@ -339,7 +339,7 @@ shapes; the SDK READMEs carry the receipt narrative, this table carries the wire
 | `GET /gateway/kv?key=K` | → `{"found": true, "value_b64": "…"}` or `{"found": false}` | a local read |
 | `POST /gateway/kv` | `{"key", "value_b64"}` → `{"ok": true, "operation_id", "local_durability", "local_durability_error"?}` | the write's **receipt**: rung 1, and rung 2 as `local_durability` (`on_disk` · `buffered` · `not_configured` · `failed`, the SDKs' vocabulary) — added 2026-09-26; before it the route answered a bare `{"ok": true}`; a missing `value_b64` is **400 and no mutation** since 2.14.0; `""` writes an empty value. A key in a namespace the substrate or a companion owns (`src/lib.rs` § KV namespace ownership; `ckpt/`, `ckptw/`, `manifest/`, `schemas/` and `agent/{node}/provision/…` excepted) is **403** `{"error": "protected_key", "message": <the route that owns it>}` whatever the token (2.27.0; `sys/`/`consensus/` since 2.26.0) — the same for `DELETE`, `/kv/quorum` and `consistent/set` |
 | `POST /gateway/kv/quorum` | `{"key", "value_b64", "min_acks", "timeout_secs"}` → `{"ok", "acks_received"}` or `{"ok": false, "error": "timeout", "acks_received", "unknown_peers"}` | rung 3: `unknown_peers` is *silence*, not refusal — `DeliveryUnknown` in the receipt vocabulary |
-| consensus commits (`/gateway/overlay/consistent/set`, …) | → `{…, "persisted", "local_durability", "local_durability_error"?}` | rung 2 for the commit; `persisted: false` with `local_durability_error` says why. Not committed: **409** `{"ok": false, "error": "superseded"}` (Python 0.2.8 raises `SupersededError`; TypeScript a generic error) (the slot was decided for another value — the normal answer to a concurrent loser since 2.30.0), 409 `topology_unsatisfied` (and `electorate_unavailable` from lock and elect), **504** on a timeout |
+| consensus commits (`/gateway/overlay/consistent/set`, …) | → `{…, "persisted", "local_durability", "local_durability_error"?}` | rung 2 for the commit; `persisted: false` with `local_durability_error` says why. Not committed: **409** `{"ok": false, "error": "superseded"}` (`SupersededError` in both SDKs — Python 0.2.8, TypeScript 0.2.4) (the slot was decided for another value — the normal answer to a concurrent loser since 2.30.0), 409 `topology_unsatisfied` (and `electorate_unavailable` from lock and elect), **504** on a timeout |
 | `GET /gateway/signal/sse/{kind}` | SSE; event name = the kind; data `{"kind", "sender", "payload_b64", "nonce"}` (`kind` in the data since 2.24.0; `nonce` is a u64 — parse it losslessly) | delivered to **this** subscriber. The node holds at most 256 undelivered signals per subscription and drops past that, logging `Signal handler channel full; signal dropped` — signals are best-effort |
 | `GET /signals/{kind}` | the same event; data `{"kind", "sender", "payload_b64", "nonce", "payload"}` — `payload` is the same base64 as `payload_b64`, kept for readers of the older shape (2.26.0) | as above |
 
@@ -351,6 +351,31 @@ Scopes: `kv:read` for the GET, `kv:write` for both POSTs; `mesh:read` for the tw
 each carrying the gateway's message (`mycelium-py` 0.2.7, where each is also the `httpx.HTTPStatusError` it raised
 before; `mycelium-ts` 0.2.2, where `delete()` now carries the body too). No scope fixes either refusal: use the
 route the message names ([deprecations.md §19](deprecations.md)).
+
+**A dropped stream is not resumed — not built: the gateway has no resume point.** No SSE route
+(`/gateway/signal/sse/{kind}`, `/signals/{kind}`, `/gateway/rpc/serve/{kind}`, `/gateway/mailbox/{kind}`,
+`/gateway/overlay/log/subscribe`, `/gateway/overlay/log/group/subscribe`) sends an event `id:` or reads
+`Last-Event-ID`, so neither SDK reconnects: the stream ends, or raises the transport's error, when the
+connection drops. A client re-opens it in a loop, and what it misses in the gap depends on the stream:
+
+| Stream | On re-open |
+|---|---|
+| signals (`on_signal` / `onSignal`, `/signals/{kind}`) | nothing emitted in the gap is delivered later — signals are best-effort |
+| `rpc_serve` / `rpcServe` | a request that arrived in the gap reached no server; its caller timed out, which is *unknown*, not *not done* |
+| `mailbox` | events stay in the KV until delivered, so the re-opened stream delivers what is still there — at-least-once, so handle duplicates |
+| `subscribe_log` / `subscribeLog` | resume with `since` = the last handled entry's `hlc + 1` (the cursor is inclusive) |
+| `subscribe_log_group` / `subscribeLogGroup` | contends for the group's claim again and resumes from the group's persisted offset, which advances when the gateway **sends** an entry, not when the client finishes it — an entry in flight at the drop is not sent again |
+
+Building reconnect means a resume point first — an event id per stream that the gateway can serve from
+— which is a gateway feature with a compatibility window, not an SDK patch (post-360 hardening plan,
+row G and decision D4).
+
+**Timeouts and path segments.** Every `timeout_secs` the gateway reads is an integer: both SDKs send whole
+seconds, a fraction rounded up (`mycelium-py` 0.2.10, `mycelium-ts` 0.2.0/0.2.4; the tuple `take` keeps `0`, its
+poll). A caller-supplied value that becomes one path segment — a kind, a prompt's `ns`/`name`, a run or blob id,
+a domain, a handle or guard id — is percent-encoded, and `.`/`..` is refused before any request (a URL parser
+resolves it, encoded or not). `scatter_gather` / `scatterGather` wait for **one** reply unless told otherwise
+(`min_ok` / `minOk`), the gateway's own default — `mycelium-ts` before 0.2.4 waited for every target.
 
 ## Authenticating to a token-protected gateway
 

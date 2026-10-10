@@ -1,4 +1,5 @@
 import { authHeaders, baseUrl, resolveToken, type AuthOptions } from "./auth";
+import { wholeSeconds } from "./wire";
 /**
  * mycelium/wiki — TypeScript client for the Mycelium group wiki.
  *
@@ -104,12 +105,13 @@ export class Wiki {
   /** Submit a staged batch.s claim-check reference for bulk ingest (council-substrate Phase 4).
    * The payload never rides the request — the curator fetches from its own BatchSource, applies
    * the whole batch atomically through its write gate, and returns the summary. Sizing contract:
-   * a batch = one meeting. */
+   * a batch = one meeting. `timeoutSecs` is sent in whole seconds, a fraction rounded up (0.2.4: the
+   * route reads an integer and refused a fraction 422). */
   async ingest(reference: string, timeoutSecs = 60): Promise<{ summary: { applied: number; refused: number; findings: string[] } }> {
     const r = await fetch(`${this.baseUrl}/gateway/wiki/ingest`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...this.auth },
-      body: JSON.stringify({ group: this.group, reference, timeout_secs: timeoutSecs }),
+      body: JSON.stringify({ group: this.group, reference, timeout_secs: wholeSeconds(timeoutSecs) }),
     });
     if (!r.ok) throw new Error(`wiki ingest failed: ${r.status}`);
     return (await r.json()) as { summary: { applied: number; refused: number; findings: string[] } };

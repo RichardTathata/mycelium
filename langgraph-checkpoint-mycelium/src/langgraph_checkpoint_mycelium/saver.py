@@ -21,6 +21,8 @@ Key encoding: every path segment is percent-encoded (``quote(seg, safe="")``)
 so thread ids and namespaces cannot forge ``/`` separators; the **empty**
 ``checkpoint_ns`` (LangGraph's default namespace is ``""``) is encoded as the
 sentinel segment ``__root__`` — which is therefore reserved as a namespace name.
+A blob id read back from a row is encoded the same way when it becomes the blob
+route's path segment (0.3.3; it was interpolated raw — the row is peer-writable).
 
 Latest-checkpoint resolution: LangGraph checkpoint ids are UUID6 — fixed-width
 hex with the timestamp in the most significant bits, so **lexicographic order is
@@ -200,6 +202,18 @@ def _seg(s: str) -> str:
     return ROOT_NS if s == "" else quote(s, safe="")
 
 
+def _blob_path(blob_id: str) -> str | None:
+    """``/gateway/reason/blob/{id}`` with the id percent-encoded as **one** segment, or ``None`` for an id of
+    ``.`` or ``..`` — which any URL parser resolves to another path, encoded or not (0.3.3).
+
+    The id comes from a checkpoint row, which is peer-writable KV: interpolated raw, a row naming
+    ``../../kv/keys?prefix=`` sent this saver's bearer to ``/gateway/kv/keys``. The Python SDK's
+    ``mycelium._pool.path_segment`` rule, mirrored (this package depends on httpx only)."""
+    if blob_id in (".", ".."):
+        return None
+    return f"/gateway/reason/blob/{quote(blob_id, safe='')}"
+
+
 def _unseg(s: str) -> str:
     """Decode one key path segment."""
     return "" if s == ROOT_NS else unquote(s)
@@ -309,8 +323,13 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
 
     def _blob_try(self, blob_id: str, reasons: dict[str, str] | None = None) -> bytes | None:
         """The blob, or ``None`` with why recorded in ``reasons`` (``IncompleteCheckpoint.reasons``)."""
+        path = _blob_path(blob_id)
+        if path is None:  # no content address is a dot: what the row names cannot be fetched, ever
+            if reasons is not None:
+                _merge_reason(reasons, blob_id, "corrupt")
+            return None
         try:
-            resp = self._client.get(f"/gateway/reason/blob/{blob_id}")
+            resp = self._client.get(path)
         except httpx.TransportError:
             if reasons is not None:
                 _merge_reason(reasons, blob_id, "unavailable")
@@ -357,8 +376,13 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
 
     async def _ablob_try(self, blob_id: str, reasons: dict[str, str] | None = None) -> bytes | None:
         """Async :meth:`_blob_try`."""
+        path = _blob_path(blob_id)
+        if path is None:  # no content address is a dot: what the row names cannot be fetched, ever
+            if reasons is not None:
+                _merge_reason(reasons, blob_id, "corrupt")
+            return None
         try:
-            resp = await self._aclient.get(f"/gateway/reason/blob/{blob_id}")
+            resp = await self._aclient.get(path)
         except httpx.TransportError:
             if reasons is not None:
                 _merge_reason(reasons, blob_id, "unavailable")

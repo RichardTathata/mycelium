@@ -50,7 +50,7 @@ from typing import Any, Optional
 
 import httpx
 
-from ._pool import ClientPool, base_url
+from ._pool import ClientPool, base_url, path_segment
 
 
 class FederationError(Exception):
@@ -161,7 +161,7 @@ class Federation:
         """The **last observed** catalogue for one partner — no network, so looking at a partner
         during an outage does not change the link's state. :meth:`connect` is the one that asks."""
         with self._pool.sync() as c:
-            r = c.get(f"/gateway/federation/catalog/{domain}")
+            r = c.get(f"/gateway/federation/catalog/{path_segment(domain)}")
         if r.status_code != 200:
             _raise(r)
         return r.json()

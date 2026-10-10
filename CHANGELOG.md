@@ -142,6 +142,40 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   variable set, the stub gateway saw `None` where `Bearer env-token` was expected). The review also corrected the
   saver's scope list: every `put()` writes blobs through `PUT /gateway/reason/blob`, which is `llm:write`, so the
   saver needs `kv:read`, `kv:write`, `llm:read` **and `llm:write`** (the README named three).
+- **The SDKs' edges with the gateway** (`mycelium-py` **0.2.10**, `mycelium-ts` **0.2.4**,
+  `langgraph-checkpoint-mycelium` **0.3.3**; post-360 hardening row G). **Whole-second timeouts:** the gateway reads
+  `timeout_secs` as an integer — `as_u64().unwrap_or(30|10)` on `rpc/call` and `scatter`, a `u64` field on
+  `overlay/emit_reliable`, `wiki/ingest` and the tuple `take` routes — so the Python SDK's fractional
+  `rpc_call`/`scatter_gather` timeout was silently replaced by the route's default while the client gave up at
+  `t + 5`, `emit_reliable` and `Wiki.ingest` were refused 422, and `TupleSpace.take`/`take_by_key` sent
+  `int(t)`, a zero-second park for `0 < t < 1`; `mycelium-ts`'s tuple `take`s and `Wiki.ingest` were refused 422
+  for a fraction. Every one now rounds up (never below 1; `take` keeps `0`, its poll) — one rule per language,
+  `mycelium._pool.whole_seconds` and `mycelium-ts` `wire.ts`. **Path segments escaped:** a prompt's
+  `ns`/`name`, a signal/serve/mailbox kind, a shard name, a run or blob id, a federation domain, a capability
+  handle or lock guard id was interpolated into the path raw in Python (and the prompt routes and handle/guard
+  ids in TypeScript), so `/`, `?` or `#` in a value changed the route; the checkpointer took its blob id from a
+  peer-writable row, and a row naming `../../kv/keys?prefix=` sent the saver's bearer to `/gateway/kv/keys`. Each
+  is now percent-encoded as one segment, and `.`/`..` — which a URL parser resolves even encoded (WHATWG reads
+  `%2e%2e` as `..`) — is refused before any request (`ValueError` / `Error`; the checkpointer reads such an id as
+  `corrupt` and never fetches it). Enumerated with `grep -rn 'f"/gateway\|f"{self._base' mycelium-py/src
+  langgraph-checkpoint-mycelium/src` and ``grep -rn '`/gateway[^`]*\${\|/gateway/.*\${' mycelium-ts/src``.
+  **`SupersededError` in TypeScript:** a lost `consistentSet`/`crossGroupPropose`/`distributedLock`/`electLeader`
+  (409 `{"error": "superseded"}`) threw a plain `Error`; it now throws `SupersededError` (`status` 409), as the
+  Python SDK has since 0.2.8 — a 409 `topology_unsatisfied` and a 504 stay what they were. **SSE reconnect —
+  not built: the gateway has no resume point** (no SSE route sends an event `id:` or reads `Last-Event-ID`);
+  both READMEs and guide 10 now say what each stream loses when it drops and how to re-open it. Seen failing
+  first: `mycelium-py/tests/test_sdk_edges.py` (`assert (<class 'float'> is int)`; `assert (<class 'int'> is int
+  and 0 == 1)` for `take(0.3)`; `'/gateway/fed...n/catalog/a/b' == '/gateway/fed...catalog/a%2Fb'`),
+  `langgraph-checkpoint-mycelium/tests/test_blob_path.py` (`b'/gateway/kv/keys?prefix=' !=
+  b'/gateway/reason/blob/..%2F..%2Fkv%2Fkeys%3Fprefix%3D'`), `mycelium-ts/tests/sdk_edges.test.ts` (38 failed:
+  the tuple and wiki timeouts, the prompt and handle/guard segments, every dot segment, `SupersededError`, the
+  `scatterGather` default).
+- **`mycelium-ts` 0.2.4: `scatterGather` has the gateway's defaults.** With no `minOk` it waited for **every**
+  target and gave up after 5 s, where the gateway, the Python SDK and the route's docs default to **one** reply and
+  10 s. It now sends `min_ok: 1` and 10 s; both READMEs document the default. **Upgrade note:** a TypeScript
+  caller that relied on hearing from every target must pass `{ minOk: targets.length }` — with the new default
+  the call returns at the first reply and the gateway cancels the rest. Seen failing first:
+  `scatterGather waits for one reply by default` (`min_ok` was `2` for two targets).
 - **The audit chain's head survives a restart.** `AuditChainState::new()` is genesis and nothing read the persisted
   `sys/audit/{self}/` stream back at `start()`, so a restarted node with `[persistence]` sealed seq 0 again with a
   zero `prev_hash` and LWW overwrote its own genesis record — the tamper-evident chain erased its history at every

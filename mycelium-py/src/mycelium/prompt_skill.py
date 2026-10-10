@@ -36,7 +36,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from ._pool import ClientPool, base_url
+from ._pool import ClientPool, base_url, path_segment
 
 
 @dataclass
@@ -123,7 +123,7 @@ class PromptSkillClient:
         Returns ``None`` if the key does not exist.
         """
         async with self._pool.asy() as c:
-            resp = await c.get(f"/gateway/prompts/{ns}/{name}")
+            resp = await c.get(f"/gateway/prompts/{path_segment(ns)}/{path_segment(name)}")
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
@@ -139,7 +139,7 @@ class PromptSkillClient:
         """
         async with self._pool.asy() as c:
             resp = await c.put(
-                f"/gateway/prompts/{ns}/{name}",
+                f"/gateway/prompts/{path_segment(ns)}/{path_segment(name)}",
                 json=template.to_dict(),
             )
         resp.raise_for_status()
@@ -153,7 +153,7 @@ class PromptSkillClient:
         objects on the Rust side first so capability entries evaporate naturally.
         """
         async with self._pool.asy() as c:
-            resp = await c.delete(f"/gateway/prompts/{ns}/{name}")
+            resp = await c.delete(f"/gateway/prompts/{path_segment(ns)}/{path_segment(name)}")
         resp.raise_for_status()
 
     # ── Skill invocation ───────────────────────────────────────────────────────
