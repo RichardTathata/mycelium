@@ -32,7 +32,7 @@ Seven confirmed gateway findings, each with a test seen failing first:
 
 Pages touched: `dev/concurrency/lock-order.md` (row 2 revised, row 55 added); this log. Operator docs:
 `docs/operations/rbac.md`, `what-is-proven.md`, `companions.md`; `docs/guide/08-a2a-interop.md`,
-`09-security.md`, `deprecations.md` §23; `CHANGELOG.md` `[Unreleased]`; `mycelium-reason/CHANGELOG.md` 0.8.0;
+`09-security.md`, `deprecations.md` §25; `CHANGELOG.md` `[Unreleased]`; `mycelium-reason/CHANGELOG.md` 0.8.0;
 the Phase-C log's finding 2 carries a dated note. Lesson for the lint: a door that *observes* protected work
 (SSE) is as much a door as one that sends it, and a scope that names a route (`mesh:serve`) binds neither a
 kind nor a request unless the handler does.

@@ -9,7 +9,7 @@
 - **The 300 s answer window (F2)** is the gateway's RPC ceiling; `/gateway/llm/call` now clamps to it; an
   in-process `rpc_call` is not bounded by it (stated on `SERVED_RPC_TTL_MS`).
 - **`Signal::sender` is emitter-written (F3).** The `(nonce, sender)` claim stops a stray reply, not a forger who
-  writes the target's id — stated in `SystemStats`, lock-order row 2, deprecations §23.
+  writes the target's id — stated in `SystemStats`, lock-order row 2, deprecations §25.
 - **Public surface (F4).** `COMPANION_PUBLIC_PATHS` lists agentfacts' two routes; the test is renamed
   `every_listed_public_path_is_mounted_and_public_and_gated_paths_are_not` (it was
   `the_public_surface_is_exactly_the_documented_list`) and checks mounting by 405 — axum cannot enumerate routes,

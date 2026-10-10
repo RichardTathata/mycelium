@@ -212,7 +212,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `a_task_is_readable_and_cancellable_only_by_the_identity_that_created_it` (the second principal read the first's
   task). **Upgrade note:** an A2A client that polls `tasks/get` must send it under the same bearer as its
   `tasks/send`; an anonymous client gets its result on the `tasks/send` response or the `sendSubscribe` stream, which
-  already carry it (`deprecations.md` §23).
+  already carry it (`deprecations.md` §25).
 - **`mycelium-tuple-space`'s `GET /api/tuple` answered without a bearer.** The gateway's auth boundary is a path
   prefix, and the cluster-wide tuple overview (every node's role, WAL bytes, per-stage depth and pressure) was
   mounted outside it. It is now `GET /gateway/tuple/overview` behind `tuple:read`; `/api/tuple` answers 404 (the
@@ -221,7 +221,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `the_public_surface_is_exactly_the_documented_list` probes a running gateway. Seen failing first:
   `the_overview_sits_behind_the_gateway_bearer` (the old path answered 200 with no bearer). **Upgrade note:** a
   dashboard or the integration scenario reading `/api/tuple` must read `/gateway/tuple/overview` with a
-  `tuple:read` (or legacy) bearer (`deprecations.md` §23).
+  `tuple:read` (or legacy) bearer (`deprecations.md` §25).
 - **`/gateway/llm/call` and `/gateway/llm/stream` ran no action preflight.** The raw routes refuse `llm.invoke` and
   name `/gateway/llm/call` as its door, yet neither door consulted the evaluator `/mcp` and `/a2a` consult — a policy
   denying `llm.invoke` was walked around by choosing it. Both now run `ae_preflight` under `gateway:llm/call` /
@@ -241,7 +241,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   whatever the token holds; an ordinary kind still streams. Added to the C7 bypass matrix. Seen failing first:
   `sse_doors_refuse_protected_kinds` (both doors answered 200 for `mcp.invoke`). **Upgrade note:** a dashboard or
   SDK reader subscribed to `mcp.invoke`, `skill.invoke`, `llm.invoke` or a configured `protected_rpc_kinds` entry
-  now gets 403 at open; read the decision trace or the evidence journal instead (`deprecations.md` §23).
+  now gets 403 at open; read the decision trace or the evidence journal instead (`deprecations.md` §25).
 - **`mesh:serve` bound to neither a kind nor a request: `rpc/respond` could pre-empt any in-flight RPC by nonce.**
   Two defects, one door. (a) The reply interceptor claimed a pending call's oneshot on **nonce match alone**, and
   `await_nonce_reply` then dropped the reply on sender mismatch — so the oneshot was consumed either way, and a peer
@@ -261,7 +261,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   was expected) and `rpc_respond_answers_only_a_request_this_principal_was_handed` (the other principal's reply
   answered 200 and the caller received it). **Upgrade note:** an SDK agent that answers with a nonce from its own
   serve stream is unaffected; one that answered on another agent's behalf (a different bearer) now gets 403 — open
-  the stream and respond under one credential (`deprecations.md` §23). `SystemStats` gained a field (an exhaustive
+  the stream and respond under one credential (`deprecations.md` §25). `SystemStats` gained a field (an exhaustive
   literal breaks).
 - **The adversarial review's findings on #587** (rule 4), each fixed before merge. (F1) Two serve streams of one
   principal on one kind both receive each request, so the second replica's `rpc/respond` got `403 unserved_request`
@@ -271,7 +271,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`[200, 403]`). (F2) The 300 s answer window assumed every door waits at most 300 s: `/gateway/llm/call` clamps
   `timeout_ms` to it; an in-process `rpc_call`'s bound is stated. Seen failing first (clamp toggled off):
   `the_llm_door_timeout_is_clamped_to_the_gateway_ceiling`. (F3) The `(nonce, sender)` claim closes the accidental
-  case, not a forger who writes the target's id — `sender` is emitter-written; said so in `SystemStats`, §23 and
+  case, not a forger who writes the target's id — `sender` is emitter-written; said so in `SystemStats`, §25 and
   lock-order row 2. (F4) `mycelium-agentfacts`' two `/.well-known/agent-facts*` routes are listed
   (`COMPANION_PUBLIC_PATHS`, rbac.md); the public-surface test is renamed for what it checks and checks mounting by
   405 (it failed in a build without `metrics`, whose `/metrics` answers 404 by design). (F5) The A2A owner check and

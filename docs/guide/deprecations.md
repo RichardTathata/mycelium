@@ -477,7 +477,7 @@ a refusal read as a commit is the class of bug `ElectorateUnavailable` ended, on
 `/gateway/govern/group` (`govern:write`) for a governed group. A client that elected a leader for a group its
 node had not joined was never electing anything the group's members agreed to.
 
-## 23. The gateway's doors answer only what they were asked by whom (unreleased)
+## 25. The gateway's doors answer only what they were asked by whom (unreleased)
 
 **What changes.**
 - **The signal SSE streams refuse a protected kind.** `GET /signals/{kind}` and `GET /gateway/signal/sse/{kind}`
