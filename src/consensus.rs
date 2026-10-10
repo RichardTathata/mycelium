@@ -228,11 +228,14 @@ pub enum ConsensusResult {
     Timeout {
         slot:          Arc<str>,
         ballots_tried: u32,
-        /// Votes received during the final ballot attempt.
+        /// Votes counted in the latest attempt whose vote phase ran out without a commit or a refusal.
         ///
-        /// Distinguishes "no voters heard at all" (likely partition) from
-        /// "some voters heard but quorum was not met" (likely overloaded members
-        /// or quorum set too high). `0` if no vote arrived in the last ballot.
+        /// In `propose` (one group) the proposer's own vote is included; `0` if no attempt got that
+        /// far. Since 2.30.0 a partition or a promise shortfall ends an attempt in the prepare phase,
+        /// so this does **not** tell them apart — it may read `0` or an earlier attempt's count. The cause of a
+        /// timeout is the `reason` label on `mycelium_consensus_timeouts_total` (`metrics`): `no_voters`,
+        /// `promise_short`, `contended`, `blocked`, `quorum_short`. In `cross_propose` it is the sum of
+        /// the last attempt's accepts across the groups.
         votes_last_ballot: usize,
         /// Quorum size that was required (as computed at proposal time).
         ///

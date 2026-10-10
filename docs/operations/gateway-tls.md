@@ -17,7 +17,11 @@ This is the right choice when you already run a proxy/mesh or want a hostname ce
 
 Set `gateway_tls` and the gateway serves HTTPS directly — no proxy required. It is **server-side
 TLS only** (no client-cert demand), unlike the mutually-authenticated gossip transport (`tls`), so
-ordinary HTTP clients (SDKs, curl, browsers) connect normally.
+ordinary HTTPS clients (curl, browsers) connect normally. **The SDKs through `mycelium-py` 0.2.8,
+`mycelium-ts` 0.2.2 and `langgraph-checkpoint-mycelium` 0.3.1 do not:** each builds an `http://` URL
+(`mycelium-py/src/mycelium/agent.py`, `mycelium-ts/src/agent.ts`, the checkpointer's `saver.py`), so from them
+a gateway serving only HTTPS is reached only through something on the client's side that originates TLS (a
+service-mesh sidecar, a local proxy). Check your SDK's README for a `scheme` option before relying on it.
 
 ```rust
 use mycelium::{GossipConfig, GatewayTlsConfig, TlsConfig};
@@ -40,7 +44,7 @@ cfg.gateway_tls = Some(GatewayTlsConfig {
 
 | Mode | Cert used | Trust story |
 |---|---|---|
-| Both fields `None` (default) | The node identity cert (from `tls`), served with no client-cert demand | Carries an **IP SAN** only — fits **CA-pinning SDK clients** and proxied setups, **not** hostname/browser trust. Requires `GossipConfig::tls` (else startup errors). Rotates automatically with the node identity (hot cert rotation). |
+| Both fields `None` (default) | The node identity cert (from `tls`), served with no client-cert demand | Carries an **IP SAN** only — fits **CA-pinning clients** and proxied setups, **not** hostname/browser trust. Requires `GossipConfig::tls` (else startup errors). Rotates automatically with the node identity (hot cert rotation). |
 | `cert_pem_path` + `key_pem_path` | Your PEM cert chain + PKCS8 key | Use a cert with a real **DNS SAN** for browser/hostname clients. Both fields must be set together. You own its rotation. |
 
 **Feature gate.** Native gateway TLS needs the `tls` feature (which `compliance` implies). A
