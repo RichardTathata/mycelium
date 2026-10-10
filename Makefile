@@ -182,7 +182,8 @@ check:
 	./scripts/with-pyyaml.sh scripts/test-check-example-matrix.py  # …and a ✓ row with no run, or a run with a · row, fails it
 	python3 scripts/test-ci-test-coverage.py                    # the observed-coverage job's log parser (the record of rule 3)
 	./scripts/test-ci-retest.sh                                 # the flake tier fails a crash, and a retry that ran nothing
-	./scripts/check-kv-namespaces.sh                            # no foreign state in the gossip medium (D7)
+	./scripts/check-kv-namespaces.sh                            # no foreign state in the gossip medium (D7); every KV prefix has a lib.rs row or a declared non-key
+	./scripts/check-kv-namespaces.sh --self-test                # …and planted rowless prefixes fail it, by name
 	./scripts/check-wiki-mutation-fence.sh                      # every wiki mutation path stays inside the mandate boundary
 	./scripts/check-positioning.sh                              # shared proposition, audience routes, resources and capability coverage
 	python3 scripts/test-check-materials.py                      # missing links/coverage and claim regressions must fail

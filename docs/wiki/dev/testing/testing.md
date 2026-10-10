@@ -29,7 +29,21 @@ cargo clippy --lib --no-default-features -- -D warnings     # minimal embed — 
 cargo clippy -p mycelium-wasm-host --all-targets -- -D warnings   # wasm-host embeds mycelium default-features=false
 cargo test -p mycelium-gateway-free-tests                   # the one test build of `mycelium` without `gateway` (or `tls`) — run alone (R8, 2026-10-05)
 cargo test -p mycelium-tls-free-tests                       # …and the one with `gateway` and without `tls` — run alone (2026-10-08)
+./scripts/check-kv-namespaces.sh                            # D7's forbidden prefixes · every KV prefix in production code has a src/lib.rs row or a declared non-key · the front door's two lists
+./scripts/check-kv-namespaces.sh --self-test                # plants rowless prefixes in a scratch copy; the gate must name each (2026-10-10)
 ```
+
+**The KV namespace table is a gate, not a lint item** (2026-10-10). `check-kv-namespaces.sh` enumerates the
+slash-bearing `const`/`static` `&str` literals, `format!("seg/…")` heads and first literals of KV calls in every
+library crate's production code, plus every entry of a constant `&str` array or slice (the call set is named in
+the script's header), matches each against the rows' patterns (the key before its first `{` — `consensus/decided/`,
+not just `consensus/`), and fails on one with no row in `src/lib.rs` § KV namespace ownership unless `scripts/kv-namespaces-nonkeys.txt` declares it a non-key with a reason (seam streams, slot and
+ring names, schema tags, git paths, relative segments). A stale or reasonless entry fails too. Why: the wiki
+lint missed live prefixes five times, the last four governor keys rowless since June. What it cannot see is in
+the script's header (a prefix built from pieces, a literal two lines below its call). Its test-item skip covers
+exactly the item a `#[cfg(test)]` attribute applies to (to its `;` or matching `}`, at any indentation) — the
+column-0-`}` skip `check-sim-seams.sh` still uses hid production code after a one-line `#[cfg(test)] mod x;` or an
+indented `#[cfg(test)] fn` (the adversarial review of #591).
 
 **`make check-full` is NOT the whole CI gate — a green local run does not prove CI is green.** The
 block above is the *Rust lib + clippy* set (CI runs its test lines through `scripts/ci-retest.sh`, the compliance

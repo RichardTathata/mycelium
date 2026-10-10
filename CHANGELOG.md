@@ -32,6 +32,67 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   extended to entry 22; `converge.py`'s path; `cluster_propose` as the canonical verb in the crate docs; the
   `test-overlay` help comment on its own target; the deck's rolling-upgrade note restated per 2.30.0.
 
+### Added
+- **The KV namespace table is a gate now, not a lint item.** `scripts/check-kv-namespaces.sh` enumerates every
+  KV prefix production code uses — slash-bearing `const`/`static` `&str` literals whatever their name, `format!`
+  key heads, and the first literal of a KV call (`set*`, `get`, `delete*`, `scan_*`, `subscribe*`, `kv_*`,
+  `make_gossip_update*`, `publish_*`, `strip_prefix`/`starts_with`; the set is named in the script's header) in
+  every library crate — and fails on one whose namespace (top segment; under `sys/`, the second too) has no row in
+  `src/lib.rs` § KV namespace ownership, unless `scripts/kv-namespaces-nonkeys.txt` declares it a non-key with a
+  reason (36 entries today: seam and journal streams, slot and ring names, schema tags, knowledge subjects, an
+  operation id, a prompt id, git paths, relative segments). A literal is matched against the table's **row patterns**
+  (`consensus/decided/`, `sys/govern/timing`), not its top segment, so a new key under a namespace with several rows
+  needs its own row; entries of constant `&str` arrays and slices are enumerated; and the test-item skip covers
+  exactly the item a `#[cfg(test)]` attribute applies to (the adversarial review of #591: the column-0-`}` skip hid
+  `mycelium-reason/src/route.rs:372-573`). A stale or reasonless entry fails too, and `--self-test` (in `make check` and CI) plants rowless
+  prefixes in a scratch copy and requires the gate to name each. The wiki lint had missed live prefixes five
+  times; the table gains the four it missed last (`sys/config/{param}`, `sys/govern/timing`, `sys/govern/fleet`,
+  `sys/govern/membership/{group}`, as PR #588 adds them). Seen failing first: the gate on the unfixed table names
+  `sys/config/` (`cluster_tuner.rs:26`) and `sys/govern/` (`membership_governor.rs:32`, `timing_governor.rs:38`,
+  `tuning_governor.rs:31`). **Not seen:** a prefix assembled from pieces, or a literal two lines below its call.
+- **A companion's gateway door can act as the HTTP client, under the evaluator** — the public API
+  `mycelium-reason`'s façade needed and nothing had: `ResolvedPrincipal` (the auth layer's resolved principal, read
+  from axum's `Extension` on a route merged with `with_http_routes`; fields crate-private, so it is never
+  constructed outside the auth layer), `ServiceHandle::rpc_call_as` (the gateway dispatch, carrying the client's
+  caller context), `GossipAgent::gateway_preflight` / `gateway_record_execution` (the preflight `/mcp`, `/a2a` and
+  `/gateway/llm/call` run, opaque `GatewayPreflight` / `GatewayRefusal`, inert without `tls`) and
+  `GatewayDispatchError` (`#[non_exhaustive]`). All under `gateway`; additive.
+- **Tripwires on two consensus records a peer should not write.** The `sys/` namespace tripwire
+  (`sys_namespace_violations`) now also covers `sys/consensus-accepted/{node}/…` — the acceptor's durable promise and
+  acceptance, which only that node's `persist_acceptor` writes and `prewarm_accepted` restores, so a peer writing
+  ours is forging a promise we never made — and the identity record's other two forms, `sys/identity-signed/{node}`
+  and `sys/identity-proof/{node}`, written only by the node itself. **And it counts only a write that changed
+  what this node holds and that this node did not write** — a gossip frame from another originator, or an
+  anti-entropy entry that replaced a value it held with a different one — for all eight prefixes: anti-entropy
+  handing a node its own records back after a restart used to count each one (the adversarial review of #591
+  measured 62 over 30 commits; the pre-existing prefixes counted 1). Seen failing first:
+  `anti_entropy_repair_after_a_restart_is_not_a_namespace_violation` (C counted 5) and
+  `connection::tests::anti_entropy_repair_of_my_own_record_is_not_counted`; and, for the prefixes:
+  `test_sys_namespace_tripwire_flags_foreign_self_owned_write` (B did not flag A's write to
+  `sys/consensus-accepted/{B}/slot-x`) and `connection::tests::flags_remote_write_to_each_self_owned_prefix`.
+  And `consensus/decided/{slot}`, which any committer writes and so is not self-owned, gets a Layer III tripwire:
+  a floor — or a ballot key, `consensus/ballot/{slot}`, read for a draw — more than `2^32` above every ballot this
+  node has itself observed for the slot (its own promise, and the ballots of verified COMMITs it processed; not the
+  shared ballot key, which any member writes — the adversarial review of #591 showed forging both keys passed
+  uncounted, and the ballot key alone exhausted the slot with no tripwire) — ballots are drawn one attempt at a
+  time, so no history of a slot gets there, while a member writing `u64::MAX` makes every later prepare on the slot
+  refuse — is counted once per slot, at most 4096 slots remembered
+  (`SystemStats::consensus_decided_floor_anomalies`, `/stats` `consensus_decided_floor_anomalies`,
+  `mycelium_consensus_decided_floor_anomalies_total`) with one `warn!`. Detection only: the floor is still obeyed
+  and the refusal is unchanged. Seen failing first: `a_forged_decided_floor_is_counted_and_still_obeyed` (the
+  count stayed 0) and `forged_ballot_keys_are_counted_as_well_as_forged_floors` (the both-keys forgery: 0, expected
+  1). **Upgrade note:** `SystemStats` gained two fields (an exhaustive struct literal breaks).
+- **A slot whose decided floor is `u64::MAX` no longer overflows the proposer.** Both proposers (group/cluster
+  and cross-group) drew every ballot as `max(ballot key, floor) + 1` — eight sites — which overflows at the
+  ceiling: a panic in any build with overflow checks, and the release profile is `panic = "abort"`, so such a
+  build lost the node; without overflow checks a wrap to ballot 0, refused below the floor. Every draw now goes
+  through `next_ballot` (`checked_add`), and a slot with no ballot left ends the proposal as a `Timeout` named
+  `ballot_exhausted` on `mycelium_consensus_timeouts_total`, counted per node on `SystemStats` and `/stats`
+  `consensus_ballot_space_exhausted`, with one `warn!`. A floor one below the ceiling still commits at
+  `u64::MAX`. The acceptor side only compares ballots and had no arithmetic to fix. Seen failing first:
+  `a_floor_at_the_ballot_ceiling_is_refused_by_name_not_overflowed` (`attempt to add with overflow` at
+  `src/consensus.rs:1146`).
+
 ### Fixed
 - **The SDKs reach a gateway over TLS** (`mycelium-py` **0.2.9**, `mycelium-ts` **0.2.3**,
   `langgraph-checkpoint-mycelium` **0.3.2**). Every client built its base URL as `http://{host}:{port}` — eight
@@ -308,15 +369,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `with_no_keys_a_failed_fetch_is_retried_after_the_short_backoff` (still refused after the back-off),
   `keys_past_the_ttl_are_refreshed` (no refresh). `a_rotated_key_is_accepted_after_the_cooldown` and
   `a_failed_refresh_keeps_the_previous_keys` pin behaviour that already held.
-
-### Added
-- **A companion's gateway door can act as the HTTP client, under the evaluator** — the public API
-  `mycelium-reason`'s façade needed and nothing had: `ResolvedPrincipal` (the auth layer's resolved principal, read
-  from axum's `Extension` on a route merged with `with_http_routes`; fields crate-private, so it is never
-  constructed outside the auth layer), `ServiceHandle::rpc_call_as` (the gateway dispatch, carrying the client's
-  caller context), `GossipAgent::gateway_preflight` / `gateway_record_execution` (the preflight `/mcp`, `/a2a` and
-  `/gateway/llm/call` run, opaque `GatewayPreflight` / `GatewayRefusal`, inert without `tls`) and
-  `GatewayDispatchError` (`#[non_exhaustive]`). All under `gateway`; additive.
 
 ### Security
 - **A hosted WASM component's `mesh.emit` is confined.** The host forwarded any kind a component

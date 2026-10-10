@@ -194,8 +194,12 @@ jobs:
       # node and fails a deadline check open.
       - run: ./scripts/check-hlc-current.sh
       # The KV namespace sweep (item 2 PR 1, D7). The plan asserted this check existed before it did;
-      # an invariant nothing runs is a sentence. Foreign state never enters the gossip medium.
+      # an invariant nothing runs is a sentence. Foreign state never enters the gossip medium — and, since
+      # 2026-10-10, every KV prefix in production code has a src/lib.rs row or a declared non-key (the
+      # wiki lint missed live prefixes five times). The self-test plants rowless prefixes and requires
+      # the gate to name each.
       - run: ./scripts/check-kv-namespaces.sh
+      - run: ./scripts/check-kv-namespaces.sh --self-test
       - run: ./scripts/check-wiki-mutation-fence.sh
       # The knowledge layer's SEMANTIC gate (item 3) — a Phase D exit condition. Its own step so the
       # exit condition is visible, rather than three tests inside a suite of hundreds. This is not

@@ -9,7 +9,7 @@ use crate::framing::{
 #[cfg(feature = "tls")]
 use crate::framing::canonical_sign_bytes;
 use crate::signal::{parse_own_grp_key, Signal, SignalScope};
-use crate::store::{apply_and_notify, intern_key, store_hash_acc};
+use crate::store::{apply_and_notify, apply_and_notify_reporting, intern_key, store_hash_acc};
 use crate::node_id::NodeId;
 use crate::writer::{get_or_spawn_writer, request_state, WriterEntry};
 use bytes::{Bytes, BytesMut};
@@ -27,38 +27,115 @@ use tracing::{error, warn};
 /// write naming *this* node is a namespace-ownership violation. `sys/quorum/`
 /// is deliberately excluded — peers legitimately write quorum evidence naming
 /// the node they observed.
-const SELF_OWNED_SYS_PREFIXES: [&str; 5] =
-    ["sys/identity/", "sys/load/", "sys/role/", "sys/tuple/", "sys/caller-context/"];
+///
+/// The last three (2026-10-10): `sys/consensus-accepted/{node}/{slot}` is the acceptor's durable
+/// promise and acceptance, written only by that node's `persist_acceptor` and restored at start by
+/// `prewarm_accepted` — a peer writing ours is forging a promise we never made; and the identity
+/// record's two other forms, `sys/identity-signed/{node}` and `sys/identity-proof/{node}`, written
+/// only by the node itself at start and on rotation, like `sys/identity/`. None is a sub-prefix of
+/// another (`sys/identity/` does not match `sys/identity-signed/…`).
+const SELF_OWNED_SYS_PREFIXES: [&str; 8] = [
+    "sys/identity/", "sys/load/", "sys/role/", "sys/tuple/", "sys/caller-context/",
+    "sys/consensus-accepted/", "sys/identity-signed/", "sys/identity-proof/",
+];
+
+/// Whether `key` lies in a `sys/` namespace this node owns — a self-owned prefix whose node-id
+/// segment is `self_node`.
+fn names_self_owned_sys_key(key: &str, self_node: &str) -> bool {
+    SELF_OWNED_SYS_PREFIXES.iter().any(|prefix| {
+        key.strip_prefix(prefix).is_some_and(|rest| rest.split('/').next() == Some(self_node))
+    })
+}
+
+/// Who an inbound update says wrote it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Origin {
+    /// A gossip frame: `GossipUpdate::sender` is the originating node's `id_hash` (relays keep it).
+    Sender(u64),
+    /// An anti-entropy entry: a `SyncEntry` names no writer — it is what the peer holds.
+    Unknown,
+}
+
+/// The `sys/` tripwire's rule: does an inbound update to a key this node owns count as a foreign
+/// write? Only when it **changed what this node holds** (`outcome` is `Applied`) **and** this node
+/// did not write it:
+/// - a gossip frame whose originator is this node (a relay's echo) never counts;
+/// - an anti-entropy entry names no originator, so it counts only when it replaced a value this
+///   node held with a different one. Re-delivering what this node holds is not applied; an older
+///   entry loses to LWW; and an entry for a key this node holds **nothing** under is this node's
+///   own record coming back (a restart without persistence, a record it never re-wrote) — a repair,
+///   never counted. A forgery that reaches this node only by anti-entropy *before* it holds its own
+///   record is therefore not seen here; a signed record still fails verification at read.
+///
+/// Until 2026-10-10 every inbound entry naming this node counted, so anti-entropy repair after a
+/// restart counted dozens of "violations" (the adversarial review of #591 measured 62) and the
+/// counter stopped being an alarm.
+fn counts_as_foreign_write(
+    origin: Origin,
+    self_hash: u64,
+    prior: Option<&Option<Bytes>>,
+    incoming: &GossipUpdate,
+    outcome: crate::receipt::LocalApplication,
+) -> bool {
+    use crate::receipt::LocalApplication;
+    if outcome != LocalApplication::Applied {
+        return false; // already current, superseded by newer, or refused: nothing changed
+    }
+    match origin {
+        Origin::Sender(sender) => sender != self_hash,
+        Origin::Unknown => {
+            let incoming = (!incoming.is_tombstone).then_some(&incoming.value);
+            matches!(prior, Some(held) if held.as_ref() != incoming)
+        }
+    }
+}
 
 /// `sys/` namespace-ownership tripwire — **detection, not prevention**.
 ///
-/// Called on each *inbound* (remote) update. If the key targets a `sys/`
-/// namespace owned by this node (the node-id segment equals `self_node`), a
-/// peer is clobbering a key only we should ever write: bump the diagnostic
-/// counter and `warn!`. The write itself is left to LWW — Layer I never learns
+/// Called on each *inbound* (remote) update that names a key this node owns
+/// ([`names_self_owned_sys_key`]), after it was applied, with what the key held before
+/// (`prior`) and how the apply went. Counted per [`counts_as_foreign_write`]: bump the
+/// diagnostic counter and `warn!`. The write itself is left to LWW — Layer I never learns
 /// the `sys/` ownership convention (that would invert the layer dependency, as
 /// the consensus commit-conflict tripwire comment explains). Signed keys
 /// (`identity`, `role`) additionally fail signature verification at read;
 /// unsigned keys (`load`, `tuple`) rely on this signal alone.
 fn flag_foreign_sys_write(
-    key: &str,
-    self_node: &str,
+    update: &GossipUpdate,
+    origin: Origin,
+    self_hash: u64,
+    prior: Option<&Option<Bytes>>,
+    outcome: crate::receipt::LocalApplication,
     counter: &std::sync::atomic::AtomicU64,
 ) {
-    for prefix in SELF_OWNED_SYS_PREFIXES {
-        if let Some(rest) = key.strip_prefix(prefix) {
-            if rest.split('/').next() == Some(self_node) {
-                counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                warn!(
-                    key = %key,
-                    "sys/ namespace violation: inbound remote write to a self-owned \
-                     sys/ key; applying per LWW but flagging \
-                     (see SystemStats::sys_namespace_violations)"
-                );
-            }
-            return;
-        }
+    if counts_as_foreign_write(origin, self_hash, prior, update, outcome) {
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        warn!(
+            key = %update.key,
+            "sys/ namespace violation: inbound remote write to a self-owned \
+             sys/ key; applied per LWW but flagged \
+             (see SystemStats::sys_namespace_violations)"
+        );
     }
+}
+
+/// Applies an inbound update and runs the `sys/` tripwire on it: reads what a self-owned key held
+/// first (only for such keys — every other key costs one prefix test), applies, then judges.
+fn apply_inbound(
+    kv_state: &crate::store::KvState,
+    update: &GossipUpdate,
+    origin: Origin,
+    self_node: &str,
+    self_hash: u64,
+    counter: &std::sync::atomic::AtomicU64,
+) {
+    if !names_self_owned_sys_key(&update.key, self_node) {
+        apply_and_notify(kv_state, update);
+        return;
+    }
+    let prior = kv_state.store.pin().get(update.key.as_ref()).map(|e| e.data.clone());
+    let outcome = apply_and_notify_reporting(kv_state, update);
+    flag_foreign_sys_write(update, origin, self_hash, prior.as_ref(), outcome, counter);
 }
 
 /// Shared state threaded into every inbound connection handler.
@@ -116,6 +193,7 @@ pub async fn handle_connection(
     // BytesMut: recv_buf.split().freeze() at TTL_OFFSET is O(1) for zero-copy forwarding.
     let mut recv_buf: BytesMut = BytesMut::with_capacity(2_048);
     let node_id_str = node_id.to_string();
+    let self_hash   = node_id.id_hash();
     // Per-connection anti-entropy rate limit. StateRequest triggers an O(store_size) scan;
     // processing repeated requests from the same peer on the same connection faster than
     // the health-check interval provides no convergence benefit and adds CPU/alloc pressure.
@@ -495,9 +573,9 @@ pub async fn handle_connection(
                         key,
                         value:        entry.value,
                     };
-                    flag_foreign_sys_write(&update.key, &node_id_str, &sys_violations);
-                    // Apply, then persist (persistence.rs durability invariant 1).
-                    apply_and_notify(&kv_state, &update);
+                    // Apply (running the `sys/` tripwire), then persist (persistence.rs durability
+                    // invariant 1). An anti-entropy entry names no writer: `Origin::Unknown`.
+                    apply_inbound(&kv_state, &update, Origin::Unknown, &node_id_str, self_hash, &sys_violations);
                     if let Some(ref wal) = wal {
                         let _ = wal.append(sync_entry_from(&update)).await;
                     }
@@ -640,9 +718,9 @@ pub async fn handle_connection(
                 // happens-before across the cluster even under wall-clock skew.
                 hlc.observe(update.timestamp);
                 if intern_keys { update.key = intern_key(update.key, intern_max_keys); }
-                flag_foreign_sys_write(&update.key, &node_id_str, &sys_violations);
-                // Apply, then persist (persistence.rs durability invariant 1).
-                apply_and_notify(&kv_state, &update);
+                // Apply (running the `sys/` tripwire), then persist (persistence.rs durability
+                // invariant 1). A gossip frame carries its originator's hash.
+                apply_inbound(&kv_state, &update, Origin::Sender(update.sender), &node_id_str, self_hash, &sys_violations);
                 if let Some(ref wal) = wal {
                     let _ = wal.append(sync_entry_from(&update)).await;
                 }
@@ -769,9 +847,9 @@ pub async fn handle_connection(
                 // Absorb HLC and apply to local store.
                 hlc.observe(update.timestamp);
                 if intern_keys { update.key = intern_key(update.key, intern_max_keys); }
-                flag_foreign_sys_write(&update.key, &node_id_str, &sys_violations);
-                // Apply, then persist (persistence.rs durability invariant 1).
-                apply_and_notify(&kv_state, &update);
+                // Apply (running the `sys/` tripwire), then persist (persistence.rs durability
+                // invariant 1). A gossip frame carries its originator's hash.
+                apply_inbound(&kv_state, &update, Origin::Sender(update.sender), &node_id_str, self_hash, &sys_violations);
                 if let Some(ref wal) = wal {
                     let _ = wal.append(sync_entry_from(&update)).await;
                 }
@@ -815,13 +893,58 @@ pub async fn handle_connection(
 
 #[cfg(test)]
 mod tests {
-    use super::flag_foreign_sys_write;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use super::{counts_as_foreign_write, names_self_owned_sys_key, Origin};
+    use crate::framing::GossipUpdate;
+    use crate::receipt::LocalApplication::{self, AlreadyCurrent, Applied, Superseded};
+    use bytes::Bytes;
+    use std::sync::Arc;
 
+    /// Whether `key` names a self-owned `sys/` key of `self_node` — 1 or 0, for the prefix tests.
     fn flagged(key: &str, self_node: &str) -> u64 {
-        let c = AtomicU64::new(0);
-        flag_foreign_sys_write(key, self_node, &c);
-        c.load(Ordering::Relaxed)
+        u64::from(names_self_owned_sys_key(key, self_node))
+    }
+
+    const ME: u64 = 0xAAAA;
+    const PEER: u64 = 0xBBBB;
+
+    fn upd(value: &'static [u8], ts: u64) -> GossipUpdate {
+        GossipUpdate {
+            nonce: 1, sender: 0, ttl: 1, is_tombstone: false, timestamp: ts,
+            key: Arc::from("sys/consensus-accepted/me/slot"), value: Bytes::from_static(value),
+        }
+    }
+
+    fn counts(origin: Origin, prior: Option<Option<&'static [u8]>>, value: &'static [u8], outcome: LocalApplication) -> bool {
+        let prior = prior.map(|p| p.map(Bytes::from_static));
+        counts_as_foreign_write(origin, ME, prior.as_ref(), &upd(value, 9), outcome)
+    }
+
+    /// The adversarial review of #591, finding 1: anti-entropy re-delivering this node's own
+    /// record is a repair, never a violation — whether this node holds the same bytes, a newer
+    /// value, or (a restart without persistence) nothing at all.
+    #[test]
+    fn anti_entropy_repair_of_my_own_record_is_not_counted() {
+        assert!(!counts(Origin::Unknown, Some(Some(b"mine")), b"mine", AlreadyCurrent), "byte-identical");
+        assert!(!counts(Origin::Unknown, Some(Some(b"newer")), b"older", Superseded), "older than mine");
+        assert!(!counts(Origin::Unknown, None, b"mine", Applied), "I hold nothing: my own record coming back");
+    }
+
+    /// …and a gossip frame this node originated, echoed back by a relay, is not counted either.
+    #[test]
+    fn my_own_frame_echoed_back_is_not_counted() {
+        assert!(!counts(Origin::Sender(ME), None, b"mine", Applied));
+        assert!(!counts(Origin::Sender(ME), Some(Some(b"old")), b"mine", Applied));
+    }
+
+    /// The positive cases: a peer's write that changed what I hold, by frame or by anti-entropy.
+    #[test]
+    fn a_peers_write_that_changed_my_record_is_counted() {
+        assert!(counts(Origin::Sender(PEER), None, b"forged", Applied), "a peer's frame, new key");
+        assert!(counts(Origin::Sender(PEER), Some(Some(b"mine")), b"forged", Applied), "a peer's frame, overwrite");
+        assert!(counts(Origin::Unknown, Some(Some(b"mine")), b"forged", Applied), "anti-entropy replaced mine");
+        assert!(counts(Origin::Unknown, Some(None), b"forged", Applied), "anti-entropy revived my tombstone");
+        // A peer's write that LWW discarded changed nothing.
+        assert!(!counts(Origin::Sender(PEER), Some(Some(b"mine")), b"forged", Superseded));
     }
 
     #[test]
@@ -831,6 +954,22 @@ mod tests {
         assert_eq!(flagged("sys/load/127.0.0.1:8080/cpu", me), 1);
         assert_eq!(flagged("sys/role/127.0.0.1:8080", me), 1);
         assert_eq!(flagged("sys/tuple/127.0.0.1:8080/orders/depth", me), 1);
+        // The acceptor's durable record and the two identity records are self-owned too: a peer
+        // writing ours is forging our promise/acceptance or our identity (2026-10-10).
+        assert_eq!(flagged("sys/consensus-accepted/127.0.0.1:8080/slot-1", me), 1);
+        assert_eq!(flagged("sys/consensus-accepted/127.0.0.1:8080/leader/g", me), 1); // a slot with a `/`
+        assert_eq!(flagged("sys/identity-signed/127.0.0.1:8080", me), 1);
+        assert_eq!(flagged("sys/identity-proof/127.0.0.1:8080", me), 1);
+    }
+
+    #[test]
+    fn the_acceptor_and_identity_records_of_another_node_are_not_ours() {
+        let me = "127.0.0.1:8080";
+        assert_eq!(flagged("sys/consensus-accepted/10.0.0.5:9000/slot-1", me), 0);
+        assert_eq!(flagged("sys/identity-signed/10.0.0.5:9000", me), 0);
+        assert_eq!(flagged("sys/identity-proof/10.0.0.5:9000", me), 0);
+        // Segment-exact under the new prefixes as well.
+        assert_eq!(flagged("sys/consensus-accepted/127.0.0.1:80800/slot-1", me), 0);
     }
 
     #[test]
@@ -845,15 +984,5 @@ mod tests {
         assert_eq!(flagged("grp/team/127.0.0.1:8080", me), 0);
         // A node id that only *prefixes* ours must not match (segment-exact).
         assert_eq!(flagged("sys/load/127.0.0.1:80800/cpu", me), 0);
-    }
-
-    #[test]
-    fn counter_accumulates_across_calls() {
-        let me = "127.0.0.1:8080";
-        let c = AtomicU64::new(0);
-        flag_foreign_sys_write("sys/load/127.0.0.1:8080/a", me, &c);
-        flag_foreign_sys_write("sys/role/127.0.0.1:8080",   me, &c);
-        flag_foreign_sys_write("sys/load/10.0.0.5:9000/a",  me, &c); // not ours
-        assert_eq!(c.load(Ordering::Relaxed), 2);
     }
 }

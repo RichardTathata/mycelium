@@ -16,7 +16,7 @@ uncredentialed:
 |---|---|
 | `GET /health` | `200` = process alive (liveness probe). With `[persistence]` the body carries a `persistence` block: `wal_refusing_appends` (`true` while the WAL writer refuses every append after a failed write, until a snapshot truncates the torn tail — since 2026-10-09), its `reason`, and `dropped_appends` (appends with no WAL record: queue-full drops, the failed write, the refusals) |
 | `GET /ready` | `200` = startup complete → serving KV/signals/membership (readiness probe). Capability discovery gossips independently and does **not** gate readiness — a node advertising no soft state is still ready (changed 2026-07-15) |
-| `GET /stats` | `node_id`, `cluster_name`, `store_entries`, `dropped_frames`, `task_count`, and the tripwire counters (`commit_conflicts`, `sys_namespace_violations`, `cap_authz_violations`, `schema_mismatch`, `governance_changes` / `governance_unaudited` (accepted governance writes at this gateway — `/gateway/govern/*`, `identity/revoke` — and those that left no audit record; 2.27.0. A plain group's `mesh:write` join is audited, not counted), `rate_limited_senders`, `individual_flood_fallbacks`), plus liveness (`dead_shards`, `gc_alive`, `health_monitor_alive`) |
+| `GET /stats` | `node_id`, `cluster_name`, `store_entries`, `dropped_frames`, `task_count`, and the tripwire counters (`commit_conflicts`, `consensus_decided_floor_anomalies`, `consensus_ballot_space_exhausted`, `sys_namespace_violations`, `cap_authz_violations`, `schema_mismatch`, `governance_changes` / `governance_unaudited` (accepted governance writes at this gateway — `/gateway/govern/*`, `identity/revoke` — and those that left no audit record; 2.27.0. A plain group's `mesh:write` join is audited, not counted), `rate_limited_senders`, `individual_flood_fallbacks`), plus liveness (`dead_shards`, `gc_alive`, `health_monitor_alive`) |
 | `GET /metrics` | Prometheus scrape (requires the `metrics` feature). Carries a `cluster` label on every series when `cluster_name` is set |
 | `GET /.well-known/agent-facts.json` | this node's self-certified AgentFacts (when the [facts lens](#viewing-agentfacts) is mounted) |
 | `GET /consensus/{slot}` | a consensus slot's committed value + ballot + lease state. **Bearer required** when a token model is set (scope `consensus:read`, since 2026-09-05); the four rows above stay public |
@@ -42,8 +42,13 @@ curl -s http://node:8080/stats | jq
   [tuning §RPC-heavy pairs](tuning.md#rpc-heavy-pairs--the-topology-pressure-warn).
 - `commit_conflicts` / `sys_namespace_violations` — the **detection-not-prevention
   tripwires**. A non-zero value means someone wrote to a `consensus/` slot or a
-  `sys/{identity,load,role,tuple}/{node}` key they don't own; the write was
-  *applied* per LWW but flagged. Investigate the offending node — see
+  `sys/{identity,identity-signed,identity-proof,load,role,tuple,caller-context,consensus-accepted}/{node}`
+  key they don't own; the write was *applied* per LWW but flagged. `consensus_decided_floor_anomalies`
+  (2026-10-10) counts slots whose decided floor or ballot key sits implausibly far (more than `2^32`)
+  above every ballot this node has itself seen — a forged `consensus/decided/` or `consensus/ballot/`
+  entry; still obeyed, so prepares on that slot keep refusing until it is dealt with.
+  `consensus_ballot_space_exhausted` counts proposals this node ended because such a slot had no
+  ballot left (a `Timeout`, reason `ballot_exhausted`). Investigate the offending node — see
   [00 · Concepts](../guide/00-concepts.md) on promise- vs mechanism-strength.
 
 ### Prometheus

@@ -155,6 +155,11 @@ fn spawn_handler(
         rpc_reply_sender_mismatches: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         commit_conflicts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         commit_conflict_slots: Arc::new(papaya::HashMap::new()),
+        decided_floor_anomaly_slots: Arc::new(papaya::HashSet::new()),
+        decided_floor_anomalies_unrecorded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        #[cfg(feature = "consensus")]
+        consensus_verified_ballots: Arc::new(papaya::HashMap::new()),
+        ballot_space_exhausted: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         event_ring: Arc::new(crate::agent::emergent::EventRing::default()),
         governed_group_conflicts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         capability_coverage_gaps: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1214,6 +1219,11 @@ async fn test_subscribe_notified_via_gossip() {
             rpc_reply_sender_mismatches: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             commit_conflicts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             commit_conflict_slots: Arc::new(papaya::HashMap::new()),
+            decided_floor_anomaly_slots: Arc::new(papaya::HashSet::new()),
+            decided_floor_anomalies_unrecorded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(feature = "consensus")]
+            consensus_verified_ballots: Arc::new(papaya::HashMap::new()),
+            ballot_space_exhausted: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             event_ring: Arc::new(crate::agent::emergent::EventRing::default()),
             governed_group_conflicts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             capability_coverage_gaps: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -4617,8 +4627,96 @@ async fn test_sys_namespace_tripwire_flags_foreign_self_owned_write() {
     }
     assert!(flagged, "B did not flag the foreign write to its own sys/load namespace");
 
+    // Violation 2: A writes B's durable acceptor record — B's promise and acceptance for a slot, which
+    // only B's `persist_acceptor` writes and `prewarm_accepted` restores. A forged one is a promise B
+    // never made; B must count it (2026-10-10).
+    let before = b.system_stats().sys_namespace_violations;
+    let forged_acceptor = format!("sys/consensus-accepted/{node_b}/slot-x");
+    let _ = a.kv().set(forged_acceptor.clone(), Bytes::from_static(b"forged"));
+    let mut flagged = false;
+    for _ in 0..200 {
+        if b.kv().get(&forged_acceptor).is_some() && b.system_stats().sys_namespace_violations > before {
+            flagged = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(flagged, "B did not flag a peer's write to its own sys/consensus-accepted/ record");
+
     a.shutdown_with_timeout(Duration::from_secs(5)).await;
     b.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// **The adversarial review of #591, finding 1: anti-entropy repair is not a violation.** Three
+/// nodes commit a few cluster slots, so each holds every voter's `sys/consensus-accepted/` record
+/// and every node's `sys/caller-context/`. Then C restarts with the same id and no persistence: it
+/// rewrites its caller-context at start, and anti-entropy hands it back its old one and every
+/// acceptor record it wrote before — its own records, repaired. The tripwire counted each of those
+/// (the review measured 62 over 30 commits; this test, 1 per slot plus the caller-context) and
+/// must count none: `sys_namespace_violations` stays 0 on every node.
+#[cfg(feature = "consensus")]
+#[tokio::test]
+async fn anti_entropy_repair_after_a_restart_is_not_a_namespace_violation() {
+    let ports = [alloc_port(), alloc_port(), alloc_port()];
+    let id = |p: u16| NodeId::new("127.0.0.1", p).unwrap();
+    let mk = |port: u16, boots: Vec<NodeId>| {
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.bootstrap_peers = boots;
+        cfg.reconnect_backoff_secs = 1;
+        cfg.health_check_interval_secs = 1;
+        Arc::new(GossipAgent::new(id(port), cfg))
+    };
+    let a = mk(ports[0], vec![]);
+    let b = mk(ports[1], vec![id(ports[0])]);
+    let c = mk(ports[2], vec![id(ports[0])]);
+    for n in [&a, &b, &c] { n.start().await.unwrap(); }
+    let _la = a.consensus().start_consensus_listener(ConsensusConfig::default());
+    let _lb = b.consensus().start_consensus_listener(ConsensusConfig::default());
+    let lc = c.consensus().start_consensus_listener(ConsensusConfig::default());
+    let mut peered = false;
+    for _ in 0..200 {
+        if [&a, &b, &c].iter().all(|n| n.peers().len() >= 2) { peered = true; break; }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(peered, "the three nodes did not peer");
+
+    const SLOTS: usize = 5;
+    for i in 0..SLOTS {
+        let res = a.consensus().cluster_propose(&format!("repair/{i}"), Bytes::from_static(b"v"), ConsensusConfig::default()).await;
+        assert!(matches!(res, ConsensusResult::Committed { .. }), "slot {i}: {res:?}");
+    }
+    // C's own acceptor records must have reached A before C goes away — they are what comes back.
+    let c_record = |i: usize| format!("sys/consensus-accepted/{}/repair/{i}", id(ports[2]));
+    let mut held = false;
+    for _ in 0..200 {
+        if (0..SLOTS).all(|i| a.kv().get(&c_record(i)).is_some()) { held = true; break; }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(held, "A never received C's acceptor records");
+
+    drop(lc);
+    c.shutdown_with_timeout(Duration::from_secs(5)).await;
+    drop(c);
+    let c2 = mk(ports[2], vec![id(ports[0])]);
+    c2.start().await.unwrap();
+    let _lc2 = c2.consensus().start_consensus_listener(ConsensusConfig::default());
+
+    // The repair happened: the restarted C holds its own pre-restart records again.
+    let mut repaired = false;
+    for _ in 0..300 {
+        if (0..SLOTS).all(|i| c2.kv().get(&c_record(i)).is_some()) { repaired = true; break; }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(repaired, "anti-entropy did not hand C its acceptor records back");
+    // Let any straggling entries land before reading the counters.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    for (name, n) in [("A", &a), ("B", &b), ("C", &c2)] {
+        assert_eq!(n.system_stats().sys_namespace_violations, 0,
+                   "{name} counted anti-entropy repair as a namespace violation");
+    }
+
+    for n in [&a, &b, &c2] { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
 }
 
 // ── WS2 audit trail — agent-level writer + chain verification ─────────────
@@ -10024,6 +10122,153 @@ async fn an_unrecorded_promise_is_counted_as_well_as_withheld() {
 
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&base);
+}
+
+/// **A decided floor no history of the slot can reach is counted, and still obeyed** (2026-10-10).
+/// `consensus/decided/{slot}` is written by whichever node commits, so it is not self-owned and the
+/// `sys/` tripwire cannot see it; a member writing `u64::MAX` there makes every later prepare on the
+/// slot refuse. The write goes in through the KV path (`kv().set`, which applies through
+/// `apply_and_notify` exactly as a gossiped update does); a prepare at ballot 1 is then refused as
+/// before — answered with a NACK naming the floor, no promise recorded — and the slot is counted
+/// once on `consensus_decided_floor_anomalies`, however many times the floor is read. A legitimate
+/// floor a little above what this node has seen (it missed some attempts) is not counted.
+/// Seen failing first with the field plumbed and no detection: the count stayed 0.
+#[cfg(feature = "consensus")]
+#[tokio::test]
+async fn a_forged_decided_floor_is_counted_and_still_obeyed() {
+    use crate::consensus::{consensus_kind, decode_consensus_msg, encode_consensus_msg, ConsensusMsg};
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    let a = GossipAgent::new(id.clone(), cfg);
+    a.start().await.unwrap();
+    let _listener = a.consensus().start_consensus_listener(ConsensusConfig::default());
+    let mut nacks = a.task_ctx.signal_handlers.register_with_capacity(Arc::from(consensus_kind::NACK), 8);
+    let mut acks = a.task_ctx.signal_handlers.register_with_capacity(Arc::from(consensus_kind::VOTE), 8);
+    assert_eq!(a.system_stats().consensus_decided_floor_anomalies, 0);
+
+    // Control: a floor of 3 on a slot this node has never seen — it missed the attempts; not counted.
+    let _ = a.kv().set("consensus/decided/plausible", Bytes::copy_from_slice(&3u64.to_le_bytes()));
+    // The forgery.
+    let slot: Arc<str> = Arc::from("forged");
+    let _ = a.kv().set(format!("consensus/decided/{slot}"), Bytes::copy_from_slice(&u64::MAX.to_le_bytes()));
+
+    for (s, ballot) in [("plausible", 4u64), (&*slot, 1), (&*slot, 2)] {
+        let bytes = encode_consensus_msg(&ConsensusMsg::Prepare { slot: Arc::from(s), ballot, proposer: id.clone() });
+        mycelium_core::ops::emit_signal(&a.task_ctx, Arc::from(consensus_kind::PROPOSE), SignalScope::Individual(id.clone()), bytes);
+    }
+    // The plausible slot's prepare is promised (above its floor of 3).
+    let ack = tokio::time::timeout(Duration::from_secs(5), acks.recv()).await.expect("answered").expect("open");
+    assert!(matches!(decode_consensus_msg(&ack.payload), Some(ConsensusMsg::PrepareAck { ballot: 4, .. })));
+    // The forged slot's two prepares are refused, as before: a NACK naming the floor, nothing promised.
+    for _ in 0..2 {
+        let nack = tokio::time::timeout(Duration::from_secs(5), nacks.recv()).await.expect("refused").expect("open");
+        match decode_consensus_msg(&nack.payload) {
+            Some(ConsensusMsg::Promise { slot: s, seen_ballot, .. }) => {
+                assert_eq!(&*s, "forged");
+                assert_eq!(seen_ballot, u64::MAX, "the refusal names the floor");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+    assert!(a.task_ctx.consensus_accepted.pin().get(&slot).is_none_or(|st| st.promised == 0),
+            "no promise is recorded below the floor");
+    assert_eq!(a.system_stats().consensus_decided_floor_anomalies, 1,
+               "the forged slot is counted, once, however often its floor is read; the plausible one is not");
+
+    a.shutdown().await;
+}
+
+/// **The floor tripwire does not trust the shared ballot key** (the adversarial review of #591,
+/// finding 3). `consensus/ballot/{slot}` is written by any member too, so measuring "observed" from it
+/// let a forger raise both keys together and pass uncounted — and the ballot key alone at `u64::MAX`
+/// exhausts the slot with no tripwire at all. "Observed" is now this node's acceptor memory and the
+/// ballots of verified COMMITs it processed, and the ballot key read for a draw gets the same check.
+/// Each forgery is counted once for its slot, and each proposal still ends by name.
+/// Seen failing first: the both-keys slot was not counted (0 where 1 was expected).
+#[cfg(feature = "consensus")]
+#[tokio::test]
+async fn forged_ballot_keys_are_counted_as_well_as_forged_floors() {
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    let a = GossipAgent::new(id.clone(), cfg);
+    a.start().await.unwrap();
+    let _listener = a.consensus().start_consensus_listener(ConsensusConfig::default());
+    a.mesh().join_group("solo");
+    let mut fast = ConsensusConfig::default();
+    fast.phase1_timeout = Duration::from_millis(200);
+    fast.max_ballots = 2;
+    let max = Bytes::copy_from_slice(&u64::MAX.to_le_bytes());
+
+    // Both keys forged together.
+    let _ = a.kv().set("consensus/decided/forged/both", max.clone());
+    let _ = a.kv().set("consensus/ballot/forged/both", max.clone());
+    let before = a.system_stats().consensus_decided_floor_anomalies;
+    let res = a.consensus().group_propose("solo", "forged/both", Bytes::from_static(b"v"), fast.clone()).await;
+    assert!(matches!(res, ConsensusResult::Timeout { .. }), "{res:?}");
+    assert_eq!(a.system_stats().consensus_decided_floor_anomalies, before + 1,
+               "forging the floor and the ballot key together is counted");
+
+    // The ballot key alone.
+    let _ = a.kv().set("consensus/ballot/forged/key", max.clone());
+    let res = a.consensus().group_propose("solo", "forged/key", Bytes::from_static(b"v"), fast.clone()).await;
+    assert!(matches!(res, ConsensusResult::Timeout { .. }), "{res:?}");
+    assert_eq!(a.system_stats().consensus_decided_floor_anomalies, before + 2,
+               "a forged ballot key alone is counted");
+
+    // Control: an ordinary slot commits and counts nothing.
+    let res = a.consensus().group_propose("solo", "forged/none", Bytes::from_static(b"v"), ConsensusConfig::default()).await;
+    assert!(matches!(res, ConsensusResult::Committed { .. }), "{res:?}");
+    assert_eq!(a.system_stats().consensus_decided_floor_anomalies, before + 2);
+
+    a.shutdown().await;
+}
+
+/// **A slot whose decided floor is `u64::MAX` cannot take a new ballot, and says so** (2026-10-10).
+/// Both proposers drew `max(ballot key, floor) + 1`, which overflows there: a panic in any build with
+/// overflow checks (and the release profile is `panic = "abort"`, so such a build loses the node), a
+/// wrap to ballot 0 — refused below the floor — without them. Now the draw is checked: the group
+/// proposal and the cross-group proposal each end as a `Timeout` named `ballot_exhausted`
+/// (this node's `consensus_ballot_space_exhausted`), and a slot below the ceiling still commits.
+/// Seen failing first: `attempt to add with overflow` in `ConsensusEngine::propose`.
+#[cfg(feature = "consensus")]
+#[tokio::test]
+async fn a_floor_at_the_ballot_ceiling_is_refused_by_name_not_overflowed() {
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    let a = GossipAgent::new(id.clone(), cfg);
+    a.start().await.unwrap();
+    let _listener = a.consensus().start_consensus_listener(ConsensusConfig::default());
+    a.mesh().join_group("solo");
+    let mut fast = ConsensusConfig::default();
+    fast.phase1_timeout = Duration::from_millis(200);
+    fast.max_ballots = 2;
+
+    for slot in ["ceiling/group", "ceiling/cross"] {
+        let _ = a.kv().set(format!("consensus/decided/{slot}"), Bytes::copy_from_slice(&u64::MAX.to_le_bytes()));
+    }
+    let exhausted = || a.system_stats().consensus_ballot_space_exhausted;
+    let before = exhausted();
+    let res = a.consensus().group_propose("solo", "ceiling/group", Bytes::from_static(b"v"), fast.clone()).await;
+    assert!(matches!(res, ConsensusResult::Timeout { .. }), "group proposal: {res:?}");
+    assert_eq!(exhausted(), before + 1, "the group proposal is refused by name");
+
+    let groups = vec![crate::consensus::GroupQuorum { group: "solo".into(), quorum: 0.5, veto: false }];
+    let res = a.consensus().cross_group_propose("ceiling/cross", Bytes::from_static(b"v"), groups, fast.clone()).await;
+    assert!(matches!(res, ConsensusResult::Timeout { .. }), "cross-group proposal: {res:?}");
+    assert_eq!(exhausted(), before + 2, "the cross-group proposal is refused by name");
+
+    // Control: a floor one below the ceiling leaves exactly one ballot, and the slot commits at it.
+    let _ = a.kv().set("consensus/decided/ceiling/last", Bytes::copy_from_slice(&(u64::MAX - 1).to_le_bytes()));
+    let res = a.consensus().group_propose("solo", "ceiling/last", Bytes::from_static(b"v"), ConsensusConfig::default()).await;
+    assert!(matches!(res, ConsensusResult::Committed { ballot: u64::MAX, .. }), "the last ballot is usable: {res:?}");
+
+    a.shutdown().await;
 }
 
 /// **Boundary H P1 gate — issuer binding on live nodes.** Two TLS members, A and B.

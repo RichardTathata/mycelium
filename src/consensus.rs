@@ -708,8 +708,19 @@ impl ConsensusEngine {
         self.task_ctx.kv_state.store.pin().get(key).and_then(|e| e.data.clone())
     }
 
+    /// The slot's shared ballot key (`consensus/ballot/{slot}`), as this node holds it — read by every
+    /// ballot draw. Any member writes it, so it gets the floor's tripwire too
+    /// ([`note_implausible`](Self::note_implausible)): a ballot key at `u64::MAX` exhausts the slot
+    /// as surely as a floor there (the adversarial review of #591, finding 3). Nothing about what is
+    /// returned changes.
     fn read_ballot(&self, ballot_key: &str) -> u64 {
-        self.get(ballot_key).map(|b| decode_ballot(&b)).unwrap_or(0)
+        let ballot = self.get(ballot_key).map(|b| decode_ballot(&b)).unwrap_or(0);
+        if ballot > DECIDED_FLOOR_ANOMALY_MARGIN
+            && let Some(slot) = ballot_key.strip_prefix(consensus_ns::BALLOT)
+        {
+            self.note_implausible(slot, ballot, "ballot key");
+        }
+        ballot
     }
 
     /// Lease-aware committed read — see [`live_committed_value`]. An expired
@@ -743,8 +754,81 @@ impl ConsensusEngine {
 
     /// The ballot this slot's most recent commit was decided at, as this node knows it; `0` when
     /// none — see [`consensus_ns::DECIDED`].
+    ///
+    /// Every reader of the floor comes through here — the acceptor's prepare and vote, the
+    /// proposer's ballot draw and phase-1 collection, the commit path, `record_decided` — so this is
+    /// where the floor's tripwire sits ([`note_implausible`](Self::note_implausible)).
+    /// It changes nothing about what is returned or refused.
     fn decided_floor(&self, slot: &str) -> u64 {
-        self.get(&format!("{}{}", consensus_ns::DECIDED, slot)).map(|b| decode_ballot(&b)).unwrap_or(0)
+        let floor = self.get(&format!("{}{}", consensus_ns::DECIDED, slot)).map(|b| decode_ballot(&b)).unwrap_or(0);
+        // Cheap guard first: no floor at or below the margin can be implausible.
+        if floor > DECIDED_FLOOR_ANOMALY_MARGIN {
+            self.note_implausible(slot, floor, "decided floor");
+        }
+        floor
+    }
+
+    /// The ballot tripwire — **detection, not prevention**, in Layer III (core's apply path never
+    /// learns consensus's conventions). `consensus/decided/{slot}` is written by whichever node
+    /// commits and `consensus/ballot/{slot}` by any proposer or voter, so neither is self-owned and
+    /// the `sys/` tripwire cannot cover them; but a member that writes `u64::MAX` into either makes the
+    /// slot refuse every later ballot. A `value` (the floor or the ballot key, named by `what`) more
+    /// than [`DECIDED_FLOOR_ANOMALY_MARGIN`] above the highest ballot this node has **itself**
+    /// observed for the slot is counted once per slot (`SystemStats::consensus_decided_floor_anomalies`,
+    /// `mycelium_consensus_decided_floor_anomalies_total`) and warned about once. The value is still
+    /// obeyed.
+    ///
+    /// "Observed" is this node's acceptor memory — the ballot it promised (never below what it
+    /// accepted) — and the ballots of verified COMMITs it processed
+    /// ([`note_verified_ballot`](Self::note_verified_ballot)). **Not** the shared ballot key: a
+    /// member writes that too, so measuring against it let a forger raise both keys together and pass
+    /// uncounted (the adversarial review of #591, finding 3).
+    ///
+    /// Bounded: at most [`ANOMALY_SLOTS_CAP`] slots are remembered; an anomaly on a slot past the cap
+    /// is counted on `decided_floor_anomalies_unrecorded` instead (each read, since it cannot be
+    /// deduplicated), and still warned about.
+    fn note_implausible(&self, slot: &str, value: u64, what: &str) {
+        let promised = self.task_ctx.consensus_accepted.pin().get(slot).map(|s| s.promised).unwrap_or(0);
+        let verified = self.task_ctx.consensus_verified_ballots.pin().get(slot).copied().unwrap_or(0);
+        let observed = promised.max(verified);
+        if !decided_floor_is_implausible(value, observed) {
+            return;
+        }
+        let slots = self.task_ctx.decided_floor_anomaly_slots.pin();
+        let first = if slots.contains(slot) {
+            false
+        } else if slots.len() >= ANOMALY_SLOTS_CAP {
+            self.task_ctx.decided_floor_anomalies_unrecorded.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            true
+        } else {
+            slots.insert(Arc::from(slot))
+        };
+        if first {
+            #[cfg(feature = "metrics")]
+            metrics::counter!("mycelium_consensus_decided_floor_anomalies_total").increment(1);
+            tracing::warn!(
+                slot = %slot, value, observed, what,
+                "consensus: the slot's {what} is far above every ballot this node has observed — a forged \
+                 consensus/ entry? Obeyed as before; counted once per slot \
+                 (see SystemStats::consensus_decided_floor_anomalies)"
+            );
+        }
+    }
+
+    /// Records the ballot of a verified consensus message this node processed (a COMMIT) as
+    /// observed for its slot — the evidence [`note_implausible`](Self::note_implausible) measures a
+    /// floor or ballot key against. Kept as the maximum; bounded at [`VERIFIED_BALLOTS_CAP`] slots
+    /// (past it a new slot is not recorded, which can only make the tripwire more sensitive there).
+    /// `compute` with a pure closure, so a CAS retry is harmless.
+    fn note_verified_ballot(&self, slot: &Arc<str>, ballot: u64) {
+        let map = self.task_ctx.consensus_verified_ballots.pin();
+        if !map.contains_key(slot) && map.len() >= VERIFIED_BALLOTS_CAP {
+            return;
+        }
+        map.compute(Arc::clone(slot), |existing| match existing {
+            Some((_, &seen)) if seen >= ballot => papaya::Operation::Abort(()),
+            _ => papaya::Operation::Insert(ballot),
+        });
     }
 
     /// Whether this node can see the slot's latest decision is **over**: it holds the committed
@@ -1108,7 +1192,9 @@ impl ConsensusEngine {
 
         // Above the slot's decided ballot too: the ballot key is no longer reset at commit, but it is
         // gossiped and may lag what this node knows was decided.
-        let mut ballot = self.read_ballot(&ballot_key).max(self.decided_floor(&slot)) + 1;
+        let Some(mut ballot) = next_ballot(self.read_ballot(&ballot_key).max(self.decided_floor(&slot))) else {
+            return self.ballots_exhausted(slot, 0, quorum_size);
+        };
         let mut votes_last_ballot: usize = 0;
         // How the latest attempt ended — what a timeout is labelled by (doc-coverage run 22, gap 3).
         let mut last = LastAttempt::None;
@@ -1207,7 +1293,10 @@ impl ConsensusEngine {
             };
             if let Some(floor) = retry_floor {
                 ballot_retry_pause(config.ballot_retry_jitter_ms).await;
-                ballot = floor.max(self.read_ballot(&ballot_key)).max(ballot) + 1;
+                let Some(next) = next_ballot(floor.max(self.read_ballot(&ballot_key)).max(ballot)) else {
+                    return self.ballots_exhausted(slot, _attempt + 1, quorum_size);
+                };
+                ballot = next;
                 continue;
             }
             last = LastAttempt::Vote;
@@ -1233,7 +1322,10 @@ impl ConsensusEngine {
                 // Already committed to a different value at this ballot. Cannot win here; move up
                 // rather than emit a proposal we are not entitled to support.
                 last = LastAttempt::Contended;
-                ballot = ballot.max(self.read_ballot(&ballot_key)) + 1;
+                let Some(next) = next_ballot(ballot.max(self.read_ballot(&ballot_key))) else {
+                    return self.ballots_exhausted(slot, _attempt + 1, quorum_size);
+                };
+                ballot = next;
                 continue;
             }
             // Durable before the proposal leaves, for the same reason the voter records before its
@@ -1330,7 +1422,10 @@ impl ConsensusEngine {
             }
 
             ballot_retry_pause(config.ballot_retry_jitter_ms).await;
-            ballot = nack_ballot.max(self.read_ballot(&ballot_key)).max(ballot) + 1;
+            let Some(next) = next_ballot(nack_ballot.max(self.read_ballot(&ballot_key)).max(ballot)) else {
+                return self.ballots_exhausted(slot, _attempt + 1, quorum_size);
+            };
+            ballot = next;
         }
 
         // After exhausting max_ballots: prefer TopologyUnsatisfied over Timeout
@@ -1454,7 +1549,9 @@ impl ConsensusEngine {
             Arc::from(consensus_kind::NACK), 64,
         );
 
-        let mut ballot = self.read_ballot(&ballot_key).max(self.decided_floor(&slot)) + 1;
+        let Some(mut ballot) = next_ballot(self.read_ballot(&ballot_key).max(self.decided_floor(&slot))) else {
+            return self.ballots_exhausted(slot, 0, 0);
+        };
         let mut last = LastAttempt::None;
 
         for _attempt in 0..config.max_ballots {
@@ -1495,7 +1592,10 @@ impl ConsensusEngine {
             };
             if let Some(floor) = retry_floor {
                 ballot_retry_pause(config.ballot_retry_jitter_ms).await;
-                ballot = floor.max(self.read_ballot(&ballot_key)).max(ballot) + 1;
+                let Some(next) = next_ballot(floor.max(self.read_ballot(&ballot_key)).max(ballot)) else {
+                    return self.ballots_exhausted(slot, _attempt + 1, 0);
+                };
+                ballot = next;
                 continue;
             }
             last = LastAttempt::Vote;
@@ -1511,7 +1611,10 @@ impl ConsensusEngine {
             let floor = self.decided_floor(&slot);
             if !claim_vote(&self.task_ctx.consensus_accepted, &slot, ballot, &value, self.task_ctx.node_id.id_hash(), floor) {
                 last = LastAttempt::Contended;
-                ballot = ballot.max(self.read_ballot(&ballot_key)) + 1;
+                let Some(next) = next_ballot(ballot.max(self.read_ballot(&ballot_key))) else {
+                    return self.ballots_exhausted(slot, _attempt + 1, 0);
+                };
+                ballot = next;
                 continue;
             }
             if !self.persist_acceptor(&slot).await {
@@ -1631,7 +1734,10 @@ impl ConsensusEngine {
                     adopted_from = ab;
                     value = v;
                 }
-            ballot = nack_ballot.max(self.read_ballot(&ballot_key)).max(ballot) + 1;
+            let Some(next) = next_ballot(nack_ballot.max(self.read_ballot(&ballot_key)).max(ballot)) else {
+                return self.ballots_exhausted(slot, _attempt + 1, 0);
+            };
+            ballot = next;
         }
 
         let votes_last_ballot: usize = group_states.values().map(|gs| gs.accepts).sum();
@@ -1826,6 +1932,22 @@ impl ConsensusEngine {
                 false
             }
         }
+    }
+
+    /// The proposal ends here: the slot's next ballot would be above `u64::MAX` — its decided floor
+    /// or ballot key is at the ceiling, which no history of a slot reaches by drawing one ballot per
+    /// attempt, and a forged `consensus/decided/` entry does (the floor tripwire counts that). Until
+    /// 2026-10-10 the draw was `… + 1`: a panic in a build with overflow checks — under the release
+    /// profile's `panic = "abort"`, the node — and a wrap to ballot 0, refused below the floor,
+    /// without them. A `Timeout`, named `ballot_exhausted` on the timeout metric and counted on
+    /// this node's `SystemStats::consensus_ballot_space_exhausted`, with one `warn!`.
+    fn ballots_exhausted(&self, slot: Arc<str>, ballots_tried: u32, quorum_required: usize) -> ConsensusResult {
+        self.task_ctx.ballot_space_exhausted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        metrics::counter!("mycelium_consensus_timeouts_total", "reason" => "ballot_exhausted").increment(1);
+        tracing::warn!(slot = %slot, "consensus: the slot's ballot space is exhausted (the next ballot would \
+            exceed u64::MAX — a decided floor or ballot key at the ceiling); the proposal ends here");
+        ConsensusResult::Timeout { slot, ballots_tried, votes_last_ballot: 0, quorum_required }
     }
 
     /// The attempt ends here: this node's own acceptor record did not reach stable storage, so
@@ -2155,6 +2277,42 @@ fn signer_authorized(msg: &ConsensusMsg, signer: &NodeId) -> bool {
 #[cfg(feature = "consensus")]
 pub(crate) fn accepted_key(node: &NodeId, slot: &str) -> String {
     format!("{}{}/{}", mycelium_core::signal::kv_ns::CONSENSUS_ACCEPTED, node, slot)
+}
+
+/// The ballot after `above`, or `None` when `above` is `u64::MAX` — every ballot draw goes through
+/// here, so the ballot space ends in a named refusal ([`ConsensusEngine::ballots_exhausted`]) rather
+/// than an overflow.
+#[cfg(feature = "consensus")]
+pub(crate) fn next_ballot(above: u64) -> Option<u64> {
+    above.checked_add(1)
+}
+
+/// How far a decided floor may sit above every ballot this node has observed for its slot before
+/// the floor's tripwire counts it: `2^32`.
+///
+/// Why this bound. A ballot is drawn one attempt at a time — `max(ballot key, floor) + 1` — so a
+/// legitimate floor can exceed what this node has seen only by the attempts it missed: a node that
+/// joined late, or whose copy of the ballot key lags the decided key it arrived with (two gossip
+/// messages, no ordering between them). Missing `2^32` attempts on one slot is ~49 days of one
+/// attempt per millisecond, which no slot's history contains; a forged floor near `u64::MAX`, the
+/// value that exhausts the ballot space, is `2^63` or more past anything observed. A forged floor
+/// *inside* the margin is not counted — and is also harmless: proposers draw above it.
+#[cfg(feature = "consensus")]
+pub(crate) const DECIDED_FLOOR_ANOMALY_MARGIN: u64 = 1 << 32;
+
+/// How many slots the ballot tripwire remembers as anomalous (one `warn!` and one count each).
+#[cfg(feature = "consensus")]
+pub(crate) const ANOMALY_SLOTS_CAP: usize = 4096;
+
+/// How many slots' verified COMMIT ballots this node keeps as tripwire evidence.
+#[cfg(feature = "consensus")]
+pub(crate) const VERIFIED_BALLOTS_CAP: usize = 65_536;
+
+/// Whether `floor` is further than [`DECIDED_FLOOR_ANOMALY_MARGIN`] above `observed`, the highest
+/// ballot this node has seen for the slot.
+#[cfg(feature = "consensus")]
+pub(crate) fn decided_floor_is_implausible(floor: u64, observed: u64) -> bool {
+    floor.saturating_sub(observed) > DECIDED_FLOOR_ANOMALY_MARGIN
 }
 
 /// Encode the pre-2.30.0 acceptance-only record, `ballot(8, LE) ‖ digest(32)` — kept so the tests
@@ -2830,6 +2988,8 @@ pub(crate) async fn run_consensus_listener(
                 let Some(ConsensusMsg::Commit { slot, ballot, value }) =
                     ctx.decode_verify(&sig.payload)
                 else { continue };
+                // A verified decision's ballot is what the ballot tripwire measures forged keys against.
+                ctx.note_verified_ballot(&slot, ballot);
 
                 // A COMMIT from a decision already superseded, or one this node already saw end
                 // (a lease expired, a lock released), is not re-stamped: re-stamping gives the old
@@ -3674,6 +3834,17 @@ mod consensus_msg_auth_tests {
         assert!(!claim_vote(&m, &slot, 3, &v, 1, 4));
         assert!(matches!(prepare_slot(&m, &slot, 5, 1, 4), PrepareOutcome::Promised(None)));
         assert!(claim_vote(&m, &slot, 5, &v, 1, 4));
+    }
+
+    /// The floor tripwire's bound: past the margin above what was observed, and only there.
+    #[test]
+    fn an_implausible_floor_is_one_past_the_margin() {
+        assert!(!decided_floor_is_implausible(5, 0), "a node that missed a few attempts");
+        assert!(!decided_floor_is_implausible(DECIDED_FLOOR_ANOMALY_MARGIN, 0));
+        assert!(decided_floor_is_implausible(DECIDED_FLOOR_ANOMALY_MARGIN + 1, 0));
+        assert!(decided_floor_is_implausible(u64::MAX, 7), "the forgery that exhausts the ballot space");
+        assert!(!decided_floor_is_implausible(u64::MAX, u64::MAX - 1), "observed ballots reached it");
+        assert!(!decided_floor_is_implausible(3, 10), "a floor below what was observed");
     }
 
     /// Two digests at the top ballot means *one value per ballot* did not hold (a proposer older
