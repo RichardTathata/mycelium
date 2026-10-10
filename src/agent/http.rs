@@ -4156,28 +4156,21 @@ async fn gw_overlay_lock_acquire(
         ..crate::consensus::ConsensusConfig::default()
     };
 
+    let started = mycelium_core::sim_seam::mono_instant();
     let result = overlay_cluster_propose(&ctx.agent_ctx, &slot, value.clone(), cfg).await;
 
     match result {
-        crate::consensus::ConsensusResult::Committed { ballot, .. } => {
-            // Confirm the converged holder before handing out a guard (bug A); the token is the
-            // commit's HLC (a monotonic fencing token — the ballot is not, #164).
-            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-            let confirmed = crate::consensus::live_committed_with_hlc(
-                    &ctx.agent_ctx.kv_state, &slot, crate::consensus::causal_now_ms(&ctx.agent_ctx.hlc))
-                .filter(|(v, _)| v.as_ref() == value.as_ref());
-            let Some((_, token)) = confirmed else {
-                return (StatusCode::CONFLICT,
-                    Json(json!({ "ok": false, "error": "superseded" }))).into_response();
+        crate::consensus::ConsensusResult::Committed { .. } => {
+            // The same guard the library issues (row A): ours only if the slot's top decision record
+            // says so; the token is the decision's.
+            let guard = match crate::agent::consensus_handle::lock_guard_after_commit(
+                &ctx.agent_ctx, &body.name, &slot, value, started, std::time::Duration::from_secs(ttl_secs),
+            ).await {
+                Ok(g) => g,
+                Err(_) => return (StatusCode::CONFLICT,
+                    Json(json!({ "ok": false, "error": "superseded" }))).into_response(),
             };
-            let guard = LockGuard {
-                ctx:      Arc::clone(&ctx.agent_ctx),
-                name:     Arc::from(body.name.as_str()),
-                value,
-                ballot,
-                token,
-                released: false,
-            };
+            let token = guard.token;
             let guard_id = format!("{:016x}", fastrand::u64(..));
             ctx.lock_guards.lock().unwrap_or_else(|e| e.into_inner()).insert(guard_id.clone(), guard);
             Json(json!({ "ok": true, "guard_id": guard_id, "token": token.to_string() })).into_response()

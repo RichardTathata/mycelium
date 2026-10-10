@@ -5349,10 +5349,10 @@ async fn a_released_leadership_survives_a_crash() {
         if dir.join(f).exists() { std::fs::copy(dir.join(f), crash.join(f)).unwrap(); }
     }
     let mut released = false;
+    let marker_prefix = format!("consensus/life/{}/end/", "leader%2Fperm");
     mycelium_core::persistence::replay(&crash, None, |e| {
-        if &*e.key == "consensus/lease/leader/perm" && !e.is_tombstone
-            && matches!(crate::consensus::decode_lease_record(&e.value),
-                        Some(crate::consensus::LeaseRecord::Lifecycle { released: true, .. })) {
+        if e.key.starts_with(marker_prefix.as_str()) && !e.is_tombstone
+            && crate::consensus_life::decode_marker(&e.value).is_some() {
             released = true;
         }
     }).await.expect("the crashed files replay");
@@ -5382,19 +5382,21 @@ async fn the_gateway_elects_on_a_lease_and_steps_down() {
         if client.get(format!("{base}/health")).send().await.is_ok_and(|r| r.status().is_success()) { break; }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let lease = |slot: &str| agent.task_ctx.kv_state.store.pin()
-        .get(format!("consensus/lease/{slot}").as_str()).and_then(|e| e.data.clone())
-        .and_then(|b| crate::consensus::decode_lease_record(&b));
+    let term = |slot: &str| match crate::consensus_life::read_slot(
+            &agent.task_ctx.kv_state, slot, mycelium_core::sim_seam::wall_now_ms()) {
+        crate::consensus_life::SlotView::Top(t) => Some(t.env.term),
+        _ => None,
+    };
 
     let r = client.post(format!("{base}/gateway/overlay/elect"))
         .json(&serde_json::json!({"group": "gw-lease", "ttl_secs": 7})).send().await.expect("elect");
     assert_eq!(r.status(), 200, "{:?}", r.text().await);
-    assert!(matches!(lease("leader/gw-lease"), Some(crate::consensus::LeaseRecord::Lifecycle { ms: 7000, released: false, .. })));
+    assert!(matches!(term("leader/gw-lease"), Some(crate::consensus_life::Term::Lease { ms: 7000, .. })));
 
     let r = client.post(format!("{base}/gateway/overlay/elect"))
         .json(&serde_json::json!({"group": "gw-perm", "permanent": true})).send().await.expect("elect");
     assert_eq!(r.status(), 200);
-    assert!(lease("leader/gw-perm").is_none(), "a permanent election carries no lease");
+    assert_eq!(term("leader/gw-perm"), Some(crate::consensus_life::Term::Permanent), "a permanent election carries no lease");
 
     let r = client.delete(format!("{base}/gateway/overlay/elect/gw-lease")).send().await.expect("release");
     assert_eq!(r.status(), 200);

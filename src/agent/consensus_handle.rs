@@ -546,38 +546,10 @@ impl ConsensusHandle {
             ..ConsensusConfig::default()
         };
 
+        let started = mycelium_core::sim_seam::mono_instant();
         match self.cluster_propose(&slot, value.clone(), cfg).await {
-            ConsensusResult::Committed { ballot, .. } => {
-                // #164 bug A: two proposers can both *optimistically* commit against their own
-                // local view — the propose return is NOT mutually exclusive. Commit-keys are
-                // LWW-resolved by HLC, so let the winning commit converge, then read the
-                // authoritative converged value; only the node whose value survived holds the
-                // lock. Losers get `Superseded` and never receive a guard.
-                //
-                // The duration of this wait is a correctness assumption (replay inventory §2.3),
-                // so it goes through the timer seam: a replay can run it at 0, exactly 1 s, or
-                // longer, and the D4 audit's model of this path can become a replay of it.
-                mycelium_core::sim_seam::sleep_ms("lock/converge", 1000).await;
-                match crate::consensus::live_committed_with_hlc(
-                        &self.ctx.kv_state, &slot, crate::consensus::causal_now_ms(&self.ctx.hlc)) {
-                    // Fencing token is the commit's HLC, not the ballot: the HLC is monotonic
-                    // across successive holders (each observes the prior release), so a resource
-                    // that rejects a lower token is actually fenced. The ballot regresses under
-                    // gossip lag and is unsafe for fencing (#164 example finding).
-                    Some((converged, hlc)) if converged.as_ref() == value.as_ref() =>
-                        Ok(LockGuard {
-                            ctx:      Arc::clone(&self.ctx),
-                            name:     Arc::from(name),
-                            value,
-                            ballot,
-                            token:    hlc,
-                            released: false,
-                        }),
-                    // Not the converged holder (or nothing converged): no guard. This `_` covers an
-                    // `Option`, not `ConsensusResult` — it is a legitimate catch-all.
-                    _ => Err(ConsistencyError::Superseded),
-                }
-            }
+            ConsensusResult::Committed { .. } =>
+                lock_guard_after_commit(&self.ctx, name, &slot, value, started, ttl).await,
             ConsensusResult::Timeout { ballots_tried, .. } =>
                 Err(ConsistencyError::Timeout { ballots_tried }),
             ConsensusResult::Superseded { .. } =>
@@ -765,6 +737,48 @@ impl ConsensusHandle {
             waited += STEP_MS;
         }
     }
+}
+
+/// After a lock's proposal committed: the guard, if the decision is ours (row A). Shared by
+/// [`ConsensusHandle::distributed_lock`] and the gateway's lock route, so both doors issue the same
+/// guard: polls (bounded by the old fixed second, through the replay seam's `lock/converge` stream)
+/// until this node's top decision record for the slot is a live decision of `value`; the token is
+/// the decision's; the monotonic deadline is the acquisition's start plus `ttl`, and a guard is never
+/// issued past it (review finding 4) — `Timeout` then, and the decision is released.
+pub(crate) async fn lock_guard_after_commit(
+    ctx:     &Arc<TaskCtx>,
+    name:    &str,
+    slot:    &str,
+    value:   Bytes,
+    started: std::time::Instant,
+    ttl:     Duration,
+) -> Result<LockGuard, ConsistencyError> {
+    const BUDGET_MS: u64 = 1000;
+    const STEP_MS:   u64 = 25;
+    let mut waited = 0;
+    let env = loop {
+        if let crate::consensus_life::SlotView::Top(top) = crate::consensus_life::read_slot(
+                &ctx.kv_state, slot, mycelium_core::sim_seam::wall_now_ms())
+            && !top.ended && top.value.as_ref() == Some(&value) {
+                break top.env;
+            }
+        if waited >= BUDGET_MS { return Err(ConsistencyError::Superseded); }
+        mycelium_core::sim_seam::sleep_ms("lock/converge", STEP_MS).await;
+        waited += STEP_MS;
+    };
+    let guard = LockGuard {
+        ctx:      Arc::clone(ctx),
+        name:     Arc::from(name),
+        token:    env.token,
+        env,
+        deadline: started + ttl,
+        released: false,
+    };
+    if guard.is_expired() {
+        drop(guard);
+        return Err(ConsistencyError::Timeout { ballots_tried: 0 });
+    }
+    Ok(guard)
 }
 
 // ── Unit tests ────────────────────────────────────────────────────────────────
@@ -979,7 +993,15 @@ mod tests {
 
         // A forged COMMIT carrying a different value for the live slot: the tripwire fires and does not endorse it.
         // Local emits self-deliver; under load one emit may be shed, so it is repeated until the tripwire sees it.
-        let forged = ConsensusMsg::Commit { slot: Arc::from("trip/slot"), ballot: 42, value: Bytes::from_static(b"clobber") };
+        // Row A: an upgraded learner judges the decision envelope a `CommitTerm` carries; a newer
+        // decision of another identity while the slot is live is the violation.
+        let genuine = match crate::consensus_life::read_slot(&a.task_ctx.kv_state, "trip/slot", mycelium_core::sim_seam::wall_now_ms()) {
+            crate::consensus_life::SlotView::Top(t) => t.env,
+            other => panic!("the genuine decision has a record: {other:?}"),
+        };
+        let clobber = crate::consensus_life::Envelope::new(
+            "trip/slot", Bytes::from_static(b"clobber"), crate::consensus_life::Term::Permanent, 42, a.node_id().clone(), 1);
+        let forged = ConsensusMsg::CommitTerm { slot: Arc::from("trip/slot"), ballot: 42, envelope: clobber.encode() };
         let fired = emit_commit_until(&a, &forged, || a.system_stats().commit_conflicts >= 1).await;
         assert!(fired, "tripwire did not fire on conflicting COMMIT (fill {fill_to})");
         assert_eq!(
@@ -999,7 +1021,7 @@ mod tests {
             }
             conflicts = now;
         }
-        let idempotent = ConsensusMsg::Commit { slot: Arc::from("trip/slot"), ballot: 43, value: Bytes::from_static(b"genuine") };
+        let idempotent = ConsensusMsg::CommitTerm { slot: Arc::from("trip/slot"), ballot: 43, envelope: genuine.encode() };
         let body = encode_consensus_msg(&idempotent);
         // A second subscriber sees what the listener sees (one fan-out, `deliver`), so seeing it here means delivered.
         let mut watch = a.task_ctx.signal_handlers.register_with_capacity(Arc::clone(&kind), 256);
@@ -1017,620 +1039,6 @@ mod tests {
         assert!(seen, "the idempotent COMMIT was never delivered (fill {fill_to})");
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert_eq!(a.system_stats().commit_conflicts, conflicts, "same-value COMMIT must not count as a conflict");
-        a.shutdown().await;
-    }
-
-    /// Delivers `msg` to this node's consensus listener and returns once the listener has
-    /// **processed** it: a second COMMIT subscriber sees what the listener sees (one fan-out), and
-    /// a probe COMMIT emitted afterwards is applied only after `msg` (the listener drains its queue
-    /// in order) — so the probe's committed key appearing is the structural proof, no fixed sleep.
-    async fn deliver_commit_processed(a: &crate::GossipAgent, msg: &crate::consensus::ConsensusMsg, probe: &str) {
-        use crate::consensus::{consensus_kind, encode_consensus_msg, ConsensusMsg};
-        use crate::signal::SignalScope;
-        use std::sync::Arc;
-        let kind: Arc<str> = Arc::from(consensus_kind::COMMIT);
-        let body = encode_consensus_msg(msg);
-        let mut watch = a.task_ctx.signal_handlers.register_with_capacity(Arc::clone(&kind), 256);
-        let mut seen = false;
-        for _ in 0..300 {
-            let _ = a.mesh().emit(consensus_kind::COMMIT, SignalScope::Cluster, body.clone());
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            while let Ok(sig) = watch.try_recv() { seen |= sig.payload == body; }
-            if seen { break; }
-        }
-        assert!(seen, "the late COMMIT was never delivered");
-        let probe_msg = ConsensusMsg::Commit { slot: Arc::from(probe), ballot: 1, value: Bytes::from_static(b"probe") };
-        let probe_key = format!("consensus/committed/{probe}");
-        let applied = emit_commit_until(a, &probe_msg, || {
-            a.task_ctx.kv_state.store.pin().get(probe_key.as_str()).is_some_and(|e| e.data.is_some())
-        }).await;
-        assert!(applied, "the probe COMMIT behind the late one was never applied");
-    }
-
-    fn decided_of(a: &crate::GossipAgent, slot: &str) -> u64 {
-        a.task_ctx.kv_state.store.pin()
-            .get(format!("consensus/decided/{slot}").as_str())
-            .and_then(|e| e.data.clone())
-            .map(|b| crate::consensus::decode_ballot(&b))
-            .unwrap_or(0)
-    }
-
-    /// **Row A, K2: a reopened lease does not adopt the expired holder's value before the decided
-    /// floor arrives.** The commit writes `committed`, then the lease, then `decided`, and each
-    /// travels as its own key. A node holding the expired commit but not yet its floor saw the
-    /// decision as *over* at the old floor, so the expired holder's acceptance survived the
-    /// set-aside, was adopted, and was committed again with a fresh lease.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_reopened_lease_does_not_adopt_the_expired_value_before_its_floor_arrives() {
-        use crate::consensus::{ConsensusConfig, ConsensusResult};
-        // No listener: the proposer's own COMMIT is then not re-applied here, so the floor this
-        // test removes stays removed — the state of a node whose `decided` copy has not arrived.
-        let a = make_agent(alloc_port(), &[]).await;
-        let c = a.consensus();
-        let leased = |secs| ConsensusConfig { committed_lease_secs: Some(secs), ..ConsensusConfig::default() };
-        match c.cluster_propose("k2/slot", Bytes::from_static(b"expired-holder"), leased(1)).await {
-            ConsensusResult::Committed { .. } => {}
-            other => panic!("expected Committed, got {other:?}"),
-        }
-        // This node's copy of the slot's floor has not arrived.
-        a.task_ctx.kv_state.store.pin().remove("consensus/decided/k2/slot");
-        for _ in 0..100 {
-            if c.consensus_get("k2/slot").is_none() { break; }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-        assert_eq!(c.consensus_get("k2/slot"), None, "the 1 s lease lapsed");
-        match c.cluster_propose("k2/slot", Bytes::from_static(b"new-holder"), leased(60)).await {
-            ConsensusResult::Committed { value, .. } => assert_eq!(value.as_ref(), b"new-holder"),
-            other => panic!("the reopened slot adopted the expired holder's value: {other:?}"),
-        }
-        assert_eq!(c.consensus_get("k2/slot").as_deref(), Some(b"new-holder".as_slice()));
-        a.shutdown().await;
-    }
-
-    /// **Row A, K3: a late COMMIT does not re-stamp a released lock.** A learner holding the floor
-    /// but not the entry, or the entry but not the floor, re-wrote `committed` with its own HLC —
-    /// which wins LWW over the release tombstone fleet-wide and hands the lock back to its old
-    /// holder, permanently once the lease tombstone is collected.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_late_commit_does_not_restamp_a_released_lock() {
-        use crate::consensus::{ConsensusConfig, ConsensusMsg};
-        use std::sync::Arc;
-        let a = make_agent(alloc_port(), &[]).await;
-        let _l = a.consensus().start_consensus_listener(ConsensusConfig::default());
-        let ttl = std::time::Duration::from_secs(60);
-
-        // (1) The learner holds the floor but not the entry.
-        let g = a.consensus().distributed_lock("k3a", ttl).await.expect("acquire");
-        let (value, ballot) = (g.value.clone(), decided_of(&a, "lock/k3a"));
-        assert!(ballot > 0);
-        g.release();
-        crate::store::sweep_stale_tombstones(&a.task_ctx.kv_state.store, u64::MAX);
-        a.task_ctx.kv_state.store.pin().remove("consensus/committed/lock/k3a");
-        let late = ConsensusMsg::Commit { slot: Arc::from("lock/k3a"), ballot, value };
-        deliver_commit_processed(&a, &late, "probe/k3a").await;
-        assert_eq!(a.consensus().consensus_get("lock/k3a"), None,
-            "a late COMMIT at the released ballot resurrected the lock (floor held, entry not)");
-
-        // (2) The learner holds the entry but not the floor.
-        let g = a.consensus().distributed_lock("k3b", ttl).await.expect("acquire");
-        let (value, ballot) = (g.value.clone(), decided_of(&a, "lock/k3b"));
-        g.release();
-        a.task_ctx.kv_state.store.pin().remove("consensus/decided/lock/k3b");
-        let late = ConsensusMsg::Commit { slot: Arc::from("lock/k3b"), ballot, value };
-        deliver_commit_processed(&a, &late, "probe/k3b").await;
-        assert_eq!(a.consensus().consensus_get("lock/k3b"), None,
-            "a late COMMIT at the released ballot resurrected the lock (entry held, floor not)");
-        a.shutdown().await;
-    }
-
-    /// **Row A, C1: `elect_leader` is leased by default.** It committed permanently, so a leader
-    /// that died was reported for ever — a role that escapes evaporation.
-    #[tokio::test]
-    async fn elect_leader_is_leased_by_default() {
-        use crate::consensus::ConsensusConfig;
-        let a = make_agent(alloc_port(), &[]).await;
-        let _l = a.consensus().start_consensus_listener(ConsensusConfig::default());
-        a.mesh().join_group("c1");
-        let l = a.consensus().elect_leader_receipt("c1").await.expect("elects");
-        assert_eq!(l.leader, *a.node_id());
-        let lease = a.task_ctx.kv_state.store.pin()
-            .get("consensus/lease/leader/c1").and_then(|e| e.data.clone())
-            .and_then(|b| crate::consensus::decode_lease_ms(&b));
-        assert_eq!(lease, Some(super::super::overlay_consistent::DEFAULT_LEADER_LEASE.as_millis() as u64),
-            "the election carries the default lease");
-        // The release path: the leader steps down and the slot reads as empty.
-        assert!(a.consensus().release_leadership("c1").await, "the leader may release");
-        assert_eq!(a.consensus().consensus_get("leader/c1"), None, "released leadership reads as no leader");
-        // Permanence is still available, by asking for it.
-        a.mesh().join_group("c1-perm");
-        a.consensus().elect_leader_with("c1-perm", super::super::overlay_consistent::LeaderTerm::Permanent)
-            .await.expect("elects permanently");
-        assert!(a.task_ctx.kv_state.store.pin().get("consensus/lease/leader/c1-perm")
-            .is_none_or(|e| e.data.is_none()), "a permanent election carries no lease");
-        a.shutdown().await;
-    }
-
-    /// **Row A, C1: a dead leader's lease lapses and a new election succeeds.** Three members;
-    /// the leader is elected on a short lease and shut down; a survivor elects itself once the
-    /// lease lapses. Before, the permanent commit named the dead node for ever.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_dead_leaders_lease_lapses_and_a_new_election_succeeds() {
-        use crate::consensus::ConsensusConfig;
-        use super::super::overlay_consistent::{LeaderTerm, LeadershipBasis};
-        let (p1, p2, p3) = (alloc_port(), alloc_port(), alloc_port());
-        let a = make_agent(p1, &[p2, p3]).await;
-        let b = make_agent(p2, &[p1, p3]).await;
-        let c = make_agent(p3, &[p1, p2]).await;
-        let _la = a.consensus().start_consensus_listener(ConsensusConfig::default());
-        let _lb = b.consensus().start_consensus_listener(ConsensusConfig::default());
-        let _lc = c.consensus().start_consensus_listener(ConsensusConfig::default());
-        for n in [&a, &b, &c] { n.mesh().join_group("c1dead"); }
-        let mut ready = false;
-        for _ in 0..200 {
-            ready = [&a, &b, &c].iter().all(|n| n.mesh().group_members("c1dead").len() >= 3);
-            if ready { break; }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-        assert!(ready, "the group's roster did not converge on three members");
-
-        let l = a.consensus()
-            .elect_leader_with("c1dead", LeaderTerm::Lease(std::time::Duration::from_secs(2))).await
-            .expect("A elects");
-        assert_eq!(l.leader, *a.node_id());
-        // B sees A's leadership before A dies, so what follows is a lapse, not a missed commit.
-        let mut seen = false;
-        for _ in 0..200 {
-            seen = b.consensus().consensus_get("leader/c1dead").as_deref() == Some(a.node_id().to_string().as_bytes());
-            if seen { break; }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-        assert!(seen, "B never saw A's leadership");
-        a.shutdown().await;
-
-        let mut won = None;
-        for _ in 0..60 {
-            if let Ok(l) = b.consensus().elect_leader_receipt("c1dead").await
-                && l.leader == *b.node_id() && l.basis == LeadershipBasis::Decided {
-                won = Some(l);
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        }
-        assert!(won.is_some(), "a dead leader was reported for ever: B never won the election");
-        b.shutdown().await;
-        c.shutdown().await;
-    }
-
-    /// **Row A, C2: acceptor state is collected once its decision is over, and a live slot's
-    /// promise survives.** Acceptor memory — and since #585 its durable record — was never erased:
-    /// an output that does not decay.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn acceptor_state_is_collected_once_its_decision_is_over() {
-        use crate::consensus::{accepted_key, claim_vote, prepare_slot, ConsensusConfig, PrepareOutcome};
-        use std::sync::Arc;
-        let a = make_agent(alloc_port(), &[]).await;
-        let _l = a.consensus().start_consensus_listener(ConsensusConfig::default());
-        let ttl = std::time::Duration::from_secs(60);
-        let mem = |slot: &str| a.task_ctx.consensus_accepted.pin().get(slot).cloned();
-        let record = |slot: &str| a.task_ctx.kv_state.store.pin()
-            .get(accepted_key(a.node_id(), slot).as_str()).and_then(|e| e.data.clone());
-
-        // Finished: acquired and released.
-        let g = a.consensus().distributed_lock("c2-done", ttl).await.expect("acquire");
-        let (done_value, done_ballot) = (g.value.clone(), decided_of(&a, "lock/c2-done"));
-        g.release();
-        // Finished, but a later ballot is promised (a proposal in flight): must survive.
-        let g = a.consensus().distributed_lock("c2-inflight", ttl).await.expect("acquire");
-        let inflight_ballot = decided_of(&a, "lock/c2-inflight");
-        g.release();
-        let inflight: Arc<str> = Arc::from("lock/c2-inflight");
-        assert!(matches!(
-            prepare_slot(&a.task_ctx.consensus_accepted, &inflight, inflight_ballot + 1, 7, 0),
-            PrepareOutcome::Promised(_)));
-        // Live: held.
-        let held = a.consensus().distributed_lock("c2-live", ttl).await.expect("acquire");
-        for s in ["lock/c2-done", "lock/c2-inflight", "lock/c2-live"] {
-            assert!(mem(s).is_some() && record(s).is_some(), "{s}: acceptor state present before collection");
-        }
-
-        let collected = a.consensus().collect_finished_acceptor_state().await;
-        assert!(collected >= 1, "nothing was collected");
-        assert!(mem("lock/c2-done").is_none(), "a finished slot's acceptor memory was kept");
-        assert!(record("lock/c2-done").is_none(), "a finished slot's durable record was kept");
-        assert_eq!(mem("lock/c2-inflight").map(|s| s.promised), Some(inflight_ballot + 1),
-            "a promise to a ballot above the finished decision was forgotten");
-        assert!(record("lock/c2-inflight").is_some());
-        assert!(mem("lock/c2-live").is_some_and(|s| s.promised > 0) && record("lock/c2-live").is_some(),
-            "a live slot's promise was forgotten");
-        // What the forgotten state refused is still refused — by the floor.
-        let done: Arc<str> = Arc::from("lock/c2-done");
-        assert!(decided_of(&a, "lock/c2-done") >= done_ballot);
-        assert!(!claim_vote(&a.task_ctx.consensus_accepted, &done, done_ballot, &done_value, 9,
-            decided_of(&a, "lock/c2-done")), "the finished ballot is refused after collection");
-        // And the slot is usable again.
-        let g = a.consensus().distributed_lock("c2-done", ttl).await;
-        assert!(g.is_ok(), "re-acquire after collection: {:?}", g.err());
-        std::mem::forget(g);
-        std::mem::forget(held);
-        a.shutdown().await;
-    }
-
-    // ── The adversarial review of #600: a lifecycle record that names another value ──────────────
-
-    /// Two nodes with listeners, each seeing the other.
-    async fn listening_pair() -> (crate::GossipAgent, crate::GossipAgent, crate::ConsensusListenerHandle, crate::ConsensusListenerHandle) {
-        use crate::consensus::ConsensusConfig;
-        let (p1, p2) = (alloc_port(), alloc_port());
-        let a = make_agent(p1, &[p2]).await;
-        let b = make_agent(p2, &[p1]).await;
-        let la = a.consensus().start_consensus_listener(ConsensusConfig::default());
-        let lb = b.consensus().start_consensus_listener(ConsensusConfig::default());
-        for _ in 0..100 {
-            if !a.peers().is_empty() && !b.peers().is_empty() { break; }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-        assert!(!a.peers().is_empty() && !b.peers().is_empty(), "the pair never peered");
-        (a, b, la, lb)
-    }
-
-    fn lease_record_of(a: &crate::GossipAgent, slot: &str) -> Option<crate::consensus::LeaseRecord> {
-        a.task_ctx.kv_state.store.pin().get(format!("consensus/lease/{slot}").as_str())
-            .and_then(|e| e.data.clone())
-            .and_then(|b| crate::consensus::decode_lease_record(&b))
-    }
-
-    fn names(rec: Option<crate::consensus::LeaseRecord>, value: &Bytes) -> bool {
-        matches!(rec, Some(crate::consensus::LeaseRecord::Lifecycle { digest, .. })
-            if digest == crate::consensus::value_digest(value))
-    }
-
-    /// A holds `name` on a 2 s lease and lets it lapse; B then acquires it with `ttl`. Returns A's
-    /// committed entry from before B's acquisition, A's guard, B's value and B's ballot, once A holds
-    /// B's lifecycle record. B is shut down, so nothing re-delivers B's frames to A afterwards.
-    async fn handover(name: &str, ttl: std::time::Duration)
-        -> (crate::GossipAgent, crate::store::StoreEntry, crate::LockGuard, Bytes, u64, crate::ConsensusListenerHandle) {
-        let (a, b, la, _lb) = listening_pair().await;
-        let slot = format!("lock/{name}");
-        let ga = a.consensus().distributed_lock(name, std::time::Duration::from_secs(2)).await.expect("A acquires");
-        let old = a.task_ctx.kv_state.store.pin().get(format!("consensus/committed/{slot}").as_str())
-            .cloned().expect("A holds its commit");
-        let gb = b.consensus().locks().lock(name, ttl, std::time::Duration::from_secs(15)).await
-            .expect("B acquires once A's lease lapses");
-        let vb = gb.value.clone();
-        let bb = decided_of(&b, &slot);
-        let mut seen = false;
-        for _ in 0..200 {
-            seen = names(lease_record_of(&a, &slot), &vb);
-            if seen { break; }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-        assert!(seen, "A never received B's lifecycle record");
-        std::mem::forget(gb);
-        b.shutdown().await;
-        (a, old, ga, vb, bb, la)
-    }
-
-    /// **Review of #600, finding 1(a): a stale guard's release cannot overwrite a newer holder's
-    /// record.** A holds B's record but its own, older `committed` (the frames arrived out of order).
-    /// A's lapsed guard is dropped: it must not write `released` over B's record — that would leave B's
-    /// commit with no lease anywhere once `committed = vB` arrived.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_stale_guards_release_cannot_overwrite_a_newer_holders_record() {
-        let (a, old, ga, vb, _, _la) = handover("r1a", std::time::Duration::from_secs(60)).await;
-        a.task_ctx.kv_state.store.pin().insert(std::sync::Arc::from("consensus/committed/lock/r1a"), old);
-        drop(ga);
-        let rec = lease_record_of(&a, "lock/r1a");
-        assert!(names(rec, &vb), "the stale guard's release replaced B's record: {rec:?}");
-        assert!(matches!(rec, Some(crate::consensus::LeaseRecord::Lifecycle { released: false, .. })), "{rec:?}");
-        a.shutdown().await;
-    }
-
-    /// **Finding 1(b): a late COMMIT below the record's ballot is stale, whatever its value.** A holds
-    /// the old floor and B's newer record but no `committed`; A's own COMMIT arrives late.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_late_commit_below_the_records_ballot_is_stale() {
-        use crate::consensus::ConsensusMsg;
-        let (a, old, ga, _vb, bb, _la) = handover("r1b", std::time::Duration::from_secs(60)).await;
-        let va = ga.value.clone();
-        std::mem::forget(ga);
-        let pin = a.task_ctx.kv_state.store.pin();
-        pin.remove("consensus/committed/lock/r1b");
-        let ba = bb - 1;
-        pin.insert(std::sync::Arc::from("consensus/decided/lock/r1b"), crate::store::StoreEntry {
-            data: Some(crate::consensus::encode_ballot(ba)), timestamp: old.timestamp,
-        });
-        drop(pin);
-        let late = ConsensusMsg::Commit { slot: std::sync::Arc::from("lock/r1b"), ballot: ba, value: va.clone() };
-        deliver_commit_processed(&a, &late, "probe/r1b").await;
-        let now = a.task_ctx.kv_state.store.pin().get("consensus/committed/lock/r1b").and_then(|e| e.data.clone());
-        assert_ne!(now.as_deref(), Some(va.as_ref()), "a COMMIT below B's ballot was re-stamped");
-        a.shutdown().await;
-    }
-
-    /// **Finding 1(c): a record that names another value reads bounded, never live for ever.** A holds
-    /// B's record (a 2 s lease) ahead of B's `committed`, with its own older entry: the entry reads
-    /// live at most for the record's window, measured from the entry.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_record_ahead_of_its_commit_reads_bounded() {
-        let (a, old, ga, _vb, _, _la) = handover("r1c", std::time::Duration::from_secs(2)).await;
-        std::mem::forget(ga);
-        a.task_ctx.kv_state.store.pin().insert(std::sync::Arc::from("consensus/committed/lock/r1c"), old);
-        let mut lapsed = false;
-        for _ in 0..100 {
-            lapsed = a.consensus().consensus_get("lock/r1c").is_none();
-            if lapsed { break; }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-        assert!(lapsed, "an entry paired with another value's record read live for ever");
-        a.shutdown().await;
-    }
-
-    /// **Finding 1(ii): `release_leadership` refuses when the slot was decided above its ballot.**
-    #[tokio::test]
-    async fn release_refuses_when_a_newer_decision_is_known() {
-        use crate::consensus::ConsensusConfig;
-        let a = make_agent(alloc_port(), &[]).await;
-        let _l = a.consensus().start_consensus_listener(ConsensusConfig::default());
-        a.mesh().join_group("r1d");
-        a.consensus().elect_leader_receipt("r1d").await.expect("elects");
-        let b = decided_of(&a, "leader/r1d");
-        let _ = a.kv().set("consensus/decided/leader/r1d", crate::consensus::encode_ballot(b + 5));
-        assert!(!a.consensus().release_leadership("r1d").await,
-            "a release at a ballot below a known decision was written");
-        let rec = lease_record_of(&a, "leader/r1d");
-        assert!(matches!(rec, Some(crate::consensus::LeaseRecord::Lifecycle { released: false, .. })), "{rec:?}");
-        a.shutdown().await;
-    }
-
-    /// **Finding 6: a permanent slot with no `decided` key (written before 2.30.0) is released at the
-    /// ballot it was committed at** — read from this node's acceptor memory — not at ballot 0, which
-    /// would set nothing aside.
-    #[tokio::test]
-    async fn a_release_without_a_floor_names_the_committed_ballot() {
-        use crate::agent::overlay_consistent::LeaderTerm;
-        use crate::consensus::ConsensusConfig;
-        let a = make_agent(alloc_port(), &[]).await;
-        let _l = a.consensus().start_consensus_listener(ConsensusConfig::default());
-        a.mesh().join_group("r6");
-        a.consensus().elect_leader_with("r6", LeaderTerm::Permanent).await.expect("elects");
-        let b = decided_of(&a, "leader/r6");
-        assert!(b > 0);
-        a.task_ctx.kv_state.store.pin().remove("consensus/decided/leader/r6");
-        assert!(a.consensus().release_leadership("r6").await);
-        match lease_record_of(&a, "leader/r6") {
-            Some(crate::consensus::LeaseRecord::Lifecycle { ballot, released: true, .. }) =>
-                assert_eq!(ballot, b, "the release names the committed ballot"),
-            other => panic!("expected a release record, got {other:?}"),
-        }
-        a.shutdown().await;
-    }
-
-    /// **Finding 4: collection is bounded per tick.**
-    #[tokio::test]
-    async fn collection_is_bounded_per_tick() {
-        use crate::consensus::{ConsensusConfig, ConsensusResult, ACCEPTOR_COLLECT_BUDGET};
-        let a = make_agent(alloc_port(), &[]).await;
-        let c = a.consensus();
-        let leased = ConsensusConfig { committed_lease_secs: Some(0), ..ConsensusConfig::default() };
-        let n = ACCEPTOR_COLLECT_BUDGET + 6;
-        for i in 0..n {
-            let r = c.cluster_propose(&format!("budget/{i}"), Bytes::from_static(b"v"), leased.clone()).await;
-            assert!(matches!(r, ConsensusResult::Committed { .. }), "{r:?}");
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await; // the 0 s leases lapse
-        assert_eq!(c.collect_finished_acceptor_state().await, ACCEPTOR_COLLECT_BUDGET, "one tick collects at most the budget");
-        assert_eq!(c.collect_finished_acceptor_state().await, n - ACCEPTOR_COLLECT_BUDGET, "the next tick the rest");
-        a.shutdown().await;
-    }
-
-    /// **Finding 8: renewal refreshes the lifecycle record's timestamp** — the window runs from it.
-    #[tokio::test]
-    async fn renewal_refreshes_the_lifecycle_record() {
-        use crate::consensus::ConsensusConfig;
-        let a = make_agent(alloc_port(), &[]).await;
-        let _l = a.consensus().start_consensus_listener(ConsensusConfig::default());
-        a.mesh().join_group("r8");
-        let ts = || a.task_ctx.kv_state.store.pin().get("consensus/lease/leader/r8").map(|e| e.timestamp);
-        a.consensus().elect_leader_receipt("r8").await.expect("elects");
-        let first = ts().expect("a lease record");
-        a.consensus().elect_leader_receipt("r8").await.expect("renews");
-        assert!(ts().expect("a lease record") > first, "renewal did not refresh the record");
-        a.shutdown().await;
-    }
-
-    /// **Finding 8: collection and a concurrent promise.** A collection racing a fresh promise on the
-    /// same finished slot never leaves memory holding a promise whose durable record is gone — the
-    /// compare-and-set re-check and `acceptor_records` together.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn collection_never_erases_a_concurrent_promise() {
-        use crate::consensus::{accepted_key, decode_acceptor, ConsensusConfig, ConsensusResult};
-        use std::sync::Arc;
-        let a = std::sync::Arc::new(make_agent(alloc_port(), &[]).await);
-        let leased = ConsensusConfig { committed_lease_secs: Some(0), ..ConsensusConfig::default() };
-        for i in 0..40 {
-            let slot = format!("race/{i}");
-            let r = a.consensus().cluster_propose(&slot, Bytes::from_static(b"v"), leased.clone()).await;
-            let ConsensusResult::Committed { ballot, .. } = r else { panic!("{r:?}") };
-            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-            let a2 = Arc::clone(&a);
-            let slot2 = slot.clone();
-            // A fresh proposal on the finished slot, racing the collection.
-            let promise = tokio::spawn(async move {
-                a2.consensus().cluster_propose(&slot2, Bytes::from_static(b"w"), ConsensusConfig::default()).await
-            });
-            let _ = a.consensus().collect_finished_acceptor_state().await;
-            let _ = promise.await;
-            let s: Arc<str> = Arc::from(slot.as_str());
-            if let Some(state) = a.task_ctx.consensus_accepted.pin().get(&s).cloned()
-                && state.promised > ballot {
-                let rec = a.task_ctx.kv_state.store.pin().get(accepted_key(a.node_id(), &slot).as_str())
-                    .and_then(|e| e.data.clone()).and_then(|b| decode_acceptor(&b));
-                assert!(rec.is_some_and(|r| r.promised >= state.promised),
-                    "slot {slot}: memory promises {} but the durable record is gone or older", state.promised);
-            }
-        }
-        a.shutdown().await;
-    }
-
-    // ── The adversarial re-review of #600 ─────────────────────────────────────────────────────────
-
-    /// `n` nodes, each peered with every other, each running a listener, each seeing `n - 1` peers.
-    async fn listening_mesh(n: usize) -> (Vec<crate::GossipAgent>, Vec<crate::ConsensusListenerHandle>) {
-        use crate::consensus::ConsensusConfig;
-        let ports: Vec<u16> = (0..n).map(|_| alloc_port()).collect();
-        let mut nodes = Vec::new();
-        for (i, p) in ports.iter().enumerate() {
-            let others: Vec<u16> = ports.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, q)| *q).collect();
-            nodes.push(make_agent(*p, &others).await);
-        }
-        let ls = nodes.iter().map(|a| a.consensus().start_consensus_listener(ConsensusConfig::default())).collect();
-        let mut ready = false;
-        for _ in 0..200 {
-            ready = nodes.iter().all(|a| a.peers().len() >= n - 1);
-            if ready { break; }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-        assert!(ready, "the mesh never fully peered");
-        (nodes, ls)
-    }
-
-    /// **Re-review of #600, finding 1: a newer commit beside an older lifecycle record is not bounded
-    /// by the older record's window.** A holds `x` on a 2 s lease and lets it lapse; B acquires it; B's
-    /// lifecycle record never reaches the learners L, M, N (they keep A's — the frame withheld), but
-    /// B's COMMIT did (`committed = vB`, `decided` = B's ballot). A and B are then partitioned away.
-    /// Once A's old window has passed, L tries to acquire `x`: it must not commit — B still holds it.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-    async fn a_newer_commit_is_not_bounded_by_an_older_record() {
-        let (nodes, _ls) = listening_mesh(5).await;
-        let (a, b) = (&nodes[0], &nodes[1]);
-        let learners = &nodes[2..];
-        let ga = a.consensus().distributed_lock("x", std::time::Duration::from_secs(2)).await.expect("A acquires");
-        let ba = decided_of(a, "lock/x");
-        // A's record as the learners hold it.
-        let mut rec_a = None;
-        for _ in 0..200 {
-            rec_a = learners[0].task_ctx.kv_state.store.pin().get("consensus/lease/lock/x").cloned();
-            if names(rec_a.as_ref().and_then(|e| e.data.as_ref()).and_then(|b| crate::consensus::decode_lease_record(b)), &ga.value) { break; }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-        let rec_a = rec_a.expect("the learners hold A's record");
-        std::mem::forget(ga);
-        let gb = b.consensus().locks().lock("x", std::time::Duration::from_secs(60), std::time::Duration::from_secs(15)).await
-            .expect("B acquires once A's lease lapses");
-        let vb = gb.value.clone();
-        std::mem::forget(gb);
-        // Every learner holds B's commit and its decided ballot.
-        let mut seen = false;
-        for _ in 0..200 {
-            seen = learners.iter().all(|l| decided_of(l, "lock/x") > ba
-                && l.task_ctx.kv_state.store.pin().get("consensus/committed/lock/x")
-                    .and_then(|e| e.data.clone()).as_deref() == Some(vb.as_ref()));
-            if seen { break; }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-        assert!(seen, "the learners never received B's commit");
-        // B's record is withheld from them: they hold A's.
-        a.shutdown().await;
-        b.shutdown().await;
-        for l in learners {
-            l.task_ctx.kv_state.store.pin().insert(std::sync::Arc::from("consensus/lease/lock/x"), rec_a.clone());
-        }
-        // A's old window (2 s, measured from the learners' entry) passes.
-        tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
-        let c = learners[0].consensus().distributed_lock("x", std::time::Duration::from_secs(60)).await;
-        assert!(c.is_err(), "a second holder committed while B holds the lock");
-        std::mem::forget(c);
-        for l in learners { assert_eq!(l.consensus().consensus_get("lock/x").as_deref(), Some(vb.as_ref())); }
-        for l in learners { l.shutdown().await; }
-    }
-
-    /// **Re-review finding 2: a permanent commit beside a stale lifecycle record elsewhere stays
-    /// permanent.** The committer tombstoned no record it did not hold; a learner holding A's old
-    /// record must not expire the permanent value after A's window.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_permanent_commit_beside_a_stale_record_stays_live() {
-        use crate::consensus::{ConsensusConfig, ConsensusResult};
-        let (a, l, _la, _ll) = listening_pair().await;
-        let leased = ConsensusConfig { committed_lease_secs: Some(1), ..ConsensusConfig::default() };
-        let r = a.consensus().cluster_propose("perm/slot", Bytes::from_static(b"vA"), leased).await;
-        assert!(matches!(r, ConsensusResult::Committed { .. }), "{r:?}");
-        let ba = decided_of(&a, "perm/slot");
-        let mut rec = None;
-        for _ in 0..200 {
-            rec = l.task_ctx.kv_state.store.pin().get("consensus/lease/perm/slot").cloned();
-            if rec.as_ref().is_some_and(|e| e.data.is_some()) { break; }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-        let rec = rec.expect("L holds A's record");
-        for _ in 0..100 {
-            if a.consensus().consensus_get("perm/slot").is_none() { break; }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-        let r = a.consensus().cluster_propose("perm/slot", Bytes::from_static(b"vP"), ConsensusConfig::default()).await;
-        assert!(matches!(r, ConsensusResult::Committed { .. }), "{r:?}");
-        let mut seen = false;
-        for _ in 0..200 {
-            seen = decided_of(&l, "perm/slot") > ba && l.consensus().consensus_get("perm/slot").as_deref() == Some(b"vP".as_slice());
-            if seen { break; }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-        assert!(seen, "L never received the permanent commit");
-        a.shutdown().await;
-        l.task_ctx.kv_state.store.pin().insert(std::sync::Arc::from("consensus/lease/perm/slot"), rec);
-        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-        assert_eq!(l.consensus().consensus_get("perm/slot").as_deref(), Some(b"vP".as_slice()),
-            "a permanent commit expired under a stale record's window");
-        l.shutdown().await;
-    }
-
-    /// **Re-review finding 3: a live permanent leader may release even when its value was re-committed
-    /// at a higher ballot by a node with a stale view.**
-    #[tokio::test]
-    async fn a_permanent_leader_releases_above_a_higher_recommit() {
-        use crate::agent::overlay_consistent::LeaderTerm;
-        use crate::consensus::ConsensusConfig;
-        let a = make_agent(alloc_port(), &[]).await;
-        let _l = a.consensus().start_consensus_listener(ConsensusConfig::default());
-        a.mesh().join_group("r3");
-        a.consensus().elect_leader_with("r3", LeaderTerm::Permanent).await.expect("elects");
-        let b = decided_of(&a, "leader/r3");
-        let _ = a.kv().set("consensus/decided/leader/r3", crate::consensus::encode_ballot(b + 3));
-        assert!(a.consensus().release_leadership("r3").await, "a live permanent leader was refused its release");
-        assert_eq!(a.consensus().consensus_get("leader/r3"), None);
-        a.shutdown().await;
-    }
-
-    /// **Re-review finding 9: a forged lifecycle record far above every observed ballot is counted**
-    /// when a COMMIT for its slot is judged against it.
-    #[tokio::test]
-    async fn a_forged_lifecycle_ballot_trips_the_tripwire() {
-        use crate::consensus::{encode_lease_record, value_digest, ConsensusConfig, ConsensusMsg};
-        let a = make_agent(alloc_port(), &[]).await;
-        let _l = a.consensus().start_consensus_listener(ConsensusConfig::default());
-        let forged = encode_lease_record(60_000, u64::MAX - 1, value_digest(&Bytes::from_static(b"other")), false);
-        let _ = a.kv().set("consensus/lease/forged/rec", forged);
-        let commit = ConsensusMsg::Commit { slot: std::sync::Arc::from("forged/rec"), ballot: 3, value: Bytes::from_static(b"v") };
-        deliver_commit_processed(&a, &commit, "probe/forged").await;
-        assert!(a.system_stats().consensus_decided_floor_anomalies >= 1, "a forged record ballot went uncounted");
-        a.shutdown().await;
-    }
-
-    /// **Re-review finding 8: the collection's compare-and-set re-check.** A promise above the ended
-    /// ballot that appears after the candidate was chosen is kept, memory and record.
-    #[tokio::test]
-    async fn collection_rechecks_the_promise_inside_its_compare_and_set() {
-        use crate::consensus::{accepted_key, prepare_slot, ConsensusConfig, ConsensusResult, PrepareOutcome};
-        let a = make_agent(alloc_port(), &[]).await;
-        let leased = ConsensusConfig { committed_lease_secs: Some(0), ..ConsensusConfig::default() };
-        let r = a.consensus().cluster_propose("cas/slot", Bytes::from_static(b"v"), leased).await;
-        let ConsensusResult::Committed { ballot, .. } = r else { panic!("{r:?}") };
-        let slot: std::sync::Arc<str> = std::sync::Arc::from("cas/slot");
-        // The candidate was chosen at `ballot`; a newer promise arrives before the removal.
-        assert!(matches!(prepare_slot(&a.task_ctx.consensus_accepted, &slot, ballot + 1, 9, 0), PrepareOutcome::Promised(_)));
-        let engine = super::make_consensus_engine_ctx(&a.task_ctx, false, false, 0, None);
-        assert!(engine.forget_acceptor_for_test(&slot, ballot).is_none(), "a newer promise was removed");
-        assert_eq!(a.task_ctx.consensus_accepted.pin().get(&slot).map(|s| s.promised), Some(ballot + 1));
-        assert!(a.task_ctx.kv_state.store.pin().get(accepted_key(a.node_id(), &slot).as_str()).is_some_and(|e| e.data.is_some()));
         a.shutdown().await;
     }
 

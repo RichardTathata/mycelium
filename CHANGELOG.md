@@ -162,84 +162,54 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `with_call_deadline(None)`; `Instance::invoke` is still synchronous, so an embedder that calls it from
   async code should move it to `spawn_blocking` as the serve loop now does — the co-op `catalog`,
   `catalog_viz` and `mcp_toolgrowth` demos now do, instantiation included.
-- **Locks and leases end where every node can see it; `elect_leader` is leased; acceptor state decays** (row A of
-  `post-360-hardening.md`, with C1 and C2). A slot's `consensus/lease/{slot}` record is now a **lifecycle record**:
-  the window, then the decision's ballot, its value's digest and a *released* flag, measured from its own timestamp
-  (`LeaseRecord::Lifecycle`, `ended_at`, `src/consensus.rs`). A lock release writes it as released at the guard's
-  ballot (`release_decision`) instead of tombstoning `committed` and the lease. Prepare sets acceptances at or below
-  an ended ballot aside, a COMMIT at or below it is stale, and acceptors refuse — and proposers draw above —
-  `max(decided, ended)`. Three findings of the 2026-10-09 360 review close: **K1** a released lock whose tombstones
-  were garbage-collected (~3000 s) looked never decided, so the next acquirer adopted the old holder's value from
-  the acceptors' memory, committed it and was told `Superseded` — the old holder held the lock again with no guard
-  (and with a value over 4 KiB after an acceptor restart, every ballot was `Blocked`); **K2** a reopened lease set
-  acceptances aside only up to a `consensus/decided` floor that travels as its own key, so before it arrived the
-  expired holder's value was re-committed; **K3** a late COMMIT at a learner holding the floor but not the entry,
-  or the entry but not the floor, re-stamped `committed` with a fresh HLC that won LWW over the release. **C1:**
-  `elect_leader` / `elect_leader_receipt` commit with a 30 s lease (`DEFAULT_LEADER_LEASE` — the default
-  anti-entropy interval, and the lease the log-consumer claim and the gateway lock already use); calling again
-  renews; `release_leadership(group)` steps down; `elect_leader_with(group, LeaderTerm::Permanent)` keeps the old
-  permanence by explicit opt-in. The gateway's `POST /gateway/overlay/elect` takes `ttl_secs` / `permanent`, reads
-  the *live* leader (it read the raw committed key), and `DELETE /gateway/overlay/elect/{group}` (`consensus:write`)
-  steps down. **C2:** each consensus listener collects, every 60 s, acceptor state (memory and durable record)
-  whose decision ended at `e` and that promises nothing above `e`, after raising the decided floor to `e` on stable
-  storage (`collect_finished`); a new lock (`TaskCtx::acceptor_records`, lock-order row 56) keeps a promise
-  recorded meanwhile from being erased by the tombstone. Entry points enumerated by `git grep -nE
-  "consensus_ns::(COMMITTED|LEASE|DECIDED)|consensus/(committed|lease|decided)/|live_committed|decision_over|
-  commit_is_stale|set_aside_finished|decode_lease_ms|encode_lease_ms"` and `git grep -n elect_leader`: the
-  engine's draw, prepare, claim, answer and COMMIT paths and both commit sites (`propose`, `cross_propose`), the
-  live reads (`consensus_get`, `consistent_get`, `distributed_lock`, `elect_leader*`, the log-group claim,
-  `GET /consensus/{slot}`), `LockGuard` release from both doors (Rust and `DELETE /gateway/overlay/lock/{id}`),
-  and the gateway election. Seen failing first: `a_released_lock_is_not_recommitted_to_its_holder_after_tombstone_gc`
-  (`Some(Superseded)`), `a_reopened_lease_does_not_adopt_the_expired_value_before_its_floor_arrives` (`Superseded
-  { slot: "k2/slot", ballot: 2 }`), `a_late_commit_does_not_restamp_a_released_lock` (`left: Some(b"127.0.0.1:…")`),
-  and — against stubs of the new API — `elect_leader_is_leased_by_default` (`left: None, right: Some(30000)`),
-  `a_dead_leaders_lease_lapses_and_a_new_election_succeeds`, `acceptor_state_is_collected_once_its_decision_is_over`
-  (`nothing was collected`). Wire **v12** unchanged — no message changes; the record's first 8 bytes are still the
-  window. **The adversarial review's findings, fixed in the same PR:** a lifecycle record naming another value than
-  the committed entry no longer makes the entry live for ever — it reads live for the record's window measured from
-  the entry (30 s, `MISMATCH_RELEASED_WINDOW_MS`, for a release record), a COMMIT below the record's ballot is stale
-  whatever its value, and a release refuses when the record names another value or a higher decided ballot is known
-  (seen failing first: `a_stale_guards_release_cannot_overwrite_a_newer_holders_record` — the release replaced B's
-  record; `a_late_commit_below_the_records_ballot_is_stale` — re-stamped; `a_record_ahead_of_its_commit_reads_bounded`
-  — "read live for ever"; `release_refuses_when_a_newer_decision_is_known`); `release_leadership` is `async` and
-  durable (`append_sync`) before it returns `true` (`a_released_leadership_survives_a_crash`, seen failing); a
-  permanent slot with no `decided` key (written before 2.30.0) is released at the ballot this node's acceptor memory
-  holds, not 0 (`a_release_without_a_floor_names_the_committed_ballot`, seen failing with `left: 0`); collection runs
-  on its own task, at most 64 slots a tick (`collection_is_bounded_per_tick`, seen failing with `left: 70`), and puts
-  a gossip-received floor on stable storage before relying on it. **The independent re-review's findings, also
-  fixed here:** the bounded reading above opened a two-holders path — a learner holds a *newer* `committed` and
-  `decided` beside an *older* record during every handover, and bounding the newer commit by the older record's
-  window let a third proposer commit beside a live holder. A record whose ballot is below the decided ballot now
-  says nothing about the entry (live, no window, until its own record arrives), and the committer writes its record
-  **before** it emits the COMMIT (seen failing first: `a_newer_commit_is_not_bounded_by_an_older_record` — five
-  nodes, B's record withheld from the learners, "a second holder committed while B holds the lock"). A permanent
-  commit tombstones the record key whether or not the committer holds one, and reads live beside a stale record
-  elsewhere (`a_permanent_commit_beside_a_stale_record_stays_live`, seen failing: `left: None`). A live permanent
-  leader re-committed higher by a stale-view node is released at that ballot
-  (`a_permanent_leader_releases_above_a_higher_recommit`, seen failing); acceptor memory names a release's ballot
-  only for a slot with no `decided` key. `DELETE /gateway/overlay/elect/{group}` answers `500 release_unrecorded`
-  when the WAL did not acknowledge the release. `persist_floor` appends after `record_decided` in every case;
-  collection starts each pass at a random slot so failing slots cannot starve the rest; a forged record ballot is
-  counted by the floor tripwire (`a_forged_lifecycle_ballot_trips_the_tripwire`, seen failing); the collection's
-  compare-and-set re-check has its own test (`collection_rechecks_the_promise_inside_its_compare_and_set`, seen
-  failing with the re-check toggled off: "a newer promise was removed"). **Upgrade notes:** (1) **`elect_leader` is no
-  longer permanent**: a leader that does not call again within 30 s is no longer reported, and another node may be
-  elected — renew by calling again (every ~10 s), or ask for `LeaderTerm::Permanent`; a slot already committed
-  permanently before the upgrade stays permanent until its leader calls `release_leadership`. The SDKs'
-  `elect_leader` reaches the gateway route, so it is leased too. `release_leadership` returns `true` once its
-  release is durable — a renewal already in flight from the same node can still re-elect it, so stop renewing first.
-  (2) **Mixed fleet — upgrade every node of a fleet that uses locks or leases.** A node older than 2.32.0 reads a
-  lifecycle record as its 8-byte window: a release is a window of 0, so it sees the lock released, and it measures a
-  lease from the committed entry rather than the record (a few ms earlier). It still releases by tombstones, so a lock
-  it released whose tombstones were collected can be re-committed once to its old holder by an upgraded acquirer, for
-  one TTL. And it has none of the K3 fix: a late COMMIT it re-stamps wins LWW over the newer holder's `committed`
-  fleet-wide, after which every upgraded node pairs the old value with the newer holder's record — the old value reads
-  live for up to one window (30 s for a release record), the newer holder's commit is lost, and its guard still
-  claims a lock the fleet no longer shows it holding (fence on the token). (3) `LockGuard` (a private field) and
-  `TaskCtx` each gained a field; `ConsensusListenerHandle` gained a private field. **Not built:** the SDKs expose no
-  `release_leadership` verb (row G's surface); a node that proposes without running a consensus listener does not
-  collect its acceptor state; `release_leadership` is not serialised against a concurrent renewal by the same node
-  (documented instead).
+- **One record per decision: a lock, a lease and a leadership end where every node can see it; `elect_leader` is
+  leased; acceptor state decays** (row A of `post-360-hardening.md`, with C1 and C2; design record
+  `docs/design/lock-lifecycle.md`, adopted after three review rounds and a design review on #600). A decision lived
+  in three keys merged by last-writer-wins on HLC — `committed`, `lease`, `decided` — so a node could hold any
+  combination of their versions, and every reading rule over the pair (value, window) had one it read wrong: a
+  released lock re-committed to its old holder once its tombstones were collected (K1), a reopened lease adopting
+  the expired value before the floor arrived (K2), a late COMMIT reviving a released lock fleet-wide (K3), and, in
+  the rounds' own fixes, a newer holder ended by an older window, a lock wedged for ever by adoption under clock
+  skew, and two leaders from a release that named a ballot it read from `decided`. Now **what Paxos decides is a
+  decision envelope** — the value with its window (permanent, or a lease ending at an `expires_at_ms` fixed on the
+  original proposer's wall clock at the first proposal), lineage, original proposer and fencing token
+  (`src/consensus_life.rs`) — so every acceptance and adoption carries the lifecycle, and an adopter re-commits the
+  holder's window, never its own. It is written under `consensus/life/{escaped slot}/{ballot}`, the same bytes from
+  every writer, read by the **highest ballot**; it ends by a release marker (`…/end/{lineage}-{proposer}`, a key no
+  record write can remove) or when its lease is past on the reader's **wall clock**. The committer writes the
+  record, fsynced, before the COMMIT; the COMMIT (`CommitTerm`, an appended variant) carries the whole envelope,
+  and an upgraded learner ignores the legacy `Commit`. `consensus/decided/` is a refusal floor only. **C1:**
+  `elect_leader` / `elect_leader_receipt` lease 30 s by default (`DEFAULT_LEADER_LEASE` — the anti-entropy
+  interval, and the lock and log-claim default); calling again renews, keeping the lineage; `release_leadership`
+  (async, durable) ends the lineage, a renewal in flight included; `elect_leader_with(group,
+  LeaderTerm::Permanent)` is the opt-in; `POST /gateway/overlay/elect` takes `ttl_secs` / `permanent` and
+  `DELETE /gateway/overlay/elect/{group}` steps down (`200`, `404 not_leader`, `500 release_unrecorded`;
+  `consensus:write` is node-wide there). `LockGuard` gains `expires_at_ms()`, `deadline()` and `is_expired()`, and is
+  never issued past its deadline. **C2:** a collector task beside each listener shrinks the acceptor state of a slot
+  whose decision ended at `e` — promising nothing above it, re-checked in the compare-and-set — to a node-owned,
+  fsynced floor `{e}` that refuses `e` and below, after fsyncing the record it relies on; lower records become
+  stubs, lease markers go after their expiry plus the drift bound, permanent markers never; 64 slots a pass, sorted
+  then seam-rotated. Wire **v12**: five appended `ConsensusMsg` variants (`PrepareTerm`, `PrepareAckTerm`,
+  `ProposeTerm`, `PromiseTerm`, `CommitTerm`); the acceptor record gains tag `0x03`. **Seen failing first** on the
+  branch before the record (black-box, `src/agent/lock_lifecycle_tests.rs`): `row17_a_skewed_holders_decision_does_not_wedge_the_lock`
+  ("the lock is wedged for ever after B's window"), `row20_an_ended_decision_does_not_revive_on_a_higher_floor`
+  ("an ended leadership read live again"), `row22_an_adoption_keeps_the_holders_lease` ("D acquired inside B's 60 s
+  lease"), `row23_a_late_commit_does_not_displace_a_permanent_decision` ("a late COMMIT displaced the permanent
+  decision"), `row26_hlc_drift_does_not_end_a_lease_early` ("HLC drift ended a 60 s lease early"),
+  `row27_collection_keeps_a_node_owned_floor` ("a finished ballot was accepted after collection"); the earlier rounds'
+  tests (K1–K3, round 1–2 rows) failed first on their own commits; the record-level rows are written against the new
+  API (`src/agent/lock_lifecycle_api_tests.rs`). **Upgrade notes:** (1) **`elect_leader` is no longer permanent** —
+  renew by calling again (every ~10 s) or ask for `LeaderTerm::Permanent`; a slot committed permanently before the
+  upgrade has no decision record and is read, and released, the legacy way. (2) **Upgrade every node.** An upgraded
+  proposer times out rather than commits until a quorum of its acceptors is upgraded (they ignore `ProposeTerm`), as
+  with 2.30.0's prepare phase. Older nodes still receive the legacy keys and `Commit`, and still read them the old way
+  — so for an older *reader* the K3 re-stamp and rounds 1–2's pairings remain until it is upgraded; an adoption of a
+  value first proposed by an older node takes the adopter's window. The legacy keys stop being written at a later,
+  governed MINOR. (3) `LockGuard`'s fields changed (private), `ConsensusListenerHandle` gained a private field,
+  `TaskCtx` gained `acceptor_records`; a lock's token is now the decision's token (still monotonic across holders
+  when the prior decision's record reached the new proposer). **Not built:** the SDKs expose no
+  `release_leadership` verb (row G); a node that proposes without a listener does not collect; a permanent decision
+  whose original proposer is gone for good cannot be released by anyone else (design §5).
 - **The SDKs reach a gateway over TLS** (`mycelium-py` **0.2.9**, `mycelium-ts` **0.2.3**,
   `langgraph-checkpoint-mycelium` **0.3.2**). Every client built its base URL as `http://{host}:{port}` — eight
   Python handles, five TypeScript clients and the checkpointer; only `A2aClient` took a full URL — so a gateway

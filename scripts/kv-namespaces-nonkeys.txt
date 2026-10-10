@@ -63,3 +63,6 @@ refs/heads/           # mycelium-wiki git_store.rs: a git branch ref
 pressure/             # mycelium-tuple-space http.rs: the tail of sys/tuple/{node}/{ns}/pressure/{stage}
 stage/                # mycelium-tuple-space http.rs: the tail of sys/tuple/{node}/{ns}/stage/{stage}/{metric}
 provision/            # agent/http.rs: the tail of agent/{node}/provision/{item}/error
+
+# ── remainders matched after a known prefix is stripped
+end/                  # consensus_life.rs collectable: a release marker's remainder under consensus/life/{slot}/ (the key has a row)
