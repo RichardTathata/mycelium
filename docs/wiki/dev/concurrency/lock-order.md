@@ -72,7 +72,7 @@ invariant held, but only by luck of review. The doc-vs-code lint (schema §Lint)
 **Scope: the full workspace** (extended 2026-07-07 on review — rows 24–30 inventory the
 data-plane companions; previously the table silently covered only `mycelium-core` +
 `mycelium`, and the lint's grep matched that blind spot). Every companion lock is a
-`parking_lot` **leaf** — the flat invariant holds workspace-wide. `mycelium-agentfacts`
+**leaf** (`parking_lot` or `std::sync`; row 37 is a `tokio::sync` mutex) — the flat invariant holds workspace-wide. `mycelium-agentfacts`
 holds no locks.
 
 **"Workspace-wide" means the library crates — `src/`, `mycelium-core/`, `mycelium-*/` — and not

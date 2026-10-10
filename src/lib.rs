@@ -103,6 +103,10 @@
 //! | `sys/audit-checkpoint/{node}/{seq}` | WS-D audit — signed mid-chain boundary enabling export-then-prune retention (`compliance`) |
 //! | `sys/revocation/{node}/{key-hex}`   | WS-D — signed key revocation; excluded on all verify paths incl. consensus (`compliance`) |
 //! | `sys/capauthz/{ns}/{name}`          | Gossip-level capability-authz policy (`required_roles`; resolve-time enforcement) (`compliance`) |
+//! | `sys/config/{param}`               | `ClusterTuner` advisory config (WS-C M9) — a fleet recommendation a node may adopt, today `writer_channel_depth` (u64 LE), written only when it changes (`src/agent/cluster_tuner.rs`, `CONFIG_PREFIX`) |
+//! | `sys/govern/timing`                 | Timing governor — the fleet timing intent (evaporating soft state; local-wins), written through `POST /gateway/govern/timing` (`src/agent/timing_governor.rs`, `TIMING_INTENT_KEY`) |
+//! | `sys/govern/fleet`                  | Tuning governor — the fleet tuning intent, written through `POST /gateway/govern/tuning` (`src/agent/tuning_governor.rs`, `GOVERN_FLEET_KEY`) |
+//! | `sys/govern/membership/{group}`     | Membership governor — one evaporating `MembershipIntent` per governed group, written through `POST /gateway/govern/membership` (`src/agent/membership_governor.rs`, `MEMBERSHIP_PREFIX`) |
 //! | `consensus/committed/{slot}`        | Consensus — committed slot state                             |
 //! | `consensus/ballot/{slot}`           | Consensus — ballot tracking; kept across commits so ballots stay monotonic (2.30.0) |
 //! | `consensus/decided/{slot}`          | Consensus — the ballot the slot's latest commit was decided at (u64 LE); a floor below which acceptors refuse (2.30.0) |
