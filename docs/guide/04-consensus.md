@@ -195,7 +195,7 @@ runs each reported slot to completion at the old epoch before it proposes the st
 that may have been chosen — **committed or not** — is held by a majority of each epoch in turn, and a
 proposer at any later epoch adopts it: single-decree safety per slot across any number of one-member
 steps. Within an epoch at most one value commits; a proposer at a superseded epoch cannot complete. The
-drain is bounded — 256 slots of a group per member, values up to 4 KiB — and past it the step is
+drain is bounded — 256 open slots of a group per member, 4 MiB of values — and past it the step is
 refused by name (`DrainRefused`, `409 drain_refused`) and the electorate does not move
 ([decision record §8.3](../design/consensus-electorate.md#83-exactly-what-holds--and-why-drain-before-step)).
 

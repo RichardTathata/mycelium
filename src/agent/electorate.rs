@@ -251,9 +251,9 @@ pub(crate) fn groups_with_records(ctx: &TaskCtx) -> Vec<String> {
 #[cfg(feature = "consensus")]
 pub(crate) fn prewarm_slot_groups(ctx: &TaskCtx) {
     let prefix = format!("{}{}/", mycelium_core::signal::kv_ns::CONSENSUS_SLOT_GROUP, ctx.node_id);
-    for (k, v) in crate::store::scan_kv_prefix(&ctx.kv_state, &prefix) {
-        if let (Some(slot), Ok(group)) = (k.strip_prefix(prefix.as_str()), std::str::from_utf8(&v)) {
-            ctx.electorate_slot_groups.pin().insert(Arc::from(slot), Arc::from(group));
+    for (k, _) in crate::store::scan_kv_prefix(&ctx.kv_state, &prefix) {
+        if let Some(entry) = k.strip_prefix(prefix.as_str()) {
+            ctx.electorate_slot_groups.pin().insert(Arc::from(entry)); // `{group}/{slot}`
         }
     }
 }

@@ -113,10 +113,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   electorate and `leader/{g}` only in `g`; every acceptor refuses a cluster-scoped exclusive slot once a group is
   marked; a refusal moves a proposal only from a member; a refused certificate is not re-verified; the electorate list
   is rescanned only when it changed. A declaration with nothing to decide completes a pending step (`200`, `"adopted"`,
-  audited). **Bounded:** 256 slots of a group per member, values up to 4 KiB — past it the step is refused
+  audited). **Bounded:** 256 open slots of a group per member, 4 MiB of values a report — past it the step is refused
   `ElectorateError::DrainRefused` (`409 drain_refused`). **Not claimed:** genesis is not ordered against a disjoint
   genesis; without `[tls]` the certificate is unauthenticated; the marking of the fleet's default is not itself a
-  cluster-scoped decision (decision record §8.5 says why the profile closes that window instead). Seen failing first in
+  cluster-scoped decision (decision record §8.5 says why the profile closes that window instead). **Round 3:** a
+  committed slot is drained like any other (the drain takes no shortcut on a commit it can see); the drain report is
+  taken before the promise, counts only open slots (finished ones are collected from the index), carries values of
+  any size up to 4 MiB a report (a value known only by digest is fetched from its commit record), and an acceptor
+  that cannot deliver it answers `StepRefused` instead of promising — so an over-bound step raises no fence; a step
+  proposer whose drain is refused sends `StepAbort`, releasing the fence of every member that promised without
+  accepting (decision record §8.4 argues why that is safe); the slot index is per `(group, slot)` and an acceptor that
+  has accepted a genesis refuses untagged proposals on the group until it is adopted; the fence gate only decides,
+  the claim runs after it; a cross-group proposal never decides an exclusive slot. Seen failing first in round 3, each
+  on a toggle: `a_committed_slot_is_drained_like_any_other` (the commit shortcut restored: `Some(b"w-other")`),
+  `a_large_committed_value_does_not_wedge_the_group` (values capped at 4 KiB, no commit fetch: `DrainRefused
+  ("drain_blocked: …")`), `a_refused_step_releases_its_fence` (no `StepAbort`: `ElectorateStale { epoch: 1,
+  seen_epoch: 2 }`), `finished_slots_do_not_count_against_the_drain_bound` (finished slots counted:
+  `drain_too_large: more than 256 open slots`), `a_cross_group_proposal_does_not_decide_an_exclusive_slot` (no
+  cross-group check: `Committed { slot: "lock/x" }`). Seen failing first in
   round 2, each on a toggle of its mechanism: `a_proposer_fenced_mid_ballot_does_not_complete_at_the_old_epoch` (gate
   ignoring the fence: `Committed { slot: "work/x", value: b"old-epoch" }` after the step's promise),
   `a_value_chosen_two_steps_ago_is_carried_by_the_drain` (drain off: `Some(b"w-other")` over the chosen `v`),

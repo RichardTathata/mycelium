@@ -528,7 +528,11 @@ change a one-member step decided by the electorate before it. What it does not: 
 proposal refuses the mismatch rather than counting it (detection, not prevention). A step drains the
 epoch it leaves — every slot its promise quorum reports is run to completion before the step is
 proposed — so a chosen value survives any number of steps, committed or not; the drain is bounded and
-a step past the bound is refused by name. **A forged electorate record** — a
+a step past the bound is refused by name. **Drain proposals (`DrainPrepare`/`DrainPropose`) are answered from
+any member, fenced or not** — that is what lets a step carry the epoch it leaves; it is safe under the crash-fault
+assumption this design makes (a drain only re-proposes what the step's promise quorum reported), and it is an unfenced
+path a *compromised* member could use to decide a slot at the old epoch: outside the claim, like every Byzantine
+member. **A forged electorate record** — a
 `consensus/committed/electorate/…` entry or certificate written straight into the store — is not
 adopted unless its certificate holds the signed votes of a majority of the previous epoch's members
 (under `[tls]`), and is counted (`mycelium::electorate_records_refused`); `sys/govern/electorate/`

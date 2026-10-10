@@ -166,7 +166,7 @@ fn spawn_handler(
         #[cfg(feature = "consensus")]
         electorate_fences: Arc::new(papaya::HashMap::new()),
         #[cfg(feature = "consensus")]
-        electorate_slot_groups: Arc::new(papaya::HashMap::new()),
+        electorate_slot_groups: Arc::new(papaya::HashSet::new()),
         #[cfg(feature = "consensus")]
         electorate_records_watch: Arc::new(std::sync::OnceLock::new()),
         #[cfg(feature = "consensus")]
@@ -1244,7 +1244,7 @@ async fn test_subscribe_notified_via_gossip() {
             #[cfg(feature = "consensus")]
             electorate_fences: Arc::new(papaya::HashMap::new()),
             #[cfg(feature = "consensus")]
-            electorate_slot_groups: Arc::new(papaya::HashMap::new()),
+            electorate_slot_groups: Arc::new(papaya::HashSet::new()),
             #[cfg(feature = "consensus")]
             electorate_records_watch: Arc::new(std::sync::OnceLock::new()),
             #[cfg(feature = "consensus")]
@@ -11977,11 +11977,15 @@ async fn electorate_mesh(n: usize, tweak: impl Fn(&mut GossipConfig)) -> (Vec<Go
     for i in 0..n {
         let mut cfg = GossipConfig::default();
         cfg.bind_port = ports[i];
-        cfg.bootstrap_peers = ids.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, id)| id.clone()).collect();
+        // Each node dials only the nodes started before it, which are already listening — a dial to a node not yet
+        // up fails and backs off, and round 3 saw meshes stay sparse for a minute after it.
+        cfg.bootstrap_peers = ids[..i].to_vec();
         cfg.health_check_max_jitter_ms = 50;
-        // Anti-entropy runs once per health-check interval: a gossip frame dropped under a loaded test run is
-        // repaired in two seconds rather than ten.
-        cfg.health_check_interval_secs = 2;
+        // Anti-entropy runs once per health-check interval: a dropped gossip frame is repaired in five seconds
+        // rather than ten. The reconnect backoff stays below the interval minus two (the config's own tuning
+        // invariant) — round 3 found peers evicted and redialled in a loop with an interval of two seconds.
+        cfg.health_check_interval_secs = 5;
+        cfg.reconnect_backoff_secs = 1;
         tweak(&mut cfg);
         agents.push(GossipAgent::new(ids[i].clone(), cfg));
     }
@@ -11992,8 +11996,10 @@ async fn electorate_mesh(n: usize, tweak: impl Fn(&mut GossipConfig)) -> (Vec<Go
     for a in &agents {
         assert!(a.kv().set(format!("electorate-test-ready/{}", a.node_id()), Bytes::from_static(b"1")));
     }
-    let reached = tokio::time::timeout(Duration::from_secs(30), async {
-        while !agents.iter().all(|a| a.kv().scan_prefix("electorate-test-ready/").len() == n) {
+    // And every node is a direct peer of every other: a group-scoped signal is forwarded to the group's known
+    // members, so a member another cannot reach directly can miss a whole round.
+    let reached = tokio::time::timeout(Duration::from_secs(60), async {
+        while !agents.iter().all(|a| a.kv().scan_prefix("electorate-test-ready/").len() == n && a.peers().len() + 1 >= n) {
             time::sleep(Duration::from_millis(20)).await;
         }
     }).await;
@@ -12020,12 +12026,14 @@ fn admits(
 /// majority's, and on a loaded test host a round can time out. Any other refusal is returned at once.
 #[cfg(feature = "consensus")]
 async fn declare(agent: &GossipAgent, group: &str, exclusive_default: bool) -> Result<crate::ElectorateDecl, crate::ElectorateError> {
+    // Until decided (round 3: a genesis needs every member's answer, and one timed out on a loaded host).
     let mut last = None;
-    for _ in 0..5 {
+    for _ in 0..10 {
         match agent.declare_electorate(group, exclusive_default).await {
             Err(crate::ElectorateError::NotDecided(why)) => last = Some(why),
             other => return other,
         }
+        time::sleep(Duration::from_millis(100)).await;
     }
     Err(crate::ElectorateError::NotDecided(last.unwrap_or_default()))
 }
@@ -12380,9 +12388,19 @@ async fn a_proposer_fenced_mid_ballot_does_not_complete_at_the_old_epoch() {
         slot: Arc::from(step.as_str()), ballot: 1, value: e2.encode(), proposer: b.node_id().clone(),
         epoch: 1, electorate: e1.digest(),
     };
-    mycelium_core::ops::emit_signal(&b.task_ctx, Arc::from(consensus_kind::PROPOSE), SignalScope::Group(Arc::from("council")),
-        crate::agent::electorate::engine(&b.task_ctx).sign_payload(encode_consensus_msg(&msg)));
-    poll_until(|| a.task_ctx.consensus_accepted.pin().get(step.as_str()).is_some_and(|s| s.promised > 0), 5_000).await;
+    // Re-sent until A's acceptor holds it (round 3: a fire-once signal was lost on a loaded host).
+    let payload = crate::agent::electorate::engine(&b.task_ctx).sign_payload(encode_consensus_msg(&msg));
+    let fenced = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            mycelium_core::ops::emit_signal(&b.task_ctx, Arc::from(consensus_kind::PROPOSE),
+                SignalScope::Group(Arc::from("council")), payload.clone());
+            for _ in 0..25 {
+                if a.task_ctx.consensus_accepted.pin().get(step.as_str()).is_some_and(|s| s.promised > 0) { return; }
+                time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    }).await;
+    assert!(fenced.is_ok(), "A's acceptor never received the step");
     // Now a quorum is reachable at epoch 1 — C answers again.
     let _c_again = c.consensus().start_consensus_listener(ConsensusConfig::default());
     match proposing.await.unwrap() {
@@ -12632,8 +12650,6 @@ async fn an_electorate_certificate_verifies_under_tls() {
     let _ = std::fs::remove_dir_all(&cert_dir);
     let dir = cert_dir.clone();
     let (agents, _l, _serial) = electorate_mesh(3, move |c| {
-        c.reconnect_backoff_secs = 1;
-        c.health_check_interval_secs = 1;
         c.tls = Some(TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() });
     }).await;
     let (a, b, c) = (&agents[0], &agents[1], &agents[2]);
@@ -12674,4 +12690,168 @@ async fn an_electorate_certificate_verifies_under_tls() {
     assert!(crate::electorate_records_refused() > before, "the forgery was refused, and counted");
     for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
     let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+
+/// **A committed slot is drained like any other** (round 3 of #601's review, finding 1 — the reviewer's PoC B). v is
+/// accepted by {A,C} and its commit record written, two steps follow, and the commit record never reaches B, D and E
+/// (removed from their stores, as a dropped frame not yet repaired would leave it). The drain does not treat "this
+/// node sees it committed" as drained: it brings v to a majority of each epoch, so E — whose quorum is {B,D,E} —
+/// adopts v. Seen failing first: E committed `w-other` while A held `v-chosen` (the drain returned at the commit).
+#[cfg(feature = "consensus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_committed_slot_is_drained_like_any_other() {
+    let (agents, mut listeners, _serial) = electorate_mesh(5, |_| {}).await;
+    let (a, b, c, d, e) = (&agents[0], &agents[1], &agents[2], &agents[3], &agents[4]);
+    for n in [a, b, c] { n.mesh().join_group("council"); }
+    roster_converges(&agents, "council", &[a, b, c]).await;
+    declare(a, "council", false).await.expect("genesis");
+    epoch_converges(&agents, "council", 1).await;
+    let v = Bytes::from_static(b"v-chosen");
+    let slot: Arc<str> = Arc::from("work/s");
+    for acceptor in [a, c] {
+        assert!(crate::agent::electorate::engine(&acceptor.task_ctx)
+            .accept_for_test("council", &slot, 5, &v, a.node_id()).await);
+    }
+    assert!(a.kv().set(format!("consensus/committed/{slot}"), v.clone()));
+    poll_until(|| agents.iter().all(|n| n.consensus().consensus_get(&slot).is_some()), 20_000).await;
+    d.mesh().join_group("council");
+    roster_converges(&agents, "council", &[a, b, c, d]).await;
+    assert_eq!(declare(b, "council", false).await.expect("3 -> 4").epoch, 2);
+    epoch_converges(&agents, "council", 2).await;
+    e.mesh().join_group("council");
+    roster_converges(&agents, "council", &[a, b, c, d, e]).await;
+    assert_eq!(declare(d, "council", false).await.expect("4 -> 5").epoch, 3);
+    epoch_converges(&agents, "council", 3).await;
+    drop(listeners.remove(2));
+    drop(listeners.remove(0));
+    for n in [b, d, e] {
+        n.task_ctx.kv_state.store.pin().remove(format!("consensus/committed/{slot}").as_str());
+    }
+    let cfg = ConsensusConfig { phase1_timeout: Duration::from_millis(1500), max_ballots: 3, ..ConsensusConfig::default() };
+    let res = e.consensus().group_propose("council", &slot, Bytes::from_static(b"w-other"), cfg).await;
+    assert!(matches!(res, ConsensusResult::Superseded { .. } | ConsensusResult::Committed { .. }), "{res:?}");
+    assert_eq!(e.consensus().consensus_get(&slot), Some(v), "E adopted the committed value, not its own");
+    for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
+}
+
+/// **A large committed value does not wedge the group** (round 3, finding 2 — the reviewer's PoC A, inverted). A
+/// 5,000-byte value committed at epoch 1 is carried by the step's drain in full (an acceptor reports what it holds,
+/// and a value known only by digest is fetched from the commit record), the step is decided, and the group keeps
+/// deciding. Seen failing first: `DrainRefused("drain_blocked: … known only by its digest")`, and every later
+/// proposal `ElectorateStale` — the group fenced for good.
+#[cfg(feature = "consensus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_large_committed_value_does_not_wedge_the_group() {
+    let (agents, _l, _serial) = electorate_mesh(4, |_| {}).await;
+    let (a, b, c, d) = (&agents[0], &agents[1], &agents[2], &agents[3]);
+    for n in [a, b, c] { n.mesh().join_group("council"); }
+    roster_converges(&agents, "council", &[a, b, c]).await;
+    declare(a, "council", false).await.expect("genesis");
+    epoch_converges(&agents, "council", 1).await;
+    let cfg = ConsensusConfig { phase1_timeout: Duration::from_millis(1500), max_ballots: 3, ..ConsensusConfig::default() };
+    let big = Bytes::from(vec![7u8; 5000]);
+    assert!(matches!(a.consensus().group_propose("council", "work/big", big.clone(), cfg.clone()).await, ConsensusResult::Committed { .. }));
+    d.mesh().join_group("council");
+    roster_converges(&agents, "council", &[a, b, c, d]).await;
+    assert_eq!(declare(b, "council", false).await.expect("the step carries the large value").epoch, 2);
+    epoch_converges(&agents, "council", 2).await;
+    assert!(matches!(a.consensus().group_propose("council", "work/y", Bytes::from_static(b"y"), cfg).await,
+        ConsensusResult::Committed { .. }), "the group keeps deciding");
+    assert_eq!(a.consensus().consensus_get("work/big"), Some(big));
+    for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
+}
+
+/// **A refused step releases its fence** (round 3, finding 2: no permanent wedge). A slot's highest acceptance is
+/// known only by its digest on every holder and was never committed, so the step's drain is refused by name; the
+/// proposer sends `StepAbort`, every member that promised without accepting releases its fence, and the group decides
+/// again at the old epoch. Seen failing first without the abort: the next proposal answered `ElectorateStale`.
+#[cfg(feature = "consensus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_step_releases_its_fence() {
+    use crate::consensus::{Accepted, AcceptorSlot};
+    let (agents, _l, _serial) = electorate_mesh(4, |_| {}).await;
+    let (a, b, c, d) = (&agents[0], &agents[1], &agents[2], &agents[3]);
+    for n in [a, b, c] { n.mesh().join_group("council"); }
+    roster_converges(&agents, "council", &[a, b, c]).await;
+    declare(a, "council", false).await.expect("genesis");
+    epoch_converges(&agents, "council", 1).await;
+    // "work/blob": accepted by A and C, known only by digest (a restart, say), committed nowhere.
+    let digest = crate::consensus::value_digest(&Bytes::from(vec![9u8; 6000]));
+    for n in [a, c] {
+        n.task_ctx.consensus_accepted.pin().insert(Arc::from("work/blob"), AcceptorSlot {
+            promised: 5, promised_to: Some(a.node_id().id_hash()), accepted: Some((5, Accepted::DigestOnly(digest))),
+        });
+        n.task_ctx.electorate_slot_groups.pin().insert(Arc::from("council/work/blob"));
+    }
+    d.mesh().join_group("council");
+    roster_converges(&agents, "council", &[a, b, c, d]).await;
+    match b.declare_electorate("council", false).await {
+        Err(crate::ElectorateError::DrainRefused(why)) => assert!(why.contains("drain_blocked"), "{why}"),
+        other => panic!("the step must be refused by name, got {other:?}"),
+    }
+    // D leaves; the roster matches epoch 1 again, and the group is not fenced.
+    let _ = d.kv().delete(format!("{}{}", crate::signal::grp_prefix("council"), d.node_id()));
+    d.mesh().leave_group("council");
+    roster_converges(&agents, "council", &[a, b, c]).await;
+    let cfg = ConsensusConfig { phase1_timeout: Duration::from_millis(1500), max_ballots: 3, ..ConsensusConfig::default() };
+    let res = a.consensus().group_propose("council", "work/after", Bytes::from_static(b"z"), cfg).await;
+    assert!(matches!(res, ConsensusResult::Committed { .. }), "the refused step left no fence: {res:?}");
+    for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
+}
+
+/// **Finished slots do not count against the drain's bound** (round 3, finding 2). Three hundred slots of the group,
+/// each decided and over (a released lock's tombstoned record, its decided ballot at the acceptance), are not open: a
+/// step's drain report skips them and collects their index entries, and the step is decided. Seen failing first: the
+/// report counted all 300 against the cap of 256, and the step was refused `drain_too_large`.
+#[cfg(feature = "consensus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn finished_slots_do_not_count_against_the_drain_bound() {
+    let (agents, _l, _serial) = electorate_mesh(4, |_| {}).await;
+    let (a, b, c, d) = (&agents[0], &agents[1], &agents[2], &agents[3]);
+    for n in [a, b, c] { n.mesh().join_group("council"); }
+    roster_converges(&agents, "council", &[a, b, c]).await;
+    declare(a, "council", false).await.expect("genesis");
+    epoch_converges(&agents, "council", 1).await;
+    for i in 0..300 {
+        let slot: Arc<str> = Arc::from(format!("work/done-{i}").as_str());
+        for n in [a, c] {
+            assert!(crate::agent::electorate::engine(&n.task_ctx)
+                .accept_for_test("council", &slot, 5, &Bytes::from_static(b"old"), a.node_id()).await);
+        }
+        assert!(a.kv().set(format!("consensus/decided/{slot}"), crate::consensus::encode_ballot(5)));
+        let _ = a.kv().delete(format!("consensus/committed/{slot}"));
+    }
+    poll_until(|| [a, c].iter().all(|n| n.kv().get("consensus/decided/work/done-299").is_some()
+        && n.task_ctx.kv_state.store.pin().get("consensus/committed/work/done-299").is_some()), 20_000).await;
+    d.mesh().join_group("council");
+    roster_converges(&agents, "council", &[a, b, c, d]).await;
+    assert_eq!(declare(b, "council", false).await.expect("the finished slots are not drained").epoch, 2);
+    assert!(a.task_ctx.electorate_slot_groups.pin().len() < 300, "the finished slots' index entries were collected");
+    for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
+}
+
+/// **A cross-group proposal does not decide an exclusive slot** (round 3, finding 3). With a fleet electorate marked,
+/// a cross-group proposal for `lock/…` over plain groups is refused at the door and by an acceptor; a `leader/{g}`
+/// slot across groups is refused too. Seen failing first: the cross-group `lock/x` committed outside the electorate.
+#[cfg(feature = "consensus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cross_group_proposal_does_not_decide_an_exclusive_slot() {
+    let (agents, _l, _serial) = electorate_mesh(1, |_| {}).await;
+    let a = &agents[0];
+    for g in ["council", "p1", "p2"] { a.mesh().join_group(g); }
+    roster_converges(&agents, "p2", &[a]).await;
+    declare(a, "council", true).await.expect("genesis, the fleet's electorate");
+    let gq = |g: &str| crate::GroupQuorum { group: g.into(), quorum: 0.5, veto: false };
+    let quick = ConsensusConfig { phase1_timeout: Duration::from_millis(300), max_ballots: 1, ..ConsensusConfig::default() };
+    for slot in ["lock/x", "leader/p1"] {
+        match a.consensus().cross_group_propose(slot, Bytes::from_static(b"x"), vec![gq("p1"), gq("p2")], quick.clone()).await {
+            ConsensusResult::ElectorateMismatch { .. } => {}
+            other => panic!("a cross-group {slot} must be refused, got {other:?}"),
+        }
+    }
+    let scope = SignalScope::Groups(vec![Arc::from("p1"), Arc::from("p2")]);
+    let engine = crate::agent::electorate::engine(&a.task_ctx);
+    assert!(admits(&engine, &scope, "lock/x", None, a.node_id(), None).is_err(), "an acceptor refuses it too");
+    a.shutdown_with_timeout(Duration::from_secs(5)).await;
 }

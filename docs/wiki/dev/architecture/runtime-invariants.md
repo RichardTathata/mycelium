@@ -79,7 +79,7 @@ before a step it has promised (the fence) — every claim made inside a `compute
 leaves: its `StepPrepareAck`s report every slot of the group (`sys/consensus-slot-group/` indexes them, durably) and
 its proposer runs each to completion at the old epoch (`DrainPrepare`/`DrainPropose`, committing nothing) before
 proposing the step — so single-decree safety per slot holds across any number of one-member steps, a chosen-never-
-committed value included (decision record §8.3; bounded at 256 slots / 4 KiB, refused by name past it). The governor
+committed value included (decision record §8.3; bounded at 256 open slots / 4 MiB a report, refused before any fence rises by name past it). The governor
 and the emergent watcher leave an electorate group alone. An embedded `grp/` write is refused at the next proposal,
 not prevented. Also not built: leased-by-default leadership (C1 —
 `elect_leader` proposes with `ConsensusConfig::default()`, `committed_lease_secs: None`, so it commits permanently) and

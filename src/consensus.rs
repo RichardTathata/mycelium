@@ -702,6 +702,21 @@ pub(crate) enum ConsensusMsg {
         epoch:      u64,
         electorate: [u8; 32],
     },
+    /// A member's refusal to promise a step whose drain report it cannot deliver in full (too many open slots,
+    /// or too many bytes) — sent instead of a promise, so the refusal raises no fence (round 3). Under `NACK`.
+    StepRefused {
+        slot:   Arc<str>,
+        ballot: u64,
+        voter:  NodeId,
+        reason: String,
+    },
+    /// A step's proposer abandoning `ballot` (its drain was refused): a member that promised that ballot and
+    /// accepted nothing at it releases the fence and refuses the ballot's accept from now on (round 3).
+    StepAbort {
+        slot:     Arc<str>,
+        ballot:   u64,
+        proposer: NodeId,
+    },
     /// [`ProposeIn`](Self::ProposeIn) for a drain proposal.
     DrainPropose {
         slot:       Arc<str>,
@@ -732,6 +747,35 @@ pub(crate) struct SlotReport {
 /// `truncated`, and the step is refused `drain_too_large`: the electorate cannot move until slots are
 /// fewer, which is better than moving without carrying what may have been chosen.
 pub(crate) const DRAIN_SLOTS_CAP: usize = 256;
+
+/// The most bytes of slot values one acceptor's drain report carries (round 3). Past it the acceptor does not
+/// promise the step, so an over-bound step is refused with no fence raised.
+pub(crate) const DRAIN_REPORT_BYTES: usize = 4 * 1024 * 1024;
+
+/// The `promised_to` of a step promise abandoned by its proposer (`StepAbort`): no proposer hashes to it, so
+/// the ballot's accept is refused (`may_accept` requires the same proposer), and it no longer fences.
+pub(crate) const ABANDONED_PROMISE: u64 = u64::MAX;
+
+/// Whether an acceptor's state for a step slot fences the epoch before it: anything accepted, or a promise
+/// its proposer has not abandoned.
+pub(crate) fn step_promise_fences(s: &AcceptorSlot) -> bool {
+    s.accepted.is_some() || (s.promised > 0 && s.promised_to != Some(ABANDONED_PROMISE))
+}
+
+/// Releases an ordinary claim's in-flight registration on its group's fence key when the claim is done.
+struct InFlight<'a> {
+    fences: &'a papaya::HashMap<Arc<str>, (u64, u32)>,
+    group:  &'a Arc<str>,
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.fences.pin().compute(Arc::clone(self.group), |cur| {
+            let (f, inflight) = cur.map_or((0, 0), |(_, v)| *v);
+            papaya::Operation::<(u64, u32), ()>::Insert((f, inflight.saturating_sub(1)))
+        });
+    }
+}
 
 /// SHA-256 of a proposal's value — what a [`VoteForValue`](ConsensusMsg::VoteForValue) commits its
 /// voter to, and what a proposer checks its votes against.
@@ -1495,8 +1539,11 @@ impl ConsensusEngine {
         // timestamp (lease renewal). Any other live commitment supersedes us.
         // Takes the current value explicitly: the proposer may **adopt** a reported accepted value
         // between ballots, so a closure capturing `value` would pin it and go stale.
+        // A drain takes no shortcut on a commit this node can see (round 3, finding 1): the commit record is
+        // gossip, not held by a quorum, so the slot is brought to a majority of the epoch whatever is committed.
+        let drain_mode = mode == ProposeMode::Drain;
         let superseded_by_live = |existing: &Bytes, current: &Bytes| -> bool {
-            !(lease_ms.is_some() && existing == current)
+            !(drain_mode || (lease_ms.is_some() && existing == current))
         };
 
         // Extract the group name once for `sys/topology-override/{group}` lookups
@@ -1580,6 +1627,14 @@ impl ConsensusEngine {
                 }
                 Phase1::Unrecorded => return self.unrecorded(slot, _attempt + 1, quorum_size),
                 Phase1::Stale(seen) => return stale_result(slot, &scope, tag.as_ref(), seen),
+                Phase1::DrainRefused(why) => {
+                    // A member could not deliver its report in full: the step is refused with every promise it
+                    // drew released (the member that refused never promised).
+                    if let Some(t) = &tag { self.abort_step(&t.gate.group, &slot, ballot).await; }
+                    return ConsensusResult::ElectorateMismatch {
+                        slot, group: tag.as_ref().map(|t| Arc::clone(&t.gate.group)), detail: Arc::from(why.as_str()),
+                    };
+                }
             };
             if let Some(floor) = retry_floor {
                 ballot_retry_pause(config.ballot_retry_jitter_ms).await;
@@ -1596,7 +1651,9 @@ impl ConsensusEngine {
             // is proposed. A refused drain refuses the step by name; nothing about the electorate changes.
             if drains && let Some(t) = &tag
                 && let Err(why) = self.drain(t, std::mem::take(&mut drain_reports)).await {
+                    // Abandon the ballot so its promises release their fences (round 3, finding 2).
                     tracing::warn!(slot = %slot, why, "electorate: the step's drain did not complete; the step is refused");
+                    self.abort_step(&t.gate.group, &slot, ballot).await;
                     return ConsensusResult::ElectorateMismatch {
                         slot, group: Some(Arc::clone(&t.gate.group)), detail: Arc::from(why.as_str()),
                     };
@@ -1625,18 +1682,15 @@ impl ConsensusEngine {
             if !self.note_slot_group(&slot, gate).await {
                 return self.unrecorded(slot, _attempt + 1, quorum_size);
             }
-            let mut contended = false;
-            let gated = self.claim_gated(gate, || {
-                let ok = claim_vote(&self.task_ctx.consensus_accepted, &slot, ballot, &value, self.task_ctx.node_id.id_hash(), floor);
-                contended = !ok;
-                ok
+            let claimed = self.claim_gated(gate, || {
+                claim_vote(&self.task_ctx.consensus_accepted, &slot, ballot, &value, self.task_ctx.node_id.id_hash(), floor)
             });
-            if !gated && !contended && let Some(t) = &tag {
+            if claimed.is_none() && let Some(t) = &tag {
                 return ConsensusResult::ElectorateStale {
                     slot, group: Arc::clone(&t.gate.group), epoch: t.epoch, seen_epoch: t.epoch + 1,
                 };
             }
-            if !gated {
+            if claimed != Some(true) {
                 // Already committed to a different value at this ballot. Cannot win here; move up
                 // rather than emit a proposal we are not entitled to support.
                 last = LastAttempt::Contended;
@@ -1872,96 +1926,128 @@ impl ConsensusEngine {
     /// electorate has promised it, so the old epoch can no longer complete a quorum — and the drain that
     /// precedes the step's proposal has carried every value it may have chosen.
     fn fenced(&self, group: &str, epoch: u64) -> bool {
-        if self.task_ctx.electorate_fences.pin().get(group).is_some_and(|f| *f > epoch) {
+        if self.task_ctx.electorate_fences.pin().get(group).is_some_and(|(f, _)| *f > epoch) {
             return true;
         }
         let next = crate::agent::electorate::step_slot(group, epoch + 1);
-        self.task_ctx.consensus_accepted.pin().get(next.as_str()).is_some_and(|s| s.promised > 0)
+        self.task_ctx.consensus_accepted.pin().get(next.as_str()).is_some_and(step_promise_fences)
     }
 
-    /// **Claim through the fence** (round 2 of #601's review, finding 1). `claim` is this node's promise or
-    /// acceptance for a slot; it runs **inside** the `compute` on the group's fence key, so it and a step's
-    /// promise are ordered on that one key:
+    /// **Claim through the fence** (round 2 of #601's review, finding 1; made retry-safe in round 3, finding 5).
+    /// The `compute` on the group's fence key only **decides**; the claim runs after it committed, with nothing
+    /// inside a closure papaya may re-run:
     ///
-    /// - `Step` raises the fence to `epoch + 1` first, then claims — its promise comes after every ordinary
-    ///   claim already made at `epoch`;
-    /// - `Ordinary` claims only while the fence is at or below `epoch` and this node still holds `epoch`
-    ///   (its cached electorate), and writes the key so a concurrent step's raise retries after it;
-    /// - `Drain` claims while this node holds `epoch`, fenced or not — it completes a reported slot.
+    /// - `Ordinary` passes while the fence is at or below `epoch` and this node holds `epoch`, and registers
+    ///   itself as **in flight** on the key; the claim runs, then the registration is released (a drop guard).
+    /// - `Step` raises the fence to `epoch + 1` only when **no** ordinary claim is in flight (it yields and retries
+    ///   otherwise), then claims. So every ordinary claim at `epoch` either completed before the raise or is
+    ///   refused after it — the order the fence argument needs (decision record §8.2).
+    /// - `Drain` passes while this node holds `epoch`, fenced or not — it completes a reported slot.
     ///
-    /// `claim` must be idempotent: a retry re-runs it (`prepare_slot` and `claim_vote` are). Returns whether
-    /// the claim was made.
-    fn claim_gated(&self, gate: Option<&Gate>, mut claim: impl FnMut() -> bool) -> bool {
-        let Some(g) = gate else { return claim() };
+    /// `None` when the gate refused (nothing was claimed); otherwise what `claim` returned.
+    fn claim_gated<T>(&self, gate: Option<&Gate>, claim: impl FnOnce() -> T) -> Option<T> {
+        let Some(g) = gate else { return Some(claim()) };
         let fences = self.task_ctx.electorate_fences.pin();
-        if g.kind == GateKind::Step {
-            fences.compute(Arc::clone(&g.group), |cur| {
-                let f = cur.map_or(0, |(_, f)| *f);
-                papaya::Operation::<u64, ()>::Insert(f.max(g.epoch + 1))
-            });
-            return claim();
-        }
-        let mut made = false;
-        fences.compute(Arc::clone(&g.group), |cur| {
-            let f = cur.map_or(0, |(_, f)| *f);
-            let step = crate::agent::electorate::step_slot(&g.group, g.epoch + 1);
-            let fenced = f > g.epoch
-                || self.task_ctx.consensus_accepted.pin().get(step.as_str()).is_some_and(|s| s.promised > 0);
-            let current = crate::agent::electorate::cached(&self.task_ctx, &g.group).map(|d| d.epoch) == Some(g.epoch);
-            if !current || (fenced && g.kind == GateKind::Ordinary) {
-                made = false;
-                return papaya::Operation::Abort(());
+        match g.kind {
+            GateKind::Step => loop {
+                let raised = fences.compute(Arc::clone(&g.group), |cur| {
+                    let (f, inflight) = cur.map_or((0, 0), |(_, v)| *v);
+                    if inflight > 0 { papaya::Operation::Abort(()) } else { papaya::Operation::Insert((f.max(g.epoch + 1), 0)) }
+                });
+                if matches!(raised, papaya::Compute::Aborted(())) { std::thread::yield_now(); continue; }
+                return Some(claim());
+            },
+            GateKind::Drain => {
+                let current = crate::agent::electorate::cached(&self.task_ctx, &g.group).map(|d| d.epoch) == Some(g.epoch);
+                current.then(claim)
             }
-            made = claim();
-            papaya::Operation::Insert(f.max(g.epoch))
-        });
-        made
+            GateKind::Ordinary => {
+                let step = crate::agent::electorate::step_slot(&g.group, g.epoch + 1);
+                let entered = fences.compute(Arc::clone(&g.group), |cur| {
+                    let (f, inflight) = cur.map_or((0, 0), |(_, v)| *v);
+                    let fenced = f > g.epoch
+                        || self.task_ctx.consensus_accepted.pin().get(step.as_str()).is_some_and(step_promise_fences);
+                    let current = crate::agent::electorate::cached(&self.task_ctx, &g.group).map(|d| d.epoch) == Some(g.epoch);
+                    if fenced || !current { papaya::Operation::Abort(()) } else { papaya::Operation::Insert((f, inflight + 1)) }
+                });
+                if matches!(entered, papaya::Compute::Aborted(())) { return None; }
+                let _leave = InFlight { fences: &self.task_ctx.electorate_fences, group: &g.group };
+                Some(claim())
+            }
+        }
     }
 
-    /// Records, on stable storage, that `slot` belongs to `gate`'s group — the first time this node answers
-    /// for it — so a step's drain can report it, after a restart too. `true` when recorded or not needed.
+    /// Records, on stable storage, that `slot` belongs to `gate`'s group — the first time this node answers for
+    /// it **in that group** (round 3, finding 4: indexed per `(group, slot)`) — so a step's drain can report it,
+    /// after a restart too. `true` when recorded or not needed.
     async fn note_slot_group(&self, slot: &Arc<str>, gate: Option<&Gate>) -> bool {
         let Some(g) = gate.filter(|g| g.kind != GateKind::Step) else { return true };
-        if self.task_ctx.electorate_slot_groups.pin().get(slot).is_some() { return true; }
-        let key = format!("{}{}/{}", mycelium_core::signal::kv_ns::CONSENSUS_SLOT_GROUP, self.task_ctx.node_id, slot);
-        let upd = self.kv_set_returning(key, Bytes::copy_from_slice(g.group.as_bytes()));
+        let entry: Arc<str> = Arc::from(format!("{}/{}", g.group, slot));
+        if self.task_ctx.electorate_slot_groups.pin().contains(&entry) { return true; }
+        let key = format!("{}{}/{}", mycelium_core::signal::kv_ns::CONSENSUS_SLOT_GROUP, self.task_ctx.node_id, entry);
+        let upd = self.kv_set_returning(key, Bytes::from_static(b"1"));
         if !self.persist_sync(slot, &upd, "electorate slot record").await { return false; }
-        self.task_ctx.electorate_slot_groups.pin().insert(Arc::clone(slot), Arc::clone(&g.group));
+        self.task_ctx.electorate_slot_groups.pin().insert(entry);
         true
     }
 
-    /// This node's drain report for `group`: every slot of the group it has answered for, with what it
-    /// accepted and what it knows was decided. `true` when it stopped at [`DRAIN_SLOTS_CAP`].
-    fn drain_report(&self, group: &str) -> (Vec<SlotReport>, bool) {
+    /// This node's drain report for `group`: every **open** slot of the group it has answered for — what it
+    /// accepted, the value (from memory, or from the slot's commit record when only the digest survived a
+    /// restart), and what it knows was decided. A slot whose acceptance belongs to a decision this node sees is
+    /// over is not open: it is not reported, and its index entry is collected (round 3, finding 2 — until #600's
+    /// acceptor collection lands, this is the collection). `Err` names why the report cannot be delivered in
+    /// full — more than [`DRAIN_SLOTS_CAP`] open slots, or more than [`DRAIN_REPORT_BYTES`] — and an acceptor
+    /// that cannot deliver it does **not** promise the step.
+    fn drain_report(&self, group: &str) -> Result<Vec<SlotReport>, String> {
+        let prefix = format!("{group}/");
+        let entries: Vec<Arc<str>> = self.task_ctx.electorate_slot_groups.pin().iter()
+            .filter(|e| e.starts_with(prefix.as_str())).cloned().collect();
         let mut out = Vec::new();
-        let mut truncated = false;
-        let slots: Vec<Arc<str>> = self.task_ctx.electorate_slot_groups.pin().iter()
-            .filter(|(_, g)| &***g == group).map(|(s, _)| Arc::clone(s)).collect();
-        for slot in slots {
+        let mut bytes = 0usize;
+        for entry in entries {
+            let slot: Arc<str> = Arc::from(&entry[prefix.len()..]);
             let Some(state) = self.task_ctx.consensus_accepted.pin().get(&slot).cloned() else { continue };
             let Some((ballot, acc)) = state.accepted else { continue };
-            if out.len() >= DRAIN_SLOTS_CAP { truncated = true; break; }
+            let floor = self.decided_floor(&slot);
+            if self.decision_over(&slot) && floor >= ballot {
+                self.collect_slot_index(&entry);
+                continue;
+            }
+            if out.len() >= DRAIN_SLOTS_CAP {
+                return Err(format!("drain_too_large: more than {DRAIN_SLOTS_CAP} open slots of group {group}"));
+            }
+            let digest = acc.digest();
+            let value = acc.value().or_else(|| {
+                self.get(&format!("{}{}", consensus_ns::COMMITTED, slot)).filter(|v| value_digest(v) == digest)
+            });
+            bytes += slot.len() + value.as_ref().map_or(0, Bytes::len) + 64;
+            if bytes > DRAIN_REPORT_BYTES {
+                return Err(format!("drain_too_large: group {group}'s open slots exceed {DRAIN_REPORT_BYTES} bytes"));
+            }
             out.push(SlotReport {
-                accepted_digest: acc.digest(),
-                accepted_value: acc.value().filter(|v| v.len() <= ACCEPTOR_RECORD_VALUE_CAP),
-                decided_floor: self.decided_floor(&slot),
-                over: self.decision_over(&slot),
-                accepted_ballot: ballot,
-                slot,
+                accepted_digest: digest, accepted_value: value, decided_floor: floor,
+                over: false, accepted_ballot: ballot, slot,
             });
         }
-        (out, truncated)
+        Ok(out)
     }
 
-    /// **Drain before step** (round 2 of #601's review). From the step's promise quorum's reports, every
-    /// slot of the group that holds an acceptance not belonging to a decision known to be over is run to
-    /// completion at the current epoch — its highest-ballot value accepted by a majority of the epoch's
-    /// members — before the step itself is proposed. `Err` refuses the step by name: a report truncated at
-    /// the bound, a value known only by digest, or a slot that did not complete.
+    /// Removes a finished slot's index entry, in memory and on disk (tombstoned; a lost tombstone only means
+    /// the entry is collected again).
+    fn collect_slot_index(&self, entry: &Arc<str>) {
+        self.task_ctx.electorate_slot_groups.pin().remove(entry);
+        let key = format!("{}{}/{}", mycelium_core::signal::kv_ns::CONSENSUS_SLOT_GROUP, self.task_ctx.node_id, entry);
+        let upd = self.kv_delete(&key);
+        self.wal_try(&upd);
+    }
+
+    /// **Drain before step** (rounds 2 and 3 of #601's review). From the step's promise quorum's reports, every
+    /// reported slot — committed or not — is run to completion at the current epoch: its highest-ballot value
+    /// accepted by a majority of the epoch's members, with no shortcut for a slot this node sees committed (the
+    /// commit record is gossip, not held by a quorum). A slot is set aside only when **this proposer** sees its
+    /// decision is over and the acceptance belongs to it. `Err` refuses the step by name; the caller then
+    /// releases the fences its promise raised (`StepAbort`).
     async fn drain(&self, tag: &ElectorateTag, reports: Vec<(NodeId, Vec<SlotReport>, bool)>) -> Result<usize, String> {
-        if reports.iter().any(|(_, _, t)| *t) {
-            return Err(format!("drain_too_large: a member reports more than {DRAIN_SLOTS_CAP} slots of the group"));
-        }
         let mut by_slot: AHashMap<Arc<str>, Vec<SlotReport>> = AHashMap::new();
         for (_, rs, _) in reports {
             for r in rs { by_slot.entry(Arc::clone(&r.slot)).or_default().push(r); }
@@ -1971,15 +2057,15 @@ impl ConsensusEngine {
         slots.sort_by(|a, b| a.0.cmp(&b.0));
         for (slot, rs) in slots {
             let Some(top) = rs.iter().map(|r| r.accepted_ballot).max().filter(|b| *b > 0) else { continue };
-            // An acceptance at or below a decision some member sees is over belongs to that finished
-            // decision; it is set aside, as every proposer's phase 1 sets it aside (`set_aside_finished`).
-            if rs.iter().any(|r| r.over && r.decided_floor >= top) { continue; }
+            if self.decision_over(&slot) && self.decided_floor(&slot) >= top { continue; }
             let at_top: Vec<&SlotReport> = rs.iter().filter(|r| r.accepted_ballot == top).collect();
             let digest = at_top[0].accepted_digest;
             if at_top.iter().any(|r| r.accepted_digest != digest) {
                 return Err(format!("drain_blocked: slot {slot} holds two values at ballot {top}"));
             }
-            let Some(value) = at_top.iter().find_map(|r| r.accepted_value.clone()).filter(|v| value_digest(v) == digest) else {
+            let value = at_top.iter().find_map(|r| r.accepted_value.clone()).filter(|v| value_digest(v) == digest)
+                .or_else(|| self.get(&format!("{}{}", consensus_ns::COMMITTED, slot)).filter(|v| value_digest(v) == digest));
+            let Some(value) = value else {
                 return Err(format!("drain_blocked: slot {slot}'s highest acceptance is known only by its digest"));
             };
             let result = Box::pin(self.propose_inner(
@@ -1987,11 +2073,53 @@ impl ConsensusEngine {
                 ConsensusConfig { safety_sensitive: true, ..ConsensusConfig::default() }, None, ProposeMode::Drain,
             )).await;
             match result {
-                ConsensusResult::Committed { .. } | ConsensusResult::Superseded { .. } => drained += 1,
+                ConsensusResult::Committed { .. } => drained += 1,
                 other => return Err(format!("drain_incomplete: slot {slot}: {other:?}")),
             }
         }
         Ok(drained)
+    }
+
+    /// Abandons a step ballot this node proposed (round 3, finding 2): tells the group, so an acceptor that
+    /// **promised** it without accepting it releases the fence and refuses the ballot's accept from now on, and
+    /// releases this node's own promise the same way.
+    async fn abort_step(&self, group: &Arc<str>, slot: &Arc<str>, ballot: u64) {
+        let msg = ConsensusMsg::StepAbort { slot: Arc::clone(slot), ballot, proposer: self.task_ctx.node_id.clone() };
+        self.emit_async(
+            Arc::from(consensus_kind::PROPOSE), SignalScope::Group(Arc::clone(group)),
+            self.sign_payload(encode_consensus_msg(&msg)),
+        ).await;
+        let _ = self.release_step_promise(group, slot, ballot, &self.task_ctx.node_id).await;
+    }
+
+    /// An acceptor's half of `StepAbort`: when its promise for the step slot is exactly `ballot`, to `proposer`,
+    /// and nothing was accepted at it, the promise is marked abandoned — durable, the ballot's accept refused
+    /// from now on — and the in-memory fence falls back to what the memory still says. `true` when released.
+    pub(crate) async fn release_step_promise(&self, group: &str, slot: &Arc<str>, ballot: u64, proposer: &NodeId) -> bool {
+        let mut released = false;
+        self.task_ctx.consensus_accepted.pin().compute(Arc::clone(slot), |cur| {
+            let Some((_, s)) = cur else { return papaya::Operation::Abort(()) };
+            let accepted_here = s.accepted.as_ref().is_some_and(|(b, _)| *b >= ballot);
+            if s.promised != ballot || s.promised_to != Some(proposer.id_hash()) || accepted_here {
+                return papaya::Operation::Abort(());
+            }
+            papaya::Operation::Insert(AcceptorSlot { promised_to: Some(ABANDONED_PROMISE), ..s.clone() })
+        });
+        if self.task_ctx.consensus_accepted.pin().get(slot).is_some_and(|s| s.promised == ballot && s.promised_to == Some(ABANDONED_PROMISE)) {
+            released = self.persist_acceptor(slot).await;
+        }
+        if released && let Some((_, epoch)) = crate::agent::electorate::parse_step_slot(slot) {
+            // The fence the promise raised falls back to the epoch before it, unless the memory still fences.
+            let prev = epoch.saturating_sub(1);
+            let still = self.task_ctx.consensus_accepted.pin().get(slot.as_ref()).is_some_and(step_promise_fences);
+            if !still {
+                self.task_ctx.electorate_fences.pin().compute(Arc::from(group), |cur| {
+                    let (f, inflight) = cur.map_or((0, 0), |(_, v)| *v);
+                    papaya::Operation::<(u64, u32), ()>::Insert((if f == epoch { prev } else { f }, inflight))
+                });
+            }
+        }
+        released
     }
 
     /// Test-only: this node's acceptor accepts `value` for `slot` at `ballot` on electorate `group`, exactly as
@@ -2004,7 +2132,7 @@ impl ConsensusEngine {
         if !self.note_slot_group(slot, Some(&gate)).await { return false; }
         let floor = self.decided_floor(slot);
         self.claim_gated(Some(&gate), || claim_vote(&self.task_ctx.consensus_accepted, slot, ballot, value, proposer.id_hash(), floor))
-            && self.persist_acceptor(slot).await
+            == Some(true) && self.persist_acceptor(slot).await
     }
 
     /// **The proposer's door for P2.** `Ok(Some(tag))` for a proposal on an electorate group (carrying
@@ -2076,6 +2204,10 @@ impl ConsensusEngine {
                     return Err(DoorRefusal::mismatch(Some(g),
                         "an electorate group decides only through its own epoch, never inside a cross-group proposal"));
                 }
+                // An exclusive slot's home is never a cross-group proposal (round 3, finding 3).
+                if let Some(why) = self.cross_group_slot_refusal(slot, groups) {
+                    return Err(DoorRefusal::mismatch(groups.first(), &why));
+                }
                 match self.refuse_ungoverned(config, slot, groups.first()) {
                     Some(_) => Err(DoorRefusal::NotGoverned(groups.first().cloned())),
                     None => Ok(None),
@@ -2099,6 +2231,23 @@ impl ConsensusEngine {
                 }
             }
         }
+    }
+
+    /// Why a cross-group proposal may not decide `slot`: a slot that names its group, or a fleet-exclusive slot
+    /// while the fleet decides those in an electorate (or the setting disagrees). `None` when it may.
+    fn cross_group_slot_refusal(&self, slot: &str, groups: &[Arc<str>]) -> Option<String> {
+        use crate::agent::electorate::{exclusive_electorate, is_fleet_exclusive_slot, slot_names_group};
+        if let Some(named) = slot_names_group(slot) && !groups.iter().all(|g| &**g == named) {
+            return Some(format!("slot {slot} belongs to group {named}"));
+        }
+        if is_fleet_exclusive_slot(slot) {
+            return match exclusive_electorate(&self.task_ctx) {
+                Ok(None) => None,
+                Ok(Some(g)) => Some(format!("slot {slot} is decided in the fleet's electorate {g}, never by a cross-group proposal")),
+                Err(e) => Some(e),
+            };
+        }
+        None
     }
 
     /// **Which group may decide a slot** (round 2, finding 2c): a fleet-exclusive slot (`lock/`, `consistent/`,
@@ -2135,9 +2284,13 @@ impl ConsensusEngine {
         let group = match scope {
             SignalScope::Group(g) => Arc::clone(g),
             SignalScope::Groups(gs) => {
-                // A cross-group proposal over an electorate group this node holds is not answered.
-                return match gs.iter().find_map(|g| self.electorate_view(g)) {
-                    Some(d) => Err((d.epoch, d.digest())),
+                // A cross-group proposal over an electorate group this node holds is not answered, nor one for an
+                // exclusive slot whose home is the fleet's electorate (round 3, finding 3).
+                if let Some(d) = gs.iter().find_map(|g| self.electorate_view(g)) {
+                    return Err((d.epoch, d.digest()));
+                }
+                return match self.cross_group_slot_refusal(slot, gs) {
+                    Some(_) => Err((0, [0; 32])),
                     None => Ok(None),
                 };
             }
@@ -2160,8 +2313,15 @@ impl ConsensusEngine {
         if self.check_slot_family(slot, &group).is_err() { return Err(refusal); }
         let step = parse_step_slot(slot).filter(|(g, _)| *g == &*group).map(|(_, e)| e);
         match (view, named) {
-            // Not an electorate group here, and a legacy message: nothing changes.
-            (None, None) => if step.is_some() { Err((0, [0; 32])) } else { Ok(None) },
+            // Not an electorate group here, and a legacy message: nothing changes — unless this node has accepted
+            // the group's genesis. Then it is an electorate in formation: an untagged proposal, which no drain
+            // could report, is refused until the genesis is adopted (round 3, finding 4: the guarantee starts when
+            // genesis is chosen, on every member).
+            (None, None) => {
+                let genesis = crate::agent::electorate::step_slot(&group, 1);
+                let forming = self.task_ctx.consensus_accepted.pin().get(genesis.as_str()).is_some_and(|s| s.accepted.is_some());
+                if step.is_some() || forming { Err((0, [0; 32])) } else { Ok(None) }
+            }
             // A genesis: every member it names answers, each checking the set is the roster it sees.
             (None, Some((0, _))) if step == Some(1) && !drain => {
                 let gate = Gate { group: Arc::clone(&group), epoch: 0, kind: GateKind::Step };
@@ -2356,6 +2516,9 @@ impl ConsensusEngine {
                 Phase1::Unrecorded => return self.unrecorded(slot, _attempt + 1, 0),
                 // Unreachable: a cross-group proposal carries no electorate. Refused all the same.
                 Phase1::Stale(seen) => return stale_result(slot, &scope, None, seen),
+                Phase1::DrainRefused(why) => return ConsensusResult::ElectorateMismatch {
+                    slot, group: None, detail: Arc::from(why.as_str()),
+                },
             };
             if let Some(floor) = retry_floor {
                 ballot_retry_pause(config.ballot_retry_jitter_ms).await;
@@ -2552,25 +2715,25 @@ impl ConsensusEngine {
         // This node's own promise passes the fence like any other claim (round 2, finding 1).
         let gate = tag.map(|t| &t.gate);
         if !self.note_slot_group(slot, gate).await { return Phase1::Unrecorded; }
-        let mut outcome = None;
-        let gated = self.claim_gated(gate, || {
-            let o = prepare_slot(&self.task_ctx.consensus_accepted, slot, ballot, me.id_hash(), floor);
-            let ok = matches!(o, PrepareOutcome::Promised(_));
-            outcome = Some(o);
-            ok
-        });
+        // A step's own drain report, taken **before** its promise raises the fence: a report this node could not
+        // deliver in full refuses the step with nothing fenced (round 3, finding 2).
+        let own_report = match (drain_out.is_some(), tag) {
+            (true, Some(t)) => match self.drain_report(&t.gate.group) {
+                Ok(rs) => Some(rs),
+                Err(why) => return Phase1::DrainRefused(why),
+            },
+            _ => None,
+        };
+        let outcome = self.claim_gated(gate, || prepare_slot(&self.task_ctx.consensus_accepted, slot, ballot, me.id_hash(), floor));
         match outcome {
             None => return Phase1::Stale(tag.map_or(0, |t| t.epoch + 1)),
             Some(PrepareOutcome::Refused { promised, .. }) => return Phase1::Refused(promised),
             Some(PrepareOutcome::Promised(acc)) => {
-                let _ = gated;
                 if let Some((b, a)) = acc { reports.push((b, a.digest(), a.value())); }
             }
         }
-        // A step's own drain report: what this node's acceptor holds for the group (after its promise).
-        if let (Some(out), Some(t)) = (drain_out.as_deref_mut(), tag) {
-            let (rs, truncated) = self.drain_report(&t.gate.group);
-            out.push((me.clone(), rs, truncated));
+        if let (Some(out), Some(rs)) = (drain_out.as_deref_mut(), own_report) {
+            out.push((me.clone(), rs, false));
         }
         if !self.persist_acceptor(slot).await { return Phase1::Unrecorded; }
         let mut promisers: AHashSet<NodeId> = AHashSet::new();
@@ -2625,7 +2788,10 @@ impl ConsensusEngine {
                         // A live commit of a different value ends this proposal. The same value — a
                         // leased slot being renewed — is one promise like any other: no shortcut
                         // past the quorum, whose reports still decide.
-                        if committed_digest.is_some_and(|d| d != value_digest(current)) {
+                        // A drain is never ended by a commit report: it brings the slot to a majority regardless
+                        // (round 3, finding 1); the reports still decide what it carries.
+                        if committed_digest.is_some_and(|d| d != value_digest(current))
+                            && !tag.is_some_and(|t| t.gate.kind == GateKind::Drain) {
                             return Phase1::DecidedOtherwise;
                         }
                         if accepted_ballot > 0 {
@@ -2661,6 +2827,9 @@ impl ConsensusEngine {
                             Some(ConsensusMsg::StaleElectorate { slot: s, voter, epoch, electorate })
                                 if s == *slot && tag.is_some_and(|t| t.knows_a_later_electorate(&voter, epoch, &electorate)) =>
                                 return Phase1::Stale(epoch),
+                            Some(ConsensusMsg::StepRefused { slot: s, ballot: b, reason, .. })
+                                if s == *slot && b == ballot && drain_out.is_some() =>
+                                return Phase1::DrainRefused(reason),
                             _ => {}
                         }
                     }
@@ -3052,6 +3221,9 @@ enum Phase1 {
     Unrecorded,
     /// A member of the proposal's electorate answered for another epoch (P2): carries the epoch it holds.
     Stale(u64),
+    /// A step's drain report could not be delivered in full by a member (or this node): the step is refused,
+    /// by name, before anything is drained (round 3).
+    DrainRefused(String),
 }
 
 /// Outcome of `ConsensusEngine::collect_one_ballot`.
@@ -3116,6 +3288,8 @@ fn signer_authorized(msg: &ConsensusMsg, signer: &NodeId) -> bool {
         ConsensusMsg::StepPrepareAck { voter, .. }   => voter == signer,
         ConsensusMsg::DrainPrepare { proposer, .. }  => proposer == signer,
         ConsensusMsg::DrainPropose { proposer, .. }  => proposer == signer,
+        ConsensusMsg::StepRefused { voter, .. }      => voter == signer,
+        ConsensusMsg::StepAbort { proposer, .. }     => proposer == signer,
         ConsensusMsg::Commit { .. } | ConsensusMsg::Nack { .. } | ConsensusMsg::Promise { .. } => true,
     }
 }
@@ -3648,15 +3822,25 @@ async fn answer_prepare(
         note_answer_unrecorded(&slot, ballot, "not answering the prepare");
         return;
     }
-    // The promise passes the fence inside the same `compute` that orders it against a step's promise
-    // (round 2, finding 1); a step's promise raises the fence first.
-    let mut outcome = None;
-    ctx.claim_gated(gate.as_ref(), || {
-        let o = prepare_slot(&ctx.task_ctx.consensus_accepted, &slot, ballot, proposer.id_hash(), floor);
-        let ok = matches!(o, PrepareOutcome::Promised(_));
-        outcome = Some(o);
-        ok
-    });
+    // A step out of an epoch: the drain report is taken **before** the promise, and a report this node cannot
+    // deliver in full refuses the step without promising — so an over-bound step raises no fence (round 3).
+    let step_report = match gate.as_ref().filter(|g| g.kind == GateKind::Step && g.epoch > 0) {
+        Some(g) => match ctx.drain_report(&g.group) {
+            Ok(rs) => Some(rs),
+            Err(reason) => {
+                let refusal = ConsensusMsg::StepRefused { slot, ballot, voter: ctx.task_ctx.node_id.clone(), reason };
+                ctx.emit(
+                    Arc::from(consensus_kind::NACK), SignalScope::Individual(proposer),
+                    ctx.sign_payload_as(encode_consensus_msg(&refusal), form),
+                );
+                return;
+            }
+        },
+        None => None,
+    };
+    // The promise passes the fence gate, which only decides; a step's promise raises the fence first. A gate
+    // that refused sends no promise (round 3, finding 5).
+    let outcome = ctx.claim_gated(gate.as_ref(), || prepare_slot(&ctx.task_ctx.consensus_accepted, &slot, ballot, proposer.id_hash(), floor));
     match outcome {
         None => {
             // Fenced since the door, or no longer holding the epoch: refused by name, never promised.
@@ -3676,14 +3860,11 @@ async fn answer_prepare(
             let committed_digest = ctx.live_committed(&slot).map(|c| value_digest(&c));
             // A step out of an epoch: the promise carries this node's drain report for the group, taken
             // after the promise fenced the epoch's ordinary business.
-            let ack = match gate.as_ref().filter(|g| g.kind == GateKind::Step && g.epoch > 0) {
-                Some(g) => {
-                    let (reports, truncated) = ctx.drain_report(&g.group);
-                    ConsensusMsg::StepPrepareAck {
-                        slot: Arc::clone(&slot), ballot, voter: ctx.task_ctx.node_id.clone(),
-                        accepted_ballot, accepted_digest, accepted_value, committed_digest, reports, truncated,
-                    }
-                }
+            let ack = match step_report {
+                Some(reports) => ConsensusMsg::StepPrepareAck {
+                    slot: Arc::clone(&slot), ballot, voter: ctx.task_ctx.node_id.clone(),
+                    accepted_ballot, accepted_digest, accepted_value, committed_digest, reports, truncated: false,
+                },
                 None => ConsensusMsg::PrepareAck {
                     slot: Arc::clone(&slot), ballot, voter: ctx.task_ctx.node_id.clone(),
                     accepted_ballot, accepted_digest, accepted_value, committed_digest,
@@ -3800,6 +3981,13 @@ pub(crate) async fn run_consensus_listener(
                         }
                         continue;
                     }
+                    Some((ConsensusMsg::StepAbort { slot, ballot, proposer }, _)) => {
+                        if let SignalScope::Group(g) = &sig.scope
+                            && crate::agent::electorate::parse_step_slot(&slot).is_some_and(|(sg, _)| sg == &**g) {
+                                let _ = ctx.release_step_promise(g, &slot, ballot, &proposer).await;
+                            }
+                        continue;
+                    }
                     Some((ConsensusMsg::DrainPrepare { slot, ballot, proposer, epoch, electorate }, form)) => {
                         match ctx.electorate_admits(&sig.scope, &slot, Some((epoch, electorate)), true, &proposer, None) {
                             Ok(gate) => answer_prepare(&ctx, slot, ballot, proposer, form, gate).await,
@@ -3834,13 +4022,11 @@ pub(crate) async fn run_consensus_listener(
                 let decided_otherwise = ctx.live_committed(&slot).is_some_and(|c| c != value);
                 let floor = ctx.decided_floor(&slot);
                 // Through the fence, in the same `compute` as the claim (round 2, finding 1).
-                let mut contended = false;
-                let claimed = !decided_otherwise && ctx.claim_gated(gate.as_ref(), || {
-                    let ok = claim_vote(&accepted, &slot, ballot, &value, proposer.id_hash(), floor);
-                    contended = !ok;
-                    ok
-                });
-                if !claimed && !decided_otherwise && !contended && let Some(g) = &gate {
+                let gated = if decided_otherwise { Some(false) } else {
+                    ctx.claim_gated(gate.as_ref(), || claim_vote(&accepted, &slot, ballot, &value, proposer.id_hash(), floor))
+                };
+                let claimed = gated == Some(true);
+                if gated.is_none() && let Some(g) = &gate {
                     let digest = crate::agent::electorate::cached(&ctx.task_ctx, &g.group).map_or([0; 32], |d| d.digest());
                     refuse_stale(&ctx, slot, proposer, (g.epoch + 1, digest), form);
                     continue;

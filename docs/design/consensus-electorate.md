@@ -239,33 +239,43 @@ At the engine's door (`ConsensusEngine::electorate_door`, reached by the library
 - promises and votes count only from the members, and a refusal (`Promise`, `Nack`) moves the proposal only when a
   member sent it;
 - **the slot is this group's to decide**: a `leader/{g}` or `electorate/{g}/…` slot only in group `g`, and a
-  fleet-exclusive slot (`lock/`, `consistent/`, `capauthz/`, a commitment award) only in the fleet's exclusive
-  electorate — so two groups never decide one `consensus/committed/{slot}`;
+  fleet-exclusive slot (`lock/`, `consistent/`, `capauthz/`, a commitment award, a consumer-group log claim) only in
+  the fleet's exclusive electorate, never by a cross-group proposal (round 3, finding 3) — so two groups never decide
+  one `consensus/committed/{slot}`;
 - every Prepare and Propose names the proposer's epoch and the electorate's digest (`PrepareIn` / `ProposeIn`).
 
 At every acceptor (`ConsensusEngine::electorate_admits`): it answers only a proposal that names **its own** epoch and
 digest, from a member, to a member, for a slot the group may decide — otherwise it refuses with `StaleElectorate`,
 naming the electorate it holds. A legacy (untagged) proposal on an electorate group is refused the same way.
 
-**The fence.** An acceptor that has **promised** the step out of epoch `e` no longer answers epoch `e`'s ordinary
-proposals. Every claim — an acceptor's promise or acceptance, and the proposer's own — is made **inside** a `compute`
-on the group's fence key (`ConsensusEngine::claim_gated`): a step's promise raises the fence there first, and an
-ordinary claim is refused there once the fence is above its epoch or the node no longer holds the epoch. So a claim
-and a step's promise are ordered on one key, and a proposer fenced after it passed the door stops at its next claim,
-`ElectorateStale` (round 2 of #601's review, finding 1). A proposer that hears a member name a later electorate stops
+**The fence.** An acceptor that has **promised** the step out of epoch `e` (and not had the promise abandoned, §8.4)
+no longer answers epoch `e`'s ordinary proposals. Every claim — an acceptor's promise or acceptance, and the
+proposer's own — passes a gate on the group's fence key (`ConsensusEngine::claim_gated`). The gate's `compute` only
+**decides**; the claim runs after it committed (round 3, finding 5): an ordinary claim registers itself as in flight
+on the key, claims, and deregisters; a step's promise raises the fence only when no ordinary claim is in flight. So
+every ordinary claim at `e` completed before the raise or is refused after it, a proposer fenced after it passed the
+door stops at its next claim (`ElectorateStale`, round 2, finding 1), and an acceptor whose gate refused sends no
+promise. A proposer that hears a member name a later electorate stops
 too; a member that is behind, or fenced mid-step, simply does not vote.
 
 ### 8.3 Exactly what holds — and why: drain before step
 
-**The drain.** Every slot an acceptor answers for on an electorate group is recorded, durably, against the group
-(`sys/consensus-slot-group/{node}/{slot}`). A step's promise is answered with a `StepPrepareAck` carrying that
-acceptor's **drain report**: for each of the group's slots, its highest acceptance (ballot, digest, the value when at
-most 4 KiB) and what it knows was decided. When a quorum of the epoch has promised the step — each promise fencing its
-acceptor — the step's proposer **drains** before proposing the step: for every reported slot whose highest acceptance
-does not belong to a decision some member sees is over, it runs that slot to completion at the epoch it is leaving
-(`DrainPrepare` / `DrainPropose`, answered by fenced members too), so the highest-ballot value is accepted by a strict
-majority of that epoch's members. A drain re-proposes only a reported value and commits nothing — no COMMIT, no record,
-no lease renewed; a later proposer adopts the value and commits it on its own terms. Only then is the step proposed.
+**The drain.** Every slot an acceptor answers for on an electorate group is recorded, durably, against **that** group
+(`sys/consensus-slot-group/{node}/{group}/{slot}`, one entry per group the slot was proposed in — round 3, finding 4).
+A step's promise is answered with a `StepPrepareAck` carrying that acceptor's **drain report**: every **open** slot of
+the group — its highest acceptance (ballot, digest, the value: from memory, or, when only the digest survived a
+restart, from the slot's commit record) and the ballot its commit was decided at. A slot whose acceptance belongs to a
+decision the acceptor sees is over is not open: it is not reported, and its index entry is collected. The report is
+taken **before** the promise: an acceptor whose report would exceed the bound (§ below) sends `StepRefused` instead of
+promising, so an over-bound step raises no fence. When a quorum of the epoch has promised the step — each promise
+fencing its acceptor — the step's proposer **drains**: for every reported slot whose highest acceptance does not belong
+to a decision **the proposer itself** sees is over (round 3, finding 6), it runs that slot to completion at the epoch it
+is leaving (`DrainPrepare` / `DrainPropose`, answered by fenced members too), so the highest-ballot value is accepted by
+a strict majority of that epoch's members. **A committed slot is drained like any other** (round 3, finding 1): the
+drain takes no shortcut on a commit it can see — the commit record is gossip, not held by a quorum — so the committed
+value (the highest acceptance) is brought to a majority all the same. A drain re-proposes only a reported value and
+commits nothing — no COMMIT, no record, no lease renewed; a later proposer adopts the value and commits it on its own
+terms. Only then is the step proposed.
 
 **The invariant.** Let `M_f` be epoch `f`'s members. For one slot of the group, crash faults, messages authenticated
 under `[tls]`:
@@ -280,8 +290,9 @@ under `[tls]`:
    its epoch tag; and the fence is checked inside the claim, so no claim slips between door and step (§8.2).
 3. **The drain carries it.** The step's promise quorum is a strict majority of `M_f`. By Inv(f) the slot's chosen value
    is held by a majority of `M_{f-1}` or `M_f`; either intersects the promise quorum (sets one member apart), so some
-   promiser reports it at the top ballot, and the drain re-runs it at epoch `f` — its phase 1 over a majority of `M_f`
-   adopts it — until a majority of `M_f` holds it.
+   promiser reports it at the top ballot — committed or not, since a report omits only a slot whose decision that
+   acceptor sees is over — and the drain re-runs it at epoch `f` (its phase 1 over a majority of `M_f` adopts it, and
+   no commit it can see ends it early) until a majority of `M_f` holds it.
 4. **The step.** Epoch `f + 1` is a consensus decision of `M_f`, one member from it; it is proposed only after the drain.
    So when `f + 1` is current a majority of `M_f` holds every value that may have been chosen: Inv(f + 1). A proposer at
    `f + 1` prepares a majority of `M_{f+1}`, which intersects that majority, and adopts it.
@@ -292,33 +303,54 @@ or the commit never reached the next quorum — is carried by acceptance, not by
 has not learned epoch `f + 1` cannot hurt it: it may still answer epoch `f`, but an epoch-`f` quorum needs a fenced
 acceptor. Steps themselves are single-decree decisions of the epoch before (two cannot both commit), made only by a
 member, adopted only with their certificate. *Test:* `a_value_chosen_two_steps_ago_is_carried_by_the_drain` — `v`
-accepted by {A,C} at epoch 1 and never committed, two steps, then a proposer whose quorum is {B,D,E} adopts `v`.
+accepted by {A,C} at epoch 1 and never committed, two steps, then a proposer whose quorum is {B,D,E} adopts `v`; and
+`a_committed_slot_is_drained_like_any_other` — the same with `v` committed and its record missing on B, D and E.
 
-**The bound, and what happens past it.** An acceptor reports at most 256 slots of one group, and carries a value only
-up to 4 KiB (the acceptor record's own cap). The step is **refused by name** (`ElectorateError::DrainRefused`, HTTP
-409 `drain_refused`) when a report is truncated (`drain_too_large`), when a slot's highest acceptance is known only by
-its digest (`drain_blocked` — the value was larger than 4 KiB, or every holder restarted), or when a slot's drain does
-not complete (`drain_incomplete`). The electorate does not move; nothing about it changed. The cost is one round per
-open slot per step.
+**The bound, and what happens past it.** An acceptor reports at most 256 **open** slots of one group and at most
+4 MiB of values; finished slots do not count and are collected (until #600's acceptor collection lands, this is the
+collection). Past the bound the acceptor **does not promise** — it answers `StepRefused` — so the step is refused by
+name (`ElectorateError::DrainRefused`, HTTP 409 `drain_refused`, `drain_too_large`) with no fence raised. A slot whose
+highest acceptance is known only by its digest, with no commit record to fetch it from (every holder restarted and it
+was never committed), refuses the step `drain_blocked`; a slot whose drain does not complete refuses it
+`drain_incomplete`. In both cases promises were given, and the proposer releases them (`StepAbort`, §8.4). The
+electorate does not move; the group keeps deciding at the old epoch. The cost is one round per open slot per step.
+*Tests:* `a_large_committed_value_does_not_wedge_the_group`, `finished_slots_do_not_count_against_the_drain_bound`,
+`a_refused_step_releases_its_fence`.
 
 ### 8.4 What does not hold — stated
 
-- **The guarantee starts at genesis.** A value accepted on the group before it became an electorate group is not in
-  any drain report.
+- **The guarantee starts when genesis is chosen.** A member that has accepted the group's genesis treats the group as
+  an electorate in formation: it refuses an untagged proposal on it until the genesis is adopted (round 3, finding
+  4), so every value chosen after genesis was chosen passed a gate and is indexed. A value accepted before the
+  genesis was chosen is not electorate business and is in no report. A genesis that is never decided keeps its
+  members refusing untagged proposals on the group until a declaration decides it.
 - **A slot whose decision is over is not drained.** An acceptance at or below a decision a member sees has ended (a
   lease expired, a lock released) belongs to that decision, and every proposer's phase 1 sets it aside already; a
   member that has not seen the end may re-commit the old value once — a delay, never a second value.
 - **Genesis is unanimous among the members it names, and not ordered against another genesis** naming a disjoint set;
   the second commit for `electorate/{group}/1` is counted by the commit-conflict tripwire.
 - **Without `[tls]` nothing is authenticated**, the certificate included: it is a shape check.
-- **A step promised but never decided** fences the members that promised it: the group decides nothing until a member
-  declares again, which completes the step slot — adopting what was accepted for it, or deciding a no-op epoch — and
-  reports it (`200`, `"adopted": true`, audited as adopted).
+- **The way out of a fence** (round 3, finding 2). A step proposer that abandons its ballot — its drain refused — sends
+  `StepAbort` for that ballot. A member that **promised** that ballot and accepted nothing at it marks the promise
+  abandoned (durably: its `promised_to` becomes a value no proposer holds), so it no longer fences and the ballot's
+  accept is refused from now on; a member that **accepted** the step keeps the fence. *Why this is safe:* the
+  abandoned ballot can never be accepted by a member that released it, its proposer sends no accept for it, and no
+  other proposer holds that ballot (a promise names one proposer), so the step at that ballot is never chosen; a
+  later step needs fresh promises, which fence again. Nothing about the drain's argument changes, since the epoch the
+  members return to is the one they never left. A step that was **accepted** by some members and then stalled
+  (its proposer died after the drain) keeps those members fenced until a member declares again, which completes the
+  step slot — adopting what was accepted, or deciding a no-op epoch — and reports it (`200`, `"adopted": true`,
+  audited as adopted); the completing step drains again, and since a fenced group chose nothing new, a drain that
+  passed once passes again. The one input that can keep it from passing is a value known only by digest everywhere
+  (the bullet below).
+- **A slot whose highest acceptance is known only by its digest, never committed,** blocks every step (`drain_blocked`)
+  until it is decided (a proposal on the slot adopts by digest only if it proposes the same value). The group keeps
+  deciding its other slots at the current epoch; only the electorate cannot move.
 - **An embedded or peer write to `grp/`** is not prevented; the next proposal refuses the roster it finds.
 
 ### 8.5 Wire, mixed fleets and the fleet's exclusive electorate
 
-`PrepareIn`, `ProposeIn`, `StaleElectorate`, `StepPrepareAck`, `DrainPrepare` and `DrainPropose` are appended to
+`PrepareIn`, `ProposeIn`, `StaleElectorate`, `StepPrepareAck`, `DrainPrepare`, `DrainPropose`, `StepRefused` and `StepAbort` are appended to
 `ConsensusMsg` (wire v12, as `Prepare` was in 2.30.0): a node predating them ignores them, so an electorate with an
 un-upgraded member **times out rather than commits**.
 
