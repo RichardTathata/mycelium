@@ -502,16 +502,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`GOSSIP_GATEWAY_ALLOW_UNAUTHENTICATED`, a strict boolean — any other value is refused) waives it; the waiver warns
   once at start. Loopback is `127.0.0.0/8`, `::1` and an IPv4-mapped loopback; `0.0.0.0` and `::` are not; a hostname
   never reaches the bind (`validate()` requires an IP literal). The check runs in every gateway build — without
-  `compliance` the only credential is `gateway_auth_token`. A **blank** token is not a credential for this check or
-  for `gw.not_open` (one predicate now, `guarantee::gateway_credential_model`); request-time authentication is
-  unchanged. New guarantee **`gw.exposed_closed`** (`not_applicable` on loopback, `not_configured` under the waiver),
+  `compliance` the only credential is `gateway_auth_token`. **One rule for blank secrets** (found by the
+  independent review of #598): `validate()` refuses an empty or whitespace-only token in `gateway_auth_token`, in
+  every `gateway_scoped_tokens` entry and every `gateway_named_tokens` entry, by name — a TOML table entry with
+  `token = ""` and `scopes = ["*"]` used to count as a credential at start and, over HTTP/2 (which `gateway_tls`
+  serves, and which does not trim `Bearer `), granted `*` to an empty bearer; and `resolve_token` never matches a
+  blank presented bearer, whatever the table holds. One predicate for `gw.not_open` and the refusal,
+  `guarantee::gateway_credential_model`. Seen failing first: `a_blank_gateway_token_is_refused_in_every_form` —
+  `a blank token in gateway_scoped_tokens must refuse at validate(), got Ok(())`;
+  `resolve_token_never_matches_an_empty_presented_bearer` — `"" must not authenticate`, left
+  `Some(("token:gw-1/legacy", ["*"]))`. New guarantee **`gw.exposed_closed`** (`not_applicable` on loopback, `not_configured` under the waiver),
   required by **`secure-single-domain` rev 3** — which refuses no node rev 2 admitted, but names the waiver. The demo
   nodes that bind `0.0.0.0` with no credential (`three_node_demo` — the Docker and Kubernetes demo image —
   and `federation_node`) set the opt-in, with a comment saying why. Seen failing first:
   `an_exposed_gateway_with_no_credential_refuses_to_start` — `0.0.0.0 with no credential (token None) must refuse to
   start, got Ok(())`. **Upgrade note** ([deprecations.md §26](docs/guide/deprecations.md)): a deployment binding
   `0.0.0.0` (or any non-loopback address) with no credential now refuses to start — set a credential, bind loopback,
-  or set the opt-in; `GossipConfig` gained a field (an exhaustive struct literal breaks).
+  or set the opt-in; a **blank token anywhere** (`gateway_auth_token`, a scoped or named entry, including
+  `GOSSIP_GATEWAY_AUTH_TOKEN=""`) now refuses at `validate()`; `GossipConfig` gained a field (an exhaustive struct
+  literal breaks).
 - **A hosted WASM component's `mesh.emit` is confined.** The host forwarded any kind a component
   named at cluster scope on the node's full `MeshHandle` — only `kv` was confined — so a component could
   emit `mcp.invoke`, `skill.invoke` or `llm.invoke` from inside the node's process and reach every

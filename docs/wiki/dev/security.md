@@ -565,9 +565,16 @@ whole gateway to anyone who could route to the port. `start()` now refuses that,
 one warning. Decisions: **loopback** is `127.0.0.0/8`, `::1` and an IPv4-mapped loopback — `0.0.0.0` and `::`
 listen everywhere and are not; a **hostname** never reaches the bind (`validate()` requires an IP literal), and
 anything unparseable reads as exposed. **Every gateway build** checks it: without `compliance` the only credential
-is `gateway_auth_token` (tables and `[oidc]` are refused there already). **A blank token is not a credential** for
-this check or for `gw.not_open` — `guarantee::gateway_credential_model` is the one predicate both and `start()`
-read; `gateway_auth` keeps its own (it reads `ctx.oidc`), and request-time behaviour is unchanged. Visible as
+is `gateway_auth_token` (tables and `[oidc]` are refused there already). **One rule for blank secrets** (the
+independent review of #598): `validate()` refuses an empty or whitespace-only token in every form, by name, and
+`resolve_token` never matches a blank presented bearer. The review's case: a TOML `[[gateway_scoped_tokens]] token
+= ""` with `scopes = ["*"]` counted as a credential, and HTTP/2 (served under `gateway_tls`) does not trim
+`Authorization: Bearer `, so an empty bearer resolved to `*` — the env parser refused a blank named token, the TOML
+path did not: two doors to one setting with different rules. `guarantee::gateway_credential_model` is the one
+predicate `gw.not_open`, `gw.exposed_closed` and `start()` read; `gateway_auth` keeps its own (it reads
+`ctx.oidc`). Pinned by `a_blank_gateway_token_is_refused_in_every_form` and
+`resolve_token_never_matches_an_empty_presented_bearer`, both seen failing first. No HTTP/2 end-to-end test: the
+unit test on `resolve_token` covers the empty string whichever transport delivers it. Visible as
 guarantee `gw.exposed_closed` (`not_applicable` on loopback, `not_configured` under the waiver), required by
 `secure-single-domain` **rev 3** — which refuses no node rev 2 admitted, but names the waiver. In-repo, the two
 demo nodes that bind `0.0.0.0` with no credential (`three_node_demo`, `federation_node`) set the opt-in with a

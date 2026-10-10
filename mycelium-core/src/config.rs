@@ -1437,6 +1437,23 @@ impl GossipConfig {
         };
         for t in &self.gateway_scoped_tokens { malformed("gateway_scoped_tokens", &t.scopes)?; }
         for t in &self.gateway_named_tokens  { malformed("gateway_named_tokens",  &t.scopes)?; }
+        // One rule for blank secrets (#598's adversarial review): an empty or whitespace-only token is
+        // a secret anyone can present, so it is refused in every form, by name — never counted as a
+        // credential at start nor matched at request time.
+        let blank = |field: &'static str, token: &str| -> Result<(), GossipError> {
+            if token.trim().is_empty() {
+                return Err(GossipError::InvalidField {
+                    field,
+                    reason: "a blank (empty or whitespace-only) token is a secret anyone can present; set a \
+                             real secret or remove the entry"
+                        .into(),
+                });
+            }
+            Ok(())
+        };
+        if let Some(t) = &self.gateway_auth_token { blank("gateway_auth_token", t)?; }
+        for t in &self.gateway_scoped_tokens { blank("gateway_scoped_tokens", &t.token)?; }
+        for t in &self.gateway_named_tokens  { blank("gateway_named_tokens",  &t.token)?; }
         #[cfg(feature = "compliance")]
         if let Some(oidc) = &self.oidc {
             for scopes in oidc.group_scopes.values() { malformed("oidc.group_scopes", scopes)?; }
@@ -2383,6 +2400,33 @@ mod tests {
         set_test_env(&_lock, vars[2], Some("ci-bot|s3cr3t"));
         let err = GossipConfig::default().apply_env_overrides().expect_err("a malformed entry refuses");
         assert!(format!("{err}").contains("gateway_named_tokens"), "{err}");
+    }
+
+    /// **One rule for blank secrets** (#598's adversarial review, finding 1). A blank token — empty or
+    /// whitespace-only — in any credential form is refused by name at `validate()`. The env parser
+    /// already refused a blank named token; a TOML table did not, so `[[gateway_scoped_tokens]] token
+    /// = ""` with `scopes = ["*"]` counted as a credential at start and granted `*` to an empty bearer
+    /// wherever the transport delivers one (HTTP/2 does not trim it).
+    #[test]
+    fn a_blank_gateway_token_is_refused_in_every_form() {
+        let cases = [
+            ("gateway_scoped_tokens", "[[gateway_scoped_tokens]]\ntoken = \"\"\nscopes = [\"*\"]\n"),
+            ("gateway_named_tokens", "[[gateway_named_tokens]]\nname = \"ops\"\ntoken = \"   \"\nscopes = [\"*\"]\n"),
+            ("gateway_auth_token", "gateway_auth_token = \"\"\n"),
+            ("gateway_auth_token", "gateway_auth_token = \" \\t\"\n"),
+        ];
+        for (field, text) in cases {
+            let cfg: GossipConfig = toml::from_str(text).expect("parses");
+            match cfg.validate() {
+                Err(GossipError::InvalidField { field: f, reason }) => {
+                    assert_eq!(f, field, "{text}");
+                    assert!(reason.contains("blank"), "{reason}");
+                }
+                other => panic!("a blank token in {field} must refuse at validate(), got {other:?}"),
+            }
+        }
+        let ok: GossipConfig = toml::from_str("gateway_auth_token = \"s3cret\"\n[[gateway_scoped_tokens]]\ntoken = \"t\"\nscopes = [\"*\"]\n").unwrap();
+        assert!(ok.validate().is_ok());
     }
 
     /// The insecure opt-in (plan P1) is a strict boolean from the environment: it waives a security

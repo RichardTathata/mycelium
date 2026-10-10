@@ -795,6 +795,12 @@ async fn federation_path_auth(_ctx: Arc<HttpCtx>, request: Request, next: Next) 
 /// Lengths still differ in time, as in every constant-time string compare.
 fn resolve_token(cfg: &crate::config::GossipConfig, issuer: &str, presented: &str) -> Option<(String, Vec<String>)> {
     use subtle::ConstantTimeEq as _;
+    // A blank bearer never authenticates, whatever the table holds (#598's review): `validate()`
+    // refuses a blank secret, and this holds for a config that never passed through it. HTTP/1 trims
+    // `Bearer `; HTTP/2 delivers the empty string.
+    if presented.trim().is_empty() {
+        return None;
+    }
     let same = |secret: &str| bool::from(secret.as_bytes().ct_eq(presented.as_bytes()));
     if let Some(legacy) = cfg.gateway_auth_token.as_deref()
         && same(legacy)
@@ -6527,6 +6533,25 @@ mod tests {
         assert_eq!(resolve_token(&cfg, "gw-1", "ro-tok"), Some(("token:gw-1/#0".to_string(), vec!["kv:read".to_string()])));
         // Unknown token → None (unauthenticated).
         assert_eq!(resolve_token(&cfg, "gw-1", "nope"), None);
+    }
+
+    /// Defence in depth for #598's review finding 1: an **empty presented bearer** never resolves,
+    /// whatever the table holds — even a blank secret that reached the config past `validate()` (an
+    /// agent built from a struct literal and started without the config path). HTTP/1 trims
+    /// `Authorization: Bearer `; HTTP/2 (served under `gateway_tls`) delivers the empty string.
+    #[test]
+    fn resolve_token_never_matches_an_empty_presented_bearer() {
+        use super::resolve_token;
+        let mut cfg = GossipConfig::default();
+        cfg.gateway_auth_token = Some(String::new());
+        #[cfg(feature = "compliance")]
+        {
+            cfg.gateway_scoped_tokens = vec![crate::GatewayToken { token: String::new(), scopes: vec!["*".into()] }];
+            cfg.gateway_named_tokens = vec![crate::GatewayNamedToken { name: "ops".into(), token: "  ".into(), scopes: vec!["*".into()] }];
+        }
+        for presented in ["", " ", "  ", "\t"] {
+            assert_eq!(resolve_token(&cfg, "gw-1", presented), None, "{presented:?} must not authenticate");
+        }
     }
 
     #[cfg(feature = "compliance")]

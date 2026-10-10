@@ -533,7 +533,10 @@ address — with **no credential model** (no `gateway_auth_token`, no `gateway_n
 `gateway_scoped_tokens`, no `[oidc]`) **refuses to start**: `InvalidField { field: "http_addr" }`, the reason naming
 the credential settings this build honours and the opt-in. It used to start and serve every gateway route to anyone
 who could reach the port. Loopback is `127.0.0.0/8`, `::1` and an IPv4-mapped loopback; development on the default
-`127.0.0.1` is unchanged. A blank token (`GOSSIP_GATEWAY_AUTH_TOKEN=""`) is not a credential for this check. Under
+`127.0.0.1` is unchanged. **A blank token anywhere is refused at `validate()`**, by the field's name: an empty or
+whitespace-only `gateway_auth_token` (including `GOSSIP_GATEWAY_AUTH_TOKEN=""`), or a `token` in any
+`gateway_scoped_tokens` / `gateway_named_tokens` entry — on every address and in every profile; such a node used to
+start and, over HTTP/2, admit an empty bearer. Under
 `profile = "secure-single-domain"` the profile is **rev 3**, which adds `gw.exposed_closed`: it refuses no node rev 2
 admitted, but names the waiver when `gateway_allow_unauthenticated` is set.
 
@@ -541,7 +544,7 @@ admitted, but names the waiver when `gateway_allow_unauthenticated` is set.
 (`gateway_allow_unauthenticated`), so an exhaustive struct literal breaks; `..Default::default()` is unaffected.
 
 **Migration.** Check before upgrading: a node with `http_addr = "0.0.0.0"` (or `GOSSIP_HTTP_ADDR`) and no
-credential. Set `gateway_auth_token` (or, in a `compliance` build, a token table or `[oidc]`) — the fix — or bind
+credential, and any blank token (an empty env variable included — unset it instead). Set `gateway_auth_token` (or, in a `compliance` build, a token table or `[oidc]`) — the fix — or bind
 `http_addr = "127.0.0.1"` behind a proxy. Where the network in front of the port really is the boundary (a private
 Docker network, a demo), set `gateway_allow_unauthenticated = true` or `GOSSIP_GATEWAY_ALLOW_UNAUTHENTICATED=1`;
 the node then warns once at start, and its guarantee report reads `gw.exposed_closed: not_configured`. The

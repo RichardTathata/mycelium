@@ -601,7 +601,7 @@ fn external(evidence: &'static str) -> impl Fn(&TaskCtx) -> Resolution + Send + 
 /// counts (`src/agent/http.rs`): `gateway_auth_token`, and under `compliance` a scoped or named token
 /// table or `[oidc]`. Without `compliance` those three are refused at `start()`, so only the token
 /// counts. A blank token (`GOSSIP_GATEWAY_AUTH_TOKEN=""`) is not a credential here: a secret anyone can
-/// guess closes nothing. One predicate for `gw.not_open`, `gw.exposed_closed` and `start()`'s refusal.
+/// guess closes nothing (and `validate()` refuses one in every form, so a started node never holds one). One predicate for `gw.not_open`, `gw.exposed_closed` and `start()`'s refusal.
 pub(crate) fn gateway_credential_model(cfg: &crate::config::GossipConfig) -> bool {
     #[allow(unused_mut)]
     let mut closed = cfg.gateway_auth_token.as_deref().is_some_and(|t| !t.trim().is_empty());

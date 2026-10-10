@@ -11617,23 +11617,37 @@ async fn an_oidc_table_this_build_cannot_enforce_refuses_to_start() {
 /// anyone who could reach the port; the docs said *suitable for loopback-only deployments* and nothing
 /// checked that the deployment was one. Now `start()` refuses, naming `http_addr`, the credential
 /// settings and the opt-in — in every gateway build (without `compliance` the only credential is
-/// `gateway_auth_token`; the tables and `[oidc]` are refused there already). `::` is the same case,
-/// and a blank token is not a credential.
+/// `gateway_auth_token`; the tables and `[oidc]` are refused there already). `::` is the same case.
+/// A blank secret is not a credential either: since #598's review `validate()` refuses it by name in
+/// every form (`gateway_auth_token`, and under `compliance` a scoped or named entry), before the
+/// exposure check is reached — so a blank-token node never starts, on any address.
 #[cfg(feature = "gateway")]
 #[tokio::test]
 async fn an_exposed_gateway_with_no_credential_refuses_to_start() {
-    for (addr, token) in [("0.0.0.0", None), ("::", None), ("0.0.0.0", Some("  "))] {
+    #[allow(unused_mut)]
+    let mut cases: Vec<(&str, Option<&str>, bool, &str)> = vec![
+        ("0.0.0.0", None, false, "http_addr"),
+        ("::", None, false, "http_addr"),
+        ("0.0.0.0", Some("  "), false, "gateway_auth_token"),
+    ];
+    #[cfg(feature = "compliance")]
+    cases.push(("0.0.0.0", None, true, "gateway_scoped_tokens"));
+    for (addr, token, blank_table, expected) in cases {
         let port = alloc_port();
         let mut cfg = GossipConfig::default();
         cfg.bind_port = port;
         cfg.http_port = Some(alloc_port());
         cfg.http_addr = addr.to_string();
         cfg.gateway_auth_token = token.map(String::from);
+        if blank_table {
+            cfg.gateway_scoped_tokens = vec![crate::GatewayToken { token: String::new(), scopes: vec!["*".into()] }];
+        }
         let agent = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
         match agent.start().await {
             Err(GossipError::InvalidField { field, reason }) => {
-                assert_eq!(field, "http_addr", "{addr}");
-                for named in ["gateway_auth_token", "gateway_allow_unauthenticated", addr] {
+                assert_eq!(field, expected, "{addr} token={token:?} blank_table={blank_table}");
+                let named: &[&str] = if expected == "http_addr" { &["gateway_auth_token", "gateway_allow_unauthenticated", addr] } else { &["blank"] };
+                for named in named {
                     assert!(reason.contains(named), "the refusal names `{named}`: {reason}");
                 }
             }
