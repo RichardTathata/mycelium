@@ -932,7 +932,7 @@ POST /gateway/govern/timing      { <span class="cv">"health_check_interval_secs"
     </div>
     <div class="card card-accent-green" style="margin-top:16px;">
       <div class="card-title">Coordination integrity — what a success <em>means</em> <span style="opacity:.7;font-weight:400;">(shipped, v2.14.0)</span></div>
-      <div class="card-body">An election needs an <strong>electorate</strong>: a group whose roster a node cannot see is <em>refused</em>, never decided alone — <em>"I cannot see members"</em> must not become <em>"I may decide alone"</em>. The answer then <strong>names the rung it reached</strong> (<code>Decided</code>, a quorum chose this value at this ballot, bound to it by digest · <code>Observed</code>, this is what my replica says) and carries a <strong>fencing token</strong>. Underneath, votes are bound to the proposal they voted for, a node casts one vote per ballot in either role, a higher ballot adopts what was already accepted, and that memory survives a restart.<br><br><em>And the limit, said out loud:</em> no coordinator-free protocol can promise a leadership that stays true. LWW decides which <em>record</em> survives; it cannot undo work two callers each performed after being told they had won. Exclusivity is enforced <strong>at the resource</strong>, by refusing a stale token — never by a call returning success.</div>
+      <div class="card-body">An election needs an <strong>electorate</strong>: a group whose roster a node cannot see is <em>refused</em>, never decided alone — <em>"I cannot see members"</em> must not become <em>"I may decide alone"</em>. The answer then <strong>names the rung it reached</strong> (<code>Decided</code>, a quorum chose this value at this ballot, bound to it by digest · <code>Observed</code>, this is what my replica says) and carries a <strong>fencing token</strong>. Underneath, votes are bound to the proposal they voted for, a node casts one vote per ballot in either role, a higher ballot adopts what was already accepted when the quorums intersect (a fixed electorate), and that memory survives a restart.<br><br><em>And the limit, said out loud:</em> no coordinator-free protocol can promise a leadership that stays true. LWW decides which <em>record</em> survives; it cannot undo work two callers each performed after being told they had won. Exclusivity is enforced <strong>at the resource</strong>, by refusing a stale token — never by a call returning success.</div>
     </div>
     <div class="card card-accent-blue" style="margin-top:10px;">
       <div class="card-title">Guarantees you can read, decisions you can trace <span style="opacity:.7;font-weight:400;">(shipped, v2.19.0–v2.21.0)</span></div>
@@ -1545,14 +1545,14 @@ agent.<span class="cs">mesh</span>().<span class="cs">suppress</span>(<span clas
       <div style="display:flex;flex-direction:column;gap:10px;">
         <div class="card card-accent-purple">
           <div class="card-title">Epidemic ballot voting — no leader</div>
-          <div class="card-body">CASPaxos-adjacent. Proposals gossip through the cluster. No Raft leader. Of two concurrent writes of different values to one key, at most one succeeds; a proposer first asks a quorum what it has already accepted.</div>
+          <div class="card-body">CASPaxos-adjacent. Proposals gossip through the cluster. No Raft leader. On a fixed electorate, of two concurrent writes of different values to one key, at most one succeeds; a proposer first asks a quorum what it has already accepted.</div>
         </div>
         <div class="card card-accent-blue">
           <div class="card-title">Cross-group federation</div>
           <div class="card-body"><code>cross_group_propose</code> + <code>GroupQuorum</code> — multiple groups each act as an independent voting bloc. Models multi-AZ durability gates and hierarchical approval.</div>
         </div>
         <div class="callout callout-purple">
-          <strong>Why not Raft:</strong> Raft requires a stable leader. Agent fleets have constant churn. Epidemic consensus tolerates node turnover without a leader to re-elect; progress still needs a live quorum.
+          <strong>Why not Raft:</strong> Raft requires a stable leader. Agent fleets have constant churn. Epidemic consensus has no leader to re-elect when a node goes; progress still needs a live quorum, and a safety-sensitive decision holds its electorate fixed — discovery churns, the electorate does not.
         </div>
       </div>
       <div>

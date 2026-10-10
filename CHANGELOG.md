@@ -22,6 +22,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   steps, which it never did. `scripts/check-positioning.sh` now runs `scripts/check-front-doors.py`, which checks
   structure and link targets (anchors included), not prose; `scripts/test-check-front-doors.py` shows ten planted
   breaks fail it (CI's documentation job and `make check`).
+- **Documentation: discovery is not an electorate — the consensus electorate decision recorded**
+  (`docs/design/consensus-electorate.md`, post-360 plan D1). Discovery membership and the consensus electorate are
+  separate capabilities by design; the supported profile for safety-sensitive agreement is a fixed electorate per
+  decision; consensus is a Layer III protocol, never a service. The record cites what is enforced today
+  (`ElectorateUnavailable` and the intent floor, `NotAMember`, the gateway's `governed_group` refusal) and states what
+  is not: an embedded `join_group` or `grp/` write still moves a governed group, and nothing requires a governed group
+  for a safety-sensitive proposal (row P2, not built); leased leadership and acceptor collection (C1, C2) and
+  versioned electorates are not built. Pointed at from the philosophy's corrected litmus, threat model §7, guide 04
+  (§ *Discovery is not an electorate*), the FAQ, `what-is-proven.md` and the wiki; three engineering-deck sentences
+  qualified to a fixed electorate. 2.30.0's *Not claimed* line stands. No code change.
 - **The composed-effect record: what it can carry versus what is written.** `AeEvidence` *can* carry the receipt's
   rung and the origin domain (`with_effect_durability`, `with_origin_domain`, 2.11.0) and `states_a_composed_effect()`
   reads them; **no shipped path calls either builder** — the gateway's evidence path writes neither field, so on every

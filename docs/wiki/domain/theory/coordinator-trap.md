@@ -24,6 +24,16 @@ constraint; a design choice, not a unique derivation. Post-review moderation dis
 (see [publications](../publications.md)): the cross-domain convergence is *homologous*
 evidence, not proof.
 
+**Consensus is a protocol, never a service** (decided 2026-10-10, post-360 plan D1). The trap applies
+to agreement as much as to scheduling: a fixed tier of nodes everyone must reach in order to agree
+(the etcd or ZooKeeper shape) is a designed-in coordinator, so no deployment shape may make a named
+node set the place agreement happens. Layer III's protocol is run by whichever nodes are in a group,
+and the electorate for a safety-sensitive decision is a fixed set for that decision — named as a
+group, kept apart from discovery, which stays dynamic. Canon: [`philosophy.md`](../../../philosophy.md)
+§ *The corrected litmus* (*A protocol, not a service*); the decision record
+[`design/consensus-electorate.md`](../../../design/consensus-electorate.md); the code-level residual is
+on [runtime-invariants](../../dev/architecture/runtime-invariants.md).
+
 **As a moat:** the published corpus is prior art — any competitor either cites it or
 consciously diverges; either way Mycelium is the reference point. Competitor paths all
 favour the incumbent: copying the model concedes the design; using a broker hits the

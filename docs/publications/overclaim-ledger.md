@@ -311,3 +311,11 @@ signal for the `/publication-lint` skill (is it catching overclaims before human
   paragraphs read from the committed data. The staleness ordering **reversed** against the earlier sweep
   (broker lower at every N here) and the text now says a single run supports neither ordering. The Zenodo
   record needs a new version; the PDF needs re-rendering.
+
+- 2026-10-10 (the consensus electorate decision, `docs/design/consensus-electorate.md`; not a full lint run): three
+  engineering-deck sentences claimed safety across an electorate change the code does not give. *At most one of two
+  concurrent writes succeeds* now says *on a fixed electorate*; *a higher ballot adopts what was already accepted* now
+  says *when the quorums intersect (a fixed electorate)*; and the *Why not Raft* callout's *epidemic consensus tolerates
+  node turnover* — which read as safety under electorate churn — now says progress needs a live quorum and a
+  safety-sensitive decision holds its electorate fixed. The buyer deck makes no consensus-membership claim. Major
+  (a reviewer would be misled on a safety property; no buyer-facing claim).
