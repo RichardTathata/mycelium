@@ -620,7 +620,7 @@ use mycelium::LeaderTerm;
 use std::time::Duration;
 let c = agent.consensus();
 let l = c.elect_leader_with("shard-0", LeaderTerm::Lease(Duration::from_secs(10))).await?; // a shorter term
-c.release_leadership("shard-0");                                       // step down deliberately
+c.release_leadership("shard-0").await;                                 // step down deliberately
 c.elect_leader_with("ledger", LeaderTerm::Permanent).await?;          // permanence, by asking for it
 ```
 
@@ -629,13 +629,16 @@ every node reads the group as leaderless, and the next election sets the old lea
 instead of re-electing it from the acceptors' memory. A permanent leadership has the release path too;
 what it lacks is a lapse. `release_leadership` is awaited and returns `true` once the release is **on stable
 storage**; it returns `false`, writing nothing, when this node is not the live leader, when the slot's lifecycle
-record names a newer decision, or when a newer decided ballot is known. `true` is not a promise to stay out of
+record names a newer decision, or when a leased leadership's record here is behind a higher decided ballot (retry
+once it arrives). A permanent leadership re-committed at a higher ballot by a node with a stale view is released
+at that ballot. `true` is not a promise to stay out of
 office: an `elect_leader` renewal this node already has in flight commits above the released ballot and makes it
 leader again — stop renewing before releasing.
 
 Over HTTP: `POST /gateway/overlay/elect` takes `ttl_secs` (default 30, clamped to 1–3600) or `"permanent": true`,
 and `DELETE /gateway/overlay/elect/{group}` steps the gateway's node down (`200 {"ok": true}` once durable, `404
-not_leader` otherwise). Both need `consensus:write`, which is **node-wide**: any principal holding it can step this
+not_leader` when nothing was released, `500 release_unrecorded` when the release was applied and gossiped but the
+WAL did not acknowledge it). Both need `consensus:write`, which is **node-wide**: any principal holding it can step this
 node down from any group it leads, or make its leadership permanent.
 
 #### Ordered Durable Log (`append` / `scan_log` / `subscribe_log`)
