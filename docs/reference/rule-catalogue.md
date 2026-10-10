@@ -9,7 +9,7 @@ Schema `mycelium.rules/1` · 27 rules.
 | [`a2a.admission`](#a2aadmission) | Admission, Authority | catalogue only | An absent credential is anonymous and a present bearer's scopes are dropped: a bearer does not gate this route, an evaluator does. |
 | [`ae.preflight`](#aepreflight) | Authority | catalogue only | Permit, deny or indeterminate, recorded before the work runs; a refused mandate denies before policy runs, so a policy engine cannot launder a revocation. |
 | [`cap.match`](#capmatch) | Response | catalogue only | The one matching rule, shared by the resolver and the offline check: namespace, name, schema id, typed attribute constraints; opacity skips, it does not unmatch. |
-| [`gateway.auth`](#gatewayauth) | Authority | catalogue only | Deny by default under `compliance`: a route needs its scope; with no credential model the gateway is open, and a table the build cannot enforce refuses to start. |
+| [`gateway.auth`](#gatewayauth) | Authority | catalogue only | Deny by default under `compliance`: a route needs its scope; with no credential model the gateway is open — on loopback only, since a non-loopback one refuses to start unless `gateway_allow_unauthenticated` waives it — and a table the build cannot enforce refuses to start. |
 | [`host.emit_admission`](#hostemit_admission) | Admission, Authority | catalogue only | A component emits only under `comp/{namespace}/…` or a kind the host listed for it, and never a protected RPC kind — an emit from inside the process would reach that kind's handlers unframed, past the door that checks authority. |
 | [`kv.expiry`](#kvexpiry) | Propagation | catalogue only | An advertisement its writer stopped refreshing leaves the view after its TTL; a stale view is possible in between. |
 | [`kv.propagation`](#kvpropagation) | Propagation | catalogue only | Every update converges by last-writer-wins on the HLC; propagation is unconditional and never taught a higher-layer law (detection, not prevention). |
@@ -88,7 +88,7 @@ The one matching rule, shared by the resolver and the offline check: namespace, 
 
 rev 1 · `mycelium::agent::http` · Authority · trace: catalogue only
 
-Deny by default under `compliance`: a route needs its scope; with no credential model the gateway is open, and a table the build cannot enforce refuses to start.
+Deny by default under `compliance`: a route needs its scope; with no credential model the gateway is open — on loopback only, since a non-loopback one refuses to start unless `gateway_allow_unauthenticated` waives it — and a table the build cannot enforce refuses to start.
 
 - **Trigger:** every gateway request
 - **Reads:**
@@ -99,7 +99,7 @@ Deny by default under `compliance`: a route needs its scope; with no credential 
 - **Effects:** the resolved principal and granted scopes travel to the handler
 - **Guards:** Authority
 - **May trigger:** [`ae.preflight`](#aepreflight)
-- **Code:** `http::gateway_auth / required_scope` · **Docs:** docs/operations/rbac.md · **Tests:** `named_tokens_alone_still_close_the_gateway`, `a_token_table_this_build_cannot_enforce_refuses_to_start`
+- **Code:** `http::gateway_auth / required_scope` · **Docs:** docs/operations/rbac.md · **Tests:** `named_tokens_alone_still_close_the_gateway`, `a_token_table_this_build_cannot_enforce_refuses_to_start`, `an_exposed_gateway_with_no_credential_refuses_to_start`
 
 ## `host.emit_admission`
 

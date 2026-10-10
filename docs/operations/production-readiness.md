@@ -48,12 +48,18 @@ this page is the index + the gate.
 - ☐ **Start under the `secure-single-domain` profile** (`profile = "secure-single-domain"` or
   `GOSSIP_PROFILE`). The node then **refuses to start** unless each of these resolves `enforced` (or
   `not_applicable` to its role), and names every one that does not, with what is missing and where to
-  read — rev 2 (v2.21.0; rev 1 was v2.19.0's fifteen): `mesh.tls` · `id.proofs_required` · `gw.not_open` · `gw.tls` ·
+  read — rev 3 (unreleased; rev 2 was v2.21.0's seventeen, rev 1 v2.19.0's fifteen): `mesh.tls` · `id.proofs_required` ·
+  `gw.not_open` · `gw.exposed_closed` · `gw.tls` ·
   `gw.caller_profile` · `ae.authorised_at_seam` · `ae.recorded_before_dispatch` · `prov.enforcement` ·
   `a2a.admission` · `authz.execution_authority` · `authz.durable_epochs` · `audit.chain` ·
   `egress.allow_list` · `persist.configured` · `persist.sync_mode` · `persist.unreadable_refused` ·
   `id.ca_key_off_node`. It needs a `compliance` + `tls` build (anything less reads `not_in_build` and
-  refuses). **Rev 2's two additions are settings, not attachments:** `persist.unreadable_refused` is the
+  refuses). **Rev 3's addition** is `gw.exposed_closed` (with `gw.not_open` at rev 2). **Upgrade note:** rev 3
+  refuses one node rev 2 admitted — a gateway whose only credential was a blank `gateway_auth_token`, which
+  `gw.not_open` rev 1 read as enforced (`validate()` now refuses a blank token in every profile; set a real
+  secret). Otherwise an open gateway already failed `gw.not_open`, and the new id names the waiver when
+  `gateway_allow_unauthenticated` is set.
+  **Rev 2's two additions are settings, not attachments:** `persist.unreadable_refused` is the
   default (`[persistence] on_unreadable = "refuse"`), and `id.ca_key_off_node` holds only for a node
   started from a certificate **issued where the CA key lives** — `mycelium tls issue --ca-dir <ca>
   --node <ip:port> --out <dir>` on the issuer's host, then `[tls] cert_pem` + `key_pem` on the node with
@@ -66,8 +72,12 @@ this page is the index + the gate.
   guarantee's resolution under four reference configurations, is the generated
   [guarantee catalogue](../reference/guarantee-catalogue.md). Without a profile the node runs as `dev`:
   nothing required, and the log says it is not a production profile.
-- ☐ **Gateway is not open** — the HTTP gateway has **no auth by default**. Bind it to loopback, or set
-  `gateway_auth_token`, or front it with the OIDC/OAuth2 ACLs. **Token tables and `[oidc]` need a
+- ☐ **Gateway is not open** — the HTTP gateway has **no auth by default**, and serves that open gateway
+  **only on loopback**: a non-loopback `http_addr` (`0.0.0.0`, `::`, a LAN address) with no credential
+  model **refuses to start**, naming `http_addr` (unreleased; plan `post-360-hardening.md` row P1),
+  unless `gateway_allow_unauthenticated = true` — the explicit insecure opt-in, which warns once at start
+  and reads `not_configured` on `gw.exposed_closed`, so this profile refuses it. **Check that no
+  production node sets it.** Set `gateway_auth_token`, or front it with the OIDC/OAuth2 ACLs. **Token tables and `[oidc]` need a
   `compliance` build, and `[gateway_tls]` a `tls` build** — a build without the feature refuses to
   start with the table set (since 2026-10-02; before, it accepted and ignored it). Intentionally
   public, in every build: `/health`, `/ready`, `/metrics`, **`/stats`** (node id, cluster name, peer

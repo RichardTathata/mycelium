@@ -53,7 +53,7 @@ fn the_gateway_guarantees_read_not_in_build() {
     cfg.http_port = Some(free_port());
     cfg.gateway_auth_token = Some("s3cret".into());
     let r = node(cfg).guarantee_report();
-    for id in ["gw.not_open", "gw.token_tables", "gw.oidc", "gw.tls", "gw.caller_profile"] {
+    for id in ["gw.not_open", "gw.exposed_closed", "gw.token_tables", "gw.oidc", "gw.tls", "gw.caller_profile"] {
         let e = r.entries.iter().find(|e| e.id == id).unwrap_or_else(|| panic!("{id} is registered"));
         assert_eq!(e.resolution.state(), "not_in_build", "{id}");
     }

@@ -142,6 +142,38 @@ impl GossipAgent {
                 );
             }
         }
+        // An open gateway where it is reachable (plan `post-360-hardening.md` row P1). With no credential
+        // model every gateway route answers an anonymous caller; on loopback that is a development node,
+        // beyond it is anyone who can route to the port. Refused by name unless explicitly waived — and
+        // the waiver is said once, here. Without `compliance` the only credential is `gateway_auth_token`
+        // (the tables and `[oidc]` were refused above), so the check applies in every gateway build.
+        #[cfg(feature = "gateway")]
+        match super::guarantee::gateway_exposure(&self.config) {
+            super::guarantee::GatewayExposure::Refused => {
+                return Err(GossipError::InvalidField {
+                    field:  "http_addr",
+                    reason: format!(
+                        "the gateway would listen on `{}`, which is not a loopback address, with no credential \
+                         model — every gateway route would answer anyone who can reach the port. Configure {}, \
+                         bind `http_addr` to loopback (`127.0.0.1`), or set `gateway_allow_unauthenticated = true` \
+                         (GOSSIP_GATEWAY_ALLOW_UNAUTHENTICATED=1) where something in front of the port is the boundary",
+                        self.config.http_addr,
+                        super::guarantee::GATEWAY_CREDENTIALS,
+                    ),
+                });
+            }
+            super::guarantee::GatewayExposure::Waived => {
+                tracing::warn!(
+                    http_addr = %self.config.http_addr,
+                    "start: gateway_allow_unauthenticated is set — the gateway listens on a non-loopback \
+                     address with NO credential, so every gateway route answers anyone who can reach the \
+                     port. Use this only where the network in front of the port is the boundary; configure \
+                     {} to close it.",
+                    super::guarantee::GATEWAY_CREDENTIALS,
+                );
+            }
+            _ => {}
+        }
         // The lifecycle boundary (plan G13): every attachment is in and the configuration is what it
         // is. Resolve every registered guarantee against this node and say so, once, before traffic.
         self.task_ctx.started.store(true, std::sync::atomic::Ordering::Release);

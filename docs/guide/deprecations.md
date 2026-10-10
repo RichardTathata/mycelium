@@ -43,6 +43,7 @@ the notice.
 | 20 | `/gateway/mesh/group` on a governed group | 2.29.0 | `/gateway/govern/group` (`govern:write`) | No — HTTP 403 `governed_group` |
 | 21 | consensus without a prepare phase (a mixed fleet) | 2.30.0 | upgrade a quorum of each group's acceptors; handle `Superseded` | No — wire behaviour; `Timeout` until a quorum is upgraded |
 | 22 | an alert keyed on one consensus-timeout `reason`; a second stop signal that waits; an untyped lost write | 2.31.0 | match the new reason set (§22); allow the grace period; catch `SupersededError` | No — a metric label, an exit code, a Python subclass |
+| 26 | an open gateway on a non-loopback `http_addr` | unreleased | a credential (`gateway_auth_token`, a token table or `[oidc]`), a loopback `http_addr`, or `gateway_allow_unauthenticated = true` | No — `start()` refuses, `InvalidField { field: "http_addr" }` |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -524,3 +525,26 @@ duplicate. One that split serving and responding across two credentials must use
 `rpc_reply_sender_mismatches > 0`: it names a misbehaving or misrouted peer (not every forger — see above). An A2A client that polls
 `tasks/get` sends it under the same bearer as its `tasks/send`; an anonymous one reads the result it was already
 given. A dashboard reading `/api/tuple` reads `/gateway/tuple/overview` with a `tuple:read` bearer.
+
+## 26. A gateway off loopback needs a credential (unreleased)
+
+**What changes.** A node whose gateway binds a **non-loopback** `http_addr` — `0.0.0.0`, `::`, a LAN or pod
+address — with **no credential model** (no `gateway_auth_token`, no `gateway_named_tokens` /
+`gateway_scoped_tokens`, no `[oidc]`) **refuses to start**: `InvalidField { field: "http_addr" }`, the reason naming
+the credential settings this build honours and the opt-in. It used to start and serve every gateway route to anyone
+who could reach the port. Loopback is `127.0.0.0/8`, `::1` and an IPv4-mapped loopback; development on the default
+`127.0.0.1` is unchanged. **A blank token anywhere is refused at `validate()`**, by the field's name: an empty or
+whitespace-only `gateway_auth_token` (including `GOSSIP_GATEWAY_AUTH_TOKEN=""`), or a `token` in any
+`gateway_scoped_tokens` / `gateway_named_tokens` entry — on every address and in every profile; such a node used to
+start and, over HTTP/2, admit an empty bearer. Under
+`profile = "secure-single-domain"` the profile is **rev 3**, which adds `gw.exposed_closed` (with `gw.not_open` at rev 2): it refuses one node rev 2 admitted — a gateway whose only credential was a blank `gateway_auth_token`, which `gw.not_open` rev 1 read as enforced (and which `validate()` now refuses in every profile) — and otherwise names the waiver when `gateway_allow_unauthenticated` is set.
+
+**Will the compiler tell me?** No — a start-time refusal. `GossipConfig` gained a field
+(`gateway_allow_unauthenticated`), so an exhaustive struct literal breaks; `..Default::default()` is unaffected.
+
+**Migration.** Check before upgrading: a node with `http_addr = "0.0.0.0"` (or `GOSSIP_HTTP_ADDR`) and no
+credential, and any blank token (an empty env variable included — unset it instead). Set `gateway_auth_token` (or, in a `compliance` build, a token table or `[oidc]`) — the fix — or bind
+`http_addr = "127.0.0.1"` behind a proxy. Where the network in front of the port really is the boundary (a private
+Docker network, a demo), set `gateway_allow_unauthenticated = true` or `GOSSIP_GATEWAY_ALLOW_UNAUTHENTICATED=1`;
+the node then warns once at start, and its guarantee report reads `gw.exposed_closed: not_configured`. The
+environment variable is a strict boolean: a value other than `true/false/1/0/yes/no` is refused.

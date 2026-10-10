@@ -135,8 +135,9 @@ These are the ones an integrator (or an agent generating integration code) gets 
   around them.
 
 Deeper: [14-patterns-and-pitfalls.md](14-patterns-and-pitfalls.md),
-[09-security.md](09-security.md) (the gateway has no auth by default — front it with mTLS/a
-proxy on untrusted networks).
+[09-security.md](09-security.md) (the gateway has no auth by default and so serves only loopback — a non-loopback `http_addr`
+with no credential refuses to start unless `gateway_allow_unauthenticated` is set; front it with
+mTLS/a proxy on untrusted networks).
 
 ## 5. Start from a template, not a blank file
 

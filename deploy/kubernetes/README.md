@@ -95,7 +95,9 @@ is the gate. Notably:
 - **No persistence.** No `volumeClaimTemplates` — WAL and node identity are ephemeral, so a
   restarted pod rejoins as a fresh node. For durable identity/state, add a PVC per the deployment
   guide's "persistent identity + WAL volume" note.
-- **No gateway auth / Ingress.** The gateway is cluster-internal only. Set `GOSSIP_GATEWAY_AUTH_TOKEN`
+- **No gateway auth / Ingress.** The gateway is cluster-internal only: the demo image sets
+  `gateway_allow_unauthenticated` (`examples/three_node_demo.rs`), without which a node binding
+  `0.0.0.0` with no credential refuses to start. Set `GOSSIP_GATEWAY_AUTH_TOKEN`
   and front it with an Ingress + TLS if you expose it. Named or scoped tokens
   (`GOSSIP_GATEWAY_NAMED_TOKENS`) need an image built with `--features compliance`; the demo image
   is not, and refuses to start with the variable set ([rbac](../../docs/operations/rbac.md) §1).

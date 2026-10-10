@@ -91,8 +91,8 @@ pub static RULES: &[RuleDescriptor] = &[
         effects: &["the resolved principal and granted scopes travel to the handler"],
         guards: &[Guard::Authority], may_trigger: &["ae.preflight"], may_inhibit: &[], depends_on: &[],
         symbol: "http::gateway_auth / required_scope", docs: "docs/operations/rbac.md",
-        tests: &["named_tokens_alone_still_close_the_gateway", "a_token_table_this_build_cannot_enforce_refuses_to_start"], trace: CatalogueOnly,
-        summary: "Deny by default under `compliance`: a route needs its scope; with no credential model the gateway is open, and a table the build cannot enforce refuses to start.",
+        tests: &["named_tokens_alone_still_close_the_gateway", "a_token_table_this_build_cannot_enforce_refuses_to_start", "an_exposed_gateway_with_no_credential_refuses_to_start"], trace: CatalogueOnly,
+        summary: "Deny by default under `compliance`: a route needs its scope; with no credential model the gateway is open — on loopback only, since a non-loopback one refuses to start unless `gateway_allow_unauthenticated` waives it — and a table the build cannot enforce refuses to start.",
     },
     RuleDescriptor {
         id: "ae.preflight", revision: 1, subsystem: "mycelium::agent::http", responsibilities: &[Authority],

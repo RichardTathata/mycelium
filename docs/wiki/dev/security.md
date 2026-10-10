@@ -556,6 +556,31 @@ warning moved to `start()`. Tests seen failing first: `an_oidc_table_…`, `a_tl
 `#[cfg]`'d field plus a serde that ignores unknown keys is a setting that vanishes; a field present in every build
 with `#[cfg]`'d consumers is a setting that lies. The plan's I2 report is what makes both visible by construction.
 
+**An open gateway is a loopback gateway (unreleased, plan `post-360-hardening.md` row P1).** The classes above
+were settings a build could not enforce; this one was the *default* doing what it said. With no credential model
+`gateway_auth` serves every route to `anonymous`, and the docs called that *suitable for loopback-only
+deployments* — nothing checked that the deployment was one, so `http_addr = "0.0.0.0"` and no token served the
+whole gateway to anyone who could route to the port. `start()` now refuses that, as field `http_addr`, unless
+`gateway_allow_unauthenticated = true` (`GOSSIP_GATEWAY_ALLOW_UNAUTHENTICATED`, strict boolean) waives it, with
+one warning. Decisions: **loopback** is `127.0.0.0/8`, `::1` and an IPv4-mapped loopback — `0.0.0.0` and `::`
+listen everywhere and are not; a **hostname** never reaches the bind (`validate()` requires an IP literal), and
+anything unparseable reads as exposed. **Every gateway build** checks it: without `compliance` the only credential
+is `gateway_auth_token` (tables and `[oidc]` are refused there already). **One rule for blank secrets** (the
+independent review of #598): `validate()` refuses an empty or whitespace-only token in every form, by name, and
+`resolve_token` never matches a blank presented bearer. The review's case: a TOML `[[gateway_scoped_tokens]] token
+= ""` with `scopes = ["*"]` counted as a credential, and HTTP/2 (served under `gateway_tls`) does not trim
+`Authorization: Bearer `, so an empty bearer resolved to `*` — the env parser refused a blank named token, the TOML
+path did not: two doors to one setting with different rules. `guarantee::gateway_credential_model` is the one
+predicate `gw.not_open`, `gw.exposed_closed` and `start()` read; `gateway_auth` keeps its own (it reads
+`ctx.oidc`). Pinned by `a_blank_gateway_token_is_refused_in_every_form` and
+`resolve_token_never_matches_an_empty_presented_bearer`, both seen failing first. No HTTP/2 end-to-end test: the
+unit test on `resolve_token` covers the empty string whichever transport delivers it. Visible as
+guarantee `gw.exposed_closed` (`not_applicable` on loopback, `not_configured` under the waiver), required by
+`secure-single-domain` **rev 3**, which refuses one node rev 2 admitted — a gateway whose only credential was a blank `gateway_auth_token`, which `gw.not_open` rev 1 read as enforced (and which `validate()` now refuses in every profile) — and otherwise names the waiver when `gateway_allow_unauthenticated` is set (the review's finding 2: an earlier draft said *refuses no node rev 2 admitted*, which the blank-token change made false). The demos' own `0.0.0.0` listeners — `three_node_demo`'s chat UI and dashboard, `llm_agent`'s UI, `federation_node`'s control port, `confined_fleet_node`'s operator port — are application code beside the library and outside this check; `docker/docker-compose.yml` publishes the waived gateways on the host's loopback only. In-repo, the two
+demo nodes that bind `0.0.0.0` with no credential (`three_node_demo`, `federation_node`) set the opt-in with a
+comment; `confined_fleet_node` carries named tokens. Pinned by `an_exposed_gateway_with_no_credential_refuses_to_start`
+(seen failing first: it started, `Ok(())`) and `an_exposed_gateway_starts_with_a_credential_on_loopback_or_with_the_opt_in`.
+
 **A governed group's membership is governance (2.29.0).** `/gateway/mesh/group` (`mesh:write`) refuses a group under a
 live membership intent 403 `governed_group`; `/gateway/govern/group` (`govern:write`, audited) moves the node. The
 handler had named *who may change an electorate* an open question since 2026-09-24; the boundary chosen is the
