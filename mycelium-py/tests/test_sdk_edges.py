@@ -174,12 +174,13 @@ def test_a_caller_supplied_value_stays_one_path_segment(port, verb, seg):
 
 
 @pytest.mark.parametrize("verb", list(SEGMENT_CALLS))
-@pytest.mark.parametrize("seg", [".", ".."])
-def test_a_dot_segment_is_refused_before_any_request(port, verb, seg):
-    # A URL parser resolves `..` — encoded or not — so it would reach another route.
+@pytest.mark.parametrize("seg", [".", "..", "", "\ud800"])
+def test_a_segment_that_cannot_travel_is_refused_before_any_request(port, verb, seg):
+    # A URL parser resolves `..` — encoded or not — so it would reach another route; an empty segment
+    # reaches another route too (a 404 read as "not found"); a lone surrogate has no UTF-8 encoding.
     agent = MyceliumAgent("127.0.0.1", port)
     agent._port = port
-    with pytest.raises(ValueError, match="dot segment"):
+    with pytest.raises(ValueError, match="cannot travel as a URL path segment"):
         SEGMENT_CALLS[verb][0](agent, seg)
     assert _Stub.seen == []
 
@@ -196,3 +197,54 @@ def test_update_prompt_escapes_its_segments(port):
 def test_scatter_gather_waits_for_one_reply_by_default(port):
     MyceliumAgent("127.0.0.1", port).scatter_gather(["127.0.0.1:1", "127.0.0.1:2"], "echo")
     assert _last_body()["min_ok"] == 1
+
+
+# ── Adversarial review of #595 ───────────────────────────────────────────────
+
+BAD_SECONDS = [-1, -0.5, float("inf"), float("-inf"), float("nan"), 2**64]
+
+ALL_TIMEOUTS = {
+    **{k: (lambda f: lambda a, t: f(a, t))(f) for k, f in MESH_TIMEOUTS.items()},
+    "ingest":      lambda a, t: asyncio.run(Wiki("127.0.0.1", a._port).ingest("b", timeout_secs=t)),
+    "take":        lambda a, t: asyncio.run(TupleSpace("127.0.0.1", a._port).take("s", timeout_secs=t)),
+    "take_by_key": lambda a, t: asyncio.run(TupleSpace("127.0.0.1", a._port).take_by_key("s", "k", timeout_secs=t)),
+}
+
+
+@pytest.mark.parametrize("verb", list(ALL_TIMEOUTS))
+@pytest.mark.parametrize("bad", BAD_SECONDS)
+def test_a_timeout_the_gateway_cannot_read_is_refused_by_name(port, verb, bad):
+    # Negative, non-finite or past u64: refused naming the parameter, not mapped to a default.
+    agent = MyceliumAgent("127.0.0.1", port)
+    agent._port = port
+    with pytest.raises(ValueError, match="timeout_secs"):
+        ALL_TIMEOUTS[verb](agent, bad)
+    assert _Stub.seen == []
+
+
+LEASES = {
+    "advertise_capability.lease_secs": (lambda a, t: a.advertise_capability("ns", "n", lease_secs=t), "lease_secs"),
+    "declare_units.lease_secs":        (lambda a, t: a.declare_units("", lease_secs=t), "lease_secs"),
+    "distributed_lock.ttl_secs":       (lambda a, t: a.distributed_lock("jobs", ttl_secs=t), "ttl_secs"),
+}
+
+
+@pytest.mark.parametrize("verb", list(LEASES))
+@pytest.mark.parametrize("given,sent", [(1.5, 2), (0.2, 1), (30, 30)])
+def test_a_lease_or_ttl_is_sent_in_whole_seconds(port, verb, given, sent):
+    # The gateway reads `lease_secs` with `as_u64()` (a fraction: an unleased advert) and `ttl_secs` as
+    # `Option<u64>` (a fraction: 422).
+    _Stub.reply = {**REPLY, "handle_id": "h", "guard_id": "g", "token": 1}
+    call, field = LEASES[verb]
+    call(MyceliumAgent("127.0.0.1", port), given)
+    value = _last_body()[field]
+    assert type(value) is int and value == sent
+
+
+@pytest.mark.parametrize("verb", list(LEASES))
+@pytest.mark.parametrize("bad", BAD_SECONDS)
+def test_a_lease_or_ttl_the_gateway_cannot_read_is_refused_by_name(port, verb, bad):
+    call, field = LEASES[verb]
+    with pytest.raises(ValueError, match=field):
+        call(MyceliumAgent("127.0.0.1", port), bad)
+    assert _Stub.seen == []

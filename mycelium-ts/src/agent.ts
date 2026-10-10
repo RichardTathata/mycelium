@@ -281,7 +281,7 @@ export class MyceliumAgent {
       ns,
       name,
       interval_secs: options.intervalSecs ?? 30,
-      ...(options.leaseSecs !== undefined ? { lease_secs: options.leaseSecs } : {}),
+      ...(options.leaseSecs !== undefined ? { lease_secs: wholeSeconds(options.leaseSecs, 1, "leaseSecs") } : {}),
       attributes: options.attributes ?? {},
       authorized_callers: options.authorizedCallers ?? [],
     }) as { handle_id: string };
@@ -313,7 +313,7 @@ export class MyceliumAgent {
     const data = (await this._post("/gateway/units/declare", {
       toml: tomlText,
       interval_secs: options.intervalSecs ?? 30,
-      ...(options.leaseSecs !== undefined ? { lease_secs: options.leaseSecs } : {}),
+      ...(options.leaseSecs !== undefined ? { lease_secs: wholeSeconds(options.leaseSecs, 1, "leaseSecs") } : {}),
     })) as {
       handle_id: string;
       principal: string | null;
@@ -654,7 +654,7 @@ export class MyceliumAgent {
   ): Promise<LockGuard> {
     const data = await this._post("/gateway/overlay/lock/acquire", {
       name,
-      ttl_secs: options.ttlSecs ?? 30,
+      ttl_secs: wholeSeconds(options.ttlSecs ?? 30, 1, "ttlSecs"),
     }) as { guard_id: string; token: string };
     const guardId = data.guard_id;
     return new LockGuard(guardId, toBigInt(data.token), async () => {

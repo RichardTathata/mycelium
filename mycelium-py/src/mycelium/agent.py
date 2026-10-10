@@ -496,7 +496,7 @@ class MyceliumAgent:
         name:               str,
         *,
         interval_secs:      int                    = 30,
-        lease_secs:         int                    | None = None,
+        lease_secs:         float                  | None = None,
         attributes:         dict[str, Any]         | None = None,
         authorized_callers: list[str]              | None = None,
     ) -> CapabilityHandle:
@@ -531,7 +531,8 @@ class MyceliumAgent:
         """
         body: dict[str, Any] = {"ns": ns, "name": name, "interval_secs": interval_secs}
         if lease_secs is not None:
-            body["lease_secs"] = lease_secs
+            # Whole seconds (0.2.10): the gateway reads `as_u64()`, and a fraction left the advert unleased.
+            body["lease_secs"] = whole_seconds(lease_secs, name="lease_secs")
         if attributes:
             body["attributes"] = attributes
         if authorized_callers:
@@ -551,7 +552,7 @@ class MyceliumAgent:
         toml_text: str,
         *,
         interval_secs: int = 30,
-        lease_secs:    int | None = None,
+        lease_secs:    float | None = None,
     ) -> "UnitHandle":
         """Declare a unit file's capabilities, requirements and groups on the node, under one handle.
 
@@ -564,7 +565,7 @@ class MyceliumAgent:
         """
         body: dict[str, Any] = {"toml": toml_text, "interval_secs": interval_secs}
         if lease_secs is not None:
-            body["lease_secs"] = lease_secs
+            body["lease_secs"] = whole_seconds(lease_secs, name="lease_secs")  # as advertise_capability
         with self._pool.sync() as c:
             resp = c.post("/gateway/units/declare", json=body)
             resp.raise_for_status()
@@ -1071,7 +1072,7 @@ class MyceliumAgent:
 
     # ── Overlay: distributed lock ───────────────────────────────────────────
 
-    def distributed_lock(self, name: str, *, ttl_secs: int = 30) -> LockGuard:
+    def distributed_lock(self, name: str, *, ttl_secs: float = 30) -> LockGuard:
         """Acquire a named distributed lock via cluster consensus.
 
         Returns a :class:`LockGuard` that releases the lock when dropped.
@@ -1080,7 +1081,8 @@ class MyceliumAgent:
             with agent.distributed_lock("my-lock") as guard:
                 print("fencing token:", guard.token)
         """
-        body = {"name": name, "ttl_secs": ttl_secs}
+        # Whole seconds (0.2.10): the route reads `Option<u64>` and refused a fraction 422.
+        body = {"name": name, "ttl_secs": whole_seconds(ttl_secs, name="ttl_secs")}
         with self._pool.sync() as c:
             resp = c.post("/gateway/overlay/lock/acquire", json=body)
             _raise_if_superseded(resp)

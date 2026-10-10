@@ -97,11 +97,11 @@ describe.each(Object.keys(SEGMENT_CALLS))("%s", (verb) => {
     expect(pathOf(seen[seen.length - 1].url)).toBe(shape(seg));
   });
 
-  test.each([".", ".."])("refuses the dot segment %p before any request", async (seg) => {
+  test.each([".", "..", "", "\ud800"])("refuses the segment %p before any request", async (seg) => {
     stub({});
     const err = await caught(() =>
       call(new MyceliumAgent("127.0.0.1", 1, 1000), new PromptSkillClient("127.0.0.1", 1), seg));
-    expect(String(err?.message)).toMatch(/dot segment/);
+    expect(String(err?.message)).toMatch(/cannot travel as a URL path segment/);
     expect(seen).toEqual([]);
   });
 });
@@ -157,4 +157,54 @@ test("scatterGather waits for one reply by default, as the gateway and the Pytho
   await new MyceliumAgent("127.0.0.1", 1, 1000).scatterGather(["127.0.0.1:1", "127.0.0.1:2"], "echo");
   expect(seen[0].body.min_ok).toBe(1);
   expect(seen[0].body.timeout_secs).toBe(10);
+});
+
+// ── Adversarial review of #595 ────────────────────────────────────────────────
+
+const BAD_SECONDS = [-1, -0.5, Infinity, -Infinity, NaN, 2 ** 64];
+
+const ALL_TIMEOUTS: Record<string, (t: number) => Promise<unknown>> = {
+  rpcCall:       (t) => new MyceliumAgent("127.0.0.1", 1, 1000).rpcCall("127.0.0.1:1", "echo", Buffer.alloc(0), { timeoutSecs: t }),
+  scatterGather: (t) => new MyceliumAgent("127.0.0.1", 1, 1000).scatterGather(["127.0.0.1:1"], "echo", Buffer.alloc(0), { timeoutSecs: t }),
+  emitReliable:  (t) => new MyceliumAgent("127.0.0.1", 1, 1000).emitReliable("127.0.0.1:1", "echo", Buffer.alloc(0), { timeoutSecs: t }),
+  ingest:        (t) => new Wiki("127.0.0.1", 1).ingest("b", t),
+  take:          (t) => new TupleSpace("127.0.0.1", 1).take("s", t),
+  takeByKey:     (t) => new TupleSpace("127.0.0.1", 1).takeByKey("s", "k", t),
+};
+
+describe.each(Object.keys(ALL_TIMEOUTS))("%s", (verb) => {
+  test.each(BAD_SECONDS)("refuses timeoutSecs %p by name, before any request", async (bad) => {
+    stub({ ok: true, ack: "acknowledged", replies: [], id: 1, payload_b64: "", summary: {} });
+    const err = await caught(() => ALL_TIMEOUTS[verb](bad));
+    expect(String(err?.message)).toMatch(/timeoutSecs/);
+    expect(seen).toEqual([]);
+  });
+});
+
+type Lease = [(a: MyceliumAgent, t: number) => Promise<unknown>, string, string];
+const LEASES: Record<string, Lease> = {
+  "advertiseCapability.leaseSecs": [(a, t) => a.advertiseCapability("ns", "n", { leaseSecs: t }), "lease_secs", "leaseSecs"],
+  "declareUnits.leaseSecs":        [(a, t) => a.declareUnits("", { leaseSecs: t }), "lease_secs", "leaseSecs"],
+  "distributedLock.ttlSecs":       [(a, t) => a.distributedLock("jobs", { ttlSecs: t }), "ttl_secs", "ttlSecs"],
+};
+
+describe.each(Object.keys(LEASES))("%s", (verb) => {
+  const [call, field, option] = LEASES[verb];
+  const reply = { ok: true, handle_id: "h", guard_id: "g", token: "1", principal: null,
+                  declared: { capabilities: 0, requirements: 0, groups: 0 }, not_enforced: [] };
+
+  test.each([[1.5, 2], [0.2, 1], [30, 30]])("sends %p as %p whole seconds", async (given, sent) => {
+    // The gateway reads `lease_secs` with `as_u64()` — a fraction left the advert unleased — and
+    // `ttl_secs` as `Option<u64>` — a fraction was refused 422.
+    stub(reply);
+    await call(new MyceliumAgent("127.0.0.1", 1, 1000), given);
+    expect(seen[0].body[field]).toBe(sent);
+  });
+
+  test.each(BAD_SECONDS)("refuses %p by name, before any request", async (bad) => {
+    stub(reply);
+    const err = await caught(() => call(new MyceliumAgent("127.0.0.1", 1, 1000), bad));
+    expect(String(err?.message)).toContain(option);
+    expect(seen).toEqual([]);
+  });
 });

@@ -461,11 +461,15 @@ protected kind — is thrown, never reported as `"timeout"`.
 
 - **Every timeout is whole seconds now**, as `rpcCall`, `scatterGather` and `emitReliable` have been since
   0.2.0: `TupleSpace.take` / `takeByKey` and `Wiki.ingest` round a fraction **up** too (`take` keeps `0`, the
-  poll that answers at once). Before 0.2.4 a fraction on those three was refused 422.
+  poll that answers at once), and so do `leaseSecs` (`advertiseCapability`, `declareUnits` — a fraction left the
+  advert unleased) and `ttlSecs` (`distributedLock` — refused 422). Before 0.2.4 a fraction on the takes, `ingest`
+  and `ttlSecs` was refused 422. A negative, `NaN`, infinite or past-`u64` value throws, naming the option,
+  before any request. (`setWithMinAcks`'s `/gateway/kv/quorum` reads a float and is sent as given.)
 - **Caller-supplied path segments are escaped.** A prompt's `ns`/`name` and a capability handle or lock guard id
   are percent-encoded as **one** path segment, as signal kinds, shard names and federation domains already were.
-  A value of `.` or `..` throws before any request, on every such route: the URL parser resolves it as a dot
-  segment even when encoded (WHATWG reads `%2e%2e` as `..`), so the request would reach a different route.
+  A value that cannot be one segment throws ("cannot travel as a URL path segment") before any request, on every
+  such route: `.` or `..`, which the URL parser resolves as a dot segment even when encoded (WHATWG reads `%2e%2e`
+  as `..`); the empty string; a string with a lone surrogate. Each would reach a different route.
 - **A dropped stream is not resumed — not built: the gateway has no resume point.** No SSE route sends an
   event `id:` or reads `Last-Event-ID`, so there is nothing for a client to resume *from*, and this SDK does not
   reconnect: when the connection drops, `onSignal`, `rpcServe`, `mailbox`, `subscribeLog` and
@@ -475,8 +479,11 @@ protected kind — is thrown, never reported as `"timeout"`.
     best-effort. Use a mailbox or a log for anything that must arrive.
   - `rpcServe` — a request that arrives in the gap reaches no server; its caller times out (and must treat
     the timeout as *unknown*, not *not done*).
-  - `mailbox` — events stay in the KV until delivered, so a re-opened stream delivers what is still there;
-    delivery is at-least-once, so handle duplicates.
+  - `mailbox` — **at-most-once across a drop.** The gateway tombstones each event as it queues it for the
+    stream (up to 256 ahead of your loop), before you have read it, so the events queued or in flight when the
+    stream drops are gone; a re-opened stream delivers only what was still undelivered. An event that must not
+    be lost needs an acknowledgement of your own — the sender keeps it until the receiver confirms — or a log
+    or tuple space instead of a mailbox.
   - `subscribeLog` — pass `sinceHlc: entry.hlc + 1n` for the last handled entry (the cursor is inclusive).
   - `subscribeLogGroup` — re-subscribing contends for the group's claim again and resumes from the group's
     persisted offset, which advances when the gateway **sends** an entry, not when you finish it: an entry in

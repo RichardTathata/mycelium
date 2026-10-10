@@ -135,8 +135,8 @@ No coordinator, no shared database — the mesh *is* the checkpoint store.
   `MYCELIUM_GATEWAY_TOKEN`, 0.3.2); `"refused"` (0.3.1) — the blob route's own 403: every holder refused for
   good (a removed member, a denied action; `mycelium-reason` 0.7.1) — fix the holder's membership or authority,
   not the token; `"corrupt"` — every copy currently on offer fails the content
-  address (one bad provider beside an honest one that lacks it is `not_found`) — or the row names an id of `.` or
-  `..`, which no content address is and which is never fetched (0.3.3); `"unsupported"` — the node
+  address (one bad provider beside an honest one that lacks it is `not_found`) — or the row names an id no content
+  address can be (`.`, `..`, empty, a lone surrogate, or not a string at all), which is never fetched (0.3.3); `"unsupported"` — the node
   does not serve the blob route (no reason companion there). `e.retriable`
   is true only when every reason is `not_found` or `unavailable`, so the loop above should re-raise
   on `not e.retriable` rather than wait. A checkpoint that stays incomplete past your bound with

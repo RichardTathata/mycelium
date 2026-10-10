@@ -174,8 +174,31 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   target and gave up after 5 s, where the gateway, the Python SDK and the route's docs default to **one** reply and
   10 s. It now sends `min_ok: 1` and 10 s; both READMEs document the default. **Upgrade note:** a TypeScript
   caller that relied on hearing from every target must pass `{ minOk: targets.length }` — with the new default
-  the call returns at the first reply and the gateway cancels the rest. Seen failing first:
+  the call returns at the first reply and the gateway cancels the rest. And `scatterGather([])` with no `minOk`
+  now asks for one reply from no targets, so the gateway answers 504 at once (a `TimeoutError`) where it resolved `[]` — pass
+  `{ minOk: 0 }` or skip the call for an empty target list. Seen failing first:
   `scatterGather waits for one reply by default` (`min_ok` was `2` for two targets).
+- **The adversarial review of #595, on the same SDK versions.** `lease_secs` and `ttl_secs` get the same
+  whole-second rounding in both SDKs — the gateway reads `lease_secs` with `as_u64()` (`capability/advertise`,
+  `units/declare`: a fractional lease left the advertisement **unleased**) and `ttl_secs` as `Option<u64>`
+  (`overlay/lock/acquire`: 422). Both helpers refuse a negative, non-finite or past-`u64` duration by name
+  (`ValueError` / `Error` naming `timeout_secs`, `lease_secs`, `ttl_secs` or the TS option) instead of mapping it
+  to a default; `take`'s `0` stays the poll. A path segment that is empty or holds a lone surrogate is refused
+  like `.`/`..`, with the same documented error ("cannot travel as a URL path segment" — the surrogate raised
+  `UnicodeEncodeError` / `URIError`); the checkpointer reads an empty, surrogate or **non-string** `blob` in a row
+  as `corrupt` (`IncompleteCheckpoint`, not retriable) where a non-string raised `TypeError`. Docs: a mailbox
+  stream is **at-most-once across a drop** — the gateway tombstones each event as it enters the stream's
+  256-slot queue (`src/agent/mailbox.rs`), so queued events are lost when the stream drops (guide 10 and both
+  READMEs said at-least-once); the whole-seconds sentence is scoped (`/gateway/kv/quorum` reads a float). Seen
+  failing first: `test_a_timeout_the_gateway_cannot_read_is_refused_by_name` (`OverflowError: cannot convert
+  float infinity to integer`, `DID NOT RAISE`), `test_a_lease_or_ttl_is_sent_in_whole_seconds` (`assert (<class
+  'float'> is int)`), `test_a_segment_that_cannot_travel_is_refused_before_any_request` (`'utf-8' codec can't
+  encode character '\ud800'`), `test_a_non_string_blob_in_a_row_reads_as_corrupt` (`TypeError:
+  quote_from_bytes() expected bytes`), and 76 in `mycelium-ts/tests/sdk_edges.test.ts`. **Not claimed:** the
+  gateway's mailbox ordering (tombstone before the client reads) and the prompt route's aliasing once `/` is
+  encoded (`ns="a/b", name="c"` and `ns="a", name="b/c"` name one KV key) are gateway work, post-360 row E; the
+  TypeScript `rpcCall`/`scatterGather`/`emitReliable` abort on the agent-wide timeout rather than `timeout + 5`,
+  and `rpcCall` defaults to 5 s where Python and the gateway use 30 s — recorded as a follow-up.
 - **The audit chain's head survives a restart.** `AuditChainState::new()` is genesis and nothing read the persisted
   `sys/audit/{self}/` stream back at `start()`, so a restarted node with `[persistence]` sealed seq 0 again with a
   zero `prev_hash` and LWW overwrote its own genesis record — the tamper-evident chain erased its history at every

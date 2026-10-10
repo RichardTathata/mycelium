@@ -122,26 +122,45 @@ def path_segment(value: object) -> str:
     percent-decodes the segment back. Before 0.2.10 these were interpolated raw; ``mycelium-ts`` and
     the checkpointer's own key segments already encoded.
 
-    A value of ``.`` or ``..`` raises :class:`ValueError` before any request: a URL parser resolves it
-    as a dot segment — encoded too (the WHATWG URL standard reads ``%2e%2e`` as ``..``, so a proxy or
-    ``mycelium-ts`` would) — and the request would reach a different route. No gateway route takes one
-    as a name.
+    Raises :class:`ValueError` ("cannot travel as a URL path segment") before any request for a value
+    that cannot be one segment: ``.`` or ``..``, which a URL parser resolves as a dot segment — encoded
+    too (the WHATWG URL standard reads ``%2e%2e`` as ``..``, so a proxy or ``mycelium-ts`` would); the
+    empty string, which reaches a different route (its 404 would read as *not found*); and a string
+    with a lone surrogate, which has no UTF-8 encoding. No gateway route takes one as a name.
     """
     text = str(value)
-    if text in (".", ".."):
-        raise ValueError(f"{text!r} cannot travel as a URL path segment: it is resolved as a dot segment")
-    return quote(text, safe="")
+    if text in ("", ".", ".."):
+        raise ValueError(f"{text!r} cannot travel as a URL path segment: it would reach a different route")
+    try:
+        return quote(text, safe="")
+    except UnicodeEncodeError:
+        raise ValueError(f"{text!r} cannot travel as a URL path segment: it has no UTF-8 encoding") from None
 
 
-def whole_seconds(secs: float, *, floor: int = 1) -> int:
-    """A timeout the gateway reads as ``u64`` seconds: a fraction rounds **up**, never below ``floor``
+#: The largest value the gateway's ``u64`` seconds fields can read.
+U64_MAX = 2**64 - 1
+
+
+def whole_seconds(secs: float, *, floor: int = 1, name: str = "timeout_secs") -> int:
+    """A duration the gateway reads as ``u64`` seconds: a fraction rounds **up**, never below ``floor``
     (0.2.10; ``mycelium-ts``'s ``wholeSeconds``).
 
     ``rpc/call`` and ``scatter`` read ``as_u64()`` and silently replaced a fraction with their default
-    (30 s, 10 s) while this client waited ``t + 5``; ``emit_reliable`` and ``wiki/ingest`` refused it 422.
-    The tuple ``take`` routes pass ``floor=0`` — there ``0`` is the documented poll.
+    (30 s, 10 s) while this client waited ``t + 5``; ``emit_reliable``, ``wiki/ingest`` and the lock's
+    ``ttl_secs`` refused it 422; a fractional ``lease_secs`` left an advertisement unleased. The tuple
+    ``take`` routes pass ``floor=0`` — there ``0`` is the documented poll.
+
+    Raises :class:`ValueError` naming ``name`` for a value the gateway cannot read — negative, ``nan``,
+    infinite, or past ``u64`` — rather than mapping it to a default or a different duration.
     """
-    return max(floor, math.ceil(secs))
+    if isinstance(secs, bool) or not isinstance(secs, (int, float)):
+        raise ValueError(f"{name} must be a number of seconds, not {secs!r}")
+    if secs != secs or secs in (float("inf"), float("-inf")) or secs < 0:
+        raise ValueError(f"{name} must be a finite, non-negative number of seconds, not {secs!r}")
+    whole = max(floor, math.ceil(secs))
+    if whole > U64_MAX:
+        raise ValueError(f"{name} {secs!r} is past the gateway's limit of {U64_MAX} seconds")
+    return whole
 
 
 def bracket_host(host: str) -> str:

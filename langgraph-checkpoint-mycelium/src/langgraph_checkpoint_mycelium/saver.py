@@ -202,16 +202,27 @@ def _seg(s: str) -> str:
     return ROOT_NS if s == "" else quote(s, safe="")
 
 
-def _blob_path(blob_id: str) -> str | None:
-    """``/gateway/reason/blob/{id}`` with the id percent-encoded as **one** segment, or ``None`` for an id of
-    ``.`` or ``..`` — which any URL parser resolves to another path, encoded or not (0.3.3).
+def _blob_key(blob_id: object) -> str:
+    """The id as a row names it, or — for a forged row whose ``blob`` is not a string — a string that
+    says so, so ``IncompleteCheckpoint.missing`` and ``.reasons`` stay keyed by strings (0.3.3)."""
+    return blob_id if isinstance(blob_id, str) else f"<not a blob id: {type(blob_id).__name__}>"
+
+
+def _blob_path(blob_id: object) -> str | None:
+    """``/gateway/reason/blob/{id}`` with the id percent-encoded as **one** segment, or ``None`` for an id
+    that cannot be one (0.3.3): not a string; empty (another route); ``.`` or ``..``, which any URL parser
+    resolves to another path, encoded or not; or a string with a lone surrogate (no UTF-8 encoding). No
+    content address is any of these, so the loaders read such an id as ``corrupt`` and never fetch it.
 
     The id comes from a checkpoint row, which is peer-writable KV: interpolated raw, a row naming
     ``../../kv/keys?prefix=`` sent this saver's bearer to ``/gateway/kv/keys``. The Python SDK's
     ``mycelium._pool.path_segment`` rule, mirrored (this package depends on httpx only)."""
-    if blob_id in (".", ".."):
+    if not isinstance(blob_id, str) or blob_id in ("", ".", ".."):
         return None
-    return f"/gateway/reason/blob/{quote(blob_id, safe='')}"
+    try:
+        return f"/gateway/reason/blob/{quote(blob_id, safe='')}"
+    except UnicodeEncodeError:
+        return None
 
 
 def _unseg(s: str) -> str:
@@ -321,23 +332,23 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
     def _blob_get(self, blob_id: str) -> bytes | None:
         return self._blob_try(blob_id)
 
-    def _blob_try(self, blob_id: str, reasons: dict[str, str] | None = None) -> bytes | None:
+    def _blob_try(self, blob_id: object, reasons: dict[str, str] | None = None) -> bytes | None:
         """The blob, or ``None`` with why recorded in ``reasons`` (``IncompleteCheckpoint.reasons``)."""
         path = _blob_path(blob_id)
-        if path is None:  # no content address is a dot: what the row names cannot be fetched, ever
+        if path is None:  # no content address looks like this: what the row names cannot be fetched, ever
             if reasons is not None:
-                _merge_reason(reasons, blob_id, "corrupt")
+                _merge_reason(reasons, _blob_key(blob_id), "corrupt")
             return None
         try:
             resp = self._client.get(path)
         except httpx.TransportError:
             if reasons is not None:
-                _merge_reason(reasons, blob_id, "unavailable")
+                _merge_reason(reasons, _blob_key(blob_id), "unavailable")
             return None
         reason = _blob_reason(resp)
         if reason is not None:
             if reasons is not None:
-                _merge_reason(reasons, blob_id, reason)
+                _merge_reason(reasons, _blob_key(blob_id), reason)
             return None
         resp.raise_for_status()
         return resp.content
@@ -374,23 +385,23 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
     async def _ablob_get(self, blob_id: str) -> bytes | None:
         return await self._ablob_try(blob_id)
 
-    async def _ablob_try(self, blob_id: str, reasons: dict[str, str] | None = None) -> bytes | None:
+    async def _ablob_try(self, blob_id: object, reasons: dict[str, str] | None = None) -> bytes | None:
         """Async :meth:`_blob_try`."""
         path = _blob_path(blob_id)
-        if path is None:  # no content address is a dot: what the row names cannot be fetched, ever
+        if path is None:  # no content address looks like this: what the row names cannot be fetched, ever
             if reasons is not None:
-                _merge_reason(reasons, blob_id, "corrupt")
+                _merge_reason(reasons, _blob_key(blob_id), "corrupt")
             return None
         try:
             resp = await self._aclient.get(path)
         except httpx.TransportError:
             if reasons is not None:
-                _merge_reason(reasons, blob_id, "unavailable")
+                _merge_reason(reasons, _blob_key(blob_id), "unavailable")
             return None
         reason = _blob_reason(resp)
         if reason is not None:
             if reasons is not None:
-                _merge_reason(reasons, blob_id, reason)
+                _merge_reason(reasons, _blob_key(blob_id), reason)
             return None
         resp.raise_for_status()
         return resp.content
@@ -508,12 +519,12 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
         reasons: dict[str, str] = {}
         skeleton = self._blob_try(row["blob"], reasons)
         if skeleton is None:
-            missing.append(row["blob"])
+            missing.append(_blob_key(row["blob"]))
         channel_bytes: dict[str, bytes] = {}
         for ch, (blob_id, _type) in row.get("channels", {}).items():
             data = self._blob_try(blob_id, reasons)
             if data is None:
-                missing.append(blob_id)
+                missing.append(_blob_key(blob_id))
             else:
                 channel_bytes[ch] = data
         writes: list[tuple[str, int, dict[str, Any], bytes]] = []
@@ -526,7 +537,7 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
             wrow = json.loads(raw)
             data = self._blob_try(wrow["blob"], reasons)
             if data is None:
-                missing.append(wrow["blob"])
+                missing.append(_blob_key(wrow["blob"]))
                 continue
             writes.append((parsed[0], parsed[1], wrow, data))
         if missing:
@@ -775,12 +786,12 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
         reasons: dict[str, str] = {}
         skeleton = await self._ablob_try(row["blob"], reasons)
         if skeleton is None:
-            missing.append(row["blob"])
+            missing.append(_blob_key(row["blob"]))
         channel_bytes: dict[str, bytes] = {}
         for ch, (blob_id, _type) in row.get("channels", {}).items():
             data = await self._ablob_try(blob_id, reasons)
             if data is None:
-                missing.append(blob_id)
+                missing.append(_blob_key(blob_id))
             else:
                 channel_bytes[ch] = data
         writes: list[tuple[str, int, dict[str, Any], bytes]] = []
@@ -793,7 +804,7 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
             wrow = json.loads(raw)
             data = await self._ablob_try(wrow["blob"], reasons)
             if data is None:
-                missing.append(wrow["blob"])
+                missing.append(_blob_key(wrow["blob"]))
                 continue
             writes.append((parsed[0], parsed[1], wrow, data))
         if missing:

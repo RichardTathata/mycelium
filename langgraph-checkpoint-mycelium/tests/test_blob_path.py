@@ -54,3 +54,43 @@ def test_a_dot_blob_id_is_not_fetched_and_reads_as_corrupt(saver_and_paths, blob
     assert asyncio.run(saver._ablob_try(blob_id, reasons)) is None
     assert paths == []
     assert reasons == {blob_id: "corrupt"}
+
+
+@pytest.mark.parametrize("blob_id", ["", "\ud800"])
+def test_an_id_that_cannot_be_one_segment_is_not_fetched_and_reads_as_corrupt(saver_and_paths, blob_id):
+    # Adversarial review of #595: an empty id reaches another route; a lone surrogate has no encoding.
+    saver, paths = saver_and_paths
+    reasons: dict[str, str] = {}
+    assert saver._blob_try(blob_id, reasons) is None
+    assert asyncio.run(saver._ablob_try(blob_id, reasons)) is None
+    assert paths == []
+    assert reasons == {blob_id: "corrupt"}
+
+
+# A forged row whose `blob` is not a string (the row is peer-writable): the loaders raised `TypeError`.
+# It is an id no content address can be, so the checkpoint is incomplete with the reason `corrupt`.
+from test_incomplete import FakeGateway, IncompleteCheckpoint, checkpoint_with_write  # noqa: E402
+
+
+@pytest.mark.parametrize("forged", [7, None, ["x"], {"id": "x"}])
+@pytest.mark.parametrize("loader", ["sync", "async"])
+def test_a_non_string_blob_in_a_row_reads_as_corrupt(forged, loader):
+    import json
+
+    gw = FakeGateway()
+    saver = MyceliumCheckpointSaver("127.0.0.1", 1)
+    transport = httpx.MockTransport(gw.handle)
+    saver._client = httpx.Client(base_url="http://test", transport=transport)
+    saver._aclient = httpx.AsyncClient(base_url="http://test", transport=transport)
+    cfg = checkpoint_with_write(saver, "t-forged")
+    key = next(k for k in gw.kv if k.startswith("ckpt/"))
+    row = json.loads(gw.kv[key])
+    row["blob"] = forged
+    gw.kv[key] = json.dumps(row).encode()
+    with pytest.raises(IncompleteCheckpoint) as e:
+        if loader == "sync":
+            saver.get_tuple(cfg)
+        else:
+            asyncio.run(saver.aget_tuple(cfg))
+    assert list(e.value.reasons.values()) == ["corrupt"]
+    assert e.value.retriable is False

@@ -362,7 +362,7 @@ connection drops. A client re-opens it in a loop, and what it misses in the gap 
 |---|---|
 | signals (`on_signal` / `onSignal`, `/signals/{kind}`) | nothing emitted in the gap is delivered later — signals are best-effort |
 | `rpc_serve` / `rpcServe` | a request that arrived in the gap reached no server; its caller timed out, which is *unknown*, not *not done* |
-| `mailbox` | events stay in the KV until delivered, so the re-opened stream delivers what is still there — at-least-once, so handle duplicates |
+| `mailbox` | **at-most-once across a drop**: the gateway tombstones each event as it queues it for the stream (up to 256 ahead of the client, `src/agent/mailbox.rs`), before the client has read it, so what was queued or in flight at the drop is gone; the re-opened stream delivers only what was still undelivered. An event that must not be lost needs an application-level acknowledgement, or a log or tuple space instead |
 | `subscribe_log` / `subscribeLog` | resume with `since` = the last handled entry's `hlc + 1` (the cursor is inclusive) |
 | `subscribe_log_group` / `subscribeLogGroup` | contends for the group's claim again and resumes from the group's persisted offset, which advances when the gateway **sends** an entry, not when the client finishes it — an entry in flight at the drop is not sent again |
 
@@ -370,11 +370,14 @@ Building reconnect means a resume point first — an event id per stream that th
 — which is a gateway feature with a compatibility window, not an SDK patch (post-360 hardening plan,
 row G and decision D4).
 
-**Timeouts and path segments.** Every `timeout_secs` the gateway reads is an integer: both SDKs send whole
-seconds, a fraction rounded up (`mycelium-py` 0.2.10, `mycelium-ts` 0.2.0/0.2.4; the tuple `take` keeps `0`, its
-poll). A caller-supplied value that becomes one path segment — a kind, a prompt's `ns`/`name`, a run or blob id,
-a domain, a handle or guard id — is percent-encoded, and `.`/`..` is refused before any request (a URL parser
-resolves it, encoded or not). `scatter_gather` / `scatterGather` wait for **one** reply unless told otherwise
+**Timeouts and path segments.** The routes that read `timeout_secs`, `lease_secs` or `ttl_secs` as an integer
+(`rpc/call`, `scatter`, `overlay/emit_reliable`, `wiki/ingest`, the tuple `take`s, `capability/advertise`,
+`units/declare`, `overlay/lock/acquire`) get whole seconds from both SDKs, a fraction rounded up (`mycelium-py`
+0.2.10, `mycelium-ts` 0.2.0/0.2.4; the tuple `take` keeps `0`, its poll); a negative, non-finite or past-`u64`
+value is refused by name before any request. `/gateway/kv/quorum` reads `timeout_secs` as a float and is sent as
+given. A caller-supplied value that becomes one path segment — a kind, a prompt's `ns`/`name`, a run or blob id,
+a domain, a handle or guard id — is percent-encoded, and a value that cannot be one segment (`.`, `..`, empty, a
+lone surrogate) is refused before any request. `scatter_gather` / `scatterGather` wait for **one** reply unless told otherwise
 (`min_ok` / `minOk`), the gateway's own default — `mycelium-ts` before 0.2.4 waited for every target.
 
 ## Authenticating to a token-protected gateway
