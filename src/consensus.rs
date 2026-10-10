@@ -160,6 +160,14 @@ pub struct ConsensusConfig {
     ///
     /// `None` (default) = permanent commitment; behaviour is unchanged.
     pub committed_lease_secs: Option<u64>,
+
+    /// **This proposal decides an exclusive outcome** — a lock, a leader, a single writer, anything a
+    /// second holder would corrupt (post-360 plan row P2). A slot in a
+    /// [`SAFETY_SLOT_FAMILIES`](crate::SAFETY_SLOT_FAMILIES) family (`lock/`, `leader/`, `consistent/`)
+    /// is safety-sensitive whatever this says. On a node with `consensus_require_electorate`, a
+    /// safety-sensitive proposal whose scope is not an electorate group is refused
+    /// [`ConsensusResult::ElectorateNotGoverned`]. Default `false`.
+    pub safety_sensitive: bool,
 }
 
 impl Default for ConsensusConfig {
@@ -175,6 +183,7 @@ impl Default for ConsensusConfig {
             use_suggest_leader:      false,
             max_abstain_ballots:     0,
             committed_lease_secs:    None,
+            safety_sensitive:        false,
         }
     }
 }
@@ -290,6 +299,19 @@ pub enum ConsensusResult {
         slot:  Arc<str>,
         group: Arc<str>,
     },
+    /// **A safety-sensitive proposal named no electorate group, so nothing was proposed** (post-360
+    /// plan row P2, `docs/design/consensus-electorate.md` §8).
+    ///
+    /// The node requires (`consensus_require_electorate`) that an exclusive outcome be decided by a
+    /// group with an electorate declaration — a fixed set named as a group, whose membership moves only
+    /// through governance — and this proposal's scope was the whole cluster (`group: None`), whose
+    /// electorate is discovery, or a group with no declaration. Refused at the engine's door, before
+    /// anything leaves. Declare the electorate (`declare_electorate`, `/gateway/govern/electorate`),
+    /// or name one for the cluster-scoped verbs (`consensus_electorate`).
+    ElectorateNotGoverned {
+        slot:  Arc<str>,
+        group: Option<Arc<str>>,
+    },
 
     /// Quorum size was met but the Hard topology gate was not satisfied — too
     /// few distinct domains at `spread_depth`. The proposal is **not** committed.
@@ -308,6 +330,17 @@ pub enum ConsensusResult {
         domains_required: usize,
         spread_depth:     usize,
     },
+}
+
+/// The voters a proposal counts: an electorate group's roster as it stood when the proposal began,
+/// narrowed by a declared trust slice when both apply (P2's tension (b): the electorate is named by the
+/// group; a trust slice stays available beneath it). Neither ⇒ no filter.
+fn electorate_vote_filter(trust: Option<AHashSet<u64>>, roster: Option<AHashSet<u64>>) -> Option<AHashSet<u64>> {
+    match (trust, roster) {
+        (Some(t), Some(r)) => Some(t.intersection(&r).copied().collect()),
+        (None, Some(r)) => Some(r),
+        (t, None) => t,
+    }
 }
 
 /// Wire payload carried inside `Signal.payload` for all consensus messages.
@@ -1156,6 +1189,39 @@ impl ConsensusEngine {
             }
         }
 
+        // **P2: an exclusive outcome is decided by an electorate group** (`docs/design/consensus-electorate.md`
+        // §8), checked here for the same reason as the membership above: the library and the gateway both
+        // reach this door. An electorate group's roster is held to its declaration — exactly `size`
+        // members, or nothing is attempted (fewer is a partial view; more is a member that joined outside
+        // the declaration, which only a proposal-time check can see: Layer I is not taught the rule). Its
+        // votes are counted only from that roster, and its quorum is at least a strict majority of `size`.
+        // Anything else is not an electorate, and a safety-sensitive proposal to it is refused when the
+        // node requires one.
+        let mut quorum_size = quorum_size;
+        let mut electorate_voters: Option<AHashSet<u64>> = None;
+        match &scope {
+            SignalScope::Group(group) => match crate::agent::electorate::electorate_size(&self.task_ctx.kv_state, group) {
+                Some(size) => {
+                    let roster = crate::agent::helpers::group_members_ctx(&self.task_ctx, group);
+                    if roster.len() != size {
+                        tracing::warn!(slot = %slot, group = %group, observed = roster.len(), declared = size,
+                            "consensus: the electorate group's roster disagrees with its declaration; refusing to propose");
+                        return ConsensusResult::ElectorateUnavailable {
+                            slot, group: Arc::clone(group), observed_members: roster.len(), declared_min: size,
+                        };
+                    }
+                    quorum_size = quorum_size.max(size / 2 + 1);
+                    electorate_voters = Some(roster.iter().map(NodeId::id_hash).collect());
+                }
+                None => if let Some(refused) = self.refuse_ungoverned(&config, &slot, Some(group)) {
+                    return refused;
+                },
+            },
+            _ => if let Some(refused) = self.refuse_ungoverned(&config, &slot, None) {
+                return refused;
+            },
+        }
+
         // The value this proposer is currently carrying. It starts as the caller's, and is
         // **replaced** by any higher-balloted accepted value an acceptor reports — accepted-value
         // preservation, without which a retry at `ballot + 1` can overwrite what a quorum already
@@ -1163,7 +1229,6 @@ impl ConsensusEngine {
         let mut value = value;
         let mut adopted_from: u64 = 0;
 
-        let mut quorum_size = quorum_size;
         // Register for BOUNDARY_TRANSPARENT signals so we can re-evaluate quorum
         // mid-ballot when previously-opaque members become available.
         // Watch for BOUNDARY_OPAQUE: a member going opaque shrinks active_members,
@@ -1189,6 +1254,8 @@ impl ConsensusEngine {
         } else {
             None
         };
+        // An electorate group's roster is the vote filter; a declared trust slice narrows it further.
+        let trust_set = electorate_vote_filter(trust_set, electorate_voters);
 
         // Above the slot's decided ballot too: the ballot key is no longer reset at commit, but it is
         // gossiped and may lag what this node knows was decided.
@@ -1458,6 +1525,24 @@ impl ConsensusEngine {
         }
     }
 
+    /// A safety-sensitive proposal to a scope that is not an electorate group: refused
+    /// [`ConsensusResult::ElectorateNotGoverned`] when the node requires an electorate
+    /// (`consensus_require_electorate`), otherwise counted and let through as before. `None` for a
+    /// proposal that is not safety-sensitive.
+    fn refuse_ungoverned(&self, config: &ConsensusConfig, slot: &Arc<str>, group: Option<&Arc<str>>) -> Option<ConsensusResult> {
+        if !crate::agent::electorate::is_safety_sensitive(config, slot) {
+            return None;
+        }
+        if self.task_ctx.config.consensus_require_electorate {
+            tracing::warn!(slot = %slot, group = ?group.map(|g| &**g),
+                "consensus: refusing a safety-sensitive proposal outside an electorate group");
+            return Some(ConsensusResult::ElectorateNotGoverned { slot: Arc::clone(slot), group: group.cloned() });
+        }
+        #[cfg(feature = "metrics")]
+        metrics::counter!("mycelium_consensus_ungoverned_safety_total").increment(1);
+        None
+    }
+
     /// Proposes `value` for `slot` requiring independent quorum from each group in `groups`.
     ///
     /// Commits only when every group reaches its configured [`GroupQuorum::quorum`] fraction.
@@ -1491,6 +1576,25 @@ impl ConsensusEngine {
                 slot,
                 ballots_tried: 0, votes_last_ballot: 0, quorum_required: 0,
             };
+        }
+
+        // P2, as at `propose_inner`'s door: each electorate group is held to its declaration, and a
+        // safety-sensitive proposal names only electorate groups when the node requires it.
+        for gq in groups {
+            let group: Arc<str> = Arc::from(gq.group.as_str());
+            match crate::agent::electorate::electorate_size(&self.task_ctx.kv_state, &group) {
+                Some(size) => {
+                    let observed = crate::agent::helpers::group_members_ctx(&self.task_ctx, &group).len();
+                    if observed != size {
+                        return ConsensusResult::ElectorateUnavailable {
+                            slot, group, observed_members: observed, declared_min: size,
+                        };
+                    }
+                }
+                None => if let Some(refused) = self.refuse_ungoverned(&config, &slot, Some(&group)) {
+                    return refused;
+                },
+            }
         }
 
         let ballot_key = format!("{}{}", consensus_ns::BALLOT,    &*slot);
@@ -3964,5 +4068,22 @@ mod consensus_msg_auth_tests {
         assert!(may_cast_vote_digest(1, Some(a), 2, b));
         // A stale (lower) ballot is never votable.
         assert!(!may_cast_vote_digest(2, Some(a), 1, a));
+    }
+}
+
+#[cfg(test)]
+mod electorate_filter_tests {
+    use super::*;
+
+    /// P2's tension (b): an electorate group's roster is the vote filter, and a declared trust slice
+    /// only narrows it — a voter outside the roster never counts, whatever a slice says.
+    #[test]
+    fn the_roster_is_the_vote_filter_and_a_trust_slice_only_narrows_it() {
+        let set = |v: &[u64]| v.iter().copied().collect::<AHashSet<u64>>();
+        assert_eq!(electorate_vote_filter(None, None), None, "no electorate, no slice: no filter");
+        assert_eq!(electorate_vote_filter(Some(set(&[1, 9])), None), Some(set(&[1, 9])), "a slice alone, as before");
+        assert_eq!(electorate_vote_filter(None, Some(set(&[1, 2, 3]))), Some(set(&[1, 2, 3])));
+        assert_eq!(electorate_vote_filter(Some(set(&[1, 9])), Some(set(&[1, 2, 3]))), Some(set(&[1])),
+            "9 is in the slice but not the electorate: it does not count");
     }
 }

@@ -83,6 +83,7 @@ mod cluster_tuner;
 pub(crate) mod tuning_governor;
 pub(crate) mod timing_governor;
 pub(crate) mod membership_governor;
+pub(crate) mod electorate;
 /// v3 item 4 PR 4a — `set_control_profile` and its tripwire, on `GossipAgent`.
 mod control_profile;
 // The diagnostics module's *snapshot/view* surface (fleet snapshot, ViewConfidence, the `explain`
@@ -191,6 +192,7 @@ pub use tuning_governor::{
 #[cfg(test)]
 pub(crate) use tuning_governor::TuningGovernor;
 pub use membership_governor::{MembershipAction, MembershipIntent, MEMBERSHIP_INTENT_TTL_MS, MEMBERSHIP_PREFIX};
+pub use electorate::{ElectorateDecl, ElectorateError, ELECTORATE_PREFIX, SAFETY_SLOT_FAMILIES};
 // Legible Emergence — fleet diagnostics as data (localize · explain · diagnose). `GroupStatus` is
 // reached via `FleetSnapshot.governed_groups` (the bare name is already the mesh-dashboard type).
 pub use emergent::{

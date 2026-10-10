@@ -14,7 +14,7 @@
 //! feature that provides it is not compiled in), or [`Resolution::NotApplicable`] (the node's role makes
 //! it moot, and the report says which role fact — a node with no gateway does not fail a gateway
 //! guarantee, G10). An **external prerequisite** is what a node cannot see — network confinement, clock
-//! sync, the consensus profile a proposer chooses per call — and resolves only to
+//! sync — and resolves only to
 //! [`Resolution::NotVerifiableHere`], listed as *unresolved* and never counted as met.
 //!
 //! The strongest sentence the report says is therefore **"node requirements satisfied"**
@@ -258,7 +258,7 @@ pub const DEV: Profile = Profile {
 
 /// The readiness checklist's production set for one trust domain (plan G3): what a node fronting
 /// agents must enforce before it is exposed. External prerequisites (network confinement, clock
-/// sync, the consensus profile) are not in it — they cannot be; the report lists them unresolved.
+/// sync) are not in it — they cannot be; the report lists them unresolved.
 pub const SECURE_SINGLE_DOMAIN: Profile = Profile {
     name: "secure-single-domain",
     // Rev 2 (announced in v2.20.0, G12): `id.ca_key_off_node` — a node certificate issued off-node
@@ -272,6 +272,9 @@ pub const SECURE_SINGLE_DOMAIN: Profile = Profile {
     // now refuses in every profile). Otherwise an open gateway already failed `gw.not_open`, and the
     // new id names the waiver (`gateway_allow_unauthenticated`) when a node sets it. G12 lets a MINOR
     // add it: a deployment meets it by configuration (a real secret; the opt-in unset).
+    //
+    // Rev 4 (plan row P2): `cons.safety_profile` — an exclusive outcome is decided only by an electorate
+    // group (`consensus_require_electorate`). Met by configuration, so a MINOR may add it (G12).
     revision: 3,
     required: &[
         "mesh.tls",
@@ -292,10 +295,12 @@ pub const SECURE_SINGLE_DOMAIN: Profile = Profile {
         "persist.sync_mode",
         "persist.unreadable_refused",
         "id.ca_key_off_node",
+        "cons.safety_profile",
     ],
     about: "a node fronting agents in one trust domain: authenticated transport and identity, a closed \
             HTTPS gateway, authority checked and recorded at the gateway and the provider, revocation \
-            that survives a restart, a sealed audit chain, an egress allow-list, durable persistence",
+            that survives a restart, a sealed audit chain, an egress allow-list, durable persistence, and exclusive \
+            outcomes decided only by an electorate group",
 };
 
 /// The profile named `name`, if it is one of [`crate::config::PROFILE_NAMES`].
@@ -928,12 +933,17 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
           &["lifecycle (cipher read once at start)"], "docs/operations/crown-jewel.md",
           |c| if c.config.persistence.is_some() { None } else { Some("no `[persistence]` configured") },
           |c| if c.at_rest_cipher_attached.load(std::sync::atomic::Ordering::Acquire) { Resolution::Enforced } else { Resolution::NotConfigured { missing: "with_data_at_rest_cipher (plaintext WAL and snapshot)" } }),
-        g("cons.safety_profile", 1, "consensus", Ext,
-          "safety-sensitive agreement runs the supported profile: a fixed voter set, a strict-majority quorum, identical trust slices",
-          "chosen per proposal in `ConsensusConfig`; nothing validates it (plan §8)",
-          &["consensus::propose"], "docs/threat-model.md",
-          always,
-          external("ConsensusConfig is chosen per proposal, not per node; the profile is a documented condition until I3 validates it")),
+        // Rev 2 (P2, 2026-10-10): a node fact. Rev 1 was an external prerequisite — the profile was chosen per
+        // proposal and nothing validated it; the engine's door now refuses a safety-sensitive proposal outside an
+        // electorate group when the node requires one.
+        g("cons.safety_profile", 2, "consensus", Node,
+          "an exclusive outcome — a lock, a leader, a consistent write, any proposal marked safety-sensitive — is decided only by an electorate group: a group named by a governance declaration, held to its declared size, whose votes are counted only from its roster",
+          "`consensus_require_electorate = true`; the electorates themselves declared (`/gateway/govern/electorate`), and `consensus_electorate` naming one for the cluster-scoped verbs. The effect is still the caller's to fence at the resource with the commit's token",
+          &["consensus::propose (the engine's door)", "consensus::cross_propose"], "docs/design/consensus-electorate.md",
+          |_| if cfg!(feature = "consensus") { None } else { Some("built without `consensus`: this node proposes nothing") },
+          |c| if c.config.consensus_require_electorate { Resolution::Enforced } else {
+              Resolution::NotConfigured { missing: "consensus_require_electorate (off: a lock or an election on the whole cluster or an undeclared group runs as before, counted)" }
+          }),
         g("net.confinement", 1, "deployment", Ext,
           "agent pods reach nothing but their gateway",
           "the network: separate pods, an enforcing CNI, a NetworkPolicy",
@@ -1032,7 +1042,7 @@ mod tests {
             assert!(because.contains("http_port"), "the role fact is named: {because}");
         }
         assert!(!r.unmet().contains(&"gw.not_open"), "not applicable is not unmet");
-        for id in ["net.confinement", "clock.sync", "cons.safety_profile"] {
+        for id in ["net.confinement", "clock.sync"] {
             assert_eq!(state(&r, id), "not_verifiable_here", "{id}");
             assert!(r.unresolved().contains(&id));
             assert!(!r.unmet().contains(&id), "an external prerequisite is never counted, either way");
@@ -1154,6 +1164,29 @@ mod tests {
         assert!(e.to_string().contains("does not vanish"), "{e}");
     }
 
+    /// **P2: the consensus safety profile is a node fact now.** `cons.safety_profile` was an external
+    /// prerequisite — "chosen per proposal, nothing validates it" — so no profile could require it. Since
+    /// rev 2 it resolves on `consensus_require_electorate`, which makes the engine's door refuse a
+    /// safety-sensitive proposal outside an electorate group: `enforced` when set, `not_configured`
+    /// otherwise, `not_applicable` in a build without `consensus` (nothing proposes). Seen failing first:
+    /// the entry read `not_verifiable_here` with the requirement set.
+    #[test]
+    fn the_consensus_safety_profile_resolves_on_the_electorate_requirement() {
+        let r = agent(GossipConfig::default()).guarantee_report();
+        assert_eq!(r.entry("cons.safety_profile").unwrap().kind, GuaranteeKind::NodeEnforced);
+        let mut cfg = GossipConfig::default();
+        cfg.consensus_require_electorate = true;
+        let required = agent(cfg).guarantee_report();
+        if cfg!(feature = "consensus") {
+            assert_eq!(state(&r, "cons.safety_profile"), "not_configured");
+            assert!(r.unmet().contains(&"cons.safety_profile"));
+            assert_eq!(state(&required, "cons.safety_profile"), "enforced");
+        } else {
+            assert_eq!(state(&r, "cons.safety_profile"), "not_applicable");
+            assert_eq!(state(&required, "cons.safety_profile"), "not_applicable");
+        }
+    }
+
     /// The secure profile's set is pinned (the readiness checklist copies it; a change is a revision
     /// bump and a release note), every id is a core guarantee, and none is an external prerequisite.
     #[test]
@@ -1164,6 +1197,7 @@ mod tests {
             "ae.authorised_at_seam", "ae.recorded_before_dispatch", "prov.enforcement", "a2a.admission",
             "authz.execution_authority", "authz.durable_epochs", "audit.chain", "egress.allow_list",
             "persist.configured", "persist.sync_mode", "persist.unreadable_refused", "id.ca_key_off_node",
+            "cons.safety_profile",
         ]);
         let r = agent(GossipConfig::default()).guarantee_report();
         for id in SECURE_SINGLE_DOMAIN.required {
@@ -1218,7 +1252,7 @@ mod tests {
         let a = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
         let e = a.start().await.unwrap_err().to_string();
         assert!(e.contains("profile `secure-single-domain` rev 3"), "{e}");
-        for id in ["gw.not_open", "mesh.tls", "egress.allow_list", "persist.configured", "ae.authorised_at_seam"] {
+        for id in ["gw.not_open", "mesh.tls", "egress.allow_list", "persist.configured", "ae.authorised_at_seam", "cons.safety_profile"] {
             assert!(e.contains(id), "{id} is named: {e}");
         }
         assert!(e.contains("not_configured") && e.contains("docs/operations/rbac.md"), "what is missing and where to read: {e}");

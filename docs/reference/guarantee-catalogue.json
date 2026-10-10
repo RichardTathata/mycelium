@@ -274,15 +274,16 @@
     },
     {
       "id": "cons.safety_profile",
-      "revision": 1,
+      "revision": 2,
       "subsystem": "consensus",
-      "kind": "external_prerequisite",
-      "promise": "safety-sensitive agreement runs the supported profile: a fixed voter set, a strict-majority quorum, identical trust slices",
-      "needs": "chosen per proposal in `ConsensusConfig`; nothing validates it (plan §8)",
+      "kind": "node_enforced",
+      "promise": "an exclusive outcome — a lock, a leader, a consistent write, any proposal marked safety-sensitive — is decided only by an electorate group: a group named by a governance declaration, held to its declared size, whose votes are counted only from its roster",
+      "needs": "`consensus_require_electorate = true`; the electorates themselves declared (`/gateway/govern/electorate`), and `consensus_electorate` naming one for the cluster-scoped verbs. The effect is still the caller's to fence at the resource with the commit's token",
       "enforcement_points": [
-        "consensus::propose"
+        "consensus::propose (the engine's door)",
+        "consensus::cross_propose"
       ],
-      "docs": "docs/threat-model.md"
+      "docs": "docs/design/consensus-electorate.md"
     },
     {
       "id": "net.confinement",

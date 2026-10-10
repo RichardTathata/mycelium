@@ -126,6 +126,7 @@ pub(crate) async fn watch_capability_group_definitions(
 /// neither auto-joins nor auto-leaves a governed group — so the governor's `[min, max]` / `drain`
 /// can actually hold against the otherwise-unconditional cap-match auto-join. When the intent
 /// evaporates the group drops out of this set and reverts to emergent (un-bounded) membership.
+/// Electorate groups (`sys/govern/electorate/`, P2) are in it for as long as they are declared.
 fn governor_owned_groups(ctx: &Arc<TaskCtx>, own: &NodeId) -> AHashSet<Arc<str>> {
     use super::membership_governor::{MembershipIntent, MEMBERSHIP_INTENT_TTL_MS, MEMBERSHIP_PREFIX};
     let mut set = AHashSet::new();
@@ -141,6 +142,11 @@ fn governor_owned_groups(ctx: &Arc<TaskCtx>, own: &NodeId) -> AHashSet<Arc<str>>
             continue; // targeted at another node — not governed for me
         }
         set.insert(Arc::from(intent.group.as_str()));
+    }
+    // An electorate group (P2) is governed until its declaration is retired — it never lapses back to
+    // emergent membership, so the watcher never joins or leaves it on a capability match.
+    for group in super::electorate::electorate_groups(&ctx.kv_state) {
+        set.insert(Arc::from(group.as_str()));
     }
     set
 }

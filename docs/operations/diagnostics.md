@@ -425,6 +425,20 @@ its leader). The body names the group; join it and retry — `POST /gateway/mesh
 {"ok": false, "error": "not_a_member", "group": "G", "detail": "…"}
 ```
 
+## A lock or an election was refused: `electorate_not_governed`
+
+`POST /gateway/overlay/elect`, `/overlay/lock/acquire` or `/overlay/consistent/set` answering **403
+`electorate_not_governed`** means this node requires an **electorate group** for an exclusive outcome
+(`consensus_require_electorate`, required by `secure-single-domain` rev 3) and the scope was not one — `"group"` names
+an undeclared group, or is `null` for the whole cluster. Nothing was proposed. Declare the group
+(`POST /gateway/govern/electorate {"group":"G","size":N}`, `govern:write`), and for the lock and consistent-write
+routes set `consensus_electorate = "G"` on the node, which must be a member of `G`
+([guide 04 § Discovery is not an electorate](../guide/04-consensus.md#discovery-is-not-an-electorate)).
+
+```json
+{"ok": false, "error": "electorate_not_governed", "group": null, "detail": "…"}
+```
+
 ## An election was refused: `electorate_unavailable`
 
 `POST /gateway/overlay/elect` answering **409 `electorate_unavailable`** means the node **did not
@@ -451,6 +465,13 @@ decide**, deliberately. Two shapes, and the body tells you which:
   partial**. Before v2.15.1 that intent never expired on this reader. Wait for the
   roster to converge (check `GET /gateway/mesh/group` on each node), or investigate why members are
   missing — a partition, or nodes that have not joined yet.
+
+- **`observed_members` not equal to `declared_min` on an electorate group** (P2) — the group has an electorate
+  declaration (`GET /gateway/govern` or `agent.electorate(G)`), and `declared_min` is its declared **size**, which is
+  exact. Fewer is a partial view, as above. **More** means a member joined outside the declaration — an embedded
+  `join_group` or a `grp/` write, which the gateway cannot see — or a node was moved through `/gateway/govern/group`
+  and the size not yet re-declared. Find the extra member (`GET /gateway/mesh/group?group=G`), and either remove it or
+  re-declare: `POST /gateway/govern/electorate {"group":"G","size":N}` (`govern:write`; one member per step).
 
 **This is not a fault to route around.** Before 2026-09-24 the same call returned a leader: an
 empty roster counted as one member with a quorum of one, satisfied by the proposer's own vote, so

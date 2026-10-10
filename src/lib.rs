@@ -107,6 +107,7 @@
 //! | `sys/govern/timing`                 | Timing governor — the fleet timing intent (evaporating soft state; local-wins), written through `POST /gateway/govern/timing` (`src/agent/timing_governor.rs`, `TIMING_INTENT_KEY`) |
 //! | `sys/govern/fleet`                  | Tuning governor — the fleet tuning intent, written through `POST /gateway/govern/tuning` (`src/agent/tuning_governor.rs`, `GOVERN_FLEET_KEY`) |
 //! | `sys/govern/membership/{group}`     | Membership governor — one evaporating `MembershipIntent` per governed group, written through `POST /gateway/govern/membership` (`src/agent/membership_governor.rs`, `MEMBERSHIP_PREFIX`) |
+//! | `sys/govern/electorate/{group}`     | Electorate declarations (P2) — one `ElectorateDecl { group, size }` per electorate group; does not evaporate; written through `GossipAgent::declare_electorate` / `POST /gateway/govern/electorate` (`src/agent/electorate.rs`, `ELECTORATE_PREFIX`) |
 //! | `consensus/committed/{slot}`        | Consensus — committed slot state                             |
 //! | `consensus/ballot/{slot}`           | Consensus — ballot tracking; kept across commits so ballots stay monotonic (2.30.0) |
 //! | `consensus/decided/{slot}`          | Consensus — the ballot the slot's latest commit was decided at (u64 LE); a floor below which acceptors refuse (2.30.0) |
@@ -355,6 +356,7 @@ pub use agent::{
 };
 // Elastic group sizing (Track 2a).
 pub use agent::{MembershipAction, MembershipIntent, MEMBERSHIP_INTENT_TTL_MS, MEMBERSHIP_PREFIX};
+pub use agent::{ElectorateDecl, ElectorateError, ELECTORATE_PREFIX, SAFETY_SLOT_FAMILIES};
 // Legible Emergence — fleet diagnostics as data (localize · explain · diagnose). `localize`
 // (`fleet_snapshot`) and `diagnose` (`fleet_diagnosis`) are node-local reads exposed here;
 // `explain` is intentionally gateway-only (`GET /gateway/explain`) — it is a cross-node `sys.explain`

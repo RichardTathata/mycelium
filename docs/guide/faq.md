@@ -143,8 +143,12 @@ quorum intersection is a property of that set, so the supported profile fixes it
 ([threat model §7](../threat-model.md#7-safety-sensitive-agreement-the-supported-profile)) and you
 fence the effect at the resource. Today the code refuses an empty or below-floor roster, refuses a
 proposer outside the group, and lets the gateway move a *governed* group's membership only through
-an audited governance route; nothing yet *requires* a governed group for a safety-sensitive proposal
-(planned, not built), and versioned electorates with joint-consensus transitions are a later plan.
+an audited governance route; and, since post-360 plan row P2, a node that sets
+`consensus_require_electorate` (the `secure-single-domain` profile requires it) refuses a lock, a
+leader election or any safety-sensitive proposal unless an **electorate group** decides it — a group
+declared by governance with a fixed size, never resized by the membership governor, refused while its
+roster disagrees with the declaration. Versioned electorates with joint-consensus transitions are a
+later plan.
 The decision and its reasons: [design/consensus-electorate.md](../design/consensus-electorate.md);
 the how-to: [04-consensus.md § Discovery is not an electorate](04-consensus.md#discovery-is-not-an-electorate).
 

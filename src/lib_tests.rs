@@ -11782,6 +11782,8 @@ async fn a_node_providing_every_requirement_starts_under_the_secure_profile() {
         snapshot_wal_threshold: 1_000_000,
         snapshot_interval_secs: 3_600, on_unreadable: Default::default(),
     });
+    // Rev 3 requires `cons.safety_profile`: an exclusive outcome is decided only by an electorate group.
+    cfg.consensus_require_electorate = true;
     cfg.profile = Some("secure-single-domain".into());
 
     let a = GossipAgent::new(id, cfg).with_a2a();
@@ -11820,7 +11822,9 @@ async fn a_node_providing_every_requirement_starts_under_the_secure_profile() {
     assert!(r.started && r.node_requirements_satisfied(), "required unmet: {:?}", r.required_unmet());
     assert_eq!(r.profile.as_ref().map(|p| (p.name, p.revision, p.selected)), Some(("secure-single-domain", 3, true)));
     assert!(!cert_dir.join("ca-key.pem").exists(), "start() minted no CA key on the node");
-    assert_eq!(r.unresolved(), ["cons.safety_profile", "net.confinement", "clock.sync"], "what the node cannot see is still listed");
+    assert_eq!(r.unresolved(), ["net.confinement", "clock.sync"], "what the node cannot see is still listed");
+    // Rev 3's requirement, met: a safety-sensitive proposal outside an electorate group is refused.
+    assert!(matches!(r.entry("cons.safety_profile").unwrap().resolution, Resolution::Enforced));
     // Rev 2's two new requirements, met: the CA key is with the issuer, and unreadable persisted
     // state refuses the start (the default).
     assert!(matches!(r.entry("id.ca_key_off_node").unwrap().resolution, Resolution::Enforced), "{:?}", r.entry("id.ca_key_off_node").unwrap().resolution);
@@ -11928,4 +11932,179 @@ async fn a_federation_client_refuses_an_endpoint_the_egress_policy_denies() {
     let agent = GossipAgent::new(NodeId::new("127.0.0.1", port2).unwrap(), cfg).with_federation_clients([Arc::clone(&bare)]);
     assert!(matches!(bare.connect().await, Err(ClientError::Egress { .. })), "the node's policy applies to a client handed to it");
     drop(agent);
+}
+
+// ── P2: a consensus electorate is a governed group ─────────────────────────────────────────────
+
+/// **A safety-sensitive proposal is decided only by an electorate group** (post-360 plan row P2,
+/// `docs/design/consensus-electorate.md` §8). On a node that requires it, a leader election, a lock,
+/// a consistent write — or any proposal flagged `safety_sensitive` — whose scope is the whole cluster
+/// or a group with no electorate declaration is refused by name, `ElectorateNotGoverned`, before
+/// anything is sent; the receipt and overlay verbs translate it. An ordinary proposal is untouched.
+/// Once the group is declared an electorate, the same election commits, and the cluster-scoped lock
+/// takes its electorate from `consensus_electorate` — a group name, never node identities.
+/// Seen failing first: before the door, `elect_leader_receipt("council")` on the ungoverned group
+/// returned `Ok(Leadership { basis: Decided, .. })`.
+#[cfg(feature = "consensus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_safety_sensitive_proposal_is_decided_only_by_an_electorate_group() {
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    cfg.consensus_require_electorate = true;
+    cfg.consensus_electorate = Some("council".into());
+    let a = GossipAgent::new(id.clone(), cfg);
+    a.start().await.unwrap();
+    let _listener = a.consensus().start_consensus_listener(ConsensusConfig::default());
+    a.mesh().join_group("council");
+    let prefix = crate::signal::grp_prefix("council");
+    poll_until(|| !a.kv().scan_prefix(&prefix).is_empty(), 2_000).await;
+    let quick = ConsensusConfig { phase1_timeout: Duration::from_millis(300), max_ballots: 1, ..ConsensusConfig::default() };
+
+    // The group exists and this node is in it, but nothing declares it an electorate.
+    match a.consensus().group_propose("council", "leader/council", Bytes::from_static(b"me"), quick.clone()).await {
+        ConsensusResult::ElectorateNotGoverned { ref slot, group: Some(ref g) } => {
+            assert_eq!(&**slot, "leader/council");
+            assert_eq!(&**g, "council", "the refusal names the group");
+        }
+        other => panic!("a leader slot on an ungoverned group must be refused by name, got {other:?}"),
+    }
+    match a.consensus().elect_leader_receipt("council").await {
+        Err(crate::ConsistencyError::ElectorateNotGoverned { group: Some(g) }) => assert_eq!(&*g, "council"),
+        other => panic!("expected ConsistencyError::ElectorateNotGoverned, got {other:?}"),
+    }
+    let flagged = ConsensusConfig { safety_sensitive: true, ..quick.clone() };
+    match a.consensus().group_propose_receipt("council", "work/exclusive", Bytes::from_static(b"x"), flagged).await {
+        Err(crate::CommitError::ElectorateNotGoverned { group: Some(g), .. }) => assert_eq!(&*g, "council"),
+        other => panic!("a flagged proposal outside the slot families is safety-sensitive too, got {other:?}"),
+    }
+    // The cluster is discovery, never an electorate.
+    match a.consensus().cluster_propose("lock/raw", Bytes::from_static(b"x"), quick.clone()).await {
+        ConsensusResult::ElectorateNotGoverned { group: None, .. } => {}
+        other => panic!("a cluster-scoped lock slot must be refused, got {other:?}"),
+    }
+    // The configured electorate is undeclared, so the lock and the consistent write are refused, naming it.
+    match a.consensus().distributed_lock("door", Duration::from_secs(5)).await {
+        Err(crate::ConsistencyError::ElectorateNotGoverned { group: Some(g) }) => assert_eq!(&*g, "council"),
+        other => panic!("expected the lock refused on the undeclared electorate, got {other:?}"),
+    }
+    match a.consensus().consistent_set("cfg/k", Bytes::from_static(b"v")).await {
+        Err(crate::ConsistencyError::ElectorateNotGoverned { group: Some(g) }) => assert_eq!(&*g, "council"),
+        other => panic!("expected the consistent write refused, got {other:?}"),
+    }
+    assert!(a.consensus().consensus_get("leader/council").is_none(), "and nothing was committed");
+    // An ordinary proposal is not an exclusive outcome, and is untouched.
+    assert!(matches!(
+        a.consensus().group_propose("council", "work/ordinary", Bytes::from_static(b"o"), quick.clone()).await,
+        ConsensusResult::Committed { .. }
+    ));
+
+    // Declared: the same election commits, decided by the one-member electorate.
+    a.declare_electorate("council", 1).expect("a first declaration");
+    let won = a.consensus().elect_leader_receipt("council").await.expect("an electorate group elects");
+    assert_eq!(won.leader, id);
+    assert_eq!(won.basis, crate::LeadershipBasis::Decided);
+    let guard = a.consensus().distributed_lock("door", Duration::from_secs(5)).await
+        .expect("the lock is decided in the configured electorate");
+    drop(guard);
+    a.consensus().consistent_set("cfg/k", Bytes::from_static(b"v")).await.expect("and the consistent write");
+    a.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// **An electorate group's roster is held to its declaration.** A member written outside governance —
+/// here an embedded `grp/` write, the residual the gateway cannot see — makes the roster disagree with
+/// the declared size, and every proposal to the group is refused `ElectorateUnavailable` rather than
+/// counted against a roster governance never agreed. Re-declaring the size (one member at a time)
+/// restores it, with a quorum that is a strict majority of the declared size. Seen failing first: with
+/// a foreign member written, `group_propose("council", "leader/council", ..)` was attempted against the
+/// ungoverned roster — `Timeout { quorum_required: 2, .. }` — rather than refused.
+#[cfg(feature = "consensus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_electorate_groups_roster_is_held_to_its_declaration() {
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    let a = GossipAgent::new(id.clone(), cfg);
+    a.start().await.unwrap();
+    let _listener = a.consensus().start_consensus_listener(ConsensusConfig::default());
+    a.mesh().join_group("council");
+    let prefix = crate::signal::grp_prefix("council");
+    poll_until(|| a.kv().scan_prefix(&prefix).len() == 1, 2_000).await;
+    a.declare_electorate("council", 1).unwrap();
+    assert_eq!(a.declare_electorate("council", 3), Err(crate::ElectorateError::StepTooLarge { from: 1, to: 3 }));
+    let quick = ConsensusConfig { phase1_timeout: Duration::from_millis(300), max_ballots: 1, ..ConsensusConfig::default() };
+
+    // A member nobody governed: an embedded write to `grp/council/…`.
+    let stranger = NodeId::new("127.0.0.1", alloc_port()).unwrap();
+    assert!(a.kv().set(format!("{prefix}{stranger}"), Bytes::from_static(b"1")));
+    poll_until(|| a.kv().scan_prefix(&prefix).len() == 2, 2_000).await;
+    match a.consensus().group_propose("council", "leader/council", Bytes::from_static(b"me"), quick.clone()).await {
+        ConsensusResult::ElectorateUnavailable { observed_members: 2, declared_min: 1, .. } => {}
+        other => panic!("a roster larger than the declaration must be refused, got {other:?}"),
+    }
+    match a.consensus().group_propose("council", "work/any", Bytes::from_static(b"w"), quick.clone()).await {
+        ConsensusResult::ElectorateUnavailable { .. } => {}
+        other => panic!("every proposal to an electorate group is held to the declaration, got {other:?}"),
+    }
+    assert!(a.consensus().consensus_get("leader/council").is_none());
+
+    // Re-declared at 2: the roster matches, and the quorum is a strict majority of 2 — the absent
+    // member's vote is needed, so the proposal cannot commit on this node's vote alone.
+    a.declare_electorate("council", 2).unwrap();
+    let explicit_one = ConsensusConfig { quorum_size: 1, ..quick.clone() };
+    match a.consensus().group_propose("council", "work/majority", Bytes::from_static(b"w"), explicit_one).await {
+        ConsensusResult::Timeout { quorum_required: 2, .. } => {}
+        other => panic!("an explicit quorum below a strict majority of the electorate is raised, got {other:?}"),
+    }
+    // The stranger removed: the roster is now smaller than the declaration — a partial view, refused.
+    assert!(a.kv().delete(format!("{prefix}{stranger}")));
+    poll_until(|| a.kv().scan_prefix(&prefix).len() == 1, 2_000).await;
+    assert!(matches!(
+        a.consensus().group_propose("council", "work/after", Bytes::from_static(b"w"), quick).await,
+        ConsensusResult::ElectorateUnavailable { observed_members: 1, declared_min: 2, .. }
+    ));
+    a.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// **Nothing resizes an electorate group but governance** (P2's tension (a), *governed is not fixed*). The
+/// membership governor does not roll on it — not even to honour a drain naming this node, which it obeys
+/// on an ordinary group in the same pass — and the emergent watcher does not auto-join it on a capability
+/// match it acts on for an undeclared group. Seen failing first: the governor drained this node out of
+/// `council`, and the watcher joined `council2`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_governor_and_the_watcher_leave_an_electorate_group_alone() {
+    use crate::capability::{Capability, CapFilter, CapabilityGroupDef};
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    cfg.health_check_interval_secs = 1;
+    cfg.health_check_max_jitter_ms = 50;
+    let a = GossipAgent::new(id.clone(), cfg);
+    a.start().await.unwrap();
+    let in_group = |g: &str| a.groups().iter().any(|x| x.as_ref() == g);
+    let _cap = a.capabilities().advertise_capability(Capability::new("svc", "voter"), Duration::from_secs(60));
+    let def = || CapabilityGroupDef { filter: CapFilter::new("svc", "voter"), topology_policy: None, provides: vec![], requires: vec![] };
+
+    // The watcher: `council2` is declared before its capability group exists; `open` is not.
+    a.declare_electorate("council2", 1).unwrap();
+    let _g2 = a.capabilities().define_capability_group("council2", def(), Duration::from_secs(60));
+    let _go = a.capabilities().define_capability_group("open", def(), Duration::from_secs(60));
+    poll_until(|| in_group("open"), 5_000).await;
+
+    // The governor: this node is in both groups and an intent drains it from both.
+    let _gc = a.capabilities().define_capability_group("council", def(), Duration::from_secs(60));
+    let _gp = a.capabilities().define_capability_group("pool", def(), Duration::from_secs(60));
+    poll_until(|| in_group("council") && in_group("pool"), 5_000).await;
+    a.declare_electorate("council", 1).unwrap();
+    for g in ["council", "pool"] {
+        let _ = a.publish_membership_intent(crate::MembershipIntent::new(g, 0, None).with_drain(vec![id.clone()]));
+    }
+    a.start_membership_governor();
+    poll_until(|| !in_group("pool"), 10_000).await;
+    assert!(in_group("council"), "the governor drained an electorate group's member");
+    assert!(!in_group("council2"), "the watcher auto-joined an electorate group");
+    a.shutdown_with_timeout(Duration::from_secs(5)).await;
 }

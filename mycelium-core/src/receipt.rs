@@ -436,7 +436,9 @@ pub enum CommitError {
         slot: Arc<str>,
         /// Members visible to this node. `0` = unknown or unjoined group.
         observed_members: usize,
-        /// The floor a fresh `MembershipIntent` declares, or `0` when none is declared.
+        /// The floor a fresh `MembershipIntent` declares, or `0` when none is declared. For an
+        /// electorate group it is the declared size, which is exact: more members than it is refused
+        /// too (a member joined outside the declaration).
         declared_min: usize,
     },
     /// The group's topology requirement was not met, so no commit was attempted.
@@ -457,6 +459,18 @@ pub enum CommitError {
         /// The group this node is not in.
         group: Arc<str>,
     },
+    /// **A safety-sensitive proposal named no electorate group, so nothing was proposed** (post-360
+    /// plan row P2, `docs/design/consensus-electorate.md` §8). The node requires
+    /// (`consensus_require_electorate`) that a lock, a leader election, a consistent write — any
+    /// exclusive outcome — be decided by a group with an electorate declaration, and this proposal's
+    /// scope was the whole cluster (`group: None`) or a group with none. A refusal: declare the
+    /// electorate (`/gateway/govern/electorate`), or name one (`consensus_electorate`).
+    ElectorateNotGoverned {
+        /// The slot.
+        slot: Arc<str>,
+        /// The group proposed to, or `None` for the whole cluster.
+        group: Option<Arc<str>>,
+    },
 }
 
 impl std::fmt::Display for CommitError {
@@ -474,6 +488,12 @@ impl std::fmt::Display for CommitError {
                 "slot {slot}: no electorate — the group roster is empty (unknown or unjoined \
                  group); an election needs members, and absence is not authority"
             ),
+            CommitError::ElectorateUnavailable { slot, observed_members, declared_min }
+                if observed_members > declared_min => write!(
+                f,
+                "slot {slot}: no electorate — {observed_members} member(s) visible but the electorate \
+                 declares {declared_min}; a member joined outside the declaration"
+            ),
             CommitError::ElectorateUnavailable { slot, observed_members, declared_min } => write!(
                 f,
                 "slot {slot}: no electorate — {observed_members} member(s) visible but the group \
@@ -486,6 +506,14 @@ impl std::fmt::Display for CommitError {
             CommitError::NotAMember { slot, group } => write!(
                 f,
                 "not a member: slot {slot} belongs to group {group}, whose roster does not hold this node — nothing was proposed"
+            ),
+            CommitError::ElectorateNotGoverned { slot, group: Some(group) } => write!(
+                f,
+                "electorate not governed: slot {slot} is safety-sensitive and group {group} has no electorate declaration — nothing was proposed"
+            ),
+            CommitError::ElectorateNotGoverned { slot, group: None } => write!(
+                f,
+                "electorate not governed: slot {slot} is safety-sensitive and the whole cluster is not an electorate group — nothing was proposed"
             ),
         }
     }

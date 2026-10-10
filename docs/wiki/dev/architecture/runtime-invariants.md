@@ -66,9 +66,15 @@ counted from each proposer's view, so intersection across a roster change is not
 `consensus/`, and do not make a named node set "the consensus nodes". Enforced today: `resolve_electorate`
 (`src/agent/helpers.rs`, empty or below `MembershipIntent.min` → `ElectorateUnavailable`), `NotAMember` (above), and
 the gateway's `governed_group` refusal on `/gateway/mesh/group` with `/gateway/govern/group` as the audited route
-(`src/agent/http.rs`, `is_governed_group`). Not enforced: an embedded `join_group` or `grp/` write moves a governed
-group by LWW; the opt-in membership governor moves it toward its band; nothing *requires* a governed group for a
-safety-sensitive proposal (post-360 row P2, not built). Also not built: leased-by-default leadership (C1 —
+(`src/agent/http.rs`, `is_governed_group`). **Since P2 (2026-10-10, decision record §8):** an
+**electorate group** (`sys/govern/electorate/{group}`, `src/agent/electorate.rs`) is a governed group made fixed — its
+declaration does not evaporate, the membership governor and the emergent watcher leave it alone, its size moves one
+member per declaration — and the engine's door in `propose_inner` holds its roster to the declared size (refused
+`ElectorateUnavailable` otherwise), counts votes only from that roster (`electorate_vote_filter`) and raises the
+quorum to a strict majority; with `consensus_require_electorate` a safety-sensitive proposal (flagged, or in `lock/`,
+`leader/`, `consistent/`) anywhere else is refused `ElectorateNotGoverned`. Not enforced: an embedded `join_group` or
+`grp/` write still moves a group by LWW — for an electorate group the next proposal refuses the mismatch (detection,
+not prevention); the governor still moves an ordinary governed group toward its band. Also not built: leased-by-default leadership (C1 —
 `elect_leader` proposes with `ConsensusConfig::default()`, `committed_lease_secs: None`, so it commits permanently) and
 collection of acceptor memory (C2 — see the paragraph above); versioned electorates with joint consensus are a later
 plan.

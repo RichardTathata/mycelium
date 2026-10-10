@@ -76,6 +76,41 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`mycelium::OwnershipLock`** — the core's exclusive-ownership lock on `<file>.lock` (held by the KV WAL and the
   node-local journals), re-exported so a companion's own log refuses a second owner the same way. The tuple space
   and the blackboard take it on their WALs (row C, above). Additive.
+- **A consensus electorate is a governed group** (post-360 plan row P2; `docs/design/consensus-electorate.md` §8).
+  An **electorate group** is a group with a governance declaration — `GossipAgent::declare_electorate(group, size)` /
+  `retire_electorate`, or `POST`/`DELETE /gateway/govern/electorate` (`govern:write`, audited), stored at
+  `sys/govern/electorate/{group}` — naming the electorate as a group and its size, never node identities. The
+  declaration does not evaporate; the membership governor does not roll on the group (not even for a drain) and the
+  emergent watcher neither joins nor leaves it; `/gateway/mesh/group` refuses it `403 governed_group`; a re-declaration
+  moves the size one member at most (`409 step_too_large`). At the engine's door, which the library and the gateway
+  both reach, a proposal to an electorate group is refused `ElectorateUnavailable` unless the roster holds **exactly**
+  the declared size — fewer is a partial view, more is a member that joined outside the declaration (an embedded
+  `join_group` or `grp/` write, refused at the next proposal rather than prevented, so Layer I learns no rule); votes
+  are counted only from that roster, a trust slice only narrowing it; and the quorum is at least a strict majority of
+  the size. **`consensus_require_electorate`** (env `GOSSIP_CONSENSUS_REQUIRE_ELECTORATE`, default off) makes a
+  **safety-sensitive** proposal — `ConsensusConfig::safety_sensitive`, or a slot in `lock/`, `leader/`, `consistent/`
+  (`distributed_lock`, `LockService`, `elect_leader*`, `consistent_set`, `/gateway/overlay/{lock/acquire, elect,
+  consistent/set}`, and the `/gateway/overlay/log/group/subscribe` claim, now flagged) — whose scope is the cluster or
+  an undeclared group answer **`ConsensusResult::ElectorateNotGoverned`** (`CommitError::` / `ConsistencyError::
+  ElectorateNotGoverned`, gateway `403 electorate_not_governed`) before anything is sent; off, it runs as before and is
+  counted (`mycelium_consensus_ungoverned_safety_total`). **`consensus_electorate`** (env
+  `GOSSIP_CONSENSUS_ELECTORATE`) names the electorate group the cluster-scoped verbs (locks, `consistent_set`, the log
+  claim) propose to. The guarantee **`cons.safety_profile`** (rev 2) is node-enforced — `enforced` on the setting,
+  `not_applicable` without `consensus` — and **`secure-single-domain` rev 3** requires it (met by configuration, G12).
+  Versioned electorates with joint-consensus transitions stay a later plan. Seen failing first:
+  `a_safety_sensitive_proposal_is_decided_only_by_an_electorate_group` (the ungoverned `leader/council` returned
+  `Committed`), `an_electorate_groups_roster_is_held_to_its_declaration` (a roster one larger than the declaration was
+  proposed to: `Timeout { quorum_required: 2 }`), `the_governor_and_the_watcher_leave_an_electorate_group_alone` (the
+  governor drained the member), `an_exclusive_outcome_at_the_gateway_needs_an_electorate_group` (`/overlay/elect`
+  answered 200), `the_consensus_safety_profile_resolves_on_the_electorate_requirement` (`ExternalPrerequisite`), and
+  the profile's pinned set (rev 2). **Upgrade notes:** `ConsensusResult` (`#[non_exhaustive]`), `CommitError` and
+  `ConsistencyError` gain `ElectorateNotGoverned` — a `_` arm must fail closed; `ConsensusConfig` and `GossipConfig`
+  gained fields (an exhaustive struct literal breaks; `..Default::default()` is unaffected); a node under
+  `profile = "secure-single-domain"` must set `consensus_require_electorate = true` or it will not start — and then a
+  lock or an election on the whole cluster or an undeclared group is refused, so declare each electorate group and set
+  `consensus_electorate` for the locks, whose proposer must be a member of it; `ElectorateUnavailable` can now report
+  `observed_members > declared_min` (an electorate group's roster larger than its declaration); an
+  `/overlay/log/group/subscribe` claim is safety-sensitive and follows `consensus_electorate`.
 - **The KV namespace table is a gate now, not a lint item.** `scripts/check-kv-namespaces.sh` enumerates every
   KV prefix production code uses — slash-bearing `const`/`static` `&str` literals whatever their name, `format!`
   key heads, and the first literal of a KV call (`set*`, `get`, `delete*`, `scan_*`, `subscribe*`, `kv_*`,

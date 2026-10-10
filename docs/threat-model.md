@@ -500,10 +500,11 @@ leader, a single writer, anything a second holder would corrupt:
 
 | Setting | Required value | Why |
 |---|---|---|
-| `quorum_size` | a strict majority of the **fixed** voter set, stated explicitly | a derived quorum shrinks with the view |
-| `use_trust_slices` | `true`, with **every** voter calling `declare_trust` with the **same** set | the tally then counts only votes from the fixed *eligible* set (`consensus.rs`, pinned by `test_trust_slice_filters_votes`) |
+| the electorate | an **electorate group** — `declare_electorate(group, size)` / `POST /gateway/govern/electorate` — and `consensus_require_electorate = true` on every proposer (`secure-single-domain` rev 3 requires it); `consensus_electorate` names the group for the cluster-scoped locks | since P2 (2026-10-10) the engine holds the roster to the declared size, counts votes only from it, and refuses a safety-sensitive proposal anywhere else (`ElectorateNotGoverned`) — the voter set is named as a **group**, never as node identities ([decision record §8](design/consensus-electorate.md#8-p2s-design--the-electorate-group)) |
+| `quorum_size` | `0`, or a strict majority of the declared size | for an electorate group the engine raises a smaller quorum to a strict majority of the size; a derived quorum is the size's majority, since the roster must equal it |
+| `use_trust_slices` | optional | the electorate group's roster is the vote filter; a declared slice only narrows it. Before P2 this row required identical `declare_trust` sets on every voter — node identities as the electorate's name |
 | `count_opaque_as_absent` | `false` | a partition that reads as "everyone else is opaque" must not become a smaller quorum |
-| membership | **fixed for the life of the slot**; drain and re-form to change it | there is no versioned electorate or transition protocol |
+| membership | changed **one member at a time**, by two governed acts (move the node, then re-declare the size); the group decides nothing in between | the governor and the emergent watcher do not move an electorate group, and a size step of more than one is refused; there is still no versioned electorate or transition protocol |
 | the effect | fenced **at the resource** with the commit's token | winning is not the grant; exclusivity is enforced by refusing a stale token |
 
 Outside that profile — automatic sizing, slices off, opacity reduction on, voters joining and
@@ -517,10 +518,12 @@ of the whole protocol. Those are roadmap; the profile above is what ships.
 [`design/consensus-electorate.md`](design/consensus-electorate.md), adopted 2026-10-10). Gossip
 membership, capability groups and emergent groups are dynamic; the electorate for a safety-sensitive
 decision is a fixed set for the life of that decision, and quorum intersection is its property, not
-discovery's. What the code enforces today: an empty or below-floor roster is refused
-(`ElectorateUnavailable`), a proposer outside the group is refused (`NotAMember`), and the gateway
-moves a governed group's membership only through `/gateway/govern/group` (`govern:write`, audited).
-What it does not: an embedded `join_group` or a `grp/` write still moves a governed group by LWW, and
-nothing *requires* a governed group for a safety-sensitive proposal — that is post-360 plan row
-**P2**, not built. Versioned electorates with joint-consensus transitions are a later plan, not
+discovery's. What the code enforces: an empty or below-floor roster is refused
+(`ElectorateUnavailable`), a proposer outside the group is refused (`NotAMember`), the gateway
+moves a governed group's membership only through `/gateway/govern/group` (`govern:write`, audited),
+and — since post-360 plan row **P2** — a node with `consensus_require_electorate` refuses a
+safety-sensitive proposal outside an **electorate group**, whose roster is held to its declared size.
+What it does not: an embedded `join_group` or a `grp/` write still moves a group's roster by LWW; for
+an electorate group the next proposal refuses the mismatch rather than counting it (detection, not
+prevention). Versioned electorates with joint-consensus transitions are a later plan, not
 built; a consensus *service* (a fixed tier of nodes everyone must reach) is rejected.

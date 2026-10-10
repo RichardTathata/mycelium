@@ -80,6 +80,7 @@ pub(crate) fn receipt_from(
         ConsensusResult::ElectorateUnavailable { slot, observed_members, declared_min, .. } =>
             Err(CommitError::ElectorateUnavailable { slot, observed_members, declared_min }),
         ConsensusResult::NotAMember { slot, group } => Err(CommitError::NotAMember { slot, group }),
+        ConsensusResult::ElectorateNotGoverned { slot, group } => Err(CommitError::ElectorateNotGoverned { slot, group }),
         ConsensusResult::Superseded { slot, ballot } => Err(CommitError::Superseded { slot, ballot }),
         ConsensusResult::TopologyUnsatisfied { slot, distinct_domains, domains_required, .. } => {
             Err(CommitError::TopologyUnsatisfied {
@@ -462,7 +463,7 @@ impl ConsensusHandle {
         let value: Bytes   = value.into();
         let slot = format!("consistent/{key}");
 
-        match self.cluster_propose(&slot, value.clone(), ConsensusConfig::default()).await {
+        match self.exclusive_propose(&slot, value.clone(), ConsensusConfig::default()).await {
             ConsensusResult::Committed { .. } => {
                 kv_set(&self.ctx, key, value);
                 Ok(())
@@ -479,6 +480,18 @@ impl ConsensusHandle {
             ConsensusResult::ElectorateUnavailable { observed_members, declared_min, .. } =>
                 Err(ConsistencyError::ElectorateUnavailable { observed_members, declared_min }),
             ConsensusResult::NotAMember { group, .. } => Err(ConsistencyError::NotAMember { group }),
+            ConsensusResult::ElectorateNotGoverned { group, .. } => Err(ConsistencyError::ElectorateNotGoverned { group }),
+        }
+    }
+
+    /// Where the cluster-scoped exclusive verbs (`consistent_set`, `distributed_lock`) decide: the
+    /// electorate group named by `consensus_electorate` when one is configured, the whole cluster
+    /// otherwise (P2, `docs/design/consensus-electorate.md` §8). Their slots are in the
+    /// safety-sensitive families, so on a node that requires an electorate the cluster path is refused.
+    async fn exclusive_propose(&self, slot: &str, value: Bytes, config: ConsensusConfig) -> ConsensusResult {
+        match self.ctx.config.consensus_electorate.as_deref() {
+            Some(group) => self.group_propose(group, slot, value, config).await,
+            None => self.cluster_propose(slot, value, config).await,
         }
     }
 
@@ -540,7 +553,7 @@ impl ConsensusHandle {
             ..ConsensusConfig::default()
         };
 
-        match self.cluster_propose(&slot, value.clone(), cfg).await {
+        match self.exclusive_propose(&slot, value.clone(), cfg).await {
             ConsensusResult::Committed { .. } => {
                 // #164 bug A: two proposers can both *optimistically* commit against their own
                 // local view — the propose return is NOT mutually exclusive. Commit-keys are
@@ -583,6 +596,7 @@ impl ConsensusHandle {
             ConsensusResult::ElectorateUnavailable { observed_members, declared_min, .. } =>
                 Err(ConsistencyError::ElectorateUnavailable { observed_members, declared_min }),
             ConsensusResult::NotAMember { group, .. } => Err(ConsistencyError::NotAMember { group }),
+            ConsensusResult::ElectorateNotGoverned { group, .. } => Err(ConsistencyError::ElectorateNotGoverned { group }),
         }
     }
 
@@ -673,6 +687,7 @@ impl ConsensusHandle {
             ConsensusResult::ElectorateUnavailable { observed_members, declared_min, .. } =>
                 Err(ConsistencyError::ElectorateUnavailable { observed_members, declared_min }),
             ConsensusResult::NotAMember { group, .. } => Err(ConsistencyError::NotAMember { group }),
+            ConsensusResult::ElectorateNotGoverned { group, .. } => Err(ConsistencyError::ElectorateNotGoverned { group }),
         }
     }
 

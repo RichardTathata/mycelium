@@ -343,6 +343,7 @@ pub(super) async fn run_http_server(
                                                   .delete(gw_group_leave))
         .route("/govern/profile",                 post(gw_govern_profile))
         .route("/govern/group",                   post(gw_govern_group_join).delete(gw_govern_group_leave))
+        .route("/govern/electorate",              post(gw_govern_electorate_declare).delete(gw_govern_electorate_retire))
         // ── Legible Emergence Phase 2: the relational fleet snapshot (localize) ─
         .route("/fleet",                          get(gw_fleet_snapshot))
         // ── Legible Emergence Phase 3: the causal event ring (explain) ─────────
@@ -905,6 +906,7 @@ fn required_scope(method: &axum::http::Method, matched_path: &str) -> &'static s
         // another node — see `gw_group_join`.
         "/gateway/mesh/group"          => if read { "mesh:read" } else { "mesh:write" },
         "/gateway/govern/group"        => "govern:write",
+        "/gateway/govern/electorate"   => "govern:write",
         "/gateway/govern/profile"      => "govern:write",
         // Legible Emergence Phase 2/3: the relational fleet snapshot + causal explain.
         "/gateway/fleet"               => "fleet:read",
@@ -1469,11 +1471,16 @@ async fn gw_govern_snapshot(State(ctx): State<Arc<HttpCtx>>) -> impl IntoRespons
             "settled_unknown":  snap.settled_unknown,
         },
     });
+    // P2: the electorate declarations this node sees — a group and its declared size, never node ids.
+    let electorates: Vec<_> = super::electorate::electorate_decls(&ctx.agent_ctx.kv_state).into_iter()
+        .map(|d| json!({ "group": d.group, "size": d.size }))
+        .collect();
     Json(json!({
         "node_id":      ctx.agent_ctx.node_id.to_string(),
         "auto_enabled": snap.auto_enabled,
         "params":       params,
         "control":      control,
+        "electorates":  electorates,
     }))
     .into_response()
 }
@@ -1772,7 +1779,8 @@ async fn gw_group_leave(
     Json(json!({ "ok": true, "group": q.group })).into_response()
 }
 
-/// Whether `group` is under a live membership intent (`sys/govern/membership/{group}`, fresh within
+/// Whether `group` is an electorate group (`sys/govern/electorate/{group}`, P2 — governed until retired), or
+/// under a live membership intent (`sys/govern/membership/{group}`, fresh within
 /// `MEMBERSHIP_INTENT_TTL_MS` — the governor's own reading, `emergent::detect_governed_group_conflicts`). Such a
 /// group's population is governed: who belongs to it decides an election's roster and quorum, so changing it is a
 /// governance act, not a data-plane write. Fleet-wide: an intent `target`ed at one node still governs the group here —
@@ -1782,6 +1790,10 @@ async fn gw_group_leave(
 #[cfg(feature = "gateway")]
 fn is_governed_group(ctx: &TaskCtx, group: &str) -> bool {
     use super::membership_governor::{MembershipIntent, MEMBERSHIP_INTENT_TTL_MS, MEMBERSHIP_PREFIX};
+    // An electorate group (P2) is governed for as long as it is declared: the declaration does not lapse.
+    if super::electorate::electorate_size(&ctx.kv_state, group).is_some() {
+        return true;
+    }
     let key = format!("{MEMBERSHIP_PREFIX}{group}");
     let Some(bytes) = ctx.kv_state.store.pin().get(key.as_str()).and_then(|e| e.data.clone()) else { return false };
     let Ok(intent) = mycelium_core::serde_fixint::from_slice::<MembershipIntent>(&bytes) else { return false };
@@ -1795,8 +1807,9 @@ fn refuse_governed_group(ctx: &TaskCtx, group: &str) -> Option<axum::response::R
     is_governed_group(ctx, group).then(|| (
         StatusCode::FORBIDDEN,
         Json(json!({ "ok": false, "error": "governed_group",
-            "message": format!("group {group} is under a membership intent, so its members decide its elections: \
-                                this node joins or leaves it through POST/DELETE /gateway/govern/group (govern:write)") })),
+            "message": format!("group {group} is governed (a membership intent or an electorate declaration), so its members \
+                                decide its elections: this node joins or leaves it through POST/DELETE /gateway/govern/group \
+                                (govern:write)") })),
     ).into_response())
 }
 
@@ -1821,6 +1834,54 @@ async fn gw_govern_group_join(
         .iter().map(|n| n.to_string()).collect();
     Json(json!({ "ok": true, "group": group, "governed": is_governed_group(&ctx.agent_ctx, group), "members": members }))
         .into_response()
+}
+
+/// `POST /gateway/govern/electorate` (`govern:write`) — declare `{group}` an **electorate group** of `{size}` members
+/// (post-360 plan row P2, `docs/design/consensus-electorate.md` §8); audited. The declaration does not evaporate; a
+/// re-declaration moves `size` by one member at most (**409** `step_too_large`). Body `{"group": "G", "size": N}`.
+#[cfg(feature = "gateway")]
+async fn gw_govern_electorate_declare(
+    State(ctx): State<Arc<HttpCtx>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if let Some(refused) = refuse_unknown_fields(&body, &["group", "size"]) {
+        return refused;
+    }
+    let Some(group) = body.get("group").and_then(|g| g.as_str()) else {
+        return bad_request("`group` must be a non-empty string without '/'".into());
+    };
+    let Some(size) = body.get("size").and_then(serde_json::Value::as_u64).and_then(|n| usize::try_from(n).ok()) else {
+        return bad_request("`size` must be a positive integer".into());
+    };
+    match super::electorate::declare(&ctx.agent_ctx, group, size) {
+        Ok(decl) => {
+            audit_govern(&ctx.agent_ctx, &format!("{}{group}", super::electorate::ELECTORATE_PREFIX), body.to_string());
+            let members = crate::agent::helpers::group_members_ctx(&ctx.agent_ctx, group).len();
+            Json(json!({ "ok": true, "group": decl.group, "size": decl.size, "members_seen": members })).into_response()
+        }
+        Err(e @ super::electorate::ElectorateError::StepTooLarge { .. }) => (StatusCode::CONFLICT,
+            Json(json!({ "ok": false, "error": "step_too_large", "message": e.to_string() }))).into_response(),
+        Err(e) => bad_request(e.to_string()),
+    }
+}
+
+/// `DELETE /gateway/govern/electorate?group=G` (`govern:write`) — retire `G`'s electorate declaration; audited.
+#[cfg(feature = "gateway")]
+async fn gw_govern_electorate_retire(
+    Query(q):   Query<std::collections::HashMap<String, String>>,
+    State(ctx): State<Arc<HttpCtx>>,
+) -> impl IntoResponse {
+    if let Some(k) = q.keys().find(|k| k.as_str() != "group") {
+        return bad_request(format!("unknown parameter `{k}`"));
+    }
+    let Some(group) = q.get("group").filter(|g| !g.is_empty() && !g.contains('/')) else {
+        return bad_request("`group` must be a non-empty name without '/'".into());
+    };
+    let retired = super::electorate::retire(&ctx.agent_ctx, group);
+    if retired {
+        audit_govern(&ctx.agent_ctx, &format!("{}{group}", super::electorate::ELECTORATE_PREFIX), json!({"route": "govern/electorate", "retire": true}).to_string());
+    }
+    Json(json!({ "ok": true, "group": group, "retired": retired })).into_response()
 }
 
 /// `DELETE /gateway/govern/group?group=G` (`govern:write`) — **this node** leaves `G`, governed or not; audited.
@@ -3916,6 +3977,21 @@ async fn overlay_cluster_propose(
         .await
 }
 
+/// The gateway's mirror of `ConsensusHandle::exclusive_propose`: the lock, consistent-write and log-claim routes
+/// decide in the electorate group `consensus_electorate` names, or the whole cluster when none is configured (P2).
+#[cfg(feature = "consensus")]
+async fn overlay_exclusive_propose(
+    ctx:    &Arc<TaskCtx>,
+    slot:   &str,
+    value:  Bytes,
+    config: crate::consensus::ConsensusConfig,
+) -> crate::consensus::ConsensusResult {
+    match ctx.config.consensus_electorate.as_deref() {
+        Some(group) => overlay_group_propose(ctx, group, slot, value, config).await,
+        None => overlay_cluster_propose(ctx, slot, value, config).await,
+    }
+}
+
 /// Thin group propose from `TaskCtx`.
 #[cfg(feature = "consensus")]
 async fn overlay_group_propose(
@@ -4042,6 +4118,7 @@ fn commit_error_response(err: crate::CommitError) -> axum::response::Response {
         CommitError::TopologyUnsatisfied { .. } =>
             (StatusCode::CONFLICT, Json(json!({ "ok": false, "error": "topology_unsatisfied" }))).into_response(),
         CommitError::NotAMember { group, .. } => not_a_member_response(&group),
+        CommitError::ElectorateNotGoverned { group, .. } => electorate_not_governed_response(group.as_deref()),
         // `CommitError` is `#[non_exhaustive]` in `mycelium-core`: a refusal this build does not
         // name is still a refusal, and its `Display` says what it is.
         other => (StatusCode::CONFLICT, Json(json!({ "ok": false, "error": other.to_string() }))).into_response(),
@@ -4076,7 +4153,7 @@ async fn gw_overlay_consistent_set(
     };
 
     let slot = format!("consistent/{key}");
-    let result = overlay_cluster_propose(
+    let result = overlay_exclusive_propose(
         &ctx.agent_ctx, &slot, value.clone(),
         crate::consensus::ConsensusConfig::default(),
     ).await;
@@ -4154,7 +4231,7 @@ async fn gw_overlay_lock_acquire(
         ..crate::consensus::ConsensusConfig::default()
     };
 
-    let result = overlay_cluster_propose(&ctx.agent_ctx, &slot, value.clone(), cfg).await;
+    let result = overlay_exclusive_propose(&ctx.agent_ctx, &slot, value.clone(), cfg).await;
 
     match result {
         crate::consensus::ConsensusResult::Committed { .. } => {
@@ -4194,6 +4271,7 @@ async fn gw_overlay_lock_acquire(
             "declared_min": declared_min,
         }))).into_response(),
         crate::consensus::ConsensusResult::NotAMember { group, .. } => not_a_member_response(&group),
+        crate::consensus::ConsensusResult::ElectorateNotGoverned { group, .. } => electorate_not_governed_response(group.as_deref()),
     }
 }
 
@@ -4268,12 +4346,16 @@ async fn gw_overlay_elect(
             "detail": if observed_members == 0 {
                 "the group roster is empty (unknown or unjoined group) — an election needs \
                  members, and absence is not authority"
+            } else if observed_members > declared_min {
+                "this node sees more members than the electorate declares; a member joined outside \
+                 the declaration — re-declare the size through POST /gateway/govern/electorate"
             } else {
                 "this node sees fewer members than the group declares; its view is partial"
             },
         }))).into_response(),
         // This node is not in the group: it may not elect a leader for it, least of all itself.
         crate::consensus::ConsensusResult::NotAMember { group, .. } => not_a_member_response(&group),
+        crate::consensus::ConsensusResult::ElectorateNotGoverned { group, .. } => electorate_not_governed_response(group.as_deref()),
     }
 }
 
@@ -4289,6 +4371,25 @@ fn not_a_member_response(group: &str) -> axum::response::Response {
         "group": group,
         "detail": "this node is not in the group's roster, so it may not propose to it — join the \
                    group first (POST /gateway/mesh/group, or /gateway/govern/group for a governed one)",
+    }))).into_response()
+}
+
+/// **403 `electorate_not_governed`**: an exclusive outcome (a lock, a leader, a consistent write) was asked of a
+/// scope with no electorate declaration — the whole cluster, or an undeclared group — on a node that requires one
+/// (`consensus_require_electorate`, post-360 plan row P2). Nothing was proposed. An authority refusal, like
+/// `not_a_member`: the fix is a governance act, not a retry.
+#[cfg(feature = "consensus")]
+fn electorate_not_governed_response(group: Option<&str>) -> axum::response::Response {
+    (StatusCode::FORBIDDEN, Json(json!({
+        "ok": false,
+        "error": "electorate_not_governed",
+        "group": group,
+        "detail": match group {
+            Some(_) => "this group has no electorate declaration, and this node requires one for an exclusive \
+                        outcome — declare it through POST /gateway/govern/electorate (govern:write)",
+            None => "the whole cluster is not an electorate group, and this node requires one for an exclusive \
+                     outcome — set `consensus_electorate` to a declared electorate group",
+        },
     }))).into_response()
 }
 
@@ -4496,8 +4597,10 @@ async fn gw_overlay_log_group_subscribe(
         // "same value" the lease path re-endorses; the lease governs expiry + failover.
         let holder: Bytes = Bytes::from(task_ctx.node_id.to_string().into_bytes());
         let lease_secs: u64 = 30;
+        // A single active consumer is an exclusive outcome (P2): flagged, and decided where the locks are.
         let mk_cfg = || crate::consensus::ConsensusConfig {
             committed_lease_secs: Some(lease_secs),
+            safety_sensitive: true,
             ..crate::consensus::ConsensusConfig::default()
         };
 
@@ -4512,7 +4615,7 @@ async fn gw_overlay_log_group_subscribe(
         'acquire: loop {
             if tx.is_closed() { return; }
             let won = matches!(
-                overlay_cluster_propose(&task_ctx, &claim_slot, holder.clone(), mk_cfg()).await,
+                overlay_exclusive_propose(&task_ctx, &claim_slot, holder.clone(), mk_cfg()).await,
                 crate::consensus::ConsensusResult::Committed { .. },
             );
             if won {
@@ -4539,7 +4642,7 @@ async fn gw_overlay_log_group_subscribe(
             // live; a different proposer is superseded). If we somehow lost the claim (a partition
             // let another win), stop — a single active consumer is the invariant.
             if last_renew.elapsed() >= renew_every {
-                let _ = overlay_cluster_propose(&task_ctx, &claim_slot, holder.clone(), mk_cfg()).await;
+                let _ = overlay_exclusive_propose(&task_ctx, &claim_slot, holder.clone(), mk_cfg()).await;
                 last_renew = std::time::Instant::now();
                 let still_me = crate::consensus::live_committed_value(
                         &kv_state, &claim_slot, crate::consensus::causal_now_ms(&task_ctx.hlc))
@@ -7597,6 +7700,7 @@ mod tests {
             ("/gateway/govern/topology-override", serde_json::json!({"group": "workers", "override": true})),
             ("/gateway/govern/profile", serde_json::json!({"profile": "observe"})),
             ("/gateway/govern/group", serde_json::json!({"group": "workers"})),
+            ("/gateway/govern/electorate", serde_json::json!({"group": "workers", "size": 1})),
         ];
         let listed: std::collections::BTreeSet<String> = bodies.iter().map(|(r, _)| r.to_string()).collect();
         assert_eq!(routed, listed, "a governance write route without a case here");
@@ -7699,6 +7803,74 @@ mod tests {
             .json(&serde_json::json!({ "toml": unit })).send().await.unwrap();
         assert_eq!(r.status(), 403);
         assert_eq!(r.json::<serde_json::Value>().await.unwrap()["error"], "governed_group");
+        agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+    }
+
+    /// **P2 at the gateway.** On a node that requires an electorate group for an exclusive outcome, the election and
+    /// lock routes refuse an ungoverned scope **403** `electorate_not_governed` and decide nothing; `POST
+    /// /gateway/govern/electorate` (`govern:write`, audited) declares the group, after which the data-plane join refuses
+    /// it **403** `governed_group` and the same election commits; a re-declaration that moves the size by more than one
+    /// member is **409** `step_too_large`, and `DELETE` retires it. Seen failing first: `/overlay/elect` on the
+    /// undeclared group answered 200 with this node as leader.
+    #[cfg(all(feature = "gateway", feature = "consensus"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_exclusive_outcome_at_the_gateway_needs_an_electorate_group() {
+        use axum::http::header::AUTHORIZATION;
+        let (gossip_port, http_port) = (alloc_port(), alloc_port());
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.gateway_auth_token = Some("t".into());
+        cfg.consensus_require_electorate = true;
+        let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
+        agent.start().await.unwrap();
+        let _listener = agent.consensus().start_consensus_listener(crate::consensus::ConsensusConfig::default());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{http_port}/gateway");
+        let post = |path: &str, body: serde_json::Value| client.post(format!("{base}{path}")).header(AUTHORIZATION, "Bearer t").json(&body).send();
+
+        let r = post("/mesh/group", serde_json::json!({"group": "council"})).await.unwrap();
+        assert_eq!(r.status(), 200, "an undeclared group is a plain group");
+        let r = post("/overlay/elect", serde_json::json!({"group": "council"})).await.unwrap();
+        assert_eq!(r.status(), 403);
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert_eq!((body["error"].as_str(), body["group"].as_str()), (Some("electorate_not_governed"), Some("council")), "{body}");
+        let r = post("/overlay/lock/acquire", serde_json::json!({"name": "door", "ttl_secs": 5})).await.unwrap();
+        assert_eq!(r.status(), 403);
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(body["error"], "electorate_not_governed");
+        assert!(body["group"].is_null(), "the whole cluster is not an electorate: {body}");
+        let r = post("/overlay/consistent/set", serde_json::json!({"key": "cfg/k", "value_b64": "dg=="})).await.unwrap();
+        assert_eq!(r.status(), 403, "the consistent write too");
+        assert!(agent.consensus().consensus_get("leader/council").is_none(), "nothing was decided");
+
+        let changes = || agent.task_ctx.governance_changes.load(std::sync::atomic::Ordering::Relaxed);
+        let before = changes();
+        let r = post("/govern/electorate", serde_json::json!({"group": "council", "size": 1})).await.unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(changes(), before + 1, "a declaration is an audited governance change");
+        let snap: serde_json::Value = client.get(format!("{base}/govern")).header(AUTHORIZATION, "Bearer t")
+            .send().await.unwrap().json().await.unwrap();
+        assert_eq!(snap["electorates"], serde_json::json!([{"group": "council", "size": 1}]), "{snap}");
+        let r = post("/mesh/group", serde_json::json!({"group": "council"})).await.unwrap();
+        assert_eq!(r.status(), 403, "an electorate group is governed");
+        assert_eq!(r.json::<serde_json::Value>().await.unwrap()["error"], "governed_group");
+        let r = post("/overlay/elect", serde_json::json!({"group": "council"})).await.unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(r.json::<serde_json::Value>().await.unwrap()["leader"], agent.node_id().to_string());
+
+        let r = post("/govern/electorate", serde_json::json!({"group": "council", "size": 3})).await.unwrap();
+        assert_eq!(r.status(), 409);
+        assert_eq!(r.json::<serde_json::Value>().await.unwrap()["error"], "step_too_large");
+        for bad in [serde_json::json!({"group": "council", "size": 0}), serde_json::json!({"group": "a/b", "size": 1}),
+                    serde_json::json!({"group": "council"}), serde_json::json!({"group": "council", "size": 1, "nodes": []})] {
+            assert_eq!(post("/govern/electorate", bad.clone()).await.unwrap().status(), 400, "{bad}");
+        }
+        let r = client.delete(format!("{base}/govern/electorate?group=council")).header(AUTHORIZATION, "Bearer t").send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(r.json::<serde_json::Value>().await.unwrap()["retired"], true);
+        assert!(agent.electorate("council").is_none());
         agent.shutdown_with_timeout(Duration::from_secs(5)).await;
     }
 

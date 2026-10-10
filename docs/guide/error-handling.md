@@ -112,6 +112,12 @@ pub enum ConsistencyError {
   read it as a refusal of the value.
 - `NotAMember` — this node is not in the group's roster, so it did not propose: its own vote would be one the
   electorate does not contain. Join the group (the same routes as above); nothing was decided.
+- `ElectorateNotGoverned` (P2) — the node requires an **electorate group** for an exclusive outcome
+  (`consensus_require_electorate`) and this safety-sensitive proposal's scope was the whole cluster (`group: None`)
+  or a group with no electorate declaration. Nothing was proposed. Declare the group (`declare_electorate`,
+  `POST /gateway/govern/electorate`) and, for the cluster-scoped lock and consistent verbs, set `consensus_electorate`.
+  Over HTTP **403** `electorate_not_governed`. On an electorate group, `ElectorateUnavailable` with `observed_members`
+  above `declared_min` means a member joined outside the declaration.
 - `TopologyUnsatisfied` — quorum has the right headcount but the Hard topology
   policy (e.g. "must span two racks") was not satisfied. Retry is unlikely to
   help unless nodes rejoin from the missing segments. If availability matters more than the spread

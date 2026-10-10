@@ -155,17 +155,42 @@ Two capabilities that are easy to conflate, and Mycelium keeps apart **by design
   [supported profile](../threat-model.md#7-safety-sensitive-agreement-the-supported-profile).
   Quorum intersection is a property of that set, never of discovery converging.
 
-A group's roster serves as the electorate only while you hold it still. What the code enforces
-today: a roster this node cannot see, or one below a fresh `MembershipIntent.min`, is refused
+A group's roster serves as the electorate only while you hold it still. What the code enforces:
+a roster this node cannot see, or one below a fresh `MembershipIntent.min`, is refused
 (`ElectorateUnavailable`); a proposer outside the group is refused (`NotAMember`); and a
 **governed group** — one under a live membership intent — moves only through
 `POST`/`DELETE /gateway/govern/group` (`govern:write`, audited), while `/gateway/mesh/group` refuses
-it `403 governed_group`. What it does not enforce yet: an embedded `mesh().join_group` or a write to
-`grp/` from Rust still moves a governed group's roster, a node running `start_membership_governor`
-still joins and leaves it toward the intent's band, and nothing *requires* a governed group for a
-safety-sensitive proposal (post-360 plan row P2, not built). So for exclusive work: form the group,
-hold its membership still for the life of the slot, use a governed group so a change is a named and
-audited act, and fence at the resource.
+it `403 governed_group`.
+
+**An electorate group** (post-360 plan row P2) is the governed group made fixed. Declare it — a
+governance act, naming the group and how many members it holds, never which nodes:
+
+```rust
+agent.declare_electorate("ledger-council", 3)?;   // or POST /gateway/govern/electorate {"group":"ledger-council","size":3} (govern:write)
+```
+
+From then on, until it is retired (`retire_electorate`, `DELETE /gateway/govern/electorate?group=…`):
+the declaration does not evaporate; the membership governor does not roll on the group and the
+emergent watcher does not join or leave it; a proposal to it is **refused unless the roster this
+node sees holds exactly the declared size** — fewer is a partial view, more is a member that joined
+outside the declaration (an embedded `join_group` or `grp/` write is not prevented, but the next
+proposal refuses what it finds); votes are counted only from that roster (a `declare_trust` slice may
+narrow it further, no longer names it); and the quorum is at least a strict majority of the size. A
+re-declaration moves the size **one member at a time** (`step_too_large` otherwise), so a change is
+two governed acts — move the node (`/gateway/govern/group`), then re-declare — and the group decides
+nothing in between.
+
+**Requiring it.** Set `consensus_require_electorate = true` (env `GOSSIP_CONSENSUS_REQUIRE_ELECTORATE`;
+the `secure-single-domain` profile requires it, rev 3). A **safety-sensitive** proposal — flagged
+`ConsensusConfig::safety_sensitive`, or in the `lock/`, `leader/`, `consistent/` families that
+`distributed_lock`, `LockService`, `elect_leader`, `consistent_set` and their gateway routes use — is
+then refused `ElectorateNotGoverned` (gateway `403 electorate_not_governed`) unless its scope is an
+electorate group. The cluster-scoped verbs (locks, `consistent_set`) have no group of their own: name
+one with `consensus_electorate = "ledger-council"`, and they propose there — this node must be a
+member, so a lock is taken by an electorate member (a non-member asks through a member's gateway).
+Off — the default — nothing changes, and such a proposal is counted
+(`mycelium_consensus_ungoverned_safety_total`). So for exclusive work: declare the electorate, require
+it, and fence at the resource.
 
 Consensus here is a **protocol run by whichever nodes are in the group**, never a service: no
 deployment shape makes a named node set "the consensus nodes". Versioned electorates with
