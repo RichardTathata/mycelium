@@ -29,8 +29,10 @@ pub(crate) const LIFE_VALUE_CAP: usize = 4096;
 
 /// Envelope magic: `L1`.
 const MAGIC: [u8; 2] = [0x4C, 0x31];
-/// A collected lower record: `L0` — proves the slot has records, carries nothing.
-pub(crate) const STUB: [u8; 2] = [0x4C, 0x30];
+/// The slot's **sentinel** (`…/s`): written, with the same bytes, by every writer of a decision record
+/// for the slot and never collected, so a slot that has ever had a record is never read the legacy
+/// way, even after its lower records are tombstoned and swept (design §2.3, §8).
+pub(crate) const SENTINEL: [u8; 2] = [0x4C, 0x53];
 
 /// How long a decision holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -147,6 +149,15 @@ pub(crate) fn slot_prefix(slot: &str) -> String {
     format!("{LIFE_PREFIX}{}/", escape_slot(slot))
 }
 
+/// The scope-index outer key of `slot`'s records (`slot_prefix` without its trailing `/`).
+fn scope_of(slot: &str) -> String {
+    format!("{LIFE_PREFIX}{}", escape_slot(slot))
+}
+
+pub(crate) fn sentinel_key(slot: &str) -> String {
+    format!("{}s", slot_prefix(slot))
+}
+
 pub(crate) fn record_key(slot: &str, ballot: u64) -> String {
     format!("{}{ballot:016x}", slot_prefix(slot))
 }
@@ -196,8 +207,8 @@ pub(crate) struct Top {
 pub(crate) enum SlotView {
     /// No record key at all: a slot never decided under row A — the legacy reading applies (design §2.3).
     NoRecord,
-    /// Record keys exist but every one is a collected stub: the latest decision has not arrived here.
-    /// Reads as not live; never falls back to the legacy reading.
+    /// The slot has had records (its sentinel is here) but no record is held: the latest decision has
+    /// not arrived here. Reads as not live; never falls back to the legacy reading.
     Unknown,
     /// The highest-ballot decision record held.
     Top(Box<Top>),
@@ -207,14 +218,17 @@ pub(crate) enum SlotView {
 /// not exactly a record, a marker or a value are ignored (finding 8).
 fn scan(kv: &KvState, slot: &str) -> Vec<(String, Bytes)> {
     let prefix = slot_prefix(slot);
-    mycelium_core::store::scan_kv_prefix(kv, &prefix)
+    // O(keys of this slot): the store files `consensus/life/{esc}/…` under one scope (review D3).
+    mycelium_core::store::scan_scope(kv, &scope_of(slot))
         .into_iter()
         .filter_map(|(k, v)| k.strip_prefix(prefix.as_str()).map(|r| (r.to_string(), v)))
         .collect()
 }
 
+/// Exactly 16 **lowercase** hex digits — the one spelling `record_key` writes (review D7).
 fn parse_hex_u64(s: &str) -> Option<u64> {
-    (s.len() == 16 && s.bytes().all(|b| b.is_ascii_hexdigit())).then(|| u64::from_str_radix(s, 16).ok()).flatten()
+    (s.len() == 16 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+        .then(|| u64::from_str_radix(s, 16).ok()).flatten()
 }
 
 /// Read the slot (design §2.3). `wall_now_ms` is this node's wall clock.
@@ -223,9 +237,9 @@ pub(crate) fn read_slot(kv: &KvState, slot: &str, wall_now_ms: u64) -> SlotView 
     let mut any_record = false;
     let mut best: Option<(u64, Envelope)> = None;
     for (rem, bytes) in &entries {
+        if rem == "s" && bytes.as_ref() == SENTINEL { any_record = true; continue; }
         let Some(ballot) = parse_hex_u64(rem) else { continue };
         any_record = true;
-        if bytes.as_ref() == STUB { continue; }
         let Some(env) = Envelope::decode(bytes) else { continue };
         if env.slot != slot { continue; }
         if best.as_ref().is_none_or(|(b, _)| ballot > *b) {
@@ -255,13 +269,9 @@ pub(crate) fn read_slot(kv: &KvState, slot: &str, wall_now_ms: u64) -> SlotView 
 /// Every slot that has decision-record keys on this node, with the remainders under it — for the
 /// record collector. Sorted by slot (review round 3, finding 6: replay must select the same slots).
 pub(crate) fn slots_with_records(kv: &KvState) -> Vec<String> {
-    let mut slots: Vec<String> = mycelium_core::store::scan_kv_prefix(kv, LIFE_PREFIX)
+    let mut slots: Vec<String> = mycelium_core::store::scopes_under(kv, LIFE_PREFIX)
         .into_iter()
-        .filter_map(|(k, _)| {
-            let rest = k.strip_prefix(LIFE_PREFIX)?;
-            let esc = rest.split('/').next()?;
-            unescape_slot(esc)
-        })
+        .filter_map(|outer| unescape_slot(outer.strip_prefix(LIFE_PREFIX)?))
         .collect();
     slots.sort();
     slots.dedup();
@@ -282,37 +292,39 @@ fn unescape_slot(esc: &str) -> Option<String> {
     Some(out)
 }
 
-/// What the record collector may do with one slot (design §8): the lower records to stub, the value
-/// keys to tombstone, the lease markers past their expiry plus the drift bound. Never the top record,
-/// never a permanent marker.
+/// What the record collector may do with one slot (design §8): tombstone the decision records below
+/// the top (the sweep then removes them), their content-addressed values unless the top shares one, and
+/// **lease** markers whose expiry plus the drift bound has passed and whose lineage is not the top's.
+/// Never the top record, the sentinel, a permanent marker or a marker of the top's lineage. Keys come
+/// back **sorted**, so the writes are replay-deterministic (review D7).
 pub(crate) struct Collectable {
-    pub(crate) stub_records:   Vec<String>,
-    pub(crate) dead_keys:      Vec<String>,
+    pub(crate) dead_keys: Vec<String>,
 }
 
 pub(crate) fn collectable(kv: &KvState, slot: &str, wall_now_ms: u64, drift_ms: u64) -> Option<Collectable> {
     let SlotView::Top(top) = read_slot(kv, slot, wall_now_ms) else { return None };
     let prefix = slot_prefix(slot);
-    let mut stub_records = Vec::new();
+    let top_marker = marker_key(slot, top.env.lineage, &top.env.proposer);
     let mut dead_keys = Vec::new();
     for (rem, bytes) in scan(kv, slot) {
         if let Some(b) = parse_hex_u64(&rem) {
-            if b < top.ballot && bytes.as_ref() != STUB {
-                // Its content-addressed value goes too, unless the top shares it.
+            if b < top.ballot {
                 if let Some(env) = Envelope::decode(&bytes)
                     && env.value.is_none() && env.value_digest != top.env.value_digest {
                         dead_keys.push(value_key(slot, &env.value_digest));
                     }
-                stub_records.push(format!("{prefix}{rem}"));
+                dead_keys.push(format!("{prefix}{rem}"));
             }
         } else if rem.starts_with("end/")
             && let Some((_, Some(exp))) = decode_marker(&bytes)
             && wall_now_ms > exp.saturating_add(drift_ms)
-            && format!("{prefix}{rem}") != marker_key(slot, top.env.lineage, &top.env.proposer) {
+            && format!("{prefix}{rem}") != top_marker {
                 dead_keys.push(format!("{prefix}{rem}"));
             }
     }
-    Some(Collectable { stub_records, dead_keys })
+    dead_keys.sort();
+    dead_keys.dedup();
+    Some(Collectable { dead_keys })
 }
 
 #[cfg(test)]

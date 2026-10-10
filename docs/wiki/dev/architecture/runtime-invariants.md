@@ -63,8 +63,11 @@ upgraded learner writes the record from it and **ignores the legacy `Commit`**. 
 proposer, no ballot, and tombstones nothing, so it ends that decision and every renewal of its lineage and nothing
 else. Renewal is explicit: only the original proposer renews, keeping the lineage. Slots are escaped and record
 remainders must match exactly, so a slot named `lock/a/<16 hex>` cannot inject a record into `lock/a`. Only a slot
-with **no** record key falls back to the legacy reading; collection never tombstones a record (the prefix index
-drops tombstones), it stubs lower ones. Older nodes keep receiving the legacy keys and `Commit`; an upgraded
+with no record and no **sentinel** (`…/s`, written with the first record, never collected) falls back to the legacy
+reading. A reader fetches a slot's keys through Layer I's scope index (`KvStore::scope_index`, a read index for
+`consensus/life/{esc}/`), O(the slot's keys). A renewal keeps its own envelope only when the highest reported
+acceptance is its lineage; an upgraded proposer never sets an acceptance aside by `decided` (the implementation
+review's D1, D2). A `CommitTerm` above a live decision of another identity is written and counted (D5). Older nodes keep receiving the legacy keys and `Commit`; an upgraded
 proposer times out until a quorum is upgraded.
 
 **Acceptor memory is not erased on commit; it shrinks to a node-owned floor once its decision is over** (2.30.0,
@@ -77,7 +80,8 @@ whose state promises nothing above `e` (re-checked inside the compare-and-set), 
 its marker are `append_sync`ed first, then memory and the durable record **shrink** to `{promised: e,
 promised_to: sentinel}` — a floor that refuses a prepare and an accept at `e` and below, owned by this node and
 fsynced (`persist_acceptor`, serialised by `acceptor_records`, lock-order row 56), never the shared `decided` key
-that LWW can regress. Lower decision records are stubbed; a lease's marker is collected after its expiry plus
+that LWW can regress. Lower decision records are tombstoned (a learner never overwrites a tombstone; steady state per slot is the
+sentinel, the top record and its marker); a lease's marker is collected after its expiry plus
 `max_clock_drift_ms`; a permanent marker never. Code: `src/consensus.rs` (`collect_finished`, `shrink_acceptor`,
 `collect_records`, `claim_envelope`, `prepare_slot`); tests: `src/agent/lock_lifecycle_tests.rs` (black-box, one per
 §9 row) and `src/agent/lock_lifecycle_api_tests.rs`.

@@ -645,6 +645,15 @@ fn legacy_live(kv: &crate::store::KvState, slot: &str, now_ms: u64) -> Option<(B
     (now_ms.saturating_sub(written_ms) <= lease_ms).then_some((data, hlc))
 }
 
+/// The digest of `slot`'s live decision's value — see [`ConsensusEngine::live_digest`].
+pub(crate) fn live_digest(kv: &crate::store::KvState, slot: &str, now_ms: u64) -> Option<[u8; 32]> {
+    match crate::consensus_life::read_slot(kv, slot, mycelium_core::sim_seam::wall_now_ms()) {
+        crate::consensus_life::SlotView::Top(top) => (!top.ended).then_some(top.env.value_digest),
+        crate::consensus_life::SlotView::Unknown => None,
+        crate::consensus_life::SlotView::NoRecord => legacy_live(kv, slot, now_ms).map(|(v, _)| value_digest(&v)),
+    }
+}
+
 /// **The ballot at or below which `slot`'s latest decision is known to be over**: the top decision
 /// record's ballot when it is released or its lease is past on this node's wall clock (design §2.3).
 /// `None` when it is live, unknown here, or the slot has no decision record (the legacy reading's
@@ -885,21 +894,15 @@ impl ConsensusEngine {
         ballot
     }
 
-    /// Lease-aware committed read — see [`live_committed_value`]. An expired
-    /// lease reads as `None`: the slot has reopened for re-proposal.
-    fn live_committed(&self, slot: &str) -> Option<Bytes> {
-        live_committed_value(&self.task_ctx.kv_state, slot, causal_now_ms(&self.task_ctx.hlc))
+    /// The **digest** of the slot's live decision, for every refusal (row A): a live decision whose
+    /// large value has not arrived yet is still a live decision (review D7), so the engine compares
+    /// digests, never "is a value here".
+    fn live_digest(&self, slot: &str) -> Option<[u8; 32]> {
+        live_digest(&self.task_ctx.kv_state, slot, causal_now_ms(&self.task_ctx.hlc))
     }
 
-    /// Applies a KV update from within a consensus task.
-    /// Uses `try_send` for gossip dispatch — dropped frames recovered via anti-entropy.
-    /// **Not handed to the WAL**: a record that must survive a restart goes through
-    /// [`kv_set_returning`](Self::kv_set_returning) and [`persist_sync`](Self::persist_sync).
-    fn kv_set(&self, key: String, value: Bytes) {
-        let _ = self.kv_set_returning(key, value);
-    }
-
-    /// [`kv_set`](Self::kv_set), returning the applied update so the caller can WAL-append the
+    /// Applies a KV update from within a consensus task (`try_send` gossip; dropped frames recovered
+    /// by anti-entropy), returning the applied update so the caller can WAL-append the
     /// exact entry — apply to the store first, then hand the record to the WAL, never the reverse.
     fn kv_set_returning(&self, key: String, value: Bytes) -> GossipUpdate {
         let tc  = &self.task_ctx;
@@ -991,20 +994,6 @@ impl ConsensusEngine {
             Some((_, &seen)) if seen >= ballot => papaya::Operation::Abort(()),
             _ => papaya::Operation::Insert(ballot),
         });
-    }
-
-    /// **Legacy reading only** (a slot with no decision record, decided by a node older than row
-    /// A): whether this node can see that decision is over — it holds the committed entry, data or
-    /// tombstone, and the entry is not live. An absent entry is *not* over. For a slot with decision
-    /// records this is always `false`; [`ended`](Self::ended) answers instead, from the record.
-    fn decision_over(&self, slot: &str) -> bool {
-        if !matches!(crate::consensus_life::read_slot(&self.task_ctx.kv_state, slot, mycelium_core::sim_seam::wall_now_ms()),
-                     crate::consensus_life::SlotView::NoRecord) {
-            return false;
-        }
-        let present = self.task_ctx.kv_state.store.pin()
-            .get(format!("{}{}", consensus_ns::COMMITTED, slot).as_str()).is_some();
-        present && self.live_committed(slot).is_none()
     }
 
     /// The ballot of `slot`'s top decision record when it has ended (design §2.3); `0` when none. A
@@ -1136,18 +1125,26 @@ impl ConsensusEngine {
     /// ([`ACCEPTOR_COLLECT_BUDGET`]), candidates sorted by slot and rotated by a seam-drawn offset so
     /// failing slots cannot starve the rest and a replay selects the same ones.
     pub(crate) async fn collect_finished(&self) -> usize {
-        let mut candidates: Vec<(Arc<str>, u64)> = self.task_ctx.consensus_accepted.pin().iter()
-            .filter_map(|(slot, state)| {
-                let ended = ended_at(&self.task_ctx.kv_state, slot)?;
-                (state.promised <= ended && state.accepted.is_some()).then(|| (Arc::clone(slot), ended))
-            })
+        // Cheap filter first (review D3): a shrunk state (no acceptance) is never walked again, and
+        // `ended_at` — a scan of the slot's records — runs only for the rotated window, at most
+        // `ACCEPTOR_COLLECT_SCAN` slots a pass.
+        let mut walk: Vec<(Arc<str>, u64)> = self.task_ctx.consensus_accepted.pin().iter()
+            .filter(|(_, state)| state.accepted.is_some())
+            .map(|(slot, state)| (Arc::clone(slot), state.promised))
             .collect();
-        candidates.sort_by(|a, b| a.0.cmp(&b.0));
-        if candidates.len() > ACCEPTOR_COLLECT_BUDGET {
-            let start = mycelium_core::sim_seam::rng_u64_below("consensus/collect", candidates.len() as u64) as usize;
-            candidates.rotate_left(start);
-            candidates.truncate(ACCEPTOR_COLLECT_BUDGET);
+        walk.sort_by(|a, b| a.0.cmp(&b.0));
+        if !walk.is_empty() {
+            let start = mycelium_core::sim_seam::rng_u64_below("consensus/collect", walk.len() as u64) as usize;
+            walk.rotate_left(start);
         }
+        let candidates: Vec<(Arc<str>, u64)> = walk.into_iter()
+            .take(ACCEPTOR_COLLECT_SCAN)
+            .filter_map(|(slot, promised)| {
+                let ended = ended_at(&self.task_ctx.kv_state, &slot)?;
+                (promised <= ended).then_some((slot, ended))
+            })
+            .take(ACCEPTOR_COLLECT_BUDGET)
+            .collect();
         let mut collected = 0;
         for (slot, ended) in candidates {
             if !self.sync_top_record(&slot).await {
@@ -1209,11 +1206,12 @@ impl ConsensusEngine {
     }
 
     /// **Collect decision records and markers** (design §8), on the collector's tick: for up to
-    /// [`ACCEPTOR_COLLECT_BUDGET`] slots (sorted, seam-rotated), rewrite every decision record below
-    /// the top as a stub (so the slot still has record keys and never falls back to the legacy reading),
-    /// tombstone content-addressed values no remaining record names, and tombstone **lease** markers
-    /// whose expiry plus `max_clock_drift_ms` has passed. Never the top record; never a permanent
-    /// marker (review finding 1).
+    /// [`ACCEPTOR_COLLECT_BUDGET`] slots (sorted, seam-rotated), tombstone every decision record below
+    /// the top (the tombstone sweep then removes them), content-addressed values no remaining record
+    /// names, and **lease** markers whose expiry plus `max_clock_drift_ms` has passed and whose lineage
+    /// is not the top's — in sorted key order, so a replay writes the same sequence. Never the top
+    /// record, the slot's sentinel, a permanent marker (review finding 1) or the top lineage's marker.
+    /// Steady state per slot: the sentinel, the top record, the top's marker.
     pub(crate) fn collect_records(&self) -> usize {
         let wall = mycelium_core::sim_seam::wall_now_ms();
         let drift = self.task_ctx.config.max_clock_drift_ms;
@@ -1226,11 +1224,6 @@ impl ConsensusEngine {
         let mut touched = 0;
         for slot in slots {
             let Some(c) = crate::consensus_life::collectable(&self.task_ctx.kv_state, &slot, wall, drift) else { continue };
-            for key in c.stub_records {
-                let upd = self.kv_set_returning(key, Bytes::from_static(&crate::consensus_life::STUB));
-                self.wal_try(&upd);
-                touched += 1;
-            }
             for key in c.dead_keys {
                 let upd = self.kv_delete(&key);
                 self.wal_try(&upd);
@@ -1544,8 +1537,8 @@ impl ConsensusEngine {
         // timestamp (lease renewal). Any other live commitment supersedes us.
         // Takes the current value explicitly: the proposer may **adopt** a reported accepted value
         // between ballots, so a closure capturing `value` would pin it and go stale.
-        let superseded_by_live = |existing: &Bytes, current: &Bytes| -> bool {
-            !(lease_ms.is_some() && raw_of(current).as_ref() == Some(existing))
+        let superseded_by_live = |existing: &[u8; 32], current: &Bytes| -> bool {
+            !(lease_ms.is_some() && raw_of(current).map(|r| value_digest(&r)).as_ref() == Some(existing))
         };
         // Row A: the value Paxos decides is the decision envelope — the caller's value with its
         // window, lineage, proposer and token (design §2.1). Built once, at the first ballot.
@@ -1560,7 +1553,7 @@ impl ConsensusEngine {
         };
 
         for _attempt in 0..config.max_ballots {
-            if let Some(existing) = self.live_committed(&slot)
+            if let Some(existing) = self.live_digest(&slot)
                 && superseded_by_live(&existing, &value) {
                     return ConsensusResult::Superseded {
                         slot,
@@ -1651,7 +1644,7 @@ impl ConsensusEngine {
             // broadcast would let this node propose a value it then discovers it may not vote for,
             // and the acceptors that had already accepted it would be holding that ballot against
             // the value this node actually owes its vote to.
-            if let Some(existing) = self.live_committed(&slot)
+            if let Some(existing) = self.live_digest(&slot)
                 && superseded_by_live(&existing, &value) {
                     return ConsensusResult::Superseded { slot, ballot: self.read_ballot(&ballot_key) };
                 }
@@ -1742,7 +1735,7 @@ impl ConsensusEngine {
                 BallotOutcome::Timeout => {}
             }
 
-            if let Some(existing) = self.live_committed(&slot)
+            if let Some(existing) = self.live_digest(&slot)
                 && superseded_by_live(&existing, &value) {
                     return ConsensusResult::Superseded {
                         slot,
@@ -1844,12 +1837,12 @@ impl ConsensusEngine {
         // Epoch lease window (ms), with the same renewal exception as `propose`:
         // a live same-value leased commitment may be re-proposed to refresh it.
         let lease_ms = config.committed_lease_secs.map(|s| s.saturating_mul(1000));
-        let superseded_by_live = |existing: &Bytes, current: &Bytes| -> bool {
-            !(lease_ms.is_some() && raw_of(current).as_ref() == Some(existing))
+        let superseded_by_live = |existing: &[u8; 32], current: &Bytes| -> bool {
+            !(lease_ms.is_some() && raw_of(current).map(|r| value_digest(&r)).as_ref() == Some(existing))
         };
 
-        if let Some(existing) = self.live_committed(&slot)
-            && !(lease_ms.is_some() && existing == value) {
+        if let Some(existing) = self.live_digest(&slot)
+            && !(lease_ms.is_some() && existing == value_digest(&value)) {
                 return ConsensusResult::Superseded { slot, ballot: self.read_ballot(&ballot_key) };
             }
 
@@ -2019,8 +2012,8 @@ impl ConsensusEngine {
                         if all_ready {
                             // Lost race with another proposer mid-ballot: refuse
                             // to clobber a different live commitment.
-                            if let Some(existing) = self.live_committed(&slot)
-                                && raw_of(&value).as_ref() != Some(&existing) {
+                            if let Some(existing) = self.live_digest(&slot)
+                                && raw_of(&value).map(|r| value_digest(&r)) != Some(existing) {
                                     return ConsensusResult::Superseded {
                                         slot, ballot: self.read_ballot(&ballot_key),
                                     };
@@ -2053,7 +2046,7 @@ impl ConsensusEngine {
                 }
             }
 
-            if let Some(existing) = self.live_committed(&slot)
+            if let Some(existing) = self.live_digest(&slot)
                 && superseded_by_live(&existing, &value) {
                     return ConsensusResult::Superseded { slot, ballot: self.read_ballot(&ballot_key) };
                 }
@@ -2187,14 +2180,7 @@ impl ConsensusEngine {
                 }
             }
         }
-        // A renewal (design §4, Q2) replaces this proposer's own live decision with a new one of the
-        // same lineage: the acceptances of that lineage by this proposer are the decision being
-        // replaced, not a value it must adopt.
-        if let Some(lineage) = carry.renewing {
-            reports.retain(|r| !r.2.as_ref()
-                .and_then(|b| crate::consensus_life::Envelope::decode(b))
-                .is_some_and(|e| e.lineage == lineage && e.proposer == *me));
-        }
+
         // `current` is the proposer's own value, or one adopted from a refusal; the reports decide
         // whether it may still be carried. Acceptances at or below the decided ballot belong to the
         // previous decision — but are set aside **only when this node can see that decision is
@@ -2206,7 +2192,19 @@ impl ConsensusEngine {
         // Row A: a slot whose top decision record has ended — released, or its lease past — sets
         // aside every acceptance at or below that record's ballot (design §2.3). The record carries
         // its own ballot, so this needs neither the committed entry nor the decided floor.
-        set_aside_finished(&mut reports, self.decided_floor(slot), self.decision_over(slot), self.ended(slot));
+        // An upgraded proposer **never** sets acceptances aside by `decided` (review D2): `decided`
+        // arrives with a commit's legacy keys and says nothing about whether the decision ended. Only
+        // the top decision record's own end does. A legacy decision is therefore never set aside here
+        // — its acceptance is adopted and re-committed as a record, which then ends by its window.
+        set_aside_finished(&mut reports, 0, false, self.ended(slot));
+        // A renewal (design §4, Q2) replaces this proposer's own live decision with a new one of the
+        // same lineage — but only when the **highest** acceptance the promise quorum reports is that
+        // lineage. Decided on the full report set (review D1): dropping the own-lineage reports and
+        // adopting the best of the rest would let a renewal adopt a *lower* value over its own higher
+        // decided acceptance.
+        if carry.renewing.is_some() && top_is_renewed_lineage(&reports, carry) {
+            return Phase1::Ready(Phase1Choice::Keep);
+        }
         Phase1::Ready(choose_after_prepare(current, &reports))
     }
 
@@ -2237,8 +2235,8 @@ impl ConsensusEngine {
         let (passes, _, _) = self.topology_check(voters, group_name);
         if !passes { return None; }
 
-        if let Some(existing) = self.live_committed(slot)
-            && raw_of(value).as_ref() != Some(&existing) {
+        if let Some(existing) = self.live_digest(slot)
+            && raw_of(value).map(|r| value_digest(&r)) != Some(existing) {
                 return Some(ConsensusResult::Superseded {
                     slot:   Arc::clone(slot),
                     ballot: self.read_ballot(ballot_key),
@@ -2270,6 +2268,11 @@ impl ConsensusEngine {
         let mut persisted = true;
         if let Some(env) = &env {
             let (record, external) = env.stored();
+            if self.get(&crate::consensus_life::sentinel_key(slot)).is_none() {
+                let upd = self.set_async(&crate::consensus_life::sentinel_key(slot),
+                    Bytes::from_static(&crate::consensus_life::SENTINEL)).await;
+                persisted &= self.persist_sync(slot, &upd, "decision sentinel").await;
+            }
             if let Some(v) = external {
                 let upd = self.set_async(&crate::consensus_life::value_key(slot, &env.value_digest), v).await;
                 persisted &= self.persist_sync(slot, &upd, "decision value").await;
@@ -2527,6 +2530,13 @@ impl Carry {
     }
 }
 
+/// Whether every report at the highest reported ballot is an acceptance of the lineage `carry` renews
+/// (and there is at least one) — the only case in which a renewal keeps its own new envelope.
+fn top_is_renewed_lineage(reports: &[AcceptReport], carry: &Carry) -> bool {
+    let Some(top) = reports.iter().map(|r| r.0).max() else { return false };
+    reports.iter().filter(|r| r.0 == top).all(|r| r.2.as_ref().is_some_and(|b| carry.renews(b)))
+}
+
 /// The caller's value inside a decision envelope; `None` for bytes that are not an envelope.
 pub(crate) fn raw_of(envelope: &Bytes) -> Option<Bytes> {
     crate::consensus_life::Envelope::decode(envelope).and_then(|e| e.value)
@@ -2749,6 +2759,11 @@ pub(crate) const DECIDED_FLOOR_ANOMALY_MARGIN: u64 = 1 << 32;
 /// (a `None` there would admit any proposer at `e`, which is how a pre-2.30.0 record reads).
 #[cfg(feature = "consensus")]
 pub(crate) const FLOOR_SENTINEL: u64 = u64::MAX;
+
+/// How many slots one collection pass examines (a record scan each) — the review's D3 bound on the
+/// pass's synchronous work, whatever the history.
+#[cfg(feature = "consensus")]
+pub(crate) const ACCEPTOR_COLLECT_SCAN: usize = 1024;
 
 /// How often a consensus listener collects acceptor state whose decision is over (row A, C2).
 #[cfg(feature = "consensus")]
@@ -3302,7 +3317,7 @@ async fn answer_prepare(ctx: &ConsensusEngine, slot: Arc<str>, ballot: u64, prop
             }
             let accepted_ballot = acc.as_ref().map(|(b, _)| *b).unwrap_or(0);
             let accepted_digest = acc.as_ref().map(|(_, a)| a.digest());
-            let committed_digest = ctx.live_committed(&slot).map(|c| value_digest(&c));
+            let committed_digest = ctx.live_digest(&slot);
             let ack = if term {
                 ConsensusMsg::PrepareAckTerm {
                     slot: Arc::clone(&slot), ballot, voter: ctx.task_ctx.node_id.clone(),
@@ -3486,7 +3501,7 @@ pub(crate) async fn run_consensus_listener(
                 // A live commit of a different value refuses the proposal outright: the slot is
                 // decided, whatever ballot the proposal carries.
                 let proposed_raw = if term { raw_of(&value) } else { Some(value.clone()) };
-                let decided_otherwise = ctx.live_committed(&slot).is_some_and(|c| Some(c) != proposed_raw);
+                let decided_otherwise = ctx.live_digest(&slot).is_some_and(|d| Some(d) != proposed_raw.as_ref().map(value_digest));
                 let floor = ctx.floor(&slot);
                 let claimed = !decided_otherwise && if term {
                     claim_envelope(&accepted, &slot, ballot, &value, proposer.id_hash(), floor)
@@ -3628,13 +3643,15 @@ pub(crate) async fn run_consensus_listener(
                                 format!("conflicting COMMIT for live slot {slot} at ballot {ballot}"),
                             );
                         }
+                        // Counted, and **still written** (review D5): a legitimate handoff whose release
+                        // marker lags the new holder's COMMIT looks exactly like this, and the record
+                        // is the newer decision's, at a higher ballot — dropping it would leave this
+                        // node reading the old holder. Detection, not prevention.
                         tracing::warn!(
                             slot = %slot, ballot,
-                            "commit conflict: COMMIT carries a different value for a \
-                             live committed slot; not endorsing \
-                             (see SystemStats::commit_conflicts)"
+                            "commit conflict: a COMMIT of another decision above this node's live one; \
+                             written and counted (see SystemStats::commit_conflicts)"
                         );
-                        continue;
                     }
 
                 // The learner writes the **decision record** — the committer's bytes, so last-writer-
@@ -3642,15 +3659,25 @@ pub(crate) async fn run_consensus_listener(
                 // end. A record key this node already collected to a stub stays a stub. The acceptor's
                 // memory is kept (erasing it on commit dropped promises, 2026-10-08 review); it is
                 // shrunk only once the decision is over (`collect_finished`, row A).
+                // **Never overwrite a tombstone**: a record key this node holds as a tombstone was
+                // collected below a higher top, and a late COMMIT must not bring it back.
                 let key = crate::consensus_life::record_key(&slot, ballot);
-                let stubbed = ctx.task_ctx.kv_state.store.pin().get(key.as_str())
-                    .is_some_and(|e| e.data.as_deref() == Some(&crate::consensus_life::STUB[..]));
-                if stubbed { continue; }
+                let collected = ctx.task_ctx.kv_state.store.pin().get(key.as_str()).is_some_and(|e| e.data.is_none());
+                if collected { continue; }
                 let (record, external) = env.stored();
-                if let Some(v) = external {
-                    ctx.kv_set(crate::consensus_life::value_key(&slot, &env.value_digest), v);
+                // Applied, then handed to the WAL (review D7: a learner's copy reached disk only with the
+                // next snapshot); collection fsyncs the top before relying on it.
+                if ctx.get(&crate::consensus_life::sentinel_key(&slot)).is_none() {
+                    let upd = ctx.kv_set_returning(crate::consensus_life::sentinel_key(&slot),
+                        Bytes::from_static(&crate::consensus_life::SENTINEL));
+                    ctx.wal_try(&upd);
                 }
-                ctx.kv_set(key, record);
+                if let Some(v) = external {
+                    let upd = ctx.kv_set_returning(crate::consensus_life::value_key(&slot, &env.value_digest), v);
+                    ctx.wal_try(&upd);
+                }
+                let upd = ctx.kv_set_returning(key, record);
+                ctx.wal_try(&upd);
                 let _ = ctx.record_decided(&slot, ballot).await;
             }
         }

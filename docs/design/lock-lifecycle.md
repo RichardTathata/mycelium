@@ -1,6 +1,7 @@
 # One record per decision: the lifecycle of a lock, a lease and a leadership (row A)
 
-**Status:** **adopted** 2026-10-10 (rev 2, after the design review on PR #600; rev 1 was the draft at `a0acdf20`).
+**Status:** **adopted** 2026-10-10 (rev 3: the implementation review on PR #600 — D1–D7, the per-slot sentinel and
+index; rev 2 after the design review; rev 1 the draft at `a0acdf20`).
 Plan of record: `docs/plans/post-360-hardening.md`, row **A** with **C1** and **C2**. It replaces the reading rules
 PR #600 built over three rounds, each broken by its review. The C1 API is unchanged: `elect_leader` /
 `elect_leader_receipt` / `elect_leader_with`, `LeaderTerm`, `DEFAULT_LEADER_LEASE`, `release_leadership`,
@@ -80,10 +81,18 @@ holds with data. Then:
 read to decide liveness.
 
 **Fallback (Q3).** A node falls back to the legacy reading (`committed` + an 8-byte `lease` measured from the
-committed entry) **only when the slot has no decision-record key at all**. Collection never tombstones a record
-(the prefix index drops tombstoned keys, so a tombstone would be indistinguishable from "never decided"): it
-rewrites a lower record as a 2-byte **stub**. A slot whose record keys are all stubs (the top not yet arrived)
-reads *not live, unknown*: a proposer proceeds to prepare, and the promise quorum reports what was accepted.
+committed entry) **only when the slot has no decision record and no sentinel**. Every writer of a decision record
+also writes the slot's **sentinel** `consensus/life/{esc}/s` (the same two bytes, never collected), so a slot that
+has ever had a record never falls back, even after its lower records are tombstoned and swept. A slot with the
+sentinel but no record held (the top not yet arrived) reads *not live, unknown*: a proposer proceeds to prepare, and
+the promise quorum reports what was accepted.
+
+**Reading cost (review D3).** Layer I files every key under `consensus/life/{esc}/` under one scope in a read index
+(`KvStore::scope_index`, the same reconcile step as the capability index; a read index, never a write condition), so
+`read_slot` costs O(the slot's keys) — in steady state three (§8) — instead of a scan of every `consensus/` key.
+Measured (debug build, 5,000 slots × 100 records each, 500,000 records): the prefix-bucket scan the first
+implementation used took **136.7 ms** per read; the scope-index read takes **1.35 ms** with all 100 records of the
+slot still present, and less after collection.
 
 ### 2.4 Why the max-ballot record is the latest decision
 
@@ -152,10 +161,11 @@ A legacy acceptance (a raw value accepted from an older proposer, flagged `accep
 by wrapping it in an envelope with the adopter's term — the one place Q1 is not closed, stated in §7.
 
 **Renewal (Q2)** is explicit. A proposer renews only a decision it **originally proposed**: its live top record's
-`proposer` is itself and its `value` equals the value it proposes. The renewal envelope keeps `lineage` (and
-`value`, `proposer`), takes a fresh `term` and `token`, and phase 1 sets aside acceptances of **that lineage by that
-proposer** — the one case where a reported acceptance is not adopted. Any other proposer, or any value, adopts as
-above. A release marks the lineage, so it ends the decision **and every renewal of it**, in flight or later
+`proposer` is itself and its `value` equals the value it proposes. The renewal envelope keeps `lineage` — the
+lineage it renews — and `value` and `proposer`, and takes a fresh `term` and `token`. Phase 1 decides on the **full**
+report set: the renewal keeps its own envelope only when the **highest** acceptance the promise quorum reports is
+that lineage's (review D1 — dropping the own-lineage reports and adopting the best of the rest let a renewal adopt a
+*lower* value over its own higher decided acceptance); otherwise it adopts the highest, as any proposer does. A release marks the lineage, so it ends the decision **and every renewal of it**, in flight or later
 (`release_leadership` can no longer be overtaken by its own renewal); a new election after a release starts a new
 lineage.
 
@@ -201,6 +211,15 @@ re-writes its record, and its marker still ends it.
 | **proposer** | writes only legacy keys; an upgraded node reads that slot the legacy way only while it holds no decision-record key for it. |
 | **reader of a release** | sees the 8-byte `lease` of 0: released. |
 
+**An upgraded proposer never sets an acceptance aside by `decided`** (review D2): only the top decision record's
+own end does. A decision made by an older proposer is therefore never set aside by an upgraded one; its acceptance
+is adopted (wrapped with the adopter's window) and re-committed as a record, which then ends by that window — a
+liveness cost of one window in a mixed fleet, never a second value.
+
+**The visibility gap, stated (review D7):** an upgraded node reads a slot the legacy way only while the slot has no
+sentinel. A decision an **older** proposer makes on a slot that already has records is invisible to upgraded
+readers, which keep reading the slot's top record — upgrade every proposer before relying on a slot.
+
 **Residuals for 2.31 readers, stated:** K3 (a late `Commit` re-stamps `committed` over a release, reviving it for
 2.31 readers until the lease rewrite reaches them), round 1's live-for-ever pairings and round 2's two-holder pairing
 remain *for 2.31 readers*, which still read the three legacy keys. Upgraded readers are unaffected. The guarantee
@@ -214,16 +233,20 @@ holds once every node is upgraded; the legacy keys stop being written at a later
   (finding 5) — then **shrinks** its memory and its node-owned acceptor record to `{promised: e}` (no proposer, no
   acceptance) under the compare-and-set re-check and `acceptor_records`. The floor that refuses `≤ e` is this node's
   own record, never the shared LWW `decided` key, which can regress (finding 5).
-- **Decision records below the top** are rewritten as stubs by a node holding the top (and their large values
-  tombstoned, unless the top shares the digest). A node that receives a stub before the top reads *not live,
-  unknown* (§2.3); a lower record a late `CommitTerm` re-writes is never the top while the top is held, and a
-  learner does not overwrite a stub it holds. Stubs stay — two bytes per decided ballot on every node, the cost of
-  never falling back.
-- **Markers:** a permanent decision's marker is **never** collected (finding 1); a lease's marker is collected only
-  once its `expires_at_ms` plus `max_clock_drift_ms` has passed on the collector's wall clock — after which the
-  window ends the record without it. The marker carries the kind and expiry the collector needs.
+- **Decision records below the top** are **tombstoned** by a node holding the top (and their large values, unless
+  the top shares the digest), in sorted key order (replay-deterministic); the tombstone sweep removes them. A
+  learner **never overwrites a tombstone** it holds with a late `CommitTerm`; a lower record resurrected after the
+  sweep sits below the top, or reads as ended (its marker or its window), or is the same identity as the top.
+  **Steady state per slot: the sentinel, the top record, the top's marker** — O(1), whatever the history (a test
+  shows 1,000 acquisitions of one lock leave at most three keys).
+- **Markers:** a permanent decision's marker is **never** collected (finding 1) — **the trade:** one marker per
+  released *permanent* decision stays on every node for good, the price of a permanent decision never reviving; a
+  lease's marker is collected only once its `expires_at_ms` plus `max_clock_drift_ms` has passed on the collector's
+  wall clock (after which the window ends the record without it), and never while its lineage is the top's (so a
+  later renewal's longer window is not orphaned). The marker carries the kind and expiry the collector needs.
 - **Bounded:** 64 slots a tick, on the collector's own task (first pass one interval after start), candidates
-  sorted by slot before a seam-drawn rotation.
+  sorted by slot before a seam-drawn rotation; a state already shrunk is skipped before any record scan, and at most
+  1,024 slots are scanned a pass (review D3).
 - **The shrunk floor** promises `e` to no proposer (a sentinel `promised_to`), so it refuses a prepare and an
   accept *at* `e` as well as below it.
 
@@ -266,12 +289,26 @@ Each row is a test (listeners on every node, structural readiness polls, exact r
 
 - **Unchanged:** the C1 API; the prepare phase, vote binding and promise rules (over envelope bytes); the floor
   tripwire; the collector's task, budget and lock (`acceptor_records`, lock-order row 56).
-- **Cost:** one record per decided ballot (lower ones collected), one prefix scan per live read, five appended wire
-  variants, an fsync of the record before COMMIT, and the legacy keys until a later governed MINOR.
-- **Limits, stated:** lease expiry rests on bounded wall-clock skew between nodes (drift lengthens a lease on a fast
-  reader, and a slow reader can still believe a lease live after the holder's monotonic deadline — fencing covers
-  that); a member signing a forged decision is outside CFT; a permanent decision of a vanished proposer cannot be
-  released (§5); Q1 for values first proposed by an older node (§7).
+- **Cost:** three keys per slot in steady state (§8), one scope read per live read, five appended wire variants, an
+  fsync of the record before COMMIT, the legacy keys until a later governed MINOR, and one marker per released
+  permanent decision.
+- **One number for lease and deadline (review D4).** A lock's lease is its TTL rounded **up** to whole seconds, and
+  the holder's monotonic deadline is the acquisition's start plus the TTL — so the deadline is never after the lease
+  ends (a 1.9 s TTL leased as 1 s outlived its lease by ~0.9 s).
+- **The skew bound, stated (and §10's direction corrected).** Readers judge a lease on their own wall clock against
+  the original proposer's wall-clock `expires_at_ms`. A reader whose clock runs **ahead** of the proposer's by δ ends
+  the lease **δ early** — and another holder can then be granted while the first is still inside its own deadline.
+  The holder must therefore stop δ before its deadline, where δ is the deployment's wall-clock skew bound; nothing in
+  the substrate knows δ, so fencing on `token` at the resource is what covers it. A reader whose clock runs behind
+  only lengthens the lease.
+- **Limits, stated:** a member signing a forged decision is outside CFT — and a forged `CommitTerm` above a live
+  decision is now written and counted (review D5: a legitimate handoff whose release marker lags looks the same); a
+  permanent decision of a vanished proposer cannot be released (§5); Q1 for values first proposed by an older node
+  (§7).
+- **Pre-existing, stated: cluster quorum shrinks with the roster.** A cluster-scoped proposal's quorum is a majority
+  of `peers + 1` as this node observes them, so when nodes die the quorum shrinks, and two sides of a partition can
+  each form one. Several rows here are shown on a cluster scope; their guarantees hold for a stable roster. A fixed,
+  governed electorate is post-360 row **P2** (#601); for other cluster-scoped consensus this is the stated limit.
 
 ## 11. Decisions on the review questions
 

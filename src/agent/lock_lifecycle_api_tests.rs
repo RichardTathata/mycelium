@@ -92,6 +92,22 @@ async fn c1_elect_leader_is_leased_by_default_with_a_release_path() {
     a.shutdown().await;
 }
 
+/// Row 13 (R2-3): a live permanent leader whose decision a stale-view node re-committed at a higher
+/// ballot (the same envelope, adopted) releases — and the release ends the re-commit too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn row13_a_release_ends_an_adopted_recommit() {
+    let (a, _l) = solo().await;
+    a.mesh().join_group("r13b");
+    a.consensus().elect_leader_with("r13b", crate::LeaderTerm::Permanent).await.expect("elects");
+    let env = top_env(&a, "leader/r13b");
+    let higher = decided(&a, "leader/r13b") + 3;
+    deliver(&a, &ConsensusMsg::CommitTerm { slot: Arc::from("leader/r13b"), ballot: higher, envelope: env.encode() }, "probe/r13b").await;
+    assert!(matches!(top(&a, "leader/r13b"), SlotView::Top(t) if t.ballot == higher), "the re-commit is the top");
+    assert!(a.consensus().release_leadership("r13b").await, "a live permanent leader was refused its release");
+    assert_eq!(a.consensus().consensus_get("leader/r13b"), None, "the adopted re-commit outlived the release");
+    a.shutdown().await;
+}
+
 /// C1: a dead leader's lease lapses and a survivor's election succeeds, `Decided`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn c1_a_dead_leaders_lease_lapses_and_a_new_election_succeeds() {
@@ -203,13 +219,19 @@ async fn row05_06_19_a_commit_carries_the_whole_decision_and_a_lower_one_never_o
     a.shutdown().await;
 }
 
-/// Row 7 (R1-2): an older node's re-stamp of `committed` does not change what an upgraded node reads.
+/// Row 7 (R1-2): a legacy re-stamp of `committed` — live by the legacy reading — does not revive an
+/// ended decision for an upgraded reader. (A reader of the legacy keys would read it live.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn row07_a_legacy_restamp_of_committed_is_not_read() {
-    let a = node(port(), &[]).await;
-    assert!(matches!(a.consensus().cluster_propose("r07", Bytes::from_static(b"vB"), ConsensusConfig::default()).await, ConsensusResult::Committed { .. }));
-    let _ = a.kv().set("consensus/committed/r07", Bytes::from_static(b"vA"));
-    assert_eq!(a.consensus().consensus_get("r07").as_deref(), Some(b"vB".as_slice()));
+    let (a, _l) = solo().await;
+    let g = a.consensus().distributed_lock("r07", Duration::from_secs(60)).await.expect("acquire");
+    let held = a.consensus().consensus_get("lock/r07").expect("held");
+    g.release();
+    assert_eq!(a.consensus().consensus_get("lock/r07"), None);
+    // An older learner's re-stamp: the committed value, live for 60 s by the legacy reading.
+    let _ = a.kv().set("consensus/committed/lock/r07", held);
+    let _ = a.kv().set("consensus/lease/lock/r07", crate::consensus::encode_lease_ms(60_000));
+    assert_eq!(a.consensus().consensus_get("lock/r07"), None, "the legacy keys revived a released lock");
     a.shutdown().await;
 }
 
@@ -259,48 +281,59 @@ async fn row16_a_forged_record_ballot_is_counted() {
 }
 
 /// Row 18 (R3-2): a released permanent leader, holding a higher decided ballot but not the newer
-/// decision, cannot release again or address the newer decision; the newer leader reads live.
+/// decision, cannot release again or address the newer decision — even one whose lineage number
+/// equals its own (another proposer's); the newer leader reads live.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn row18_a_release_cannot_address_a_newer_decision() {
     let (a, _l) = solo().await;
     a.mesh().join_group("r18");
     a.consensus().elect_leader_with("r18", crate::LeaderTerm::Permanent).await.expect("elects");
+    let mine = top_env(&a, "leader/r18");
     assert!(a.consensus().release_leadership("r18").await);
     let _ = a.kv().set("consensus/decided/leader/r18", crate::consensus::encode_ballot(9));
     assert!(!a.consensus().release_leadership("r18").await, "a released leader released again");
-    let c = Envelope::new("leader/r18", Bytes::from_static(b"C"), Term::Permanent, 9, other_node(), 99);
+    let c = Envelope::new("leader/r18", Bytes::from_static(b"C"), Term::Permanent, mine.lineage, other_node(), 99);
     deliver(&a, &ConsensusMsg::CommitTerm { slot: Arc::from("leader/r18"), ballot: 9, envelope: c.encode() }, "probe/r18").await;
-    assert_eq!(a.consensus().consensus_get("leader/r18").as_deref(), Some(b"C".as_slice()), "the newer leader was ended");
+    assert_eq!(a.consensus().consensus_get("leader/r18").as_deref(), Some(b"C".as_slice()), "A's release ended the newer leader");
     a.shutdown().await;
 }
 
 /// Row 24 (review finding 1): a permanent decision's marker is never collected; a lease's only after
-/// its expiry plus the drift bound; lower records become stubs and the slot never falls back.
+/// its expiry plus the drift bound; lower records are tombstoned; the sentinel keeps a slot whose
+/// records are gone from ever reading the legacy way.
 #[test]
 fn row24_collection_never_drops_a_permanent_marker() {
     let kv = crate::store::KvState::new(1024);
-    let put = |k: String, v: Bytes| { kv.store.pin().insert(Arc::from(k.as_str()), crate::store::StoreEntry { data: Some(v), timestamp: 1 }); };
+    let put = |k: String, v: Bytes| crate::store::apply_and_notify(&kv, &crate::framing::GossipUpdate {
+        nonce: fastrand::u64(..), sender: 1, ttl: 1, is_tombstone: false, timestamp: 1, key: Arc::from(k.as_str()), value: v });
     let n = other_node();
     let perm = Envelope::new("s", Bytes::from_static(b"A"), Term::Permanent, 5, n.clone(), 1);
     let lease = Envelope::new("s", Bytes::from_static(b"L"), Term::Lease { ms: 1, expires_at_ms: 1_000 }, 7, n.clone(), 2);
     let top_env = Envelope::new("s", Bytes::from_static(b"C"), Term::Permanent, 9, n.clone(), 3);
+    put(life::sentinel_key("s"), Bytes::from_static(&life::SENTINEL));
     for (b, e) in [(5, &perm), (7, &lease), (9, &top_env)] {
         put(life::record_key("s", b), e.encode());
         put(life::marker_key("s", e.lineage, &e.proposer), life::encode_marker(e));
     }
     let c = life::collectable(&kv, "s", 1_000 + 300_000 + 1, 300_000).expect("a top is held");
-    assert_eq!(c.stub_records.len(), 2, "both lower records are stubbed");
+    assert!(c.dead_keys.contains(&life::record_key("s", 5)) && c.dead_keys.contains(&life::record_key("s", 7)), "lower records go");
+    assert!(!c.dead_keys.contains(&life::record_key("s", 9)), "never the top");
     assert!(c.dead_keys.contains(&life::marker_key("s", 7, &n)), "an expired lease marker past the drift bound goes");
     assert!(!c.dead_keys.contains(&life::marker_key("s", 5, &n)), "a permanent marker is never collected");
+    assert!(!c.dead_keys.contains(&life::sentinel_key("s")), "never the sentinel");
     let early = life::collectable(&kv, "s", 1_000 + 1, 300_000).expect("a top is held");
     assert!(!early.dead_keys.contains(&life::marker_key("s", 7, &n)), "not before the drift bound");
-    // A slot whose records are all stubs reads unknown — never the legacy fallback.
-    for b in [5u64, 7, 9] { put(life::record_key("s", b), Bytes::from_static(&life::STUB)); }
+    // Every record gone, the sentinel kept: unknown — never the legacy fallback.
+    for b in [5u64, 7, 9] {
+        crate::store::apply_and_notify(&kv, &crate::framing::GossipUpdate {
+            nonce: fastrand::u64(..), sender: 1, ttl: 1, is_tombstone: true, timestamp: 2, key: Arc::from(life::record_key("s", b).as_str()), value: Bytes::new() });
+    }
+    put("consensus/committed/s".into(), Bytes::from_static(b"legacy"));
     assert!(matches!(life::read_slot(&kv, "s", 0), SlotView::Unknown));
 }
 
 /// Row 25 (review finding 2): an upgraded learner ignores the legacy COMMIT — it writes neither
-/// `committed` nor `decided` from it.
+/// `committed` nor `decided` from it, and a released decision stays released.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn row25_the_legacy_commit_writes_nothing() {
     let (a, _l) = solo().await;
@@ -308,6 +341,14 @@ async fn row25_the_legacy_commit_writes_nothing() {
     deliver(&a, &legacy, "probe/r25").await;
     assert!(a.task_ctx.kv_state.store.pin().get("consensus/committed/r25").is_none(), "committed was written");
     assert_eq!(decided(&a, "r25"), 0, "decided was raised");
+    let g = a.consensus().distributed_lock("r25", Duration::from_secs(60)).await.expect("acquire");
+    let held = a.consensus().consensus_get("lock/r25").expect("held");
+    let ballot = decided(&a, "lock/r25");
+    g.release();
+    let late = ConsensusMsg::Commit { slot: Arc::from("lock/r25"), ballot: ballot + 1, value: held };
+    deliver(&a, &late, "probe/r25b").await;
+    assert_eq!(a.consensus().consensus_get("lock/r25"), None, "a legacy COMMIT revived a released lock");
+    assert_eq!(decided(&a, "lock/r25"), ballot, "a legacy COMMIT raised the floor");
     a.shutdown().await;
 }
 
