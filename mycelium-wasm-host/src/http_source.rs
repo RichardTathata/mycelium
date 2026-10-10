@@ -341,16 +341,50 @@ impl RangedBlobFetcher for HttpLibrarySource {
 /// Serving is delegated to an [`FsLibrarySource`] over the same directory, so everything a
 /// library directory offers — ranged reads, `list`, `remove` — is available on the stage.
 pub struct DiskStagedSource {
-    fetcher:     Arc<dyn RangedBlobFetcher>,
-    stage:       FsLibrarySource,
-    chunk_bytes: u64,
+    fetcher:         Arc<dyn RangedBlobFetcher>,
+    stage:           FsLibrarySource,
+    chunk_bytes:     u64,
+    /// The most one artifact may stage, in bytes. A holder's `size` reply is a claim from an
+    /// untrusted party; past this it is refused before a byte is requested.
+    max_stage_bytes: u64,
 }
+
+/// How one staging attempt ended ([`DiskStagedSource::try_stage`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StageOutcome {
+    /// The artifact is in the stage, verified (now, or already).
+    Staged,
+    /// No holder answered for it — nothing was attempted. Not a failure: a catalogue line can
+    /// gossip ahead of the bytes.
+    NoHolder,
+    /// An attempt was made and refused or failed (size past the ceiling, a failed piece, a hash
+    /// mismatch); nothing partial is kept.
+    Failed,
+}
+
+/// The most one artifact stages by default: 64 GiB — above the largest model blob the stem
+/// examples place, and a bound rather than none, so a holder answering `artifact.size` with
+/// `u64::MAX` is refused before the stage writes toward it. `DiskStagedSource::with_max_stage_bytes`
+/// and `StemOptions::max_stage_bytes` set it.
+pub const DEFAULT_MAX_STAGE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 
 impl DiskStagedSource {
     /// A staged source over `dir` (created if absent), pulling in [`DEFAULT_RANGE_CHUNK_BYTES`]
-    /// pieces.
+    /// pieces, each artifact bounded by [`DEFAULT_MAX_STAGE_BYTES`].
     pub fn open(fetcher: Arc<dyn RangedBlobFetcher>, dir: impl Into<std::path::PathBuf>) -> std::io::Result<Self> {
-        Ok(Self { fetcher, stage: FsLibrarySource::open(dir)?, chunk_bytes: DEFAULT_RANGE_CHUNK_BYTES })
+        Ok(Self {
+            fetcher,
+            stage: FsLibrarySource::open(dir)?,
+            chunk_bytes: DEFAULT_RANGE_CHUNK_BYTES,
+            max_stage_bytes: DEFAULT_MAX_STAGE_BYTES,
+        })
+    }
+
+    /// The most one artifact may stage. A `size` reply above it is refused before any range is
+    /// requested.
+    pub fn with_max_stage_bytes(mut self, max_stage_bytes: u64) -> Self {
+        self.max_stage_bytes = max_stage_bytes;
+        self
     }
 
     /// Override the range piece (min 1; tests use tiny pieces to exercise many rounds).
@@ -365,24 +399,48 @@ impl DiskStagedSource {
     }
 
     /// Pull `id` into the stage, verified, returning whether it is now staged. A miss, a store
-    /// that cannot be ranged, a range the store ignores, a short or failed piece, or a hash
-    /// mismatch each return `false` with the reason logged; nothing partial is left behind.
-    /// Idempotent — a staged id short-circuits without a request.
+    /// that cannot be ranged, a range the store ignores, a short or failed piece, a size past
+    /// the stage's ceiling, or a hash mismatch each return `false` with the reason logged;
+    /// nothing partial is left behind. Idempotent — a staged id short-circuits without a request.
     pub async fn stage_artifact(&self, id: &ArtifactId) -> bool {
+        self.stage_artifact_bounded(id, 0).await
+    }
+
+    /// [`stage_artifact`](Self::stage_artifact) under the catalogue entry's own size hint as well:
+    /// `size_hint` (0 = none) is the entry's `size_bytes`, and a holder's `size` reply above it —
+    /// or above the stage's ceiling — is refused **before any range is requested**. The hint is
+    /// a ranking hint outside the signature, so it bounds the pull without being trusted for
+    /// anything else: the hash still decides what is kept.
+    pub async fn stage_artifact_bounded(&self, id: &ArtifactId, size_hint: u64) -> bool {
+        self.try_stage(id, size_hint).await == StageOutcome::Staged
+    }
+
+    /// [`stage_artifact_bounded`](Self::stage_artifact_bounded), saying why not: no holder
+    /// answered for `id` yet ([`StageOutcome::NoHolder`] — nothing was attempted) is told apart
+    /// from an attempt that failed ([`StageOutcome::Failed`]), so a caller backing off retries
+    /// can back off only the second.
+    pub async fn try_stage(&self, id: &ArtifactId, size_hint: u64) -> StageOutcome {
         use sha2::{Digest, Sha256};
         use tokio::io::AsyncWriteExt;
 
         if self.stage.size(id).is_some() {
-            return true;
+            return StageOutcome::Staged;
         }
         let total = match self.fetcher.size(id).await {
             Ok(Some(n)) => n,
-            Ok(None) => return false,
+            Ok(None) => return StageOutcome::NoHolder,
             Err(e) => {
                 tracing::warn!(artifact = %id, %e, "cannot stage: size unknown");
-                return false;
+                return StageOutcome::Failed;
             }
         };
+        let ceiling = if size_hint > 0 { size_hint.min(self.max_stage_bytes) } else { self.max_stage_bytes };
+        if total > ceiling {
+            tracing::warn!(artifact = %id, total, ceiling, size_hint, max_stage_bytes = self.max_stage_bytes,
+                "cannot stage: the holder's size reply is past the ceiling — refused before any byte");
+            metrics::counter!("mycelium_artifact_stage_refused_total", "reason" => "size_past_ceiling").increment(1);
+            return StageOutcome::Failed;
+        }
         static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let tmp = self.stage.dir().join(format!(
             ".part-{}-{}-{}",
@@ -418,17 +476,17 @@ impl DiskStagedSource {
         .await;
         match result {
             Ok(()) => match tokio::fs::rename(&tmp, self.stage.dir().join(id.to_hex())).await {
-                Ok(()) => true,
+                Ok(()) => StageOutcome::Staged,
                 Err(e) => {
                     tracing::warn!(artifact = %id, %e, "staged bytes verified but could not be placed");
                     let _ = tokio::fs::remove_file(&tmp).await;
-                    false
+                    StageOutcome::Failed
                 }
             },
             Err(e) => {
                 tracing::warn!(artifact = %id, %e, "staging failed — nothing kept");
                 let _ = tokio::fs::remove_file(&tmp).await;
-                false
+                StageOutcome::Failed
             }
         }
     }
@@ -720,6 +778,63 @@ mod tests {
         let h = hits.load(Ordering::SeqCst);
         assert!(staged.stage_artifact(&id).await);
         assert_eq!(hits.load(Ordering::SeqCst), h);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The staging pull is bounded before its first byte: a peer that answers `artifact.size`
+    /// with `u64::MAX` (or any size past the entry's hint or the stage's ceiling) is refused with
+    /// no range requested and no partial file created — the size reply is a hint from an untrusted
+    /// holder, and the stage must not write toward it. Seen failing first: the stage created its
+    /// `.part` file and asked for the first range.
+    #[tokio::test]
+    async fn a_size_reply_past_the_ceiling_is_refused_before_any_byte_is_written() {
+        struct Liar { ranges: AtomicUsize }
+        #[async_trait::async_trait]
+        impl BlobFetcher for Liar {
+            async fn fetch_remote(&self, _id: &ArtifactId) -> Result<Option<Bytes>, String> { Ok(None) }
+        }
+        #[async_trait::async_trait]
+        impl RangedBlobFetcher for Liar {
+            async fn size(&self, _id: &ArtifactId) -> Result<Option<u64>, String> { Ok(Some(u64::MAX)) }
+            async fn fetch_range(&self, _id: &ArtifactId, _o: u64, _l: u64) -> Result<Option<Bytes>, String> {
+                // Count the request, then end the pull: on the unfixed code the stage would
+                // otherwise write toward u64::MAX one piece at a time.
+                self.ranges.fetch_add(1, Ordering::SeqCst);
+                Err("the holder went away".into())
+            }
+        }
+        let liar = Arc::new(Liar { ranges: AtomicUsize::new(0) });
+        let dir = std::env::temp_dir().join(format!("mycelium-stage-ceiling-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let staged = DiskStagedSource::open(Arc::clone(&liar) as Arc<dyn RangedBlobFetcher>, &dir).unwrap();
+        let id = ArtifactId::of(b"whatever the catalogue named");
+
+        // The stage's own ceiling (the default) refuses u64::MAX...
+        assert!(!staged.stage_artifact(&id).await, "a size of u64::MAX must not stage");
+        assert_eq!(liar.ranges.load(Ordering::SeqCst), 0, "no range was requested");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "no partial file was created");
+
+        // ...and the entry's own size hint is a tighter ceiling than the stage's: a holder
+        // claiming more than the catalogue line said is refused the same way.
+        struct Inflated;
+        #[async_trait::async_trait]
+        impl BlobFetcher for Inflated {
+            async fn fetch_remote(&self, _id: &ArtifactId) -> Result<Option<Bytes>, String> { Ok(None) }
+        }
+        #[async_trait::async_trait]
+        impl RangedBlobFetcher for Inflated {
+            async fn size(&self, _id: &ArtifactId) -> Result<Option<u64>, String> { Ok(Some(4096)) }
+            async fn fetch_range(&self, _id: &ArtifactId, _o: u64, _l: u64) -> Result<Option<Bytes>, String> {
+                panic!("a range was requested past the entry's size hint")
+            }
+        }
+        let staged = DiskStagedSource::open(Arc::new(Inflated), &dir).unwrap();
+        assert!(!staged.stage_artifact_bounded(&id, 1024).await, "4096 claimed against a 1024 hint");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        // A tighter stage ceiling than the hint is refused too.
+        let staged = DiskStagedSource::open(Arc::new(Inflated), &dir).unwrap().with_max_stage_bytes(2048);
+        assert!(!staged.stage_artifact_bounded(&id, 8192).await);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

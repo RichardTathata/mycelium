@@ -193,4 +193,19 @@ pub static RULES: &[RuleDescriptor] = &[
         tests: &["a_declared_activation_runs_after_placement_and_its_probe_gates_the_capability"], trace: CatalogueOnly,
         summary: "Withdrawal removes the install and tombstones its advertisement; restart ≡ provisioning is how it comes back.",
     },
+    RuleDescriptor {
+        id: "host.emit_admission", revision: 1, subsystem: "mycelium-wasm-host::host", responsibilities: &[Admission, Authority],
+        trigger: "a hosted component calls its `mesh.emit(kind, payload)` import",
+        inputs: &[Input { source: "the component's namespace, the kinds the host listed for it, and the node's `protected_rpc_kinds` — all set at instantiation", scope: "this component instance", freshness: "fixed at instantiation" }],
+        outcomes: &[
+            Outcome { kind: Action, reasons: &["admitted"] },
+            Outcome { kind: Refusal, reasons: &["protected_kind", "foreign_kind", "malformed"] },
+        ],
+        effects: &["the signal is emitted at cluster scope, or dropped — never sent — and counted: `mycelium_wasm_host_emits_refused_total{reason}`"],
+        guards: &[Guard::Authority], may_trigger: &[], may_inhibit: &[], depends_on: &[],
+        symbol: "host::HostState::emit", docs: "docs/reference/unit-file.md",
+        tests: &["a_component_cannot_emit_a_protected_kind_but_can_emit_in_its_own_namespace", "a_protected_kind_is_refused_even_when_listed"],
+        trace: CatalogueOnly,
+        summary: "A component emits only under `comp/{namespace}/…` or a kind the host listed for it, and never a protected RPC kind — an emit from inside the process would reach that kind's handlers unframed, past the door that checks authority.",
+    },
 ];

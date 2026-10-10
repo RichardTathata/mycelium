@@ -742,7 +742,7 @@ impl Provisioner {
                         Some(agent.capabilities().advertise_capability(cap, ADVERTISE_INTERVAL));
                 })
             };
-            let ctx = RuntimeCtx { agent: Arc::clone(&agent), trace: trace.clone(), install_token: token };
+            let ctx = RuntimeCtx { agent: Arc::clone(&agent), trace: trace.clone(), install_token: token, shadow };
 
             let result = runtime.install(entry, source, ctx, progress).await;
             loading.lock().unwrap().1.take(); // install resolved — the loading tier ends
@@ -2174,6 +2174,77 @@ mod tests {
                 b"for real".to_vec(), Duration::from_secs(5))
             .await.expect("serves");
         assert_eq!(reply.as_ref(), b"for real");
+
+        agent.shutdown().await;
+    }
+
+    /// D20 says the shadow lane takes no demand; an MCP tool is demand. A `tool/*` proposal in the
+    /// shadow lane must not register as an MCP tool (`tools/{name}.shadow/{node}` in KV, hence
+    /// `tools/list`) until a listed reviewer accepts it. Seen failing first: the shadow registered
+    /// `tools/echo.shadow/{node}` on its first round.
+    #[cfg(feature = "gateway")]
+    #[tokio::test]
+    async fn a_shadow_lane_tool_proposal_is_not_registered_as_an_mcp_tool_until_accepted() {
+        use crate::catalog::InstallableEntry;
+        use ed25519_dalek::SigningKey;
+
+        let agent = live_agent().await;
+        let host = Arc::new(WasmHost::new().expect("engine"));
+        let author = SigningKey::from_bytes(&[41u8; 32]);
+        let reviewer = SigningKey::from_bytes(&[42u8; 32]);
+
+        let mut source = InMemorySource::new();
+        let id = source.insert(ECHO_COMPONENT.to_vec());
+        let proposed = InstallableEntry::new(Capability::new("tool", "echo"), id).as_proposed().signed_by(&author);
+        let mut catalog = InstallableCatalog::new();
+        catalog.add(proposed.clone());
+
+        let mut prov = Provisioner::new(Arc::clone(&agent), host, catalog, Arc::new(source), 1.0);
+        prov.require_provenance(vec![author.verifying_key().to_bytes()]);
+        prov.require_reviewers(vec![reviewer.verifying_key().to_bytes()]);
+
+        let _req = agent.capabilities().declare_requirement(CapFilter::new("tool", "echo"), Duration::from_secs(30));
+        for _ in 0..40 {
+            if !agent.capabilities().demand(&CapFilter::new("tool", "echo")).demanding_nodes.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        assert_eq!(prov.provision_round(), 1, "the proposal loads into the shadow lane");
+        wait_live(&prov, 1).await;
+        assert_eq!(prov.shadow_count(), 1);
+        // The shadow is resolvable by name (for comparison)...
+        let mut shadow_seen = false;
+        for _ in 0..40 {
+            if !agent.capabilities().resolve(&CapFilter::new("tool", "echo.shadow")).is_empty() {
+                shadow_seen = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(shadow_seen);
+        // ...but it is no MCP tool: neither its shadow name nor the real one is in `tools/`.
+        let shadow_key = format!("tools/echo.shadow/{}", agent.node_id());
+        let real_key = format!("tools/echo/{}", agent.node_id());
+        assert!(agent.kv().get(&shadow_key).is_none(), "a shadow registered itself as MCP tool {shadow_key}");
+        assert!(agent.kv().get(&real_key).is_none(), "a shadow registered itself as MCP tool {real_key}");
+
+        // The listed reviewer's acceptance promotes it, and only then is it an MCP tool.
+        let mut cat = InstallableCatalog::new();
+        cat.add(proposed.clone().accepted_by(&reviewer).unwrap());
+        prov.refresh_catalog(cat);
+        let mut registered = false;
+        for _ in 0..80 {
+            prov.provision_round();
+            if prov.shadow_count() == 0 && prov.hosted_count() == 1 && agent.kv().get(&real_key).is_some() {
+                registered = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(registered, "accepted: loaded for real and registered as MCP tool {real_key}");
+        assert!(agent.kv().get(&shadow_key).is_none(), "the shadow name never becomes a tool");
 
         agent.shutdown().await;
     }

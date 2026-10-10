@@ -296,6 +296,7 @@ pub use agent::{
     AckResult, CapabilitiesHandle, LogEntry,
     KvHandle, KvQuorumExt, MeshHandle, QuorumError, ServiceHandle, ShardError,
     SchemaError, SchemaHandle, SchemaPublishResult,
+    is_protected_kind, BUILTIN_PROTECTED_RPC_KINDS,
 };
 // Layer III consensus + the consistency overlay built on it (v2 M2 feature gate).
 // The AE evaluator seam (runtime authorisation at the gateway) — present where it is enforced.

@@ -77,6 +77,11 @@ pub struct StemOptions {
     /// Where a mesh-sourced stem stages what it pulls (zero-gaps Z3); `None` is
     /// `<placement_root>/stage`. Content-addressed and verified on read, so a stale stage is harmless.
     pub stage_dir:          Option<std::path::PathBuf>,
+    /// The most one artifact may stage, in bytes (default
+    /// [`DEFAULT_MAX_STAGE_BYTES`](crate::DEFAULT_MAX_STAGE_BYTES), 64 GiB). A holder's
+    /// `artifact.size` reply past it — or past the entry's own `size_bytes` hint — is refused
+    /// before a byte is requested.
+    pub max_stage_bytes:    u64,
 }
 
 impl Default for StemOptions {
@@ -89,6 +94,7 @@ impl Default for StemOptions {
             reprobe_every:    Duration::from_secs(10),
             trace:            None,
             stage_dir:        None,
+            max_stage_bytes:  crate::DEFAULT_MAX_STAGE_BYTES,
         }
     }
 }
@@ -215,7 +221,8 @@ impl Stem {
                         });
                         let fetcher = Arc::new(MeshRangedFetcher::resolving(Arc::clone(&agent), librarian_filter(), *timeout));
                         let staged = Arc::new(DiskStagedSource::open(fetcher, &stage_dir)
-                            .map_err(|e| StemError(format!("stage {}: {e}", stage_dir.display())))?);
+                            .map_err(|e| StemError(format!("stage {}: {e}", stage_dir.display())))?
+                            .with_max_stage_bytes(opts.max_stage_bytes));
                         (Arc::clone(&staged) as Arc<dyn ArtifactSource + Send + Sync>, Some(staged))
                     }
                     StemSource::Library(dir) => (Arc::new(
@@ -232,7 +239,8 @@ impl Stem {
                                 .map_err(|e| StemError(format!("store {url}: {e}")))?,
                         );
                         let staged = Arc::new(DiskStagedSource::open(fetcher, &stage_dir)
-                            .map_err(|e| StemError(format!("stage {}: {e}", stage_dir.display())))?);
+                            .map_err(|e| StemError(format!("stage {}: {e}", stage_dir.display())))?
+                            .with_max_stage_bytes(opts.max_stage_bytes));
                         (Arc::clone(&staged) as Arc<dyn ArtifactSource + Send + Sync>, Some(staged))
                     }
                     #[cfg(not(feature = "object_store"))]
@@ -276,6 +284,19 @@ impl Stem {
                         .map(|s| parse_publisher("trusted_publishers", s))
                         .collect::<Result<Vec<_>, _>>()?;
                     prov.require_provenance(keys);
+                } else if h.accept_unsigned {
+                    // `validate()` refused the empty list unless this was said on purpose; say it
+                    // back once, where the operator reads the start.
+                    tracing::warn!(
+                        "[hosts] accept_unsigned = true: this stem installs entries with no provenance — \
+                         any catalogue line any peer gossips installs here; list trusted_publishers to close it"
+                    );
+                } else {
+                    // Unreachable through `NodeCapabilityConfig::validate()`; a config built in code
+                    // and never validated gets the same refusal, by name.
+                    return Err(StemError(
+                        "hosts.trusted_publishers is empty and hosts.accept_unsigned is not set: list the publisher keys, or accept unsigned entries on purpose".into(),
+                    ));
                 }
                 if metered {
                     let operator_publishers = h
@@ -307,6 +328,8 @@ impl Stem {
                 let cache_agent = Arc::clone(&agent);
                 let ticker = tokio::spawn(async move {
                     let mut cache_cap: Option<CapabilityReg> = None;
+                    let mut backoff = StageBackoff::default();
+                    let mut ticks: u64 = 0;
                     loop {
                         if *stop_rx.borrow_and_update() {
                             break;
@@ -314,10 +337,16 @@ impl Stem {
                         prov.refresh_catalog(InstallableCatalog::from_kv(&kv));
                         if let Some(m) = &mesh {
                             // Stage every catalogue entry once (idempotent: a staged id is a size
-                            // check, no request) — a component whole, a blob in ranges.
-                            let ids: Vec<_> = prov.catalog().entries().iter().map(|e| e.artifact).collect();
-                            for id in ids {
-                                let _ = m.stage_artifact(&id).await;
+                            // check, no request) — a component whole, a blob in ranges, each
+                            // bounded by the entry's size hint and the stage's ceiling.
+                            let wanted: Vec<_> = prov.catalog().entries().iter().map(|e| (e.artifact, e.size_bytes)).collect();
+                            backoff.retain(|id| wanted.iter().any(|(w, _)| w == id));
+                            for (id, size_hint) in wanted {
+                                if !backoff.due(&id, ticks) {
+                                    continue;
+                                }
+                                let outcome = m.try_stage(&id, size_hint).await;
+                                backoff.record(id, outcome, ticks);
                             }
                             // Once the stage holds something, say so: a peer holder, not the
                             // library of record.
@@ -330,6 +359,7 @@ impl Stem {
                         }
                         prov.provision_round();
                         hosted_w.store(prov.hosted_count(), Ordering::Relaxed);
+                        ticks = ticks.wrapping_add(1);
                         tokio::select! {
                             _ = tokio::time::sleep(tick) => {}
                             _ = stop_rx.changed() => {}
@@ -395,8 +425,75 @@ impl Drop for Stem {
     }
 }
 
+/// The stem tick's retry discipline for staging. A failed stage is not retried every tick: after
+/// the n-th consecutive failure the next attempt is due `2^min(n,6)` ticks after the failure
+/// (2, 4, … at most 64). No holder answering is not a failure — nothing was attempted, and a
+/// catalogue line can gossip ahead of its bytes — so it is retried on the next tick. Counted in
+/// ticks, so it needs no clock of its own.
+#[derive(Default)]
+struct StageBackoff {
+    /// Per id: consecutive failures, and the tick the next attempt is due.
+    failures: std::collections::HashMap<crate::artifact::ArtifactId, (u32, u64)>,
+}
+
+impl StageBackoff {
+    fn retain(&mut self, keep: impl Fn(&crate::artifact::ArtifactId) -> bool) {
+        self.failures.retain(|id, _| keep(id));
+    }
+
+    fn due(&self, id: &crate::artifact::ArtifactId, tick: u64) -> bool {
+        self.failures.get(id).is_none_or(|&(_, next)| tick >= next)
+    }
+
+    fn record(&mut self, id: crate::artifact::ArtifactId, outcome: crate::http_source::StageOutcome, tick: u64) {
+        use crate::http_source::StageOutcome::*;
+        match outcome {
+            Staged => {
+                self.failures.remove(&id);
+            }
+            NoHolder => {}
+            Failed => {
+                let e = self.failures.entry(id).or_insert((0, 0));
+                e.0 = e.0.saturating_add(1);
+                e.1 = tick.saturating_add(1u64 << e.0.min(6));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// A catalogue line can gossip ahead of its bytes: no holder answering is not a failed stage
+    /// and must not push the next attempt out; a real failure backs off, the wait doubling per
+    /// consecutive failure up to 64 ticks, counted from the failure. Seen failing first: a
+    /// `NoHolder` outcome was counted and the id skipped on the next tick.
+    #[test]
+    fn a_missing_holder_is_not_a_failed_stage_and_a_failure_backs_off_from_the_failure() {
+        use crate::http_source::StageOutcome::*;
+        let id = crate::artifact::ArtifactId::of(b"named before its bytes arrive");
+        let mut b = StageBackoff::default();
+
+        // No holder yet: retried on the very next tick, however long it lasts.
+        for t in 0..10 {
+            assert!(b.due(&id, t), "tick {t}: a missing holder must not delay the next attempt");
+            b.record(id, NoHolder, t);
+        }
+        // A failure at tick 11 waits two ticks from 11, not to the next multiple of two.
+        b.record(id, Failed, 11);
+        assert!(!b.due(&id, 12));
+        assert!(b.due(&id, 13), "the first failure waits 2 ticks from the failure");
+        b.record(id, Failed, 13);
+        assert!(!b.due(&id, 16));
+        assert!(b.due(&id, 17), "the second waits 4");
+        // The wait is capped at 64 ticks.
+        for t in [17u64, 100, 200, 300, 400, 500, 600] { b.record(id, Failed, t); }
+        assert!(!b.due(&id, 663));
+        assert!(b.due(&id, 664), "capped at 64 ticks");
+        // A success clears it.
+        b.record(id, Staged, 664);
+        assert!(b.due(&id, 665));
+    }
     use super::*;
     use crate::catalog::{InstallableEntry, Manifest, MANIFEST_FILE};
     use crate::librarian::{spawn_librarian, LibrarianConfig};
@@ -536,6 +633,7 @@ mod tests {
             reprobe_every: Duration::from_millis(500),
             trace: None,
             stage_dir: None,
+            max_stage_bytes: crate::DEFAULT_MAX_STAGE_BYTES,
         }
     }
 
@@ -730,6 +828,7 @@ mod tests {
             reprobe_every: Duration::from_secs(1),
             trace: None,
             stage_dir: None,
+            max_stage_bytes: crate::DEFAULT_MAX_STAGE_BYTES,
         };
 
         // The installer: pulls from the librarian, hosts, and — once its cache holds the bytes —
@@ -799,6 +898,7 @@ mod tests {
             reprobe_every: Duration::from_secs(1),
             trace: None,
             stage_dir: None,
+            max_stage_bytes: crate::DEFAULT_MAX_STAGE_BYTES,
         };
         // Three stems, started so that the fleet is **deterministic**: with `self_elect_p: 1.0`
         // (no herd damping) three stems started together can all elect in one round — three hosts

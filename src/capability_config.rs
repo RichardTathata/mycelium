@@ -624,6 +624,12 @@ pub struct HostsDecl {
     /// to a real load. Absent = a proposal never loads for real on this host.
     #[serde(default)]
     pub trusted_reviewers: Vec<String>,
+    /// Say on purpose that this host installs entries with no provenance. An empty
+    /// `trusted_publishers` is otherwise refused by `validate()` — with no key, any entry any peer
+    /// gossips installs here — and a stem warns once at start when this is set. Refused beside a
+    /// non-empty `trusted_publishers` (one or the other names the policy).
+    #[serde(default)]
+    pub accept_unsigned: bool,
 }
 
 impl HostsDecl {
@@ -772,6 +778,24 @@ impl NodeCapabilityConfig {
                 return Err(invalid("presence.max_providers", format!(
                     "[{i}] {}/{}: ceiling {max} is below floor {}", p.filter.ns, p.filter.name, p.min_providers
                 )));
+            }
+        }
+        // Last, so every other `[hosts]` refusal keeps its own name: a hosting unit with no
+        // provenance policy. An empty trusted list is not "provenance not required" — it is "any
+        // entry any peer publishes installs here", and the 2.18.1 rule is that a setting a node
+        // cannot be seen to mean is refused at start rather than run silently.
+        if let Some(h) = &self.hosts {
+            if h.accept_unsigned && !h.trusted_publishers.is_empty() {
+                return Err(invalid(
+                    "hosts.accept_unsigned",
+                    "is set beside a non-empty hosts.trusted_publishers: one names the policy — list the keys, or accept unsigned entries, not both",
+                ));
+            }
+            if h.trusted_publishers.is_empty() && !h.accept_unsigned {
+                return Err(invalid(
+                    "hosts.trusted_publishers",
+                    "is empty: with no publisher key, any entry any peer gossips installs here with no provenance — list the keys this host installs from, or set hosts.accept_unsigned = true to run that way on purpose",
+                ));
             }
         }
         Ok(())
@@ -1210,5 +1234,23 @@ max_providers = 4
 
         let e = refused("[[requirement]]\nns = \"a\"\nname = \"b\"\n[requirement.attrs]\nx = { gte = 1, lte = 9 }\n");
         assert!(e.contains("exactly one operator"), "{e}");
+    }
+
+    /// A `[hosts]` table with no `trusted_publishers` installs anything any peer publishes
+    /// (`Provisioner::provenance_ok` is true for an empty list), so it is refused by name unless
+    /// the unit says `accept_unsigned = true` on purpose. Seen failing first: the table validated.
+    #[test]
+    fn a_hosts_table_without_trusted_publishers_is_refused_unless_it_opts_out() {
+        let e = refused("[hosts]\nkinds = [\"wasm-component\"]\n");
+        assert!(e.contains("hosts.trusted_publishers") && e.contains("accept_unsigned"), "{e}");
+        // The opt-out, said on purpose, validates.
+        NodeCapabilityConfig::from_toml_str("[hosts]\nkinds = [\"wasm-component\"]\naccept_unsigned = true\n")
+            .expect("the opt-out validates");
+        // Keys listed: validates, as before.
+        NodeCapabilityConfig::from_toml_str("[hosts]\nkinds = [\"wasm-component\"]\ntrusted_publishers = [\"ed25519:aa\"]\n")
+            .expect("a trusted list validates");
+        // Both at once name two policies.
+        let e = refused("[hosts]\nkinds = [\"wasm-component\"]\naccept_unsigned = true\ntrusted_publishers = [\"ed25519:aa\"]\n");
+        assert!(e.contains("hosts.accept_unsigned"), "{e}");
     }
 }

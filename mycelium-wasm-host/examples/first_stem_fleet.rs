@@ -103,6 +103,7 @@ name = "echo"
         reprobe_every: Duration::from_secs(1),
         trace: None,
         stage_dir: None,
+        max_stage_bytes: mycelium_wasm_host::DEFAULT_MAX_STAGE_BYTES,
     };
     let mut fleet: Vec<(Arc<GossipAgent>, Stem)> = Vec::new();
     for _ in 0..3 {

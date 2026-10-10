@@ -1044,13 +1044,13 @@ mod tests {
         assert!(kinds(&r).contains(&("presence unhostable", Severity::Error)));
 
         // one host with budget below the footprint → still unhostable
-        let small = unit("depot-small", "[hosts]\nkinds=[\"wasm-component\"]\ninstall_budget_bytes=1024\n");
+        let small = unit("depot-small", "[hosts]\nkinds=[\"wasm-component\"]\ninstall_budget_bytes=1024\naccept_unsigned=true\n");
         let r = check(&[worker.clone(), small], std::slice::from_ref(&art), &CheckOptions::default());
         assert!(kinds(&r).contains(&("unhostable entry", Severity::Error)), "{}", r.render_text());
 
         // two hosts with budget → would bind by provisioning (a warning), presence 2 of 2, exit 0
-        let a = unit("depot-a", "[hosts]\nkinds=[\"wasm-component\",\"blob\"]\ninstall_budget_bytes=8589934592\n");
-        let b = unit("depot-b", "[hosts]\nkinds=[\"wasm-component\"]\n");
+        let a = unit("depot-a", "[hosts]\nkinds=[\"wasm-component\",\"blob\"]\ninstall_budget_bytes=8589934592\naccept_unsigned=true\n");
+        let b = unit("depot-b", "[hosts]\nkinds=[\"wasm-component\"]\naccept_unsigned=true\n");
         let r = check(&[worker.clone(), a.clone(), b.clone()], std::slice::from_ref(&art), &CheckOptions::default());
         assert_eq!(r.exit_code(), 0, "{}", r.render_text());
         assert!(kinds(&r).contains(&("would bind by provisioning", Severity::Warning)));

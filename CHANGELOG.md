@@ -187,6 +187,91 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **Upgrade note:** three `#[non_exhaustive]` enums gain a variant — a `_` arm must fail closed, as the enums'
   docs already require (`docs/guide/deprecations.md` §24).
 
+### Security
+- **A hosted WASM component's `mesh.emit` is confined.** The host forwarded any kind a component
+  named at cluster scope on the node's full `MeshHandle` — only `kv` was confined — so a component could
+  emit `mcp.invoke`, `skill.invoke` or `llm.invoke` from inside the node's process and reach every
+  `rpc_rx` of that kind on the hosting node **unframed**: a self-originated request is a plain member
+  call, with no mandate and no evaluator, past the doors (`/mcp`, `/a2a`, the raw routes' `protected_kind`
+  refusal, provider enforcement) that check authority for exactly those kinds. A component may now emit
+  only a kind under `comp/{namespace}/…` or one the host listed for it (`HostState::with_emit_kinds`), and
+  never a protected kind — the built-ins or the node's `protected_rpc_kinds`, which a listing cannot
+  override (`confine_kind`, rule `host.emit_admission`). The WIT signature is unchanged (it carries no
+  error channel, and changing it would re-cut every committed fixture component), so a refused emit is
+  dropped, logged and counted: `mycelium_wasm_host_emits_refused_total{reason}`. The predicate every
+  door asks is now one ungated function, `mycelium::is_protected_kind` (with
+  `BUILTIN_PROTECTED_RPC_KINDS`), which the gateway's raw routes and provider enforcement call too. Seen
+  failing first: `a_component_cannot_emit_a_protected_kind_but_can_emit_in_its_own_namespace`
+  (`mycelium-wasm-host/src/host.rs` — the protected kind arrived at `rpc_rx(mcp.invoke)`). **Upgrade
+  note:** `HostState::emit` returns `Result<(), ConfinementError>` and `ConfinementError` gained
+  `ProtectedKind` and `ForeignKind` (an exhaustive `match` breaks); a component that emitted a kind
+  outside `comp/{namespace}/…` is now refused — list the kind with `with_emit_kinds` if it is not
+  protected work. **Granting such a kind is code-only for now:** nothing in the runtime or the unit file
+  calls `with_emit_kinds`, so a component installed by a provisioner or a stem emits only under its own
+  namespace; a `[hosts]` field naming extra emit kinds is follow-up work. A namespace that is empty or
+  contains `/` emits nothing (`ConfinementError::MalformedNamespace`), since its `comp/` family would
+  overlap another namespace's — seen failing first: `a_namespace_with_a_slash_or_none_emits_nothing`
+  (`a/b` emitted `comp/a/b/x`). The coop examples that build a `HostState` by hand
+  (`catalog`, `catalog_viz`, `mcp_toolgrowth`) pass the node's `protected_rpc_kinds` too.
+- **A shadow-lane `tool/*` proposal is no longer registered as a live MCP tool.** D20 promises the
+  shadow lane *takes no demand*, and the provisioner kept that for capability resolution (a shadow is
+  advertised as `{name}.shadow`, never under the incumbent's filter) — but the WASM runtime bridged
+  every `tool/*` namespace install as MCP tool `{name}`, shadow or not, so a proposed tool nobody had
+  accepted appeared in `tools/{name}.shadow/{node}`, in `tools/list`, and answered `tools/call`. The
+  install now carries its lane (`RuntimeCtx::shadow`) and the runtime bridges a tool only for a real
+  load; acceptance withdraws the shadow and the reinstall registers it. A `[[serve]]` skill was already
+  shadow-safe (`while_live` resolves `{ns}/{name}`, which a shadow never advertises). Seen failing
+  first: `a_shadow_lane_tool_proposal_is_not_registered_as_an_mcp_tool_until_accepted`
+  (`mycelium-wasm-host/src/provisioner.rs` — the shadow registered `tools/echo.shadow/{node}`).
+  **Upgrade note:** `RuntimeCtx` gained `shadow` (an exhaustive literal breaks). **Unchanged, and
+  stated because an earlier draft of this entry said otherwise:** a shadow *blob*'s `[[activation]]`
+  does **not** run — the entry is renamed `{name}.shadow` before install and the activation hook
+  matches declarations on the renamed name, so it finds none (`no_declaration`); the shadow is placed,
+  not activated.
+- **A `[hosts]` table with no `trusted_publishers` refuses at start, instead of installing anything any
+  peer publishes.** `Provisioner::provenance_ok` admitted every entry when the trusted list was empty,
+  `validate()` checked only the subset rules, and the stem started without a word (the reference said
+  *empty means provenance is not required*) — so a stem whose unit file omitted the key installed and
+  served any catalogue line gossiped into its mesh. The 2.18.1 shape: `validate()` now refuses it by
+  name (`hosts.trusted_publishers`), and the stem will not start; a host that means to run without
+  provenance says so with `[hosts] accept_unsigned = true`, which the stem warns about once at start
+  and which is refused beside a non-empty `trusted_publishers`. Every reader of the list was enumerated
+  (`grep -rn trusted_publishers mycelium-wasm-host/src src`): the provisioner's predicate, the stem's
+  start, the artifact gateway's publish door and `validate()`'s operator-key rules — none changes
+  meaning. Every example unit file under `examples/units/` and the co-op fixtures already list a key.
+  Seen failing first: `a_hosts_table_without_trusted_publishers_is_refused_unless_it_opts_out`
+  (`src/capability_config.rs` — the table validated). **Upgrade note:** a unit file with `[hosts]` and
+  no `trusted_publishers` now fails to load; add the publisher keys, or `accept_unsigned = true` to
+  keep the old behaviour on purpose.
+- **The staging pull is bounded before its first byte.** `DiskStagedSource::stage_artifact` took the
+  holder's `artifact.size` reply as the pull's `total` and wrote toward it piece by piece — a peer
+  answering `u64::MAX` had the stage filling its disk, with nothing in the catalogue line consulted —
+  and a stem re-tried every failed stage on every tick. A holder's size reply past the stage's ceiling
+  (`DEFAULT_MAX_STAGE_BYTES`, 64 GiB; `DiskStagedSource::with_max_stage_bytes`, `StemOptions::max_stage_bytes`)
+  or past the entry's own `size_bytes` hint (`stage_artifact_bounded`; the hint is outside the
+  signature and bounds the pull without being trusted for anything else — the hash still decides what
+  is kept) is refused before any range is requested, counted as
+  `mycelium_artifact_stage_refused_total{reason="size_past_ceiling"}`; the stem's tick stages each
+  entry under its hint and backs a failed stage off — the next attempt `2^min(n,6)` ticks after the n-th
+  consecutive failure (2, 4, … 64), while no holder answering yet is not a failure and is retried on
+  the next tick (`DiskStagedSource::try_stage` → `StageOutcome::{Staged, NoHolder, Failed}`; seen failing
+  first: `a_missing_holder_is_not_a_failed_stage_and_a_failure_backs_off_from_the_failure`, a `NoHolder`
+  outcome skipped the next tick). `mycelium-stem`'s librarian-over-store mirror stages each manifest
+  entry under its hint and the ceiling as well. Seen failing first:
+  `a_size_reply_past_the_ceiling_is_refused_before_any_byte_is_written` (`mycelium-wasm-host/src/http_source.rs`
+  — one range was requested against a size of `u64::MAX`). **Upgrade note:** `StemOptions` gained
+  `max_stage_bytes` (an exhaustive literal breaks; `..Default::default()` is unaffected). **Not built:** a
+  `--max-stage-bytes` flag on `mycelium-stem` (the default applies).
+- **A hosted component's linear memory is capped.** The wasmtime store had no resource limiter, so a
+  component could `memory.grow` without bound and take the node's memory with it — fuel bounds
+  instructions, not bytes. Every store now carries `StoreLimits` with a memory cap:
+  `DEFAULT_MEMORY_LIMIT_BYTES` (256 MiB — generous for a capability component, the fixtures run in
+  under 2 MiB) or `HostState::with_memory_limit(bytes)` per instance; a grow past it is answered no
+  and an initial allocation past it refuses instantiation. Seen failing first:
+  `a_component_cannot_grow_its_memory_past_the_cap` (`mycelium-wasm-host/src/host.rs` — the echo
+  component instantiated and ran under a 64 KiB cap). **Not built:** a unit-file field for the cap
+  (the runtime uses the default for every install).
+
 ## [2.31.0] — 2026-10-09
 
 **Stops that stop, and failures that say what they are.** A node, a stem or a demo image now shuts down on SIGTERM

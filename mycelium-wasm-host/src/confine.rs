@@ -10,11 +10,21 @@
 //! deliberately **not** `cap/` (which the capability resolver/`demand` scan): component working
 //! state must not pollute the capability registry. (This refines the §E.2 sketch, which named
 //! `cap/{me}/{ns}/*`, for that reason.)
+//!
+//! A component's **signals** are confined the same way ([`confine_kind`]): it may emit only kinds
+//! under [`COMPONENT_SIGNAL_PREFIX`]`{namespace}/…` or kinds the host listed for it, and never a
+//! protected RPC kind (`mcp.invoke`, `skill.invoke`, `llm.invoke`, the node's
+//! `protected_rpc_kinds`) — those have doors of their own where authority is checked, and an
+//! emit from inside the node's process would reach their handlers unframed, past every check.
 
 use mycelium::NodeId;
 
 /// KV prefix owned by component working-state. One private subtree per `(node, namespace)`.
 pub const COMPONENT_KV_PREFIX: &str = "comp/";
+
+/// Signal-kind prefix a component may emit under: `comp/{namespace}/…`. Fleet-wide (no node
+/// segment — a signal is addressed by kind, not by the emitter), one family per namespace.
+pub const COMPONENT_SIGNAL_PREFIX: &str = "comp/";
 
 /// Why a component-relative key was refused. The guest cannot turn any of these into a
 /// host-side write — confinement is enforced, not merely logged.
@@ -26,6 +36,16 @@ pub enum ConfinementError {
     Absolute,
     /// A `..` path segment — a traversal attempt out of the subtree.
     Traversal,
+    /// A signal kind that is protected work on this node (`mcp.invoke`, `skill.invoke`,
+    /// `llm.invoke`, a configured `protected_rpc_kinds` entry): it has a door of its own where
+    /// authority is checked, and a component is not that door.
+    ProtectedKind,
+    /// A signal kind outside the component's namespace (`comp/{namespace}/…`) and not listed for
+    /// it by the host.
+    ForeignKind,
+    /// The component's namespace is empty or contains `/`, so its `comp/{namespace}/…` family
+    /// would overlap another namespace's; such a component emits nothing.
+    MalformedNamespace,
 }
 
 impl std::fmt::Display for ConfinementError {
@@ -34,6 +54,9 @@ impl std::fmt::Display for ConfinementError {
             Self::Empty => write!(f, "empty component key"),
             Self::Absolute => write!(f, "absolute key escapes the component subtree"),
             Self::Traversal => write!(f, "`..` traversal escapes the component subtree"),
+            Self::ProtectedKind => write!(f, "protected RPC kind: a component may not emit work that has its own door"),
+            Self::ForeignKind => write!(f, "signal kind outside the component's namespace and not listed for it"),
+            Self::MalformedNamespace => write!(f, "component namespace is empty or contains `/`: its signal family would overlap another's"),
         }
     }
 }
@@ -57,6 +80,31 @@ pub fn confine_key(node: &NodeId, namespace: &str, rel_key: &str) -> Result<Stri
         return Err(ConfinementError::Traversal);
     }
     Ok(format!("{COMPONENT_KV_PREFIX}{node}/{namespace}/{rel_key}"))
+}
+
+/// May a component in `namespace` emit signal `kind`? A namespace that is empty or contains `/`
+/// emits nothing (its family would overlap another namespace's). Allowed: a kind under
+/// `comp/{namespace}/…`, or one of `listed` (kinds the host granted this component — never a
+/// protected one, so a grant cannot open the door). Refused first and always: a kind in
+/// [`mycelium::BUILTIN_PROTECTED_RPC_KINDS`] or in `protected` (the node's
+/// `protected_rpc_kinds`). Everything else is foreign and refused.
+///
+/// `namespace`, `listed` and `protected` are host-set (trusted); only `kind` is guest-controlled.
+pub fn confine_kind(namespace: &str, kind: &str, listed: &[String], protected: &[String]) -> Result<(), ConfinementError> {
+    if kind.is_empty() {
+        return Err(ConfinementError::Empty);
+    }
+    if namespace.is_empty() || namespace.contains('/') {
+        return Err(ConfinementError::MalformedNamespace);
+    }
+    if mycelium::BUILTIN_PROTECTED_RPC_KINDS.contains(&kind) || protected.iter().any(|k| k == kind) {
+        return Err(ConfinementError::ProtectedKind);
+    }
+    let own = format!("{COMPONENT_SIGNAL_PREFIX}{namespace}/");
+    if kind.strip_prefix(own.as_str()).is_some_and(|rest| !rest.is_empty()) || listed.iter().any(|k| k == kind) {
+        return Ok(());
+    }
+    Err(ConfinementError::ForeignKind)
 }
 
 #[cfg(test)]
@@ -89,6 +137,46 @@ mod tests {
         assert_eq!(confine_key(&node(), "nlp", ".."), Err(ConfinementError::Traversal));
         assert_eq!(confine_key(&node(), "nlp", "../other"), Err(ConfinementError::Traversal));
         assert_eq!(confine_key(&node(), "nlp", "a/../../cap/evil"), Err(ConfinementError::Traversal));
+    }
+
+    #[test]
+    fn a_component_emits_only_under_its_own_signal_namespace() {
+        let none: &[String] = &[];
+        assert_eq!(confine_kind("nlp", "comp/nlp/tick", none, none), Ok(()));
+        assert_eq!(confine_kind("nlp", "comp/nlp/", none, none), Err(ConfinementError::ForeignKind));
+        assert_eq!(confine_kind("nlp", "comp/nlpx/tick", none, none), Err(ConfinementError::ForeignKind));
+        assert_eq!(confine_kind("nlp", "comp/other/tick", none, none), Err(ConfinementError::ForeignKind));
+        assert_eq!(confine_kind("nlp", "agent.state", none, none), Err(ConfinementError::ForeignKind));
+        assert_eq!(confine_kind("nlp", "", none, none), Err(ConfinementError::Empty));
+        // A host-listed kind is allowed...
+        let listed = vec!["agent.state".to_string()];
+        assert_eq!(confine_kind("nlp", "agent.state", &listed, none), Ok(()));
+    }
+
+    /// A namespace with a `/` (or none at all) would share another namespace's `comp/` family —
+    /// `a` emitting `comp/a/b/x` is `a/b`'s kind — so such a namespace emits nothing. Seen failing
+    /// first: `a/b` emitted `comp/a/b/x`.
+    #[test]
+    fn a_namespace_with_a_slash_or_none_emits_nothing() {
+        let none: &[String] = &[];
+        assert_eq!(confine_kind("a/b", "comp/a/b/x", none, none), Err(ConfinementError::MalformedNamespace));
+        assert_eq!(confine_kind("", "comp//x", none, none), Err(ConfinementError::MalformedNamespace));
+        assert_eq!(confine_kind("a/b", "listed.kind", &["listed.kind".to_string()], none), Err(ConfinementError::MalformedNamespace));
+        assert_eq!(confine_kind("a", "comp/a/x", none, none), Ok(()));
+    }
+
+    #[test]
+    fn a_protected_kind_is_refused_even_when_listed() {
+        let none: &[String] = &[];
+        for k in ["mcp.invoke", "skill.invoke", "llm.invoke"] {
+            assert_eq!(confine_kind("nlp", k, none, none), Err(ConfinementError::ProtectedKind), "{k}");
+            // ...and a listing cannot open the door.
+            assert_eq!(confine_kind("nlp", k, &[k.to_string()], none), Err(ConfinementError::ProtectedKind), "{k} listed");
+        }
+        // The node's own `protected_rpc_kinds` are refused the same way.
+        let protected = vec!["depot.dispatch".to_string()];
+        assert_eq!(confine_kind("nlp", "depot.dispatch", none, &protected), Err(ConfinementError::ProtectedKind));
+        assert_eq!(confine_kind("nlp", "depot.dispatch", &protected, &protected), Err(ConfinementError::ProtectedKind));
     }
 
     #[test]

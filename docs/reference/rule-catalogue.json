@@ -211,6 +211,56 @@
       "summary": "Deny by default under `compliance`: a route needs its scope; with no credential model the gateway is open, and a table the build cannot enforce refuses to start."
     },
     {
+      "id": "host.emit_admission",
+      "revision": 1,
+      "subsystem": "mycelium-wasm-host::host",
+      "responsibilities": [
+        "admission",
+        "authority"
+      ],
+      "trigger": "a hosted component calls its `mesh.emit(kind, payload)` import",
+      "inputs": [
+        {
+          "source": "the component's namespace, the kinds the host listed for it, and the node's `protected_rpc_kinds` — all set at instantiation",
+          "scope": "this component instance",
+          "freshness": "fixed at instantiation"
+        }
+      ],
+      "outcomes": [
+        {
+          "kind": "action",
+          "reasons": [
+            "admitted"
+          ]
+        },
+        {
+          "kind": "refusal",
+          "reasons": [
+            "protected_kind",
+            "foreign_kind",
+            "malformed"
+          ]
+        }
+      ],
+      "effects": [
+        "the signal is emitted at cluster scope, or dropped — never sent — and counted: `mycelium_wasm_host_emits_refused_total{reason}`"
+      ],
+      "guards": [
+        "authority"
+      ],
+      "may_trigger": [],
+      "may_inhibit": [],
+      "depends_on": [],
+      "symbol": "host::HostState::emit",
+      "docs": "docs/reference/unit-file.md",
+      "tests": [
+        "a_component_cannot_emit_a_protected_kind_but_can_emit_in_its_own_namespace",
+        "a_protected_kind_is_refused_even_when_listed"
+      ],
+      "trace": "catalogue_only",
+      "summary": "A component emits only under `comp/{namespace}/…` or a kind the host listed for it, and never a protected RPC kind — an emit from inside the process would reach that kind's handlers unframed, past the door that checks authority."
+    },
+    {
       "id": "kv.expiry",
       "revision": 1,
       "subsystem": "mycelium-core::store",

@@ -207,7 +207,7 @@ pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest) -> Result<Admiss
         return Ok(Admission::default());
     }
     let kind: &str = req.kind();
-    if !super::http::is_protected_kind(&ctx.config, kind) {
+    if !super::is_protected_kind(&ctx.config, kind) {
         return Ok(Admission::default());
     }
     if enforcing && ctx.action_evaluator.get().is_none() {
