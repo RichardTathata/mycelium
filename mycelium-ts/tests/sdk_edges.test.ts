@@ -90,14 +90,15 @@ const SEGMENT_CALLS: Record<string, Call> = {
 describe.each(Object.keys(SEGMENT_CALLS))("%s", (verb) => {
   const [call, shape] = SEGMENT_CALLS[verb];
 
-  test.each(HOSTILE)("keeps %p one path segment", async (seg) => {
+  test.each(HOSTILE)(`${verb} keeps %p one path segment`, async (seg) => {
     stub({ owner: "127.0.0.1:1", system: "s", user_template: "u" });
     await call(new MyceliumAgent("127.0.0.1", 1, 1000), new PromptSkillClient("127.0.0.1", 1), seg);
     expect(seen.length).toBeGreaterThan(0);
     expect(pathOf(seen[seen.length - 1].url)).toBe(shape(seg));
   });
 
-  test.each([".", "..", "", "\ud800"])("refuses the segment %p before any request", async (seg) => {
+  test.each([[".", "."], ["..", ".."], ["empty", ""], ["lone-surrogate", "\ud800"]])(
+    `${verb} refuses the segment %s before any request`, async (_label, seg) => {
     stub({});
     const err = await caught(() =>
       call(new MyceliumAgent("127.0.0.1", 1, 1000), new PromptSkillClient("127.0.0.1", 1), seg));
@@ -173,7 +174,7 @@ const ALL_TIMEOUTS: Record<string, (t: number) => Promise<unknown>> = {
 };
 
 describe.each(Object.keys(ALL_TIMEOUTS))("%s", (verb) => {
-  test.each(BAD_SECONDS)("refuses timeoutSecs %p by name, before any request", async (bad) => {
+  test.each(BAD_SECONDS)(`${verb} refuses timeoutSecs %p by name, before any request`, async (bad) => {
     stub({ ok: true, ack: "acknowledged", replies: [], id: 1, payload_b64: "", summary: {} });
     const err = await caught(() => ALL_TIMEOUTS[verb](bad));
     expect(String(err?.message)).toMatch(/timeoutSecs/);
@@ -193,7 +194,7 @@ describe.each(Object.keys(LEASES))("%s", (verb) => {
   const reply = { ok: true, handle_id: "h", guard_id: "g", token: "1", principal: null,
                   declared: { capabilities: 0, requirements: 0, groups: 0 }, not_enforced: [] };
 
-  test.each([[1.5, 2], [0.2, 1], [30, 30]])("sends %p as %p whole seconds", async (given, sent) => {
+  test.each([[1.5, 2], [0.2, 1], [30, 30]])(`${verb} sends %p as %p whole seconds`, async (given, sent) => {
     // The gateway reads `lease_secs` with `as_u64()` — a fraction left the advert unleased — and
     // `ttl_secs` as `Option<u64>` — a fraction was refused 422.
     stub(reply);
@@ -201,7 +202,7 @@ describe.each(Object.keys(LEASES))("%s", (verb) => {
     expect(seen[0].body[field]).toBe(sent);
   });
 
-  test.each(BAD_SECONDS)("refuses %p by name, before any request", async (bad) => {
+  test.each(BAD_SECONDS)(`${verb} refuses %p by name, before any request`, async (bad) => {
     stub(reply);
     const err = await caught(() => call(new MyceliumAgent("127.0.0.1", 1, 1000), bad));
     expect(String(err?.message)).toContain(option);

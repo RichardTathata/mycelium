@@ -163,7 +163,7 @@ SEGMENT_CALLS = {
 
 
 @pytest.mark.parametrize("verb", list(SEGMENT_CALLS))
-@pytest.mark.parametrize("seg", HOSTILE)
+@pytest.mark.parametrize("seg", HOSTILE, ids=["slash", "query-fragment", "space-percent", "encoded-dots"])
 def test_a_caller_supplied_value_stays_one_path_segment(port, verb, seg):
     agent = MyceliumAgent("127.0.0.1", port)
     agent._port = port
@@ -174,7 +174,7 @@ def test_a_caller_supplied_value_stays_one_path_segment(port, verb, seg):
 
 
 @pytest.mark.parametrize("verb", list(SEGMENT_CALLS))
-@pytest.mark.parametrize("seg", [".", "..", "", "\ud800"])
+@pytest.mark.parametrize("seg", [".", "..", "", "\ud800"], ids=["dot", "dot-dot", "empty", "lone-surrogate"])
 def test_a_segment_that_cannot_travel_is_refused_before_any_request(port, verb, seg):
     # A URL parser resolves `..` — encoded or not — so it would reach another route; an empty segment
     # reaches another route too (a 404 read as "not found"); a lone surrogate has no UTF-8 encoding.

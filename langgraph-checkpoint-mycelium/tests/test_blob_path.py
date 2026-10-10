@@ -36,7 +36,7 @@ HOSTILE = {
 }
 
 
-@pytest.mark.parametrize("blob_id", list(HOSTILE))
+@pytest.mark.parametrize("blob_id", list(HOSTILE), ids=["dot-dot-traversal", "slash-fragment"])
 def test_a_row_supplied_blob_id_is_one_path_segment(saver_and_paths, blob_id):
     saver, paths = saver_and_paths
     reasons: dict[str, str] = {}
@@ -46,7 +46,7 @@ def test_a_row_supplied_blob_id_is_one_path_segment(saver_and_paths, blob_id):
     assert reasons == {blob_id: "not_found"}
 
 
-@pytest.mark.parametrize("blob_id", [".", ".."])
+@pytest.mark.parametrize("blob_id", [".", ".."], ids=["dot", "dot-dot"])
 def test_a_dot_blob_id_is_not_fetched_and_reads_as_corrupt(saver_and_paths, blob_id):
     saver, paths = saver_and_paths
     reasons: dict[str, str] = {}
@@ -56,7 +56,7 @@ def test_a_dot_blob_id_is_not_fetched_and_reads_as_corrupt(saver_and_paths, blob
     assert reasons == {blob_id: "corrupt"}
 
 
-@pytest.mark.parametrize("blob_id", ["", "\ud800"])
+@pytest.mark.parametrize("blob_id", ["", "\ud800"], ids=["empty", "lone-surrogate"])
 def test_an_id_that_cannot_be_one_segment_is_not_fetched_and_reads_as_corrupt(saver_and_paths, blob_id):
     # Adversarial review of #595: an empty id reaches another route; a lone surrogate has no encoding.
     saver, paths = saver_and_paths
@@ -72,7 +72,7 @@ def test_an_id_that_cannot_be_one_segment_is_not_fetched_and_reads_as_corrupt(sa
 from test_incomplete import FakeGateway, IncompleteCheckpoint, checkpoint_with_write  # noqa: E402
 
 
-@pytest.mark.parametrize("forged", [7, None, ["x"], {"id": "x"}])
+@pytest.mark.parametrize("forged", [7, None, ["x"], {"id": "x"}], ids=["int", "null", "list", "object"])
 @pytest.mark.parametrize("loader", ["sync", "async"])
 def test_a_non_string_blob_in_a_row_reads_as_corrupt(forged, loader):
     import json
