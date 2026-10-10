@@ -37,7 +37,10 @@ Design: `docs/plans/mycelium-tuple-space.md`. Key facts:
   (truncated, file + dir synced) from a corrupt one with data after it (open refused,
   `InvalidData`); compaction folds the log itself (`fold_wal`, never a memory snapshot — a
   put appends before it applies) and installs with `sync_data → rename → fsync_parent`. Limit: no checksum, so
-  a length prefix corrupted past EOF reads as torn. **A joining secondary backfills** (2026-07-10): live replication only ships
+  a length prefix corrupted past EOF reads as torn. **Maintenance runs on every WAL
+  holder** (`spawn_wal_maintenance`, from `init_store`) — a primary-only repair left a
+  poisoned secondary refusing every mirrored record (#597 review); a refused mirror apply
+  sets `mirror_gap` and the backfill re-drains. Compaction keeps the id high-water mark. **A joining secondary backfills** (2026-07-10): live replication only ships
   records put while the secondary is present, so a late joiner drives the paginated
   `wal_replay` RPC at join (WAL-backed primary → WAL pages; transient primary → *state
   chunks*: live items as `Put` records, id-cursor pagination; `apply_records` dedupes overlap

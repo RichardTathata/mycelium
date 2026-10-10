@@ -252,6 +252,9 @@ pub struct Blackboard {
     role_reg: parking_lot::Mutex<Option<CapabilityReg>>,
     /// Mirror dedup: fact ids already applied (a replicated Post may arrive twice).
     mirrored: parking_lot::Mutex<HashSet<u64>>,
+    /// Set when a mirrored fact could not be applied (its WAL append was refused): the mirror re-syncs
+    /// from the primary, so the fact is re-delivered once the WAL is repaired.
+    mirror_gap: AtomicBool,
     tasks: parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
@@ -267,6 +270,7 @@ impl Blackboard {
             primary_reg: parking_lot::Mutex::new(None),
             role_reg: parking_lot::Mutex::new(None),
             mirrored: parking_lot::Mutex::new(HashSet::new()),
+            mirror_gap: AtomicBool::new(false),
             tasks: parking_lot::Mutex::new(Vec::new()),
         });
         match bb.cfg.role {
@@ -289,15 +293,36 @@ impl Blackboard {
     }
 
     fn init_store(&self) -> Result<(), BlackboardError> {
-        let mut g = self.store.lock();
-        if g.is_none() {
-            let store = if self.cfg.persist {
-                BoardStore::persistent(&self.cfg.wal_path, self.cfg.checkpoint_every)?
-            } else {
-                BoardStore::transient()
+        let created = {
+            let mut g = self.store.lock();
+            if g.is_some() {
+                return Ok(());
             }
-            .with_high_watermark(self.cfg.high_watermark);
-            *g = Some(Arc::new(store));
+            let store = Arc::new(
+                if self.cfg.persist {
+                    BoardStore::persistent(&self.cfg.wal_path, self.cfg.checkpoint_every)?
+                } else {
+                    BoardStore::transient()
+                }
+                .with_high_watermark(self.cfg.high_watermark),
+            );
+            *g = Some(Arc::clone(&store));
+            store
+        };
+        // WAL maintenance runs wherever a WAL does — a mirror's too (#597 review, finding 1): the
+        // compaction that repairs a writer poisoned by a failed append, and the periodic sync. It ran
+        // on the primary only, so a secondary's poisoned WAL refused every later mirrored fact.
+        if self.cfg.persist {
+            let h = tokio::spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_secs(1));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    tick.tick().await;
+                    let s = Arc::clone(&created);
+                    let _ = tokio::task::spawn_blocking(move || s.maintenance_tick()).await;
+                }
+            });
+            self.tasks.lock().push(h);
         }
         Ok(())
     }
@@ -320,6 +345,27 @@ impl Blackboard {
     }
     pub(crate) fn mark_mirrored(&self, id: u64) -> bool {
         self.mirrored.lock().insert(id)
+    }
+
+    /// A mirrored fact's WAL append was refused: forget it was seen, so a re-delivery applies it,
+    /// and ask the mirror to re-sync from the primary.
+    pub(crate) fn note_mirror_gap(&self, id: u64, e: &BlackboardError) {
+        tracing::error!(id, error = %e, "blackboard: mirror fact refused; it is re-fetched once the WAL is repaired");
+        self.mirrored.lock().remove(&id);
+        self.mirror_gap.store(true, Ordering::Release);
+    }
+
+    /// The store refused to open (a corrupt WAL, a second owner, an unreadable file): say why — the
+    /// error names the file and, for corruption, the byte — and withdraw the candidacy, so the ring
+    /// does not keep electing a node that cannot serve (#597 review, finding 2).
+    fn withdraw_after_store_refusal(&self, e: &BlackboardError) {
+        tracing::error!(
+            ns = %self.cfg.namespace,
+            wal = %self.cfg.wal_path.display(),
+            error = %e,
+            "blackboard: the store refused to open; withdrawing the candidacy and staying client"
+        );
+        *self.role_reg.lock() = None;
     }
 
     // ── Role assumption ──────────────────────────────────────────────────────
@@ -348,26 +394,6 @@ impl Blackboard {
                     for id in store2.requeue_expired(timeout) {
                         tracing::warn!(id, "blackboard: re-queued expired in-flight claim");
                     }
-                }
-            }));
-        }
-
-        // Checkpoint + compaction, off the hot path.
-        {
-            let store2 = Arc::clone(&store);
-            tasks.push(tokio::spawn(async move {
-                let mut tick = tokio::time::interval(Duration::from_secs(1));
-                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                loop {
-                    tick.tick().await;
-                    let s = Arc::clone(&store2);
-                    let _ = tokio::task::spawn_blocking(move || {
-                        let _ = s.sync();
-                        if s.wants_compaction() {
-                            let _ = s.compact();
-                        }
-                    })
-                    .await;
                 }
             }));
         }
@@ -408,7 +434,17 @@ impl Blackboard {
                     }
                     if me.sync_from_primary().await {
                         tracing::info!(ns = %me.cfg.namespace, "blackboard: initial mirror sync drained");
-                        return;
+                        // Drained once. Stay, to re-sync whenever a mirrored fact was refused
+                        // (`mirror_gap`), so it is re-delivered after the WAL repairs.
+                        loop {
+                            tick.tick().await;
+                            if me.is_primary() {
+                                return;
+                            }
+                            if me.mirror_gap.swap(false, Ordering::AcqRel) {
+                                break;
+                            }
+                        }
                     }
                     // Unreachable / partial: retry next tick.
                 }
@@ -485,8 +521,9 @@ impl Blackboard {
 
         loop {
             if !self.resolve_role("primary").is_empty() {
-                if self.init_store().is_ok() {
-                    self.become_secondary();
+                match self.init_store() {
+                    Ok(()) => self.become_secondary(),
+                    Err(e) => self.withdraw_after_store_refusal(&e),
                 }
                 return;
             }
@@ -498,8 +535,9 @@ impl Blackboard {
             let self_id = self.agent.node_id().to_string();
             match mycelium::election::elect(&ring, &candidates) {
                 Some(winner) if winner.to_string() == self_id => {
-                    if self.init_store().is_ok() {
-                        self.become_primary();
+                    match self.init_store() {
+                        Ok(()) => self.become_primary(),
+                        Err(e) => self.withdraw_after_store_refusal(&e),
                     }
                     return;
                 }
@@ -527,7 +565,10 @@ impl Blackboard {
         };
         for f in facts {
             if self.mark_mirrored(f.id) {
-                let _ = store.post_with_id(f.id, f.attributes, f.payload);
+                let id = f.id;
+                if let Err(e) = store.post_with_id(id, f.attributes, f.payload) {
+                    self.note_mirror_gap(id, &e);
+                }
             }
         }
         true // a full snapshot (possibly empty) was applied — the mirror is now complete
@@ -714,5 +755,123 @@ impl Blackboard {
         *self.role_reg.lock() = None;
         self.is_primary.store(false, Ordering::Release);
         self.is_secondary.store(false, Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+mod wal_role_tests {
+    use super::*;
+    use mycelium::GossipConfig;
+
+    async fn agent() -> Arc<GossipAgent> {
+        let port = mycelium::test_util::alloc_port();
+        let cfg = GossipConfig { bind_port: port, ..Default::default() };
+        let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+        agent.start().await.unwrap();
+        agent
+    }
+
+    fn temp_wal(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("mbb-role-{}-{name}.log", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    fn fact(id: u64) -> Fact {
+        Fact {
+            id,
+            attributes: BTreeMap::from([("kind".to_string(), "surplus".to_string())]),
+            payload: Bytes::from(vec![id as u8; 64]),
+        }
+    }
+
+    /// #597 review, finding 1 (a regression the PR introduced): a secondary's WAL poisoned by one
+    /// failed append was never repaired — only the primary ran compaction — and the replicate handler
+    /// had already marked each refused id mirrored, so no re-delivery applied it: failover lost every
+    /// fact after the error. The mirror must repair, and a re-delivery must land, in memory and in the
+    /// log.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_poisoned_mirror_repairs_and_keeps_every_later_record() {
+        let path = temp_wal("poisoned-mirror");
+        let bb = Blackboard::new(
+            agent().await,
+            BoardConfig {
+                namespace: Arc::from("poisoned-mirror"),
+                role: BoardRole::Secondary,
+                persist: true,
+                wal_path: path.clone(),
+                cap_refresh: Duration::from_millis(300),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let store = bb.store().unwrap();
+        store.inject_append_fault();
+        for id in 0..4 {
+            bb.apply_replicated(&rpc::enc_replicate_post(&fact(id)));
+        }
+        for _ in 0..50 {
+            if !store.wal_poisoned() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        // The re-delivery (a re-sent replicate, or the re-sync a gap triggers).
+        for id in 0..4 {
+            bb.apply_replicated(&rpc::enc_replicate_post(&fact(id)));
+        }
+        let mut ids: Vec<u64> = store.read(&Predicate::new()).iter().map(|f| f.id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![0, 1, 2, 3], "every fact is in the mirror");
+        bb.shutdown().await;
+        drop(store);
+        drop(bb);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 review, finding 2: in Auto mode an elected node whose WAL refuses to open logged nothing
+    /// and kept advertising its candidacy, so the ring elected it again and never got a primary.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_auto_node_whose_wal_refuses_withdraws_its_candidacy() {
+        let path = temp_wal("auto-refused");
+        let mut bytes = b"MBBWAL".to_vec();
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.push(99);
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(&[1, 2, 3, 4, 5, 6]);
+        std::fs::write(&path, &bytes).unwrap();
+        let bb = Blackboard::new(
+            agent().await,
+            BoardConfig {
+                namespace: Arc::from("auto-refused"),
+                role: BoardRole::Auto,
+                persist: true,
+                wal_path: path.clone(),
+                cap_refresh: Duration::from_millis(300),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        for _ in 0..50 {
+            if bb.role_reg.lock().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(bb.role_reg.lock().is_some(), "the node advertises its candidacy first");
+        let mut withdrawn = false;
+        for _ in 0..60 {
+            if bb.role_reg.lock().is_none() {
+                withdrawn = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(withdrawn, "the candidacy is withdrawn when the store refuses");
+        assert!(!bb.is_primary() && !bb.is_secondary());
+        bb.shutdown().await;
+        let _ = std::fs::remove_file(&path);
     }
 }

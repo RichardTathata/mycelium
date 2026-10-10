@@ -522,6 +522,31 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   construction — so the node does not become primary — where it used to start with the later records gone; a second
   store on one `wal_path` (in one process or two) is refused; a `<wal_path>.lock` file appears beside each WAL (do not
   delete it while a node runs — the lock is the OS's and goes with its holder).
+  **The PR's adversarial review (#597) found a regression and six more, all fixed here.** The poison was cleared only
+  by compaction, and only the primary ran it — so a **secondary** whose WAL failed once refused every later mirrored
+  record, and the replicate paths had already marked each id seen, so no re-delivery applied it: a failover lost
+  everything after the error (before the PR, only the failing record). Now WAL maintenance (the periodic sync, and the
+  repairing compaction) runs on **every node that holds a WAL**, primary or secondary; a mirrored record whose append
+  is refused is forgotten as seen and the mirror drains the primary again (`apply_records`, the blackboard's
+  replicate handler and initial sync); a mirror's `remove_queued` no longer counts an ack whose record was refused
+  (the blackboard's `discard` already did not; it is now logged). Also: an Auto-mode node whose store refuses to
+  open logs the error (file and byte) and **withdraws its candidacy**, where it logged nothing useful and stayed on
+  the ring to be elected again; a valid kind byte followed only by zeros (a zero-extended partial append) is a torn
+  tail, not corruption — and the limit beside it is stated: a torn frame whose missing body was zero-filled can
+  decode into a phantom record; a repair that keeps failing **backs off** (1, 2, 4 … 64 ticks), and a failing sync no
+  longer skips it; the compaction temp file is `<wal_path>.compact`, named after the whole file (it was derived from
+  the stem, so `x.a` and `x.b` shared one); and compaction keeps the **id high-water mark** — a lone `Ack` for the
+  highest id when that id was acked away — so a restart never reissues an acknowledged id (open fenced `next_id` from
+  the highest id left). Seen failing first, in both crates: `a_poisoned_mirror_repairs_and_keeps_every_later_record`
+  (`left: 0`, `right: 4` / `left: []`, `right: [0, 1, 2, 3]`), `an_auto_node_whose_wal_refuses_withdraws_its_candidacy`
+  (still advertised), `a_valid_kind_followed_by_zeros_is_a_torn_tail` (refused as corrupt), `a_failing_repair_backs_off`
+  (`20 attempts in 20 ticks`), `the_compaction_temp_file_is_named_after_the_whole_wal_file` (`IsADirectory` at the
+  stem's name), `a_restart_never_reuses_an_acked_id` (`left: 0`, `right: 3`); the tuple space's
+  `the_repair_runs_even_when_the_sync_fails` and `a_refused_mirror_ack_is_not_counted` (`left: 1`, `right: 0`). Added
+  as pins (they held): the repair path end to end, a known kind whose body does not decode, an ack racing a
+  compaction, the blackboard's refused `discard`. **Further upgrade notes:** a secondary now syncs its WAL
+  periodically and compacts it; a compacted WAL may end in a lone `Ack` (older builds replay it as a no-op); a temp
+  file left by a crashed compaction under the old name (`<stem>.compact`, `<stem>.wal.compact`) is not removed.
 
 ### Security
 - **An open gateway is refused off loopback** (plan `post-360-hardening.md` row P1). With no credential model the

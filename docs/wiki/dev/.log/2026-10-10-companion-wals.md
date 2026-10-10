@@ -21,3 +21,13 @@
 - Pinned by five tests per crate, each seen failing first. Pages touched: `dev/companions/tuple-space.md`,
   `dev/companions/blackboard.md`, `dev/concurrency/lock-order.md`; outside the wiki
   `docs/design/exactly-once-effect.md`, `docs/operations/companions.md`, `docs/operations/deployment.md`.
+- **The PR's adversarial review (#597):** a regression — the poison was cleared only by compaction, which only the
+  primary ran, so a poisoned *secondary* refused every later mirrored record while `apply_records` / the replicate
+  handler had already marked the ids seen (failover lost everything after the error). Fixed: maintenance spawned in
+  `init_store` for any persistent store (`spawn_wal_maintenance` / the board's equivalent), a refused mirror apply
+  un-marks the id and sets `mirror_gap` (the backfill loop stays alive and re-drains on it), `remove_queued` counts an
+  ack only when logged. Also: Auto-mode `init_store` refusals logged and the candidacy withdrawn
+  (`withdraw_after_store_refusal`); valid-kind-then-zeros is torn (and the zero-filled-body phantom decode stated as a
+  limit); repair back-off in `WalInner::{repair_failures, repair_skip}`; `maintenance_tick` runs the repair even when
+  the sync fails; temp path `<wal>.compact`; compaction keeps a lone `Ack` for the id high-water mark, and `fold_wal`
+  counts an `Ack` as terminal only for an item it holds. No new lock (one `AtomicBool` per handle).

@@ -119,6 +119,11 @@ struct WalInner {
     /// Every append is refused by name until a compaction rewrites the file from the live state —
     /// or a reopen truncates the torn tail.
     poison: Option<String>,
+    /// Consecutive failed repairs, and the `wants_compaction` calls still to decline before the next
+    /// attempt — a repair that keeps failing backs off (1, 2, 4 … 64 ticks) rather than rereading
+    /// the whole log on every tick.
+    repair_failures: u32,
+    repair_skip: u32,
     file_len: u64,
     ops_since_sync: u64,
     /// Live records (Post). Terminal records (Ack) bump `acked`; compaction fires past a ratio.
@@ -138,6 +143,9 @@ pub(crate) struct WalWriter {
     /// disk or a pulled cable produces, which the production path cannot be made to produce on demand.
     #[cfg(test)]
     pub(crate) fault: std::sync::atomic::AtomicBool,
+    /// Test seam: while set, every compaction fails.
+    #[cfg(test)]
+    pub(crate) compact_fault: std::sync::atomic::AtomicBool,
 }
 
 // Test seam: the storage steps compaction takes, in order, on this thread (compaction is synchronous,
@@ -192,7 +200,7 @@ impl WalWriter {
 
         // Replay. Post adds a fact; Claim/Release are runtime-only (a claimed-unacked fact
         // re-queues as claimable — at-least-once); Ack is the sole terminal.
-        let Folded { facts, total, acked, end: offset } = fold_wal(&data).map_err(|offset| {
+        let Folded { facts, total, acked, end: offset, high_water } = fold_wal(&data).map_err(|offset| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -215,7 +223,7 @@ impl WalWriter {
                 "blackboard: truncated a torn final record left by a crash mid-append"
             );
         }
-        let max_id = facts.keys().next_back().copied();
+        let max_id = high_water;
         let live: Vec<LiveFact> = facts
             .into_iter()
             .filter(|(_, f)| !f.acked)
@@ -224,12 +232,14 @@ impl WalWriter {
         let file_len = offset as u64;
         Ok((
             Self {
-                inner: Mutex::new(WalInner { file, poison: None, file_len, ops_since_sync: 0, total, acked, epoch: 0 }),
+                inner: Mutex::new(WalInner { file, poison: None, repair_failures: 0, repair_skip: 0, file_len, ops_since_sync: 0, total, acked, epoch: 0 }),
                 path: path.to_path_buf(),
                 checkpoint_every,
                 _lock: lock,
                 #[cfg(test)]
                 fault: std::sync::atomic::AtomicBool::new(false),
+                #[cfg(test)]
+                compact_fault: std::sync::atomic::AtomicBool::new(false),
             },
             live,
             max_id,
@@ -281,9 +291,17 @@ impl WalWriter {
 
     /// True once acked records dominate — a compaction would reclaim meaningful space.
     pub(crate) fn wants_compaction(&self) -> bool {
-        let g = self.inner.lock();
-        // A poisoned writer is repaired by the rewrite, so it always wants one.
-        g.poison.is_some() || (g.total >= 64 && g.acked * 2 >= g.total)
+        let mut g = self.inner.lock();
+        if g.poison.is_some() {
+            // A poisoned writer is repaired by the rewrite, so it wants one — unless the last repair
+            // failed and the back-off has not run out.
+            if g.repair_skip > 0 {
+                g.repair_skip -= 1;
+                return false;
+            }
+            return true;
+        }
+        g.total >= 64 && g.acked * 2 >= g.total
     }
 
     /// Rewrite the WAL to contain only its live facts — **folded from the log itself**, under the
@@ -297,7 +315,33 @@ impl WalWriter {
     /// returns. Only the bytes up to `file_len` are folded, so a poisoned writer's torn frame is
     /// left behind.
     pub(crate) fn compact(&self) -> io::Result<()> {
-        let mut g = self.inner.lock();
+        let mut guard = self.inner.lock();
+        let result = self.compact_locked(&mut guard);
+        match &result {
+            Ok(()) => {
+                guard.repair_failures = 0;
+                guard.repair_skip = 0;
+            }
+            Err(e) if guard.poison.is_some() => {
+                guard.repair_failures = guard.repair_failures.saturating_add(1);
+                guard.repair_skip = 1u32 << guard.repair_failures.min(6);
+                tracing::warn!(
+                    error = %e,
+                    failures = guard.repair_failures,
+                    "blackboard: the repairing compaction failed; backing off {} ticks",
+                    guard.repair_skip
+                );
+            }
+            Err(_) => {}
+        }
+        result
+    }
+
+    fn compact_locked(&self, g: &mut WalInner) -> io::Result<()> {
+        #[cfg(test)]
+        if self.compact_fault.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(io::Error::other("injected compaction failure"));
+        }
         let mut data = vec![0u8; g.file_len as usize];
         g.file.seek(SeekFrom::Start(0))?;
         g.file.read_exact(&mut data)?;
@@ -310,13 +354,29 @@ impl WalWriter {
                 ),
             )
         })?;
-        let live: Vec<WalRecord> = folded
+        let mut live: Vec<WalRecord> = folded
             .facts
             .into_iter()
             .filter(|(_, f)| !f.acked)
             .map(|(id, f)| WalRecord::Post { id, attributes: f.attributes, payload: f.payload })
             .collect();
-        let tmp = self.path.with_extension("wal.compact");
+        let posts = live.len() as u64;
+        // The id high-water mark survives the rewrite (#597 review, finding 7): when the highest id
+        // the log ever held was acked away, a lone `Ack` for it is kept, so the next open fences
+        // `next_id` past it and a restart never reissues an acknowledged id. A lone `Ack` names no
+        // fact, so replay — this build's or an older one's — changes nothing else for it.
+        let highest_live = live.iter().map(|r| match r { WalRecord::Post { id, .. } => *id, _ => 0 }).max();
+        if let Some(hw) = folded.high_water
+            && highest_live.is_none_or(|h| h < hw)
+        {
+            live.push(WalRecord::Ack { id: hw });
+        }
+        // Named after the whole WAL file, so two WALs sharing a stem never share a temp file.
+        let tmp = {
+            let mut name = self.path.as_os_str().to_owned();
+            name.push(".compact");
+            PathBuf::from(name)
+        };
         let mut buf = wal_header().to_vec();
         for rec in &live {
             rec.encode(&mut buf);
@@ -338,7 +398,7 @@ impl WalWriter {
         file.seek(SeekFrom::End(0))?;
         g.file = file;
         g.file_len = buf.len() as u64;
-        g.total = live.len() as u64;
+        g.total = posts;
         g.acked = 0;
         g.ops_since_sync = 0;
         g.epoch += 1;
@@ -347,6 +407,11 @@ impl WalWriter {
             tracing::info!(%reason, "blackboard: a compaction rewrote the WAL after a failed append; appends resume");
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn poisoned(&self) -> bool {
+        self.inner.lock().poison.is_some()
     }
 
     pub(crate) fn epoch(&self) -> u64 {
@@ -376,6 +441,8 @@ struct Folded {
     acked: u64,
     /// Where the complete records end — short of the image's end only for a torn final frame.
     end: usize,
+    /// The highest fact id any record names, acked or live — what `next_id` is fenced past.
+    high_water: Option<u64>,
 }
 
 /// Fold a whole WAL image (header included) record by record. `Err(offset)` names a corrupt record
@@ -384,6 +451,7 @@ fn fold_wal(data: &[u8]) -> Result<Folded, usize> {
     let mut facts: BTreeMap<u64, FactState> = BTreeMap::new();
     let mut total = 0u64;
     let mut acked = 0u64;
+    let mut high_water: Option<u64> = None;
     let mut offset = WAL_HEADER_LEN as usize;
     while offset < data.len() {
         match scan_frame(&data[offset..]) {
@@ -393,14 +461,18 @@ fn fold_wal(data: &[u8]) -> Result<Folded, usize> {
             Frame::Corrupt => return Err(offset),
             Frame::Record(rec, consumed) => {
                 offset += consumed;
+                let (WalRecord::Post { id, .. } | WalRecord::Claim { id } | WalRecord::Ack { id } | WalRecord::Release { id }) = &rec;
+                high_water = high_water.max(Some(*id));
                 match rec {
                     WalRecord::Post { id, attributes, payload } => {
                         total += 1;
                         facts.insert(id, FactState { attributes, payload, acked: false });
                     }
+                    // Counted only when it terminates a fact the log holds: the lone `Ack` a compaction
+                    // keeps for the high-water mark is not a terminal record.
                     WalRecord::Ack { id } => {
-                        acked += 1;
                         if let Some(f) = facts.get_mut(&id) {
+                            acked += 1;
                             f.acked = true;
                         }
                     }
@@ -410,7 +482,7 @@ fn fold_wal(data: &[u8]) -> Result<Folded, usize> {
             }
         }
     }
-    Ok(Folded { facts, total, acked, end: offset })
+    Ok(Folded { facts, total, acked, end: offset, high_water })
 }
 
 /// What a WAL image holds at a record boundary — the difference between a crash and corruption
@@ -434,14 +506,17 @@ fn scan_frame(data: &[u8]) -> Frame {
         // read as a torn tail, as in the core; anything else is corruption.
         return if data.iter().any(|b| *b != 0) { Frame::Corrupt } else { Frame::Torn };
     }
-    if data.len() < 5 {
+    // A valid kind byte and nothing but zeros after it: a partial append the filesystem zero-extended
+    // in a crash (#597 review, finding 3) — torn, like the core's zeroed prefix.
+    if data.len() < 5 || data[1..].iter().all(|b| *b == 0) {
         return Frame::Torn;
     }
     let body_len = u32::from_le_bytes(data[1..5].try_into().expect("four length bytes")) as usize;
     // A length the image cannot supply is a torn tail; a whole body that does not decode is not.
-    // What this cannot see: a length prefix corrupted to run past the end of the file reads as torn
-    // (there is no checksum), which is why a failed append poisons the writer rather than relying
-    // on this scan.
+    // What this cannot see, for want of a checksum: a length prefix corrupted to run past the end of
+    // the file reads as torn; and a torn frame whose missing body was zero-filled can *decode* — a
+    // phantom record (an `Ack` of id 0, a `Post` with a zeroed payload) replayed as if written. That
+    // is why a failed append poisons the writer rather than relying on this scan.
     if body_len.saturating_add(5) > data.len() { Frame::Torn } else { Frame::Corrupt }
 }
 

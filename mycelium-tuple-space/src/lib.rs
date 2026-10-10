@@ -290,6 +290,9 @@ pub struct TupleSpace {
     last_heartbeat_sender: parking_lot::Mutex<Option<NodeId>>,
     /// Mirror bookkeeping: item id → stage, for dedupe and ack routing.
     mirror_stages: parking_lot::Mutex<HashMap<u64, Arc<str>>>,
+    /// Set when a mirrored record could not be applied (its WAL append was refused): the backfill
+    /// drains the primary again, so the record is re-delivered once the WAL is repaired.
+    mirror_gap: AtomicBool,
     /// Guards against a second metrics writer after a role transition.
     metrics_running: AtomicBool,
     tasks: parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -313,6 +316,7 @@ impl TupleSpace {
             replay_cursor: parking_lot::Mutex::new((0, 0)),
             last_heartbeat_sender: parking_lot::Mutex::new(None),
             mirror_stages: parking_lot::Mutex::new(HashMap::new()),
+            mirror_gap: AtomicBool::new(false),
             metrics_running: AtomicBool::new(false),
             tasks: parking_lot::Mutex::new(Vec::new()),
         });
@@ -336,9 +340,12 @@ impl TupleSpace {
     }
 
     fn init_store(&self) -> Result<(), TupleError> {
-        let mut g = self.store.lock();
-        if g.is_none() {
-            let store = if self.cfg.persist {
+        let created = {
+            let mut g = self.store.lock();
+            if g.is_some() {
+                return Ok(());
+            }
+            let store = Arc::new(if self.cfg.persist {
                 TupleStore::persistent(
                     &self.cfg.wal_path,
                     self.cfg.checkpoint_every,
@@ -346,10 +353,26 @@ impl TupleSpace {
                 )?
             } else {
                 TupleStore::transient(self.cfg.high_watermark)
-            };
-            *g = Some(Arc::new(store));
+            });
+            *g = Some(Arc::clone(&store));
+            store
+        };
+        // WAL maintenance runs wherever a WAL does — a mirror's too (#597 review, finding 1): the
+        // compaction that repairs a writer poisoned by a failed append, and the periodic sync. It
+        // ran on the primary only, so a secondary's poisoned WAL refused every later mirrored record.
+        if self.cfg.persist {
+            let h = spawn_wal_maintenance(created);
+            self.tasks.lock().push(h);
         }
         Ok(())
+    }
+
+    /// A mirrored record's WAL append was refused: forget it was seen, so a re-delivery applies it,
+    /// and ask the backfill to drain the primary again.
+    fn note_mirror_gap(&self, id: u64, e: &TupleError) {
+        tracing::error!(id, error = %e, "tuple-space: mirror record refused; it is re-fetched once the WAL is repaired");
+        self.mirror_stages.lock().remove(&id);
+        self.mirror_gap.store(true, Ordering::Release);
     }
 
     pub(crate) fn store(&self) -> Option<Arc<TupleStore>> {
@@ -406,35 +429,6 @@ impl TupleSpace {
                         tracing::warn!(id, "tuple-space: re-queued expired in-flight item");
                     }
                     me.sweep_stale_inflight_keys(timeout);
-                }
-            }));
-        }
-
-        // Checkpoint + compaction: fsync on the configured cadence, compact
-        // when more than half the log is acked. Both run off the hot path.
-        {
-            let store2 = Arc::clone(&store);
-            tasks.push(tokio::spawn(async move {
-                let mut tick = tokio::time::interval(Duration::from_millis(200));
-                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                let mut n: u32 = 0;
-                loop {
-                    tick.tick().await;
-                    n = n.wrapping_add(1);
-                    // Force a sync every ~1 s even below the ops threshold.
-                    let force = n.is_multiple_of(5);
-                    let s = Arc::clone(&store2);
-                    let r = tokio::task::spawn_blocking(move || {
-                        s.checkpoint_if_due(force)?;
-                        if s.wants_compaction() {
-                            s.compact_now()?;
-                        }
-                        std::io::Result::Ok(())
-                    })
-                    .await;
-                    if let Ok(Err(e)) = r {
-                        tracing::error!(error = %e, "tuple-space: wal maintenance failed");
-                    }
                 }
             }));
         }
@@ -641,9 +635,19 @@ impl TupleSpace {
                             ns = %me.cfg.namespace,
                             "tuple-space: join-time wal backfill drained"
                         );
-                        return;
+                        // Drained once. Stay, to drain again whenever a mirrored record was refused
+                        // (`mirror_gap`), so it is re-delivered after the WAL repairs.
+                        loop {
+                            tick.tick().await;
+                            if me.is_primary() {
+                                return;
+                            }
+                            if me.mirror_gap.swap(false, Ordering::AcqRel) {
+                                break;
+                            }
+                        }
                     }
-                    // Unreachable / partial: retry next tick.
+                    // Unreachable / partial / a gap to refill: retry next tick.
                 }
             }));
         }
@@ -741,6 +745,19 @@ impl TupleSpace {
         tracing::info!(ns = %self.cfg.namespace, "tuple-space: mirroring as secondary");
     }
 
+    /// The store refused to open (a corrupt WAL, a second owner, an unreadable file): say why — the
+    /// error names the file and, for corruption, the byte — and withdraw the candidacy, so the ring
+    /// does not keep electing a node that cannot serve (#597 review, finding 2).
+    fn withdraw_after_store_refusal(&self, e: &TupleError) {
+        tracing::error!(
+            ns = %self.cfg.namespace,
+            wal = %self.cfg.wal_path.display(),
+            error = %e,
+            "tuple-space: the store refused to open; withdrawing the candidacy and staying client"
+        );
+        *self.role_reg.lock() = None;
+    }
+
     /// `TupleRole::Auto`: advertise as candidate, let candidates settle,
     /// then self-assign. The plan's bare resolve-then-promote races when two
     /// candidates start together; the ring's negotiated election rule breaks the tie
@@ -762,10 +779,9 @@ impl TupleSpace {
 
         loop {
             if !self.resolve_role("primary").is_empty() {
-                if self.init_store().is_ok() {
-                    self.become_secondary();
-                } else {
-                    tracing::error!("tuple-space: store init failed; staying client");
+                match self.init_store() {
+                    Ok(()) => self.become_secondary(),
+                    Err(e) => self.withdraw_after_store_refusal(&e),
                 }
                 return;
             }
@@ -776,10 +792,9 @@ impl TupleSpace {
             let self_id = self.agent.node_id().to_string();
             match mycelium::election::elect(&ring, &candidates) {
                 Some(winner) if winner.to_string() == self_id => {
-                    if self.init_store().is_ok() {
-                        self.become_primary();
-                    } else {
-                        tracing::error!("tuple-space: store init failed; staying client");
+                    match self.init_store() {
+                        Ok(()) => self.become_primary(),
+                        Err(e) => self.withdraw_after_store_refusal(&e),
                     }
                     return;
                 }
@@ -869,7 +884,7 @@ impl TupleSpace {
                         .is_none();
                     if fresh && let Err(e) = store.put_with_id(stage, *id, payload.clone(), key.clone())
                     {
-                        tracing::error!(id, error = %e, "tuple-space: mirror put failed");
+                        self.note_mirror_gap(*id, &e);
                     }
                 }
                 Record::Ack { id } => {
@@ -889,7 +904,7 @@ impl TupleSpace {
                     if fresh
                         && let Err(e) = store.put_with_id(stage, *new_id, payload.clone(), key.clone())
                     {
-                        tracing::error!(id = new_id, error = %e, "tuple-space: mirror complete failed");
+                        self.note_mirror_gap(*new_id, &e);
                     }
                 }
                 // A mirror keeps taken items queued: on promotion they are
@@ -1419,9 +1434,142 @@ impl TupleSpace {
     }
 }
 
+/// The WAL's periodic sync and its compaction, off the hot path, on every node that holds a WAL. A
+/// failing repair backs off inside the WAL; a failing sync does not skip the repair.
+fn spawn_wal_maintenance(store: Arc<TupleStore>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_millis(200));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut n: u32 = 0;
+        loop {
+            tick.tick().await;
+            n = n.wrapping_add(1);
+            // Force a sync every ~1 s even below the ops threshold.
+            let force = n.is_multiple_of(5);
+            let s = Arc::clone(&store);
+            let r = tokio::task::spawn_blocking(move || s.maintenance_tick(force)).await;
+            if let Ok(Err(e)) = r {
+                tracing::error!(error = %e, "tuple-space: wal maintenance failed");
+            }
+        }
+    })
+}
+
 fn rpc_err(e: RpcError) -> TupleError {
     match e {
         RpcError::Timeout => TupleError::Timeout,
         other => TupleError::Rpc(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod wal_role_tests {
+    use super::*;
+    use mycelium::{GossipConfig, NodeId};
+
+    async fn agent() -> Arc<GossipAgent> {
+        let port = mycelium::test_util::alloc_port();
+        let cfg = GossipConfig { bind_port: port, ..Default::default() };
+        let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+        agent.start().await.unwrap();
+        agent
+    }
+
+    fn temp_wal(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("mts-role-{}-{name}.log", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    /// #597 review, finding 1 (a regression the PR introduced): a secondary's WAL poisoned by one
+    /// failed append was never repaired — only the primary ran compaction — and `apply_records` had
+    /// already marked each refused id seen, so neither live replication nor backfill re-applied it:
+    /// failover lost every item after the error. The mirror must repair, and a re-delivery of the
+    /// refused records must land, in memory and in the log.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_poisoned_mirror_repairs_and_keeps_every_later_record() {
+        let path = temp_wal("poisoned-mirror");
+        let ts = TupleSpace::new(
+            agent().await,
+            TupleConfig {
+                namespace: Arc::from("poisoned-mirror"),
+                role: TupleRole::Secondary,
+                persist: true,
+                wal_path: path.clone(),
+                cap_refresh: Duration::from_millis(300),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let store = ts.store().unwrap();
+        let recs: Vec<Record> = (0..4u64)
+            .map(|id| Record::Put { id, stage: Arc::from("s"), payload: Bytes::from(vec![id as u8; 64]), key: None })
+            .collect();
+        store.inject_append_fault();
+        ts.apply_records(&recs);
+        for _ in 0..50 {
+            if !store.wal_poisoned() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        // The backfill's re-delivery: the same records, as `wal_replay` or a re-sent replicate would.
+        ts.apply_records(&recs);
+        assert_eq!(store.depth(Some("s")).first().map_or(0, |d| d.depth), 4, "every record is in the mirror");
+        let mut logged: Vec<u64> = store::read_wal(&path)
+            .into_iter()
+            .filter_map(|r| match r { Record::Put { id, .. } => Some(id), _ => None })
+            .collect();
+        logged.sort_unstable();
+        logged.dedup();
+        assert_eq!(logged, vec![0, 1, 2, 3], "and in its log, for the failover after a crash");
+        ts.shutdown().await;
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 review, finding 2: in Auto mode an elected node whose WAL refuses to open logged nothing
+    /// useful and kept advertising its candidacy, so the ring elected it again and never got a primary.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_auto_node_whose_wal_refuses_withdraws_its_candidacy() {
+        let path = temp_wal("auto-refused");
+        let mut bytes = b"MTSWAL".to_vec();
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.push(99);
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(&[1, 2, 3, 4, 5, 6]);
+        std::fs::write(&path, &bytes).unwrap();
+        let ts = TupleSpace::new(
+            agent().await,
+            TupleConfig {
+                namespace: Arc::from("auto-refused"),
+                role: TupleRole::Auto,
+                persist: true,
+                wal_path: path.clone(),
+                cap_refresh: Duration::from_millis(300),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        for _ in 0..50 {
+            if ts.role_reg.lock().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(ts.role_reg.lock().is_some(), "the node advertises its candidacy first");
+        let mut withdrawn = false;
+        for _ in 0..60 {
+            if ts.role_reg.lock().is_none() {
+                withdrawn = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(withdrawn, "the candidacy is withdrawn when the store refuses");
+        assert!(!ts.is_primary() && !ts.is_secondary());
+        ts.shutdown().await;
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -155,8 +155,9 @@ impl BoardStore {
         Ok(id)
     }
 
-    /// Test seam: the window between a write's WAL append and its in-memory apply. A test arms
-    /// `COMPACT_BETWEEN` to run a compaction exactly there, on this thread.
+    /// Test seam: the window between a write's two steps — its WAL append and its in-memory apply,
+    /// in whichever order the write takes them. A test arms `COMPACT_BETWEEN` to run a compaction
+    /// exactly there, on this thread.
     #[cfg(test)]
     fn between_append_and_apply(&self) {
         if COMPACT_BETWEEN.with(|c| c.replace(false)) {
@@ -221,6 +222,8 @@ impl BoardStore {
         if !removed {
             return Err(BlackboardError::NotFound);
         }
+        #[cfg(test)]
+        self.between_append_and_apply();
         if let Some(wal) = &self.wal {
             wal.append(&WalRecord::Ack { id })?;
         }
@@ -258,6 +261,29 @@ impl BoardStore {
         let Some(wal) = &self.wal else { return Ok(()) };
         wal.compact()?;
         Ok(())
+    }
+
+    /// One maintenance pass: the periodic sync, then a compaction when one is wanted. Each failure
+    /// is the next tick's to retry; neither stops the other.
+    pub(crate) fn maintenance_tick(&self) {
+        let _ = self.sync();
+        if self.wants_compaction() {
+            let _ = self.compact();
+        }
+    }
+
+    /// Test seams over the WAL.
+    #[cfg(test)]
+    pub(crate) fn inject_append_fault(&self) {
+        self.wal.as_ref().unwrap().fault.store(true, Ordering::SeqCst);
+    }
+    #[cfg(test)]
+    pub(crate) fn set_compact_fault(&self, on: bool) {
+        self.wal.as_ref().unwrap().compact_fault.store(on, Ordering::SeqCst);
+    }
+    #[cfg(test)]
+    pub(crate) fn wal_poisoned(&self) -> bool {
+        self.wal.as_ref().unwrap().poisoned()
     }
 
     /// The WAL compaction epoch (0 for a transient board) — for tests / future replay cursors.
@@ -666,6 +692,160 @@ mod tests {
         let got: Vec<u64> = store.read(&Predicate::new()).iter().map(|f| f.id).collect();
         assert_eq!(got, vec![id], "the acknowledged post survives the compaction and the reopen");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 review, finding 7: compaction drops acked facts, and open fenced `next_id` from the
+    /// highest id *left*, so a restart reissued an acknowledged id.
+    #[test]
+    fn a_restart_never_reuses_an_acked_id() {
+        let path = temp_wal("id-high-water");
+        {
+            let store = BoardStore::persistent(&path, 1).unwrap();
+            for i in 0..3 {
+                store.post(surplus(&i.to_string(), "1.0"), Bytes::from("x")).unwrap();
+            }
+            while let Some(f) = store.claim(&Predicate::new()).unwrap() {
+                store.ack(f.id).unwrap();
+            }
+            store.compact().unwrap();
+        }
+        let store = BoardStore::persistent(&path, 1).unwrap();
+        assert_eq!(store.post(surplus("9", "1.0"), Bytes::from("next")).unwrap(), 3, "the next id is past every id the log held");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 review, finding 3: a valid kind byte followed by zeros is a zero-extended partial append —
+    /// a torn tail, not corruption.
+    #[test]
+    fn a_valid_kind_followed_by_zeros_is_a_torn_tail() {
+        let path = temp_wal("zero-tail");
+        {
+            let store = BoardStore::persistent(&path, 1).unwrap();
+            store.post(surplus("1", "1.0"), Bytes::from("kept")).unwrap();
+        }
+        let mut bytes = std::fs::read(&path).unwrap();
+        let good = bytes.len();
+        bytes.push(1); // REC_POST
+        bytes.extend_from_slice(&[0u8; 12]);
+        std::fs::write(&path, &bytes).unwrap();
+        let store = BoardStore::persistent(&path, 1).expect("a zero-filled tail is torn, not corrupt");
+        assert_eq!(store.read(&Predicate::new()).len(), 1);
+        assert_eq!(std::fs::metadata(&path).unwrap().len() as usize, good, "the torn tail is truncated");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 review, finding 6: a whole frame of a known kind whose body does not decode, with a record
+    /// after it, refuses the open.
+    #[test]
+    fn a_known_kind_whose_body_does_not_decode_refuses_the_open() {
+        let path = temp_wal("bad-body");
+        {
+            let store = BoardStore::persistent(&path, 1).unwrap();
+            store.post(surplus("1", "1.0"), Bytes::from("first")).unwrap();
+        }
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.push(1); // REC_POST
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        bytes.extend_from_slice(&[1, 2, 3]);
+        WalRecord::Post { id: 1, attributes: surplus("2", "2.0"), payload: Bytes::from("second") }.encode(&mut bytes);
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(matches!(BoardStore::persistent(&path, 1), Err(BlackboardError::Io(e)) if e.kind() == std::io::ErrorKind::InvalidData));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 review, finding 6: the repair path end to end.
+    #[test]
+    fn a_compaction_repairs_a_poisoned_wal_and_appends_resume() {
+        let path = temp_wal("repair");
+        let (a, c) = {
+            let store = BoardStore::persistent(&path, 1).unwrap();
+            let a = store.post(surplus("1", "1.0"), Bytes::from("a")).unwrap();
+            store.inject_append_fault();
+            assert!(store.post(surplus("2", "1.0"), Bytes::from("lost")).is_err());
+            assert!(store.post(surplus("3", "1.0"), Bytes::from("refused")).is_err(), "poisoned");
+            assert!(store.wants_compaction(), "a poisoned writer asks for the repair");
+            store.compact().unwrap();
+            assert!(!store.wal_poisoned());
+            let c = store.post(surplus("4", "1.0"), Bytes::from("c")).unwrap();
+            (a, c)
+        };
+        let store = BoardStore::persistent(&path, 1).unwrap();
+        let got: Vec<u64> = store.read(&Predicate::new()).iter().map(|f| f.id).collect();
+        assert_eq!(got, vec![a, c]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 review, finding 6: an ack (memory first, then the WAL) racing a compaction is kept.
+    #[test]
+    fn an_ack_racing_a_compaction_is_kept() {
+        let path = temp_wal("ack-window");
+        {
+            let store = BoardStore::persistent(&path, 1).unwrap();
+            store.post(surplus("1", "1.0"), Bytes::from("x")).unwrap();
+            let f = store.claim(&Predicate::new()).unwrap().unwrap();
+            COMPACT_BETWEEN.with(|c| c.set(true));
+            store.ack(f.id).unwrap();
+            assert!(!COMPACT_BETWEEN.with(|c| c.get()), "the compaction ran in the window");
+        }
+        let store = BoardStore::persistent(&path, 1).unwrap();
+        assert!(store.read(&Predicate::new()).is_empty(), "the acked fact does not come back");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 review, finding 1: a mirror's `discard` whose `Ack` record is refused is reported and not
+    /// counted (pinned: this already held — the `?` returns before the count).
+    #[test]
+    fn a_refused_mirror_discard_is_not_counted() {
+        let path = temp_wal("mirror-discard");
+        let store = BoardStore::persistent(&path, 1).unwrap();
+        store.post_with_id(5, surplus("1", "1.0"), Bytes::from("x")).unwrap();
+        store.inject_append_fault();
+        assert!(store.discard(5).is_err());
+        assert_eq!(store.stats().acked, 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 review, finding 4: a repair that keeps failing reread the whole log on every tick. It
+    /// backs off, and a later tick still repairs.
+    #[test]
+    fn a_failing_repair_backs_off() {
+        let path = temp_wal("repair-backoff");
+        let store = BoardStore::persistent(&path, 1).unwrap();
+        store.inject_append_fault();
+        assert!(store.post(surplus("1", "1.0"), Bytes::from("x")).is_err());
+        store.set_compact_fault(true);
+        let mut attempts = 0;
+        for _ in 0..20 {
+            if store.wants_compaction() {
+                attempts += 1;
+                assert!(store.compact().is_err());
+            }
+        }
+        assert!(attempts <= 5, "{attempts} attempts in 20 ticks");
+        store.set_compact_fault(false);
+        let mut repaired = false;
+        for _ in 0..200 {
+            store.maintenance_tick();
+            if !store.wal_poisoned() {
+                repaired = true;
+                break;
+            }
+        }
+        assert!(repaired, "the back-off ends: a later tick repairs");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 review, finding 5: the compaction temp file was `with_extension("wal.compact")`, so `x.a`
+    /// and `x.b` shared `x.wal.compact`, outside either's ownership lock.
+    #[test]
+    fn the_compaction_temp_file_is_named_after_the_whole_wal_file() {
+        let dir = std::env::temp_dir().join(format!("mbb-stem-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("x.wal.compact")).unwrap();
+        let store = BoardStore::persistent(dir.join("x.a"), 1).unwrap();
+        store.post(surplus("1", "1.0"), Bytes::from("x")).unwrap();
+        store.compact().expect("the temp path is the WAL's own, not its stem's");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Row C: one owner per WAL file. Two boards on one path used to replay, append and compact the

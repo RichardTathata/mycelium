@@ -48,14 +48,17 @@ left blank. The obligations every companion owes are the
 - **WAL integrity (both companions, since row C of the post-360 hardening).** One owner per `wal_path` —
   a second store on the same path, in this process or another, is refused with `WouldBlock` naming the
   file (the lock is `<wal_path>.lock`; do not delete it — the OS releases it with its holder). A failed
-  append (`ENOSPC`, `EIO`) **poisons the writer**: every later write is refused by name until the next
-  maintenance tick's compaction rewrites the log from the live state, or a restart truncates the torn
-  tail. At open, a file ending *inside* its last record is a crash's torn tail and is truncated; a
+  append (`ENOSPC`, `EIO`) **poisons the writer**: every later write is refused by name until a
+  maintenance tick's compaction rewrites the log, or a restart truncates the torn tail. Maintenance runs
+  on **every node holding a WAL**, primary or secondary (a repair that keeps failing backs off to one
+  try per 64 ticks); a mirrored record refused meanwhile is re-fetched from the primary once the WAL is
+  repaired. An Auto-mode node whose store refuses to open logs why and withdraws its candidacy. At open, a file ending *inside* its last record is a crash's torn tail and is truncated; a
   record that is all there and does not decode, **with data after it**, refuses the open (`InvalidData`,
   file and byte named, file untouched) — the node does not become primary. Move the file aside to start
   empty; there is no quarantine switch. Compaction rewrites the log from the log itself (never from
-  memory, so a write in flight is never left out), syncs the temp file, renames it, then syncs the
-  directory, so it survives a power loss.
+  memory, so a write in flight is never left out) into `<wal_path>.compact`, syncs it, renames it, then
+  syncs the directory, so it survives a power loss; it keeps the id high-water mark, so a restart never
+  reissues an acked id.
 - **Un-acked work re-queues.** `worker_timeout_secs` (default **300**): an item taken but not
   `complete`d within the window is re-queued (at-least-once); the scan runs every 30 s. Set it above
   your longest task — too low duplicates work, too high slows recovery of a dead worker's item.
