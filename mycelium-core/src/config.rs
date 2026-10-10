@@ -2335,25 +2335,20 @@ mod tests {
     /// The three new variables are applied, and a malformed named-token entry refuses the
     /// override rather than silently leaving the table empty.
     #[test]
-    #[allow(unsafe_code)]
     fn the_control_bound_and_named_tokens_come_from_the_environment() {
         let _lock = env_test_lock();
         let vars = ["GOSSIP_CONTROL_MAX_STALENESS_MS", "GOSSIP_CONTROL_MIN_PEERS_HEARD", "GOSSIP_GATEWAY_NAMED_TOKENS"];
         let _guards: Vec<EnvGuard> = vars.iter().map(|v| EnvGuard(v, std::env::var(v).ok())).collect();
-        // SAFETY: mutations serialised by env_test_lock().
-        unsafe {
-            std::env::set_var(vars[0], "90000");
-            std::env::set_var(vars[1], "3");
-            std::env::set_var(vars[2], "ci-bot|s3cr3t|mcp:invoke;skill-server|t0k3n|mesh:serve");
-        }
+        set_test_env(vars[0], Some("90000"));
+        set_test_env(vars[1], Some("3"));
+        set_test_env(vars[2], Some("ci-bot|s3cr3t|mcp:invoke;skill-server|t0k3n|mesh:serve"));
         let mut cfg = GossipConfig::default();
         cfg.apply_env_overrides().expect("well-formed overrides apply");
         assert_eq!((cfg.control_max_staleness_ms, cfg.control_min_peers_heard), (90_000, 3));
         assert_eq!(cfg.gateway_named_tokens.len(), 2);
         assert_eq!(cfg.gateway_named_tokens[1].scopes, vec!["mesh:serve".to_string()]);
 
-        // SAFETY: as above.
-        unsafe { std::env::set_var(vars[2], "ci-bot|s3cr3t") };
+        set_test_env(vars[2], Some("ci-bot|s3cr3t"));
         let err = GossipConfig::default().apply_env_overrides().expect_err("a malformed entry refuses");
         assert!(format!("{err}").contains("gateway_named_tokens"), "{err}");
     }
@@ -2453,27 +2448,34 @@ mod tests {
     /// Restores (or removes) an env var on drop. Hold `env_test_lock()` for the
     /// guard's whole lifetime.
     struct EnvGuard(&'static str, Option<String>);
-    #[allow(unsafe_code)]
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            // SAFETY: mutations serialised by env_test_lock().
-            unsafe {
-                match &self.1 {
-                    Some(v) => std::env::set_var(self.0, v),
-                    None    => std::env::remove_var(self.0),
-                }
+            set_test_env(self.0, self.1.as_deref());
+        }
+    }
+
+    /// Sets (`Some`) or removes (`None`) a process env var — the crate's one `unsafe` site, test
+    /// code only. The crate is `#![deny(unsafe_code)]` (post-360 P3); edition 2024 makes
+    /// `set_var`/`remove_var` unsafe because another thread may read the environment at the same
+    /// time, so every caller must hold `env_test_lock()` for as long as the value matters.
+    #[allow(unsafe_code)]
+    fn set_test_env(var: &str, value: Option<&str>) {
+        // SAFETY: every caller holds env_test_lock(), which serialises the tests that touch the
+        // environment; no non-test code in this crate writes it.
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var(var, v),
+                None => std::env::remove_var(var),
             }
         }
     }
 
     #[test]
-    #[allow(unsafe_code)]
     fn apply_env_overrides_sets_field() {
         let _lock = env_test_lock();
         let var = "GOSSIP_MAX_SEEN_ENTRIES";
         let _guard = EnvGuard(var, std::env::var(var).ok());
-        // SAFETY: mutations serialised by env_test_lock().
-        unsafe { std::env::set_var(var, "12345"); }
+        set_test_env(var, Some("12345"));
         let mut cfg = GossipConfig::default();
         cfg.apply_env_overrides().expect("apply_env_overrides must not fail");
         assert_eq!(cfg.max_seen_entries, 12345);
@@ -2538,15 +2540,13 @@ mod tests {
     /// a panic, and must leave the config field untouched.
     /// PASSED at Run 28 — kept as a regression gate.
     #[test]
-    #[allow(unsafe_code)]
     fn apply_env_overrides_rejects_malformed_value_with_typed_error() {
         let _lock = env_test_lock();
         let var = "GOSSIP_BIND_PORT";
         let _guard = EnvGuard(var, std::env::var(var).ok());
 
         for bad in ["not-a-port", "99999999", "-1", ""] {
-            // SAFETY: mutations serialised by env_test_lock().
-            unsafe { std::env::set_var(var, bad); }
+            set_test_env(var, Some(bad));
             let mut cfg = GossipConfig::default();
             let before = cfg.bind_port;
             match cfg.apply_env_overrides() {

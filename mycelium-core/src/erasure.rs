@@ -112,11 +112,7 @@ impl SubjectKeyRegistry {
     pub fn destroy(&self, subject: &str) -> bool {
         match self.lock().remove(subject) {
             Some(mut dek) => {
-                // Overwrite the key material before it drops. `write_volatile` is not optimised
-                // away; sufficient for the reference (a KMS is the production custody boundary).
-                for b in dek.iter_mut() {
-                    unsafe { std::ptr::write_volatile(b, 0u8) };
-                }
+                wipe(&mut dek);
                 true
             }
             None => false,
@@ -146,9 +142,28 @@ impl SubjectKeyRegistry {
     }
 }
 
+/// Overwrite key material before it drops. `zeroize` writes volatilely and fences, so the
+/// compiler cannot elide the stores as dead — sufficient for the reference (a KMS is the
+/// production custody boundary). It wipes the copy it is handed: the registry's map, like any
+/// `HashMap`, may leave the moved-from bytes in its old bucket, which is one more reason the module
+/// doc names KMS custody as the real erasure boundary.
+fn wipe(dek: &mut [u8; 32]) {
+    use zeroize::Zeroize;
+    dek.zeroize();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wipe `destroy` runs leaves every DEK byte zero (P3 replaced a hand-rolled
+    /// `write_volatile` loop with `zeroize`; this pins that the replacement still clears the key).
+    #[test]
+    fn wipe_zeroes_every_dek_byte() {
+        let mut dek = [0xA5u8; 32];
+        wipe(&mut dek);
+        assert_eq!(dek, [0u8; 32]);
+    }
 
     #[test]
     fn round_trips_and_isolates_subjects() {

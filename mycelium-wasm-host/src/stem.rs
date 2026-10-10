@@ -713,7 +713,11 @@ mod tests {
             while_live: None, api_key: literal.map(str::to_string), api_key_env: env.map(str::to_string),
             max_tokens: None, temperature: None,
         };
-        #[allow(unused_unsafe)]
+        // The crate is `#![deny(unsafe_code)]` (post-360 P3); this test's one env write is its only
+        // `unsafe`. SAFETY: edition 2024 marks `set_var` unsafe because another thread may read
+        // the environment concurrently; the variable is unique to this test and set once, before
+        // any reader of it runs, and nothing in this crate's tests removes or rewrites it.
+        #[allow(unsafe_code)]
         unsafe { std::env::set_var("MYCELIUM_TEST_SERVE_KEY_SET_7F", "sk-test-7f"); }
         assert_eq!(resolve_serve_key(&decl(None, None)).unwrap(), None, "no key: none sent");
         assert_eq!(resolve_serve_key(&decl(Some("sk-lit"), None)).unwrap().as_deref(), Some("sk-lit"));

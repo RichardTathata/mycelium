@@ -41,6 +41,8 @@
 //!
 //! Remaining phases add the HTTP gateway + SDKs and the worked example.
 
+#![deny(unsafe_code)]
+
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;

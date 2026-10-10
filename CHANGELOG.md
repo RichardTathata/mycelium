@@ -32,6 +32,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   versioned electorates are not built. Pointed at from the philosophy's corrected litmus, threat model §7, guide 04
   (§ *Discovery is not an electorate*), the FAQ, `what-is-proven.md` and the wiki; three engineering-deck sentences
   qualified to a fixed electorate. 2.30.0's *Not claimed* line stands. No code change.
+- **`#![deny(unsafe_code)]` in `mycelium-core` and every companion library** (post-360 P3). The root crate
+  and `mycelium-tuple-space` had it; the substrate did not, and it held the workspace's one production `unsafe`:
+  `SubjectKeyRegistry::destroy`'s hand-rolled `write_volatile` wipe of a DEK (`erasure.rs`). That is now
+  `zeroize::Zeroize` (already in the tree under `tls` through `ed25519-dalek` and `rustls`; a direct optional
+  dependency of core under `tls`, one lockfile line), with `wipe_zeroes_every_dek_byte` pinning that the key is
+  cleared. What remains is test code, each under one scoped `#[allow(unsafe_code)]` with its `SAFETY:` comment:
+  core's env-var mutation in one helper (`config.rs` `set_test_env`, replacing four allows) and one `set_var` in a
+  wasm-host test (edition 2024 makes both unsafe). Added to `mycelium-sim`, `-blackboard`, `-wiki`, `-wasm-host`
+  (its `bindgen!` output compiles under it), `-agentfacts`, `-reason`, `-guardrails`, `-effects`, `-commitment`
+  and the coop examples library; not to `loom-spike` or `mycelium-gateway-free-tests`, whose libraries are
+  empty. Seen failing first: the attribute alone failed core's build, `error: usage of an \`unsafe\` block
+  --> mycelium-core/src/erasure.rs:118:21`. No behaviour change, no API change.
 - **The composed-effect record: what it can carry versus what is written.** `AeEvidence` *can* carry the receipt's
   rung and the origin domain (`with_effect_durability`, `with_origin_domain`, 2.11.0) and `states_a_composed_effect()`
   reads them; **no shipped path calls either builder** — the gateway's evidence path writes neither field, so on every

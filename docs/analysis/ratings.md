@@ -3953,3 +3953,9 @@ Deep-dive dimensions this run: **1 Philosophy · 8 Language Best Practices · 13
 - **P4 canary** — `probe_constructing_an_agent_takes_milliseconds_not_a_minute`: **failed at 86.5 s, then falsified as a constructor defect** (see Findings); kept `#[ignore]`d with the diagnosis.
 
 **Calibration ledger:** two entries appended (Documentation; Operational Readiness). Total **48**.
+
+**Addendum (2026-10-10, post-360 P3): dim 8's `unsafe` count above is superseded.** `mycelium-core` and
+every companion library with code now carry `#![deny(unsafe_code)]`; the production site this run quoted
+(`erasure.rs` `write_volatile`) is `zeroize`; the test env-var sites are one scoped allow in core
+(`config.rs` `set_test_env`) and one in wasm-host (`stem.rs`). Production `unsafe` in the workspace: **0**.
+The Run 62 row stands as written; this is a change after it, not a re-score.

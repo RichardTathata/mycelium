@@ -31,8 +31,9 @@ assert!(reg.decrypt_for("user-42", &blob).is_none());
 
 - `encrypt_for` mints the DEK on first use; the blob is `nonce ‖ ciphertext ‖ tag` (AEAD —
   tampering is rejected on decrypt).
-- `destroy` zeroizes and drops the DEK. Re-encrypting after erasure mints a **new** DEK; old
-  ciphertext never revives.
+- `destroy` zeroizes (the `zeroize` crate) and drops the DEK it removes. Re-encrypting after erasure
+  mints a **new** DEK; old ciphertext never revives. The wipe is in-process and best-effort: copies a map
+  move or an earlier call left in freed memory are not reached — KMS custody (below) is the boundary.
 - `install_key` is the seam for **KMS-backed custody** (below).
 
 ## Production custody — use a KMS

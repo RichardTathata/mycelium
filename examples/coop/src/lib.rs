@@ -9,4 +9,6 @@
 //!   running example can be inspected live at `/.well-known/agent-facts.json`.
 //! - [`common::bootstrap`] — spins up depot agents with consistent config (gateway + tls identity).
 
+#![deny(unsafe_code)]
+
 pub mod common;
