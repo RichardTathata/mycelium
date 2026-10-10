@@ -237,7 +237,10 @@ Sends a reply to an in-flight RPC request.
 #### `scatterGather(targets, method, payload?, options?) → Promise<Array<{sender, result}>>`
 
 Fan-out RPC to multiple targets; waits for at least `minOk` replies, and throws `TimeoutError` when
-fewer arrive. **Fixed in 0.2.1:** every call before it was refused with 400 `missing method` — the
+fewer arrive. `minOk` defaults to **1** and `timeoutSecs` to 10 — the gateway's own defaults and the Python
+SDK's: the call returns at the first reply and the other targets are cancelled. Pass
+`minOk: targets.length` to hear from every target. **Changed in 0.2.4:** this SDK alone defaulted to every
+target and 5 s. **Fixed in 0.2.1:** every call before it was refused with 400 `missing method` — the
 SDK sent the method under `kind`, which the gateway does not read.
 
 ```typescript
@@ -374,6 +377,12 @@ res.persisted;  // true: on the gateway node's disk · false: committed but that
 `void` before, so existing callers are unaffected). The commit is cluster-wide either way —
 `persisted` is the *gateway node's* local durability, the same flag the Rust API reports.
 
+Of two concurrent writes of different values to one key, at most one succeeds; the other throws
+`SupersededError` (409 `superseded`, 0.2.4 — a plain `Error` before) or times out (504, a `TimeoutError`),
+and a timeout does not mean its value lost — read the key (substrate ≥ 2.30.0). `crossGroupPropose`,
+`distributedLock` and `electLeader` throw `SupersededError` the same way; a 409 `topology_unsatisfied` stays
+a plain `Error`.
+
 #### `distributedLock(name, options?) → Promise<LockGuard>`
 
 Acquires a named cluster lock via consensus.
@@ -448,6 +457,38 @@ protected kind — is thrown, never reported as `"timeout"`.
   `sseStream`) bounds only the events parsed from a single network read (`maxPending`, default 1024,
   when you call `sseStream` yourself).
 
+### Timeouts, path segments and streams (0.2.4)
+
+- **Every timeout is whole seconds now**, as `rpcCall`, `scatterGather` and `emitReliable` have been since
+  0.2.0: `TupleSpace.take` / `takeByKey` and `Wiki.ingest` round a fraction **up** too (`take` keeps `0`, the
+  poll that answers at once), and so do `leaseSecs` (`advertiseCapability`, `declareUnits` — a fraction left the
+  advert unleased) and `ttlSecs` (`distributedLock` — refused 422). Before 0.2.4 a fraction on the takes, `ingest`
+  and `ttlSecs` was refused 422. A negative, `NaN`, infinite or past-`u64` value throws, naming the option,
+  before any request. (`setWithMinAcks`'s `/gateway/kv/quorum` reads a float and is sent as given.)
+- **Caller-supplied path segments are escaped.** A prompt's `ns`/`name` and a capability handle or lock guard id
+  are percent-encoded as **one** path segment, as signal kinds, shard names and federation domains already were.
+  A value that cannot be one segment throws ("cannot travel as a URL path segment") before any request, on every
+  such route: `.` or `..`, which the URL parser resolves as a dot segment even when encoded (WHATWG reads `%2e%2e`
+  as `..`); the empty string; a string with a lone surrogate. Each would reach a different route.
+- **A dropped stream is not resumed — not built: the gateway has no resume point.** No SSE route sends an
+  event `id:` or reads `Last-Event-ID`, so there is nothing for a client to resume *from*, and this SDK does not
+  reconnect: when the connection drops, `onSignal`, `rpcServe`, `mailbox`, `subscribeLog` and
+  `subscribeLogGroup` end (or throw the network error). What to do today is re-open the stream in a loop,
+  knowing what each one loses in the gap:
+  - `onSignal` — signals emitted while no stream is open are **not** delivered later; signals are
+    best-effort. Use a mailbox or a log for anything that must arrive.
+  - `rpcServe` — a request that arrives in the gap reaches no server; its caller times out (and must treat
+    the timeout as *unknown*, not *not done*).
+  - `mailbox` — **at-most-once across a drop.** The gateway tombstones each event as it queues it for the
+    stream (up to 256 ahead of your loop), before you have read it, so the events queued or in flight when the
+    stream drops are gone; a re-opened stream delivers only what was still undelivered. An event that must not
+    be lost needs an acknowledgement of your own — the sender keeps it until the receiver confirms — or a log
+    or tuple space instead of a mailbox.
+  - `subscribeLog` — pass `sinceHlc: entry.hlc + 1n` for the last handled entry (the cursor is inclusive).
+  - `subscribeLogGroup` — re-subscribing contends for the group's claim again and resumes from the group's
+    persisted offset, which advances when the gateway **sends** an entry, not when you finish it: an entry in
+    flight when the stream dropped is not sent again.
+
 ### Migrating from 0.1.x
 
 | Verb | 0.1.x | 0.2.x |
@@ -462,6 +503,8 @@ protected kind — is thrown, never reported as `"timeout"`.
 | `scatterGather` | refused 400 by every gateway | works (0.2.1) |
 | `RpcRequest.kind` from `rpcServe` | `undefined` | the kind (0.2.1) |
 | an RPC or scatter timeout | a plain `Error` naming 504 | an error named `TimeoutError` (0.2.1) |
+| `scatterGather` with no `minOk` | waited for every target, 5 s | waits for one reply, 10 s (0.2.4) — pass `minOk: targets.length` for all |
+| a lost consensus write (409 `superseded`) | a plain `Error` naming 409 | `SupersededError` (0.2.4) |
 
 ### Federated domains
 
@@ -513,15 +556,16 @@ twice — it is the only thing that lets a silent gateway be retried elsewhere, 
 
 ### Errors
 
-Three gateway refusals are thrown as typed errors (each an `Error` whose `message` is the gateway's,
-naming the route to use instead). Any other non-2xx answer to a write is an `Error` naming the method, path,
-status and response body.
+Four gateway answers are thrown as typed errors. The three refusals are each an `Error` whose `message` is the
+gateway's, naming the route to use instead; `SupersededError` is a lost consensus write. Any other non-2xx
+answer to a write is an `Error` naming the method, path, status and response body.
 
 | Error | Gateway answer | Thrown by | Fields |
 |---|---|---|---|
 | `ProtectedKindError` | `403 protected_kind` — `mcp.invoke`, `skill.invoke`, `llm.invoke` (and operator-listed kinds) on a raw mesh route | `rpcCall`, `scatterGather`, `emit`, `deliverEvent`, `emitSharded`, `emitReliable` | `kind` |
 | `ProtectedKeyError` (0.2.2) | `403 protected_key` — a key in a namespace the substrate or a companion owns | `set`, `delete`, `setWithMinAcks`, `consistentSet` | `key`, `status` |
 | `ProtectedStreamError` (0.2.2) | `403 protected_stream` — a log stream under `cn/`, `wiki/`, `reason/` | `append`, `compactLog` | `stream`, `status` |
+| `SupersededError` (0.2.4) | `409 superseded` — the slot was decided for another value (a concurrent writer, holder or leader won) | `consistentSet`, `crossGroupPropose`, `distributedLock`, `electLeader` | `status` |
 
 ```typescript
 import { ProtectedKeyError } from "mycelium-ts";

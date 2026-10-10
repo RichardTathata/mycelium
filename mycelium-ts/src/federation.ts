@@ -26,6 +26,8 @@
  * a failure: a gateway went silent and nobody can say whether the call ran.
  */
 
+import { pathSegment } from "./wire";
+
 /** One partner, as the gateway reports it. */
 export interface PartnerLink {
   domain: string;
@@ -179,7 +181,7 @@ export class Federation {
    */
   async catalog(domain: string): Promise<CatalogView> {
     return (await this.get(
-      `/gateway/federation/catalog/${encodeURIComponent(domain)}`,
+      `/gateway/federation/catalog/${pathSegment(domain)}`,
     )) as unknown as CatalogView;
   }
 

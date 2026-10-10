@@ -54,7 +54,7 @@ from typing import Any, AsyncIterator, Dict, Optional
 import httpx
 from httpx_sse import aconnect_sse
 
-from ._pool import ClientPool, base_url
+from ._pool import ClientPool, base_url, path_segment, whole_seconds
 
 
 class ProtectedKindError(PermissionError):
@@ -185,12 +185,12 @@ class CapabilityHandle:
     def drop(self) -> None:
         """Retract the advertised capability synchronously."""
         with self._agent._pool.sync(timeout=5.0) as c:
-            c.delete(f"/gateway/capability/{self.handle_id}")
+            c.delete(f"/gateway/capability/{path_segment(self.handle_id)}")
 
     async def adrop(self) -> None:
         """Retract the advertised capability asynchronously."""
         async with self._agent._pool.asy(timeout=5.0) as c:
-            await c.delete(f"/gateway/capability/{self.handle_id}")
+            await c.delete(f"/gateway/capability/{path_segment(self.handle_id)}")
 
     def heartbeat(self) -> None:
         """Renew the lease on an advertisement made with ``lease_secs``.
@@ -200,12 +200,12 @@ class CapabilityHandle:
         retracted handle (404) or one advertised without a lease (409).
         """
         with self._agent._pool.sync(timeout=5.0) as c:
-            c.post(f"/gateway/capability/{self.handle_id}/heartbeat").raise_for_status()
+            c.post(f"/gateway/capability/{path_segment(self.handle_id)}/heartbeat").raise_for_status()
 
     async def aheartbeat(self) -> None:
         """Async variant of :meth:`heartbeat`."""
         async with self._agent._pool.asy(timeout=5.0) as c:
-            (await c.post(f"/gateway/capability/{self.handle_id}/heartbeat")).raise_for_status()
+            (await c.post(f"/gateway/capability/{path_segment(self.handle_id)}/heartbeat")).raise_for_status()
 
     def __enter__(self) -> "CapabilityHandle":
         return self
@@ -389,12 +389,12 @@ class LockGuard:
     def release(self) -> None:
         """Release the lock synchronously."""
         with self._agent._pool.sync(timeout=5.0) as c:
-            c.delete(f"/gateway/overlay/lock/{self.guard_id}")
+            c.delete(f"/gateway/overlay/lock/{path_segment(self.guard_id)}")
 
     async def arelease(self) -> None:
         """Release the lock asynchronously."""
         async with self._agent._pool.asy(timeout=5.0) as c:
-            await c.delete(f"/gateway/overlay/lock/{self.guard_id}")
+            await c.delete(f"/gateway/overlay/lock/{path_segment(self.guard_id)}")
 
     def __enter__(self) -> "LockGuard":
         return self
@@ -496,7 +496,7 @@ class MyceliumAgent:
         name:               str,
         *,
         interval_secs:      int                    = 30,
-        lease_secs:         int                    | None = None,
+        lease_secs:         float                  | None = None,
         attributes:         dict[str, Any]         | None = None,
         authorized_callers: list[str]              | None = None,
     ) -> CapabilityHandle:
@@ -531,7 +531,8 @@ class MyceliumAgent:
         """
         body: dict[str, Any] = {"ns": ns, "name": name, "interval_secs": interval_secs}
         if lease_secs is not None:
-            body["lease_secs"] = lease_secs
+            # Whole seconds (0.2.10): the gateway reads `as_u64()`, and a fraction left the advert unleased.
+            body["lease_secs"] = whole_seconds(lease_secs, name="lease_secs")
         if attributes:
             body["attributes"] = attributes
         if authorized_callers:
@@ -551,7 +552,7 @@ class MyceliumAgent:
         toml_text: str,
         *,
         interval_secs: int = 30,
-        lease_secs:    int | None = None,
+        lease_secs:    float | None = None,
     ) -> "UnitHandle":
         """Declare a unit file's capabilities, requirements and groups on the node, under one handle.
 
@@ -564,7 +565,7 @@ class MyceliumAgent:
         """
         body: dict[str, Any] = {"toml": toml_text, "interval_secs": interval_secs}
         if lease_secs is not None:
-            body["lease_secs"] = lease_secs
+            body["lease_secs"] = whole_seconds(lease_secs, name="lease_secs")  # as advertise_capability
         with self._pool.sync() as c:
             resp = c.post("/gateway/units/declare", json=body)
             resp.raise_for_status()
@@ -655,7 +656,7 @@ class MyceliumAgent:
                 if done:
                     break
         """
-        url = f"{self._base_url}/gateway/signal/sse/{kind}"
+        url = f"{self._base_url}/gateway/signal/sse/{path_segment(kind)}"
         async with httpx.AsyncClient(timeout=None, headers=self._pool.headers, verify=self._pool.verify) as client:
             async with aconnect_sse(client, "GET", url) as event_source:
                 async for event in event_source.aiter_sse():
@@ -697,7 +698,7 @@ class MyceliumAgent:
         method:       str,
         payload:      bytes          = b"",
         *,
-        timeout_secs: int            = 30,
+        timeout_secs: float          = 30,
     ) -> bytes:
         """Blocking RPC call to a named node.
 
@@ -708,7 +709,9 @@ class MyceliumAgent:
                           with :class:`ProtectedKindError`: call tools through ``/mcp`` and skills
                           through :class:`~mycelium.A2aClient`, where authority is checked.
             payload:      Request payload bytes.
-            timeout_secs: Maximum wait time.
+            timeout_secs: Maximum wait time, sent in whole seconds — a fraction rounds up, never
+                          below 1 (0.2.10; the gateway reads an integer and replaced a fraction
+                          with its 30 s default).
 
         Returns:
             Response payload bytes.
@@ -717,13 +720,14 @@ class MyceliumAgent:
             TimeoutError: If the node does not respond within ``timeout_secs``.
             httpx.HTTPStatusError: For other HTTP errors.
         """
+        secs = whole_seconds(timeout_secs)
         body = {
             "target":       target,
             "method":       method,
             "payload_b64":  base64.b64encode(payload).decode(),
-            "timeout_secs": timeout_secs,
+            "timeout_secs": secs,
         }
-        with self._pool.sync(timeout=timeout_secs + 5.0) as c:
+        with self._pool.sync(timeout=secs + 5.0) as c:
             resp = c.post("/gateway/rpc/call", json=body)
             _raise_if_protected(resp)
             if resp.status_code == 504:
@@ -892,7 +896,7 @@ class MyceliumAgent:
         :meth:`rpc_respond`). A serving agent should not hold ``mesh:write``, which also opens
         :meth:`rpc_call`.
         """
-        url = f"{self._base_url}/gateway/rpc/serve/{kind}"
+        url = f"{self._base_url}/gateway/rpc/serve/{path_segment(kind)}"
         async with httpx.AsyncClient(timeout=None, headers=self._pool.headers, verify=self._pool.verify) as client:
             async with aconnect_sse(client, "GET", url) as event_source:
                 async for event in event_source.aiter_sse():
@@ -931,7 +935,7 @@ class MyceliumAgent:
         payload:      bytes = b"",
         *,
         min_ok:       int   = 1,
-        timeout_secs: int   = 10,
+        timeout_secs: float = 10,
     ) -> list[dict[str, Any]]:
         """Fan-out an RPC to multiple targets and collect at least ``min_ok`` replies.
 
@@ -939,8 +943,12 @@ class MyceliumAgent:
             targets:      List of target node IDs (``"IP:PORT"``).
             method:       Signal kind (e.g. ``"echo"``).
             payload:      Request payload bytes.
-            min_ok:       Minimum number of successful replies to wait for.
-            timeout_secs: Maximum wait time.
+            min_ok:       Minimum number of successful replies to wait for. Default **1** — the
+                          gateway's own default: the call returns at the first reply and the
+                          others are cancelled. Pass ``min_ok=len(targets)`` to wait for every
+                          target (``mycelium-ts`` defaults to 1 too since 0.2.4).
+            timeout_secs: Maximum wait time, sent in whole seconds — a fraction rounds up, never
+                          below 1 (0.2.10; the gateway replaced a fraction with its 10 s default).
 
         Returns:
             List of ``{"sender": "IP:PORT", "result_b64": "…"}`` dicts.
@@ -949,14 +957,15 @@ class MyceliumAgent:
             TimeoutError: Fewer than ``min_ok`` replies arrived.
             httpx.HTTPStatusError: For other HTTP errors.
         """
+        secs = whole_seconds(timeout_secs)
         body = {
             "targets":      targets,
             "method":       method,
             "payload_b64":  base64.b64encode(payload).decode(),
-            "timeout_secs": timeout_secs,
+            "timeout_secs": secs,
             "min_ok":       min_ok,
         }
-        with self._pool.sync(timeout=timeout_secs + 5.0) as c:
+        with self._pool.sync(timeout=secs + 5.0) as c:
             resp = c.post("/gateway/scatter", json=body)
             _raise_if_protected(resp)
             if resp.status_code == 504:
@@ -988,7 +997,7 @@ class MyceliumAgent:
             async for event in agent.mailbox("task.result"):
                 print(event.sender, event.payload)
         """
-        url = f"{self._base_url}/gateway/mailbox/{kind}"
+        url = f"{self._base_url}/gateway/mailbox/{path_segment(kind)}"
         async with httpx.AsyncClient(timeout=None, headers=self._pool.headers, verify=self._pool.verify) as client:
             async with aconnect_sse(client, "GET", url) as event_source:
                 async for event in event_source.aiter_sse():
@@ -1063,7 +1072,7 @@ class MyceliumAgent:
 
     # ── Overlay: distributed lock ───────────────────────────────────────────
 
-    def distributed_lock(self, name: str, *, ttl_secs: int = 30) -> LockGuard:
+    def distributed_lock(self, name: str, *, ttl_secs: float = 30) -> LockGuard:
         """Acquire a named distributed lock via cluster consensus.
 
         Returns a :class:`LockGuard` that releases the lock when dropped.
@@ -1072,7 +1081,8 @@ class MyceliumAgent:
             with agent.distributed_lock("my-lock") as guard:
                 print("fencing token:", guard.token)
         """
-        body = {"name": name, "ttl_secs": ttl_secs}
+        # Whole seconds (0.2.10): the route reads `Option<u64>` and refused a fraction 422.
+        body = {"name": name, "ttl_secs": whole_seconds(ttl_secs, name="ttl_secs")}
         with self._pool.sync() as c:
             resp = c.post("/gateway/overlay/lock/acquire", json=body)
             _raise_if_superseded(resp)
@@ -1224,20 +1234,22 @@ class MyceliumAgent:
         kind:         str,
         payload:      bytes = b"",
         *,
-        timeout_secs: int = 5,
+        timeout_secs: float = 5,
     ) -> str:
         """Send ``payload`` to ``target`` and wait for an explicit ACK.
 
         Returns ``"acknowledged"`` or ``"timeout"``.
-        The receiver calls ``rpc_respond`` to acknowledge.
+        The receiver calls ``rpc_respond`` to acknowledge. ``timeout_secs`` is sent in whole seconds,
+        a fraction rounded up, never below 1 (0.2.10; the route refused a fraction 422).
         """
+        secs = whole_seconds(timeout_secs)
         body = {
             "target":       target,
             "kind":         kind,
             "payload_b64":  base64.b64encode(payload).decode(),
-            "timeout_secs": timeout_secs,
+            "timeout_secs": secs,
         }
-        with self._pool.sync(timeout=timeout_secs + 5.0) as c:  # the server parks for timeout_secs
+        with self._pool.sync(timeout=secs + 5.0) as c:  # the server parks for timeout_secs
             resp = c.post("/gateway/overlay/emit_reliable", json=body)
             _raise_if_protected(resp)
             data = resp.raise_for_status().json()
@@ -1251,7 +1263,7 @@ class MyceliumAgent:
         Raises :class:`KeyError` when no providers match the filter.
         """
         with self._pool.sync() as c:
-            r = c.get(f"/gateway/shard/{ns}/{name}", params={"key": key})
+            r = c.get(f"/gateway/shard/{path_segment(ns)}/{path_segment(name)}", params={"key": key})
             if r.status_code == 404:
                 raise KeyError(f"no providers for {ns}/{name}")
             r.raise_for_status()

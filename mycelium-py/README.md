@@ -238,7 +238,9 @@ Sends a reply to an in-flight RPC request.
 #### `scatter_gather(targets, method, payload, *, min_ok, timeout_secs) → list[dict]`
 
 Fan-out RPC to multiple targets; waits for at least `min_ok` replies. Raises `TimeoutError`
-if the threshold is not met.
+if the threshold is not met. `min_ok` defaults to **1** — the gateway's own default, and `mycelium-ts`'s
+since 0.2.4: the call returns at the first reply and the other targets are cancelled. Pass
+`min_ok=len(targets)` to hear from every target. `timeout_secs` defaults to 10.
 
 ```python
 replies = agent.scatter_gather(
@@ -548,6 +550,43 @@ twice — it is the only thing that lets a silent gateway be retried elsewhere, 
 `False`.
 
 ---
+
+### Timeouts, path segments and streams (0.2.10)
+
+- **Timeouts are whole seconds.** The routes below read `timeout_secs` as an integer (`set_with_min_acks`'s
+  `/gateway/kv/quorum` reads a float and is sent as given). `rpc_call`, `scatter_gather`,
+  `emit_reliable` and `Wiki.ingest` round a fraction **up**, never below 1; `TupleSpace.take` / `take_by_key`
+  round up too, but keep `0` — there it is the poll that answers at once. Before 0.2.10 a fraction on `rpc_call`
+  or `scatter_gather` was silently replaced by the route's 30 s / 10 s default while this client gave up at
+  `t + 5`, `emit_reliable` and `ingest` were refused 422, and `take(0.3)` sent `int(0.3)` — a zero-second park.
+  The same rounding applies to `lease_secs` (`advertise_capability`, `declare_units` — a fraction left the advert
+  unleased) and `ttl_secs` (`distributed_lock` — refused 422). A negative, `nan`, infinite or past-`u64` value
+  raises `ValueError` naming the parameter, before any request.
+- **Caller-supplied path segments are escaped.** A signal kind, a prompt's `ns`/`name`, a run or blob id, a
+  federation domain, a capability handle or lock guard id is percent-encoded as **one** path segment, so a `/`,
+  `?` or `#` in it stays in it. A value that cannot be one segment raises `ValueError` ("cannot travel as a URL
+  path segment") before any request: `.` or `..`, which a URL parser resolves as a dot segment, encoded or not;
+  the empty string; a string with a lone surrogate (no UTF-8 encoding). Each would reach a different route. Before 0.2.10
+  these were interpolated raw (`mycelium-ts` already encoded most of them).
+- **A dropped stream is not resumed — not built: the gateway has no resume point.** No SSE route sends an
+  event `id:` or reads `Last-Event-ID`, so there is nothing for a client to resume *from*, and this SDK does not
+  reconnect: when the connection drops, `on_signal`, `rpc_serve`, `mailbox`, `subscribe_log` and
+  `subscribe_log_group` end (or raise the transport's `httpx` error). What to do today is re-open the stream
+  in a loop, knowing what each one loses in the gap:
+  - `on_signal` — signals emitted while no stream is open are **not** delivered later; signals are
+    best-effort. Use a mailbox or a log for anything that must arrive.
+  - `rpc_serve` — a request that arrives in the gap reaches no server; its caller times out (and must treat
+    the timeout as *unknown*, not *not done*).
+  - `mailbox` — **at-most-once across a drop.** The gateway tombstones each event as it queues it for the
+    stream (up to 256 ahead of your loop), before you have read it, so the events queued or in flight when the
+    stream drops are gone; a re-opened stream delivers only what was still undelivered. An event that must not
+    be lost needs an acknowledgement of your own — the sender keeps it until the receiver confirms — or a log
+    or tuple space instead of a mailbox.
+  - `subscribe_log` — pass `since_hlc` = the last handled entry's `hlc + 1` (the cursor is inclusive; the
+    gateway's own cursor advances the same way).
+  - `subscribe_log_group` — re-subscribing contends for the group's claim again and resumes from the
+    group's persisted offset, which advances when the gateway **sends** an entry, not when you finish it: an
+    entry in flight when the stream dropped is not sent again.
 
 ### Errors
 

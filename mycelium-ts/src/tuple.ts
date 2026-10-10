@@ -1,4 +1,5 @@
 import { authHeaders, baseUrl, resolveToken, type AuthOptions } from "./auth";
+import { wholeSeconds } from "./wire";
 /**
  * mycelium/tuple — TypeScript client for the Mycelium TupleSpace.
  *
@@ -127,7 +128,9 @@ export class TupleSpace {
 
   /**
    * Blocking claim: resolves with `[itemId, payload]` or throws on timeout.
-   * The HTTP request blocks server-side for up to `timeoutSecs`.
+   * The HTTP request blocks server-side for up to `timeoutSecs`, in whole seconds: a fraction rounds
+   * **up** (`0.3` parks for 1 s) and `0` is a poll that answers at once. Before 0.2.4 a fraction was
+   * refused 422 (the route reads an integer).
    */
   async take(
     stage: string,
@@ -136,8 +139,8 @@ export class TupleSpace {
     const r = await fetch(`${this.baseUrl}/gateway/tuple/take`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...this.auth },
-      body: JSON.stringify({ ns: this.ns, stage, timeout_secs: timeoutSecs }),
-      signal: AbortSignal.timeout((timeoutSecs + 5) * 1000),
+      body: JSON.stringify({ ns: this.ns, stage, timeout_secs: wholeSeconds(timeoutSecs, 0) }),
+      signal: AbortSignal.timeout((wholeSeconds(timeoutSecs, 0) + 5) * 1000),
     });
     if (r.status === 408) {
       throw new Error(`no item on stage "${stage}" within ${timeoutSecs}s`);
@@ -172,7 +175,7 @@ export class TupleSpace {
   /**
    * Blocking keyed claim (M13): claims the item on `stage` whose correlation key
    * is `key`, or parks until it arrives. Resolves with `[itemId, payload]` or
-   * throws on timeout.
+   * throws on timeout. `timeoutSecs` rounds up to whole seconds, as {@link take} does.
    */
   async takeByKey(
     stage: string,
@@ -182,8 +185,8 @@ export class TupleSpace {
     const r = await fetch(`${this.baseUrl}/gateway/tuple/take_by_key`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...this.auth },
-      body: JSON.stringify({ ns: this.ns, stage, key, timeout_secs: timeoutSecs }),
-      signal: AbortSignal.timeout((timeoutSecs + 5) * 1000),
+      body: JSON.stringify({ ns: this.ns, stage, key, timeout_secs: wholeSeconds(timeoutSecs, 0) }),
+      signal: AbortSignal.timeout((wholeSeconds(timeoutSecs, 0) + 5) * 1000),
     });
     if (r.status === 408) {
       throw new Error(`no item keyed "${key}" on stage "${stage}" within ${timeoutSecs}s`);

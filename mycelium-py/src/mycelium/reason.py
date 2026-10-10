@@ -28,7 +28,7 @@ from typing import Any, Optional
 
 import httpx
 
-from ._pool import ClientPool, base_url
+from ._pool import ClientPool, base_url, path_segment
 
 
 class ReasonError(Exception):
@@ -147,7 +147,7 @@ class ReasonClient:
         empty ``events`` list (not an error).
         """
         async with self._pool.asy() as c:
-            resp = await c.get(f"/gateway/reason/trace/{run_id}")
+            resp = await c.get(f"/gateway/reason/trace/{path_segment(run_id)}")
         resp.raise_for_status()
         return resp.json()
 
@@ -176,7 +176,7 @@ class ReasonClient:
         that JSON came from a proxy in front of the node, not from the route.
         """
         async with self._pool.asy() as c:
-            resp = await c.get(f"/gateway/reason/blob/{blob_id}")
+            resp = await c.get(f"/gateway/reason/blob/{path_segment(blob_id)}")
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
