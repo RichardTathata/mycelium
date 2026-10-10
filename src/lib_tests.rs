@@ -4687,6 +4687,162 @@ async fn test_ws2_audit_chain_writes_and_verifies_on_a_node() {
     let _ = std::fs::remove_dir_all(&cert_dir);
 }
 
+/// **The audit chain's head survives a restart.** `AuditChainState::new()` is `{ next_seq: 0,
+/// last_hash: zero }` and nothing read the persisted `sys/audit/{self}/` stream back at `start()`,
+/// so a restarted node with `[persistence]` sealed seq 0 again with a zero `prev_hash` and LWW
+/// overwrote the original genesis record — the tamper-evident chain erased its own history at every
+/// restart. The head is now recovered from this node's own persisted stream, verified from genesis
+/// (or the newest signed checkpoint) so a forged record cannot seed it. Seen failing first: the
+/// restarted node's stream held three records and seq 0 was not the original.
+#[cfg(all(feature = "compliance", unix))]
+#[tokio::test]
+async fn the_audit_chain_head_is_recovered_from_persistence_at_restart() {
+    use crate::config::{OnUnreadable, PersistenceConfig, SyncMode, TlsConfig};
+    use crate::{audit_stream_prefix, verify_stream_from_genesis, AuditAction, AuditOutcome, SignedAuditRecord};
+
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let base = std::env::temp_dir().join(format!("myc-audit-restart-{port}"));
+    let _ = std::fs::remove_dir_all(&base);
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    cfg.tls = Some(TlsConfig { auto_cert_dir: base.join("certs"), ..TlsConfig::default() });
+    cfg.persistence = Some(PersistenceConfig { base_path: base.join("data"), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 1_000, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse });
+
+    let stream = |a: &GossipAgent| -> Vec<SignedAuditRecord> {
+        let mut entries = a.kv().scan_prefix(&audit_stream_prefix(&id));
+        entries.sort_by(|x, y| x.0.cmp(&y.0));
+        entries.iter().map(|(_, v)| SignedAuditRecord::decode(v).expect("decode audit record")).collect()
+    };
+
+    let a = GossipAgent::new(id.clone(), cfg.clone());
+    a.start().await.unwrap();
+    let vk = a.task_ctx.tls.get().expect("tls").verifying_key_bytes();
+    let h0 = a.audit(AuditAction::Invoke, "10.0.0.1:9000", "skill/a", AuditOutcome::Success, None).unwrap();
+    let _ = a.audit(AuditAction::Read, "10.0.0.2:9000", "kv/secret", AuditOutcome::Denied, None).unwrap();
+    let h2 = a.audit(AuditAction::Write, "10.0.0.1:9000", "kv/x", AuditOutcome::Success, None).unwrap();
+    assert_eq!(stream(&a).len(), 3);
+    a.shutdown().await;
+
+    let b = GossipAgent::new(id.clone(), cfg);
+    b.start().await.unwrap();
+    assert_eq!(stream(&b).len(), 3, "the persisted stream replays before anything is sealed");
+    let h3 = b.audit(AuditAction::Admin, "10.0.0.3:9000", "role/grant", AuditOutcome::Success, None).unwrap();
+    let chain = stream(&b);
+    assert_eq!(chain.len(), 4, "the restarted node sealed seq 3, not seq 0 again: {:?}", chain.iter().map(|r| r.record.seq).collect::<Vec<_>>());
+    assert_eq!(chain[0].record.content_hash(), h0, "the genesis record is the original, not overwritten by a new seq 0");
+    assert_eq!(chain[3].record.seq, 3);
+    assert_eq!(chain[3].record.prev_hash, h2, "the new record links to the last record sealed before the restart");
+    assert_eq!(chain[3].record.content_hash(), h3);
+    assert_eq!(verify_stream_from_genesis(&chain, &id, &vk), Ok(()), "the chain across the restart verifies from genesis");
+    assert_eq!(b.audit_verify(&id), Ok(()));
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// The recovery is **verified**: a record in this node's own persisted stream that does not verify
+/// under its keys — planted by whoever can write the files — does not seed the chain. The head
+/// resumes after the longest verified prefix, and the restart logs what it could not verify.
+#[cfg(all(feature = "compliance", unix))]
+#[tokio::test]
+async fn a_forged_record_in_the_persisted_audit_stream_does_not_seed_the_chain_head() {
+    use crate::config::{OnUnreadable, PersistenceConfig, SyncMode, TlsConfig};
+    use crate::{audit_key, audit_stream_prefix, AuditAction, AuditOutcome, AuditRecord, SignedAuditRecord};
+
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let base = std::env::temp_dir().join(format!("myc-audit-forged-{port}"));
+    let _ = std::fs::remove_dir_all(&base);
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    cfg.tls = Some(TlsConfig { auto_cert_dir: base.join("certs"), ..TlsConfig::default() });
+    cfg.persistence = Some(PersistenceConfig { base_path: base.join("data"), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 1_000, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse });
+
+    let a = GossipAgent::new(id.clone(), cfg.clone());
+    a.start().await.unwrap();
+    let h0 = a.audit(AuditAction::Invoke, "10.0.0.1:9000", "skill/a", AuditOutcome::Success, None).unwrap();
+    // A forged seq 1, signed by a key that is not this node's, planted through the data plane into
+    // the persisted store (the same bytes an attacker with the files could write).
+    let forged = AuditRecord { node_id: id.clone(), seq: 1, hlc: 1, principal: "attacker".into(), action: AuditAction::Admin, target: "role/grant".into(), outcome: AuditOutcome::Success, detail: None, prev_hash: h0 };
+    let signed = SignedAuditRecord::sign(forged, &ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]));
+    let _ = a.kv().set(audit_key(&id, 1), signed.encode());
+    a.shutdown().await;
+
+    let b = GossipAgent::new(id.clone(), cfg);
+    b.start().await.unwrap();
+    let _ = b.audit(AuditAction::Write, "10.0.0.1:9000", "kv/x", AuditOutcome::Success, None).unwrap();
+    let mut entries = b.kv().scan_prefix(&audit_stream_prefix(&id));
+    entries.sort_by(|x, y| x.0.cmp(&y.0));
+    let chain: Vec<SignedAuditRecord> = entries.iter().map(|(_, v)| SignedAuditRecord::decode(v).unwrap()).collect();
+    assert_eq!(chain.len(), 2, "seq 0 and the new seal: {:?}", chain.iter().map(|r| r.record.seq).collect::<Vec<_>>());
+    assert_eq!(chain[0].record.content_hash(), h0, "genesis is untouched");
+    assert_eq!(chain[1].record.seq, 1, "the head resumed after the verified prefix, over the forgery");
+    assert_eq!(chain[1].record.prev_hash, h0, "linked to the last verified record, not to the forgery");
+    assert_eq!(b.audit_verify(&id), Ok(()), "the stream verifies once the forgery is sealed over");
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// The adversarial review of #584 (finding 2): only the genesis branch of `recover_chain_head` was
+/// tested. The three other anchors, each through the real seal/checkpoint/prune calls:
+/// (a) no record and a checkpoint — the stream pruned to its head — anchors at the newest checkpoint;
+/// (b) a first record at N with a checkpoint at N — a pruned stream — anchors there and verifies on;
+/// (c) a first record at N with no matching checkpoint — a hand-deleted genesis — stays at genesis
+/// and reports the gap, overwriting nothing because nothing is at seq 0.
+#[cfg(feature = "compliance")]
+#[tokio::test]
+async fn recover_chain_head_anchors_at_a_checkpoint_or_reports_the_gap() {
+    use crate::agent::audit::{recover_chain_head, AuditVerifyError};
+    use crate::config::TlsConfig;
+    use crate::{audit_key, AuditAction, AuditOutcome};
+
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let cert_dir = std::env::temp_dir().join(format!("myc-audit-anchors-{port}"));
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+    let a = GossipAgent::new(id.clone(), cfg);
+    a.start().await.unwrap();
+    let seal = |n: u64| a.audit(AuditAction::Invoke, "10.0.0.1:9000", format!("skill/{n}"), AuditOutcome::Success, None).unwrap();
+
+    // (b) records 0,1 · checkpoint at 2 · records 2,3 · prune → [2, 3] anchored at the checkpoint.
+    let _h0 = seal(0); let _h1 = seal(1);
+    let (cp_seq, cp_prev) = a.audit_checkpoint().unwrap();
+    assert_eq!(cp_seq, 2);
+    let _h2 = seal(2); let h3 = seal(3);
+    assert_eq!(a.audit_prune_to_checkpoint(), 2, "records 0 and 1 pruned");
+    let head = recover_chain_head(&a.task_ctx).expect("a stream to recover");
+    assert_eq!((head.next_seq, head.last_hash, head.verified, head.unverified.clone()), (4, h3, 2, None),
+        "(b) anchored at the checkpoint's (seq, prev_hash) and verified through seq 3");
+    let _ = cp_prev;
+
+    // (a) checkpoint at 4, prune everything → no record, anchored at the newest checkpoint.
+    let (cp_seq, cp_prev) = a.audit_checkpoint().unwrap();
+    assert_eq!((cp_seq, cp_prev), (4, h3));
+    assert_eq!(a.audit_prune_to_checkpoint(), 2);
+    assert!(a.audit_stream(&id).is_empty());
+    let head = recover_chain_head(&a.task_ctx).expect("a checkpoint to recover from");
+    assert_eq!((head.next_seq, head.last_hash, head.verified, head.unverified.clone()), (4, h3, 0, None),
+        "(a) the newest checkpoint is the head when the stream is pruned to it");
+    let h4 = seal(4);
+    assert_eq!(a.audit_stream(&id).last().map(|r| (r.record.seq, r.record.prev_hash)), Some((4, h3)));
+    assert_eq!(a.audit_verify(&id), Ok(()), "verification resumes from the checkpoint over the new seal");
+
+    // (c) delete the first present record (seq 4) by hand: no checkpoint at 5 → genesis, and the gap named.
+    assert!(a.kv().delete(audit_key(&id, 4)));
+    let _h5 = seal(5);
+    let head = recover_chain_head(&a.task_ctx).expect("records to fold");
+    assert_eq!(head.next_seq, 0, "(c) no anchor covers seq 5: the head stays at genesis");
+    assert_eq!(head.last_hash, [0u8; 32]);
+    assert_eq!(head.verified, 0);
+    assert_eq!(head.unverified, Some(AuditVerifyError::SequenceGap { expected: 0, found: 5 }), "the gap is reported, not guessed over");
+    let _ = h4;
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
 // ── WS3 crown-jewel — data-at-rest encryption hook ────────────────────────
 
 /// A trivial reversible cipher for exercising the data-at-rest hook: a 1-byte

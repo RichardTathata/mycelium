@@ -265,7 +265,10 @@ impl GossipAgent {
                 let defer_snapshot: Option<crate::persistence::SnapshotDeferHook> = {
                     let kv2 = Arc::clone(&kv_state);
                     let nid2 = node_id.clone();
-                    Some(Arc::new(move || crate::agent::is_self_opaque(&kv2, &nid2)))
+                    // Any self-opacity defers; the snapshot's own mark only within the fleet's
+                    // freshness bound, so a stale one cannot defer for ever.
+                    let max_age_ms = super::opacity::opaque_freshness_ms(&self.config);
+                    Some(Arc::new(move || super::opacity::defer_snapshot_on_self_opacity(&kv2, &nid2, max_age_ms)))
                 };
                 let handle = crate::persistence::spawn_wal_writer(
                     dir.clone(),
@@ -376,6 +379,15 @@ impl GossipAgent {
                 }
                 Err(e) => return Err(e),
             }
+        }
+
+        // Recover the audit chain's head from this node's own persisted stream **before** anything
+        // can seal — after the identity is loaded (the records are verified under its keys) and the
+        // persisted state replayed. Without this a restarted node sealed seq 0 again and LWW
+        // overwrote its own genesis record (see `audit::restore_chain_head`).
+        #[cfg(feature = "compliance")]
+        if self.task_ctx.tls.get().is_some() {
+            super::audit::restore_chain_head(&self.task_ctx);
         }
 
         self.start_listener(bind_addr).await.inspect_err(|_| {

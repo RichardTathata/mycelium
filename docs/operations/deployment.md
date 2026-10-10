@@ -149,7 +149,7 @@ What a write acknowledgement means is the one operator decision:
 |---|---|---|
 | `Flush` | the write returns after the record's `fdatasync`; a stopped WAL writer or disk error is **logged at `warn`** — plain `set`/`set_async` do not surface it (their `bool` is the gossip-queue result). Consensus commits and leases *do* surface it via `persisted`, and **since v2.5.0 any write can ask for a receipt** — see below | ~1 ms/write on SSD |
 | `Async` (default) | OS-buffered; the last few writes can be lost on power failure | none |
-| `Os` | no explicit sync — development only | none |
+| `Os` | no explicit sync — development only; the writer treats it exactly as `Async`, so the guarantee `persist.sync_mode` reads `not_configured` and `secure-single-domain` refuses it | none |
 
 In every mode: **consensus committed slots and leases are fsynced** (`append_sync` forces it) and
 the commit result carries `persisted` (gateway JSON `"persisted"`; `false` = committed
@@ -166,6 +166,14 @@ drive's write cache (`F_FULLFSYNC` would), so a laptop's power-loss durability i
 every sync in the WAL, not only this one — development only. Tune `snapshot_interval_secs` / `snapshot_wal_threshold` so replay time is
 bounded; the snapshot pass raises the node's opacity for its duration. Since v2.4.2
 (`CHANGELOG § [2.4.2]`); the invariants are canon in `mycelium-core/src/persistence.rs`.
+
+**A failed append stops the writer** (since 2026-10-09): after a write error (`ENOSPC`, `EIO`) the WAL
+writer refuses every later append — `Err` to a caller awaiting one, `local_durability: "failed"` on a
+receipt, a count in the fire-and-forget path — until a snapshot truncates the torn frame the failed
+write left, which it tries at once and on every snapshot after (log line `the WAL writer refuses
+appends after a failed write`; recovery is logged too). It used to append behind the torn frame, which
+the next restart read as corruption. A snapshot that fails is logged at `warn` with its reason and no
+longer leaves the node marked self-opaque.
 
 **Unreadable state fails closed** (`on_unreadable`, default `"refuse"`). A corrupt or undecryptable
 `snapshot.bin`, or a WAL record that is all there and does not decode, is **not** a crash's torn tail

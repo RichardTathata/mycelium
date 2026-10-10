@@ -201,6 +201,31 @@ impl Hlc {
         wall_now_ms().max(physical_ms(self.current()))
     }
 
+    /// Advances the clock by one logical step **without reading the wall clock** and returns the
+    /// new packed timestamp — strictly greater than every stamp this clock has handed out, and never
+    /// ahead of what [`tick`](Self::tick) would return at the same instant (the same carry rule, from
+    /// the same state, minus the `max(now)`).
+    ///
+    /// For a **failing exit that must consume no choice**: under replay every wall-clock read is a
+    /// recorded decision, and a fault injected into a clean recording (the storage fault sweep) is
+    /// followed by code the recording never ran. If that code reads the clock, the replay diverges at
+    /// the read instead of measuring what the fault cost. `do_snapshot` lowers the node's opacity
+    /// mark on its failing exit with this, so the lowering is a store write and nothing else.
+    pub fn tick_logical(&self) -> u64 {
+        loop {
+            let prev = self.state.load(Ordering::Acquire);
+            // `+1` on the packed value is `tick`'s own carry: the logical counter, overflowing into
+            // the physical millisecond at `LOGICAL_MASK`; saturating at the ceiling as `tick` does.
+            let next = prev.saturating_add(1);
+            if self.state
+                .compare_exchange(prev, next, Ordering::Release, Ordering::Acquire)
+                .is_ok()
+            {
+                return next;
+            }
+        }
+    }
+
     /// Advances the clock for a local event and returns the new packed
     /// timestamp.
     pub fn tick(&self) -> u64 {
@@ -313,6 +338,21 @@ impl Default for Hlc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `tick_logical` is strictly monotonic from the clock's own state and never ahead of `tick`.
+    #[test]
+    fn tick_logical_advances_without_the_clock_and_stays_behind_tick() {
+        let hlc = Hlc::new();
+        let a = hlc.tick();
+        let b = hlc.tick_logical();
+        assert_eq!(b, a + 1, "one logical step from the last stamp");
+        assert_eq!(physical_ms(b), physical_ms(a));
+        let c = hlc.tick();
+        assert!(c > b, "the next wall tick is still strictly later");
+        // At a saturated logical counter the step carries into the millisecond, as `tick` does.
+        hlc.force_state_for_tests(pack(1_000, LOGICAL_MASK));
+        assert_eq!(hlc.tick_logical(), pack(1_001, 0));
+    }
 
     /// Pins the HLC state directly; drift bound disabled so tests that pin
     /// far-future physical values keep their original semantics.

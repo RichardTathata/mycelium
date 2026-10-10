@@ -854,9 +854,25 @@ async fn metrics_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoResponse {
 }
 
 async fn health_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoResponse {
+    // The WAL writer's state, so a writer refusing appends after a failed write is visible here and
+    // not only in the log (the adversarial review of #584). Liveness is unchanged: the process is
+    // alive, and the body says what its disk is doing.
+    let persistence = match ctx.agent_ctx.wal.get() {
+        None => json!({ "configured": false }),
+        Some(wal) => {
+            let reason = wal.refusing_appends();
+            json!({
+                "configured": true,
+                "wal_refusing_appends": reason.is_some(),
+                "reason": reason,
+                "dropped_appends": wal.dropped_appends(),
+            })
+        }
+    };
     Json(json!({
         "status":  "ok",
         "node_id": ctx.agent_ctx.node_id.to_string(),
+        "persistence": persistence,
     }))
 }
 
@@ -5621,6 +5637,56 @@ mod tests {
 
         agent.shutdown().await;
         let _ = std::fs::remove_dir_all(&cert_dir);
+    }
+
+    /// The adversarial review of #584 (finding 5): a WAL writer refusing appends after a failed
+    /// write was visible only in the log. `/health` now carries a `persistence` block —
+    /// `wal_refusing_appends` with the reason — that flips on and, once a snapshot truncates the
+    /// torn tail, off. Seen failing first: the block was absent (`null`).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn health_says_when_the_wal_writer_refuses_appends() {
+        use crate::config::{OnUnreadable, PersistenceConfig, SyncMode};
+        let gossip_port = alloc_port();
+        let http_port   = alloc_port();
+        let base = std::env::temp_dir().join(format!("myc-health-wal-{gossip_port}"));
+        let _ = std::fs::remove_dir_all(&base);
+        let id  = NodeId::new("127.0.0.1", gossip_port).unwrap();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.persistence = Some(PersistenceConfig { base_path: base.clone(), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 1_000, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse });
+        let agent = Arc::new(GossipAgent::new(id, cfg));
+        agent.start().await.unwrap();
+        let url = format!("http://127.0.0.1:{http_port}/health");
+        let client = reqwest::Client::builder().timeout(Duration::from_millis(500)).build().unwrap();
+        let mut body = None;
+        for _ in 0..100 {
+            if let Ok(resp) = client.get(&url).send().await && resp.status() == 200 {
+                body = Some(resp.json::<serde_json::Value>().await.unwrap());
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let body = body.expect("gateway /health never returned 200");
+        assert_eq!(body["persistence"]["configured"], serde_json::json!(true), "{body}");
+        assert_eq!(body["persistence"]["wal_refusing_appends"], serde_json::json!(false), "a healthy writer: {body}");
+
+        let wal = Arc::clone(agent.task_ctx.wal.get().expect("persistence configured"));
+        wal.poison_for_test("injected write failure").await.unwrap();
+        let body: serde_json::Value = client.get(&url).send().await.unwrap().json().await.unwrap();
+        assert_eq!(body["persistence"]["wal_refusing_appends"], serde_json::json!(true), "{body}");
+        assert_eq!(body["persistence"]["reason"], serde_json::json!("injected write failure"), "{body}");
+        assert!(agent.kv().set_requiring_sync(&mycelium_core::receipt::OperationId::new("h-refused"), "h/refused", b"v".to_vec()).await.is_err(),
+            "an append is refused while the writer is poisoned");
+
+        wal.trigger_snapshot().await.expect("the repairing snapshot");
+        let body: serde_json::Value = client.get(&url).send().await.unwrap().json().await.unwrap();
+        assert_eq!(body["persistence"]["wal_refusing_appends"], serde_json::json!(false), "recovered: {body}");
+        assert_eq!(body["persistence"]["reason"], serde_json::Value::Null);
+        assert!(body["persistence"]["dropped_appends"].as_u64().unwrap() >= 1, "the refusal was counted: {body}");
+        agent.shutdown().await;
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Operational-readiness invariant: shutdown must actually close the

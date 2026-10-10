@@ -303,7 +303,7 @@ an absent section.
   `AeEvidence::for_destination_refusal(&envelope, leg, reason)` record in its evidence journal
   (enforcement point `destination`, verdict deny, `checked = ["composition:{leg}"]`;
   `src/agent/action_evaluator.rs`, written by `examples/composed_commit.rs`). So watch the journal
-  exporter ([audit.md §9](audit.md#9-evidence-export--what-a-gap-looks-like-to-the-consumer)) for
+  exporter ([audit.md §10](audit.md#10-evidence-export--what-a-gap-looks-like-to-the-consumer)) for
   destination-point refusals. A provider that does not write that record leaves no trace at all.
 - **Observe.** `committed_count()`, and since v2.22.0 `Counting<D>` — wrap the destination and read
   `counts()`: commits, and refusals by kind and by composition leg (`RefusalSnapshot`); with the
@@ -317,7 +317,7 @@ an absent section.
 
 - **Tier-C needs `compliance`.** The invoke gate seals every blocked call into this node's signed,
   hash-chained audit trail, so its operational story is the audit runbook's: see
-  [audit.md §7](audit.md).
+  [audit.md §8](audit.md).
 - **Per-node, by design.** Absence of a denial in one provider's chain is not proof of absence
   elsewhere. Only *guarded* capabilities that reach the gate seal denials.
 - **Observe.** `mycelium_guardrails_*` ([metrics.md](metrics.md)).

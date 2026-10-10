@@ -59,6 +59,61 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   variable set, the stub gateway saw `None` where `Bearer env-token` was expected). The review also corrected the
   saver's scope list: every `put()` writes blobs through `PUT /gateway/reason/blob`, which is `llm:write`, so the
   saver needs `kv:read`, `kv:write`, `llm:read` **and `llm:write`** (the README named three).
+- **The audit chain's head survives a restart.** `AuditChainState::new()` is genesis and nothing read the persisted
+  `sys/audit/{self}/` stream back at `start()`, so a restarted node with `[persistence]` sealed seq 0 again with a
+  zero `prev_hash` and LWW overwrote its own genesis record — the tamper-evident chain erased its history at every
+  restart. `start()` now folds the node's own persisted stream (`audit::restore_chain_head`, after the identity is
+  loaded and before anything can seal), **verified** from genesis or the newest signed checkpoint under the retained
+  key set: the head resumes after the longest verified prefix, and a record that does not verify is logged at `error`
+  and sealed over rather than seeding the chain. Without persistence the stream still restarts at seq 0 (nothing to
+  recover from; peers' copies are not consulted). Seen failing first:
+  `the_audit_chain_head_is_recovered_from_persistence_at_restart` (the restarted node's stream held three records and
+  seq 0 was not the original), `a_forged_record_in_the_persisted_audit_stream_does_not_seed_the_chain_head`.
+- **A failed WAL append poisons the writer until a snapshot repairs the file.** A short write followed by an error
+  (`ENOSPC`, `EIO`) leaves a torn frame at the end of `wal.bin`; the writer forwarded the error to that one caller
+  and carried on, so the next record landed behind the torn frame — the next restart read `Corrupt` with data after
+  it (a refusal to start by default, or both files quarantined), and until then every snapshot aborted on the same
+  `Corrupt`. Now every later append is answered `Err` (`LocalDurability::Failed` on the receipt path) or counted in
+  `dropped_appends()` on every path, a `sync()` establishes nothing, the failure is logged once at
+  `error`, and the writer tries a repairing snapshot at once and on every snapshot after — the torn frame is the last
+  thing in the file, so a successful snapshot carries the complete records and truncates it — un-poisoning only when
+  one succeeds. A refused append has no WAL record, but the store already holds its value (apply first, then the
+  WAL), so the repairing snapshot's store scan carries it into `snapshot.bin`; what its caller was told is that
+  durability was **not established** by the ack. `/health` carries a `persistence` block (`wal_refusing_appends`,
+  `reason`, `dropped_appends`) and the counters `gossip_wal_append_failures_total` /
+  `gossip_wal_appends_refused_total` say so too. The node-local journal has done the same since 2.23.0; this is the WAL's mirror. On-disk format
+  unchanged. Seen failing first: `a_failed_append_poisons_the_writer_until_a_snapshot_truncates_the_torn_tail` (the
+  append after the injected failure was acknowledged `Ok`).
+- **A failed snapshot no longer latches the node self-opaque, and the timer keeps snapshotting.** `do_snapshot` raised
+  `sys/load/{node}/persistence` at step 1 and lowered it only at step 5; every `?` between them returned past the
+  lowering, the writer's timer branch defers while `is_self_opaque` reads that mark — which had no age check — and the
+  three callers discarded the error unlogged. One failed snapshot therefore stopped every timer snapshot after it
+  (the WAL grew until a restart) and the node abstained from every proposal while the fleet had stopped counting it
+  within seconds. The mark is now lowered on every exit, a failed snapshot is logged at `warn` with its reason (a
+  repeat of the same failure at `debug`, recovery at `info`), and `is_self_opaque` counts a mark only within the same
+  freshness bound the consensus counters use (`opaque_freshness_ms`: two health-check intervals). Seen failing first:
+  `a_failed_snapshot_lowers_the_self_opacity_mark_and_the_next_timer_snapshot_runs`,
+  `a_stale_self_opacity_mark_does_not_read_as_opaque`. The bound ages **only the `persistence` mark**, read by the
+  snapshot-deferral hook (`defer_snapshot_on_self_opacity`); a requirement's or the governor's mark is a transition,
+  lowered by whoever raised it, and `is_self_opaque` reads those unaged as before. The bound reads the static
+  `health_check_interval_secs`, not the hot-tuned value. The failing exit lowers the mark with `Hlc::tick_logical()`
+  — one logical step, no wall-clock read — because a failing exit must consume no choice a recording did not make:
+  the storage fault sweep (`a_fault_at_any_storage_effect_leaves_the_acknowledged_record_recoverable`) injects a
+  fault into a clean recording, and the first cut's `tick()` there made the replay diverge at the lowering.
+- **The `sim` build's storage seams report a failed effect when no kernel is installed.** `kernel_fs` answered
+  `Ok(())` before looking at the real outcome, so under `--features sim` without a kernel a failed write, rename or
+  sync — `EISDIR` on `snapshot.tmp`, a missing file — came back as success and a snapshot "succeeded" over it; the
+  error's kind now survives (`NotFound` on a tail read stays an empty tail). Off in every shipped build; CI's
+  `-p mycelium-core --features sim` step is where it showed. Seen failing first:
+  `sim_seam::no_kernel_tests::without_a_kernel_a_failed_effect_is_still_a_failure` (the write to a directory returned
+  `Ok`).
+- **`persist.sync_mode` reads `not_configured` under `sync_mode = "os"`.** The writer syncs only when
+  `force_sync || sync_mode == Flush`, so `os` is buffered exactly like `async` — but the guarantee resolved
+  `enforced` for it, and `secure-single-domain` admitted a node whose acks were `buffered`. It now resolves
+  `not_configured — sync_mode (os: the OS buffers; an ack is `buffered`)`, and the profile refuses the start by
+  name; the catalogue golden is regenerated. **Check before upgrading:** a `secure-single-domain` node running
+  `sync_mode = "os"` now fails at start — set `flush`. Seen failing first:
+  `the_secure_profile_names_sync_mode_os_as_not_configured`.
 
 ## [2.31.0] — 2026-10-09
 

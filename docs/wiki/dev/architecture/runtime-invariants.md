@@ -333,6 +333,32 @@ in its `open` rather than by a snapshot. And a persistence directory that cannot
 losing every write at the next restart, while `persist.configured` — resolved from the configuration
 alone — still said `enforced` and `secure-single-domain` admitted the node.
 
+**5. A failed append poisons the writer, and a failed snapshot lowers the mark it raised**
+(2026-10-09; the review's P2 pair). A short write followed by an error leaves a torn frame at the
+end of `wal.bin`; the writer used to forward the error to that caller and append the next record
+*behind* it, where `decode_wal_records` read the torn length over it as `Corrupt` — a refusal at the
+next start, and every snapshot before it aborted. Now `WriterState::poison` is set by the failed
+append and every later `Append` is answered `Err` and counted in `dropped_appends()` — every path,
+alongside the failed record itself: the store already holds each value (apply first, then the WAL)
+with no WAL record, the replica-sync hole, and the repairing snapshot's store scan carries those
+values into `snapshot.bin`; what the caller was told is that the ack established nothing —
+`Sync` establishes nothing, and the writer tries a repairing snapshot at once and on every snapshot
+after, un-poisoning only on success: the torn frame is the last thing in the file, so step 2b carries
+the complete records and step 4 truncates it. Beside it, `do_snapshot`'s steps 2–4 are
+`snapshot_body`, so **every** exit reaches step 5's lowering of `sys/load/{node}/persistence` — each
+`?` used to return past it, leaving the node self-opaque, the timer branch deferring on the mark for
+ever and the three callers discarding the error unlogged; a failed snapshot is now logged at `warn`
+(a repeat at `debug`), and the deferral hook (`opacity::defer_snapshot_on_self_opacity`) ages the
+`persistence` mark alone against the fleet's freshness bound (`opaque_freshness_ms`, two
+health-check intervals, the static interval) — a requirement's or the governor's mark is a
+transition its owner lowers, so `is_self_opaque` still reads those unaged and agrees with
+`CapabilityHandle::is_opaque` (the adversarial review of #584). The writer's refusing state is on
+`/health` (`persistence.wal_refusing_appends`) and in `gossip_wal_appends_refused_total`. Pins: `a_failed_append_poisons_the_writer_until_a_snapshot_truncates_the_torn_tail`
+(`spawn_wal_writer_with_fault`, the WAL's `open_with_fault`),
+`a_failed_snapshot_lowers_the_self_opacity_mark_and_the_next_timer_snapshot_runs`,
+`a_stale_self_opacity_mark_does_not_read_as_opaque`. And `persist.sync_mode` resolves
+`not_configured` for `Os` — the writer syncs on `force_sync || sync_mode == Flush`, nothing else.
+
 **The contract above the invariants (contracts axis item 1, ADR 2026-09-13).** What each public
 acknowledgement proves — and does not — is inventoried site by site in
 [`docs/design/contracts-receipts.md`](../../../design/contracts-receipts.md) §1, with the four receipts
@@ -360,6 +386,8 @@ Gates (`persistence.rs::durability_tests`): `regression_snapshot_retains_wal_rec
 replay taken while it is alive — a clean shutdown would mask the loss), `snapshot_wal_merge_follows_store_lww`,
 `regression_replay_keeps_wal_record_older_than_snapshot_watermark`,
 `replay_without_watermark_still_lets_snapshot_win_same_key`, `regression_closed_writer_never_acks_success`,
-`regression_writer_dying_mid_request_is_an_error`, `append_sync_fdatasyncs_in_async_mode`.
+`regression_writer_dying_mid_request_is_an_error`, `append_sync_fdatasyncs_in_async_mode`,
+`a_failed_append_poisons_the_writer_until_a_snapshot_truncates_the_torn_tail`,
+`a_failed_snapshot_lowers_the_self_opacity_mark_and_the_next_timer_snapshot_runs`.
 Not gated: `Committed { persisted: false }` end-to-end (needs a writer death or disk fault inside
 a running agent — the unit path is covered by the closed-writer test).

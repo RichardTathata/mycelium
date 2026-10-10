@@ -7,7 +7,9 @@
 mycelium-core/src/connection.rs 4
 # mycelium-core/src/ops.rs: the same seen-set TTL on local emission, three sites. Fails closed.
 mycelium-core/src/ops.rs 3
-# mycelium-core/src/persistence.rs: a `written_at_ms` stamp and a snapshot ordering stamp.
+# mycelium-core/src/persistence.rs: the opacity mark's `written_at_ms` — a stamp that feeds the snapshot-deferral
+#   decision since 2026-10-09 (`defer_snapshot_on_self_opacity` ages it against `wall_now_ms`; an HLC ahead of the
+#   wall reads it fresh, so it fails closed, towards deferring) — and a snapshot ordering stamp.
 mycelium-core/src/persistence.rs 2
 # src/consensus.rs: a test that sanity-checks the HLC's own reading.
 src/consensus.rs 1

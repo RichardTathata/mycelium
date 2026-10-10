@@ -32,6 +32,21 @@ SHA-256 content hash of the previous record in this node's stream).
 coordinator). Verify each node's stream independently; the cluster trail is the
 union of those streams.
 
+**The head survives a restart with `[persistence]`.** At `start()` — after the identity is
+loaded and persisted state replayed, before anything can seal — the node folds its own
+persisted stream, verified from genesis (or the newest signed checkpoint, §5) under its
+retained keys, and resumes sealing at the next `seq` (`audit::restore_chain_head`). A record
+that does not verify is logged at `error` and sealed over, never used as the link; without
+persistence there is nothing to recover from and the stream restarts at seq 0 (peers' copies
+are not consulted). A stream whose first present record has no anchor — seq 0 deleted by
+hand with no checkpoint at the first record — folds nothing: the head stays at genesis, the
+log names `SequenceGap`, and nothing is overwritten because nothing is at seq 0 (`audit_verify`
+reports the same gap). **Rotate-and-revoke before a restart** ([cert-rotation.md](cert-rotation.md)
+§ Compromise remediation): a revoked key verifies nowhere, so every record it signed fails
+`BadSignature`, the fold stops at genesis and the next seal overwrites seq 0 — seal a checkpoint
+with the **new** key and `audit_prune_to_checkpoint()` **before** restarting, so the head anchors
+at that checkpoint instead.
+
 ---
 
 ## 2. Querying the trail
@@ -145,7 +160,7 @@ by design (the chain is meant to notice).
 
 ---
 
-## 5. Failure modes
+## 6. Failure modes
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -154,10 +169,11 @@ by design (the chain is meant to notice).
 | `verified: false`, `UnknownSigner` | owner's identity key not learned | confirm peering + shared CA; the key arrives via `sys/identity/` gossip |
 | `verified: false`, `BrokenLink`/`BadSignature` | records tampered or store hand-edited | treat as an incident; cite the offending `seq` + `content_hash` |
 | trail not shrinking | by design — no time-eviction of live keys | export + size the store; see §4 |
+| at `start()`: `audit: the persisted stream stops verifying at …` | a record in this node's own persisted stream did not verify (planted, edited, or signed by a key since revoked — see §1 on rotate-and-revoke) — the head resumed after the verified prefix and the next seal overwrote it | treat as an incident; the log names the `seq`; the overwritten bytes survive in `snapshot.bin`/`wal.bin` only until the next periodic snapshot compacts them — copy the persistence directory first |
 
 ---
 
-## 6. `/gateway/transparency` — revocation proofs
+## 7. `/gateway/transparency` — revocation proofs
 
 Key **revocations** get their own tamper-evident surface: a Merkle transparency log over
 each node's validated revocation list, served at `GET /gateway/transparency` (scope
@@ -198,7 +214,7 @@ The head `count` is also the cheap fleet-wide sanity check: if nodes disagree on
 
 ---
 
-## 7. Proving a guardrail stopped an agent
+## 8. Proving a guardrail stopped an agent
 
 When a node runs the `mycelium-guardrails` **Tier-C** invoke gate (feature `compliance`),
 every *unauthorized* invocation it blocks is sealed as an `Invoke`/`Denied` record into
@@ -232,7 +248,7 @@ underlying chain with §3 before citing any denial.
 *Code: `mycelium-guardrails/src/verify.rs` (`prove_denials`, `narrate_proof`),
 `mycelium-guardrails/src/guard.rs` (the sealing gate).*
 
-## 8. Mandate lifecycle — three endings, recorded apart
+## 9. Mandate lifecycle — three endings, recorded apart
 
 An appointment can end three ways, and they are **separate events** on purpose:
 
@@ -266,7 +282,7 @@ closed, not a refusal: check that this node's reader holds a current-key checkpo
 appointment records the walk names can be fetched, and that the stream has not forked. `not eligible: …` is a
 rule saying no. The rule table and the trust walk are in [guide 21 § Eligibility](../guide/21-mandates.md).
 
-## 9. Evidence export — what a gap looks like to the consumer
+## 10. Evidence export — what a gap looks like to the consumer
 
 Authorisation evidence does **not** live in this gossiped chain. Every decision and execution goes
 to a **node-local evidence journal**, fsynced and never gossiped; only a hash-bearing reference

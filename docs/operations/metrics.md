@@ -41,6 +41,8 @@ The hot-path layer-I/II counters and gauges from `mycelium-core`. The
 | `gossip_store_entries` | gauge | — | live KV keys held by this node | unbounded growth = tombstones not GC'd or a writer looping (mirrors `/stats` `store_entries`) |
 | `gossip_peers_connected` | gauge | — | live outbound writers — sockets this node holds to peers, set where the writer map changes and at the GC sweep (mirrors `/stats` `cached_connections`; the *view* is `mycelium_emergent_peers_known`) | `0` while `peers_known > 0` = this node can see peers it cannot reach; a sawtooth = writers idling out and re-dialling |
 | `gossip_kv_writes_total` | counter | — | KV writes applied | a sudden spike locates a hot writer |
+| `gossip_wal_append_failures_total` | counter | — | WAL appends whose write failed at the disk (`ENOSPC`, `EIO`); each one poisons the writer | **any value = this node's WAL is refusing appends until a snapshot repairs it** — `/health` says so (`persistence.wal_refusing_appends`); check the disk |
+| `gossip_wal_appends_refused_total` | counter | — | appends refused by a poisoned WAL writer (no WAL record; a caller awaiting an ack was told `failed`) | rising while `wal_append_failures_total` is flat = the repairing snapshot keeps failing too; read its `warn` line |
 | `gossip_kv_deletes_total` | counter | — | KV deletes (tombstones) applied | — |
 | `gossip_anti_entropy_rounds_total` | counter | — | Merkle anti-entropy reconciliation rounds run | flat-lining while peers are up = anti-entropy stalled |
 | `gossip_messages_received_total` | counter | — | gossip frames received from peers | zero on a node that should have peers = isolation/partition |
@@ -164,7 +166,7 @@ unconditional but only fires when the gate runs. Both counters.
 | Metric | Type | Meaning | Watch for / alert |
 |---|---|---|---|
 | `mycelium_guardrails_admits_total` | counter | callers the Tier-C gate admitted (authorized invocations) | — (the healthy baseline) |
-| `mycelium_guardrails_denials_sealed_total` | counter | unauthorized invocations the gate stopped (and sealed as an `Invoke`/`Denied` audit record) | **a rising value = unauthorized invocations are being stopped fleet-wide** — investigate the caller; each denial is provable via [audit.md §7 · Proving a guardrail stopped an agent](audit.md#7-proving-a-guardrail-stopped-an-agent) |
+| `mycelium_guardrails_denials_sealed_total` | counter | unauthorized invocations the gate stopped (and sealed as an `Invoke`/`Denied` audit record) | **a rising value = unauthorized invocations are being stopped fleet-wide** — investigate the caller; each denial is provable via [audit.md §8 · Proving a guardrail stopped an agent](audit.md#8-proving-a-guardrail-stopped-an-agent) |
 
 ## Reason routing
 
