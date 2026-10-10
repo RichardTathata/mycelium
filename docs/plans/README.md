@@ -62,13 +62,16 @@ record, not duplicates of those.
 > *would bind*, never *is bound*. **The design-time half of the composition theme** — §13 of the axis plan is the
 > runtime half (the records); this is the vocabulary they are written in.
 >
-> **Post-360 hardening (adopted 2026-10-10; nothing delivered yet):** [`post-360-hardening.md`](post-360-hardening.md) —
+> **Post-360 hardening (adopted 2026-10-10; R0 and wave 1 — G, P3, C, D, P1 — in v2.32.0, #595–#599):** [`post-360-hardening.md`](post-360-hardening.md) —
 > the batch after the 2026-10-09 360 review's must-do fixes (#582–#592): release 2.32.0, the external review's items
 > (refuse an exposed unauthenticated gateway, a consensus electorate as a governed group, `deny(unsafe_code)` in core,
 > the `http.rs` split), and rows A–J (locks and leases, resource bounds, companion WALs, WASM limits, the gateway
 > remainder, a wire-and-crypto MINOR, SDKs, companions, the private repo, hygiene). It records one decision that
 > shapes several rows: **consensus is a Layer III protocol, never a service** — no deployment may make a named node
 > set the place agreement happens; leadership is leased by default and acceptor state decays.
+> **Next:** P2, the governed electorate (#601), A with C1/C2, locks and leases (#600), and B, core resource bounds
+> (#602), are on open PRs; then Φ, P5 (before E), E, F (its own MINOR, closing the #585/#587 windows), H, I, J, and R0's
+> private re-pin with `COMPATIBILITY.md`.
 >
 > **Realignment repairs (adopted 2026-10-04; delivered — piece 1 in v2.23.0, #518–#524; pieces 2 and 4 with R7 in v2.24.0, #526–#532; the private exporter, piece 3, on the same pin; R8 and R9 in v2.25.0, #534–#535 — every row closed; S5's and A3's unbuilt halves found by doc-coverage run 20 and delivered in v2.26.0, #542–#543):** [`realignment-repairs.md`](realignment-repairs.md) —
 > an external review's twelve findings, each verified by `file:line` and six re-run as probes (eleven hold; F01 is

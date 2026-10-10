@@ -9,6 +9,29 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.32.0] — 2026-10-10
+
+**The 360 review's must-do list, and the first wave of the post-360 hardening plan.** A gateway bound off loopback
+with no credential refuses to start unless `gateway_allow_unauthenticated` says so, a blank token is refused in every
+form, and `secure-single-domain` is **rev 3** (`gw.exposed_closed`, row P1). The gateway's doors answer only what they
+were asked by whom: the signal SSE streams refuse protected kinds, `rpc/respond` answers only a request its own serve
+stream delivered, an A2A task belongs to its creator, the tuple overview sits behind the bearer, the LLM doors and
+`mycelium-reason`'s façade (**0.8.0**) run the action preflight as the HTTP client, the OIDC key refresh is
+single-flight and timed out. Identity proofs and consensus signatures are domain-tagged (the bare form accepted for
+one release), a proposer must be in the group's roster (`NotAMember`), the acceptor's promise reaches the WAL before
+it answers, and a forged decided floor is counted and no longer overflows the ballot draw. Hosted WASM components are
+confined (`mesh.emit`), bounded in memory and in time — a call has a deadline and runs off the async workers, a trap
+does not recompile (row D) — and a `[hosts]` table must name its publishers. Durability: the audit chain's head
+survives a restart, a failed WAL append poisons the writer until a snapshot repairs the file, and the companion WALs
+compact crash-durably and refuse a corrupt record (row C). `#![deny(unsafe_code)]` across the library crates (row P3);
+the KV namespace table is a CI gate. Companions on their own lines: `mycelium-py` **0.2.10**, `mycelium-ts`
+**0.2.4**, `langgraph-checkpoint-mycelium` **0.3.3** (TLS, the checkpointer's bearer, whole-second timeouts, escaped
+path segments — row G), `mycelium-reason` **0.8.0**. Wire **v12** unchanged. **Check before upgrading:** a node whose
+gateway binds `0.0.0.0` (or any non-loopback address) with no credential, or holds a blank token anywhere, now refuses
+to start — an unauthenticated `GET /gateway/kv/keys` from another host answering 200 today means that node is
+exposed; a `secure-single-domain` node running `sync_mode = "os"` refuses to start; a unit file with `[hosts]` and no
+`trusted_publishers` fails to load. Upgrade notes in `docs/guide/deprecations.md` §23–§29.
+
 ### Changed
 - **Documentation: the front doors route by intent — build, run, see it work, check the evidence** (2026-10-10; no
   code change). Under the hero and the sentence, the root README adds one plain-language line and an intent router
@@ -32,6 +55,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   versioned electorates are not built. Pointed at from the philosophy's corrected litmus, threat model §7, guide 04
   (§ *Discovery is not an electorate*), the FAQ, `what-is-proven.md` and the wiki; three engineering-deck sentences
   qualified to a fixed electorate. 2.30.0's *Not claimed* line stands. No code change.
+- **Documentation: the post-360 hardening plan, doc-coverage run 23 and the wiki lint** (#593, #589, #588; 2026-10-10).
+  `docs/plans/post-360-hardening.md` records the batch after the 360 review — R0 (this release), Φ, the external
+  review's P1/P2/P3/P5 and rows A–J — and decision D1, *consensus is a Layer III protocol, never a service*. Doc-coverage
+  run 23 lands stopping a node for operators (`deployment.md` § Stopping a node, building-on §4) and corrects four
+  pages the code contradicted; the documented `MyceliumConsensusStalled` rule (`diagnostics.md`) no longer pages on
+  `reason="contended"` — **an operator who copied the rule** should re-copy it. The wiki lint corrects lock-order row
+  17 and adds four governor keys to the KV table. Since this release, `diagnostics.md` also names the two new timeout
+  reasons, `unrecorded` and `ballot_exhausted`.
 - **`#![deny(unsafe_code)]` in `mycelium-core` and every companion library** (post-360 P3). The root crate
   and `mycelium-tuple-space` had it; the substrate did not, and it held the workspace's one production `unsafe`:
   `SubjectKeyRegistry::destroy`'s hand-rolled `write_volatile` wipe of a DEK (`erasure.rs`). That is now
@@ -351,7 +382,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   An acceptor that withholds an answer counts it (`GET /stats` `consensus_acceptor_unrecorded`,
   `mycelium_consensus_unrecorded_total{role}`). **Unmeasured:** the per-answer `append_sync` on the voter loop is
   an fsync per promise and per vote, serialised on the listener; its cost is not measured here —
-  `examples/authority_drain` is the shape such a measurement takes.
+  `examples/authority_drain` is the shape such a measurement takes. **Upgrade note:**
+  `mycelium_consensus_timeouts_total{reason}` gains `unrecorded` (here) and `ballot_exhausted` (above, under Added)
+  beside 2.31.0's set — an alert keyed on `reason` should know both (`deprecations.md` §28) — and every acceptor
+  answer is now one forced `fdatasync` on the listener.
   Seen failing first: `an_acceptors_record_survives_a_crash_without_a_snapshot`
   (the crash copy replayed `consensus/committed/leader/solo` and not the acceptor's record). **Not claimed:** the
   learner's re-stamp of `consensus/committed/` stays on the gossip path (replicated state anti-entropy

@@ -22,6 +22,24 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## v2.32.0 release — 2026-10-10 (tag `v2.32.0`) — the 360 review's must-do list, and post-360 wave 1
+
+**#582–#592** the 360 review's must-do train: record corrections (#582); the SDKs over TLS and the checkpointer's
+bearer (#583); durability — the audit chain head survives a restart, a failed WAL append poisons the writer, a failed
+snapshot lowers its opacity mark, `sync_mode = "os"` reads `not_configured` (#584); identity proofs and consensus
+signatures domain-tagged with a one-release bare allowance, the acceptor's record on the WAL before it answers, a
+proposer outside the roster refused `NotAMember` (#585); the WASM host confined — `mesh.emit`, `trusted_publishers`,
+shadow tools, the staging ceiling, the memory cap (#586); the gateway's doors — SSE protected kinds, `rpc/respond`
+bound to its request, A2A task owners, the tuple overview behind auth, the LLM doors and the reason façade under the
+evaluator (#587, `mycelium-reason` 0.8.0); the wiki lint (#588) and doc-coverage run 23 (#589); the OIDC refresh
+single-flight (#590); the KV namespace gate and the consensus-record tripwires (#591); the front doors by intent
+(#592). Then **#593** the post-360 plan and **#594** the electorate decision record, and wave 1 of the plan: **#595**
+SDK edges (row G), **#596** `deny(unsafe_code)` (P3), **#597** companion WALs (C), **#598** an exposed open gateway
+refused, `secure-single-domain` rev 3 (P1), **#599** WASM call deadlines (D). Companions: `mycelium-py` 0.2.10,
+`mycelium-ts` 0.2.4, `langgraph-checkpoint-mycelium` 0.3.3, `mycelium-reason` 0.8.0. Upgrade notes
+`deprecations.md` §23–§29. Release record:
+[`.log/2026-10-10-release-v2.32.0.md`](.log/2026-10-10-release-v2.32.0.md).
+
 ## v2.31.0 release — 2026-10-09 (tag `v2.31.0`) — stops that stop
 
 **#577** the wiki lint; **#578** doc-coverage run 22 (nine failing instructions, three code gaps reported); **#579**

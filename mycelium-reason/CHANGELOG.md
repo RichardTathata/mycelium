@@ -6,7 +6,7 @@ All notable changes to this crate. It versions **independently** of the Mycelium
 
 ---
 
-## [0.8.0] — unreleased
+## [0.8.0] — 2026-10-10
 
 **The façade acts as the HTTP client, under the evaluator.** `POST /gateway/reason/route` and
 `/gateway/reason/v1/chat/completions` dispatched `llm.invoke` with `rpc_call` — the node's own action — so under
@@ -23,6 +23,7 @@ records the outcome. A denial is `403`: `{"error": "policy", "reason", "code", "
 - **Behaviour:** under the secure profile a provider whose caller-context marker has not reached the gateway is
   refused for a façade call and failed over, as `/gateway/llm/call` does; it used to be called as the node.
 - **Breaking:** an exhaustive `match` on `RouteError` needs the `Refused` arm (hence the MINOR).
+- **Also:** `#![deny(unsafe_code)]` (post-360 P3; the crate had no `unsafe`).
 - Seen failing first: `tests/gateway.rs::the_facade_dispatches_as_the_http_client_not_the_node` (the provider saw
   `node:…`), `the_facade_runs_the_action_preflight` (200, and the provider ran). Requires `mycelium` ≥ 2.32.0.
 
