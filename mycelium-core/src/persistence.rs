@@ -1043,10 +1043,21 @@ async fn do_snapshot(
     // mark went on telling the fleet the node was shedding (2026-10-09).
     let result = snapshot_body(dir, kv_state, hlc, wal_file, cipher).await;
 
-    // 5. Lower opacity — tombstone the persistence key, on success and on failure alike.
-    let lower_upd = crate::framing::make_gossip_update(
-        node_id, default_ttl, opacity_key, bytes::Bytes::new(), true, hlc,
-    );
+    // 5. Lower opacity — tombstone the persistence key, on success and on failure alike. On
+    // success the tombstone is stamped by `tick()` as it always was (a wall-clock read the corpus's
+    // recordings carry). On failure it is stamped by `tick_logical()`: **a failing exit consumes no
+    // choice the recording did not make**. The storage fault sweep injects a failure into a clean
+    // recording and replays it, and the first version of this lowering read the clock there — the
+    // replay diverged at `wall now_ms()` where the recording had the snapshot write, and the sweep
+    // measured nothing (the adversarial review's follow-up on #584).
+    let lower_upd = match &result {
+        Ok(()) => crate::framing::make_gossip_update(
+            node_id, default_ttl, opacity_key, bytes::Bytes::new(), true, hlc,
+        ),
+        Err(_) => crate::framing::make_gossip_update_stamped(
+            node_id, default_ttl, opacity_key, bytes::Bytes::new(), true, hlc.tick_logical(),
+        ),
+    };
     apply_and_notify(kv_state, &lower_upd);
 
     result

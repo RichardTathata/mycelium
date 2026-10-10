@@ -281,7 +281,14 @@ mod installed {
     {
         CTX.with(|c| {
             let mut guard = c.borrow_mut();
-            let Some(ctx) = guard.as_mut() else { return Ok(()) };
+            // No kernel: the seam is the call it replaced, **errors included**. This arm used to
+            // answer `Ok(())` before looking at the outcome, so under `--features sim` with no
+            // kernel installed a failed write, rename or sync reported success — a snapshot
+            // "succeeded" over `EISDIR`, and tests that pass in every other build failed only there
+            // (the adversarial review's follow-up on #584).
+            let Some(ctx) = guard.as_mut() else {
+                return if ok { Ok(()) } else { Err(err.to_string()) };
+            };
             let offset = *ctx.offsets.get(file).unwrap_or(&0);
             let observed = if ok {
                 mycelium_sim::FsOutcome::Ok(bytes.len())
@@ -1046,15 +1053,15 @@ pub async fn fs_write_all(
         file.flush().await
     }
     .await;
-    installed::kernel_fs(
+    let verdict = installed::kernel_fs(
         name,
         "write_all",
         bytes,
         false,
         res.is_ok(),
         &res.as_ref().err().map(|e| e.to_string()).unwrap_or_default(),
-    )
-    .map_err(std::io::Error::other)
+    );
+    settle(res, verdict)
 }
 
 /// A whole-file write.
@@ -1091,15 +1098,15 @@ pub async fn fs_write(
         };
     }
     let res = tokio::fs::write(path, bytes).await;
-    installed::kernel_fs(
+    let verdict = installed::kernel_fs(
         name,
         "write",
         bytes,
         false,
         res.is_ok(),
         &res.as_ref().err().map(|e| e.to_string()).unwrap_or_default(),
-    )
-    .map_err(std::io::Error::other)
+    );
+    settle(res, verdict)
 }
 
 /// A rename — the step that publishes a snapshot, and whose durability needs the *directory* sync.
@@ -1145,15 +1152,15 @@ pub async fn fs_rename(
         };
     }
     let res = tokio::fs::rename(from, to).await;
-    installed::kernel_fs(
+    let verdict = installed::kernel_fs(
         name,
         "rename",
         both.as_bytes(),
         false,
         res.is_ok(),
         &res.as_ref().err().map(|e| e.to_string()).unwrap_or_default(),
-    )
-    .map_err(std::io::Error::other)
+    );
+    settle(res, verdict)
 }
 
 /// Read a whole file.
@@ -1200,7 +1207,20 @@ pub async fn fs_read(path: &std::path::Path, name: &str) -> std::io::Result<Vec<
         &res.as_ref().err().map(|e| e.to_string()).unwrap_or_default(),
     ) {
         Ok(()) => res,
-        Err(e) => Err(std::io::Error::other(e)),
+        // The kernel's verdict, on the real error when there is one (its kind survives: a tail read's
+        // `NotFound` is an empty tail, not a refusal).
+        Err(e) => Err(res.err().unwrap_or_else(|| std::io::Error::other(e))),
+    }
+}
+
+/// The outcome a caller sees after an effect was performed and reported: the kernel's verdict,
+/// carried on the real error when there is one so its kind survives, and on a stand-in otherwise
+/// (a recorded failure replayed over a disk that succeeded).
+#[cfg(feature = "sim")]
+fn settle(res: std::io::Result<()>, verdict: Result<(), String>) -> std::io::Result<()> {
+    match verdict {
+        Ok(()) => Ok(()),
+        Err(e) => Err(res.err().unwrap_or_else(|| std::io::Error::other(e))),
     }
 }
 
@@ -1231,15 +1251,15 @@ pub async fn fs_sync_data(file: &tokio::fs::File, name: &str) -> std::io::Result
         };
     }
     let res = file.sync_data().await;
-    installed::kernel_fs(
+    let verdict = installed::kernel_fs(
         name,
         "sync_data",
         &[],
         true,
         res.is_ok(),
         &res.as_ref().err().map(|e| e.to_string()).unwrap_or_default(),
-    )
-    .map_err(std::io::Error::other)
+    );
+    settle(res, verdict)
 }
 
 /// `sync_all` on a directory — what makes a preceding `rename` survive a power loss.
@@ -1269,15 +1289,15 @@ pub async fn fs_sync_dir(dir: &tokio::fs::File, name: &str) -> std::io::Result<(
         };
     }
     let res = dir.sync_all().await;
-    installed::kernel_fs(
+    let verdict = installed::kernel_fs(
         name,
         "sync_dir",
         &[],
         true,
         res.is_ok(),
         &res.as_ref().err().map(|e| e.to_string()).unwrap_or_default(),
-    )
-    .map_err(std::io::Error::other)
+    );
+    settle(res, verdict)
 }
 
 #[cfg(all(test, feature = "sim"))]
@@ -2175,6 +2195,33 @@ mod production_arm_tests {
              on exactly this answer, and reported OnDisk when it lied"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(all(test, feature = "sim"))]
+mod no_kernel_tests {
+    /// The `sim` build's seams reported **success for a failed effect** whenever no kernel was
+    /// installed: `kernel_fs` answered `Ok(())` before looking at the real outcome, so a write to a
+    /// path that is a directory came back `Ok`, a snapshot "succeeded" over an `EISDIR`, and two
+    /// durability tests that pass in every other build failed under `--features sim` (CI's
+    /// `-p mycelium-core --features sim` step, the adversarial review's follow-up on #584). Without a
+    /// kernel a seam is the call it replaced, errors included. Seen failing first: the write to a
+    /// directory returned `Ok`.
+    #[tokio::test]
+    async fn without_a_kernel_a_failed_effect_is_still_a_failure() {
+        let dir = std::env::temp_dir().join(format!("myc-seam-nokernel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("is-a-dir")).unwrap();
+        assert!(super::installed::mode().is_none(), "no kernel installed on this thread");
+        let e = super::fs_write(&dir.join("is-a-dir"), "snapshot.tmp", b"x").await
+            .expect_err("writing a directory path fails, kernel or no kernel");
+        assert!(e.to_string().to_lowercase().contains("directory"), "the real error, not a stand-in: {e}");
+        let e = super::fs_rename(&dir.join("absent"), &dir.join("elsewhere"), "snapshot.bin").await
+            .expect_err("renaming a missing file fails");
+        assert_eq!(e.kind(), std::io::ErrorKind::NotFound, "the real error's kind survives: {e}");
+        let e = super::fs_read(&dir.join("absent"), "wal.bin#tail").await.expect_err("reading a missing file fails");
+        assert_eq!(e.kind(), std::io::ErrorKind::NotFound, "{e}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

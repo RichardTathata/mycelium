@@ -96,7 +96,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `a_stale_self_opacity_mark_does_not_read_as_opaque`. The bound ages **only the `persistence` mark**, read by the
   snapshot-deferral hook (`defer_snapshot_on_self_opacity`); a requirement's or the governor's mark is a transition,
   lowered by whoever raised it, and `is_self_opaque` reads those unaged as before. The bound reads the static
-  `health_check_interval_secs`, not the hot-tuned value.
+  `health_check_interval_secs`, not the hot-tuned value. The failing exit lowers the mark with `Hlc::tick_logical()`
+  — one logical step, no wall-clock read — because a failing exit must consume no choice a recording did not make:
+  the storage fault sweep (`a_fault_at_any_storage_effect_leaves_the_acknowledged_record_recoverable`) injects a
+  fault into a clean recording, and the first cut's `tick()` there made the replay diverge at the lowering.
+- **The `sim` build's storage seams report a failed effect when no kernel is installed.** `kernel_fs` answered
+  `Ok(())` before looking at the real outcome, so under `--features sim` without a kernel a failed write, rename or
+  sync — `EISDIR` on `snapshot.tmp`, a missing file — came back as success and a snapshot "succeeded" over it; the
+  error's kind now survives (`NotFound` on a tail read stays an empty tail). Off in every shipped build; CI's
+  `-p mycelium-core --features sim` step is where it showed. Seen failing first:
+  `sim_seam::no_kernel_tests::without_a_kernel_a_failed_effect_is_still_a_failure` (the write to a directory returned
+  `Ok`).
 - **`persist.sync_mode` reads `not_configured` under `sync_mode = "os"`.** The writer syncs only when
   `force_sync || sync_mode == Flush`, so `os` is buffered exactly like `async` — but the guarantee resolved
   `enforced` for it, and `secure-single-domain` admitted a node whose acks were `buffered`. It now resolves
