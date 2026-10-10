@@ -35,6 +35,8 @@
 //! leaks into `mycelium` / `mycelium-core` (WS-A dep-tree invariant). Same posture as
 //! `mycelium-tuple-space`.
 
+#![deny(unsafe_code)]
+
 mod artifact;
 mod catalog;
 mod confine;

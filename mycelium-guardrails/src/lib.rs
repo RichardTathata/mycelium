@@ -42,6 +42,8 @@
 //! - `cap/{node}/…` — Tier C `authorized_callers` stamped onto advertised capabilities.
 //! - `sys/audit/{node}/…` — Tier C sealed `Denied` records (feature `compliance`).
 
+#![deny(unsafe_code)]
+
 mod apply;
 mod policy;
 #[cfg(feature = "compliance")]

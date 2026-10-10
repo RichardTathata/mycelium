@@ -32,6 +32,8 @@
 //!   atomic hard-link CAS publish, manifest-authoritative reads). An `S3Store` is a parallel impl
 //!   (its conditional `PUT`/`If-Match` is the same CAS contract).
 
+#![deny(unsafe_code)]
+
 mod model;
 mod store;
 mod fs;

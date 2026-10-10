@@ -25,6 +25,20 @@
 //! destruction can restore the data — custody must guarantee DEK destruction reaches DEK backups
 //! (KMS enforces this).
 //!
+//! **Copies the wipe does not reach.** `destroy` wipes the key it removes from the map, and
+//! `install_key` the key it replaces. Every other copy of a DEK is dropped un-wiped:
+//! - `decrypt_for`'s local copy of the key (`let dek = *…`), and the value `get_or_create` returns
+//!   to `encrypt_for` — stack copies made on every call;
+//! - ring's expanded AES key schedule inside each `LessSafeKey`, built per call and dropped by ring
+//!   without zeroizing;
+//! - every live key when the registry itself drops (the map's `Drop` frees, it does not wipe);
+//! - bytes a `HashMap` resize or removal leaves in freed memory.
+//!
+//! Storing keys as `zeroize::Zeroizing<[u8; 32]>` (wiped on every drop, including the registry's)
+//! and passing references rather than copies is the path to closing the first, third and fourth;
+//! ring's key schedule is outside this crate. Until then the wipe is best-effort, and KMS custody
+//! (above) is the erasure boundary.
+//!
 //! Gated behind `tls` (reuses ring, already in-tree via rustls — no new compiled crate).
 
 #![cfg(feature = "tls")]
@@ -107,16 +121,13 @@ impl SubjectKeyRegistry {
 
     /// **Erase** `subject`: destroy its DEK. All ciphertext ever produced for it becomes
     /// permanently undecryptable — the GDPR-erasure primitive. Returns `true` if a key was
-    /// present. The DEK bytes are zeroized before being dropped. (Best-effort in-process zeroize;
-    /// production KMS custody makes destruction durable and backup-safe — see the module doc.)
+    /// present. The removed DEK bytes are zeroized before being dropped; other in-memory copies are
+    /// not (module doc, *Copies the wipe does not reach*). Production KMS custody makes destruction
+    /// durable and backup-safe.
     pub fn destroy(&self, subject: &str) -> bool {
         match self.lock().remove(subject) {
             Some(mut dek) => {
-                // Overwrite the key material before it drops. `write_volatile` is not optimised
-                // away; sufficient for the reference (a KMS is the production custody boundary).
-                for b in dek.iter_mut() {
-                    unsafe { std::ptr::write_volatile(b, 0u8) };
-                }
+                wipe(&mut dek);
                 true
             }
             None => false,
@@ -125,9 +136,11 @@ impl SubjectKeyRegistry {
 
     /// Insert a DEK for `subject` from external custody (e.g. unwrapped from a KMS) — the seam a
     /// KMS-backed deployment uses instead of the in-memory `get_or_create`. Overwrites any existing
-    /// key for the subject.
+    /// key for the subject; the key it replaces is wiped.
     pub fn install_key(&self, subject: impl Into<String>, dek: [u8; 32]) {
-        self.lock().insert(subject.into(), dek);
+        if let Some(mut replaced) = self.lock().insert(subject.into(), dek) {
+            wipe(&mut replaced);
+        }
     }
 
     fn get_or_create(&self, subject: &str) -> [u8; 32] {
@@ -146,9 +159,39 @@ impl SubjectKeyRegistry {
     }
 }
 
+/// Overwrite key material before it drops. `zeroize` writes volatilely and fences, so the
+/// compiler cannot elide the stores as dead. It wipes the copy it is handed — the key `destroy`
+/// removes and the key `install_key` replaces — and no other; the copies it does not reach are
+/// listed in the module doc under *Copies the wipe does not reach*.
+fn wipe(dek: &mut [u8; 32]) {
+    use zeroize::Zeroize;
+    #[cfg(test)]
+    let before = *dek;
+    dek.zeroize();
+    #[cfg(test)]
+    WIPED.with(|w| w.borrow_mut().push((before, *dek)));
+}
+
+// Test-only hook: every `wipe` on this thread records `(key before, bytes after)`, so a test can
+// see that `destroy` and `install_key` wiped the copy they took out of the map. Thread-local because
+// each test runs on its own thread.
+#[cfg(test)]
+thread_local! {
+    static WIPED: std::cell::RefCell<Vec<([u8; 32], [u8; 32])>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wipe `destroy` runs leaves every DEK byte zero (P3 replaced a hand-rolled
+    /// `write_volatile` loop with `zeroize`; this pins that the replacement still clears the key).
+    #[test]
+    fn wipe_zeroes_every_dek_byte() {
+        let mut dek = [0xA5u8; 32];
+        wipe(&mut dek);
+        assert_eq!(dek, [0u8; 32]);
+    }
 
     #[test]
     fn round_trips_and_isolates_subjects() {
@@ -189,6 +232,32 @@ mod tests {
         let last = ct.len() - 1;
         ct[last] ^= 0xff; // flip a tag bit
         assert_eq!(reg.decrypt_for("dave", &ct), None, "AEAD rejects tampering");
+    }
+
+    /// Through `destroy`, not `wipe` alone: the key read back afterwards is gone, and the copy
+    /// `destroy` removed from the map was the subject's key and is all zeros (adversarial review
+    /// of #596, finding 1).
+    #[test]
+    fn destroy_wipes_the_key_it_removes() {
+        let reg = SubjectKeyRegistry::new();
+        let dek = [0x5Cu8; 32];
+        reg.install_key("frank", dek);
+        WIPED.with(|w| w.borrow_mut().clear());
+        assert!(reg.destroy("frank"));
+        assert!(!reg.contains("frank"), "the key is gone from the registry");
+        assert_eq!(WIPED.with(|w| w.borrow().clone()), vec![(dek, [0u8; 32])], "the removed copy was wiped");
+    }
+
+    /// `install_key` over an existing key wipes the key it replaces (finding 2: the old DEK was
+    /// returned by `HashMap::insert` and dropped un-wiped).
+    #[test]
+    fn install_key_wipes_the_key_it_replaces() {
+        let reg = SubjectKeyRegistry::new();
+        let old = [0x11u8; 32];
+        reg.install_key("gina", old);
+        WIPED.with(|w| w.borrow_mut().clear());
+        reg.install_key("gina", [0x22u8; 32]);
+        assert_eq!(WIPED.with(|w| w.borrow().clone()), vec![(old, [0u8; 32])], "the replaced key was wiped");
     }
 
     #[test]

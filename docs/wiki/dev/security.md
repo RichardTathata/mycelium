@@ -582,3 +582,28 @@ substrate prevents (the guest is foreign code in the node's process — `myceliu
 Beside them, bounds rather than refusals: a component's linear memory (`DEFAULT_MEMORY_LIMIT_BYTES`), a
 stage's pull (`DEFAULT_MAX_STAGE_BYTES` and the entry's `size_bytes`), and a shadow install never bridged
 as an MCP tool. Not built: a unit-file field for extra emit kinds or the memory cap.
+
+## `unsafe` — denied in every library crate (2026-10-10, post-360 P3)
+
+Every workspace library with code carries `#![deny(unsafe_code)]`: the root crate (`src/lib.rs`),
+`mycelium-core` (`mycelium-core/src/lib.rs`) and each companion's `src/lib.rs` (sim, tuple-space,
+blackboard, wiki, wasm-host, agentfacts, reason, guardrails, effects, commitment, the coop examples).
+`loom-spike` and `mycelium-gateway-free-tests` have empty libraries and carry nothing. **No production
+`unsafe` remains**; the DEK wipe in `SubjectKeyRegistry::destroy` was the last (a `write_volatile` loop),
+and is `zeroize` now (`wipe` in `mycelium-core/src/erasure.rs`, pinned by `wipe_zeroes_every_dek_byte`).
+The `unsafe` left is test-only, edition 2024's `std::env::set_var`/`remove_var`, each under one scoped
+`#[allow(unsafe_code)]` with its `SAFETY:` line: core's `set_test_env` (`config.rs` tests; it takes the
+`env_test_lock()` guard as a parameter) and one wasm-host test (`stem.rs`, a variable unique to it). The
+SAFETY lines name the real hazard — a libc `getenv` on another test thread, which no test lock prevents —
+and why test code tolerates it. The census covers **library crates**:
+`grep -rn 'unsafe' --include='*.rs' src mycelium-*/src examples/coop/src` minus comments and messages.
+Outside it, `examples/conway.rs` (a root example binary, for `libc`) is the one example that uses
+`unsafe`; `examples/conway-gpu` is outside the workspace.
+
+The wipe's limit is the module doc's (*Copies the wipe does not reach*, `mycelium-core/src/erasure.rs`):
+`destroy` wipes the key it removes and `install_key` the key it replaces
+(`destroy_wipes_the_key_it_removes`, `install_key_wipes_the_key_it_replaces`, through a test-only hook in
+`wipe`); `decrypt_for`'s local copy, the copy `get_or_create` returns, ring's expanded key schedule, every
+live key when the registry drops, and bytes a map leaves in freed memory are not wiped. `Zeroizing<[u8; 32]>`
+storage is the path to closing all but ring's; until then KMS custody is the erasure boundary
+(`docs/operations/data-erasure.md`).

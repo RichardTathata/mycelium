@@ -67,6 +67,8 @@
 //! under one prefix (`cn/`, registered in `mycelium`'s namespace table). Time enters through the
 //! caller (`now_ms`), so every decision here is pure in time and a harness can drive it.
 
+#![deny(unsafe_code)]
+
 use bytes::Bytes;
 use mycelium::mandate::{Mandate, MandateRefusal, ResourceAuthority};
 use mycelium::{CommitError, CommitReceipt, ConsensusConfig, GossipAgent, OperationId, ReceiptError, WriteReceipt};

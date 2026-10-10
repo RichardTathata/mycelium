@@ -36,6 +36,8 @@
 //! length**, and require a divergence. A harness that passes that test unchanged is not detecting
 //! divergence, only re-seeding.
 
+#![deny(unsafe_code)]
+
 pub mod bundle;
 pub mod kernel;
 pub mod seams;

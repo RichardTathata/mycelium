@@ -21,6 +21,10 @@ folklore and became a page.
 | 6 | **A gallery entry** | one runnable demonstration that ends by naming what it does **not** establish | no |
 | 7 | **An SDK verb** | *only if it has a gateway route.* A route without a verb is a surface only Rust can reach | **yes**, if it has no route |
 
+Beside the rows, one line in the code: a companion's `src/lib.rs` carries `#![deny(unsafe_code)]`, as
+every workspace library with code does since post-360 P3 ([security](../security.md)); an `unsafe` it truly
+needs is one scoped `#[allow(unsafe_code)]` with a `SAFETY:` comment.
+
 Rows 3, 4 and 7 are the conditional ones, and the condition must be **written down**. "It has no
 operational surface" is a fine answer; leaving the row blank so a reader cannot tell the difference
 between *deliberate* and *forgotten* is not.

@@ -53,6 +53,8 @@
 //!   `log/reason/{run_id}/{node}/…`; a shared stream would collide same-millisecond
 //!   HLCs across writers — see `trace`'s module doc)
 
+#![deny(unsafe_code)]
+
 mod blob;
 #[cfg(feature = "gateway")]
 mod http;

@@ -31,8 +31,14 @@ assert!(reg.decrypt_for("user-42", &blob).is_none());
 
 - `encrypt_for` mints the DEK on first use; the blob is `nonce ‖ ciphertext ‖ tag` (AEAD —
   tampering is rejected on decrypt).
-- `destroy` zeroizes and drops the DEK. Re-encrypting after erasure mints a **new** DEK; old
-  ciphertext never revives.
+- `destroy` zeroizes (the `zeroize` crate) and drops the DEK it removes. Re-encrypting after erasure
+  mints a **new** DEK; old ciphertext never revives. `install_key` over an existing subject wipes the key
+  it replaces.
+- The wipe is in-process and best-effort. It does **not** reach: `decrypt_for`'s local copy of the key
+  and the copy `encrypt_for` gets from the registry (stack copies, every call); ring's expanded AES key
+  schedule, built per call; every live key when the registry itself is dropped; bytes a map resize or
+  removal leaves in freed memory. Storing keys as `zeroize::Zeroizing<[u8; 32]>` and passing references
+  is the path to closing all but ring's; until then KMS custody (below) is the boundary.
 - `install_key` is the seam for **KMS-backed custody** (below).
 
 ## Production custody — use a KMS

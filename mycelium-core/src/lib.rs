@@ -11,6 +11,8 @@
 //! boundary at the documented II↔III seam. The substrate never references a
 //! higher-layer type (the inverted-dependency invariant — see `docs/philosophy.md`).
 
+#![deny(unsafe_code)]
+
 pub mod codec;
 pub mod config;
 pub mod serde_fixint;

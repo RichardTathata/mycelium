@@ -43,6 +43,8 @@
 //! composes the two ([`tuple_consumer`]): effect first, acknowledgement second, so the pipeline's
 //! receipt never stands in for the destination's.
 
+#![deny(unsafe_code)]
+
 pub mod counting;
 pub mod sqlite;
 #[cfg(feature = "tuple-space")]

@@ -16,6 +16,8 @@
 //! Built **entirely on Mycelium's public API** (companion-crate contract, same as
 //! `mycelium-tuple-space` / `mycelium-wasm-host`).
 
+#![deny(unsafe_code)]
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
