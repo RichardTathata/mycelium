@@ -43,7 +43,7 @@ declarations, shadow acceptance, authority boundaries, replay, and declared vers
 | [production-readiness.md](production-readiness.md) | **the go-live checklist** — one pre-flight tying the topic docs below into a single sweep (security · persistence · sizing · observability · supply chain · companions) |
 | [customer-pilot.md](customer-pilot.md) | **first customer-led project** — scoping, de-risking, and treating the pilot as the external validation the internal audit loop can't self-supply |
 | [engagement-kit.md](engagement-kit.md) | **the consultancy kit** — one bounded customer integration end to end: qualification, pre-site and integration workbooks, the pinned pack, the acceptance script, handover, closeout; three roles named; its own acceptance test |
-| [deployment.md](deployment.md) | the library-embed model, ports, seeds, TLS/auto-CA, containers, restart behaviour |
+| [deployment.md](deployment.md) | the library-embed model, ports, seeds, TLS/auto-CA, containers, restart behaviour, stopping a node (SIGTERM, the grace period, a second signal) |
 | [capability-lifecycle.md](capability-lifecycle.md) | **the two ways a capability arrives** — directly deployed or installed by a host from the catalogue — as one workflow: declare (unit files) · check (`mycelium wire-check`) · deploy · publish · watch · read back what actually bound |
 | [observability.md](observability.md) | the public endpoints (`/health` `/ready` `/stats` `/metrics`), reading the tripwire counters, **viewing AgentFacts**, Prometheus, dashboards |
 | [metrics.md](metrics.md) | **the metrics reference** — every emitted Prometheus series (gossip · emergent · governor · artifact · guardrails · reason), by family, with what to watch for |

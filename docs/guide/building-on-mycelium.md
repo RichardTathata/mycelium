@@ -108,6 +108,19 @@ These are the ones an integrator (or an agent generating integration code) gets 
 
 - **Call `shutdown()`** on the agent and on any companion handle with background loops
   (curators, primaries). Drop alone does not stop tasks — it can leak an `Arc` cycle.
+- **In a long-running process, wait for SIGTERM too** — `docker stop` and a Kubernetes pod stop send
+  SIGTERM, which a `tokio::signal::ctrl_c()` wait never sees. `mycelium::shutdown::ShutdownSignal` is the
+  one the node binary and `mycelium-stem` use: SIGINT or SIGTERM, a second one exits at once with
+  `128 + signal`. Install it before `start()`, so a stop during startup is a stop and not a kill; leave it out
+  of an interactive program whose Ctrl-C should keep its default. What the operator then sees:
+  [deployment.md § Stopping a node](../operations/deployment.md#stopping-a-node).
+
+  ```rust
+  let stop = mycelium::shutdown::ShutdownSignal::install()?; // inside the Tokio runtime, before start()
+  agent.start().await?;
+  stop.wait().await?;      // the first SIGINT or SIGTERM
+  agent.shutdown().await;  // retracts this node's advertisements, drains tasks, takes the final WAL snapshot
+  ```
 - **KV writes are size-gated** (`framing::MAX_KV_WRITE_BYTES`). Chunk large state yourself;
   an oversized frame is dropped, not fragmented.
 - **Signals flood; boundaries scope.** Forwarding is *unconditional* — only whether a node

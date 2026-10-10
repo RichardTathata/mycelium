@@ -139,6 +139,33 @@ persisted `auto_cert_dir` it keeps its identity; with persistence enabled it
 replays its WAL. Capability advertisements evaporate while a node is down and
 reappear on restart (see [00 · Concepts](../guide/00-concepts.md) on evaporation).
 
+### Stopping a node
+
+**SIGTERM and SIGINT both stop a node in order** — the `mycelium` binary, `mycelium-stem` and the demo images
+(`mycelium::shutdown::ShutdownSignal`, 2.31.0; before it the stem and the demo images did not handle SIGTERM —
+killed outright, or, as a container's PID 1, left running until the grace period ended in SIGKILL). So
+`docker stop`, a Kubernetes pod stop and `systemctl stop` are the ordinary way to stop one. The handlers are installed before the node binds, so a stop during startup is
+orderly too. A stem first stops its provisioner (withdrawing its installs) and writes its `--trace-dir`
+output; then every node runs the substrate's shutdown (`GossipAgent::shutdown`, `src/agent/lifecycle.rs`):
+
+1. tombstones this node's own advertisements — `sys/load/`, capabilities, requirements, locality — so peers
+   stop routing to it rather than waiting for them to evaporate;
+2. stops every background task, waiting **up to 5 s** and then aborting the rest (a `warn` line counts them);
+3. stops the WAL writer last — its final snapshot, then the directory's ownership lock released — waiting
+   **up to 5 s** more (`the WAL writer did not exit` if not).
+
+**Give it the time.** Up to ~10 s of the substrate's own, plus whatever your application does around it —
+Docker's default stop timeout is 10 s (`docker stop -t`), Kubernetes' `terminationGracePeriodSeconds` 30 s
+(the reference manifests set 10 for the memory-only demo). A node with persistence on deserves more than the
+bare minimum.
+
+**A second SIGINT or SIGTERM exits at once**, with `128 + signal` (130, 143): the way out of a shutdown that
+hangs, and **SIGKILL-equivalent** — records the WAL writer has not yet written out are lost, the final snapshot
+is not taken (the next start replays what reached the file and truncates a torn tail), and a stem's trace
+can be left truncated. A supervisor that re-sends the signal to hurry a stop gets that exit, not a faster orderly one
+([deprecations §22](../guide/deprecations.md#22-consensus-timeout-reasons-say-who-answered-a-second-stop-signal-exits-a-lost-write-is-typed-2310)).
+`mycelium -i` (interactive) installs no handler: Ctrl-C keeps its default and kills it.
+
 ### Persistence modes
 
 `PersistenceConfig` (`base_path` · `sync_mode` · `snapshot_wal_threshold`, default 10 000 ·

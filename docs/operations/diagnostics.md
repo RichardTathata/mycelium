@@ -160,8 +160,11 @@ alertable scalar, the snapshot field is the relational detail, and the diagnosis
   record from before 2.30.0 — deprecations §21); `quorum_short` ⇒ members heard but **quorum not met**
   (overloaded members, or the quorum set is larger than live membership); `all_opaque` ⇒ every
   member is shedding load (cross-check [fleet-opacity storm](#fleet-opacity-storm)). Dev-side, the
-  returned `ConsensusResult::Timeout { ballots_tried, votes_last_ballot, quorum_required }` carries
-  the same distinction per call.
+  returned `ConsensusResult::Timeout { ballots_tried, votes_last_ballot, quorum_required }` does **not**
+  carry the label: in a single-group proposal `votes_last_ballot` counts the votes of the latest attempt whose vote
+  phase ran out, the proposer's own included (`0` if none did), so a timeout whose last attempt ended earlier —
+  in the prepare phase (a partition, a promise shortfall) or refused — reads `0` or an earlier attempt's count. The
+  metric's `reason` is the per-cause signal.
 - **Do:** for `no_voters` or `promise_short` during an upgrade, check the group's versions first — finish
   it (deprecations §21); for `contended`, nothing is broken — fewer concurrent proposers for the slot; for
   `no_voters`, restore member reachability / heal the partition (membership is
@@ -284,8 +287,9 @@ groups:
 - name: mycelium-consensus
   rules:
   # Consensus rounds timing out — the CP overlay is blocking (no quorum). Partition (or an unfinished 2.30.0 upgrade) if reason=no_voters / promise_short.
+  # `contended` is left out: another proposer was ahead — contention, not a stall (deprecations §22).
   - alert: MyceliumConsensusStalled
-    expr: rate(mycelium_consensus_timeouts_total[5m]) > 0
+    expr: rate(mycelium_consensus_timeouts_total{reason!="contended"}[5m]) > 0
     for: 3m
     labels: { severity: warning }
     annotations:

@@ -217,7 +217,9 @@ Nothing to persist: routing state is capability pheromone + **node-local** in-fl
   `retriable` is false for `corrupt`, `unauthorized`, `refused` and `unsupported`: a damaged or forged blob, a refused
   read, or a node without the reason companion — each needs a person, not a retry. The client
   tells the two 403s apart (checkpointer 0.3.1): `unauthorized` is the gateway refusing the token (no
-  `llm:read`); `refused` is the route's own — every holder refused for good — so fix the holder's membership or
+  `llm:read`) — and **through 0.3.1 the checkpointer presents no bearer at all** (its clients carry no
+  `Authorization` header), so a gateway with any token model answers its every call 401: it works only against
+  an open gateway; `refused` is the route's own — every holder refused for good — so fix the holder's membership or
   authority, not the token (a 0.3.0 client reports both as `unauthorized`; `GET /gateway/reason/blob/{id}`
   shows which). `refused` needs a substrate ≥ 2.28.0; against
   an older one every holder refusal reads as 503 `unavailable`. **Which providers a miss asked** — and what each
