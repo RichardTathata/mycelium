@@ -35,7 +35,8 @@ Design: `docs/plans/mycelium-tuple-space.md`. Key facts:
   `WalInner::poison` and every later append is refused until `compact` (which
   `wants_compaction` then asks for) or a reopen; `scan_frame` tells a torn final frame
   (truncated, file + dir synced) from a corrupt one with data after it (open refused,
-  `InvalidData`); compaction is `sync_data → rename → fsync_parent`. Limit: no checksum, so
+  `InvalidData`); compaction folds the log itself (`fold_wal`, never a memory snapshot — a
+  put appends before it applies) and installs with `sync_data → rename → fsync_parent`. Limit: no checksum, so
   a length prefix corrupted past EOF reads as torn. **A joining secondary backfills** (2026-07-10): live replication only ships
   records put while the secondary is present, so a late joiner drives the paginated
   `wal_replay` RPC at join (WAL-backed primary → WAL pages; transient primary → *state

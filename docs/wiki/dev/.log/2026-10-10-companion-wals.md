@@ -12,8 +12,12 @@
   and synced with its directory, a corrupt frame with data after it refusing the open untouched; compaction in the
   snapshot's install order. No quarantine switch (the companions' configs carry no `on_unreadable`).
 - **Limit:** no per-record checksum, so a length prefix corrupted to run past EOF still reads as a torn tail.
-- **Found on the way, not fixed (needs a decision):** in both companions a write appends to the WAL and *then*
-  updates memory, while compaction rewrites the log from memory — a record appended between the two can be absent
-  from the rewritten log, so a crash after that compaction loses it.
-- Pinned by four tests per crate, each seen failing first. Pages touched: `dev/companions/tuple-space.md`,
-  `dev/companions/blackboard.md`; outside the wiki `docs/operations/companions.md`, `docs/operations/deployment.md`.
+- **Found on the way, then fixed:** in both companions a write appends to the WAL and *then* updates memory, while
+  compaction rewrote the log from a memory snapshot — a record appended between the two was absent from the
+  rewritten log, so a crash after that compaction lost an acknowledged record. Compaction now folds the log itself
+  (`fold_wal`, shared with open) under the WAL lock alone; memory-first writes (take, ack, claim, release) append to
+  the new file afterwards. The tuple space's compaction no longer nests stage/in-flight locks inside the WAL lock,
+  and `inflight_snapshot` (its only user) is gone — [lock-order](../concurrency/lock-order.md) rows 25 and 28.
+- Pinned by five tests per crate, each seen failing first. Pages touched: `dev/companions/tuple-space.md`,
+  `dev/companions/blackboard.md`, `dev/concurrency/lock-order.md`; outside the wiki
+  `docs/design/exactly-once-effect.md`, `docs/operations/companions.md`, `docs/operations/deployment.md`.

@@ -506,14 +506,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the byte; the file untouched). Each WAL takes the core's `OwnershipLock` on `<wal>.lock`, so a second store on one
   path is refused with `WouldBlock`. Compaction installs its file in the core snapshot's order — temp file synced,
   renamed, **directory synced**: the tuple space skipped the directory sync, the blackboard both syncs
-  (`std::fs::write` + `rename`). Not done: a length prefix corrupted to run past the end of the file still reads as
+  (`std::fs::write` + `rename`). And compaction now **folds the log itself** under the WAL lock instead of
+  snapshotting memory: a write appends and *then* applies to memory, so a compaction landing between the two
+  rewrote a log without a record already acknowledged, and a crash after it lost the record; the log holds every
+  acknowledged record and no append interleaves under the lock, so the rewrite loses none (the tuple space's
+  compaction also stops taking stage and in-flight locks inside the WAL lock). Not done: a length prefix corrupted to run past the end of the file still reads as
   a torn tail (the format has no checksum), and there is no `on_unreadable = "quarantine"` counterpart — move the
   file aside to start empty. Seen failing first, in both crates: `a_failed_append_never_strands_a_later_acknowledged_put`
   / `_post` (`left: [0]`, `right: [0, 2]` — the put after the failure was acknowledged and gone at reopen),
   `a_corrupt_middle_record_refuses_the_open_and_leaves_the_file` (the open succeeded), `a_second_owner_of_the_wal_is_refused`
   (the second open succeeded), `compaction_syncs_the_directory_after_the_rename` (`no dir.sync in ["tmp.write",
   "tmp.sync", "rename"]`) / `compaction_syncs_the_temp_file_and_the_directory` (`no tmp.sync in ["tmp.write",
-  "rename"]`). **Upgrade notes:** a WAL holding a corrupt record before its last now refuses `TupleStore`/`BoardStore`
+  "rename"]`), `a_compaction_between_append_and_apply_keeps_the_acknowledged_put` (`left: None`, `right: Some(0)`) /
+  `_post` (`left: []`, `right: [0]`). **Upgrade notes:** a WAL holding a corrupt record before its last now refuses `TupleStore`/`BoardStore`
   construction — so the node does not become primary — where it used to start with the later records gone; a second
   store on one `wal_path` (in one process or two) is refused; a `<wal_path>.lock` file appears beside each WAL (do not
   delete it while a node runs — the lock is the OS's and goes with its holder).

@@ -53,7 +53,8 @@ left blank. The obligations every companion owes are the
   tail. At open, a file ending *inside* its last record is a crash's torn tail and is truncated; a
   record that is all there and does not decode, **with data after it**, refuses the open (`InvalidData`,
   file and byte named, file untouched) — the node does not become primary. Move the file aside to start
-  empty; there is no quarantine switch. Compaction syncs the temp file, renames it, then syncs the
+  empty; there is no quarantine switch. Compaction rewrites the log from the log itself (never from
+  memory, so a write in flight is never left out), syncs the temp file, renames it, then syncs the
   directory, so it survives a power loss.
 - **Un-acked work re-queues.** `worker_timeout_secs` (default **300**): an item taken but not
   `complete`d within the window is re-queued (at-least-once); the scan runs every 30 s. Set it above

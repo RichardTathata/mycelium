@@ -12,15 +12,17 @@
 //! acquired in this order (release in reverse):
 //!
 //! 1. `WalInner` — held across the whole compaction rewrite; appends are
-//!    short. Compaction acquires stage/inflight locks *inside* the WAL lock
-//!    to snapshot live items.
+//!    short. Compaction folds the log itself under it and takes no other lock
+//!    (row C: a snapshot of memory could miss a record appended but not yet
+//!    applied), so today no path nests the WAL lock with another.
 //! 2. `StageInner` — the put/take hot-path lock; never held across `await`.
 //! 3. `inflight` — leaf lock. `dispatch` and `take` acquire it while holding
 //!    a `StageInner` lock (stage → inflight), never the reverse.
 //!
 //! No path holds a stage or inflight lock while *waiting* for the WAL lock
-//! (appends happen after the stage guard is dropped), so the WAL-first order
-//! used by compaction cannot deadlock against the hot path.
+//! (appends happen after the stage guard is dropped), and compaction no longer
+//! takes a stage or inflight lock inside the WAL lock, so the two families
+//! never nest.
 
 use bytes::Bytes;
 use parking_lot::Mutex;
@@ -205,6 +207,15 @@ impl TupleStore {
         Ok(store)
     }
 
+    /// Test seam: the window between a write's WAL append and its in-memory apply. A test arms
+    /// `COMPACT_BETWEEN` to run a compaction exactly there, on this thread.
+    #[cfg(test)]
+    fn between_append_and_apply(&self) {
+        if COMPACT_BETWEEN.with(|c| c.replace(false)) {
+            self.compact_now().expect("the interleaved compaction");
+        }
+    }
+
     fn stage(&self, name: &str) -> Arc<StageState> {
         let map = self.stages.pin();
         if let Some(s) = map.get(name) {
@@ -233,6 +244,8 @@ impl TupleStore {
                 key: None,
             })?;
         }
+        #[cfg(test)]
+        self.between_append_and_apply();
         state.put_total.fetch_add(1, Ordering::Relaxed);
         let hot = self.dispatch(&state, Arc::from(stage), id, payload)?;
         if hot {
@@ -728,14 +741,6 @@ impl TupleStore {
         out
     }
 
-    pub(crate) fn inflight_snapshot(&self) -> Vec<(u64, Inflight)> {
-        self.inflight
-            .lock()
-            .iter()
-            .map(|(k, v)| (*k, v.clone()))
-            .collect()
-    }
-
     pub(crate) fn stage_states(&self) -> Vec<(Arc<str>, Arc<StageState>)> {
         let map = self.stages.pin();
         map.iter()
@@ -753,44 +758,12 @@ impl TupleStore {
         self.wal.as_ref().is_some_and(WalWriter::wants_compaction)
     }
 
-    /// Rewrites the WAL to contain only live items (queued + in-flight) and
-    /// atomically swaps it in. Holds the WAL lock for the duration; appends
-    /// block but the in-memory hot path does not.
+    /// Rewrites the WAL to contain only live items (queued + in-flight), folded from
+    /// the log itself, and atomically swaps it in. Holds the WAL lock for the duration
+    /// and no other; appends block but the in-memory hot path does not.
     pub(crate) fn compact_now(&self) -> io::Result<()> {
         let Some(wal) = &self.wal else { return Ok(()) };
-        wal.compact(|| {
-            let mut live: Vec<Record> = Vec::new();
-            for (name, state) in self.stage_states() {
-                let g = state.inner.lock();
-                for (id, payload, _) in &g.entries {
-                    live.push(Record::Put {
-                        id: *id,
-                        stage: Arc::clone(&name),
-                        payload: payload.clone(),
-                        key: None,
-                    });
-                }
-                // Keyed queued items are preserved under their key (M13 / G1b).
-                for (key, (id, payload, _)) in &g.keyed_entries {
-                    live.push(Record::Put {
-                        id: *id,
-                        stage: Arc::clone(&name),
-                        payload: payload.clone(),
-                        key: Some(Arc::clone(key)),
-                    });
-                }
-            }
-            for (id, item) in self.inflight_snapshot() {
-                live.push(Record::Put {
-                    id,
-                    stage: Arc::clone(&item.stage),
-                    payload: item.payload.clone(),
-                    key: item.key.clone(),
-                });
-                live.push(Record::Take { id, taken_at_ms: item.taken_at_ms });
-            }
-            live
-        })
+        wal.compact()
     }
 
     /// `(epoch, head)` of the WAL, or `(0, 0)` for a transient store.
@@ -1091,6 +1064,11 @@ thread_local! {
     static FS_TRACE: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+#[cfg(test)]
+thread_local! {
+    static COMPACT_BETWEEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn fs_trace(_op: &'static str) {
     #[cfg(test)]
     FS_TRACE.with(|t| t.borrow_mut().push(_op));
@@ -1160,61 +1138,18 @@ impl WalWriter {
             }
         }
 
-        struct ItemState {
-            stage: Arc<str>,
-            payload: Bytes,
-            acked: bool,
-            key: Option<Arc<str>>,
-        }
-        let mut items: BTreeMap<u64, ItemState> = BTreeMap::new();
-        let mut total = 0u64;
-        let mut acked = 0u64;
-        let mut offset = WAL_HEADER_LEN as usize;
-        while offset < data.len() {
-            match scan_frame(&data[offset..]) {
-                // The file ends inside this frame: a crash mid-append. Nothing in it was acknowledged
-                // (a failed append poisons the writer, so nothing lands behind it); truncated below.
-                Frame::Torn => break,
-                Frame::Corrupt => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "{} holds a corrupt record at byte {offset} with data after it; refusing to \
-                             open (the records after it cannot be trusted, and truncating would discard \
-                             them silently). The file is untouched: move it aside to start empty, or \
-                             restore it",
-                            path.display()
-                        ),
-                    ));
-                }
-                Frame::Record(rec, consumed) => {
-                    offset += consumed;
-                    match rec {
-                        Record::Put { id, stage, payload, key } => {
-                            total += 1;
-                            items.insert(id, ItemState { stage, payload, acked: false, key });
-                        }
-                        // Take alone never terminates an item: taken-but-unacked
-                        // re-queues as abandoned.
-                        Record::Take { .. } => {}
-                        Record::Ack { id } => {
-                            acked += 1;
-                            if let Some(it) = items.get_mut(&id) {
-                                it.acked = true;
-                            }
-                        }
-                        Record::Complete { old_id, new_id, stage, payload, key } => {
-                            acked += 1;
-                            total += 1;
-                            if let Some(it) = items.get_mut(&old_id) {
-                                it.acked = true;
-                            }
-                            items.insert(new_id, ItemState { stage, payload, acked: false, key });
-                        }
-                    }
-                }
-            }
-        }
+        let Folded { items, total, acked, end: offset } = fold_wal(&data).map_err(|offset| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} holds a corrupt record at byte {offset} with data after it; refusing to \
+                     open (the records after it cannot be trusted, and truncating would discard \
+                     them silently). The file is untouched: move it aside to start empty, or \
+                     restore it",
+                    path.display()
+                ),
+            )
+        })?;
         if offset < data.len() {
             // Drop the torn tail so the next append lands where every reader will find it, and make
             // the truncation as durable as the file (a crash must not resurrect the torn bytes).
@@ -1319,12 +1254,36 @@ impl WalWriter {
         Ok(())
     }
 
-    /// Rewrites the log with the records produced by `snapshot`, atomically
-    /// swapping the new file in. `snapshot` runs while the WAL lock is held
-    /// so no append can interleave with the rewrite.
-    fn compact(&self, snapshot: impl FnOnce() -> Vec<Record>) -> io::Result<()> {
+    /// Rewrites the log to hold only its live items — **folded from the log itself**, under the WAL
+    /// lock, never from memory — and atomically swaps the new file in.
+    ///
+    /// Row C: a write appends to the WAL and then applies to memory, so a compaction that snapshot
+    /// memory could land between the two and rewrite a log without a record whose append had
+    /// already been acknowledged. The log holds every acknowledged record by definition, and no
+    /// append interleaves while the lock is held, so the rewrite loses none. A record applied to
+    /// memory *before* its append (take, ack, requeue) appends to the new file after this returns.
+    /// Only the bytes up to `file_len` are folded, so a poisoned writer's torn frame is left behind.
+    fn compact(&self) -> io::Result<()> {
         let mut g = self.inner.lock();
-        let live = snapshot();
+        let mut data = vec![0u8; g.file_len as usize];
+        g.file.seek(SeekFrom::Start(0))?;
+        g.file.read_exact(&mut data)?;
+        let folded = fold_wal(&data).map_err(|offset| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} holds a corrupt record at byte {offset}; compaction refuses to rewrite over it",
+                    g.path.display()
+                ),
+            )
+        })?;
+        let mut live: Vec<Record> = Vec::new();
+        for (id, it) in folded.items.into_iter().filter(|(_, it)| !it.acked) {
+            live.push(Record::Put { id, stage: it.stage, payload: it.payload, key: it.key });
+            if let Some(taken_at_ms) = it.taken_at_ms {
+                live.push(Record::Take { id, taken_at_ms });
+            }
+        }
         let tmp_path = g.path.with_extension("compact");
         let mut tmp = File::create(&tmp_path)?;
         let mut buf = Vec::new();
@@ -1435,6 +1394,74 @@ impl WalWriter {
             done: next >= head,
         })
     }
+}
+
+/// One item's state as the log records it.
+struct ItemState {
+    stage: Arc<str>,
+    payload: Bytes,
+    acked: bool,
+    key: Option<Arc<str>>,
+    /// The latest `Take` for the item, if any (kept by compaction; replay re-queues it regardless).
+    taken_at_ms: Option<u64>,
+}
+
+/// A WAL image folded to its items: what open replays and compaction rewrites.
+struct Folded {
+    items: BTreeMap<u64, ItemState>,
+    /// Put-side records (Put + the new half of Complete).
+    total: u64,
+    /// Terminal records (Ack + the old half of Complete).
+    acked: u64,
+    /// Where the complete records end — short of the image's end only for a torn final frame.
+    end: usize,
+}
+
+/// Fold a whole WAL image (header included) record by record. `Err(offset)` names a corrupt record
+/// with data after it; a torn final frame ends the fold at `end`.
+fn fold_wal(data: &[u8]) -> Result<Folded, usize> {
+    let mut items: BTreeMap<u64, ItemState> = BTreeMap::new();
+    let mut total = 0u64;
+    let mut acked = 0u64;
+    let mut offset = WAL_HEADER_LEN as usize;
+    while offset < data.len() {
+        match scan_frame(&data[offset..]) {
+            // The image ends inside this frame: a crash mid-append. Nothing in it was acknowledged
+            // (a failed append poisons the writer, so nothing lands behind it).
+            Frame::Torn => break,
+            Frame::Corrupt => return Err(offset),
+            Frame::Record(rec, consumed) => {
+                offset += consumed;
+                match rec {
+                    Record::Put { id, stage, payload, key } => {
+                        total += 1;
+                        items.insert(id, ItemState { stage, payload, acked: false, key, taken_at_ms: None });
+                    }
+                    // Take alone never terminates an item: taken-but-unacked re-queues as abandoned.
+                    Record::Take { id, taken_at_ms } => {
+                        if let Some(it) = items.get_mut(&id) {
+                            it.taken_at_ms = Some(taken_at_ms);
+                        }
+                    }
+                    Record::Ack { id } => {
+                        acked += 1;
+                        if let Some(it) = items.get_mut(&id) {
+                            it.acked = true;
+                        }
+                    }
+                    Record::Complete { old_id, new_id, stage, payload, key } => {
+                        acked += 1;
+                        total += 1;
+                        if let Some(it) = items.get_mut(&old_id) {
+                            it.acked = true;
+                        }
+                        items.insert(new_id, ItemState { stage, payload, acked: false, key, taken_at_ms: None });
+                    }
+                }
+            }
+        }
+    }
+    Ok(Folded { items, total, acked, end: offset })
 }
 
 /// What a WAL image holds at a record boundary — the difference between a crash and corruption
@@ -2130,6 +2157,26 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(err.to_string().contains(&path.display().to_string()), "the refusal names the file: {err}");
         assert_eq!(std::fs::read(&path).unwrap(), bytes, "a refused open leaves the file as it was");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Row C: a write appends to the WAL and *then* applies to memory. A compaction that rewrote the
+    /// log from memory, landing between the two, wrote a log without the record — and the put was
+    /// still acknowledged, so a crash after that compaction lost it. The acknowledged put must
+    /// survive a reopen whatever compaction ran in that window.
+    #[tokio::test]
+    async fn a_compaction_between_append_and_apply_keeps_the_acknowledged_put() {
+        let path = temp_wal("compact-window");
+        let id = {
+            let store = TupleStore::persistent(&path, 1, 500).unwrap();
+            COMPACT_BETWEEN.with(|c| c.set(true));
+            let id = store.put("s", b("in-the-window")).unwrap();
+            assert!(!COMPACT_BETWEEN.with(|c| c.get()), "the compaction ran in the window");
+            id
+        };
+        let store = TupleStore::persistent(&path, 1, 500).unwrap();
+        let got = store.take("s", Duration::from_millis(50)).await.map(|(id, _)| id);
+        assert_eq!(got.ok(), Some(id), "the acknowledged put survives the compaction and the reopen");
         let _ = std::fs::remove_file(&path);
     }
 

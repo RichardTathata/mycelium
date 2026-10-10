@@ -192,50 +192,17 @@ impl WalWriter {
 
         // Replay. Post adds a fact; Claim/Release are runtime-only (a claimed-unacked fact
         // re-queues as claimable — at-least-once); Ack is the sole terminal.
-        struct FactState {
-            attributes: BTreeMap<String, String>,
-            payload: Bytes,
-            acked: bool,
-        }
-        let mut facts: BTreeMap<u64, FactState> = BTreeMap::new();
-        let mut total = 0u64;
-        let mut acked = 0u64;
-        let mut offset = WAL_HEADER_LEN as usize;
-        while offset < data.len() {
-            match scan_frame(&data[offset..]) {
-                // The file ends inside this frame: a crash mid-append. Nothing in it was acknowledged
-                // (a failed append poisons the writer, so nothing lands behind it); truncated below.
-                Frame::Torn => break,
-                Frame::Corrupt => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "{} holds a corrupt record at byte {offset} with data after it; refusing to open \
-                             (the records after it cannot be trusted, and truncating would discard them \
-                             silently). The file is untouched: move it aside to start empty, or restore it",
-                            path.display()
-                        ),
-                    ));
-                }
-                Frame::Record(rec, consumed) => {
-                    offset += consumed;
-                    match rec {
-                        WalRecord::Post { id, attributes, payload } => {
-                            total += 1;
-                            facts.insert(id, FactState { attributes, payload, acked: false });
-                        }
-                        WalRecord::Ack { id } => {
-                            acked += 1;
-                            if let Some(f) = facts.get_mut(&id) {
-                                f.acked = true;
-                            }
-                        }
-                        // Claim / Release do not change replay liveness.
-                        WalRecord::Claim { .. } | WalRecord::Release { .. } => {}
-                    }
-                }
-            }
-        }
+        let Folded { facts, total, acked, end: offset } = fold_wal(&data).map_err(|offset| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} holds a corrupt record at byte {offset} with data after it; refusing to open \
+                     (the records after it cannot be trusted, and truncating would discard them \
+                     silently). The file is untouched: move it aside to start empty, or restore it",
+                    path.display()
+                ),
+            )
+        })?;
         if offset < data.len() {
             // Drop the torn tail so the next append lands where every reader will find it, and make
             // the truncation as durable as the file (a crash must not resurrect the torn bytes).
@@ -319,13 +286,39 @@ impl WalWriter {
         g.poison.is_some() || (g.total >= 64 && g.acked * 2 >= g.total)
     }
 
-    /// Rewrite the WAL to contain only the live facts (supplied by the store under its lock) and
-    /// atomically swap it in. Bumps the epoch.
-    pub(crate) fn compact(&self, live: &[WalRecord]) -> io::Result<()> {
+    /// Rewrite the WAL to contain only its live facts — **folded from the log itself**, under the
+    /// WAL lock, never from memory — and atomically swap it in. Bumps the epoch.
+    ///
+    /// Row C: a post appends to the WAL and then applies to memory, so a compaction that snapshot
+    /// memory could land between the two and rewrite a log without a post whose append had already
+    /// been acknowledged. The log holds every acknowledged record by definition, and no append
+    /// interleaves while the lock is held, so the rewrite loses none. A change applied to memory
+    /// *before* its append (claim, ack, release, discard) appends to the new file after this
+    /// returns. Only the bytes up to `file_len` are folded, so a poisoned writer's torn frame is
+    /// left behind.
+    pub(crate) fn compact(&self) -> io::Result<()> {
         let mut g = self.inner.lock();
+        let mut data = vec![0u8; g.file_len as usize];
+        g.file.seek(SeekFrom::Start(0))?;
+        g.file.read_exact(&mut data)?;
+        let folded = fold_wal(&data).map_err(|offset| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} holds a corrupt record at byte {offset}; compaction refuses to rewrite over it",
+                    self.path.display()
+                ),
+            )
+        })?;
+        let live: Vec<WalRecord> = folded
+            .facts
+            .into_iter()
+            .filter(|(_, f)| !f.acked)
+            .map(|(id, f)| WalRecord::Post { id, attributes: f.attributes, payload: f.payload })
+            .collect();
         let tmp = self.path.with_extension("wal.compact");
         let mut buf = wal_header().to_vec();
-        for rec in live {
+        for rec in &live {
             rec.encode(&mut buf);
         }
         // The core snapshot's install order (`sync_data → rename → fsync_dir`): the temp file's bytes
@@ -367,6 +360,57 @@ impl WalWriter {
         g.ops_since_sync = 0;
         Ok(())
     }
+}
+
+/// One fact's state as the log records it.
+struct FactState {
+    attributes: BTreeMap<String, String>,
+    payload: Bytes,
+    acked: bool,
+}
+
+/// A WAL image folded to its facts: what open replays and compaction rewrites.
+struct Folded {
+    facts: BTreeMap<u64, FactState>,
+    total: u64,
+    acked: u64,
+    /// Where the complete records end — short of the image's end only for a torn final frame.
+    end: usize,
+}
+
+/// Fold a whole WAL image (header included) record by record. `Err(offset)` names a corrupt record
+/// with data after it; a torn final frame ends the fold at `end`.
+fn fold_wal(data: &[u8]) -> Result<Folded, usize> {
+    let mut facts: BTreeMap<u64, FactState> = BTreeMap::new();
+    let mut total = 0u64;
+    let mut acked = 0u64;
+    let mut offset = WAL_HEADER_LEN as usize;
+    while offset < data.len() {
+        match scan_frame(&data[offset..]) {
+            // The image ends inside this frame: a crash mid-append. Nothing in it was acknowledged
+            // (a failed append poisons the writer, so nothing lands behind it).
+            Frame::Torn => break,
+            Frame::Corrupt => return Err(offset),
+            Frame::Record(rec, consumed) => {
+                offset += consumed;
+                match rec {
+                    WalRecord::Post { id, attributes, payload } => {
+                        total += 1;
+                        facts.insert(id, FactState { attributes, payload, acked: false });
+                    }
+                    WalRecord::Ack { id } => {
+                        acked += 1;
+                        if let Some(f) = facts.get_mut(&id) {
+                            f.acked = true;
+                        }
+                    }
+                    // Claim / Release do not change replay liveness.
+                    WalRecord::Claim { .. } | WalRecord::Release { .. } => {}
+                }
+            }
+        }
+    }
+    Ok(Folded { facts, total, acked, end: offset })
 }
 
 /// What a WAL image holds at a record boundary — the difference between a crash and corruption

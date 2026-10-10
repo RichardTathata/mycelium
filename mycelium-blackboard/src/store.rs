@@ -19,6 +19,11 @@ use bytes::Bytes;
 use parking_lot::Mutex;
 
 use crate::wal::{WalRecord, WalWriter};
+
+#[cfg(test)]
+thread_local! {
+    static COMPACT_BETWEEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 use crate::{BlackboardError, Fact, Predicate};
 
 /// An in-flight (claimed-but-not-terminal) fact and when it was claimed (for the deadline sweep).
@@ -143,9 +148,20 @@ impl BoardStore {
         if let Some(wal) = &self.wal {
             wal.append(&WalRecord::Post { id, attributes: attributes.clone(), payload: payload.clone() })?;
         }
+        #[cfg(test)]
+        self.between_append_and_apply();
         self.inner.lock().available.insert(id, Fact { id, attributes, payload });
         self.posted.fetch_add(1, Ordering::Relaxed);
         Ok(id)
+    }
+
+    /// Test seam: the window between a write's WAL append and its in-memory apply. A test arms
+    /// `COMPACT_BETWEEN` to run a compaction exactly there, on this thread.
+    #[cfg(test)]
+    fn between_append_and_apply(&self) {
+        if COMPACT_BETWEEN.with(|c| c.replace(false)) {
+            self.compact().expect("the interleaved compaction");
+        }
     }
 
     /// Apply a fact under its ORIGINAL id (replication / WAL replay — later phases), fencing
@@ -234,24 +250,13 @@ impl BoardStore {
         self.wal.as_ref().is_some_and(WalWriter::wants_compaction)
     }
 
-    /// Rewrite the WAL to hold only live (claimable + in-flight) facts. Both replay as claimable, so
-    /// each is written as a `Post` record. No-op on a transient board.
+    /// Rewrite the WAL to hold only live (claimable + in-flight) facts, folded from the log itself
+    /// under the WAL lock alone (row C: a snapshot of memory could miss a post appended but not yet
+    /// applied). Both replay as claimable, so each is written as a `Post` record. No-op on a
+    /// transient board.
     pub fn compact(&self) -> Result<(), BlackboardError> {
         let Some(wal) = &self.wal else { return Ok(()) };
-        let live: Vec<WalRecord> = {
-            let g = self.inner.lock();
-            g.available
-                .values()
-                .map(|f| (f.id, &f.attributes, &f.payload))
-                .chain(g.inflight.values().map(|i| (i.fact.id, &i.fact.attributes, &i.fact.payload)))
-                .map(|(id, attrs, payload)| WalRecord::Post {
-                    id,
-                    attributes: attrs.clone(),
-                    payload: payload.clone(),
-                })
-                .collect()
-        };
-        wal.compact(&live)?;
+        wal.compact()?;
         Ok(())
     }
 
@@ -640,6 +645,26 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         assert!(err.to_string().contains(&path.display().to_string()), "the refusal names the file: {err}");
         assert_eq!(std::fs::read(&path).unwrap(), bytes, "a refused open leaves the file as it was");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Row C: a write appends to the WAL and *then* applies to memory. A compaction that rewrote the
+    /// log from memory, landing between the two, wrote a log without the record — and the post was
+    /// still acknowledged, so a crash after that compaction lost it. The acknowledged post must
+    /// survive a reopen whatever compaction ran in that window.
+    #[test]
+    fn a_compaction_between_append_and_apply_keeps_the_acknowledged_post() {
+        let path = temp_wal("compact-window");
+        let id = {
+            let store = BoardStore::persistent(&path, 1).unwrap();
+            COMPACT_BETWEEN.with(|c| c.set(true));
+            let id = store.post(surplus("1", "1.0"), Bytes::from("in-the-window")).unwrap();
+            assert!(!COMPACT_BETWEEN.with(|c| c.get()), "the compaction ran in the window");
+            id
+        };
+        let store = BoardStore::persistent(&path, 1).unwrap();
+        let got: Vec<u64> = store.read(&Predicate::new()).iter().map(|f| f.id).collect();
+        assert_eq!(got, vec![id], "the acknowledged post survives the compaction and the reopen");
         let _ = std::fs::remove_file(&path);
     }
 
