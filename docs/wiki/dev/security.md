@@ -590,7 +590,9 @@ not, the operator's entries included — ending in `WasmHostError::DeadlineExcee
 (`mycelium-wasm-host/src/host.rs`). Guest code runs on `spawn_blocking`, never on a runtime worker
 (`serve_loop`, and install's compile/instantiate/`describe`, in `runtime.rs`), and a trapped instance is
 replaced from the install's compiled component, so a trap-inducing payload costs an instantiation, not a
-Cranelift compile. Why: before this, a stem with no fuel declared ran guests unmetered on the async
+Cranelift compile — and not even that once the install is gone (`Served::gone`, set by `uninstall`). The
+tick count saturates: a deadline too large to count is no deadline, never a truncated one (wasmtime adds
+the delta unchecked). Why: before this, a stem with no fuel declared ran guests unmetered on the async
 task — one looping call pinned a worker for ever, and a payload that trapped bought a full compile per
 request. The epoch ticker is a thread per host (wall time, outside the replay seams — the inventory
 records it). `Instance::invoke` stays synchronous: an embedder calling it from async code moves it to

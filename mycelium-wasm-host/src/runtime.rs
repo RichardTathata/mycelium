@@ -293,6 +293,10 @@ struct Served {
     signer:   Vec<u8>,
     ns:       Arc<str>,
     again:    Reinstantiate,
+    /// Set by `uninstall` (review finding 2): a call in flight when the install goes keeps running
+    /// on its blocking thread, and must not replace its instance afterwards — no fresh store, no
+    /// start-up code, for an install that is gone.
+    gone:     Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Served {
@@ -327,6 +331,10 @@ impl Served {
         // The trapped instance cannot be entered again: replace it, or stop serving so the
         // provisioner's probe withdraws and reinstalls (restart ≡ provisioning).
         drop(instance);
+        if self.gone.load(std::sync::atomic::Ordering::Acquire) {
+            tracing::debug!(artifact = %self.artifact, provides = %self.provides, "trapped instance not replaced: the install is gone");
+            return (None, result, outcome);
+        }
         match self.fresh(agent) {
             Ok(fresh) => {
                 tracing::info!(artifact = %self.artifact, provides = %self.provides, "trapped instance replaced with a fresh one");
@@ -338,6 +346,17 @@ impl Served {
                 (None, result, outcome)
             }
         }
+    }
+}
+
+/// The `outcome` label of `mycelium_artifact_invocations_total` for one invocation.
+fn outcome_label(outcome: &InvocationOutcome) -> &'static str {
+    match outcome {
+        InvocationOutcome::Completed => "completed",
+        InvocationOutcome::ComponentError(_) => "component_error",
+        InvocationOutcome::HostError(_) => "host_error",
+        InvocationOutcome::FuelExhausted { .. } => "fuel_exhausted",
+        InvocationOutcome::DeadlineExceeded { .. } => "deadline_exceeded",
     }
 }
 
@@ -357,23 +376,22 @@ async fn serve_loop(agent: Arc<GossipAgent>, instance: Instance, mut rx: myceliu
             Ok(done) => done,
             Err(e) => {
                 // A panic inside the host (not a guest trap, which is an `Err`): the instance went
-                // with it, so stop serving and let the probe withdraw the install.
-                tracing::error!(artifact = %served.artifact, provides = %served.provides, error = %e,
-                    "the guest call's thread failed — the serve task stops; the probe will withdraw the install");
+                // with it, so stop serving and let the probe withdraw the install. A cancellation
+                // is the runtime shutting down (review finding 7) — not a failure.
+                if e.is_cancelled() {
+                    tracing::debug!(artifact = %served.artifact, provides = %served.provides,
+                        "the guest call was cancelled (runtime shutdown) — the serve task stops");
+                } else {
+                    tracing::error!(artifact = %served.artifact, provides = %served.provides, error = %e,
+                        "the guest call's thread failed — the serve task stops; the probe will withdraw the install");
+                }
                 let outcome = InvocationOutcome::HostError(format!("guest call thread: {e}"));
                 agent.service().rpc_respond(&req, format!("host-error: guest call thread: {e}").into_bytes());
                 record_invocation(&served.log, served.record(outcome));
                 return;
             }
         };
-        let label = match &outcome {
-            InvocationOutcome::Completed => "completed",
-            InvocationOutcome::ComponentError(_) => "component_error",
-            InvocationOutcome::HostError(_) => "host_error",
-            InvocationOutcome::FuelExhausted { .. } => "fuel_exhausted",
-            InvocationOutcome::DeadlineExceeded { .. } => "deadline_exceeded",
-        };
-        metrics::counter!("mycelium_artifact_invocations_total", "outcome" => label).increment(1);
+        metrics::counter!("mycelium_artifact_invocations_total", "outcome" => outcome_label(&outcome)).increment(1);
         match &outcome {
             InvocationOutcome::FuelExhausted { budget } => {
                 tracing::warn!(artifact = %served.artifact, provides = %served.provides, budget, "hosted component stopped at its fuel budget");
@@ -508,6 +526,7 @@ impl ArtifactRuntime for WasmComponentRuntime {
         let bridge_kind: Arc<str> = Arc::from(invoke_kind.as_str());
         let rx = ctx.agent.service().rpc_rx(invoke_kind);
         let provides = format!("{}/{}", entry.provides.namespace, entry.provides.name);
+        let gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let served = Served {
             log: Arc::clone(&self.log),
             artifact: entry.artifact,
@@ -515,6 +534,7 @@ impl ArtifactRuntime for WasmComponentRuntime {
             signer: entry.signer.clone(),
             ns: entry.provides.namespace.clone(),
             again: Reinstantiate { host: Arc::clone(&self.host), component, budget },
+            gone: Arc::clone(&gone),
         };
         let serve = tokio::spawn(serve_loop(Arc::clone(&ctx.agent), instance, rx, served));
         #[cfg(feature = "gateway")]
@@ -550,6 +570,7 @@ impl ArtifactRuntime for WasmComponentRuntime {
         };
         Ok(Box::new(WasmInstalled {
             serve,
+            gone,
             #[cfg(feature = "gateway")]
             _mcp_tool: mcp_tool,
         }))
@@ -559,6 +580,9 @@ impl ArtifactRuntime for WasmComponentRuntime {
 /// A live, serving WASM component installation.
 struct WasmInstalled {
     serve: tokio::task::JoinHandle<()>,
+    /// Shared with the serve loop's `Served::gone`: set before the abort, so a call still running
+    /// on its blocking thread does not replace its instance.
+    gone:  Arc<std::sync::atomic::AtomicBool>,
     /// X2: a `tool/{name}` component is also an MCP tool `{name}` (`tools/{name}/{node}` in KV,
     /// `tools/call` over `mcp.invoke`), forwarded to the component's serve loop. Dropped with the
     /// install, so the tool disappears with the capability. Needs the node's gateway feature.
@@ -572,6 +596,7 @@ impl Installed for WasmInstalled {
     }
 
     fn uninstall(self: Box<Self>) {
+        self.gone.store(true, std::sync::atomic::Ordering::Release);
         self.serve.abort();
     }
 }
@@ -868,6 +893,58 @@ mod tests {
         let log: ProgressLog = Arc::new(Mutex::new(Vec::new()));
         let l = Arc::clone(&log);
         (Arc::new(move |f, t| l.lock().unwrap().push((f, t))), log)
+    }
+
+    /// Review finding 3: the invocation counter names a deadline stop by its own label. Planted:
+    /// with the arm mapped to `host_error` this fails.
+    #[test]
+    fn a_deadline_stop_has_its_own_metric_label() {
+        assert_eq!(outcome_label(&InvocationOutcome::DeadlineExceeded { deadline_ms: 5 }), "deadline_exceeded");
+        assert_eq!(outcome_label(&InvocationOutcome::FuelExhausted { budget: 5 }), "fuel_exhausted");
+    }
+
+    /// Review finding 2: an install that is gone never makes another instance. A call in flight
+    /// when the install is uninstalled runs on its blocking thread until it returns or reaches its
+    /// deadline; when it trapped, the serve loop used to replace the instance anyway — a fresh
+    /// store, the guest's start-up code, a KV-capable host state — for nothing. Seen failing
+    /// first: see the commit.
+    #[tokio::test]
+    async fn an_uninstalled_install_does_not_reinstantiate_after_its_in_flight_call_traps() {
+        const SPIN_COMPONENT: &[u8] = include_bytes!("../tests/fixtures/spin_component.wasm");
+        let mut agent = None;
+        for _ in 0..16 {
+            let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+            let id = mycelium::NodeId::new("127.0.0.1", port).unwrap();
+            let a = Arc::new(GossipAgent::new(id, mycelium::GossipConfig { bind_port: port, ..Default::default() }));
+            if a.start().await.is_ok() {
+                agent = Some(a);
+                break;
+            }
+        }
+        let agent = agent.expect("a gossip port");
+        let host = Arc::new(WasmHost::new().expect("engine").with_call_deadline(Some(std::time::Duration::from_millis(300))));
+        let runtime = WasmComponentRuntime::new(Arc::clone(&host));
+        let mut source = crate::InMemorySource::new();
+        let id = source.insert(SPIN_COMPONENT.to_vec());
+        let entry = InstallableEntry::new(Capability::new("text", "spin"), id);
+        let ctx = RuntimeCtx { agent: Arc::clone(&agent), trace: None, install_token: 0, shadow: false };
+        let installed = runtime.install(entry, Arc::new(source), ctx, Arc::new(|_, _| {})).await.expect("install");
+        assert_eq!(host.instantiations(), 1);
+
+        let caller = Arc::clone(&agent);
+        let call = tokio::spawn(async move {
+            let _ = caller
+                .service()
+                .rpc_call(caller.node_id().clone(), cap_invoke_kind("text", "spin"), b"x".to_vec(), std::time::Duration::from_secs(2))
+                .await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await; // the call is in flight
+        installed.uninstall();
+        // Past the call's deadline, and past the time a replacement would take.
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        assert_eq!(host.instantiations(), 1, "an uninstalled install made a fresh instance after its call trapped");
+        let _ = call.await;
+        agent.shutdown().await;
     }
 
     #[tokio::test]

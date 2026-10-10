@@ -143,7 +143,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   every instantiation — gets a wall-clock deadline, `DEFAULT_CALL_DEADLINE` (5 s), metered or not and whoever
   signed the entry (`WasmHost::with_call_deadline`, `[hosts].call_deadline_ms`; `0` refused by name), ending
   in `WasmHostError::DeadlineExceeded { deadline_ms }` and `InvocationOutcome::DeadlineExceeded` (counter
-  outcome `deadline_exceeded`); the serve loop runs each call, and install runs compile, instantiation and
+  outcome `deadline_exceeded`) — start-up past it too; `Duration::ZERO` stops the guest at its first check and a
+  deadline too large to count in 10 ms ticks is no deadline (it was truncated: `Duration::MAX` meant one tick). An
+  uninstalled install's in-flight call that then traps does not re-instantiate. The serve loop runs each call, and install runs compile, instantiation and
   `describe`, on `spawn_blocking`; and a trapped instance is replaced from the install's compiled component
   (`WasmHost::compiles()`). The epoch is advanced by one thread per host every 10 ms — wall time, outside the
   replay seams, recorded in the nondeterminism inventory. Seen failing first:

@@ -2039,13 +2039,13 @@ mod tests {
 
     /// Row D's harness: a node hosting only the `spin` fixture (a guest that never returns),
     /// signed by an agent principal, under `budget` instructions per call on a metered host.
-    async fn hosting_spin(budget: u64) -> (Arc<GossipAgent>, Arc<WasmHost>, Provisioner) {
+    async fn hosting_spin(host: WasmHost, budget: Option<u64>) -> (Arc<GossipAgent>, Arc<WasmHost>, Provisioner) {
         use crate::catalog::InstallableEntry;
         use crate::runtime::FuelPolicy;
         use ed25519_dalek::SigningKey;
         const SPIN_COMPONENT: &[u8] = include_bytes!("../tests/fixtures/spin_component.wasm");
         let agent = live_agent().await;
-        let host = Arc::new(WasmHost::metered().expect("engine"));
+        let host = Arc::new(host);
         let author = SigningKey::from_bytes(&[12u8; 32]);
         let mut source = InMemorySource::new();
         let spin = source.insert(SPIN_COMPONENT.to_vec());
@@ -2053,7 +2053,9 @@ mod tests {
         catalog.add(InstallableEntry::new(Capability::new("text", "spin"), spin).signed_by(&author));
         let mut prov = Provisioner::new(Arc::clone(&agent), Arc::clone(&host), catalog, Arc::new(source), 1.0);
         prov.require_provenance(vec![author.verifying_key().to_bytes()]);
-        prov.set_fuel_policy(FuelPolicy { operator_publishers: vec![], agent_budget: Some(budget), operator_budget: None });
+        if budget.is_some() {
+            prov.set_fuel_policy(FuelPolicy { operator_publishers: vec![], agent_budget: budget, operator_budget: None });
+        }
         prov.supervise(CapFilter::new("text", "spin"), 1);
         for _ in 0..40 {
             prov.provision_round();
@@ -2085,7 +2087,9 @@ mod tests {
     async fn a_long_guest_call_does_not_block_another_task_on_a_current_thread_runtime() {
         // A budget the spin guest takes a good fraction of a second to burn through.
         const LONG: u64 = 3_000_000_000;
-        let (agent, _host, _prov) = hosting_spin(LONG).await;
+        // Review finding 4: no deadline on this host, so the fuel budget alone ends the call — the
+        // test does not race a 5 s default it never meant to measure.
+        let (agent, _host, _prov) = hosting_spin(WasmHost::metered().expect("engine").with_call_deadline(None), Some(LONG)).await;
 
         let beating = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let longest_gap = Arc::new(std::sync::Mutex::new(Duration::ZERO));
@@ -2120,7 +2124,7 @@ mod tests {
     /// request. Seen failing first: `compiles` was 4 after three stopped calls.
     #[tokio::test]
     async fn a_trapping_guest_called_repeatedly_compiles_once() {
-        let (agent, host, prov) = hosting_spin(1_000).await;
+        let (agent, host, prov) = hosting_spin(WasmHost::metered().expect("engine"), Some(1_000)).await;
         assert_eq!(host.compiles(), 1, "the install compiles once");
         for _ in 0..3 {
             let reply = call_spin(&agent).await;
@@ -2128,6 +2132,26 @@ mod tests {
         }
         assert_eq!(prov.hosted_count(), 1, "still live after three stopped calls");
         assert_eq!(host.compiles(), 1, "a trapped instance was replaced by recompiling the component");
+        agent.shutdown().await;
+    }
+
+    /// Review finding 3: the serve loop's deadline path end to end — an unmetered host's call into
+    /// a guest that never returns is stopped at the deadline, the reply and the execution record
+    /// name it, and the install stays live on a fresh instance (the second call is entered and
+    /// stopped the same way, not refused as a poisoned instance). Planted: with the serve loop's
+    /// `DeadlineExceeded` arm removed (falling to `HostError`) this fails.
+    #[tokio::test]
+    async fn the_serve_loop_names_a_deadline_stop_and_serves_on_from_a_fresh_instance() {
+        use crate::runtime::InvocationOutcome;
+        let host = WasmHost::new().expect("engine").with_call_deadline(Some(Duration::from_millis(200)));
+        let (agent, _host, prov) = hosting_spin(host, None).await;
+        for _ in 0..2 {
+            let reply = call_spin(&agent).await;
+            assert!(reply.contains("deadline exceeded") && reply.contains("200 ms"), "{reply}");
+        }
+        let outcomes: Vec<InvocationOutcome> = prov.invocations().into_iter().map(|r| r.outcome).collect();
+        assert_eq!(outcomes, vec![InvocationOutcome::DeadlineExceeded { deadline_ms: 200 }; 2]);
+        assert_eq!(prov.hosted_count(), 1, "still live after two stopped calls");
         agent.shutdown().await;
     }
 

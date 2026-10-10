@@ -100,8 +100,9 @@ pub const DEFAULT_MEMORY_LIMIT_BYTES: usize = 256 * 1024 * 1024;
 
 /// The longest one guest call may run by default, in wall-clock time: 5 s. Fuel bounds a call in
 /// *instructions* and only where an engine is metered; this bounds every call in *time*, metered or
-/// not and whoever signed the entry, so a guest that loops (or a host import that stalls it) gives
-/// its thread back. Generous for a capability handler (the fixtures answer in microseconds) and
+/// not and whoever signed the entry, so a guest that loops gives its thread back. Epoch checks run
+/// in guest code only (loop headers, function entries): a host import that blocks is not
+/// interrupted until it returns to the guest. Generous for a capability handler (the fixtures answer in microseconds) and
 /// below the MCP bridge's 30 s call timeout, so the caller hears *deadline exceeded* rather than a
 /// timeout. Per host: [`WasmHost::with_call_deadline`]; a stem reads `[hosts].call_deadline_ms`.
 pub const DEFAULT_CALL_DEADLINE: Duration = Duration::from_secs(5);
@@ -115,11 +116,24 @@ pub const EPOCH_TICK: Duration = Duration::from_millis(10);
 /// reaches it, and small enough that `current + delta` cannot overflow in wasmtime.
 const NO_DEADLINE_TICKS: u64 = u64::MAX / 2;
 
+/// The epoch delta for `deadline`. A zero deadline is already reached (`0`: the first epoch check
+/// stops the guest). A deadline too large to count in ticks saturates to [`NO_DEADLINE_TICKS`] —
+/// never truncated, because wasmtime adds the delta to the current epoch unchecked (review
+/// finding 1: `Duration::MAX` truncated to one tick).
 fn deadline_ticks(deadline: Option<Duration>) -> u64 {
     match deadline {
-        Some(d) => (d.as_nanos().div_ceil(EPOCH_TICK.as_nanos()) as u64).saturating_add(1),
+        Some(d) if d.is_zero() => 0,
+        Some(d) => u64::try_from(d.as_nanos().div_ceil(EPOCH_TICK.as_nanos()))
+            .unwrap_or(NO_DEADLINE_TICKS)
+            .saturating_add(1)
+            .min(NO_DEADLINE_TICKS),
         None => NO_DEADLINE_TICKS,
     }
+}
+
+/// A deadline in whole milliseconds for the error that names it, saturating.
+fn deadline_ms(d: Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Start the thread that advances `engine`'s epoch every [`EPOCH_TICK`]. It holds only a weak
@@ -264,6 +278,9 @@ pub struct WasmHost {
     /// row D's gate: a trapped instance is replaced from the install's compiled component, so a
     /// trapping guest costs one compile, not one per call.
     compiles:      AtomicU64,
+    /// How many instances this host has made (a store plus the guest's start-up code). A
+    /// diagnostic: the review's gate that an uninstalled install never makes another.
+    instantiations: AtomicU64,
 }
 
 /// Errors from host setup / instantiation / invocation.
@@ -348,13 +365,15 @@ impl WasmHost {
         cfg.epoch_interruption(true);
         let engine = Engine::new(&cfg).map_err(|e| WasmHostError::Engine(e.to_string()))?;
         spawn_epoch_ticker(&engine)?;
-        Ok(Self { engine, metered, fuel_per_call, call_deadline: Some(DEFAULT_CALL_DEADLINE), compiles: AtomicU64::new(0) })
+        Ok(Self { engine, metered, fuel_per_call, call_deadline: Some(DEFAULT_CALL_DEADLINE), compiles: AtomicU64::new(0), instantiations: AtomicU64::new(0) })
     }
 
     /// Bound each call into an instance this host makes — and each instantiation, which runs the
     /// guest's start-up code — by `deadline` of wall-clock time (`None` = unbounded). A call past
     /// it is interrupted and returns [`WasmHostError::DeadlineExceeded`]; the instance is then
-    /// poisoned, as after any trap. Applies to instances made after the call.
+    /// poisoned, as after any trap — start-up past it as [`WasmHostError::DeadlineExceeded`] too.
+    /// `Some(Duration::ZERO)` stops the guest at its first epoch check; a deadline too large to
+    /// count in [`EPOCH_TICK`]s is no deadline. Applies to instances made after the call.
     pub fn with_call_deadline(mut self, deadline: Option<Duration>) -> Self {
         self.call_deadline = deadline;
         self
@@ -368,6 +387,11 @@ impl WasmHost {
     /// How many times this host has compiled component bytes.
     pub fn compiles(&self) -> u64 {
         self.compiles.load(Ordering::Relaxed)
+    }
+
+    /// How many instances this host has made (each runs the guest's start-up code).
+    pub fn instantiations(&self) -> u64 {
+        self.instantiations.load(Ordering::Relaxed)
     }
 
     /// Compile `component_bytes` for this host's engine — the expensive half of instantiation (a
@@ -424,6 +448,7 @@ impl WasmHost {
         fuel_per_call: Option<u64>,
     ) -> Result<Instance, WasmHostError> {
         Self::refuse_unmetered_budget(self.metered, fuel_per_call)?;
+        self.instantiations.fetch_add(1, Ordering::Relaxed);
         let mut linker: Linker<HostState> = Linker::new(&self.engine);
         // Restricted WASI (std-based guests link wasi:* at init) + our scoped host imports.
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
@@ -444,8 +469,14 @@ impl WasmHost {
         let deadline_ticks = deadline_ticks(self.call_deadline);
         store.epoch_deadline_trap();
         store.set_epoch_deadline(deadline_ticks);
-        let world = bindings::CapabilityComponent::instantiate(&mut store, component, &linker)
-            .map_err(|e| WasmHostError::Instantiate(e.to_string()))?;
+        // Review finding 6: start-up stopped at the deadline is named as a call's stop is.
+        let call_deadline = self.call_deadline;
+        let world = bindings::CapabilityComponent::instantiate(&mut store, component, &linker).map_err(|e| {
+            match (e.downcast_ref::<wasmtime::Trap>(), call_deadline) {
+                (Some(wasmtime::Trap::Interrupt), Some(d)) => WasmHostError::DeadlineExceeded { deadline_ms: deadline_ms(d) },
+                _ => WasmHostError::Instantiate(e.to_string()),
+            }
+        })?;
         Ok(Instance { store, world, metered: self.metered, fuel_per_call, call_deadline: self.call_deadline, deadline_ticks })
     }
 
@@ -535,7 +566,7 @@ impl Instance {
             .map_err(|e| match (e.downcast_ref::<wasmtime::Trap>(), self.fuel_per_call, self.call_deadline) {
                 (Some(wasmtime::Trap::OutOfFuel), Some(budget), _) => WasmHostError::FuelExhausted { budget },
                 (Some(wasmtime::Trap::Interrupt), _, Some(d)) => {
-                    WasmHostError::DeadlineExceeded { deadline_ms: d.as_millis() as u64 }
+                    WasmHostError::DeadlineExceeded { deadline_ms: deadline_ms(d) }
                 }
                 _ => WasmHostError::Invoke(e.to_string()),
             })?;
@@ -717,6 +748,50 @@ mod tests {
         let default = HostState::new(agent.node_id().clone(), "nlp", agent.kv(), agent.mesh());
         let mut inst = host.instantiate(ECHO_COMPONENT, default).expect("the default cap runs the component");
         assert_eq!(inst.invoke("greet", b"hello".to_vec()).unwrap().unwrap(), b"hello");
+        agent.shutdown().await;
+    }
+
+    /// Review finding 1: a deadline too large to count in epoch ticks means *no deadline*. The
+    /// tick count was truncated with `as u64` and wasmtime adds it to the current epoch unchecked:
+    /// `Duration::MAX` truncated to **one tick** (a 10–20 ms deadline), and a duration whose count
+    /// truncates to just under `u64::MAX` overflowed (a debug panic) or wrapped into the past
+    /// (every call stopped at once). A spin call that burns ~50 ms of fuel must end at its fuel
+    /// budget under either. Seen failing first: see the commit.
+    #[tokio::test]
+    async fn a_deadline_too_large_to_count_in_ticks_means_no_deadline() {
+        const SPIN_COMPONENT: &[u8] = include_bytes!("../tests/fixtures/spin_component.wasm");
+        const BUDGET: u64 = 300_000_000;
+        let agent = live_agent().await;
+        // `3_504_881_374_004_814_807` s is 100 × that many ticks, ≡ 2^64 − 4 (mod 2^64).
+        for deadline in [Duration::MAX, Duration::from_secs(3_504_881_374_004_814_807)] {
+            let host = WasmHost::metered().expect("engine").with_call_deadline(Some(deadline));
+            // Let the ticker advance the epoch, so `current + delta` is not `0 + delta`.
+            std::thread::sleep(EPOCH_TICK * 5);
+            let state = HostState::new(agent.node_id().clone(), "nlp", agent.kv(), agent.mesh());
+            let mut inst = host.instantiate_with_fuel(SPIN_COMPONENT, state, Some(BUDGET)).expect("instantiate");
+            let out = inst.invoke("spin", b"x".to_vec());
+            assert!(
+                matches!(out, Err(WasmHostError::FuelExhausted { budget: BUDGET })),
+                "under a {deadline:?} deadline the call ended {out:?}, not at its fuel budget"
+            );
+        }
+        agent.shutdown().await;
+    }
+
+    /// Review finding 6: start-up code past its deadline is stopped **by name**, as a call is —
+    /// not as an `Instantiate("…interrupt…")` string. A zero deadline is already reached when the
+    /// guest's start-up code runs. Seen failing first: see the commit.
+    #[tokio::test]
+    async fn a_start_up_past_its_deadline_is_stopped_by_name() {
+        const ECHO_COMPONENT: &[u8] = include_bytes!("../tests/fixtures/echo_component.wasm");
+        let agent = live_agent().await;
+        let host = WasmHost::new().expect("engine").with_call_deadline(Some(Duration::ZERO));
+        let state = HostState::new(agent.node_id().clone(), "nlp", agent.kv(), agent.mesh());
+        let res = host.instantiate(ECHO_COMPONENT, state).map(|_| ());
+        assert!(
+            matches!(res, Err(WasmHostError::DeadlineExceeded { deadline_ms: 0 })),
+            "start-up past a zero deadline: {res:?}"
+        );
         agent.shutdown().await;
     }
 

@@ -148,7 +148,9 @@ every instantiation, which runs the guest's start-up code — is bounded in wall
 stem reads `[hosts].call_deadline_ms`. Unlike fuel it needs no metered engine and applies to the
 operator's entries too. A call past it returns `WasmHostError::DeadlineExceeded { deadline_ms }`,
 recorded as `InvocationOutcome::DeadlineExceeded` (counter outcome `deadline_exceeded`), and the trapped
-instance is replaced like any other. The epoch is advanced every `EPOCH_TICK` (10 ms) by one thread per
+instance is replaced like any other — unless the install was uninstalled while the call ran, in which
+case nothing is re-instantiated. Start-up past the deadline is `DeadlineExceeded` too; `Duration::ZERO`
+stops the guest at its first epoch check; a deadline too large to count in ticks is no deadline. The epoch is advanced every `EPOCH_TICK` (10 ms) by one thread per
 host (`mycelium-wasm-epoch`, holding a weak engine reference so it ends with the engine), so a call stops
 between `d` and `d + 10 ms` after it starts. The serve loop runs each guest call — and install's
 compile, instantiation and `describe` — on `tokio::task::spawn_blocking`, so a long call holds a
