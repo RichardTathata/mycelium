@@ -34,10 +34,13 @@ mesh (a seed needs none). Everything else is optional.
 |---|---|---|
 | `bind_port` | gossip transport (TCP, and SWIM UDP if enabled) — node-to-node | required |
 | `http_port` | the embedded gateway (diagnostics, AgentFacts, `/gateway/*`) — needs a build with the `gateway` feature; without it `start()` refuses the setting by name (2.25.0) | `None` (off) |
-| `http_addr` | interface the gateway binds | `127.0.0.1` |
+| `http_addr` | interface the gateway binds — an IP literal; off loopback it needs a credential (below) | `127.0.0.1` |
 
 `http_port` must differ from `bind_port`. Leave `http_port = None` for a
-headless node; set it (and `http_addr = "0.0.0.0"`) to expose the gateway. See
+headless node; set it (and `http_addr = "0.0.0.0"`) to expose the gateway — **with a credential**
+(`gateway_auth_token`, or under `compliance` a token table or `[oidc]`): a non-loopback `http_addr`
+with none refuses to start, naming `http_addr`, unless `gateway_allow_unauthenticated = true`
+(`GOSSIP_GATEWAY_ALLOW_UNAUTHENTICATED=1`) says the network in front of the port is the boundary. See
 [observability.md](observability.md) for what the gateway serves.
 
 ## Seeds & bootstrapping
@@ -318,6 +321,7 @@ degraded — each was running without the protection it was configured for, so c
 | 2.23.0 | a second agent owns the persistence directory; the startup snapshot that repairs a torn WAL fails | share a WAL, or append behind a torn frame |
 | 2.24.0 | the persistence directory cannot be created | run in memory and lose every write at restart |
 | 2.25.0 | `http_port` or `[gateway_tls]` is set in a build without `gateway` | run no gateway while advertising its port |
+| unreleased | the gateway binds a non-loopback `http_addr` (`0.0.0.0`, `::`, a LAN address) with no credential model and `gateway_allow_unauthenticated` unset | serve every gateway route to anyone who could reach the port |
 
 Each refusal names the setting; the Dev view is [error-handling.md](../guide/error-handling.md) §
 *Start refusals*, the persistence ones are [above](#persistence-modes).

@@ -11612,6 +11612,76 @@ async fn an_oidc_table_this_build_cannot_enforce_refuses_to_start() {
     }
 }
 
+/// **An exposed gateway with no credential refuses to start** (plan `post-360-hardening.md` row P1).
+/// `http_addr = "0.0.0.0"` with no token, no token table and no `[oidc]` served every gateway route to
+/// anyone who could reach the port; the docs said *suitable for loopback-only deployments* and nothing
+/// checked that the deployment was one. Now `start()` refuses, naming `http_addr`, the credential
+/// settings and the opt-in — in every gateway build (without `compliance` the only credential is
+/// `gateway_auth_token`; the tables and `[oidc]` are refused there already). `::` is the same case,
+/// and a blank token is not a credential.
+#[cfg(feature = "gateway")]
+#[tokio::test]
+async fn an_exposed_gateway_with_no_credential_refuses_to_start() {
+    for (addr, token) in [("0.0.0.0", None), ("::", None), ("0.0.0.0", Some("  "))] {
+        let port = alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.http_port = Some(alloc_port());
+        cfg.http_addr = addr.to_string();
+        cfg.gateway_auth_token = token.map(String::from);
+        let agent = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
+        match agent.start().await {
+            Err(GossipError::InvalidField { field, reason }) => {
+                assert_eq!(field, "http_addr", "{addr}");
+                for named in ["gateway_auth_token", "gateway_allow_unauthenticated", addr] {
+                    assert!(reason.contains(named), "the refusal names `{named}`: {reason}");
+                }
+            }
+            other => {
+                let _ = agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+                panic!("{addr} with no credential (token {token:?}) must refuse to start, got {other:?}");
+            }
+        }
+    }
+}
+
+/// The three ways an exposed or local gateway still starts (P1): a credential on a non-loopback
+/// address; no credential on loopback (development is unchanged — `127.0.0.0/8` and `::1`); and the
+/// explicit opt-in, which starts, is classified as a waiver (the case `start()` warns about, once)
+/// and reads `not_configured` in the report, so the secure profile refuses it.
+#[cfg(feature = "gateway")]
+#[tokio::test]
+async fn an_exposed_gateway_starts_with_a_credential_on_loopback_or_with_the_opt_in() {
+    use crate::agent::guarantee::{gateway_exposure, GatewayExposure};
+    // `127.0.0.2` and `::1` are loopback too (`guarantee::tests`), but not bindable on every runner
+    // (macOS configures only `127.0.0.1`; some containers have no IPv6), so they are not started here.
+    let cases: [(&str, Option<&str>, bool, GatewayExposure); 3] = [
+        ("0.0.0.0", Some("s3cret"), false, GatewayExposure::Credentialed),
+        ("127.0.0.1", None, false, GatewayExposure::Loopback),
+        ("0.0.0.0", None, true, GatewayExposure::Waived),
+    ];
+    for (addr, token, opt_in, expected) in cases {
+        let port = alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.http_port = Some(alloc_port());
+        cfg.http_addr = addr.to_string();
+        cfg.gateway_auth_token = token.map(String::from);
+        cfg.gateway_allow_unauthenticated = opt_in;
+        assert_eq!(gateway_exposure(&cfg), expected, "{addr} token={token:?} opt_in={opt_in}");
+        let agent = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
+        agent.start().await.unwrap_or_else(|e| panic!("{addr} token={token:?} opt_in={opt_in} must start: {e:?}"));
+        let state = agent.guarantee_report().entry("gw.exposed_closed").expect("registered").resolution.state();
+        let want = match expected {
+            GatewayExposure::Credentialed => "enforced",
+            GatewayExposure::Loopback => "not_applicable",
+            _ => "not_configured",
+        };
+        assert_eq!(state, want, "{addr} token={token:?} opt_in={opt_in}");
+        agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+    }
+}
+
 // A `[tls]` or `[gateway_tls]` table in a build without `tls` refusing to start: `mycelium-tls-free-tests`, the one
 // test build of `mycelium` without `tls` (this crate's dev-dependencies turn it on, so a test here never ran).
 
@@ -11734,7 +11804,7 @@ async fn a_node_providing_every_requirement_starts_under_the_secure_profile() {
     a.start().await.expect("and so the profile admits the node");
     let r = a.guarantee_report();
     assert!(r.started && r.node_requirements_satisfied(), "required unmet: {:?}", r.required_unmet());
-    assert_eq!(r.profile.as_ref().map(|p| (p.name, p.revision, p.selected)), Some(("secure-single-domain", 2, true)));
+    assert_eq!(r.profile.as_ref().map(|p| (p.name, p.revision, p.selected)), Some(("secure-single-domain", 3, true)));
     assert!(!cert_dir.join("ca-key.pem").exists(), "start() minted no CA key on the node");
     assert_eq!(r.unresolved(), ["cons.safety_profile", "net.confinement", "clock.sync"], "what the node cannot see is still listed");
     // Rev 2's two new requirements, met: the CA key is with the issuer, and unreadable persisted

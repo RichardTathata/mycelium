@@ -2,13 +2,14 @@
 
 **Generated** from `core_guarantees()` (`src/agent/guarantee.rs`); do not edit. Regenerate with `UPDATE_GUARANTEE_CATALOGUE=1 cargo test --lib --features compliance,a2a the_checked_in_guarantee_catalogue_is_current`. A guarantee is a claim the startup report resolves against the node as built and configured — `enforced` · `not_configured` (the setting named) · `not_in_build` (the feature named) · `not_applicable` (the role fact named) · `not_verifiable_here` (external prerequisites, never counted). The plan is `docs/plans/guarantees-and-rule-catalogue.md`; the live report is `guarantee_report()` / `GET /gateway/guarantees`.
 
-Schema `mycelium.guarantees/1` · 24 core guarantees.
+Schema `mycelium.guarantees/1` · 25 core guarantees.
 
 ## The descriptors
 
 | Id | Rev | Subsystem | Kind | Promise | Needs | Enforcement points | Docs |
 |---|---|---|---|---|---|---|---|
-| `gw.not_open` | 1 | gateway | NodeEnforced | the HTTP gateway requires a credential on every non-public route | `gateway_auth_token`, or (`compliance`) a token table or `[oidc]` | `gateway_auth` | `docs/operations/rbac.md` |
+| `gw.not_open` | 2 | gateway | NodeEnforced | the HTTP gateway requires a credential on every non-public route | `gateway_auth_token`, or (`compliance`) a token table or `[oidc]` | `gateway_auth` | `docs/operations/rbac.md` |
+| `gw.exposed_closed` | 1 | gateway | NodeEnforced | a gateway bound beyond loopback requires a credential — `start()` refuses an open one unless explicitly waived | `gateway_auth_token`, or (`compliance`) a token table or `[oidc]`, on any non-loopback `http_addr`; `gateway_allow_unauthenticated` unset | `GossipAgent::start`, `guarantee::gateway_exposure` | `docs/operations/production-readiness.md` |
 | `gw.token_tables` | 1 | gateway | NodeEnforced | scoped or named tokens close the gateway with a per-route scope floor | `compliance`; `gateway_scoped_tokens` / `gateway_named_tokens` | `gateway_auth`, `required_scope` | `docs/operations/rbac.md` |
 | `gw.oidc` | 1 | gateway | NodeEnforced | human operators authenticate to the gateway through the IdP, groups mapped to scopes | `compliance`; `[oidc]` | `gateway_auth`, `oidc::OidcVerifier` | `docs/operations/sso.md` |
 | `gw.tls` | 1 | gateway | NodeEnforced | the gateway serves HTTPS, so bearers and JWTs do not cross the wire in cleartext | `tls`; `[gateway_tls]` (or TLS terminated by a proxy in front — not visible here) | `http::serve_https` | `docs/operations/gateway-tls.md` |
@@ -40,6 +41,7 @@ Each guarantee's resolution on an **unstarted** node (nothing attached) under th
 | Id | default | `dev` profile | persistence + egress | gateway + bearer |
 |---|---|---|---|---|
 | `gw.not_open` | not_applicable | not_applicable | not_applicable | enforced |
+| `gw.exposed_closed` | not_applicable | not_applicable | not_applicable | enforced |
 | `gw.token_tables` | not_applicable | not_applicable | not_applicable | not_configured |
 | `gw.oidc` | not_applicable | not_applicable | not_applicable | not_configured |
 | `gw.tls` | not_applicable | not_applicable | not_applicable | not_configured |

@@ -581,7 +581,9 @@ async fn shutdown_signal(mut rx: watch::Receiver<bool>) {
 /// 1. **Authentication** (always): when `gateway_auth_token` is set, or
 ///    (compliance) any `gateway_scoped_tokens` are configured, every gateway
 ///    request must carry a valid `Authorization: Bearer <token>`. With neither
-///    set the gateway is open (loopback-only deployments). `/health`, `/ready`,
+///    set the gateway is open — which `start()` permits only on a loopback
+///    `http_addr` or under `gateway_allow_unauthenticated`
+///    (`guarantee::gateway_exposure`, plan P1). `/health`, `/ready`,
 ///    `/stats`, `/metrics`, `/bulk/{id}` and the descriptor path stay public
 ///    regardless; the node-level `/mcp`, `/signals/{kind}` and `/consensus/{*slot}`
 ///    carry this same layer (2026-09-05).

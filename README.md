@@ -193,8 +193,9 @@ tamper-evident audit (`compliance` feature), hot identity rotation. Posture + th
 [guide ch. 09](docs/guide/09-security.md) · [threat model](docs/threat-model.md) · operator
 runbooks under [`docs/operations/`](docs/operations/README.md) (rbac, sso, audit,
 cert-rotation, crown-jewel). **The default configuration is a development posture, not this one:**
-a `GossipConfig::default()` node gossips in plaintext and trusts every peer, opens its gateway to
-anyone if `http_port` is set, allows all egress and runs under no profile; `profile =
+a `GossipConfig::default()` node gossips in plaintext and trusts every peer, serves an open gateway
+on loopback if `http_port` is set (off loopback it refuses to start without a credential, unless
+`gateway_allow_unauthenticated` says otherwise), allows all egress and runs under no profile; `profile =
 "secure-single-domain"` makes `start()` refuse unless the enforced posture holds on the node
 ([production readiness](docs/operations/production-readiness.md)).
 

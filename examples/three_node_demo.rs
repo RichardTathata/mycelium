@@ -315,6 +315,12 @@ async fn make_agent(
     cfg.bind_port                  = port;
     cfg.http_port                  = http_port;
     cfg.http_addr                  = "0.0.0.0".to_string();
+    // A demo: the gateway serves the compose network (or the cluster) with no credential so the
+    // walkthroughs and the scale harness can drive it. Set GOSSIP_GATEWAY_AUTH_TOKEN to close it
+    // (the env overrides below win, and a token makes this opt-in inert); without a token or this
+    // opt-in, `start()` refuses an open gateway on a non-loopback address (plan
+    // `post-360-hardening.md` row P1).
+    cfg.gateway_allow_unauthenticated = true;
     cfg.bootstrap_peers            = peers;
     cfg.default_ttl                = 240;
     cfg.reconnect_backoff_secs     = 2;

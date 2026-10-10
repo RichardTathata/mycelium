@@ -3,7 +3,7 @@
   "guarantees": [
     {
       "id": "gw.not_open",
-      "revision": 1,
+      "revision": 2,
       "subsystem": "gateway",
       "kind": "node_enforced",
       "promise": "the HTTP gateway requires a credential on every non-public route",
@@ -12,6 +12,19 @@
         "gateway_auth"
       ],
       "docs": "docs/operations/rbac.md"
+    },
+    {
+      "id": "gw.exposed_closed",
+      "revision": 1,
+      "subsystem": "gateway",
+      "kind": "node_enforced",
+      "promise": "a gateway bound beyond loopback requires a credential — `start()` refuses an open one unless explicitly waived",
+      "needs": "`gateway_auth_token`, or (`compliance`) a token table or `[oidc]`, on any non-loopback `http_addr`; `gateway_allow_unauthenticated` unset",
+      "enforcement_points": [
+        "GossipAgent::start",
+        "guarantee::gateway_exposure"
+      ],
+      "docs": "docs/operations/production-readiness.md"
     },
     {
       "id": "gw.token_tables",

@@ -60,6 +60,7 @@ setting — the full list, by `field`:
 | `oidc` | the issuer, or a configured `jwks_uri`, is not on a non-empty `egress.allow_hosts` | 2.20.0 |
 | `audit_sink` | an audit sink is attached (`compliance`) without `[tls]` — nothing would be sealed | 2.20.0 |
 | `gateway` | the gateway cannot bind its port or load its certificate | 2.20.0 |
+| `http_addr` | the gateway binds a non-loopback address with no credential model (no token, no token table, no `[oidc]`) and `gateway_allow_unauthenticated` is unset | unreleased |
 | `persistence` | unreadable state (2.20.0); a second owner of the directory, or a failed startup snapshot (2.23.0); a directory that cannot be created (2.24.0) — `docs/operations/deployment.md` § *Persistence start refusals* | — |
 | `profile` | a guarantee the configured profile requires is unmet; the message names each | 2.19.0 |
 | `http_addr` / `bind_address` | not a valid IP address | — |

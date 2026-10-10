@@ -266,11 +266,16 @@ pub const SECURE_SINGLE_DOMAIN: Profile = Profile {
     // node — and `persist.unreadable_refused` (`persistence.on_unreadable = "refuse"`, the default).
     // Rev 1 could not require the first: until v2.20.0 the TLS init re-signed the node cert with
     // the CA key at every start and minted a CA where the key was absent.
-    revision: 2,
+    // Rev 3 (plan `post-360-hardening.md` row P1): `gw.exposed_closed`. It refuses no node rev 2
+    // admitted — `gw.not_open` already refused every open gateway — but it names the waiver
+    // (`gateway_allow_unauthenticated`) when a node sets it, which G12 lets a MINOR add because a
+    // deployment meets it by configuration.
+    revision: 3,
     required: &[
         "mesh.tls",
         "id.proofs_required",
         "gw.not_open",
+        "gw.exposed_closed",
         "gw.tls",
         "gw.caller_profile",
         "ae.authorised_at_seam",
@@ -592,23 +597,95 @@ fn external(evidence: &'static str) -> impl Fn(&TaskCtx) -> Resolution + Send + 
     move |_| Resolution::NotVerifiableHere { evidence }
 }
 
+/// Whether this configuration names a gateway **credential model** — the same set `gateway_auth`
+/// counts (`src/agent/http.rs`): `gateway_auth_token`, and under `compliance` a scoped or named token
+/// table or `[oidc]`. Without `compliance` those three are refused at `start()`, so only the token
+/// counts. A blank token (`GOSSIP_GATEWAY_AUTH_TOKEN=""`) is not a credential here: a secret anyone can
+/// guess closes nothing. One predicate for `gw.not_open`, `gw.exposed_closed` and `start()`'s refusal.
+pub(crate) fn gateway_credential_model(cfg: &crate::config::GossipConfig) -> bool {
+    #[allow(unused_mut)]
+    let mut closed = cfg.gateway_auth_token.as_deref().is_some_and(|t| !t.trim().is_empty());
+    #[cfg(feature = "compliance")]
+    { closed |= !cfg.gateway_scoped_tokens.is_empty() || !cfg.gateway_named_tokens.is_empty() || cfg.oidc.is_some(); }
+    closed
+}
+
+/// Whether `http_addr` reaches only this host: an IPv4 address in `127.0.0.0/8`, `::1`, or an
+/// IPv4-mapped loopback (`::ffff:127.0.0.1`). The unspecified addresses (`0.0.0.0`, `::`) listen on
+/// every interface and are **not** loopback. A hostname (`localhost`) never reaches the bind —
+/// `validate()` refuses an `http_addr` that is not an IP literal — and an unparseable value reads as
+/// exposed, so the check fails closed.
+pub(crate) fn binds_loopback_only(http_addr: &str) -> bool {
+    http_addr.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.to_canonical().is_loopback())
+}
+
+/// How a configured gateway is exposed, and what `start()` does about it (plan `post-360-hardening.md`
+/// row P1). Pure over the configuration, so the report, the refusal and the test read one answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GatewayExposure {
+    /// No `http_port`: no gateway.
+    NoGateway,
+    /// A loopback `http_addr`: reachable from this host only; a credential is not required.
+    Loopback,
+    /// A credential model is configured; the address does not matter.
+    Credentialed,
+    /// Non-loopback, no credential, `gateway_allow_unauthenticated = true`: starts, warns once.
+    Waived,
+    /// Non-loopback, no credential, no opt-in: `start()` refuses, naming `http_addr`.
+    Refused,
+}
+
+pub(crate) fn gateway_exposure(cfg: &crate::config::GossipConfig) -> GatewayExposure {
+    if cfg.http_port.is_none() {
+        GatewayExposure::NoGateway
+    } else if gateway_credential_model(cfg) {
+        GatewayExposure::Credentialed
+    } else if binds_loopback_only(&cfg.http_addr) {
+        GatewayExposure::Loopback
+    } else if cfg.gateway_allow_unauthenticated {
+        GatewayExposure::Waived
+    } else {
+        GatewayExposure::Refused
+    }
+}
+
+/// The credential settings this build honours, for `start()`'s refusal and warning to name.
+#[cfg(feature = "gateway")]
+pub(crate) const GATEWAY_CREDENTIALS: &str = if cfg!(feature = "compliance") {
+    "`gateway_auth_token`, `gateway_named_tokens`, `gateway_scoped_tokens` or `[oidc]`"
+} else {
+    "`gateway_auth_token` (the token tables and `[oidc]` need the `compliance` feature)"
+};
+
 pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
     use GuaranteeKind::{ExternalPrerequisite as Ext, NodeEnforced as Node};
     vec![
         // A merged router's route outside the gated prefixes is public by construction — a documented
         // class, not a guarantee (`gw.extra_routes_auth`, plan §8; docs/operations/rbac.md).
-        g("gw.not_open", 1, "gateway", Node,
+        // Rev 2 (plan P1): a blank `gateway_auth_token` no longer counts as closing the gateway — the
+        // check reads `gateway_credential_model`, shared with `gw.exposed_closed` and `start()`.
+        g("gw.not_open", 2, "gateway", Node,
           "the HTTP gateway requires a credential on every non-public route",
           "`gateway_auth_token`, or (`compliance`) a token table or `[oidc]`",
           &["gateway_auth"], "docs/operations/rbac.md",
           gateway_role,
           in_gateway_build(|c| {
-              let cfg = &c.config;
-              #[allow(unused_mut)]
-              let mut closed = cfg.gateway_auth_token.is_some();
-              #[cfg(feature = "compliance")]
-              { closed |= !cfg.gateway_scoped_tokens.is_empty() || !cfg.gateway_named_tokens.is_empty() || cfg.oidc.is_some(); }
-              if closed { Resolution::Enforced } else { Resolution::NotConfigured { missing: "gateway_auth_token (or, with `compliance`, a token table or [oidc])" } }
+              if gateway_credential_model(&c.config) { Resolution::Enforced } else { Resolution::NotConfigured { missing: "gateway_auth_token (or, with `compliance`, a token table or [oidc])" } }
+          })),
+        // Plan `post-360-hardening.md` row P1: the open gateway is refused where it is reachable. Loopback
+        // is the role fact that makes it moot; the opt-in is the one way past it, and reads unmet.
+        g("gw.exposed_closed", 1, "gateway", Node,
+          "a gateway bound beyond loopback requires a credential — `start()` refuses an open one unless explicitly waived",
+          "`gateway_auth_token`, or (`compliance`) a token table or `[oidc]`, on any non-loopback `http_addr`; `gateway_allow_unauthenticated` unset",
+          &["GossipAgent::start", "guarantee::gateway_exposure"], "docs/operations/production-readiness.md",
+          // Loopback is a role fact only where a gateway can run: a gateway-free build reads
+          // `not_in_build`, like every other gateway guarantee (R8).
+          |c| gateway_role(c).or_else(|| (cfg!(feature = "gateway") && gateway_exposure(&c.config) == GatewayExposure::Loopback)
+              .then_some("`http_addr` is loopback: the gateway is reachable from this host only")),
+          in_gateway_build(|c| match gateway_exposure(&c.config) {
+              GatewayExposure::Waived => Resolution::NotConfigured { missing: "a gateway credential — `gateway_allow_unauthenticated = true` waives the refusal on a non-loopback `http_addr`" },
+              GatewayExposure::Refused => Resolution::NotConfigured { missing: "a gateway credential on a non-loopback `http_addr` (start() refuses this node)" },
+              _ => Resolution::Enforced,
           })),
         g("gw.token_tables", 1, "gateway", Node,
           "scoped or named tokens close the gateway with a per-route scope floor",
@@ -1079,9 +1156,9 @@ mod tests {
     /// bump and a release note), every id is a core guarantee, and none is an external prerequisite.
     #[test]
     fn the_secure_profiles_required_set_is_pinned() {
-        assert_eq!(SECURE_SINGLE_DOMAIN.revision, 2);
+        assert_eq!(SECURE_SINGLE_DOMAIN.revision, 3);
         assert_eq!(SECURE_SINGLE_DOMAIN.required, &[
-            "mesh.tls", "id.proofs_required", "gw.not_open", "gw.tls", "gw.caller_profile",
+            "mesh.tls", "id.proofs_required", "gw.not_open", "gw.exposed_closed", "gw.tls", "gw.caller_profile",
             "ae.authorised_at_seam", "ae.recorded_before_dispatch", "prov.enforcement", "a2a.admission",
             "authz.execution_authority", "authz.durable_epochs", "audit.chain", "egress.allow_list",
             "persist.configured", "persist.sync_mode", "persist.unreadable_refused", "id.ca_key_off_node",
@@ -1090,6 +1167,39 @@ mod tests {
         for id in SECURE_SINGLE_DOMAIN.required {
             assert!(core_ids().contains(id), "{id} is a core guarantee");
             assert_eq!(r.entry(id).unwrap().kind, GuaranteeKind::NodeEnforced, "{id}: an external prerequisite can never be met from inside the node");
+        }
+    }
+
+    /// What counts as loopback for P1's refusal: `127.0.0.0/8`, `::1` and an IPv4-mapped loopback;
+    /// never the unspecified addresses, a routable address, a hostname (which `validate()` refuses
+    /// before the bind) or anything unparseable — those read as exposed, so the check fails closed.
+    #[test]
+    fn loopback_is_127_slash_8_and_colon_colon_1_and_nothing_else() {
+        for addr in ["127.0.0.1", "127.0.0.2", "127.255.255.254", "::1", "::ffff:127.0.0.1"] {
+            assert!(binds_loopback_only(addr), "{addr} is loopback");
+        }
+        for addr in ["0.0.0.0", "::", "10.0.0.5", "192.168.1.2", "fe80::1", "::ffff:10.0.0.1", "localhost", "", "127.0.0.1 "] {
+            assert!(!binds_loopback_only(addr), "{addr} is not loopback");
+        }
+    }
+
+    /// P1 at the profile: the opt-in reads `not_configured` on `gw.exposed_closed`, so
+    /// `secure-single-domain` names the waiver; a credential makes it inert and the guarantee holds.
+    #[test]
+    fn the_secure_profile_names_the_unauthenticated_opt_in() {
+        let mut cfg = GossipConfig::default();
+        cfg.http_port = Some(crate::test_util::alloc_port());
+        cfg.http_addr = "0.0.0.0".into();
+        cfg.gateway_allow_unauthenticated = true;
+        let r = agent(cfg.clone()).guarantee_report();
+        if cfg!(feature = "gateway") {
+            assert_eq!(state(&r, "gw.exposed_closed"), "not_configured");
+            let e = check(&r, &SECURE_SINGLE_DOMAIN).unwrap_err().to_string();
+            assert!(e.contains("gw.exposed_closed") && e.contains("gateway_allow_unauthenticated"), "{e}");
+            cfg.gateway_auth_token = Some("s3cret".into());
+            assert_eq!(state(&agent(cfg).guarantee_report(), "gw.exposed_closed"), "enforced", "a credential makes the opt-in inert");
+        } else {
+            assert_eq!(state(&r, "gw.exposed_closed"), "not_in_build");
         }
     }
 
@@ -1105,7 +1215,7 @@ mod tests {
         cfg.profile = Some("secure-single-domain".into());
         let a = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
         let e = a.start().await.unwrap_err().to_string();
-        assert!(e.contains("profile `secure-single-domain` rev 2"), "{e}");
+        assert!(e.contains("profile `secure-single-domain` rev 3"), "{e}");
         for id in ["gw.not_open", "mesh.tls", "egress.allow_list", "persist.configured", "ae.authorised_at_seam"] {
             assert!(e.contains(id), "{id} is named: {e}");
         }
@@ -1135,7 +1245,7 @@ mod tests {
         };
         let os = start_under(SyncMode::Os);
         let e = os.start().await.unwrap_err().to_string();
-        assert!(e.contains("profile `secure-single-domain` rev 2"), "{e}");
+        assert!(e.contains("profile `secure-single-domain` rev 3"), "{e}");
         assert!(e.contains("persist.sync_mode"), "`os` is named as unmet — the writer treats it as `async`: {e}");
         assert!(e.contains("os: the OS buffers"), "what is missing says why: {e}");
         assert_eq!(os.guarantee_report().entry("persist.sync_mode").unwrap().resolution, Resolution::NotConfigured { missing: "sync_mode (os: the OS buffers; an ack is `buffered`)" });

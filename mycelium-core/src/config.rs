@@ -896,7 +896,10 @@ pub struct GossipConfig {
     /// Bind address for the embedded HTTP server.
     ///
     /// Defaults to `"127.0.0.1"` (loopback only). Set to `"0.0.0.0"` to accept
-    /// connections on all interfaces. Only meaningful when `http_port` is `Some`.
+    /// connections on all interfaces. Only meaningful when `http_port` is `Some`. Must be an IP
+    /// literal (`validate()`); a **non-loopback** address (anything outside `127.0.0.0/8` and `::1`,
+    /// including `0.0.0.0` and `::`) needs a gateway credential, or `start()` refuses — see
+    /// [`gateway_allow_unauthenticated`](Self::gateway_allow_unauthenticated).
     pub http_addr: String,
 
     /// Native server-side TLS for the HTTP gateway. `None` (default) = plaintext HTTP.
@@ -996,12 +999,28 @@ pub struct GossipConfig {
     /// must send `Authorization: Bearer …`; scoped tokens need `mcp:invoke` /
     /// `mesh:read` / `consensus:read` — see `docs/operations/rbac.md`).
     ///
-    /// `None` (the default) leaves the gateway unauthenticated — suitable for
-    /// loopback-only deployments (`http_addr = "127.0.0.1"`). Set to `Some(token)`
+    /// `None` (the default) leaves the gateway unauthenticated — permitted only for
+    /// loopback-only deployments (`http_addr = "127.0.0.1"`, below). Set to `Some(token)`
     /// when the HTTP port is exposed beyond localhost.
     ///
     /// Can also be set via the `GOSSIP_GATEWAY_AUTH_TOKEN` environment variable.
+    ///
+    /// A gateway that binds a **non-loopback** `http_addr` (`0.0.0.0`, `::`, a LAN
+    /// address) with no credential model — no token, no token table, no `[oidc]` — refuses to start
+    /// (`InvalidField { field: "http_addr" }`) unless
+    /// [`gateway_allow_unauthenticated`](Self::gateway_allow_unauthenticated) is set. An empty or
+    /// whitespace-only token is not a credential for that check.
     pub gateway_auth_token: Option<String>,
+
+    /// **The explicit insecure opt-in**: serve a gateway on a non-loopback `http_addr` with no
+    /// credential model. Default `false` — such a node refuses to start, naming `http_addr`. Set it
+    /// only where something in front of the port is the boundary (a private Docker network, a
+    /// demo); `start()` then warns once, and the guarantee `gw.exposed_closed` reads
+    /// `not_configured` (so `secure-single-domain` refuses the node). Inert on a loopback address or
+    /// when a credential is configured. Set via `GOSSIP_GATEWAY_ALLOW_UNAUTHENTICATED`
+    /// (`true`/`false`/`1`/`0`/`yes`/`no`; any other value is refused).
+    #[serde(default)]
+    pub gateway_allow_unauthenticated: bool,
 
     /// OAuth2-style scoped gateway tokens (`compliance` feature).
     ///
@@ -1262,6 +1281,7 @@ impl Default for GossipConfig {
             rate_aggregate_threshold_fps:  0,
             emergent_detectors_enabled:    false,
             gateway_auth_token:            None,
+            gateway_allow_unauthenticated: false,
             gateway_scoped_tokens:         Vec::new(),
             gateway_named_tokens:          Vec::new(),
             gateway_identity_issuer:       None,
@@ -1693,7 +1713,7 @@ impl GossipConfig {
     /// `GOSSIP_HEALTH_CHECK_MAX_JITTER_MS`, `GOSSIP_SIGNAL_WINDOW_SECS`,
     /// `GOSSIP_MAX_STORE_ENTRIES`, `GOSSIP_MAX_CLOCK_DRIFT_MS`,
     /// `GOSSIP_EPIDEMIC_EXTRA_PEERS`,
-    /// `GOSSIP_GATEWAY_AUTH_TOKEN`.
+    /// `GOSSIP_GATEWAY_AUTH_TOKEN`, `GOSSIP_GATEWAY_ALLOW_UNAUTHENTICATED` (strict boolean).
     pub fn apply_env_overrides(&mut self) -> Result<(), GossipError> {
         if let Ok(v) = env::var("GOSSIP_BIND_ADDRESS") {
             self.bind_address = v;
@@ -1902,6 +1922,18 @@ impl GossipConfig {
         }
         if let Ok(v) = env::var("GOSSIP_GATEWAY_AUTH_TOKEN") {
             self.gateway_auth_token = Some(v);
+        }
+        if let Ok(v) = env::var("GOSSIP_GATEWAY_ALLOW_UNAUTHENTICATED") {
+            // Strict, unlike the diagnostic toggles above: this one waives a security refusal, so a
+            // typo must not be read as either answer.
+            self.gateway_allow_unauthenticated = match v.trim() {
+                "1" | "true" | "TRUE" | "yes" => true,
+                "0" | "false" | "FALSE" | "no" => false,
+                other => return Err(GossipError::InvalidField {
+                    field:  "gateway_allow_unauthenticated",
+                    reason: format!("GOSSIP_GATEWAY_ALLOW_UNAUTHENTICATED={other:?} is not one of true/false/1/0/yes/no"),
+                }),
+            };
         }
         Ok(())
     }
@@ -2351,6 +2383,28 @@ mod tests {
         set_test_env(&_lock, vars[2], Some("ci-bot|s3cr3t"));
         let err = GossipConfig::default().apply_env_overrides().expect_err("a malformed entry refuses");
         assert!(format!("{err}").contains("gateway_named_tokens"), "{err}");
+    }
+
+    /// The insecure opt-in (plan P1) is a strict boolean from the environment: it waives a security
+    /// refusal, so a typo is refused by name rather than read as either answer.
+    #[test]
+    #[allow(unsafe_code)]
+    fn the_unauthenticated_gateway_opt_in_parses_strictly_from_the_environment() {
+        let _lock = env_test_lock();
+        let var = "GOSSIP_GATEWAY_ALLOW_UNAUTHENTICATED";
+        let _guard = EnvGuard(var, std::env::var(var).ok());
+        assert!(!GossipConfig::default().gateway_allow_unauthenticated, "off by default");
+        for (v, want) in [("1", true), ("true", true), ("yes", true), ("0", false), ("false", false), ("no", false)] {
+            // SAFETY: mutations serialised by env_test_lock().
+            unsafe { std::env::set_var(var, v) };
+            let mut cfg = GossipConfig::default();
+            cfg.apply_env_overrides().expect("a boolean applies");
+            assert_eq!(cfg.gateway_allow_unauthenticated, want, "{v}");
+        }
+        // SAFETY: as above.
+        unsafe { std::env::set_var(var, "ture") };
+        let err = GossipConfig::default().apply_env_overrides().expect_err("a typo refuses");
+        assert!(matches!(err, GossipError::InvalidField { field: "gateway_allow_unauthenticated", .. }), "{err}");
     }
 
     #[test]

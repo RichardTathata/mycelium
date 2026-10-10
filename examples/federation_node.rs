@@ -257,6 +257,11 @@ async fn run_node(role: &str) {
     cfg.bind_port = port;
     cfg.http_port = Some(http_port);
     cfg.http_addr = "0.0.0.0".to_string();
+    // No gateway credential: the suite's driver and the partner mesh reach these routes over the
+    // compose project's private bridge network, which is the boundary here. A node off that network
+    // would set `gateway_auth_token` instead; without one or this opt-in, `start()` refuses to serve
+    // an open gateway on a non-loopback address (plan `post-360-hardening.md` row P1).
+    cfg.gateway_allow_unauthenticated = true;
     cfg.bootstrap_peers = peers;
     // Fast pings, because peer registration happens on Ping receipt and the suite's formation
     // polls are bounded. `health_check_interval_secs` stays above `reconnect_backoff_secs + 2`:

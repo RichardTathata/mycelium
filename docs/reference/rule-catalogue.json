@@ -205,10 +205,11 @@
       "docs": "docs/operations/rbac.md",
       "tests": [
         "named_tokens_alone_still_close_the_gateway",
-        "a_token_table_this_build_cannot_enforce_refuses_to_start"
+        "a_token_table_this_build_cannot_enforce_refuses_to_start",
+        "an_exposed_gateway_with_no_credential_refuses_to_start"
       ],
       "trace": "catalogue_only",
-      "summary": "Deny by default under `compliance`: a route needs its scope; with no credential model the gateway is open, and a table the build cannot enforce refuses to start."
+      "summary": "Deny by default under `compliance`: a route needs its scope; with no credential model the gateway is open — on loopback only, since a non-loopback one refuses to start unless `gateway_allow_unauthenticated` waives it — and a table the build cannot enforce refuses to start."
     },
     {
       "id": "host.emit_admission",
