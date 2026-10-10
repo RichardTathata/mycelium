@@ -58,10 +58,15 @@ cfg.oidc = Some(mycelium::OidcConfig {
   (`JWKS_REFRESH_COOLDOWN`), so a client sending tokens with invented `kid`s cannot
   make the node call your IdP once per request; a token signed under a newly
   rotated key is accepted at most one cooldown after its first use. A failed fetch
-  keeps the previous keys and is retried on the same 30 s spacing. Concurrent
-  requests share one fetch (single-flight), and each discovery or JWKS request
-  times out after **10 s** (`JWKS_FETCH_TIMEOUT`) — so an unresponsive IdP delays
-  gateway requests by at most that, then their tokens are refused (the release after 2.31.0).
+  keeps the previous keys and is retried on the same 30 s spacing — except while
+  the node holds **no keys at all** (an IdP unreachable at start), when the retry
+  comes after **2 s** (`JWKS_EMPTY_RETRY_BACKOFF`), so a node does not refuse every
+  token for 30 s after the IdP recovers. A token whose `kid` is already cached
+  **never waits for the IdP** (past the TTL it is checked against the cached keys
+  while they refresh in the background). Requests that do need a fetch share one
+  (single-flight), and that fetch — discovery and the JWKS request together — has
+  one **10 s** deadline (`JWKS_FETCH_TIMEOUT`): an unresponsive IdP delays those
+  requests by at most that, then their tokens are refused (the release after 2.31.0).
 
 ---
 
