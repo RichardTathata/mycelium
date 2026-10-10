@@ -53,7 +53,20 @@ cfg.oidc = Some(mycelium::OidcConfig {
   list the family's scopes by name.
 - **`jwks_uri`** — leave `None` for standard discovery; set explicitly only if the
   IdP's JWKS is hosted off the discovery path. Keys are cached (TTL ~1h) and
-  re-fetched on an unknown `kid`, so IdP key rotation is picked up automatically.
+  re-fetched on an unknown `kid`, so IdP key rotation is picked up automatically —
+  but a refresh forced by an unknown `kid` happens **at most once every 30 s**
+  (`JWKS_REFRESH_COOLDOWN`), so a client sending tokens with invented `kid`s cannot
+  make the node call your IdP once per request; a token signed under a newly
+  rotated key is accepted at most one cooldown after its first use. A failed fetch
+  keeps the previous keys and is retried on the same 30 s spacing — except while
+  the node holds **no keys at all** (an IdP unreachable at start), when the retry
+  comes after **2 s** (`JWKS_EMPTY_RETRY_BACKOFF`), so a node does not refuse every
+  token for 30 s after the IdP recovers. A token whose `kid` is already cached
+  **never waits for the IdP** (past the TTL it is checked against the cached keys
+  while they refresh in the background). Requests that do need a fetch share one
+  (single-flight), and that fetch — discovery and the JWKS request together — has
+  one **10 s** deadline (`JWKS_FETCH_TIMEOUT`): an unresponsive IdP delays those
+  requests by at most that, then their tokens are refused (the release after 2.31.0).
 
 ---
 
@@ -87,7 +100,7 @@ too. Network-layer egress control must allow the same hosts.
   attack (re-signing with the public key as an HMAC secret). The verifier never
   trusts the token header to choose the verification family.
 - **Signature, `iss`, `aud`, and `exp`** are all checked (≈60s clock-skew leeway
-  on expiry). Unknown `kid` → rejected (after one JWKS refresh attempt).
+  on expiry). Unknown `kid` → rejected (after one JWKS refresh attempt, at most one per 30 s).
 - **Failure is opaque.** Any validation failure is a flat `401` to the caller;
   the specific reason goes to logs only — never leak validation detail to an
   unauthenticated client.
@@ -119,5 +132,5 @@ see `src/agent/http.rs::test_gateway_oidc_jwt_maps_groups_to_scopes`.
 | every JWT → 401; log `oidc: the egress policy does not permit the JWKS host` | the discovered `jwks_uri` is on a host the allow-list does not permit | allow that host, or set `jwks_uri` so `start()` checks it |
 | every JWT → 401 after upgrading to 2.23.0; log `egress: the redirect target … is not on the allow-list` | the issuer or JWKS URL redirects to an unlisted host | allow the redirect target, or configure the final URL |
 | valid user → 403 | their groups map to no/insufficient scopes | extend `group_scopes`, or check `group_claim` is the right claim |
-| works then breaks after IdP key rotation | stale JWKS cache | automatic — the verifier refetches on unknown `kid`; if persistent, check JWKS reachability |
+| works then breaks after IdP key rotation | stale JWKS cache | automatic — the verifier refetches on unknown `kid` (at most once per 30 s, so the first tokens under a new key can 401 for up to that long); if persistent, check JWKS reachability |
 | `groups` claim empty (Entra) | tenant emits group object-IDs or omits groups | switch to app `roles`, or configure group-name emission |

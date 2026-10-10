@@ -282,6 +282,32 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`/signals/rpc.result` answered 200). (F8) rbac.md states what a `mesh:serve` stream sees. (F9) The served-request
   TTL sweep runs every 1 024 inserts or at the cap, not per request. (F10) The tuple-space crate's manifest comment.
   The `gw_llm_stream` label that failed `llm`-without-`tls` clippy is gone (a helper with an early return).
+- **The OIDC key refresh is single-flight, bounded and timed out** (`src/agent/oidc.rs`). The verifier fetched the
+  JWKS *before* taking its cache's write guard, so a burst of verifies on a cold or stale cache, or on an unknown
+  `kid`, each fetched (sixteen concurrent verifies cost the IdP 32 requests) — although lock-order row 17 has said
+  since WS4 that the guard was held across the fetch. And since the gateway offers every bearer to OIDC first, an
+  **unauthenticated** client sending JWTs with invented `kid`s made the node call the IdP once per request, through
+  a client with **no timeout**, so an IdP that stopped answering held gateway handlers indefinitely. Now:
+  - one fetch at a time, run in a **detached task** (a verify cancelled mid-fetch does not cancel it or spend the
+    cooldown); the cache is a `std::sync::RwLock` written only to swap in the result, so a token whose `kid` is
+    cached **never waits** for a fetch — past the TTL it is checked against the cached keys while they refresh;
+  - a refresh forced by an unknown `kid`, or a retry after a failed fetch, at most once per `JWKS_REFRESH_COOLDOWN`
+    (30 s) — inside it the token is refused without a fetch — or once per `JWKS_EMPTY_RETRY_BACKOFF` (2 s) while no
+    keys are held at all;
+  - one `JWKS_FETCH_TIMEOUT` (10 s) deadline across discovery and the JWKS request together;
+  - a failed fetch still keeps the previous keys; the cache's clock reads go through `sim_seam` (`oidc.rs` leaves
+    the forbidden-call baseline).
+
+  **Behaviour note:** after an IdP key rotation, tokens under the new key can be refused for up to 30 s if an
+  unknown `kid` was seen just before. Seen failing first: `concurrent_verifies_with_an_unknown_kid_fetch_the_jwks_once`
+  (32 fetches, expected 1), `an_unknown_kid_forces_at_most_one_refresh_per_cooldown` (4, expected 1),
+  `a_jwks_endpoint_that_never_answers_does_not_hold_verify` (still waiting at 5 s),
+  `a_failed_jwks_fetch_is_not_retried_inside_the_cooldown` (4, expected 1); and, from the PR's adversarial review,
+  `a_cached_kid_does_not_wait_behind_a_stalled_fetch` (still waiting at 2 s), `a_cancelled_verify_does_not_cancel_its_fetch`
+  (2 fetches, expected 1), `discovery_and_jwks_share_one_deadline` (3.8 s against a 2 s deadline),
+  `with_no_keys_a_failed_fetch_is_retried_after_the_short_backoff` (still refused after the back-off),
+  `keys_past_the_ttl_are_refreshed` (no refresh). `a_rotated_key_is_accepted_after_the_cooldown` and
+  `a_failed_refresh_keeps_the_previous_keys` pin behaviour that already held.
 
 ### Added
 - **A companion's gateway door can act as the HTTP client, under the evaluator** — the public API
