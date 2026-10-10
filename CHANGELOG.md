@@ -32,6 +32,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   extended to entry 22; `converge.py`'s path; `cluster_propose` as the canonical verb in the crate docs; the
   `test-overlay` help comment on its own target; the deck's rolling-upgrade note restated per 2.30.0.
 
+### Added
+- **The KV namespace table is a gate now, not a lint item.** `scripts/check-kv-namespaces.sh` enumerates every
+  KV prefix production code uses — slash-bearing `const`/`static` `&str` literals whatever their name, `format!`
+  key heads, and the first literal of a KV call (`set*`, `get`, `delete*`, `scan_*`, `subscribe*`, `kv_*`,
+  `make_gossip_update*`, `publish_*`, `strip_prefix`/`starts_with`; the set is named in the script's header) in
+  every library crate — and fails on one whose namespace (top segment; under `sys/`, the second too) has no row in
+  `src/lib.rs` § KV namespace ownership, unless `scripts/kv-namespaces-nonkeys.txt` declares it a non-key with a
+  reason (30 entries today: seam streams, slot and ring names, schema tags, knowledge subjects, git paths, relative
+  segments). A stale or reasonless entry fails too, and `--self-test` (in `make check` and CI) plants rowless
+  prefixes in a scratch copy and requires the gate to name each. The wiki lint had missed live prefixes five
+  times; the table gains the four it missed last (`sys/config/{param}`, `sys/govern/timing`, `sys/govern/fleet`,
+  `sys/govern/membership/{group}`, as PR #588 adds them). Seen failing first: the gate on the unfixed table names
+  `sys/config/` (`cluster_tuner.rs:26`) and `sys/govern/` (`membership_governor.rs:32`, `timing_governor.rs:38`,
+  `tuning_governor.rs:31`). **Not seen:** a prefix assembled from pieces, or a literal two lines below its call.
+- **A companion's gateway door can act as the HTTP client, under the evaluator** — the public API
+  `mycelium-reason`'s façade needed and nothing had: `ResolvedPrincipal` (the auth layer's resolved principal, read
+  from axum's `Extension` on a route merged with `with_http_routes`; fields crate-private, so it is never
+  constructed outside the auth layer), `ServiceHandle::rpc_call_as` (the gateway dispatch, carrying the client's
+  caller context), `GossipAgent::gateway_preflight` / `gateway_record_execution` (the preflight `/mcp`, `/a2a` and
+  `/gateway/llm/call` run, opaque `GatewayPreflight` / `GatewayRefusal`, inert without `tls`) and
+  `GatewayDispatchError` (`#[non_exhaustive]`). All under `gateway`; additive.
+
 ### Fixed
 - **The SDKs reach a gateway over TLS** (`mycelium-py` **0.2.9**, `mycelium-ts` **0.2.3**,
   `langgraph-checkpoint-mycelium` **0.3.2**). Every client built its base URL as `http://{host}:{port}` — eight
@@ -308,15 +330,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `with_no_keys_a_failed_fetch_is_retried_after_the_short_backoff` (still refused after the back-off),
   `keys_past_the_ttl_are_refreshed` (no refresh). `a_rotated_key_is_accepted_after_the_cooldown` and
   `a_failed_refresh_keeps_the_previous_keys` pin behaviour that already held.
-
-### Added
-- **A companion's gateway door can act as the HTTP client, under the evaluator** — the public API
-  `mycelium-reason`'s façade needed and nothing had: `ResolvedPrincipal` (the auth layer's resolved principal, read
-  from axum's `Extension` on a route merged with `with_http_routes`; fields crate-private, so it is never
-  constructed outside the auth layer), `ServiceHandle::rpc_call_as` (the gateway dispatch, carrying the client's
-  caller context), `GossipAgent::gateway_preflight` / `gateway_record_execution` (the preflight `/mcp`, `/a2a` and
-  `/gateway/llm/call` run, opaque `GatewayPreflight` / `GatewayRefusal`, inert without `tls`) and
-  `GatewayDispatchError` (`#[non_exhaustive]`). All under `gateway`; additive.
 
 ### Security
 - **A hosted WASM component's `mesh.emit` is confined.** The host forwarded any kind a component

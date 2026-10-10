@@ -67,18 +67,12 @@ For every wiki-page claim that cites code, confirm the code still says it. Minim
   `framing.rs`. `09-security.md` carried a stale `v10 "(current)"` / `v10↔v9` window through many
   passes because this check stopped at `building-on`/`faq` (ledger 2026-07-11).
 - **KV-namespace table** (`src/lib.rs` §KV namespace ownership — code canon, but it drifts
-  like a doc): grep the workspace for KV prefix writers
-  (`kv_ns::` constants in `mycelium-core/src/signal.rs`, `format!("…/` keys in `kv.set`/
-  `kv_set`/`publish_*` call sites, incl. companions) and confirm every live prefix has a
-  row. The 2026-07-07 lint found NINE missing (`svc/ log/ clog/ lock/ prompts/ skills/
-  installable/ comp/ wiki/`) — the front-door reserved list had inherited the same gap
-  because it was only ever diffed against this table, not against code. **Enumerate every
-  slash-bearing `&str` constant** in production code across all crates (`const X: &str = "seg/…"`,
-  whatever the constant's name — `_KEY`, `_PREFIX`, `_NS` alike) plus the `format!("seg/…")` keys at write
-  sites, and **classify each**: a table row, or a non-key (a replay-seam stream, a channel name, a schema tag such
-  as `ae/journal`, `knowledge/records`, `mycelium.*/1`). An unclassified constant is the finding — the 10-09 pass
-  counted only `kv_ns`/`consensus_ns` and missed four governor keys (`sys/config/`, `sys/govern/…`) that had no
-  row since June, the fifth miss in this area (ledger 2026-10-10).
+  like a doc): **the sweep is `scripts/check-kv-namespaces.sh`'s job now** (a `make check` + CI gate since
+  2026-10-10, after five lint misses — the 2026-07-07 lint found NINE missing, the 10-10 one four governor
+  keys). It enumerates every slash-bearing constant, `format!` key head and KV-call literal in production code
+  and fails on any with no row unless `scripts/kv-namespaces-nonkeys.txt` declares it a non-key. **The lint
+  only reviews that allow-list's reasons**: each entry must really be a non-key (a seam stream, slot or ring
+  name, schema tag, path) — an entry that is in fact a KV key is the finding; it needs a row instead.
 - **Endpoint/feature lists** (`docs/wiki/dev/operations.md`): spot-check against
   `src/agent/http.rs` routes and `Cargo.toml` features. **And every URL a runbook or guide chapter tells an
   operator to call** — `grep -rnoE '(GET|POST|DELETE|PUT) /[A-Za-z0-9_/{}%.:-]+' docs/operations docs/guide

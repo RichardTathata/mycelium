@@ -1,0 +1,56 @@
+# Slash-bearing literals in production code that are NOT KV keys — read by scripts/check-kv-namespaces.sh.
+#
+# One entry per line: `<literal head>  # <reason>`. An entry admits every enumerated literal that starts with
+# it. A reason is required, and an entry that admits nothing fails the gate as stale — so this list says what
+# the code needs today and nothing more. A literal that IS a KV key never belongs here: give it a row in
+# src/lib.rs § KV namespace ownership instead. The wiki lint reviews these reasons; it no longer does the sweep.
+#
+# Seeded 2026-10-10 from the gate's first enumeration (every entry checked against its call site).
+
+# ── replay-seam streams and channel names (mycelium_core::sim_seam — a name a recording keys on, not a key)
+gossip/shard          # framing.rs gossip_stream: the per-shard replay stream name
+mesh/emit/            # mesh_handle.rs: timer-seam stream, one per emitted kind
+mesh/stale/           # mesh_handle.rs: timer-seam stream, one per watched kind
+signal/handler        # signal.rs SIGNAL_CHAN: the per-handler signal channel's seam name
+wal/append            # persistence.rs WAL_CHAN: the WAL's bounded append channel's seam name
+writer/               # writer.rs STATE_REQ_CHAN and tasks.rs writer_stream: per-peer writer channel names
+kv-persist/           # kv_persist.rs: timer-seam stream, one per persisted key
+intent/               # agent/intent.rs: timer-seam stream, one per governor intent key
+opacity/              # agent/opacity.rs: timer-seam stream, one per opacity kind
+ae/journal            # agent/evidence_journal.rs STREAM: the evidence journal queue's seam stream (node-local, never gossiped)
+
+# ── consensus slot names (the key is consensus/{committed,ballot,decided,lease}/{slot}, which has rows)
+consistent/           # consensus_handle.rs + http.rs: the overlay-consistent KV write's slot
+leader/               # consensus_handle.rs + http.rs: the leader-election slot
+capauthz/             # agent/mod.rs: the cluster-proposed capability-authz policy's slot (sys/capauthz/ has its own row)
+
+# ── election ring names and governor actuator names (inputs to rendezvous / the control contract)
+blackboard/           # mycelium-blackboard lib.rs: the primary election's ring name (blackboard/{ns}.primary)
+boundary/             # agent/opacity.rs: the opacity governor's ControlSpec actuator name
+
+# ── signal / RPC kinds
+cap.invoke/           # mycelium-wasm-host runtime.rs cap_invoke_kind: the rpc_call kind for a component capability
+
+# ── schema and record-format tags
+mycelium.decision/    # decision.rs RECORD_SCHEMA: the decision-trace record schema id
+mycelium.rules/       # rule.rs: the rule-catalogue schema id
+mycelium.ae/          # agent/action_evaluator.rs: the evidence / reference record schema ids
+mycelium.guarantees/  # agent/guarantee.rs: the guarantee-report schema id
+mycelium.federation/  # federation*.rs: the descriptor / policy / call / catalogue signing-domain tags
+mycelium.design/      # wire_check.rs: the declaration JSON schema id
+
+# ── knowledge-layer subjects (identifiers a claim is filed under, held in the authorized store, not KV)
+agentfacts/           # mycelium-agentfacts knowledge.rs subject_for: a node's self-description subject
+release/              # knowledge/resolution.rs: a release subject, length-prefixed for domain separation
+
+# ── log stream names and audit targets (the key is log/{stream}/…, which has a row)
+reason/               # mycelium-reason trace.rs: the trace substream passed to append, and the audit target string
+
+# ── paths in a git repository (GitStore), not KV
+councils/             # mycelium-wiki git_store.rs: the council's subdirectory in the git tree
+refs/heads/           # mycelium-wiki git_store.rs: a git branch ref
+
+# ── relative segments matched after a row's prefix has been stripped
+pressure/             # mycelium-tuple-space http.rs: the tail of sys/tuple/{node}/{ns}/pressure/{stage}
+stage/                # mycelium-tuple-space http.rs: the tail of sys/tuple/{node}/{ns}/stage/{stage}/{metric}
+provision/            # agent/http.rs: the tail of agent/{node}/provision/{item}/error
