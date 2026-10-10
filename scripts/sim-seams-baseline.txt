@@ -42,7 +42,6 @@
 8 src/agent/lifecycle.rs
 3 src/agent/lock_service.rs
 2 src/agent/mod.rs
-2 src/agent/oidc.rs
 4 src/agent/opacity.rs
 1 src/agent/prompt.rs
 2 src/agent/replica_sync.rs

@@ -118,20 +118,60 @@ pub(crate) fn validate_token(
 
 // ── Runtime verifier: JWKS fetch + cache (gateway wiring) ─────────────────────
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-/// Re-fetch the IdP's JWKS at most this often (also re-fetched on an unknown
-/// `kid`, so key rotation is picked up without waiting out the TTL).
+use mycelium_core::sim_seam;
+
+/// Re-fetch the IdP's JWKS at most this often on the TTL path (an unknown `kid` can force an
+/// earlier refresh, bounded by [`JWKS_REFRESH_COOLDOWN`]).
 const JWKS_TTL: Duration = Duration::from_secs(3600);
 
+/// The shortest interval between two JWKS fetch **attempts** that are not TTL expiries: a refresh
+/// forced by an unknown `kid`, and a retry after a fetch that failed.
+///
+/// Without it, every bearer the gateway sees is offered to OIDC first, so an unauthenticated client
+/// that minted JWT headers with random `kid`s made the node issue one outbound request to the IdP per
+/// gateway request — a free amplifier aimed at someone else's identity provider. Thirty seconds is
+/// short against how IdPs rotate (a new key is published before it signs, typically hours or days
+/// ahead), so a genuine rotation is picked up by the first token signed under it at most one
+/// cooldown late, and long enough that the IdP sees at most two requests a minute from this node
+/// whatever the traffic.
+const JWKS_REFRESH_COOLDOWN: Duration = Duration::from_secs(30);
+
+/// The deadline on each discovery and JWKS request (the whole request: connect, send, body).
+///
+/// The fetch runs under the cache's write guard (single-flight), so a request with no deadline to
+/// an IdP that accepts and never answers would hold every verify — and every gateway handler
+/// awaiting one — indefinitely. Ten seconds is generous for a small JSON document from an IdP, and
+/// bounded: a handler waits at most this long for keys before the token is refused.
+const JWKS_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Default)]
 struct CachedKeys {
-    at:   Instant,
+    /// When the current `keys` were fetched; `None` until a fetch first succeeds.
+    fetched_at: Option<std::time::Instant>,
+    /// When a fetch was last attempted, whatever its outcome — the cooldown's reference point.
+    attempted_at: Option<std::time::Instant>,
+    /// Whether that attempt came back with no keys (unreachable, refused by egress, unparsable).
+    last_attempt_failed: bool,
     keys: Vec<(String, DecodingKey)>,
+}
+
+impl CachedKeys {
+    /// Keys fetched within the TTL.
+    fn fresh(&self) -> bool {
+        self.fetched_at.is_some_and(|at| sim_seam::mono_elapsed(&at) < JWKS_TTL)
+    }
+
+    fn knows(&self, kid: &str) -> bool {
+        self.keys.iter().any(|(k, _)| k == kid)
+    }
 }
 
 /// Holds the OIDC config + a cached JWKS, and validates tokens against it. One
 /// per gateway; `verify` is cheap on the hot path (a read-lock + cached keys),
-/// fetching only on cold cache, TTL expiry, or an unknown `kid`.
+/// fetching only on cold cache, TTL expiry, or an unknown `kid` — single-flight, the forced and
+/// retried fetches at most once per [`JWKS_REFRESH_COOLDOWN`], each within [`JWKS_FETCH_TIMEOUT`].
 pub(crate) struct OidcVerifier {
     cfg:    OidcConfig,
     http:   reqwest::Client,
@@ -140,15 +180,31 @@ pub(crate) struct OidcVerifier {
     /// verifier then holds no keys and refuses every token. `start()` refuses the contradiction
     /// first, so this is the runtime's belt to that brace.
     egress: crate::config::EgressPolicy,
-    cache:  tokio::sync::RwLock<Option<CachedKeys>>,
+    /// Lock-order row 17 — the one `tokio::sync` lock whose write guard is held across I/O: the
+    /// JWKS fetch runs under it, so concurrent verifies needing a refresh wait for one fetch rather
+    /// than each issuing their own.
+    cache:  tokio::sync::RwLock<CachedKeys>,
+    refresh_cooldown: Duration,
 }
 
 impl OidcVerifier {
     pub(crate) fn new(cfg: OidcConfig, egress: crate::config::EgressPolicy) -> Self {
+        Self::with_limits(cfg, egress, JWKS_REFRESH_COOLDOWN, JWKS_FETCH_TIMEOUT)
+    }
+
+    /// `new` with the cooldown and the request deadline given — the tests' door to both.
+    fn with_limits(
+        cfg: OidcConfig,
+        egress: crate::config::EgressPolicy,
+        refresh_cooldown: Duration,
+        fetch_timeout: Duration,
+    ) -> Self {
         // Discovery and JWKS are gated by URL below; every redirect is re-checked as well, or keys
         // served by a denied host would be trusted (realignment repairs R3).
-        let http = crate::agent::egress_client::build_or_none(crate::agent::egress_client::with_policy(&egress));
-        Self { cfg, http, egress, cache: tokio::sync::RwLock::new(None) }
+        let http = crate::agent::egress_client::build_or_none(
+            crate::agent::egress_client::with_policy(&egress).timeout(fetch_timeout),
+        );
+        Self { cfg, http, egress, cache: tokio::sync::RwLock::new(CachedKeys::default()), refresh_cooldown }
     }
 
     /// The IdP issuer every accepted JWT was validated against — the authority that qualifies an
@@ -165,35 +221,47 @@ impl OidcVerifier {
             return None;
         }
         let kid = header.kid.clone()?;
-
-        let mut keys = self.cached_keys(false).await;
-        if !keys.iter().any(|(k, _)| *k == kid) {
-            // Unknown kid — the IdP may have rotated; force one refresh.
-            keys = self.cached_keys(true).await;
-        }
+        let keys = self.keys_for(&kid).await;
         validate_token(&self.cfg, &keys, token).ok()
     }
 
-    /// Return cached keys, fetching when cold, stale (TTL), or `force`.
-    async fn cached_keys(&self, force: bool) -> Vec<(String, DecodingKey)> {
-        if !force {
+    /// The key set to validate a token signed under `kid` against.
+    ///
+    /// Hot path: fresh keys that know `kid`, under the read guard. Otherwise the write guard is
+    /// taken and **held across the fetch** (single-flight), and the state is re-read under it, so a
+    /// caller that queued behind a refresh uses that refresh's keys instead of fetching again. A
+    /// fetch then happens when the keys are cold or past the TTL, or when `kid` is unknown — but the
+    /// last case, and a retry after a failed fetch, only once per cooldown: inside it the current
+    /// keys are returned as they are and an unknown `kid` is refused by `validate_token`. A failed
+    /// fetch keeps the previous good set (no flapping to empty).
+    async fn keys_for(&self, kid: &str) -> Vec<(String, DecodingKey)> {
+        {
             let guard = self.cache.read().await;
-            if let Some(c) = guard.as_ref()
-                && c.at.elapsed() < JWKS_TTL
-            {
-                return c.keys.clone();
+            if guard.fresh() && guard.knows(kid) {
+                return guard.keys.clone();
             }
         }
-        let fetched = self.fetch_keys().await;
         let mut guard = self.cache.write().await;
-        // Keep a previous good set if the refresh failed (avoid flapping to empty).
-        if fetched.is_empty()
-            && let Some(c) = guard.as_ref()
-        {
-            return c.keys.clone();
+        let fresh = guard.fresh();
+        if fresh && guard.knows(kid) {
+            return guard.keys.clone(); // a refresh we queued behind brought the key
         }
-        *guard = Some(CachedKeys { at: Instant::now(), keys: fetched.clone() });
-        fetched
+        let in_cooldown = guard.attempted_at.is_some_and(|at| sim_seam::mono_elapsed(&at) < self.refresh_cooldown);
+        // Fresh keys without `kid` → a forced refresh; stale keys whose last attempt failed → a retry.
+        // Both wait out the cooldown. A first fetch, and the first attempt past the TTL, do not.
+        let retry_after_failure = !fresh && guard.last_attempt_failed;
+        if in_cooldown && (fresh || retry_after_failure) {
+            return guard.keys.clone();
+        }
+        let now = sim_seam::mono_instant();
+        guard.attempted_at = Some(now);
+        let fetched = self.fetch_keys().await;
+        guard.last_attempt_failed = fetched.is_empty();
+        if !fetched.is_empty() {
+            guard.fetched_at = Some(now);
+            guard.keys = fetched;
+        }
+        guard.keys.clone()
     }
 
     /// Resolve the JWKS URI (explicit, or via `.well-known/openid-configuration`),
@@ -411,5 +479,104 @@ mod tests {
         let v = OidcVerifier::new(c, crate::config::EgressPolicy { allow_hosts: vec!["localhost".into()] });
         assert!(v.fetch_keys().await.is_empty());
         assert_eq!(hits.load(Ordering::SeqCst), 0, "the denied host is never contacted");
+    }
+
+    // ── JWKS refresh: single-flight, a bounded forced refresh, a fetch timeout ──────────────────
+
+    const JWKS_BODY: &str = include_str!("../../tests/fixtures/oidc_jwks.json");
+
+    /// A config whose JWKS is the counting stub on `port` (explicit `jwks_uri`, so no discovery).
+    fn stub_cfg(port: u16) -> OidcConfig {
+        let mut c = cfg();
+        c.jwks_uri = Some(format!("http://127.0.0.1:{port}/jwks"));
+        c
+    }
+
+    fn open_egress() -> crate::config::EgressPolicy {
+        crate::config::EgressPolicy { allow_hosts: Vec::new() }
+    }
+
+    /// **Single-flight (lock-order row 17).** Sixteen concurrent verifies of a token whose `kid` the
+    /// IdP does not serve, on a cold cache: before the fix each one fetched (cold), then each one
+    /// fetched again (forced by the unknown `kid`) — up to 32 requests to the IdP for one burst. The
+    /// write guard is now held across the fetch and the forced refresh is bounded by the cooldown,
+    /// so the burst costs the IdP exactly one request.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_verifies_with_an_unknown_kid_fetch_the_jwks_once() {
+        use std::sync::atomic::Ordering;
+        let (port, hits) = crate::test_util::spawn_counting_listener(JWKS_BODY).await;
+        let v = std::sync::Arc::new(OidcVerifier::new(stub_cfg(port), open_egress()));
+        let token = mint(valid_claims(), Algorithm::RS256, "rotated-away", TEST_PRIV);
+        let mut set = tokio::task::JoinSet::new();
+        for _ in 0..16 {
+            let (v, token) = (std::sync::Arc::clone(&v), token.clone());
+            set.spawn(async move { v.verify(&token).await });
+        }
+        while let Some(r) = set.join_next().await {
+            assert!(r.expect("verify task").is_none(), "an unknown kid is refused");
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "one burst, one JWKS fetch");
+        // The keys that one fetch stored still serve a known kid without another fetch.
+        assert!(v.verify(&mint(valid_claims(), Algorithm::RS256, "test-kid", TEST_PRIV)).await.is_some());
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "a known kid inside the TTL is served from the cache");
+    }
+
+    /// **The forced refresh is bounded.** An unauthenticated client choosing random `kid`s used to
+    /// force one outbound JWKS fetch per gateway request. Inside the cooldown an unknown `kid` is now
+    /// refused without a fetch; once the cooldown has passed one more forced refresh is allowed (key
+    /// rotation is still picked up).
+    #[tokio::test]
+    async fn an_unknown_kid_forces_at_most_one_refresh_per_cooldown() {
+        use std::sync::atomic::Ordering;
+        let (port, hits) = crate::test_util::spawn_counting_listener(JWKS_BODY).await;
+        let cooldown = Duration::from_millis(300);
+        let v = OidcVerifier::with_limits(stub_cfg(port), open_egress(), cooldown, JWKS_FETCH_TIMEOUT);
+        // Warm the cache with a known kid: one fetch.
+        assert!(v.verify(&mint(valid_claims(), Algorithm::RS256, "test-kid", TEST_PRIV)).await.is_some());
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        // Unknown kids inside the cooldown that began with that fetch: refused, no fetch.
+        for kid in ["random-1", "random-2", "random-3"] {
+            assert!(v.verify(&mint(valid_claims(), Algorithm::RS256, kid, TEST_PRIV)).await.is_none());
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "no forced refresh inside the cooldown");
+        // After the cooldown: exactly one forced refresh, then the cooldown applies again.
+        tokio::time::sleep(cooldown + Duration::from_millis(100)).await;
+        assert!(v.verify(&mint(valid_claims(), Algorithm::RS256, "random-4", TEST_PRIV)).await.is_none());
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "one forced refresh once the cooldown has passed");
+        assert!(v.verify(&mint(valid_claims(), Algorithm::RS256, "random-5", TEST_PRIV)).await.is_none());
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "and the next unknown kid waits out a new cooldown");
+    }
+
+    /// **The fetch has a deadline.** The client set no timeout, so an IdP that accepts the connection
+    /// and never answers held the verify — and the gateway handler awaiting it — indefinitely.
+    #[tokio::test]
+    async fn a_jwks_endpoint_that_never_answers_does_not_hold_verify() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock); // accept, read nothing, answer nothing
+            }
+        });
+        let v = OidcVerifier::with_limits(stub_cfg(port), open_egress(), Duration::from_secs(30), Duration::from_millis(500));
+        let token = mint(valid_claims(), Algorithm::RS256, "test-kid", TEST_PRIV);
+        let out = tokio::time::timeout(Duration::from_secs(5), v.verify(&token)).await;
+        assert!(matches!(out, Ok(None)), "verify returns (refusing) within the fetch timeout, got {out:?}");
+    }
+
+    /// **A failed fetch is retried on the cooldown's spacing**, not per request: an IdP serving
+    /// garbage (or down) used to be asked twice per verify — the cold fetch, then the refresh the
+    /// resulting unknown `kid` forced.
+    #[tokio::test]
+    async fn a_failed_jwks_fetch_is_not_retried_inside_the_cooldown() {
+        use std::sync::atomic::Ordering;
+        let (port, hits) = crate::test_util::spawn_counting_listener("not a jwks").await;
+        let v = OidcVerifier::new(stub_cfg(port), open_egress());
+        let token = mint(valid_claims(), Algorithm::RS256, "test-kid", TEST_PRIV);
+        for _ in 0..3 {
+            assert!(v.verify(&token).await.is_none(), "no keys, every token refused");
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "one attempt, then the cooldown");
     }
 }

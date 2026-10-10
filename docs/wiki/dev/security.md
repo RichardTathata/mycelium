@@ -74,8 +74,9 @@ Four layers, all additive/opt-in (`src/agent/rbac.rs`, gateway middleware in
 
 **WS4 OIDC SSO** (`src/agent/oidc.rs`): JWT validated against IdP JWKS, groups→scopes into
 the same gate. Alg-confusion-safe (asymmetric-only allowlist *before* key selection);
-iss/aud/exp checked; JWKS cached with refresh-on-unknown-kid. Human-operator auth, not agent
-identity.
+iss/aud/exp checked; JWKS cached with refresh-on-unknown-kid — single-flight under lock-order
+row 17, a forced refresh at most once per 30 s, each fetch timed out at 10 s (2026-10-10).
+Human-operator auth, not agent identity.
 
 ## Every signature the substrate verifies is domain-tagged (2026-10-09, 2.32.0)
 
