@@ -236,7 +236,9 @@ The node-local journals (`DurableEpochs`, the evidence journal, the rights ledge
 rules in their own `open`: one owner per file — a second opener gets `WouldBlock` naming the path, so give
 each its own path — and **a failed append poisons the writer**, which refuses every later append
 (`the journal is poisoned by an earlier failed append …`) until the journal is reopened, i.e. until the
-node restarts after the disk is fixed.
+node restarts after the disk is fixed. The companion WALs (`mycelium-tuple-space`, `mycelium-blackboard`)
+follow both rules too, recovering from the poison by a compaction rather than a restart, and refuse an
+open over a corrupt record with data after it (`operations/companions.md`).
 
 ### Choosing a sync mode with the receipt contract in hand
 

@@ -73,6 +73,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `test-overlay` help comment on its own target; the deck's rolling-upgrade note restated per 2.30.0.
 
 ### Added
+- **`mycelium::OwnershipLock`** — the core's exclusive-ownership lock on `<file>.lock` (held by the KV WAL and the
+  node-local journals), re-exported so a companion's own log refuses a second owner the same way. The tuple space
+  and the blackboard take it on their WALs (row C, above). Additive.
 - **The KV namespace table is a gate now, not a lint item.** `scripts/check-kv-namespaces.sh` enumerates every
   KV prefix production code uses — slash-bearing `const`/`static` `&str` literals whatever their name, `format!`
   key heads, and the first literal of a KV call (`set*`, `get`, `delete*`, `scan_*`, `subscribe*`, `kv_*`,
@@ -491,6 +494,29 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `with_no_keys_a_failed_fetch_is_retried_after_the_short_backoff` (still refused after the back-off),
   `keys_past_the_ttl_are_refreshed` (no refresh). `a_rotated_key_is_accepted_after_the_cooldown` and
   `a_failed_refresh_keeps_the_previous_keys` pin behaviour that already held.
+- **The companion WALs (tuple space, blackboard): a failed append no longer strands later records, a corrupt record
+  refuses the open, one owner per file, and compaction survives a power loss** (post-360 hardening row C). Both
+  writers carried on after a failed `write_all`, so the next acknowledged record landed behind the torn frame, and the
+  next open read the torn frame's length over it, called the lot a torn tail and **truncated every later record
+  silently** — and any undecodable record, torn or not, ended replay the same way. Now a failed append **poisons the
+  writer** (every later append refused by name) until a compaction rewrites the log from the live state — the
+  maintenance tick asks for one at once — or a reopen truncates the torn tail; at open, a frame the file ends inside
+  is still a crash's torn tail and is truncated (now synced, file and directory), while a whole frame that does not
+  decode, or bytes that are no record, **with data after it refuses the open** (`InvalidData`, naming the file and
+  the byte; the file untouched). Each WAL takes the core's `OwnershipLock` on `<wal>.lock`, so a second store on one
+  path is refused with `WouldBlock`. Compaction installs its file in the core snapshot's order — temp file synced,
+  renamed, **directory synced**: the tuple space skipped the directory sync, the blackboard both syncs
+  (`std::fs::write` + `rename`). Not done: a length prefix corrupted to run past the end of the file still reads as
+  a torn tail (the format has no checksum), and there is no `on_unreadable = "quarantine"` counterpart — move the
+  file aside to start empty. Seen failing first, in both crates: `a_failed_append_never_strands_a_later_acknowledged_put`
+  / `_post` (`left: [0]`, `right: [0, 2]` — the put after the failure was acknowledged and gone at reopen),
+  `a_corrupt_middle_record_refuses_the_open_and_leaves_the_file` (the open succeeded), `a_second_owner_of_the_wal_is_refused`
+  (the second open succeeded), `compaction_syncs_the_directory_after_the_rename` (`no dir.sync in ["tmp.write",
+  "tmp.sync", "rename"]`) / `compaction_syncs_the_temp_file_and_the_directory` (`no tmp.sync in ["tmp.write",
+  "rename"]`). **Upgrade notes:** a WAL holding a corrupt record before its last now refuses `TupleStore`/`BoardStore`
+  construction — so the node does not become primary — where it used to start with the later records gone; a second
+  store on one `wal_path` (in one process or two) is refused; a `<wal_path>.lock` file appears beside each WAL (do not
+  delete it while a node runs — the lock is the OS's and goes with its holder).
 
 ### Security
 - **An open gateway is refused off loopback** (plan `post-360-hardening.md` row P1). With no credential model the

@@ -402,6 +402,9 @@ pub use mesh_manifest::{
 };
 pub use config::{DomainProfile, EgressPolicy, PROFILE_NAMES, GatewayCallerProfile, GatewayNamedToken, GatewayToken, GatewayTlsConfig, GossipConfig, GroupTopologyPolicy, PersistenceConfig, SyncMode, TlsConfig, TopologyEnforcement};
 pub use persistence::DataAtRestCipher;
+/// Exclusive ownership of a persistence file (`<file>.lock`), the lock the KV WAL and the node-local
+/// journal hold — re-exported so a companion's own log is refused to a second owner the same way.
+pub use persistence::OwnershipLock;
 pub use locality::LocalityPreference;
 #[cfg(feature = "consensus")]
 pub use consensus::{ConsensusConfig, ConsensusListenerHandle, ConsensusResult, GroupQuorum, consensus_kind, consensus_ns};

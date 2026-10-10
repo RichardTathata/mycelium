@@ -1056,6 +1056,11 @@ impl Record {
 struct WalInner {
     file: File,
     path: PathBuf,
+    /// `Some(reason)` after a failed append: part of a frame may be on disk, so the file's end is
+    /// unknown and nothing may be appended behind it (row C, mirroring the core WAL's `WriterState`).
+    /// Every append is refused by name until a compaction rewrites the file from the live state —
+    /// or a reopen truncates the torn tail.
+    poison: Option<String>,
     file_len: u64,
     ops_since_sync: u64,
     /// Live put-side records (Put + the new half of Complete).
@@ -1071,6 +1076,24 @@ pub(crate) struct WalWriter {
     inner: Mutex<WalInner>,
     checkpoint_every: u64,
     file_len_shadow: AtomicU64,
+    /// One owner per WAL file: the core's lock on `<wal>.lock`, held for the writer's lifetime.
+    _lock: mycelium::OwnershipLock,
+    /// Test seam: when set, the next append writes part of its frame and fails — the shape a full
+    /// disk or a pulled cable produces, which the production path cannot be made to produce on demand.
+    #[cfg(test)]
+    fault: std::sync::atomic::AtomicBool,
+}
+
+// Test seam: the storage steps compaction takes, in order, on this thread (compaction is synchronous,
+// so the test that runs it reads its own trace). Production records nothing.
+#[cfg(test)]
+thread_local! {
+    static FS_TRACE: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn fs_trace(_op: &'static str) {
+    #[cfg(test)]
+    FS_TRACE.with(|t| t.borrow_mut().push(_op));
 }
 
 impl WalWriter {
@@ -1087,6 +1110,9 @@ impl WalWriter {
         {
             std::fs::create_dir_all(parent)?;
         }
+        // Ownership first, repair second, writes last — the core journal's order. A second store on
+        // this path, in this process or another, is refused with `WouldBlock` naming the file.
+        let lock = mycelium::OwnershipLock::acquire(path)?;
         let mut file = OpenOptions::new()
             .read(true)
             .create(true)
@@ -1145,9 +1171,23 @@ impl WalWriter {
         let mut acked = 0u64;
         let mut offset = WAL_HEADER_LEN as usize;
         while offset < data.len() {
-            match Record::decode(&data[offset..]) {
-                None => break, // truncated tail from a mid-append crash
-                Some((rec, consumed)) => {
+            match scan_frame(&data[offset..]) {
+                // The file ends inside this frame: a crash mid-append. Nothing in it was acknowledged
+                // (a failed append poisons the writer, so nothing lands behind it); truncated below.
+                Frame::Torn => break,
+                Frame::Corrupt => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "{} holds a corrupt record at byte {offset} with data after it; refusing to \
+                             open (the records after it cannot be trusted, and truncating would discard \
+                             them silently). The file is untouched: move it aside to start empty, or \
+                             restore it",
+                            path.display()
+                        ),
+                    ));
+                }
+                Frame::Record(rec, consumed) => {
                     offset += consumed;
                     match rec {
                         Record::Put { id, stage, payload, key } => {
@@ -1176,8 +1216,16 @@ impl WalWriter {
             }
         }
         if offset < data.len() {
-            // Drop the corrupt/truncated tail so future appends start clean.
+            // Drop the torn tail so the next append lands where every reader will find it, and make
+            // the truncation as durable as the file (a crash must not resurrect the torn bytes).
             file.set_len(offset as u64)?;
+            file.sync_all()?;
+            fsync_parent(path)?;
+            tracing::warn!(
+                wal = %path.display(),
+                dropped_bytes = data.len() - offset,
+                "tuple-space: truncated a torn final record left by a crash mid-append"
+            );
         }
         let max_id = items.keys().next_back().copied();
         let live: Vec<(u64, Arc<str>, Bytes, Option<Arc<str>>)> = items
@@ -1190,6 +1238,7 @@ impl WalWriter {
             inner: Mutex::new(WalInner {
                 file,
                 path: path.to_path_buf(),
+                poison: None,
                 file_len,
                 ops_since_sync: 0,
                 total,
@@ -1198,6 +1247,9 @@ impl WalWriter {
             }),
             checkpoint_every,
             file_len_shadow: AtomicU64::new(file_len),
+            _lock: lock,
+            #[cfg(test)]
+            fault: std::sync::atomic::AtomicBool::new(false),
         };
         Ok((writer, live, max_id))
     }
@@ -1206,7 +1258,31 @@ impl WalWriter {
         let mut buf = Vec::with_capacity(64);
         rec.encode(&mut buf);
         let mut g = self.inner.lock();
-        g.file.write_all(&buf).map_err(TupleError::Io)?;
+        if let Some(reason) = &g.poison {
+            return Err(TupleError::Io(io::Error::other(format!(
+                "the tuple-space WAL refuses appends after a failed write ({reason}) until a compaction \
+                 rewrites it or a reopen truncates the torn tail"
+            ))));
+        }
+        #[cfg(test)]
+        let written = if self.fault.swap(false, Ordering::SeqCst) {
+            let _ = g.file.write_all(&buf[..buf.len().min(5)]);
+            Err(io::Error::other("injected write failure after a partial frame"))
+        } else {
+            g.file.write_all(&buf)
+        };
+        #[cfg(not(test))]
+        let written = g.file.write_all(&buf);
+        if let Err(e) = written {
+            // Part of the frame may be on disk; nothing may follow it.
+            tracing::error!(
+                error = %e,
+                "tuple-space: a WAL append failed; every later append is refused until a compaction \
+                 rewrites the log (the next maintenance tick tries one)"
+            );
+            g.poison = Some(e.to_string());
+            return Err(TupleError::Io(e));
+        }
         g.file_len += buf.len() as u64;
         g.ops_since_sync += 1;
         if matches!(rec, Record::Put { .. } | Record::Complete { .. }) {
@@ -1222,7 +1298,8 @@ impl WalWriter {
 
     fn wants_compaction(&self) -> bool {
         let g = self.inner.lock();
-        g.total > 0 && g.acked * 2 > g.total
+        // A poisoned writer is repaired by the rewrite, so it always wants one.
+        g.poison.is_some() || (g.total > 0 && g.acked * 2 > g.total)
     }
 
     fn file_len(&self) -> u64 {
@@ -1260,8 +1337,15 @@ impl WalWriter {
             rec.encode(&mut buf);
         }
         tmp.write_all(&buf)?;
+        fs_trace("tmp.write");
         tmp.sync_data()?;
+        fs_trace("tmp.sync");
         std::fs::rename(&tmp_path, &g.path)?;
+        fs_trace("rename");
+        // The rename is durable only once the directory is: without this a power loss can bring back
+        // the old log — the core snapshot's install order (`sync_data → rename → fsync_dir`).
+        fsync_parent(&g.path)?;
+        fs_trace("dir.sync");
         let file = OpenOptions::new().read(true).append(true).open(&g.path)?;
         g.file = file;
         g.file_len = buf.len() as u64;
@@ -1269,6 +1353,10 @@ impl WalWriter {
         g.total = total;
         g.acked = 0;
         g.epoch += 1;
+        // The torn frame went with the old file; appends resume behind the rewritten log.
+        if let Some(reason) = g.poison.take() {
+            tracing::info!(%reason, "tuple-space: a compaction rewrote the WAL after a failed append; appends resume");
+        }
         self.file_len_shadow.store(g.file_len, Ordering::Relaxed);
         Ok(())
     }
@@ -1347,6 +1435,51 @@ impl WalWriter {
             done: next >= head,
         })
     }
+}
+
+/// What a WAL image holds at a record boundary — the difference between a crash and corruption
+/// (row C, after the core's `WalEnd`).
+enum Frame {
+    /// A whole record, and the bytes it took.
+    Record(Record, usize),
+    /// The image ends inside this record: a crash mid-append. Everything before it is good.
+    Torn,
+    /// A record that is all there and does not decode, or bytes that are not a record at all, with
+    /// data after them. Nothing after it can be trusted — and nothing after it may be truncated away.
+    Corrupt,
+}
+
+fn scan_frame(data: &[u8]) -> Frame {
+    if let Some((rec, n)) = Record::decode(data) {
+        return Frame::Record(rec, n);
+    }
+    if !(REC_PUT..=REC_COMPLETE_KEYED).contains(&data[0]) {
+        // Not the start of any record this build writes. Zeros only (preallocation after a crash)
+        // read as a torn tail, as in the core; anything else is corruption.
+        return if data.iter().any(|b| *b != 0) { Frame::Corrupt } else { Frame::Torn };
+    }
+    if data.len() < 5 {
+        return Frame::Torn;
+    }
+    let body_len = u32::from_le_bytes(data[1..5].try_into().expect("four length bytes")) as usize;
+    // A length the image cannot supply is a torn tail; a whole body that does not decode is not.
+    // What this cannot see: a length prefix corrupted to run past the end of the file reads as torn
+    // (there is no checksum), which is why a failed append poisons the writer rather than relying
+    // on this scan.
+    if body_len.saturating_add(5) > data.len() { Frame::Torn } else { Frame::Corrupt }
+}
+
+/// Fsync the directory holding `path`, so a rename or a truncation survives a power loss the way
+/// the file's bytes do. Honoured by ext4 / XFS / btrfs; a no-op on non-Unix platforms.
+fn fsync_parent(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        let parent = if parent.as_os_str().is_empty() { Path::new(".") } else { parent };
+        File::open(parent)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 /// Decodes a raw record stream (as served by `wal_read_chunk`) back into
@@ -1945,6 +2078,89 @@ mod tests {
             let store = TupleStore::persistent(&path, 10_000, 500).unwrap();
             assert_eq!(store.depth(Some("s"))[0].depth, 6);
         }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Row C (post-360 hardening): a failed append leaves part of a frame on disk. The writer used
+    /// to carry on, so the next acknowledged put landed *behind* the torn frame, and the next open
+    /// read the torn frame's length over it, called the lot a torn tail and truncated it — an
+    /// acknowledged put silently gone. Every put that returned `Ok` must survive a reopen.
+    #[tokio::test]
+    async fn a_failed_append_never_strands_a_later_acknowledged_put() {
+        let path = temp_wal("failed-append");
+        let mut acked = Vec::new();
+        {
+            let store = TupleStore::persistent(&path, 1, 500).unwrap();
+            acked.push(store.put("s", b("before")).unwrap());
+            store.wal.as_ref().unwrap().fault.store(true, Ordering::SeqCst);
+            assert!(store.put("s", Bytes::from(vec![7u8; 200])).is_err(), "the injected failure is reported");
+            // After the failure, a put either is refused or survives the reopen — never both Ok and lost.
+            if let Ok(id) = store.put("s", b("after")) {
+                acked.push(id);
+            }
+        }
+        let store = TupleStore::persistent(&path, 1, 500)
+            .expect("a torn final frame is a crash's signature: truncated, not refused");
+        let mut got = Vec::new();
+        while let Ok((id, _)) = store.take("s", Duration::from_millis(20)).await {
+            got.push(id);
+        }
+        assert_eq!(got, acked, "every acknowledged put survives the reopen");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Row C: a complete frame that does not decode, with records after it, is corruption — not a
+    /// crash. The open used to stop there and truncate, discarding every later record silently. It
+    /// must refuse by name and leave the file untouched.
+    #[tokio::test]
+    async fn a_corrupt_middle_record_refuses_the_open_and_leaves_the_file() {
+        let path = temp_wal("corrupt-middle");
+        {
+            let store = TupleStore::persistent(&path, 1, 500).unwrap();
+            store.put("s", b("first")).unwrap();
+        }
+        let mut bytes = std::fs::read(&path).unwrap();
+        // A whole frame of an unknown kind, then a good record after it.
+        bytes.push(99);
+        bytes.extend_from_slice(&8u32.to_le_bytes());
+        bytes.extend_from_slice(&[0xAB; 8]);
+        Record::Put { id: 1, stage: Arc::from("s"), payload: b("second"), key: None }.encode(&mut bytes);
+        std::fs::write(&path, &bytes).unwrap();
+        let err = TupleStore::persistent(&path, 1, 500).err().expect("a corrupt middle record refuses the open");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains(&path.display().to_string()), "the refusal names the file: {err}");
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "a refused open leaves the file as it was");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Row C: one owner per WAL file. Two stores on one path used to replay, append and compact the
+    /// same file, each over the other.
+    #[tokio::test]
+    async fn a_second_owner_of_the_wal_is_refused() {
+        let path = temp_wal("second-owner");
+        let first = TupleStore::persistent(&path, 1, 500).unwrap();
+        let err = TupleStore::persistent(&path, 1, 500).err().expect("a second owner is refused");
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock, "{err}");
+        drop(first);
+        TupleStore::persistent(&path, 1, 500).expect("the lock is released with its owner");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Row C: compaction installs its file the way the core installs a snapshot — the temp file's
+    /// bytes synced, renamed into place, then the **directory** synced, without which the rename
+    /// (and so the compaction) may not survive a power loss.
+    #[tokio::test]
+    async fn compaction_syncs_the_directory_after_the_rename() {
+        let path = temp_wal("compact-durable");
+        let store = TupleStore::persistent(&path, 1, 500).unwrap();
+        store.put("s", b("x")).unwrap();
+        FS_TRACE.with(|t| t.borrow_mut().clear());
+        store.compact_now().unwrap();
+        let trace = FS_TRACE.with(|t| t.borrow().clone());
+        let pos = |op: &str| trace.iter().position(|o| *o == op).unwrap_or_else(|| panic!("no {op} in {trace:?}"));
+        assert!(pos("tmp.write") < pos("tmp.sync"), "{trace:?}");
+        assert!(pos("tmp.sync") < pos("rename"), "{trace:?}");
+        assert!(pos("rename") < pos("dir.sync"), "the directory sync makes the rename durable: {trace:?}");
         let _ = std::fs::remove_file(&path);
     }
 

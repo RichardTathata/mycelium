@@ -590,6 +590,93 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// Row C (post-360 hardening): a failed append leaves part of a frame on disk. The writer used
+    /// to carry on, so the next acknowledged post landed *behind* the torn frame, and the next open
+    /// read the torn frame's length over it, called the lot a torn tail and truncated it — an
+    /// acknowledged post silently gone. Every post that returned `Ok` must survive a reopen.
+    #[test]
+    fn a_failed_append_never_strands_a_later_acknowledged_post() {
+        let path = temp_wal("failed-append");
+        let mut acked = Vec::new();
+        {
+            let store = BoardStore::persistent(&path, 1).unwrap();
+            acked.push(store.post(surplus("1", "1.0"), Bytes::from("before")).unwrap());
+            store.wal.as_ref().unwrap().fault.store(true, Ordering::SeqCst);
+            assert!(store.post(surplus("2", "2.0"), Bytes::from(vec![7u8; 200])).is_err(), "the injected failure is reported");
+            // After the failure, a post either is refused or survives the reopen — never both Ok and lost.
+            if let Ok(id) = store.post(surplus("3", "3.0"), Bytes::from("after")) {
+                acked.push(id);
+            }
+        }
+        let store = BoardStore::persistent(&path, 1)
+            .expect("a torn final frame is a crash's signature: truncated, not refused");
+        let got: Vec<u64> = store.read(&Predicate::new()).iter().map(|f| f.id).collect();
+        assert_eq!(got, acked, "every acknowledged post survives the reopen");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Row C: a complete frame that does not decode, with records after it, is corruption — not a
+    /// crash. The open used to stop there and truncate, discarding every later record silently. It
+    /// must refuse by name and leave the file untouched.
+    #[test]
+    fn a_corrupt_middle_record_refuses_the_open_and_leaves_the_file() {
+        let path = temp_wal("corrupt-middle");
+        {
+            let store = BoardStore::persistent(&path, 1).unwrap();
+            store.post(surplus("1", "1.0"), Bytes::from("first")).unwrap();
+        }
+        let mut bytes = std::fs::read(&path).unwrap();
+        // A whole frame of an unknown kind, then a good record after it.
+        bytes.push(99);
+        bytes.extend_from_slice(&8u32.to_le_bytes());
+        bytes.extend_from_slice(&[0xAB; 8]);
+        WalRecord::Post { id: 1, attributes: surplus("2", "2.0"), payload: Bytes::from("second") }.encode(&mut bytes);
+        std::fs::write(&path, &bytes).unwrap();
+        let err = match BoardStore::persistent(&path, 1) {
+            Err(BlackboardError::Io(e)) => e,
+            Err(other) => panic!("expected an io refusal, got {other}"),
+            Ok(_) => panic!("a corrupt middle record refuses the open"),
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains(&path.display().to_string()), "the refusal names the file: {err}");
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "a refused open leaves the file as it was");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Row C: one owner per WAL file. Two boards on one path used to replay, append and compact the
+    /// same file, each over the other.
+    #[test]
+    fn a_second_owner_of_the_wal_is_refused() {
+        let path = temp_wal("second-owner");
+        let first = BoardStore::persistent(&path, 1).unwrap();
+        match BoardStore::persistent(&path, 1) {
+            Err(BlackboardError::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::WouldBlock, "{e}"),
+            Err(other) => panic!("expected an io refusal, got {other}"),
+            Ok(_) => panic!("a second owner is refused"),
+        }
+        drop(first);
+        BoardStore::persistent(&path, 1).expect("the lock is released with its owner");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Row C: compaction installs its file the way the core installs a snapshot — the temp file's
+    /// bytes synced, renamed into place, then the **directory** synced, without which the rename
+    /// (and so the compaction) may not survive a power loss.
+    #[test]
+    fn compaction_syncs_the_temp_file_and_the_directory() {
+        let path = temp_wal("compact-durable");
+        let store = BoardStore::persistent(&path, 1).unwrap();
+        store.post(surplus("1", "1.0"), Bytes::from("x")).unwrap();
+        crate::wal::FS_TRACE.with(|t| t.borrow_mut().clear());
+        store.compact().unwrap();
+        let trace = crate::wal::FS_TRACE.with(|t| t.borrow().clone());
+        let pos = |op: &str| trace.iter().position(|o| *o == op).unwrap_or_else(|| panic!("no {op} in {trace:?}"));
+        assert!(pos("tmp.write") < pos("tmp.sync"), "{trace:?}");
+        assert!(pos("tmp.sync") < pos("rename"), "{trace:?}");
+        assert!(pos("rename") < pos("dir.sync"), "the directory sync makes the rename durable: {trace:?}");
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn refuses_a_newer_wal_format() {
         // A future-version header must be refused, not silently truncated.
