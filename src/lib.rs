@@ -110,7 +110,10 @@
 //! | `consensus/committed/{slot}`        | Consensus — committed slot state                             |
 //! | `consensus/ballot/{slot}`           | Consensus — ballot tracking; kept across commits so ballots stay monotonic (2.30.0) |
 //! | `consensus/decided/{slot}`          | Consensus — the ballot the slot's latest commit was decided at (u64 LE); a floor below which acceptors refuse (2.30.0) |
-//! | `consensus/lease/{slot}`            | Consensus — the slot's lifecycle record: epoch-lease window (u64 LE ms), then (2.32.0) the decision's ballot, value digest and a released flag; written at a leased commit and by a lock/leadership release; expiry is evaluated read-side |
+//! | `consensus/lease/{slot}`            | Consensus — the **legacy** epoch-lease window (u64 LE ms), still written for nodes older than 2.32.0 and read by an upgraded node only for a slot with no decision record; expiry is evaluated read-side |
+//! | `consensus/life/{slot}/{ballot}`    | Consensus (2.32.0, row A) — the **decision record**: the decision envelope (value, window or permanent, lineage, original proposer, fencing token) decided at that ballot, the same bytes from every writer; readers take the highest ballot. `{slot}` is escaped (`%`→`%25`, `/`→`%2F`). A collected lower record is a 2-byte stub (`docs/design/lock-lifecycle.md`) |
+//! | `consensus/life/{slot}/end/{lineage}-{proposer}` | Consensus (2.32.0) — a **release marker**: ends the decision lineage it names; written by the holder, never by a record write |
+//! | `consensus/life/{slot}/v/{digest}`  | Consensus (2.32.0) — a decision value over 4 KiB, content-addressed |
 //! | `consensus/trust/{group}/{node}`    | Consensus — trust slices                                     |
 //! | `cap/{node}/{ns}/{name}`            | Node-level capability advertisements                         |
 //! | `cap/{node}/locality/self`          | Locality (also a capability — single namespace, single shape)|
@@ -288,6 +291,8 @@ mod agent;
 pub mod schema_evolution;
 #[cfg(feature = "consensus")]
 mod consensus;
+#[cfg(feature = "consensus")]
+mod consensus_life;
 
 pub use agent::{
     AgentPolicy, ExecutionState, AgentStateMachine, PolicyViolation,

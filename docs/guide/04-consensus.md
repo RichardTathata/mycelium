@@ -624,16 +624,20 @@ c.release_leadership("shard-0").await;                                 // step d
 c.elect_leader_with("ledger", LeaderTerm::Permanent).await?;          // permanence, by asking for it
 ```
 
-`release_leadership` writes the slot's lifecycle record as *released at the ballot it was decided at*:
-every node reads the group as leaderless, and the next election sets the old leader's acceptance aside
-instead of re-electing it from the acceptors' memory. A permanent leadership has the release path too;
-what it lacks is a lapse. `release_leadership` is awaited and returns `true` once the release is **on stable
-storage**; it returns `false`, writing nothing, when this node is not the live leader, when the slot's lifecycle
-record names a newer decision, or when a leased leadership's record here is behind a higher decided ballot (retry
-once it arrives). A permanent leadership re-committed at a higher ballot by a node with a stale view is released
-at that ballot. `true` is not a promise to stay out of
-office: an `elect_leader` renewal this node already has in flight commits above the released ballot and makes it
-leader again — stop renewing before releasing.
+`release_leadership` writes a **release marker** for the leadership's lineage: every node reads the group
+as leaderless, the next election sets the old leader's acceptance aside instead of re-electing it from the
+acceptors' memory, and a renewal of that leadership still in flight is ended too (a renewal keeps its lineage).
+A permanent leadership has the release path too; what it lacks is a lapse. `release_leadership` is awaited and
+returns `true` once the marker is **on stable storage**; it returns `false`, writing nothing, when this node does
+not read a live leadership of its own (one it originally proposed). A release can never end another node's
+leadership, or a later one of this node's: it names its lineage, not a ballot.
+
+**Locks know their deadline.** A `LockGuard` exposes `expires_at_ms()` — the lease's end on the wall clock every
+node judges it by — and `deadline()` / `is_expired()`, a **monotonic** local bound (the acquisition's start plus the
+TTL) by which the holder must stop whatever any clock says. A guard is never issued past its deadline. Fence the
+resource on `token` regardless. How a decision, its window and its end are recorded is in
+[`docs/design/lock-lifecycle.md`](../design/lock-lifecycle.md): one record per decided ballot, read by the highest
+ballot, so a window always travels with its decision and an adoption keeps the holder's window.
 
 Over HTTP: `POST /gateway/overlay/elect` takes `ttl_secs` (default 30, clamped to 1–3600) or `"permanent": true`,
 and `DELETE /gateway/overlay/elect/{group}` steps the gateway's node down (`200 {"ok": true}` once durable, `404

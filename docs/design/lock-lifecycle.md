@@ -80,9 +80,10 @@ holds with data. Then:
 read to decide liveness.
 
 **Fallback (Q3).** A node falls back to the legacy reading (`committed` + an 8-byte `lease` measured from the
-committed entry) **only when the slot has no decision-record key at all** — data or tombstone. A slot with only
-tombstones (lower records collected, the top not yet arrived) reads *not live, unknown*: a proposer proceeds to
-prepare, and the promise quorum reports what was accepted.
+committed entry) **only when the slot has no decision-record key at all**. Collection never tombstones a record
+(the prefix index drops tombstoned keys, so a tombstone would be indistinguishable from "never decided"): it
+rewrites a lower record as a 2-byte **stub**. A slot whose record keys are all stubs (the top not yet arrived)
+reads *not live, unknown*: a proposer proceeds to prepare, and the promise quorum reports what was accepted.
 
 ### 2.4 Why the max-ballot record is the latest decision
 
@@ -213,13 +214,18 @@ holds once every node is upgraded; the legacy keys stop being written at a later
   (finding 5) — then **shrinks** its memory and its node-owned acceptor record to `{promised: e}` (no proposer, no
   acceptance) under the compare-and-set re-check and `acceptor_records`. The floor that refuses `≤ e` is this node's
   own record, never the shared LWW `decided` key, which can regress (finding 5).
-- **Decision records below the top** are tombstoned by a node holding the top (and their large values, unless the
-  top shares the digest). A node that receives a tombstone before the top reads *not live, unknown* (§2.3), and a
-  resurrected lower record is never the top while the top is held.
+- **Decision records below the top** are rewritten as stubs by a node holding the top (and their large values
+  tombstoned, unless the top shares the digest). A node that receives a stub before the top reads *not live,
+  unknown* (§2.3); a lower record a late `CommitTerm` re-writes is never the top while the top is held, and a
+  learner does not overwrite a stub it holds. Stubs stay — two bytes per decided ballot on every node, the cost of
+  never falling back.
 - **Markers:** a permanent decision's marker is **never** collected (finding 1); a lease's marker is collected only
   once its `expires_at_ms` plus `max_clock_drift_ms` has passed on the collector's wall clock — after which the
   window ends the record without it. The marker carries the kind and expiry the collector needs.
-- **Bounded:** 64 slots a tick, on the collector's own task, candidates sorted by slot before a seam-drawn rotation.
+- **Bounded:** 64 slots a tick, on the collector's own task (first pass one interval after start), candidates
+  sorted by slot before a seam-drawn rotation.
+- **The shrunk floor** promises `e` to no proposer (a sentinel `promised_to`), so it refuses a prepare and an
+  accept *at* `e` as well as below it.
 
 ## 9. Every interleaving, and why it cannot happen
 

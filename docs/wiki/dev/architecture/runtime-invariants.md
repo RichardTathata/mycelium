@@ -46,84 +46,45 @@ The check is at the engine, not the callers, so every door — `ConsensusHandle:
 `overlay_group_propose` (`/overlay/elect`) — reaches it. `cluster_propose` has no roster; `cross_propose` never
 counts itself. Test: `a_non_member_cannot_propose_to_a_group_on_either_surface`, seen failing first.
 
-**Acceptor memory is not erased on commit; it is collected once its decision is over** (2.30.0, #575; collection
-row A, 2.32.0). The record under `sys/consensus-accepted/{node}/{slot}` holds the acceptor's **promise** as well as
-its acceptance, and it outlives the commit. It used to be deleted when a slot committed, to keep the prefix
-bounded; that dropped promises, so a delayed lower-ballot `Propose` reached acceptors that had forgotten them and
-could commit a second value — the first cut of the prepare phase repeated the mistake — an HLC-based "retire" plus
-the listener's erase-on-COMMIT — and an independent review broke it. What a commit changes instead is the
-**floor**: `consensus/decided/{slot}` records the ballot, and acceptors refuse at or below it.
+**One record per decision** (row A, 2.32.0; design record [`docs/design/lock-lifecycle.md`](../../../design/lock-lifecycle.md)).
+Three review rounds on PR #600 broke every reading rule over `committed` + `lease` + `decided`: three independent
+LWW keys, so any node can hold any combination of their versions, and HLC order is not decision order. The fix is
+structural. What Paxos decides is a **decision envelope** — the caller's value with its window (`Permanent`, or a
+lease ending at an `expires_at_ms` fixed on the **original proposer's wall clock** at the first proposal), lineage,
+original proposer and fencing token (`src/consensus_life.rs`, `Envelope`). Every acceptance, promise report and
+adoption therefore carries the whole lifecycle: an adopter re-commits the holder's window, never its own (Q1). The
+decision is written under `consensus/life/{escaped slot}/{ballot}` — one key per decided ballot, **the same bytes
+from every writer**, so LWW never orders two decisions; a reader takes the **highest ballot** it holds (decisions
+are decided at strictly increasing ballots). It is **ended** iff a release marker `…/end/{lineage}-{proposer}`
+names it — a separate key no record write can remove — or the lease is past on **the reader's wall clock** (HLC
+drift can only lengthen a lease). `consensus/decided/` is a refusal and draw floor only, never read for liveness.
+The committer writes the record (fsynced) before it emits `CommitTerm`, which carries the whole envelope; an
+upgraded learner writes the record from it and **ignores the legacy `Commit`**. A release names its lineage and
+proposer, no ballot, and tombstones nothing, so it ends that decision and every renewal of its lineage and nothing
+else. Renewal is explicit: only the original proposer renews, keeping the lineage. Slots are escaped and record
+remainders must match exactly, so a slot named `lock/a/<16 hex>` cannot inject a record into `lock/a`. Only a slot
+with **no** record key falls back to the legacy reading; collection never tombstones a record (the prefix index
+drops tombstones), it stubs lower ones. Older nodes keep receiving the legacy keys and `Commit`; an upgraded
+proposer times out until a quorum is upgraded.
 
-**A slot's lifecycle has an explicit end** (row A). `consensus/lease/{slot}` is a *lifecycle record*: the window,
-then the decision's ballot, the digest of its value, and a *released* flag (`LeaseRecord::Lifecycle`). The
-committer writes it with the lease; a lock or leadership release rewrites it as released (`release_decision`) —
-it no longer tombstones `committed` and the lease. Its window runs from **its own** timestamp. From it every node
-reads `ended_at(slot)`: the ballot of a decision that is over, bound to the committed entry by digest, needing
-neither the entry nor the decided floor. It is data, so tombstone GC never collects it. Three findings of the
-360 review close on it: a released lock whose tombstones were collected looked never decided, and the next
-acquirer re-committed the old holder's value (K1); a reopened lease set aside acceptances only up to a decided
-floor that travels separately and may lag (K2); a late COMMIT at a learner missing the floor or the entry
-re-stamped `committed` over the release (K3). Prepare sets aside acceptances at or below `ended`
-(`set_aside_finished`); a COMMIT at or below it is stale (`commit_is_stale`); acceptors refuse and proposers draw
-above `max(decided, ended)` (`ConsensusEngine::floor`). The older reading stays for records written by a node
-older than row A: the decision is over only when this node holds the committed entry and it is not live (`decided`
-and `committed` gossip separately, so filtering on the floor alone hid a commit that had not yet arrived — second
-review, M1). A lifecycle record for a different value than the entry held describes another decision and is
-not taken as its end. Which of the two is newer decides the reading, and only the ballot can tell (timestamps
-cannot: a learner stamps `committed` with its own HLC). **A record whose ballot is below this node's decided ballot
-says nothing about the entry**, which reads live with no window until a record at or above it arrives — the normal
-state during every handover, since a learner writes `committed` and `decided` from the COMMIT signal while the
-record travels as its own key; bounding that newer commit by the older record's window let a third proposer commit
-a second value beside a live holder (the re-review of #600, finding 1, `a_newer_commit_is_not_bounded_by_an_older_record`).
-To keep that state a propagation gap, the committer writes its record **before** it emits the COMMIT. A record at or
-above the decided ballot naming another value is the other direction — an older entry under a newer record, which
-LWW can keep for good (a 2.31 learner's re-stamp): the entry reads live for the record's window measured from the
-entry's own timestamp, or `MISMATCH_RELEASED_WINDOW_MS` (30 s) for a release record, never permanently. A
-permanent commit tombstones the record key whether or not the committer holds one. A COMMIT **below the record's ballot** is
-stale whatever its value (`commit_is_stale`'s `record` argument), and `release_decision` refuses when the record
-names another value, or when its own leased record is behind a higher decided ballot, so a lapsed guard cannot
-release over a newer holder's record; a permanent value (no record) is released at the decided ballot, and one
-with no `decided` key at the ballot acceptor memory holds. A forged record ballot far above every observed ballot
-is counted by the floor's tripwire (`record_ballot`).
+**Acceptor memory is not erased on commit; it shrinks to a node-owned floor once its decision is over** (2.30.0,
+#575; C2 in row A). The record under `sys/consensus-accepted/{node}/{slot}` holds the acceptor's **promise** as well
+as its acceptance (since row A, an envelope acceptance is tagged `0x03`). Erasing it on commit dropped promises and
+let a delayed lower-ballot `Propose` commit a second value (2026-10-08 review). **C2, the exact condition:** on the
+collector's tick (`run_acceptor_collector`, its own task beside each listener, every 60 s, first pass one interval
+after start, at most 64 slots, sorted then seam-rotated), a slot whose top decision record has **ended** at `e`, and
+whose state promises nothing above `e` (re-checked inside the compare-and-set), is collected: the top record and
+its marker are `append_sync`ed first, then memory and the durable record **shrink** to `{promised: e,
+promised_to: sentinel}` — a floor that refuses a prepare and an accept at `e` and below, owned by this node and
+fsynced (`persist_acceptor`, serialised by `acceptor_records`, lock-order row 56), never the shared `decided` key
+that LWW can regress. Lower decision records are stubbed; a lease's marker is collected after its expiry plus
+`max_clock_drift_ms`; a permanent marker never. Code: `src/consensus.rs` (`collect_finished`, `shrink_acceptor`,
+`collect_records`, `claim_envelope`, `prepare_slot`); tests: `src/agent/lock_lifecycle_tests.rs` (black-box, one per
+§9 row) and `src/agent/lock_lifecycle_api_tests.rs`.
 
-**Collection (C2), the exact condition.** On the acceptor collector's tick (`run_acceptor_collector`, a task beside
-each consensus listener, `ACCEPTOR_COLLECT_INTERVAL_MS` = 60 s through the timer seam, at most
-`ACCEPTOR_COLLECT_BUDGET` = 64 slots a tick so its fsyncs never delay a vote), `ConsensusEngine::collect_finished`
-collects a slot's acceptor state when (1) its
-lifecycle record says the decision ended at ballot `e`, (2) the state promises nothing above `e` — a promise
-above `e` belongs to a ballot that may be in flight and is kept — re-checked inside the removal's
-compare-and-set, and (3) the decided floor is first on stable storage at `e` or above — raised by `record_decided`, or, when the floor
-was received by gossip (which reaches the WAL only with the next snapshot), re-appended with `append_sync`
-after `record_decided` in every case (`persist_floor`; gossip can raise the floor between a check and the write) — so every ballot the forgotten state refused is still refused by the floor. The durable record's tombstone and `persist_acceptor`'s
-writes are serialised by `TaskCtx::acceptor_records` (lock-order row 56), so a promise recorded while a
-collection runs is written after the tombstone and wins. A permanent decision never ends, so its state is kept;
-so is a slot whose record predates row A, or that never committed. "Lapsed" is read on the node's causal clock —
-the same bounded-skew assumption the lease rests on. Code: `src/consensus.rs` (`ended_at`, `release_decision`,
-`collect_finished`, `claim_vote`, `prepare_slot`, `set_aside_finished`, `commit_is_stale`); tests
-`a_released_lock_is_not_recommitted_to_its_holder_after_tombstone_gc`,
-`a_reopened_lease_does_not_adopt_the_expired_value_before_its_floor_arrives`,
-`a_late_commit_does_not_restamp_a_released_lock`, `acceptor_state_is_collected_once_its_decision_is_over`;
-records: [`.log/2026-10-08-consensus-prepare-phase.md`](../.log/2026-10-08-consensus-prepare-phase.md),
-[`.log/2026-10-10-locks-leases-row-a.md`](../.log/2026-10-10-locks-leases-row-a.md).
-
-**`elect_leader` is leased** (row A, C1, 2.32.0): `DEFAULT_LEADER_LEASE` (30 s), renewed by calling again,
-released by `release_leadership`; permanence is `LeaderTerm::Permanent`, by explicit opt-in. A role that escapes
-evaporation is what the philosophy's corrected litmus rules out.
-
-**Discovery is not an electorate; consensus is a protocol, not a service** (decided 2026-10-10 —
-[`docs/design/consensus-electorate.md`](../../../design/consensus-electorate.md); philosophy § *The corrected
-litmus*, *A protocol, not a service*). Group rosters are discovery — dynamic, eventually consistent — and quorums are
-counted from each proposer's view, so intersection across a roster change is not enforced; the supported profile
-(threat model §7) is a **fixed electorate per decision**. Do not "fix" this by teaching Layer I a guard on `grp/` or
-`consensus/`, and do not make a named node set "the consensus nodes". Enforced today: `resolve_electorate`
-(`src/agent/helpers.rs`, empty or below `MembershipIntent.min` → `ElectorateUnavailable`), `NotAMember` (above), and
-the gateway's `governed_group` refusal on `/gateway/mesh/group` with `/gateway/govern/group` as the audited route
-(`src/agent/http.rs`, `is_governed_group`). Not enforced: an embedded `join_group` or `grp/` write moves a governed
-group by LWW; the opt-in membership governor moves it toward its band; nothing *requires* a governed group for a
-safety-sensitive proposal (post-360 row P2, not built). Also not built: leased-by-default leadership (C1 —
-`elect_leader` proposes with `ConsensusConfig::default()`, `committed_lease_secs: None`, so it commits permanently) and
-collection of acceptor memory (C2 — see the paragraph above); versioned electorates with joint consensus are a later
-plan.
+**`elect_leader` is leased** (row A, C1, 2.32.0): `DEFAULT_LEADER_LEASE` (30 s), renewed by calling again (the
+renewal keeps the lineage), released by `release_leadership` (which also ends a renewal in flight); permanence is
+`LeaderTerm::Permanent`, by explicit opt-in.
 
 ## Individual-scope routing: forwarding stays unconditional
 
