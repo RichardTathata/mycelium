@@ -19,7 +19,7 @@ rust src/lib.rs::mycelium_core::persistence::durability_tests::regenerate_golden
 # Illustrative fragments in module docs (`rust,ignore`): they show registration order against an agent
 # the snippet does not construct.
 rust doc:mycelium_agentfacts::mycelium-agentfacts/src/http.rs - http (line 9) — illustrative fragment, not a program
-rust doc:mycelium_tuple_space::mycelium-tuple-space/src/http.rs - http (line 5) — illustrative fragment, not a program
+rust doc:mycelium_tuple_space::mycelium-tuple-space/src/http.rs - http (line 7) — illustrative fragment, not a program
 rust doc:mycelium::src/agent/rpc.rs - agent::rpc::RpcRequest::authority_lapsed (line 57) — illustrative fragment (`ignore`): a serve loop's select! against an agent the snippet does not build
 rust doc:mycelium::src/federation.rs - federation::TrustBundle::tls_pins_for (line 291) — illustrative fragment (`ignore`): one line of wiring
 rust doc:mycelium::src/federation/client.rs - federation::client::FederationClient::with_tls_pins (line 354) — illustrative fragment (`ignore`): one line of wiring
