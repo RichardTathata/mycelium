@@ -281,9 +281,17 @@ impl BoardStore {
     pub(crate) fn set_compact_fault(&self, on: bool) {
         self.wal.as_ref().unwrap().compact_fault.store(on, Ordering::SeqCst);
     }
+    /// True while the WAL refuses appends (poisoned by a failed write). `false` when transient.
+    pub(crate) fn wal_refusing(&self) -> bool {
+        self.wal.as_ref().is_some_and(WalWriter::poisoned)
+    }
     #[cfg(test)]
     pub(crate) fn wal_poisoned(&self) -> bool {
-        self.wal.as_ref().unwrap().poisoned()
+        self.wal_refusing()
+    }
+    #[cfg(test)]
+    pub(crate) fn set_post_rename_fault(&self, on: bool) {
+        self.wal.as_ref().unwrap().post_rename_fault.store(on, Ordering::SeqCst);
     }
 
     /// The WAL compaction epoch (0 for a transient board) — for tests / future replay cursors.
@@ -846,6 +854,104 @@ mod tests {
         store.post(surplus("1", "1.0"), Bytes::from("x")).unwrap();
         store.compact().expect("the temp path is the WAL's own, not its stem's");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #597 re-review, finding 5: a compaction failing *after* its rename left the writer appending to
+    /// the old, unlinked file, unpoisoned.
+    #[test]
+    fn a_failure_after_the_rename_poisons_the_writer() {
+        let path = temp_wal("post-rename");
+        let (a, c) = {
+            let store = BoardStore::persistent(&path, 1).unwrap();
+            let a = store.post(surplus("1", "1.0"), Bytes::from("a")).unwrap();
+            store.set_post_rename_fault(true);
+            assert!(store.compact().is_err());
+            assert!(store.wal_poisoned(), "an error after the rename poisons the writer");
+            assert!(store.post(surplus("2", "1.0"), Bytes::from("refused")).is_err());
+            store.set_post_rename_fault(false);
+            store.compact().unwrap();
+            let c = store.post(surplus("3", "1.0"), Bytes::from("c")).unwrap();
+            (a, c)
+        };
+        let store = BoardStore::persistent(&path, 1).unwrap();
+        let got: Vec<u64> = store.read(&Predicate::new()).iter().map(|f| f.id).collect();
+        assert_eq!(got, vec![a, c]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 re-review, finding 4: a compaction failing on an unpoisoned writer was retried every tick.
+    #[test]
+    fn a_failing_compaction_backs_off_even_when_not_poisoned() {
+        let path = temp_wal("unpoisoned-backoff");
+        let store = BoardStore::persistent(&path, 1).unwrap();
+        for i in 0..64 {
+            store.post(surplus(&i.to_string(), "1.0"), Bytes::from("x")).unwrap();
+        }
+        for _ in 0..32 {
+            let f = store.claim(&Predicate::new()).unwrap().unwrap();
+            store.ack(f.id).unwrap();
+        }
+        store.set_compact_fault(true);
+        let mut attempts = 0;
+        for _ in 0..20 {
+            if store.wants_compaction() {
+                attempts += 1;
+                assert!(store.compact().is_err());
+            }
+        }
+        assert!(attempts <= 5, "{attempts} attempts in 20 ticks");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 re-review, finding 4: the board ticks once a second, so a 64-tick ceiling was a minute of
+    /// refused appends. The ceiling is ~10 s.
+    #[test]
+    fn the_repair_back_off_is_capped_near_ten_seconds() {
+        let path = temp_wal("backoff-cap");
+        let store = BoardStore::persistent(&path, 1).unwrap();
+        store.inject_append_fault();
+        assert!(store.post(surplus("1", "1.0"), Bytes::from("x")).is_err());
+        store.set_compact_fault(true);
+        let mut last = None;
+        let mut widest = 0;
+        for tick in 0..300u32 {
+            if store.wants_compaction() {
+                let _ = store.compact();
+                if let Some(prev) = last {
+                    widest = widest.max(tick - prev);
+                }
+                last = Some(tick);
+            }
+        }
+        assert!(widest <= 11, "{widest} ticks (seconds) between repair attempts");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 re-review, finding 7: the id high-water mark across two compactions and restarts.
+    #[test]
+    fn the_high_water_mark_survives_two_compactions_and_a_restart() {
+        let path = temp_wal("hw-twice");
+        {
+            let store = BoardStore::persistent(&path, 1).unwrap();
+            for i in 0..3 {
+                store.post(surplus(&i.to_string(), "1.0"), Bytes::from("x")).unwrap();
+            }
+            while let Some(f) = store.claim(&Predicate::new()).unwrap() {
+                store.ack(f.id).unwrap();
+            }
+            store.compact().unwrap();
+        }
+        {
+            let store = BoardStore::persistent(&path, 1).unwrap();
+            assert_eq!(store.post(surplus("y", "1.0"), Bytes::from("y")).unwrap(), 3);
+            let f = store.claim(&Predicate::new()).unwrap().unwrap();
+            store.ack(f.id).unwrap();
+            store.compact().unwrap();
+            store.compact().unwrap();
+        }
+        let store = BoardStore::persistent(&path, 1).unwrap();
+        assert_eq!(store.post(surplus("z", "1.0"), Bytes::from("z")).unwrap(), 4, "past both compactions and restarts");
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Row C: one owner per WAL file. Two boards on one path used to replay, append and compact the

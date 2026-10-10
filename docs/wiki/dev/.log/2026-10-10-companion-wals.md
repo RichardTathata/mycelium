@@ -31,3 +31,11 @@
   limit); repair back-off in `WalInner::{repair_failures, repair_skip}`; `maintenance_tick` runs the repair even when
   the sync fails; temp path `<wal>.compact`; compaction keeps a lone `Ack` for the id high-water mark, and `fold_wal`
   counts an `Ack` as terminal only for an item it holds. No new lock (one `AtomicBool` per handle).
+- **The re-review of #597:** the re-drain resurrected — a tuple-space re-drain from offset 0 re-applied the `Put` of an
+  item whose `Ack` it had applied (the map forgot acked ids) and, with a primary compaction between chunks, never saw
+  the `Ack` again. `MirrorIndex` (tuple `mirror_stages`, blackboard `mirrored`) keeps a bounded acked-id memory
+  (100 000). Also: `should_redrain` / `should_resync` wait while the mirror's WAL refuses; the promotion replay starts
+  at `(0, 0)` with a gap pending (tuple) or first re-syncs from `last_primary` (blackboard, new row-29 field); a
+  failure after the compaction's rename poisons the writer (it appended to the unlinked old file); every failing
+  compaction backs off, capped at `MAX_COMPACTION_SKIP` (≈10 s); `shutting_down` closes the `init_store`/`shutdown`
+  race. Lock-order rows 26 and 29 updated.

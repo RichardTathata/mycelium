@@ -27,6 +27,9 @@ const WAL_MAGIC: &[u8; 6] = b"MBBWAL";
 const WAL_VERSION: u16 = 1;
 const WAL_HEADER_LEN: u64 = 8; // magic(6) + u16 LE version
 
+/// The back-off ceiling for a failing compaction, in maintenance ticks: 10 × 1 s.
+const MAX_COMPACTION_SKIP: u32 = 10;
+
 const REC_POST: u8 = 1;
 const REC_CLAIM: u8 = 2;
 const REC_ACK: u8 = 3;
@@ -119,9 +122,9 @@ struct WalInner {
     /// Every append is refused by name until a compaction rewrites the file from the live state —
     /// or a reopen truncates the torn tail.
     poison: Option<String>,
-    /// Consecutive failed repairs, and the `wants_compaction` calls still to decline before the next
-    /// attempt — a repair that keeps failing backs off (1, 2, 4 … 64 ticks) rather than rereading
-    /// the whole log on every tick.
+    /// Consecutive failed compactions, and the `wants_compaction` calls still to decline before the
+    /// next attempt — a compaction that keeps failing (a repair or not) backs off (2, 4 … up to
+    /// `MAX_COMPACTION_SKIP` ticks) rather than rereading the whole log on every tick.
     repair_failures: u32,
     repair_skip: u32,
     file_len: u64,
@@ -146,6 +149,8 @@ pub(crate) struct WalWriter {
     /// Test seam: while set, every compaction fails.
     #[cfg(test)]
     pub(crate) compact_fault: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    pub(crate) post_rename_fault: std::sync::atomic::AtomicBool,
 }
 
 // Test seam: the storage steps compaction takes, in order, on this thread (compaction is synchronous,
@@ -240,6 +245,8 @@ impl WalWriter {
                 fault: std::sync::atomic::AtomicBool::new(false),
                 #[cfg(test)]
                 compact_fault: std::sync::atomic::AtomicBool::new(false),
+                #[cfg(test)]
+                post_rename_fault: std::sync::atomic::AtomicBool::new(false),
             },
             live,
             max_id,
@@ -292,16 +299,13 @@ impl WalWriter {
     /// True once acked records dominate — a compaction would reclaim meaningful space.
     pub(crate) fn wants_compaction(&self) -> bool {
         let mut g = self.inner.lock();
-        if g.poison.is_some() {
-            // A poisoned writer is repaired by the rewrite, so it wants one — unless the last repair
-            // failed and the back-off has not run out.
-            if g.repair_skip > 0 {
-                g.repair_skip -= 1;
-                return false;
-            }
-            return true;
+        // The last compaction failed and the back-off has not run out.
+        if g.repair_skip > 0 {
+            g.repair_skip -= 1;
+            return false;
         }
-        g.total >= 64 && g.acked * 2 >= g.total
+        // A poisoned writer is repaired by the rewrite, so it wants one.
+        g.poison.is_some() || (g.total >= 64 && g.acked * 2 >= g.total)
     }
 
     /// Rewrite the WAL to contain only its live facts — **folded from the log itself**, under the
@@ -322,17 +326,17 @@ impl WalWriter {
                 guard.repair_failures = 0;
                 guard.repair_skip = 0;
             }
-            Err(e) if guard.poison.is_some() => {
+            Err(e) => {
                 guard.repair_failures = guard.repair_failures.saturating_add(1);
-                guard.repair_skip = 1u32 << guard.repair_failures.min(6);
+                guard.repair_skip = (1u32 << guard.repair_failures.min(6)).min(MAX_COMPACTION_SKIP);
                 tracing::warn!(
                     error = %e,
                     failures = guard.repair_failures,
-                    "blackboard: the repairing compaction failed; backing off {} ticks",
+                    poisoned = guard.poison.is_some(),
+                    "blackboard: the compaction failed; backing off {} ticks",
                     guard.repair_skip
                 );
             }
-            Err(_) => {}
         }
         result
     }
@@ -392,10 +396,29 @@ impl WalWriter {
         drop(tmp_file);
         std::fs::rename(&tmp, &self.path)?;
         fs_trace("rename");
-        fsync_parent(&self.path)?;
-        fs_trace("dir.sync");
-        let mut file = OpenOptions::new().read(true).append(true).open(&self.path)?;
-        file.seek(SeekFrom::End(0))?;
+        // From here the new log is at `path` and `g.file` is the old, unlinked one: any failure must
+        // poison the writer, or appends would go on landing in a file no restart will read
+        // (#597 re-review, finding 5). A later compaction folds `g.file` — the old file, which holds
+        // every record — and installs again.
+        let installed = (|| -> io::Result<File> {
+            #[cfg(test)]
+            if self.post_rename_fault.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(io::Error::other("injected failure after the rename"));
+            }
+            fsync_parent(&self.path)?;
+            fs_trace("dir.sync");
+            let mut file = OpenOptions::new().read(true).append(true).open(&self.path)?;
+            file.seek(SeekFrom::End(0))?;
+            Ok(file)
+        })();
+        let file = match installed {
+            Ok(file) => file,
+            Err(e) => {
+                tracing::error!(error = %e, "blackboard: compaction failed after its rename; appends are refused until a compaction succeeds");
+                g.poison = Some(format!("compaction failed after its rename: {e}"));
+                return Err(e);
+            }
+        };
         g.file = file;
         g.file_len = buf.len() as u64;
         g.total = posts;
@@ -409,7 +432,7 @@ impl WalWriter {
         Ok(())
     }
 
-    #[cfg(test)]
+    /// True while the WAL refuses appends (poisoned by a failed write, until a compaction repairs it).
     pub(crate) fn poisoned(&self) -> bool {
         self.inner.lock().poison.is_some()
     }

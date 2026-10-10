@@ -547,6 +547,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   compaction, the blackboard's refused `discard`. **Further upgrade notes:** a secondary now syncs its WAL
   periodically and compacts it; a compacted WAL may end in a lone `Ack` (older builds replay it as a no-op); a temp
   file left by a crashed compaction under the old name (`<stem>.compact`, `<stem>.wal.compact`) is not removed.
+  **A second review (the re-review of #597) found the re-drain could resurrect, and four more; fixed.** A tuple-space
+  re-drain restarts from offset 0 and an applied `Ack` had forgotten its id, so a primary compacting between drain
+  chunks (the `Ack` gone, the `Put` already re-delivered) left an acked item live in the mirror; each mirror now keeps
+  a bounded memory of the ids it saw acked (100 000, oldest forgotten first) and never re-applies one — the blackboard
+  too, where a snapshot racing a live `Ack` did the same. No re-drain or re-sync while the mirror's own WAL refuses
+  appends (it re-fetched the primary's whole log every tick). A promotion with a refused record pending replays the
+  old primary's log **from the start** (the tuple space; the heartbeat cursor cannot cover a record refused before
+  it), or first re-syncs from the primary the mirror last heard from (the blackboard), and says so when that fails.
+  A compaction failing **after its rename** poisons the writer — it went on appending to the unlinked old file. Every
+  failing compaction backs off, poisoned or not, capped near 10 s (50 ticks of 200 ms; 10 of 1 s on the blackboard,
+  which was a 64 s ceiling). An `init_store` racing `shutdown` aborts the maintenance task it starts, which otherwise
+  outlived the space and held the WAL's lock. Seen failing first, in both crates unless named:
+  `a_redrain_never_resurrects_an_acked_item` (`left: [1, 0]`, `right: [1]`) / the blackboard's
+  `an_ack_before_its_post_does_not_resurrect_the_fact` (`left: [0, 1]`, `right: [1]`), `no_redrain_while_the_mirror_wal_refuses`
+  / `no_resync_…`, `a_promotion_with_a_pending_gap_replays_from_the_start` (`left: (3, 999)`, `right: (0, 0)`) /
+  `…_syncs_from_the_last_primary` (`left: None`), `a_failure_after_the_rename_poisons_the_writer`,
+  `a_failing_compaction_backs_off_even_when_not_poisoned` (`20 attempts in 20 ticks`),
+  `the_repair_back_off_is_capped_near_ten_seconds` (`65 ticks between repair attempts`),
+  `a_store_opened_after_shutdown_does_not_pin_the_wal`. Pins that held: `the_backfill_redrains_a_refused_record` /
+  `the_mirror_resyncs_a_refused_fact` (two nodes, the loop re-draining on `mirror_gap`) and
+  `the_high_water_mark_survives_two_compactions_and_a_restart`.
 
 ### Security
 - **An open gateway is refused off loopback** (plan `post-360-hardening.md` row P1). With no credential model the

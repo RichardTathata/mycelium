@@ -240,6 +240,42 @@ impl Default for BoardConfig {
     }
 }
 
+/// How many acked fact ids a mirror remembers (oldest forgotten first): enough to cover the window
+/// in which a snapshot taken before an ack can arrive after it.
+const MIRROR_ACKED_MEMORY: usize = 100_000;
+
+/// The mirror's id bookkeeping, under the one `mirrored` lock.
+#[derive(Default)]
+pub(crate) struct MirrorIndex {
+    /// Fact ids applied to this mirror.
+    seen: HashSet<u64>,
+    /// Ids this mirror saw acked (bounded by `MIRROR_ACKED_MEMORY`), in arrival order.
+    acked: HashSet<u64>,
+    acked_order: std::collections::VecDeque<u64>,
+}
+
+impl MirrorIndex {
+    fn admit(&mut self, id: u64) -> bool {
+        !self.acked.contains(&id) && self.seen.insert(id)
+    }
+
+    fn ack(&mut self, id: u64) {
+        if self.acked.insert(id) {
+            self.acked_order.push_back(id);
+            if self.acked_order.len() > MIRROR_ACKED_MEMORY
+                && let Some(oldest) = self.acked_order.pop_front()
+            {
+                self.acked.remove(&oldest);
+            }
+        }
+        self.seen.remove(&id);
+    }
+
+    fn forget(&mut self, id: u64) {
+        self.seen.remove(&id);
+    }
+}
+
 /// An agent-backed board: posting/reading/claiming over a coordinator-free primary discovered on the
 /// capability ring, with emergent secondary failover. Construct after `agent.start()`.
 pub struct Blackboard {
@@ -251,7 +287,13 @@ pub struct Blackboard {
     primary_reg: parking_lot::Mutex<Option<CapabilityReg>>,
     role_reg: parking_lot::Mutex<Option<CapabilityReg>>,
     /// Mirror dedup: fact ids already applied (a replicated Post may arrive twice).
-    mirrored: parking_lot::Mutex<HashSet<u64>>,
+    mirrored: parking_lot::Mutex<MirrorIndex>,
+    /// The primary this mirror last heard from (a replicate, a snapshot), for the promotion-time sync
+    /// when a refused fact is pending.
+    last_primary: parking_lot::Mutex<Option<NodeId>>,
+    /// Set by `shutdown` before it drains the tasks, so an `init_store` racing it aborts the
+    /// maintenance task it starts instead of leaving it to hold the store (and the WAL's lock).
+    shutting_down: AtomicBool,
     /// Set when a mirrored fact could not be applied (its WAL append was refused): the mirror re-syncs
     /// from the primary, so the fact is re-delivered once the WAL is repaired.
     mirror_gap: AtomicBool,
@@ -269,7 +311,9 @@ impl Blackboard {
             is_secondary: AtomicBool::new(false),
             primary_reg: parking_lot::Mutex::new(None),
             role_reg: parking_lot::Mutex::new(None),
-            mirrored: parking_lot::Mutex::new(HashSet::new()),
+            mirrored: parking_lot::Mutex::new(MirrorIndex::default()),
+            last_primary: parking_lot::Mutex::new(None),
+            shutting_down: AtomicBool::new(false),
             mirror_gap: AtomicBool::new(false),
             tasks: parking_lot::Mutex::new(Vec::new()),
         });
@@ -322,7 +366,12 @@ impl Blackboard {
                     let _ = tokio::task::spawn_blocking(move || s.maintenance_tick()).await;
                 }
             });
-            self.tasks.lock().push(h);
+            let mut tasks = self.tasks.lock();
+            if self.shutting_down.load(Ordering::SeqCst) {
+                h.abort(); // `shutdown` already drained the tasks; nothing else would stop this one
+            } else {
+                tasks.push(h);
+            }
         }
         Ok(())
     }
@@ -343,15 +392,47 @@ impl Blackboard {
     fn store_expect(&self) -> Arc<BoardStore> {
         self.store().expect("serving role requires a store")
     }
+    /// Whether a mirrored `Post` for `id` should be applied: not already applied, and never seen
+    /// acked — a re-sync's snapshot racing a live `Ack` must not resurrect the fact (#597 re-review).
     pub(crate) fn mark_mirrored(&self, id: u64) -> bool {
-        self.mirrored.lock().insert(id)
+        self.mirrored.lock().admit(id)
+    }
+
+    /// A mirrored `Ack` for `id`: remembered, so a later `Post` for it is not applied.
+    pub(crate) fn note_mirror_ack(&self, id: u64) {
+        self.mirrored.lock().ack(id);
+    }
+
+    /// Whether the mirror should re-sync from the primary now.
+    /// Not while this mirror's WAL refuses appends: every fact would be refused again and the
+    /// primary's whole board re-fetched per tick (#597 re-review, finding 2). The gap waits.
+    fn should_resync(&self) -> bool {
+        if self.store().is_some_and(|s| s.wal_refusing()) {
+            return false;
+        }
+        self.mirror_gap.swap(false, Ordering::AcqRel)
+    }
+
+    /// The node a promotion should sync from first: the primary this mirror last heard from, when a
+    /// refused fact is pending — it may still answer (a graceful step-down, a blip), and otherwise
+    /// the refused fact is lost with it (#597 re-review, finding 3).
+    fn promotion_sync_target(&self) -> Option<NodeId> {
+        if !self.mirror_gap.load(Ordering::Acquire) {
+            return None;
+        }
+        self.last_primary.lock().clone()
+    }
+
+    /// Remember the primary this mirror last heard from.
+    pub(crate) fn note_primary_seen(&self, node: &NodeId) {
+        *self.last_primary.lock() = Some(node.clone());
     }
 
     /// A mirrored fact's WAL append was refused: forget it was seen, so a re-delivery applies it,
     /// and ask the mirror to re-sync from the primary.
     pub(crate) fn note_mirror_gap(&self, id: u64, e: &BlackboardError) {
         tracing::error!(id, error = %e, "blackboard: mirror fact refused; it is re-fetched once the WAL is repaired");
-        self.mirrored.lock().remove(&id);
+        self.mirrored.lock().forget(id);
         self.mirror_gap.store(true, Ordering::Release);
     }
 
@@ -441,7 +522,7 @@ impl Blackboard {
                             if me.is_primary() {
                                 return;
                             }
-                            if me.mirror_gap.swap(false, Ordering::AcqRel) {
+                            if me.should_resync() {
                                 break;
                             }
                         }
@@ -492,6 +573,15 @@ impl Blackboard {
                         }
                         tracing::warn!(ns = %me.cfg.namespace, ticks = ORPHAN_GRACE_TICKS,
                             "blackboard: no primary ever seen within the orphan grace — promoting");
+                    }
+                    if let Some(old) = me.promotion_sync_target() {
+                        if me.sync_from(old).await {
+                            me.mirror_gap.store(false, Ordering::Release);
+                            tracing::info!(ns = %me.cfg.namespace, "blackboard: re-synced a pending gap before promoting");
+                        } else {
+                            tracing::error!(ns = %me.cfg.namespace,
+                                "blackboard: promoting with a mirror gap the old primary could not fill — facts refused by this mirror's WAL may be missing");
+                        }
                     }
                     me.become_primary();
                     return;
@@ -551,6 +641,12 @@ impl Blackboard {
     /// transient-unresolvable primary cannot leave a partial mirror (audit 2026-07-15 pass 3).
     async fn sync_from_primary(self: &Arc<Self>) -> bool {
         let Ok(primary) = self.resolve_primary() else { return false };
+        self.sync_from(primary).await
+    }
+
+    /// One snapshot RPC to `primary`, applied into the mirror.
+    async fn sync_from(self: &Arc<Self>, primary: NodeId) -> bool {
+        self.note_primary_seen(&primary);
         let kind = rpc::rpc_kind(&self.cfg.namespace, "snapshot");
         let Ok(resp) = self
             .agent
@@ -748,6 +844,7 @@ impl Blackboard {
 
     /// Abort background tasks and retract advertisements.
     pub async fn shutdown(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
         for h in self.tasks.lock().drain(..) {
             h.abort();
         }
@@ -761,6 +858,7 @@ impl Blackboard {
 #[cfg(test)]
 mod wal_role_tests {
     use super::*;
+    use crate::store::BoardStore;
     use mycelium::GossipConfig;
 
     async fn agent() -> Arc<GossipAgent> {
@@ -874,4 +972,121 @@ mod wal_role_tests {
         bb.shutdown().await;
         let _ = std::fs::remove_file(&path);
     }
+
+    fn mirror_cfg(ns: &str, persist: bool, path: PathBuf) -> BoardConfig {
+        BoardConfig {
+            namespace: Arc::from(ns),
+            role: BoardRole::Secondary,
+            persist,
+            wal_path: path,
+            cap_refresh: Duration::from_millis(300),
+            ..Default::default()
+        }
+    }
+
+    /// #597 re-review, finding 1 (the board's form): an `Ack` that arrives before the snapshot carrying
+    /// its fact (a re-sync racing live replication) found nothing to discard, and the snapshot's `Post`
+    /// then resurrected the acked fact in the mirror.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_ack_before_its_post_does_not_resurrect_the_fact() {
+        let bb = Blackboard::new(agent().await, mirror_cfg("ack-first", false, temp_wal("unused"))).await.unwrap();
+        bb.apply_replicated(&rpc::enc_replicate_post(&fact(1)));
+        bb.apply_replicated(&rpc::enc_replicate_ack(0));
+        bb.apply_replicated(&rpc::enc_replicate_post(&fact(0)));
+        let ids: Vec<u64> = bb.store().unwrap().read(&Predicate::new()).iter().map(|f| f.id).collect();
+        assert_eq!(ids, vec![1], "the acked fact stays acked in the mirror");
+        bb.shutdown().await;
+    }
+
+    /// #597 re-review, finding 2: no re-sync while the mirror's WAL refuses appends.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_resync_while_the_mirror_wal_refuses() {
+        let path = temp_wal("no-resync-poisoned");
+        let bb = Blackboard::new(agent().await, mirror_cfg("no-resync", true, path.clone())).await.unwrap();
+        let store = bb.store().unwrap();
+        store.set_compact_fault(true);
+        store.inject_append_fault();
+        assert!(store.post_with_id(0, BTreeMap::new(), Bytes::from("x")).is_err());
+        bb.mirror_gap.store(true, Ordering::Release);
+        assert!(!bb.should_resync(), "no re-sync while the WAL refuses appends");
+        assert!(bb.mirror_gap.load(Ordering::Acquire), "the gap waits for the repair");
+        store.set_compact_fault(false);
+        bb.shutdown().await;
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 re-review, finding 3 (the board's form): a promotion with a gap pending first syncs from the
+    /// primary this mirror last heard from, which may still answer (a graceful step-down, a blip).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_promotion_with_a_pending_gap_syncs_from_the_last_primary() {
+        let bb = Blackboard::new(agent().await, mirror_cfg("gap-promotion", false, temp_wal("unused2"))).await.unwrap();
+        let old = NodeId::new("127.0.0.1", 1).unwrap();
+        bb.note_primary_seen(&old);
+        assert_eq!(bb.promotion_sync_target(), None, "no gap, no extra sync");
+        bb.mirror_gap.store(true, Ordering::Release);
+        assert_eq!(bb.promotion_sync_target(), Some(old), "a gap syncs from the last primary first");
+        bb.shutdown().await;
+    }
+
+    /// #597 re-review, finding 6: `init_store` racing `shutdown` started a maintenance task nothing
+    /// aborted, which held the store and so the WAL's ownership lock.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_store_opened_after_shutdown_does_not_pin_the_wal() {
+        let path = temp_wal("init-after-shutdown");
+        let mut cfg = mirror_cfg("late-init", true, path.clone());
+        cfg.role = BoardRole::Client;
+        let bb = Blackboard::new(agent().await, cfg).await.unwrap();
+        bb.shutdown().await;
+        bb.init_store().unwrap();
+        drop(bb);
+        let mut reopened = false;
+        for _ in 0..30 {
+            if BoardStore::persistent(&path, 1).is_ok() {
+                reopened = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(reopened, "the WAL's lock is released once the board is gone");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 re-review, finding 7: the mirror's sync loop re-syncs on `mirror_gap` — a primary and a
+    /// mirror, one injected append failure on the mirror, the refused fact arriving by the re-sync.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_mirror_resyncs_a_refused_fact() {
+        let a = agent().await;
+        let port = mycelium::test_util::alloc_port();
+        let cfg = GossipConfig {
+            bind_port: port,
+            bootstrap_peers: vec![a.node_id().clone()],
+            ..Default::default()
+        };
+        let b = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+        b.start().await.unwrap();
+        let path = temp_wal("resync-loop");
+        let mut pcfg = mirror_cfg("resync-loop", false, temp_wal("unused3"));
+        pcfg.role = BoardRole::Primary;
+        let primary = Blackboard::new(a, pcfg).await.unwrap();
+        let mirror = Blackboard::new(b, mirror_cfg("resync-loop", true, path.clone())).await.unwrap();
+        let mstore = mirror.store().unwrap();
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        mstore.inject_append_fault();
+        let id = primary.post(fact(7).attributes, Bytes::from("refused-then-resynced")).await.unwrap();
+        let mut arrived = false;
+        for _ in 0..100 {
+            if mstore.read(&Predicate::new()).iter().any(|f| f.id == id) {
+                arrived = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(arrived, "fact {id} reached the mirror by the re-sync");
+        mirror.shutdown().await;
+        primary.shutdown().await;
+        drop(mstore);
+        let _ = std::fs::remove_file(&path);
+    }
+
 }

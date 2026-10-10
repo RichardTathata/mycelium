@@ -871,9 +871,18 @@ impl TupleStore {
     pub(crate) fn set_sync_fault(&self, on: bool) {
         self.wal.as_ref().unwrap().sync_fault.store(on, Ordering::SeqCst);
     }
+    /// True while the WAL refuses appends (poisoned by a failed write, until a compaction repairs
+    /// it). `false` for a transient store.
+    pub(crate) fn wal_refusing(&self) -> bool {
+        self.wal.as_ref().is_some_and(|w| w.inner.lock().poison.is_some())
+    }
     #[cfg(test)]
     pub(crate) fn wal_poisoned(&self) -> bool {
-        self.wal.as_ref().unwrap().inner.lock().poison.is_some()
+        self.wal_refusing()
+    }
+    #[cfg(test)]
+    pub(crate) fn set_post_rename_fault(&self, on: bool) {
+        self.wal.as_ref().unwrap().post_rename_fault.store(on, Ordering::SeqCst);
     }
     #[cfg(test)]
     pub(crate) fn wal_acked_count(&self) -> u64 {
@@ -911,6 +920,9 @@ const WAL_MAGIC: &[u8; 6] = b"MTSWAL";
 const WAL_VERSION: u16 = 2;
 const PREV_WAL_VERSION: u16 = 1;
 const WAL_HEADER_LEN: u64 = 8; // magic + u16 LE version
+
+/// The back-off ceiling for a failing compaction, in maintenance ticks: 50 × 200 ms ≈ 10 s.
+const MAX_COMPACTION_SKIP: u32 = 50;
 
 fn wal_header() -> [u8; WAL_HEADER_LEN as usize] {
     let mut h = [0u8; WAL_HEADER_LEN as usize];
@@ -1074,9 +1086,9 @@ struct WalInner {
     /// Every append is refused by name until a compaction rewrites the file from the live state —
     /// or a reopen truncates the torn tail.
     poison: Option<String>,
-    /// Consecutive failed repairs, and the `wants_compaction` calls still to decline before the next
-    /// attempt — a repair that keeps failing backs off (1, 2, 4 … 64 ticks) rather than rereading
-    /// the whole log on every tick.
+    /// Consecutive failed compactions, and the `wants_compaction` calls still to decline before the
+    /// next attempt — a compaction that keeps failing (a repair or not) backs off (2, 4 … up to
+    /// `MAX_COMPACTION_SKIP` ticks) rather than rereading the whole log on every tick.
     repair_failures: u32,
     repair_skip: u32,
     file_len: u64,
@@ -1105,6 +1117,8 @@ pub(crate) struct WalWriter {
     compact_fault: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     sync_fault: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    post_rename_fault: std::sync::atomic::AtomicBool,
 }
 
 // Test seam: the storage steps compaction takes, in order, on this thread (compaction is synchronous,
@@ -1241,6 +1255,8 @@ impl WalWriter {
             compact_fault: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             sync_fault: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            post_rename_fault: std::sync::atomic::AtomicBool::new(false),
         };
         Ok((writer, live, max_id))
     }
@@ -1289,16 +1305,13 @@ impl WalWriter {
 
     fn wants_compaction(&self) -> bool {
         let mut g = self.inner.lock();
-        if g.poison.is_some() {
-            // A poisoned writer is repaired by the rewrite, so it wants one — unless the last repair
-            // failed and the back-off has not run out.
-            if g.repair_skip > 0 {
-                g.repair_skip -= 1;
-                return false;
-            }
-            return true;
+        // The last compaction failed and the back-off has not run out.
+        if g.repair_skip > 0 {
+            g.repair_skip -= 1;
+            return false;
         }
-        g.total > 0 && g.acked * 2 > g.total
+        // A poisoned writer is repaired by the rewrite, so it wants one.
+        g.poison.is_some() || (g.total > 0 && g.acked * 2 > g.total)
     }
 
     fn file_len(&self) -> u64 {
@@ -1339,17 +1352,17 @@ impl WalWriter {
                 guard.repair_failures = 0;
                 guard.repair_skip = 0;
             }
-            Err(e) if guard.poison.is_some() => {
+            Err(e) => {
                 guard.repair_failures = guard.repair_failures.saturating_add(1);
-                guard.repair_skip = 1u32 << guard.repair_failures.min(6);
+                guard.repair_skip = (1u32 << guard.repair_failures.min(6)).min(MAX_COMPACTION_SKIP);
                 tracing::warn!(
                     error = %e,
                     failures = guard.repair_failures,
-                    "tuple-space: the repairing compaction failed; backing off {} ticks",
+                    poisoned = guard.poison.is_some(),
+                    "tuple-space: the compaction failed; backing off {} ticks",
                     guard.repair_skip
                 );
             }
-            Err(_) => {}
         }
         result
     }
@@ -1411,11 +1424,30 @@ impl WalWriter {
         fs_trace("tmp.sync");
         std::fs::rename(&tmp_path, &g.path)?;
         fs_trace("rename");
-        // The rename is durable only once the directory is: without this a power loss can bring back
-        // the old log — the core snapshot's install order (`sync_data → rename → fsync_dir`).
-        fsync_parent(&g.path)?;
-        fs_trace("dir.sync");
-        let file = OpenOptions::new().read(true).append(true).open(&g.path)?;
+        // From here the new log is at `path` and `g.file` is the old, unlinked one: any failure must
+        // poison the writer, or appends would go on landing in a file no restart will read
+        // (#597 re-review, finding 5). A later compaction folds `g.file` — the old file, which holds
+        // every record — and installs again.
+        let path = g.path.clone();
+        let installed = (|| -> io::Result<File> {
+            #[cfg(test)]
+            if self.post_rename_fault.load(Ordering::SeqCst) {
+                return Err(io::Error::other("injected failure after the rename"));
+            }
+            // The rename is durable only once the directory is: without this a power loss can bring
+            // back the old log — the core snapshot's install order (`sync_data → rename → fsync_dir`).
+            fsync_parent(&path)?;
+            fs_trace("dir.sync");
+            OpenOptions::new().read(true).append(true).open(&path)
+        })();
+        let file = match installed {
+            Ok(file) => file,
+            Err(e) => {
+                tracing::error!(error = %e, "tuple-space: compaction failed after its rename; appends are refused until a compaction succeeds");
+                g.poison = Some(format!("compaction failed after its rename: {e}"));
+                return Err(e);
+            }
+        };
         g.file = file;
         g.file_len = buf.len() as u64;
         g.ops_since_sync = 0;
@@ -2480,6 +2512,105 @@ mod tests {
         store.put("s", b("x")).unwrap();
         store.compact_now().expect("the temp path is the WAL's own, not its stem's");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #597 re-review, finding 5: a compaction failing *after* its rename left the writer appending to
+    /// the old, unlinked file — every later acknowledged record gone at restart — and unpoisoned.
+    #[tokio::test]
+    async fn a_failure_after_the_rename_poisons_the_writer() {
+        let path = temp_wal("post-rename");
+        let (a, c) = {
+            let store = TupleStore::persistent(&path, 1, 500).unwrap();
+            let a = store.put("s", b("a")).unwrap();
+            store.set_post_rename_fault(true);
+            assert!(store.compact_now().is_err());
+            assert!(store.wal_poisoned(), "an error after the rename poisons the writer");
+            assert!(store.put("s", b("refused")).is_err());
+            store.set_post_rename_fault(false);
+            store.compact_now().unwrap();
+            let c = store.put("s", b("c")).unwrap();
+            (a, c)
+        };
+        let store = TupleStore::persistent(&path, 1, 500).unwrap();
+        let mut got = Vec::new();
+        while let Ok((id, _)) = store.take("s", Duration::from_millis(20)).await {
+            got.push(id);
+        }
+        assert_eq!(got, vec![a, c]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 re-review, finding 4: a compaction failing on an *unpoisoned* writer was retried every
+    /// tick, rereading the whole log each time. It backs off too.
+    #[tokio::test]
+    async fn a_failing_compaction_backs_off_even_when_not_poisoned() {
+        let path = temp_wal("unpoisoned-backoff");
+        let store = TupleStore::persistent(&path, 1, 500).unwrap();
+        for _ in 0..2 {
+            store.put("s", b("x")).unwrap();
+            let (id, _) = store.take("s", Duration::from_millis(50)).await.unwrap();
+            store.ack(id).unwrap();
+        }
+        store.set_compact_fault(true);
+        let mut attempts = 0;
+        for _ in 0..20 {
+            if store.wants_compaction() {
+                attempts += 1;
+                assert!(store.compact_now().is_err());
+            }
+        }
+        assert!(attempts <= 5, "{attempts} attempts in 20 ticks");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 re-review, finding 4: the back-off is capped near ten seconds of ticks (200 ms each), not
+    /// left to grow to a minute of refused appends.
+    #[tokio::test]
+    async fn the_repair_back_off_is_capped_near_ten_seconds() {
+        let path = temp_wal("backoff-cap");
+        let store = TupleStore::persistent(&path, 1, 500).unwrap();
+        store.inject_append_fault();
+        assert!(store.put("s", b("x")).is_err());
+        store.set_compact_fault(true);
+        let mut last = None;
+        let mut widest = 0;
+        for tick in 0..600u32 {
+            if store.wants_compaction() {
+                let _ = store.compact_now();
+                if let Some(prev) = last {
+                    widest = widest.max(tick - prev);
+                }
+                last = Some(tick);
+            }
+        }
+        assert!(widest <= 51, "{widest} ticks between repair attempts");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #597 re-review, finding 7: the id high-water mark across two compactions and restarts.
+    #[tokio::test]
+    async fn the_high_water_mark_survives_two_compactions_and_a_restart() {
+        let path = temp_wal("hw-twice");
+        {
+            let store = TupleStore::persistent(&path, 1, 500).unwrap();
+            for _ in 0..3 {
+                store.put("s", b("x")).unwrap();
+                let (id, _) = store.take("s", Duration::from_millis(50)).await.unwrap();
+                store.ack(id).unwrap();
+            }
+            store.compact_now().unwrap();
+        }
+        {
+            let store = TupleStore::persistent(&path, 1, 500).unwrap();
+            assert_eq!(store.put("s", b("y")).unwrap(), 3);
+            let (id, _) = store.take("s", Duration::from_millis(50)).await.unwrap();
+            store.ack(id).unwrap();
+            store.compact_now().unwrap();
+            store.compact_now().unwrap();
+        }
+        let store = TupleStore::persistent(&path, 1, 500).unwrap();
+        assert_eq!(store.put("s", b("z")).unwrap(), 4, "past both compactions and both restarts");
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Row C: one owner per WAL file. Two stores on one path used to replay, append and compact the
