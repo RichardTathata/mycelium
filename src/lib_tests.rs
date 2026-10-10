@@ -149,6 +149,8 @@ fn spawn_handler(
     let task_ctx = Arc::new(TaskCtx {
         #[cfg(feature = "consensus")]
         consensus_accepted: Arc::new(papaya::HashMap::new()),
+        #[cfg(feature = "consensus")]
+        acceptor_records: std::sync::Mutex::new(()),
         core: core_ctx,
         bulk_transport: Arc::new(BulkTransport::new(0, Duration::from_secs(5), 64)),
         rpc_pending: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -1213,6 +1215,8 @@ async fn test_subscribe_notified_via_gossip() {
         let task_ctx = Arc::new(TaskCtx {
         #[cfg(feature = "consensus")]
         consensus_accepted: Arc::new(papaya::HashMap::new()),
+        #[cfg(feature = "consensus")]
+        acceptor_records: std::sync::Mutex::new(()),
             core: core_ctx,
             bulk_transport: Arc::new(BulkTransport::new(0, Duration::from_secs(5), 64)),
             rpc_pending: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),

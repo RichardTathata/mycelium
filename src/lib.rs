@@ -110,7 +110,7 @@
 //! | `consensus/committed/{slot}`        | Consensus — committed slot state                             |
 //! | `consensus/ballot/{slot}`           | Consensus — ballot tracking; kept across commits so ballots stay monotonic (2.30.0) |
 //! | `consensus/decided/{slot}`          | Consensus — the ballot the slot's latest commit was decided at (u64 LE); a floor below which acceptors refuse (2.30.0) |
-//! | `consensus/lease/{slot}`            | Consensus — epoch-lease window (u64 LE ms); written when `ConsensusConfig::committed_lease_secs` is set; expiry is evaluated read-side |
+//! | `consensus/lease/{slot}`            | Consensus — the slot's lifecycle record: epoch-lease window (u64 LE ms), then (2.32.0) the decision's ballot, value digest and a released flag; written at a leased commit and by a lock/leadership release; expiry is evaluated read-side |
 //! | `consensus/trust/{group}/{node}`    | Consensus — trust slices                                     |
 //! | `cap/{node}/{ns}/{name}`            | Node-level capability advertisements                         |
 //! | `cap/{node}/locality/self`          | Locality (also a capability — single namespace, single shape)|
@@ -346,7 +346,7 @@ pub use agent::evidence_journal::{
     EvidenceProfile, JournalEntry, JournalError, JournalPage,
 };
 #[cfg(feature = "consensus")]
-pub use agent::{ConsensusHandle, ConsistencyError, Leadership, LeadershipBasis, LockGuard, LockService};
+pub use agent::{ConsensusHandle, ConsistencyError, Leadership, LeadershipBasis, LeaderTerm, LockGuard, LockService, DEFAULT_LEADER_LEASE};
 // WS-C M9: self-managing-metabolism config tuner + governance.
 pub use agent::{accept_all, clamped, reject_all, ConfigPolicy, CONFIG_PREFIX};
 pub use agent::{

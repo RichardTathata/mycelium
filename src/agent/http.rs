@@ -361,6 +361,7 @@ pub(super) async fn run_http_server(
         .route("/overlay/lock/acquire",           post(gw_overlay_lock_acquire))
         .route("/overlay/lock/{guard_id}",         delete(gw_overlay_lock_release))
         .route("/overlay/elect",                  post(gw_overlay_elect))
+        .route("/overlay/elect/{group}",          delete(gw_overlay_elect_release))
         // log/group/subscribe uses the distributed-lock claim (consensus overlay)
         .route("/overlay/log/group/subscribe",    get(gw_overlay_log_group_subscribe))
         .route("/consensus/cross_group_propose",  post(gw_cross_group_propose));
@@ -878,6 +879,7 @@ fn required_scope(method: &axum::http::Method, matched_path: &str) -> &'static s
         "/gateway/overlay/lock/acquire"        => "consensus:write",
         "/gateway/overlay/lock/{guard_id}"     => "consensus:write",
         "/gateway/overlay/elect"               => "consensus:write",
+        "/gateway/overlay/elect/{group}"       => "consensus:write",
         "/gateway/overlay/log/append"          => "consensus:write",
         "/gateway/overlay/log/scan"            => "consensus:read",
         "/gateway/overlay/log/compact"         => "consensus:write",
@@ -4157,7 +4159,7 @@ async fn gw_overlay_lock_acquire(
     let result = overlay_cluster_propose(&ctx.agent_ctx, &slot, value.clone(), cfg).await;
 
     match result {
-        crate::consensus::ConsensusResult::Committed { .. } => {
+        crate::consensus::ConsensusResult::Committed { ballot, .. } => {
             // Confirm the converged holder before handing out a guard (bug A); the token is the
             // commit's HLC (a monotonic fencing token — the ballot is not, #164).
             tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
@@ -4172,6 +4174,7 @@ async fn gw_overlay_lock_acquire(
                 ctx:      Arc::clone(&ctx.agent_ctx),
                 name:     Arc::from(body.name.as_str()),
                 value,
+                ballot,
                 token,
                 released: false,
             };
@@ -4215,12 +4218,22 @@ async fn gw_overlay_lock_release(
 
 #[derive(Deserialize)]
 #[cfg(feature = "consensus")]
-struct ElectBody { group: String }
+struct ElectBody {
+    group:     String,
+    /// The leadership's lease in seconds (row A, C1); default `DEFAULT_LEADER_LEASE` (30 s).
+    #[serde(default)]
+    ttl_secs:  Option<u64>,
+    /// `true` asks for a permanent leadership — the pre-2.32.0 behaviour, now an explicit opt-in.
+    #[serde(default)]
+    permanent: bool,
+}
 
 /// `POST /gateway/overlay/elect` — elect a leader for `group`.
 ///
-/// Body: `{"group": "G"}`.
-/// Returns `{"leader": "IP:PORT"}` on success.
+/// Body: `{"group": "G", "ttl_secs": 30, "permanent": false}` (both optional).
+/// Returns `{"leader": "IP:PORT"}` on success. **Leased by default** (since 2.32.0, row A C1): the
+/// leadership lapses `ttl_secs` after its commit unless re-elected (calling again renews it); step
+/// down with `DELETE /gateway/overlay/elect/{group}`.
 #[cfg(feature = "consensus")]
 async fn gw_overlay_elect(
     State(ctx): State<Arc<HttpCtx>>,
@@ -4229,9 +4242,17 @@ async fn gw_overlay_elect(
     let slot  = format!("leader/{}", body.group);
     let value = Bytes::from(ctx.agent_ctx.node_id.to_string().into_bytes());
 
+    let term = if body.permanent {
+        crate::agent::overlay_consistent::LeaderTerm::Permanent
+    } else {
+        crate::agent::overlay_consistent::LeaderTerm::Lease(body.ttl_secs.map_or(
+            crate::agent::overlay_consistent::DEFAULT_LEADER_LEASE,
+            |s| std::time::Duration::from_secs(s.clamp(1, 3600)),
+        ))
+    };
     let result = overlay_group_propose(
         &ctx.agent_ctx, &body.group, &slot, value,
-        crate::consensus::ConsensusConfig::default(),
+        crate::consensus::ConsensusConfig { committed_lease_secs: term.lease_secs(), ..crate::consensus::ConsensusConfig::default() },
     ).await;
 
     // #164 class: an optimistic `Committed` is NOT mutually exclusive — never return `self`.
@@ -4244,8 +4265,9 @@ async fn gw_overlay_elect(
             if converge {
                 tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
             }
-            let committed_key = format!("consensus/committed/{slot}");
-            if let Some(raw) = ctx.agent_ctx.kv_state.store.pin().get(committed_key.as_str()).and_then(|e| e.data.clone())
+            // The live leader: a leadership whose lease lapsed or that was released is no leader.
+            if let Some(raw) = crate::consensus::live_committed_value(
+                    &ctx.agent_ctx.kv_state, &slot, crate::consensus::causal_now_ms(&ctx.agent_ctx.hlc))
                 && let Ok(s) = std::str::from_utf8(&raw) {
                     return Json(json!({ "ok": true, "leader": s.to_string() })).into_response();
                 }
@@ -4274,6 +4296,23 @@ async fn gw_overlay_elect(
         }))).into_response(),
         // This node is not in the group: it may not elect a leader for it, least of all itself.
         crate::consensus::ConsensusResult::NotAMember { group, .. } => not_a_member_response(&group),
+    }
+}
+
+/// `DELETE /gateway/overlay/elect/{group}` — this node steps down as `group`'s leader (row A, C1).
+///
+/// Returns `{"ok": true}` when this node was the live leader and its leadership is now released,
+/// `404 not_leader` when the live leader this node sees is not itself (nothing is written).
+#[cfg(feature = "consensus")]
+async fn gw_overlay_elect_release(
+    Path(group): Path<String>,
+    State(ctx):  State<Arc<HttpCtx>>,
+) -> impl IntoResponse {
+    let value = Bytes::from(ctx.agent_ctx.node_id.to_string().into_bytes());
+    if crate::consensus::release_decision(&ctx.agent_ctx, &format!("leader/{group}"), &value, 0) {
+        Json(json!({ "ok": true })).into_response()
+    } else {
+        (StatusCode::NOT_FOUND, Json(json!({ "ok": false, "error": "not_leader" }))).into_response()
     }
 }
 

@@ -162,6 +162,49 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `with_call_deadline(None)`; `Instance::invoke` is still synchronous, so an embedder that calls it from
   async code should move it to `spawn_blocking` as the serve loop now does — the co-op `catalog`,
   `catalog_viz` and `mcp_toolgrowth` demos now do, instantiation included.
+- **Locks and leases end where every node can see it; `elect_leader` is leased; acceptor state decays** (row A of
+  `post-360-hardening.md`, with C1 and C2). A slot's `consensus/lease/{slot}` record is now a **lifecycle record**:
+  the window, then the decision's ballot, its value's digest and a *released* flag, measured from its own timestamp
+  (`LeaseRecord::Lifecycle`, `ended_at`, `src/consensus.rs`). A lock release writes it as released at the guard's
+  ballot (`release_decision`) instead of tombstoning `committed` and the lease. Prepare sets acceptances at or below
+  an ended ballot aside, a COMMIT at or below it is stale, and acceptors refuse — and proposers draw above —
+  `max(decided, ended)`. Three findings of the 2026-10-09 360 review close: **K1** a released lock whose tombstones
+  were garbage-collected (~3000 s) looked never decided, so the next acquirer adopted the old holder's value from
+  the acceptors' memory, committed it and was told `Superseded` — the old holder held the lock again with no guard
+  (and with a value over 4 KiB after an acceptor restart, every ballot was `Blocked`); **K2** a reopened lease set
+  acceptances aside only up to a `consensus/decided` floor that travels as its own key, so before it arrived the
+  expired holder's value was re-committed; **K3** a late COMMIT at a learner holding the floor but not the entry,
+  or the entry but not the floor, re-stamped `committed` with a fresh HLC that won LWW over the release. **C1:**
+  `elect_leader` / `elect_leader_receipt` commit with a 30 s lease (`DEFAULT_LEADER_LEASE` — the default
+  anti-entropy interval, and the lease the log-consumer claim and the gateway lock already use); calling again
+  renews; `release_leadership(group)` steps down; `elect_leader_with(group, LeaderTerm::Permanent)` keeps the old
+  permanence by explicit opt-in. The gateway's `POST /gateway/overlay/elect` takes `ttl_secs` / `permanent`, reads
+  the *live* leader (it read the raw committed key), and `DELETE /gateway/overlay/elect/{group}` (`consensus:write`)
+  steps down. **C2:** each consensus listener collects, every 60 s, acceptor state (memory and durable record)
+  whose decision ended at `e` and that promises nothing above `e`, after raising the decided floor to `e` on stable
+  storage (`collect_finished`); a new lock (`TaskCtx::acceptor_records`, lock-order row 56) keeps a promise
+  recorded meanwhile from being erased by the tombstone. Entry points enumerated by `git grep -nE
+  "consensus_ns::(COMMITTED|LEASE|DECIDED)|consensus/(committed|lease|decided)/|live_committed|decision_over|
+  commit_is_stale|set_aside_finished|decode_lease_ms|encode_lease_ms"` and `git grep -n elect_leader`: the
+  engine's draw, prepare, claim, answer and COMMIT paths and both commit sites (`propose`, `cross_propose`), the
+  live reads (`consensus_get`, `consistent_get`, `distributed_lock`, `elect_leader*`, the log-group claim,
+  `GET /consensus/{slot}`), `LockGuard` release from both doors (Rust and `DELETE /gateway/overlay/lock/{id}`),
+  and the gateway election. Seen failing first: `a_released_lock_is_not_recommitted_to_its_holder_after_tombstone_gc`
+  (`Some(Superseded)`), `a_reopened_lease_does_not_adopt_the_expired_value_before_its_floor_arrives` (`Superseded
+  { slot: "k2/slot", ballot: 2 }`), `a_late_commit_does_not_restamp_a_released_lock` (`left: Some(b"127.0.0.1:…")`),
+  and — against stubs of the new API — `elect_leader_is_leased_by_default` (`left: None, right: Some(30000)`),
+  `a_dead_leaders_lease_lapses_and_a_new_election_succeeds`, `acceptor_state_is_collected_once_its_decision_is_over`
+  (`nothing was collected`). Wire **v12** unchanged — no message changes; the record's first 8 bytes are still the
+  window. **Upgrade notes:** (1) **`elect_leader` is no longer permanent**: a leader that does not call again within
+  30 s is no longer reported, and another node may be elected — renew by calling again (every ~10 s), or ask for
+  `LeaderTerm::Permanent`; a slot already committed permanently before the upgrade stays permanent until its leader
+  calls `release_leadership`. The SDKs' `elect_leader` reaches the gateway route, so it is leased too. (2) Mixed
+  fleet: a node older than 2.32.0 reads a lifecycle record as its 8-byte window — a release is a window of 0, so it
+  sees the lock released; it measures a lease from the committed entry rather than the record (a few ms earlier);
+  it still releases by tombstones, and a lock it released whose tombstones were collected can be re-committed once
+  to its old holder by an upgraded acquirer, for one TTL. (3) `LockGuard` gained a private field (no public change);
+  `TaskCtx` gained `acceptor_records`. **Not built:** the SDKs expose no `release_leadership` verb (row G's surface);
+  a node that proposes without running a consensus listener does not collect its acceptor state.
 - **The SDKs reach a gateway over TLS** (`mycelium-py` **0.2.9**, `mycelium-ts` **0.2.3**,
   `langgraph-checkpoint-mycelium` **0.3.2**). Every client built its base URL as `http://{host}:{port}` — eight
   Python handles, five TypeScript clients and the checkpointer; only `A2aClient` took a full URL — so a gateway

@@ -403,6 +403,10 @@ await using lock = await agent.distributedLock("job-42");
 
 One-shot election for `group`. Returns the elected node's `"ip:port"` string. A group with no members
 is refused (`electorate_unavailable`, thrown): absence is not authority.
+Since substrate 2.32.0 the leadership is **leased** (30 s): the leader keeps it by calling again (every
+~10 s); a leader that stops — or dies — is no longer reported once the lease lapses. The gateway route
+also takes `ttl_secs` or `"permanent": true`, and `DELETE /gateway/overlay/elect/{group}` steps down;
+this SDK does not wrap either yet.
 
 #### `append(stream, value?) → Promise<bigint>`
 

@@ -46,17 +46,51 @@ The check is at the engine, not the callers, so every door — `ConsensusHandle:
 `overlay_group_propose` (`/overlay/elect`) — reaches it. `cluster_propose` has no roster; `cross_propose` never
 counts itself. Test: `a_non_member_cannot_propose_to_a_group_on_either_surface`, seen failing first.
 
-**Acceptor memory is never erased — not on commit, not to bound storage** (2.30.0, #575). The record under
-`sys/consensus-accepted/{node}/{slot}` holds the acceptor's **promise** as well as its acceptance, and it outlives
-the commit. It used to be deleted when a slot committed, to keep the prefix bounded; that dropped promises, so a
-delayed lower-ballot `Propose` reached acceptors that had forgotten them and could commit a second value — the
-first cut of the prepare phase repeated the mistake — an HLC-based "retire" plus the listener's erase-on-COMMIT —
-and an independent review broke it. What a commit changes instead is the **floor**: `consensus/decided/{slot}` records the ballot, acceptors
-refuse at or below it, and a new decision sets the old acceptances aside only once this node can **see** the
-previous one is over (it holds the committed entry and it is not live). `decided` and `committed` gossip
-separately, so filtering on the floor alone hid a commit that had not yet arrived (second review, M1). The prefix
-grows with slots, not ballots. Code: `src/consensus.rs` (`claim_vote`, `prepare_slot`, `set_aside_finished`,
-`commit_is_stale`); record: [`.log/2026-10-08-consensus-prepare-phase.md`](../.log/2026-10-08-consensus-prepare-phase.md).
+**Acceptor memory is not erased on commit; it is collected once its decision is over** (2.30.0, #575; collection
+row A, 2.32.0). The record under `sys/consensus-accepted/{node}/{slot}` holds the acceptor's **promise** as well as
+its acceptance, and it outlives the commit. It used to be deleted when a slot committed, to keep the prefix
+bounded; that dropped promises, so a delayed lower-ballot `Propose` reached acceptors that had forgotten them and
+could commit a second value — the first cut of the prepare phase repeated the mistake — an HLC-based "retire" plus
+the listener's erase-on-COMMIT — and an independent review broke it. What a commit changes instead is the
+**floor**: `consensus/decided/{slot}` records the ballot, and acceptors refuse at or below it.
+
+**A slot's lifecycle has an explicit end** (row A). `consensus/lease/{slot}` is a *lifecycle record*: the window,
+then the decision's ballot, the digest of its value, and a *released* flag (`LeaseRecord::Lifecycle`). The
+committer writes it with the lease; a lock or leadership release rewrites it as released (`release_decision`) —
+it no longer tombstones `committed` and the lease. Its window runs from **its own** timestamp. From it every node
+reads `ended_at(slot)`: the ballot of a decision that is over, bound to the committed entry by digest, needing
+neither the entry nor the decided floor. It is data, so tombstone GC never collects it. Three findings of the
+360 review close on it: a released lock whose tombstones were collected looked never decided, and the next
+acquirer re-committed the old holder's value (K1); a reopened lease set aside acceptances only up to a decided
+floor that travels separately and may lag (K2); a late COMMIT at a learner missing the floor or the entry
+re-stamped `committed` over the release (K3). Prepare sets aside acceptances at or below `ended`
+(`set_aside_finished`); a COMMIT at or below it is stale (`commit_is_stale`); acceptors refuse and proposers draw
+above `max(decided, ended)` (`ConsensusEngine::floor`). The older reading stays for records written by a node
+older than row A: the decision is over only when this node holds the committed entry and it is not live (`decided`
+and `committed` gossip separately, so filtering on the floor alone hid a commit that had not yet arrived — second
+review, M1). A lifecycle record for a different value than the entry held describes another decision and is
+ignored: the entry reads live, which refuses rather than admits.
+
+**Collection (C2), the exact condition.** On each consensus listener's tick (`ACCEPTOR_COLLECT_INTERVAL_MS`, 60 s,
+through the timer seam), `ConsensusEngine::collect_finished` collects a slot's acceptor state when (1) its
+lifecycle record says the decision ended at ballot `e`, (2) the state promises nothing above `e` — a promise
+above `e` belongs to a ballot that may be in flight and is kept — re-checked inside the removal's
+compare-and-set, and (3) the decided floor has first been raised to `e` on stable storage, so every ballot the
+forgotten state refused is still refused by the floor. The durable record's tombstone and `persist_acceptor`'s
+writes are serialised by `TaskCtx::acceptor_records` (lock-order row 56), so a promise recorded while a
+collection runs is written after the tombstone and wins. A permanent decision never ends, so its state is kept;
+so is a slot whose record predates row A, or that never committed. "Lapsed" is read on the node's causal clock —
+the same bounded-skew assumption the lease rests on. Code: `src/consensus.rs` (`ended_at`, `release_decision`,
+`collect_finished`, `claim_vote`, `prepare_slot`, `set_aside_finished`, `commit_is_stale`); tests
+`a_released_lock_is_not_recommitted_to_its_holder_after_tombstone_gc`,
+`a_reopened_lease_does_not_adopt_the_expired_value_before_its_floor_arrives`,
+`a_late_commit_does_not_restamp_a_released_lock`, `acceptor_state_is_collected_once_its_decision_is_over`;
+records: [`.log/2026-10-08-consensus-prepare-phase.md`](../.log/2026-10-08-consensus-prepare-phase.md),
+[`.log/2026-10-10-locks-leases-row-a.md`](../.log/2026-10-10-locks-leases-row-a.md).
+
+**`elect_leader` is leased** (row A, C1, 2.32.0): `DEFAULT_LEADER_LEASE` (30 s), renewed by calling again,
+released by `release_leadership`; permanence is `LeaderTerm::Permanent`, by explicit opt-in. A role that escapes
+evaporation is what the philosophy's corrected litmus rules out.
 
 **Discovery is not an electorate; consensus is a protocol, not a service** (decided 2026-10-10 —
 [`docs/design/consensus-electorate.md`](../../../design/consensus-electorate.md); philosophy § *The corrected
