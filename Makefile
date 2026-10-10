@@ -187,6 +187,7 @@ check:
 	./scripts/check-wiki-mutation-fence.sh                      # every wiki mutation path stays inside the mandate boundary
 	./scripts/check-positioning.sh                              # shared proposition, audience routes, resources and capability coverage
 	python3 scripts/test-check-materials.py                      # missing links/coverage and claim regressions must fail
+	python3 scripts/test-check-front-doors.py                    # a broken route, chooser or operator journey must fail
 
 ## gate-knowledge — the knowledge layer's SEMANTIC gate (item 3, a Phase D exit condition).
 ## Three negative cases — misleading evidence cannot erase a conflicting observation, cannot refresh

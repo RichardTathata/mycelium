@@ -26,6 +26,7 @@ jobs:
           python-version: "3.x"
       - run: ./scripts/check-positioning.sh
       - run: python3 scripts/test-check-materials.py
+      - run: python3 scripts/test-check-front-doors.py
 
   test:
     name: Test
@@ -860,6 +861,7 @@ jobs:
         run: |
           echo "@@test-universe@@ begin scripts"
           python3 scripts/test-check-materials.py --list
+          python3 scripts/test-check-front-doors.py --list
           python3 scripts/test-ci-test-coverage.py --list
           ./scripts/with-pyyaml.sh scripts/test-check-test-inventory.py --list
           bash scripts/test-ci-retest.sh --list

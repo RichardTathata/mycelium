@@ -11,14 +11,32 @@ READMEs follow.
 every example by the stack **layer** it teaches *and* its facets — how deep (*Level*), how you watch it
 (*Surface*), whether it needs a model (*LLM*), and which operational surfaces it lights up (*Audit*,
 *Metrics*). Scan **down a column** to filter ("show me the browser demos", "the zero-LLM ones"), or read
-**across a row** to characterize one example at a glance. New here? Start at the **Intro** rows and climb.
+**across a row** to characterize one example at a glance. New here? Pick one of the four below to watch,
+or follow the [learning path](#learning-path) and then climb the **Intro** rows.
 
 > **Colour-coded, scannable, opens offline:** [`docs/wiki/dev/examples-layer-matrix.html`](../docs/wiki/dev/examples-layer-matrix.html)
 > is the same matrix rendered — layer dots + facet chips + a per-layer summary strip.
 
-## Recommended paths
+## What do you want to see?
 
-**Start here — five steps**, the same five on every front door ([`docs/positioning.md`](../docs/positioning.md)):
+Four examples, one for each thing the [root README](../README.md#what-do-you-want-to-do) promises you can watch.
+Each line says what you will see and how to run it; the link is its run doc.
+
+<!-- chooser:start -->
+- **The mesh** — [`conway`](../docs/guide/01-gossip-kv.md#the-example): 256 in-process agents, one Game-of-Life cell each, every agent computing its next state from its own gossiped view of its neighbours. `cargo run --example conway --features metrics`, then open `http://127.0.0.1:8090/` and choose *Live (Rust)*.
+- **Self-provisioning** — [`provisioning_viz`](coop/README.md#browser-showcases): demand for a capability no node offers makes one depot fetch, verify and start a component; the demo then stops that depot and the standby provisions in its place, with no coordinator. `cargo run -p mycelium-coop-examples --features wasm,metrics --bin provisioning_viz`, then open `http://127.0.0.1:8101/`.
+- **Governed action** — [`procurement_authority`](coop/README.md#13--procurement_authority--the-governed-autonomy-flagship): a purchase permitted, one denied, one no rule covers (*authority not established*, not a denial), and a misrouted one the evidence shows was denied and ran anyway. `cargo run -p mycelium-coop-examples --bin procurement_authority`.
+- **Operational insight** — [`diagnostics`](coop/README.md#12--diagnostics): a node that never saw the operator's change names the group, the band and the fix from the state it already holds. `cargo run -p mycelium-coop-examples --bin diagnostics`.
+<!-- chooser:end -->
+
+`conway` and `provisioning_viz` run until you stop them and are not run in CI (`provisioning_viz`'s
+batch twin, `provisioning`, is); `procurement_authority` and `diagnostics` run in CI on every change,
+as the matrix's *CI* column says.
+
+## Learning path
+
+The developer's five steps — the same five as the root README's *Build a fleet* route and the
+[developer guide](../docs/guide/README.md) ([`docs/positioning.md`](../docs/positioning.md)):
 
 <!-- path:start -->
 1. **[`hello_mesh`](hello_mesh.rs)** — two embedded agents share state by gossip: 30 seconds, no setup.
@@ -30,6 +48,8 @@ every example by the stack **layer** it teaches *and* its facets — how deep (*
 
 **Learn the newer surfaces:** [six developer tutorials](../docs/guide/tutorials/README.md) — stem fleets,
 declarations, shadow acceptance, authority boundaries, replay, and declared versus observed.
+
+## Recommended paths
 
 The matrix below is complete and is the architect's view. These five paths are the integrator's:
 each answers *which example fits my situation*, *what must I change*, and *how do I know it worked*.

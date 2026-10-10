@@ -7,7 +7,14 @@ developer, operator and researcher journeys; [capabilities](../../capabilities.m
 examples, operations and evidence. It is a reader grouping, not an additional architecture layer.
 `scripts/check-materials.py` checks the resource targets and required routes; its mutation checks
 prevent missing routes and named claim regressions from silently passing. Both are included in CI
-and `make check`. HTML decks have reading mode, keyboard navigation and mobile layout; structural
+and `make check`. **Routing by intent (2026-10-10).** The root [README](../../../README.md) routes first
+by intent — *Build a fleet*, *Run a fleet*, *See it work*, *Check the evidence* — and this page's
+[index](../../../examples/README.md) leads with the same four *See it work* examples (`conway`,
+`provisioning_viz`, `procurement_authority`, `diagnostics`), then the five-step learning path, then the
+matrix; the operations door keeps its own operator journey. `scripts/check-front-doors.py` (run by
+`check-positioning.sh`) holds the structure and link targets, with anchors resolved; its mutation suite is
+`scripts/test-check-front-doors.py` — rule in [`positioning.md`](../../positioning.md) § *The routes and
+the five-step path*. HTML decks have reading mode, keyboard navigation and mobile layout; structural
 checks do not replace browser or screen-reader review.
 
 
