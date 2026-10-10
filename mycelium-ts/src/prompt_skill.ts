@@ -1,4 +1,4 @@
-import { authHeaders, resolveToken, type AuthOptions } from "./auth";
+import { authHeaders, baseUrl, resolveToken, type AuthOptions } from "./auth";
 /**
  * mycelium/prompt_skill — TypeScript client for LLM Prompt Skills.
  *
@@ -114,7 +114,7 @@ export class PromptSkillClient {
     timeoutMs = 30_000,
     opts: AuthOptions = {},
   ) {
-    this.baseUrl = `http://${host}:${port}`;
+    this.baseUrl = baseUrl(host, port, opts.scheme);
     this.defaultTimeoutMs = timeoutMs;
     this.auth = authHeaders(resolveToken(opts.token));
   }

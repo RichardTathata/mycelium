@@ -47,13 +47,16 @@ asyncio.run(main())
 
 ## API reference
 
-### `MyceliumAgent(host, port, timeout, *, token=None)`
+### `MyceliumAgent(host, port, timeout, *, token=None, scheme="http", ca_file=None)`
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `host` | `"127.0.0.1"` | Gateway host |
 | `port` | `7946` | HTTP port the Mycelium node listens on |
 | `timeout` | `30.0` | Default request timeout (seconds) |
+| `token` | `None` | Gateway bearer; `MYCELIUM_GATEWAY_TOKEN` when unset ([below](#authentication-gateway-bearer)) |
+| `scheme` | `"http"` | `"https"` for a gateway serving TLS ([below](#reaching-a-gateway-over-tls)) |
+| `ca_file` | `None` | PEM bundle of a private fleet CA to trust; verification stays on |
 
 ---
 
@@ -75,6 +78,30 @@ The header rides the pooled clients *and* the dedicated SSE/stream clients (`on_
 carry the route's scope **by name** (`kv:read`, `mesh:write`, `wiki:read` / `wiki:write`, … — a
 family wildcard such as `wiki:*` is refused by the node's `validate()`; the table is the node's
 `docs/operations/rbac.md`). Since 0.2.4.
+
+### Reaching a gateway over TLS
+
+A gateway serving HTTPS — the node's own `gateway_tls` (`docs/operations/gateway-tls.md`) or a
+TLS-terminating proxy in front of it — is reached with `scheme="https"`. Every handle takes it
+(`MyceliumAgent`, `Wiki`, `TupleSpace`, `Blackboard`, `PromptSkillClient`, `ReasonClient`,
+`Federation`, `Artifacts`; `A2aClient` takes a full URL, so the scheme is in it). The default is
+`"http"`, so an existing loopback deployment is unchanged. Certificate verification — chain and
+hostname — is **on** and has no off switch; a private fleet CA is trusted with `ca_file=` (in the
+node-cert mode of `gateway_tls` that is the cluster CA's `ca-cert.pem`, whose certificate carries an
+IP SAN, so connect by the IP it names). The file is read at construction and a missing one is
+refused there; an empty `ca_file` means none, like `None`. The scheme is case-insensitive, and an
+IPv6 host is bracketed for you (`"::1"` → `https://[::1]:9443`). Both options ride the pooled
+clients and the dedicated SSE/stream clients.
+
+```python
+agent = MyceliumAgent("10.0.0.5", 9443, scheme="https", token="…")                      # system trust store
+agent = MyceliumAgent("10.0.0.5", 9443, scheme="https", ca_file="mycelium-tls/ca-cert.pem")  # pinned fleet CA
+a2a   = A2aClient("https://10.0.0.5:9443", ca_file="mycelium-tls/ca-cert.pem")
+```
+
+Since 0.2.9 — before it every handle hard-coded `http://`, so a TLS gateway was unreachable from
+this package and the bearer travelled in cleartext off loopback. `mycelium.base_url(host, port,
+scheme)` is the one place the URL is built.
 
 **Who the provider sees (core v3 item 7).** A call this client makes through the gateway
 (`rpc_call`, `scatter_gather`, `PromptSkillClient.call`, `/mcp` `tools/call`, A2A `send`) reaches the provider with a

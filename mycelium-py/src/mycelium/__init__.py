@@ -28,7 +28,7 @@ from .reason import (
 from .tuple import TupleSpace, TupleBackpressureError, TupleNotFoundError
 from .typed import TypedCallError, call_typed
 from .wiki import Wiki
-from ._pool import TOKEN_ENV, auth_headers, resolve_token
+from ._pool import SCHEMES, TOKEN_ENV, auth_headers, base_url, resolve_token
 
 __all__ = [
     "MyceliumAgent",

@@ -167,12 +167,24 @@ class A2aClient:
         The ``/.well-known/agent.json`` and ``/a2a`` paths are derived from this.
     timeout_secs:
         Default RPC timeout in seconds (can be overridden per call).
+    token:
+        Gateway bearer; defaults to ``MYCELIUM_GATEWAY_TOKEN`` when unset.
+    ca_file:
+        PEM bundle of a private fleet CA to trust for an ``https://`` base URL (verification
+        stays on; the system store is used without it).
     """
 
-    def __init__(self, base_url: str, *, timeout_secs: float = 30.0, token: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        timeout_secs: float = 30.0,
+        token: Optional[str] = None,
+        ca_file: Optional[str] = None,
+    ) -> None:
         self._base   = base_url.rstrip("/")
         self._timeout = timeout_secs
-        self._pool   = ClientPool(self._base, timeout_secs, token=token)
+        self._pool   = ClientPool(self._base, timeout_secs, token=token, ca_file=ca_file)
 
     # ── Discovery ─────────────────────────────────────────────────────────────
 
@@ -296,6 +308,7 @@ class A2aClient:
             f"{self._base}/a2a",
             json=payload,
             headers=self._pool.headers,
+            verify=self._pool.verify,
             timeout=timeout + 5.0,
         ) as resp:
             resp.raise_for_status()

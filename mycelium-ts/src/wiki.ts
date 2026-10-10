@@ -1,4 +1,4 @@
-import { authHeaders, resolveToken, type AuthOptions } from "./auth";
+import { authHeaders, baseUrl, resolveToken, type AuthOptions } from "./auth";
 /**
  * mycelium/wiki — TypeScript client for the Mycelium group wiki.
  *
@@ -64,7 +64,7 @@ export class Wiki {
     private readonly group: string = "wiki",
     opts: AuthOptions = {},
   ) {
-    this.baseUrl = `http://${host}:${port}`;
+    this.baseUrl = baseUrl(host, port, opts.scheme);
     this.auth = authHeaders(resolveToken(opts.token));
   }
 

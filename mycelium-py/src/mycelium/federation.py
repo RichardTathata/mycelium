@@ -50,7 +50,7 @@ from typing import Any, Optional
 
 import httpx
 
-from ._pool import ClientPool
+from ._pool import ClientPool, base_url
 
 
 class FederationError(Exception):
@@ -124,9 +124,14 @@ class Federation:
         port: int = 7946,
         *,
         token: Optional[str] = None,
+        scheme: str = "http",
+        ca_file: Optional[str] = None,
         _pool: Optional[ClientPool] = None,
     ) -> None:
-        self._pool = _pool if _pool is not None else ClientPool(f"http://{host}:{port}", token=token)
+        self._pool = (
+            _pool if _pool is not None
+            else ClientPool(base_url(host, port, scheme), token=token, ca_file=ca_file)
+        )
 
     # ── Read (federation:read) ──────────────────────────────────────────────
 

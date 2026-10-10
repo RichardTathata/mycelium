@@ -1,4 +1,4 @@
-import { authHeaders, resolveToken, type AuthOptions } from "./auth";
+import { authHeaders, baseUrl, resolveToken, type AuthOptions } from "./auth";
 /**
  * mycelium/tuple — TypeScript client for the Mycelium TupleSpace.
  *
@@ -71,7 +71,7 @@ export class TupleSpace {
     private ns: string = "pipeline",
     opts: AuthOptions = {},
   ) {
-    this.baseUrl = `http://${host}:${port}`;
+    this.baseUrl = baseUrl(host, port, opts.scheme);
     this.auth = authHeaders(resolveToken(opts.token));
   }
 

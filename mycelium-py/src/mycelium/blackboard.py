@@ -40,7 +40,7 @@ from typing import Optional
 
 import httpx
 
-from ._pool import ClientPool, PoolOwner
+from ._pool import ClientPool, PoolOwner, base_url
 
 
 class BlackboardNotFoundError(Exception):
@@ -50,10 +50,19 @@ class BlackboardNotFoundError(Exception):
 class Blackboard(PoolOwner):
     """Async client for one board namespace via a node's HTTP gateway."""
 
-    def __init__(self, host: str, port: int, ns: str = "board", *, token: Optional[str] = None):
-        self._base_url = f"http://{host}:{port}"
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        ns: str = "board",
+        *,
+        token: Optional[str] = None,
+        scheme: str = "http",
+        ca_file: Optional[str] = None,
+    ):
+        self._base_url = base_url(host, port, scheme)
         self._ns = ns
-        self._pool = ClientPool(self._base_url, token=token)
+        self._pool = ClientPool(self._base_url, token=token, ca_file=ca_file)
 
     async def post(self, attributes: dict[str, str], payload: bytes) -> int:
         """Post a fact (Linda ``out``) — non-destructive; readable + claimable cluster-wide.

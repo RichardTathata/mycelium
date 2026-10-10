@@ -32,6 +32,34 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   extended to entry 22; `converge.py`'s path; `cluster_propose` as the canonical verb in the crate docs; the
   `test-overlay` help comment on its own target; the deck's rolling-upgrade note restated per 2.30.0.
 
+### Fixed
+- **The SDKs reach a gateway over TLS** (`mycelium-py` **0.2.9**, `mycelium-ts` **0.2.3**,
+  `langgraph-checkpoint-mycelium` **0.3.2**). Every client built its base URL as `http://{host}:{port}` — eight
+  Python handles, five TypeScript clients and the checkpointer; only `A2aClient` took a full URL — so a gateway
+  serving HTTPS (`gateway_tls`, v2.3.0, or a TLS-terminating proxy) was unreachable from any SDK, and a bearer
+  sent to a node off loopback travelled in cleartext. Each now takes `scheme="https"` / `{ scheme: "https" }`
+  (default `http`, unchanged), built in one place per language (`mycelium.base_url`, `mycelium-ts` `baseUrl`,
+  the checkpointer's mirror of the Python rule). Verification stays on with no off switch; Python and the
+  checkpointer pin a private fleet CA with `ca_file=` (httpx `verify=`, read at construction, a missing file
+  refused there), riding the pooled clients and the dedicated SSE/stream clients; the TypeScript SDK documents
+  `NODE_EXTRA_CA_CERTS` rather than add `undici`. Seen failing first: `mycelium-py/tests/test_scheme.py`,
+  `mycelium-ts/tests/scheme.test.ts`, `langgraph-checkpoint-mycelium/tests/test_connection.py` (the option
+  was not a parameter). Guide: `docs/guide/10-language-bridges.md` § Reaching a gateway over TLS. The adversarial
+  review of #583 then held both helpers to one rule: the scheme case-insensitive on both sides (the TypeScript helper
+  compared strictly, so a JS caller's `"HTTPS"` threw) and `None`/a non-string the documented `ValueError` (it was an
+  `AttributeError`); an empty `ca_file` is `None` (`ssl.create_default_context(cafile="")` loaded nothing silently
+  where the docs promised a refusal); an IPv6 literal host is bracketed once (`"::1"` built `https://::1:8300`, which
+  httpx rejects). Each seen failing first in the same three test files.
+- **The LangGraph checkpointer sends a bearer** (`langgraph-checkpoint-mycelium` **0.3.2**). `MyceliumCheckpointSaver`
+  opened both httpx clients with no headers and took no token, so a token-protected gateway answered 401 to every
+  checkpoint — while the saver's own `"unauthorized"` reason and README sent the operator to the token. It now takes
+  `token=`, resolved as the Python SDK resolves it (the argument, then `MYCELIUM_GATEWAY_TOKEN`; empty means none)
+  and sent as `Authorization: Bearer` on the sync and async clients — header only, never in a URL, the `repr` or an
+  error. Seen failing first: `langgraph-checkpoint-mycelium/tests/test_connection.py` (with only the environment
+  variable set, the stub gateway saw `None` where `Bearer env-token` was expected). The review also corrected the
+  saver's scope list: every `put()` writes blobs through `PUT /gateway/reason/blob`, which is `llm:write`, so the
+  saver needs `kv:read`, `kv:write`, `llm:read` **and `llm:write`** (the README named three).
+
 ## [2.31.0] — 2026-10-09
 
 **Stops that stop, and failures that say what they are.** A node, a stem or a demo image now shuts down on SIGTERM

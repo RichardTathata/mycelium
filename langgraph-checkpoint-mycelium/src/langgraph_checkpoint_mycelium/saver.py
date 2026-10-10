@@ -43,6 +43,8 @@ capped at 8 MiB (the v1 single-frame mesh-fetch ceiling).
 from __future__ import annotations
 
 import json
+import os
+import ssl
 from collections.abc import AsyncIterator, Iterator, Sequence
 from typing import Any
 from urllib.parse import quote, unquote
@@ -149,6 +151,45 @@ def _merge_reason(reasons: dict[str, str], blob_id: str, reason: str) -> None:
         reasons[blob_id] = reason
 
 
+#: The URL schemes the saver accepts (``https`` for a gateway serving TLS — ``gateway_tls`` — or a
+#: TLS-terminating proxy; ``http`` is the default, so an existing deployment is unchanged).
+SCHEMES = ("http", "https")
+
+
+def _base_url(host: str, port: int, scheme: str) -> str:
+    """``"{scheme}://{host}:{port}"`` — the Python SDK's rule (``mycelium._pool.base_url``), mirrored
+    here because this package depends on httpx only: the scheme case-insensitive, ``None`` or a
+    non-string a ``ValueError``, an IPv6 literal host bracketed once (``::1`` → ``[::1]``).
+    Before 0.3.2 ``http://`` was hard-coded."""
+    if not isinstance(scheme, str) or scheme.lower() not in SCHEMES:
+        raise ValueError(f"scheme must be one of {SCHEMES}, not {scheme!r}")
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"{scheme.lower()}://{host}:{port}"
+
+
+#: Environment variable consulted when the saver is constructed without ``token=`` — the Python
+#: SDK's (``mycelium._pool.TOKEN_ENV``), so one variable serves both.
+TOKEN_ENV = "MYCELIUM_GATEWAY_TOKEN"
+
+
+def _auth_headers(token: str | None) -> dict[str, str]:
+    """The Python SDK's rule, mirrored: an explicit ``token`` wins, then :data:`TOKEN_ENV`, and an
+    empty string means *none*. ``{"Authorization": "Bearer …"}`` or ``{}`` — the token travels in
+    this header only, never in a URL, and the saver keeps no attribute that would show it in a
+    ``repr`` or an error (httpx redacts the header in its own)."""
+    resolved = (token or None) if token is not None else (os.environ.get(TOKEN_ENV) or None)
+    return {"Authorization": f"Bearer {resolved}"} if resolved else {}
+
+
+def _ssl_verify(ca_file: str | None) -> ssl.SSLContext | bool:
+    """httpx's ``verify=``: the system trust store, or a default context that trusts a private fleet
+    CA's PEM. Chain and hostname verification stay on either way; a missing file is refused here,
+    and an empty ``ca_file`` means *none* (``create_default_context(cafile="")`` would load nothing
+    silently)."""
+    return True if not ca_file else ssl.create_default_context(cafile=ca_file)
+
+
 CKPT_PREFIX  = "ckpt"
 WRITE_PREFIX = "ckptw"
 ROOT_NS      = "__root__"   # sentinel for checkpoint_ns == "" (reserved)
@@ -180,6 +221,17 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
     :param port:    HTTP port of the gateway.
     :param timeout: Default request timeout in seconds.
     :param serde:   Serializer (defaults to LangGraph's ``JsonPlusSerializer``).
+    :param token:   Gateway bearer, sent as ``Authorization: Bearer`` on both clients; when
+                    ``None``, ``MYCELIUM_GATEWAY_TOKEN`` is used, as the Python SDK does (0.3.2 —
+                    before it the saver could not present a bearer at all, so a token-protected
+                    gateway answered 401 to every call).
+    :param scheme:  ``"http"`` (default) or ``"https"`` for a gateway serving TLS (0.3.2).
+    :param ca_file: PEM bundle of a private fleet CA to trust instead of the system store
+                    (verification stays on; 0.3.2).
+
+    Under scoped tokens the saver needs ``kv:read`` and ``kv:write`` (the index rows) and
+    ``llm:read`` and ``llm:write`` (the blob tier — every ``put()`` writes blobs through
+    ``PUT /gateway/reason/blob``, which is ``llm:write``).
     """
 
     def __init__(
@@ -189,11 +241,16 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
         *,
         timeout: float = 30.0,
         serde: SerializerProtocol | None = None,
+        token: str | None = None,
+        scheme: str = "http",
+        ca_file: str | None = None,
     ) -> None:
         super().__init__(serde=serde)
-        self._base = f"http://{host}:{port}"
-        self._client  = httpx.Client(base_url=self._base, timeout=timeout)
-        self._aclient = httpx.AsyncClient(base_url=self._base, timeout=timeout)
+        self._base = _base_url(host, port, scheme)
+        verify = _ssl_verify(ca_file)
+        headers = _auth_headers(token)
+        self._client  = httpx.Client(base_url=self._base, timeout=timeout, verify=verify, headers=headers)
+        self._aclient = httpx.AsyncClient(base_url=self._base, timeout=timeout, verify=verify, headers=headers)
 
     # ── Lifecycle ────────────────────────────────────────────────────────────
 

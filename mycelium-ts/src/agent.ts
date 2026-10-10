@@ -2,7 +2,7 @@ import { sseStream } from "./sse";
 import { parseLossless, stringifyLossless, toBigInt } from "./json";
 import { Federation } from "./federation";
 import { Artifacts } from "./artifacts";
-import { authHeaders, resolveToken, type AuthOptions } from "./auth";
+import { authHeaders, baseUrl, resolveToken, type AuthOptions } from "./auth";
 import {
   KvReceipt,
   CapabilityHandle,
@@ -108,7 +108,8 @@ export class MyceliumAgent {
    * @param host    Gateway host (default "127.0.0.1")
    * @param port    HTTP port the Mycelium node listens on (default 7946)
    * @param timeout Default request timeout in milliseconds (default 30_000)
-   * @param opts    `{ token }` — gateway bearer; defaults to `MYCELIUM_GATEWAY_TOKEN`
+   * @param opts    `{ token, scheme }` — gateway bearer (defaults to `MYCELIUM_GATEWAY_TOKEN`) and
+   *                `"http"` (default) or `"https"` for a gateway serving TLS
    */
   constructor(
     host = "127.0.0.1",
@@ -116,7 +117,7 @@ export class MyceliumAgent {
     timeout = 30_000,
     opts: AuthOptions = {},
   ) {
-    this.base = `http://${host}:${port}`;
+    this.base = baseUrl(host, port, opts.scheme);
     this.timeout = timeout;
     this.auth = authHeaders(resolveToken(opts.token));
   }

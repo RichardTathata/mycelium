@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import ssl
 import threading
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any, AsyncIterator, Iterator, Optional
@@ -89,6 +90,47 @@ def auth_headers(token: Optional[str]) -> dict[str, str]:
     """
     return {"Authorization": f"Bearer {token}"} if token else {}
 
+#: The URL schemes a handle accepts. ``https`` reaches a gateway serving TLS (``gateway_tls``,
+#: v2.3.0, or a TLS-terminating proxy in front of it); ``http`` is the default, so an existing
+#: loopback deployment is unchanged.
+SCHEMES = ("http", "https")
+
+
+def base_url(host: str, port: int, scheme: str = "http") -> str:
+    """``"{scheme}://{host}:{port}"`` — the one place every handle builds its base URL.
+
+    Raises :class:`ValueError` for a scheme other than ``http`` / ``https`` (case-insensitive;
+    ``None`` or a non-string is the same error, never an ``AttributeError``). An IPv6 literal host
+    (one containing ``:``) is bracketed — ``"::1"`` → ``http://[::1]:port`` — unless the caller
+    already bracketed it; httpx rejects the unbracketed form. Before 0.2.9 every handle hard-coded
+    ``http://``, so a gateway serving HTTPS was unreachable from this SDK and the bearer travelled
+    in cleartext off loopback.
+    """
+    if not isinstance(scheme, str) or scheme.lower() not in SCHEMES:
+        raise ValueError(f"scheme must be one of {SCHEMES}, not {scheme!r}")
+    return f"{scheme.lower()}://{bracket_host(host)}:{port}"
+
+
+def bracket_host(host: str) -> str:
+    """An IPv6 literal in brackets (``::1`` → ``[::1]``); anything else unchanged."""
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]"
+    return host
+
+
+def ssl_verify(ca_file: Optional[str]) -> "ssl.SSLContext | bool":
+    """What to hand httpx as ``verify=``: ``True`` (the system trust store) or, for a private
+    fleet CA (``mycelium-tls/ca-cert.pem`` in the node-cert mode of ``gateway_tls``), a default
+    context that trusts ``ca_file``. Verification — certificate chain **and** hostname — is on in
+    both; there is no option to turn it off. A missing file is refused here, at construction;
+    an **empty** ``ca_file`` means *none* (the system store), stated here because
+    ``ssl.create_default_context(cafile="")`` would load nothing and say nothing.
+    """
+    if not ca_file:
+        return True
+    return ssl.create_default_context(cafile=ca_file)
+
+
 #: The SDK-wide default request timeout for pooled clients (seconds). The one
 #: place to tune it — every handle that doesn't take a user-facing ``timeout``
 #: parameter (Wiki/TupleSpace/Blackboard) constructs its pool with this.
@@ -108,13 +150,21 @@ class ClientPool:
     """Lazily-created persistent httpx clients (one sync; one async per loop)."""
 
     def __init__(
-        self, base_url: str, timeout: float = DEFAULT_TIMEOUT, *, token: Optional[str] = None,
+        self,
+        base_url: str,
+        timeout: float = DEFAULT_TIMEOUT,
+        *,
+        token: Optional[str] = None,
+        ca_file: Optional[str] = None,
     ) -> None:
         self._base_url = base_url
         self._timeout = timeout
         #: Headers every pooled request carries (the gateway bearer, if any). Handles
         #: that open dedicated clients (SSE streams) pass this to them too.
         self.headers: dict[str, str] = auth_headers(resolve_token(token))
+        #: The ``verify=`` every client built here is given (and the dedicated SSE clients): the
+        #: system trust store, or a context pinned to ``ca_file``. Never ``False``.
+        self.verify: ssl.SSLContext | bool = ssl_verify(ca_file)
         self._lock = threading.Lock()
         self._sync_client: Optional[httpx.Client] = None
         # id(loop) -> (loop, AsyncClient). Loop-aware (see module doc); at most
@@ -131,7 +181,8 @@ class ClientPool:
         with self._lock:
             if self._sync_client is None or self._sync_client.is_closed:
                 self._sync_client = httpx.Client(
-                    base_url=self._base_url, timeout=self._timeout, limits=_LIMITS, headers=self.headers
+                    base_url=self._base_url, timeout=self._timeout, limits=_LIMITS,
+                    headers=self.headers, verify=self.verify,
                 )
             client = self._sync_client
         yield _Bound(client, timeout)
@@ -151,7 +202,8 @@ class ClientPool:
                     if k != key and l.is_closed():
                         self._async_clients.pop(k, None)
                 client = httpx.AsyncClient(
-                    base_url=self._base_url, timeout=self._timeout, limits=_LIMITS, headers=self.headers
+                    base_url=self._base_url, timeout=self._timeout, limits=_LIMITS,
+                    headers=self.headers, verify=self.verify,
                 )
                 self._async_clients[key] = (loop, client)
         yield _Bound(client, timeout)
