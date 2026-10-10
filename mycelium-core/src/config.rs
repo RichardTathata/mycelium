@@ -2432,21 +2432,18 @@ mod tests {
     /// The insecure opt-in (plan P1) is a strict boolean from the environment: it waives a security
     /// refusal, so a typo is refused by name rather than read as either answer.
     #[test]
-    #[allow(unsafe_code)]
     fn the_unauthenticated_gateway_opt_in_parses_strictly_from_the_environment() {
         let _lock = env_test_lock();
         let var = "GOSSIP_GATEWAY_ALLOW_UNAUTHENTICATED";
-        let _guard = EnvGuard(var, std::env::var(var).ok());
+        let _guard = EnvGuard(&_lock, var, std::env::var(var).ok());
         assert!(!GossipConfig::default().gateway_allow_unauthenticated, "off by default");
         for (v, want) in [("1", true), ("true", true), ("yes", true), ("0", false), ("false", false), ("no", false)] {
-            // SAFETY: mutations serialised by env_test_lock().
-            unsafe { std::env::set_var(var, v) };
+            set_test_env(&_lock, var, Some(v));
             let mut cfg = GossipConfig::default();
             cfg.apply_env_overrides().expect("a boolean applies");
             assert_eq!(cfg.gateway_allow_unauthenticated, want, "{v}");
         }
-        // SAFETY: as above.
-        unsafe { std::env::set_var(var, "ture") };
+        set_test_env(&_lock, var, Some("ture"));
         let err = GossipConfig::default().apply_env_overrides().expect_err("a typo refuses");
         assert!(matches!(err, GossipError::InvalidField { field: "gateway_allow_unauthenticated", .. }), "{err}");
     }
