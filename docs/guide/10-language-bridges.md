@@ -368,8 +368,16 @@ const agent = new MyceliumAgent("10.0.0.5", 8300, 30_000, { token: "…" }); // 
 ```
 
 Companion handles (`Wiki`, `TupleSpace`, `Blackboard`, `PromptSkillClient`, `ReasonClient`,
-`A2aClient`) take the same option. Under scoped tokens, grant the route families the client
-uses (`kv:*`, `mesh:*`, `wiki:*`, `tuple:*`, …). Before these versions the bridges could not
+`A2aClient`) take the same option. Under scoped tokens, grant the scopes the client's routes
+require, **by name** — a family wildcard such as `kv:*` is refused by `validate()` at start (2.16.0;
+a scope matches exactly, or is the single `*`): `kv:read` / `kv:write` for the KV verbs, `cap:read` /
+`cap:write` for capabilities and `declare`, `mesh:read` / `mesh:write` for signals, mailboxes and
+`rpc_call`, `mesh:serve` to serve a kind, `consensus:read` / `consensus:write` for the overlay,
+`llm:read` / `llm:write` / `llm:invoke` for prompts and inference (`ReasonClient` included),
+`wiki:read` / `wiki:write`, `tuple:read` / `tuple:write`, `board:read` / `board:write`,
+`mcp:invoke` for `/mcp`, `federation:read` / `federation:invoke` for the `/gateway/federation/*`
+verbs, and `artifact:publish` for `POST /gateway/artifacts/publish`. The route → scope table is `required_scope` in `src/agent/http.rs`, read
+through [rbac.md](../operations/rbac.md). Before these versions the bridges could not
 present a bearer at all — a token-protected node was unreachable from Python and TypeScript.
 
 ## The sidecar in practice — fluid pipeline

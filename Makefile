@@ -137,11 +137,11 @@ test-three-node:
 	$(COMPOSE_THREE_NODE) down --remove-orphans 2>/dev/null || true; \
 	exit $$EXIT
 
-## test-overlay — 3-node overlay cluster: task auction, leader election, shared log
-## Builds Docker images, starts cluster, runs S11/S12/S13. ~3 min on warm cache.
 test-confined-fleet: ## Boundary H7 deployment test: kind + Calico, deploy/confined-fleet (needs docker, kubectl, network)
 	bash scripts/test-confined-fleet.sh
 
+## test-overlay — 3-node overlay cluster: task auction, leader election, shared log
+## Builds Docker images, starts cluster, runs S11/S12/S13. ~3 min on warm cache.
 test-overlay:
 	$(COMPOSE_OVERLAY) down -v --remove-orphans 2>/dev/null || true
 	$(COMPOSE_OVERLAY) up -d --build

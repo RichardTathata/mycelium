@@ -17,7 +17,7 @@
 //! Committed values are written to the Layer 1 KV store at
 //! `consensus/committed/{slot}` and anti-entropy synced to late joiners.
 //!
-//! See [`GossipAgent::group_propose`] and [`GossipAgent::system_propose`] for
+//! See [`crate::ConsensusHandle::group_propose`] and [`crate::ConsensusHandle::cluster_propose`] for
 //! the entry points. [`GossipAgent::start_consensus_listener`] must be called
 //! on every node that should participate as a voter.
 //!
@@ -73,9 +73,9 @@ pub struct ConsensusConfig {
     /// Minimum number of distinct voters needed to commit.
     ///
     /// `0` = auto: `floor(N / 2) + 1` where N is the group member count
-    /// (for [`group_propose`](crate::GossipAgent::group_propose)) or the
+    /// (for [`group_propose`](crate::ConsensusHandle::group_propose)) or the
     /// known peer count + 1 (for
-    /// [`system_propose`](crate::GossipAgent::system_propose)).
+    /// [`cluster_propose`](crate::ConsensusHandle::cluster_propose)).
     pub quorum_size:    usize,
     /// How long each phase of a ballot attempt waits — the promises of the prepare phase (2.30.0),
     /// then the votes — before the attempt is declared failed. A ballot can take up to twice this.
@@ -130,7 +130,7 @@ pub struct ConsensusConfig {
     /// pheromone freshness. Default: `false`.
     ///
     /// **Note**: in `group_propose`, suggestion is based on pheromone load + trust counts
-    /// within the group. In `system_propose`, suggestion defers this node if it is not the
+    /// within the group. In `cluster_propose`, suggestion defers this node if it is not the
     /// lowest-load proposer among all peers that have written a `consensus.propose` trail.
     pub use_suggest_leader: bool,
 
@@ -179,7 +179,7 @@ impl Default for ConsensusConfig {
     }
 }
 
-/// Per-group quorum requirement for [`GossipAgent::cross_group_propose`].
+/// Per-group quorum requirement for [`crate::ConsensusHandle::cross_group_propose`].
 ///
 /// Each entry describes one named capability group and the fraction of its
 /// members that must accept before the proposal can commit across all groups.
@@ -197,8 +197,8 @@ pub struct GroupQuorum {
     pub veto: bool,
 }
 
-/// Outcome of a [`group_propose`](crate::GossipAgent::group_propose) or
-/// [`system_propose`](crate::GossipAgent::system_propose) call.
+/// Outcome of a [`group_propose`](crate::ConsensusHandle::group_propose) or
+/// [`cluster_propose`](crate::ConsensusHandle::cluster_propose) call.
 ///
 /// **`#[non_exhaustive]` since 2026-09-24.** A `_` arm is required, and it must **fail closed**:
 /// a future refusal variant read as success is exactly the class of bug
@@ -625,7 +625,7 @@ pub(crate) fn evaluate_topology_gate(
 
 /// Context for mid-ballot opaque-member recomputation.
 ///
-/// Injected by `group_propose` / `system_propose` at the signal-mesh call site so
+/// Injected by `group_propose` / `cluster_propose` at the signal-mesh call site so
 /// `propose` does not read `KvState` directly — the opacity query strategy is an
 /// injected dependency, not a consensus-engine concern.
 pub(crate) struct OpaqueRecompute {
@@ -641,7 +641,7 @@ pub(crate) struct OpaqueRecompute {
 //
 // Shared context for both the voter/listener task and the proposer.
 // Constructed by GossipAgent::start_consensus_listener and
-// GossipAgent::group_propose / system_propose, then either spawned
+// ConsensusHandle::group_propose / cluster_propose, then either spawned
 // (spawn_listener) or driven directly (propose).
 
 /// Bundles the Arc fields needed for consensus tasks.
@@ -929,7 +929,7 @@ impl ConsensusEngine {
 
     /// Runs one full proposal attempt sequence for `slot`.
     ///
-    /// Called by `GossipAgent::group_propose` and `GossipAgent::system_propose`.
+    /// Called by `ConsensusHandle::group_propose` and `ConsensusHandle::cluster_propose`.
     ///
     /// `opaque_recompute` — when `Some`, `propose` registers for `BOUNDARY_OPAQUE` signals
     /// and re-evaluates the effective quorum size mid-ballot when any member transitions.
@@ -1263,7 +1263,7 @@ impl ConsensusEngine {
     /// Uses a single ballot round so the commit is atomic — no group can commit without
     /// all others also committing.
     ///
-    /// Called by [`GossipAgent::cross_group_propose`].
+    /// Called by [`crate::ConsensusHandle::cross_group_propose`].
     pub(crate) async fn cross_propose(
         &self,
         slot:   Arc<str>,

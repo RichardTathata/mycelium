@@ -72,7 +72,8 @@ Wiki("10.0.0.5", 8300, "council", token="…")                # companions too �
 
 The header rides the pooled clients *and* the dedicated SSE/stream clients (`on_signal`,
 `rpc_serve`, `mailbox`, `subscribe_log*`, A2A streaming). Under scoped tokens the token must
-carry the route's scope (`kv:read`, `mesh:write`, `wiki:*`, … — the node's
+carry the route's scope **by name** (`kv:read`, `mesh:write`, `wiki:read` / `wiki:write`, … — a
+family wildcard such as `wiki:*` is refused by the node's `validate()`; the table is the node's
 `docs/operations/rbac.md`). Since 0.2.4.
 
 **Who the provider sees (core v3 item 7).** A call this client makes through the gateway

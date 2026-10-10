@@ -252,7 +252,7 @@ mod tests {
     #[tokio::test]
     async fn test_consistent_set_timeout_unreachable_quorum() {
         // Require quorum > 1 by proposing with an explicit ConsensusConfig that
-        // sets max_ballots = 1 and quorum_size = 2. Use system_propose directly.
+        // sets max_ballots = 1 and quorum_size = 2. Use cluster_propose directly.
         use crate::consensus::ConsensusConfig;
         let p   = alloc_port();
         let id  = NodeId::new("127.0.0.1", p).unwrap();

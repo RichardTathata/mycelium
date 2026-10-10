@@ -731,7 +731,7 @@ fn required_scope(method: &axum::http::Method, matched_path: &str) -> &'static s
         "/gateway/rpc/call"        => "mesh:write",
         // Closure plan C1: serving is its own scope, so an agent that serves skills needs no power
         // to *call* (`mesh:write` also opens `rpc/call`). The 2.15.0 window that admitted `mesh:read`/
-        // `mesh:write` here is closed (2.19.0).
+        // `mesh:write` here is closed (2.18.2).
         "/gateway/rpc/serve/{kind}" => "mesh:serve",
         "/gateway/rpc/respond"     => "mesh:serve",
         "/gateway/scatter"         => "mesh:write",
@@ -3505,7 +3505,7 @@ async fn gw_mailbox_deliver(
 // ── Overlay gateway helpers ───────────────────────────────────────────────────
 
 /// Build a `ConsensusEngine` from `TaskCtx`, skipping the opacity/load-balance
-/// heuristics used by `GossipAgent::system_propose` — those are performance
+/// heuristics used by `ConsensusHandle::cluster_propose` — those are performance
 /// hints, not correctness requirements, and are not available from `TaskCtx`.
 #[cfg(feature = "consensus")]
 fn overlay_make_engine(ctx: &Arc<TaskCtx>) -> crate::consensus::ConsensusEngine {

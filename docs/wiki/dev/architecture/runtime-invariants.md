@@ -47,7 +47,7 @@ silent drop, which broke RPC and ballot voting in partial meshes. Only *admissio
 `test_individual_signal_reaches_unpeered_target_via_relay`,
 `test_individual_consumers_over_random_partial_meshes` (both in `src/lib_tests.rs`).
 
-**The one legitimate termination: the frame's own target (2026-07-10, #162).** An Individual
+**The first of two carve-outs, routing at the terminal: the frame's own target (2026-07-10, #162).** An Individual
 frame addressed to *this* node has nowhere further to route — admission already delivered it
 locally. Pre-fix it still entered the forward path (both self-emits like mailbox
 deliver-to-self and relayed frames arriving at their destination traverse the gossip queue),
@@ -58,6 +58,17 @@ self-addressed Individual frames before any forwarding logic (`src/agent/tasks.r
 **routing at the terminal, not scope admission** — do not cite it as precedent for
 conditional forwarding: any frame addressed *elsewhere* still forwards unconditionally.
 Gate: `self_targeted_signal_does_not_flood` (`src/lib_tests.rs`, verified failing pre-fix).
+
+**The second carve-out is keyed on origin, not on route: a removed member (closure plan C5,
+2.15.0).** A frame whose sender is on the removal ledger — a `Ping`, a `Signal`, a `Data` or
+`SignedData` write (for `SignedData`, the signer too) — is dropped at the connection before
+admission or forwarding (`mycelium-core/src/connection.rs`, the four
+`task_ctx.removed.is_node_removed` / `is_hash_removed` checks; `docs/design/member-removal.md`).
+This is **membership admission keyed on a KV-carried fact** (`sys/membership/removed/`,
+monotonic), applied to the frame's *origin*: the node is not a member, so nothing it sends is a
+frame of the mesh. It is not scope admission and not conditional forwarding — a frame from a member
+still forwards unconditionally whatever its scope — and, like #162, **do not cite it as precedent**
+for dropping a frame on its scope or its contents.
 
 **Flood-relay is correct but slow for RPC — pin RPC-heavy pairs.** The direct-send path only
 fires for a peer in the *forwarding-target set*, and that set **deliberately de-pins non-active

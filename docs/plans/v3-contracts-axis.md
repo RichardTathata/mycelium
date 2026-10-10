@@ -1004,9 +1004,13 @@ on 2026-09-23 and are struck through below):
    shared-observation alternative was rejected because it would put foreign domain names into
    `sys/` (D7) and is unbuildable without this counter anyway. Both carry stated limits rather than
    implied ones: a signature's strength rests on `require_identity_proofs`, which is **default-off**
-   — it was flipped on 2026-09-23 and reverted on 2026-09-24, because identity and proof are two
-   independent gossip writes and requiring proofs opens a window a leader election can be decided
-   inside (`docs/wiki/dev/security.md`) — and the cap is per gateway (N gateways ⇒ N × cap) and
+   — it was flipped on 2026-09-23 and reverted on 2026-09-24; the cause stated here at the time (two
+   independent gossip writes, a window a leader election could be decided inside) was **wrong** — the
+   failure it was blamed on ran without TLS, where the flag is inert — and the two-writes window was
+   closed by construction in 2.14.0's sealed record (`sys/identity-signed/`); what keeps the default
+   off is the residual the security page states, trust on first sighting of an unseen node, which
+   anchors close and proofs do not (`docs/wiki/dev/security.md` § *The identity-proof window*,
+   corrected 2026-10-09) — and the cap is per gateway (N gateways ⇒ N × cap) and
    bounds concurrency rather than rate. Note that even *with* proofs required the signature would
    not establish identity: first sighting remains trust-on-first-use, which anchors close, not
    proofs. The caveat is therefore still live, and acting on it means anchors.

@@ -9,6 +9,29 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **The composed-effect record: what it can carry versus what is written.** `AeEvidence` *can* carry the receipt's
+  rung and the origin domain (`with_effect_durability`, `with_origin_domain`, 2.11.0) and `states_a_composed_effect()`
+  reads them; **no shipped path calls either builder** — the gateway's evidence path writes neither field, so on every
+  record it produces both are `None` and the predicate is false (the only callers are the module's own tests). The
+  fields are available to an enforcement point that has the receipt and the credential in hand; 2.11.0's *now carries*
+  described the record's shape, not a writer. `docs/design/composed-effect.md` §9 and `what-is-proven.md` now say so.
+  No code change (the 360 review, 2026-10-09).
+- **Documentation: the records a 360 review found contradicting the code, corrected** (2026-10-09; no code change
+  beyond doc-comments). Guide 10 told operators to grant `kv:*` / `mesh:*` / `wiki:*` / `tuple:*`, which
+  `validate()` has refused by name since 2.16.0 — the scopes are now listed by name; guide 12 showed a
+  `schema-seed --fail-on-conflict` binary that does not exist — a labelled sketch against `seed_schemas_from_dir`
+  replaces it; the contracts-axis plan's §10.2 and `what-is-proven.md` gave the two-writes window as the reason
+  `require_identity_proofs` is default-off — both now cite the live residual (trust on first sighting, closed by
+  anchors), as `dev/security.md` already did; CLAUDE.md's sim-seam and lock-order invariants state their scope (the
+  three scanned crates; the library crates, not `examples/`), with the two off-seam wasm-host loops named on the
+  proof page; `philosophy.md`'s forwarding row reads *regardless of admission*, and `runtime-invariants.md` names the
+  removed-member drop (C5) as the second, origin-keyed carve-out; the TLS-without-CA-key row moves to the proof
+  page's CI table; README and `positioning.md` say the default configuration is a development posture. Smaller
+  drift: the serve window's closing release in `http.rs` (2.18.2, not 2.19.0); `deprecations.md`'s summary table
+  extended to entry 22; `converge.py`'s path; `cluster_propose` as the canonical verb in the crate docs; the
+  `test-overlay` help comment on its own target; the deck's rolling-upgrade note restated per 2.30.0.
+
 ## [2.31.0] — 2026-10-09
 
 **Stops that stop, and failures that say what they are.** A node, a stem or a demo image now shuts down on SIGTERM
@@ -210,7 +233,7 @@ finding, two metrics, a 403 `refused` blob outcome, a machine-readable `reason` 
   CI failures because it did not yet resolve node A as a blob provider until A's first 30 s capability refresh (the
   propagation gap is #563) — and that `not_found` is the documented retriable "not yet"
   (`examples/langgraph/03_cross_node.py` and `06_deploy_reheal.py` already waited through it). The poll is a helper now
-  (`tests/converge.py`) that keeps waiting on a retriable miss and stops on any non-transient reason, with node-free
+  (`langgraph-checkpoint-mycelium/tests/converge.py`) that keeps waiting on a retriable miss and stops on any non-transient reason, with node-free
   tests seen failing first; `TestRowBeforeBlob`'s second poll re-raises a non-retriable one instead of spinning to its
   deadline. Test-only; no package change.
 - **A blob fetch tells a refusal from a corrupt copy (#564; `mycelium-reason` 0.7.1).** A provider's RPC layer refusing

@@ -1,6 +1,6 @@
 //! The **data-plane interface** — the pluggable backing store a group's wiki lives in. Deliberately
 //! substrate-agnostic: an `FsStore` (this crate), an `S3Store`, or a doc-store all implement it, and
-//! the Mycelium control plane (Phase 2) drives whichever the group is configured with.
+//! the Mycelium coordination layer (Phase 2) drives whichever the group is configured with.
 //!
 //! **Concurrency contract.** The store is **airtight under concurrent writers** — it does not *assume*
 //! a single writer, it *enforces* one per object via compare-and-swap. Two writers (e.g. a transient
