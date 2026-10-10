@@ -40,8 +40,13 @@ Four layers, all additive/opt-in (`src/agent/rbac.rs`, gateway middleware in
    `regression_node_level_routes_require_bearer_when_token_set`,
    `node_level_routes_honour_scoped_tokens` (`src/agent/http.rs`).
 4. **`sys/` namespace tripwire (core, feature-free):** inbound writes naming *self* under
-   `sys/identity|load|role|tuple|caller-context/{node}` → `warn!` + `sys_namespace_violations`.
-   Detection only — never make it a write guard.
+   `sys/identity|identity-signed|identity-proof|load|role|tuple|caller-context|consensus-accepted/{node}`
+   → `warn!` + `sys_namespace_violations` (the acceptor record and the two other identity forms since
+   2026-10-10: each is written only by its own node — `persist_acceptor`, the start/rotation identity
+   writers). Detection only — never make it a write guard. `consensus/decided/{slot}` is written by
+   whichever node commits, so it has its own tripwire in Layer III instead (`ConsensusEngine::decided_floor`
+   → `consensus_decided_floor_anomalies`: a floor more than `2^32` above every ballot this node has
+   observed for the slot, counted once per slot; the floor is still obeyed).
 5. **Gateway caller identity (v3 item 7, 2026-09-13; `src/agent/gateway_caller.rs`):** the
    confused deputy the 2026-09-05 fix left open — every gateway dispatch (`tools/call`, `/a2a`,
    `rpc/call`, `scatter`, `emit_reliable`, `llm/*`) ran as the **node**, so layer 2's

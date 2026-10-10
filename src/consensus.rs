@@ -743,8 +743,46 @@ impl ConsensusEngine {
 
     /// The ballot this slot's most recent commit was decided at, as this node knows it; `0` when
     /// none — see [`consensus_ns::DECIDED`].
+    ///
+    /// Every reader of the floor comes through here — the acceptor's prepare and vote, the
+    /// proposer's ballot draw and phase-1 collection, the commit path, `record_decided` — so this is
+    /// where the floor's tripwire sits ([`note_implausible_floor`](Self::note_implausible_floor)).
+    /// It changes nothing about what is returned or refused.
     fn decided_floor(&self, slot: &str) -> u64 {
-        self.get(&format!("{}{}", consensus_ns::DECIDED, slot)).map(|b| decode_ballot(&b)).unwrap_or(0)
+        let floor = self.get(&format!("{}{}", consensus_ns::DECIDED, slot)).map(|b| decode_ballot(&b)).unwrap_or(0);
+        // Cheap guard first: no floor at or below the margin can be implausible.
+        if floor > DECIDED_FLOOR_ANOMALY_MARGIN {
+            self.note_implausible_floor(slot, floor);
+        }
+        floor
+    }
+
+    /// The decided-floor tripwire — **detection, not prevention**, in Layer III (core's apply path
+    /// never learns consensus's conventions). `consensus/decided/{slot}` is written by whichever node
+    /// commits, so it is not self-owned and the `sys/` tripwire cannot cover it; but a member that
+    /// writes `u64::MAX` there makes every later prepare on the slot refuse. A floor more than
+    /// [`DECIDED_FLOOR_ANOMALY_MARGIN`] above the highest ballot this node has observed for the slot —
+    /// the shared ballot key and its own acceptor memory (a promise is never below the acceptance) —
+    /// is counted once per slot (`SystemStats::consensus_decided_floor_anomalies`,
+    /// `mycelium_consensus_decided_floor_anomalies_total`) and warned about once. The floor is still
+    /// obeyed.
+    fn note_implausible_floor(&self, slot: &str, floor: u64) {
+        let ballot_key = format!("{}{}", consensus_ns::BALLOT, slot);
+        let promised = self.task_ctx.consensus_accepted.pin().get(slot).map(|s| s.promised).unwrap_or(0);
+        let observed = self.read_ballot(&ballot_key).max(promised);
+        if !decided_floor_is_implausible(floor, observed) {
+            return;
+        }
+        if self.task_ctx.decided_floor_anomaly_slots.pin().insert(Arc::from(slot)) {
+            #[cfg(feature = "metrics")]
+            metrics::counter!("mycelium_consensus_decided_floor_anomalies_total").increment(1);
+            tracing::warn!(
+                slot = %slot, floor, observed,
+                "consensus: the slot's decided floor is far above every ballot this node has observed \
+                 — a forged consensus/decided/ entry? Obeyed as before; counted once per slot \
+                 (see SystemStats::consensus_decided_floor_anomalies)"
+            );
+        }
     }
 
     /// Whether this node can see the slot's latest decision is **over**: it holds the committed
@@ -2155,6 +2193,26 @@ fn signer_authorized(msg: &ConsensusMsg, signer: &NodeId) -> bool {
 #[cfg(feature = "consensus")]
 pub(crate) fn accepted_key(node: &NodeId, slot: &str) -> String {
     format!("{}{}/{}", mycelium_core::signal::kv_ns::CONSENSUS_ACCEPTED, node, slot)
+}
+
+/// How far a decided floor may sit above every ballot this node has observed for its slot before
+/// the floor's tripwire counts it: `2^32`.
+///
+/// Why this bound. A ballot is drawn one attempt at a time — `max(ballot key, floor) + 1` — so a
+/// legitimate floor can exceed what this node has seen only by the attempts it missed: a node that
+/// joined late, or whose copy of the ballot key lags the decided key it arrived with (two gossip
+/// messages, no ordering between them). Missing `2^32` attempts on one slot is ~49 days of one
+/// attempt per millisecond, which no slot's history contains; a forged floor near `u64::MAX`, the
+/// value that exhausts the ballot space, is `2^63` or more past anything observed. A forged floor
+/// *inside* the margin is not counted — and is also harmless: proposers draw above it.
+#[cfg(feature = "consensus")]
+pub(crate) const DECIDED_FLOOR_ANOMALY_MARGIN: u64 = 1 << 32;
+
+/// Whether `floor` is further than [`DECIDED_FLOOR_ANOMALY_MARGIN`] above `observed`, the highest
+/// ballot this node has seen for the slot.
+#[cfg(feature = "consensus")]
+pub(crate) fn decided_floor_is_implausible(floor: u64, observed: u64) -> bool {
+    floor.saturating_sub(observed) > DECIDED_FLOOR_ANOMALY_MARGIN
 }
 
 /// Encode the pre-2.30.0 acceptance-only record, `ballot(8, LE) ‖ digest(32)` — kept so the tests
@@ -3674,6 +3732,17 @@ mod consensus_msg_auth_tests {
         assert!(!claim_vote(&m, &slot, 3, &v, 1, 4));
         assert!(matches!(prepare_slot(&m, &slot, 5, 1, 4), PrepareOutcome::Promised(None)));
         assert!(claim_vote(&m, &slot, 5, &v, 1, 4));
+    }
+
+    /// The floor tripwire's bound: past the margin above what was observed, and only there.
+    #[test]
+    fn an_implausible_floor_is_one_past_the_margin() {
+        assert!(!decided_floor_is_implausible(5, 0), "a node that missed a few attempts");
+        assert!(!decided_floor_is_implausible(DECIDED_FLOOR_ANOMALY_MARGIN, 0));
+        assert!(decided_floor_is_implausible(DECIDED_FLOOR_ANOMALY_MARGIN + 1, 0));
+        assert!(decided_floor_is_implausible(u64::MAX, 7), "the forgery that exhausts the ballot space");
+        assert!(!decided_floor_is_implausible(u64::MAX, u64::MAX - 1), "observed ballots reached it");
+        assert!(!decided_floor_is_implausible(3, 10), "a floor below what was observed");
     }
 
     /// Two digests at the top ballot means *one value per ballot* did not hold (a proposer older

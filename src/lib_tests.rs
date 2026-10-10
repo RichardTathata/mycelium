@@ -155,6 +155,7 @@ fn spawn_handler(
         rpc_reply_sender_mismatches: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         commit_conflicts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         commit_conflict_slots: Arc::new(papaya::HashMap::new()),
+        decided_floor_anomaly_slots: Arc::new(papaya::HashSet::new()),
         event_ring: Arc::new(crate::agent::emergent::EventRing::default()),
         governed_group_conflicts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         capability_coverage_gaps: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1214,6 +1215,7 @@ async fn test_subscribe_notified_via_gossip() {
             rpc_reply_sender_mismatches: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             commit_conflicts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             commit_conflict_slots: Arc::new(papaya::HashMap::new()),
+            decided_floor_anomaly_slots: Arc::new(papaya::HashSet::new()),
             event_ring: Arc::new(crate::agent::emergent::EventRing::default()),
             governed_group_conflicts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             capability_coverage_gaps: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -4616,6 +4618,22 @@ async fn test_sys_namespace_tripwire_flags_foreign_self_owned_write() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(flagged, "B did not flag the foreign write to its own sys/load namespace");
+
+    // Violation 2: A writes B's durable acceptor record — B's promise and acceptance for a slot, which
+    // only B's `persist_acceptor` writes and `prewarm_accepted` restores. A forged one is a promise B
+    // never made; B must count it (2026-10-10).
+    let before = b.system_stats().sys_namespace_violations;
+    let forged_acceptor = format!("sys/consensus-accepted/{node_b}/slot-x");
+    let _ = a.kv().set(forged_acceptor.clone(), Bytes::from_static(b"forged"));
+    let mut flagged = false;
+    for _ in 0..200 {
+        if b.kv().get(&forged_acceptor).is_some() && b.system_stats().sys_namespace_violations > before {
+            flagged = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(flagged, "B did not flag a peer's write to its own sys/consensus-accepted/ record");
 
     a.shutdown_with_timeout(Duration::from_secs(5)).await;
     b.shutdown_with_timeout(Duration::from_secs(5)).await;
@@ -10024,6 +10042,62 @@ async fn an_unrecorded_promise_is_counted_as_well_as_withheld() {
 
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&base);
+}
+
+/// **A decided floor no history of the slot can reach is counted, and still obeyed** (2026-10-10).
+/// `consensus/decided/{slot}` is written by whichever node commits, so it is not self-owned and the
+/// `sys/` tripwire cannot see it; a member writing `u64::MAX` there makes every later prepare on the
+/// slot refuse. The write goes in through the KV path (`kv().set`, which applies through
+/// `apply_and_notify` exactly as a gossiped update does); a prepare at ballot 1 is then refused as
+/// before — answered with a NACK naming the floor, no promise recorded — and the slot is counted
+/// once on `consensus_decided_floor_anomalies`, however many times the floor is read. A legitimate
+/// floor a little above what this node has seen (it missed some attempts) is not counted.
+/// Seen failing first with the field plumbed and no detection: the count stayed 0.
+#[cfg(feature = "consensus")]
+#[tokio::test]
+async fn a_forged_decided_floor_is_counted_and_still_obeyed() {
+    use crate::consensus::{consensus_kind, decode_consensus_msg, encode_consensus_msg, ConsensusMsg};
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    let a = GossipAgent::new(id.clone(), cfg);
+    a.start().await.unwrap();
+    let _listener = a.consensus().start_consensus_listener(ConsensusConfig::default());
+    let mut nacks = a.task_ctx.signal_handlers.register_with_capacity(Arc::from(consensus_kind::NACK), 8);
+    let mut acks = a.task_ctx.signal_handlers.register_with_capacity(Arc::from(consensus_kind::VOTE), 8);
+    assert_eq!(a.system_stats().consensus_decided_floor_anomalies, 0);
+
+    // Control: a floor of 3 on a slot this node has never seen — it missed the attempts; not counted.
+    let _ = a.kv().set("consensus/decided/plausible", Bytes::copy_from_slice(&3u64.to_le_bytes()));
+    // The forgery.
+    let slot: Arc<str> = Arc::from("forged");
+    let _ = a.kv().set(format!("consensus/decided/{slot}"), Bytes::copy_from_slice(&u64::MAX.to_le_bytes()));
+
+    for (s, ballot) in [("plausible", 4u64), (&*slot, 1), (&*slot, 2)] {
+        let bytes = encode_consensus_msg(&ConsensusMsg::Prepare { slot: Arc::from(s), ballot, proposer: id.clone() });
+        mycelium_core::ops::emit_signal(&a.task_ctx, Arc::from(consensus_kind::PROPOSE), SignalScope::Individual(id.clone()), bytes);
+    }
+    // The plausible slot's prepare is promised (above its floor of 3).
+    let ack = tokio::time::timeout(Duration::from_secs(5), acks.recv()).await.expect("answered").expect("open");
+    assert!(matches!(decode_consensus_msg(&ack.payload), Some(ConsensusMsg::PrepareAck { ballot: 4, .. })));
+    // The forged slot's two prepares are refused, as before: a NACK naming the floor, nothing promised.
+    for _ in 0..2 {
+        let nack = tokio::time::timeout(Duration::from_secs(5), nacks.recv()).await.expect("refused").expect("open");
+        match decode_consensus_msg(&nack.payload) {
+            Some(ConsensusMsg::Promise { slot: s, seen_ballot, .. }) => {
+                assert_eq!(&*s, "forged");
+                assert_eq!(seen_ballot, u64::MAX, "the refusal names the floor");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+    assert!(a.task_ctx.consensus_accepted.pin().get(&slot).is_none_or(|st| st.promised == 0),
+            "no promise is recorded below the floor");
+    assert_eq!(a.system_stats().consensus_decided_floor_anomalies, 1,
+               "the forged slot is counted, once, however often its floor is read; the plausible one is not");
+
+    a.shutdown().await;
 }
 
 /// **Boundary H P1 gate — issuer binding on live nodes.** Two TLS members, A and B.

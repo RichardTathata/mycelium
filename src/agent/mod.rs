@@ -344,9 +344,22 @@ pub struct SystemStats {
     /// `start_consensus_listener` — nodes without a listener do not detect.
     pub commit_conflicts: u64,
 
+    /// Slots whose **decided floor** (`consensus/decided/{slot}`, the ballot at or below which every
+    /// acceptor refuses) this node found more than `2^32` above every ballot it has observed for the
+    /// slot — its shared ballot key, its own promise and its own acceptance. Ballots are drawn one
+    /// attempt at a time (`max(seen, floor) + 1`), so no history of a slot gets there; a member that
+    /// writes a huge floor (`u64::MAX`) does, and with it makes every later prepare on the slot refuse.
+    ///
+    /// **Detection, not prevention** (the tripwire idiom, in Layer III): the floor is still obeyed and
+    /// the refusal is unchanged — `consensus/decided/` is written by whichever node commits, so it is
+    /// not self-owned and the `sys/` tripwire cannot see it. Counted once per slot, with one `warn!`.
+    /// Any non-zero value warrants investigation. `0` without the `consensus` feature.
+    pub consensus_decided_floor_anomalies: u64,
+
     /// Cumulative count of inbound (remote) writes to a `sys/` key this node
-    /// owns — `sys/identity/{self}`, `sys/load/{self}`, `sys/role/{self}`,
-    /// `sys/tuple/{self}/…`. Only the named node should ever originate these;
+    /// owns — `sys/identity/{self}`, `sys/identity-signed/{self}`, `sys/identity-proof/{self}`,
+    /// `sys/load/{self}`, `sys/role/{self}`, `sys/tuple/{self}/…`, `sys/caller-context/{self}` and
+    /// `sys/consensus-accepted/{self}/…`. Only the named node should ever originate these;
     /// a remote write to one is a namespace-ownership violation.
     ///
     /// **Detection, not prevention** (mirrors [`commit_conflicts`](Self::commit_conflicts)):
@@ -504,6 +517,12 @@ pub(crate) struct TaskCtx {
     // single feature makes it both, and it is legitimately unread in a gateway-free build.
     #[cfg_attr(not(feature = "gateway"), allow(dead_code))]
     pub(crate) commit_conflict_slots: Arc<papaya::HashMap<Arc<str>, u64>>,
+    /// Slots whose `consensus/decided/{slot}` floor this node found **implausibly far** above every
+    /// ballot it has observed for the slot — the Layer III tripwire in `ConsensusEngine::decided_floor`
+    /// (see `SystemStats::consensus_decided_floor_anomalies`, which is this set's size). One entry per
+    /// slot, so each is counted and logged once. `papaya`, not a lock — no lock-order row; `insert` is
+    /// a single atomic operation with no closure.
+    pub(crate) decided_floor_anomaly_slots: Arc<papaya::HashSet<Arc<str>>>,
 
     /// Legible-Emergence Phase 3: the bounded, HLC-stamped **event ring** — the per-node source the
     /// `explain` fan-out assembles in causal order. Always allocated (tiny); recorded to only when
@@ -1063,6 +1082,7 @@ impl GossipAgent {
             rpc_reply_sender_mismatches,
             commit_conflicts: Arc::new(AtomicU64::new(0)),
             commit_conflict_slots: Arc::new(papaya::HashMap::new()),
+            decided_floor_anomaly_slots: Arc::new(papaya::HashSet::new()),
             event_ring: Arc::new(emergent::EventRing::default()),
             governed_group_conflicts: Arc::new(AtomicU64::new(0)),
             capability_coverage_gaps: Arc::new(AtomicU64::new(0)),

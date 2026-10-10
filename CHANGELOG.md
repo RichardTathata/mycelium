@@ -53,6 +53,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   caller context), `GossipAgent::gateway_preflight` / `gateway_record_execution` (the preflight `/mcp`, `/a2a` and
   `/gateway/llm/call` run, opaque `GatewayPreflight` / `GatewayRefusal`, inert without `tls`) and
   `GatewayDispatchError` (`#[non_exhaustive]`). All under `gateway`; additive.
+- **Tripwires on two consensus records a peer should not write.** The `sys/` namespace tripwire
+  (`sys_namespace_violations`) now also covers `sys/consensus-accepted/{node}/…` — the acceptor's durable promise and
+  acceptance, which only that node's `persist_acceptor` writes and `prewarm_accepted` restores, so a peer writing
+  ours is forging a promise we never made — and the identity record's other two forms, `sys/identity-signed/{node}`
+  and `sys/identity-proof/{node}`, written only by the node itself. Seen failing first:
+  `test_sys_namespace_tripwire_flags_foreign_self_owned_write` (B did not flag A's write to
+  `sys/consensus-accepted/{B}/slot-x`) and `connection::tests::flags_remote_write_to_each_self_owned_prefix`.
+  And `consensus/decided/{slot}`, which any committer writes and so is not self-owned, gets a Layer III tripwire:
+  a floor more than `2^32` above every ballot this node has observed for the slot (the shared ballot key, its own
+  promise) — ballots are drawn one attempt at a time, so no history of a slot gets there, while a member writing
+  `u64::MAX` makes every later prepare on the slot refuse — is counted once per slot
+  (`SystemStats::consensus_decided_floor_anomalies`, `/stats` `consensus_decided_floor_anomalies`,
+  `mycelium_consensus_decided_floor_anomalies_total`) with one `warn!`. Detection only: the floor is still obeyed
+  and the refusal is unchanged. Seen failing first: `a_forged_decided_floor_is_counted_and_still_obeyed` (the
+  count stayed 0). **Upgrade note:** `SystemStats` gained a field (an exhaustive struct literal breaks).
+  **Not changed:** a proposer on such a slot draws `max(ballot key, floor) + 1`, which overflows at `u64::MAX` —
+  a panic in a debug build, a wrap to ballot 0 (refused) in release.
 
 ### Fixed
 - **The SDKs reach a gateway over TLS** (`mycelium-py` **0.2.9**, `mycelium-ts` **0.2.3**,

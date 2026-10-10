@@ -1095,6 +1095,7 @@ async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoResponse {
         "task_count":    task_count,
         "commit_conflicts": ctx.agent_ctx.commit_conflicts
             .load(std::sync::atomic::Ordering::Relaxed),
+        "consensus_decided_floor_anomalies": ctx.agent_ctx.decided_floor_anomaly_slots.pin().len(),
         "sys_namespace_violations": ctx.agent_ctx.sys_namespace_violations
             .load(std::sync::atomic::Ordering::Relaxed),
         "identity_anchor_conflicts": ctx.agent_ctx.identity_anchor_conflicts

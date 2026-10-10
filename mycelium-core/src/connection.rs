@@ -27,8 +27,17 @@ use tracing::{error, warn};
 /// write naming *this* node is a namespace-ownership violation. `sys/quorum/`
 /// is deliberately excluded — peers legitimately write quorum evidence naming
 /// the node they observed.
-const SELF_OWNED_SYS_PREFIXES: [&str; 5] =
-    ["sys/identity/", "sys/load/", "sys/role/", "sys/tuple/", "sys/caller-context/"];
+///
+/// The last three (2026-10-10): `sys/consensus-accepted/{node}/{slot}` is the acceptor's durable
+/// promise and acceptance, written only by that node's `persist_acceptor` and restored at start by
+/// `prewarm_accepted` — a peer writing ours is forging a promise we never made; and the identity
+/// record's two other forms, `sys/identity-signed/{node}` and `sys/identity-proof/{node}`, written
+/// only by the node itself at start and on rotation, like `sys/identity/`. None is a sub-prefix of
+/// another (`sys/identity/` does not match `sys/identity-signed/…`).
+const SELF_OWNED_SYS_PREFIXES: [&str; 8] = [
+    "sys/identity/", "sys/load/", "sys/role/", "sys/tuple/", "sys/caller-context/",
+    "sys/consensus-accepted/", "sys/identity-signed/", "sys/identity-proof/",
+];
 
 /// `sys/` namespace-ownership tripwire — **detection, not prevention**.
 ///
@@ -831,6 +840,22 @@ mod tests {
         assert_eq!(flagged("sys/load/127.0.0.1:8080/cpu", me), 1);
         assert_eq!(flagged("sys/role/127.0.0.1:8080", me), 1);
         assert_eq!(flagged("sys/tuple/127.0.0.1:8080/orders/depth", me), 1);
+        // The acceptor's durable record and the two identity records are self-owned too: a peer
+        // writing ours is forging our promise/acceptance or our identity (2026-10-10).
+        assert_eq!(flagged("sys/consensus-accepted/127.0.0.1:8080/slot-1", me), 1);
+        assert_eq!(flagged("sys/consensus-accepted/127.0.0.1:8080/leader/g", me), 1); // a slot with a `/`
+        assert_eq!(flagged("sys/identity-signed/127.0.0.1:8080", me), 1);
+        assert_eq!(flagged("sys/identity-proof/127.0.0.1:8080", me), 1);
+    }
+
+    #[test]
+    fn the_acceptor_and_identity_records_of_another_node_are_not_ours() {
+        let me = "127.0.0.1:8080";
+        assert_eq!(flagged("sys/consensus-accepted/10.0.0.5:9000/slot-1", me), 0);
+        assert_eq!(flagged("sys/identity-signed/10.0.0.5:9000", me), 0);
+        assert_eq!(flagged("sys/identity-proof/10.0.0.5:9000", me), 0);
+        // Segment-exact under the new prefixes as well.
+        assert_eq!(flagged("sys/consensus-accepted/127.0.0.1:80800/slot-1", me), 0);
     }
 
     #[test]
