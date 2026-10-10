@@ -156,6 +156,10 @@ fn spawn_handler(
         commit_conflicts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         commit_conflict_slots: Arc::new(papaya::HashMap::new()),
         decided_floor_anomaly_slots: Arc::new(papaya::HashSet::new()),
+        decided_floor_anomalies_unrecorded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        #[cfg(feature = "consensus")]
+        consensus_verified_ballots: Arc::new(papaya::HashMap::new()),
+        ballot_space_exhausted: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         event_ring: Arc::new(crate::agent::emergent::EventRing::default()),
         governed_group_conflicts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         capability_coverage_gaps: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1216,6 +1220,10 @@ async fn test_subscribe_notified_via_gossip() {
             commit_conflicts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             commit_conflict_slots: Arc::new(papaya::HashMap::new()),
             decided_floor_anomaly_slots: Arc::new(papaya::HashSet::new()),
+            decided_floor_anomalies_unrecorded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(feature = "consensus")]
+            consensus_verified_ballots: Arc::new(papaya::HashMap::new()),
+            ballot_space_exhausted: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             event_ring: Arc::new(crate::agent::emergent::EventRing::default()),
             governed_group_conflicts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             capability_coverage_gaps: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -10172,17 +10180,63 @@ async fn a_forged_decided_floor_is_counted_and_still_obeyed() {
     a.shutdown().await;
 }
 
+/// **The floor tripwire does not trust the shared ballot key** (the adversarial review of #591,
+/// finding 3). `consensus/ballot/{slot}` is written by any member too, so measuring "observed" from it
+/// let a forger raise both keys together and pass uncounted — and the ballot key alone at `u64::MAX`
+/// exhausts the slot with no tripwire at all. "Observed" is now this node's acceptor memory and the
+/// ballots of verified COMMITs it processed, and the ballot key read for a draw gets the same check.
+/// Each forgery is counted once for its slot, and each proposal still ends by name.
+/// Seen failing first: the both-keys slot was not counted (0 where 1 was expected).
+#[cfg(feature = "consensus")]
+#[tokio::test]
+async fn forged_ballot_keys_are_counted_as_well_as_forged_floors() {
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    let a = GossipAgent::new(id.clone(), cfg);
+    a.start().await.unwrap();
+    let _listener = a.consensus().start_consensus_listener(ConsensusConfig::default());
+    a.mesh().join_group("solo");
+    let mut fast = ConsensusConfig::default();
+    fast.phase1_timeout = Duration::from_millis(200);
+    fast.max_ballots = 2;
+    let max = Bytes::copy_from_slice(&u64::MAX.to_le_bytes());
+
+    // Both keys forged together.
+    let _ = a.kv().set("consensus/decided/forged/both", max.clone());
+    let _ = a.kv().set("consensus/ballot/forged/both", max.clone());
+    let before = a.system_stats().consensus_decided_floor_anomalies;
+    let res = a.consensus().group_propose("solo", "forged/both", Bytes::from_static(b"v"), fast.clone()).await;
+    assert!(matches!(res, ConsensusResult::Timeout { .. }), "{res:?}");
+    assert_eq!(a.system_stats().consensus_decided_floor_anomalies, before + 1,
+               "forging the floor and the ballot key together is counted");
+
+    // The ballot key alone.
+    let _ = a.kv().set("consensus/ballot/forged/key", max.clone());
+    let res = a.consensus().group_propose("solo", "forged/key", Bytes::from_static(b"v"), fast.clone()).await;
+    assert!(matches!(res, ConsensusResult::Timeout { .. }), "{res:?}");
+    assert_eq!(a.system_stats().consensus_decided_floor_anomalies, before + 2,
+               "a forged ballot key alone is counted");
+
+    // Control: an ordinary slot commits and counts nothing.
+    let res = a.consensus().group_propose("solo", "forged/none", Bytes::from_static(b"v"), ConsensusConfig::default()).await;
+    assert!(matches!(res, ConsensusResult::Committed { .. }), "{res:?}");
+    assert_eq!(a.system_stats().consensus_decided_floor_anomalies, before + 2);
+
+    a.shutdown().await;
+}
+
 /// **A slot whose decided floor is `u64::MAX` cannot take a new ballot, and says so** (2026-10-10).
 /// Both proposers drew `max(ballot key, floor) + 1`, which overflows there: a panic in any build with
 /// overflow checks (and the release profile is `panic = "abort"`, so such a build loses the node), a
 /// wrap to ballot 0 — refused below the floor — without them. Now the draw is checked: the group
 /// proposal and the cross-group proposal each end as a `Timeout` named `ballot_exhausted`
-/// (`consensus_ballot_space_exhausted`), and a slot below the ceiling still commits.
+/// (this node's `consensus_ballot_space_exhausted`), and a slot below the ceiling still commits.
 /// Seen failing first: `attempt to add with overflow` in `ConsensusEngine::propose`.
 #[cfg(feature = "consensus")]
 #[tokio::test]
 async fn a_floor_at_the_ballot_ceiling_is_refused_by_name_not_overflowed() {
-    use crate::consensus::ballot_space_exhausted;
     let port = alloc_port();
     let id = NodeId::new("127.0.0.1", port).unwrap();
     let mut cfg = GossipConfig::default();
@@ -10198,15 +10252,16 @@ async fn a_floor_at_the_ballot_ceiling_is_refused_by_name_not_overflowed() {
     for slot in ["ceiling/group", "ceiling/cross"] {
         let _ = a.kv().set(format!("consensus/decided/{slot}"), Bytes::copy_from_slice(&u64::MAX.to_le_bytes()));
     }
-    let before = ballot_space_exhausted();
+    let exhausted = || a.system_stats().consensus_ballot_space_exhausted;
+    let before = exhausted();
     let res = a.consensus().group_propose("solo", "ceiling/group", Bytes::from_static(b"v"), fast.clone()).await;
     assert!(matches!(res, ConsensusResult::Timeout { .. }), "group proposal: {res:?}");
-    assert_eq!(ballot_space_exhausted(), before + 1, "the group proposal is refused by name");
+    assert_eq!(exhausted(), before + 1, "the group proposal is refused by name");
 
     let groups = vec![crate::consensus::GroupQuorum { group: "solo".into(), quorum: 0.5, veto: false }];
     let res = a.consensus().cross_group_propose("ceiling/cross", Bytes::from_static(b"v"), groups, fast.clone()).await;
     assert!(matches!(res, ConsensusResult::Timeout { .. }), "cross-group proposal: {res:?}");
-    assert_eq!(ballot_space_exhausted(), before + 2, "the cross-group proposal is refused by name");
+    assert_eq!(exhausted(), before + 2, "the cross-group proposal is refused by name");
 
     // Control: a floor one below the ceiling leaves exactly one ballot, and the slot commits at it.
     let _ = a.kv().set("consensus/decided/ceiling/last", Bytes::copy_from_slice(&(u64::MAX - 1).to_le_bytes()));

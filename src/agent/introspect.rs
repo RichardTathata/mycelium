@@ -202,7 +202,9 @@ impl GossipAgent {
             active_bulk_handlers: self.task_ctx.bulk_transport.active_handlers.load(Ordering::Relaxed),
             commit_conflicts:     self.task_ctx.commit_conflicts.load(Ordering::Relaxed),
             consensus_decided_floor_anomalies:
-                self.task_ctx.decided_floor_anomaly_slots.pin().len() as u64,
+                self.task_ctx.decided_floor_anomaly_slots.pin().len() as u64
+                    + self.task_ctx.decided_floor_anomalies_unrecorded.load(Ordering::Relaxed),
+            consensus_ballot_space_exhausted: self.task_ctx.ballot_space_exhausted.load(Ordering::Relaxed),
             sys_namespace_violations:
                 self.task_ctx.sys_namespace_violations.load(Ordering::Relaxed),
             identity_anchor_conflicts:

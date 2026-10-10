@@ -1095,7 +1095,10 @@ async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoResponse {
         "task_count":    task_count,
         "commit_conflicts": ctx.agent_ctx.commit_conflicts
             .load(std::sync::atomic::Ordering::Relaxed),
-        "consensus_decided_floor_anomalies": ctx.agent_ctx.decided_floor_anomaly_slots.pin().len(),
+        "consensus_decided_floor_anomalies": ctx.agent_ctx.decided_floor_anomaly_slots.pin().len() as u64
+            + ctx.agent_ctx.decided_floor_anomalies_unrecorded.load(std::sync::atomic::Ordering::Relaxed),
+        "consensus_ballot_space_exhausted": ctx.agent_ctx.ballot_space_exhausted
+            .load(std::sync::atomic::Ordering::Relaxed),
         "sys_namespace_violations": ctx.agent_ctx.sys_namespace_violations
             .load(std::sync::atomic::Ordering::Relaxed),
         "identity_anchor_conflicts": ctx.agent_ctx.identity_anchor_conflicts
@@ -1165,14 +1168,7 @@ fn feature_gated_counters() -> Vec<(&'static str, u64)> {
         #[cfg(not(feature = "consensus"))]
         { None }
     };
-    // Proposals ended because the slot's next ballot would exceed u64::MAX (a floor at the ceiling).
-    let ballot_exhausted: Option<(&'static str, u64)> = {
-        #[cfg(feature = "consensus")]
-        { Some(("consensus_ballot_space_exhausted", crate::consensus::ballot_space_exhausted())) }
-        #[cfg(not(feature = "consensus"))]
-        { None }
-    };
-    [identity_untagged, consensus_untagged, acceptor_unrecorded, ballot_exhausted].into_iter().flatten().collect()
+    [identity_untagged, consensus_untagged, acceptor_unrecorded].into_iter().flatten().collect()
 }
 
 /// `GET /gateway/audit` — query the tamper-evident audit trail (compliance, scope

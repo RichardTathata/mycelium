@@ -71,19 +71,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `test_sys_namespace_tripwire_flags_foreign_self_owned_write` (B did not flag A's write to
   `sys/consensus-accepted/{B}/slot-x`) and `connection::tests::flags_remote_write_to_each_self_owned_prefix`.
   And `consensus/decided/{slot}`, which any committer writes and so is not self-owned, gets a Layer III tripwire:
-  a floor more than `2^32` above every ballot this node has observed for the slot (the shared ballot key, its own
-  promise) — ballots are drawn one attempt at a time, so no history of a slot gets there, while a member writing
-  `u64::MAX` makes every later prepare on the slot refuse — is counted once per slot
+  a floor — or a ballot key, `consensus/ballot/{slot}`, read for a draw — more than `2^32` above every ballot this
+  node has itself observed for the slot (its own promise, and the ballots of verified COMMITs it processed; not the
+  shared ballot key, which any member writes — the adversarial review of #591 showed forging both keys passed
+  uncounted, and the ballot key alone exhausted the slot with no tripwire) — ballots are drawn one attempt at a
+  time, so no history of a slot gets there, while a member writing `u64::MAX` makes every later prepare on the slot
+  refuse — is counted once per slot, at most 4096 slots remembered
   (`SystemStats::consensus_decided_floor_anomalies`, `/stats` `consensus_decided_floor_anomalies`,
   `mycelium_consensus_decided_floor_anomalies_total`) with one `warn!`. Detection only: the floor is still obeyed
   and the refusal is unchanged. Seen failing first: `a_forged_decided_floor_is_counted_and_still_obeyed` (the
-  count stayed 0). **Upgrade note:** `SystemStats` gained a field (an exhaustive struct literal breaks).
+  count stayed 0) and `forged_ballot_keys_are_counted_as_well_as_forged_floors` (the both-keys forgery: 0, expected
+  1). **Upgrade note:** `SystemStats` gained two fields (an exhaustive struct literal breaks).
 - **A slot whose decided floor is `u64::MAX` no longer overflows the proposer.** Both proposers (group/cluster
   and cross-group) drew every ballot as `max(ballot key, floor) + 1` — eight sites — which overflows at the
   ceiling: a panic in any build with overflow checks, and the release profile is `panic = "abort"`, so such a
   build lost the node; without overflow checks a wrap to ballot 0, refused below the floor. Every draw now goes
   through `next_ballot` (`checked_add`), and a slot with no ballot left ends the proposal as a `Timeout` named
-  `ballot_exhausted` on `mycelium_consensus_timeouts_total`, counted on `/stats`
+  `ballot_exhausted` on `mycelium_consensus_timeouts_total`, counted per node on `SystemStats` and `/stats`
   `consensus_ballot_space_exhausted`, with one `warn!`. A floor one below the ceiling still commits at
   `u64::MAX`. The acceptor side only compares ballots and had no arithmetic to fix. Seen failing first:
   `a_floor_at_the_ballot_ceiling_is_refused_by_name_not_overflowed` (`attempt to add with overflow` at

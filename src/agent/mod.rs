@@ -345,16 +345,25 @@ pub struct SystemStats {
     pub commit_conflicts: u64,
 
     /// Slots whose **decided floor** (`consensus/decided/{slot}`, the ballot at or below which every
-    /// acceptor refuses) this node found more than `2^32` above every ballot it has observed for the
-    /// slot — its shared ballot key, its own promise and its own acceptance. Ballots are drawn one
-    /// attempt at a time (`max(seen, floor) + 1`), so no history of a slot gets there; a member that
-    /// writes a huge floor (`u64::MAX`) does, and with it makes every later prepare on the slot refuse.
+    /// acceptor refuses) or **ballot key** (`consensus/ballot/{slot}`, read by every draw) this node
+    /// found more than `2^32` above every ballot it has itself observed for the slot — its own promise
+    /// (never below its acceptance) and the ballots of verified COMMITs it processed; never the shared
+    /// ballot key, which any member writes. Ballots are drawn one attempt at a time
+    /// (`max(seen, floor) + 1`), so no history of a slot gets there; a member that writes `u64::MAX`
+    /// into either key does, and with it makes the slot refuse every later ballot. Bounded: past 4096
+    /// remembered slots, further anomalies are added per read rather than per slot.
     ///
     /// **Detection, not prevention** (the tripwire idiom, in Layer III): the floor is still obeyed and
     /// the refusal is unchanged — `consensus/decided/` is written by whichever node commits, so it is
     /// not self-owned and the `sys/` tripwire cannot see it. Counted once per slot, with one `warn!`.
     /// Any non-zero value warrants investigation. `0` without the `consensus` feature.
     pub consensus_decided_floor_anomalies: u64,
+
+    /// Proposals this node ended because the slot's next ballot would exceed `u64::MAX` — a decided
+    /// floor or ballot key at the ceiling, which no slot's history reaches (one ballot per attempt);
+    /// each ended as a `Timeout` named `ballot_exhausted` rather than overflowing. `0` without the
+    /// `consensus` feature.
+    pub consensus_ballot_space_exhausted: u64,
 
     /// Cumulative count of inbound (remote) writes to a `sys/` key this node
     /// owns — `sys/identity/{self}`, `sys/identity-signed/{self}`, `sys/identity-proof/{self}`,
@@ -527,6 +536,17 @@ pub(crate) struct TaskCtx {
     /// slot, so each is counted and logged once. `papaya`, not a lock — no lock-order row; `insert` is
     /// a single atomic operation with no closure.
     pub(crate) decided_floor_anomaly_slots: Arc<papaya::HashSet<Arc<str>>>,
+    /// Ballot-tripwire anomalies on slots past the set's cap (`consensus::ANOMALY_SLOTS_CAP`) — counted
+    /// per read, since they cannot be deduplicated; added to `consensus_decided_floor_anomalies`.
+    pub(crate) decided_floor_anomalies_unrecorded: Arc<AtomicU64>,
+    /// Per slot, the highest ballot of a verified COMMIT this node processed — the ballot tripwire's
+    /// evidence of what a slot's history really reached (never the shared ballot key, which any
+    /// member writes). Bounded at `consensus::VERIFIED_BALLOTS_CAP`; `compute` with a pure max.
+    #[cfg(feature = "consensus")]
+    pub(crate) consensus_verified_ballots: Arc<papaya::HashMap<Arc<str>, u64>>,
+    /// Proposals this node ended because the slot's next ballot would exceed `u64::MAX`
+    /// (see `SystemStats::consensus_ballot_space_exhausted`).
+    pub(crate) ballot_space_exhausted: Arc<AtomicU64>,
 
     /// Legible-Emergence Phase 3: the bounded, HLC-stamped **event ring** — the per-node source the
     /// `explain` fan-out assembles in causal order. Always allocated (tiny); recorded to only when
@@ -1087,6 +1107,10 @@ impl GossipAgent {
             commit_conflicts: Arc::new(AtomicU64::new(0)),
             commit_conflict_slots: Arc::new(papaya::HashMap::new()),
             decided_floor_anomaly_slots: Arc::new(papaya::HashSet::new()),
+            decided_floor_anomalies_unrecorded: Arc::new(AtomicU64::new(0)),
+            #[cfg(feature = "consensus")]
+            consensus_verified_ballots: Arc::new(papaya::HashMap::new()),
+            ballot_space_exhausted: Arc::new(AtomicU64::new(0)),
             event_ring: Arc::new(emergent::EventRing::default()),
             governed_group_conflicts: Arc::new(AtomicU64::new(0)),
             capability_coverage_gaps: Arc::new(AtomicU64::new(0)),

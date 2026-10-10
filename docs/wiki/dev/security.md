@@ -47,9 +47,12 @@ Four layers, all additive/opt-in (`src/agent/rbac.rs`, gateway middleware in
    a restart never counts; the adversarial review of #591 measured 62 false counts before) (the acceptor record and the two other identity forms since
    2026-10-10: each is written only by its own node — `persist_acceptor`, the start/rotation identity
    writers). Detection only — never make it a write guard. `consensus/decided/{slot}` is written by
-   whichever node commits, so it has its own tripwire in Layer III instead (`ConsensusEngine::decided_floor`
-   → `consensus_decided_floor_anomalies`: a floor more than `2^32` above every ballot this node has
-   observed for the slot, counted once per slot; the floor is still obeyed).
+   whichever node commits and `consensus/ballot/{slot}` by any proposer, so they have their own tripwire in
+   Layer III instead (`ConsensusEngine::decided_floor` and `read_ballot` → `consensus_decided_floor_anomalies`:
+   a value more than `2^32` above every ballot this node has **itself** observed for the slot — its promise and
+   verified COMMIT ballots, never the shared ballot key, which a forger can raise alongside — counted once per
+   slot; still obeyed). A slot with no ballot left ends a proposal as `Timeout` `ballot_exhausted`, never an
+   overflow.
 5. **Gateway caller identity (v3 item 7, 2026-09-13; `src/agent/gateway_caller.rs`):** the
    confused deputy the 2026-09-05 fix left open — every gateway dispatch (`tools/call`, `/a2a`,
    `rpc/call`, `scatter`, `emit_reliable`, `llm/*`) ran as the **node**, so layer 2's

@@ -8,7 +8,9 @@
   apply sites (anti-entropy, `Data`, `SignedData`).
 - `consensus/decided/{slot}` is not self-owned, so its tripwire is in Layer III: `ConsensusEngine::decided_floor`
   (every floor reader goes through it) counts a floor more than `DECIDED_FLOOR_ANOMALY_MARGIN = 2^32` above the
-  highest ballot this node has observed for the slot (ballot key, acceptor promise) — once per slot, in
+  highest ballot this node has itself observed for the slot (acceptor promise, verified COMMIT ballots in
+  `TaskCtx::consensus_verified_ballots` — never the shared ballot key; the same check runs on the ballot key in
+  `read_ballot`, the review of #591) — once per slot, in
   `TaskCtx::decided_floor_anomaly_slots` (a `papaya::HashSet`, no lock-order row); surfaced as
   `SystemStats::consensus_decided_floor_anomalies`, `/stats` and `mycelium_consensus_decided_floor_anomalies_total`.
   Refusal unchanged.
