@@ -105,10 +105,11 @@ impl ConsensusHandle {
     /// Returns a `watch::Receiver` that fires whenever the slot is committed or
     /// overwritten. Initial value is the current committed state (or `None`).
     ///
-    /// **Raw KV view**: the receiver reflects the stored bytes and does not
-    /// apply the epoch-lease convention — an expired leased slot still shows
-    /// its last value here. Use [`consensus_get`](Self::consensus_get) for
-    /// lease-aware reads.
+    /// **Raw, lagging view**: the receiver watches the legacy `consensus/committed/{slot}` key, which
+    /// the committer still writes (and gossips) for nodes older than 2.32.0 — upgraded learners no
+    /// longer write it from the COMMIT. It fires when that key changes, reflects the stored bytes, and
+    /// applies neither a lease, nor a release, nor the decision record (row A). Treat a change as a
+    /// prompt to read [`consensus_get`](Self::consensus_get), which is authoritative.
     #[must_use]
     pub fn consensus_rx(&self, slot: &str) -> tokio::sync::watch::Receiver<Option<Bytes>> {
         kv_subscribe(&self.ctx, format!("{}{}", consensus_ns::COMMITTED, slot))
@@ -423,7 +424,13 @@ impl ConsensusHandle {
         self.ctx.spawn_task(crate::consensus::run_consensus_listener(
             engine, cancel_rx, shutdown_rx, rx_propose, rx_commit,
         ));
-        ConsensusListenerHandle { _cancel: cancel_tx }
+        // The acceptor collector (row A, C2) — its own task, so its fsyncs never delay a vote.
+        let (collector_tx, collector_rx) = tokio::sync::oneshot::channel::<()>();
+        self.ctx.spawn_task(crate::consensus::run_acceptor_collector(
+            make_consensus_engine_ctx(&self.ctx, false, false, 0, None),
+            collector_rx, self.ctx.shutdown_tx.subscribe(),
+        ));
+        ConsensusListenerHandle { _cancel: cancel_tx, _cancel_collector: collector_tx }
     }
 
     // ── Consistent overlay ───────────────────────────────────────────────────
@@ -536,41 +543,16 @@ impl ConsensusHandle {
             format!("{}:{:016x}", self.ctx.node_id, fastrand::u64(..)).into_bytes(),
         );
         let cfg = ConsensusConfig {
-            committed_lease_secs: Some(ttl.as_secs().max(1)),
+            // Rounded **up** (review D4): the lease must not end before the holder's monotonic
+            // deadline (`started + ttl`), which a 1.9 s TTL leased as 1 s did by ~0.9 s.
+            committed_lease_secs: Some(lease_secs_ceil(ttl)),
             ..ConsensusConfig::default()
         };
 
+        let started = mycelium_core::sim_seam::mono_instant();
         match self.cluster_propose(&slot, value.clone(), cfg).await {
-            ConsensusResult::Committed { .. } => {
-                // #164 bug A: two proposers can both *optimistically* commit against their own
-                // local view — the propose return is NOT mutually exclusive. Commit-keys are
-                // LWW-resolved by HLC, so let the winning commit converge, then read the
-                // authoritative converged value; only the node whose value survived holds the
-                // lock. Losers get `Superseded` and never receive a guard.
-                //
-                // The duration of this wait is a correctness assumption (replay inventory §2.3),
-                // so it goes through the timer seam: a replay can run it at 0, exactly 1 s, or
-                // longer, and the D4 audit's model of this path can become a replay of it.
-                mycelium_core::sim_seam::sleep_ms("lock/converge", 1000).await;
-                match crate::consensus::live_committed_with_hlc(
-                        &self.ctx.kv_state, &slot, crate::consensus::causal_now_ms(&self.ctx.hlc)) {
-                    // Fencing token is the commit's HLC, not the ballot: the HLC is monotonic
-                    // across successive holders (each observes the prior release), so a resource
-                    // that rejects a lower token is actually fenced. The ballot regresses under
-                    // gossip lag and is unsafe for fencing (#164 example finding).
-                    Some((converged, hlc)) if converged.as_ref() == value.as_ref() =>
-                        Ok(LockGuard {
-                            ctx:      Arc::clone(&self.ctx),
-                            name:     Arc::from(name),
-                            value,
-                            token:    hlc,
-                            released: false,
-                        }),
-                    // Not the converged holder (or nothing converged): no guard. This `_` covers an
-                    // `Option`, not `ConsensusResult` — it is a legitimate catch-all.
-                    _ => Err(ConsistencyError::Superseded),
-                }
-            }
+            ConsensusResult::Committed { .. } =>
+                lock_guard_after_commit(&self.ctx, name, &slot, value, started, ttl).await,
             ConsensusResult::Timeout { ballots_tried, .. } =>
                 Err(ConsistencyError::Timeout { ballots_tried }),
             ConsensusResult::Superseded { .. } =>
@@ -590,6 +572,12 @@ impl ConsensusHandle {
     ///
     /// If this node wins, returns its own `NodeId`. If another node committed first,
     /// reads the winner from the committed KV slot and returns it.
+    ///
+    /// **Leased** (since 2.32.0, row A C1): the leadership lapses
+    /// [`DEFAULT_LEADER_LEASE`](crate::DEFAULT_LEADER_LEASE) (30 s) after its commit unless the
+    /// leader calls again — re-electing while live renews it — so a dead leader is not reported for
+    /// ever. Step down with [`release_leadership`](Self::release_leadership); ask for a different
+    /// term, or for permanence, with [`elect_leader_with`](Self::elect_leader_with).
     pub async fn elect_leader(&self, group: &str) -> Result<NodeId, ConsistencyError> {
         self.elect_leader_receipt(group).await.map(|l| l.leader)
     }
@@ -624,9 +612,31 @@ impl ConsensusHandle {
     /// immediately, a slow one still gets its second, and the answer is a value that was actually
     /// there rather than one a timer hoped for. Lengthening a sleep only changes how often the
     /// difference is visible.
+    ///
+    /// ## How long it holds
+    ///
+    /// Leased for [`DEFAULT_LEADER_LEASE`](crate::DEFAULT_LEADER_LEASE) — see
+    /// [`elect_leader`](Self::elect_leader) and [`elect_leader_with`](Self::elect_leader_with).
     pub async fn elect_leader_receipt(
         &self,
         group: &str,
+    ) -> Result<crate::agent::overlay_consistent::Leadership, ConsistencyError> {
+        self.elect_leader_with(group, crate::agent::overlay_consistent::LeaderTerm::default()).await
+    }
+
+    /// [`elect_leader_receipt`](Self::elect_leader_receipt) with an explicit
+    /// [`LeaderTerm`](crate::LeaderTerm): a lease of your choosing, or — by explicit opt-in — a
+    /// permanent leadership, the pre-2.32.0 behaviour (row A, C1).
+    ///
+    /// A leased leadership is renewed by calling again while it is live (the same value re-commits
+    /// and refreshes the lease); call every `lease / 3` or so. Once it lapses — the leader died, or
+    /// stopped renewing — the slot reopens and the next election decides afresh, setting the lapsed
+    /// leader's acceptance aside. A permanent leadership never lapses: if its leader dies it is
+    /// reported until someone [releases](Self::release_leadership) it, which only the leader can.
+    pub async fn elect_leader_with(
+        &self,
+        group: &str,
+        term:  crate::agent::overlay_consistent::LeaderTerm,
     ) -> Result<crate::agent::overlay_consistent::Leadership, ConsistencyError> {
         use crate::agent::overlay_consistent::{Leadership, LeadershipBasis};
 
@@ -642,7 +652,8 @@ impl ConsensusHandle {
             Some((id, hlc))
         };
 
-        match self.group_propose(group, &slot, value.clone(), ConsensusConfig::default()).await {
+        let cfg = ConsensusConfig { committed_lease_secs: term.lease_secs(), ..ConsensusConfig::default() };
+        match self.group_propose(group, &slot, value.clone(), cfg).await {
             ConsensusResult::Committed { .. } => {
                 // #164 class: an optimistic `Committed` is NOT mutually exclusive on its own — the
                 // binding and one-vote-per-ballot rules are what make it decisive, and the
@@ -676,6 +687,37 @@ impl ConsensusHandle {
         }
     }
 
+    /// **Step down**: release this node's leadership of `group` (row A, C1).
+    ///
+    /// Writes the leadership slot's lifecycle record as *released* at the ballot it was decided at,
+    /// so every node reads the group as leaderless, the next election sets this node's acceptance
+    /// aside rather than re-electing it, and a late COMMIT of it is stale. Works for a leased and a
+    /// permanent leadership alike, and the release is **on stable storage** when this returns `true`
+    /// (a permanent leadership has no lease to fall back on if a crash forgot it).
+    ///
+    /// Returns `false` — and writes nothing — when the live leader this node sees is not itself, when
+    /// the slot's lifecycle record names a newer decision, or when a leased leadership's record here is
+    /// behind a higher decided ballot (retry once the newer record arrives); and `false` when the
+    /// release did not reach the WAL (it is then applied and gossiped only). A permanent leadership
+    /// re-committed at a higher ballot by a node with a stale view is released at that ballot.
+    ///
+    /// **`true` means the release was written, not that this node will stay out of office:** a
+    /// renewal this node already has in flight (`elect_leader` called concurrently) commits at a
+    /// ballot above the released one and makes it leader again for another term. Stop renewing
+    /// before releasing.
+    pub async fn release_leadership(&self, group: &str) -> bool {
+        let value = Bytes::from(self.ctx.node_id.to_string().into_bytes());
+        crate::consensus::release_decision_durable(&self.ctx, &format!("leader/{group}"), &value).await
+            == crate::consensus::ReleaseOutcome::Released
+    }
+
+    /// Collect acceptor state whose decision is over — what each consensus listener does on its
+    /// collection tick (`ConsensusEngine::collect_finished`, row A C2). For tests.
+    #[cfg(test)]
+    pub(crate) async fn collect_finished_acceptor_state(&self) -> usize {
+        make_consensus_engine_ctx(&self.ctx, false, false, 0, None).collect_finished().await
+    }
+
     /// Poll for the committed slot to hold a value, bounded by the convergence budget.
     ///
     /// Replaces `sleep(1s); read`. The budget is unchanged — what changes is that the answer is a
@@ -698,6 +740,54 @@ impl ConsensusHandle {
             waited += STEP_MS;
         }
     }
+}
+
+/// A TTL as whole lease seconds, **rounded up**, at least 1 — so a lease never ends before the holder's
+/// own deadline (review D4).
+pub(crate) fn lease_secs_ceil(ttl: Duration) -> u64 {
+    u64::try_from(ttl.as_millis().div_ceil(1000)).unwrap_or(u64::MAX).max(1)
+}
+
+/// After a lock's proposal committed: the guard, if the decision is ours (row A). Shared by
+/// [`ConsensusHandle::distributed_lock`] and the gateway's lock route, so both doors issue the same
+/// guard: polls (bounded by the old fixed second, through the replay seam's `lock/converge` stream)
+/// until this node's top decision record for the slot is a live decision of `value`; the token is
+/// the decision's; the monotonic deadline is the acquisition's start plus `ttl`, and a guard is never
+/// issued past it (review finding 4) — `Timeout` then, and the decision is released.
+pub(crate) async fn lock_guard_after_commit(
+    ctx:     &Arc<TaskCtx>,
+    name:    &str,
+    slot:    &str,
+    value:   Bytes,
+    started: std::time::Instant,
+    ttl:     Duration,
+) -> Result<LockGuard, ConsistencyError> {
+    const BUDGET_MS: u64 = 1000;
+    const STEP_MS:   u64 = 25;
+    let mut waited = 0;
+    let env = loop {
+        if let crate::consensus_life::SlotView::Top(top) = crate::consensus_life::read_slot(
+                &ctx.kv_state, slot, mycelium_core::sim_seam::wall_now_ms())
+            && !top.ended && top.value.as_ref() == Some(&value) {
+                break top.env;
+            }
+        if waited >= BUDGET_MS { return Err(ConsistencyError::Superseded); }
+        mycelium_core::sim_seam::sleep_ms("lock/converge", STEP_MS).await;
+        waited += STEP_MS;
+    };
+    let guard = LockGuard {
+        ctx:      Arc::clone(ctx),
+        name:     Arc::from(name),
+        token:    env.token,
+        env,
+        deadline: started + ttl,
+        released: false,
+    };
+    if guard.is_expired() {
+        drop(guard);
+        return Err(ConsistencyError::Timeout { ballots_tried: 0 });
+    }
+    Ok(guard)
 }
 
 // ── Unit tests ────────────────────────────────────────────────────────────────
@@ -912,13 +1002,22 @@ mod tests {
 
         // A forged COMMIT carrying a different value for the live slot: the tripwire fires and does not endorse it.
         // Local emits self-deliver; under load one emit may be shed, so it is repeated until the tripwire sees it.
-        let forged = ConsensusMsg::Commit { slot: Arc::from("trip/slot"), ballot: 42, value: Bytes::from_static(b"clobber") };
+        // Row A: an upgraded learner judges the decision envelope a `CommitTerm` carries; a newer
+        // decision of another identity while the slot is live is the violation.
+        let genuine = match crate::consensus_life::read_slot(&a.task_ctx.kv_state, "trip/slot", mycelium_core::sim_seam::wall_now_ms()) {
+            crate::consensus_life::SlotView::Top(t) => t.env,
+            other => panic!("the genuine decision has a record: {other:?}"),
+        };
+        let clobber = crate::consensus_life::Envelope::new(
+            "trip/slot", Bytes::from_static(b"clobber"), crate::consensus_life::Term::Permanent, 42, a.node_id().clone(), 1);
+        let forged = ConsensusMsg::CommitTerm { slot: Arc::from("trip/slot"), ballot: 42, envelope: clobber.encode() };
         let fired = emit_commit_until(&a, &forged, || a.system_stats().commit_conflicts >= 1).await;
         assert!(fired, "tripwire did not fire on conflicting COMMIT (fill {fill_to})");
-        assert_eq!(
-            a.consensus().consensus_get("trip/slot").as_deref(), Some(b"genuine".as_slice()),
-            "conflicting COMMIT must not be endorsed",
-        );
+        // Row A, review D5: counted **and written** — a legitimate handoff whose release marker lags
+        // the new holder's COMMIT looks exactly like this (detection, not prevention; a member signing
+        // a forged decision is outside CFT).
+        assert!(a.task_ctx.kv_state.store.pin().get(crate::consensus_life::record_key("trip/slot", 42).as_str())
+            .is_some_and(|e| e.data.is_some()), "the newer decision's record was not written");
 
         // An idempotent re-COMMIT of the same value is legal and must not trip — checked once it has been seen
         // delivered, so a shed emit cannot pass this vacuously. The baseline is taken once the count is stable: a second
@@ -932,7 +1031,9 @@ mod tests {
             }
             conflicts = now;
         }
-        let idempotent = ConsensusMsg::Commit { slot: Arc::from("trip/slot"), ballot: 43, value: Bytes::from_static(b"genuine") };
+        // The top is now the written decision: a re-COMMIT of it (same identity) is not a conflict.
+        let _ = &genuine;
+        let idempotent = ConsensusMsg::CommitTerm { slot: Arc::from("trip/slot"), ballot: 43, envelope: clobber.encode() };
         let body = encode_consensus_msg(&idempotent);
         // A second subscriber sees what the listener sees (one fan-out, `deliver`), so seeing it here means delivered.
         let mut watch = a.task_ctx.signal_handlers.register_with_capacity(Arc::clone(&kind), 256);

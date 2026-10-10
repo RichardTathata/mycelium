@@ -423,6 +423,10 @@ async with agent.distributed_lock("job-42") as lock:
 
 One-shot election for `group`. Returns the elected node's `"ip:port"` string.
 All nodes calling concurrently converge on the same winner.
+Since substrate 2.32.0 the leadership is **leased** (30 s): the leader keeps it by calling again (every
+~10 s); a leader that stops — or dies — is no longer reported once the lease lapses. The gateway route
+also takes `ttl_secs` or `"permanent": true`, and `DELETE /gateway/overlay/elect/{group}` steps down;
+this SDK does not wrap either yet.
 
 ```python
 leader = agent.elect_leader("shard-0")

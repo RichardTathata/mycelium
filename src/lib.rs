@@ -110,7 +110,11 @@
 //! | `consensus/committed/{slot}`        | Consensus — committed slot state                             |
 //! | `consensus/ballot/{slot}`           | Consensus — ballot tracking; kept across commits so ballots stay monotonic (2.30.0) |
 //! | `consensus/decided/{slot}`          | Consensus — the ballot the slot's latest commit was decided at (u64 LE); a floor below which acceptors refuse (2.30.0) |
-//! | `consensus/lease/{slot}`            | Consensus — epoch-lease window (u64 LE ms); written when `ConsensusConfig::committed_lease_secs` is set; expiry is evaluated read-side |
+//! | `consensus/lease/{slot}`            | Consensus — the **legacy** epoch-lease window (u64 LE ms), still written for nodes older than 2.32.0 and read by an upgraded node only for a slot with no decision record; expiry is evaluated read-side |
+//! | `consensus/life/{slot}/{ballot}`    | Consensus (2.32.0, row A) — the **decision record**: the decision envelope (value, window or permanent, lineage, original proposer, fencing token) decided at that ballot, the same bytes from every writer; readers take the highest ballot. `{slot}` is escaped (`%`→`%25`, `/`→`%2F`). A record below the slot's top is tombstoned by collection (`docs/design/lock-lifecycle.md`) |
+//! | `consensus/life/{slot}/s`           | Consensus (2.32.0) — the slot's **sentinel**: written with its first decision record, never collected, so a slot that has had records never falls back to the legacy reading |
+//! | `consensus/life/{slot}/end/{lineage}-{proposer}` | Consensus (2.32.0) — a **release marker**: ends the decision lineage it names; written by the holder, never by a record write |
+//! | `consensus/life/{slot}/v/{digest}`  | Consensus (2.32.0) — a decision value over 4 KiB, content-addressed |
 //! | `consensus/trust/{group}/{node}`    | Consensus — trust slices                                     |
 //! | `cap/{node}/{ns}/{name}`            | Node-level capability advertisements                         |
 //! | `cap/{node}/locality/self`          | Locality (also a capability — single namespace, single shape)|
@@ -288,6 +292,8 @@ mod agent;
 pub mod schema_evolution;
 #[cfg(feature = "consensus")]
 mod consensus;
+#[cfg(feature = "consensus")]
+mod consensus_life;
 
 pub use agent::{
     AgentPolicy, ExecutionState, AgentStateMachine, PolicyViolation,
@@ -346,7 +352,7 @@ pub use agent::evidence_journal::{
     EvidenceProfile, JournalEntry, JournalError, JournalPage,
 };
 #[cfg(feature = "consensus")]
-pub use agent::{ConsensusHandle, ConsistencyError, Leadership, LeadershipBasis, LockGuard, LockService};
+pub use agent::{ConsensusHandle, ConsistencyError, Leadership, LeadershipBasis, LeaderTerm, LockGuard, LockService, DEFAULT_LEADER_LEASE};
 // WS-C M9: self-managing-metabolism config tuner + governance.
 pub use agent::{accept_all, clamped, reject_all, ConfigPolicy, CONFIG_PREFIX};
 pub use agent::{

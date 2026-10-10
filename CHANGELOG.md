@@ -162,6 +162,69 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `with_call_deadline(None)`; `Instance::invoke` is still synchronous, so an embedder that calls it from
   async code should move it to `spawn_blocking` as the serve loop now does — the co-op `catalog`,
   `catalog_viz` and `mcp_toolgrowth` demos now do, instantiation included.
+- **One record per decision: a lock, a lease and a leadership end where every node can see it; `elect_leader` is
+  leased; acceptor state decays** (row A of `post-360-hardening.md`, with C1 and C2; design record
+  `docs/design/lock-lifecycle.md`, adopted after three review rounds and a design review on #600). A decision lived
+  in three keys merged by last-writer-wins on HLC — `committed`, `lease`, `decided` — so a node could hold any
+  combination of their versions, and every reading rule over the pair (value, window) had one it read wrong: a
+  released lock re-committed to its old holder once its tombstones were collected (K1), a reopened lease adopting
+  the expired value before the floor arrived (K2), a late COMMIT reviving a released lock fleet-wide (K3), and, in
+  the rounds' own fixes, a newer holder ended by an older window, a lock wedged for ever by adoption under clock
+  skew, and two leaders from a release that named a ballot it read from `decided`. Now **what Paxos decides is a
+  decision envelope** — the value with its window (permanent, or a lease ending at an `expires_at_ms` fixed on the
+  original proposer's wall clock at the first proposal), lineage, original proposer and fencing token
+  (`src/consensus_life.rs`) — so every acceptance and adoption carries the lifecycle, and an adopter re-commits the
+  holder's window, never its own. It is written under `consensus/life/{escaped slot}/{ballot}`, the same bytes from
+  every writer, read by the **highest ballot**; it ends by a release marker (`…/end/{lineage}-{proposer}`, a key no
+  record write can remove) or when its lease is past on the reader's **wall clock**. The committer writes the
+  record, fsynced, before the COMMIT; the COMMIT (`CommitTerm`, an appended variant) carries the whole envelope,
+  and an upgraded learner ignores the legacy `Commit`. `consensus/decided/` is a refusal floor only. **C1:**
+  `elect_leader` / `elect_leader_receipt` lease 30 s by default (`DEFAULT_LEADER_LEASE` — the anti-entropy
+  interval, and the lock and log-claim default); calling again renews, keeping the lineage; `release_leadership`
+  (async, durable) ends the lineage, a renewal in flight included; `elect_leader_with(group,
+  LeaderTerm::Permanent)` is the opt-in; `POST /gateway/overlay/elect` takes `ttl_secs` / `permanent` and
+  `DELETE /gateway/overlay/elect/{group}` steps down (`200`, `404 not_leader`, `500 release_unrecorded`;
+  `consensus:write` is node-wide there). `LockGuard` gains `expires_at_ms()`, `deadline()` and `is_expired()`, and is
+  never issued past its deadline. **C2:** a collector task beside each listener shrinks the acceptor state of a slot
+  whose decision ended at `e` — promising nothing above it, re-checked in the compare-and-set — to a node-owned,
+  fsynced floor `{e}` that refuses `e` and below, after fsyncing the record it relies on; lower records are
+  tombstoned (a per-slot sentinel keeps the slot off the legacy reading), lease markers go after their expiry plus
+  the drift bound, permanent markers never — steady state three keys per slot; 64 slots a pass, sorted then
+  seam-rotated. **The implementation review's findings, fixed here:** a renewal keeps its own envelope only when the
+  highest reported acceptance is its lineage (D1: it adopted a lower value over its own higher decided acceptance;
+  seen failing first: `d1_a_renewal_never_adopts_a_lower_value_over_its_own` — "basis: Observed"); an upgraded
+  proposer never sets aside by `decided` (D2, `d2_an_upgraded_proposer_never_sets_aside_by_decided` — "a second
+  holder beside B: Ok(LockGuard …)"); a slot's records are read through a per-slot scope index in Layer I's index
+  step (D3: 136.7 ms per read → 1.35 ms at 5,000 slots × 100 records, debug build); a lock's lease is its TTL rounded
+  up (D4, `d4_a_guard_never_outlives_its_lease` — "the lease ends 1000 ms after the start, before the 1.9 s
+  deadline"); a `CommitTerm` above a live decision of another identity is written and counted (D5,
+  `d5_a_commit_ahead_of_its_release_marker_is_written` — "L still reads the released holder"); `GET
+  /gateway/overlay/consistent/get` and `GET /consensus/{slot}` read through the decision record (D6,
+  `d6_the_gateway_consistent_get_reads_the_decision` — the raw key's bytes); uppercase-hex record keys are not
+  records (`d7_an_uppercase_ballot_is_not_a_record`), learner records reach the WAL, the deadline refusal answers
+  409 `expired_before_grant`; 1,000 acquisitions leave three keys (`growth_a_thousand_acquisitions_leave_constant_keys`
+  — "1001 keys remain"). The interleaving tests withhold real frames with a test-only frame filter on the receive
+  path (`mycelium-core` feature `test-support`). Wire **v12**: five appended `ConsensusMsg` variants (`PrepareTerm`, `PrepareAckTerm`,
+  `ProposeTerm`, `PromiseTerm`, `CommitTerm`); the acceptor record gains tag `0x03`. **Seen failing first** on the
+  branch before the record (black-box, `src/agent/lock_lifecycle_tests.rs`): `row17_a_skewed_holders_decision_does_not_wedge_the_lock`
+  ("the lock is wedged for ever after B's window"), `row20_an_ended_decision_does_not_revive_on_a_higher_floor`
+  ("an ended leadership read live again"), `row22_an_adoption_keeps_the_holders_lease` ("D acquired inside B's 60 s
+  lease"), `row23_a_late_commit_does_not_displace_a_permanent_decision` ("a late COMMIT displaced the permanent
+  decision"), `row26_hlc_drift_does_not_end_a_lease_early` ("HLC drift ended a 60 s lease early"),
+  `row27_collection_keeps_a_node_owned_floor` ("a finished ballot was accepted after collection"); the earlier rounds'
+  tests (K1–K3, round 1–2 rows) failed first on their own commits; the record-level rows are written against the new
+  API (`src/agent/lock_lifecycle_api_tests.rs`). **Upgrade notes:** (1) **`elect_leader` is no longer permanent** —
+  renew by calling again (every ~10 s) or ask for `LeaderTerm::Permanent`; a slot committed permanently before the
+  upgrade has no decision record and is read, and released, the legacy way. (2) **Upgrade every node.** An upgraded
+  proposer times out rather than commits until a quorum of its acceptors is upgraded (they ignore `ProposeTerm`), as
+  with 2.30.0's prepare phase. Older nodes still receive the legacy keys and `Commit`, and still read them the old way
+  — so for an older *reader* the K3 re-stamp and rounds 1–2's pairings remain until it is upgraded; an adoption of a
+  value first proposed by an older node takes the adopter's window. The legacy keys stop being written at a later,
+  governed MINOR. (3) `LockGuard`'s fields changed (private), `ConsensusListenerHandle` gained a private field,
+  `TaskCtx` gained `acceptor_records`; a lock's token is now the decision's token (still monotonic across holders
+  when the prior decision's record reached the new proposer). **Not built:** the SDKs expose no
+  `release_leadership` verb (row G); a node that proposes without a listener does not collect; a permanent decision
+  whose original proposer is gone for good cannot be released by anyone else (design §5).
 - **The SDKs reach a gateway over TLS** (`mycelium-py` **0.2.9**, `mycelium-ts` **0.2.3**,
   `langgraph-checkpoint-mycelium` **0.3.2**). Every client built its base URL as `http://{host}:{port}` — eight
   Python handles, five TypeScript clients and the checkpointer; only `A2aClient` took a full URL — so a gateway

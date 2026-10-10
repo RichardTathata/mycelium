@@ -104,6 +104,8 @@ fn spawn_handler(
             prefix_index:      Arc::new(crate::store::PrefixIndex::new()),
             index_stripes:     Arc::new(std::array::from_fn(|_| std::sync::Mutex::new(()))),
             cap_ns_index:      Arc::new(crate::store::PrefixIndex::new()),
+            scope_index: Arc::new(papaya::HashMap::new()),
+            frame_filter: Arc::new(papaya::HashMap::new()),
             hash_acc:          Arc::new(AtomicU64::new(initial_hash)),
             dropped_frames:    Arc::new(AtomicU64::new(0)),
             individual_flood_fallbacks: Arc::new(AtomicU64::new(0)),
@@ -149,6 +151,8 @@ fn spawn_handler(
     let task_ctx = Arc::new(TaskCtx {
         #[cfg(feature = "consensus")]
         consensus_accepted: Arc::new(papaya::HashMap::new()),
+        #[cfg(feature = "consensus")]
+        acceptor_records: std::sync::Mutex::new(()),
         core: core_ctx,
         bulk_transport: Arc::new(BulkTransport::new(0, Duration::from_secs(5), 64)),
         rpc_pending: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -1168,6 +1172,8 @@ async fn test_subscribe_notified_via_gossip() {
                 prefix_index:      Arc::new(crate::store::PrefixIndex::new()),
                 index_stripes:     Arc::new(std::array::from_fn(|_| std::sync::Mutex::new(()))),
                 cap_ns_index:      Arc::new(crate::store::PrefixIndex::new()),
+                scope_index: Arc::new(papaya::HashMap::new()),
+                frame_filter: Arc::new(papaya::HashMap::new()),
                 hash_acc:          Arc::new(AtomicU64::new(0)),
                 dropped_frames:    Arc::new(AtomicU64::new(0)),
             individual_flood_fallbacks: Arc::new(AtomicU64::new(0)),
@@ -1213,6 +1219,8 @@ async fn test_subscribe_notified_via_gossip() {
         let task_ctx = Arc::new(TaskCtx {
         #[cfg(feature = "consensus")]
         consensus_accepted: Arc::new(papaya::HashMap::new()),
+        #[cfg(feature = "consensus")]
+        acceptor_records: std::sync::Mutex::new(()),
             core: core_ctx,
             bulk_transport: Arc::new(BulkTransport::new(0, Duration::from_secs(5), 64)),
             rpc_pending: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -5318,6 +5326,143 @@ async fn an_acceptors_record_survives_a_crash_without_a_snapshot() {
     );
     b.shutdown().await;
     let _ = std::fs::remove_dir_all(&base);
+}
+
+/// **Review of #600, finding 5: a released leadership is on disk when `release_leadership` returns.**
+/// A permanent leadership has no lease to fall back on, so a release a crash forgets restores it.
+#[cfg(all(unix, feature = "consensus"))]
+#[tokio::test]
+async fn a_released_leadership_survives_a_crash() {
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let base = std::env::temp_dir().join(format!("mycelium-release-wal-{port}"));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join(id.to_string()).join("kv");
+    let mut cfg = GossipConfig::auto();
+    cfg.bind_port = port;
+    cfg.persistence = Some(r2_persistence(&base));
+    let a = GossipAgent::new(id.clone(), cfg.clone());
+    a.start().await.unwrap();
+    a.mesh().join_group("perm");
+    a.consensus().elect_leader_with("perm", crate::LeaderTerm::Permanent).await.expect("elects");
+    assert!(a.consensus().release_leadership("perm").await);
+    // The crash, at the instant the call returned.
+    let crash = base.join("crash");
+    std::fs::create_dir_all(&crash).unwrap();
+    for f in ["snapshot.bin", "wal.bin"] {
+        if dir.join(f).exists() { std::fs::copy(dir.join(f), crash.join(f)).unwrap(); }
+    }
+    let mut released = false;
+    let marker_prefix = format!("consensus/life/{}/end/", "leader%2Fperm");
+    mycelium_core::persistence::replay(&crash, None, |e| {
+        if e.key.starts_with(marker_prefix.as_str()) && !e.is_tombstone
+            && crate::consensus_life::decode_marker(&e.value).is_some() {
+            released = true;
+        }
+    }).await.expect("the crashed files replay");
+    assert!(released, "the release was not on disk when release_leadership returned");
+    a.shutdown().await;
+    // Restart over what the crash left (row 9): the leadership stays released.
+    for f in ["snapshot.bin", "wal.bin"] {
+        let _ = std::fs::remove_file(dir.join(f));
+        if crash.join(f).exists() { std::fs::copy(crash.join(f), dir.join(f)).unwrap(); }
+    }
+    let b = GossipAgent::new(id, cfg);
+    b.start().await.unwrap();
+    assert_eq!(b.consensus().consensus_get("leader/perm"), None, "the release did not survive the restart");
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// **Rows 14 / 27 (review finding 5), across a restart: collection's floor is this node's own record.**
+/// A lock is acquired and released; collection shrinks the acceptor state to the floor; the node
+/// crashes and restarts over what is on disk: the finished ballot is still refused, by the restored
+/// floor, with the shared `decided` key regressed.
+#[cfg(all(unix, feature = "consensus"))]
+#[tokio::test]
+async fn a_collected_floor_survives_a_crash() {
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let base = std::env::temp_dir().join(format!("mycelium-floor-wal-{port}"));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join(id.to_string()).join("kv");
+    let mut cfg = GossipConfig::auto();
+    cfg.bind_port = port;
+    cfg.persistence = Some(r2_persistence(&base));
+    let a = GossipAgent::new(id.clone(), cfg.clone());
+    a.start().await.unwrap();
+    let _l = a.consensus().start_consensus_listener(ConsensusConfig::default());
+    let g = a.consensus().distributed_lock("floor", Duration::from_secs(60)).await.expect("acquire");
+    let slot: Arc<str> = Arc::from("lock/floor");
+    let ballot = a.task_ctx.consensus_accepted.pin().get(&slot).map(|s| s.promised).expect("accepted");
+    g.release();
+    assert!(a.consensus().collect_finished_acceptor_state().await >= 1, "collected");
+    let crash = base.join("crash");
+    std::fs::create_dir_all(&crash).unwrap();
+    for f in ["snapshot.bin", "wal.bin"] {
+        if dir.join(f).exists() { std::fs::copy(dir.join(f), crash.join(f)).unwrap(); }
+    }
+    a.shutdown().await;
+    for f in ["snapshot.bin", "wal.bin"] {
+        let _ = std::fs::remove_file(dir.join(f));
+        if crash.join(f).exists() { std::fs::copy(crash.join(f), dir.join(f)).unwrap(); }
+    }
+    let b = GossipAgent::new(id, cfg);
+    b.start().await.unwrap();
+    let _ = b.kv().set("consensus/decided/lock/floor", crate::consensus::encode_ballot(0));
+    let restored = b.task_ctx.consensus_accepted.pin().get(&slot).cloned();
+    assert!(restored.as_ref().is_some_and(|s| s.promised >= ballot && s.accepted.is_none()), "the shrunk floor was restored: {restored:?}");
+    assert!(!crate::consensus::claim_vote(&b.task_ctx.consensus_accepted, &slot, ballot, &Bytes::from_static(b"x"), 0xBEEF, 0),
+        "a finished ballot was accepted after a restart");
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// **Review of #600, finding 8: the gateway's election routes** — `ttl_secs`, `permanent`, and
+/// `DELETE /gateway/overlay/elect/{group}` (stepping down; `404 not_leader` when this node is not it).
+#[cfg(all(feature = "consensus", feature = "gateway"))]
+#[tokio::test]
+async fn the_gateway_elects_on_a_lease_and_steps_down() {
+    let gossip_port = alloc_port();
+    let http_port   = alloc_port();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = gossip_port;
+    cfg.http_port = Some(http_port);
+    let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
+    agent.start().await.expect("start");
+    let _l = agent.consensus().start_consensus_listener(ConsensusConfig::default());
+    agent.mesh().join_group("gw-lease");
+    agent.mesh().join_group("gw-perm");
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{http_port}");
+    for _ in 0..40 {
+        if client.get(format!("{base}/health")).send().await.is_ok_and(|r| r.status().is_success()) { break; }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let term = |slot: &str| match crate::consensus_life::read_slot(
+            &agent.task_ctx.kv_state, slot, mycelium_core::sim_seam::wall_now_ms()) {
+        crate::consensus_life::SlotView::Top(t) => Some(t.env.term),
+        _ => None,
+    };
+
+    let r = client.post(format!("{base}/gateway/overlay/elect"))
+        .json(&serde_json::json!({"group": "gw-lease", "ttl_secs": 7})).send().await.expect("elect");
+    assert_eq!(r.status(), 200, "{:?}", r.text().await);
+    assert!(matches!(term("leader/gw-lease"), Some(crate::consensus_life::Term::Lease { ms: 7000, .. })));
+
+    let r = client.post(format!("{base}/gateway/overlay/elect"))
+        .json(&serde_json::json!({"group": "gw-perm", "permanent": true})).send().await.expect("elect");
+    assert_eq!(r.status(), 200);
+    assert_eq!(term("leader/gw-perm"), Some(crate::consensus_life::Term::Permanent), "a permanent election carries no lease");
+
+    let r = client.delete(format!("{base}/gateway/overlay/elect/gw-lease")).send().await.expect("release");
+    assert_eq!(r.status(), 200);
+    assert!(agent.consensus().consensus_get("leader/gw-lease").is_none(), "released leadership reads as none");
+    let r = client.delete(format!("{base}/gateway/overlay/elect/gw-lease")).send().await.expect("release");
+    assert_eq!(r.status(), 404, "this node is no longer the leader");
+    let body: serde_json::Value = r.json().await.expect("json");
+    assert_eq!(body["error"], "not_leader");
+    agent.shutdown().await;
 }
 
 /// **Realignment repairs R7** (found by A2's configuration audit, 2026-10-05). A persistence

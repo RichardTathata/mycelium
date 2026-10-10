@@ -361,6 +361,7 @@ pub(super) async fn run_http_server(
         .route("/overlay/lock/acquire",           post(gw_overlay_lock_acquire))
         .route("/overlay/lock/{guard_id}",         delete(gw_overlay_lock_release))
         .route("/overlay/elect",                  post(gw_overlay_elect))
+        .route("/overlay/elect/{group}",          delete(gw_overlay_elect_release))
         // log/group/subscribe uses the distributed-lock claim (consensus overlay)
         .route("/overlay/log/group/subscribe",    get(gw_overlay_log_group_subscribe))
         .route("/consensus/cross_group_propose",  post(gw_cross_group_propose));
@@ -878,6 +879,7 @@ fn required_scope(method: &axum::http::Method, matched_path: &str) -> &'static s
         "/gateway/overlay/lock/acquire"        => "consensus:write",
         "/gateway/overlay/lock/{guard_id}"     => "consensus:write",
         "/gateway/overlay/elect"               => "consensus:write",
+        "/gateway/overlay/elect/{group}"       => "consensus:write",
         "/gateway/overlay/log/append"          => "consensus:write",
         "/gateway/overlay/log/scan"            => "consensus:read",
         "/gateway/overlay/log/compact"         => "consensus:write",
@@ -1069,7 +1071,10 @@ async fn consensus_slot_handler(
         .is_some();
     let committed_b64 = live
         .map(|b| base64::engine::general_purpose::STANDARD.encode(&b));
-    let lease_expired = raw_present && committed_b64.is_none();
+    // Row A: a decision whose record has ended (released, or its lease past) reads `lease_expired`;
+    // the raw committed key is consulted only for a slot with no decision record.
+    let lease_expired = committed_b64.is_none()
+        && (crate::consensus::ended_at(&ctx.agent_ctx.kv_state, &slot).is_some() || raw_present);
     let lease_ms = store.get(lease_key.as_str())
         .and_then(|e| e.data.clone())
         .and_then(|b| crate::consensus::decode_lease_ms(&b));
@@ -4110,10 +4115,13 @@ async fn gw_overlay_consistent_get(
     State(ctx): State<Arc<HttpCtx>>,
 ) -> impl IntoResponse {
     use base64::Engine as _;
-    let committed_key = format!("consensus/committed/consistent/{}", q.key);
-    let value = ctx.agent_ctx.kv_state.store.pin()
-        .get(committed_key.as_str())
-        .and_then(|e| e.data.clone())
+    // The same read the library's `consistent_get` makes (review D6): the slot's live decision — its
+    // decision record, or the legacy reading for a slot with none — then the raw key. It read the raw
+    // `consensus/committed/consistent/…` key, which disagreed with the library once decisions became
+    // records (and never applied a lease).
+    let value = crate::consensus::live_committed_value(
+            &ctx.agent_ctx.kv_state, &format!("consistent/{}", q.key),
+            crate::consensus::causal_now_ms(&ctx.agent_ctx.hlc))
         .or_else(|| {
             ctx.agent_ctx.kv_state.store.pin()
                 .get(q.key.as_str())
@@ -4154,27 +4162,24 @@ async fn gw_overlay_lock_acquire(
         ..crate::consensus::ConsensusConfig::default()
     };
 
+    let started = mycelium_core::sim_seam::mono_instant();
     let result = overlay_cluster_propose(&ctx.agent_ctx, &slot, value.clone(), cfg).await;
 
     match result {
         crate::consensus::ConsensusResult::Committed { .. } => {
-            // Confirm the converged holder before handing out a guard (bug A); the token is the
-            // commit's HLC (a monotonic fencing token — the ballot is not, #164).
-            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-            let confirmed = crate::consensus::live_committed_with_hlc(
-                    &ctx.agent_ctx.kv_state, &slot, crate::consensus::causal_now_ms(&ctx.agent_ctx.hlc))
-                .filter(|(v, _)| v.as_ref() == value.as_ref());
-            let Some((_, token)) = confirmed else {
-                return (StatusCode::CONFLICT,
-                    Json(json!({ "ok": false, "error": "superseded" }))).into_response();
+            // The same guard the library issues (row A): ours only if the slot's top decision record
+            // says so; the token is the decision's.
+            let guard = match crate::agent::consensus_handle::lock_guard_after_commit(
+                &ctx.agent_ctx, &body.name, &slot, value, started, std::time::Duration::from_secs(ttl_secs),
+            ).await {
+                Ok(g) => g,
+                // The decision converged after the guard's own deadline (review D7): its own code.
+                Err(crate::ConsistencyError::Timeout { .. }) => return (StatusCode::CONFLICT,
+                    Json(json!({ "ok": false, "error": "expired_before_grant" }))).into_response(),
+                Err(_) => return (StatusCode::CONFLICT,
+                    Json(json!({ "ok": false, "error": "superseded" }))).into_response(),
             };
-            let guard = LockGuard {
-                ctx:      Arc::clone(&ctx.agent_ctx),
-                name:     Arc::from(body.name.as_str()),
-                value,
-                token,
-                released: false,
-            };
+            let token = guard.token;
             let guard_id = format!("{:016x}", fastrand::u64(..));
             ctx.lock_guards.lock().unwrap_or_else(|e| e.into_inner()).insert(guard_id.clone(), guard);
             Json(json!({ "ok": true, "guard_id": guard_id, "token": token.to_string() })).into_response()
@@ -4215,12 +4220,22 @@ async fn gw_overlay_lock_release(
 
 #[derive(Deserialize)]
 #[cfg(feature = "consensus")]
-struct ElectBody { group: String }
+struct ElectBody {
+    group:     String,
+    /// The leadership's lease in seconds (row A, C1); default `DEFAULT_LEADER_LEASE` (30 s).
+    #[serde(default)]
+    ttl_secs:  Option<u64>,
+    /// `true` asks for a permanent leadership — the pre-2.32.0 behaviour, now an explicit opt-in.
+    #[serde(default)]
+    permanent: bool,
+}
 
 /// `POST /gateway/overlay/elect` — elect a leader for `group`.
 ///
-/// Body: `{"group": "G"}`.
-/// Returns `{"leader": "IP:PORT"}` on success.
+/// Body: `{"group": "G", "ttl_secs": 30, "permanent": false}` (both optional).
+/// Returns `{"leader": "IP:PORT"}` on success. **Leased by default** (since 2.32.0, row A C1): the
+/// leadership lapses `ttl_secs` after its commit unless re-elected (calling again renews it); step
+/// down with `DELETE /gateway/overlay/elect/{group}`.
 #[cfg(feature = "consensus")]
 async fn gw_overlay_elect(
     State(ctx): State<Arc<HttpCtx>>,
@@ -4229,9 +4244,17 @@ async fn gw_overlay_elect(
     let slot  = format!("leader/{}", body.group);
     let value = Bytes::from(ctx.agent_ctx.node_id.to_string().into_bytes());
 
+    let term = if body.permanent {
+        crate::agent::overlay_consistent::LeaderTerm::Permanent
+    } else {
+        crate::agent::overlay_consistent::LeaderTerm::Lease(body.ttl_secs.map_or(
+            crate::agent::overlay_consistent::DEFAULT_LEADER_LEASE,
+            |s| std::time::Duration::from_secs(s.clamp(1, 3600)),
+        ))
+    };
     let result = overlay_group_propose(
         &ctx.agent_ctx, &body.group, &slot, value,
-        crate::consensus::ConsensusConfig::default(),
+        crate::consensus::ConsensusConfig { committed_lease_secs: term.lease_secs(), ..crate::consensus::ConsensusConfig::default() },
     ).await;
 
     // #164 class: an optimistic `Committed` is NOT mutually exclusive — never return `self`.
@@ -4244,8 +4267,9 @@ async fn gw_overlay_elect(
             if converge {
                 tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
             }
-            let committed_key = format!("consensus/committed/{slot}");
-            if let Some(raw) = ctx.agent_ctx.kv_state.store.pin().get(committed_key.as_str()).and_then(|e| e.data.clone())
+            // The live leader: a leadership whose lease lapsed or that was released is no leader.
+            if let Some(raw) = crate::consensus::live_committed_value(
+                    &ctx.agent_ctx.kv_state, &slot, crate::consensus::causal_now_ms(&ctx.agent_ctx.hlc))
                 && let Ok(s) = std::str::from_utf8(&raw) {
                     return Json(json!({ "ok": true, "leader": s.to_string() })).into_response();
                 }
@@ -4274,6 +4298,32 @@ async fn gw_overlay_elect(
         }))).into_response(),
         // This node is not in the group: it may not elect a leader for it, least of all itself.
         crate::consensus::ConsensusResult::NotAMember { group, .. } => not_a_member_response(&group),
+    }
+}
+
+/// `DELETE /gateway/overlay/elect/{group}` — this node steps down as `group`'s leader (row A, C1).
+///
+/// Returns `{"ok": true}` when this node was the live leader and its release is on stable storage;
+/// `404 not_leader` when nothing was released — the live leader this node sees is not itself, or the
+/// slot's lifecycle record names a newer decision or is behind a higher decided ballot; `500
+/// release_unrecorded` when the release was applied and gossiped but the WAL did not acknowledge it.
+///
+/// **Who may call it:** any principal holding `consensus:write` may step **this node** down from any
+/// group it leads, and — through `POST /gateway/overlay/elect` — elect it with any `ttl_secs` or
+/// `"permanent": true`. The scope is node-wide, not per group (`rbac.md`).
+#[cfg(feature = "consensus")]
+async fn gw_overlay_elect_release(
+    Path(group): Path<String>,
+    State(ctx):  State<Arc<HttpCtx>>,
+) -> impl IntoResponse {
+    let value = Bytes::from(ctx.agent_ctx.node_id.to_string().into_bytes());
+    match crate::consensus::release_decision_durable(&ctx.agent_ctx, &format!("leader/{group}"), &value).await {
+        crate::consensus::ReleaseOutcome::Released => Json(json!({ "ok": true })).into_response(),
+        crate::consensus::ReleaseOutcome::Refused =>
+            (StatusCode::NOT_FOUND, Json(json!({ "ok": false, "error": "not_leader" }))).into_response(),
+        // Applied and gossiped, not on stable storage: a crash may restore the leadership here.
+        crate::consensus::ReleaseOutcome::Unrecorded =>
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "ok": false, "error": "release_unrecorded" }))).into_response(),
     }
 }
 
