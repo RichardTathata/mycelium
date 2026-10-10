@@ -35,12 +35,15 @@ cargo test -p mycelium-tls-free-tests                       # …and the one wit
 
 **The KV namespace table is a gate, not a lint item** (2026-10-10). `check-kv-namespaces.sh` enumerates the
 slash-bearing `const`/`static` `&str` literals, `format!("seg/…")` heads and first literals of KV calls in every
-library crate's production code (the call set is named in the script's header), reduces each to its namespace
-(top segment; under `sys/`, the second too), and fails on one with no row in `src/lib.rs` § KV namespace
-ownership unless `scripts/kv-namespaces-nonkeys.txt` declares it a non-key with a reason (seam streams, slot and
+library crate's production code, plus every entry of a constant `&str` array or slice (the call set is named in
+the script's header), matches each against the rows' patterns (the key before its first `{` — `consensus/decided/`,
+not just `consensus/`), and fails on one with no row in `src/lib.rs` § KV namespace ownership unless `scripts/kv-namespaces-nonkeys.txt` declares it a non-key with a reason (seam streams, slot and
 ring names, schema tags, git paths, relative segments). A stale or reasonless entry fails too. Why: the wiki
 lint missed live prefixes five times, the last four governor keys rowless since June. What it cannot see is in
-the script's header (a prefix built from pieces, a literal two lines below its call).
+the script's header (a prefix built from pieces, a literal two lines below its call). Its test-item skip covers
+exactly the item a `#[cfg(test)]` attribute applies to (to its `;` or matching `}`, at any indentation) — the
+column-0-`}` skip `check-sim-seams.sh` still uses hid production code after a one-line `#[cfg(test)] mod x;` or an
+indented `#[cfg(test)] fn` (the adversarial review of #591).
 
 **`make check-full` is NOT the whole CI gate — a green local run does not prove CI is green.** The
 block above is the *Rust lib + clippy* set (CI runs its test lines through `scripts/ci-retest.sh`, the compliance

@@ -39,8 +39,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `make_gossip_update*`, `publish_*`, `strip_prefix`/`starts_with`; the set is named in the script's header) in
   every library crate — and fails on one whose namespace (top segment; under `sys/`, the second too) has no row in
   `src/lib.rs` § KV namespace ownership, unless `scripts/kv-namespaces-nonkeys.txt` declares it a non-key with a
-  reason (30 entries today: seam streams, slot and ring names, schema tags, knowledge subjects, git paths, relative
-  segments). A stale or reasonless entry fails too, and `--self-test` (in `make check` and CI) plants rowless
+  reason (36 entries today: seam and journal streams, slot and ring names, schema tags, knowledge subjects, an
+  operation id, a prompt id, git paths, relative segments). A literal is matched against the table's **row patterns**
+  (`consensus/decided/`, `sys/govern/timing`), not its top segment, so a new key under a namespace with several rows
+  needs its own row; entries of constant `&str` arrays and slices are enumerated; and the test-item skip covers
+  exactly the item a `#[cfg(test)]` attribute applies to (the adversarial review of #591: the column-0-`}` skip hid
+  `mycelium-reason/src/route.rs:372-573`). A stale or reasonless entry fails too, and `--self-test` (in `make check` and CI) plants rowless
   prefixes in a scratch copy and requires the gate to name each. The wiki lint had missed live prefixes five
   times; the table gains the four it missed last (`sys/config/{param}`, `sys/govern/timing`, `sys/govern/fleet`,
   `sys/govern/membership/{group}`, as PR #588 adds them). Seen failing first: the gate on the unfixed table names

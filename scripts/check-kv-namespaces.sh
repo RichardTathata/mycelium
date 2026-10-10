@@ -31,11 +31,13 @@
 #
 #   WHAT IT ENUMERATES — production code in every library crate: `src/` (incl. `src/bin/`), `mycelium-core/src`
 #   and every `mycelium-*/src` except `mycelium-gateway-free-tests` (a test crate); never a `tests/` directory,
-#   a `*_tests.rs`/`tests.rs`/`test_util.rs` file, or a top-level `#[cfg(test)]` / `#[cfg(all(test, …))]` item.
+#   a `*_tests.rs`/`tests.rs`/`test_util.rs` file, or an item a `#[cfg(test)]` / `#[cfg(all(test, …))]` attribute
+#   applies to, at any indentation (to its `;` or its matching `}` — see PROD_FILTER).
 #   In it, every string literal whose head is a path segment (`"seg/…"`, seg = `[a-z][a-z0-9_.-]*`) in one of
-#   three shapes:
+#   four shapes:
 #     const   `const X: &str = "seg/…"` / `static X: &str = …` — whatever the name (`_KEY`, `_PREFIX`, `_NS`,
 #             `kv_ns::*`, `consensus_ns::*` alike), the literal on the same line or the next;
+#     array   every entry of `const X: [&str; N] = [ … ]` / `const X: &[&str] = &[ … ]` (and `static`), to its `]`;
 #     format  `format!("seg/…")` — the literal head, on the same line or the next. Every one, not only those
 #             visibly passed to a writer: `let key = format!(…); kv.set(key, …)` is the common shape, and a
 #             format! that is not a key is a non-key the allow-list names;
@@ -50,13 +52,15 @@
 #                         namespace in use.
 #             The log verbs (`append`, `scan_log`, `subscribe_log*`, `compact_log`) are deliberately NOT in
 #             the set: their argument is a stream name and the key is `log/{stream}/…`, which has a row.
-#   Each literal is reduced to its namespace — the top segment (`cap/`), and under `sys/` the second as well
-#   (`sys/config/`) — and must match a row's namespace, or start with an allow-list entry.
+#   Each literal must match a row of the table — its static head (the text before any `{`) extending a row's
+#   pattern (the row's key before its first `{` or `…`: `consensus/decided/`, `sys/govern/timing`), or, for a
+#   literal with no placeholder, being a prefix of one (a namespace scan: `"consensus/"`) — or start with an
+#   allow-list entry. Rows, not top segments: `consensus/zforged/` has no row although `consensus/` has five.
 #
 #   WHAT IT CANNOT SEE — stated rather than glossed. A prefix assembled from pieces (`format!("{a}/{b}")`, a
 #   literal built with `concat!` or `+`), a key literal held in a `let` and passed later, a call whose literal
-#   sits two or more lines below the call, and a `#[cfg(test)]` item nested inside an `impl` (the skip runs
-#   to the next column-0 `}`, as in `check-sim-seams.sh`). It does not parse Rust; it closes the way this
+#   sits two or more lines below the call, and a brace inside a raw string (`r#"{"#`) of a test item, which can
+#   end the skip early or late. It does not parse Rust; it closes the way this
 #   mistake has actually been made five times — a named constant or a format! key with no row.
 #
 #   THE ALLOW-LIST — `scripts/kv-namespaces-nonkeys.txt`, one entry per line, `<literal head>  # <reason>`.
@@ -118,6 +122,28 @@ pub fn planted_next_line(x: u32) -> String {
 mod planted_tests {
     const TEST_ONLY: &str = "zz-planted-testonly/";
 }
+// A one-line test item ends at its `;` — what follows is production (the review of #591, finding 2).
+#[cfg(test)]
+mod planted_oneline;
+pub const PLANTED_AFTER_ONELINE: &str = "zz-after-oneline/";
+// An indented test item ends at its own closing brace, not the next column-0 `}`.
+pub struct PlantedImpl;
+impl PlantedImpl {
+    #[cfg(all(test, feature = "x"))]
+    fn test_only(&self) -> String {
+        if true { format!("zz-planted-testonly-fn/{}", 1) } else { String::new() }
+    }
+    pub fn after(&self) -> String { format!("zz-after-indented/{}", 1) }
+}
+// Slash-bearing entries of a constant array or slice (finding 5).
+pub const PLANTED_ARRAY: [&str; 2] = ["zz-planted-array/", "sys/zz-planted-array-sys/"];
+pub const PLANTED_SLICE: &[&str] = &[
+    "zz-planted-slice/",
+];
+// A new key under a namespace with several rows, matched against the rows, not the top segment
+// (finding 4).
+pub fn planted_multirow() -> String { format!("consensus/zforged/{}", 1) }
+pub const PLANTED_GOVERN: &str = "sys/govern/zanything";
 RS
   printf '%s\n' 'pub fn planted_call(kv: &KvHandle) { kv.set("zz-planted-call/k", vec![]); }' \
     >> "$scratch/src/agent/intent.rs"
@@ -132,8 +158,11 @@ RS
   set -e
   fails=0
   if [ "$rc" -eq 0 ]; then echo "self-test FAIL: the planted tree passed"; fails=1; fi
-  for want in '"zz-planted-const/"' '"sys/zz-planted-sys/{x}"' '"zz-planted-nextline/{x}"' \
-              '"zz-planted-call/k"' 'sys/config/' 'STALE zz-stale-entry/' 'NO REASON zz-noreason/'; do
+  wants=('"zz-planted-const/"' '"sys/zz-planted-sys/{x}"' '"zz-planted-nextline/{x}"' '"zz-planted-call/k"'
+         'sys/config/' 'STALE zz-stale-entry/' 'NO REASON zz-noreason/'
+         '"zz-after-oneline/"' '"zz-after-indented/{}"' '"zz-planted-array/"' '"sys/zz-planted-array-sys/"'
+         '"zz-planted-slice/"' '"consensus/zforged/{}"' '"sys/govern/zanything"')
+  for want in "${wants[@]}"; do
     if ! printf '%s\n' "$out" | grep -qF -- "$want"; then
       echo "self-test FAIL: the planted tree's output does not name $want"; fails=1
     fi
@@ -144,7 +173,7 @@ RS
   if [ "$fails" -ne 0 ]; then
     echo "--- the planted run's output ---"; printf '%s\n' "$out"; exit 1
   fi
-  echo "self-test: the planted tree fails naming all 7 plants (exit $rc); the test-module plant is not named."
+  echo "self-test: the planted tree fails naming all ${#wants[@]} plants (exit $rc); the test-only plants are not named."
   if ! "$SCRIPT" --root "$ROOT" > /dev/null 2>&1; then
     echo "self-test FAIL: the real tree does not pass"; "$SCRIPT" --root "$ROOT"; exit 1
   fi
@@ -160,8 +189,54 @@ federation/	docs/design/federated-domains.md §8 (D7) — foreign state never en
 LIST
 )
 
-# Production sources only. Test modules are exempt for the same reason they are in the seam check: a test
-# that names a forbidden prefix to prove it is absent is doing its job.
+# Production lines only, as `file<TAB>line<TAB>text`. Test items are exempt for the same reason they are in the seam
+# check: a test that names a prefix to prove it is absent is doing its job. Comment lines are skipped too (a doc
+# comment naming a prefix is prose, not a write).
+#
+# The skip covers exactly the item a `#[cfg(test)]` / `#[cfg(all(test, …))]` attribute applies to (the adversarial
+# review of #591, finding 2): further attributes, then the item's header up to either a `;` that ends it (`mod x;`,
+# `use …;`, a `const`) or the `{` that opens its body, which ends at the matching `}` — braces counted at any
+# indentation, with string and char literals and `//` comments stripped first. The earlier skip ran to the next
+# column-0 `}`, so a one-line `#[cfg(test)] mod x;` or an indented `#[cfg(test)] fn` hid the production code after
+# it to the end of the enclosing block (`mycelium-reason/src/route.rs:372-573` hid a key at `:488`).
+PROD_FILTER='
+  function braces(s,   t, o, c) {
+    t = s
+    gsub(/"([^"\\]|\\.)*"/, "", t)
+    gsub(/\047([^\047\\]|\\.)\047/, "", t)
+    sub(/\/\/.*$/, "", t)
+    o = gsub(/\{/, "{", t); c = gsub(/\}/, "}", t)
+    opens = o; closes = c
+    semi = (t ~ /;[ \t]*$/)
+  }
+  # One line of a skipped item: returns once the item has ended.
+  function skip_line(s) {
+    braces(s)
+    if (!started) {
+      if (opens > 0) { started = 1; depth = opens - closes; if (depth <= 0) skip = 0; return }
+      if (semi) { skip = 0 }
+      return
+    }
+    depth += opens - closes
+    if (depth <= 0) skip = 0
+  }
+  FNR == 1 { skip = 0 }
+  skip {
+    if (!started && $0 ~ /^[ \t]*#\[/) next
+    skip_line($0); next
+  }
+  /^[ \t]*#\[cfg\((all\()?test[,)]/ {
+    skip = 1; started = 0; depth = 0
+    rest = $0; sub(/^[ \t]*#\[cfg\([^]]*\)\][ \t]*/, "", rest)
+    if (rest != "") skip_line(rest)
+    next
+  }
+  /^[ \t]*\/\// { next }
+  { print FILENAME "\t" FNR "\t" $0 }
+'
+production_lines() { awk "$PROD_FILTER" "$@"; }
+
+# Production sources only, for the forbidden check.
 scan_files() {
   find src mycelium-core/src -name '*.rs' \
     ! -name '*_tests.rs' \
@@ -170,31 +245,15 @@ scan_files() {
     | sort
 }
 
-# Skip each top-level `#[cfg(test)]` item and comment lines — the same shape `check-sim-seams.sh` uses, and for
-# the same reasons (production code below a test module is still production code; a doc comment naming a prefix
-# to forbid it is prose, not a write).
-production_lines() {
-  awk '
-    /^[[:space:]]*#\[cfg\(test\)\]/ { skip = 1 }
-    skip && /^}/                    { skip = 0; next }
-    /^[[:space:]]*\/\//             { next }
-    !skip                           { print FILENAME ":" FNR ":" $0 }
-  ' "$1"
-}
-
 status=0
 if [ "$MODE" = gate ]; then
 while IFS=$'\t' read -r prefix record; do
   [ -z "$prefix" ] && continue
-  hits=""
-  while IFS= read -r f; do
-    found=$(production_lines "$f" | grep -F "\"$prefix" || true)
-    [ -n "$found" ] && hits="$hits$found"$'\n'
-  done < <(scan_files)
-
+  # shellcheck disable=SC2046
+  hits=$(production_lines $(scan_files) | grep -F "\"$prefix" | awk -F'\t' '{ print $1 ":" $2 ":" $3 }' || true)
   if [ -n "$hits" ]; then
     echo "FAIL forbidden KV prefix \"$prefix\" appears in production code:"
-    printf '%s' "$hits" | sed 's/^/  /'
+    printf '%s\n' "$hits" | sed 's/^/  /'
     echo "  forbidden by: $record"
     status=1
   fi
@@ -208,8 +267,10 @@ table_file=$(mktemp "${TMPDIR:-/tmp}/kv-ns-table.XXXXXX")
 cand_file=$(mktemp "${TMPDIR:-/tmp}/kv-ns-cand.XXXXXX")
 trap 'rm -f -- "$table_file" "$cand_file"' EXIT
 
-# The table's namespaces: every backticked key in the first cell of each row of § KV namespace ownership,
-# reduced the same way a literal is (top segment; under `sys/`, the second too).
+# The table's row patterns: every backticked key in the first cell of each row of § KV namespace ownership, cut to
+# its static head — the text before the first `{` or `…` (`consensus/decided/{slot}` → `consensus/decided/`,
+# `sys/govern/timing` stays whole). A literal is matched against these patterns, not against its top segment
+# (finding 4): `consensus/zforged/…` has no row even though `consensus/` has five.
 awk '
   /^\/\/! ## KV namespace ownership/ { on = 1; next }
   on && /^\/\/! ## /                 { on = 0 }
@@ -218,8 +279,9 @@ awk '
     i = index(cell, " | "); if (i) cell = substr(cell, 1, i - 1)
     while (match(cell, /`[^`]+`/)) {
       tok = substr(cell, RSTART + 1, RLENGTH - 2); cell = substr(cell, RSTART + RLENGTH)
-      n = split(tok, seg, "/")
-      if (seg[1] == "sys" && n >= 2) print "sys/" seg[2] "/"; else print seg[1] "/"
+      j = index(tok, "{"); if (j) tok = substr(tok, 1, j - 1)
+      j = index(tok, "…"); if (j) tok = substr(tok, 1, j - 1)
+      if (tok != "") print tok
     }
   }
 ' src/lib.rs | sort -u > "$table_file"
@@ -236,27 +298,41 @@ kv_files() {
 
 KV_CALLS='set|set_async|set_with_receipt|set_with_receipt_as|set_requiring_sync|retry_requiring_sync|retry_with_receipt|retry_with_receipt_as|prepare_write|delete|delete_async|get|scan_prefix|subscribe|subscribe_prefix|subscribe_prefix_with_predicate|kv_[a-z_]+|scan_kv_prefix|scan_prefix_kv_with_ts|subscribe_prefix_on_kv|make_gossip_update|make_gossip_update_stamped|publish_[a-z_]+|strip_prefix|starts_with|parse_cap_key_or_warn'
 
-# file:line<TAB>literal<TAB>shape
+# file:line<TAB>literal<TAB>shape, from the production lines.
 # shellcheck disable=SC2046
-awk -v calls="$KV_CALLS" '
+production_lines $(kv_files) | awk -F'\t' -v calls="$KV_CALLS" '
   BEGIN {
     lit   = "\"[a-z][a-z0-9_.-]*/[^\"]*\""
     cdecl = "(const|static)[ \t]+[A-Za-z_0-9]+[ \t]*:[ \t]*&(\047static[ \t]+)?str[ \t]*="
+    # A constant array or slice of strings: `[&str; N] = [` or `&[&str] = &[` (finding 5).
+    adecl = "(const|static)[ \t]+[A-Za-z_0-9]+[ \t]*:[ \t]*&?(\047static[ \t]+)?\\[[ \t]*&(\047static[ \t]+)?str[ \t]*(;[^]]*)?\\][ \t]*=[ \t]*&?\\["
     fmt   = "format!\\("
     call  = "(^|[^A-Za-z_0-9])(" calls ")\\("
   }
-  function emit(l, shape) { print FILENAME ":" FNR "\t" substr(l, 2, length(l) - 2) "\t" shape }
-  FNR == 1 { skip = 0; pending = "" }
-  /^[[:space:]]*#\[cfg\((all\()?test[,)]/ { skip = 1 }
-  skip && /^}/ { skip = 0; next }
-  skip { next }
-  /^[[:space:]]*\/\// { next }
+  function emit(l, shape) { print where "\t" substr(l, 2, length(l) - 2) "\t" shape }
+  function emit_all(s, shape,   m) {
+    while (match(s, lit)) { m = substr(s, RSTART, RLENGTH); s = substr(s, RSTART + RLENGTH); emit(m, shape) }
+  }
   {
-    line = $0
+    if ($1 != file) { file = $1; pending = ""; in_array = 0 }
+    where = $1 ":" $2
+    line = $0; sub(/^[^\t]*\t[^\t]*\t/, "", line)
+    # Inside a constant array: every literal is an entry until its `]`.
+    if (in_array) {
+      emit_all(line, "array")
+      if (line ~ /\]/) in_array = 0
+      next
+    }
     # A shape whose literal opens the next line.
     if (pending != "") {
       if (match(line, "^[ \t]*" lit)) { m = substr(line, RSTART, RLENGTH); sub(/^[ \t]*/, "", m); emit(m, pending) }
       pending = ""
+    }
+    if (match(line, adecl)) {
+      rest = substr(line, RSTART + RLENGTH)
+      emit_all(rest, "array")
+      if (rest !~ /\]/) in_array = 1
+      next
     }
     rest = line
     while (match(rest, "(" cdecl ")[ \t]*" lit)) {
@@ -277,11 +353,15 @@ awk -v calls="$KV_CALLS" '
     else if (line ~ fmt "[ \t]*$")        pending = "format"
     else if (line ~ call "[ \t]*$")       pending = "call"
   }
-' $(kv_files) | sort -u > "$cand_file"
+' | sort -u > "$cand_file"
 
 # Classify: row · non-key · UNCLASSIFIED; then the allow-list's own health (stale entries, missing reasons).
+# A literal matches a row when one static head extends the other: its head (the text before any `{`) starts with
+# the row's pattern (`sys/load/{}/req/…` under `sys/load/`), or — for a literal with no placeholder, a scan of the
+# namespace (`"consensus/"`, `"sys/govern/"`, the bare `"sys/"`) — the pattern starts with it. A `format!` key
+# whose placeholder follows the head (`"consensus/{}"`) is not a scan: its head must extend a row's pattern.
 classified=$(awk -F'\t' -v mode="$MODE" '
-  FILENAME == ARGV[1] { row[$1] = 1; next }
+  FILENAME == ARGV[1] { pat[++np] = $1; next }
   FILENAME == ARGV[2] {
     raw = $0; sub(/^[ \t]+/, "", raw)
     if (raw == "" || raw ~ /^#/) next
@@ -292,13 +372,16 @@ classified=$(awk -F'\t' -v mode="$MODE" '
   }
   {
     l = $2
-    k = split(l, seg, "/")
-    if (seg[1] == "sys") ns = "sys/" seg[2] "/"; else ns = seg[1] "/"
-    if (ns in row || (seg[1] == "sys" && seg[2] == "")) { if (mode == "list") print "row\t" ns "\t" $1 "\t\"" l "\"\t" $3; next }
+    head = l; j = index(head, "{"); if (j) head = substr(head, 1, j - 1)
+    row = ""
+    dynamic = (index(l, "{") > 0)
+    for (i = 1; i <= np; i++)
+      if (index(head, pat[i]) == 1 || (!dynamic && index(pat[i], head) == 1)) { row = pat[i]; break }
+    if (row != "") { if (mode == "list") print "row\t" row "\t" $1 "\t\"" l "\"\t" $3; next }
     hit = ""
     for (i = 1; i <= n; i++) if (index(l, order[i]) == 1) { hit = order[i]; break }
     if (hit != "") { used[hit] = 1; if (mode == "list") print "nonkey\t" hit "\t" $1 "\t\"" l "\"\t" $3; next }
-    print "UNCLASSIFIED\t" ns "\t" $1 "\t\"" l "\"\t" $3
+    print "UNCLASSIFIED\t" head "\t" $1 "\t\"" l "\"\t" $3
   }
   END {
     for (i = 1; i <= n; i++) {
@@ -330,7 +413,7 @@ if [ -n "$listhealth" ]; then
   status=1
 fi
 if [ -z "$unclassified" ] && [ -z "$listhealth" ]; then
-  echo "KV namespace-table sweep: clean ($ncand literals enumerated; $(wc -l < "$table_file" | tr -d ' ') table namespaces; $nentries non-key entries)."
+  echo "KV namespace-table sweep: clean ($ncand literals enumerated; $(wc -l < "$table_file" | tr -d ' ') table row patterns; $nentries non-key entries)."
 fi
 
 # ── 3. The reserved-prefix lists on the front door ───────────────────────────────────────────────

@@ -5,7 +5,8 @@
 # the code needs today and nothing more. A literal that IS a KV key never belongs here: give it a row in
 # src/lib.rs § KV namespace ownership instead. The wiki lint reviews these reasons; it no longer does the sweep.
 #
-# Seeded 2026-10-10 from the gate's first enumeration (every entry checked against its call site).
+# Seeded 2026-10-10 from the gate's first enumeration (every entry checked against its call site); six entries
+# added the same day when the gate began matching row patterns and skipping only the test item itself.
 
 # ── replay-seam streams and channel names (mycelium_core::sim_seam — a name a recording keys on, not a key)
 gossip/shard          # framing.rs gossip_stream: the per-shard replay stream name
@@ -18,6 +19,9 @@ kv-persist/           # kv_persist.rs: timer-seam stream, one per persisted key
 intent/               # agent/intent.rs: timer-seam stream, one per governor intent key
 opacity/              # agent/opacity.rs: timer-seam stream, one per opacity kind
 ae/journal            # agent/evidence_journal.rs STREAM: the evidence journal queue's seam stream (node-local, never gossiped)
+rights/journal        # control/ledger.rs STREAM: the rights ledger journal's seam stream (node-local, never gossiped)
+knowledge/records     # knowledge/durable.rs RECORDS_STREAM: the durable record journal's seam stream (node-local)
+knowledge/heads       # knowledge/durable.rs HEADS_STREAM: the head-checkpoint journal's seam stream (node-local)
 
 # ── consensus slot names (the key is consensus/{committed,ballot,decided,lease}/{slot}, which has rows)
 consistent/           # consensus_handle.rs + http.rs: the overlay-consistent KV write's slot
@@ -26,10 +30,15 @@ capauthz/             # agent/mod.rs: the cluster-proposed capability-authz poli
 
 # ── election ring names and governor actuator names (inputs to rendezvous / the control contract)
 blackboard/           # mycelium-blackboard lib.rs: the primary election's ring name (blackboard/{ns}.primary)
+tuple/{ns}.primary    # mycelium-tuple-space lib.rs: the primary election's ring name
 boundary/             # agent/opacity.rs: the opacity governor's ControlSpec actuator name
 
 # ── signal / RPC kinds
 cap.invoke/           # mycelium-wasm-host runtime.rs cap_invoke_kind: the rpc_call kind for a component capability
+
+# ── identifiers that are not keys
+tuple/{}/{}/{}        # mycelium-effects tuple_consumer.rs operation_id: an item's stable OperationId, never a KV key
+llm/                  # mycelium-reason route.rs: the `{ns}/{name}` prompt id in an llm.invoke request (the key is prompts/llm/{model})
 
 # ── schema and record-format tags
 mycelium.decision/    # decision.rs RECORD_SCHEMA: the decision-trace record schema id

@@ -10,5 +10,9 @@
   both run in `make check` and CI.
 - Why: the wiki lint missed live prefixes five times (ledger 2026-07-07 … 2026-10-10). On the unfixed table the gate
   names exactly the 2026-10-10 misses, `sys/config/` and `sys/govern/`; the four rows (as PR #588 adds them) are in.
+- Same day, the adversarial review of #591: literals match the table's row patterns (not the top segment), constant
+  `&str` arrays and slices are enumerated, and the `#[cfg(test)]` skip ends at the item's own `;` or matching `}` (it
+  hid `route.rs:372-573`, including the prompt id `llm/{model}`). The self-test grew to 14 plants; the allow-list
+  to 36 (three journal streams, a ring name, an operation id, the prompt id).
 - Pages: `dev/testing/testing.md` (gate list + paragraph); `.claude/commands/wiki-lint.md` (the sweep is the
   script's; the lint reviews the allow-list's reasons).
