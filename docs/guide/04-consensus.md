@@ -126,7 +126,8 @@ accepted. A conflict that does happen is counted in `commit_conflicts` by a memb
 second COMMIT while holding the first — check every node; one that learned both values by gossip
 counts nothing — and LWW converges every node to whichever value was re-stamped last. Both
 proposers may have been told they won. A versioned electorate (membership epochs, joint-consensus
-transitions) is recorded, not planned.
+transitions) is recorded as protocol work for a later plan, not built — see *Discovery is not an
+electorate* below.
 
 **Run it.** All three claims as one narrative, each act asserting:
 
@@ -138,6 +139,38 @@ It elects on a group nobody joined (refused), joins and elects (`Decided`, with 
 a *stale* holder — one whose own call also returned `Ok` and which never learned it was
 superseded — try to write. The fence stops it. The election did not, and was never going to: those
 are different jobs.
+
+---
+
+## Discovery is not an electorate
+
+Two capabilities that are easy to conflate, and Mycelium keeps apart **by design**
+([decision record](../design/consensus-electorate.md)):
+
+- **Discovery** — gossip membership, capability groups, emergent groups, the elastic membership
+  governor — answers *who is here and what can it do*. It is dynamic and eventually consistent:
+  nodes join and leave without anyone's permission.
+- **The electorate** answers *whose votes decide this slot*. For a lock, a leader or any exclusive
+  outcome it is a **fixed set for the life of the decision** — the
+  [supported profile](../threat-model.md#7-safety-sensitive-agreement-the-supported-profile).
+  Quorum intersection is a property of that set, never of discovery converging.
+
+A group's roster serves as the electorate only while you hold it still. What the code enforces
+today: a roster this node cannot see, or one below a fresh `MembershipIntent.min`, is refused
+(`ElectorateUnavailable`); a proposer outside the group is refused (`NotAMember`); and a
+**governed group** — one under a live membership intent — moves only through
+`POST`/`DELETE /gateway/govern/group` (`govern:write`, audited), while `/gateway/mesh/group` refuses
+it `403 governed_group`. What it does not enforce yet: an embedded `mesh().join_group` or a write to
+`grp/` from Rust still moves a governed group's roster, a node running `start_membership_governor`
+still joins and leaves it toward the intent's band, and nothing *requires* a governed group for a
+safety-sensitive proposal (post-360 plan row P2, not built). So for exclusive work: form the group,
+hold its membership still for the life of the slot, use a governed group so a change is a named and
+audited act, and fence at the resource.
+
+Consensus here is a **protocol run by whichever nodes are in the group**, never a service: no
+deployment shape makes a named node set "the consensus nodes". Versioned electorates with
+joint-consensus transitions — an electorate that can change under a live slot — are a later plan,
+not built.
 
 ---
 

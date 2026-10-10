@@ -58,6 +58,21 @@ separately, so filtering on the floor alone hid a commit that had not yet arrive
 grows with slots, not ballots. Code: `src/consensus.rs` (`claim_vote`, `prepare_slot`, `set_aside_finished`,
 `commit_is_stale`); record: [`.log/2026-10-08-consensus-prepare-phase.md`](../.log/2026-10-08-consensus-prepare-phase.md).
 
+**Discovery is not an electorate; consensus is a protocol, not a service** (decided 2026-10-10 —
+[`docs/design/consensus-electorate.md`](../../../design/consensus-electorate.md); philosophy § *The corrected
+litmus*, *A protocol, not a service*). Group rosters are discovery — dynamic, eventually consistent — and quorums are
+counted from each proposer's view, so intersection across a roster change is not enforced; the supported profile
+(threat model §7) is a **fixed electorate per decision**. Do not "fix" this by teaching Layer I a guard on `grp/` or
+`consensus/`, and do not make a named node set "the consensus nodes". Enforced today: `resolve_electorate`
+(`src/agent/helpers.rs`, empty or below `MembershipIntent.min` → `ElectorateUnavailable`), `NotAMember` (above), and
+the gateway's `governed_group` refusal on `/gateway/mesh/group` with `/gateway/govern/group` as the audited route
+(`src/agent/http.rs`, `is_governed_group`). Not enforced: an embedded `join_group` or `grp/` write moves a governed
+group by LWW; the opt-in membership governor moves it toward its band; nothing *requires* a governed group for a
+safety-sensitive proposal (post-360 row P2, not built). Also not built: leased-by-default leadership (C1 —
+`elect_leader` proposes with `ConsensusConfig::default()`, `committed_lease_secs: None`, so it commits permanently) and
+collection of acceptor memory (C2 — see the paragraph above); versioned electorates with joint consensus are a later
+plan.
+
 ## Individual-scope routing: forwarding stays unconditional
 
 `SignalScope::Individual` carries RPC and consensus votes. The gossip loop sends directly to

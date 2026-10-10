@@ -512,3 +512,15 @@ answer names the rung it reached) and is appropriate for work distribution, elec
 merely idles, and anything where a duplicate is a cost rather than a corruption. **Not claimed:**
 a versioned electorate, a safe membership-transition protocol, or single-decree safety as a proof
 of the whole protocol. Those are roadmap; the profile above is what ships.
+
+**Discovery is not an electorate — by design** (decision record
+[`design/consensus-electorate.md`](design/consensus-electorate.md), adopted 2026-10-10). Gossip
+membership, capability groups and emergent groups are dynamic; the electorate for a safety-sensitive
+decision is a fixed set for the life of that decision, and quorum intersection is its property, not
+discovery's. What the code enforces today: an empty or below-floor roster is refused
+(`ElectorateUnavailable`), a proposer outside the group is refused (`NotAMember`), and the gateway
+moves a governed group's membership only through `/gateway/govern/group` (`govern:write`, audited).
+What it does not: an embedded `join_group` or a `grp/` write still moves a governed group by LWW, and
+nothing *requires* a governed group for a safety-sensitive proposal — that is post-360 plan row
+**P2**, not built. Versioned electorates with joint-consensus transitions are a later plan, not
+built; a consensus *service* (a fixed tier of nodes everyone must reach) is rejected.

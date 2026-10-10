@@ -132,6 +132,22 @@ More failure modes: [14-patterns-and-pitfalls.md](14-patterns-and-pitfalls.md) a
 
 ---
 
+## Is consensus safe across membership changes?
+
+**Not across a change of the electorate, and that is a design choice, not a gap.** Discovery —
+who is in the mesh, which groups a node's capabilities put it in — is dynamic. The electorate that
+decides a lock, a leader or any exclusive outcome is a **fixed set for the life of that decision**;
+quorum intersection is a property of that set, so the supported profile fixes it
+([threat model §7](../threat-model.md#7-safety-sensitive-agreement-the-supported-profile)) and you
+fence the effect at the resource. Today the code refuses an empty or below-floor roster, refuses a
+proposer outside the group, and lets the gateway move a *governed* group's membership only through
+an audited governance route; nothing yet *requires* a governed group for a safety-sensitive proposal
+(planned, not built), and versioned electorates with joint-consensus transitions are a later plan.
+The decision and its reasons: [design/consensus-electorate.md](../design/consensus-electorate.md);
+the how-to: [04-consensus.md § Discovery is not an electorate](04-consensus.md#discovery-is-not-an-electorate).
+
+---
+
 ## How do I build, test, and run?
 
 - **Build:** `cargo build --release` (a `--no-default-features` build drops the
