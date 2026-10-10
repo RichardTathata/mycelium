@@ -168,3 +168,32 @@ async fn a_metered_host_gives_each_instance_its_own_budget() {
 
     agent.shutdown().await;
 }
+
+/// Row D: a guest call is bounded in **time**, not only in instructions — an unmetered host's
+/// call into a guest that never returns is interrupted at its deadline (wasmtime epoch
+/// interruption) and the error names it. Seen failing first: with no epoch deadline on the
+/// engine the call never returned (`the call returned within its bound` timed out).
+#[tokio::test]
+async fn a_guest_call_past_its_deadline_is_stopped_by_name() {
+    const SPIN_COMPONENT: &[u8] = include_bytes!("fixtures/spin_component.wasm");
+    let agent = live_agent().await;
+    let host = WasmHost::new().expect("engine").with_call_deadline(Some(std::time::Duration::from_millis(200)));
+    let state = HostState::new(agent.node_id().clone(), "nlp", agent.kv(), agent.mesh());
+    let mut inst = host.instantiate(SPIN_COMPONENT, state).expect("instantiate");
+
+    // On its own thread, so a call that never returns fails this test instead of hanging it.
+    let started = std::time::Instant::now();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(inst.invoke("spin", b"x".to_vec()));
+    });
+    let res = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the call returned within its bound");
+    let took = started.elapsed();
+    assert!(
+        matches!(res, Err(mycelium_wasm_host::WasmHostError::DeadlineExceeded { deadline_ms: 200 })),
+        "a call past its deadline is stopped by name, got {res:?}"
+    );
+    assert!(took >= std::time::Duration::from_millis(200), "stopped before its deadline: {took:?}");
+    assert!(took < std::time::Duration::from_secs(3), "stopped well after its deadline: {took:?}");
+    agent.shutdown().await;
+}

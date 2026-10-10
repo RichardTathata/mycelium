@@ -169,7 +169,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         installer.node_id(), entry.provides.namespace.clone(),
         installer.agent.kv(), installer.agent.mesh())
         .with_protected_kinds(installer.agent.config().protected_rpc_kinds.iter().cloned());
-    let mut instance = host.provision(&*mesh_source, &entry.artifact, state)
+    // Instantiation runs the guest's start-up code: off the runtime's workers, like every call.
+    let (src, id) = (Arc::clone(&mesh_source), entry.artifact);
+    let instance = tokio::task::spawn_blocking(move || host.provision(&*src, &id, state))
+        .await?
         .expect("provision (fetch from cache + verify + instantiate)");
 
     let invoke_kind: Arc<str> = Arc::from(cap_invoke_kind("route", "optimize").as_str());
@@ -178,9 +181,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .advertise_capability(entry.provides.clone(), Duration::from_secs(30));
     let serve_agent = Arc::clone(&installer.agent);
     let serve = tokio::spawn(async move {
+        // Guest code runs on the blocking pool, never on a runtime worker (the serve loop in
+        // mycelium-wasm-host's runtime does the same): the instance moves there and back per call.
+        let mut slot = Some(instance);
         while let Some(req) = rx.recv().await {
-            let out = instance.invoke("invoke", req.payload().to_vec())
-                .ok().and_then(|r| r.ok()).unwrap_or_default();
+            let Some(mut inst) = slot.take() else { break };
+            let payload = req.payload().to_vec();
+            let Ok((inst, out)) = tokio::task::spawn_blocking(move || {
+                let out = inst.invoke("invoke", payload).ok().and_then(|r| r.ok()).unwrap_or_default();
+                (inst, out)
+            }).await else { break };
+            slot = Some(inst);
             serve_agent.service().rpc_respond(&req, out);
         }
     });
@@ -250,11 +261,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         late.node_id(), late_entry.provides.namespace.clone(),
         late.agent.kv(), late.agent.mesh())
         .with_protected_kinds(late.agent.config().protected_rpc_kinds.iter().cloned());
-    let mut late_instance = WasmHost::new()?
-        .provision(&late_source, &late_entry.artifact, late_state)
-        .expect("late node provisions from peer-cached bytes");
-    let out = late_instance.invoke("invoke", b"late-route".to_vec())
-        .expect("invoke").expect("component ok");
+    let late_host = WasmHost::new()?;
+    let late_id = late_entry.artifact;
+    let out = tokio::task::spawn_blocking(move || {
+        let mut late_instance = late_host
+            .provision(&late_source, &late_id, late_state)
+            .expect("late node provisions from peer-cached bytes");
+        late_instance.invoke("invoke", b"late-route".to_vec())
+    })
+    .await?
+    .expect("invoke").expect("component ok");
     assert_eq!(out, b"late-route");
     println!("[late] joined after the origin died — installed from a peer cache and ran it");
 

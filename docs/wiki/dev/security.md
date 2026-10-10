@@ -583,6 +583,22 @@ Beside them, bounds rather than refusals: a component's linear memory (`DEFAULT_
 stage's pull (`DEFAULT_MAX_STAGE_BYTES` and the entry's `size_bytes`), and a shadow install never bridged
 as an MCP tool. Not built: a unit-file field for extra emit kinds or the memory cap.
 
+**Execution limits (row D, 2026-10-10).** A guest call is bounded in wall-clock time, not only in
+instructions: every engine has epoch interruption on, and each call and each instantiation gets
+`DEFAULT_CALL_DEADLINE` (5 s; `WasmHost::with_call_deadline`, `[hosts].call_deadline_ms`) — metered or
+not, the operator's entries included — ending in `WasmHostError::DeadlineExceeded`
+(`mycelium-wasm-host/src/host.rs`). Guest code runs on `spawn_blocking`, never on a runtime worker
+(`serve_loop`, and install's compile/instantiate/`describe`, in `runtime.rs`), and a trapped instance is
+replaced from the install's compiled component, so a trap-inducing payload costs an instantiation, not a
+Cranelift compile — and not even that once the install is gone (`Served::gone`, set by `uninstall`). The
+tick count saturates: a deadline too large to count is no deadline, never a truncated one (wasmtime adds
+the delta unchecked). Why: before this, a stem with no fuel declared ran guests unmetered on the async
+task — one looping call pinned a worker for ever, and a payload that trapped bought a full compile per
+request. The epoch ticker is a thread per host (wall time, outside the replay seams — the inventory
+records it). `Instance::invoke` stays synchronous: an embedder calling it from async code moves it to
+`spawn_blocking` as the serve loop does — the co-op `catalog`, `catalog_viz` and `mcp_toolgrowth` demos,
+which call it directly, do (instantiation included).
+
 ## `unsafe` — denied in every library crate (2026-10-10, post-360 P3)
 
 Every workspace library with code carries `#![deny(unsafe_code)]`: the root crate (`src/lib.rs`),

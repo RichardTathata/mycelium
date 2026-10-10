@@ -2037,6 +2037,124 @@ mod tests {
         agent.shutdown().await;
     }
 
+    /// Row D's harness: a node hosting only the `spin` fixture (a guest that never returns),
+    /// signed by an agent principal, under `budget` instructions per call on a metered host.
+    async fn hosting_spin(host: WasmHost, budget: Option<u64>) -> (Arc<GossipAgent>, Arc<WasmHost>, Provisioner) {
+        use crate::catalog::InstallableEntry;
+        use crate::runtime::FuelPolicy;
+        use ed25519_dalek::SigningKey;
+        const SPIN_COMPONENT: &[u8] = include_bytes!("../tests/fixtures/spin_component.wasm");
+        let agent = live_agent().await;
+        let host = Arc::new(host);
+        let author = SigningKey::from_bytes(&[12u8; 32]);
+        let mut source = InMemorySource::new();
+        let spin = source.insert(SPIN_COMPONENT.to_vec());
+        let mut catalog = InstallableCatalog::new();
+        catalog.add(InstallableEntry::new(Capability::new("text", "spin"), spin).signed_by(&author));
+        let mut prov = Provisioner::new(Arc::clone(&agent), Arc::clone(&host), catalog, Arc::new(source), 1.0);
+        prov.require_provenance(vec![author.verifying_key().to_bytes()]);
+        if budget.is_some() {
+            prov.set_fuel_policy(FuelPolicy { operator_publishers: vec![], agent_budget: budget, operator_budget: None });
+        }
+        prov.supervise(CapFilter::new("text", "spin"), 1);
+        for _ in 0..40 {
+            prov.provision_round();
+            if prov.hosted_count() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        wait_live(&prov, 1).await;
+        (agent, host, prov)
+    }
+
+    async fn call_spin(agent: &Arc<GossipAgent>) -> String {
+        let out = agent
+            .service()
+            .rpc_call(agent.node_id().clone(), crate::runtime::cap_invoke_kind("text", "spin"), b"payload".to_vec(),
+                Duration::from_secs(30))
+            .await
+            .expect("the serve loop answers");
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    /// Row D: guest code runs **off the runtime's worker threads**. On a current-thread runtime
+    /// (this test's), a long guest call that ran on the serve task would stall every other task for
+    /// its whole duration; a heartbeat task sleeping 10 ms at a time must keep beating while the
+    /// call runs. Seen failing first: the heartbeat's longest gap equalled the call
+    /// (`the heartbeat stalled for …` with the gap ≈ the call's duration).
+    #[tokio::test]
+    async fn a_long_guest_call_does_not_block_another_task_on_a_current_thread_runtime() {
+        // A budget the spin guest takes a good fraction of a second to burn through.
+        const LONG: u64 = 3_000_000_000;
+        // Review finding 4: no deadline on this host, so the fuel budget alone ends the call — the
+        // test does not race a 5 s default it never meant to measure.
+        let (agent, _host, _prov) = hosting_spin(WasmHost::metered().expect("engine").with_call_deadline(None), Some(LONG)).await;
+
+        let beating = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let longest_gap = Arc::new(std::sync::Mutex::new(Duration::ZERO));
+        let heartbeat = {
+            let (beating, longest_gap) = (Arc::clone(&beating), Arc::clone(&longest_gap));
+            tokio::spawn(async move {
+                let mut last = std::time::Instant::now();
+                while beating.load(std::sync::atomic::Ordering::Relaxed) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    let gap = last.elapsed();
+                    last = std::time::Instant::now();
+                    let mut g = longest_gap.lock().unwrap();
+                    *g = (*g).max(gap);
+                }
+            })
+        };
+        let started = std::time::Instant::now();
+        let reply = call_spin(&agent).await;
+        let call = started.elapsed();
+        beating.store(false, std::sync::atomic::Ordering::Relaxed);
+        heartbeat.await.unwrap();
+        assert!(reply.contains("fuel exhausted"), "{reply}");
+        assert!(call >= Duration::from_millis(300), "the call was too short to show anything: {call:?}");
+        let gap = *longest_gap.lock().unwrap();
+        assert!(gap < Duration::from_millis(200), "the heartbeat stalled for {gap:?} during a {call:?} guest call");
+        agent.shutdown().await;
+    }
+
+    /// Row D: a trap does not recompile. A trapped instance is replaced from the install's
+    /// compiled component, so N stopped calls cost one compile (the install's), not N + 1 — a
+    /// payload that makes a component trap would otherwise force a full Cranelift compile per
+    /// request. Seen failing first: `compiles` was 4 after three stopped calls.
+    #[tokio::test]
+    async fn a_trapping_guest_called_repeatedly_compiles_once() {
+        let (agent, host, prov) = hosting_spin(WasmHost::metered().expect("engine"), Some(1_000)).await;
+        assert_eq!(host.compiles(), 1, "the install compiles once");
+        for _ in 0..3 {
+            let reply = call_spin(&agent).await;
+            assert!(reply.contains("fuel exhausted"), "{reply}");
+        }
+        assert_eq!(prov.hosted_count(), 1, "still live after three stopped calls");
+        assert_eq!(host.compiles(), 1, "a trapped instance was replaced by recompiling the component");
+        agent.shutdown().await;
+    }
+
+    /// Review finding 3: the serve loop's deadline path end to end — an unmetered host's call into
+    /// a guest that never returns is stopped at the deadline, the reply and the execution record
+    /// name it, and the install stays live on a fresh instance (the second call is entered and
+    /// stopped the same way, not refused as a poisoned instance). Planted: with the serve loop's
+    /// `DeadlineExceeded` arm removed (falling to `HostError`) this fails.
+    #[tokio::test]
+    async fn the_serve_loop_names_a_deadline_stop_and_serves_on_from_a_fresh_instance() {
+        use crate::runtime::InvocationOutcome;
+        let host = WasmHost::new().expect("engine").with_call_deadline(Some(Duration::from_millis(200)));
+        let (agent, _host, prov) = hosting_spin(host, None).await;
+        for _ in 0..2 {
+            let reply = call_spin(&agent).await;
+            assert!(reply.contains("deadline exceeded") && reply.contains("200 ms"), "{reply}");
+        }
+        let outcomes: Vec<InvocationOutcome> = prov.invocations().into_iter().map(|r| r.outcome).collect();
+        assert_eq!(outcomes, vec![InvocationOutcome::DeadlineExceeded { deadline_ms: 200 }; 2]);
+        assert_eq!(prov.hosted_count(), 1, "still live after two stopped calls");
+        agent.shutdown().await;
+    }
+
     /// Zero-gaps Z4 (D4): a `tool/{name}` component that answers `describe` publishes **its own**
     /// input schema and description as the MCP tool, not the bridge's generic `{"type":"object"}` —
     /// so an agent reading `tools/{name}/{node}` learns the arguments. Seen failing first: the bridge

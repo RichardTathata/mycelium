@@ -142,6 +142,28 @@ the gate). Gate:
 `an_agent_published_entry_that_loops_is_stopped_at_its_budget_and_the_operators_is_not` over the
 committed `spin_component.wasm` fixture (a guest that never returns).
 
+**Execution limits (row D, landed):** every engine has **epoch interruption** on, and every call — and
+every instantiation, which runs the guest's start-up code — is bounded in wall-clock time:
+`DEFAULT_CALL_DEADLINE` (5 s) unless `WasmHost::with_call_deadline(Some(d))` (`None` = unbounded); a
+stem reads `[hosts].call_deadline_ms`. Unlike fuel it needs no metered engine and applies to the
+operator's entries too. A call past it returns `WasmHostError::DeadlineExceeded { deadline_ms }`,
+recorded as `InvocationOutcome::DeadlineExceeded` (counter outcome `deadline_exceeded`), and the trapped
+instance is replaced like any other — unless the install was uninstalled while the call ran, in which
+case nothing is re-instantiated. Start-up past the deadline is `DeadlineExceeded` too; `Duration::ZERO`
+stops the guest at its first epoch check; a deadline too large to count in ticks is no deadline. The epoch is advanced every `EPOCH_TICK` (10 ms) by one thread per
+host (`mycelium-wasm-epoch`, holding a weak engine reference so it ends with the engine), so a call stops
+between `d` and `d + 10 ms` after it starts. The serve loop runs each guest call — and install's
+compile, instantiation and `describe` — on `tokio::task::spawn_blocking`, so a long call holds a
+blocking-pool thread, never a runtime worker; `Instance::invoke` itself stays synchronous, and an
+embedder calling it from async code does the same (the co-op `catalog`, `catalog_viz` and
+`mcp_toolgrowth` demos show the pattern). A trapped instance is replaced from the
+install's **compiled** component (`WasmHost::compiles()` counts compiles), so a payload that makes a
+guest trap no longer buys a full compile per request. Gates: `a_guest_call_past_its_deadline_is_stopped_by_name`
+(`tests/e2e.rs`), `a_long_guest_call_does_not_block_another_task_on_a_current_thread_runtime`,
+`a_trapping_guest_called_repeatedly_compiles_once` (`src/provisioner.rs`). Not bounded: a call's
+memory beyond `DEFAULT_MEMORY_LIMIT_BYTES`, and a host import that blocks (the kv/mesh/log imports do
+not); a deadline is wall time, so whether a call reaches it is not replayable (fuel is).
+
 **Proposed → shadow → accept (D20, plan F2):** a description with `proposed = true` publishes an entry
 that `Provisioner` loads only into the **shadow lane** — installed and advertised as `{ns}/{name}.shadow`,
 callable by name for comparison, never resolved by the incumbent's filter, taking no demand and keeping

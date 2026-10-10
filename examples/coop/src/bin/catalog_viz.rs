@@ -40,8 +40,8 @@ use coop::common::{alloc_ports, spawn_depot, DepotOpts, Loads};
 use ed25519_dalek::SigningKey;
 use mycelium::{CapFilter, Capability};
 use mycelium_wasm_host::{
-    cap_invoke_kind, librarian_filter, serve_artifacts, spawn_librarian, FsLibrarySource,
-    HostState, InstallableCatalog, InstallableEntry, LibrarianConfig, Manifest, MeshArtifactSource,
+    cap_invoke_kind, librarian_filter, serve_artifacts, spawn_librarian, ArtifactSource, FsLibrarySource,
+    HostState, InMemorySource, InstallableCatalog, InstallableEntry, LibrarianConfig, Manifest, MeshArtifactSource,
     WasmHost, LIBRARIAN_NAME, LIBRARIAN_NS, MANIFEST_FILE,
 };
 
@@ -337,7 +337,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         installer.node_id(), entry.provides.namespace.clone(),
         installer.agent.kv(), installer.agent.mesh())
         .with_protected_kinds(installer.agent.config().protected_rpc_kinds.iter().cloned());
-    let mut instance = host.provision(&*installer_source, &entry.artifact, state_host)
+    // Instantiation runs the guest's start-up code: off the runtime's workers, like every call.
+    let (src, id) = (Arc::clone(&installer_source), entry.artifact);
+    let instance = tokio::task::spawn_blocking(move || host.provision(&*src, &id, state_host))
+        .await?
         .expect("provision (fetch from cache + verify + instantiate)");
 
     let invoke_kind: Arc<str> = Arc::from(cap_invoke_kind("route", "optimize").as_str());
@@ -346,9 +349,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .advertise_capability(entry.provides.clone(), Duration::from_secs(30));
     let serve_agent = Arc::clone(&installer.agent);
     let serve = tokio::spawn(async move {
+        // Guest code runs on the blocking pool, never on a runtime worker (the serve loop in
+        // mycelium-wasm-host's runtime does the same): the instance moves there and back per call.
+        let mut slot = Some(instance);
         while let Some(req) = rx.recv().await {
-            let out = instance.invoke("invoke", req.payload().to_vec())
-                .ok().and_then(|r| r.ok()).unwrap_or_default();
+            let Some(mut inst) = slot.take() else { break };
+            let payload = req.payload().to_vec();
+            let Ok((inst, out)) = tokio::task::spawn_blocking(move || {
+                let out = inst.invoke("invoke", payload).ok().and_then(|r| r.ok()).unwrap_or_default();
+                (inst, out)
+            }).await else { break };
+            slot = Some(inst);
             serve_agent.service().rpc_respond(&req, out);
         }
     });
@@ -372,7 +383,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     wait_until(20, || !late.agent.peers().is_empty()).await;
     let late_source = MeshArtifactSource::resolving(
         Arc::clone(&late.agent), librarian_filter(), Duration::from_secs(3));
-    let late_host = WasmHost::new()?;
+    let late_host = Arc::new(WasmHost::new()?);
     let namespace = entry.provides.namespace.clone();
 
     // ── The story loop: narrate the arc forever, doing genuine peer-cache installs each cycle. ──
@@ -405,7 +416,7 @@ async fn story_loop(
     late: &coop::common::Depot,
     installer_source: &Arc<MeshArtifactSource>,
     late_source: &MeshArtifactSource,
-    late_host: &WasmHost,
+    late_host: &Arc<WasmHost>,
     entry: &InstallableEntry,
     namespace: &str,
     invoke_kind: &Arc<str>,
@@ -536,15 +547,27 @@ async fn story_loop(
                 late.node_id(), namespace.to_string(),
                 late.agent.kv(), late.agent.mesh())
         .with_protected_kinds(late.agent.config().protected_rpc_kinds.iter().cloned());
-            match late_host.provision(late_source, &entry.artifact, late_state) {
-                Ok(mut inst) => inst
-                    .invoke("invoke", b"late-route".to_vec())
-                    .ok()
-                    .and_then(|r| r.ok())
-                    .map(|o| String::from_utf8_lossy(&o).into_owned())
-                    .unwrap_or_else(|| "<invoke failed>".into()),
-                Err(_) => "<provision failed>".into(),
-            }
+            // Instantiate and call on the blocking pool (guest code never on a runtime worker).
+            // The bytes are already in the source's verified cache; `provision` verifies again.
+            let (host, id) = (Arc::clone(late_host), entry.artifact);
+            let cached = late_source.fetch(&id);
+            tokio::task::spawn_blocking(move || {
+                let mut src = InMemorySource::new();
+                if let Some(bytes) = cached {
+                    src.insert(bytes);
+                }
+                match host.provision(&src, &id, late_state) {
+                    Ok(mut inst) => inst
+                        .invoke("invoke", b"late-route".to_vec())
+                        .ok()
+                        .and_then(|r| r.ok())
+                        .map(|o| String::from_utf8_lossy(&o).into_owned())
+                        .unwrap_or_else(|| "<invoke failed>".into()),
+                    Err(_) => "<provision failed>".into(),
+                }
+            })
+            .await
+            .unwrap_or_else(|_| "<guest thread failed>".into())
         } else {
             "<pull failed>".into()
         };

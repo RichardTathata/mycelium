@@ -67,7 +67,9 @@ signer*, who pays for fuel and who may load for real: keys in `operator_publishe
 `trusted_publishers`) run unbounded or under `operator_fuel_per_call`; every other trusted key is an
 agent principal and runs under `fuel_per_call` — a call that runs past it is stopped and recorded as
 *fuel exhausted* with the budget named (`Provisioner::invocations()`; counter
-`mycelium_artifact_invocations_total{outcome}`). A description with `proposed = true` publishes an
+`mycelium_artifact_invocations_total{outcome}`). Every call, whoever signed the entry, is also bounded in wall-clock
+time by `call_deadline_ms` (default 5000): past it the call is interrupted and recorded as *deadline
+exceeded*, and the guest runs on a blocking thread, never on the node's async workers. A description with `proposed = true` publishes an
 entry the host loads only into the shadow lane (`{ns}/{name}.shadow`, callable by name, never
 resolved by a requirer's filter) until a key in `trusted_reviewers` co-signs it with
 `mycelium-artifact accept <library> <ns/name> --key <reviewer-seed>`; `verify --reviewer` names a

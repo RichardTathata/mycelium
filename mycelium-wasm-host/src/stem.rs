@@ -204,11 +204,8 @@ impl Stem {
                 (None, None, None)
             }
             Some(h) => {
-                // D19: the engine counts fuel whenever any budget is declared; who pays is the
-                // policy below, decided per entry from its verified signer.
                 let metered = h.fuel_per_call.is_some() || h.operator_fuel_per_call.is_some();
-                let host = if metered { WasmHost::metered() } else { WasmHost::new() }
-                    .map_err(|e| StemError(format!("wasm host: {e}")))?;
+                let host = wasm_host_for(h)?;
                 // Zero-gaps Z3: the mesh path stages to disk through the same `DiskStagedSource` an
                 // object store fills — a component in one pull, a blob past the frame cap in ranges —
                 // under `<placement_root>/stage` (or `stage_dir`), so nothing pulled lives in memory
@@ -461,8 +458,35 @@ impl StageBackoff {
     }
 }
 
+/// The wasm host a `[hosts]` table asks for. D19: the engine counts fuel whenever any budget is
+/// declared (who pays is the provisioner's policy, decided per entry from its verified signer).
+/// Row D: every call is bounded in wall-clock time, metered or not — `call_deadline_ms`, or the
+/// host's `DEFAULT_CALL_DEADLINE`.
+fn wasm_host_for(h: &mycelium::HostsDecl) -> Result<WasmHost, StemError> {
+    let metered = h.fuel_per_call.is_some() || h.operator_fuel_per_call.is_some();
+    let host = if metered { WasmHost::metered() } else { WasmHost::new() }
+        .map_err(|e| StemError(format!("wasm host: {e}")))?;
+    Ok(match h.call_deadline_ms {
+        Some(ms) => host.with_call_deadline(Some(Duration::from_millis(ms))),
+        None => host,
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    /// Review finding 3: `[hosts].call_deadline_ms` reaches the host the stem builds; absent, the
+    /// host's default stands. Planted: with the wiring removed the first assertion fails.
+    #[test]
+    fn hosts_call_deadline_ms_reaches_the_stems_wasm_host() {
+        let h = mycelium::HostsDecl { call_deadline_ms: Some(250), ..Default::default() };
+        assert_eq!(wasm_host_for(&h).unwrap().call_deadline(), Some(Duration::from_millis(250)));
+        let fuelled = mycelium::HostsDecl { call_deadline_ms: Some(250), fuel_per_call: Some(10), ..Default::default() };
+        let host = wasm_host_for(&fuelled).unwrap();
+        assert!(host.is_metered());
+        assert_eq!(host.call_deadline(), Some(Duration::from_millis(250)));
+        assert_eq!(wasm_host_for(&mycelium::HostsDecl::default()).unwrap().call_deadline(), Some(crate::host::DEFAULT_CALL_DEADLINE));
+    }
+
 
     /// A catalogue line can gossip ahead of its bytes: no holder answering is not a failed stage
     /// and must not push the next attempt out; a real failure backs off, the wait doubling per

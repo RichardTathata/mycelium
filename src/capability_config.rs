@@ -130,7 +130,8 @@
 //! naming more than one; a `Version` that does not parse; a ranking with an unknown order; a group,
 //! lane or rule with an empty name or field; a mandate with an empty holder or scope, or one that
 //! enumerates nothing; a presence floor of zero or a ceiling below it; a `[hosts]` table naming an
-//! unknown kind, a headroom outside `(0, 1]`, a `fuel_per_call` or `operator_fuel_per_call` of `0`,
+//! unknown kind, a headroom outside `(0, 1]`, a `fuel_per_call`, `operator_fuel_per_call` or
+//! `call_deadline_ms` of `0`,
 //! or `operator_publishers` that are not all in `trusted_publishers`; an `[[activation]]` with an
 //! empty `command`, `timeout_secs = 0`, a placeholder outside `{path} {dir} {artifact} {ns} {name}
 //! {rendered}`, `{rendered}` without `resolve_artifact_refs = true`, or in a unit whose `[hosts]`
@@ -620,6 +621,11 @@ pub struct HostsDecl {
     pub operator_publishers: Vec<String>,
     #[serde(default)]
     pub operator_fuel_per_call: Option<u64>,
+    /// Row D: the wall-clock bound, in milliseconds, on each call into a hosted component (and on
+    /// its instantiation), whoever published it — a call past it is interrupted and recorded as
+    /// *deadline exceeded*. Absent = the wasm host's default (5 s). `0` is refused.
+    #[serde(default)]
+    pub call_deadline_ms: Option<u64>,
     /// D20: the reviewer keys whose acceptance promotes a proposed entry from the shadow lane
     /// to a real load. Absent = a proposal never loads for real on this host.
     #[serde(default)]
@@ -709,6 +715,9 @@ impl NodeCapabilityConfig {
             }
             if h.operator_fuel_per_call == Some(0) {
                 return Err(invalid("hosts.operator_fuel_per_call", "a budget of 0 stops every call before its first instruction"));
+            }
+            if h.call_deadline_ms == Some(0) {
+                return Err(invalid("hosts.call_deadline_ms", "a deadline of 0 stops every call before its first instruction"));
             }
             if !h.operator_publishers.is_empty() && h.trusted_publishers.is_empty() {
                 return Err(invalid(
@@ -1225,6 +1234,9 @@ max_providers = 4
 
         let e = refused("[hosts]\nfuel_per_call = 0\n");
         assert!(e.contains("hosts.fuel_per_call") && e.contains("budget of 0"), "{e}");
+
+        let e = refused("[hosts]\ncall_deadline_ms = 0\n");
+        assert!(e.contains("hosts.call_deadline_ms") && e.contains("deadline of 0"), "{e}");
 
         let e = refused("[hosts]\noperator_publishers = [\"ed25519:aa\"]\n");
         assert!(e.contains("hosts.operator_publishers") && e.contains("trusted_publishers is empty"), "{e}");

@@ -170,6 +170,8 @@ the right envelope for a function an agent wrote an hour ago, and these are the 
    entry not signed by a key in `[hosts].operator_publishers` runs under; a call that runs past it is
    stopped, recorded as *fuel exhausted* with the budget named (`Provisioner::invocations()`), and the
    next call gets a fresh budget on a fresh instance. The operator's own entries run as configured.
+   Beside fuel, **every** call has a wall-clock deadline (`[hosts].call_deadline_ms`, default 5 s),
+   operator's entries included: a call past it is stopped as *deadline exceeded*.
 4. **A second signature before promotion** (D20). A description with `proposed = true` publishes an
    entry the host loads only into a **shadow lane** — advertised as `{ns}/{name}.shadow`, callable
    by name for comparison, never resolved by the requirer's filter, so it takes no demand — until a
