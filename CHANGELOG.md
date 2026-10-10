@@ -10,6 +10,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed
+- **Documentation: the front doors route by intent — build, run, see it work, check the evidence** (2026-10-10; no
+  code change). Under the hero and the sentence, the root README adds one plain-language line and an intent router
+  of four routes — *Build a fleet* (the developer guide, its tutorials and the five steps), *Run a fleet* (the
+  operator journey: readiness and observability), *See it work* (four examples: `conway` for the mesh,
+  `provisioning_viz` for self-provisioning, `procurement_authority` for governed action, `diagnostics` for
+  operational insight), *Check the evidence* (`what-is-proven.md`) — then a six-row capability compass into
+  `docs/capabilities.md`, then the five steps under *Build a fleet — five steps*. `examples/README.md` leads with a
+  *What do you want to see?* chooser of the same four, then the five steps as its *Learning path*, then the matrix.
+  The operations door keeps its own operator journey; `docs/positioning.md` no longer lists it as carrying the five
+  steps, which it never did. `scripts/check-positioning.sh` now runs `scripts/check-front-doors.py`, which checks
+  structure and link targets (anchors included), not prose; `scripts/test-check-front-doors.py` shows ten planted
+  breaks fail it (CI's documentation job and `make check`).
 - **The composed-effect record: what it can carry versus what is written.** `AeEvidence` *can* carry the receipt's
   rung and the origin domain (`with_effect_durability`, `with_origin_domain`, 2.11.0) and `states_a_composed_effect()`
   reads them; **no shipped path calls either builder** — the gateway's evidence path writes neither field, so on every

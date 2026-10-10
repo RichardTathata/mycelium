@@ -2,7 +2,11 @@
 # The positioning gate (docs/plans/proposition-alignment.md D1, D5, D6).
 #
 # 1. Every front door quotes the canonical hero and sentence from docs/positioning.md verbatim.
-# 2. Developer funnels share a starter path; other audiences have role-specific routes.
+# 2. The five-step developer path is identical on the README (the *Build a fleet* route), the developer
+#    guide and the examples page (its learning path); the routing structure — the README's intent
+#    router and its targets, the examples chooser, the operations door's own journey — is
+#    scripts/check-front-doors.py (structure and link targets, not prose; docs/positioning.md
+#    § The routes and the five-step path).
 # 3. No live artifact links the repository's pre-move account.
 set -u
 cd "$(dirname "$0")/.."
@@ -50,6 +54,7 @@ for f in README.md docs/guide/README.md examples/README.md; do
     say "positioning: $f's five-step path differs from docs/positioning.md (or is missing its path markers)"; fail=1
   fi
 done
+python3 scripts/check-front-doors.py || fail=1
 
 # ── 3. the pre-move account ─────────────────────────────────────────────────────
 # Historical records keep the old name on purpose: the wiki's history and lint logs, the analysis

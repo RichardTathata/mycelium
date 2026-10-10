@@ -23,6 +23,10 @@ deterministic replay (chapters 18–24). The sentence is the project's one descr
 
 ## Start here — five steps
 
+The canonical developer path: the same five steps are the root README's
+[*Build a fleet*](../../README.md#what-do-you-want-to-do) route and the examples page's
+[learning path](../../examples/README.md#learning-path).
+
 <!-- path:start -->
 1. **[`hello_mesh`](../../examples/hello_mesh.rs)** — two embedded agents share state by gossip: 30 seconds, no setup.
 2. **[`hello_capability`](../../examples/hello_capability.rs)** — one node says what it does, another finds it by name and calls it: no registry, no addresses.

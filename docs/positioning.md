@@ -2,8 +2,8 @@
 
 This file is the **single source** for how Mycelium describes itself. Every front door quotes the
 hero and the sentence below verbatim and links here; `scripts/check-positioning.sh` (in `make check`)
-fails when a door's copy of either differs, when a developer funnel's five-step path differs, or when a link still points at the
-repository's pre-move account. Edit them **here and nowhere else**. Rationale and the list of
+fails when a door's copy of either differs, when the front doors' routing structure breaks (§ *The routes and the
+five-step path*), or when a link still points at the repository's pre-move account. Edit them **here and nowhere else**. Rationale and the list of
 doors: [`docs/plans/proposition-alignment.md`](plans/proposition-alignment.md).
 
 ## The hero
@@ -60,7 +60,8 @@ also removed the universal *every action* claim and separated evidence from repl
 
 Each is one paragraph and opens with the hero and the sentence.
 
-**The visitor's** — README, the GitHub description, crates.io, docs.rs:
+**The visitor's** — README, the GitHub description, crates.io, docs.rs (on the README it sits below the
+intent router, under *Is it for you?*, since the router is the first choice a reader makes):
 
 > **A fleet that grows the capabilities it lacks, under rules it can show it kept.** Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Where you configure an enforcement point, it checks authority before work runs and records what it decided; a recorded run replays. It is built in three layers — a gossip
 > KV store, a signal mesh, and epidemic consensus — with capability discovery across them: no
@@ -86,11 +87,36 @@ is not ([`what-is-proven.md`](operations/what-is-proven.md)).
 the contracts axis: *local decision-making · evidence-aware capability selection · scoped authority ·
 bounded federation · coordination contracts tested through deterministic replay*, then the layer table.
 
-## The five-step path
+## The routes and the five-step path
 
-Every funnel (`README.md`, `docs/guide/README.md`, `examples/README.md`, `docs/operations/README.md`)
-shows these five steps, in this order, above anything else it recommends. The check compares the
-text of the steps with link targets removed, since a relative link differs by directory.
+The first choice a reader makes is **by role and intent**, not by audience page. The rule, which
+`scripts/check-positioning.sh` (with `scripts/check-front-doors.py`) enforces as structure and link targets, not prose:
+
+- **The README carries the intent router** — between `<!-- router:start -->` and `<!-- router:end -->`,
+  directly under the hero, the sentence and one plain-language line, four routes in this order:
+  - **Build a fleet** → the developer guide (`docs/guide/README.md`), its tutorials
+    (`docs/guide/tutorials/README.md`) and the five steps below the router;
+  - **Run a fleet** → the operations door's journey (`docs/operations/README.md#operator-journey`),
+    `production-readiness.md` and `observability.md`;
+  - **See it work** → four curated examples, chosen on the examples page
+    (`examples/README.md#what-do-you-want-to-see`): the mesh, self-provisioning, governed action and
+    operational insight;
+  - **Check the evidence** → `docs/operations/what-is-proven.md`.
+
+  Below the router, a compact capability compass (`<!-- compass:start -->` … `<!-- compass:end -->`)
+  points every row into [`capabilities.md`](capabilities.md); then the five steps.
+- **The five steps are the developer's canonical path.** They appear, identical, in three places:
+  the developer guide (`docs/guide/README.md`, the path's home for a reader), the README's *Build a fleet*
+  route, and the examples page's *Learning path*. The check compares the text of the steps with link
+  targets removed, since a relative link differs by directory.
+- **The examples page leads with the chooser** — *What do you want to see?*, the same four examples
+  as the README's *See it work* route (`<!-- chooser:start -->` … `<!-- chooser:end -->`) — then the
+  learning path, then the full capability matrix.
+- **The operations door has its own journey** — deploy, readiness, observation, diagnosis and recovery,
+  under *Operator journey* — and does not carry the five steps; an operator's first five moves are not a
+  developer's.
+
+The five steps' text lives here — edit it here first; the check compares every copy against it:
 
 <!-- path:start -->
 1. **`hello_mesh`** — two embedded agents share state by gossip: 30 seconds, no setup.
@@ -100,4 +126,4 @@ text of the steps with link targets removed, since a relative link differs by di
 5. **`what-is-proven.md`** — what CI proves on every merge, what is demonstrated with its bound stated, and what is not yet shown.
 <!-- path:end -->
 
-Audience navigation is role-specific: developers share the starter path; operators follow deployment, readiness, observation and recovery. The [documentation index](README.md) routes all four audiences. `scripts/check-materials.py` checks these links and capability-map coverage.
+The [documentation index](README.md) routes all four audiences (prospect, developer, operator, researcher) at greater length. `scripts/check-materials.py` checks that every local link on these pages resolves and that the capability map covers the guide.

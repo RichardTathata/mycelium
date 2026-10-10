@@ -4,18 +4,33 @@
 
 Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Where you configure an enforcement point, it checks authority before work runs and records what it decided; a recorded run replays.
 
-It is built in three layers — a gossip KV store, a signal mesh, and epidemic
-consensus — with capability discovery across them: no broker, no registry, no daemon, no control
-plane. State converges by gossip; work is claimed, not dispatched; roles are discovered, not
-assigned. It is **probably overkill** if you want to chain a few LLM calls, run one orchestrator
-that fans out to workers, or coordinate through a database or queue you already operate; reach for
-a workflow engine or a broker there ([why not X?](docs/guide/faq.md#why-not-langgraph--temporal--nats--)).
-It earns its keep when many agents must coordinate and nobody should be in charge: fleets that
-partition and heal, edge and on-prem meshes, systems where *who is in charge* must be emergent and
-recallable. The sentence above is the project's one description ([`docs/positioning.md`](docs/positioning.md));
-what it can prove, and what it cannot yet, is one page: [`what-is-proven.md`](docs/operations/what-is-proven.md).
+For teams running fleets of AI agents: nodes find and install the capabilities they need, coordinate with no central controller, and — where you configure it — check authority before work runs and keep a record of what they decided.
 
-## Start here — five steps
+## What do you want to do?
+
+<!-- router:start -->
+- **Build a fleet** → the [developer guide](docs/guide/README.md) and its [tutorials](docs/guide/tutorials/README.md), starting with the [five steps below](#build-a-fleet--five-steps).
+- **Run a fleet** → the [operator journey](docs/operations/README.md#operator-journey): deploy, then the [production-readiness checklist](docs/operations/production-readiness.md), then [observability](docs/operations/observability.md).
+- **See it work** → [four examples](examples/README.md#what-do-you-want-to-see): the mesh ([`conway`](docs/guide/01-gossip-kv.md#the-example)) · self-provisioning ([`provisioning_viz`](examples/coop/README.md#browser-showcases)) · governed action ([`procurement_authority`](examples/coop/README.md#13--procurement_authority--the-governed-autonomy-flagship)) · operational insight ([`diagnostics`](examples/coop/README.md#12--diagnostics)).
+- **Check the evidence** → [`what-is-proven.md`](docs/operations/what-is-proven.md): what CI proves on every merge, what is demonstrated with its bound stated, and what is not yet shown.
+<!-- router:end -->
+
+## What it can do
+
+<!-- compass:start -->
+| Area | In one line | Learn it |
+|---|---|---|
+| [Coordination](docs/capabilities.md) | Nodes share state by gossip, find each other by capability, signal, and agree by consensus where you ask for it. | [guide 01](docs/guide/01-gossip-kv.md) · [02](docs/guide/02-capabilities.md) · [04](docs/guide/04-consensus.md) |
+| [Tools and reasoning](docs/capabilities.md) | LLM skills and MCP tools are found and called by name across the mesh, outside agents reach them over A2A, and a companion routes inference across the fleet. | [guide 05](docs/guide/05-skills.md) · [06](docs/guide/06-tool-discovery.md) · [15](docs/guide/15-reasoning-and-langgraph.md) |
+| [Adaptive capabilities](docs/capabilities.md) | Stem hosts install signed components from a catalogue when demand goes unmet and restore the provider floors they declared. | [first stem fleet](docs/guide/tutorials/01-first-stem-fleet.md) |
+| [Authority](docs/capabilities.md) | Where an enforcement point is configured, mandates and an evaluator decide before work runs; with an evidence journal attached, the decision is recorded. | [guide 20](docs/guide/20-authorising-actions.md) · [21](docs/guide/21-mandates.md) |
+| [Federation](docs/capabilities.md) | Separately admitted meshes exchange explicitly exported services without merging, and trust does not pass through a partner. | [guide 17](docs/guide/17-federation.md) |
+| [Replay and knowledge](docs/capabilities.md) | Receipts name how far a write got, a recorded run replays against its captured inputs, and knowledge keeps its provenance and disagreements. | [guide 18](docs/guide/18-contracts-and-receipts.md) · [19](docs/guide/19-replay-and-simulation.md) · [23](docs/guide/23-knowledge.md) |
+<!-- compass:end -->
+
+Every row has a runnable starting point and its limits in the [capability map](docs/capabilities.md).
+
+## Build a fleet — five steps
 
 <!-- path:start -->
 1. **[`hello_mesh`](examples/hello_mesh.rs)** — two embedded agents share state by gossip: 30 seconds, no setup.
@@ -27,6 +42,19 @@ what it can prove, and what it cannot yet, is one page: [`what-is-proven.md`](do
 
 **Learn the newer surfaces:** [six developer tutorials](docs/guide/tutorials/README.md) — stem fleets,
 declarations, shadow acceptance, authority boundaries, replay, and declared versus observed.
+
+## Is it for you?
+
+Mycelium is built in three layers — a gossip KV store, a signal mesh, and epidemic
+consensus — with capability discovery across them: no broker, no registry, no daemon, no control
+plane. State converges by gossip; work is claimed, not dispatched; roles are discovered, not
+assigned. It is **probably overkill** if you want to chain a few LLM calls, run one orchestrator
+that fans out to workers, or coordinate through a database or queue you already operate; reach for
+a workflow engine or a broker there ([why not X?](docs/guide/faq.md#why-not-langgraph--temporal--nats--)).
+It earns its keep when many agents must coordinate and nobody should be in charge: fleets that
+partition and heal, edge and on-prem meshes, systems where *who is in charge* must be emergent and
+recallable. The sentence at the top is the project's one description ([`docs/positioning.md`](docs/positioning.md));
+what it can prove, and what it cannot yet, is one page: [`what-is-proven.md`](docs/operations/what-is-proven.md).
 
 ## Hello, mesh — 30 seconds, no setup
 
@@ -44,16 +72,16 @@ RPC, **no registry and no configured addresses**.
 
 ## Where next?
 
-Start with the [audience routes](docs/README.md) or [capability map](docs/capabilities.md).
+The router above covers building, running, watching and checking. For the rest:
+the [audience routes](docs/README.md) and the [capability map](docs/capabilities.md).
 Prospects: [buyer deck](docs/publications/customer-pitch.html) → [pilot](docs/operations/customer-pilot.md).
-Users and operators: [operations](docs/operations/README.md). Researchers: [research guide](docs/publications/research-guide.md).
+Researchers: [research guide](docs/publications/research-guide.md).
 
 | You are… | Go to |
 |---|---|
-| **New here** — is this for me? which primitive? which demo? why-not-X? | the **[FAQ](docs/guide/faq.md)** — your map, and the intended first read |
-| **Wanting to see it run** — which demo? | the **[examples](examples/README.md)** — the capability matrix: every runnable example fingerprinted by layer + facet (level · surface · LLM · audit · metrics), each linking to its run-doc |
+| **New here** — is this for me? which primitive? why-not-X? | the **[FAQ](docs/guide/faq.md)** — your map, and the intended first read |
 | **Building a use case *on* Mycelium** | [Building on Mycelium](docs/guide/building-on-mycelium.md) — the integrator contract (dependency, public-API rule, reserved KV prefixes, a copyable `CLAUDE.md`) |
-| **Wanting the guided depth** | the **[developer guide](docs/guide/README.md)** — 25 chapters, each with a runnable example |
+| **Choosing among every example** | the **[capability matrix](examples/README.md#the-capability-matrix)** — every runnable example fingerprinted by layer + facet (level · surface · LLM · audit · metrics), each linking to its run-doc |
 
 > The rest of this page is a **short orientation** — what the system is and a
 > layers-at-a-glance table. Every deep dive lives one link away in the
