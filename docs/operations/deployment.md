@@ -323,7 +323,7 @@ degraded — each was running without the protection it was configured for, so c
 | 2.23.0 | a second agent owns the persistence directory; the startup snapshot that repairs a torn WAL fails | share a WAL, or append behind a torn frame |
 | 2.24.0 | the persistence directory cannot be created | run in memory and lose every write at restart |
 | 2.25.0 | `http_port` or `[gateway_tls]` is set in a build without `gateway` | run no gateway while advertising its port |
-| unreleased | the gateway binds a non-loopback `http_addr` (`0.0.0.0`, `::`, a LAN address) with no credential model and `gateway_allow_unauthenticated` unset | serve every gateway route to anyone who could reach the port |
+| 2.32.0 | the gateway binds a non-loopback `http_addr` (`0.0.0.0`, `::`, a LAN address) with no credential model and `gateway_allow_unauthenticated` unset | serve every gateway route to anyone who could reach the port |
 
 Each refusal names the setting; the Dev view is [error-handling.md](../guide/error-handling.md) §
 *Start refusals*, the persistence ones are [above](#persistence-modes).

@@ -556,7 +556,7 @@ warning moved to `start()`. Tests seen failing first: `an_oidc_table_…`, `a_tl
 `#[cfg]`'d field plus a serde that ignores unknown keys is a setting that vanishes; a field present in every build
 with `#[cfg]`'d consumers is a setting that lies. The plan's I2 report is what makes both visible by construction.
 
-**An open gateway is a loopback gateway (unreleased, plan `post-360-hardening.md` row P1).** The classes above
+**An open gateway is a loopback gateway (2.32.0, plan `post-360-hardening.md` row P1).** The classes above
 were settings a build could not enforce; this one was the *default* doing what it said. With no credential model
 `gateway_auth` serves every route to `anonymous`, and the docs called that *suitable for loopback-only
 deployments* — nothing checked that the deployment was one, so `http_addr = "0.0.0.0"` and no token served the
