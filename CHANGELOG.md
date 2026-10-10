@@ -187,9 +187,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `consensus:write` is node-wide there). `LockGuard` gains `expires_at_ms()`, `deadline()` and `is_expired()`, and is
   never issued past its deadline. **C2:** a collector task beside each listener shrinks the acceptor state of a slot
   whose decision ended at `e` — promising nothing above it, re-checked in the compare-and-set — to a node-owned,
-  fsynced floor `{e}` that refuses `e` and below, after fsyncing the record it relies on; lower records become
-  stubs, lease markers go after their expiry plus the drift bound, permanent markers never; 64 slots a pass, sorted
-  then seam-rotated. Wire **v12**: five appended `ConsensusMsg` variants (`PrepareTerm`, `PrepareAckTerm`,
+  fsynced floor `{e}` that refuses `e` and below, after fsyncing the record it relies on; lower records are
+  tombstoned (a per-slot sentinel keeps the slot off the legacy reading), lease markers go after their expiry plus
+  the drift bound, permanent markers never — steady state three keys per slot; 64 slots a pass, sorted then
+  seam-rotated. **The implementation review's findings, fixed here:** a renewal keeps its own envelope only when the
+  highest reported acceptance is its lineage (D1: it adopted a lower value over its own higher decided acceptance;
+  seen failing first: `d1_a_renewal_never_adopts_a_lower_value_over_its_own` — "basis: Observed"); an upgraded
+  proposer never sets aside by `decided` (D2, `d2_an_upgraded_proposer_never_sets_aside_by_decided` — "a second
+  holder beside B: Ok(LockGuard …)"); a slot's records are read through a per-slot scope index in Layer I's index
+  step (D3: 136.7 ms per read → 1.35 ms at 5,000 slots × 100 records, debug build); a lock's lease is its TTL rounded
+  up (D4, `d4_a_guard_never_outlives_its_lease` — "the lease ends 1000 ms after the start, before the 1.9 s
+  deadline"); a `CommitTerm` above a live decision of another identity is written and counted (D5,
+  `d5_a_commit_ahead_of_its_release_marker_is_written` — "L still reads the released holder"); `GET
+  /gateway/overlay/consistent/get` and `GET /consensus/{slot}` read through the decision record (D6,
+  `d6_the_gateway_consistent_get_reads_the_decision` — the raw key's bytes); uppercase-hex record keys are not
+  records (`d7_an_uppercase_ballot_is_not_a_record`), learner records reach the WAL, the deadline refusal answers
+  409 `expired_before_grant`; 1,000 acquisitions leave three keys (`growth_a_thousand_acquisitions_leave_constant_keys`
+  — "1001 keys remain"). The interleaving tests withhold real frames with a test-only frame filter on the receive
+  path (`mycelium-core` feature `test-support`). Wire **v12**: five appended `ConsensusMsg` variants (`PrepareTerm`, `PrepareAckTerm`,
   `ProposeTerm`, `PromiseTerm`, `CommitTerm`); the acceptor record gains tag `0x03`. **Seen failing first** on the
   branch before the record (black-box, `src/agent/lock_lifecycle_tests.rs`): `row17_a_skewed_holders_decision_does_not_wedge_the_lock`
   ("the lock is wedged for ever after B's window"), `row20_an_ended_decision_does_not_revive_on_a_higher_floor`

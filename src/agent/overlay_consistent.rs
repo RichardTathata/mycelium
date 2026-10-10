@@ -146,7 +146,7 @@ impl LeaderTerm {
     /// `ConsensusConfig::committed_lease_secs` for this term.
     pub(crate) fn lease_secs(self) -> Option<u64> {
         match self {
-            LeaderTerm::Lease(d) => Some(d.as_secs().max(1)),
+            LeaderTerm::Lease(d) => Some(crate::agent::consensus_handle::lease_secs_ceil(d)),
             LeaderTerm::Permanent => None,
         }
     }

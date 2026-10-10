@@ -105,10 +105,11 @@ impl ConsensusHandle {
     /// Returns a `watch::Receiver` that fires whenever the slot is committed or
     /// overwritten. Initial value is the current committed state (or `None`).
     ///
-    /// **Raw KV view**: the receiver reflects the stored bytes and does not
-    /// apply the epoch-lease convention — an expired leased slot still shows
-    /// its last value here. Use [`consensus_get`](Self::consensus_get) for
-    /// lease-aware reads.
+    /// **Raw, lagging view**: the receiver watches the legacy `consensus/committed/{slot}` key, which
+    /// the committer still writes (and gossips) for nodes older than 2.32.0 — upgraded learners no
+    /// longer write it from the COMMIT. It fires when that key changes, reflects the stored bytes, and
+    /// applies neither a lease, nor a release, nor the decision record (row A). Treat a change as a
+    /// prompt to read [`consensus_get`](Self::consensus_get), which is authoritative.
     #[must_use]
     pub fn consensus_rx(&self, slot: &str) -> tokio::sync::watch::Receiver<Option<Bytes>> {
         kv_subscribe(&self.ctx, format!("{}{}", consensus_ns::COMMITTED, slot))
@@ -542,7 +543,9 @@ impl ConsensusHandle {
             format!("{}:{:016x}", self.ctx.node_id, fastrand::u64(..)).into_bytes(),
         );
         let cfg = ConsensusConfig {
-            committed_lease_secs: Some(ttl.as_secs().max(1)),
+            // Rounded **up** (review D4): the lease must not end before the holder's monotonic
+            // deadline (`started + ttl`), which a 1.9 s TTL leased as 1 s did by ~0.9 s.
+            committed_lease_secs: Some(lease_secs_ceil(ttl)),
             ..ConsensusConfig::default()
         };
 
@@ -737,6 +740,12 @@ impl ConsensusHandle {
             waited += STEP_MS;
         }
     }
+}
+
+/// A TTL as whole lease seconds, **rounded up**, at least 1 — so a lease never ends before the holder's
+/// own deadline (review D4).
+pub(crate) fn lease_secs_ceil(ttl: Duration) -> u64 {
+    u64::try_from(ttl.as_millis().div_ceil(1000)).unwrap_or(u64::MAX).max(1)
 }
 
 /// After a lock's proposal committed: the guard, if the decision is ours (row A). Shared by
@@ -1004,10 +1013,11 @@ mod tests {
         let forged = ConsensusMsg::CommitTerm { slot: Arc::from("trip/slot"), ballot: 42, envelope: clobber.encode() };
         let fired = emit_commit_until(&a, &forged, || a.system_stats().commit_conflicts >= 1).await;
         assert!(fired, "tripwire did not fire on conflicting COMMIT (fill {fill_to})");
-        assert_eq!(
-            a.consensus().consensus_get("trip/slot").as_deref(), Some(b"genuine".as_slice()),
-            "conflicting COMMIT must not be endorsed",
-        );
+        // Row A, review D5: counted **and written** — a legitimate handoff whose release marker lags
+        // the new holder's COMMIT looks exactly like this (detection, not prevention; a member signing
+        // a forged decision is outside CFT).
+        assert!(a.task_ctx.kv_state.store.pin().get(crate::consensus_life::record_key("trip/slot", 42).as_str())
+            .is_some_and(|e| e.data.is_some()), "the newer decision's record was not written");
 
         // An idempotent re-COMMIT of the same value is legal and must not trip — checked once it has been seen
         // delivered, so a shed emit cannot pass this vacuously. The baseline is taken once the count is stable: a second
@@ -1021,7 +1031,9 @@ mod tests {
             }
             conflicts = now;
         }
-        let idempotent = ConsensusMsg::CommitTerm { slot: Arc::from("trip/slot"), ballot: 43, envelope: genuine.encode() };
+        // The top is now the written decision: a re-COMMIT of it (same identity) is not a conflict.
+        let _ = &genuine;
+        let idempotent = ConsensusMsg::CommitTerm { slot: Arc::from("trip/slot"), ballot: 43, envelope: clobber.encode() };
         let body = encode_consensus_msg(&idempotent);
         // A second subscriber sees what the listener sees (one fan-out, `deliver`), so seeing it here means delivered.
         let mut watch = a.task_ctx.signal_handlers.register_with_capacity(Arc::clone(&kind), 256);

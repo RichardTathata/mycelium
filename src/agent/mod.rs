@@ -31,6 +31,8 @@ mod kv_handle_tests;
 mod lock_lifecycle_tests;
 #[cfg(all(test, feature = "consensus"))]
 mod lock_lifecycle_api_tests;
+#[cfg(all(test, feature = "consensus"))]
+mod lock_lifecycle_review_tests;
 #[cfg(test)]
 mod mesh_handle_tests;
 #[cfg(feature = "consensus")]

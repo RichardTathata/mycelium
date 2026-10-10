@@ -556,6 +556,10 @@ pub async fn handle_connection(
 
             WireMessage::StateResponse { entries } => {
                 for entry in entries {
+                    #[cfg(any(test, feature = "test-support"))]
+                    if crate::store::frame_filtered(&kv_state, &crate::store::FrameView::Kv { key: &entry.key, sender: 0 }) {
+                        continue;
+                    }
                     // Absorb the remote HLC stamp so our clock dominates anything
                     // anti-entropy hands us, even on a fresh restart where the
                     // local clock is otherwise far behind any prior cluster state.
@@ -585,6 +589,11 @@ pub async fn handle_connection(
             }
 
             WireMessage::Signal { ttl, nonce, sender, scope, kind, payload, hlc_seq } => {
+                #[cfg(any(test, feature = "test-support"))]
+                if crate::store::frame_filtered(&kv_state, &crate::store::FrameView::Signal {
+                    kind: &kind, payload: &payload, sender: sender.id_hash() }) {
+                    continue;
+                }
                 // Closure plan C5: a removed member's signals are dropped, not delivered or forwarded.
                 if task_ctx.removed.is_node_removed(&sender) {
                     continue;
@@ -701,6 +710,10 @@ pub async fn handle_connection(
             }
 
             WireMessage::Data(mut update) => {
+                #[cfg(any(test, feature = "test-support"))]
+                if crate::store::frame_filtered(&kv_state, &crate::store::FrameView::Kv { key: &update.key, sender: update.sender }) {
+                    continue;
+                }
                 // Closure plan C5: a write originated by a removed member is not applied or forwarded.
                 if task_ctx.removed.is_hash_removed(update.sender) {
                     continue;
@@ -800,6 +813,10 @@ pub async fn handle_connection(
             }
 
             WireMessage::SignedData { mut update, signer, signature } => {
+                #[cfg(any(test, feature = "test-support"))]
+                if crate::store::frame_filtered(&kv_state, &crate::store::FrameView::Kv { key: &update.key, sender: update.sender }) {
+                    continue;
+                }
                 // Closure plan C5: a write originated or signed by a removed member is not applied.
                 if task_ctx.removed.is_hash_removed(update.sender) || task_ctx.removed.is_hash_removed(signer) {
                     continue;

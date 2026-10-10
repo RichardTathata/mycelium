@@ -104,6 +104,8 @@ fn spawn_handler(
             prefix_index:      Arc::new(crate::store::PrefixIndex::new()),
             index_stripes:     Arc::new(std::array::from_fn(|_| std::sync::Mutex::new(()))),
             cap_ns_index:      Arc::new(crate::store::PrefixIndex::new()),
+            scope_index: Arc::new(papaya::HashMap::new()),
+            frame_filter: Arc::new(papaya::HashMap::new()),
             hash_acc:          Arc::new(AtomicU64::new(initial_hash)),
             dropped_frames:    Arc::new(AtomicU64::new(0)),
             individual_flood_fallbacks: Arc::new(AtomicU64::new(0)),
@@ -1170,6 +1172,8 @@ async fn test_subscribe_notified_via_gossip() {
                 prefix_index:      Arc::new(crate::store::PrefixIndex::new()),
                 index_stripes:     Arc::new(std::array::from_fn(|_| std::sync::Mutex::new(()))),
                 cap_ns_index:      Arc::new(crate::store::PrefixIndex::new()),
+                scope_index: Arc::new(papaya::HashMap::new()),
+                frame_filter: Arc::new(papaya::HashMap::new()),
                 hash_acc:          Arc::new(AtomicU64::new(0)),
                 dropped_frames:    Arc::new(AtomicU64::new(0)),
             individual_flood_fallbacks: Arc::new(AtomicU64::new(0)),
@@ -5358,6 +5362,59 @@ async fn a_released_leadership_survives_a_crash() {
     }).await.expect("the crashed files replay");
     assert!(released, "the release was not on disk when release_leadership returned");
     a.shutdown().await;
+    // Restart over what the crash left (row 9): the leadership stays released.
+    for f in ["snapshot.bin", "wal.bin"] {
+        let _ = std::fs::remove_file(dir.join(f));
+        if crash.join(f).exists() { std::fs::copy(crash.join(f), dir.join(f)).unwrap(); }
+    }
+    let b = GossipAgent::new(id, cfg);
+    b.start().await.unwrap();
+    assert_eq!(b.consensus().consensus_get("leader/perm"), None, "the release did not survive the restart");
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// **Rows 14 / 27 (review finding 5), across a restart: collection's floor is this node's own record.**
+/// A lock is acquired and released; collection shrinks the acceptor state to the floor; the node
+/// crashes and restarts over what is on disk: the finished ballot is still refused, by the restored
+/// floor, with the shared `decided` key regressed.
+#[cfg(all(unix, feature = "consensus"))]
+#[tokio::test]
+async fn a_collected_floor_survives_a_crash() {
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let base = std::env::temp_dir().join(format!("mycelium-floor-wal-{port}"));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join(id.to_string()).join("kv");
+    let mut cfg = GossipConfig::auto();
+    cfg.bind_port = port;
+    cfg.persistence = Some(r2_persistence(&base));
+    let a = GossipAgent::new(id.clone(), cfg.clone());
+    a.start().await.unwrap();
+    let _l = a.consensus().start_consensus_listener(ConsensusConfig::default());
+    let g = a.consensus().distributed_lock("floor", Duration::from_secs(60)).await.expect("acquire");
+    let slot: Arc<str> = Arc::from("lock/floor");
+    let ballot = a.task_ctx.consensus_accepted.pin().get(&slot).map(|s| s.promised).expect("accepted");
+    g.release();
+    assert!(a.consensus().collect_finished_acceptor_state().await >= 1, "collected");
+    let crash = base.join("crash");
+    std::fs::create_dir_all(&crash).unwrap();
+    for f in ["snapshot.bin", "wal.bin"] {
+        if dir.join(f).exists() { std::fs::copy(dir.join(f), crash.join(f)).unwrap(); }
+    }
+    a.shutdown().await;
+    for f in ["snapshot.bin", "wal.bin"] {
+        let _ = std::fs::remove_file(dir.join(f));
+        if crash.join(f).exists() { std::fs::copy(crash.join(f), dir.join(f)).unwrap(); }
+    }
+    let b = GossipAgent::new(id, cfg);
+    b.start().await.unwrap();
+    let _ = b.kv().set("consensus/decided/lock/floor", crate::consensus::encode_ballot(0));
+    let restored = b.task_ctx.consensus_accepted.pin().get(&slot).cloned();
+    assert!(restored.as_ref().is_some_and(|s| s.promised >= ballot && s.accepted.is_none()), "the shrunk floor was restored: {restored:?}");
+    assert!(!crate::consensus::claim_vote(&b.task_ctx.consensus_accepted, &slot, ballot, &Bytes::from_static(b"x"), 0xBEEF, 0),
+        "a finished ballot was accepted after a restart");
+    b.shutdown().await;
     let _ = std::fs::remove_dir_all(&base);
 }
 

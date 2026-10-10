@@ -1071,7 +1071,10 @@ async fn consensus_slot_handler(
         .is_some();
     let committed_b64 = live
         .map(|b| base64::engine::general_purpose::STANDARD.encode(&b));
-    let lease_expired = raw_present && committed_b64.is_none();
+    // Row A: a decision whose record has ended (released, or its lease past) reads `lease_expired`;
+    // the raw committed key is consulted only for a slot with no decision record.
+    let lease_expired = committed_b64.is_none()
+        && (crate::consensus::ended_at(&ctx.agent_ctx.kv_state, &slot).is_some() || raw_present);
     let lease_ms = store.get(lease_key.as_str())
         .and_then(|e| e.data.clone())
         .and_then(|b| crate::consensus::decode_lease_ms(&b));
@@ -4112,10 +4115,13 @@ async fn gw_overlay_consistent_get(
     State(ctx): State<Arc<HttpCtx>>,
 ) -> impl IntoResponse {
     use base64::Engine as _;
-    let committed_key = format!("consensus/committed/consistent/{}", q.key);
-    let value = ctx.agent_ctx.kv_state.store.pin()
-        .get(committed_key.as_str())
-        .and_then(|e| e.data.clone())
+    // The same read the library's `consistent_get` makes (review D6): the slot's live decision — its
+    // decision record, or the legacy reading for a slot with none — then the raw key. It read the raw
+    // `consensus/committed/consistent/…` key, which disagreed with the library once decisions became
+    // records (and never applied a lease).
+    let value = crate::consensus::live_committed_value(
+            &ctx.agent_ctx.kv_state, &format!("consistent/{}", q.key),
+            crate::consensus::causal_now_ms(&ctx.agent_ctx.hlc))
         .or_else(|| {
             ctx.agent_ctx.kv_state.store.pin()
                 .get(q.key.as_str())
@@ -4167,6 +4173,9 @@ async fn gw_overlay_lock_acquire(
                 &ctx.agent_ctx, &body.name, &slot, value, started, std::time::Duration::from_secs(ttl_secs),
             ).await {
                 Ok(g) => g,
+                // The decision converged after the guard's own deadline (review D7): its own code.
+                Err(crate::ConsistencyError::Timeout { .. }) => return (StatusCode::CONFLICT,
+                    Json(json!({ "ok": false, "error": "expired_before_grant" }))).into_response(),
                 Err(_) => return (StatusCode::CONFLICT,
                     Json(json!({ "ok": false, "error": "superseded" }))).into_response(),
             };
