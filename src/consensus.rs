@@ -567,6 +567,12 @@ pub(crate) enum LeaseRecord {
 /// (the adversarial review of #600, finding 1).
 pub(crate) const MISMATCH_RELEASED_WINDOW_MS: u64 = 30_000;
 
+/// `slot`'s decided floor as this node's store holds it; `0` when none.
+fn stored_decided(kv: &crate::store::KvState, slot: &str) -> u64 {
+    kv.store.pin().get(format!("{}{}", consensus_ns::DECIDED, slot).as_str())
+        .and_then(|e| e.data.clone()).map(|b| decode_ballot(&b)).unwrap_or(0)
+}
+
 /// The ballot `slot`'s lifecycle record names, whatever value and state it describes; `0` when there
 /// is none (or it predates row A). A COMMIT below it belongs to an older decision (finding 1(i)).
 pub(crate) fn lifecycle_ballot(kv: &crate::store::KvState, slot: &str) -> u64 {
@@ -669,7 +675,19 @@ pub(crate) fn live_committed_with_hlc(
         None => return Some((data, hlc)), // malformed lease → treat as permanent
         // The pre-2.32.0 record: the window runs from the committed entry's timestamp.
         Some(LeaseRecord::Window(ms)) => (ms, crate::hlc::physical_ms(entry.timestamp)),
-        Some(LeaseRecord::Lifecycle { ms, digest, released, .. }) => {
+        Some(LeaseRecord::Lifecycle { ms, ballot, digest, released }) => {
+            // **A record below the decided ballot says nothing about the entry** (the adversarial
+            // re-review of #600, finding 1). The committed entry and `decided` travel together on
+            // the COMMIT path (the listener writes both from the signal), while the record travels
+            // as its own key — so a learner routinely holds a *newer* commit beside an *older*
+            // record during a handover. Bounding the newer commit by the older record's window let a
+            // third proposer set the newer holder's acceptance aside and commit a second value. The
+            // entry reads live, with no window, until a record at or above the decided ballot
+            // arrives; the committer writes its record before it emits the COMMIT, so that wait is
+            // a propagation gap, not a state LWW can keep.
+            if ballot < stored_decided(kv, slot) {
+                return Some((data, hlc));
+            }
             // A record for a different value describes another decision — one whose commit, or
             // whose own record, has not arrived here, or a frame that arrived out of order. It
             // does not end this entry's decision, but it must not make it permanent either: LWW can
@@ -723,6 +741,11 @@ pub(crate) fn ended_at(kv: &crate::store::KvState, slot: &str, now_ms: u64) -> O
         && value_digest(value) != digest {
             return None;
         }
+    // A record below the decided ballot describes an older decision than the latest this node
+    // knows of: it ends nothing (re-review of #600, finding 1).
+    if ballot < stored_decided(kv, slot) {
+        return None;
+    }
     let lapsed = now_ms.saturating_sub(crate::hlc::physical_ms(lease.timestamp)) > ms;
     (released || lapsed).then_some(ballot)
 }
@@ -751,32 +774,42 @@ pub(crate) fn release_decision(ctx: &TaskCtx, slot: &str, value: &Bytes, ballot_
         return None;
     }
     let digest = value_digest(value);
-    let (from_record, decided) = {
-        let guard = ctx.kv_state.store.pin();
-        let rec = guard.get(format!("{}{}", consensus_ns::LEASE, slot).as_str())
-            .and_then(|e| e.data.as_ref().and_then(|b| decode_lease_record(b)));
-        let from_record = match rec {
-            Some(LeaseRecord::Lifecycle { ballot, digest: d, .. }) if d == digest => ballot,
-            Some(LeaseRecord::Lifecycle { .. }) => return None, // names another decision
-            _ => 0,
-        };
-        let decided = guard.get(format!("{}{}", consensus_ns::DECIDED, slot).as_str())
-            .and_then(|e| e.data.clone()).map(|b| decode_ballot(&b)).unwrap_or(0);
-        (from_record, decided)
+    let record = ctx.kv_state.store.pin().get(format!("{}{}", consensus_ns::LEASE, slot).as_str())
+        .and_then(|e| e.data.as_ref().and_then(|b| decode_lease_record(b)));
+    let decided = stored_decided(&ctx.kv_state, slot);
+    let ballot = match record {
+        // A record for another value: a newer decision whose `committed` has not arrived here, or
+        // arrived out of order. Releasing over it would strip that decision of its lease.
+        Some(LeaseRecord::Lifecycle { digest: d, .. }) if d != digest => return None,
+        // Our own leased decision. If a higher decided ballot is known, the record here is behind a
+        // re-commit whose own record has not arrived: refuse rather than name the older ballot
+        // (the caller may retry once it does).
+        Some(LeaseRecord::Lifecycle { ballot, .. }) => {
+            let b = ballot.max(ballot_hint);
+            if decided > b { return None; }
+            b
+        }
+        // No lifecycle record: a permanent decision (a leased one has a record). A permanent
+        // value that is live here cannot have been superseded by another value, so a decided
+        // ballot above the commit's is a re-commit of the same value by a node with a stale view —
+        // release at it (the re-review of #600, finding 3).
+        _ => {
+            let b = ballot_hint.max(decided);
+            if b > 0 { b } else {
+                // No `decided` key either: a permanent slot written before 2.30.0. The ballot this
+                // node's acceptor memory holds for the value names its commit (finding 6); used only
+                // here, so it never names a ballot above a known decision.
+                #[cfg(feature = "consensus")]
+                let from_memory = ctx.consensus_accepted.pin().get(slot)
+                    .and_then(|s| s.accepted.as_ref().filter(|(_, a)| a.digest() == digest).map(|(b, _)| *b))
+                    .unwrap_or(0);
+                #[cfg(not(feature = "consensus"))]
+                let from_memory = 0;
+                if from_memory == 0 { return None; }
+                from_memory
+            }
+        }
     };
-    #[cfg(feature = "consensus")]
-    let from_memory = ctx.consensus_accepted.pin().get(slot)
-        .and_then(|s| s.accepted.as_ref().filter(|(_, a)| a.digest() == digest).map(|(b, _)| *b))
-        .unwrap_or(0);
-    #[cfg(not(feature = "consensus"))]
-    let from_memory = 0;
-    let ballot = match ballot_hint.max(from_record).max(from_memory) {
-        0 => decided,
-        b => b,
-    };
-    if ballot == 0 || decided > ballot {
-        return None;
-    }
     let upd = make_gossip_update(
         &ctx.node_id, ctx.default_ttl,
         Arc::from(format!("{}{}", consensus_ns::LEASE, slot).as_str()),
@@ -802,22 +835,33 @@ pub(crate) fn release_decision_try(ctx: &TaskCtx, slot: &str, value: &Bytes, bal
     true
 }
 
-/// [`release_decision`], **on stable storage** before it returns `true` (`append_sync`, an fsync in
+/// [`release_decision`], **on stable storage** before it answers `Released` (`append_sync`, an fsync in
 /// every `SyncMode`) — for a leadership, which may be permanent and then has no lease to fall back on
-/// if a crash forgot the release (the adversarial review of #600, finding 5). `false` when nothing
-/// was released, or the record did not reach the WAL (it is applied and gossiped regardless).
-pub(crate) async fn release_decision_durable(ctx: &TaskCtx, slot: &str, value: &Bytes) -> bool {
-    let Some(upd) = release_decision(ctx, slot, value, 0) else { return false };
+/// if a crash forgot the release (the adversarial review of #600, finding 5).
+pub(crate) async fn release_decision_durable(ctx: &TaskCtx, slot: &str, value: &Bytes) -> ReleaseOutcome {
+    let Some(upd) = release_decision(ctx, slot, value, 0) else { return ReleaseOutcome::Refused };
     match ctx.wal.get() {
-        None => true,
+        None => ReleaseOutcome::Released,
         Some(wal) => match wal.append_sync(sync_entry_from(&upd)).await {
-            Ok(()) => true,
+            Ok(()) => ReleaseOutcome::Released,
             Err(e) => {
                 tracing::error!(slot = %slot, error = %e, "consensus: a release did not reach stable storage on this node");
-                false
+                ReleaseOutcome::Unrecorded
             }
         },
     }
+}
+
+/// What [`release_decision_durable`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReleaseOutcome {
+    /// Released, and on stable storage (or no persistence is configured).
+    Released,
+    /// Nothing was written — see [`release_decision`]'s refusals.
+    Refused,
+    /// Applied and gossiped, but the WAL did not acknowledge it: a crash may restore the leadership
+    /// on this node (the gateway answers 500 `release_unrecorded`, not 404).
+    Unrecorded,
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1076,6 +1120,17 @@ impl ConsensusEngine {
     /// is higher (row A). A ballot at or below an ended decision belongs to finished history whether
     /// or not the decided floor has arrived — and once acceptor state is collected
     /// ([`collect_finished`](Self::collect_finished)), the floor is what refuses it.
+    /// The ballot `slot`'s lifecycle record names ([`lifecycle_ballot`]), with the floor's tripwire: a
+    /// member writes the record too, and a forged one far above every observed ballot makes every
+    /// COMMIT for the slot stale on this node (the re-review of #600, finding 9). Detection only.
+    fn record_ballot(&self, slot: &str) -> u64 {
+        let ballot = lifecycle_ballot(&self.task_ctx.kv_state, slot);
+        if ballot > DECIDED_FLOOR_ANOMALY_MARGIN {
+            self.note_implausible(slot, ballot, "lease record's ballot");
+        }
+        ballot
+    }
+
     fn floor(&self, slot: &str) -> u64 {
         self.decided_floor(slot).max(self.ended(slot))
     }
@@ -1178,8 +1233,16 @@ impl ConsensusEngine {
                 let ended = ended_at(&self.task_ctx.kv_state, slot, now)?;
                 (state.promised <= ended).then(|| (Arc::clone(slot), ended))
             })
-            .take(ACCEPTOR_COLLECT_BUDGET)
             .collect();
+        // Start at a random place, so slots that keep failing (a floor that will not persist) cannot
+        // fill every pass's budget and starve the rest (the re-review of #600, finding 7). Through the
+        // replay seam.
+        let mut candidates = candidates;
+        if candidates.len() > ACCEPTOR_COLLECT_BUDGET {
+            let start = mycelium_core::sim_seam::rng_u64_below("consensus/collect", candidates.len() as u64) as usize;
+            candidates.rotate_left(start);
+            candidates.truncate(ACCEPTOR_COLLECT_BUDGET);
+        }
         let mut collected = 0;
         for (slot, ended) in candidates {
             if !self.persist_floor(&slot, ended).await {
@@ -1198,9 +1261,17 @@ impl ConsensusEngine {
     /// reaches the WAL only with the next snapshot — the entry held is appended with `append_sync`, so
     /// collection never relies on a floor that a crash could take back (the adversarial review of
     /// #600, finding 7). `true` when nothing was promised (no WAL).
+    ///
+    /// The append runs **after** `record_decided` in every case, not instead of it: gossip can raise
+    /// the floor between the check and the write, and `record_decided` then returns without writing
+    /// anything (the re-review of #600, finding 6). What is appended is whatever floor the store holds
+    /// then, at or above `ended`.
     async fn persist_floor(&self, slot: &str, ended: u64) -> bool {
+        if !self.record_decided(slot, ended).await {
+            return false;
+        }
         if self.decided_floor(slot) < ended {
-            return self.record_decided(slot, ended).await;
+            return false;
         }
         let Some(wal) = self.task_ctx.wal.get() else { return true };
         let key = format!("{}{}", consensus_ns::DECIDED, slot);
@@ -1210,6 +1281,12 @@ impl ConsensusEngine {
             key: Arc::from(key.as_str()), value, timestamp: entry.timestamp, is_tombstone: false,
         };
         wal.append_sync(sync).await.is_ok()
+    }
+
+    /// [`forget_acceptor`](Self::forget_acceptor), for the re-check test.
+    #[cfg(test)]
+    pub(crate) fn forget_acceptor_for_test(&self, slot: &Arc<str>, ended: u64) -> Option<GossipUpdate> {
+        self.forget_acceptor(slot, ended)
     }
 
     /// Removes `slot`'s acceptor memory if it still promises nothing above `ended`, and tombstones
@@ -2006,6 +2083,8 @@ impl ConsensusEngine {
                                         slot, ballot: self.read_ballot(&ballot_key),
                                     };
                                 }
+                            // The record before the COMMIT — see `try_commit_if_ready`.
+                            let lease_ok = self.write_lease(&slot, lease_ms, ballot, &value).await;
                             let commit_msg = ConsensusMsg::Commit {
                                 slot: Arc::clone(&slot), ballot, value: value.clone(),
                             };
@@ -2016,7 +2095,7 @@ impl ConsensusEngine {
                             ).await;
                             let committed_upd = self.set_async(&commit_key, value.clone()).await;
                             let persisted = self.persist_sync(&slot, &committed_upd, "committed slot").await
-                                & self.write_lease(&slot, lease_ms, ballot, &value).await
+                                & lease_ok
                                 & self.record_decided(&slot, ballot).await;
                             return ConsensusResult::Committed { slot, value: value.clone(), ballot, persisted };
                         }
@@ -2225,6 +2304,10 @@ impl ConsensusEngine {
                 });
             }
 
+        // The lifecycle record leaves **before** the COMMIT (the adversarial re-review of #600,
+        // finding 1): a learner applies `committed` and `decided` from the signal, and one that held
+        // the commit without its window was the gap a newer holder fell through.
+        let lease_ok = self.write_lease(slot, lease_ms, ballot, value).await;
         let commit = ConsensusMsg::Commit {
             slot: Arc::clone(slot), ballot, value: value.clone(),
         };
@@ -2233,7 +2316,7 @@ impl ConsensusEngine {
         ).await;
         let committed_upd = self.set_async(commit_key, value.clone()).await;
         let persisted = self.persist_sync(slot, &committed_upd, "committed slot").await
-            & self.write_lease(slot, lease_ms, ballot, value).await
+            & lease_ok
             & self.record_decided(slot, ballot).await;
         Some(ConsensusResult::Committed {
             slot:   Arc::clone(slot),
@@ -2311,13 +2394,13 @@ impl ConsensusEngine {
             }
             None => {
                 // The tombstone is on the same footing as the lease it clears: a restart that
-                // replayed the old lease without it would expire the permanent commit.
-                if self.get(&lease_key).is_some() {
-                    let upd = self.kv_delete(&lease_key);
-                    self.persist_sync(slot, &upd, "lease tombstone for committed slot").await
-                } else {
-                    true
-                }
+                // replayed the old lease without it would expire the permanent commit. Written
+                // whether or not this node holds a record (the re-review of #600, finding 2): a
+                // learner may hold one this committer never received, and the tombstone, newer than
+                // any earlier record, clears it there. A learner it has not reached yet reads the
+                // permanent commit live regardless — the stale record is below the decided ballot.
+                let upd = self.kv_delete(&lease_key);
+                self.persist_sync(slot, &upd, "lease tombstone for committed slot").await
             }
         }
     }
@@ -3372,7 +3455,7 @@ pub(crate) async fn run_consensus_listener(
                 // value a fresh HLC, which revives its lease and can win LWW over a newer decision.
                 let floor = ctx.decided_floor(&slot);
                 if commit_is_stale(ballot, floor, ctx.decision_over(&slot), ctx.ended(&slot),
-                                   lifecycle_ballot(&ctx.task_ctx.kv_state, &slot)) {
+                                   ctx.record_ballot(&slot)) {
                     continue;
                 }
 

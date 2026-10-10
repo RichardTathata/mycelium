@@ -206,7 +206,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   permanent slot with no `decided` key (written before 2.30.0) is released at the ballot this node's acceptor memory
   holds, not 0 (`a_release_without_a_floor_names_the_committed_ballot`, seen failing with `left: 0`); collection runs
   on its own task, at most 64 slots a tick (`collection_is_bounded_per_tick`, seen failing with `left: 70`), and puts
-  a gossip-received floor on stable storage before relying on it. **Upgrade notes:** (1) **`elect_leader` is no
+  a gossip-received floor on stable storage before relying on it. **The independent re-review's findings, also
+  fixed here:** the bounded reading above opened a two-holders path — a learner holds a *newer* `committed` and
+  `decided` beside an *older* record during every handover, and bounding the newer commit by the older record's
+  window let a third proposer commit beside a live holder. A record whose ballot is below the decided ballot now
+  says nothing about the entry (live, no window, until its own record arrives), and the committer writes its record
+  **before** it emits the COMMIT (seen failing first: `a_newer_commit_is_not_bounded_by_an_older_record` — five
+  nodes, B's record withheld from the learners, "a second holder committed while B holds the lock"). A permanent
+  commit tombstones the record key whether or not the committer holds one, and reads live beside a stale record
+  elsewhere (`a_permanent_commit_beside_a_stale_record_stays_live`, seen failing: `left: None`). A live permanent
+  leader re-committed higher by a stale-view node is released at that ballot
+  (`a_permanent_leader_releases_above_a_higher_recommit`, seen failing); acceptor memory names a release's ballot
+  only for a slot with no `decided` key. `DELETE /gateway/overlay/elect/{group}` answers `500 release_unrecorded`
+  when the WAL did not acknowledge the release. `persist_floor` appends after `record_decided` in every case;
+  collection starts each pass at a random slot so failing slots cannot starve the rest; a forged record ballot is
+  counted by the floor tripwire (`a_forged_lifecycle_ballot_trips_the_tripwire`, seen failing); the collection's
+  compare-and-set re-check has its own test (`collection_rechecks_the_promise_inside_its_compare_and_set`, seen
+  failing with the re-check toggled off: "a newer promise was removed"). **Upgrade notes:** (1) **`elect_leader` is no
   longer permanent**: a leader that does not call again within 30 s is no longer reported, and another node may be
   elected — renew by calling again (every ~10 s), or ask for `LeaderTerm::Permanent`; a slot already committed
   permanently before the upgrade stays permanent until its leader calls `release_leadership`. The SDKs'

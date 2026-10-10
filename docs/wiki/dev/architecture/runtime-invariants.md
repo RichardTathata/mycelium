@@ -69,12 +69,22 @@ above `max(decided, ended)` (`ConsensusEngine::floor`). The older reading stays 
 older than row A: the decision is over only when this node holds the committed entry and it is not live (`decided`
 and `committed` gossip separately, so filtering on the floor alone hid a commit that had not yet arrived — second
 review, M1). A lifecycle record for a different value than the entry held describes another decision and is
-not taken as its end — but neither does it make the entry permanent (LWW can pair the two for good: the
-adversarial review of #600, finding 1): the entry reads live for the record's window measured from the entry's own
-timestamp, or `MISMATCH_RELEASED_WINDOW_MS` (30 s) for a release record. A COMMIT **below the record's ballot** is
+not taken as its end. Which of the two is newer decides the reading, and only the ballot can tell (timestamps
+cannot: a learner stamps `committed` with its own HLC). **A record whose ballot is below this node's decided ballot
+says nothing about the entry**, which reads live with no window until a record at or above it arrives — the normal
+state during every handover, since a learner writes `committed` and `decided` from the COMMIT signal while the
+record travels as its own key; bounding that newer commit by the older record's window let a third proposer commit
+a second value beside a live holder (the re-review of #600, finding 1, `a_newer_commit_is_not_bounded_by_an_older_record`).
+To keep that state a propagation gap, the committer writes its record **before** it emits the COMMIT. A record at or
+above the decided ballot naming another value is the other direction — an older entry under a newer record, which
+LWW can keep for good (a 2.31 learner's re-stamp): the entry reads live for the record's window measured from the
+entry's own timestamp, or `MISMATCH_RELEASED_WINDOW_MS` (30 s) for a release record, never permanently. A
+permanent commit tombstones the record key whether or not the committer holds one. A COMMIT **below the record's ballot** is
 stale whatever its value (`commit_is_stale`'s `record` argument), and `release_decision` refuses when the record
-names another value or a higher decided ballot is known, so a lapsed guard cannot release over a newer holder's
-record.
+names another value, or when its own leased record is behind a higher decided ballot, so a lapsed guard cannot
+release over a newer holder's record; a permanent value (no record) is released at the decided ballot, and one
+with no `decided` key at the ballot acceptor memory holds. A forged record ballot far above every observed ballot
+is counted by the floor's tripwire (`record_ballot`).
 
 **Collection (C2), the exact condition.** On the acceptor collector's tick (`run_acceptor_collector`, a task beside
 each consensus listener, `ACCEPTOR_COLLECT_INTERVAL_MS` = 60 s through the timer seam, at most
@@ -84,7 +94,7 @@ lifecycle record says the decision ended at ballot `e`, (2) the state promises n
 above `e` belongs to a ballot that may be in flight and is kept — re-checked inside the removal's
 compare-and-set, and (3) the decided floor is first on stable storage at `e` or above — raised by `record_decided`, or, when the floor
 was received by gossip (which reaches the WAL only with the next snapshot), re-appended with `append_sync`
-(`persist_floor`) — so every ballot the forgotten state refused is still refused by the floor. The durable record's tombstone and `persist_acceptor`'s
+after `record_decided` in every case (`persist_floor`; gossip can raise the floor between a check and the write) — so every ballot the forgotten state refused is still refused by the floor. The durable record's tombstone and `persist_acceptor`'s
 writes are serialised by `TaskCtx::acceptor_records` (lock-order row 56), so a promise recorded while a
 collection runs is written after the tombstone and wins. A permanent decision never ends, so its state is kept;
 so is a slot whose record predates row A, or that never committed. "Lapsed" is read on the node's causal clock —
