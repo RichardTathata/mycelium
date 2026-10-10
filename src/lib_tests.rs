@@ -159,7 +159,9 @@ fn spawn_handler(
         decided_floor_anomalies_unrecorded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         #[cfg(feature = "consensus")]
         consensus_verified_ballots: Arc::new(papaya::HashMap::new()),
+        #[cfg(feature = "consensus")]
         electorates: Arc::new(papaya::HashMap::new()),
+        #[cfg(feature = "consensus")]
         electorate_refused: Arc::new(papaya::HashSet::new()),
         ballot_space_exhausted: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         event_ring: Arc::new(crate::agent::emergent::EventRing::default()),
@@ -1225,7 +1227,9 @@ async fn test_subscribe_notified_via_gossip() {
             decided_floor_anomalies_unrecorded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             #[cfg(feature = "consensus")]
             consensus_verified_ballots: Arc::new(papaya::HashMap::new()),
+            #[cfg(feature = "consensus")]
             electorates: Arc::new(papaya::HashMap::new()),
+            #[cfg(feature = "consensus")]
             electorate_refused: Arc::new(papaya::HashSet::new()),
             ballot_space_exhausted: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             event_ring: Arc::new(crate::agent::emergent::EventRing::default()),

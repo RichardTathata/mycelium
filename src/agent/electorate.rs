@@ -91,10 +91,12 @@ impl ElectorateDecl {
     }
 
     /// The bytes a step proposes.
+    #[cfg(feature = "consensus")]
     pub(crate) fn encode(&self) -> bytes::Bytes {
         bytes::Bytes::from(mycelium_core::serde_fixint::to_vec(self).unwrap_or_default())
     }
 
+    #[cfg(feature = "consensus")]
     pub(crate) fn decode(bytes: &[u8]) -> Option<Self> {
         mycelium_core::serde_fixint::from_slice(bytes).ok()
     }
@@ -143,11 +145,13 @@ impl std::fmt::Display for ElectorateError {
 impl std::error::Error for ElectorateError {}
 
 /// `electorate/{group}/{epoch}`.
+#[cfg(feature = "consensus")]
 pub(crate) fn step_slot(group: &str, epoch: u64) -> String {
     format!("{ELECTORATE_SLOT_PREFIX}{group}/{epoch}")
 }
 
 /// `(group, epoch)` for a step slot.
+#[cfg(feature = "consensus")]
 pub(crate) fn parse_step_slot(slot: &str) -> Option<(&str, u64)> {
     let rest = slot.strip_prefix(ELECTORATE_SLOT_PREFIX)?;
     let (group, epoch) = rest.split_once('/')?;
@@ -156,12 +160,14 @@ pub(crate) fn parse_step_slot(slot: &str) -> Option<(&str, u64)> {
 }
 
 /// The certificate key for `(group, epoch)`.
+#[cfg(feature = "consensus")]
 pub(crate) fn cert_key(group: &str, epoch: u64) -> String {
     format!("{ELECTORATE_CERT_PREFIX}{group}/{epoch}")
 }
 
 /// **The step rule**, pure: `next` follows `prev` (or is a genesis) — same group, the next epoch, a
 /// non-empty sorted member set, and at most one member added or removed.
+#[cfg(feature = "consensus")]
 pub(crate) fn check_step(group: &str, prev: Option<&ElectorateDecl>, next: &ElectorateDecl) -> Result<(), ElectorateError> {
     if group.is_empty() || group.contains('/') || next.group != group { return Err(ElectorateError::InvalidGroup); }
     if next.members.is_empty() { return Err(ElectorateError::NotAMember); }
@@ -182,6 +188,7 @@ pub(crate) fn check_step(group: &str, prev: Option<&ElectorateDecl>, next: &Elec
 }
 
 /// A member list in the electorate's canonical order: sorted by the node's address, without duplicates.
+#[cfg(feature = "consensus")]
 pub(crate) fn sorted_members(mut members: Vec<NodeId>) -> Vec<NodeId> {
     members.sort_by_key(ToString::to_string);
     members.dedup();
@@ -189,11 +196,13 @@ pub(crate) fn sorted_members(mut members: Vec<NodeId>) -> Vec<NodeId> {
 }
 
 /// Members added plus members removed between two sorted sets.
+#[cfg(feature = "consensus")]
 pub(crate) fn member_changes(a: &[NodeId], b: &[NodeId]) -> usize {
     a.iter().filter(|m| !b.contains(m)).count() + b.iter().filter(|m| !a.contains(m)).count()
 }
 
 /// The verified electorate this node holds for `group`, without refreshing it.
+#[cfg(feature = "consensus")]
 pub(crate) fn cached(ctx: &TaskCtx, group: &str) -> Option<Arc<ElectorateDecl>> {
     ctx.electorates.pin().get(group).cloned()
 }
@@ -201,7 +210,8 @@ pub(crate) fn cached(ctx: &TaskCtx, group: &str) -> Option<Arc<ElectorateDecl>> 
 /// Every group that has a committed electorate record this node can see (verified or not — the caller
 /// verifies through [`view`]).
 pub(crate) fn groups_with_records(ctx: &TaskCtx) -> Vec<String> {
-    let prefix = format!("{}{ELECTORATE_SLOT_PREFIX}", crate::consensus::consensus_ns::COMMITTED);
+    // `consensus_ns::COMMITTED`, spelled out: this module compiles without `consensus` too.
+    let prefix = format!("consensus/committed/{ELECTORATE_SLOT_PREFIX}");
     let mut groups: Vec<String> = crate::store::scan_kv_prefix(&ctx.kv_state, &prefix)
         .into_iter()
         .filter_map(|(k, _)| k.strip_prefix(prefix.as_str()).and_then(|r| r.split_once('/')).map(|(g, _)| g.to_string()))
@@ -231,6 +241,7 @@ pub(crate) fn all_views(ctx: &Arc<TaskCtx>) -> Vec<Arc<ElectorateDecl>> {
 }
 
 /// Counts a refused record once per distinct `(slot, digest)` and warns once.
+#[cfg(feature = "consensus")]
 pub(crate) fn note_refused(ctx: &TaskCtx, slot: &str, digest: &[u8; 32], why: &str) {
     let tag: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
     let key: Arc<str> = Arc::from(format!("{slot}#{tag}"));
@@ -257,6 +268,7 @@ pub(crate) fn is_safety_sensitive(config: &crate::consensus::ConsensusConfig, sl
 /// or the whole cluster when none is. `consensus_electorate` may only restate it: a local setting that
 /// names another group, or names one when the fleet names none, is refused by name, as are two groups
 /// both marked.
+#[cfg(feature = "consensus")]
 pub(crate) fn exclusive_electorate(ctx: &Arc<TaskCtx>) -> Result<Option<String>, String> {
     let marked: Vec<String> = all_views(ctx).into_iter().filter(|d| d.exclusive_default).map(|d| d.group.clone()).collect();
     if marked.len() > 1 {
@@ -356,7 +368,7 @@ impl GossipAgent {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "consensus"))]
 mod tests {
     use super::*;
 
@@ -391,7 +403,6 @@ mod tests {
         assert_eq!(parse_step_slot("leader/g"), None);
     }
 
-    #[cfg(feature = "consensus")]
     #[test]
     fn the_exclusive_slot_families_are_safety_sensitive_by_definition() {
         let plain = crate::consensus::ConsensusConfig::default();

@@ -1252,7 +1252,9 @@ mod tests {
         let a = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
         let e = a.start().await.unwrap_err().to_string();
         assert!(e.contains("profile `secure-single-domain` rev 3"), "{e}");
-        for id in ["gw.not_open", "mesh.tls", "egress.allow_list", "persist.configured", "ae.authorised_at_seam", "cons.safety_profile"] {
+        // `cons.safety_profile` is `not_applicable` in a build without `consensus` — nothing proposes there.
+        let consensus_id: &[&str] = if cfg!(feature = "consensus") { &["cons.safety_profile"] } else { &[] };
+        for id in ["gw.not_open", "mesh.tls", "egress.allow_list", "persist.configured", "ae.authorised_at_seam"].iter().chain(consensus_id) {
             assert!(e.contains(id), "{id} is named: {e}");
         }
         assert!(e.contains("not_configured") && e.contains("docs/operations/rbac.md"), "what is missing and where to read: {e}");

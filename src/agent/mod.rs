@@ -548,8 +548,10 @@ pub(crate) struct TaskCtx {
     pub(crate) consensus_verified_ballots: Arc<papaya::HashMap<Arc<str>, u64>>,
     /// P2: the verified electorate per group (`electorate::view` refreshes it from the committed chain,
     /// adopting an epoch only when its certificate verifies). Lock-free; a pure insert of a newer epoch.
+    #[cfg(feature = "consensus")]
     pub(crate) electorates: Arc<papaya::HashMap<Arc<str>, Arc<electorate::ElectorateDecl>>>,
     /// Electorate records refused (not adopted), so each is counted once — bounded at 4096.
+    #[cfg(feature = "consensus")]
     pub(crate) electorate_refused: Arc<papaya::HashSet<Arc<str>>>,
     /// Proposals this node ended because the slot's next ballot would exceed `u64::MAX`
     /// (see `SystemStats::consensus_ballot_space_exhausted`).
@@ -1117,7 +1119,9 @@ impl GossipAgent {
             decided_floor_anomalies_unrecorded: Arc::new(AtomicU64::new(0)),
             #[cfg(feature = "consensus")]
             consensus_verified_ballots: Arc::new(papaya::HashMap::new()),
+            #[cfg(feature = "consensus")]
             electorates: Arc::new(papaya::HashMap::new()),
+            #[cfg(feature = "consensus")]
             electorate_refused: Arc::new(papaya::HashSet::new()),
             ballot_space_exhausted: Arc::new(AtomicU64::new(0)),
             event_ring: Arc::new(emergent::EventRing::default()),

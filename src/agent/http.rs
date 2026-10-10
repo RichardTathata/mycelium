@@ -7762,6 +7762,12 @@ mod tests {
             assert_eq!(r.status(), 400, "{route}");
             assert_eq!(changes(), before, "{route} counted a refused body");
             let r = client.post(&url).header(AUTHORIZATION, "Bearer t").json(&body).send().await.unwrap();
+            if !cfg!(feature = "consensus") && route == "/gateway/govern/electorate" {
+                // An electorate is a consensus decision: without `consensus` the route says so and records nothing.
+                assert_eq!(r.status(), 501, "{route}");
+                assert_eq!(changes(), before, "{route} recorded a change it could not make");
+                continue;
+            }
             assert_eq!(r.status(), 200, "{route}: {}", r.text().await.unwrap_or_default());
             assert_eq!(changes(), before + 1, "{route} recorded no audit attempt");
         }
