@@ -81,6 +81,24 @@ Four places strain that line today, and the rows in §3 address each:
 | **I** | Private repo P3s | RA5 correction chains and competing corrections; attempt keys carry the operation id; a lock-order table; the outbox directory fsynced at create; Cedar policies schema-validated at load; the CI pin check refuses `[patch]`, `rev =` and multi-line tables | R0's re-pin |
 | **J** | Hygiene | the sim-seam gate's test-skip bug (the one the KV gate fixed in #591); every feature and bench linted or built by some CI step; the two CI jobs on `stable` pinned; unreferenced public items deprecated, not removed (nothing is removed on the 2.x line); only the duplicates that disagree are unified (`hex_line`'s whitespace, `now_ms` copies outside the seam) | — |
 
+### 3.4 · Documentation follow-through
+
+A row is not closed until the documents that describe its subject say what the code now does. Several pages record a
+position as *planned* or *not built* (the consensus electorate decision record `docs/design/consensus-electorate.md`,
+the proof ledger, the threat model, the guide, the FAQ, the wiki); each must be flipped in the same PR that delivers
+the change, or the row stays open. In particular:
+
+| When this lands | Update |
+|---|---|
+| **P2** (governed electorate required) | the decision record's *enforced today* section; `what-is-proven.md`'s "Agreement across an electorate change" row (move what is now gated); `threat-model.md` §7; `guide/04-consensus.md` § *Discovery is not an electorate*; the FAQ answer; the wiki runtime-invariants page |
+| **C1** (leased leadership) and **C2** (acceptor state decays) | the decision record and philosophy's "protocol, not service" paragraph (strike *not built*); `guide/04-consensus.md` on `elect_leader`; `runtime-invariants.md` § *Acceptor memory* |
+| **P1** (exposed-gateway refusal) | README's and `positioning.md`'s default-posture sentence; `production-readiness.md`; `configuration.md`; the guarantee catalogue golden |
+| **F** (wire and crypto MINOR) | `deprecations.md` (close the #585/#587 windows); the threat model's Boundary A; `what-is-proven.md`'s KV `SignedData` residual |
+| **every row** | the CHANGELOG entry, a dated wiki `.log/` entry, and any `what-is-proven.md` row the change moves between tables |
+
+The next `doc-coverage` run after each MINOR checks this table: a page still saying *not built* for a delivered row is a
+calibration entry.
+
 ## 4 · Decisions taken
 
 | # | Decision | Recorded |
