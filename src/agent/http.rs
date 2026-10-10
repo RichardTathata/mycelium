@@ -1862,16 +1862,19 @@ async fn gw_govern_electorate_declare(
     #[cfg(feature = "consensus")]
     {
         use super::electorate::ElectorateError as E;
-        let before = super::electorate::view(&ctx.agent_ctx, group).map(|d| (*d).clone());
-        match super::electorate::declare(&ctx.agent_ctx, group, exclusive_default).await {
-            Ok(decl) => {
-                // Audited only when a step was decided: a declaration that changes nothing is not a change, and a
-                // refused or undecided one never reaches here (#601's review, finding 6).
-                let changed = before.as_ref() != Some(&decl);
+        match super::electorate::declare_outcome(&ctx.agent_ctx, group, exclusive_default).await {
+            Ok((decl, outcome)) => {
+                // Audited when a step was decided — this node's, or another member's it completed (round 2,
+                // finding 3); a declaration that changes nothing is not a change, and a refused or undecided one
+                // never reaches here (#601's review, finding 6).
+                use super::electorate::Declared;
+                let changed = outcome != Declared::Unchanged;
                 if changed {
-                    audit_govern(&ctx.agent_ctx, &super::electorate::step_slot(group, decl.epoch), body.to_string());
+                    let detail = json!({ "request": body, "outcome": if outcome == Declared::Adopted { "adopted" } else { "decided" } });
+                    audit_govern(&ctx.agent_ctx, &super::electorate::step_slot(group, decl.epoch), detail.to_string());
                 }
-                Json(json!({ "ok": true, "changed": changed, "group": decl.group, "epoch": decl.epoch, "exclusive_default": decl.exclusive_default,
+                Json(json!({ "ok": true, "changed": changed, "adopted": outcome == Declared::Adopted,
+                             "group": decl.group, "epoch": decl.epoch, "exclusive_default": decl.exclusive_default,
                              "members": decl.members.iter().map(ToString::to_string).collect::<Vec<_>>() })).into_response()
             }
             Err(e @ E::StepTooLarge { .. }) => (StatusCode::CONFLICT,
@@ -1879,6 +1882,8 @@ async fn gw_govern_electorate_declare(
             Err(e @ E::NotAMember) => (StatusCode::FORBIDDEN,
                 Json(json!({ "ok": false, "error": "not_a_member", "message": e.to_string() }))).into_response(),
             Err(e @ E::InvalidGroup) => bad_request(e.to_string()),
+            Err(e @ E::DrainRefused(_)) => (StatusCode::CONFLICT,
+                Json(json!({ "ok": false, "error": "drain_refused", "message": e.to_string() }))).into_response(),
             Err(e) => (StatusCode::CONFLICT,
                 Json(json!({ "ok": false, "error": "not_decided", "message": e.to_string() }))).into_response(),
         }

@@ -189,23 +189,27 @@ not learned a step is refused by those that have (`ElectorateStale`), and a memb
 a step stops answering the epoch before it. So a change is: move one node
 (`/gateway/govern/group`), then declare — and the group decides nothing in between.
 
-**What that guarantees, exactly.** Within an epoch, at most one value commits per slot; a proposer at
-a superseded epoch cannot complete once the next step is chosen; and a value decided at one epoch is
-carried to the next, because majorities of member sets one member apart intersect. **Two or more
-steps after a decision**, the decision is protected by its commit record (the COMMIT and the
-replicated `consensus/committed/` entry), not by quorum intersection: let a decided slot's commit
-reach the group before a second step. Versioned electorates with state transfer would close it — a
-later plan ([decision record §8.4](../design/consensus-electorate.md#84-what-does-not-hold--stated-not-closed)).
+**What that guarantees, exactly.** A step **drains** the epoch it leaves: its promise fences every
+member that gives it, each answers with what it holds for the group's slots, and the step's proposer
+runs each reported slot to completion at the old epoch before it proposes the step. So every value
+that may have been chosen — **committed or not** — is held by a majority of each epoch in turn, and a
+proposer at any later epoch adopts it: single-decree safety per slot across any number of one-member
+steps. Within an epoch at most one value commits; a proposer at a superseded epoch cannot complete. The
+drain is bounded — 256 slots of a group per member, values up to 4 KiB — and past it the step is
+refused by name (`DrainRefused`, `409 drain_refused`) and the electorate does not move
+([decision record §8.3](../design/consensus-electorate.md#83-exactly-what-holds--and-why-drain-before-step)).
 
 **Requiring it.** Set `consensus_require_electorate = true` (env `GOSSIP_CONSENSUS_REQUIRE_ELECTORATE`;
-the `secure-single-domain` profile requires it, rev 3). A **safety-sensitive** proposal — flagged
+the `secure-single-domain` profile requires it, rev 4). A **safety-sensitive** proposal — flagged
 `ConsensusConfig::safety_sensitive`, or in the `lock/`, `leader/`, `consistent/` families that
 `distributed_lock`, `LockService`, `elect_leader`, `consistent_set` and their gateway routes use — is
 then refused `ElectorateNotGoverned` (gateway `403 electorate_not_governed`) unless its scope is an
 electorate group. The cluster-scoped exclusive verbs (locks, `consistent_set`, the log claim,
 `mycelium-commitment`'s award, `set_capability_authz_via_consensus`) decide in the group marked
 `exclusive_default` — a fleet record, so every node agrees; `consensus_electorate` may only restate
-it, and a node whose setting disagrees refuses them by name. The proposer must be a member, so a lock
+it, and a node whose setting disagrees refuses them by name. Those slots have one home: a `lock/`,
+`consistent/`, `capauthz/`, commitment-award or log-claim slot proposed on any other group — and a
+`leader/{g}` slot on any group but `g` — is refused `ElectorateMismatch`. The proposer must be a member, so a lock
 is taken by an electorate member (a non-member asks through a member's gateway). Off — the default —
 nothing changes, and such a proposal is counted (`mycelium_consensus_ungoverned_safety_total`). So for
 exclusive work: declare the electorate, require it, and fence at the resource.

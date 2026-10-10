@@ -74,10 +74,14 @@ the epoch before — certified under `consensus/electorate-cert/`, adopted only 
 member set by identity (`ElectorateMismatch`, roster tripwire), counts promises and votes only from the members, and
 holds the quorum at a strict majority; every Prepare/Propose names the epoch and digest (`PrepareIn`/`ProposeIn`), and
 an acceptor (`electorate_admits`) answers only its own — refusing `StaleElectorate` otherwise, and refusing the epoch
-before a step it has accepted (the fence). The governor and the emergent watcher leave an electorate group alone.
-What holds: single-decree safety per slot within an epoch and across one step. What does not: a decision two or more
-steps old rests on its commit record (state transfer would close it); an embedded `grp/` write is refused at the next
-proposal, not prevented. Also not built: leased-by-default leadership (C1 —
+before a step it has promised (the fence) — every claim made inside a `compute` on the group's fence key
+(`claim_gated`), so a step's promise and an ordinary claim are ordered on one key. A step **drains** the epoch it
+leaves: its `StepPrepareAck`s report every slot of the group (`sys/consensus-slot-group/` indexes them, durably) and
+its proposer runs each to completion at the old epoch (`DrainPrepare`/`DrainPropose`, committing nothing) before
+proposing the step — so single-decree safety per slot holds across any number of one-member steps, a chosen-never-
+committed value included (decision record §8.3; bounded at 256 slots / 4 KiB, refused by name past it). The governor
+and the emergent watcher leave an electorate group alone. An embedded `grp/` write is refused at the next proposal,
+not prevented. Also not built: leased-by-default leadership (C1 —
 `elect_leader` proposes with `ConsensusConfig::default()`, `committed_lease_secs: None`, so it commits permanently) and
 collection of acceptor memory (C2 — see the paragraph above); versioned electorates with joint consensus are a later
 plan.

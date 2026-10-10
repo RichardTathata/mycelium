@@ -122,8 +122,9 @@ pub enum ConsistencyError {
   `electorate_stale`.
 - `ElectorateMismatch` (P2) — the electorate and this node's view disagree: the roster differs from the epoch's
   members (a node joined or left without a declared step — declare, or undo it), a step that is not one member, a
-  cross-group proposal over an electorate group, or a `consensus_electorate` that disagrees with the fleet's
-  exclusive default. `detail` says which; nothing was proposed. **409** `electorate_mismatch`.
+  cross-group proposal over an electorate group, a `consensus_electorate` that disagrees with the fleet's
+  exclusive default, a slot proposed on a group that is not its home (a `lock/`-family slot off the fleet's
+  electorate, `leader/{g}` off `g`), or a step whose drain was refused (`drain_…`). `detail` says which; nothing was proposed. **409** `electorate_mismatch`.
 - `TopologyUnsatisfied` — quorum has the right headcount but the Hard topology
   policy (e.g. "must span two racks") was not satisfied. Retry is unlikely to
   help unless nodes rejoin from the missing segments. If availability matters more than the spread

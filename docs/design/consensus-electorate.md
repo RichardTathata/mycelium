@@ -109,7 +109,7 @@ Since P2 (2026-10-10, §8):
 | **Nothing resizes an electorate group but a decided step.** The governor does not roll on it; the emergent watcher defers to it; `/gateway/mesh/group` refuses it **403** `governed_group` | `membership_governor::converge`; `emergent_groups::governor_owned_groups`; `is_governed_group`, `src/agent/http.rs` | `the_governor_and_the_watcher_leave_an_electorate_group_alone` |
 | **The fleet's exclusive electorate is a fleet record.** The cluster-scoped exclusive verbs decide in the group marked `exclusive_default`; a disagreeing `consensus_electorate` is refused | `electorate::exclusive_electorate`; `exclusive_propose`, `src/agent/consensus_handle.rs`; `overlay_exclusive_propose`, `src/agent/http.rs` | `a_local_electorate_setting_that_disagrees_with_the_fleet_is_refused`; `a_safety_sensitive_proposal_is_decided_only_by_an_electorate_group` |
 | **A cross-group proposal does not decide for an electorate group** | `electorate_door` (`Groups`) | `a_cross_group_proposal_does_not_decide_for_an_electorate_group` |
-| **The secure profile checks it.** `cons.safety_profile` (rev 2) resolves `enforced` on `consensus_require_electorate`; `secure-single-domain` rev 3 requires it | `src/agent/guarantee.rs` | `the_consensus_safety_profile_resolves_on_the_electorate_requirement`; `the_secure_profile_refuses_an_open_node_by_name` |
+| **The secure profile checks it.** `cons.safety_profile` (rev 2) resolves `enforced` on `consensus_require_electorate`; `secure-single-domain` rev 4 requires it | `src/agent/guarantee.rs` | `the_consensus_safety_profile_resolves_on_the_electorate_requirement`; `the_secure_profile_refuses_an_open_node_by_name` |
 
 **What is not enforced — the residual, stated exactly** (as recorded before P2; each bullet now says what P2 changed):
 
@@ -184,12 +184,13 @@ change §2.1 — discovery would still not be an electorate, and the epoch would
 > safety-sensitive decision is a fixed set for the life of that decision (threat model §7). Today the code refuses an
 > empty or below-floor electorate, refuses a proposer outside the group, and refuses a governed group's membership
 > change at the gateway except through an audited governance route. Since plan row P2, a node that sets
-> `consensus_require_electorate` (required by the `secure-single-domain` profile, rev 3) refuses a lock, a leader
+> `consensus_require_electorate` (required by the `secure-single-domain` profile, rev 4) refuses a lock, a leader
 > election or any safety-sensitive proposal unless an **electorate group** decides it — one pinned by member identity
 > and epoch, each change a one-member step decided by the electorate before it, acceptors answering only their own
-> epoch. That gives single-decree safety per slot within an epoch and across one step; two or more steps after a
-> decision, the decision is protected by its commit record, not by quorum intersection — closing that is state
-> transfer, the versioned-electorates plan.
+> epoch, and each step draining the epoch it leaves: before a step is proposed, every slot of the group its promise
+> quorum reports is run to completion at the old epoch. That gives single-decree safety per slot across any number of
+> one-member steps — a value chosen and never committed included — bounded (256 slots a group, 4 KiB a value; past
+> it the step is refused by name).
 > Versioned electorates with joint-consensus transitions are recorded protocol work for a later plan, and a consensus
 > *service* — a fixed tier of nodes everyone must reach to agree — is rejected: consensus is a Layer III protocol run by
 > whichever nodes are in the group, never a place.
@@ -235,66 +236,113 @@ At the engine's door (`ConsensusEngine::electorate_door`, reached by the library
   roster tripwire (`mycelium::electorate_roster_mismatches`), never decided by the roster it saw;
 - the quorum is at least a strict majority of the members, whatever `quorum_size` asks, and opacity does not reduce
   it (`count_opaque_as_absent` is ignored for an electorate group);
-- promises and votes are counted only from the members;
+- promises and votes count only from the members, and a refusal (`Promise`, `Nack`) moves the proposal only when a
+  member sent it;
+- **the slot is this group's to decide**: a `leader/{g}` or `electorate/{g}/…` slot only in group `g`, and a
+  fleet-exclusive slot (`lock/`, `consistent/`, `capauthz/`, a commitment award) only in the fleet's exclusive
+  electorate — so two groups never decide one `consensus/committed/{slot}`;
 - every Prepare and Propose names the proposer's epoch and the electorate's digest (`PrepareIn` / `ProposeIn`).
 
 At every acceptor (`ConsensusEngine::electorate_admits`): it answers only a proposal that names **its own** epoch and
-digest, from a member, to a member — otherwise it refuses with `StaleElectorate`, naming the electorate it holds. A
-legacy (untagged) proposal on an electorate group is refused the same way. **The fence:** an acceptor that has
-accepted a step out of epoch `e` no longer answers epoch `e`'s ordinary proposals. A proposer that hears a member
-name a later electorate stops, `ElectorateStale`; a member that is behind, or fenced mid-step, simply does not vote.
+digest, from a member, to a member, for a slot the group may decide — otherwise it refuses with `StaleElectorate`,
+naming the electorate it holds. A legacy (untagged) proposal on an electorate group is refused the same way.
 
-### 8.3 Exactly what holds
+**The fence.** An acceptor that has **promised** the step out of epoch `e` no longer answers epoch `e`'s ordinary
+proposals. Every claim — an acceptor's promise or acceptance, and the proposer's own — is made **inside** a `compute`
+on the group's fence key (`ConsensusEngine::claim_gated`): a step's promise raises the fence there first, and an
+ordinary claim is refused there once the fence is above its epoch or the node no longer holds the epoch. So a claim
+and a step's promise are ordered on one key, and a proposer fenced after it passed the door stops at its next claim,
+`ElectorateStale` (round 2 of #601's review, finding 1). A proposer that hears a member name a later electorate stops
+too; a member that is behind, or fenced mid-step, simply does not vote.
 
-For one slot on an electorate group, crash faults, messages authenticated under `[tls]`:
+### 8.3 Exactly what holds — and why: drain before step
 
-1. **Within an epoch, at most one value commits.** The members are fixed, promises and votes come only from them, and
-   any two strict majorities of one set intersect — the prepare phase (2.30.0) does the rest.
-2. **A proposer at a superseded epoch cannot complete once the next step is chosen.** A step is chosen when a strict
-   majority of the old members has accepted it, and each of those refuses the old epoch from that moment (the fence
-   is in its acceptor memory, which is durable). So the old epoch can no longer form a quorum. *An acceptor that has
-   not learned epoch `e + 1`* may still answer an epoch-`e` proposer — and that cannot violate safety, because the
-   proposer still needs a majority of epoch `e`, which must include a fenced acceptor.
-3. **Across one step, a decided value is carried.** A value chosen at epoch `e` is adopted by every proposer at epoch
-   `e + 1`: strict majorities of two member sets that differ by one member share an acceptor, and an acceptor's
-   acceptance memory spans epochs.
-4. **Steps are ordered.** Each is a single-decree decision of the electorate before it; two cannot both commit, a
-   non-member cannot make one, and a node adopts one only with its certificate.
+**The drain.** Every slot an acceptor answers for on an electorate group is recorded, durably, against the group
+(`sys/consensus-slot-group/{node}/{slot}`). A step's promise is answered with a `StepPrepareAck` carrying that
+acceptor's **drain report**: for each of the group's slots, its highest acceptance (ballot, digest, the value when at
+most 4 KiB) and what it knows was decided. When a quorum of the epoch has promised the step — each promise fencing its
+acceptor — the step's proposer **drains** before proposing the step: for every reported slot whose highest acceptance
+does not belong to a decision some member sees is over, it runs that slot to completion at the epoch it is leaving
+(`DrainPrepare` / `DrainPropose`, answered by fenced members too), so the highest-ballot value is accepted by a strict
+majority of that epoch's members. A drain re-proposes only a reported value and commits nothing — no COMMIT, no record,
+no lease renewed; a later proposer adopts the value and commits it on its own terms. Only then is the step proposed.
 
-### 8.4 What does not hold — stated, not closed
+**The invariant.** Let `M_f` be epoch `f`'s members. For one slot of the group, crash faults, messages authenticated
+under `[tls]`:
 
-- **Two or more steps after a decision, the decision is protected by its commit record, not by quorum
-  intersection.** A value chosen at epoch `e` is known to the acceptors that accepted it and, once committed, to every
-  node the COMMIT or the replicated `consensus/committed/{slot}` entry reaches (a phase-1 answer reports it). A
-  proposer at epoch `e + 2` or later whose quorum shares no acceptor with the deciding quorum, none of which has learned
-  the commit, may decide another value. It needs two whole steps decided inside the window in which the commit has not
-  reached those acceptors. Closing it needs **state transfer at the step** — the new electorate learning, from the
-  old, what it accepted — which is the versioned-electorates plan (§4.2). Operating rule until then: let a decided
-  slot's commit reach the group before a second step.
+> **Inv(f)** — while epoch `f` is current, every value that may have been chosen for the slot is accepted, at a ballot
+> no lower than any other acceptance of the slot, by a strict majority of `M_{f-1}` or of `M_f`.
+
+1. **Base.** A value chosen at epoch `f` is accepted by a strict majority of `M_f` (the vote filter and quorum), and the
+   prepare phase makes every later acceptance carry it (2.30.0).
+2. **No choice outside the epoch.** Once a quorum of `M_f` has promised the step out of `f`, no new epoch-`f` value can
+   be chosen except by a drain (an epoch-`f` majority must include a fenced acceptor); a stale proposer is refused on
+   its epoch tag; and the fence is checked inside the claim, so no claim slips between door and step (§8.2).
+3. **The drain carries it.** The step's promise quorum is a strict majority of `M_f`. By Inv(f) the slot's chosen value
+   is held by a majority of `M_{f-1}` or `M_f`; either intersects the promise quorum (sets one member apart), so some
+   promiser reports it at the top ballot, and the drain re-runs it at epoch `f` — its phase 1 over a majority of `M_f`
+   adopts it — until a majority of `M_f` holds it.
+4. **The step.** Epoch `f + 1` is a consensus decision of `M_f`, one member from it; it is proposed only after the drain.
+   So when `f + 1` is current a majority of `M_f` holds every value that may have been chosen: Inv(f + 1). A proposer at
+   `f + 1` prepares a majority of `M_{f+1}`, which intersects that majority, and adopts it.
+
+So **single-decree safety holds per slot across any number of steps**, each one member, ordered by consensus. That
+covers the case the first design did not: **a value chosen and never committed** — its proposer died before the COMMIT,
+or the commit never reached the next quorum — is carried by acceptance, not by its commit record. And an acceptor that
+has not learned epoch `f + 1` cannot hurt it: it may still answer epoch `f`, but an epoch-`f` quorum needs a fenced
+acceptor. Steps themselves are single-decree decisions of the epoch before (two cannot both commit), made only by a
+member, adopted only with their certificate. *Test:* `a_value_chosen_two_steps_ago_is_carried_by_the_drain` — `v`
+accepted by {A,C} at epoch 1 and never committed, two steps, then a proposer whose quorum is {B,D,E} adopts `v`.
+
+**The bound, and what happens past it.** An acceptor reports at most 256 slots of one group, and carries a value only
+up to 4 KiB (the acceptor record's own cap). The step is **refused by name** (`ElectorateError::DrainRefused`, HTTP
+409 `drain_refused`) when a report is truncated (`drain_too_large`), when a slot's highest acceptance is known only by
+its digest (`drain_blocked` — the value was larger than 4 KiB, or every holder restarted), or when a slot's drain does
+not complete (`drain_incomplete`). The electorate does not move; nothing about it changed. The cost is one round per
+open slot per step.
+
+### 8.4 What does not hold — stated
+
+- **The guarantee starts at genesis.** A value accepted on the group before it became an electorate group is not in
+  any drain report.
+- **A slot whose decision is over is not drained.** An acceptance at or below a decision a member sees has ended (a
+  lease expired, a lock released) belongs to that decision, and every proposer's phase 1 sets it aside already; a
+  member that has not seen the end may re-commit the old value once — a delay, never a second value.
 - **Genesis is unanimous among the members it names, and not ordered against another genesis** naming a disjoint set;
   the second commit for `electorate/{group}/1` is counted by the commit-conflict tripwire.
 - **Without `[tls]` nothing is authenticated**, the certificate included: it is a shape check.
-- **A step accepted but never decided** (its proposer failed) fences the members that accepted it: the group decides
-  nothing until a member declares again, which completes the step slot.
+- **A step promised but never decided** fences the members that promised it: the group decides nothing until a member
+  declares again, which completes the step slot — adopting what was accepted for it, or deciding a no-op epoch — and
+  reports it (`200`, `"adopted": true`, audited as adopted).
 - **An embedded or peer write to `grp/`** is not prevented; the next proposal refuses the roster it finds.
 
 ### 8.5 Wire, mixed fleets and the fleet's exclusive electorate
 
-`PrepareIn`, `ProposeIn` and `StaleElectorate` are appended to `ConsensusMsg` (wire v12, as `Prepare` was in 2.30.0): a
-node predating them ignores them, so an electorate with an un-upgraded member **times out rather than commits**.
+`PrepareIn`, `ProposeIn`, `StaleElectorate`, `StepPrepareAck`, `DrainPrepare` and `DrainPropose` are appended to
+`ConsensusMsg` (wire v12, as `Prepare` was in 2.30.0): a node predating them ignores them, so an electorate with an
+un-upgraded member **times out rather than commits**.
 
 The cluster-scoped exclusive verbs (`distributed_lock`, `LockService`, `consistent_set`, the lock and consistent routes,
 the log claim, `mycelium-commitment`'s linearizable award, `set_capability_authz_via_consensus`) decide in the group
-whose current epoch is marked `exclusive_default` — a fleet record, so every node reads the same answer — or across the
-cluster when none is. `consensus_electorate` may only restate it: a node whose setting disagrees, or names a group
-the fleet has not marked, refuses its exclusive verbs `ElectorateMismatch`, and two marked groups are refused the same
-way. While a group is marked, a cluster-scoped proposal for an exclusive slot is refused by the proposer and by every
-upgraded acceptor. **A pre-P2 node** still proposes those verbs to the whole cluster; mark an exclusive default only
-once every node runs P2, or a pre-P2 majority could decide a lock elsewhere.
+whose current epoch is marked `exclusive_default` — a fleet record — or across the cluster when none is.
+`consensus_electorate` may only restate it. Every acceptor refuses a cluster-scoped proposal for any exclusive slot —
+`lock/`, `leader/`, `consistent/`, `capauthz/`, a commitment award — once it knows a group is marked (round 2,
+finding 2b), and a group-scoped one on any group but the marked one (2c).
+
+**Why the marking is not itself a cluster-scoped consensus decision (round 2, finding 2a).** A node that has not yet
+learned the mark can still propose, and answer, a cluster-scoped exclusive slot, so while the mark propagates a lock
+can be decided across the cluster and in the marked group. Deciding the mark by a cluster-scoped slot whose acceptors
+are fenced from cluster-scoped exclusive slots would close that window only as far as two cluster majorities
+intersect — and the cluster is discovery, which this record says is never an electorate (§2.1). The window is closed by
+the supported profile instead: with `consensus_require_electorate` on every node, no node proposes a cluster-scoped
+exclusive slot at all (`ElectorateNotGoverned`), before the mark or after it, so there is never a second electorate for
+one slot. A node off the profile is outside the claim; the rolling-upgrade note says to mark a group only once every
+node runs this release, and with the requirement on.
 
 ### 8.6 Requirement, guarantee, profile
 
 `consensus_require_electorate` refuses a safety-sensitive proposal (flagged, or in `lock/`, `leader/`, `consistent/`,
-`electorate/`) outside an electorate group, `ElectorateNotGoverned`. `cons.safety_profile` (rev 2) resolves on it;
-`secure-single-domain` rev 3 requires it. A cross-group proposal is never an electorate: one naming an electorate group
-is refused `ElectorateMismatch`, and a safety-sensitive one `ElectorateNotGoverned` under the requirement.
+`capauthz/`, `electorate/`, or a commitment award) outside an electorate group, `ElectorateNotGoverned`.
+`cons.safety_profile` (rev 2) resolves on it; `secure-single-domain` rev 4 requires it. A cross-group proposal is never
+an electorate: one naming an electorate group is refused `ElectorateMismatch`, and a safety-sensitive one
+`ElectorateNotGoverned` under the requirement.

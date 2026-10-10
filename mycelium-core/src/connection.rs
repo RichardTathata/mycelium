@@ -34,9 +34,9 @@ use tracing::{error, warn};
 /// record's two other forms, `sys/identity-signed/{node}` and `sys/identity-proof/{node}`, written
 /// only by the node itself at start and on rotation, like `sys/identity/`. None is a sub-prefix of
 /// another (`sys/identity/` does not match `sys/identity-signed/…`).
-const SELF_OWNED_SYS_PREFIXES: [&str; 8] = [
+const SELF_OWNED_SYS_PREFIXES: [&str; 9] = [
     "sys/identity/", "sys/load/", "sys/role/", "sys/tuple/", "sys/caller-context/",
-    "sys/consensus-accepted/", "sys/identity-signed/", "sys/identity-proof/",
+    "sys/consensus-accepted/", "sys/consensus-slot-group/", "sys/identity-signed/", "sys/identity-proof/",
 ];
 
 /// Whether `key` lies in a `sys/` namespace this node owns — a self-owned prefix whose node-id

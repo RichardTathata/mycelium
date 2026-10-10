@@ -429,7 +429,7 @@ its leader). The body names the group; join it and retry — `POST /gateway/mesh
 
 `POST /gateway/overlay/elect`, `/overlay/lock/acquire` or `/overlay/consistent/set` answering **403
 `electorate_not_governed`** means this node requires an **electorate group** for an exclusive outcome
-(`consensus_require_electorate`, required by `secure-single-domain` rev 3) and the scope was not one — `"group"` names
+(`consensus_require_electorate`, required by `secure-single-domain` rev 4) and the scope was not one — `"group"` names
 an undeclared group, or is `null` for the whole cluster. Nothing was proposed. Declare the group
 (`POST /gateway/govern/electorate {"group":"G"}`, `govern:write`, from a member, every member running the consensus
 listener), and for the lock and consistent-write routes mark one group `"exclusive_default": true`; this node must be

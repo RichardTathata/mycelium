@@ -553,6 +553,24 @@ pub(crate) struct TaskCtx {
     /// Electorate records refused (not adopted), so each is counted once — bounded at 4096.
     #[cfg(feature = "consensus")]
     pub(crate) electorate_refused: Arc<papaya::HashSet<Arc<str>>>,
+    /// P2's fence gate, per electorate group: the highest epoch this node's acceptor has promised a step
+    /// into. An ordinary claim at an epoch below it is refused **inside the same `compute`** that admits
+    /// it, so a claim and a step's promise are ordered on one key (round 2 of #601's review, finding 1).
+    /// The durable record of the same fact is the acceptor memory for the step slot.
+    #[cfg(feature = "consensus")]
+    pub(crate) electorate_fences: Arc<papaya::HashMap<Arc<str>, u64>>,
+    /// Slot → electorate group, for every slot this node has answered for on an electorate group;
+    /// restored at start from `sys/consensus-slot-group/{self}/` (the drain before a step reports them).
+    #[cfg(feature = "consensus")]
+    pub(crate) electorate_slot_groups: Arc<papaya::HashMap<Arc<str>, Arc<str>>>,
+    /// Watches `consensus/committed/electorate/` so the fleet's electorate list is rescanned only when it
+    /// changed (round 2, finding 5); with the generation last scanned.
+    #[cfg(feature = "consensus")]
+    pub(crate) electorate_records_watch: Arc<std::sync::OnceLock<tokio::sync::watch::Receiver<u64>>>,
+    #[cfg(feature = "consensus")]
+    pub(crate) electorate_records_scanned: Arc<AtomicU64>,
+    #[cfg(feature = "consensus")]
+    pub(crate) electorate_groups_known: Arc<papaya::HashSet<Arc<str>>>,
     /// Proposals this node ended because the slot's next ballot would exceed `u64::MAX`
     /// (see `SystemStats::consensus_ballot_space_exhausted`).
     pub(crate) ballot_space_exhausted: Arc<AtomicU64>,
@@ -1123,6 +1141,16 @@ impl GossipAgent {
             electorates: Arc::new(papaya::HashMap::new()),
             #[cfg(feature = "consensus")]
             electorate_refused: Arc::new(papaya::HashSet::new()),
+            #[cfg(feature = "consensus")]
+            electorate_fences: Arc::new(papaya::HashMap::new()),
+            #[cfg(feature = "consensus")]
+            electorate_slot_groups: Arc::new(papaya::HashMap::new()),
+            #[cfg(feature = "consensus")]
+            electorate_records_watch: Arc::new(std::sync::OnceLock::new()),
+            #[cfg(feature = "consensus")]
+            electorate_records_scanned: Arc::new(AtomicU64::new(u64::MAX)),
+            #[cfg(feature = "consensus")]
+            electorate_groups_known: Arc::new(papaya::HashSet::new()),
             ballot_space_exhausted: Arc::new(AtomicU64::new(0)),
             event_ring: Arc::new(emergent::EventRing::default()),
             governed_group_conflicts: Arc::new(AtomicU64::new(0)),

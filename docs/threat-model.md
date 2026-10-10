@@ -500,11 +500,11 @@ leader, a single writer, anything a second holder would corrupt:
 
 | Setting | Required value | Why |
 |---|---|---|
-| the electorate | an **electorate group** — `declare_electorate(group, exclusive_default)` / `POST /gateway/govern/electorate` — and `consensus_require_electorate = true` on every proposer (`secure-single-domain` rev 3 requires it); one group marked `exclusive_default` for the cluster-scoped locks | since P2 (2026-10-10) the electorate is pinned by **member identity and epoch**, each epoch a consensus decision of the one before it; acceptors answer only their own epoch, and a safety-sensitive proposal anywhere else is refused (`ElectorateNotGoverned`) — named as a **group**, never as node identities in configuration ([decision record §8](design/consensus-electorate.md#8-p2s-design--the-electorate-group)) |
+| the electorate | an **electorate group** — `declare_electorate(group, exclusive_default)` / `POST /gateway/govern/electorate` — and `consensus_require_electorate = true` on every proposer (`secure-single-domain` rev 4 requires it); one group marked `exclusive_default` for the cluster-scoped locks | since P2 (2026-10-10) the electorate is pinned by **member identity and epoch**, each epoch a consensus decision of the one before it; acceptors answer only their own epoch, and a safety-sensitive proposal anywhere else is refused (`ElectorateNotGoverned`) — named as a **group**, never as node identities in configuration ([decision record §8](design/consensus-electorate.md#8-p2s-design--the-electorate-group)) |
 | `quorum_size` | `0`, or a strict majority of the members | for an electorate group the engine raises a smaller quorum to a strict majority of the epoch's members |
 | `use_trust_slices` | optional | the epoch's member set is the vote filter; a declared slice only narrows it. Before P2 this row required identical `declare_trust` sets on every voter — node identities as the electorate's name |
 | `count_opaque_as_absent` | `false` (ignored for an electorate group) | a partition that reads as "everyone else is opaque" must not become a smaller quorum; on an electorate group the engine does not reduce the quorum for opacity |
-| membership | changed **one member at a time**: move the node, then declare — a step decided by the current electorate; the group decides nothing in between | the governor and the emergent watcher do not move an electorate group; a step of more than one member is refused. Safety per slot holds within an epoch and across one step; **two or more steps after a decision it rests on the commit record**, not quorum intersection (decision record §8.4) — let a decided slot's commit reach the group before a second step |
+| membership | changed **one member at a time**: move the node, then declare — a step decided by the current electorate; the group decides nothing in between | the governor and the emergent watcher do not move an electorate group; a step of more than one member is refused. Each step drains the epoch it leaves first, so safety per slot holds across any number of steps (decision record §8.3); a step whose drain exceeds its bound is refused by name |
 | the effect | fenced **at the resource** with the commit's token | winning is not the grant; exclusivity is enforced by refusing a stale token |
 
 Outside that profile — automatic sizing, slices off, opacity reduction on, voters joining and
@@ -525,9 +525,10 @@ and — since post-360 plan row **P2** — a node with `consensus_require_electo
 safety-sensitive proposal outside an **electorate group**, pinned by member identity and epoch, each
 change a one-member step decided by the electorate before it. What it does not: an embedded
 `join_group` or a `grp/` write still moves a group's roster by LWW — for an electorate group the next
-proposal refuses the mismatch rather than counting it (detection, not prevention); and a decision two
-or more steps old is protected by its commit record, not by quorum intersection (state transfer at the
-step would close it — the versioned-electorates plan). **A forged electorate record** — a
+proposal refuses the mismatch rather than counting it (detection, not prevention). A step drains the
+epoch it leaves — every slot its promise quorum reports is run to completion before the step is
+proposed — so a chosen value survives any number of steps, committed or not; the drain is bounded and
+a step past the bound is refused by name. **A forged electorate record** — a
 `consensus/committed/electorate/…` entry or certificate written straight into the store — is not
 adopted unless its certificate holds the signed votes of a majority of the previous epoch's members
 (under `[tls]`), and is counted (`mycelium::electorate_records_refused`); `sys/govern/electorate/`

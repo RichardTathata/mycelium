@@ -998,6 +998,13 @@ pub mod kv_ns {
     /// value. The prefix grows with the number of slots, not of ballots.
     pub const CONSENSUS_ACCEPTED: &str = "sys/consensus-accepted/";
 
+    /// Which electorate group a slot this node has promised or accepted belongs to (post-360 plan row P2):
+    /// `sys/consensus-slot-group/{node}/{slot}` → the group's name. Written, on stable storage, the first
+    /// time this node answers for a slot of an electorate group, so the drain before an electorate step can
+    /// report every slot of the group this node holds — after a restart too. **Strictly self-owned**, like
+    /// `CONSENSUS_ACCEPTED`. Grows with the slots, never rewritten.
+    pub const CONSENSUS_SLOT_GROUP: &str = "sys/consensus-slot-group/";
+
     /// Gateway caller-context marker (v3 item 7). Key: `sys/caller-context/{node}`, value: the
     /// envelope version this node enforces (`b"1"`). Written once at start by every node that
     /// strips and verifies the `GatewayCaller` envelope on its RPC receive path; a gateway in the

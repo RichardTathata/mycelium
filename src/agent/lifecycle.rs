@@ -349,6 +349,8 @@ impl GossipAgent {
         {
             let n = crate::consensus::prewarm_accepted(
                 &self.task_ctx.kv_state, &self.node_id, &self.task_ctx.consensus_accepted);
+            // And which electorate group each answered slot belongs to (P2's drain reports them).
+            crate::agent::electorate::prewarm_slot_groups(&self.task_ctx);
             if n > 0 {
                 tracing::info!(slots = n, "recovered acceptor memory from durable records");
             }

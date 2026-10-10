@@ -148,8 +148,9 @@ an audited governance route; and, since post-360 plan row P2, a node that sets
 leader election or any safety-sensitive proposal unless an **electorate group** decides it — one
 pinned by member identity and epoch, changed only by one-member steps the electorate itself decides,
 never resized by the membership governor, refused while its roster differs from the member set. That
-gives single-decree safety per slot within an epoch and across one step; a decision two or more steps
-old rests on its commit record. Versioned electorates with state transfer are a later plan.
+gives single-decree safety per slot across any number of steps: each step first drains the epoch it
+leaves, carrying every value that may have been chosen. Joint-consensus transitions (more than one
+member at a time) are a later plan.
 The decision and its reasons: [design/consensus-electorate.md](../design/consensus-electorate.md);
 the how-to: [04-consensus.md § Discovery is not an electorate](04-consensus.md#discovery-is-not-an-electorate).
 

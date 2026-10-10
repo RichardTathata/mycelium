@@ -102,10 +102,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   group marked `exclusive_default` (a fleet record), via the new `ConsensusHandle::exclusive_propose[_receipt]`;
   `consensus_electorate` only restates it, and a disagreeing setting is refused. A cross-group proposal naming an
   electorate group is refused; the gateway's cross-group route takes `safety_sensitive`. `cons.safety_profile` (rev 2)
-  is node-enforced and **`secure-single-domain` rev 3** requires it. **What holds:** single-decree safety per slot
-  within an epoch and across one step. **Not claimed:** a decision two or more steps old rests on its commit record,
-  not quorum intersection (state transfer at the step — the versioned-electorates plan — would close it); genesis is
-  not ordered against a disjoint genesis; without `[tls]` the certificate is unauthenticated. Seen failing first, each
+  is node-enforced and **`secure-single-domain` rev 4** requires it (rev 3 is P1's `gw.exposed_closed`). **What holds:** single-decree safety per slot
+  across any number of one-member steps — **drain before step** (round 2 of #601's review): a step's promise fences its
+  acceptor and answers with a `StepPrepareAck` reporting every slot of the group (indexed durably under
+  `sys/consensus-slot-group/`); the step's proposer runs each reported slot to completion at the old epoch
+  (`DrainPrepare`/`DrainPropose`, committing nothing) before proposing the step, so a value chosen and never committed
+  survives any number of steps. Every claim — promise or acceptance, an acceptor's or the proposer's own — is made
+  inside a `compute` on the group's fence key, so a proposer fenced mid-ballot stops (`ElectorateStale`). A
+  fleet-exclusive slot (`lock/`, `consistent/`, `capauthz/`, a commitment award) is decided only in the fleet's
+  electorate and `leader/{g}` only in `g`; every acceptor refuses a cluster-scoped exclusive slot once a group is
+  marked; a refusal moves a proposal only from a member; a refused certificate is not re-verified; the electorate list
+  is rescanned only when it changed. A declaration with nothing to decide completes a pending step (`200`, `"adopted"`,
+  audited). **Bounded:** 256 slots of a group per member, values up to 4 KiB — past it the step is refused
+  `ElectorateError::DrainRefused` (`409 drain_refused`). **Not claimed:** genesis is not ordered against a disjoint
+  genesis; without `[tls]` the certificate is unauthenticated; the marking of the fleet's default is not itself a
+  cluster-scoped decision (decision record §8.5 says why the profile closes that window instead). Seen failing first in
+  round 2, each on a toggle of its mechanism: `a_proposer_fenced_mid_ballot_does_not_complete_at_the_old_epoch` (gate
+  ignoring the fence: `Committed { slot: "work/x", value: b"old-epoch" }` after the step's promise),
+  `a_value_chosen_two_steps_ago_is_carried_by_the_drain` (drain off: `Some(b"w-other")` over the chosen `v`),
+  `a_declaration_completes_a_pending_step` (no completion: the epoch stayed 1, the group fenced), and
+  `an_electorate_certificate_verifies_under_tls` (votes counted without their signer: the forged epoch 3 adopted).
+  Seen failing first, each
   on a toggle of the mechanism it pins: `a_swap_without_a_declared_step_is_refused` (count rule: `Committed` on
   {A,B,D}), `chained_steps_refuse_a_stale_proposer` (no epoch check: A answered epoch 1), `votes_from_outside_the_
   electorate_are_not_counted` (filter unwired, and separately the quorum floor removed: `Committed` on forged votes),
@@ -124,7 +141,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   award and a capability-authz policy now decide where the locks do; **rolling upgrade:** an electorate whose members
   are not all on this release times out rather than commits (the new messages are ignored by older nodes), and a
   pre-P2 node still proposes the exclusive verbs to the whole cluster — mark an `exclusive_default` group only once
-  every node runs this release.
+  every node runs this release; **a group-scoped proposal for a `lock/`, `consistent/`, `capauthz/` or commitment-award
+  slot is refused on any group but the fleet's exclusive electorate, and `leader/{g}` on any group but `g`**
+  (`ElectorateMismatch`); `ElectorateError` gained `DrainRefused`; the HTTP declaration answers `"adopted"`.
 - **The KV namespace table is a gate now, not a lint item.** `scripts/check-kv-namespaces.sh` enumerates every
   KV prefix production code uses — slash-bearing `const`/`static` `&str` literals whatever their name, `format!`
   key heads, and the first literal of a KV call (`set*`, `get`, `delete*`, `scan_*`, `subscribe*`, `kv_*`,

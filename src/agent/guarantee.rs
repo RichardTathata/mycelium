@@ -275,7 +275,7 @@ pub const SECURE_SINGLE_DOMAIN: Profile = Profile {
     //
     // Rev 4 (plan row P2): `cons.safety_profile` — an exclusive outcome is decided only by an electorate
     // group (`consensus_require_electorate`). Met by configuration, so a MINOR may add it (G12).
-    revision: 3,
+    revision: 4,
     required: &[
         "mesh.tls",
         "id.proofs_required",
@@ -938,7 +938,7 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
         // electorate group when the node requires one.
         g("cons.safety_profile", 2, "consensus", Node,
           "an exclusive outcome — a lock, a leader, a consistent write, a commitment award, a capability-authz policy, any proposal marked safety-sensitive — is decided only by an electorate group: one pinned by member identity and epoch, whose steps are its own consensus decisions, and whose acceptors answer only for their own epoch",
-          "`consensus_require_electorate = true`; the electorates declared (`/gateway/govern/electorate`), one marked `exclusive_default` for the cluster-scoped verbs. Safety per slot holds across steps one member apart; a value two or more steps old is protected by its commit record, not by quorum intersection (docs/design/consensus-electorate.md §8). The effect is still the caller's to fence at the resource",
+          "`consensus_require_electorate = true`; the electorates declared (`/gateway/govern/electorate`), one marked `exclusive_default` for the cluster-scoped verbs. Safety per slot holds across any number of one-member steps — each step drains the epoch it leaves first (docs/design/consensus-electorate.md §8.3); a step past the drain's bound is refused by name. The effect is still the caller's to fence at the resource",
           &["consensus::propose (the engine's door)", "consensus::cross_propose"], "docs/design/consensus-electorate.md",
           |_| if cfg!(feature = "consensus") { None } else { Some("built without `consensus`: this node proposes nothing") },
           |c| if c.config.consensus_require_electorate { Resolution::Enforced } else {
@@ -1191,7 +1191,7 @@ mod tests {
     /// bump and a release note), every id is a core guarantee, and none is an external prerequisite.
     #[test]
     fn the_secure_profiles_required_set_is_pinned() {
-        assert_eq!(SECURE_SINGLE_DOMAIN.revision, 3);
+        assert_eq!(SECURE_SINGLE_DOMAIN.revision, 4);
         assert_eq!(SECURE_SINGLE_DOMAIN.required, &[
             "mesh.tls", "id.proofs_required", "gw.not_open", "gw.exposed_closed", "gw.tls", "gw.caller_profile",
             "ae.authorised_at_seam", "ae.recorded_before_dispatch", "prov.enforcement", "a2a.admission",
@@ -1251,7 +1251,7 @@ mod tests {
         cfg.profile = Some("secure-single-domain".into());
         let a = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
         let e = a.start().await.unwrap_err().to_string();
-        assert!(e.contains("profile `secure-single-domain` rev 3"), "{e}");
+        assert!(e.contains("profile `secure-single-domain` rev 4"), "{e}");
         // `cons.safety_profile` is `not_applicable` in a build without `consensus` — nothing proposes there.
         let consensus_id: &[&str] = if cfg!(feature = "consensus") { &["cons.safety_profile"] } else { &[] };
         for id in ["gw.not_open", "mesh.tls", "egress.allow_list", "persist.configured", "ae.authorised_at_seam"].iter().chain(consensus_id) {
@@ -1283,7 +1283,7 @@ mod tests {
         };
         let os = start_under(SyncMode::Os);
         let e = os.start().await.unwrap_err().to_string();
-        assert!(e.contains("profile `secure-single-domain` rev 3"), "{e}");
+        assert!(e.contains("profile `secure-single-domain` rev 4"), "{e}");
         assert!(e.contains("persist.sync_mode"), "`os` is named as unmet — the writer treats it as `async`: {e}");
         assert!(e.contains("os: the OS buffers"), "what is missing says why: {e}");
         assert_eq!(os.guarantee_report().entry("persist.sync_mode").unwrap().resolution, Resolution::NotConfigured { missing: "sync_mode (os: the OS buffers; an ack is `buffered`)" });

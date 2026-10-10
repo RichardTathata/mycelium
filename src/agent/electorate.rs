@@ -36,8 +36,10 @@ pub const ELECTORATE_CERT_PREFIX: &str = "consensus/electorate-cert/";
 
 /// Slot families the substrate's exclusive verbs propose in — safety-sensitive **by definition**:
 /// `distributed_lock` and the lock route (`lock/`), `elect_leader` and the election route (`leader/`),
-/// `consistent_set` and its route (`consistent/`), and an electorate's own steps (`electorate/`).
-pub const SAFETY_SLOT_FAMILIES: &[&str] = &["lock/", "leader/", "consistent/", ELECTORATE_SLOT_PREFIX];
+/// `consistent_set` and its route (`consistent/`), and an electorate's own steps (`electorate/`). With
+/// [`is_fleet_exclusive_slot`]'s `capauthz/` and commitment awards, these are what every acceptor refuses
+/// across the cluster once the fleet marks an electorate.
+pub const SAFETY_SLOT_FAMILIES: &[&str] = &["lock/", "leader/", "consistent/", "capauthz/", ELECTORATE_SLOT_PREFIX];
 
 static RECORDS_REFUSED: AtomicU64 = AtomicU64::new(0);
 
@@ -122,9 +124,14 @@ pub enum ElectorateError {
         /// Members added plus members removed.
         changed: usize,
     },
-    /// The step was not decided: another step won the slot (re-read the electorate), the electorate
-    /// moved under it, or no quorum answered in time. Nothing changed unless the reason says so.
+    /// The step was not decided: the electorate moved under it, or no quorum answered in time. Nothing
+    /// changed unless the reason says so.
     NotDecided(String),
+    /// The step's drain could not complete, so the step was refused: a member reports more slots of the
+    /// group than the drain carries (`drain_too_large`), a slot's highest acceptance is known only by its
+    /// digest (`drain_blocked`), or a slot did not complete (`drain_incomplete`). The electorate did not
+    /// move; reduce the group's open slots, or let them complete, and declare again.
+    DrainRefused(String),
 }
 
 impl std::fmt::Display for ElectorateError {
@@ -138,6 +145,7 @@ impl std::fmt::Display for ElectorateError {
                  {changed} member(s) differ — move one node, declare, and repeat"
             ),
             Self::NotDecided(why) => write!(f, "the electorate step was not decided: {why}"),
+            Self::DrainRefused(why) => write!(f, "the electorate step was refused: its drain did not complete ({why})"),
         }
     }
 }
@@ -208,17 +216,65 @@ pub(crate) fn cached(ctx: &TaskCtx, group: &str) -> Option<Arc<ElectorateDecl>> 
 }
 
 /// Every group that has a committed electorate record this node can see (verified or not — the caller
-/// verifies through [`view`]).
+/// verifies through [`view`]). Rescanned only when `consensus/committed/electorate/` changed since the last
+/// scan (a prefix subscription's generation), so a proposal does not walk every `consensus/` key (round 2
+/// of #601's review, finding 5). Without `consensus` there are none.
 pub(crate) fn groups_with_records(ctx: &TaskCtx) -> Vec<String> {
-    // `consensus_ns::COMMITTED`, spelled out: this module compiles without `consensus` too.
-    let prefix = format!("consensus/committed/{ELECTORATE_SLOT_PREFIX}");
-    let mut groups: Vec<String> = crate::store::scan_kv_prefix(&ctx.kv_state, &prefix)
-        .into_iter()
-        .filter_map(|(k, _)| k.strip_prefix(prefix.as_str()).and_then(|r| r.split_once('/')).map(|(g, _)| g.to_string()))
-        .collect();
-    groups.sort();
-    groups.dedup();
-    groups
+    #[cfg(feature = "consensus")]
+    {
+        use std::sync::atomic::Ordering::{Acquire, Release};
+        let prefix = format!("{}{ELECTORATE_SLOT_PREFIX}", crate::consensus::consensus_ns::COMMITTED);
+        let rx = ctx.electorate_records_watch.get_or_init(|| {
+            mycelium_core::ops::kv_subscribe_prefix(ctx, Arc::from(prefix.as_str()))
+        });
+        let generation = *rx.borrow();
+        if ctx.electorate_records_scanned.swap(generation, Release) != generation {
+            for (k, _) in crate::store::scan_kv_prefix(&ctx.kv_state, &prefix) {
+                if let Some((g, _)) = k.strip_prefix(prefix.as_str()).and_then(|r| r.split_once('/')) {
+                    ctx.electorate_groups_known.pin().insert(Arc::from(g));
+                }
+            }
+        }
+        let _ = ctx.electorate_records_scanned.load(Acquire);
+        let mut groups: Vec<String> = ctx.electorate_groups_known.pin().iter().map(|g| g.to_string()).collect();
+        groups.sort();
+        groups
+    }
+    #[cfg(not(feature = "consensus"))]
+    {
+        let _ = ctx;
+        Vec::new()
+    }
+}
+
+/// Restores which electorate group each slot this node answered for belongs to, from its durable records.
+#[cfg(feature = "consensus")]
+pub(crate) fn prewarm_slot_groups(ctx: &TaskCtx) {
+    let prefix = format!("{}{}/", mycelium_core::signal::kv_ns::CONSENSUS_SLOT_GROUP, ctx.node_id);
+    for (k, v) in crate::store::scan_kv_prefix(&ctx.kv_state, &prefix) {
+        if let (Some(slot), Ok(group)) = (k.strip_prefix(prefix.as_str()), std::str::from_utf8(&v)) {
+            ctx.electorate_slot_groups.pin().insert(Arc::from(slot), Arc::from(group));
+        }
+    }
+}
+
+/// The slots of the cluster-scoped exclusive verbs — `lock/`, `consistent/`, `capauthz/`, a commitment award
+/// (`cn/{requirement}/award`) and a consumer-group log claim (`clog/{stream}/{group}/claim`). They are decided in the fleet's electorate group (or the whole cluster
+/// when none is marked) and **nowhere else**: a group-scoped proposal for one on any other group is refused,
+/// so two groups never decide the same `consensus/committed/{slot}` (round 2, finding 2c).
+#[cfg(feature = "consensus")]
+pub fn is_fleet_exclusive_slot(slot: &str) -> bool {
+    ["lock/", "consistent/", "capauthz/"].iter().any(|f| slot.starts_with(f))
+        || (slot.starts_with("cn/") && slot.ends_with("/award"))
+        || (slot.starts_with("clog/") && slot.ends_with("/claim"))
+}
+
+/// The group a slot names itself, when its family does: `leader/{group}` and `electorate/{group}/{epoch}`
+/// are decided only by that group.
+#[cfg(feature = "consensus")]
+pub(crate) fn slot_names_group(slot: &str) -> Option<&str> {
+    if let Some(g) = slot.strip_prefix("leader/") { return Some(g); }
+    slot.strip_prefix(ELECTORATE_SLOT_PREFIX).and_then(|r| r.split_once('/')).map(|(g, _)| g)
 }
 
 /// The verified electorate for `group` — refreshed from the committed chain. `None` when the group is
@@ -240,11 +296,22 @@ pub(crate) fn all_views(ctx: &Arc<TaskCtx>) -> Vec<Arc<ElectorateDecl>> {
     groups_with_records(ctx).iter().filter_map(|g| view(ctx, g)).collect()
 }
 
+#[cfg(feature = "consensus")]
+fn refused_key(slot: &str, digest: &[u8; 32]) -> Arc<str> {
+    let tag: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+    Arc::from(format!("{slot}#{tag}"))
+}
+
+/// Whether this exact record (and certificate) was already refused — it is not verified again.
+#[cfg(feature = "consensus")]
+pub(crate) fn already_refused(ctx: &TaskCtx, slot: &str, digest: &[u8; 32]) -> bool {
+    ctx.electorate_refused.pin().contains(&refused_key(slot, digest))
+}
+
 /// Counts a refused record once per distinct `(slot, digest)` and warns once.
 #[cfg(feature = "consensus")]
 pub(crate) fn note_refused(ctx: &TaskCtx, slot: &str, digest: &[u8; 32], why: &str) {
-    let tag: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
-    let key: Arc<str> = Arc::from(format!("{slot}#{tag}"));
+    let key = refused_key(slot, digest);
     let seen = ctx.electorate_refused.pin();
     if seen.contains(&key) || seen.len() >= 4096 {
         return;
@@ -260,7 +327,7 @@ pub(crate) fn note_refused(ctx: &TaskCtx, slot: &str, digest: &[u8; 32], why: &s
 /// Whether `slot` is safety-sensitive under `config`: flagged, or in a [`SAFETY_SLOT_FAMILIES`] family.
 #[cfg(feature = "consensus")]
 pub(crate) fn is_safety_sensitive(config: &crate::consensus::ConsensusConfig, slot: &str) -> bool {
-    config.safety_sensitive || SAFETY_SLOT_FAMILIES.iter().any(|f| slot.starts_with(f))
+    config.safety_sensitive || SAFETY_SLOT_FAMILIES.iter().any(|f| slot.starts_with(f)) || is_fleet_exclusive_slot(slot)
 }
 
 /// **Where the fleet's exclusive verbs decide** (finding 2 of #601's review): the electorate group whose
@@ -291,12 +358,44 @@ pub(crate) fn exclusive_electorate(ctx: &Arc<TaskCtx>) -> Result<Option<String>,
 /// [`GossipAgent::declare_electorate`].
 #[cfg(feature = "consensus")]
 pub(crate) async fn declare(ctx: &Arc<TaskCtx>, group: &str, exclusive_default: bool) -> Result<ElectorateDecl, ElectorateError> {
+    declare_outcome(ctx, group, exclusive_default).await.map(|(d, _)| d)
+}
+
+/// What a declaration did.
+#[cfg(feature = "consensus")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Declared {
+    /// Nothing to decide, and no step pending: the electorate is as it was.
+    Unchanged,
+    /// This node's step was decided.
+    Decided,
+    /// Another member's step was decided — this declaration completed it (round 2, finding 3).
+    Adopted,
+}
+
+/// Whether a step out of `epoch` is pending: this node, or any member whose durable acceptor record has
+/// reached this node, has promised the step slot without the electorate having moved. A pending step
+/// fences the members that promised it, so the group decides nothing until it completes.
+#[cfg(feature = "consensus")]
+fn step_pending(ctx: &TaskCtx, current: &ElectorateDecl) -> bool {
+    let slot = step_slot(&current.group, current.epoch + 1);
+    if ctx.consensus_accepted.pin().get(slot.as_str()).is_some_and(|s| s.promised > 0) { return true; }
+    current.members.iter().any(|m| {
+        ctx.kv_state.store.pin().get(crate::consensus::accepted_key(m, &slot).as_str()).is_some_and(|e| e.data.is_some())
+    })
+}
+
+/// [`declare`], saying what it did.
+#[cfg(feature = "consensus")]
+pub(crate) async fn declare_outcome(
+    ctx: &Arc<TaskCtx>, group: &str, exclusive_default: bool,
+) -> Result<(ElectorateDecl, Declared), ElectorateError> {
     use crate::consensus::ConsensusResult;
     if group.is_empty() || group.contains('/') { return Err(ElectorateError::InvalidGroup); }
     let engine = crate::agent::helpers::make_consensus_engine_ctx(ctx, false, false, 0, None);
     let current = engine.electorate_view(group);
     let members = sorted_members(crate::agent::helpers::group_members_ctx(ctx, group));
-    let next = ElectorateDecl {
+    let mut next = ElectorateDecl {
         group: group.to_string(),
         epoch: current.as_ref().map_or(1, |c| c.epoch + 1),
         members,
@@ -304,18 +403,30 @@ pub(crate) async fn declare(ctx: &Arc<TaskCtx>, group: &str, exclusive_default: 
     };
     if let Some(c) = &current
         && c.members == next.members && c.exclusive_default == next.exclusive_default {
-            return Ok((**c).clone()); // nothing to decide
+            if !step_pending(ctx, c) {
+                return Ok(((**c).clone(), Declared::Unchanged)); // nothing to decide
+            }
+            // A step promised and never decided fences its members: complete it. Phase 1 adopts whatever
+            // was accepted for the slot; if nothing was, a no-op step (the same members) decides it.
+            next = ElectorateDecl { epoch: c.epoch + 1, ..(**c).clone() };
         }
     check_step(group, current.as_deref(), &next)?;
     let proposer_set = current.as_ref().map_or(&next.members, |c| &c.members);
     if !proposer_set.contains(&ctx.node_id) { return Err(ElectorateError::NotAMember); }
-    match propose_step(ctx, current.as_deref(), &next).await {
-        ConsensusResult::Committed { .. } => match engine.electorate_view(group) {
-            Some(v) if *v == next => Ok(next),
+    let result = propose_step(ctx, current.as_deref(), &next).await;
+    let after = engine.electorate_view(group);
+    match result {
+        ConsensusResult::Committed { .. } => match after {
+            Some(v) if *v == next => Ok((next, Declared::Decided)),
             _ => Err(ElectorateError::NotDecided(
                 "committed, but its certificate did not reach the store — the record was not adopted".into())),
         },
+        // The slot was decided for another member's step: this declaration completed it.
+        ConsensusResult::Superseded { .. } if after.as_ref().is_some_and(|v| v.epoch == next.epoch) =>
+            Ok(((*after.unwrap_or_else(|| Arc::new(next.clone()))).clone(), Declared::Adopted)),
         ConsensusResult::NotAMember { .. } => Err(ElectorateError::NotAMember),
+        ConsensusResult::ElectorateMismatch { detail, .. } if detail.starts_with("drain_") =>
+            Err(ElectorateError::DrainRefused(detail.to_string())),
         other => Err(ElectorateError::NotDecided(format!("{other:?}"))),
     }
 }
