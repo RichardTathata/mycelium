@@ -213,6 +213,12 @@ impl GossipAgent {
             schema_mismatch: self.task_ctx.schema_mismatch.load(Ordering::Relaxed),
             rate_limited_senders: mycelium_core::rate::throttled_sender_count(&self.task_ctx.core),
             rpc_reply_sender_mismatches: self.task_ctx.rpc_reply_sender_mismatches.load(Ordering::Relaxed),
+            inbound_connections_timed_out:
+                self.task_ctx.transport_bounds.inbound_timed_out.load(Ordering::Relaxed),
+            anti_entropy_replies_skipped:
+                self.task_ctx.transport_bounds.anti_entropy_replies_skipped.load(Ordering::Relaxed),
+            signal_handler_drops:     self.task_ctx.signal_handlers.handler_drops(),
+            signal_log_kinds_refused: self.task_ctx.signal_handlers.log_kinds_refused(),
         }
     }
 

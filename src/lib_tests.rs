@@ -131,6 +131,7 @@ fn spawn_handler(
         kv_state,
         wal: std::sync::OnceLock::new(),
         sys_namespace_violations: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        transport_bounds: Arc::default(),
         tls: std::sync::OnceLock::new(),
         peer_keys: Arc::new(papaya::HashMap::new()),
         peer_anchor_keys: Arc::new(papaya::HashMap::new()),
@@ -223,7 +224,7 @@ fn spawn_handler(
         intern_keys: true,
         intern_max_keys: 0,
         max_peers: usize::MAX,
-        writer_idle_timeout: Duration::ZERO,
+        writer_timing: mycelium_core::writer::WriterTiming::with_idle(Duration::ZERO),
         peer_list_tx: tokio::sync::watch::channel(std::sync::Arc::from(Vec::<NodeId>::new())).0,
     };
     let handle = tokio::spawn(handle_connection(
@@ -1195,6 +1196,7 @@ async fn test_subscribe_notified_via_gossip() {
             kv_state,
             wal: std::sync::OnceLock::new(),
             sys_namespace_violations: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            transport_bounds: Arc::default(),
             tls: std::sync::OnceLock::new(),
             peer_keys: Arc::new(papaya::HashMap::new()),
             peer_anchor_keys: Arc::new(papaya::HashMap::new()),
@@ -1287,7 +1289,7 @@ async fn test_subscribe_notified_via_gossip() {
             intern_keys: true,
             intern_max_keys: 0,
             max_peers: usize::MAX,
-            writer_idle_timeout: Duration::ZERO,
+            writer_timing: mycelium_core::writer::WriterTiming::with_idle(Duration::ZERO),
             peer_list_tx: tokio::sync::watch::channel(std::sync::Arc::from(Vec::<NodeId>::new())).0,
         };
         use crate::connection::handle_connection;

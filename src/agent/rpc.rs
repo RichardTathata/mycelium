@@ -143,10 +143,20 @@ pub struct RpcRequestRx {
 
 impl RpcRequestRx {
     /// Receives the next **verified** RPC request. Returns `None` when the agent shuts down.
+    ///
+    /// The shutdown arm is what makes that true (row B, post-360 hardening): this receiver's sender
+    /// lives in the node's handler table, which the receiver's own `Arc<TaskCtx>` keeps alive, so the
+    /// channel alone never closes — a serve loop over it, detached at start by every node
+    /// (`replica_sync::serve`), held the whole context after `shutdown()`.
     pub async fn recv(&mut self) -> Option<RpcRequest> {
+        let mut shutdown = self.ctx.shutdown_tx.subscribe();
         loop {
+            let next = tokio::select! { biased;
+                _ = shutdown.wait_for(|v| *v) => return None,
+                s = self.rx.recv() => s?,
+            };
             #[allow(unused_mut)] // mutated only when the provider check can attach a budget slot
-            let mut req = RpcRequest::from(self.rx.recv().await?);
+            let mut req = RpcRequest::from(next);
             match super::gateway_caller::verify(&self.ctx, &req) {
                 Ok(_) => {
                     // Closure plan C3: protected work is decided at this boundary, so every serve
@@ -442,5 +452,33 @@ mod tests {
 
         agent_a.shutdown().await;
         agent_b.shutdown().await;
+    }
+
+    /// Finding (26): `RpcRequestRx::recv` said it returns `None` at shutdown and did not — its
+    /// sender lives in the handler table, which the receiver's own `Arc<TaskCtx>` keeps alive, so
+    /// the channel never closed. `replica_sync::serve`, spawned by every node at start and detached,
+    /// therefore held the whole context after `shutdown()` and after the agent was dropped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stopped_agent_frees_its_task_context() {
+        let port = alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        let agent = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
+        agent.start().await.unwrap();
+        // A serve loop of the caller's own, the shape every companion uses.
+        let mut rx = agent.service().rpc_rx("leak.probe");
+        let serve = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let weak = Arc::downgrade(&agent.task_ctx);
+        agent.shutdown().await;
+        drop(agent);
+        tokio::time::timeout(Duration::from_secs(5), serve).await
+            .expect("rpc_rx must return None once the agent has shut down").unwrap();
+        let mut freed = false;
+        for _ in 0..100 {
+            if weak.upgrade().is_none() { freed = true; break; }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(freed, "after shutdown() and drop the TaskCtx must be freed; {} strong refs remain",
+                weak.strong_count());
     }
 }

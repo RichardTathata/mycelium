@@ -36,6 +36,9 @@ operator's working set.
 | `max_concurrent_bulk_handlers` | `64` | `GOSSIP_MAX_CONCURRENT_BULK_HANDLERS` | tasks |
 | `gossip_shards` | CPU count (≤16) | — | shards |
 | `writer_idle_timeout_secs` | `30` | `GOSSIP_WRITER_IDLE_TIMEOUT_SECS` | s |
+| `inbound_idle_timeout_secs` | `300` (must exceed `writer_idle_timeout_secs`; `0` = never) | `GOSSIP_INBOUND_IDLE_TIMEOUT_SECS` | s |
+| `handshake_timeout_ms` | `10_000` | `GOSSIP_HANDSHAKE_TIMEOUT_MS` | ms |
+| `peer_write_timeout_ms` | `30_000` | `GOSSIP_PEER_WRITE_TIMEOUT_MS` | ms |
 | `swim_failure_detector` | `true` | `GOSSIP_SWIM_FAILURE_DETECTOR` | bool |
 | `swim_udp_port` | same as `bind_port` | `GOSSIP_SWIM_UDP_PORT` | port |
 | `swim_probe_interval_ms` | `500` | `GOSSIP_SWIM_PROBE_INTERVAL_MS` | ms |
@@ -436,6 +439,9 @@ transport (v2 roadmap item) is the structural fix.  In the meantime:
 - Accept higher gossip diameter (3–4 hops) and raise TTL accordingly.
 - Enable `writer_idle_timeout_secs = 120` so idle connections to transient peers
   are reclaimed, preventing fd exhaustion.
+  Keep `inbound_idle_timeout_secs` above it (the default `300` is; `validate()` refuses
+  one at or below it): the reader closing a link before the writer does costs that
+  writer's next frame.
 
 ---
 

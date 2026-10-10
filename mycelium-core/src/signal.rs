@@ -20,7 +20,6 @@ use ahash::AHashSet;
 use bytes::Bytes;
 use papaya::HashMap as PapayaMap;
 use parking_lot::Mutex;
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
@@ -36,6 +35,21 @@ use tracing::warn;
 /// `signal_window_secs` at agent construction and is used for all runtime eviction.
 #[allow(dead_code)]
 pub const SENDER_LOG_WINDOW: Duration = Duration::from_secs(600);
+
+/// Most distinct signal kinds the sender log and the last-seen table hold at once (row B,
+/// post-360 hardening). A kind is chosen by whoever sends the frame, so without a bound a peer
+/// emitting random kinds grew both tables by one entry per kind, each kept for the whole
+/// `signal_window_secs`. Past the bound a **new** kind is not recorded — counted in
+/// `SystemStats::signal_log_kinds_refused` — unless this node has a handler registered for it;
+/// kinds already tracked keep being recorded. The GC trims kinds whose window has passed.
+pub const SIGNAL_LOG_MAX_KINDS: usize = 4096;
+
+/// Most distinct senders one kind's sender log holds (row B). The log keeps each sender's
+/// **latest** signal only — a quorum counts distinct senders, so earlier entries from the same
+/// sender never changed an answer — and past the bound the sender heard from longest ago is
+/// dropped. Worst case for the whole log: `SIGNAL_LOG_MAX_KINDS × SIGNAL_LOG_MAX_SENDERS_PER_KIND`
+/// entries, reached only by forged senders across forged kinds.
+pub const SIGNAL_LOG_MAX_SENDERS_PER_KIND: usize = 1024;
 
 /// Scope of a signal — determines which nodes **act** on it.
 ///
@@ -132,7 +146,12 @@ impl Boundary {
 /// Per-kind sender history shard type alias.
 /// `(sender, received_at)`. The *interval* is what the replay kernel owns — see
 /// `sim_seam::mono_elapsed`.
-type SenderLog = PapayaMap<Arc<str>, Arc<Mutex<VecDeque<(NodeId, Instant)>>>>;
+/// One kind's senders: each sender's **latest** signal, keyed by `NodeId::id_hash` (row B — a quorum
+/// counts distinct senders, so earlier entries from the same sender never changed an answer, and
+/// keeping one per sender is what lets the per-kind bound hold without a chatty sender pushing a
+/// quiet one out).
+type SenderEntries = ahash::AHashMap<u64, (NodeId, Instant)>;
+type SenderLog = PapayaMap<Arc<str>, Arc<Mutex<SenderEntries>>>;
 
 // ── SignalHandlers sub-types ──────────────────────────────────────────────────
 //
@@ -180,11 +199,13 @@ impl FilteredSender {
 /// snapshot in `deliver_to_handlers` is a single atomic refcount increment;
 /// the guard drops before the per-sender try_send loop.
 struct HandlerTable {
-    map: PapayaMap<Arc<str>, Arc<Vec<FilteredSender>>>,
+    map:   PapayaMap<Arc<str>, Arc<Vec<FilteredSender>>>,
+    /// Signals dropped to a full subscriber channel (row B).
+    drops: std::sync::atomic::AtomicU64,
 }
 
 impl HandlerTable {
-    fn new() -> Self { Self { map: PapayaMap::new() } }
+    fn new() -> Self { Self { map: PapayaMap::new(), drops: std::sync::atomic::AtomicU64::new(0) } }
 
     fn register_with_capacity(&self, kind: Arc<str>, cap: usize) -> mpsc::Receiver<Signal> {
         let (tx, rx) = mpsc::channel(cap);
@@ -230,15 +251,26 @@ impl HandlerTable {
         rx
     }
 
+    /// How full this kind's subscribers are, for admission and opacity: the **least** full open
+    /// subscriber's fill (row B, finding 25). It was the *most* full, so one subscriber that stopped
+    /// reading — an SSE client, a serve stream — held its kind at 1.0 and the boundary admitted
+    /// nothing of that kind for any subscriber on the node. A full subscriber now loses its own
+    /// copies (dropped and counted in `deliver_to_handlers`); the kind sheds only when *every*
+    /// subscriber is full, which is overload rather than one stalled reader.
     fn fill_ratio(&self, kind: &Arc<str>) -> f32 {
         let guard = self.map.pin();
         let Some(senders) = guard.get(kind.as_ref()) else { return 0.0 };
-        let mut max_ratio: f32 = 0.0;
+        let mut min_ratio: Option<f32> = None;
         for fs in senders.iter().filter(|fs| !fs.is_closed()) {
             let ratio = 1.0_f32 - fs.tx.capacity() as f32 / fs.tx.max_capacity() as f32;
-            if ratio > max_ratio { max_ratio = ratio; }
+            min_ratio = Some(min_ratio.map_or(ratio, |m| m.min(ratio)));
         }
-        max_ratio.min(1.0)
+        min_ratio.unwrap_or(0.0).clamp(0.0, 1.0)
+    }
+
+    /// Whether any subscriber is registered for `kind`.
+    fn has_kind(&self, kind: &str) -> bool {
+        self.map.pin().contains_key(kind)
     }
 
     /// Fans out a snapshot of senders for `signal.kind`. Sender-identity filters
@@ -263,6 +295,9 @@ impl HandlerTable {
             match crate::sim_seam::chan_try_send(SIGNAL_CHAN, &fs.tx, signal.clone()) {
                 crate::sim_seam::ChanVerdict::Sent => {}
                 crate::sim_seam::ChanVerdict::Full => {
+                    self.drops.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    #[cfg(feature = "metrics")]
+                    metrics::counter!("gossip_signal_handler_drops_total").increment(1);
                     warn!(
                         kind = %signal.kind,
                         "Signal handler channel full; signal dropped. \
@@ -299,6 +334,8 @@ struct SignalLog {
     last_seen:         PapayaMap<Arc<str>, Instant>,
     sender_log:        SenderLog,
     sender_log_window: Duration,
+    /// New kinds not tracked because the log was full (row B).
+    kinds_refused:     std::sync::atomic::AtomicU64,
 }
 
 impl SignalLog {
@@ -307,34 +344,63 @@ impl SignalLog {
             last_seen:  PapayaMap::new(),
             sender_log: PapayaMap::new(),
             sender_log_window,
+            kinds_refused: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
-    /// Records that `signal` was seen at `now`, updating both `last_seen` and
-    /// the sender history. Lazy retention prunes the deque front while the
-    /// oldest entry is older than `sender_log_window`.
-    fn record(&self, kind: &Arc<str>, sender: NodeId, now: Instant) {
-        self.last_seen.pin().insert(Arc::clone(kind), now);
-        let window = self.sender_log_window;
-        let arc = {
-            let guard = self.sender_log.pin();
-            if let Some(existing) = guard.get(kind.as_ref()) {
-                Arc::clone(existing)
-            } else {
-                let new_arc = Arc::new(Mutex::new(VecDeque::<(NodeId, Instant)>::new()));
-                let mut result: Option<Arc<Mutex<VecDeque<_>>>> = None;
-                guard.compute(Arc::clone(kind), |existing| match existing {
-                    Some((_, arc)) => { result = Some(Arc::clone(arc)); papaya::Operation::Abort(()) }
-                    None => { result = Some(Arc::clone(&new_arc)); papaya::Operation::Insert(Arc::clone(&new_arc)) }
-                });
-                result.expect("papaya compute always sets result via Abort or Insert")
-            }
-        };
-        let mut log = arc.lock();
-        while log.front().map(|(_, t)| crate::sim_seam::mono_elapsed(t) >= window).unwrap_or(false) {
-            log.pop_front();
+    /// The per-kind entry for `kind`, creating it when the log has room — or when `admit_new`, which
+    /// [`SignalHandlers::deliver`] sets for a kind this node has a handler for. `None` = not tracked
+    /// (counted in `kinds_refused`). The bound is soft by the number of concurrent first sightings.
+    fn entries_for(&self, kind: &Arc<str>, admit_new: bool) -> Option<Arc<Mutex<SenderEntries>>> {
+        let guard = self.sender_log.pin();
+        if let Some(existing) = guard.get(kind.as_ref()) {
+            return Some(Arc::clone(existing));
         }
-        log.push_back((sender, now));
+        if !admit_new && guard.len() >= SIGNAL_LOG_MAX_KINDS {
+            self.kinds_refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            #[cfg(feature = "metrics")]
+            metrics::counter!("gossip_signal_log_kinds_refused_total").increment(1);
+            return None;
+        }
+        let new_arc = Arc::new(Mutex::new(SenderEntries::default()));
+        let mut result: Option<Arc<Mutex<SenderEntries>>> = None;
+        guard.compute(Arc::clone(kind), |existing| match existing {
+            Some((_, arc)) => { result = Some(Arc::clone(arc)); papaya::Operation::Abort(()) }
+            None => { result = Some(Arc::clone(&new_arc)); papaya::Operation::Insert(Arc::clone(&new_arc)) }
+        });
+        Some(result.expect("papaya compute always sets result via Abort or Insert"))
+    }
+
+    /// Records that a signal of `kind` from `sender` was seen at `now`, in both `last_seen` and the
+    /// sender history — when the kind is tracked (see [`entries_for`](Self::entries_for)). Keeps the
+    /// sender's latest entry only; past [`SIGNAL_LOG_MAX_SENDERS_PER_KIND`] it first drops entries
+    /// older than the window, then the sender heard from longest ago.
+    fn record(&self, kind: &Arc<str>, sender: NodeId, now: Instant, admit_new: bool) {
+        let Some(arc) = self.entries_for(kind, admit_new) else { return };
+        {
+            let seen = self.last_seen.pin();
+            if admit_new || seen.contains_key(kind.as_ref()) || seen.len() < SIGNAL_LOG_MAX_KINDS {
+                seen.insert(Arc::clone(kind), now);
+            }
+        }
+        let window = self.sender_log_window;
+        let mut log = arc.lock();
+        log.insert(sender.id_hash(), (sender, now));
+        if log.len() > SIGNAL_LOG_MAX_SENDERS_PER_KIND {
+            log.retain(|_, (_, t)| crate::sim_seam::mono_elapsed(t) < window);
+            while log.len() > SIGNAL_LOG_MAX_SENDERS_PER_KIND {
+                let oldest = log.iter()
+                    .min_by(|a, b| {
+                        if crate::sim_seam::mono_before(&a.1.1, &b.1.1) { std::cmp::Ordering::Less }
+                        else { std::cmp::Ordering::Greater }
+                    })
+                    .map(|(h, _)| *h);
+                match oldest {
+                    Some(h) => { log.remove(&h); }
+                    None => break,
+                }
+            }
+        }
     }
 
     fn last_signal(&self, kind: &str) -> Option<Instant> {
@@ -344,11 +410,13 @@ impl SignalLog {
     fn quorum(&self, kind: &str, min_senders: usize, window: Duration) -> bool {
         let Some(arc) = self.sender_log.pin().get(kind).map(Arc::clone) else { return false };
         let log = arc.lock();
-        let mut distinct: AHashSet<u64> = AHashSet::with_capacity(min_senders + 1);
-        for (sender, received_at) in log.iter() {
+        // One entry per sender (keyed by `id_hash`), so a count of fresh entries is a count of
+        // distinct senders.
+        let mut distinct = 0usize;
+        for (_, received_at) in log.values() {
             if crate::sim_seam::mono_elapsed(received_at) > window { continue; }
-            distinct.insert(sender.id_hash());
-            if distinct.len() >= min_senders { return true; }
+            distinct += 1;
+            if distinct >= min_senders { return true; }
         }
         false
     }
@@ -362,13 +430,12 @@ impl SignalLog {
     ) -> bool {
         let Some(arc) = self.sender_log.pin().get(kind).map(Arc::clone) else { return false };
         let log = arc.lock();
-        let mut distinct: AHashSet<u64> = AHashSet::with_capacity(min_senders + 1);
-        for (sender, received_at) in log.iter() {
+        let mut distinct = 0usize;
+        for (hash, (_, received_at)) in log.iter() {
             if crate::sim_seam::mono_elapsed(received_at) > window { continue; }
-            let hash = sender.id_hash();
-            if !member_hashes.contains(&hash) { continue; }
-            distinct.insert(hash);
-            if distinct.len() >= min_senders { return true; }
+            if !member_hashes.contains(hash) { continue; }
+            distinct += 1;
+            if distinct >= min_senders { return true; }
         }
         false
     }
@@ -380,33 +447,32 @@ impl SignalLog {
         let received_at = Instant::now()
             .checked_sub(Duration::from_millis(age_ms))
             .unwrap_or_else(Instant::now);
-        let guard = self.sender_log.pin();
-        let arc = if let Some(existing) = guard.get(kind.as_ref()) {
-            Arc::clone(existing)
-        } else {
-            let new_arc = Arc::new(Mutex::new(VecDeque::<(NodeId, Instant)>::new()));
-            let mut result: Option<Arc<Mutex<VecDeque<_>>>> = None;
-            guard.compute(Arc::clone(&kind), |existing| match existing {
-                Some((_, arc)) => { result = Some(Arc::clone(arc)); papaya::Operation::Abort(()) }
-                None => { result = Some(Arc::clone(&new_arc)); papaya::Operation::Insert(Arc::clone(&new_arc)) }
-            });
-            result.expect("papaya compute always sets result via Abort or Insert")
-        };
-        arc.lock().push_back((sender, received_at));
+        // Seeds come from `sys/quorum/` records, whose kinds were chosen by senders too: the same
+        // bound applies.
+        let Some(arc) = self.entries_for(&kind, false) else { return };
+        let mut log = arc.lock();
+        if log.len() >= SIGNAL_LOG_MAX_SENDERS_PER_KIND && !log.contains_key(&sender.id_hash()) {
+            return;
+        }
+        let newer = log.get(&sender.id_hash())
+            .is_none_or(|(_, held)| crate::sim_seam::mono_before(held, &received_at));
+        if newer {
+            log.insert(sender.id_hash(), (sender, received_at));
+        }
     }
 
-    /// Evicts sender_log entries older than `window`; drops kinds whose deque
-    /// becomes empty.
+    /// Evicts sender-log entries older than `window` and drops kinds whose log becomes empty. Under
+    /// pressure — the last-seen table at [`SIGNAL_LOG_MAX_KINDS`] — also drops last-seen stamps
+    /// older than `window`; below it `last_signal` keeps answering for any kind ever seen, as before.
     fn trim(&self, window: Duration) {
         let cutoff = Instant::now().checked_sub(window);
+        let fresh = |t: &Instant| cutoff.is_none_or(|c| crate::sim_seam::mono_before(&c, t));
         let to_remove: Vec<Arc<str>> = {
             let guard = self.sender_log.pin();
             guard.iter()
                 .filter_map(|(kind, arc)| {
                     let mut log = arc.lock();
-                    while cutoff.is_some_and(|c| log.front().map(|(_, t)| !crate::sim_seam::mono_before(&c, t)).unwrap_or(false)) {
-                        log.pop_front();
-                    }
+                    log.retain(|_, (_, t)| fresh(t));
                     if log.is_empty() { Some(Arc::clone(kind)) } else { None }
                 })
                 .collect()
@@ -414,6 +480,16 @@ impl SignalLog {
         let guard = self.sender_log.pin();
         for kind in to_remove {
             guard.remove(&kind);
+        }
+        let seen = self.last_seen.pin();
+        if seen.len() >= SIGNAL_LOG_MAX_KINDS {
+            let stale: Vec<Arc<str>> = seen.iter()
+                .filter(|(_, t)| !fresh(t))
+                .map(|(k, _)| Arc::clone(k))
+                .collect();
+            for k in stale {
+                seen.remove(&k);
+            }
         }
     }
 }
@@ -546,7 +622,10 @@ impl SignalHandlers {
         self.handlers.register_with_filter(kind, 256, trusted_arc)
     }
 
-    /// Returns the maximum fill ratio across all open senders for `kind`.
+    /// How full `kind`'s subscribers are: the **least** full open subscriber's fill, `0.0` with
+    /// none. One full subscriber loses its own signals (counted in [`handler_drops`](Self::handler_drops))
+    /// rather than holding the kind at 1.0 for every other subscriber (row B); the kind reads full
+    /// only when every subscriber is.
     pub fn fill_ratio(&self, kind: &Arc<str>) -> f32 {
         self.handlers.fill_ratio(kind)
     }
@@ -562,7 +641,10 @@ impl SignalHandlers {
     /// then delegates fan-out to [`HandlerTable`].
     pub fn deliver(&self, signal: &Signal) {
         let now = Instant::now();
-        self.log.record(&signal.kind, signal.sender.clone(), now);
+        // A kind this node subscribes to is always tracked; a kind only a sender chose is tracked
+        // while the log has room (row B).
+        let subscribed = self.handlers.has_kind(&signal.kind);
+        self.log.record(&signal.kind, signal.sender.clone(), now, subscribed);
         if self.suppression.is_suppressed_at(&signal.kind, now) {
             #[cfg(feature = "metrics")]
             metrics::counter!("gossip_signals_rejected_total").increment(1);
@@ -571,6 +653,26 @@ impl SignalHandlers {
         #[cfg(feature = "metrics")]
         metrics::counter!("gossip_signals_delivered_total", "kind" => signal.kind.to_string()).increment(1);
         self.handlers.deliver_to_handlers(signal);
+    }
+
+    /// Distinct kinds the sender log and last-seen table hold (the larger of the two).
+    pub fn log_kinds_tracked(&self) -> usize {
+        self.log.sender_log.pin().len().max(self.log.last_seen.pin().len())
+    }
+
+    /// Entries the sender log holds for `kind`.
+    pub fn log_entries(&self, kind: &str) -> usize {
+        self.log.sender_log.pin().get(kind).map_or(0, |a| a.lock().len())
+    }
+
+    /// Signals dropped because a subscriber's channel was full, summed over every subscriber.
+    pub fn handler_drops(&self) -> u64 {
+        self.handlers.drops.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// New kinds the sender log declined to track because it held [`SIGNAL_LOG_MAX_KINDS`].
+    pub fn log_kinds_refused(&self) -> u64 {
+        self.log.kinds_refused.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Returns when this node last admitted a signal of `kind`, or `None` if never.
@@ -1354,5 +1456,110 @@ mod load_state_tests {
         // NaN clamps to 0 (not propagated).
         let enc = encode_load_state(&LoadState { fill_ratio: f32::NAN, is_opaque: false, written_at_ms: 1 });
         assert_eq!(decode_load_state(&enc).expect("decode").fill_ratio, 0.0, "NaN fill_ratio must decode to 0");
+    }
+}
+
+#[cfg(test)]
+mod bound_tests {
+    //! Row B (post-360 hardening): the sender log is bounded per sender-chosen kind, and a full
+    //! subscriber loses its own signals instead of vetoing its kind for everyone.
+    use super::*;
+    use crate::node_id::NodeId;
+    use bytes::Bytes;
+    use std::time::Duration;
+
+    fn id(p: u16) -> NodeId { NodeId::new("127.0.0.1", p).unwrap() }
+
+    fn sig(kind: &str, sender: NodeId) -> Signal {
+        Signal {
+            kind: Arc::from(kind), scope: SignalScope::Cluster,
+            payload: Bytes::from_static(b"x"), sender, nonce: 0,
+        }
+    }
+
+    #[test]
+    fn the_signal_log_stays_bounded_under_random_kinds() {
+        let h = SignalHandlers::new(Duration::from_secs(600));
+        for i in 0..SIGNAL_LOG_MAX_KINDS * 3 {
+            h.deliver(&sig(&format!("rand.{i}"), id(1)));
+        }
+        assert!(
+            h.log_kinds_tracked() <= SIGNAL_LOG_MAX_KINDS,
+            "{} kinds tracked after {} random kinds; the bound is {SIGNAL_LOG_MAX_KINDS}",
+            h.log_kinds_tracked(), SIGNAL_LOG_MAX_KINDS * 3,
+        );
+        assert!(h.log_kinds_refused() >= (SIGNAL_LOG_MAX_KINDS * 2) as u64, "refusals are counted");
+    }
+
+    #[test]
+    fn one_kind_stays_bounded_under_random_senders() {
+        let h = SignalHandlers::new(Duration::from_secs(600));
+        for p in 0..(SIGNAL_LOG_MAX_SENDERS_PER_KIND * 3) as u16 {
+            h.deliver(&sig("one.kind", id(1 + p)));
+        }
+        assert!(
+            h.log_entries("one.kind") <= SIGNAL_LOG_MAX_SENDERS_PER_KIND,
+            "{} entries for one kind; the bound is {SIGNAL_LOG_MAX_SENDERS_PER_KIND}",
+            h.log_entries("one.kind"),
+        );
+    }
+
+    /// The per-kind bound must not cost a quorum its answer: a sender repeating itself keeps one
+    /// entry, so it cannot push a quieter sender out.
+    #[test]
+    fn a_repeating_sender_does_not_push_a_quieter_one_out() {
+        let h = SignalHandlers::new(Duration::from_secs(600));
+        h.deliver(&sig("hb", id(1)));
+        for _ in 0..SIGNAL_LOG_MAX_SENDERS_PER_KIND * 4 {
+            h.deliver(&sig("hb", id(2)));
+        }
+        assert!(h.quorum("hb", 2, Duration::from_secs(60)), "both senders still count");
+        assert!(h.log_entries("hb") <= 2, "one entry per sender");
+    }
+
+    /// A kind this node subscribes to is tracked even when random kinds have filled the log.
+    #[test]
+    fn a_subscribed_kind_is_tracked_when_the_log_is_full() {
+        let h = SignalHandlers::new(Duration::from_secs(600));
+        for i in 0..SIGNAL_LOG_MAX_KINDS + 10 {
+            h.deliver(&sig(&format!("rand.{i}"), id(1)));
+        }
+        let _rx = h.register(Arc::from("mine"));
+        h.deliver(&sig("mine", id(7)));
+        assert!(h.quorum("mine", 1, Duration::from_secs(60)));
+        assert!(h.last_signal("mine").is_some());
+    }
+
+    /// Finding (25): `fill_ratio` was the MAX over open subscribers, so one subscriber that stopped
+    /// reading drove its kind's fill to 1.0 and the boundary admitted nothing of that kind — for
+    /// every other subscriber on the node.
+    #[test]
+    fn a_stalled_subscriber_does_not_veto_its_kind() {
+        let h = SignalHandlers::new(Duration::from_secs(600));
+        let kind: Arc<str> = Arc::from("busy");
+        let _stalled = h.register(Arc::clone(&kind));
+        let mut reading = h.register(Arc::clone(&kind));
+        for _ in 0..300 {
+            h.deliver(&sig("busy", id(1)));
+            while reading.try_recv().is_ok() {}
+        }
+        assert!(
+            h.fill_ratio(&kind) < 0.5,
+            "a reading subscriber has room, so the kind is not overloaded; fill = {}",
+            h.fill_ratio(&kind),
+        );
+        assert!(h.handler_drops() >= 300 - 256, "the stalled subscriber's losses are counted");
+    }
+
+    /// Genuine overload still sheds: when every subscriber of a kind is full, the kind is full.
+    #[test]
+    fn a_kind_whose_only_subscriber_is_full_still_sheds() {
+        let h = SignalHandlers::new(Duration::from_secs(600));
+        let kind: Arc<str> = Arc::from("solo");
+        let _rx = h.register_with_capacity(Arc::clone(&kind), 4);
+        for _ in 0..4 {
+            h.deliver(&sig("solo", id(1)));
+        }
+        assert_eq!(h.fill_ratio(&kind), 1.0);
     }
 }

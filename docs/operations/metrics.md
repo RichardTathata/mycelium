@@ -45,11 +45,15 @@ The hot-path layer-I/II counters and gauges from `mycelium-core`. The
 | `gossip_wal_appends_refused_total` | counter | — | appends refused by a poisoned WAL writer (no WAL record; a caller awaiting an ack was told `failed`) | rising while `wal_append_failures_total` is flat = the repairing snapshot keeps failing too; read its `warn` line |
 | `gossip_kv_deletes_total` | counter | — | KV deletes (tombstones) applied | — |
 | `gossip_anti_entropy_rounds_total` | counter | — | Merkle anti-entropy reconciliation rounds run | flat-lining while peers are up = anti-entropy stalled |
+| `gossip_anti_entropy_replies_skipped_total` | counter | — | `StateRequest`s not answered because this node's reply to the same peer was still in flight — at most one per peer (2.32, row B; mirrors `SystemStats::anti_entropy_replies_skipped`) | rising for one peer = that peer accepts and does not read; its own anti-entropy tick asks again |
+| `gossip_inbound_connections_timed_out_total` | counter | — | inbound gossip connections closed because the TLS handshake or first frame missed `handshake_timeout_ms`, or the connection was silent for `inbound_idle_timeout_secs` (2.32, row B; mirrors `SystemStats::inbound_connections_timed_out`) | a burst = sockets that connect and never speak; a steady rate with healthy peers = `inbound_idle_timeout_secs` not above the fleet's `writer_idle_timeout_secs` |
 | `gossip_messages_received_total` | counter | — | gossip frames received from peers | zero on a node that should have peers = isolation/partition |
 | `gossip_frames_dropped_total` | counter | — | inbound frames dropped (backpressure, oversize `FrameTooLarge`, or reconnect) | sustained growth = raise `GOSSIP_WRITER_CHANNEL_DEPTH` ([tuning.md](tuning.md)); mirrors `/stats` `dropped_frames` |
 | `gossip_signals_emitted_total` | counter | `scope` | signals emitted, by admission scope | — |
 | `gossip_signals_delivered_total` | counter | `kind` | signals delivered to a local subscriber, by kind | — |
 | `gossip_signals_rejected_total` | counter | — | signals rejected (admission scope / load shedding) | a rising rate = admission or opacity is suppressing signals |
+| `gossip_signal_handler_drops_total` | counter | — | signals dropped because a local subscriber's channel was full — that subscriber's own loss (2.32, row B; mirrors `SystemStats::signal_handler_drops`). Since 2.32 a full subscriber no longer holds its kind's admission fill at 1.0 for every other subscriber | rising = an SSE client, serve stream or `signal_rx` loop is not reading; the others of its kind are unaffected |
+| `gossip_signal_log_kinds_refused_total` | counter | — | new signal kinds the sender log declined to track because it held `SIGNAL_LOG_MAX_KINDS` (4096) kinds; kinds with a local handler are always tracked (2.32, row B; mirrors `SystemStats::signal_log_kinds_refused`) | any value = some sender is inventing signal kinds |
 | `gossip_rpc_latency_ms` | histogram | — | request→response RPC latency (ms) | use `histogram_quantile(0.99, …_bucket)`; p99 climbing = peers slow/opaque |
 
 ## Emergent / diagnosis

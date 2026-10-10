@@ -430,6 +430,30 @@ pub struct SystemStats {
     /// sender passes the claim and is not counted. The check closes the accidental case — a stray or
     /// late reply from another node — not a forger who knows both the nonce and the target.
     pub rpc_reply_sender_mismatches: u64,
+
+    /// Cumulative inbound gossip connections this node closed because a bound elapsed (row B,
+    /// post-360 hardening): the TLS handshake and first frame did not arrive within
+    /// `handshake_timeout_ms`, or an established connection was silent for
+    /// `inbound_idle_timeout_secs`. Each returned its `max_connections` permit. A steady rate with
+    /// healthy peers suggests `inbound_idle_timeout_secs` is not above the fleet's
+    /// `writer_idle_timeout_secs`; a burst names sockets that connect and never speak.
+    pub inbound_connections_timed_out: u64,
+
+    /// Cumulative `StateRequest`s this node did not answer because its anti-entropy reply to the
+    /// same peer was still in flight — queued for, or being written to, that peer (row B). At most
+    /// one reply per peer is in flight; the requester asks again on its next anti-entropy tick.
+    /// Rising for one peer means that peer is not reading.
+    pub anti_entropy_replies_skipped: u64,
+
+    /// Cumulative signals dropped because a local subscriber's channel was full — the subscriber's
+    /// own loss (row B). Since 2.32 a full subscriber no longer vetoes admission of its kind for every
+    /// other subscriber; it drops its own copies, counted here.
+    pub signal_handler_drops: u64,
+
+    /// Cumulative new signal kinds the sender log declined to track because it already held
+    /// [`SIGNAL_LOG_MAX_KINDS`](mycelium_core::signal::SIGNAL_LOG_MAX_KINDS) kinds (row B). Kinds
+    /// with a local handler are always tracked. Non-zero means some sender is inventing kinds.
+    pub signal_log_kinds_refused: u64,
 }
 
 /// The in-flight RPC/bulk correlation map: nonce → (the node the call was sent to, the waiting
@@ -1028,6 +1052,7 @@ impl GossipAgent {
             kv_state:        Arc::clone(&kv_state),
             wal:             std::sync::OnceLock::new(),
             sys_namespace_violations: Arc::new(AtomicU64::new(0)),
+            transport_bounds: Arc::default(),
             tls: std::sync::OnceLock::new(),
             peer_keys: Arc::new(papaya::HashMap::new()),
             peer_anchor_keys: Arc::new(papaya::HashMap::new()),
@@ -1564,7 +1589,7 @@ impl GossipAgent {
 
         let ctx   = Arc::clone(&self.task_ctx);
         let tasks = Arc::new(papaya::HashMap::<String, a2a::A2aTask>::new());
-        a2a::spawn_cleanup(Arc::clone(&tasks));
+        a2a::spawn_cleanup(Arc::clone(&tasks), self.task_ctx.shutdown_tx.subscribe());
         let router = a2a::a2a_router_full(ctx, tasks);
         self.with_http_routes(router);
         self

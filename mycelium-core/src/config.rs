@@ -748,6 +748,33 @@ pub struct GossipConfig {
     /// socket forever. 30 s comfortably exceeds the 10 s default health-check
     /// interval, so actively-pinged (fan-out) writers stay warm while idle ones close.
     pub writer_idle_timeout_secs: u64,
+    /// Milliseconds a gossip connection may take to become useful, in both directions (row B,
+    /// post-360 hardening, 2026-10-10). **Inbound:** the TLS handshake and the first frame after it
+    /// must arrive within this bound, or the socket is closed and its `max_connections` permit
+    /// returned — before this bound `max_connections` idle sockets that never spoke held every
+    /// permit forever, and no peer could connect. **Outbound:** the writer's TCP connect plus its
+    /// TLS handshake; past it the attempt fails like a refused connect (reconnect backoff).
+    ///
+    /// A healthy peer's writer connects lazily *on* a frame and writes it at once, so the first
+    /// frame follows the handshake by microseconds; the default leaves two orders of magnitude.
+    /// Validated `1..=600_000`. Default `10_000`. Env: `GOSSIP_HANDSHAKE_TIMEOUT_MS`.
+    pub handshake_timeout_ms: u64,
+    /// Seconds an established inbound gossip connection may stay silent before this node closes it
+    /// (row B). The peer's writer reconnects on its next frame. Bounds how long a socket that spoke
+    /// once can hold a `max_connections` permit.
+    ///
+    /// Must exceed the fleet's `writer_idle_timeout_secs` (validated when both are non-zero): a peer
+    /// writer closes its own idle connection first, so a healthy link never meets this bound — a
+    /// connection the *reader* closes costs the writer's next frame. `0` = never close (the
+    /// pre-2.32 behaviour). Default `300`. Env: `GOSSIP_INBOUND_IDLE_TIMEOUT_SECS`.
+    pub inbound_idle_timeout_secs: u64,
+    /// Milliseconds the outbound writer may spend writing one frame, or flushing, to a peer (row B).
+    /// Past it the connection is treated as failed — frames queued behind it are dropped during the
+    /// reconnect backoff, as on any write failure — so a peer that accepts and never reads cannot
+    /// park the writer, its channel, or the anti-entropy replies queued for it. Shutdown and
+    /// eviction now also interrupt a writer mid-write. Validated `1..=600_000`. Default `30_000`
+    /// (a 10 MB frame at ~350 kB/s). Env: `GOSSIP_PEER_WRITE_TIMEOUT_MS`.
+    pub peer_write_timeout_ms: u64,
     /// When `true`, gossip shards apply scope-aware forwarding for Signal frames:
     /// Group-scoped signals are forwarded only to known group members (plus up to
     /// `epidemic_extra_peers` random non-members for epidemic coverage), and
@@ -1259,6 +1286,9 @@ impl Default for GossipConfig {
             swim_gossip_updates: 12,
             swim_suspicion_timeout_ms: 4000,
             writer_idle_timeout_secs: 30,
+            handshake_timeout_ms: 10_000,
+            inbound_idle_timeout_secs: 300,
+            peer_write_timeout_ms: 30_000,
             group_aware_forwarding: true,
             epidemic_extra_peers:   3,
             health_check_max_jitter_ms: 0,
@@ -1566,6 +1596,28 @@ impl GossipConfig {
                 reason: "cannot be zero".into(),
             });
         }
+        for (field, v) in [("handshake_timeout_ms", self.handshake_timeout_ms),
+                           ("peer_write_timeout_ms", self.peer_write_timeout_ms)] {
+            if v == 0 || v > 600_000 {
+                return Err(GossipError::InvalidField {
+                    field,
+                    reason: format!("must be in 1..=600000 ms, got {v}"),
+                });
+            }
+        }
+        if self.inbound_idle_timeout_secs != 0
+            && self.writer_idle_timeout_secs != 0
+            && self.inbound_idle_timeout_secs <= self.writer_idle_timeout_secs
+        {
+            return Err(GossipError::InvalidField {
+                field: "inbound_idle_timeout_secs",
+                reason: format!(
+                    "must exceed writer_idle_timeout_secs ({}) so a peer's writer closes an idle \
+                     link before this node does, got {}",
+                    self.writer_idle_timeout_secs, self.inbound_idle_timeout_secs,
+                ),
+            });
+        }
         if self.max_seen_entries == 0 {
             return Err(GossipError::InvalidField {
                 field: "max_seen_entries",
@@ -1808,6 +1860,15 @@ impl GossipConfig {
         }
         if let Ok(v) = env::var("GOSSIP_WRITER_IDLE_TIMEOUT_SECS") {
             self.writer_idle_timeout_secs = v.parse().map_err(GossipError::Parse)?;
+        }
+        if let Ok(v) = env::var("GOSSIP_HANDSHAKE_TIMEOUT_MS") {
+            self.handshake_timeout_ms = v.parse().map_err(GossipError::Parse)?;
+        }
+        if let Ok(v) = env::var("GOSSIP_INBOUND_IDLE_TIMEOUT_SECS") {
+            self.inbound_idle_timeout_secs = v.parse().map_err(GossipError::Parse)?;
+        }
+        if let Ok(v) = env::var("GOSSIP_PEER_WRITE_TIMEOUT_MS") {
+            self.peer_write_timeout_ms = v.parse().map_err(GossipError::Parse)?;
         }
         if let Ok(v) = env::var("GOSSIP_MAX_ACTIVE_CONNECTIONS") {
             self.max_active_connections = v.parse().map_err(GossipError::Parse)?;

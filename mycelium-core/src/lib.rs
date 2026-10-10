@@ -29,6 +29,7 @@ pub mod kv_handle;
 pub mod kv_persist;
 pub mod locality;
 pub mod mesh_handle;
+pub mod bounds;
 pub mod erasure;
 pub mod node_id;
 pub mod ops;

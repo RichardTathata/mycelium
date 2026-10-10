@@ -143,9 +143,22 @@ pub(super) async fn run_listener_task(mut listener: TcpListener, lctx: ListenerC
                             Ok(permit) => {
                                 let ctx = conn.clone();
                                 let tls = tls.clone();
+                                let handshake = Duration::from_millis(ctx.task_ctx.config.handshake_timeout_ms);
                                 conn_set.spawn(async move {
                                     let _permit = permit;
-                                    let gs = tls_accept(socket, &tls).await;
+                                    // Row B: the handshake is bounded. Before, a socket that
+                                    // connected and never completed TLS held its permit for as
+                                    // long as it stayed open, and `max_connections` of them
+                                    // closed the node to every peer. A real-socket deadline,
+                                    // outside the replay kernel like the socket (inventory §2.4).
+                                    let gs = match time::timeout(handshake, tls_accept(socket, &tls)).await {
+                                        Ok(r) => r,
+                                        Err(_) => {
+                                            ctx.task_ctx.transport_bounds.count_inbound_timeout();
+                                            debug!("TLS accept from {} timed out after {:?} (handshake_timeout_ms)", peer_addr, handshake);
+                                            return;
+                                        }
+                                    };
                                     match gs {
                                         Ok(gs) => {
                                             if let Err(e) = handle_connection(gs, peer_addr, ctx).await {
@@ -204,7 +217,7 @@ pub(super) struct GossipShardContext {
     pub(super) peer_localities: Arc<papaya::HashMap<NodeId, LocalityPath>>,
     // policy knobs
     pub(super) backoff:                Duration,
-    pub(super) idle_timeout:           Duration,
+    pub(super) idle_timeout:           mycelium_core::writer::WriterTiming,
     pub(super) max_forwarding_peers:   usize,
     pub(super) group_aware_forwarding: bool,
     pub(super) epidemic_extra_peers:   usize,
@@ -550,7 +563,7 @@ pub(super) struct HealthMonitorContext {
     // policy knobs
     pub(super) interval_secs:            u64,
     pub(super) backoff:                  Duration,
-    pub(super) idle_timeout:             Duration,
+    pub(super) idle_timeout:             mycelium_core::writer::WriterTiming,
     pub(super) peer_eviction_intervals:  u64,
     pub(super) ping_peer_sample_size:    usize,
     pub(super) max_active_connections:   usize,

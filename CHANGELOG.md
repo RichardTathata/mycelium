@@ -162,6 +162,52 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `with_call_deadline(None)`; `Instance::invoke` is still synchronous, so an embedder that calls it from
   async code should move it to `spawn_blocking` as the serve loop now does — the co-op `catalog`,
   `catalog_viz` and `mcp_toolgrowth` demos now do, instantiation included.
+- **Core resource bounds: what one socket, peer or kind can hold** (post-360 hardening row B, 2026-10-10). Five
+  findings of the 360 review, each with a test seen failing on the unfixed code:
+  - **The accept path had no deadline.** A `max_connections` permit was taken before the TLS handshake and the
+    read loop waited on the first frame forever, so `max_connections` sockets that connect and say nothing
+    closed the node to every peer. The TLS accept, then the first frame, must each arrive within
+    `handshake_timeout_ms` (default 10 s), and an established connection silent for `inbound_idle_timeout_secs`
+    (default 300 s, must exceed `writer_idle_timeout_secs`; `0` = never) is closed. Seen failing first:
+    `idle_sockets_that_never_speak_are_closed_and_a_new_peer_connects` — *a socket that never spoke must be
+    closed after handshake_timeout_ms; got Err(Elapsed(()))*.
+  - **The outbound writer could be parked by a peer that accepts and never reads.** Connect + TLS are bounded by
+    `handshake_timeout_ms`, each write and the flush by `peer_write_timeout_ms` (default 30 s), and shutdown and
+    eviction now interrupt a blocked write (they were polled only between frames). Seen failing first:
+    `a_peer_that_never_reads_does_not_block_eviction` / `…_shutdown` — *an evicted writer blocked in a write to a
+    peer that never reads must still exit*; `a_stalled_write_times_out_and_the_queue_drains` — *left: 4034*.
+  - **Anti-entropy replies piled up behind a stalled peer**, one whole-store dump per reconnect (the cooldown is
+    per connection). A peer now has at most one reply in flight; a request while it is answered is skipped and
+    counted. Seen failing first: `a_peer_that_never_reads_gets_one_anti_entropy_reply_at_a_time` — *skipped = 0*.
+  - **One stalled subscriber vetoed its kind node-wide.** Admission rolled against the *most* full subscriber,
+    so an SSE client or serve stream that stopped reading held the kind at fill 1.0 and nothing of it was admitted
+    for anyone. The fill is now the *least* full open subscriber; a full one drops its own copies, counted.
+    Seen failing first: `a_stalled_subscriber_does_not_stop_admission_for_another` — *the reading subscriber got
+    228 of 600*; `a_stalled_subscriber_does_not_veto_its_kind` — *fill = 1*.
+  - **The signal log grew with every sender-chosen kind.** At most `SIGNAL_LOG_MAX_KINDS` (4096) kinds — a kind
+    with a local handler is always tracked — and one entry per sender per kind up to
+    `SIGNAL_LOG_MAX_SENDERS_PER_KIND` (1024), so a chatty sender no longer pushes a quiet one out of a quorum.
+    Seen failing first: `the_signal_log_stays_bounded_under_random_kinds` — *12288 kinds tracked after 12288
+    random kinds*; `one_kind_stays_bounded_under_random_senders` — *3072 entries for one kind*.
+  - **A stopped agent leaked its whole context.** `RpcRequestRx::recv` said it returns `None` at shutdown and did
+    not (its sender lives in the handler table its own `Arc<TaskCtx>` keeps alive), so `replica_sync::serve`,
+    detached by every node, and `serve_artifacts` held the `TaskCtx` forever; the A2A cleanup ticker never
+    stopped either. Seen failing first: `a_stopped_agent_frees_its_task_context` — *rpc_rx must return None once
+    the agent has shut down: Elapsed(())*.
+
+  Four counters, on `SystemStats` and as metrics: `inbound_connections_timed_out`, `anti_entropy_replies_skipped`,
+  `signal_handler_drops`, `signal_log_kinds_refused`. **Not bounded:** connections per source (a plaintext mesh
+  is open to whoever reaches the port), and `sys/quorum/` evidence keys, which nothing collects. **Upgrade
+  notes:** `GossipConfig` gained `handshake_timeout_ms`, `inbound_idle_timeout_secs`, `peer_write_timeout_ms`
+  and `SystemStats` four fields (an exhaustive struct literal breaks; `..Default::default()` is unaffected);
+  `validate()` refuses `inbound_idle_timeout_secs` at or below a non-zero `writer_idle_timeout_secs`, so a
+  config that raised `writer_idle_timeout_secs` to 300 s or more must raise the inbound bound with it (or set it
+  to `0`); `mycelium_core::writer::{run_peer_writer, get_or_spawn_writer, request_state}` take a `WriterTiming`
+  where they took the idle `Duration`, and `ConnContext::writer_idle_timeout` is `writer_timing`; a fleet whose
+  writers keep idle links open past 300 s (`writer_idle_timeout_secs = 0`) sees the reader close them and the
+  writer's next frame lost — set `inbound_idle_timeout_secs = 0` there; `SignalHandlers::fill_ratio` is the
+  least-full subscriber, so opacity hints and local emit shedding read the same; the `bytes` requirement is
+  `1.9` (`Bytes::from_owner`).
 - **The SDKs reach a gateway over TLS** (`mycelium-py` **0.2.9**, `mycelium-ts` **0.2.3**,
   `langgraph-checkpoint-mycelium` **0.3.2**). Every client built its base URL as `http://{host}:{port}` — eight
   Python handles, five TypeScript clients and the checkpointer; only `A2aClient` took a full URL — so a gateway
