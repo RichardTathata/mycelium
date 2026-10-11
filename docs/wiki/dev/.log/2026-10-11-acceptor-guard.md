@@ -50,6 +50,16 @@
   seen failing first: A promised ballot 2 after the withholding), `cross_propose_inner` reports `groups.len()`; (6)
   one bounded notice set per kind (`Notice::{Persist, Adopt, Empty}`), the adoption refusal counted on every refused
   view, and the forged-copy case named (one slot withheld at once; liveness, within the trust model).
+- **The confirming review of 77e91933** (two changes): (1) the compare read memory outside `acceptor_records`, so a
+  listener promise at `b''` landing between the read and the repair write left the disk saying less than an ack that was
+  out — `repair_own_record` now re-reads memory under the lock and merges again (`merge_records`, which also clamps
+  `promised` to the acceptance it carries); row 56 names the connection task as a caller;
+  `the_repair_merges_the_memory_it_finds_under_the_lock` (seen failing first: the stored record said `p+4`, not `p+9`).
+  (2) the rule keyed on `promised` only, so memory `{b to Y, none}` against the copy `{b to X, (b, vX)}` was not forgotten
+  and N would vote at `b` for Y's value after X's quorum counted its vote for vX — `forgotten()` now also fires on an
+  acceptance the copy carries at a ballot at or above memory's promise, unless the promise is the C2 floor sentinel;
+  `a_forgotten_acceptance_at_an_equal_ballot_withholds_the_slot` runs the review's trace (seen failing first: Y committed
+  vY at ballot 1).
 - `acceptor_guard` is gated on `consensus` like the memory it guards (the first gate chain's `--no-default-features` build
   and the wasm-host build caught it ungated); the refusal's text lives in `electorate.rs`, whose error enum is in every build.
 - Rule catalogue: `cons.acceptor_memory` rev 1 (the first consensus entry). Counters on `GET /gateway/stats`;

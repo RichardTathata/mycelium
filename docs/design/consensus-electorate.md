@@ -428,13 +428,18 @@ attempt it holds; the argument above then needs every other adopter of `k` to re
     `connection::apply_inbound` for every inbound copy of a key under a prefix the agent named — core reports, decides
     nothing), a peer's copy of this node's **own** acceptor record is compared with its memory for the slot,
     independently of what LWW made of it in the store. Memory never lowers (a promise only rises; `shrink_acceptor`
-    raises `promised` to the ended ballot), so a copy whose promised or accepted ballot is **above** memory is an
-    answer this node gave and no longer holds: the slot is withheld — no prepare answered, no vote cast, no proposal
+    raises `promised` to the ended ballot), so a copy whose promised ballot is **above** memory's, or whose acceptance
+    memory lacks at a ballot **at or above** memory's promise (memory `{b to Y, none}` against the copy `{b to X,
+    (b, vX)}` — a vote cast at `b` this node would cast again for another value; #605's confirming review), unless
+    memory's promise is the collector's floor (a collected slot's older acceptance-bearing copy at exactly `ended`), is
+    an answer this node gave and no longer holds: the slot is withheld — no prepare answered, no vote cast, no proposal
     made by this node, as acceptor or proposer — **until the next start**, counted on `acceptor_promises_forgotten`;
     re-checked at the top of every ballot and before the proposer's own vote, so a slot withheld mid-proposal ends it
     at the next step. **The disk is repaired at detection** (#605's review, finding 1): the merged record — the higher
     promise and whom it was promised to, the higher acceptance — is written to this node's own key under
-    `acceptor_records`, a Layer III write of a key the agent owns. Without it, a node that had already promised a ballot
+    `acceptor_records`, with memory **re-read and merged again under that lock** (a listener promise can land between
+    the compare and the write; the record must never say less than an answer that is out), a Layer III write of a key
+    the agent owns. Without it, a node that had already promised a ballot
     empty-handed before the copy arrived would have written `{promised}` with a fresh HLC and beaten the copy by LWW
     locally and fleet-wide, and the next start would read the empty-handed record. `persist_acceptor` writes nothing
     for a withheld slot, so no answer in flight lands over the merged record. A withheld slot never resumes without a

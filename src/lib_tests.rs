@@ -13214,3 +13214,99 @@ async fn a_slot_withheld_mid_proposal_ends_it_at_the_next_ballot() {
     assert!(mem.promised <= 1 && mem.accepted.is_none(), "no answer of A's own after the withholding: {mem:?}");
     for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
 }
+
+/// **The repair merges the memory it finds under the lock** (#605's confirming review, finding 1). The merged record
+/// is computed from a memory read outside `acceptor_records`; a listener promise at a higher ballot can land between
+/// that read and the write. Here B's memory is raised to `p+9` (a promise to another proposer, as the listener would
+/// make it) after the merge was computed from `p+4`, and the record written says `p+9` — never less than an answer
+/// that is out. Seen failing first (the re-read removed): the stored record said `p+4`.
+#[cfg(feature = "consensus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_repair_merges_the_memory_it_finds_under_the_lock() {
+    use crate::consensus::{accepted_key, decode_acceptor, prepare_slot, Accepted, AcceptorSlot, PrepareOutcome};
+    let _serial = ELECTORATE_MESHES.lock().await;
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let b = GossipAgent::new(id.clone(), electorate_cfg(port, vec![], true));
+    b.start().await.unwrap();
+    let _l = b.consensus().start_consensus_listener(ConsensusConfig::default());
+    b.mesh().join_group("solo");
+    assert!(matches!(b.consensus().group_propose("solo", "work/x", Bytes::from_static(b"own"), ConsensusConfig::default()).await,
+        ConsensusResult::Committed { .. }));
+    let slot: Arc<str> = Arc::from("work/x");
+    let p = b.task_ctx.consensus_accepted.pin().get(&slot).map(|s| s.promised).expect("B holds the slot");
+    // The merge as the connection task computed it from memory `p`, with the copy's acceptance at `p+4`.
+    let merged = AcceptorSlot { promised: p + 4, promised_to: Some(0xC0FFEE), accepted: Some((p + 4, Accepted::DigestOnly([7; 32]))) };
+    // The listener's promise lands in between: memory now says `p+9` to another proposer.
+    assert!(matches!(prepare_slot(&b.task_ctx.consensus_accepted, &slot, p + 9, 0xD1CE, 0), PrepareOutcome::Promised(_)));
+    crate::agent::acceptor_guard::repair_own_record(&b.task_ctx, "work/x", &merged);
+    let stored = b.kv().get(&accepted_key(&id, &slot)).and_then(|v| decode_acceptor(&v)).expect("the record was written");
+    assert_eq!((stored.promised, stored.promised_to, stored.accepted.as_ref().map(|(bl, a)| (*bl, a.digest()))),
+        (p + 9, Some(0xD1CE), Some((p + 4, [7; 32]))), "the record says what memory said under the lock: {stored:?}");
+    b.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// **A forgotten acceptance at an equal ballot withholds the slot** (#605's confirming review, finding 2 — its trace).
+/// Electorate {X, Y, N}; X decides vX at ballot 1 with N's vote (Y's listener down, Y never learns it and hears nothing
+/// from X). N restarts empty, never learning the decision nor its own record, and promises ballot 1 to Y empty-handed
+/// — set directly, as Y's prepare would leave it. Then N's own record `{1 to X, (1, vX)}` arrives: an acceptance at the
+/// promised ballot that N's memory lacks. N withholds the slot, so Y's proposal at ballot 1 gets no vote and times out.
+/// Seen failing first (the equal-ballot rule absent): Y committed vY at ballot 1 — two values at one ballot — with N's
+/// memory holding `(1, vY)`.
+#[cfg(all(feature = "consensus", feature = "test-frame-filter"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_forgotten_acceptance_at_an_equal_ballot_withholds_the_slot() {
+    use crate::consensus::{accepted_key, encode_acceptor, prepare_slot, Accepted, AcceptorSlot, PrepareOutcome};
+    use crate::store::FrameView;
+    let (mut agents, mut listeners, _serial) = electorate_mesh(3, |_| {}).await;
+    for n in &agents { n.mesh().join_group("council"); }
+    roster_converges(&agents, "council", &[&agents[0], &agents[1], &agents[2]]).await;
+    declare(&agents[0], "council", false).await.expect("a genesis of three");
+    epoch_converges(&agents, "council", 1).await;
+    let (x_id, y_id, n_id) = (agents[0].node_id().clone(), agents[1].node_id().clone(), agents[2].node_id().clone());
+    let names_slot = |key: &str| key.contains("work/x") || key.contains("work%2Fx");
+    // Y never learns the decision (nor the ballot key: it draws ballot 1) and hears nothing from X.
+    let x_hash = x_id.id_hash();
+    agents[1].task_ctx.kv_state.frame_filter.pin().insert(1, Arc::new(move |v: &FrameView<'_>| match v {
+        FrameView::Kv { key, .. } => names_slot(key),
+        FrameView::Signal { sender, .. } => *sender == x_hash,
+    }));
+    drop(listeners.remove(1)); // Y answers nothing while X decides
+    let cfg = ConsensusConfig { phase1_timeout: Duration::from_millis(1500), max_ballots: 1, ..ConsensusConfig::default() };
+    let r = agents[0].consensus().group_propose("council", "work/x", Bytes::from_static(b"vX"), cfg.clone()).await;
+    assert!(matches!(r, ConsensusResult::Committed { ballot: 1, .. }), "vX decided at ballot 1 by {{X, N}}: {r:?}");
+    poll_until(|| agents[2].task_ctx.consensus_accepted.pin().get("work/x").is_some_and(|s| s.accepted.is_some()), 10_000).await;
+    listeners.push(agents[1].consensus().start_consensus_listener(ConsensusConfig::default()));
+
+    // N restarts over an empty store, learning nothing about the slot — not even its own record.
+    drop(listeners.remove(1));
+    agents.remove(2).shutdown_with_timeout(Duration::from_secs(5)).await;
+    let _ = std::fs::remove_dir_all(std::env::temp_dir().join(format!("mycelium-electorate-{}", n_id.to_socket_addr().port())));
+    let n = GossipAgent::new(n_id.clone(), electorate_cfg(n_id.to_socket_addr().port(), vec![x_id.clone(), y_id.clone()], false));
+    n.task_ctx.kv_state.frame_filter.pin().insert(2, Arc::new(move |v: &FrameView<'_>| matches!(v, FrameView::Kv { key, .. } if names_slot(key))));
+    n.start().await.unwrap();
+    listeners.push(n.consensus().start_consensus_listener(ConsensusConfig::default()));
+    n.mesh().join_group("council");
+    agents.push(n);
+    let (x, y, n) = (&agents[0], &agents[1], &agents[2]);
+    roster_converges(&agents, "council", &[x, y, n]).await;
+    epoch_converges(std::slice::from_ref(n), "council", 1).await;
+    // N promised ballot 1 to Y empty-handed; then its own record from before the restart comes back.
+    let slot: Arc<str> = Arc::from("work/x");
+    assert!(matches!(prepare_slot(&n.task_ctx.consensus_accepted, &slot, 1, y_id.id_hash(), 0), PrepareOutcome::Promised(None)));
+    let copy = AcceptorSlot { promised: 1, promised_to: Some(x_hash), accepted: Some((1, Accepted::DigestOnly([9; 32]))) };
+    let upd = crate::framing::GossipUpdate {
+        nonce: 1, sender: x_hash, ttl: 1, is_tombstone: false, timestamp: 1,
+        key: Arc::from(accepted_key(&n_id, &slot).as_str()), value: encode_acceptor(&copy),
+    };
+    let before = crate::acceptor_promises_forgotten();
+    (n.task_ctx.inbound_observer.get().unwrap().on_inbound)(&upd);
+    assert_eq!(crate::acceptor_promises_forgotten() - before, 1, "an acceptance at the promised ballot that memory lacks is forgotten");
+    assert!(n.task_ctx.acceptor_withheld.pin().contains("work/x"));
+    // Y proposes at ballot 1: N withholds, so {Y} alone is no quorum.
+    let r = y.consensus().group_propose("council", "work/x", Bytes::from_static(b"vY"), cfg).await;
+    assert!(matches!(r, ConsensusResult::Timeout { .. }), "no second value at ballot 1: {r:?}");
+    assert!(n.task_ctx.consensus_accepted.pin().get("work/x").is_some_and(|s| s.accepted.is_none()), "N voted for nothing");
+    assert_ne!(y.consensus().consensus_get("work/x").as_deref(), Some(b"vY".as_slice()));
+    for a in &agents { a.shutdown_with_timeout(Duration::from_secs(5)).await; }
+}

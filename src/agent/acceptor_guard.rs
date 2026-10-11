@@ -54,7 +54,7 @@ use bytes::Bytes;
 
 use super::electorate::{genesis_slot, ElectorateDecl, ELECTORATE_SLOT_PREFIX};
 use super::TaskCtx;
-use crate::consensus::{accepted_key, consensus_ns, decode_acceptor, encode_acceptor, AcceptorMemory, AcceptorSlot};
+use crate::consensus::{accepted_key, consensus_ns, decode_acceptor, encode_acceptor, AcceptorMemory, AcceptorSlot, FLOOR_SENTINEL};
 use crate::node_id::NodeId;
 
 static PERSISTENCE_REFUSED: AtomicU64 = AtomicU64::new(0);
@@ -196,24 +196,45 @@ pub(crate) fn check_at_start(ctx: &TaskCtx) {
     for decl in top.values() { check_memory_for(ctx, decl); }
 }
 
+/// The ballot of a record's acceptance, `0` for none.
+fn accepted_ballot(s: &AcceptorSlot) -> u64 {
+    s.accepted.as_ref().map_or(0, |(b, _)| *b)
+}
+
+/// **The merge**, pure: the higher promise and whom it was promised to (an equal promise keeps `b`'s promisee — the
+/// callers pass memory, the later answer, as `b`), the higher acceptance — and `promised` never below the acceptance
+/// it carries (a malformed copy is clamped; accepting at a ballot is promising it).
+pub(crate) fn merge_records(a: &AcceptorSlot, b: &AcceptorSlot) -> AcceptorSlot {
+    let (pa, pb) = (accepted_ballot(a), accepted_ballot(b));
+    let accepted = if pa > pb { a.accepted.clone() } else { b.accepted.clone() };
+    let (promised, promised_to) = if a.promised > b.promised { (a.promised, a.promised_to) } else { (b.promised, b.promised_to) };
+    let floor = accepted_ballot(&AcceptorSlot { promised: 0, promised_to: None, accepted: accepted.clone() });
+    AcceptorSlot { promised: promised.max(floor), promised_to, accepted }
+}
+
+/// **The rule**: is `copy` — a peer's copy of this node's own record — an answer this node gave and does not hold?
+/// Memory never lowers, so a promise above memory's is forgotten; and an acceptance the copy carries that memory
+/// does not — at a ballot at or above memory's promise — is forgotten too (#605's confirming review, finding 2: memory
+/// `{b to Y, none}` against copy `{b to X, (b, vX)}` is a vote at `b` this node cast and would cast again for another
+/// value), **unless** memory's promise is the collector's floor (`FLOOR_SENTINEL`): a collected slot legitimately has an
+/// older acceptance-bearing copy at exactly its ended ballot.
+fn forgotten(copy: &AcceptorSlot, held: &AcceptorSlot) -> bool {
+    if copy.promised > held.promised { return true; }
+    let (ca, ha) = (accepted_ballot(copy), accepted_ballot(held));
+    ca > ha && ca >= held.promised && held.promised_to != Some(FLOOR_SENTINEL)
+}
+
 /// Detection 3, over the leaf state: a peer's copy of this node's own record for `slot` against its memory. On
-/// detection the slot is withheld and the **merged** record — the higher promise (and whom it was promised to), the
-/// higher acceptance — is returned for [`repair_own_record`] to write; `None` otherwise.
+/// detection the slot is withheld and the **merged** record ([`merge_records`]) is returned for [`repair_own_record`]
+/// to write; `None` otherwise.
 fn compare_own_record(
     memory: &AcceptorMemory, withheld: &papaya::HashSet<Arc<str>>, slot: &str, value: &Bytes,
 ) -> Option<AcceptorSlot> {
     let copy = decode_acceptor(value)?;
     let held = memory.pin().get(slot).cloned().unwrap_or_default();
-    let copy_accepted = copy.accepted.as_ref().map_or(0, |(b, _)| *b);
-    let held_accepted = held.accepted.as_ref().map_or(0, |(b, _)| *b);
-    // Memory never lowers: a copy at or below it is one this node wrote and still holds (or a shrunk record's
-    // floor). Above it is an answer this node gave and does not hold.
-    if copy.promised <= held.promised && copy_accepted <= held.promised { return None; }
-    let merged = AcceptorSlot {
-        promised: copy.promised.max(held.promised),
-        promised_to: if copy.promised >= held.promised { copy.promised_to } else { held.promised_to },
-        accepted: if copy_accepted >= held_accepted { copy.accepted.clone() } else { held.accepted.clone() },
-    };
+    if !forgotten(&copy, &held) { return None; }
+    let copy_accepted = accepted_ballot(&copy);
+    let merged = merge_records(&copy, &held);
     if withheld.pin().insert(Arc::from(slot)) {
         PROMISES_FORGOTTEN.fetch_add(1, Ordering::Relaxed);
         #[cfg(feature = "metrics")]
@@ -227,16 +248,21 @@ fn compare_own_record(
     Some(merged)
 }
 
-/// **Repairs this node's own durable record** for a withheld slot (#605's review, finding 1): writes `merged` to
-/// `sys/consensus-accepted/{me}/{slot}` with a fresh HLC — applied, gossiped, handed to the WAL — under
-/// `acceptor_records`, the lock every writer of this node's acceptor records takes (lock-order row 56; held across one
-/// synchronous store apply, never an `await`). A Layer III write of a key this node owns, so the next start's
-/// `prewarm_accepted` reads the forgotten promise and acceptance back even where this node's own empty-handed write had
-/// won LWW over the copy. Memory is left as it is: the slot stays withheld until that start.
+/// **Repairs this node's own durable record** for a withheld slot (#605's review, finding 1): writes the merged record
+/// to `sys/consensus-accepted/{me}/{slot}` with a fresh HLC — applied, gossiped, handed to the WAL — under
+/// `acceptor_records`, the lock every writer of this node's acceptor records takes (lock-order row 56; a leaf hold
+/// across one synchronous store apply, never an `await`). **Memory is re-read under the lock and merged again**
+/// (the confirming review's finding 1): `merged` was computed from a read outside it, and a listener promise at a
+/// higher ballot can land — and its record be written and its ack sent — between that read and this write; the record
+/// written here must not say less than any answer that is out. A Layer III write of a key this node owns, so the next
+/// start's `prewarm_accepted` reads the forgotten promise and acceptance back even where this node's own empty-handed
+/// write had won LWW over the copy. Memory itself is left as it is: the slot stays withheld until that start.
 pub(crate) fn repair_own_record(ctx: &Arc<TaskCtx>, slot: &str, merged: &AcceptorSlot) {
     let engine = crate::agent::helpers::make_consensus_engine_ctx(ctx, false, false, 0, None);
     let _records = ctx.acceptor_records.lock().unwrap_or_else(|e| e.into_inner());
-    let upd = engine.kv_set_returning(accepted_key(&ctx.node_id, slot), encode_acceptor(merged));
+    let now = ctx.consensus_accepted.pin().get(slot).cloned().unwrap_or_default();
+    let record = merge_records(merged, &now);
+    let upd = engine.kv_set_returning(accepted_key(&ctx.node_id, slot), encode_acceptor(&record));
     engine.wal_try(&upd);
 }
 
@@ -320,9 +346,9 @@ mod tests {
         assert_eq!((merged.promised, merged.promised_to, merged.accepted.as_ref().map(|(b, _)| *b)), (6, Some(7), Some(4)));
         assert!(compare_own_record(&memory, &withheld, "b", &copy(6, None)).is_some(), "the record is merged again; the slot was withheld already");
         assert_eq!(acceptor_promises_forgotten() - before, 1, "once per slot");
-        memory.pin().insert(Arc::from("c"), AcceptorSlot { promised: 2, promised_to: Some(1), accepted: None });
+        memory.pin().insert(Arc::from("c"), AcceptorSlot { promised: 2, promised_to: Some(FLOOR_SENTINEL), accepted: None });
         assert!(compare_own_record(&memory, &withheld, "c", &copy(2, Some(2))).is_none());
-        assert!(!withheld.pin().contains("c"), "an acceptance at the promised ballot is within memory (a shrunk record)");
+        assert!(!withheld.pin().contains("c"), "an acceptance at a shrunk record's floor is one the collector shed");
         let merged = compare_own_record(&memory, &withheld, "c", &copy(3, Some(3))).expect("an acceptance (and its promise) above memory is forgotten");
         assert_eq!((merged.promised, merged.accepted.as_ref().map(|(b, _)| *b)), (3, Some(3)), "the copy's acceptance is the higher one");
         assert!(withheld.pin().contains("c"));
@@ -330,5 +356,27 @@ mod tests {
         assert!(withheld.pin().contains("d"), "an empty memory is below any promise");
         assert!(compare_own_record(&memory, &withheld, "e", &Bytes::from_static(b"garbage")).is_none());
         assert!(!withheld.pin().contains("e"), "a copy that does not decode is not compared");
+    }
+
+    /// **A forgotten acceptance at an equal ballot** (the confirming review's finding 2): memory `{b to Y, none}`
+    /// against the copy `{b to X, (b, vX)}` is a vote this node cast at `b` and would cast again for Y's value — forgotten;
+    /// the same copy against the collector's floor `{b, FLOOR_SENTINEL, none}` is a collected slot's legitimate older
+    /// record — not. And the merge never leaves `promised` below the acceptance it carries.
+    #[test]
+    fn an_acceptance_at_the_promised_ballot_is_forgotten_unless_the_promise_is_the_collection_floor() {
+        let held = AcceptorSlot { promised: 4, promised_to: Some(0xEE), accepted: None };
+        let copy = AcceptorSlot { promised: 4, promised_to: Some(0xAA), accepted: Some((4, Accepted::DigestOnly([3; 32]))) };
+        assert!(forgotten(&copy, &held), "an acceptance at the promised ballot that memory lacks");
+        let floor = AcceptorSlot { promised: 4, promised_to: Some(FLOOR_SENTINEL), accepted: None };
+        assert!(!forgotten(&copy, &floor), "a collected slot's floor legitimately has an older acceptance-bearing copy");
+        let below = AcceptorSlot { promised: 3, promised_to: Some(0xAA), accepted: Some((3, Accepted::DigestOnly([3; 32]))) };
+        assert!(!forgotten(&below, &held), "an acceptance below the promise is one memory may have shed");
+        let same = AcceptorSlot { promised: 4, promised_to: Some(0xEE), accepted: Some((4, Accepted::DigestOnly([3; 32]))) };
+        assert!(!forgotten(&copy, &same), "an acceptance memory holds is nothing");
+        let merged = merge_records(&copy, &held);
+        assert_eq!((merged.promised, merged.promised_to, accepted_ballot(&merged)), (4, Some(0xEE), 4), "the merge keeps the later promisee and the acceptance");
+        let malformed = AcceptorSlot { promised: 1, promised_to: Some(1), accepted: Some((6, Accepted::DigestOnly([3; 32]))) };
+        assert_eq!(merge_records(&malformed, &held).promised, 6, "promised is clamped to the acceptance it carries");
+        assert!(forgotten(&malformed, &held));
     }
 }

@@ -34,7 +34,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   slot never resumes without a restart — but the disk is repaired at detection: the merged record (the higher
   promise, the higher acceptance) is written to the node's own key under `acceptor_records`, so the next start holds
   the forgotten answers even where the node's own empty-handed write had beaten the copy by LWW, and
-  `persist_acceptor` writes nothing for a withheld slot (#605's review). The withheld check is re-run per ballot and
+  `persist_acceptor` writes nothing for a withheld slot (#605's review); memory is re-read under the lock and merged
+  again before the write, and an acceptance the copy carries at a ballot at or above memory's promise is forgotten
+  too — a vote cast at `b` the node would cast again for another value — unless the promise is the collector's floor
+  (the confirming review). The withheld check is re-run per ballot and
   before the proposer's own vote; a cross-group timeout reports its real quorum; the once-only notices are one
   bounded set per kind, and the adoption refusal is counted on every refused view. Counters on `GET /gateway/stats`;
   `mycelium_acceptor_guard_total{event}`.
