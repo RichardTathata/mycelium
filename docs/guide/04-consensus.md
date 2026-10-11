@@ -216,7 +216,11 @@ follow-up, branch `fix/p2-migration`). Membership is fixed at genesis. What that
   at the acceptor's, and a committed electorate naming the node is not adopted — each counted on
   `electorate_persistence_refused`. Without persistence nothing would be on disk and the node would
   still answer (`persist_sync` reports "no promise was made"), so the hazard below would recur on
-  *every* restart, not only a reissue.
+  *every* restart, not only a reissue. **The declarer does not learn why** when *another* member lacks
+  persistence: that member answers nothing to the genesis, so the declaration retries and ends
+  `NotDecided` (a timeout, 409 `not_decided` at the gateway) — the reason is on the silent member's own
+  log and `electorate_persistence_refused` counter. Check every member's `[persistence]` before
+  declaring.
   Nothing checks that the store it reads is the one the member had: a node started under the old
   `NodeId` with an **empty or older** store starts with an empty or older memory, and can promise a
   ballot it had already promised past, or report no acceptance where it had accepted — a quorum that
@@ -241,7 +245,10 @@ follow-up, branch `fix/p2-migration`). Membership is fixed at genesis. What that
     once, at start, so the copy is not in the running acceptor until the next restart, and the node's
     first own answer overwrites it by LWW. What the arriving copy does do is **withhold the slot** when
     it holds more than the memory (above), so the node stops answering for it rather than contradicting
-    itself — restart it over the repaired store.
+    itself — restart it over the repaired store. The arriving copy also **repairs the record on disk**:
+    the node writes the merged record (the higher promise, the higher acceptance) to its own key, so the
+    next start reads the forgotten answers back even where the node's own newer write had beaten the
+    copy by LWW. Memory is not refreshed live — a withheld slot never resumes without a restart.
   - **Retire:** the directory is gone, or you cannot show it is the latest — put the `NodeId` on the
     removal ledger (`sys/membership/removed/`,
     [cert-rotation.md § Removing a member](../operations/cert-rotation.md)) and count the group one

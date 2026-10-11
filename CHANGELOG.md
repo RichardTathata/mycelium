@@ -31,7 +31,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `(2, v2)`** — two decided values); the electorate test harness now configures persistence, as a member must.
   **The limit, stated** (design §8.5, `what-is-proven.md`): the withholding needs the copy to arrive, and before
   the node answers a higher ballot for the slot — between a restart and the repair the hazard is open; a withheld
-  slot never resumes without a restart. Counters on `GET /gateway/stats`; `mycelium_acceptor_guard_total{event}`.
+  slot never resumes without a restart — but the disk is repaired at detection: the merged record (the higher
+  promise, the higher acceptance) is written to the node's own key under `acceptor_records`, so the next start holds
+  the forgotten answers even where the node's own empty-handed write had beaten the copy by LWW, and
+  `persist_acceptor` writes nothing for a withheld slot (#605's review). The withheld check is re-run per ballot and
+  before the proposer's own vote; a cross-group timeout reports its real quorum; the once-only notices are one
+  bounded set per kind, and the adoption refusal is counted on every refused view. Counters on `GET /gateway/stats`;
+  `mycelium_acceptor_guard_total{event}`.
   The module, its counters and the seam's installer exist only under `consensus` (a gateway-only build is untouched).
   **Upgrade notes:** an electorate member without `[persistence]` is now refused — configure it (it was never
   safe without); `ElectorateError` gained `PersistenceRequired` (`#[non_exhaustive]`, a `_` arm fails closed);

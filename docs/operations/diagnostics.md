@@ -451,7 +451,10 @@ these. **409 `electorate_stale`** — a member holds a later electorate than thi
 retry. **409 `membership_frozen`** from `/gateway/govern/electorate` — the roster differs from an adopted electorate.
 **409 `refused`** — a second default while one is held, or a door refusal. **409 `persistence_required`** — this
 node would be a member and has no `[persistence]`: configure it (an electorate member's promises must survive a
-restart; `mycelium::electorate_persistence_refused` counts every door's refusal). A rising
+restart; `mycelium::electorate_persistence_refused` counts every door's refusal). **409 `not_decided` on a genesis
+whose members all look live** — one of them may lack `[persistence]`: such a member answers nothing to a genesis and
+the declarer only times out; the refusal is on *that* member's log and its `electorate_persistence_refused` counter.
+A rising
 `mycelium_electorate_records_refused_total` means an electorate record arrived that did not come through consensus —
 a forgery, or a write by hand.
 
@@ -463,7 +466,9 @@ it, restore `{persistence.base_path}/{node_id}/kv/` at its latest state, or reti
 ([guide 04 § Changing an electorate's members](../guide/04-consensus.md)). A non-zero `acceptor_promises_forgotten`
 means a peer's copy of this node's own acceptor record carried a promise or acceptance the node had forgotten; the
 named slot is **withheld** — no answer, no vote, no proposal from this node — until the next start, which reads the
-repaired record. A proposal on a withheld slot ends `Timeout` (`mycelium_consensus_timeouts_total{reason="acceptor_withheld"}`).
+repaired record (the merged record is written to the node's own key at detection, so that start holds it). A peer
+writing a forged copy with a higher ballot trips the same wire (one slot, liveness; counted as a `sys/` namespace
+violation). A proposal on a withheld slot ends `Timeout` (`mycelium_consensus_timeouts_total{reason="acceptor_withheld"}`).
 
 ## An election was refused: `electorate_unavailable`
 

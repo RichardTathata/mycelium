@@ -29,7 +29,14 @@
 //!    **until the next start**, when `prewarm_accepted` reads the repaired record (the copy reached the store; an
 //!    orderly shutdown snapshots it, a crash before a snapshot may lose it and the next start detects it again). A
 //!    withheld slot never resumes without a restart: the memory that would make its answers safe is on disk, not in the
-//!    process, and refreshing it live would race the acceptor's own writes.
+//!    process, and refreshing it live would race the acceptor's own writes. **The disk is repaired at once**, though
+//!    (#605's review, finding 1): on detection the **merged** record — the higher promise, the higher acceptance — is
+//!    written to this node's own key under `acceptor_records` ([`repair_own_record`]), a Layer III write of a key the
+//!    agent owns, not a Layer I guard. Without it a node that had already promised a ballot empty-handed before the
+//!    copy arrived would have written `{promised}` with a fresh HLC, and its own write would beat the copy by LWW
+//!    locally and fleet-wide — the next start would read the empty-handed record and the forgotten acceptance would be
+//!    gone for good. `persist_acceptor` writes nothing for a withheld slot, so no answer in flight lands over the
+//!    merged record.
 //!
 //! **What this cannot see** (the limit, stated in §8.5 and `what-is-proven.md`): detection 3 needs the copy to arrive
 //! — a promise whose gossip reached no survivor is forgotten unseen; and it needs to arrive **before** the node answers
@@ -47,7 +54,7 @@ use bytes::Bytes;
 
 use super::electorate::{genesis_slot, ElectorateDecl, ELECTORATE_SLOT_PREFIX};
 use super::TaskCtx;
-use crate::consensus::{consensus_ns, decode_acceptor, AcceptorMemory};
+use crate::consensus::{accepted_key, consensus_ns, decode_acceptor, encode_acceptor, AcceptorMemory, AcceptorSlot};
 use crate::node_id::NodeId;
 
 static PERSISTENCE_REFUSED: AtomicU64 = AtomicU64::new(0);
@@ -74,14 +81,40 @@ pub fn acceptor_promises_forgotten() -> u64 {
 
 pub(crate) use super::electorate::PERSISTENCE_REQUIRED_DETAIL;
 
-/// Bound on the once-only notice set.
+/// Bound on each once-only notice set.
 const NOTICES_CAP: usize = 4096;
 
-/// `true` the first time `key` is noticed in this process (bounded: past the cap nothing is new).
-fn notice_once(notices: &papaya::HashSet<Arc<str>>, key: &str) -> bool {
-    let set = notices.pin();
+/// The once-only notices, one bounded set per kind (`TaskCtx::acceptor_notices`), so records of one kind — unverified
+/// committed records, say — cannot exhaust another kind's set and silence it (#605's review, finding 6).
+#[derive(Clone, Copy)]
+pub(crate) enum Notice {
+    /// A persistence refusal at a door (`persist:{group}/{epoch}:{site}`).
+    Persist = 0,
+    /// An adoption refused for want of persistence (`{group}/{epoch}`).
+    Adopt = 1,
+    /// An empty store for a committed genesis (`{group}`).
+    Empty = 2,
+}
+
+/// The notice sets' type: one bounded set per [`Notice`] kind.
+pub(crate) type NoticeSets = [papaya::HashSet<Arc<str>>; 3];
+
+/// A fresh [`NoticeSets`].
+pub(crate) fn notice_sets() -> NoticeSets {
+    [papaya::HashSet::new(), papaya::HashSet::new(), papaya::HashSet::new()]
+}
+
+/// `true` the first time `key` is noticed under `kind` in this process (bounded per kind: past the cap nothing is new).
+fn notice_once(notices: &NoticeSets, kind: Notice, key: &str) -> bool {
+    let set = notices[kind as usize].pin();
     if set.contains(key) || set.len() >= NOTICES_CAP { return false; }
     set.insert(Arc::from(key))
+}
+
+/// Whether `key` was noticed under `kind` (tests).
+#[cfg(test)]
+pub(crate) fn noticed(ctx: &TaskCtx, kind: Notice, key: &str) -> bool {
+    ctx.acceptor_notices[kind as usize].pin().contains(key)
 }
 
 /// Whether `decl` names this node and this node has no `[persistence]` — the condition every door refuses on.
@@ -94,20 +127,21 @@ pub(crate) fn note_persistence_refused(ctx: &TaskCtx, group: &str, epoch: u64, s
     PERSISTENCE_REFUSED.fetch_add(1, Ordering::Relaxed);
     #[cfg(feature = "metrics")]
     metrics::counter!("mycelium_acceptor_guard_total", "event" => "persistence_required").increment(1);
-    if notice_once(&ctx.acceptor_notices, &format!("persist:{group}/{epoch}:{site}")) {
+    if notice_once(&ctx.acceptor_notices, Notice::Persist, &format!("{group}/{epoch}:{site}")) {
         tracing::warn!(group, epoch, site, "electorate: refused — {PERSISTENCE_REQUIRED_DETAIL} \
             (see mycelium::electorate_persistence_refused)");
     }
 }
 
-/// The adoption half of detection 1: `true` when `electorate_view` must not adopt `decl` on this node. Counted once
-/// per record.
+/// The adoption half of detection 1: `true` when `electorate_view` must not adopt `decl` on this node. Counted on
+/// every refused view of the record (the counter does not depend on the notice — #605's review, finding 6); warned
+/// once per record.
 pub(crate) fn refuse_adoption_without_persistence(ctx: &TaskCtx, decl: &ElectorateDecl) -> bool {
     if !persistence_required(ctx, decl) { return false; }
-    if notice_once(&ctx.acceptor_notices, &format!("adopt:{}/{}", decl.group, decl.epoch)) {
-        PERSISTENCE_REFUSED.fetch_add(1, Ordering::Relaxed);
-        #[cfg(feature = "metrics")]
-        metrics::counter!("mycelium_acceptor_guard_total", "event" => "persistence_required").increment(1);
+    PERSISTENCE_REFUSED.fetch_add(1, Ordering::Relaxed);
+    #[cfg(feature = "metrics")]
+    metrics::counter!("mycelium_acceptor_guard_total", "event" => "persistence_required").increment(1);
+    if notice_once(&ctx.acceptor_notices, Notice::Adopt, &format!("{}/{}", decl.group, decl.epoch)) {
         tracing::warn!(group = %decl.group, epoch = decl.epoch, "electorate: not adopted — {PERSISTENCE_REQUIRED_DETAIL} \
             (see mycelium::electorate_persistence_refused)");
     }
@@ -120,11 +154,11 @@ fn holds(memory: &AcceptorMemory, slot: &str) -> bool {
 }
 
 /// Detection 2, over the leaf state (so the inbound observer can run it without the agent): warns once per group.
-fn check_memory(memory: &AcceptorMemory, notices: &papaya::HashSet<Arc<str>>, me: &NodeId, decl: &ElectorateDecl) {
+fn check_memory(memory: &AcceptorMemory, notices: &NoticeSets, me: &NodeId, decl: &ElectorateDecl) {
     if !decl.contains(me) { return; }
     let slot = genesis_slot(&decl.group, decl.epoch);
     if holds(memory, &slot) { return; }
-    if !notice_once(notices, &format!("empty:{}", decl.group)) { return; }
+    if !notice_once(notices, Notice::Empty, &decl.group) { return; }
     MEMORY_EMPTY.fetch_add(1, Ordering::Relaxed);
     #[cfg(feature = "metrics")]
     metrics::counter!("mycelium_acceptor_guard_total", "event" => "memory_empty").increment(1);
@@ -162,23 +196,48 @@ pub(crate) fn check_at_start(ctx: &TaskCtx) {
     for decl in top.values() { check_memory_for(ctx, decl); }
 }
 
-/// Detection 3, over the leaf state: a peer's copy of this node's own record for `slot` against its memory.
-fn compare_own_record(memory: &AcceptorMemory, withheld: &papaya::HashSet<Arc<str>>, slot: &str, value: &Bytes) {
-    let Some(copy) = decode_acceptor(value) else { return };
+/// Detection 3, over the leaf state: a peer's copy of this node's own record for `slot` against its memory. On
+/// detection the slot is withheld and the **merged** record — the higher promise (and whom it was promised to), the
+/// higher acceptance — is returned for [`repair_own_record`] to write; `None` otherwise.
+fn compare_own_record(
+    memory: &AcceptorMemory, withheld: &papaya::HashSet<Arc<str>>, slot: &str, value: &Bytes,
+) -> Option<AcceptorSlot> {
+    let copy = decode_acceptor(value)?;
     let held = memory.pin().get(slot).cloned().unwrap_or_default();
     let copy_accepted = copy.accepted.as_ref().map_or(0, |(b, _)| *b);
+    let held_accepted = held.accepted.as_ref().map_or(0, |(b, _)| *b);
     // Memory never lowers: a copy at or below it is one this node wrote and still holds (or a shrunk record's
     // floor). Above it is an answer this node gave and does not hold.
-    if copy.promised <= held.promised && copy_accepted <= held.promised { return; }
-    if !withheld.pin().insert(Arc::from(slot)) { return; }
-    PROMISES_FORGOTTEN.fetch_add(1, Ordering::Relaxed);
-    #[cfg(feature = "metrics")]
-    metrics::counter!("mycelium_acceptor_guard_total", "event" => "promise_forgotten").increment(1);
-    tracing::warn!(slot, copy_promised = copy.promised, copy_accepted, held_promised = held.promised,
-        "consensus: a peer holds this node's own acceptor record with a promise or acceptance above this node's \
-         memory — an answer this node gave and has forgotten (a restart over an empty or older store). Withholding \
-         every answer for the slot until the next start, which reads the repaired record \
-         (see mycelium::acceptor_promises_forgotten)");
+    if copy.promised <= held.promised && copy_accepted <= held.promised { return None; }
+    let merged = AcceptorSlot {
+        promised: copy.promised.max(held.promised),
+        promised_to: if copy.promised >= held.promised { copy.promised_to } else { held.promised_to },
+        accepted: if copy_accepted >= held_accepted { copy.accepted.clone() } else { held.accepted.clone() },
+    };
+    if withheld.pin().insert(Arc::from(slot)) {
+        PROMISES_FORGOTTEN.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        metrics::counter!("mycelium_acceptor_guard_total", "event" => "promise_forgotten").increment(1);
+        tracing::warn!(slot, copy_promised = copy.promised, copy_accepted, held_promised = held.promised,
+            "consensus: a peer holds this node's own acceptor record with a promise or acceptance above this node's \
+             memory — an answer this node gave and has forgotten (a restart over an empty or older store). Withholding \
+             every answer for the slot until the next start, and writing the merged record so that start reads it \
+             (see mycelium::acceptor_promises_forgotten)");
+    }
+    Some(merged)
+}
+
+/// **Repairs this node's own durable record** for a withheld slot (#605's review, finding 1): writes `merged` to
+/// `sys/consensus-accepted/{me}/{slot}` with a fresh HLC — applied, gossiped, handed to the WAL — under
+/// `acceptor_records`, the lock every writer of this node's acceptor records takes (lock-order row 56; held across one
+/// synchronous store apply, never an `await`). A Layer III write of a key this node owns, so the next start's
+/// `prewarm_accepted` reads the forgotten promise and acceptance back even where this node's own empty-handed write had
+/// won LWW over the copy. Memory is left as it is: the slot stays withheld until that start.
+pub(crate) fn repair_own_record(ctx: &Arc<TaskCtx>, slot: &str, merged: &AcceptorSlot) {
+    let engine = crate::agent::helpers::make_consensus_engine_ctx(ctx, false, false, 0, None);
+    let _records = ctx.acceptor_records.lock().unwrap_or_else(|e| e.into_inner());
+    let upd = engine.kv_set_returning(accepted_key(&ctx.node_id, slot), encode_acceptor(merged));
+    engine.wal_try(&upd);
 }
 
 /// Whether this node withholds every answer for `slot` (detection 3). Read on every prepare and proposal; empty-set
@@ -188,22 +247,26 @@ pub(crate) fn withheld(ctx: &TaskCtx, slot: &str) -> bool {
     !set.is_empty() && set.contains(slot)
 }
 
-/// A proposer's outcome on a withheld slot: a timeout labelled `acceptor_withheld`, nothing sent.
-pub(crate) fn withheld_timeout(slot: Arc<str>, quorum_required: usize) -> crate::consensus::ConsensusResult {
+/// A proposer's outcome on a withheld slot: a timeout labelled `acceptor_withheld`, nothing more sent. Checked at the
+/// door, at the top of every ballot and before the accept-phase claim (#605's review, finding 5), so a slot withheld
+/// mid-proposal ends it at the next step; `ballots_tried` says how far it got.
+pub(crate) fn withheld_timeout(slot: Arc<str>, ballots_tried: u32, quorum_required: usize) -> crate::consensus::ConsensusResult {
     #[cfg(feature = "metrics")]
     metrics::counter!("mycelium_consensus_timeouts_total", "reason" => "acceptor_withheld").increment(1);
-    tracing::warn!(slot = %slot, "consensus: not proposing — this node withholds every answer for the slot since a \
-        forgotten promise was detected; restart it over the repaired store");
-    crate::consensus::ConsensusResult::Timeout { slot, ballots_tried: 0, votes_last_ballot: 0, quorum_required }
+    tracing::warn!(slot = %slot, ballots_tried, "consensus: not proposing — this node withholds every answer for the slot \
+        since a forgotten promise was detected; restart it over the repaired store");
+    crate::consensus::ConsensusResult::Timeout { slot, ballots_tried, votes_last_ballot: 0, quorum_required }
 }
 
 /// Installs detection 3 (and detection 2's gossip half) on the core's inbound seam, once, before any connection.
-/// The closure captures only leaf state — never the context — so a stopped agent is freed.
+/// The closure captures leaf state and a `Weak` context (for the repair write) — never a strong `Arc` to the context
+/// that holds it — so a stopped agent is freed.
 pub(crate) fn install(ctx: &Arc<TaskCtx>) {
     let me = ctx.node_id.clone();
     let memory = Arc::clone(&ctx.consensus_accepted);
     let withheld = Arc::clone(&ctx.acceptor_withheld);
     let notices = Arc::clone(&ctx.acceptor_notices);
+    let weak = Arc::downgrade(ctx);
     let own_prefix = format!("{}{me}/", mycelium_core::signal::kv_ns::CONSENSUS_ACCEPTED);
     let committed_prefix = format!("{}{ELECTORATE_SLOT_PREFIX}", consensus_ns::COMMITTED);
     let prefixes = vec![own_prefix.clone(), committed_prefix.clone()];
@@ -212,7 +275,10 @@ pub(crate) fn install(ctx: &Arc<TaskCtx>) {
         on_inbound: Arc::new(move |update| {
             if update.is_tombstone { return; }
             if let Some(slot) = update.key.strip_prefix(own_prefix.as_str()) {
-                compare_own_record(&memory, &withheld, slot, &update.value);
+                if let Some(merged) = compare_own_record(&memory, &withheld, slot, &update.value)
+                    && let Some(ctx) = weak.upgrade() {
+                        repair_own_record(&ctx, slot, &merged);
+                    }
             } else if update.key.starts_with(committed_prefix.as_str())
                 && let Some(decl) = decode_committed(&update.value) {
                     check_memory(&memory, &notices, &me, &decl);
@@ -242,24 +308,27 @@ mod tests {
         let memory: AcceptorMemory = papaya::HashMap::new();
         let withheld: papaya::HashSet<Arc<str>> = papaya::HashSet::new();
         let before = acceptor_promises_forgotten();
-        compare_own_record(&memory, &withheld, "a", &copy(0, None));
+        assert!(compare_own_record(&memory, &withheld, "a", &copy(0, None)).is_none());
         assert!(withheld.pin().is_empty(), "a record of nothing is nothing");
         memory.pin().insert(Arc::from("b"), AcceptorSlot { promised: 5, promised_to: Some(1), accepted: Some((4, Accepted::DigestOnly([1; 32]))) });
-        compare_own_record(&memory, &withheld, "b", &copy(5, Some(4)));
-        compare_own_record(&memory, &withheld, "b", &copy(3, Some(2)));
+        assert!(compare_own_record(&memory, &withheld, "b", &copy(5, Some(4))).is_none());
+        assert!(compare_own_record(&memory, &withheld, "b", &copy(3, Some(2))).is_none());
         assert!(withheld.pin().is_empty(), "a copy at or below memory is one this node wrote");
-        compare_own_record(&memory, &withheld, "b", &copy(6, None));
-        assert!(withheld.pin().contains("b"), "a promise above memory was forgotten");
-        compare_own_record(&memory, &withheld, "b", &copy(6, None));
+        // The merged record: the copy's higher promise (and promisee), memory's higher acceptance.
+        let merged = compare_own_record(&memory, &withheld, "b", &copy(6, None)).expect("a promise above memory was forgotten");
+        assert!(withheld.pin().contains("b"));
+        assert_eq!((merged.promised, merged.promised_to, merged.accepted.as_ref().map(|(b, _)| *b)), (6, Some(7), Some(4)));
+        assert!(compare_own_record(&memory, &withheld, "b", &copy(6, None)).is_some(), "the record is merged again; the slot was withheld already");
         assert_eq!(acceptor_promises_forgotten() - before, 1, "once per slot");
         memory.pin().insert(Arc::from("c"), AcceptorSlot { promised: 2, promised_to: Some(1), accepted: None });
-        compare_own_record(&memory, &withheld, "c", &copy(2, Some(2)));
+        assert!(compare_own_record(&memory, &withheld, "c", &copy(2, Some(2))).is_none());
         assert!(!withheld.pin().contains("c"), "an acceptance at the promised ballot is within memory (a shrunk record)");
-        compare_own_record(&memory, &withheld, "c", &copy(3, Some(3)));
-        assert!(withheld.pin().contains("c"), "an acceptance (and its promise) above memory is forgotten");
-        compare_own_record(&memory, &withheld, "d", &copy(1, None));
+        let merged = compare_own_record(&memory, &withheld, "c", &copy(3, Some(3))).expect("an acceptance (and its promise) above memory is forgotten");
+        assert_eq!((merged.promised, merged.accepted.as_ref().map(|(b, _)| *b)), (3, Some(3)), "the copy's acceptance is the higher one");
+        assert!(withheld.pin().contains("c"));
+        assert!(compare_own_record(&memory, &withheld, "d", &copy(1, None)).is_some());
         assert!(withheld.pin().contains("d"), "an empty memory is below any promise");
-        compare_own_record(&memory, &withheld, "e", &Bytes::from_static(b"garbage"));
+        assert!(compare_own_record(&memory, &withheld, "e", &Bytes::from_static(b"garbage")).is_none());
         assert!(!withheld.pin().contains("e"), "a copy that does not decode is not compared");
     }
 }

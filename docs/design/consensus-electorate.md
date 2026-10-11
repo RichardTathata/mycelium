@@ -430,10 +430,18 @@ attempt it holds; the argument above then needs every other adopter of `k` to re
     independently of what LWW made of it in the store. Memory never lowers (a promise only rises; `shrink_acceptor`
     raises `promised` to the ended ballot), so a copy whose promised or accepted ballot is **above** memory is an
     answer this node gave and no longer holds: the slot is withheld — no prepare answered, no vote cast, no proposal
-    made by this node, as acceptor or proposer — **until the next start**, counted on `acceptor_promises_forgotten`.
-    A withheld slot never resumes without a restart: the memory that would make its answers safe is on disk (the copy
-    reached the store; an orderly shutdown snapshots it, and a crash before a snapshot leaves the next start to detect
-    it again), and refreshing it live would race the acceptor's own writes.
+    made by this node, as acceptor or proposer — **until the next start**, counted on `acceptor_promises_forgotten`;
+    re-checked at the top of every ballot and before the proposer's own vote, so a slot withheld mid-proposal ends it
+    at the next step. **The disk is repaired at detection** (#605's review, finding 1): the merged record — the higher
+    promise and whom it was promised to, the higher acceptance — is written to this node's own key under
+    `acceptor_records`, a Layer III write of a key the agent owns. Without it, a node that had already promised a ballot
+    empty-handed before the copy arrived would have written `{promised}` with a fresh HLC and beaten the copy by LWW
+    locally and fleet-wide, and the next start would read the empty-handed record. `persist_acceptor` writes nothing
+    for a withheld slot, so no answer in flight lands over the merged record. A withheld slot never resumes without a
+    restart: memory is not refreshed live (that would race the acceptor's own writes); the start reads the merged record
+    (`a_forgotten_promise_repairs_the_record_so_the_next_start_holds_it`). The same wire is reachable by a forgery — a
+    peer writing a copy of this node's own record with a higher ballot withholds that one slot at once; liveness, one
+    slot, within the trusted-domain model, and the write is a counted `sys/` namespace violation.
 
   **What this cannot see, stated.** The third detection needs the copy to **arrive** — a promise whose gossip reached
   no survivor is forgotten unseen — and to arrive **before** this node answers a higher ballot for the slot: once it

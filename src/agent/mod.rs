@@ -634,9 +634,9 @@ pub(crate) struct TaskCtx {
     /// Lock-free; a pure insert, read on every prepare and proposal.
     #[cfg(feature = "consensus")]
     pub(crate) acceptor_withheld: Arc<papaya::HashSet<Arc<str>>>,
-    /// The acceptor guard's once-only notices (a warning per group or record, bounded) — `acceptor_guard`.
+    /// The acceptor guard's once-only notices (a warning per group or record), one bounded set per kind — `acceptor_guard`.
     #[cfg(feature = "consensus")]
-    pub(crate) acceptor_notices: Arc<papaya::HashSet<Arc<str>>>,
+    pub(crate) acceptor_notices: Arc<acceptor_guard::NoticeSets>,
     /// P2: the highest genesis epoch with a committed record per group, from the watched rescan of
     /// `consensus/committed/electorate/`.
     #[cfg(feature = "consensus")]
@@ -1234,7 +1234,7 @@ impl GossipAgent {
             #[cfg(feature = "consensus")]
             acceptor_withheld: Arc::new(papaya::HashSet::new()),
             #[cfg(feature = "consensus")]
-            acceptor_notices: Arc::new(papaya::HashSet::new()),
+            acceptor_notices: Arc::new(acceptor_guard::notice_sets()),
             #[cfg(feature = "consensus")]
             electorate_epochs_known: Arc::new(papaya::HashMap::new()),
             #[cfg(feature = "consensus")]

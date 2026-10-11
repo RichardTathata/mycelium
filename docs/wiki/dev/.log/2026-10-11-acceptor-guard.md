@@ -39,6 +39,17 @@
   a temp directory per port), as a member must; a restart over an empty store is `remove_dir_all` + the same config.
   A restarted member is reached again only once A's writer meets the dead socket at its next write and redials,
   then anti-entropy's next round — measured 15–25 s on a loaded host; the restart polls are bounded at 60 s.
+- **#605's adversarial review, same day** (mergeable with changes; six items, all taken): (1) the restart exit did not
+  repair where B had promised empty-handed first — its `{promised}` beat the copy by LWW — so detection now writes the
+  **merged** record to B's own key under `acceptor_records` (`repair_own_record`, via a `Weak<TaskCtx>` in the seam's
+  closure; `kv_set_returning` + `wal_try`; `persist_acceptor` writes nothing for a withheld slot, closing the in-flight
+  race), tested by `a_forgotten_promise_repairs_the_record_so_the_next_start_holds_it` (seen failing first: the store
+  kept `{p, (p, own)}`); (2) the persistence check runs before `certificate_holds`; (3) threat model row 530 reworded;
+  (4) guide 04 and diagnostics say the declarer only sees `NotDecided` when another member lacks persistence; (5) the
+  withheld check re-runs per ballot and before the proposer's own vote (`a_slot_withheld_mid_proposal_ends_it_at_the_next_ballot`,
+  seen failing first: A promised ballot 2 after the withholding), `cross_propose_inner` reports `groups.len()`; (6)
+  one bounded notice set per kind (`Notice::{Persist, Adopt, Empty}`), the adoption refusal counted on every refused
+  view, and the forged-copy case named (one slot withheld at once; liveness, within the trust model).
 - `acceptor_guard` is gated on `consensus` like the memory it guards (the first gate chain's `--no-default-features` build
   and the wasm-host build caught it ungated); the refusal's text lives in `electorate.rs`, whose error enum is in every build.
 - Rule catalogue: `cons.acceptor_memory` rev 1 (the first consensus entry). Counters on `GET /gateway/stats`;
