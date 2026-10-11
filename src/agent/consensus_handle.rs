@@ -887,7 +887,13 @@ mod tests {
         done()
     }
 
-    /// The tripwire on a node whose COMMIT queue is held `fill` full by a subscriber that never reads (0.0 = none).
+    /// The tripwire on a node with a second COMMIT subscriber that never reads, held `fill` full (0.0 = none).
+    ///
+    /// Before row B (2.32) admission rolled against the fullest subscriber, so this stalled subscriber shed the
+    /// listener's COMMITs too and the case exercised the tripwire under shedding. Since then a subscriber that
+    /// never reads loses only its own copies: this case now checks that a stalled co-subscriber does not keep a
+    /// forged COMMIT from the listener. Shedding itself — every worker of a kind full — is exercised directly by
+    /// `resource_bounds_tests::a_kind_whose_every_worker_is_full_sheds_while_a_tap_reads` (#602's review, finding 5).
     async fn tripwire_case(fill_to: f32) {
         use crate::consensus::{consensus_kind, encode_consensus_msg, ConsensusConfig, ConsensusMsg, ConsensusResult};
         use crate::signal::SignalScope;
@@ -906,9 +912,18 @@ mod tests {
         let kind: Arc<str> = Arc::from(consensus_kind::COMMIT);
         let _stalled = (fill_to > 0.0).then(|| a.task_ctx.signal_handlers.register_with_capacity(Arc::clone(&kind), 1000));
         let junk = ConsensusMsg::Commit { slot: Arc::from("stall/junk"), ballot: 1, value: Bytes::from_static(b"j") };
-        while a.task_ctx.signal_handlers.fill_ratio(&kind) < fill_to {
+        // The stalled subscriber's own depth, not the kind's fill: since row B (2.32) a subscriber that never
+        // reads no longer holds its kind's fill up while the listener's subscriber drains, so `fill_ratio` would
+        // never reach `fill_to` here and the loop would spin.
+        let stalled_len = || _stalled.as_ref().map_or(0, |r| r.len());
+        // Yield between emits so the listener and the gossip shard drain: shedding is for a kind whose every
+        // subscriber is full, so the stalled one fills while the others keep up.
+        for _ in 0..200_000 {
+            if (stalled_len() as f32) >= fill_to * 1000.0 { break; }
             let _ = a.mesh().emit(consensus_kind::COMMIT, SignalScope::Cluster, encode_consensus_msg(&junk));
+            tokio::task::yield_now().await;
         }
+        assert!((stalled_len() as f32) >= fill_to * 1000.0, "the stalled subscriber never filled to {fill_to}");
 
         // A forged COMMIT carrying a different value for the live slot: the tripwire fires and does not endorse it.
         // Local emits self-deliver; under load one emit may be shed, so it is repeated until the tripwire sees it.

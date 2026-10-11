@@ -176,6 +176,7 @@ check:
 	cargo clippy -p mycelium-core --lib --tests --features sim -- -D warnings  # the seams' OTHER arm
 	cargo build --examples --features tls,metrics,a2a,llm       # CI builds these; `--lib --tests` does not
 	./scripts/check-sim-seams.sh                                # no new nondeterminism outside the seams
+	./scripts/test-check-sim-seams.sh                           # …and it sees every timer-alias spelling (planted files)
 	./scripts/with-pyyaml.sh scripts/check-test-inventory.py    # every test requirement runs in some CI step, with its features (verification policy rule 3)
 	./scripts/with-pyyaml.sh scripts/test-check-test-inventory.py  # …and the check catches every bypass a review found
 	./scripts/with-pyyaml.sh scripts/check-example-matrix.py     # examples/README.md's CI column matches what CI executes, both ways

@@ -206,9 +206,13 @@ pub(crate) struct A2aState {
 
 // ── Public constructor ────────────────────────────────────────────────────────
 
-/// Spawns a background task that evicts A2A tasks older than 5 minutes.
-/// Call this once after creating the shared `tasks` map.
-pub(crate) fn spawn_cleanup(tasks: Arc<papaya::HashMap<String, A2aTask>>) {
+/// Spawns a background task that evicts A2A tasks older than 5 minutes, until the agent shuts
+/// down. Call this once after creating the shared `tasks` map. It ran forever before row B
+/// (post-360 hardening), holding the task map of a stopped agent.
+pub(crate) fn spawn_cleanup(
+    tasks: Arc<papaya::HashMap<String, A2aTask>>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
     tokio::spawn(async move {
         // Through the timer seam (item 6). Tokio's default missed-tick behaviour, as before.
         let mut interval = mycelium_core::sim_seam::interval_ms(
@@ -217,7 +221,10 @@ pub(crate) fn spawn_cleanup(tasks: Arc<papaya::HashMap<String, A2aTask>>) {
             tokio::time::MissedTickBehavior::Burst,
         );
         loop {
-            interval.tick().await;
+            tokio::select! { biased;
+                _ = shutdown.wait_for(|v| *v) => break,
+                _ = interval.tick() => {}
+            }
             evict_stale_tasks(&tasks, Instant::now());
         }
     });

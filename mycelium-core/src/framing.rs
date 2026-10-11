@@ -358,6 +358,9 @@ where
     Ok(())
 }
 
+/// Upfront reservation for a frame body; larger frames grow the buffer as their bytes arrive.
+const FRAME_INITIAL_RESERVE: usize = 64 * 1024;
+
 /// Reads one length-prefixed frame into `buf`, reusing its allocation.
 /// Returns [`FrameVersion`] so the caller can select the appropriate decoder.
 /// Accepts frames at both `WIRE_VERSION` and `PREV_WIRE_VERSION` to support
@@ -394,7 +397,11 @@ where
     };
     let payload_len = total - 1;
     buf.clear();
-    buf.reserve(payload_len);
+    // Reserve what a frame usually needs, not what the header claims (#602's re-review, finding 8): a
+    // five-byte header claiming 10 MB used to allocate 10 MB at once, held for as long as its sender
+    // trickled the body. Past this the buffer grows as bytes arrive (`BytesMut` doubles), so memory
+    // tracks what was received.
+    buf.reserve(payload_len.min(FRAME_INITIAL_RESERVE));
     // Fill exactly payload_len bytes. `limit()` constrains read_buf to the budget
     // so it cannot overshoot, and the spare_capacity_mut path avoids zero-init.
     {
@@ -1118,5 +1125,24 @@ mod prop_tests {
                 "oversized payload_len {} should exceed MAX_FRAME_BYTES {}", oversized_payload_len, MAX_FRAME_BYTES
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod frame_reserve_tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    /// #602's re-review, finding 8: a five-byte header claiming 10 MB made `read_frame` reserve the
+    /// whole 10 MB at once, held for as long as the sender trickles. The buffer grows as bytes arrive.
+    #[tokio::test]
+    async fn a_header_claiming_a_large_frame_does_not_reserve_it_upfront() {
+        let (mut tx, mut rx) = tokio::io::duplex(1024);
+        let total = (MAX_FRAME_BYTES as u32).to_be_bytes();
+        tx.write_all(&[total[0], total[1], total[2], total[3], WIRE_VERSION]).await.unwrap();
+        tx.write_all(&[0u8; 10]).await.unwrap();
+        let mut buf = BytesMut::new();
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), read_frame(&mut rx, &mut buf)).await;
+        assert!(buf.capacity() < 1024 * 1024, "reserved {} bytes for 15 received", buf.capacity());
     }
 }

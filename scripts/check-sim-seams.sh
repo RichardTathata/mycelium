@@ -115,7 +115,24 @@ alias_pattern() {
   # `\b`, so `std::time::Instant` and `tokio::time::sleep` are not matched a second time through it.
   # The bare `use tokio::time;` line itself is not counted — it enables nothing on its own.
   local time_aliases
-  time_aliases=$(grep -oE '^use tokio::time as [a-z_][a-z0-9_]*' "$file" 2>/dev/null | awk '{print $5}' || true)
+  # Every alias the module gets under, read from whole `use` statements (perl, so a statement that
+  # spans lines, nests groups or is `pub use` is one unit): `use tokio::time as X`, `time as X`
+  # anywhere inside a `use tokio::{…}` (one line, its own line, nested groups), and
+  # `time::{self as X, …}`. The grep version of this missed a grouped `time as ttime`, which hid
+  # `writer.rs`'s timer sites until #602's review (2026-10-10), and its first repair still missed
+  # `{time as tt, io}`, `time::{self as t}`, nested groups and `pub use` (the re-review); planted
+  # files for each form are checked by `scripts/test-check-sim-seams.sh`. A `std::{time as X}` alias
+  # is caught too, which is correct: `X::Instant` is the monotonic clock.
+  time_aliases=$(perl -0777 -ne '
+      while (/\b(?:pub(?:\([^)]*\))?\s+)?use\s+([^;]*);/gs) {
+        my $u = $1;
+        next unless $u =~ /\b(?:tokio|std)\b/;
+        while ($u =~ /\btime\s+as\s+(\w+)/g) { print "$1\n" }
+        while ($u =~ /\btime::\{([^}]*)\}/gs) {
+          my $g = $1;
+          while ($g =~ /\bself\s+as\s+(\w+)/g) { print "$1\n" }
+        }
+      }' "$file" 2>/dev/null || true)
   if grep -qE '^use tokio::time;|^use tokio::time::\{[[:space:]]*self|^use tokio::\{.*[[:space:],{]time([[:space:],}]|::\{[[:space:]]*self)|^[[:space:]]+time,[[:space:]]*$' "$file" 2>/dev/null; then
     time_aliases="$time_aliases"$'\n'"time"
   fi
@@ -160,6 +177,12 @@ generate() {
     fi
   done < <(scan_files)
 }
+
+if [ "${1:-}" = "--count" ]; then
+  # Count one file's forbidden sites as the gate would (used by scripts/test-check-sim-seams.sh).
+  count_in "$2"
+  exit 0
+fi
 
 if [ "${1:-}" = "--update" ]; then
   {

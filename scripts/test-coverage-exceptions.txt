@@ -13,6 +13,7 @@ rust tests/unique_id.rs::unique_id::unique_id_load_then_store_COLLIDES — broke
 rust src/lib.rs::mycelium_core::store::tests::apply_and_notify_throughput_smoke — perf smoke, meaningful only under --release on quiet hardware
 rust src/lib.rs::mycelium_tuple_space::store::tests::wal_throughput_smoke — perf smoke, meaningful only under --release on quiet hardware
 rust src/lib.rs::mycelium::swim_oracle_tests::swim_scale_oracle — heavy scale harness (minutes of CPU), run by hand
+rust src/lib.rs::mycelium::resource_bounds_tests::worst_case_chunk_apply_with_an_fsync_wal — a measurement (minutes of fsync), run by hand; its numbers are recorded in docs/reference/configuration.md beside peer_write_stall_timeout_ms
 rust src/lib.rs::mycelium::lib_tests::probe_constructing_an_agent_takes_milliseconds_not_a_minute — a wall-clock probe of first-launch page-in, which depends on the volume, not the code
 rust src/lib.rs::mycelium_core::persistence::durability_tests::regenerate_golden_fixture_fixint_v1 — writes the checked-in fixture; running it in CI would rewrite what the replay test checks
 

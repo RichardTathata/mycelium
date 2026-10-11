@@ -19,7 +19,7 @@ use std::{
     time::Duration,
 };
 use crate::stream::GossipStream;
-use tokio::{io::BufReader, sync::watch};
+use tokio::{io::{AsyncBufReadExt, BufReader}, sync::watch};
 use tracing::{error, warn};
 
 /// `sys/` sub-prefixes whose node-id segment immediately follows the prefix.
@@ -157,9 +157,9 @@ pub struct ConnContext {
     /// Cap on the peer table. Piggybacked peers are silently ignored once this
     /// is reached; bootstrap peers and direct senders are always admitted.
     pub max_peers:           usize,
-    /// Idle timeout forwarded to `get_or_spawn_writer` / `request_state`.
-    /// Zero means no timeout (default).
-    pub writer_idle_timeout: Duration,
+    /// Writer bounds forwarded to `get_or_spawn_writer` / `request_state`: idle timeout (zero
+    /// means none), connect and write timeouts (row B).
+    pub writer_timing: crate::writer::WriterTiming,
     /// Fan-out list publisher (same channel the health monitor feeds). A peer
     /// learned here must become sendable IMMEDIATELY: waiting for the health
     /// monitor's next tick left inbound-only nodes mute for live sends —
@@ -173,9 +173,10 @@ pub async fn handle_connection(
     peer_addr: SocketAddr,
     ctx: ConnContext,
 ) -> Result<(), GossipError> {
+
     let ConnContext {
         task_ctx, peers, shutdown, peer_writers, backoff, n_shards,
-        intern_keys, intern_max_keys, max_peers, writer_idle_timeout, peer_list_tx,
+        intern_keys, intern_max_keys, max_peers, writer_timing, peer_list_tx,
     } = ctx;
     let node_id         = task_ctx.node_id.clone();
     let gossip_txs      = Arc::clone(&task_ctx.gossip_txs);
@@ -188,7 +189,8 @@ pub async fn handle_connection(
     let sys_violations  = Arc::clone(&task_ctx.sys_namespace_violations);
     let wal             = task_ctx.wal.get().cloned();
     let tls             = task_ctx.tls.get().cloned();
-    let mut socket = BufReader::with_capacity(8_192, socket);
+    let mut socket = BufReader::with_capacity(8_192, crate::stall::StallGuard::new(socket));
+    let frame_progress = crate::stall::StallBound::read_from_config(&task_ctx.config);
     let mut shutdown_rx = shutdown.subscribe();
     // BytesMut: recv_buf.split().freeze() at TTL_OFFSET is O(1) for zero-copy forwarding.
     let mut recv_buf: BytesMut = BytesMut::with_capacity(2_048);
@@ -217,19 +219,78 @@ pub async fn handle_connection(
     let m7_enabled = task_ctx.config.rate_observation_enabled;
     let peer_key: std::sync::Arc<str> = std::sync::Arc::from(peer_addr.to_string());
     let mut sender_throttle: u64 = 0;
+    // Row B (post-360 hardening): how long the socket may stay silent. The first frame must arrive
+    // within `handshake_timeout_ms` — a peer's writer connects *on* a frame and sends it at once —
+    // and after that `inbound_idle_timeout_secs` (0 = never). Before this, a socket that connected
+    // and said nothing held its `max_connections` permit for as long as it stayed open.
+    let first_frame_bound = Duration::from_millis(task_ctx.config.handshake_timeout_ms);
+    let idle_bound = match task_ctx.config.inbound_idle_timeout_secs {
+        0 => None,
+        n => Some(Duration::from_secs(n)),
+    };
+    let mut spoke = false;
 
     loop {
+        // A large frame grew the buffer (doubling, up to ~16 MiB for a 10 MB frame); give it back
+        // before waiting on the next one rather than holding it for the connection's life (#602's
+        // round 3, Q4). Frames forwarded zero-copy were split off and own their bytes.
+        if recv_buf.capacity() > 1 << 20 {
+            recv_buf = BytesMut::with_capacity(2_048);
+        }
+        let silence_bound = if spoke { idle_bound } else { Some(first_frame_bound) };
+        // Two waits per frame (row B; #602's review, finding 1). First the frame's **first byte**,
+        // under the silence bound — `handshake_timeout_ms` for a connection's first frame,
+        // `inbound_idle_timeout_secs` after it. `fill_buf` consumes nothing, and `biased` keeps this
+        // off the hot path: a frame already buffered never arms a timer. Then the rest of the frame
+        // under the progress bound only, so a large frame on a slow link is read however long it
+        // takes as a whole, while a stall mid-frame is closed and counted apart from silence.
+        let arrived = tokio::select! { biased;
+            r = async { socket.fill_buf().await.map(|b| !b.is_empty()) } => match r {
+                Ok(true)  => true,
+                Ok(false) => break, // closed between frames
+                Err(e) if matches!(e.kind(),
+                    std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::BrokenPipe) => break,
+                Err(e) => { warn!("Read error from {}: {}", peer_addr, e); break; }
+            },
+            _ = shutdown_rx.wait_for(|v| *v) => break,
+            _ = async {
+                match silence_bound {
+                    // A real-socket deadline: outside the replay kernel's coverage, like the
+                    // socket it bounds (inventory §2.4, row B).
+                    Some(d) => tokio::time::sleep(d).await,
+                    None    => std::future::pending().await,
+                }
+            } => false,
+        };
+        if !arrived {
+            task_ctx.transport_bounds.count_inbound_timeout();
+            tracing::debug!(
+                from = %peer_addr, first_frame = !spoke,
+                "closing a silent inbound connection (handshake_timeout_ms / inbound_idle_timeout_secs)"
+            );
+            break;
+        }
+        socket.get_mut().arm(Some(frame_progress));
         // read_frame returns FrameVersion so we can select the right decoder.
         // The never-type of break expressions coerces to FrameVersion, allowing
         // break directly inside the select! arms.
         let frame_version: FrameVersion = tokio::select! { biased;
             result = read_frame(&mut socket, &mut recv_buf) => match result {
                 Ok(v)                              => v,
+                Err(GossipError::Io(e)) if crate::stall::is_stall(&e) => {
+                    task_ctx.transport_bounds.count_frame_stalled();
+                    tracing::debug!(from = %peer_addr, "closing an inbound connection stalled mid-frame: {e}");
+                    break;
+                }
                 Err(e) if is_connection_closed(&e) => break,
                 Err(e) => { warn!("Read error from {}: {}", peer_addr, e); break; }
             },
             _ = shutdown_rx.wait_for(|v| *v) => break,
         };
+        socket.get_mut().arm(None);
+
+        spoke = true;
 
         // Inbound rate limiting: drop frames from a flooding peer. The effective limit is the
         // tightest of the global per-peer limit (`max_inbound_frames_per_sec`, M9-hot) and the M7
@@ -417,14 +478,14 @@ pub async fn handle_connection(
                     });
                     if let Some(tx) = crate::writer::get_or_spawn_writer(
                         &sender, &peer_writers, task_ctx.hot.writer_depth(), backoff,
-                        writer_idle_timeout, &shutdown, &kv_state.dropped_frames, tls.clone(),
+                        &writer_timing, &shutdown, &kv_state.dropped_frames, tls.clone(),
                     ) {
                         // A dropped pong looks to the peer exactly like a dead node, so the drop
                         // is worth replaying rather than re-provoking.
                         let _ = crate::sim_seam::chan_try_send("writer/pong", &tx, pong);
                     }
                     let bucket_hashes = crate::store::store_bucket_hashes(&kv_state);
-                    request_state(&sender, &peer_writers, task_ctx.hot.writer_depth(), backoff, writer_idle_timeout, &shutdown, &node_id, &kv_state.hash_acc, &kv_state.dropped_frames, bucket_hashes, tls.clone());
+                    request_state(&sender, &peer_writers, task_ctx.hot.writer_depth(), backoff, &writer_timing, &shutdown, &node_id, &kv_state.hash_acc, &kv_state.dropped_frames, bucket_hashes, tls.clone());
                 }
             }
 
@@ -446,14 +507,23 @@ pub async fn handle_connection(
                     );
                     continue;
                 }
+                // Row B: at most one reply per peer in flight. The slot is held by every frame of
+                // the reply and released when the last is written or dropped, so a peer that does
+                // not read gets one dump, not one per reconnect (the cooldown above is
+                // per-connection). Claimed before the dump is built — building it is the cost.
+                let Some(slot) = task_ctx.transport_bounds.claim_reply(&sender) else {
+                    tracing::debug!("Anti-entropy reply to {} still in flight; StateRequest skipped", sender);
+                    continue;
+                };
                 // Anti-entropy fast-path: if the sender's store hash matches ours and is
                 // non-zero (zero = "no digest" sentinel from v7 peers), send an empty
                 // StateResponse to acknowledge we're alive without transferring entries.
                 let my_hash = store_hash_acc(&kv_state.hash_acc);
                 if their_hash != 0 && their_hash == my_hash {
-                    let data: Bytes = crate::codec::wire_to_bytes(
-                        &WireMessage::StateResponse { entries: vec![] });
-                    if let Some(tx) = get_or_spawn_writer(&sender, &peer_writers, task_ctx.hot.writer_depth(), backoff, writer_idle_timeout, &shutdown, &kv_state.dropped_frames, tls.clone()) {
+                    let data: Bytes = crate::bounds::hold_slot(crate::codec::wire_to_bytes(
+                        &WireMessage::StateResponse { entries: vec![] }), &slot);
+                    drop(slot);
+                    if let Some(tx) = get_or_spawn_writer(&sender, &peer_writers, task_ctx.hot.writer_depth(), backoff, &writer_timing, &shutdown, &kv_state.dropped_frames, tls.clone()) {
                         tokio::spawn(async move {
                             if tx.send(data).await.is_err() {
                                 tracing::error!("Fast-path StateResponse writer for {} has exited", sender);
@@ -534,14 +604,16 @@ pub async fn handle_connection(
                 // doubles as the liveness ack (same as the fast-path above).
                 chunks.push(chunk);
                 let frames: Vec<Bytes> = chunks.into_iter()
-                    .map(|entries| crate::codec::wire_to_bytes(&WireMessage::StateResponse { entries }))
+                    .map(|entries| crate::bounds::hold_slot(
+                        crate::codec::wire_to_bytes(&WireMessage::StateResponse { entries }), &slot))
                     .collect();
+                drop(slot);
                 // Use send().await (not try_send) — StateResponse is a rare,
                 // join-time message. Dropping it causes permanent divergence
                 // because StateRequest is only sent on first contact; there is
                 // no automatic retry. Wrap in spawn so the connection handler
                 // is not blocked waiting for the writer to drain.
-                if let Some(tx) = get_or_spawn_writer(&sender, &peer_writers, task_ctx.hot.writer_depth(), backoff, writer_idle_timeout, &shutdown, &kv_state.dropped_frames, tls.clone()) {
+                if let Some(tx) = get_or_spawn_writer(&sender, &peer_writers, task_ctx.hot.writer_depth(), backoff, &writer_timing, &shutdown, &kv_state.dropped_frames, tls.clone()) {
                     tokio::spawn(async move {
                         for data in frames {
                             if tx.send(data).await.is_err() {

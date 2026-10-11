@@ -153,7 +153,29 @@ is itself a crown jewel (Boundary A).
   scope and audit records intent, but a member authorized for X can do X.
 - **Egress on the not-yet-gated paths** (LLM/probe/A2A) — network-layer control.
 - **Availability attacks** beyond the documented gossip backpressure/opacity
-  mechanisms.
+  mechanisms and the transport bounds of 2.32 (row B of the post-360 hardening plan): a
+  socket that connects and says nothing is closed after `handshake_timeout_ms`, a silent
+  established one after `inbound_idle_timeout_secs`; a frame in flight must keep moving
+  (`peer_read_stall_timeout_ms` receiving, `peer_write_stall_timeout_ms` sending) and, when
+  received, keep 1 KiB/s past the stall window (`peer_min_rate_bytes_per_sec`). A peer that
+  never reads parks only its own writer and one anti-entropy reply, for up to
+  `peer_write_stall_timeout_ms` (1 140 s); a stalled
+  subscriber loses its own signals rather than its kind's admission; the signal log holds at
+  most 4096 sender-chosen kinds, evicting the least recently seen; `sys/quorum/` evidence is
+  written only for kinds this node works on or asks about, bounded per kind and per second.
+  **The residual, plainly:** the accept path is bounded against *silent* and *slow*
+  connections; an attacker that **keeps talking** can hold the connection slots it obtained
+  from free permits, up to `max_connections`, and new peers are refused while it does.
+  Mitigations: mTLS — a non-member fails the handshake within `handshake_timeout_ms` and never
+  holds a slot past it — and the opt-in per-source cap `max_connections_per_source` (exact IPs;
+  an IPv6 /64 is not covered). Per-identity limits on a TLS mesh are not built.
+  **The write-side residual:** there is no rate floor on writes, deliberately — a sender cannot
+  tell a slow link from a receiver applying what it read — so a peer that reads **one byte per
+  `peer_write_stall_timeout_ms` window** parks its own writer and its reply slot indefinitely.
+  The parked reply is the **whole divergent dump** queued for that peer, so the memory at stake
+  is up to `max_peers` × the divergent store, held for up to the write-stall bound (or longer
+  under the one-byte trickle); on a plaintext mesh a forged `Ping` can introduce a peer, which
+  is why `max_peers` and mTLS matter where memory does.
 - **Key custody** — Mycelium provides hooks; the KMS/HSM and rotation are the
   operator's.
 

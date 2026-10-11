@@ -21,7 +21,9 @@ inversion a compile-time guarantee. Pages:
   (realignment repairs A2, decision D3).
 - **[runtime-invariants.md](runtime-invariants.md)** — the invariants that keep recurring
   in review: Layer III's detection-not-prevention posture, individual-scope routing,
-  event-driven fan-out. Read before "optimizing" anything in the gossip loop.
+  event-driven fan-out, the transport bounds (row B: handshake/idle/write deadlines, one
+  anti-entropy reply per peer, least-full admission fill, the bounded sender log). Read before
+  "optimizing" anything in the gossip loop.
 
 Canon: `src/lib.rs` crate doc (API + KV-namespace ownership table), `ROADMAP.md` (layer
 model + milestones), `docs/philosophy.md` (purpose).

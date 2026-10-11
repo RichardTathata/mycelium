@@ -694,4 +694,7 @@ pub mod test_util;
 mod lib_tests;
 
 #[cfg(test)]
+mod resource_bounds_tests;
+
+#[cfg(test)]
 mod swim_oracle_tests;

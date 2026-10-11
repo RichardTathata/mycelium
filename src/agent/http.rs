@@ -1959,7 +1959,9 @@ async fn signal_sse_handler(
     if let Some(refused) = refuse_unobservable_kind(&ctx.agent_ctx.config, &kind) {
         return refused;
     }
-    let rx = ctx.agent_ctx.signal_handlers.register_with_capacity(
+    // A tap: an observer, never counted in the kind's fill, so a stalled or fast SSE client neither
+    // vetoes nor hides the kind's workers (#602's review, finding 4).
+    let rx = ctx.agent_ctx.signal_handlers.register_tap(
         std::sync::Arc::from(kind.as_str()),
         256,
     );
@@ -2555,7 +2557,9 @@ async fn gw_signal_sse(
     if let Some(refused) = refuse_unobservable_kind(&ctx.agent_ctx.config, &kind) {
         return refused;
     }
-    let rx = ctx.agent_ctx.signal_handlers.register_with_capacity(
+    // A tap: an observer, never counted in the kind's fill, so a stalled or fast SSE client neither
+    // vetoes nor hides the kind's workers (#602's review, finding 4).
+    let rx = ctx.agent_ctx.signal_handlers.register_tap(
         Arc::from(kind.as_str()),
         256,
     );

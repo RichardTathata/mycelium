@@ -54,7 +54,8 @@ impl GossipAgent {
             &self.peer_writers,
             self.task_ctx.hot.writer_depth(),
             std::time::Duration::from_secs(self.task_ctx.hot.reconnect_backoff_secs(self.config.reconnect_backoff_secs)),
-            std::time::Duration::from_secs(self.config.writer_idle_timeout_secs),
+            &mycelium_core::writer::WriterTiming::from_config(&self.config)
+                .counting(Arc::clone(&self.task_ctx.transport_bounds.outbound_stalls)),
             &self.shutdown_tx,
             &self.kv_state.dropped_frames,
             self.task_ctx.tls.get().cloned(),
