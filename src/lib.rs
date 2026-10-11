@@ -363,6 +363,7 @@ pub use agent::{
 // Elastic group sizing (Track 2a).
 pub use agent::{MembershipAction, MembershipIntent, MEMBERSHIP_INTENT_TTL_MS, MEMBERSHIP_PREFIX};
 pub use agent::{electorate_records_refused, ElectorateDecl, ElectorateError, Superseded, ELECTORATE_CERT_PREFIX, ELECTORATE_SLOT_PREFIX, SAFETY_SLOT_FAMILIES};
+pub use agent::{acceptor_memory_empty_for_electorate, acceptor_promises_forgotten, electorate_persistence_refused};
 // Legible Emergence — fleet diagnostics as data (localize · explain · diagnose). `localize`
 // (`fleet_snapshot`) and `diagnose` (`fleet_diagnosis`) are node-local reads exposed here;
 // `explain` is intentionally gateway-only (`GET /gateway/explain`) — it is a cross-node `sys.explain`

@@ -1761,6 +1761,11 @@ impl ConsensusEngine {
             quorum_size = quorum_size.max(t.quorum);
             opaque_recompute = None;
         }
+        // This node's own promise and vote count toward the quorum below; on a slot whose forgotten promise was
+        // detected they are withheld like any other answer (`acceptor_guard`).
+        if crate::agent::acceptor_guard::withheld(&self.task_ctx, &slot) {
+            return crate::agent::acceptor_guard::withheld_timeout(slot, quorum_size);
+        }
         // Register for BOUNDARY_TRANSPARENT signals so we can re-evaluate quorum
         // mid-ballot when previously-opaque members become available.
         // Watch for BOUNDARY_OPAQUE: a member going opaque shrinks active_members,
@@ -2127,6 +2132,10 @@ impl ConsensusEngine {
                 note_refused(&self.task_ctx, &slot, &key, "its certificate does not verify");
                 continue;
             }
+            // A member with no `[persistence]` never adopts — refused by name, counted once (`acceptor_guard`, detection 1).
+            if crate::agent::acceptor_guard::refuse_adoption_without_persistence(&self.task_ctx, &next) {
+                return cur;
+            }
             if !self.adopt_through_gate(group, epoch) {
                 return cur; // this node touched a later attempt: it never adopts this one
             }
@@ -2136,6 +2145,8 @@ impl ConsensusEngine {
                 Some((_, e)) if e.epoch >= adopted.epoch => papaya::Operation::Abort(()),
                 _ => papaya::Operation::Insert(Arc::clone(&adopted)),
             });
+            // A member whose memory holds nothing for the genesis it adopted is warned once (detection 2).
+            crate::agent::acceptor_guard::check_memory_for(&self.task_ctx, &next);
             return cached(&self.task_ctx, group);
         }
         cur
@@ -2274,6 +2285,10 @@ impl ConsensusEngine {
                     };
                     check_genesis(group, &next).map_err(|e| DoorRefusal::mismatch(Some(group), &e.to_string()))?;
                     if !next.contains(me) { return Err(DoorRefusal::NotAMember(Arc::clone(group))); }
+                    if crate::agent::acceptor_guard::persistence_required(&self.task_ctx, &next) {
+                        crate::agent::acceptor_guard::note_persistence_refused(&self.task_ctx, group, epoch, "door");
+                        return Err(DoorRefusal::mismatch(Some(group), crate::agent::acceptor_guard::PERSISTENCE_REQUIRED_DETAIL));
+                    }
                     if next.exclusive_default {
                         match crate::agent::electorate::live_default(&self.task_ctx) {
                             Ok(None) => {}
@@ -2451,6 +2466,12 @@ impl ConsensusEngine {
         if let Some((_, epoch)) = parse_genesis_slot(slot).filter(|(g, _)| *g == &*group) {
             // A genesis attempt: answered by the members it names, none of which holds an electorate for the group.
             if view.is_some() || named != Some((0, [0; 32])) { return Err(own); }
+            // A genesis is answered only by the members it names; one with no `[persistence]` does not answer
+            // (`acceptor_guard`, detection 1), so a genesis naming it is never decided.
+            if self.task_ctx.config.persistence.is_none() {
+                crate::agent::acceptor_guard::note_persistence_refused(&self.task_ctx, &group, epoch, "acceptor");
+                return Err((0, [0; 32]));
+            }
             let gate = Gate { group: Arc::clone(&group), epoch: 0, kind: GateKind::Genesis(epoch) };
             return match (raw, proposed) {
                 (None, _) => Ok(Some(gate)), // a prepare carries no value
@@ -2564,6 +2585,9 @@ impl ConsensusEngine {
         let scope_groups = SignalScope::Groups(groups.iter().map(|g| Arc::from(g.group.as_str())).collect());
         if let Err(refused) = self.electorate_door(&scope_groups, &slot, &value, &config) {
             return refused.into_result(slot);
+        }
+        if crate::agent::acceptor_guard::withheld(&self.task_ctx, &slot) {
+            return crate::agent::acceptor_guard::withheld_timeout(slot, 0);
         }
 
         let ballot_key = format!("{}{}", consensus_ns::BALLOT,    &*slot);
@@ -4130,6 +4154,8 @@ pub(crate) fn untagged_consensus_signatures_accepted() -> u64 {
 async fn answer_prepare(
     ctx: &ConsensusEngine, slot: Arc<str>, ballot: u64, proposer: NodeId, form: SignatureForm, term: bool, gate: Option<Gate>,
 ) {
+    // A slot whose forgotten promise was detected is not answered until the next start (`acceptor_guard`).
+    if crate::agent::acceptor_guard::withheld(&ctx.task_ctx, &slot) { return; }
     let floor = ctx.floor(&slot);
     // P2: the promise passes the electorate's gate, which only decides. A gate that refused sends no promise
     // (round 3, finding 5).
@@ -4382,6 +4408,8 @@ pub(crate) async fn run_consensus_listener(
                     }
                     _ => continue,
                 };
+                // A slot whose forgotten promise was detected is not voted until the next start (`acceptor_guard`).
+                if crate::agent::acceptor_guard::withheld(&ctx.task_ctx, &slot) { continue; }
                 // Claim this node's single vote at this ballot. Refuses a stale ballot OR an
                 // equal-ballot proposal for a DIFFERENT value than we already accepted: casting a
                 // second vote at one ballot for another value lets two proposers each reach quorum

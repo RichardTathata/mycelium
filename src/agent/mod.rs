@@ -90,6 +90,9 @@ pub(crate) mod tuning_governor;
 pub(crate) mod timing_governor;
 pub(crate) mod membership_governor;
 pub(crate) mod electorate;
+/// The acceptor's memory guard (detection, never prevention): persistence required for an electorate member, an empty
+/// store warned, a forgotten promise withholding the slot.
+pub(crate) mod acceptor_guard;
 /// v3 item 4 PR 4a — `set_control_profile` and its tripwire, on `GossipAgent`.
 mod control_profile;
 // The diagnostics module's *snapshot/view* surface (fleet snapshot, ViewConfidence, the `explain`
@@ -199,6 +202,7 @@ pub use tuning_governor::{
 pub(crate) use tuning_governor::TuningGovernor;
 pub use membership_governor::{MembershipAction, MembershipIntent, MEMBERSHIP_INTENT_TTL_MS, MEMBERSHIP_PREFIX};
 pub use electorate::{electorate_records_refused, ElectorateDecl, ElectorateError, Superseded, ELECTORATE_CERT_PREFIX, ELECTORATE_SLOT_PREFIX, SAFETY_SLOT_FAMILIES};
+pub use acceptor_guard::{acceptor_memory_empty_for_electorate, acceptor_promises_forgotten, electorate_persistence_refused};
 // Legible Emergence — fleet diagnostics as data (localize · explain · diagnose). `GroupStatus` is
 // reached via `FleetSnapshot.governed_groups` (the bare name is already the mesh-dashboard type).
 pub use emergent::{
@@ -623,6 +627,14 @@ pub(crate) struct TaskCtx {
     /// memory for the group's genesis slots.
     #[cfg(feature = "consensus")]
     pub(crate) electorate_fences: Arc<papaya::HashMap<Arc<str>, crate::consensus::FenceState>>,
+    /// Slots this node's acceptor **withholds every answer for** until the next start: an inbound copy of its own
+    /// durable record held a promise or acceptance its memory did not (`acceptor_guard`, forgotten-promise detection).
+    /// Lock-free; a pure insert, read on every prepare and proposal.
+    #[cfg(feature = "consensus")]
+    pub(crate) acceptor_withheld: Arc<papaya::HashSet<Arc<str>>>,
+    /// The acceptor guard's once-only notices (a warning per group or record, bounded) — `acceptor_guard`.
+    #[cfg(feature = "consensus")]
+    pub(crate) acceptor_notices: Arc<papaya::HashSet<Arc<str>>>,
     /// P2: the highest genesis epoch with a committed record per group, from the watched rescan of
     /// `consensus/committed/electorate/`.
     #[cfg(feature = "consensus")]
@@ -1119,6 +1131,7 @@ impl GossipAgent {
             hlc:             Arc::new(crate::hlc::Hlc::with_max_drift(config.max_clock_drift_ms)),
             signal_boundary: Arc::new(RwLock::new(Boundary::new(node_id.clone()))),
             decision_sink: std::sync::OnceLock::new(),
+            inbound_observer: std::sync::OnceLock::new(),
             signal_handlers: Arc::new(SignalHandlers::new(signal_window)),
             gossip_txs,
             default_ttl,
@@ -1217,6 +1230,10 @@ impl GossipAgent {
             #[cfg(feature = "consensus")]
             electorate_fences: Arc::new(papaya::HashMap::new()),
             #[cfg(feature = "consensus")]
+            acceptor_withheld: Arc::new(papaya::HashSet::new()),
+            #[cfg(feature = "consensus")]
+            acceptor_notices: Arc::new(papaya::HashSet::new()),
+            #[cfg(feature = "consensus")]
             electorate_epochs_known: Arc::new(papaya::HashMap::new()),
             #[cfg(feature = "consensus")]
             electorate_records_watch: Arc::new(std::sync::OnceLock::new()),
@@ -1278,6 +1295,10 @@ impl GossipAgent {
             #[cfg(feature = "llm")]
             llm_dispatch_spawned: std::sync::atomic::AtomicBool::new(false),
         });
+        // The acceptor's forgotten-promise detector watches inbound copies of this node's own acceptor records
+        // (`acceptor_guard`); installed before any connection exists, once, on the core seam.
+        #[cfg(feature = "consensus")]
+        acceptor_guard::install(&task_ctx);
 
         Self {
             node_id,

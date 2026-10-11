@@ -91,6 +91,25 @@ impl HotConfig {
 /// closure the service layer registers (mechanism in core; agency above).
 pub type ReplyInterceptor = Arc<dyn Fn(&Signal) -> bool + Send + Sync>;
 
+/// What [`CoreCtx::inbound_observer`] holds: the key prefixes the upper layer asked to see, and the
+/// callback that sees each inbound update under them. Called inline on the connection task, so it must
+/// be cheap and must not block — a decode, a lock-free lookup, a counter, a log line.
+#[derive(Clone)]
+pub struct InboundObserver {
+    /// Key prefixes (`sys/consensus-accepted/{me}/`, …); an update is reported when its key starts
+    /// with any of them.
+    pub prefixes: Vec<String>,
+    /// The callback, with the update as it arrived.
+    pub on_inbound: Arc<dyn Fn(&crate::framing::GossipUpdate) + Send + Sync>,
+}
+
+impl InboundObserver {
+    /// Whether `key` is under one of the observed prefixes.
+    pub fn watches(&self, key: &str) -> bool {
+        self.prefixes.iter().any(|p| key.starts_with(p.as_str()))
+    }
+}
+
 /// The shared Layers I + II infrastructure bundle. The full `mycelium` crate's
 /// `TaskCtx` holds this as `core: Arc<CoreCtx>` and `Deref`s to it.
 pub struct CoreCtx {
@@ -166,6 +185,15 @@ pub struct CoreCtx {
     /// key this node owns; Relaxed ordering — purely diagnostic. Core because the
     /// connection handler (Layer I transport) is the sole writer.
     pub sys_namespace_violations: Arc<AtomicU64>,
+
+    /// An observer of **inbound** updates under named key prefixes ([`InboundObserver`]), installed
+    /// once before start by the upper layer (`OnceLock`, like `decision_sink`). The connection handler
+    /// calls it for every inbound gossip frame or anti-entropy entry whose key starts with one of its
+    /// prefixes, after the update was applied — whatever LWW decided about it. Core reports the
+    /// arrival; it compares nothing and refuses nothing (a consensus acceptor comparing a peer's copy
+    /// of its own record against its memory lives in `mycelium::agent::acceptor_guard`). Absent for a
+    /// pure KV/signal embed: one prefix test per inbound update, nothing else.
+    pub inbound_observer: std::sync::OnceLock<InboundObserver>,
 
     /// Transport resource bounds (row B): the counters behind `SystemStats::{inbound_connections_timed_out,
     /// anti_entropy_replies_skipped}` and the per-peer anti-entropy reply slots.

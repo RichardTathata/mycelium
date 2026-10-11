@@ -161,6 +161,14 @@ pub enum ElectorateError {
     /// superseding genesis that keeps no majority, or this node cannot name the genesis it would supersede. The reason
     /// says which. Not retried.
     Refused(String),
+    /// This node would be a member and has no `[persistence]`: its promises and acceptances would not survive a
+    /// restart, and a member restarted empty can let two values be decided (`docs/design/consensus-electorate.md`
+    /// §8.5, PR #604). Refused at every door — declaration, adoption, the genesis proposal and the genesis answer —
+    /// and counted on [`crate::electorate_persistence_refused`]. `409 persistence_required` at the gateway. Not retried.
+    PersistenceRequired {
+        /// The group.
+        group: String,
+    },
 }
 
 impl std::fmt::Display for ElectorateError {
@@ -175,6 +183,8 @@ impl std::fmt::Display for ElectorateError {
             ),
             Self::NotDecided(why) => write!(f, "the electorate decision was not decided: {why}"),
             Self::Refused(why) => write!(f, "the electorate decision was refused: {why}"),
+            Self::PersistenceRequired { group } => write!(
+                f, "electorate group {group}: {}", crate::agent::acceptor_guard::PERSISTENCE_REQUIRED_DETAIL),
         }
     }
 }
@@ -492,6 +502,11 @@ pub(crate) async fn declare_outcome(
         return Err(ElectorateError::MembershipFrozen { group: group.to_string() });
     }
     if !roster.contains(&ctx.node_id) { return Err(ElectorateError::NotAMember); }
+    // A member with no `[persistence]` declares nothing (`acceptor_guard`, detection 1): refused by name before anything is sent.
+    if ctx.config.persistence.is_none() {
+        crate::agent::acceptor_guard::note_persistence_refused(ctx, group, 0, "declare");
+        return Err(ElectorateError::PersistenceRequired { group: group.to_string() });
+    }
     // One default: a genesis may declare it only while no group holds it (round 5, D1/D2).
     if exclusive_default {
         match live_default(ctx) {

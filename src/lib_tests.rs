@@ -129,6 +129,7 @@ fn spawn_handler(
         hlc: Arc::new(crate::hlc::Hlc::new()),
         signal_boundary: Arc::new(RwLock::new(Boundary::new(node_id))),
         decision_sink: std::sync::OnceLock::new(),
+        inbound_observer: std::sync::OnceLock::new(),
         signal_handlers: Arc::new(SignalHandlers::new(Duration::from_secs(600))),
         gossip_txs,
         default_ttl: max_ttl,
@@ -172,6 +173,10 @@ fn spawn_handler(
         electorate_refused: Arc::new(papaya::HashSet::new()),
         #[cfg(feature = "consensus")]
         electorate_fences: Arc::new(papaya::HashMap::new()),
+        #[cfg(feature = "consensus")]
+        acceptor_withheld: Arc::new(papaya::HashSet::new()),
+        #[cfg(feature = "consensus")]
+        acceptor_notices: Arc::new(papaya::HashSet::new()),
         #[cfg(feature = "consensus")]
         electorate_epochs_known: Arc::new(papaya::HashMap::new()),
         #[cfg(feature = "consensus")]
@@ -1214,6 +1219,7 @@ async fn test_subscribe_notified_via_gossip() {
             hlc: Arc::new(crate::hlc::Hlc::new()),
             signal_boundary: Arc::new(RwLock::new(Boundary::new(node_id))),
             decision_sink: std::sync::OnceLock::new(),
+        inbound_observer: std::sync::OnceLock::new(),
             signal_handlers: Arc::new(SignalHandlers::new(Duration::from_secs(600))),
             gossip_txs,
             default_ttl: 5,
@@ -1257,6 +1263,10 @@ async fn test_subscribe_notified_via_gossip() {
             electorate_refused: Arc::new(papaya::HashSet::new()),
             #[cfg(feature = "consensus")]
             electorate_fences: Arc::new(papaya::HashMap::new()),
+            #[cfg(feature = "consensus")]
+            acceptor_withheld: Arc::new(papaya::HashSet::new()),
+            #[cfg(feature = "consensus")]
+            acceptor_notices: Arc::new(papaya::HashSet::new()),
             #[cfg(feature = "consensus")]
             electorate_epochs_known: Arc::new(papaya::HashMap::new()),
             #[cfg(feature = "consensus")]
@@ -12115,6 +12125,31 @@ async fn a_federation_client_refuses_an_endpoint_the_egress_policy_denies() {
 
 // ── P2: a consensus electorate is a governed group ─────────────────────────────────────────────
 
+/// One electorate test node's config: `[persistence]` under a temp directory of its own (an electorate member must
+/// configure it — a member without is refused by name, `acceptor_guard` detection 1), the mesh tuning the rounds
+/// settled on, and `peers` as its bootstrap list. `fresh` wipes the directory first — a node restarted over an
+/// **empty** store keeps the same config with `fresh = false` and the directory removed by the test.
+#[cfg(feature = "consensus")]
+fn electorate_cfg(port: u16, peers: Vec<NodeId>, fresh: bool) -> GossipConfig {
+    use crate::config::{OnUnreadable, PersistenceConfig, SyncMode};
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    cfg.bootstrap_peers = peers;
+    cfg.health_check_max_jitter_ms = 50;
+    // Anti-entropy runs once per health-check interval: a dropped gossip frame is repaired in five seconds
+    // rather than ten. The reconnect backoff stays below the interval minus two (the config's own tuning
+    // invariant) — round 3 found peers evicted and redialled in a loop with an interval of two seconds.
+    cfg.health_check_interval_secs = 5;
+    cfg.reconnect_backoff_secs = 1;
+    let base = std::env::temp_dir().join(format!("mycelium-electorate-{port}"));
+    if fresh { let _ = std::fs::remove_dir_all(&base); }
+    cfg.persistence = Some(PersistenceConfig {
+        base_path: base, sync_mode: SyncMode::Flush, snapshot_wal_threshold: 1_000, snapshot_interval_secs: 3_600,
+        on_unreadable: OnUnreadable::Refuse,
+    });
+    cfg
+}
+
 /// `n` started agents, fully meshed, each running the consensus listener; returns once every node
 /// has a peer (a structural poll, never a fixed sleep). `tweak` adjusts each node's config.
 #[cfg(feature = "consensus")]
@@ -12126,17 +12161,9 @@ async fn electorate_mesh(n: usize, tweak: impl Fn(&mut GossipConfig)) -> (Vec<Go
     let ids: Vec<NodeId> = ports.iter().map(|p| NodeId::new("127.0.0.1", *p).unwrap()).collect();
     let mut agents = Vec::new();
     for i in 0..n {
-        let mut cfg = GossipConfig::default();
-        cfg.bind_port = ports[i];
         // Each node dials only the nodes started before it, which are already listening — a dial to a node not yet
         // up fails and backs off, and round 3 saw meshes stay sparse for a minute after it.
-        cfg.bootstrap_peers = ids[..i].to_vec();
-        cfg.health_check_max_jitter_ms = 50;
-        // Anti-entropy runs once per health-check interval: a dropped gossip frame is repaired in five seconds
-        // rather than ten. The reconnect backoff stays below the interval minus two (the config's own tuning
-        // invariant) — round 3 found peers evicted and redialled in a loop with an interval of two seconds.
-        cfg.health_check_interval_secs = 5;
-        cfg.reconnect_backoff_secs = 1;
+        let mut cfg = electorate_cfg(ports[i], ids[..i].to_vec(), true);
         tweak(&mut cfg);
         agents.push(GossipAgent::new(ids[i].clone(), cfg));
     }
@@ -12609,12 +12636,7 @@ async fn electorate_line(n: usize) -> (Vec<GossipAgent>, Vec<crate::ConsensusLis
     let ids: Vec<NodeId> = ports.iter().map(|p| NodeId::new("127.0.0.1", *p).unwrap()).collect();
     let mut agents = Vec::new();
     for i in 0..n {
-        let mut cfg = GossipConfig::default();
-        cfg.bind_port = ports[i];
-        cfg.bootstrap_peers = if i == 0 { vec![] } else { vec![ids[i - 1].clone()] };
-        cfg.health_check_max_jitter_ms = 50;
-        cfg.health_check_interval_secs = 5;
-        cfg.reconnect_backoff_secs = 1;
+        let cfg = electorate_cfg(ports[i], if i == 0 { vec![] } else { vec![ids[i - 1].clone()] }, true);
         agents.push(GossipAgent::new(ids[i].clone(), cfg));
     }
     for a in &agents { a.start().await.unwrap(); }
@@ -12883,4 +12905,218 @@ async fn two_defaults_fail_closed() {
     let r = engine.propose(SignalScope::Group(Arc::from("one")), Arc::from("work/y"), Bytes::from_static(b"v"), 1, quick(), None).await;
     assert!(matches!(r, ConsensusResult::Committed { .. }), "group work stops too: {r:?}");
     a.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+// ── The acceptor's memory guard (`acceptor_guard`; design §8.5; the hazard PR #604 documents) ──────────────────
+
+/// **A member without `[persistence]` is refused an electorate by name** (`acceptor_guard`, detection 1). Its
+/// promises would not survive a restart (`persist_sync` reports "no promise was made" with nothing on disk), so a
+/// member restarted empty could let two values be decided. Refused at every door: `declare_electorate` returns
+/// `ElectorateError::PersistenceRequired`, the proposer's door refuses the genesis proposal, the acceptor's door does
+/// not answer a genesis naming it — and each is counted. A node outside the roster is untouched (`NotAMember`, as
+/// before), and consensus outside an electorate keeps committing. Seen failing first (2026-10-11): the declaration
+/// was decided.
+#[cfg(feature = "consensus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_without_persistence_is_refused_an_electorate_by_name() {
+    let (agents, _l, _serial) = electorate_mesh(1, |c| c.persistence = None).await;
+    let a = &agents[0];
+    a.mesh().join_group("council");
+    roster_converges(&agents, "council", &[a]).await;
+    let before = crate::electorate_persistence_refused();
+    match a.declare_electorate("council", false).await {
+        Err(crate::ElectorateError::PersistenceRequired { group }) => assert_eq!(group, "council"),
+        other => panic!("a member without persistence is refused by name: {other:?}"),
+    }
+    assert!(a.electorate("council").is_none(), "nothing was decided");
+    let genesis = crate::ElectorateDecl {
+        group: "council".into(), epoch: 1, members: vec![a.node_id().clone()], ..Default::default()
+    };
+    let slot = crate::agent::electorate::genesis_slot("council", 1);
+    let engine = crate::agent::electorate::engine(&a.task_ctx);
+    let door = engine.electorate_door(
+        &SignalScope::Group(Arc::from("council")), &Arc::from(slot.as_str()), &genesis.encode(), &ConsensusConfig::default());
+    match door {
+        Err(crate::consensus::DoorRefusal::Mismatch { detail, .. }) => assert!(detail.contains("[persistence]"), "{detail}"),
+        Err(_) => panic!("the proposer's door refuses the genesis by name, not another way"),
+        Ok(_) => panic!("the proposer's door let the genesis through"),
+    }
+    assert!(admits(&engine, &SignalScope::Group(Arc::from("council")), &slot, Some((0, [0; 32])), a.node_id(), Some(&genesis.encode())).is_err(),
+        "the acceptor's door does not answer a genesis naming it");
+    assert!(admits(&engine, &SignalScope::Group(Arc::from("council")), &slot, Some((0, [0; 32])), a.node_id(), None).is_err(),
+        "nor a genesis prepare");
+    assert!(crate::electorate_persistence_refused() >= before + 3, "each refusal is counted: {}", crate::electorate_persistence_refused() - before);
+    let quick = ConsensusConfig { phase1_timeout: Duration::from_millis(500), max_ballots: 2, ..ConsensusConfig::default() };
+    assert!(matches!(a.consensus().group_propose("council", "work/plain", Bytes::from_static(b"v"), quick).await,
+        ConsensusResult::Committed { .. }), "consensus outside an electorate is untouched");
+    a.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// **A member restarted without `[persistence]` does not adopt its electorate** (detection 1's adoption half, and the
+/// gateway-free path to it). The group's genesis was decided while B had persistence; B comes back under the same
+/// `NodeId` with an empty store and no `[persistence]`. The committed record and its certificate reach it by gossip,
+/// and B refuses to adopt — by name, once, counted — so it answers for the electorate as a node that holds none (a
+/// stale refusal, never a promise). Seen failing first: B adopted epoch 1.
+#[cfg(feature = "consensus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_restarted_without_persistence_does_not_adopt_its_electorate() {
+    let (mut agents, mut listeners, _serial) = electorate_mesh(2, |_| {}).await;
+    for n in &agents { n.mesh().join_group("council"); }
+    roster_converges(&agents, "council", &[&agents[0], &agents[1]]).await;
+    declare(&agents[0], "council", false).await.expect("a genesis of two");
+    epoch_converges(&agents, "council", 1).await;
+    let b_id = agents[1].node_id().clone();
+    let a_id = agents[0].node_id().clone();
+    drop(listeners.remove(1));
+    agents.remove(1).shutdown_with_timeout(Duration::from_secs(5)).await;
+    let _ = std::fs::remove_dir_all(std::env::temp_dir().join(format!("mycelium-electorate-{}", b_id.to_socket_addr().port())));
+    let mut cfg = electorate_cfg(b_id.to_socket_addr().port(), vec![a_id], false);
+    cfg.persistence = None;
+    let b = GossipAgent::new(b_id.clone(), cfg);
+    b.start().await.unwrap();
+    let _lb = b.consensus().start_consensus_listener(ConsensusConfig::default());
+    b.mesh().join_group("council");
+    let before = crate::electorate_persistence_refused();
+    // The record and its certificate arrive by anti-entropy; the adoption is refused where it would happen.
+    let record = format!("{}{}", crate::consensus::consensus_ns::COMMITTED, crate::agent::electorate::genesis_slot("council", 1));
+    // A restarted member is reached again once A's writer meets the dead socket at its next write and redials, and
+    // anti-entropy runs once per health-check interval: a bounded structural poll, measured at 15–25 s on a loaded host.
+    poll_until(|| b.kv().get(&record).is_some() && b.kv().get(&crate::agent::electorate::cert_key("council", 1)).is_some(), 60_000).await;
+    assert!(b.kv().get(&record).is_some(), "the committed genesis reached B's store");
+    assert!(b.electorate("council").is_none(), "B does not adopt an electorate it cannot keep promises for");
+    assert!(b.electorate("council").is_none(), "nor on a second look");
+    assert_eq!(crate::electorate_persistence_refused() - before, 1, "counted once per record");
+    let engine = crate::agent::electorate::engine(&b.task_ctx);
+    let a_view = agents[0].electorate("council").unwrap();
+    assert!(admits(&engine, &SignalScope::Group(Arc::from("council")), "work/x", Some((1, a_view.digest())), agents[0].node_id(), None).is_err(),
+        "B answers a proposal naming the electorate as a node that holds none");
+    b.shutdown_with_timeout(Duration::from_secs(5)).await;
+    agents[0].shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// **A member restarted over an empty store is warned once its genesis is learned** (`acceptor_guard`, detection 2).
+/// Every member accepted the group's genesis, and the collector keeps the promise, so a member that kept its store
+/// always holds a record for the genesis slot. B comes back under the same `NodeId` over an **empty** persistence
+/// directory: at `start()` its store holds no record and nothing is warned (a brand-new member legitimately has
+/// none); when the committed genesis arrives by gossip the warning fires — once, counted on
+/// `acceptor_memory_empty_for_electorate` — and B still adopts the electorate (warned, not refused: the record was
+/// read unverified, and the fork is the operator's). The same arrival carries B's own acceptor record for the genesis
+/// slot, a promise above its empty memory: that slot is withheld (detection 3, `acceptor_promises_forgotten`). Seen
+/// failing first: nothing was counted.
+#[cfg(feature = "consensus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_restarted_over_an_empty_store_is_warned_once_its_genesis_is_learned() {
+    let (mut agents, mut listeners, _serial) = electorate_mesh(2, |_| {}).await;
+    for n in &agents { n.mesh().join_group("council"); }
+    roster_converges(&agents, "council", &[&agents[0], &agents[1]]).await;
+    declare(&agents[0], "council", false).await.expect("a genesis of two");
+    epoch_converges(&agents, "council", 1).await;
+    let genesis = crate::agent::electorate::genesis_slot("council", 1);
+    assert!(agents[1].task_ctx.consensus_accepted.pin().get(genesis.as_str()).is_some_and(|s| s.promised > 0),
+        "a member that kept its store holds the genesis slot");
+    let b_id = agents[1].node_id().clone();
+    let a_id = agents[0].node_id().clone();
+    drop(listeners.remove(1));
+    agents.remove(1).shutdown_with_timeout(Duration::from_secs(5)).await;
+    let _ = std::fs::remove_dir_all(std::env::temp_dir().join(format!("mycelium-electorate-{}", b_id.to_socket_addr().port())));
+    let (empty_before, forgotten_before) = (crate::acceptor_memory_empty_for_electorate(), crate::acceptor_promises_forgotten());
+    let b = GossipAgent::new(b_id.clone(), electorate_cfg(b_id.to_socket_addr().port(), vec![a_id], false));
+    b.start().await.unwrap();
+    assert_eq!(crate::acceptor_memory_empty_for_electorate(), empty_before, "an empty store has no record to warn on at start");
+    let _lb = b.consensus().start_consensus_listener(ConsensusConfig::default());
+    b.mesh().join_group("council");
+    poll_until(|| crate::acceptor_memory_empty_for_electorate() > empty_before, 60_000).await;
+    assert_eq!(crate::acceptor_memory_empty_for_electorate() - empty_before, 1, "warned once the committed genesis arrived");
+    assert!(b.task_ctx.acceptor_notices.pin().contains("empty:council"), "the notice names the group");
+    epoch_converges(std::slice::from_ref(&b), "council", 1).await;
+    assert_eq!(crate::acceptor_memory_empty_for_electorate() - empty_before, 1, "adopting it does not warn again");
+    poll_until(|| crate::acceptor_promises_forgotten() > forgotten_before, 60_000).await;
+    assert!(b.task_ctx.acceptor_withheld.pin().contains(genesis.as_str()),
+        "B's own genesis record, repaired from A, held a promise B's memory did not: the slot is withheld");
+    b.shutdown_with_timeout(Duration::from_secs(5)).await;
+    agents[0].shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// **A forgotten promise withholds the slot, so a second value is not decided** (`acceptor_guard`, detection 3 —
+/// the interleaving from PR #604's review). Electorate {A, B, C}; `work/x` = v1 is decided by {A, B} while C's
+/// listener is down, and C never learns the decision (the frame filter drops every `work/x` key at C but the ballot
+/// key, so C draws ballot 2). B restarts under the same `NodeId` over an **empty** store and never learns the decision
+/// either — only its own acceptor record for `work/x` reaches it, repaired from A. C then proposes v2 at ballot 2,
+/// hearing no answer from A.
+///
+/// **Unfixed code:** B, empty, promises ballot 2 reporting no acceptance; {B, C} is a quorum; B votes v2; **v2 is
+/// decided** — two values for one slot, and A's commit-conflict tripwire fires when C's commit reaches it. **With
+/// detection 3:** B's own record, arriving with a promise above B's empty memory, puts `work/x` in B's withheld set;
+/// B answers nothing; C alone is no quorum; the proposal times out. Then C hears A again, proposes once more, A
+/// reports v1, and C adopts it: v1 everywhere, no conflict.
+///
+/// **The limit, stated:** the test waits for B's record to arrive *before* C proposes. Had C's prepare reached B
+/// first, B would have promised ballot 2 empty-handed, and the copy carrying ballot 1 would then read as stale —
+/// the detection needs the repair to arrive before the next higher ballot (design §8.5; `what-is-proven.md`).
+/// Seen failing first: `consensus_get("work/x")` on C was v2 and A counted a commit conflict.
+#[cfg(all(feature = "consensus", feature = "test-frame-filter"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_forgotten_promise_withholds_the_slot_so_a_second_value_is_not_decided() {
+    use crate::store::FrameView;
+    let (mut agents, mut listeners, _serial) = electorate_mesh(3, |_| {}).await;
+    for n in &agents { n.mesh().join_group("council"); }
+    roster_converges(&agents, "council", &[&agents[0], &agents[1], &agents[2]]).await;
+    declare(&agents[0], "council", false).await.expect("a genesis of three");
+    epoch_converges(&agents, "council", 1).await;
+    let (a_id, b_id, c_id) = (agents[0].node_id().clone(), agents[1].node_id().clone(), agents[2].node_id().clone());
+    let names_slot = |key: &str| key.contains("work/x") || key.contains("work%2Fx");
+    let ballot_key = format!("{}work/x", crate::consensus::consensus_ns::BALLOT);
+    // C never learns the decision — only the ballot it must go above.
+    agents[2].task_ctx.kv_state.frame_filter.pin().insert(1, Arc::new(move |v: &FrameView<'_>| match v {
+        FrameView::Kv { key, .. } => *key != ballot_key && names_slot(key),
+        FrameView::Signal { .. } => false,
+    }));
+    drop(listeners.remove(2));
+    let cfg = ConsensusConfig { phase1_timeout: Duration::from_millis(1500), max_ballots: 2, ..ConsensusConfig::default() };
+    let r = agents[0].consensus().group_propose("council", "work/x", Bytes::from_static(b"v1"), cfg.clone()).await;
+    assert!(matches!(r, ConsensusResult::Committed { .. }), "v1 decided by {{A, B}}: {r:?}");
+    poll_until(|| agents[1].consensus().consensus_get("work/x").as_deref() == Some(b"v1".as_slice()), 10_000).await;
+    assert!(agents[1].task_ctx.consensus_accepted.pin().get("work/x").is_some_and(|s| s.accepted.is_some()), "B accepted v1");
+    assert!(agents[2].consensus().consensus_get("work/x").is_none(), "C never learned it");
+    listeners.push(agents[2].consensus().start_consensus_listener(ConsensusConfig::default()));
+
+    // B restarts over an empty store, and never learns the decision either — only its own record comes back.
+    drop(listeners.remove(1));
+    agents.remove(1).shutdown_with_timeout(Duration::from_secs(5)).await;
+    let _ = std::fs::remove_dir_all(std::env::temp_dir().join(format!("mycelium-electorate-{}", b_id.to_socket_addr().port())));
+    let b = GossipAgent::new(b_id.clone(), electorate_cfg(b_id.to_socket_addr().port(), vec![a_id.clone(), c_id.clone()], false));
+    let own_record = crate::consensus::accepted_key(&b_id, "work/x");
+    b.task_ctx.kv_state.frame_filter.pin().insert(2, Arc::new(move |v: &FrameView<'_>| match v {
+        FrameView::Kv { key, .. } => !key.starts_with(mycelium_core::signal::kv_ns::CONSENSUS_ACCEPTED) && names_slot(key),
+        FrameView::Signal { .. } => false,
+    }));
+    b.start().await.unwrap();
+    listeners.push(b.consensus().start_consensus_listener(ConsensusConfig::default()));
+    b.mesh().join_group("council");
+    agents.push(b);
+    let (a, c, b) = (&agents[0], &agents[1], &agents[2]);
+    roster_converges(&agents, "council", &[a, b, c]).await;
+    epoch_converges(std::slice::from_ref(b), "council", 1).await;
+    // The repair: B's own acceptor record for `work/x`, from A, reaches B's store before C proposes.
+    poll_until(|| b.kv().get(&own_record).is_some(), 60_000).await;
+    assert!(b.kv().get(&own_record).is_some(), "B's own record came back by anti-entropy");
+    assert!(b.consensus().consensus_get("work/x").is_none(), "B does not know the decision");
+
+    // C proposes v2 at ballot 2, hearing nothing from A.
+    let a_hash = a_id.id_hash();
+    c.task_ctx.kv_state.frame_filter.pin().insert(3, Arc::new(move |v: &FrameView<'_>| matches!(v, FrameView::Signal { sender, .. } if *sender == a_hash)));
+    let r = c.consensus().group_propose("council", "work/x", Bytes::from_static(b"v2"), cfg.clone()).await;
+    assert!(matches!(r, ConsensusResult::Timeout { .. }), "B withholds the slot, so C alone is no quorum: {r:?}");
+    assert!(b.task_ctx.acceptor_withheld.pin().contains("work/x"), "the slot is withheld on B");
+    assert_ne!(c.consensus().consensus_get("work/x").as_deref(), Some(b"v2".as_slice()), "v2 was not decided");
+    // C hears A again: A reports v1, C adopts it.
+    c.task_ctx.kv_state.frame_filter.pin().remove(&3);
+    c.task_ctx.kv_state.frame_filter.pin().remove(&1);
+    let r = c.consensus().group_propose("council", "work/x", Bytes::from_static(b"v2"), cfg).await;
+    assert!(matches!(r, ConsensusResult::Committed { .. } | ConsensusResult::Superseded { .. }), "{r:?}");
+    poll_until(|| c.consensus().consensus_get("work/x").as_deref() == Some(b"v1".as_slice()), 10_000).await;
+    assert_eq!(c.consensus().consensus_get("work/x").as_deref(), Some(b"v1".as_slice()), "v1 kept");
+    assert_eq!(a.consensus().consensus_get("work/x").as_deref(), Some(b"v1".as_slice()));
+    assert_eq!(a.system_stats().commit_conflicts, 0, "one value was decided");
+    for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
 }
