@@ -157,6 +157,10 @@ impl Boundary {
 type SenderEntries = ahash::AHashMap<u64, (NodeId, Instant)>;
 type SenderLog = PapayaMap<Arc<str>, Arc<Mutex<SenderEntries>>>;
 
+/// `SignalLog`'s test hook in `trim` (see the field).
+#[cfg(test)]
+type TrimHook = Box<dyn Fn(&SignalLog, &Arc<str>) + Send + Sync>;
+
 /// A total order on monotonic stamps, through the clock seam (`mono_before`).
 fn mono_order(a: &Instant, b: &Instant) -> std::cmp::Ordering {
     if crate::sim_seam::mono_before(a, b) { std::cmp::Ordering::Less }
@@ -391,6 +395,10 @@ struct SignalLog {
     eviction_scans:    std::sync::atomic::AtomicU64,
     /// Records dropped after losing the race with eviction repeatedly (round 4; expected zero).
     records_dropped:   std::sync::atomic::AtomicU64,
+    /// Test hook: runs inside `trim` when a log is found empty, before it is removed — where a
+    /// concurrent recorder could have replaced the table's log (the final review's test of item 7a).
+    #[cfg(test)]
+    trim_hook: std::sync::OnceLock<TrimHook>,
 }
 
 impl SignalLog {
@@ -407,6 +415,8 @@ impl SignalLog {
             evicting:      std::sync::atomic::AtomicBool::new(false),
             eviction_scans: std::sync::atomic::AtomicU64::new(0),
             records_dropped: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            trim_hook: std::sync::OnceLock::new(),
         }
     }
 
@@ -692,6 +702,8 @@ impl SignalLog {
             let mut log = arc.lock();
             log.retain(|_, (_, t)| fresh(t));
             if log.is_empty() {
+                #[cfg(test)]
+                if let Some(hook) = self.trim_hook.get() { hook(self, &kind); }
                 guard.compute(Arc::clone(&kind), |e| match e {
                     Some((_, cur)) if Arc::ptr_eq(cur, &arc) => papaya::Operation::Remove,
                     _ => papaya::Operation::Abort(()),
@@ -741,11 +753,13 @@ struct QuorumEvidence {
     quorum_written: PapayaMap<Arc<str>, Instant>,
     /// Senders each kind has written evidence for, with when, at most
     /// [`SIGNAL_LOG_MAX_SENDERS_PER_KIND`] per kind (#602's round 3, finding 2). At the cap a new
-    /// sender is **skipped and counted** — the set does not slide, since a sliding set let forged
-    /// senders each write a permanent gossiped key (round 5, item 2) — and a slot frees only when its
-    /// sender's last write is older than the quorum window, because evidence that old never counts
-    /// toward a quorum anyway. A kind with neither a worker nor a live pin loses its set at the next
-    /// trim; a sender is entered only when its write happens. `sys/quorum/` keys already written stay.
+    /// sender is **skipped and counted** (round 5, item 2), and a slot frees once its sender's last
+    /// write is older than the signal window. What that bounds is a **rate, not a total**: about 1024
+    /// new evidence keys per kind per signal window. The keys are not collected, and a reader's own
+    /// window (`quorum_persistent(kind, window)`) may be longer than the signal window, so old keys
+    /// can still count there; forged senders on a worked kind add keys at that rate. A kind with
+    /// neither a worker nor a live pin loses its set at the next trim; a sender is entered only when
+    /// its write happens.
     senders_written: PapayaMap<Arc<str>, Arc<PapayaMap<u64, Instant>>>,
     /// Evidence writes skipped by either bound (diagnostics).
     skipped: std::sync::atomic::AtomicU64,
@@ -795,7 +809,8 @@ impl QuorumEvidence {
         if held.len() >= SIGNAL_LOG_MAX_KINDS && !held.contains_key(&quorum_key) {
             return self.skip();
         }
-        // The write happens: enter the sender in its kind's set (sliding past the cap).
+        // The write happens: enter the sender in its kind's set (skipping past the cap unless a slot
+        // has aged out of the signal window).
         {
             let per_kind = self.senders_written.pin();
             let set = match per_kind.get(kind.as_ref()) {
@@ -2159,5 +2174,22 @@ mod bound_tests {
         std::thread::sleep(Duration::from_millis(1_500));
         h.trim_sender_log(Duration::from_millis(500));
         assert_eq!(h.evidence_kinds(), 0, "no worker and a lapsed pin: the set goes");
+    }
+
+    /// The final review of #602, item 6: a test of `SignalLog::trim`'s fix (round 5, item 7a). Trim found
+    /// a log empty; before it removes it, another log has replaced it in the table (a recorder re-created
+    /// the kind after an eviction). The replacement must survive — trim removes only the log it emptied.
+    #[test]
+    fn trim_removes_only_the_log_it_emptied() {
+        let h = SignalHandlers::new(Duration::from_millis(50));
+        h.deliver(&sig("k", id(1)));
+        std::thread::sleep(Duration::from_millis(120)); // the entry ages out: trim will empty the log
+        let _ = h.log.trim_hook.set(Box::new(|log: &SignalLog, kind: &Arc<str>| {
+            let fresh = Arc::new(Mutex::new(SenderEntries::default()));
+            fresh.lock().insert(id(2).id_hash(), (id(2), Instant::now()));
+            log.sender_log.pin().insert(Arc::clone(kind), fresh);
+        }));
+        h.trim_sender_log(Duration::from_millis(50));
+        assert_eq!(h.log_entries("k"), 1, "the replacing log, written after the scan, must survive the trim");
     }
 }

@@ -41,6 +41,9 @@ pub struct TransportBounds {
     /// claimed for a sender the connection handler has already found in `peers`, and is removed when
     /// the reply's last frame is gone.
     replying_to: Arc<papaya::HashMap<NodeId, ()>>,
+    /// Inbound connections refused because their source address was at `max_connections_per_source`
+    /// (the final review of #602, item 8). See `SystemStats::inbound_per_source_refused`.
+    pub per_source_refused: AtomicU64,
     /// Inbound connections per source address — kept only when `max_connections_per_source` is set.
     per_source: Arc<papaya::HashMap<std::net::IpAddr, Arc<AtomicU64>>>,
 }
@@ -93,6 +96,9 @@ impl TransportBounds {
             };
             if count.fetch_add(1, Ordering::AcqRel) >= cap as u64 {
                 count.fetch_sub(1, Ordering::AcqRel);
+                self.per_source_refused.fetch_add(1, Ordering::Relaxed);
+                #[cfg(feature = "metrics")]
+                metrics::counter!("gossip_inbound_per_source_refused_total").increment(1);
                 return None;
             }
             // A give-back may have removed this counter between the lookup and the increment; count
@@ -170,6 +176,43 @@ mod tests {
     use super::*;
 
     fn id(p: u16) -> NodeId { NodeId::new("127.0.0.1", p).unwrap() }
+
+    fn ip(n: u8) -> std::net::IpAddr { std::net::IpAddr::from([10, 0, 0, n]) }
+
+    /// The final review of #602, item 6: a guard dropped, then the source admitted again — the give-back
+    /// removed the entry and the next admit installs a fresh counter, never a stale or wrapped one.
+    #[test]
+    fn a_source_is_readmitted_after_its_guard_drops() {
+        let b = TransportBounds::default();
+        let g = b.admit_source(ip(1), 1).expect("first");
+        assert!(b.admit_source(ip(1), 1).is_none(), "at the cap");
+        assert_eq!(b.per_source_refused.load(Ordering::Relaxed), 1);
+        drop(g);
+        assert!(b.per_source.pin().get(&ip(1)).is_none(), "the last give-back removes the entry");
+        let g2 = b.admit_source(ip(1), 1).expect("readmitted");
+        assert!(b.admit_source(ip(1), 1).is_none(), "and the cap holds again");
+        drop(g2);
+    }
+
+    /// Concurrent admits and drops on one source never leave it refused for good, or over its cap.
+    #[test]
+    fn concurrent_admits_and_drops_keep_the_count_exact() {
+        let b = Arc::new(TransportBounds::default());
+        let threads: Vec<_> = (0..8).map(|_| {
+            let b = Arc::clone(&b);
+            std::thread::spawn(move || {
+                for _ in 0..5_000 {
+                    if let Some(g) = b.admit_source(ip(2), 3) { drop(g); }
+                }
+            })
+        }).collect();
+        for t in threads { t.join().unwrap(); }
+        assert!(b.per_source.pin().get(&ip(2)).is_none_or(|c| c.load(Ordering::Acquire) == 0),
+                "every guard was dropped: nothing may still be counted");
+        let held: Vec<_> = (0..3).map(|_| b.admit_source(ip(2), 3).expect("the full cap is available again")).collect();
+        assert!(b.admit_source(ip(2), 3).is_none());
+        drop(held);
+    }
 
     #[test]
     fn a_peer_has_one_reply_in_flight_until_its_last_frame_is_gone() {

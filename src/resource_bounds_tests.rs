@@ -299,10 +299,10 @@ async fn worst_case_chunk_apply_with_an_fsync_wal() {
     }
 }
 
-/// #602's re-review, finding 9: the one-byte-then-trickle attack on an agent. With the rate floor
-/// set, a peer that starts a frame and then sends a byte per 100 ms — never silent long enough for
-/// the no-progress bound — is closed by the floor and counted as a stalled frame. (With the floor
-/// off, the default, the same trickle holds the socket; `configuration.md` states that cost.)
+/// #602's re-review, finding 9: the one-byte-then-trickle attack on an agent. A peer that starts a
+/// frame and then sends a byte per 100 ms — never silent long enough for the no-progress bound — is
+/// closed by the rate floor (on by default at 1 KiB/s; set higher here) and counted as a stalled frame.
+/// With the floor off (`0`) the same trickle holds the socket; `configuration.md` states that cost.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_one_byte_trickle_is_closed_by_the_rate_floor() {
     use tokio::io::AsyncWriteExt;
@@ -329,7 +329,8 @@ async fn a_one_byte_trickle_is_closed_by_the_rate_floor() {
     x.shutdown().await;
 }
 
-/// And with the floor off (the default), one byte then silence still closes — by the no-progress bound.
+/// And with the floor off (`0`; the default is 1 KiB/s), one byte then silence still closes — by the
+/// no-progress bound.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn one_byte_then_silence_is_closed_with_the_floor_off() {
     use tokio::io::AsyncWriteExt;

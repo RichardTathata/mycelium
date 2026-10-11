@@ -803,13 +803,13 @@ pub struct GossipConfig {
     pub peer_write_stall_timeout_ms: u64,
     /// A bandwidth floor, bytes per second, on frames being **received**: once
     /// `peer_read_stall_timeout_ms` has passed since a frame started, it must have moved at least
-    /// `floor × (elapsed − peer_read_stall_timeout_ms)` bytes. **`0` (the default) disables it**
-    /// (#602's re-review, finding 2): the floor is per connection, so a joiner whose link is shared by
-    /// its senders — eight peers on 512 kbit/s give each under 8 KiB/s — would cut every one of them.
-    /// Without it, a peer can hold one socket by trickling a byte per read-stall window (one byte per
-    /// minute per held permit at the default); set it, sized to `link ÷ concurrent senders`, where that
-    /// matters more than slow links. Not applied to writes: a sender cannot tell a slow link from a
-    /// receiver applying what it read. Env: `GOSSIP_PEER_MIN_RATE_BYTES_PER_SEC`.
+    /// `floor × (elapsed − peer_read_stall_timeout_ms)` bytes. **Default `1024` (on)**; `0` disables it.
+    /// It is per connection, so a joiner bootstrapping from N peers over one link needs N × floor of it
+    /// — 8 senders need ~66 kbit/s at the default (the first default, 8 KiB/s, cut every sender to a
+    /// joiner whose 512 kbit/s link eight peers shared: 8 000 B/s each, under 8 192). It closes a trickle
+    /// inside a frame — a byte per read-stall window, which the no-progress bound alone lets hold a
+    /// socket indefinitely. Not applied to writes: a sender cannot tell a slow link from a receiver
+    /// applying what it read. Env: `GOSSIP_PEER_MIN_RATE_BYTES_PER_SEC`.
     pub peer_min_rate_bytes_per_sec: u64,
     /// When `true`, gossip shards apply scope-aware forwarding for Signal frames:
     /// Group-scoped signals are forwarded only to known group members (plus up to

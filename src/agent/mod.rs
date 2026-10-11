@@ -440,11 +440,15 @@ pub struct SystemStats {
     pub inbound_connections_timed_out: u64,
 
     /// Cumulative inbound gossip connections closed because a frame **in progress** stalled — no byte
-    /// for `peer_read_stall_timeout_ms`, or below `peer_min_rate_bytes_per_sec` (off by default) over the frame
+    /// for `peer_read_stall_timeout_ms`, or below `peer_min_rate_bytes_per_sec` (1 KiB/s by default) over the frame
     /// (#602's review, finding 1). Counted apart from
     /// [`inbound_connections_timed_out`](Self::inbound_connections_timed_out), which is silence
     /// between frames. Rising with a healthy peer means the link is slower than the floor.
     pub inbound_frames_stalled: u64,
+
+    /// Cumulative inbound connections refused because their source address was already at
+    /// `max_connections_per_source` (opt-in; always 0 when it is 0). Keys exact IPs.
+    pub inbound_per_source_refused: u64,
 
 
     /// Cumulative outbound writer connections failed because the peer accepted no byte for

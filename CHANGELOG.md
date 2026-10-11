@@ -202,8 +202,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `a_kind_first_seen_after_a_flood_is_still_tracked`; `a_tap_does_not_exempt_its_kind_from_eviction`;
     `a_query_pin_expires`; `eviction_scans_are_amortised_when_most_kinds_are_exempt`.
   - **`sys/quorum/` evidence** — the signal log's twin, written to Layer I — is written only for a kind with a
-    local worker or a live query pin, at most 1024 senders' keys per kind within the quorum window and 4096
-    writes a second; past either the write is skipped and counted. Seen failing first:
+    local worker or a live query pin, for at most 1024 senders per kind at a time (a slot frees once its last
+    write is older than the signal window) and 4096 writes a second; past either the write is skipped and
+    counted. That bounds a **rate** — about 1024 new keys per kind per signal window — not a total: the keys
+    are not collected. Seen failing first:
     `a_random_kind_flood_writes_no_evidence`; `one_kinds_evidence_is_bounded_by_the_sender_cap` — *3072 evidence
     keys for one kind*; `a_sender_slot_frees_once_its_evidence_ages_out` — *past the cap a new sender is skipped*.
   - **A stopped agent leaked its whole context.** `RpcRequestRx::recv` now ends at shutdown, as its doc said; the
@@ -215,22 +217,29 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **The residual, plainly:** the accept path is bounded against silent and slow connections; **an attacker that
   keeps talking can hold the connection slots it obtained from free permits**, up to `max_connections`. The
   mitigations are mTLS — a non-member fails the handshake within `handshake_timeout_ms` — and the opt-in
-  `max_connections_per_source` (default off; exact IPs, so an IPv6 /64 is not covered). Connection preemption and
+  `max_connections_per_source` (default off; exact IPs, so an IPv6 /64 is not covered; refusals counted in
+  `inbound_per_source_refused`). On the write side there is no rate floor, deliberately (a sender cannot tell a
+  slow link from an applying receiver): a peer that reads one byte per `peer_write_stall_timeout_ms` window parks
+  its own writer and its reply — the whole divergent dump queued for it — indefinitely, so up to `max_peers` ×
+  the divergent store can be held; on a plaintext mesh a forged `Ping` introduces a peer. Connection preemption and
   WAL group commit were built during review and removed (rounds 3–5). The inbound `Data` and anti-entropy paths
   apply a record before its WAL append, as before (stated, unchanged). Counters, on `SystemStats` and as metrics:
-  `inbound_connections_timed_out`, `inbound_frames_stalled`, `outbound_stalls`, `anti_entropy_replies_skipped`,
+  `inbound_connections_timed_out`, `inbound_frames_stalled`, `inbound_per_source_refused`, `outbound_stalls`,
+  `anti_entropy_replies_skipped`,
   `signal_handler_drops`, `signal_log_kinds_evicted`, `signal_log_kinds_refused`.
 
   **Upgrade notes:**
   - `GossipConfig` gained `handshake_timeout_ms`, `inbound_idle_timeout_secs`, `peer_read_stall_timeout_ms`,
     `peer_write_stall_timeout_ms`, `peer_min_rate_bytes_per_sec` and `max_connections_per_source`, and
-    `SystemStats` seven fields (an exhaustive struct literal breaks; `..Default::default()` is unaffected).
+    `SystemStats` eight fields, and `CoreCtx` gained the public field `transport_bounds` (an exhaustive struct
+    literal of any of them breaks; `..Default::default()` is unaffected).
   - `validate()` refuses `inbound_idle_timeout_secs` at or below a non-zero `writer_idle_timeout_secs`; a fleet
     whose writers never idle-close (`writer_idle_timeout_secs = 0`) should set `inbound_idle_timeout_secs = 0`.
   - **The read floor defaults to 1 KiB/s** after `peer_read_stall_timeout_ms`: a joiner bootstrapping from many
     peers over a thin shared link needs senders × floor — set `peer_min_rate_bytes_per_sec = 0` there.
   - **The write stall bound defaults to 1 140 s**: a peer that accepts and never reads parks only its
-    own writer and its one anti-entropy reply that long; lower it for a fleet with no `flush` nodes.
+    own writer and its one anti-entropy reply (the whole divergent dump) that long; lower it for a fleet with
+    no `flush` nodes.
   - **`sys/quorum/` evidence is written only by nodes with a worker on the kind or a recent query of it**
     (`deprecations.md` §30): an observer outside a group reading `quorum_persistent` sees evidence only from nodes
     that subscribe to or ask about the kind, itself included from its first query; a poller slower than its

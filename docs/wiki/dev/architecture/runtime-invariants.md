@@ -278,7 +278,9 @@ setting or constant with a counter (`SystemStats`, `docs/operations/metrics.md`)
   were polled only between frames, so a peer that accepts and never reads parked the task.
 - **Anti-entropy replies** — at most one per peer in flight: a `ReplySlot` (`mycelium-core/src/bounds.rs`)
   is held by every frame of a reply via `Bytes::from_owner` and released when the last is written or
-  dropped. The per-connection cooldown alone was reset by a reconnect.
+  dropped. The per-connection cooldown alone was reset by a reconnect. The reply is the whole divergent
+  dump, held for up to `peer_write_stall_timeout_ms` (or indefinitely by a peer reading a byte per window —
+  there is no write rate floor), so the memory at stake is up to `max_peers` × the divergent store.
 - **Admission fill** — `SignalHandlers::fill_ratio` is the **least** full open **work-bearing**
   subscriber (handlers, `rpc_rx`, the serve stream), not the most: one stalled subscriber loses its own
   signals (`signal_handler_drops`) instead of holding its kind at 1.0 for every subscriber. SSE streams
