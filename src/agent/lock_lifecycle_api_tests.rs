@@ -112,8 +112,9 @@ async fn row13_a_release_ends_an_adopted_recommit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn c1_a_dead_leaders_lease_lapses_and_a_new_election_succeeds() {
     let (p1, p2, p3) = (port(), port(), port());
-    let a = node(p1, &[p2, p3]).await;
-    let b = node(p2, &[p1, p3]).await;
+    // Each node dials only the nodes started before it.
+    let a = node(p1, &[]).await;
+    let b = node(p2, &[p1]).await;
     let c = node(p3, &[p1, p2]).await;
     let _ls: Vec<_> = [&a, &b, &c].iter().map(|n| n.consensus().start_consensus_listener(ConsensusConfig::default())).collect();
     for n in [&a, &b, &c] { n.mesh().join_group("c1d"); }
@@ -303,7 +304,7 @@ async fn row18_a_release_cannot_address_a_newer_decision() {
 /// records are gone from ever reading the legacy way.
 #[test]
 fn row24_collection_never_drops_a_permanent_marker() {
-    let kv = crate::store::KvState::new(1024);
+    let kv = crate::consensus_life::test_kv(1024);
     let put = |k: String, v: Bytes| crate::store::apply_and_notify(&kv, &crate::framing::GossipUpdate {
         nonce: fastrand::u64(..), sender: 1, ttl: 1, is_tombstone: false, timestamp: 1, key: Arc::from(k.as_str()), value: v });
     let n = other_node();

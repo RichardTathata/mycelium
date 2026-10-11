@@ -33,6 +33,10 @@ sim = ["dep:mycelium-sim", "tokio/test-util"]
 # dependent crates' test builds — `#[cfg(test)]` items are invisible across a crate
 # boundary. Enabled by the full crate's dev-dependency; never in a normal build.
 test-support = []
+# The receive-path frame filter (`store::FrameView`, `KvStore::frame_filter`): lets a test withhold real
+# frames from a node. Enabled only by `mycelium`'s `test-frame-filter` feature for its lib tests — never
+# by `test-support`, so examples, benches and demo images do not compile it.
+test-frame-filter = []
 
 [dependencies]
 # Test harness only, and optional: see the `sim` feature.

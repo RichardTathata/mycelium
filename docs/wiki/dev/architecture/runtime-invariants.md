@@ -9,8 +9,9 @@ session or shipped a regression before being written down.
 
 The substrate never enforces the `consensus/` prefix — a rogue writer can clobber
 `consensus/committed/{slot}` and LWW accepts it. The deliberate response is the
-**commit-conflict tripwire** (listener refuses to re-endorse a conflicting COMMIT, `warn!`s,
-increments `SystemStats::commit_conflicts`). Do **not** add a `consensus/`-prefix write guard
+**commit-conflict tripwire** (since row A: a COMMIT of a newer decision of another identity above a live
+one is written — at its own ballot key, so it endorses nothing over another decision — `warn!`ed and counted in
+`SystemStats::commit_conflicts`, because a legitimate handoff whose release marker lags looks the same). Do **not** add a `consensus/`-prefix write guard
 to `apply_and_notify` — that teaches Layer I a Layer III law and inverts the dependency.
 The same posture governs the `sys/` namespace tripwire (`sys_namespace_violations`, see
 [security](../security.md)) and the RBAC design generally.
@@ -66,8 +67,9 @@ remainders must match exactly, so a slot named `lock/a/<16 hex>` cannot inject a
 with no record and no **sentinel** (`…/s`, written with the first record, never collected) falls back to the legacy
 reading. A reader fetches a slot's keys through Layer I's scope index (`KvStore::scope_index`, a read index for
 `consensus/life/{esc}/`), O(the slot's keys). A renewal keeps its own envelope only when the highest reported
-acceptance is its lineage; an upgraded proposer never sets an acceptance aside by `decided` (the implementation
-review's D1, D2). A `CommitTerm` above a live decision of another identity is written and counted (D5). Older nodes keep receiving the legacy keys and `Commit`; an upgraded
+acceptance is its lineage; `decided` sets aside only acceptances reported raw (a legacy proposer's), and only when
+the legacy reading says that decision is over — never an envelope; an adopted legacy value is wrapped in a lease,
+never as permanent (the implementation reviews' D1, D2 and finding 1). A `CommitTerm` above a live decision of another identity is written and counted (D5). Older nodes keep receiving the legacy keys and `Commit`; an upgraded
 proposer times out until a quorum is upgraded.
 
 **Acceptor memory is not erased on commit; it shrinks to a node-owned floor once its decision is over** (2.30.0,

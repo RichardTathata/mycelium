@@ -60,7 +60,10 @@ consensus/life/{esc}/v/{digest:064x}                     a large value, content-
 **Every writer of a decision record writes the same bytes** — the committer and every learner apply the envelope
 they were given, and nothing in it is local to the writer. LWW between two versions of one ballot's record is
 between identical content and decides nothing; **no two decisions share a key**, so LWW never orders two decisions.
-Ordering is by the ballot in the key, read by the reader (§2.3). Layer I learns nothing: these are ordinary keys.
+Ordering is by the ballot in the key, read by the reader (§2.3). Layer I learns no Layer III law: these are
+ordinary keys merged by last-writer-wins, and no write is conditioned on them. Layer I does keep a generic
+**read index** — the agent registers `consensus/life/` as a scoped prefix at construction, and the store files
+each slot's keys under one scope (§2.3) — but core names no prefix itself.
 
 A release marker's value is `digest(value ‖ proposer ‖ lineage) ‖ kind ‖ expires_at_ms` — the identity of the
 lineage it ends, and the term kind the collector needs (§8). It is a **separate key**, so released beats live by
@@ -211,10 +214,17 @@ re-writes its record, and its marker still ends it.
 | **proposer** | writes only legacy keys; an upgraded node reads that slot the legacy way only while it holds no decision-record key for it. |
 | **reader of a release** | sees the 8-byte `lease` of 0: released. |
 
-**An upgraded proposer never sets an acceptance aside by `decided`** (review D2): only the top decision record's
-own end does. A decision made by an older proposer is therefore never set aside by an upgraded one; its acceptance
-is adopted (wrapped with the adopter's window) and re-committed as a record, which then ends by that window — a
-liveness cost of one window in a mixed fleet, never a second value.
+**`decided` sets aside only legacy acceptances, and only when the legacy reading says over** (review D2, and the
+review of `ee3d9e4b`, finding 1). An **envelope** acceptance is never set aside by `decided` — `decided` arrives
+with a commit's legacy keys ahead of its record and says nothing about whether *that* decision ended; only the top
+record's own end sets an envelope aside. An acceptance reported **raw** — an older proposer's value — is set aside
+at or below `decided` exactly when the slot has no decision record and the legacy reading says its decision is
+over (the committed entry present, data or tombstone, and not live). Without that, a legacy decision released the
+legacy way came back: the next upgraded proposal adopted the raw acceptance and re-committed it. A raw acceptance
+that is adopted (its decision not seen over) is wrapped in the adopter's lease — or, when the adopter asked for
+permanence, a 30 s lease — and **never** as permanent: an adopted legacy value has no original proposer in the
+scheme to release it, and a permanent wrap would make it unreleasable. Its holder re-elects itself the upgraded way
+within that window.
 
 **The visibility gap, stated (review D7):** an upgraded node reads a slot the legacy way only while the slot has no
 sentinel. A decision an **older** proposer makes on a slot that already has records is invisible to upgraded
@@ -237,8 +247,13 @@ holds once every node is upgraded; the legacy keys stop being written at a later
   the top shares the digest), in sorted key order (replay-deterministic); the tombstone sweep removes them. A
   learner **never overwrites a tombstone** it holds with a late `CommitTerm`; a lower record resurrected after the
   sweep sits below the top, or reads as ended (its marker or its window), or is the same identity as the top.
-  **Steady state per slot: the sentinel, the top record, the top's marker** — O(1), whatever the history (a test
-  shows 1,000 acquisitions of one lock leave at most three keys).
+  **Steady state per slot: the sentinel, the top record and the top's marker** — plus the top's `v/{digest}` key
+  when its value is over 4 KiB, plus **one marker per released permanent lineage**, kept for good (a test shows
+  1,000 acquisitions of one lock leave at most three keys). Permanent markers are kept deliberately rather than
+  collected below a fsynced top: the collector's top being durable says nothing about a node that holds a lower
+  permanent record and not the top — if that record's marker were gone, it would read live for ever, and a
+  permanent decision has no window to end it. The cost is one marker per *released permanent* decision, which is
+  rare by construction.
 - **Markers:** a permanent decision's marker is **never** collected (finding 1) — **the trade:** one marker per
   released *permanent* decision stays on every node for good, the price of a permanent decision never reviving; a
   lease's marker is collected only once its `expires_at_ms` plus `max_clock_drift_ms` has passed on the collector's
@@ -289,7 +304,7 @@ Each row is a test (listeners on every node, structural readiness polls, exact r
 
 - **Unchanged:** the C1 API; the prepare phase, vote binding and promise rules (over envelope bytes); the floor
   tripwire; the collector's task, budget and lock (`acceptor_records`, lock-order row 56).
-- **Cost:** three keys per slot in steady state (§8), one scope read per live read, five appended wire variants, an
+- **Cost:** three keys per slot in steady state (§8: plus a large value's `v/` key and one marker per released permanent lineage), one scope read per live read, five appended wire variants, an
   fsync of the record before COMMIT, the legacy keys until a later governed MINOR, and one marker per released
   permanent decision.
 - **One number for lease and deadline (review D4).** A lock's lease is its TTL rounded **up** to whole seconds, and

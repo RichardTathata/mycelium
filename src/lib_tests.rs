@@ -105,7 +105,9 @@ fn spawn_handler(
             index_stripes:     Arc::new(std::array::from_fn(|_| std::sync::Mutex::new(()))),
             cap_ns_index:      Arc::new(crate::store::PrefixIndex::new()),
             scope_index: Arc::new(papaya::HashMap::new()),
+            #[cfg(feature = "test-frame-filter")]
             frame_filter: Arc::new(papaya::HashMap::new()),
+            scoped_prefixes: Arc::from(Vec::<Arc<str>>::new()),
             hash_acc:          Arc::new(AtomicU64::new(initial_hash)),
             dropped_frames:    Arc::new(AtomicU64::new(0)),
             individual_flood_fallbacks: Arc::new(AtomicU64::new(0)),
@@ -1174,7 +1176,9 @@ async fn test_subscribe_notified_via_gossip() {
                 index_stripes:     Arc::new(std::array::from_fn(|_| std::sync::Mutex::new(()))),
                 cap_ns_index:      Arc::new(crate::store::PrefixIndex::new()),
                 scope_index: Arc::new(papaya::HashMap::new()),
-                frame_filter: Arc::new(papaya::HashMap::new()),
+                #[cfg(feature = "test-frame-filter")]
+            frame_filter: Arc::new(papaya::HashMap::new()),
+            scoped_prefixes: Arc::from(Vec::<Arc<str>>::new()),
                 hash_acc:          Arc::new(AtomicU64::new(0)),
                 dropped_frames:    Arc::new(AtomicU64::new(0)),
             individual_flood_fallbacks: Arc::new(AtomicU64::new(0)),

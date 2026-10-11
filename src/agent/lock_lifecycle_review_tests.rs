@@ -29,7 +29,9 @@ async fn mesh(n: usize) -> (Vec<GossipAgent>, Vec<crate::ConsensusListenerHandle
     let ports: Vec<u16> = (0..n).map(|_| port()).collect();
     let mut nodes = Vec::new();
     for (i, p) in ports.iter().enumerate() {
-        let others: Vec<u16> = ports.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, q)| *q).collect();
+        // Each node dials only the nodes started before it (the P2 author's finding: dialling a node
+        // not yet listening puts the dialer into reconnect backoff longer than a test waits).
+        let others: Vec<u16> = ports[..i].to_vec();
         nodes.push(node_with(*p, &others, |_| {}).await);
     }
     let ls = nodes.iter().map(|a| a.consensus().start_consensus_listener(ConsensusConfig::default())).collect();
@@ -212,10 +214,10 @@ async fn growth_a_thousand_acquisitions_leave_constant_keys() {
         let g = a.consensus().distributed_lock("grow", Duration::from_secs(1)).await
             .unwrap_or_else(|e| panic!("acquire {i}: {e:?}"));
         g.release();
-        if i % 100 == 99 { engine.collect_records(); } // the collector's periodic pass
+        if i % 100 == 99 { engine.collect_records().await; } // the collector's periodic pass
     }
     tokio::time::sleep(Duration::from_millis(1_200)).await; // every lease and the drift bound pass
-    for _ in 0..4 { engine.collect_records(); }
+    for _ in 0..4 { engine.collect_records().await; }
     crate::store::sweep_stale_tombstones(&a.task_ctx.kv_state.store, u64::MAX);
     let prefix = format!("consensus/life/{}/", esc("lock/grow"));
     let keys = a.task_ctx.kv_state.store.pin().iter().filter(|(k, _)| k.starts_with(prefix.as_str())).count();
@@ -249,7 +251,7 @@ async fn d6_the_gateway_consistent_get_reads_the_decision() {
 /// **D7: a record key spelled in uppercase hex is not a record.**
 #[test]
 fn d7_an_uppercase_ballot_is_not_a_record() {
-    let kv = crate::store::KvState::new(1024);
+    let kv = crate::consensus_life::test_kv(1024);
     let n = NodeId::new("127.0.0.1", 1).unwrap();
     let real = Envelope::new("s", Bytes::from_static(b"real"), Term::Permanent, 1, n.clone(), 1);
     let fake = Envelope::new("s", Bytes::from_static(b"fake"), Term::Permanent, 2, n, 2);
@@ -266,7 +268,7 @@ fn d7_an_uppercase_ballot_is_not_a_record() {
 #[test]
 fn row21_collection_writes_in_sorted_order() {
     let build = |order: &[u64]| {
-        let kv = crate::store::KvState::new(1024);
+        let kv = crate::consensus_life::test_kv(1024);
         let n = NodeId::new("127.0.0.1", 1).unwrap();
         for b in order {
             let e = Envelope::new("s", Bytes::from(format!("v{b}").into_bytes()), Term::Lease { ms: 1, expires_at_ms: 1 }, *b, n.clone(), *b);
@@ -289,7 +291,7 @@ fn row21_collection_writes_in_sorted_order() {
 /// must not depend on other slots' history — measured in `measure_read_slot_cost`.
 #[test]
 fn d3_a_slot_read_ignores_other_slots() {
-    let kv = crate::store::KvState::new(1 << 20);
+    let kv = crate::consensus_life::test_kv(1 << 20);
     let n = NodeId::new("127.0.0.1", 1).unwrap();
     for s in 0..200 {
         for b in 1..=20u64 {
@@ -309,7 +311,7 @@ fn d3_a_slot_read_ignores_other_slots() {
 #[test]
 #[ignore]
 fn measure_read_slot_cost() {
-    let kv = crate::store::KvState::new(1 << 22);
+    let kv = crate::consensus_life::test_kv(1 << 22);
     let n = NodeId::new("127.0.0.1", 1).unwrap();
     for s in 0..5_000u64 {
         let slot = format!("lock/m{s}");
@@ -332,3 +334,96 @@ fn measure_read_slot_cost() {
 /// Keeps `ConsensusResult` in use for the file's imports across feature sets.
 #[allow(dead_code)]
 fn _uses(_: ConsensusResult) {}
+
+/// **The review of `ee3d9e4b`, finding 1 (the reviewer's probe, ported):** a 2.31 permanent
+/// leadership, released the legacy way, must not be resurrected as an unreleasable permanent decision
+/// by an upgraded proposer adopting the legacy acceptance.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f1_a_legacy_released_permanent_is_not_resurrected() {
+    let (n, _l) = mesh(1).await;
+    let a = &n[0];
+    a.mesh().join_group("pz");
+    assert!(until(|| !a.mesh().group_members("pz").is_empty(), 5_000).await);
+    let slot = "leader/pz";
+    let x = NodeId::new("127.0.0.1", 1).unwrap();
+    let xv = Bytes::from(x.to_string().into_bytes());
+    let b = 7u64;
+    // The 2.31 decision: legacy committed (no lease: permanent), decided b, acceptor memory at b.
+    let _ = a.kv().set(format!("consensus/committed/{slot}"), xv.clone());
+    let _ = a.kv().set(format!("consensus/decided/{slot}"), crate::consensus::encode_ballot(b));
+    let _ = a.kv().set(format!("consensus/ballot/{slot}"), crate::consensus::encode_ballot(b));
+    let cs: Arc<str> = Arc::from(slot);
+    assert!(crate::consensus::claim_vote(&a.task_ctx.consensus_accepted, &cs, b, &xv, x.id_hash(), 0));
+    // The legacy release (what a 2.31 X's release_leadership did): committed + lease tombstoned.
+    let _ = a.kv().delete(format!("consensus/committed/{slot}"));
+    let _ = a.kv().delete(format!("consensus/lease/{slot}"));
+    assert!(a.consensus().consensus_get(slot).is_none(), "released before the upgrade");
+    // An upgraded node elects itself, permanently.
+    let r = a.consensus().elect_leader_with("pz", crate::LeaderTerm::Permanent).await;
+    assert!(matches!(&r, Ok(l) if l.leader == *a.node_id()),
+        "the released 2.31 leader was resurrected: {r:?}");
+    a.shutdown().await;
+}
+
+/// **The review of `ee3d9e4b`, finding 2, black-box:** a renewal whose own lineage is reported
+/// **below** a foreign acceptance adopts the foreign one, as any proposer must (it may be chosen). P
+/// leads at b1; C has accepted W at b′ > b1; P renews on {P, C}: P must not renew its own lineage.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn f2_a_renewal_adopts_a_higher_foreign_acceptance() {
+    let (n, _l) = mesh(3).await;
+    let (p, x, c) = (&n[0], &n[1], &n[2]);
+    for a in [p, x, c] { a.mesh().join_group("f2"); }
+    assert!(until(|| [p, x, c].iter().all(|a| a.mesh().group_members("f2").len() >= 3), 30_000).await);
+    let slot = "leader/f2";
+    p.consensus().elect_leader_receipt("f2").await.expect("P elects");
+    assert!(until(|| c.consensus().consensus_get(slot).is_some(), 5_000).await);
+    let b_prime = decided(c, slot) + 3;
+    let w = Envelope::new(slot, Bytes::from(x.node_id().to_string().into_bytes()), Term::Lease { ms: 60_000, expires_at_ms: wall() + 60_000 },
+        b_prime, x.node_id().clone(), 1);
+    let cs: Arc<str> = Arc::from(slot);
+    assert!(crate::consensus::claim_envelope(&c.task_ctx.consensus_accepted, &cs, b_prime, &w.encode(), x.node_id().id_hash(), 0));
+    let _ = c.kv().set(format!("consensus/ballot/{slot}"), crate::consensus::encode_ballot(b_prime));
+    assert!(until(|| p.task_ctx.kv_state.store.pin().get(format!("consensus/ballot/{slot}").as_str())
+        .and_then(|e| e.data.clone()).map(|b| crate::consensus::decode_ballot(&b)) == Some(b_prime), 5_000).await);
+    // X partitioned: P's promise quorum is {P, C}.
+    withhold(p, 1, from(vec![x.node_id().id_hash()]));
+    withhold(c, 1, from(vec![x.node_id().id_hash()]));
+    withhold(x, 1, from(vec![p.node_id().id_hash(), c.node_id().id_hash()]));
+    // P adopts W (it may have been chosen). Committing it is then refused by P's own live decision,
+    // so P reports what it reads, `Observed`; what it must never report is a renewal of its own lower
+    // lineage, `Decided`, over W.
+    let r = p.consensus().elect_leader_receipt("f2").await;
+    assert!(!matches!(&r, Ok(l) if l.leader == *p.node_id() && l.basis == crate::LeadershipBasis::Decided),
+        "the renewal kept its own lower lineage over a higher foreign acceptance: {r:?}");
+    for a in [p, x, c] { a.shutdown().await; }
+}
+
+/// **The review of `ee3d9e4b`, finding 7: a learner never overwrites a tombstone.** A record key this
+/// node holds as a tombstone (collected below a higher top) is not re-written by a late COMMIT of it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f7_a_learner_never_overwrites_a_tombstone() {
+    use crate::consensus::{consensus_kind, encode_consensus_msg};
+    let (n, _l) = mesh(1).await;
+    let a = &n[0];
+    let slot = "f7";
+    let low = Envelope::new(slot, Bytes::from_static(b"low"), Term::Permanent, 3, NodeId::new("127.0.0.1", 1).unwrap(), 1);
+    let key = life::record_key(slot, 3);
+    let _ = a.kv().delete(key.clone());
+    assert!(a.task_ctx.kv_state.store.pin().get(key.as_str()).is_some_and(|e| e.data.is_none()), "a tombstone");
+    let late = ConsensusMsg::CommitTerm { slot: Arc::from(slot), ballot: 3, envelope: low.encode() };
+    let probe = Envelope::new("probe/f7", Bytes::from_static(b"p"), Term::Permanent, 1, NodeId::new("127.0.0.1", 1).unwrap(), 1);
+    let probe_msg = ConsensusMsg::CommitTerm { slot: Arc::from("probe/f7"), ballot: 1, envelope: probe.encode() };
+    let probe_key = life::record_key("probe/f7", 1);
+    let mut applied = false;
+    for _ in 0..200 {
+        let _ = a.mesh().emit(consensus_kind::COMMIT, crate::signal::SignalScope::Cluster, encode_consensus_msg(&late));
+        let _ = a.mesh().emit(consensus_kind::COMMIT, crate::signal::SignalScope::Cluster, encode_consensus_msg(&probe_msg));
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        applied = a.task_ctx.kv_state.store.pin().get(probe_key.as_str()).is_some_and(|e| e.data.is_some());
+        if applied { break; }
+    }
+    assert!(applied, "the listener processed the COMMITs");
+    assert!(a.task_ctx.kv_state.store.pin().get(key.as_str()).is_some_and(|e| e.data.is_none()),
+        "a late COMMIT overwrote a collected record's tombstone");
+    a.shutdown().await;
+}

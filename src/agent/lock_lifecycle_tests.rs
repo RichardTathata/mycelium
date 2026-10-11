@@ -33,7 +33,9 @@ async fn mesh(n: usize) -> (Vec<GossipAgent>, Vec<crate::ConsensusListenerHandle
     let ports: Vec<u16> = (0..n).map(|_| port()).collect();
     let mut nodes = Vec::new();
     for (i, p) in ports.iter().enumerate() {
-        let others: Vec<u16> = ports.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, q)| *q).collect();
+        // Each node dials only the nodes started before it (the P2 author's finding: dialling a node
+        // not yet listening puts the dialer into reconnect backoff longer than a test waits).
+        let others: Vec<u16> = ports[..i].to_vec();
         nodes.push(node(*p, &others).await);
     }
     let ls = nodes.iter().map(|a| a.consensus().start_consensus_listener(ConsensusConfig::default())).collect();
@@ -160,11 +162,13 @@ async fn row04_a_stale_guards_release_does_not_end_a_newer_holder() {
     let gb = b.consensus().locks().lock("r04", Duration::from_secs(60), Duration::from_secs(15)).await
         .expect("B acquires once A's lease lapses");
     let vb = b.consensus().consensus_get("lock/r04").expect("B holds");
+    // M has learned B's decision before anything is asserted about it (the review's flake: 2/10).
+    assert!(until(|| m.consensus().consensus_get("lock/r04").as_ref() == Some(&vb), 10_000).await, "M never learned B's lock");
     drop(ga);
     heal(a, 1);
     for _ in 0..40 {
         assert_eq!(b.consensus().consensus_get("lock/r04").as_ref(), Some(&vb), "a stale release ended B's lock (B)");
-        assert_ne!(m.consensus().consensus_get("lock/r04"), None, "a stale release ended B's lock (M)");
+        assert_eq!(m.consensus().consensus_get("lock/r04").as_ref(), Some(&vb), "a stale release ended B's lock (M)");
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     std::mem::forget(gb);

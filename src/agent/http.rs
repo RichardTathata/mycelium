@@ -1073,8 +1073,15 @@ async fn consensus_slot_handler(
         .map(|b| base64::engine::general_purpose::STANDARD.encode(&b));
     // Row A: a decision whose record has ended (released, or its lease past) reads `lease_expired`;
     // the raw committed key is consulted only for a slot with no decision record.
-    let lease_expired = committed_b64.is_none()
-        && (crate::consensus::ended_at(&ctx.agent_ctx.kv_state, &slot).is_some() || raw_present);
+    // Row A: a slot with a decision record says `lease_expired` exactly when its top record has ended
+    // (released, or its lease past) — not when a live top's large value has not arrived, and not for a
+    // slot whose top is not here yet (`Unknown`). Only a slot with no record reads the raw committed key.
+    let lease_expired = match crate::consensus_life::read_slot(
+            &ctx.agent_ctx.kv_state, &slot, mycelium_core::sim_seam::wall_now_ms()) {
+        crate::consensus_life::SlotView::Top(t) => t.ended,
+        crate::consensus_life::SlotView::Unknown => false,
+        crate::consensus_life::SlotView::NoRecord => raw_present && committed_b64.is_none(),
+    };
     let lease_ms = store.get(lease_key.as_str())
         .and_then(|e| e.data.clone())
         .and_then(|b| crate::consensus::decode_lease_ms(&b));

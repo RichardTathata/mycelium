@@ -27,11 +27,11 @@ mod kv_quorum_ext;
 // tests stay here.
 #[cfg(test)]
 mod kv_handle_tests;
-#[cfg(all(test, feature = "consensus"))]
+#[cfg(all(test, feature = "consensus", feature = "test-frame-filter"))]
 mod lock_lifecycle_tests;
 #[cfg(all(test, feature = "consensus"))]
 mod lock_lifecycle_api_tests;
-#[cfg(all(test, feature = "consensus"))]
+#[cfg(all(test, feature = "consensus", feature = "test-frame-filter"))]
 mod lock_lifecycle_review_tests;
 #[cfg(test)]
 mod mesh_handle_tests;
@@ -1066,7 +1066,13 @@ impl GossipAgent {
         let seen_shards = n_shards.max(16);
 
         let signal_window = std::time::Duration::from_secs(config.signal_window_secs);
-        let kv_state      = KvState::new(config.max_store_entries);
+        // The decision-record namespace is indexed per slot (row A, `consensus_life`) — registered here,
+        // before any key is applied or replayed; core names no Layer III prefix itself.
+        #[cfg(feature = "consensus")]
+        let scoped: &[&str] = &[crate::consensus_life::LIFE_PREFIX];
+        #[cfg(not(feature = "consensus"))]
+        let scoped: &[&str] = &[];
+        let kv_state      = KvState::with_scoped_prefixes(config.max_store_entries, scoped);
         let default_ttl   = config.default_ttl;
         let gossip_txs: Arc<[mpsc::Sender<(Bytes, u64, ForwardHint)>]> = gossip_txs_vec.into();
         // Last time each peer was heard from, in monotonic nanoseconds from the clock seam.

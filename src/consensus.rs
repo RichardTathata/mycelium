@@ -609,8 +609,8 @@ pub(crate) fn live_committed_value(
 /// Row A (`docs/design/lock-lifecycle.md` §2.3): the decision record with the highest ballot this
 /// node holds decides it — live unless a release marker names it or its lease is past on **this
 /// node's wall clock** — and the token is the one the original proposer fixed in the envelope. A slot
-/// whose record keys are all collected stubs reads as not live. Only a slot with **no** decision-record
-/// key falls back to the legacy reading below, with `now_ms` (the causal now) against the committed
+/// that has had records (its sentinel is here) but holds none reads as not live. Only a slot with no
+/// record and no sentinel falls back to the legacy reading below, with `now_ms` (the causal now) against the committed
 /// entry's timestamp and an 8-byte lease — the reading a node older than row A uses.
 pub(crate) fn live_committed_with_hlc(
     kv:     &crate::store::KvState,
@@ -996,6 +996,19 @@ impl ConsensusEngine {
         });
     }
 
+    /// **The legacy reading says the slot's decision is over**: the slot has no decision record (no
+    /// record, no sentinel — design §2.3), and its committed entry is present, data or tombstone, and
+    /// not live. An absent entry is *not* over: the commit may not have arrived yet.
+    fn legacy_over(&self, slot: &str) -> bool {
+        if !matches!(crate::consensus_life::read_slot(&self.task_ctx.kv_state, slot, mycelium_core::sim_seam::wall_now_ms()),
+                     crate::consensus_life::SlotView::NoRecord) {
+            return false;
+        }
+        let present = self.task_ctx.kv_state.store.pin()
+            .get(format!("{}{}", consensus_ns::COMMITTED, slot).as_str()).is_some();
+        present && legacy_live(&self.task_ctx.kv_state, slot, causal_now_ms(&self.task_ctx.hlc)).is_none()
+    }
+
     /// The ballot of `slot`'s top decision record when it has ended (design §2.3); `0` when none. A
     /// member can write a record too, so a ballot far above every one this node observed is counted by
     /// the floor's tripwire ([`note_implausible`](Self::note_implausible)) — detection only.
@@ -1029,7 +1042,14 @@ impl ConsensusEngine {
         }
         let token = self.task_ctx.hlc.tick();
         let lineage = renewing.unwrap_or(first_ballot);
-        Carry { own: Envelope::new(slot, raw.clone(), term, lineage, me, token), renewing }
+        let legacy_term = match term {
+            Term::Lease { .. } => term,
+            Term::Permanent => Term::Lease {
+                ms: LEGACY_ADOPTION_LEASE_MS,
+                expires_at_ms: mycelium_core::sim_seam::wall_now_ms().saturating_add(LEGACY_ADOPTION_LEASE_MS),
+            },
+        };
+        Carry { own: Envelope::new(slot, raw.clone(), term, lineage, me, token), renewing, legacy_term }
     }
 
     /// The ballot at or below which this node refuses `slot`'s prepares and accepts, and above which
@@ -1169,6 +1189,7 @@ impl ConsensusEngine {
             crate::consensus_life::read_slot(&self.task_ctx.kv_state, slot, mycelium_core::sim_seam::wall_now_ms())
         else { return false };
         let keys = [
+            crate::consensus_life::sentinel_key(slot),
             crate::consensus_life::record_key(slot, top.ballot),
             crate::consensus_life::marker_key(slot, top.env.lineage, &top.env.proposer),
         ];
@@ -1212,7 +1233,7 @@ impl ConsensusEngine {
     /// is not the top's — in sorted key order, so a replay writes the same sequence. Never the top
     /// record, the slot's sentinel, a permanent marker (review finding 1) or the top lineage's marker.
     /// Steady state per slot: the sentinel, the top record, the top's marker.
-    pub(crate) fn collect_records(&self) -> usize {
+    pub(crate) async fn collect_records(&self) -> usize {
         let wall = mycelium_core::sim_seam::wall_now_ms();
         let drift = self.task_ctx.config.max_clock_drift_ms;
         let mut slots = crate::consensus_life::slots_with_records(&self.task_ctx.kv_state);
@@ -1224,6 +1245,11 @@ impl ConsensusEngine {
         let mut touched = 0;
         for slot in slots {
             let Some(c) = crate::consensus_life::collectable(&self.task_ctx.kv_state, &slot, wall, drift) else { continue };
+            if c.dead_keys.is_empty() { continue; }
+            // The top, its marker and the sentinel on stable storage **before** anything below them is
+            // tombstoned (the review of `ee3d9e4b`, finding 5): a crash between would otherwise leave
+            // this node holding neither — `Unknown` until anti-entropy repaired it.
+            if !self.sync_top_record(&slot).await { continue; }
             for key in c.dead_keys {
                 let upd = self.kv_delete(&key);
                 self.wal_try(&upd);
@@ -2106,12 +2132,16 @@ impl ConsensusEngine {
     ) -> Phase1 {
         let me = &self.task_ctx.node_id;
         let mut reports: Vec<AcceptReport> = Vec::new();
+        // The ballots whose acceptance was reported **raw** (a legacy value, before it is wrapped) —
+        // the only acceptances the legacy reading may set aside (below).
+        let mut raw_ballots: Vec<u64> = Vec::new();
         let floor = self.floor(slot);
         match prepare_slot(&self.task_ctx.consensus_accepted, slot, ballot, me.id_hash(), floor) {
             PrepareOutcome::Refused { promised, .. } => return Phase1::Refused(promised),
             PrepareOutcome::Promised(acc) => {
                 if let Some((b, a)) = acc {
                     let is_env = matches!(a, Accepted::Envelope(_));
+                    if !is_env && a.value().is_some() { raw_ballots.push(b); }
                     reports.push(carry.report(slot, b, Some(a.digest()), a.value(), is_env));
                 }
             }
@@ -2160,6 +2190,7 @@ impl ConsensusEngine {
                                 // us how: do not count this promiser.
                                 continue;
                             }
+                            if !accepted_is_envelope && accepted.is_some() { raw_ballots.push(accepted_ballot); }
                             reports.push(carry.report(slot, accepted_ballot, accepted_digest, accepted, accepted_is_envelope));
                         }
                         promisers.insert(voter);
@@ -2192,20 +2223,18 @@ impl ConsensusEngine {
         // Row A: a slot whose top decision record has ended — released, or its lease past — sets
         // aside every acceptance at or below that record's ballot (design §2.3). The record carries
         // its own ballot, so this needs neither the committed entry nor the decided floor.
-        // An upgraded proposer **never** sets acceptances aside by `decided` (review D2): `decided`
-        // arrives with a commit's legacy keys and says nothing about whether the decision ended. Only
-        // the top decision record's own end does. A legacy decision is therefore never set aside here
-        // — its acceptance is adopted and re-committed as a record, which then ends by its window.
         set_aside_finished(&mut reports, 0, false, self.ended(slot));
-        // A renewal (design §4, Q2) replaces this proposer's own live decision with a new one of the
-        // same lineage — but only when the **highest** acceptance the promise quorum reports is that
-        // lineage. Decided on the full report set (review D1): dropping the own-lineage reports and
-        // adopting the best of the rest would let a renewal adopt a *lower* value over its own higher
-        // decided acceptance.
-        if carry.renewing.is_some() && top_is_renewed_lineage(&reports, carry) {
-            return Phase1::Ready(Phase1Choice::Keep);
+        // `decided` sets aside **only acceptances reported raw** — a legacy proposer's — and only when
+        // the legacy reading says that legacy decision is over (no decision record, the committed entry
+        // present and not live). An envelope is never set aside by `decided` (review D2: `decided`
+        // arrives with a commit's legacy keys ahead of its record and says nothing about whether *that*
+        // decision ended). Without this, a legacy decision released the legacy way came back on the next
+        // proposal, adopted and re-committed (the review of `ee3d9e4b`, finding 1).
+        if self.legacy_over(slot) {
+            let floor = self.decided_floor(slot);
+            reports.retain(|r| !(r.0 <= floor && raw_ballots.contains(&r.0)));
         }
-        Phase1::Ready(choose_after_prepare(current, &reports))
+        Phase1::Ready(phase1_choice(current, &reports, carry))
     }
 
     /// Evaluates quorum-by-count + topology gate. When both pass, dispatches
@@ -2500,7 +2529,17 @@ impl ConsensusEngine {
 pub(crate) struct Carry {
     pub(crate) own:      crate::consensus_life::Envelope,
     pub(crate) renewing: Option<u64>,
+    /// The term a **legacy** acceptance is wrapped in when adopted: this proposal's own lease, or —
+    /// when this proposal is permanent — a lease of [`LEGACY_ADOPTION_LEASE_MS`]. Never permanent: an
+    /// adopted legacy value has no original proposer in the scheme to release it, so a permanent wrap
+    /// would make it unreleasable (the review of `ee3d9e4b`, finding 1). Fixed once per proposal, so two
+    /// promisers reporting one legacy acceptance wrap it identically.
+    pub(crate) legacy_term: crate::consensus_life::Term,
 }
+
+/// The window an adopted legacy value gets when the adopter asked for permanence — the default leader
+/// lease (30 s): long enough for the value's holder to re-elect itself the upgraded way.
+pub(crate) const LEGACY_ADOPTION_LEASE_MS: u64 = 30_000;
 
 impl Carry {
     /// One acceptor's report as an [`AcceptReport`] over envelope bytes: an envelope as it is; a legacy
@@ -2512,7 +2551,7 @@ impl Carry {
             (Some(env), true) => (ballot, value_digest(&env), Some(env)),
             (Some(raw), false) => {
                 let wrapped = crate::consensus_life::Envelope::wrap_legacy(
-                    slot, raw, self.own.term, self.own.proposer.clone(), self.own.token, ballot,
+                    slot, raw, self.legacy_term, self.own.proposer.clone(), self.own.token, ballot,
                 ).encode();
                 (ballot, value_digest(&wrapped), Some(wrapped))
             }
@@ -2528,6 +2567,21 @@ impl Carry {
         self.renewing.is_some_and(|l| crate::consensus_life::Envelope::decode(env)
             .is_some_and(|e| e.lineage == l && e.proposer == self.own.proposer))
     }
+}
+
+/// **The phase-1 rule, as this proposer applies it** — pure, so it is tested on its own.
+///
+/// A renewal (design §4, Q2) replaces this proposer's own live decision with a new one of the same
+/// lineage, but only when the **highest** acceptance the promise quorum reports is that lineage. It is
+/// decided on the full report set (review D1): dropping the own-lineage reports and adopting the best of
+/// the rest let a renewal adopt a *lower* value over its own higher decided acceptance; and a renewal
+/// whose own lineage is reported **below** a foreign acceptance must adopt the foreign one, as any
+/// proposer does. Otherwise [`choose_after_prepare`].
+pub(crate) fn phase1_choice(current: &Bytes, reports: &[AcceptReport], carry: &Carry) -> Phase1Choice {
+    if carry.renewing.is_some() && top_is_renewed_lineage(reports, carry) {
+        return Phase1Choice::Keep;
+    }
+    choose_after_prepare(current, reports)
 }
 
 /// Whether every report at the highest reported ballot is an acceptance of the lineage `carry` renews
@@ -3417,7 +3471,7 @@ pub(crate) async fn run_acceptor_collector(
             _ = async { let _ = shutdown_rx.wait_for(|v| *v).await; } => break,
             _ = collect.tick() => {
                 let _ = ctx.collect_finished().await;
-                let _ = ctx.collect_records();
+                let _ = ctx.collect_records().await;
             }
         }
     }
@@ -3601,20 +3655,14 @@ pub(crate) async fn run_consensus_listener(
                     }
 
                 // ── Commit-conflict tripwire ─────────────────────────────────
-                // Slots are commit-once (or renewed with the same value while an
-                // epoch lease is live; any value once the lease has expired —
-                // `live_committed` returns None for an expired lease, so a legal
-                // reopen never trips this). A COMMIT carrying a *different* value
-                // while the existing commitment is still live is a protocol
-                // violation: a raced double-commit, a buggy proposer, or a forged
-                // message. Refuse to endorse it — re-writing it here would
-                // propagate the clobber with a fresh HLC from this node, actively
-                // helping it win LWW everywhere. Detection only: the substrate's
-                // own forwarding of the foreign frame is untouched (Layer I/II
-                // stay ignorant of Layer III's laws).
-                // A *newer* decision of another identity while this node's top is live is the
-                // violation; a COMMIT at or below the top only writes a lower record, which no reader
-                // takes while the top is held (design §2.3), and a renewal keeps the identity.
+                // A COMMIT of a *newer* decision of another identity while this node's top is live is
+                // counted: a raced double-commit, a buggy or forged proposer — or a legitimate handoff
+                // whose release marker has not reached this node yet, which looks exactly the same. So
+                // it is counted and **written** (row A, review D5): the record is the newer decision's
+                // at its own ballot key, so writing it endorses nothing over another decision's key and
+                // gives it no fresh HLC to win with. A COMMIT at or below the top only writes a lower
+                // record, which no reader takes while the top is held (design §2.3); a renewal keeps
+                // the identity. Detection only: Layers I and II stay ignorant of Layer III's laws.
                 if let crate::consensus_life::SlotView::Top(t) = &top
                     && !t.ended && t.ballot < ballot && t.env.identity() != env.identity() {
                         ctx.task_ctx.commit_conflicts.fetch_add(
@@ -3656,7 +3704,7 @@ pub(crate) async fn run_consensus_listener(
 
                 // The learner writes the **decision record** — the committer's bytes, so last-writer-
                 // wins between copies decides nothing — and nothing else: never `committed`, never an
-                // end. A record key this node already collected to a stub stays a stub. The acceptor's
+                // end. A record key this node holds as a tombstone (collected) stays one. The acceptor's
                 // memory is kept (erasing it on commit dropped promises, 2026-10-08 review); it is
                 // shrunk only once the decision is over (`collect_finished`, row A).
                 // **Never overwrite a tombstone**: a record key this node holds as a tombstone was
@@ -4493,6 +4541,27 @@ mod consensus_msg_auth_tests {
         set_aside_finished(&mut reports, 5, true, 0);
         assert_eq!(choose_after_prepare(&mine, &reports), Phase1Choice::Keep,
                    "a decision seen to be over does not");
+    }
+
+    /// **D1 and the review of `ee3d9e4b`, finding 2: the renewal rule, both directions.** A renewal keeps
+    /// its own envelope only when the highest report is its own lineage; with its lineage reported
+    /// **below** a foreign acceptance it adopts the foreign one.
+    #[test]
+    fn a_renewal_keeps_its_lineage_only_when_it_is_the_top_report() {
+        use crate::consensus_life::{Envelope, Term};
+        let me = NodeId::new("127.0.0.1", 9).unwrap();
+        let other = NodeId::new("127.0.0.1", 8).unwrap();
+        let own = Envelope::new("s", Bytes::from_static(b"L"), Term::Lease { ms: 1, expires_at_ms: 9 }, 4, me.clone(), 1).encode();
+        let renewal = Envelope::new("s", Bytes::from_static(b"L"), Term::Lease { ms: 1, expires_at_ms: 99 }, 4, me.clone(), 2);
+        let w = Envelope::new("s", Bytes::from_static(b"W"), Term::Lease { ms: 1, expires_at_ms: 9 }, 6, other, 1).encode();
+        let carry = Carry { own: renewal.clone(), renewing: Some(4), legacy_term: Term::Lease { ms: 1, expires_at_ms: 9 } };
+        let current = renewal.encode();
+        let lower_own = vec![(4, value_digest(&own), Some(own.clone())), (6, value_digest(&w), Some(w.clone()))];
+        assert_eq!(phase1_choice(&current, &lower_own, &carry), Phase1Choice::Adopt(6, w.clone()),
+            "a renewal whose lineage is below a foreign acceptance must adopt it");
+        let top_own = vec![(6, value_digest(&w), Some(w)), (8, value_digest(&own), Some(own))];
+        assert_eq!(phase1_choice(&current, &top_own, &carry), Phase1Choice::Keep,
+            "a renewal whose lineage is the top report keeps its own envelope");
     }
 
     /// Row A, K1/K2: an ended decision's acceptances are set aside by the ballot its lifecycle

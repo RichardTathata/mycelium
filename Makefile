@@ -168,6 +168,7 @@ build:
 ## wasmtime). Run it before every push.
 check:
 	cargo clippy --lib --tests -- -D warnings
+	cargo clippy --lib --tests --features test-frame-filter -- -D warnings
 	cargo clippy --lib --tests --features tls,metrics,a2a,llm -- -D warnings
 	cargo clippy --lib --tests --features compliance -- -D warnings
 	cargo clippy --lib --no-default-features -- -D warnings
@@ -205,7 +206,7 @@ gate-knowledge:
 ## coverage is what scripts/check-test-inventory.py proves. The Python line needs pytest and the two
 ## Python packages installed (pip install -e mycelium-py -e langgraph-checkpoint-mycelium pytest pytest-asyncio).
 check-full: check
-	cargo test  --lib --features tls,metrics,a2a,llm
+	cargo test  --lib --features tls,metrics,a2a,llm,test-frame-filter   # + the row-A frame-filter tests
 	cargo test  --lib --features compliance,a2a   # the audit chain + both gateway enforcement points
 	cargo test  --features tls,a2a --test '*'           # every root integration test, by discovery (rule 3)
 	cargo test  --features tls,a2a --bins                # the skillrunner binary's unit tests

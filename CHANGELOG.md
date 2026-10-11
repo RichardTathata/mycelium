@@ -277,7 +277,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   whose decision ended at `e` — promising nothing above it, re-checked in the compare-and-set — to a node-owned,
   fsynced floor `{e}` that refuses `e` and below, after fsyncing the record it relies on; lower records are
   tombstoned (a per-slot sentinel keeps the slot off the legacy reading), lease markers go after their expiry plus
-  the drift bound, permanent markers never — steady state three keys per slot; 64 slots a pass, sorted then
+  the drift bound, permanent markers never — steady state the sentinel, the top and its marker (plus a large
+  value's `v/` key and one marker per released permanent lineage); 64 slots a pass, sorted then
   seam-rotated. **The implementation review's findings, fixed here:** a renewal keeps its own envelope only when the
   highest reported acceptance is its lineage (D1: it adopted a lower value over its own higher decided acceptance;
   seen failing first: `d1_a_renewal_never_adopts_a_lower_value_over_its_own` — "basis: Observed"); an upgraded
@@ -290,9 +291,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   /gateway/overlay/consistent/get` and `GET /consensus/{slot}` read through the decision record (D6,
   `d6_the_gateway_consistent_get_reads_the_decision` — the raw key's bytes); uppercase-hex record keys are not
   records (`d7_an_uppercase_ballot_is_not_a_record`), learner records reach the WAL, the deadline refusal answers
-  409 `expired_before_grant`; 1,000 acquisitions leave three keys (`growth_a_thousand_acquisitions_leave_constant_keys`
+  409 `expired_before_grant`; 1,000 acquisitions of one lock leave at most three keys (`growth_a_thousand_acquisitions_leave_constant_keys`
   — "1001 keys remain"). The interleaving tests withhold real frames with a test-only frame filter on the receive
-  path (`mycelium-core` feature `test-support`). Wire **v12**: five appended `ConsensusMsg` variants (`PrepareTerm`, `PrepareAckTerm`,
+  path (`mycelium-core` feature `test-frame-filter`, enabled by `mycelium`'s `test-frame-filter` for lib test runs
+  only — never by `test-support`, so examples and demo images do not compile it; anti-entropy entries carry the
+  answering peer, so a partition withholds them too). **And the review of `ee3d9e4b`:** `decided` sets aside only
+  acceptances reported raw (an older proposer's), and only when the legacy reading says that decision is over —
+  never an envelope; an adopted legacy value is wrapped in a lease, never as permanent (finding 1: a 2.31 permanent
+  leadership released the legacy way was re-elected permanently by the next upgraded proposal, and nobody could
+  release it; seen failing first: `f1_a_legacy_released_permanent_is_not_resurrected` — "the released 2.31 leader
+  was resurrected: Ok(Leadership { leader: … 127.0.0.1:1 …, basis: Observed })"); the renewal rule is pinned in
+  both directions (`a_renewal_keeps_its_lineage_only_when_it_is_the_top_report`,
+  `f2_a_renewal_adopts_a_higher_foreign_acceptance`) and "a learner never overwrites a tombstone" by
+  `f7_a_learner_never_overwrites_a_tombstone` — each seen failing against its mutant; collection fsyncs the top,
+  its marker and the sentinel before tombstoning below them; `GET /consensus/{slot}`'s `lease_expired` reads the
+  record (a live top whose large value has not arrived, or an `Unknown` slot, is not expired). The scope index is
+  generic: `KvState::with_scoped_prefixes`, the agent registers `consensus/life/` before any key is applied or
+  replayed, and core names no prefix. Wire **v12**: five appended `ConsensusMsg` variants (`PrepareTerm`, `PrepareAckTerm`,
   `ProposeTerm`, `PromiseTerm`, `CommitTerm`); the acceptor record gains tag `0x03`. **Seen failing first** on the
   branch before the record (black-box, `src/agent/lock_lifecycle_tests.rs`): `row17_a_skewed_holders_decision_does_not_wedge_the_lock`
   ("the lock is wedged for ever after B's window"), `row20_an_ended_decision_does_not_revive_on_a_higher_floor`

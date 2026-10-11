@@ -229,6 +229,10 @@ pub async fn handle_connection(
         n => Some(Duration::from_secs(n)),
     };
     let mut spoke = false;
+    // Test-only: the node this connection's peer last named itself (a `Ping` or `StateRequest`
+    // sender) — what an anti-entropy entry is attributed to for the frame filter.
+    #[cfg(any(test, feature = "test-frame-filter"))]
+    let mut conn_peer: u64 = 0;
 
     loop {
         // A large frame grew the buffer (doubling, up to ~16 MiB for a 10 MB frame); give it back
@@ -382,6 +386,8 @@ pub async fn handle_connection(
 
         match msg {
             WireMessage::Ping { sender, known_peers } => {
+                #[cfg(any(test, feature = "test-frame-filter"))]
+                { conn_peer = sender.id_hash(); }
                 // Closure plan C5: a removed member is not a peer, however it announces itself.
                 if task_ctx.removed.is_node_removed(&sender) {
                     continue;
@@ -490,6 +496,8 @@ pub async fn handle_connection(
             }
 
             WireMessage::StateRequest { sender, store_hash: their_hash, bucket_hashes: their_buckets } => {
+                #[cfg(any(test, feature = "test-frame-filter"))]
+                { conn_peer = sender.id_hash(); }
                 // Trusted-domain check: sender must be a known peer. We do not verify that
                 // peer_addr matches sender.to_socket_addr() — that would reject NAT'd topologies.
                 // In the trusted domain a connected node could spoof the sender field; the
@@ -628,8 +636,8 @@ pub async fn handle_connection(
 
             WireMessage::StateResponse { entries } => {
                 for entry in entries {
-                    #[cfg(any(test, feature = "test-support"))]
-                    if crate::store::frame_filtered(&kv_state, &crate::store::FrameView::Kv { key: &entry.key, sender: 0 }) {
+                    #[cfg(any(test, feature = "test-frame-filter"))]
+                    if crate::store::frame_filtered(&kv_state, &crate::store::FrameView::Kv { key: &entry.key, sender: conn_peer }) {
                         continue;
                     }
                     // Absorb the remote HLC stamp so our clock dominates anything
@@ -661,7 +669,7 @@ pub async fn handle_connection(
             }
 
             WireMessage::Signal { ttl, nonce, sender, scope, kind, payload, hlc_seq } => {
-                #[cfg(any(test, feature = "test-support"))]
+                #[cfg(any(test, feature = "test-frame-filter"))]
                 if crate::store::frame_filtered(&kv_state, &crate::store::FrameView::Signal {
                     kind: &kind, payload: &payload, sender: sender.id_hash() }) {
                     continue;
@@ -782,7 +790,7 @@ pub async fn handle_connection(
             }
 
             WireMessage::Data(mut update) => {
-                #[cfg(any(test, feature = "test-support"))]
+                #[cfg(any(test, feature = "test-frame-filter"))]
                 if crate::store::frame_filtered(&kv_state, &crate::store::FrameView::Kv { key: &update.key, sender: update.sender }) {
                     continue;
                 }
@@ -885,7 +893,7 @@ pub async fn handle_connection(
             }
 
             WireMessage::SignedData { mut update, signer, signature } => {
-                #[cfg(any(test, feature = "test-support"))]
+                #[cfg(any(test, feature = "test-frame-filter"))]
                 if crate::store::frame_filtered(&kv_state, &crate::store::FrameView::Kv { key: &update.key, sender: update.sender }) {
                     continue;
                 }

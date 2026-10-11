@@ -14,7 +14,10 @@
 //! - a release is a separate marker key, `…/end/{lineage}-{proposer}`, which no record write can
 //!   remove.
 //!
-//! Layer I learns nothing: these are ordinary keys, merged as every key is.
+//! Layer I learns no Layer III law: these are ordinary keys, merged by last-writer-wins as every key is,
+//! and no write is conditioned on them. What Layer I does know is a **read index**: the agent registers
+//! `consensus/life/` as a scoped prefix (`KvState::with_scoped_prefixes`) so the store files each slot's
+//! keys under one scope — a generic mechanism; core names no prefix itself.
 
 use crate::node_id::NodeId;
 use crate::store::KvState;
@@ -26,6 +29,13 @@ pub(crate) const LIFE_PREFIX: &str = "consensus/life/";
 /// The largest value a decision record carries inline; above it the record carries the digest and the
 /// value lives under `v/{digest}`, content-addressed (design §2.5).
 pub(crate) const LIFE_VALUE_CAP: usize = 4096;
+
+/// A `KvState` with this namespace's per-slot index registered — what the agent builds; for tests that
+/// build a store by hand.
+#[cfg(test)]
+pub(crate) fn test_kv(max: usize) -> std::sync::Arc<KvState> {
+    KvState::with_scoped_prefixes(max, &[LIFE_PREFIX])
+}
 
 /// Envelope magic: `L1`.
 const MAGIC: [u8; 2] = [0x4C, 0x31];
