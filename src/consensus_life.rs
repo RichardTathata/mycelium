@@ -276,6 +276,31 @@ pub(crate) fn read_slot(kv: &KvState, slot: &str, wall_now_ms: u64) -> SlotView 
     SlotView::Top(Box::new(Top { ballot, ended: released || lapsed, env, value }))
 }
 
+/// Every decision record this node holds for `slot` — `(ballot, envelope)`, the envelope's value resolved from
+/// the content-addressed key when the record stripped it (and left out when the value has not arrived). What a
+/// migration resolves a digest-only acceptance from (`ConsensusEngine::resolve_envelope_by_digest`).
+pub(crate) fn records_with_values(kv: &KvState, slot: &str) -> Vec<(u64, Envelope)> {
+    let entries = scan(kv, slot);
+    let prefix = slot_prefix(slot);
+    let mut out = Vec::new();
+    for (rem, bytes) in &entries {
+        let Some(ballot) = parse_hex_u64(rem) else { continue };
+        let Some(mut env) = Envelope::decode(bytes) else { continue };
+        if env.slot != slot { continue; }
+        if env.value.is_none() {
+            let key = value_key(slot, &env.value_digest);
+            let Some(vrem) = key.strip_prefix(prefix.as_str()) else { continue };
+            match entries.iter().find(|(r, _)| r == vrem).map(|(_, v)| v.clone())
+                .filter(|v| crate::consensus::value_digest(v) == env.value_digest) {
+                Some(v) => env.value = Some(v),
+                None => continue,
+            }
+        }
+        out.push((ballot, env));
+    }
+    out
+}
+
 /// Every slot that has decision-record keys on this node, with the remainders under it — for the
 /// record collector. Sorted by slot (review round 3, finding 6: replay must select the same slots).
 pub(crate) fn slots_with_records(kv: &KvState) -> Vec<String> {

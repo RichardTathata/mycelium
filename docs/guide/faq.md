@@ -148,15 +148,16 @@ an audited governance route; and, since post-360 plan row P2, a node that sets
 leader election or any safety-sensitive proposal unless an **electorate group** decides it — one
 pinned by member identity and decided by every member it names, **fixed at genesis**, never
 resized by the membership governor, refused while its roster differs from the member set. **Changing
-an electorate's members is not built in this release**: a dead member lowers the group's fault
-tolerance, a lost majority stops it (its repair is a disaster-recovery procedure that is not built), and a
-migration to another group is the follow-up. A member that goes down comes back **with its persistence
+an electorate's members is a migration that terminates** — declare the successor naming the group, retire
+the group into it, complete the carry — so a dead member is replaced by migrating the group while it has
+its majority; a dead member lowers the group's fault tolerance until then, and a lost majority stops it
+(its repair is a disaster-recovery procedure that is not built). A member that goes down comes back **with its persistence
 directory at its latest state, or not at all**: its promises and acceptances live there (fsynced before the
 answer leaves since 2.32.0 — an electorate member must configure `[persistence]`), and a
 member reissued its identity over an empty or older store can contradict them and let two values be
 decided — restore it, or retire it onto the removal ledger (which forecloses the restore); never reissue it
-empty ([04-consensus.md § Changing an electorate's members](04-consensus.md)). The fleet's exclusive
-default is set once, at genesis, and cannot move in this release. Live reconfiguration
+empty ([04-consensus.md § Discovery is not an electorate](04-consensus.md#discovery-is-not-an-electorate)). The fleet's exclusive
+default is declared once, at genesis, and moves only by the holder's retirement. Live reconfiguration
 (joint-consensus transitions under a live slot) is a later plan.
 The decision and its reasons: [design/consensus-electorate.md](../design/consensus-electorate.md);
 the how-to: [04-consensus.md § Discovery is not an electorate](04-consensus.md#discovery-is-not-an-electorate).

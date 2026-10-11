@@ -69,7 +69,7 @@ record, not duplicates of those.
 > remainder, a wire-and-crypto MINOR, SDKs, companions, the private repo, hygiene). It records one decision that
 > shapes several rows: **consensus is a Layer III protocol, never a service** — no deployment may make a named node
 > set the place agreement happens; leadership is leased by default and acceptor state decays.
-> **Next:** P2's migration (changing an electorate's members, branch `fix/p2-migration`); Φ (the runtime-invariants
+> **Next:** Φ (the runtime-invariants
 > citation); P5 (before E), E, F (its own MINOR, closing the #585/#587 windows), H, I, J, and R0's private re-pin with
 > `COMPATIBILITY.md`.
 >

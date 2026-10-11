@@ -108,7 +108,7 @@
 //! | `sys/govern/fleet`                  | Tuning governor — the fleet tuning intent, written through `POST /gateway/govern/tuning` (`src/agent/tuning_governor.rs`, `GOVERN_FLEET_KEY`) |
 //! | `sys/govern/membership/{group}`     | Membership governor — one evaporating `MembershipIntent` per governed group, written through `POST /gateway/govern/membership` (`src/agent/membership_governor.rs`, `MEMBERSHIP_PREFIX`) |
 //! | `consensus/committed/{slot}`        | Consensus — committed slot state                             |
-//! | `consensus/electorate-cert/{group}/{epoch}` | Electorate certificates (P2) — the decided envelope and the signed votes of every member that decided a genesis `electorate/{group}/{epoch}` (whose value is the `ElectorateDecl` under `consensus/committed/`); written by the deciding proposer; a node adopts a genesis only when its certificate verifies (`src/agent/electorate.rs`, `ELECTORATE_CERT_PREFIX`) |
+//! | `consensus/electorate-cert/{group}/{epoch}` · `…/{group}/retire` · `…/{group}/carried/{predecessor}` · `…/{group}/drop/{predecessor}` | Electorate certificates (P2) — the decided envelope and the signed votes that decided a genesis `electorate/{group}/{epoch}` (every member it names), a retirement `electorate/{group}/retire` (a strict majority of the retired electorate), a migration's completion `electorate/{group}/carried/{predecessor}` or a drop `electorate/{group}/drop/{predecessor}` (a strict majority of the successor), whose values are the `ElectorateDecl` / `Retirement` / `Completion` / `PredecessorDrop` under `consensus/committed/`; written by the deciding proposer; a node adopts a record only when its certificate verifies (`src/agent/electorate.rs`, `ELECTORATE_CERT_PREFIX`) |
 //! | `consensus/ballot/{slot}`           | Consensus — ballot tracking; kept across commits so ballots stay monotonic (2.30.0) |
 //! | `consensus/decided/{slot}`          | Consensus — the ballot the slot's latest commit was decided at (u64 LE); a floor below which acceptors refuse (2.30.0) |
 //! | `consensus/lease/{slot}`            | Consensus — the **legacy** epoch-lease window (u64 LE ms), still written for nodes older than 2.32.0 and read by an upgraded node only for a slot with no decision record; expiry is evaluated read-side |
@@ -362,9 +362,14 @@ pub use agent::{
 };
 // Elastic group sizing (Track 2a).
 pub use agent::{MembershipAction, MembershipIntent, MEMBERSHIP_INTENT_TTL_MS, MEMBERSHIP_PREFIX};
-pub use agent::{electorate_records_refused, ElectorateDecl, ElectorateError, Superseded, ELECTORATE_CERT_PREFIX, ELECTORATE_SLOT_PREFIX, SAFETY_SLOT_FAMILIES};
 #[cfg(feature = "consensus")]
 pub use agent::{acceptor_memory_empty_for_electorate, acceptor_promises_forgotten, electorate_persistence_refused};
+pub use agent::{
+    electorate_records_refused, electorate_retirements_undecided, Completion, ElectorateDecl, ElectorateError, PredecessorDrop,
+    Retirement, Superseded, ELECTORATE_CERT_PREFIX, ELECTORATE_SLOT_PREFIX, SAFETY_SLOT_FAMILIES,
+};
+#[cfg(feature = "consensus")]
+pub use agent::{migration_completions, migration_manifest_pages, migration_slots_carried, MigrationPhase, MigrationState};
 // Legible Emergence — fleet diagnostics as data (localize · explain · diagnose). `localize`
 // (`fleet_snapshot`) and `diagnose` (`fleet_diagnosis`) are node-local reads exposed here;
 // `explain` is intentionally gateway-only (`GET /gateway/explain`) — it is a cross-node `sys.explain`
@@ -417,7 +422,7 @@ pub use persistence::DataAtRestCipher;
 pub use persistence::OwnershipLock;
 pub use locality::LocalityPreference;
 #[cfg(feature = "consensus")]
-pub use consensus::{ConsensusConfig, ConsensusListenerHandle, ConsensusResult, GroupQuorum, consensus_kind, consensus_ns, electorate_roster_mismatches};
+pub use consensus::{ConsensusConfig, ConsensusListenerHandle, ConsensusResult, GroupQuorum, consensus_kind, consensus_ns, electorate_roster_mismatches, electorate_waiting_refusals};
 pub use mycelium_core::error::GossipError;
 // The contracts axis' receipt vocabulary (item 1 PR 2) — what an acknowledgement proves, by rung.
 pub use mycelium_core::receipt::{

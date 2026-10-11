@@ -278,7 +278,7 @@
       "subsystem": "consensus",
       "kind": "node_enforced",
       "promise": "an exclusive outcome — a lock, a leader, a consistent write, a commitment award, a capability-authz policy, any proposal marked safety-sensitive — is decided only by an electorate group: one pinned by member identity, decided by every member it names and frozen after, whose acceptors answer only for their own electorate",
-      "needs": "`consensus_require_electorate = true`; the electorates declared (`/gateway/govern/electorate`), one marked `exclusive_default` for the cluster-scoped verbs. Its members are fixed at genesis — changing them is not built in this release (docs/design/consensus-electorate.md §8.3): a dead member lowers the group's fault tolerance, a lost majority stops it. The fleet's default is set once, at genesis, and cannot move in this release. The effect is still the caller's to fence at the resource",
+      "needs": "`consensus_require_electorate = true`; the electorates declared (`/gateway/govern/electorate`), one marked `exclusive_default` for the cluster-scoped verbs. Its members are fixed at genesis — changing them is a migration that terminates: declare the successor naming the group, retire the group into it (closing it), complete the carry from a majority of it, after which the predecessor is never consulted (docs/design/consensus-electorate.md §8.3); a dead member lowers the group's fault tolerance until it is migrated, a lost majority stops it and cannot migrate. The fleet's default is declared once and moves only by the holder's retirement. The effect is still the caller's to fence at the resource",
       "enforcement_points": [
         "consensus::propose (the engine's door)",
         "consensus::cross_propose"

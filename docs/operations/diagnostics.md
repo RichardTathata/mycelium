@@ -445,9 +445,23 @@ a member of it ([guide 04 § Discovery is not an electorate](../guide/04-consens
 **409 `electorate_mismatch`** — the electorate and this node's view disagree; `detail` says how. Most often the group
 roster differs from the members (`GET /gateway/govern` lists each electorate's `members`;
 `GET /gateway/mesh/group?group=G` the roster): a node joined or left an electorate, whose membership is fixed at
-genesis — undo the move (changing an electorate's members is not built in this release:
+genesis — undo the move, or migrate the group (declare a successor naming it, `retire_to`, `complete`:
 [guide 04](../guide/04-consensus.md#discovery-is-not-an-electorate)). `mycelium::electorate_roster_mismatches` counts
-these. **409 `electorate_stale`** — a member holds a later electorate than this proposer (a superseded genesis);
+these. During a migration `detail` names the step: *waiting for its predecessor …'s retirement* (the successor's
+members have not seen it — gossip, retry), *the carry is not complete here — complete the migration* (run
+`{"group": "G2", "complete": true}` on a member of the successor), *cannot retire: its predecessor …'s retirement to
+it is not visible / retired to …* (complete the carry, or `{"group": "G2", "drop_predecessor": "P"}` for one that
+will never retire), *is retired; its successor is …* (propose there),
+*is closing: this node promised its retirement* (a retirement attempt in flight or abandoned — `retire_to` again from
+any member completes it; `mycelium::electorate_retirements_undecided` counts the abandoned ones). An acceptor that
+refuses for the same reasons counts `mycelium::electorate_waiting_refusals`; `GET /gateway/govern` shows each
+electorate's `predecessors`, `retired_to` and `migration` (`waiting` · `closed` · `carrying` with `carried`/`total` ·
+`complete`); `mycelium::migration_slots_carried`, `migration_completions` and `migration_manifest_pages` count the
+carry. A completion whose `conflicts` is not zero names slots the carry found already decided to another value in the
+successor — two values chosen for one slot (a forced drop that raced a retirement, a 2.32.0 member, two merged
+defaults); each is counted on `commit_conflicts` (`SystemStats`) and `mycelium_electorate_carry_conflicts_total` and logged;
+the successor's value stands. The counter is a tripwire, the completion record the count: a completion run that is
+retried re-carries the slot and counts the conflict again, while the completion's `conflicts` stays exact. **409 `electorate_stale`** — a member holds a later electorate than this proposer (a superseded genesis);
 retry. **409 `membership_frozen`** from `/gateway/govern/electorate` — the roster differs from an adopted electorate.
 **409 `refused`** — a second default while one is held, or a door refusal. **409 `persistence_required`** — this
 node would be a member and has no `[persistence]`: configure it (an electorate member's promises must survive a

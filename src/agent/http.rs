@@ -1492,13 +1492,23 @@ async fn gw_govern_snapshot(State(ctx): State<Arc<HttpCtx>>) -> impl IntoRespons
             "settled_unknown":  snap.settled_unknown,
         },
     });
-    // P2: the electorate declarations this node sees — each group, its epoch, whether it holds the default, and its
-    // members (node ids: a governance read, behind `govern:read`).
+    // P2: the electorate declarations this node sees — each group, its epoch, whether it holds the default, its
+    // members (node ids: a governance read, behind `govern:read`), its predecessors, where it retired to, and where
+    // its migration stands per predecessor (waiting · closed · carrying n of |S| · complete).
     let electorates: Vec<_> = super::electorate::all_views(&ctx.agent_ctx).into_iter()
-        .map(|d| json!({
-            "group": d.group, "epoch": d.epoch, "exclusive_default": d.exclusive_default,
-            "members": d.members.iter().map(ToString::to_string).collect::<Vec<_>>(),
-        }))
+        .map(|d| {
+            #[cfg(feature = "consensus")]
+            let migration = super::migration::state(&ctx.agent_ctx, &d.group);
+            #[cfg(not(feature = "consensus"))]
+            let migration: Vec<serde_json::Value> = Vec::new();
+            json!({
+                "group": d.group, "epoch": d.epoch, "exclusive_default": d.exclusive_default,
+                "members": d.members.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                "predecessors": d.predecessors.iter().cloned().collect::<Vec<_>>(),
+                "retired_to": super::electorate::retirement(&ctx.agent_ctx, &d.group).map(|r| r.successor.clone()),
+                "migration": migration,
+            })
+        })
         .collect();
     Json(json!({
         "node_id":      ctx.agent_ctx.node_id.to_string(),
@@ -1861,22 +1871,38 @@ async fn gw_govern_group_join(
         .into_response()
 }
 
-/// `POST /gateway/govern/electorate` (`govern:write`) — **declare `{group}`'s electorate** (post-360 plan row P2,
-/// `docs/design/consensus-electorate.md` §8), decided by consensus: `{"group": "G", "exclusive_default": false}`
-/// proposes a genesis from the roster this node sees, decided by every member named; `exclusive_default` declares the
-/// fleet's default, refused while any group holds it. Membership is fixed at genesis: on a group that has an
-/// electorate this decides nothing — `changed: false` when the roster matches, **409** `membership_frozen` when not
-/// (changing an electorate's members is not built in this release).
+/// `POST /gateway/govern/electorate` (`govern:write`) — **declare `{group}`'s electorate**, **retire it**, or
+/// **complete its migration** (post-360 plan row P2, `docs/design/consensus-electorate.md` §8), each decided by
+/// consensus. Membership is fixed at genesis; changing who decides is a migration — the three calls in order:
 ///
-/// Audited only when something was decided. **403** `not_a_member`, **409** `refused` (a precondition no retry
-/// changes: a second default, a door refusal), **409** `not_decided` (no quorum answered after the bounded retries, or
-/// another genesis won); without `consensus`, 501.
+/// - `{"group": "G", "exclusive_default": false}` declares a genesis from the roster this node sees, decided by every
+///   member named; `exclusive_default` declares the fleet's default, refused while any group holds it. On a group that
+///   has an electorate it decides nothing: `changed: false` when the roster matches, **409** `membership_frozen` when not.
+/// - `{"group": "H", "predecessors": ["G", …]}` declares a **successor** first: it decides nothing until each named
+///   group has retired to it, and outside the carried slots nothing until each carry is complete.
+/// - `{"group": "G", "retire_to": "H"}` retires `G` to its successor `H`, which must already name `G` — a decision of
+///   a strict majority of `G`'s electorate, closing `G`; when `G` holds the fleet's default, the retirement passes it to
+///   `H`. An attempt that ends undecided is audited too (members that promised it have closed `G`).
+/// - `{"group": "H", "complete": true}` **completes** `H`'s migration from a member of `H`: enumerates each retired
+///   predecessor's carry set from a strict majority of it, carries every slot with one ballot of `H`, and decides the
+///   completion `electorate/H/carried/G`. Idempotent; the response lists each predecessor's phase.
+/// - `{"group": "H", "drop_predecessor": "G"}` **drops** a predecessor that cannot retire into `H` any more — its
+///   retirement to another successor is visible (a losing successor's way on): a decision of `H`'s majority; afterwards
+///   `H` no longer waits on `G`. Nothing of `G` is carried. `"force": true` asserts, as an operator and **outside the
+///   protocol's guarantee**, that `G`'s majority is gone for good (DR territory): the drop is admitted without a
+///   retirement elsewhere, audited with the flag; refused **409** without it while `G` may still retire.
+///
+/// **403** `not_a_member`, **409** `retired` (the group is retired — the successor is named), **409** `refused` (a
+/// precondition no retry changes: a second default, a successor that does not name the retiree, a predecessor retired
+/// elsewhere, a retirement with an incomplete carry), **409** `not_decided` (no quorum answered after the bounded
+/// retries, a record not visible here yet, or a carry that could not finish — the message names the slot); without
+/// `consensus`, 501.
 #[cfg(feature = "gateway")]
 async fn gw_govern_electorate_declare(
     State(ctx): State<Arc<HttpCtx>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    if let Some(refused) = refuse_unknown_fields(&body, &["group", "exclusive_default"]) {
+    if let Some(refused) = refuse_unknown_fields(&body, &["group", "exclusive_default", "retire_to", "predecessors", "complete", "drop_predecessor", "force"]) {
         return refused;
     }
     let Some(group) = body.get("group").and_then(|g| g.as_str()).filter(|g| !g.is_empty() && !g.contains('/')) else {
@@ -1885,6 +1911,49 @@ async fn gw_govern_electorate_declare(
     let exclusive_default = match body.get("exclusive_default") {
         None => false,
         Some(v) => match v.as_bool() { Some(b) => b, None => return bad_request("`exclusive_default` must be a boolean".into()) },
+    };
+    let retire_to = match body.get("retire_to") {
+        None => None,
+        Some(v) => match v.as_str().filter(|s| !s.is_empty() && !s.contains('/') && *s != group) {
+            Some(s) if body.get("exclusive_default").is_none() => Some(s),
+            Some(_) => return bad_request("`retire_to` retires the group; the default follows the retirement and is not given".into()),
+            None => return bad_request("`retire_to` must be another group's name, without '/'".into()),
+        },
+    };
+    let predecessors: std::collections::BTreeSet<String> = match body.get("predecessors") {
+        None => std::collections::BTreeSet::new(),
+        Some(v) => match v.as_array().map(|a| a.iter().map(|p| p.as_str().filter(|p| !p.is_empty() && !p.contains('/') && *p != group)
+                .map(str::to_string)).collect::<Option<std::collections::BTreeSet<String>>>()) {
+            Some(Some(set)) if retire_to.is_none() => set,
+            Some(Some(_)) => return bad_request("`predecessors` declares a successor; `retire_to` retires one — not both".into()),
+            _ => return bad_request("`predecessors` must be a list of other groups' names, without '/'".into()),
+        },
+    };
+    let complete = match body.get("complete") {
+        None => false,
+        Some(v) => match v.as_bool() {
+            Some(true) if retire_to.is_none() && body.get("predecessors").is_none() && body.get("exclusive_default").is_none()
+                && body.get("drop_predecessor").is_none() => true,
+            Some(true) => return bad_request("`complete` completes the group's migration; it takes no other field".into()),
+            Some(false) => false,
+            None => return bad_request("`complete` must be a boolean".into()),
+        },
+    };
+    let force = match body.get("force") {
+        None => false,
+        Some(v) => match v.as_bool() {
+            Some(b) if body.get("drop_predecessor").is_some() => b,
+            Some(_) => return bad_request("`force` belongs to `drop_predecessor`".into()),
+            None => return bad_request("`force` must be a boolean".into()),
+        },
+    };
+    let drop_predecessor = match body.get("drop_predecessor") {
+        None => None,
+        Some(v) => match v.as_str().filter(|s| !s.is_empty() && !s.contains('/') && *s != group) {
+            Some(s) if retire_to.is_none() && body.get("predecessors").is_none() && body.get("exclusive_default").is_none() && !complete => Some(s),
+            Some(_) => return bad_request("`drop_predecessor` drops one predecessor; it takes no other field".into()),
+            None => return bad_request("`drop_predecessor` must be another group's name, without '/'".into()),
+        },
     };
     #[cfg(feature = "consensus")]
     {
@@ -1895,6 +1964,8 @@ async fn gw_govern_electorate_declare(
             E::InvalidGroup => bad_request(e.to_string()),
             E::MembershipFrozen { .. } => (StatusCode::CONFLICT,
                 Json(json!({ "ok": false, "error": "membership_frozen", "message": e.to_string() }))).into_response(),
+            E::Retired { ref successor } => (StatusCode::CONFLICT,
+                Json(json!({ "ok": false, "error": "retired", "successor": successor, "message": e.to_string() }))).into_response(),
             E::Refused(_) => (StatusCode::CONFLICT,
                 Json(json!({ "ok": false, "error": "refused", "message": e.to_string() }))).into_response(),
             E::PersistenceRequired { .. } => (StatusCode::CONFLICT,
@@ -1902,7 +1973,55 @@ async fn gw_govern_electorate_declare(
             e => (StatusCode::CONFLICT,
                 Json(json!({ "ok": false, "error": "not_decided", "message": e.to_string() }))).into_response(),
         };
-        match super::electorate::retrying(|| super::electorate::declare_outcome(&ctx.agent_ctx, group, exclusive_default)).await {
+        if let Some(predecessor) = drop_predecessor {
+            let already = super::electorate::dropped(&ctx.agent_ctx, group, predecessor).is_some();
+            return match super::electorate::retrying(|| super::electorate::drop_outcome(&ctx.agent_ctx, group, predecessor, force)).await {
+                Ok(d) => {
+                    if !already {
+                        let detail = json!({ "request": body, "outcome": "dropped", "force": d.force });
+                        audit_govern(&ctx.agent_ctx, &super::electorate::drop_slot(group, predecessor), detail.to_string());
+                    }
+                    Json(json!({ "ok": true, "changed": !already, "group": d.group, "dropped": d.predecessor, "force": d.force })).into_response()
+                }
+                Err(e) => refusal(e),
+            };
+        }
+        if complete {
+            let before: Vec<_> = super::migration::state(&ctx.agent_ctx, group);
+            return match super::electorate::retrying(|| super::migration::complete_outcome(&ctx.agent_ctx, group)).await {
+                Ok(states) => {
+                    // Audited once per completion this run decided or found newly decided.
+                    for s in states.iter().filter(|s| matches!(s.phase, super::electorate::MigrationPhase::Complete { .. })) {
+                        let newly = !before.iter().any(|b| b.predecessor == s.predecessor
+                            && matches!(b.phase, super::electorate::MigrationPhase::Complete { .. }));
+                        if newly {
+                            let detail = json!({ "request": body, "outcome": "complete", "predecessor": s.predecessor });
+                            audit_govern(&ctx.agent_ctx, &super::electorate::carried_slot(group, &s.predecessor), detail.to_string());
+                        }
+                    }
+                    Json(json!({ "ok": true, "group": group, "migration": states })).into_response()
+                }
+                Err(e) => refusal(e),
+            };
+        }
+        if let Some(successor) = retire_to {
+            return match super::electorate::retrying(|| super::electorate::retire_outcome(&ctx.agent_ctx, group, successor)).await {
+                Ok(r) => {
+                    let detail = json!({ "request": body, "outcome": "retired", "passes_default": r.passes_default });
+                    audit_govern(&ctx.agent_ctx, &super::electorate::retire_slot(group), detail.to_string());
+                    Json(json!({ "ok": true, "changed": true, "group": r.group, "retired_to": r.successor,
+                                 "passes_default": r.passes_default })).into_response()
+                }
+                Err(e @ E::NotDecided(_)) => {
+                    // An undecided attempt may still have closed the members that promised it (round 5, Q4): audited.
+                    let detail = json!({ "request": body, "outcome": "undecided", "message": e.to_string() });
+                    audit_govern(&ctx.agent_ctx, &super::electorate::retire_slot(group), detail.to_string());
+                    refusal(e)
+                }
+                Err(e) => refusal(e),
+            };
+        }
+        match super::electorate::retrying(|| super::electorate::declare_outcome(&ctx.agent_ctx, group, exclusive_default, &predecessors)).await {
             Ok((decl, outcome)) => {
                 // Audited when a genesis was decided — this node's, or another member's it completed (round 2,
                 // finding 3); a declaration that changes nothing is not a change, and a refused or undecided one
@@ -1915,6 +2034,7 @@ async fn gw_govern_electorate_declare(
                 }
                 Json(json!({ "ok": true, "changed": changed, "adopted": outcome == Declared::Adopted,
                              "group": decl.group, "epoch": decl.epoch, "exclusive_default": decl.exclusive_default,
+                             "predecessors": decl.predecessors.iter().cloned().collect::<Vec<_>>(),
                              "members": decl.members.iter().map(ToString::to_string).collect::<Vec<_>>() })).into_response()
             }
             Err(e) => refusal(e),
@@ -1922,7 +2042,7 @@ async fn gw_govern_electorate_declare(
     }
     #[cfg(not(feature = "consensus"))]
     {
-        let _ = (ctx, group, exclusive_default);
+        let _ = (ctx, group, exclusive_default, retire_to, predecessors, complete, drop_predecessor, force);
         (StatusCode::NOT_IMPLEMENTED, Json(json!({ "ok": false, "error": "not_in_build", "message": "an electorate needs `consensus`" })))
             .into_response()
     }
@@ -8025,7 +8145,16 @@ mod tests {
         let changes = || agent.task_ctx.governance_changes.load(std::sync::atomic::Ordering::Relaxed);
         let before = changes();
         for bad in [serde_json::json!({"group": "a/b"}), serde_json::json!({"group": "council", "exclusive_default": "yes"}),
-                    serde_json::json!({"group": "council", "size": 1}), serde_json::json!({"group": "council", "retire_to": "next"})] {
+                    serde_json::json!({"group": "council", "size": 1}), serde_json::json!({"group": "council", "retire_to": "council"}),
+                    serde_json::json!({"group": "council", "retire_to": "next", "exclusive_default": true}),
+                    serde_json::json!({"group": "council", "predecessors": ["council"]}),
+                    serde_json::json!({"group": "council", "predecessors": ["x"], "retire_to": "next"}),
+                    serde_json::json!({"group": "council", "complete": true, "retire_to": "next"}),
+                    serde_json::json!({"group": "council", "complete": "yes"}),
+                    serde_json::json!({"group": "council", "drop_predecessor": "council"}),
+                    serde_json::json!({"group": "council", "drop_predecessor": "x", "complete": true}),
+                    serde_json::json!({"group": "council", "force": true}),
+                    serde_json::json!({"group": "council", "drop_predecessor": "x", "force": "yes"})] {
             assert_eq!(post("/govern/electorate", bad.clone()).await.unwrap().status(), 400, "{bad}");
         }
         assert_eq!(changes(), before, "a refused body records nothing");
@@ -8058,6 +8187,60 @@ mod tests {
         assert_eq!(r.status(), 409);
         assert_eq!(r.json::<serde_json::Value>().await.unwrap()["error"], "membership_frozen");
         assert_eq!(changes(), before + 1);
+        // The way to change it: declare a successor naming it, retire it into it, complete — each audited — after
+        // which the group is retired by name and the gateway shows the migration complete.
+        assert_eq!(post("/mesh/group", serde_json::json!({"group": "council-2"})).await.unwrap().status(), 200);
+        let r = post("/govern/electorate", serde_json::json!({"group": "council-2", "predecessors": ["council"]})).await.unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(r.json::<serde_json::Value>().await.unwrap()["predecessors"], serde_json::json!(["council"]));
+        let snap: serde_json::Value = client.get(format!("{base}/govern")).header(AUTHORIZATION, "Bearer t")
+            .send().await.unwrap().json().await.unwrap();
+        let of = |snap: &serde_json::Value, g: &str| snap["electorates"].as_array().unwrap().iter().find(|e| e["group"] == g).cloned().unwrap();
+        assert_eq!(of(&snap, "council-2")["migration"][0]["phase"], "waiting", "{snap}");
+        let r = post("/govern/electorate", serde_json::json!({"group": "council", "retire_to": "council-2"})).await.unwrap();
+        assert_eq!(r.status(), 200);
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(body["retired_to"].as_str(), Some("council-2"), "{body}");
+        assert_eq!(body["passes_default"], true, "{body}");
+        assert_eq!(changes(), before + 3, "a successor's genesis and a retirement are audited governance changes");
+        let r = post("/govern/electorate", serde_json::json!({"group": "council-2", "complete": true})).await.unwrap();
+        assert_eq!(r.status(), 200);
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(body["migration"][0]["phase"], "complete", "{body}");
+        assert_eq!(changes(), before + 4, "the completion is audited");
+        let r = post("/govern/electorate", serde_json::json!({"group": "council-2", "complete": true})).await.unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(changes(), before + 4, "a second completion run changes nothing");
+        let snap: serde_json::Value = client.get(format!("{base}/govern")).header(AUTHORIZATION, "Bearer t")
+            .send().await.unwrap().json().await.unwrap();
+        assert_eq!(of(&snap, "council")["retired_to"], "council-2", "{snap}");
+        assert_eq!(of(&snap, "council-2")["migration"][0]["phase"], "complete", "{snap}");
+        let r = post("/govern/electorate", serde_json::json!({"group": "council", "exclusive_default": true})).await.unwrap();
+        assert_eq!(r.status(), 409);
+        assert_eq!(r.json::<serde_json::Value>().await.unwrap()["error"], "retired");
+        // The lock now decides in the successor, which holds the default.
+        assert_eq!(post("/overlay/lock/acquire", serde_json::json!({"name": "door2", "ttl_secs": 5})).await.unwrap().status(), 200);
+        // A predecessor that will never retire is dropped — audited once — after which the successor decides.
+        for g in ["spare", "council-3"] { assert_eq!(post("/mesh/group", serde_json::json!({"group": g})).await.unwrap().status(), 200); }
+        assert_eq!(post("/govern/electorate", serde_json::json!({"group": "spare"})).await.unwrap().status(), 200);
+        assert_eq!(post("/govern/electorate", serde_json::json!({"group": "council-3", "predecessors": ["spare"]})).await.unwrap().status(), 200);
+        let audited = changes();
+        let r = post("/govern/electorate", serde_json::json!({"group": "council-3", "drop_predecessor": "spare"})).await.unwrap();
+        assert_eq!(r.status(), 409, "spare may still retire: a drop needs its retirement elsewhere, or force");
+        assert_eq!(r.json::<serde_json::Value>().await.unwrap()["error"], "refused");
+        let r = post("/govern/electorate", serde_json::json!({"group": "council-3", "drop_predecessor": "spare", "force": true})).await.unwrap();
+        assert_eq!(r.status(), 200);
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert_eq!((body["dropped"].as_str(), body["changed"].as_bool(), body["force"].as_bool()), (Some("spare"), Some(true), Some(true)), "{body}");
+        assert_eq!(changes(), audited + 1, "a forced drop is audited");
+        let r = post("/govern/electorate", serde_json::json!({"group": "council-3", "drop_predecessor": "spare", "force": true})).await.unwrap();
+        assert_eq!(r.json::<serde_json::Value>().await.unwrap()["changed"], false, "a second drop changes nothing");
+        assert_eq!(changes(), audited + 1);
+        let snap: serde_json::Value = client.get(format!("{base}/govern")).header(AUTHORIZATION, "Bearer t")
+            .send().await.unwrap().json().await.unwrap();
+        assert_eq!(of(&snap, "council-3")["migration"][0]["phase"], "dropped", "{snap}");
+        assert_eq!(post("/overlay/elect", serde_json::json!({"group": "council-3"})).await.unwrap().status(), 200,
+            "a successor whose only predecessor is dropped decides");
         agent.shutdown_with_timeout(Duration::from_secs(5)).await;
     }
 

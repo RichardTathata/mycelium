@@ -120,8 +120,9 @@ touching the identity:
   `grp/` entry alone: the proposer's door refuses every proposal on a group whose live roster differs from
   the electorate's members (`ElectorateMismatch`), so tidying the dead member out of the group stops it.
   Migrating the
-  group into a successor is the follow-up (until then: size for the whole life, or declare a new group
-  and move the work).
+  group into a successor — declare the successor naming it, retire it, complete — is the third branch
+  ([guide 04 § Discovery is not an electorate](../guide/04-consensus.md#discovery-is-not-an-electorate)),
+  while the group still has its majority.
 - **Removal forecloses restore.** The ledger is monotonic — there is no un-removal — and a removed
   `NodeId` is dropped at every connection whatever certificate it presents, so a restore after a removal
   is a *new* member under a new identity, and the group has still lost one. Sign the removal only once

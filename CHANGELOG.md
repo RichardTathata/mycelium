@@ -45,6 +45,47 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **Upgrade notes:** an electorate member without `[persistence]` is now refused — configure it (it was never
   safe without); `ElectorateError` gained `PersistenceRequired` (`#[non_exhaustive]`, a `_` arm fails closed);
   `CoreCtx` gained `inbound_observer` (an exhaustive literal breaks); `TaskCtx` gained two sets.
+- **An electorate's members change by a migration that terminates — close, enumerate, carry, complete — so a
+  retired group can be decommissioned** (post-360 plan row P2's follow-up; `docs/design/consensus-electorate.md`
+  §8.3, `docs/guide/deprecations.md` §34). 2.32.0 shipped P2 with membership fixed at genesis and no way to change
+  it; the parked lazy carry (a successor reading a majority of its predecessor at its first touch of every slot,
+  for ever) was replaced, by the maintainer's decision of 2026-10-11, with one that ends. Three governance acts,
+  each a consensus decision with a certificate: **declare the successor first**, naming its predecessors
+  (`declare_successor_electorate`, `{"predecessors": […]}`; a set — a merge when two or more) — it decides nothing,
+  at the proposer's door and at every acceptor, until each has retired to it; **retire** the group into it
+  (`retire_electorate`, `{"retire_to": …}`; `Retirement`, a strict majority of the retired group) — accepted only
+  into a successor that names the retiree and only while no carry into the retiree is incomplete, passing the
+  fleet's exclusive default exactly when held (`passes_default`, checked by every acceptor), and **closing every
+  member at its promise, durably**, so no value of the retired group is chosen after it; **complete**
+  (`complete_migration`, `{"complete": true}`, any member of the successor, idempotent; `src/agent/migration.rs`)
+  — a **manifest** of every slot each member holds acceptor state for in the group, from a strict majority of it
+  (the acceptor memory is tagged with the electorate group a claim passed through, `AcceptorSlot::groups`, in the
+  durable record, tag `0x04`; manifests paged, `CarryManifestRequest`/`CarryManifestPage`), the union carried slot
+  by slot with one ballot of the successor proposing the acceptance's decision envelope whole (`propose_carry`,
+  `CarryPrepare`/`CarryPropose` — a lock keeps its holder's window, a released lock stays released, a committed
+  value whose record did not propagate is carried), and the **completion** `electorate/{successor}/carried/{p}`
+  (`Completion`, certified), before which the successor decides nothing outside the carry set and after which the
+  predecessor is never consulted — its members may be removed — and a chain reads only its predecessor (a group
+  retires only once every predecessor is complete or **dropped** — `drop_predecessor`, `{"drop_predecessor": …}`,
+  admitted only for a predecessor whose retirement elsewhere is visible, or under the operator's `force` assertion
+  that its majority is gone for good (audited; outside the guarantee — a false assertion ends as a detected
+  **conflict** on the carry, counted on `commit_conflicts` and named in the completion, never prevented) — and every
+  acceptor checks this at the retirement's prepare,
+  before it closes; a verified completion stands as proof of the retirement, and the predecessor's records are
+  fsynced on each successor member at the completion). The safety argument is six sentences in §8.3, each a multi-node test
+  seen failing with its mechanism disabled, with the review's interleavings (D1–D3, the report-versus-fence race, a
+  committed-but-unpropagated value) and the acceptance case: after the completion, every predecessor node shut
+  down and the successor restarted from disk, the successor decides fresh slots and reads every carried slot.
+  `GET /gateway/govern` shows `predecessors`, `retired_to` and each predecessor's `migration` phase (`waiting` ·
+  `closed` · `carrying` *n* of |S| · `complete`); `ElectorateError::Retired` (409 `retired`); counters
+  `electorate_waiting_refusals`, `electorate_retirements_undecided`, `migration_slots_carried`,
+  `migration_completions`, `migration_manifest_pages`. Wire **v12**, four variants appended; a genesis without
+  predecessors and the record of a slot never claimed on an electorate group are byte-identical to 2.32.0's.
+  **Upgrade notes:** `ElectorateDecl` gained `predecessors` (an exhaustive literal breaks); `ElectorateError`
+  gained `Retired`; every member of a retired group and of its successor must run this release to migrate. **Not
+  built:** disaster recovery of a group that lost its majority (it cannot migrate either); the carry is one ballot
+  per slot, sequential; an acceptance a restarted predecessor member holds only by digest, with no decision record
+  anywhere, stops the carry at that slot, named.
 
 ### Changed
 
