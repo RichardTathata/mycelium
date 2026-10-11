@@ -526,7 +526,7 @@ leader, a single writer, anything a second holder would corrupt:
 | `quorum_size` | `0`, or a strict majority of the members | for an electorate group the engine raises a smaller quorum to a strict majority of its members |
 | `use_trust_slices` | optional | the electorate's member set is the vote filter; a declared slice only narrows it. Before P2 this row required identical `declare_trust` sets on every voter — node identities as the electorate's name |
 | `count_opaque_as_absent` | `false` (ignored for an electorate group) | a partition that reads as "everyone else is opaque" must not become a smaller quorum; on an electorate group the engine does not reduce the quorum for opacity |
-| membership | **fixed at genesis**; changing it is **not built in this release** (the migration follow-up) | the governor and the emergent watcher do not move an electorate group, and a changed roster is refused. A dead member lowers the group's fault tolerance for good; a lost majority stops the group — size the electorate for its lifetime's failures |
+| membership | **fixed at genesis**; changed only by a **migration** that terminates — declare the successor naming the group, retire the group into it (closing it), complete the carry (`docs/design/consensus-electorate.md` §8.3) | the governor and the emergent watcher do not move an electorate group, and a changed roster is refused. The successor decides nothing until the retirement is visible, nothing outside the carried slots until the completion, and after it anything without the predecessor; every value possibly chosen in the retired group is carried (its manifest majority intersects every majority that chose one). A dead member lowers the group's fault tolerance for good; a lost majority stops the group and cannot migrate — size the electorate for its lifetime's failures, or migrate it while it has its majority |
 | a member that goes down | **restored with its persistence directory at its latest state, or retired onto the removal ledger — never reissued over an empty or older store** | a member's promises and acceptances are durable on its own disk (`sys/consensus-accepted/{node}/{slot}` — fsynced before the answer leaves since 2.32.0, read back by `prewarm_accepted` once at start; a peer's gossiped copy reaches the store later, not the running acceptor), **so an electorate member must configure `[persistence]`** — and is refused the electorate by name without it (`PersistenceRequired`, at every door). An acceptor under the old `NodeId` with an empty or older store could promise below what it promised and forget what it accepted, and a quorum counting it decide a **second value** — the safety break; that is **detected, not prevented**: a member of a decided electorate holding no record for its genesis is warned once, and a peer's copy of the node's own record arriving with a promise or acceptance above its memory **withholds the slot until the next start** and writes the merged record to the node's own key so that start reads it (`src/agent/acceptor_guard.rs`; the limit — the copy must arrive, and before the node answers a higher ballot — in the [design record §8.5](design/consensus-electorate.md)). The same tripwire is reachable by a forgery: a peer that writes a copy of this node's own record with a higher ballot withholds that one slot at once (liveness, one slot, within the trusted-domain model — the write is a `sys/` namespace violation, counted, and the node stops answering rather than contradicting itself). Removal is monotonic and enforced by `NodeId` at the connection, so removing first forecloses the restore ([design record §8.3](design/consensus-electorate.md#83-changing-an-electorates-members-is-not-built-in-this-release)) |
 | a lost majority | **stops the group**; its repair is a **disaster-recovery procedure that is not built** | ordinary consensus cannot authorise its own repair — a minority cannot know what the majority decided. What it would take (an operator-forced genesis from the survivors' durable records, with the possibly-lost decisions stated) is named in [what-is-proven.md](operations/what-is-proven.md), not shipped |
 | the effect | fenced **at the resource** with the commit's token | winning is not the grant; exclusivity is enforced by refusing a stale token |
@@ -547,8 +547,10 @@ discovery's. What the code enforces: an empty or below-floor roster is refused
 moves a governed group's membership only through `/gateway/govern/group` (`govern:write`, audited),
 and — since post-360 plan row **P2** — a node with `consensus_require_electorate` refuses a
 safety-sensitive proposal outside an **electorate group**, pinned by member identity and **frozen**
-(the maintainer's decisions, 2026-10-11): its members are fixed at genesis, and **changing them is not
-built in this release** — a migration is the follow-up. A dead member lowers the group's fault
+(the maintainer's decisions, 2026-10-11): its members are fixed at genesis, and **changing them is a
+migration that terminates** — successor declared first, the group retired into it and closed, the carry
+enumerated from a majority of the retired group and completed by a decision of the successor
+(§8.3 of the decision record; the safety argument is six sentences, each a test). A dead member lowers the group's fault
 tolerance; a lost majority stops the group, as in any consensus protocol, and its repair — a
 disaster-recovery genesis forced by an operator from the survivors' durable state — is not built. A
 member comes back **with its persistence directory at its latest state or not at all**: its promises and
@@ -560,9 +562,9 @@ under the stated limit that the copy must arrive before the node answers a highe
 record §8.5; §7's table, row *a member that goes down*). A forged copy of the node's own record with a
 higher ballot trips the same wire and withholds one slot at once — liveness, within the trust model.
 The fleet's exclusive
-default is set once, at genesis (a second is refused by name), and cannot move in this release; two
-declarations made at once within gossip lag stop the exclusive verbs (fail closed) with no escape until
-the follow-up. What it does not: an embedded `join_group` or a `grp/` write still moves a
+default is declared once, at genesis (a second is refused by name), and moves only by the holder's
+retirement, which passes it; two declarations made at once within gossip lag stop the exclusive verbs
+(fail closed) until the two are merged into one successor. What it does not: an embedded `join_group` or a `grp/` write still moves a
 group's roster by LWW — for an electorate group the next proposal refuses the mismatch rather than
 counting it (detection, not prevention). **A forged electorate record** — a
 `consensus/committed/electorate/…` entry or certificate written straight into the store — is not

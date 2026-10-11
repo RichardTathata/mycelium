@@ -54,6 +54,7 @@ the notice.
 | 31 | an exclusive outcome (lock, leader, consistent write) on the whole cluster or an undeclared group, under the secure profile | 2.32.0 | declare an electorate group (`declare_electorate`, one `exclusive_default`), sized for its lifetime — its members are fixed at genesis | Partly — new `ConsensusResult`/`CommitError`/`ConsistencyError` variants (a `_` arm must fail closed); otherwise `start()` refuses rev 4 without `consensus_require_electorate`, and proposals are refused by name |
 | 32 | an accept path, a writer and a signal log with no bound | 2.32.0 | `handshake_timeout_ms`, `inbound_idle_timeout_secs`, `peer_read_stall_timeout_ms`, `peer_write_stall_timeout_ms`, `peer_min_rate_bytes_per_sec`, `max_connections_per_source` | Partly — `GossipConfig`, `SystemStats` and `CoreCtx` gain fields; `WriterTiming` replaces a `Duration` in three `writer` functions; `validate()` refuses an idle timeout at or below the writer's |
 | 33 | a permanent `elect_leader`; a lock or leadership read from the three legacy keys | 2.32.0 (legacy keys still written; they stop at a later, governed MINOR) | renew by calling again, or `elect_leader_with(group, LeaderTerm::Permanent)`; `release_leadership`; upgrade every node | No — a leadership lapses after 30 s; an upgraded proposer times out until a quorum is upgraded |
+| 34 | "declare a new group and move the work yourself" as the way to change an electorate's members; a default that cannot move | unreleased (after 2.32.0) | `declare_successor_electorate` → `retire_electorate` → `complete_migration` (`POST /gateway/govern/electorate` with `predecessors` / `retire_to` / `complete`; `drop_predecessor` for one that never retires) | Partly — `ElectorateDecl` and `Retirement` gained fields, `ElectorateError` gained `Retired` (`#[non_exhaustive]`; a `_` arm must fail closed); otherwise refusals by name |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -704,9 +705,9 @@ upgrade stay; nothing collects `sys/quorum/`.
 `cons.safety_profile`), a lock, a leader election, a consistent write, a capability-authz policy, a commitment award or
 any proposal flagged `safety_sensitive` is refused `ElectorateNotGoverned` unless an **electorate group** decides it.
 An electorate is a genesis decided by every member it names, and its membership is **fixed at genesis**: declaring a
-changed roster is `MembershipFrozen`, and **changing an electorate's members is not built in this release** (a
-migration is the follow-up). The fleet's exclusive default is set once, at genesis (a second is refused by name), and
-cannot move in this release.
+changed roster is `MembershipFrozen`. In 2.32.0 changing an electorate's members was not built; it is now a migration
+(§34). In 2.32.0 the fleet's exclusive default is set once, at genesis (a second is refused by name), and cannot move;
+since §34 it moves by the holder's retirement.
 
 **Will the compiler tell me?** Partly. `ConsensusResult` (`#[non_exhaustive]`), `CommitError` and
 `ConsistencyError` gain `ElectorateNotGoverned`, `ElectorateStale` and `ElectorateMismatch` — a `_` arm must fail
@@ -738,8 +739,8 @@ any group but `g`.
 - **Rolling upgrade:** an electorate whose members are not all on 2.32.0 times out rather than commits, and a pre-P2
   node still proposes the exclusive verbs to the whole cluster — mark an `exclusive_default` only once every node runs
   2.32.0.
-- **Stated limits:** changing an electorate's members, or moving the default, is not built in this release; a lost
-  majority is unrecoverable; **two default declarations made at once, within gossip lag, stop the exclusive verbs
+- **Stated limits (2.32.0):** changing an electorate's members, or moving the default, is not built in this release
+  (both are §34 now); a lost majority is unrecoverable; **two default declarations made at once, within gossip lag, stop the exclusive verbs
   fleet-wide with no escape in this release** (group-scoped work outside the exclusive families keeps running);
   genesis assumes its members agree on the roster; without `[tls]` the certificates are unauthenticated.
 - **The profile, in two steps this release:** `secure-single-domain` was rev 2 in 2.31.0; **rev 3** adds
@@ -835,3 +836,70 @@ leadership after 30 s.
 
 **Not built:** an SDK `release_leadership` verb; collection on a node that proposes without a listener; releasing
 a permanent decision whose original proposer is gone for good (design §5).
+
+## 34. An electorate's members change by a migration that terminates (unreleased, after 2.32.0)
+
+**What changes.** Post-360 plan row P2's follow-up (`docs/design/consensus-electorate.md` §8.3). 2.32.0 said *declare a
+new group and move the work yourself — nothing decided in the old group is carried* and *the default cannot move*.
+Now who decides changes by a **migration** in three governance acts, each a consensus decision: declare the
+**successor** first, naming its predecessors (`declare_successor_electorate`, `{"group": "G2", "predecessors":
+["G1"]}`) — it decides nothing until each has retired to it; **retire** the group into it
+(`retire_electorate`, `{"group": "G1", "retire_to": "G2"}`) — a strict majority of G1 decides, every member closes G1
+at its promise, and the fleet's default passes with it when held; **complete** (`complete_migration`, `{"group":
+"G2", "complete": true}` on a member of G2) — the carry set is enumerated from a strict majority of G1's acceptor
+memory, every slot is carried with one ballot of G2 (the decision envelope whole: a lock keeps its holder's window, a
+released lock stays released), and `electorate/G2/carried/G1` is decided, after which G2 decides anything without G1
+and G1's members may be removed. Before the completion G2 decides nothing outside the carried slots, at the door and
+at every acceptor. Two or more predecessors is a merge. A predecessor that cannot retire into G2 any more (its
+retirement to another successor is visible) is **dropped** (`drop_predecessor`, `{"group": "G2", "drop_predecessor":
+"P"}`; a G2-majority decision); `"force": true` asserts, outside the protocol's guarantee, that P's majority is gone for
+good — audited, refused without it while P may still retire, and a false assertion ends as a detected conflict on the
+carry, never a prevented one. A group retires only once every predecessor is complete or dropped — checked by every
+acceptor at the prepare, before it closes. A carry that finds another value already decided above the carried one
+reports the slot as a `conflict` in the completion and counts it on `commit_conflicts`; the completion still decides. `GET /gateway/govern` shows `predecessors`,
+`retired_to` and each predecessor's `migration` phase.
+
+**Will the compiler tell me?** Partly. `ElectorateDecl` gained `predecessors` and `Retirement` is new (an exhaustive
+literal of `ElectorateDecl` breaks; `..Default::default()` is unaffected); `ElectorateError` (`#[non_exhaustive]`)
+gained `Retired`, and `MigrationState` / `MigrationPhase` are new. `AcceptorSlot` gained `groups` (crate-private).
+The rest is refusals by name.
+
+**Migration.** Nothing to do for a fleet that never migrates: a genesis without predecessors is byte-for-byte
+2.32.0's, and the acceptor record of a slot never claimed on an electorate group is unchanged. To migrate: every
+member of the retired group and of the successor runs this release — a 2.32.0 member ignores the four appended
+variants (`CarryManifestRequest`, `CarryManifestPage`, `CarryPrepare`, `CarryPropose`), so a predecessor needs a strict
+majority of upgraded members to be enumerated and a successor with an un-upgraded member times out its carry ballots;
+a 2.32.0 node decodes a successor's genesis without its predecessors and computes another digest, so it never answers
+the successor and the successor never answers it. Migrate while the group **has its majority**: a group that lost
+it cannot be retired or enumerated, and its repair is not built. Configure `[persistence]` on every member (§8.3's
+restore-or-retire rule): the carry set is complete because the group tag is in the durable acceptor record.
+
+**The surface, in one place:**
+- **API:** `GossipAgent::declare_successor_electorate(group, &[predecessors])`, `retire_electorate(group, successor)
+  -> Retirement`, `complete_migration(group) -> Vec<MigrationState>` (idempotent; `NotDecided` names the slot a carry
+  stopped at, retried with the bounded backoff), `drop_predecessor(group, predecessor, force) -> PredecessorDrop`,
+  `migration_state(group)`, `electorate_retirement`, `electorate_completion`, `electorate_drop`;
+  `ElectorateError::Retired { successor }`.
+- **HTTP:** `POST /gateway/govern/electorate` with `predecessors`, `retire_to`, `complete` or `drop_predecessor` (`govern:write`; each
+  decision audited, an undecided retirement attempt too); `409 retired`, `409 refused` (a successor that does not name
+  the retiree, a predecessor retired elsewhere, a retirement with an incomplete carry, a retirement that drops or
+  claims the default wrongly), `409 not_decided` (a record not visible here yet; a carry that could not finish, naming
+  the slot). `GET /gateway/govern` lists each electorate's `predecessors`, `retired_to`, `migration`.
+- **Counters:** `mycelium::electorate_waiting_refusals` (an acceptor refusing while a migration is not visible to
+  it), `electorate_retirements_undecided`, `migration_slots_carried`, `migration_completions`,
+  `migration_manifest_pages`; metrics `mycelium_electorate_waiting_refusals_total`,
+  `mycelium_electorate_retirements_undecided_total`, `mycelium_electorate_slots_carried_total`,
+  `mycelium_electorate_migration_completions_total`, `mycelium_electorate_manifests_total`.
+- **Wire v12, appended:** `CarryManifestRequest`, `CarryManifestPage`, `CarryPrepare`, `CarryPropose`; the
+  retirement, the completion and the drop are ordinary `PrepareIn`/`ProposeIn` on `electorate/{g}/retire`,
+  `electorate/{g}/carried/{p}` and `electorate/{g}/drop/{p}`, certified under `consensus/electorate-cert/{g}/…`. A
+  2.32.0 member of a retired group votes for its retirement **without closing**: with one such member a value can be
+  chosen after the retirement and safety rests on the carry set (enumerated from the upgraded members) and the
+  conflict tripwire; with two, no majority of manifests can be gathered — stuck, not unsafe. Migrate once every member
+  is upgraded.
+- **On disk:** a slot claimed on an electorate group writes its acceptor record with tag `0x04` — the 2.32.0 record
+  plus the group names — a few bytes per slot per node, never removed.
+- **Stated limits:** a group that lost its majority cannot migrate (DR not built); the carry is one ballot per slot,
+  sequential; a value a restarted predecessor member holds only by digest and no decision record resolves stops the
+  carry at that slot, named; the claim is for slots decided only in the electorate (an ordinary slot also proposed
+  under another scope is not enumerated); two default declarations within gossip lag are escaped by a merge.

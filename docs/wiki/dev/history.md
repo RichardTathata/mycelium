@@ -22,6 +22,18 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## Unreleased — 2026-10-11 — P2's migration: close · enumerate · carry · complete
+
+Changing an electorate's members is a migration that terminates (`docs/design/consensus-electorate.md` §8.3;
+`src/agent/migration.rs`): declare the successor naming its predecessors, retire the group into it (every member
+closes at the promise; the default passes with it), complete — a manifest from a strict majority of the retired
+group's tagged acceptor memory, one carry ballot per slot (`CarryPrepare`/`CarryPropose`), a certified completion
+record after which the predecessor is never consulted. Replaces the parked lazy carry of #601's rounds 4–5 (branch
+`fix/p2-migration`, rebased: both parked commits conflicted wholesale with #601's cut-back and were resolved to the
+shipped model). Twelve multi-node tests, each argument row seen failing with its mechanism disabled; the acceptance
+test shuts every predecessor node down and restarts the successor from disk. Wire v12, four variants appended.
+Not built: DR of a group that lost its majority. Log: `dev/.log/2026-10-11-p2-migration.md`.
+
 ## v2.32.0 release — 2026-10-11 (tag `v2.32.0`) — the 360 review's must-do list, and post-360 wave 1
 
 **#582–#592** the 360 review's must-do train: record corrections (#582); the SDKs over TLS and the checkpointer's

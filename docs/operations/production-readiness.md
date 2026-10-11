@@ -70,8 +70,9 @@ this page is the index + the gate.
   write is then refused (`electorate_not_governed`) unless an **electorate group** decides it: declare each
   with `POST /gateway/govern/electorate` (`govern:write`, every member running the consensus listener), mark the one
   the cluster-scoped locks use `"exclusive_default": true` — once, only once every node runs P2. **An electorate's
-  members are fixed at genesis and the default cannot move in this release**: size each electorate for the failures
-  it must survive for its whole life (a lost majority stops it) →
+  members are fixed at genesis; changing them is a migration** (declare the successor naming the group, retire the
+  group into it, `"complete": true` on the successor — the default follows the retirement): size each electorate for
+  the failures it must survive, or migrate it while it has its majority (a lost majority stops it and cannot migrate) →
   [guide 04 § Discovery is not an electorate](../guide/04-consensus.md). **What it does not cover, by
   construction:** the external prerequisites — network confinement, clock sync —
   which the report lists as `not_verifiable_here` and this checklist owns; and the at-rest cipher and

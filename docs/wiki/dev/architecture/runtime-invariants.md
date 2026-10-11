@@ -110,10 +110,28 @@ member set by identity (`ElectorateMismatch`, roster tripwire), counts promises 
 holds the quorum at a strict majority; every Prepare/Propose names the epoch and digest (`PrepareIn`/`ProposeIn`), and
 an acceptor (`electorate_admits`) answers only its own — refusing `StaleElectorate` otherwise. Every genesis claim and
 adoption passes one `compute` on the group's gate key (`claim_gated`, `FenceState`), which only decides; the claim runs
-after it, and a refused claim raises nothing. **Membership is fixed at genesis, and changing it is not built in 2.32.0**
-(the maintainer's decision, 2026-10-11; the migration is the follow-up, branch `fix/p2-migration`): a dead member lowers
-the group's fault tolerance, a lost majority stops it, and a lost majority's repair (an operator-forced genesis from
-the survivors' durable records) is not built. **A member comes back with its state or not at all** (2026-10-11,
+after it, and a refused claim raises nothing. **Membership is fixed at genesis; changing it is a migration that
+terminates** (built after 2.32.0, decision record §8.3; `src/agent/migration.rs`): a successor's genesis names its
+predecessors (`ElectorateDecl::predecessors`, inside the digest) and the successor decides nothing until each has
+retired to it (`successor_ready`, door and acceptor); a retirement (`electorate/{g}/retire`, `Retirement`, certified
+by a strict majority, `passes_default` checked at both ends) **closes** every member at its promise through the
+gate's `Retire` kind — `FenceState { closed, inflight, closing }`: a close waits out every ordinary claim in flight and
+refuses every later one, so no value of the retired group is chosen after the retirement; the acceptor memory is
+**tagged with the group a claim passed through** (`AcceptorSlot::groups`, record tag `0x04`, restored at start), which
+is what a retired member's **manifest** enumerates (`CarryManifestRequest`/`Page`, paged, after `close_for_carry`); a
+successor member unions a strict majority's manifests into the carry set, carries each slot with one `propose_carry`
+ballot (`CarryPrepare`/`CarryPropose`, admitted per predecessor, never stopping at a live record) and decides the
+completion `electorate/{g}/carried/{p}` (`Completion`, certified), before which an ordinary proposal on the successor
+is refused at the door and every acceptor (`migration_complete`) and after which the predecessor is never read. A
+group retires only once every predecessor is complete or dropped (`retirable`, checked by every acceptor at the
+retirement's **prepare**, which closes nothing otherwise — the review of #606, finding 1); a predecessor that never
+retires is dropped (`electorate/{g}/drop/{p}`, `PredecessorDrop`, void if a retirement to the group is visible); a
+verified completion stands as proof of the retirement (`predecessor_state`) and the predecessor's records are fsynced
+on each successor member at completion (`sync_migration_records`); untagged slots are reported too, and skipped only
+when the successor may not decide them at all. Nothing of a run's progress needs to survive: a restart re-enumerates.
+No lock was added — the caches are papaya maps and sets. A dead member lowers the group's fault tolerance until the
+group is migrated, a lost majority stops it and cannot migrate, and a lost majority's repair (an operator-forced
+genesis from the survivors' durable records) is not built. **A member comes back with its state or not at all** (2026-10-11,
 correcting "replace hardware under the same identity"): its acceptor memory (`AcceptorSlot` per slot — promised
 ballot, proposer, acceptance) is written as `sys/consensus-accepted/{node}/{slot}` (`accepted_key`) by
 `persist_acceptor` with a forced fsync before a promise or vote leaves since 2.32.0 (the guards before the promise
