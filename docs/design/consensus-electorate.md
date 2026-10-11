@@ -353,6 +353,14 @@ attempt it holds; the argument above then needs every other adopter of `k` to re
   it sees both, every exclusive verb is refused by name (fail closed, never decided across the cluster). **That stop
   has no escape in this release** (merging them is the migration follow-up's work), and a tie-break would trade it for
   a second lock holder. Declare the default once, from a node that sees the fleet's records, and never twice at once.
+  Group-scoped work outside the exclusive families keeps running during the stop; only the exclusive verbs halt.
+- **A `safety_sensitive` slot outside the pinned families has two homes.** A slot in `lock/`, `leader/`,
+  `consistent/`, `capauthz/` or `electorate/` (and a commitment award) is decided only in its electorate — refused
+  across the cluster while a default is marked. A slot the caller marks `ConsensusConfig::safety_sensitive` under any
+  other name is checked only at the proposer that marks it: an untagged cluster-scoped proposal for the same slot,
+  from a node with `consensus_require_electorate` off, is answered by every acceptor, so the slot can be decided both
+  in the electorate and across the cluster. Use the pinned families for an exclusive outcome, or keep
+  `consensus_require_electorate` on fleet-wide and propose through the exclusive verbs (`exclusive_propose`).
 - **Changing members** is not built (§8.3); a lost majority stops a group for good.
 - **Without `[tls]` nothing is authenticated**, the certificates included.
 - **A forged commit record stops a proposer.** A `consensus/committed/electorate/…` entry written straight into the
@@ -379,6 +387,11 @@ the log claim, `mycelium-commitment`'s linearizable award, `set_capability_authz
   disagrees — every exclusive verb is refused by name, and every acceptor refuses a cluster-scoped proposal for an
   exclusive slot, tagged or not (round 5, D5). `consensus_electorate` may only restate the answer. An acceptor also
   refuses a group-scoped proposal for an exclusive slot on any group but the default.
+- **A slot that names a group is decided only in that group.** `leader/{g}` and every `electorate/{g}/…` slot are
+  refused — at the door and at every acceptor, whatever the default state or `consensus_require_electorate` — under
+  any scope but exactly `Group(g)`: under the cluster scope or `Groups`, the votes would be signed at that scope and
+  could assemble a certificate the group's gate never saw (#601's final review, D1). A tagged `PrepareIn`/`ProposeIn`
+  is answered only under `Group` scope, since the scope is not inside the signed payload (D2).
 
 **Why the marking is not itself a cluster-scoped consensus decision (round 2, finding 2a).** A node that has not yet
 learned the mark can still propose, and answer, a cluster-scoped exclusive slot, so while the mark propagates a lock

@@ -2254,7 +2254,7 @@ impl ConsensusEngine {
     /// **The proposer's door for P2.** `Ok(Some(tag))` for a proposal on an electorate group (carrying
     /// its epoch, digest, vote filter and quorum), `Ok(None)` for one outside
     /// any, or a refusal by name.
-    fn electorate_door(
+    pub(crate) fn electorate_door(
         &self, scope: &SignalScope, slot: &Arc<str>, value: &Bytes, config: &ConsensusConfig,
     ) -> Result<Option<ElectorateTag>, DoorRefusal> {
         use crate::agent::electorate::{check_genesis, parse_genesis_slot};
@@ -2308,6 +2308,12 @@ impl ConsensusEngine {
                 }
             }
             SignalScope::Groups(groups) => {
+                // A slot that names a group — `leader/{g}`, any `electorate/{g}/…` — is decided only under exactly
+                // `Group(g)`, whatever the default state or `consensus_require_electorate` (#601 final review, D1).
+                if let Some(g) = crate::agent::electorate::slot_names_group(slot) {
+                    return Err(DoorRefusal::mismatch(Some(&Arc::from(g)), &format!(
+                        "slot {slot} is decided only in group {g}'s own scope, never by a cross-group proposal")));
+                }
                 if let Some(g) = groups.iter().find(|g| self.electorate_view(g).is_some()) {
                     return Err(DoorRefusal::mismatch(Some(g),
                         "an electorate group decides only through its own electorate, never inside a cross-group proposal"));
@@ -2322,6 +2328,12 @@ impl ConsensusEngine {
                 }
             }
             _ => {
+                // D1: a slot that names a group is never decided across the cluster — its votes would be signed at
+                // cluster scope and assemble a certificate the group's gate never saw.
+                if let Some(g) = crate::agent::electorate::slot_names_group(slot) {
+                    return Err(DoorRefusal::mismatch(Some(&Arc::from(g)), &format!(
+                        "slot {slot} is decided only in group {g}'s own scope, never across the cluster")));
+                }
                 if crate::agent::electorate::is_safety_sensitive(config, slot) {
                     match crate::agent::electorate::exclusive_electorate(&self.task_ctx) {
                         Ok(Some(g)) => return Err(DoorRefusal::Mismatch {
@@ -2394,6 +2406,15 @@ impl ConsensusEngine {
         let me = &self.task_ctx.node_id;
         let group = match scope {
             SignalScope::Group(g) => Arc::clone(g),
+            // Outside exactly `Group(g)` (#601 final review): a tagged message is never answered — the scope is not
+            // inside the signed payload, and only a group's scope runs the gate (D2) — nor is a slot that names a
+            // group, whatever the default state or `consensus_require_electorate` (D1): cluster-signed votes would
+            // otherwise assemble a certificate for `electorate/{g}/…` that the group's gate never saw.
+            _ if named.is_some() || crate::agent::electorate::slot_names_group(slot).is_some() => {
+                return Err(crate::agent::electorate::slot_names_group(slot)
+                    .and_then(|g| self.electorate_view(g))
+                    .map_or((0, [0; 32]), |d| (d.epoch, d.digest())));
+            }
             SignalScope::Groups(gs) => {
                 // A cross-group proposal over an electorate group this node holds is not answered, nor one for an
                 // exclusive slot whose home is the fleet's electorate (round 3, finding 3).

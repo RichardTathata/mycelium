@@ -1215,7 +1215,7 @@ pub struct GossipConfig {
     /// `consistent/` slot families — whose scope is not a group with an electorate declaration
     /// (`sys/govern/electorate/{group}`) is refused `ElectorateNotGoverned` before anything is sent.
     /// `false` (default) runs it as before and counts it. Resolves the guarantee `cons.safety_profile`,
-    /// which `secure-single-domain` rev 3 requires. Env `GOSSIP_CONSENSUS_REQUIRE_ELECTORATE`.
+    /// which `secure-single-domain` rev 4 requires. Env `GOSSIP_CONSENSUS_REQUIRE_ELECTORATE`.
     #[serde(default)]
     pub consensus_require_electorate: bool,
 

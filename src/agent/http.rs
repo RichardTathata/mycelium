@@ -1483,7 +1483,8 @@ async fn gw_govern_snapshot(State(ctx): State<Arc<HttpCtx>>) -> impl IntoRespons
             "settled_unknown":  snap.settled_unknown,
         },
     });
-    // P2: the electorate declarations this node sees — a group and its declared size, never node ids.
+    // P2: the electorate declarations this node sees — each group, its epoch, whether it holds the default, and its
+    // members (node ids: a governance read, behind `govern:read`).
     let electorates: Vec<_> = super::electorate::all_views(&ctx.agent_ctx).into_iter()
         .map(|d| json!({
             "group": d.group, "epoch": d.epoch, "exclusive_default": d.exclusive_default,

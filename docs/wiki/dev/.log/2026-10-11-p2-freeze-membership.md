@@ -69,3 +69,11 @@
   what-is-proven, the FAQ, deprecations §31, the CHANGELOG and the plan's P2 row. One stop with no escape remains
   besides a lost majority: two default declarations made at once within gossip lag (fail closed; merging them is the
   follow-up's work).
+
+**Final review of 85dc14cf (same day).** D1: a cluster-scoped (or `Groups`) proposal for `electorate/{g}/…` or
+`leader/{g}` passed both ends while no default was marked, and its cluster-signed votes assembled a certificate that
+moved a frozen electorate (the reviewer's probe). A slot naming a group is now refused at the door and every acceptor
+under any scope but exactly `Group(g)`; D2: a tagged `PrepareIn`/`ProposeIn` is answered only under `Group` scope.
+Tests: `a_slot_that_names_a_group_is_decided_only_in_that_group` (the probe), `a_tagged_proposal_outside_its_group_scope_is_refused`,
+`two_defaults_fail_closed`, and the door half of `a_second_default_is_refused_by_name`. Design §8.5 states the
+two homes of a `safety_sensitive` slot outside the pinned families.

@@ -12743,6 +12743,10 @@ async fn a_second_default_is_refused_by_name() {
     let slot = crate::agent::electorate::genesis_slot("new", 1);
     assert!(admits(&crate::agent::electorate::engine(&d.task_ctx), &SignalScope::Group(Arc::from("new")), &slot,
         Some((0, [0; 32])), c.node_id(), Some(&second.encode())).is_err(), "an acceptor refuses it too");
+    // The door's own refusal, reached directly — `declare_outcome` refuses before it, so it is otherwise unreached.
+    let door = crate::agent::electorate::engine(&c.task_ctx).electorate_door(
+        &SignalScope::Group(Arc::from("new")), &Arc::from(slot.as_str()), &second.encode(), &ConsensusConfig::default());
+    assert!(door.is_err(), "the proposer's door refuses a second default");
     assert!(agents.iter().all(|n| n.electorate("new").is_none()), "nothing was decided");
     for n in &agents {
         assert_eq!(crate::agent::electorate::exclusive_electorate(&n.task_ctx), Ok(Some("old".to_string())), "{}", n.node_id());
@@ -12767,5 +12771,116 @@ async fn a_tagged_cluster_proposal_for_an_exclusive_slot_fails_closed() {
         assert!(admits(&engine, &SignalScope::Cluster, "lock/x", named, a.node_id(), None).is_err(),
             "a cluster-scoped lock/x is refused, named {named:?}");
     }
+    a.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// **A slot that names a group is decided only in that group** (#601's final review, D1 — the reviewer's probe).
+/// `electorate/{g}/…` and `leader/{g}` were answered, and proposed, under the cluster scope while no default was
+/// marked — and since the votes are signed at cluster scope too, they assembled a valid certificate: the probe moved a
+/// frozen electorate to epoch 2, marked the default. Now such a slot is refused at the proposer's door and at every
+/// acceptor unless the scope is exactly `Group(g)`, whatever the default state or `consensus_require_electorate`; an
+/// `electorate/` slot is never answered under `Groups`, nor is `leader/{g}` under `Groups([g])`.
+#[cfg(feature = "consensus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_slot_that_names_a_group_is_decided_only_in_that_group() {
+    let (agents, _l, _serial) = electorate_mesh(1, |_| {}).await;
+    let a = &agents[0];
+    a.mesh().join_group("council");
+    roster_converges(&agents, "council", &[a]).await;
+    let e1 = declare(a, "council", false).await.expect("genesis");
+    let engine = crate::agent::electorate::engine(&a.task_ctx);
+    for slot in ["electorate/council/2", "leader/council"] {
+        assert!(engine.electorate_admits(&SignalScope::Cluster, slot, None, a.node_id(), None).is_err(),
+            "an acceptor answers {slot} under the cluster scope");
+    }
+    let only = SignalScope::Groups(vec![Arc::from("other")]);
+    for slot in ["electorate/other/1", "leader/other"] {
+        assert!(engine.electorate_admits(&only, slot, None, a.node_id(), None).is_err(),
+            "an acceptor answers {slot} under Groups([other]), a group with no electorate here");
+    }
+    // The probe: a cluster-scoped proposal of a superseding genesis that marks the default.
+    let e2 = crate::ElectorateDecl {
+        group: "council".into(), epoch: 2, exclusive_default: true, members: e1.members.clone(),
+        supersedes: Some(crate::Superseded {
+            epoch: 1, digest: crate::consensus::value_digest(&e1.encode()), envelope: [0; 32], members: e1.members.clone(),
+        }),
+    };
+    let slot = crate::agent::electorate::genesis_slot("council", 2);
+    let quick = ConsensusConfig { phase1_timeout: Duration::from_millis(300), max_ballots: 1, ..ConsensusConfig::default() };
+    let r = engine.propose(SignalScope::Cluster, Arc::from(slot.as_str()), e2.encode(), 1, quick, None).await;
+    assert!(!matches!(r, ConsensusResult::Committed { .. }), "the cluster-scoped genesis was decided: {r:?}");
+    // Had it been accepted, a certificate from the cluster-signed vote would move the electorate.
+    let held = a.task_ctx.consensus_accepted.pin().get(slot.as_str()).and_then(|s| s.accepted.clone());
+    if let Some((ballot, crate::consensus::Accepted::Envelope(env))) = held {
+        let vote = crate::consensus::ConsensusMsg::VoteForValue {
+            slot: Arc::from(slot.as_str()), ballot, voter: a.node_id().clone(),
+            value_digest: crate::consensus::value_digest(&env), locality: None,
+        };
+        let signed = engine.sign_payload(crate::consensus::encode_consensus_msg(&vote));
+        let cert = mycelium_core::serde_fixint::to_vec(&(env, vec![signed])).unwrap();
+        assert!(a.kv().set(crate::agent::electorate::cert_key("council", 2), Bytes::from(cert)));
+        poll_until(|| a.kv().get(&crate::agent::electorate::cert_key("council", 2)).is_some(), 2_000).await;
+    }
+    assert_eq!(a.electorate("council"), Some(e1), "a frozen electorate must not move");
+    a.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// **A tagged proposal is answered only under its group's scope** (#601's final review, D2). `PrepareIn`/`ProposeIn`
+/// name an electorate, and the scope is not inside the signed payload — so a tagged message under the cluster scope, or
+/// under `Groups`, is refused rather than answered without the gate.
+#[cfg(feature = "consensus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tagged_proposal_outside_its_group_scope_is_refused() {
+    let (agents, _l, _serial) = electorate_mesh(1, |_| {}).await;
+    let a = &agents[0];
+    a.mesh().join_group("council");
+    roster_converges(&agents, "council", &[a]).await;
+    let e1 = declare(a, "council", false).await.expect("genesis");
+    let engine = crate::agent::electorate::engine(&a.task_ctx);
+    let named = Some((e1.epoch, e1.digest()));
+    for scope in [SignalScope::Cluster, SignalScope::Groups(vec![Arc::from("plain")])] {
+        assert!(admits(&engine, &scope, "work/x", named, a.node_id(), None).is_err(), "tagged work/x answered under {scope:?}");
+    }
+    a.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// **Two defaults fail closed** (#601's final review). Two groups that could not see each other's genesis can both be
+/// marked the fleet's exclusive default; a node that sees both names neither — `live_default` is an error naming them,
+/// and every exclusive verb is refused, at the door and at the acceptor — while group-scoped work outside the exclusive
+/// families keeps running. Built here from two meshes: the second group's record and certificate, decided on a mesh of
+/// its own, are carried into the first.
+#[cfg(feature = "consensus")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_defaults_fail_closed() {
+    use crate::consensus::consensus_ns::COMMITTED;
+    let carried = {
+        let (agents, _l, _serial) = electorate_mesh(1, |_| {}).await;
+        let x = &agents[0];
+        x.mesh().join_group("two");
+        roster_converges(&agents, "two", &[x]).await;
+        declare(x, "two", true).await.expect("the other side's default");
+        let record = format!("{COMMITTED}{}", crate::agent::electorate::genesis_slot("two", 1));
+        let cert = crate::agent::electorate::cert_key("two", 1);
+        let carried = [(record.clone(), x.kv().get(&record).expect("record")), (cert.clone(), x.kv().get(&cert).expect("cert"))];
+        x.shutdown_with_timeout(Duration::from_secs(5)).await;
+        carried
+    };
+    let (agents, _l, _serial) = electorate_mesh(1, |_| {}).await;
+    let a = &agents[0];
+    a.mesh().join_group("one");
+    roster_converges(&agents, "one", &[a]).await;
+    declare(a, "one", true).await.expect("this side's default");
+    for (k, v) in carried { assert!(a.kv().set(k, v)); }
+    poll_until(|| crate::agent::electorate::live_default(&a.task_ctx).is_err(), 5_000).await;
+    let why = crate::agent::electorate::live_default(&a.task_ctx).unwrap_err();
+    assert!(why.contains("one") && why.contains("two"), "{why}");
+    let engine = crate::agent::electorate::engine(&a.task_ctx);
+    assert!(admits(&engine, &SignalScope::Cluster, "lock/x", None, a.node_id(), None).is_err(), "an acceptor answers lock/x");
+    let quick = || ConsensusConfig { phase1_timeout: Duration::from_millis(500), max_ballots: 2, ..ConsensusConfig::default() };
+    let r = engine.propose(SignalScope::Cluster, Arc::from("lock/x"), Bytes::from_static(b"holder"), 1, quick(), None).await;
+    assert!(matches!(r, ConsensusResult::ElectorateMismatch { .. }), "an exclusive verb is refused by name: {r:?}");
+    // Group-scoped work outside the exclusive families keeps running during the stop.
+    let r = engine.propose(SignalScope::Group(Arc::from("one")), Arc::from("work/y"), Bytes::from_static(b"v"), 1, quick(), None).await;
+    assert!(matches!(r, ConsensusResult::Committed { .. }), "group work stops too: {r:?}");
     a.shutdown_with_timeout(Duration::from_secs(5)).await;
 }

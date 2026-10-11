@@ -111,11 +111,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   genesis is refused by name while one is held, at the door and at every acceptor, and the default cannot move in this
   release. `consensus_electorate` only restates the default, and a disagreeing setting is refused; while the default
   cannot be named, every acceptor refuses a cluster-scoped exclusive slot, tagged or not. A fleet-exclusive slot is
-  decided only in the fleet's electorate and `leader/{g}` only in `g` — at the door and at every acceptor, never by a
-  cross-group proposal. `cons.safety_profile` (rev 2) is node-enforced and **`secure-single-domain` rev 4** requires it
+  decided only in the fleet's electorate, and a slot that names a group (`leader/{g}`, `electorate/{g}/…`) only under
+  exactly `Group(g)` — at the door and at every acceptor, whatever the default state or `consensus_require_electorate`,
+  never across the cluster or by a cross-group proposal; a tagged proposal is answered only under a group's scope. `cons.safety_profile` (rev 2) is node-enforced and **`secure-single-domain` rev 4** requires it
   (rev 3 is P1's `gw.exposed_closed`). **Not claimed:** changing an electorate's members, or moving the default (the
   follow-up); a lost majority is unrecoverable; two default declarations made at once within gossip lag stop the
-  exclusive verbs with no escape in this release; genesis assumes its members agree on the roster; without `[tls]` the
+  exclusive verbs with no escape in this release (group-scoped work outside the exclusive families keeps running); a
+  `safety_sensitive` slot outside the pinned families can also be decided by an untagged cluster-scoped proposal; genesis assumes its members agree on the roster; without `[tls]` the
   certificates are unauthenticated; the marking of the fleet's default is not itself a cluster-scoped decision (§8.6
   says why the profile closes that window instead); live reconfiguration is a later plan. **Removed before release:**
   rounds 2–3 built live one-member steps with a drain before each step, withdrawn in round 4; rounds 4–5 built a

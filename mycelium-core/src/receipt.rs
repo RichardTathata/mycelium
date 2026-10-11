@@ -483,8 +483,9 @@ pub enum CommitError {
         seen_epoch: u64,
     },
     /// **The electorate and what this node sees disagree, so nothing was proposed** (P2) — a roster that
-    /// differs from the members, the group is retired or closing, a cross-group proposal over an electorate
-    /// group, or a `consensus_electorate` that disagrees with the fleet's. `detail` says which.
+    /// differs from the members, a slot that names a group proposed outside exactly that group's scope, a
+    /// cross-group proposal over an electorate group, a second exclusive default, or a `consensus_electorate`
+    /// that disagrees with the fleet's. `detail` says which.
     ElectorateMismatch {
         /// The slot.
         slot: Arc<str>,
