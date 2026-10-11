@@ -98,9 +98,11 @@ fields verify with `verify_any` against the known-key history. Nothing needs re-
 A node's identity is its `NodeId`, and `mycelium tls issue` can reissue its certificate off-node — but for
 a member of a **consensus electorate group** (guide [04 § Discovery is not an
 electorate](../guide/04-consensus.md#discovery-is-not-an-electorate)) the identity is not the whole
-member. Since 2.30.0 its acceptor memory — the ballot it promised, to whom, and the value it accepted,
-per slot — is on its own disk (`sys/consensus-accepted/{node}/{slot}`, fsynced before a promise or vote
-leaves) and is read back once at start by `prewarm_accepted`. Nothing checks the store is the one the
+member. Its acceptor memory — the ballot it promised, to whom, and the value it accepted, per slot — is
+on its own disk (`sys/consensus-accepted/{node}/{slot}`, fsynced before a promise or vote leaves since
+2.32.0) and is read back once at start by `prewarm_accepted`. **An electorate member must configure
+`[persistence]`** — without it nothing is on disk, the node answers anyway, and the hazard below recurs on
+every restart. Nothing checks the store is the one the
 member had: started under the old `NodeId` over an **empty or older** store, it answers as a fresh
 acceptor — it can promise a ballot it had already promised past, or report no acceptance where it had
 accepted — and a quorum that counts it can decide a **second value** for the slot. Decide, before
@@ -110,10 +112,14 @@ touching the identity:
   directory `{persistence.base_path}/{node_id}/kv/` (`snapshot.bin` + `wal.bin`) at its **latest** state,
   copied quiesced ([deployment.md § Backup & restore](deployment.md#backup--restore)). Safe; nothing to
   migrate. An older copy is the empty-store hazard with a shorter reach — every promise and vote after
-  the copy is forgotten — and anti-entropy does not repair it: the memory is read from the local store,
-  never from a peer.
+  the copy is forgotten. Anti-entropy does not close it: a peer's copy of this node's own record does
+  reach a fresh store, but the acceptor's memory is loaded once at start, so the copy is not in the
+  running acceptor until the next restart, and the node's first own answer overwrites it by LWW.
 - **Retire** — the directory is gone, or you cannot show it is the latest: do **not** reissue the
-  identity. Remove the member (below) and count the group one member smaller for good; migrating the
+  identity. Remove the member (below) and count the group one member smaller for good — and leave its
+  `grp/` entry alone: the proposer's door refuses every proposal on a group whose live roster differs from
+  the electorate's members (`ElectorateMismatch`), so tidying the dead member out of the group stops it.
+  Migrating the
   group into a successor is the follow-up (until then: size for the whole life, or declare a new group
   and move the work).
 - **Removal forecloses restore.** The ledger is monotonic — there is no un-removal — and a removed

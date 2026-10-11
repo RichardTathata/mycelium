@@ -356,7 +356,7 @@ node, and what an older copy of each does on its own:
 
 | State | Where | An older copy alone… |
 |---|---|---|
-| KV WAL + snapshot | persistence dir `kv/` | application keys are re-learned from peers; **this node's own consensus acceptor records are not** (`sys/consensus-accepted/{node}/{slot}` — read once at start by `prewarm_accepted`, never from a peer). For a member of an electorate group an older copy lets it promise below what it promised and forget what it accepted — two decided values. Restore the **latest** copy, or retire the member: [cert-rotation.md § A member that goes down](cert-rotation.md#a-member-that-goes-down-restore-it-with-its-state-or-retire-it--never-reissue-it-empty) |
+| KV WAL + snapshot | persistence dir `kv/` | application keys are re-learned from peers; **this node's own consensus acceptor records are re-learned into the files, not into the running acceptor** (`sys/consensus-accepted/{node}/{slot}` — the memory is loaded once at start by `prewarm_accepted`; a peer's copy arriving later waits for the next restart, and the node's first own answer overwrites it by LWW). For a member of an electorate group an older copy lets it promise below what it promised and forget what it accepted — two decided values. Restore the **latest** copy, or retire the member: [cert-rotation.md § A member that goes down](cert-rotation.md#a-member-that-goes-down-restore-it-with-its-state-or-retire-it--never-reissue-it-empty) |
 | Node identity | `auto_cert_dir` | a *different* node to the mesh if the key changed; if an operator removed the old identity, its removal record still stands |
 | Revocation epochs, mandate floors | the `DurableEpochs` journal (when attached) | **resurrects revoked authority** — never restore this older than the identity |
 | Evidence journal | the `with_evidence_journal` path | records the consumer already has re-send under the same ids (safe); records after the copy are **gone**, and the exporter's cursor must be reset with it |
@@ -366,9 +366,9 @@ node, and what an older copy of each does on its own:
 **Restore** = stop the node, put **all** of the above back from the **same** point in time, and
 start it. On boot it loads the latest snapshot and replays the WAL tail on top (last-writer-wins
 per key, every record), re-bootstraps, and re-learns any newer KV from peers via anti-entropy —
-except its own acceptor memory, which is read from the restored files alone (the row above): for an
-electorate member, the restore is the latest copy or it is a retirement, never a reissued identity
-over an empty directory.
+but its own acceptor memory is loaded from the restored files at start and not refilled from peers
+until the next restart (the row above): for an electorate member, the restore is the latest copy or it
+is a retirement, never a reissued identity over an empty directory.
 Then verify: `/ready` answers, `/stats` shows it hearing peers, and — if an evaluator or authority
 is attached — a **revoked** mandate is still refused (the check that a restore did not resurrect
 authority; `examples/authority_drain` is the shape of it).

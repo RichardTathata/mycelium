@@ -206,10 +206,13 @@ follow-up, branch `fix/p2-migration`). Membership is fixed at genesis. What that
   electorate group with the members you want and move the work there yourself. The new group starts
   empty: a lock held, or a value decided, in the old group is not carried.
 - **A member that goes down comes back one of two ways — restored with its state, or retired. Never
-  reissue its identity over an empty store.** A member is its `NodeId`, and since 2.30.0 its acceptor
-  memory — the ballot it promised, to whom, and the value it accepted, per slot — is on its own disk
+  reissue its identity over an empty store.** A member is its `NodeId`, and its acceptor memory — the
+  ballot it promised, to whom (since 2.30.0), and the value it accepted, per slot — is on its own disk
   (`sys/consensus-accepted/{node}/{slot}`, in the WAL under `{persistence.base_path}/{node_id}/kv/`,
-  fsynced before the promise or vote leaves) and is read back once at start, by `prewarm_accepted`.
+  fsynced before the promise or vote leaves since 2.32.0) and is read back once at start, by
+  `prewarm_accepted`. **An electorate member must configure `[persistence]`:** without it nothing is on
+  disk and the node still answers (`persist_sync` reports "no promise was made"), so the hazard below
+  recurs on *every* restart, not only a reissue.
   Nothing checks that the store it reads is the one the member had: a node started under the old
   `NodeId` with an **empty or older** store starts with an empty or older memory, and can promise a
   ballot it had already promised past, or report no acceptance where it had accepted — a quorum that
@@ -219,12 +222,17 @@ follow-up, branch `fix/p2-migration`). Membership is fixed at genesis. What that
     (`snapshot.bin` + `wal.bin`), copied quiesced
     ([deployment.md § Backup & restore](../operations/deployment.md#backup--restore)). Safe; nothing to
     migrate. An **older copy is the empty-store hazard with a shorter reach** — every promise and vote
-    after the copy is forgotten — and anti-entropy does not repair it: the memory is read from the local
-    store at start and never from a peer.
+    after the copy is forgotten. Anti-entropy does not close it: the record is gossiped, and a peer's
+    copy of this node's own record does reach a fresh **store** — but the acceptor's memory is loaded
+    once, at start, so the copy is not in the running acceptor until the next restart, and the node's
+    first own answer overwrites it by LWW.
   - **Retire:** the directory is gone, or you cannot show it is the latest — put the `NodeId` on the
     removal ledger (`sys/membership/removed/`,
     [cert-rotation.md § Removing a member](../operations/cert-rotation.md)) and count the group one
-    member smaller for good. Migrating the group into a successor is the follow-up; until it ships, the
+    member smaller for good — and **leave its `grp/` entry alone**: the proposer's door compares the
+    live group roster to the electorate's member set and refuses every proposal on a group whose roster
+    has moved (`ElectorateMismatch`), so tidying the dead member out of the group stops the group.
+    Migrating the group into a successor is the follow-up; until it ships, the
     options are the two above: size for the whole life, or declare a new group and move the work.
   - **Removal is permanent and fleet-wide.** A removed `NodeId` is dropped at every connection whatever
     certificate it presents, and there is no un-removal — so **removing first forecloses the restore**.

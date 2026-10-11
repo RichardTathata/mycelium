@@ -151,7 +151,8 @@ resized by the membership governor, refused while its roster differs from the me
 an electorate's members is not built in this release**: a dead member lowers the group's fault
 tolerance, a lost majority stops it (its repair is a disaster-recovery procedure that is not built), and a
 migration to another group is the follow-up. A member that goes down comes back **with its persistence
-directory at its latest state, or not at all**: since 2.30.0 its promises and acceptances live there, and a
+directory at its latest state, or not at all**: its promises and acceptances live there (fsynced before the
+answer leaves since 2.32.0 — an electorate member must configure `[persistence]`), and a
 member reissued its identity over an empty or older store can contradict them and let two values be
 decided — restore it, or retire it onto the removal ledger (which forecloses the restore); never reissue it
 empty ([04-consensus.md § Changing an electorate's members](04-consensus.md)). The fleet's exclusive

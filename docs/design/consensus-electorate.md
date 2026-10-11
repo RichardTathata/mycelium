@@ -298,17 +298,25 @@ gossip lag and the second still in review; the work is preserved on branch `fix/
 - **A member that goes down is restored with its state or retired — never reissued over an empty store.** An earlier
   version of this bullet said *replace hardware under the same node identity*; that is unsafe as stated. A member is
   its `NodeId` (a socket address, `mycelium-core/src/node_id.rs:20-22`), and `mycelium tls issue` can reissue its
-  certificate off-node, but since 2.30.0 the member's acceptor memory is **durable and node-local**: each slot's
-  promised ballot, the proposer it was promised to and the accepted value (`AcceptorSlot`) are written as
+  certificate off-node, but the member's acceptor memory is **durable and node-local**: each slot's promised
+  ballot, the proposer it was promised to (added in 2.30.0) and the accepted value (`AcceptorSlot`) are written as
   `sys/consensus-accepted/{node}/{slot}` (`accepted_key`, `src/consensus.rs:3552`) by `persist_acceptor`
-  (`src/consensus.rs:1331-1357`), handed to the WAL with a forced `fdatasync` before the promise or vote leaves
-  (`answer_prepare`, `src/consensus.rs:4121-4128`), and restored at the next start by `prewarm_accepted`
+  (`src/consensus.rs:1331-1357`), and since 2.32.0 (#585) handed to the WAL with a forced `fdatasync` before the
+  promise or vote leaves — the guards at `src/consensus.rs:4146` (the promise) and `:4428` (the vote); before
+  2.32.0 the record reached disk only by snapshot. It is restored at the next start by `prewarm_accepted`
   (`src/consensus.rs:3725-3743`) from the local store after the snapshot and WAL replay
   (`src/agent/lifecycle.rs:215-217`, `:274`, `:349-354` — the directory is `{base_path}/{node_id}/kv/`,
-  `PersistenceConfig::base_path`, `mycelium-core/src/config.rs:394-397`). **There is no empty-acceptor guard:**
-  `prewarm_accepted` restores whatever it finds, the call site logs only when it found something, and the memory is
-  never fed from anti-entropy — so a node that takes the old `NodeId` with an empty store answers the next
-  `Prepare` as a fresh acceptor. It can promise a ballot below one it had already promised (so a slower proposer's
+  `PersistenceConfig::base_path`, `mycelium-core/src/config.rs:394-397`). **An electorate member must configure
+  `[persistence]`:** without it `persist_sync` returns `true` with nothing on disk ("no promise was made",
+  `src/consensus.rs:3094-3096`) and the node answers anyway, so the hazard below recurs on every restart. **There is
+  no empty-acceptor guard:** `prewarm_accepted` restores whatever it finds and the call site logs only when it found
+  something. Anti-entropy does not close the gap either — the record is gossiped (`src/consensus.rs:3659-3662`),
+  and a peer's copy of this node's *own* record is applied to a fresh store as a repair
+  (`mycelium-core/src/connection.rs:66-68`, `anti_entropy_repair_after_a_restart_is_not_a_namespace_violation`) —
+  but the memory is loaded once at start, so a copy arriving later reaches the store and not the running acceptor
+  until the next restart, and the node's first own write overwrites it by LWW. So a node that takes the old
+  `NodeId` with an empty store answers the next `Prepare` as a fresh acceptor. It can promise a ballot below one it
+  had already promised (so a slower proposer's
   older ballot is granted after a newer one was), or report no acceptance where it had accepted a value (so a
   proposer at a higher ballot is free to choose another) — and a quorum counting it decides a **second value** for the
   slot. An older backup is the same hazard with a shorter reach: every promise and vote after the copy is forgotten.
@@ -318,7 +326,10 @@ gossip lag and the second still in review; the work is preserved on branch `fix/
     crash-survival is `an_acceptors_record_survives_a_crash_without_a_snapshot`.)
   - **Retire** — the state is gone or not provably latest: never reissue the identity empty; sign a `MemberRemoval`
     naming the `NodeId` and every key it held (`src/agent/membership_ops.rs:22-55`, published under
-    `sys/membership/removed/{node}`) and count the group one member smaller. Migrating the group is the follow-up.
+    `sys/membership/removed/{node}`) and count the group one member smaller — and **leave its `grp/` entry
+    alone**: `electorate_door` refuses every proposal on a group whose live roster differs from the member set
+    (`ElectorateMismatch`, `src/consensus.rs:2299`), so tidying the dead member out of the group stops the group.
+    Migrating the group is the follow-up.
   - **Removal forecloses restore.** The ledger is monotonic — no un-removal (`src/membership.rs:20`); a removed key is
     refused at the TLS handshake (`mycelium-core/src/tls.rs:570-579`) and a frame from a removed `NodeId` is dropped at
     the connection whatever key it carries (`mycelium-core/src/connection.rs:392`, `:678`), so a certificate reissued
@@ -394,12 +405,18 @@ attempt it holds; the argument above then needs every other adopter of `k` to re
 - **Changing members** is not built (§8.3); a lost majority stops a group for good, and **its repair is not built
   either** — a disaster-recovery genesis forced from the survivors' durable records, with the possibly-lost
   decisions stated, is the follow-up's follow-up (`docs/operations/what-is-proven.md`, the third table).
-- **An acceptor restarted over an empty or older store is not detected.** The guarantee rests on each member's
-  durable acceptor record (§8.3): `prewarm_accepted` restores what it finds and `start()` does not refuse a known
-  electorate member whose store holds no records. A member reissued its `NodeId` over an empty directory, or
-  restored from an older backup, can promise below what it promised and forget what it accepted, and two values can
-  be decided. The rule is operational — restore with the latest directory, or retire onto the removal ledger — and a
-  start-time refusal (or warning) for an electorate member with no acceptor records would be the mechanical half.
+- **An acceptor restarted over an empty or older store is not detected — nor a member without persistence.** The
+  guarantee rests on each member's durable acceptor record (§8.3): `prewarm_accepted` restores what it finds,
+  `start()` does not refuse a known electorate member whose store holds no records, and a member with no
+  `[persistence]` answers with nothing on disk (`persist_sync` returns `true`). A member reissued its `NodeId` over
+  an empty directory, restored from an older backup, or simply restarted without persistence, can promise below
+  what it promised and forget what it accepted, and two values can be decided. The rule is operational — configure
+  persistence; restore with the latest directory, or retire onto the removal ledger. The mechanical half, queued as
+  a code PR from #604's review: refuse genesis adoption for a member without `[persistence]`; warn by name when a
+  member of an adopted electorate holds zero own `sys/consensus-accepted/` records for it; and at
+  `connection.rs:66-68` compare an inbound copy of this node's own record against memory and warn when it holds a
+  promise or acceptance the node has forgotten — stated with what that cannot see (a promise whose gossip reached
+  no survivor; a stale copy whose forgotten answers were on slots since ended).
 - **Without `[tls]` nothing is authenticated**, the certificates included.
 - **A forged commit record stops a proposer.** A `consensus/committed/electorate/…` entry written straight into the
   store is not adopted, but a proposer for that slot reads it as decided and ends `Superseded`, as for any slot — so a
