@@ -37,8 +37,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Socket-binding suites go through the flake tier (scripts/ci-retest.sh): a wall-clock
       # flake no longer reds main, but every flake is a loud annotation — never silent.
-      - run: ./scripts/ci-retest.sh --lib
-      - run: ./scripts/ci-retest.sh --lib --features tls,metrics,a2a,llm
+      # `test-frame-filter`: the test-only receive-path frame filter the row-A interleaving tests withhold
+      # real frames with (`agent::lock_lifecycle_tests`, `agent::lock_lifecycle_review_tests`). Only lib
+      # test runs enable it — never `test-support` — so examples and demo images do not compile it.
+      - run: ./scripts/ci-retest.sh --lib --features test-frame-filter
+      - run: ./scripts/ci-retest.sh --lib --features tls,metrics,a2a,llm,test-frame-filter
       # WS1 RBAC + WS2 audit + WS4 OIDC + WS5 rotation. Listed as a gate in
       # testing.md and run by `make check` since v2.1 — but never in CI until
       # 2026-07-21 (wiki-lint finding: local green masked the gap, the exact
@@ -156,6 +159,7 @@ jobs:
       # `tls` is dead here — the matrix line below and `--no-default-features` both missed
       # `consensus::signer_authorized` (v2.4.1 release day finding).
       - run: cargo clippy --lib --tests -- -D warnings
+      - run: cargo clippy --lib --tests --features test-frame-filter -- -D warnings
       # Full feature matrix — `--lib --tests` alone misses code behind
       # #[cfg(feature = "tls")] etc. (same set CLAUDE.md mandates locally).
       - run: cargo clippy --lib --tests --features tls,metrics,a2a,llm -- -D warnings

@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
-use bytes::Bytes;
 
-use super::{helpers::make_gossip_update, TaskCtx};
-use crate::store::apply_and_notify;
+use super::TaskCtx;
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -106,22 +104,76 @@ impl Leadership {
     }
 }
 
+/// **The lease an election carries unless it asks for another** — 30 s (row A, C1).
+///
+/// A leadership is a role, and in this substrate roles evaporate (philosophy § *Anderson — More Is
+/// Different*: a layer may never demand "roles that escape evaporation"). Until 2.32.0 `elect_leader`
+/// committed permanently, so a leader that died was reported for ever. Why 30 s:
+///
+/// - it is the default anti-entropy interval (`GossipConfig::anti_entropy_interval_secs`), so a node
+///   that missed the commit's gossip learns of it within one lease — a shorter lease could lapse on a
+///   node before that node ever saw it;
+/// - it is the lease the log-consumer claim and the gateway lock already default to, so the
+///   substrate's leased roles fail over on one time scale;
+/// - it is long against the ~1 s an election round takes, so renewing every `lease / 3` costs one
+///   round per 10 s, and short against the failover an operator expects from a dead leader.
+///
+/// **Renewal is calling again**: re-electing while the lease is live re-commits the same value and
+/// refreshes it (`ConsensusConfig::committed_lease_secs`). Stepping down is
+/// [`release_leadership`](super::ConsensusHandle::release_leadership).
+pub const DEFAULT_LEADER_LEASE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// **How long an election holds** — [`elect_leader_with`](super::ConsensusHandle::elect_leader_with).
+///
+/// Leased by default ([`DEFAULT_LEADER_LEASE`]); permanence is an explicit opt-in, for a decision
+/// that is genuinely ledger-shaped. A permanent leadership still has a release path
+/// ([`release_leadership`](super::ConsensusHandle::release_leadership)) — what it lacks is a lapse, so
+/// a permanent leader that dies is reported until someone releases it.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LeaderTerm {
+    /// The leadership lapses `Duration` after its commit unless renewed (whole seconds, at least 1).
+    Lease(std::time::Duration),
+    /// The pre-2.32.0 behaviour: committed with no lease.
+    Permanent,
+}
+
+impl Default for LeaderTerm {
+    fn default() -> Self { LeaderTerm::Lease(DEFAULT_LEADER_LEASE) }
+}
+
+impl LeaderTerm {
+    /// `ConsensusConfig::committed_lease_secs` for this term.
+    pub(crate) fn lease_secs(self) -> Option<u64> {
+        match self {
+            LeaderTerm::Lease(d) => Some(crate::agent::consensus_handle::lease_secs_ceil(d)),
+            LeaderTerm::Permanent => None,
+        }
+    }
+}
+
 /// RAII guard for a distributed lock acquired via [`ConsensusHandle::distributed_lock`].
 ///
-/// On drop (or [`release`](Self::release)) it clears the lock's authoritative consensus slot
-/// (`consensus/committed/lock/{name}` + its lease) — **but only if this guard is still the
-/// converged holder** (#164). `token` is a monotonic fencing token (the commit's HLC).
+/// On drop (or [`release`](Self::release)) it releases **the decision it was granted** — writes the
+/// release marker for that decision's lineage (row A, `docs/design/lock-lifecycle.md` §5). A marker
+/// ends only the decision it names, so a stale guard (its lease lapsed, another acquire won) can never
+/// end the live holder's (#164). `token` is the decision's fencing token.
+///
+/// **The lease is the holder's to keep track of.** [`expires_at_ms`](Self::expires_at_ms) is the
+/// lease's end on the wall clock every reader judges it by; [`deadline`](Self::deadline) is a
+/// **monotonic** local bound — the instant this node started the proposal plus the TTL — by which the
+/// holder must stop, whatever any clock says (review finding 4). Past it the lock may already be
+/// someone else's; fence the resource on `token`.
 pub struct LockGuard {
     pub(super) ctx:      Arc<TaskCtx>,
     pub(super) name:     Arc<str>,
-    /// The exact committed value this guard holds (`{holder}:{nonce}`). Release only clears the
-    /// slot if the converged value still equals this — so a stale guard (lease lapsed, another
-    /// acquire won, or even the same node re-acquiring under a fresh nonce) is a safe no-op.
-    pub(super) value:    Bytes,
-    /// Fencing token: the **HLC timestamp** of the winning commit. Monotonic across
-    /// successive holders of this lock name — stamp resource writes with it and have the
-    /// resource reject a lower token (Kleppmann fencing). (The consensus *ballot* is NOT used —
-    /// it regresses under gossip lag; #164.)
+    /// The decision this guard was granted — what its release names (row A).
+    pub(super) env:      crate::consensus_life::Envelope,
+    /// The monotonic local deadline: the proposal's start plus the TTL.
+    pub(super) deadline: std::time::Instant,
+    /// Fencing token: fixed by the decision's original proposer, after observing the prior decision's
+    /// token (`docs/design/lock-lifecycle.md` §2.6). Stamp resource writes with it and have the
+    /// resource reject a lower token (Kleppmann fencing). (The consensus *ballot* is NOT used — #164.)
     pub token: u64,
     pub(super) released: bool,
 }
@@ -130,6 +182,18 @@ impl LockGuard {
     /// Explicitly release the lock. Equivalent to dropping the guard.
     pub fn release(mut self) { self.do_release(); }
 
+    /// The lease's end, on the wall clock every reader judges it by (milliseconds since the epoch).
+    pub fn expires_at_ms(&self) -> Option<u64> { self.env.expires_at_ms() }
+
+    /// The monotonic local deadline by which this holder must stop: the instant the acquisition
+    /// started plus the TTL. Earlier than the readers' wall-clock end, never later.
+    pub fn deadline(&self) -> std::time::Instant { self.deadline }
+
+    /// Whether [`deadline`](Self::deadline) has passed.
+    pub fn is_expired(&self) -> bool {
+        mycelium_core::sim_seam::mono_before(&self.deadline, &mycelium_core::sim_seam::mono_instant())
+    }
+
     fn do_release(&mut self) {
         if self.released {
             return;
@@ -137,43 +201,11 @@ impl LockGuard {
         self.released = true;
         let slot = format!("lock/{}", self.name);
 
-        // #164 bug B: release the AUTHORITATIVE consensus slot (`consensus/committed/lock/{name}`
-        // + its lease), token-guarded. The pre-fix code tombstoned the plain `lock/{name}` key —
-        // which acquire never writes — so release was a total no-op and locks were permanently
-        // unreleasable. Guard: only clear the slot if the converged committed value is still
-        // EXACTLY ours (`{holder}:{nonce}`). A stale guard — lease lapsed, another acquire won, or
-        // even the same node re-acquiring under a fresh nonce — sees a different value and no-ops,
-        // so it can never clear the live holder's claim (the "losers stand by without releasing"
-        // rule, #149/#151).
-        let still_ours = crate::consensus::live_committed_value(
-                &self.ctx.kv_state, &slot, crate::consensus::causal_now_ms(&self.ctx.hlc))
-            .as_deref() == Some(self.value.as_ref());
-        if !still_ours {
-            return;
-        }
-
-        // Tombstone the committed value + its lease so the slot reopens for the next acquirer.
-        for key in [
-            format!("consensus/committed/{slot}"),
-            format!("consensus/lease/{slot}"),
-        ] {
-            let update = make_gossip_update(
-                &self.ctx.node_id,
-                self.ctx.default_ttl,
-                Arc::from(key.as_str()),
-                Bytes::new(),
-                true, // tombstone
-                &self.ctx.hlc,
-            );
-            apply_and_notify(&self.ctx.kv_state, &update);
-            crate::framing::dispatch_gossip_try_send(
-                &self.ctx.gossip_txs,
-                crate::framing::WireMessage::Data(update),
-                self.ctx.node_id.id_hash(),
-                crate::framing::ForwardHint::All,
-                &self.ctx.kv_state.dropped_frames,
-            );
-        }
+        // Row A: the release is the marker for this guard's decision (`release_envelope`) — it names
+        // the lineage, proposer and value, so it ends this decision and no other, whatever this node
+        // currently reads; nothing is tombstoned, so nothing can be collected out from under it (K1),
+        // and no record write can remove it (K3).
+        crate::consensus::release_envelope_try(&self.ctx, &slot, &self.env);
     }
 }
 

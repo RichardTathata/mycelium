@@ -74,6 +74,18 @@ pub struct KvStore {
     /// Inner key: the full store key (`"cap/{node}/{ns}/{name}"`).
     /// Maintained alongside `prefix_index` in `apply_and_notify`.
     pub cap_ns_index:      Arc<PrefixIndex>,
+    /// Secondary index for O(scope) reads of a **scoped namespace**: a key under `"{prefix}{scope}/…"`,
+    /// for a prefix in [`scoped_prefixes`](Self::scoped_prefixes), is filed under the outer key
+    /// `"{prefix}{scope}"`. A read index only — it never conditions a write; maintained alongside
+    /// `cap_ns_index` in `apply_and_notify`, live keys only.
+    pub scope_index:       Arc<PrefixIndex>,
+    /// The prefixes [`scope_index`](Self::scope_index) files keys under — fixed at construction by the
+    /// layer above ([`KvState::with_scoped_prefixes`]); empty by default. Core names none itself.
+    pub scoped_prefixes:   Arc<[Arc<str>]>,
+    /// **Test-only** frame filter (feature `test-frame-filter`, enabled only by `mycelium`'s lib tests): predicates that drop matching inbound frames on
+    /// the receive path, so a test can withhold a real frame from a node instead of editing its store.
+    #[cfg(any(test, feature = "test-frame-filter"))]
+    pub frame_filter:      Arc<papaya::HashMap<u64, FrameFilterFn>>,
     pub hash_acc:          Arc<AtomicU64>,
     pub dropped_frames:    Arc<AtomicU64>,
     /// Times an Individual-scoped frame (RPC request/response, consensus vote)
@@ -169,12 +181,23 @@ impl KvState {
     /// All sub-Arcs are created here so callers own a single `Arc<KvState>` rather
     /// than building five independent Arcs and threading them separately.
     pub fn new(max_store_entries: usize) -> Arc<Self> {
+        Self::with_scoped_prefixes(max_store_entries, &[])
+    }
+
+    /// [`new`](Self::new), with the prefixes the scope index files keys under (see
+    /// [`KvStore::scoped_prefixes`]). Set before any key is applied — a WAL replay included — so the
+    /// index is complete; it cannot change afterwards.
+    pub fn with_scoped_prefixes(max_store_entries: usize, scoped_prefixes: &[&str]) -> Arc<Self> {
         Arc::new(Self {
             kv_store: KvStore {
                 store:             Arc::new(papaya::HashMap::new()),
                 prefix_index:      Arc::new(PrefixIndex::new()),
                 index_stripes:     Arc::new(std::array::from_fn(|_| Mutex::new(()))),
                 cap_ns_index:      Arc::new(PrefixIndex::new()),
+                scope_index:       Arc::new(PrefixIndex::new()),
+                scoped_prefixes:   scoped_prefixes.iter().map(|p| Arc::from(*p)).collect(),
+                #[cfg(any(test, feature = "test-frame-filter"))]
+                frame_filter:      Arc::new(papaya::HashMap::new()),
                 hash_acc:          Arc::new(AtomicU64::new(0)),
                 dropped_frames:    Arc::new(AtomicU64::new(0)),
                 individual_flood_fallbacks: Arc::new(AtomicU64::new(0)),
@@ -256,6 +279,60 @@ pub fn cap_ns_index_key(key: &str) -> Option<Arc<str>> {
     let ns   = parts.next()?;
     let name = parts.next()?;
     Some(Arc::from(format!("{seg}/{ns}/{name}").as_str()))
+}
+
+/// The scope-index outer key of `key`: `"{prefix}{scope}"` for a key `"{prefix}{scope}/…"` under one of
+/// `prefixes` ([`KvStore::scoped_prefixes`]); `None` otherwise.
+pub fn scope_index_key(prefixes: &[Arc<str>], key: &str) -> Option<Arc<str>> {
+    for prefix in prefixes {
+        if let Some(rest) = key.strip_prefix(prefix.as_ref())
+            && let Some(i) = rest.find('/') {
+                return Some(Arc::from(&key[..prefix.len() + i]));
+            }
+    }
+    None
+}
+
+/// Every live `(key, value)` filed under `outer` in the scope index — O(keys in the scope).
+pub fn scan_scope(kv: &KvState, outer: &str) -> Vec<(Arc<str>, Bytes)> {
+    let store_guard = kv.store.pin();
+    let idx_guard = kv.scope_index.pin();
+    let Some(bucket) = idx_guard.get(outer) else { return Vec::new() };
+    bucket.pin().iter()
+        .filter_map(|(key, _)| {
+            let data = store_guard.get(key.as_ref())?.data.clone()?;
+            Some((Arc::clone(key), data))
+        })
+        .collect()
+}
+
+/// The scope-index outer keys under `prefix` (one per scope that has live keys).
+pub fn scopes_under(kv: &KvState, prefix: &str) -> Vec<Arc<str>> {
+    kv.scope_index.pin().iter()
+        .filter(|(outer, bucket)| outer.starts_with(prefix) && !bucket.pin().is_empty())
+        .map(|(outer, _)| Arc::clone(outer))
+        .collect()
+}
+
+/// What the test-only frame filter sees of an inbound frame.
+#[cfg(any(test, feature = "test-frame-filter"))]
+pub enum FrameView<'a> {
+    /// A KV update — a gossiped `Data`/`SignedData` frame (`sender` its originator), or an
+    /// anti-entropy entry (`sender` the peer that answered, as this connection last heard it name
+    /// itself; `0` before it has).
+    Kv { key: &'a str, sender: u64 },
+    /// A signal.
+    Signal { kind: &'a str, payload: &'a [u8], sender: u64 },
+}
+
+/// A frame-filter predicate: `true` drops the frame.
+#[cfg(any(test, feature = "test-frame-filter"))]
+pub type FrameFilterFn = Arc<dyn Fn(&FrameView<'_>) -> bool + Send + Sync>;
+
+/// Whether the test-only frame filter drops `view` on this node.
+#[cfg(any(test, feature = "test-frame-filter"))]
+pub fn frame_filtered(kv: &KvState, view: &FrameView<'_>) -> bool {
+    kv.frame_filter.pin().iter().any(|(_, f)| f(view))
 }
 
 /// Inserts `inner_key` into the `outer` bucket of `index`, creating the bucket if absent.
@@ -676,6 +753,13 @@ fn apply_and_notify_inner(kv: &KvState, update: &GossipUpdate) -> crate::receipt
                     index_bucket_insert(&kv.cap_ns_index, identity, Arc::clone(&update.key));
                 } else {
                     index_bucket_remove(&kv.cap_ns_index, &identity, &update.key);
+                }
+            }
+            if let Some(scope) = scope_index_key(&kv.scoped_prefixes, &update.key) {
+                if current_live.is_some() {
+                    index_bucket_insert(&kv.scope_index, scope, Arc::clone(&update.key));
+                } else {
+                    index_bucket_remove(&kv.scope_index, &scope, &update.key);
                 }
             }
 

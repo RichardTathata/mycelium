@@ -27,6 +27,12 @@ mod kv_quorum_ext;
 // tests stay here.
 #[cfg(test)]
 mod kv_handle_tests;
+#[cfg(all(test, feature = "consensus", feature = "test-frame-filter"))]
+mod lock_lifecycle_tests;
+#[cfg(all(test, feature = "consensus"))]
+mod lock_lifecycle_api_tests;
+#[cfg(all(test, feature = "consensus", feature = "test-frame-filter"))]
+mod lock_lifecycle_review_tests;
 #[cfg(test)]
 mod mesh_handle_tests;
 #[cfg(feature = "consensus")]
@@ -199,7 +205,7 @@ pub use emergent::{
 #[cfg(feature = "consensus")]
 pub use lock_service::LockService;
 #[cfg(feature = "consensus")]
-pub use overlay_consistent::{ConsistencyError, Leadership, LeadershipBasis, LockGuard};
+pub use overlay_consistent::{ConsistencyError, Leadership, LeadershipBasis, LeaderTerm, LockGuard, DEFAULT_LEADER_LEASE};
 #[cfg(feature = "consensus")]
 pub use consensus_handle::ConsensusHandle;
 pub use service_handle::ServiceHandle;
@@ -531,6 +537,12 @@ pub(crate) struct TaskCtx {
     /// [lock-free-and-atomics](../../docs/wiki/dev/concurrency/lock-free-and-atomics.md).
     #[cfg(feature = "consensus")]
     pub(crate) consensus_accepted: Arc<crate::consensus::AcceptorMemory>,
+    /// Serialises writing this node's durable acceptor records (`persist_acceptor`) with collecting
+    /// them (`ConsensusEngine::forget_acceptor`, row A C2), so a collection's tombstone can never land
+    /// after — and erase — the record of a promise made while it ran. Lock-order row 56: held across
+    /// one synchronous store apply (which takes row 7, a leaf), never across an `await`.
+    #[cfg(feature = "consensus")]
+    pub(crate) acceptor_records: std::sync::Mutex<()>,
     /// Short-lived cache of group membership lists keyed by group name.
     /// Invalidated generation-based: `KvState::grp_generation` is bumped (Release)
     /// whenever a `grp/` key changes; the cache reader loads it with Acquire so it
@@ -1054,7 +1066,13 @@ impl GossipAgent {
         let seen_shards = n_shards.max(16);
 
         let signal_window = std::time::Duration::from_secs(config.signal_window_secs);
-        let kv_state      = KvState::new(config.max_store_entries);
+        // The decision-record namespace is indexed per slot (row A, `consensus_life`) — registered here,
+        // before any key is applied or replayed; core names no Layer III prefix itself.
+        #[cfg(feature = "consensus")]
+        let scoped: &[&str] = &[crate::consensus_life::LIFE_PREFIX];
+        #[cfg(not(feature = "consensus"))]
+        let scoped: &[&str] = &[];
+        let kv_state      = KvState::with_scoped_prefixes(config.max_store_entries, scoped);
         let default_ttl   = config.default_ttl;
         let gossip_txs: Arc<[mpsc::Sender<(Bytes, u64, ForwardHint)>]> = gossip_txs_vec.into();
         // Last time each peer was heard from, in monotonic nanoseconds from the clock seam.
@@ -1149,6 +1167,8 @@ impl GossipAgent {
         let task_ctx = Arc::new(TaskCtx {
             #[cfg(feature = "consensus")]
             consensus_accepted: Arc::new(papaya::HashMap::new()),
+            #[cfg(feature = "consensus")]
+            acceptor_records: std::sync::Mutex::new(()),
             core: Arc::clone(&core_ctx),
             bulk_transport:  Arc::new(bulk::BulkTransport::new(
                 config.http_port.unwrap_or(0),

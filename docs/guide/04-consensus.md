@@ -52,7 +52,7 @@ sequenceDiagram
     P->>A: Commit(slot=42, b, "x")
     P->>B: Commit(slot=42, b, "x")
     P->>C: Commit(slot=42, b, "x")
-    Note over A,C: committed/42 and decided/42 written to KV<br/>acceptor memory kept (2.30.0)
+    Note over A,C: committed/42 and decided/42 written to KV<br/>acceptor memory kept until the decision is over (2.32.0)
 ```
 
 **Available operations**
@@ -64,8 +64,10 @@ sequenceDiagram
 | `append(stream, entry)` | `kv()` | Append to an ordered log — entries keyed by HLC, so ordering is causal and cluster-wide unique |
 | `scan_log(stream, from, to)` | `kv()` | Range scan the log by HLC window |
 | `distributed_lock(name, ttl)` | `consensus()` | Acquire an exclusive lock (returns a `LockGuard`); TTL prevents deadlock |
-| `elect_leader(group)` | `consensus()` | Nominate one node as leader — returns the id only, so it cannot tell you *how* it knows |
+| `elect_leader(group)` | `consensus()` | Nominate one node as leader — returns the id only, so it cannot tell you *how* it knows. **Leased** (30 s by default, since 2.32.0): call again to renew |
 | `elect_leader_receipt(group)` | `consensus()` | **Prefer this.** Returns `Leadership { leader, epoch, basis }` — the rung the answer reached, and a fencing token |
+| `elect_leader_with(group, term)` | `consensus()` | The same, with a `LeaderTerm`: `Lease(d)`, or `Permanent` by explicit opt-in |
+| `release_leadership(group)` | `consensus()` | Step down: the group reads as leaderless at once, and the next election does not re-elect you from the acceptors' memory |
 | `join_group(name)` / `leave_group(name)` | `mesh()` | Join or leave a group. **An election needs an electorate**: a group nobody has joined is refused, not decided alone |
 | `emit_reliable(kind, scope, payload)` | `service()` | Signal with explicit ACK |
 
@@ -595,15 +597,53 @@ drop(guard); // or guard.release()
 
 #### Leader Election (`elect_leader`)
 
-One-shot election per group. If this node loses it reads the committed winner and returns
+Election per group. If this node loses it reads the committed winner and returns
 that `NodeId` — so all nodes converge on the same answer.
 
 ```rust
 let leader = agent.consensus().elect_leader("shard-0").await?;
 if leader == *agent.node_id() {
-    // I won — start serving shard-0
+    // I won — start serving shard-0, and call elect_leader again every ~10 s to renew
 }
 ```
+
+**A leadership is leased, not permanent** (since 2.32.0). It lapses
+`DEFAULT_LEADER_LEASE` (30 s) after its commit unless the leader calls again — re-electing while the
+lease is live re-commits the same value and refreshes it — so a leader that dies stops being reported
+once its lease runs out, and the next election decides afresh. Until 2.32.0 the commit was permanent and
+a dead leader was named for ever: a role that escaped evaporation, which the philosophy's corrected
+litmus rules out. 30 s is the default anti-entropy interval (a lease shorter than that can lapse on a
+node before the node has seen it) and the lease the log-consumer claim and the gateway lock default to.
+
+```rust
+use mycelium::LeaderTerm;
+use std::time::Duration;
+let c = agent.consensus();
+let l = c.elect_leader_with("shard-0", LeaderTerm::Lease(Duration::from_secs(10))).await?; // a shorter term
+c.release_leadership("shard-0").await;                                 // step down deliberately
+c.elect_leader_with("ledger", LeaderTerm::Permanent).await?;          // permanence, by asking for it
+```
+
+`release_leadership` writes a **release marker** for the leadership's lineage: every node reads the group
+as leaderless, the next election sets the old leader's acceptance aside instead of re-electing it from the
+acceptors' memory, and a renewal of that leadership still in flight is ended too (a renewal keeps its lineage).
+A permanent leadership has the release path too; what it lacks is a lapse. `release_leadership` is awaited and
+returns `true` once the marker is **on stable storage**; it returns `false`, writing nothing, when this node does
+not read a live leadership of its own (one it originally proposed). A release can never end another node's
+leadership, or a later one of this node's: it names its lineage, not a ballot.
+
+**Locks know their deadline.** A `LockGuard` exposes `expires_at_ms()` — the lease's end on the wall clock every
+node judges it by — and `deadline()` / `is_expired()`, a **monotonic** local bound (the acquisition's start plus the
+TTL) by which the holder must stop whatever any clock says. A guard is never issued past its deadline. Fence the
+resource on `token` regardless. How a decision, its window and its end are recorded is in
+[`docs/design/lock-lifecycle.md`](../design/lock-lifecycle.md): one record per decided ballot, read by the highest
+ballot, so a window always travels with its decision and an adoption keeps the holder's window.
+
+Over HTTP: `POST /gateway/overlay/elect` takes `ttl_secs` (default 30, clamped to 1–3600) or `"permanent": true`,
+and `DELETE /gateway/overlay/elect/{group}` steps the gateway's node down (`200 {"ok": true}` once durable, `404
+not_leader` when nothing was released, `500 release_unrecorded` when the release was applied and gossiped but the
+WAL did not acknowledge it). Both need `consensus:write`, which is **node-wide**: any principal holding it can step this
+node down from any group it leads, or make its leadership permanent.
 
 #### Ordered Durable Log (`append` / `scan_log` / `subscribe_log`)
 
