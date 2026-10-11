@@ -198,7 +198,7 @@ pub use tuning_governor::{
 #[cfg(test)]
 pub(crate) use tuning_governor::TuningGovernor;
 pub use membership_governor::{MembershipAction, MembershipIntent, MEMBERSHIP_INTENT_TTL_MS, MEMBERSHIP_PREFIX};
-pub use electorate::{electorate_records_refused, electorate_retirements_undecided, ElectorateDecl, ElectorateError, Retirement, Superseded, ELECTORATE_CERT_PREFIX, ELECTORATE_SLOT_PREFIX, SAFETY_SLOT_FAMILIES};
+pub use electorate::{electorate_records_refused, ElectorateDecl, ElectorateError, Superseded, ELECTORATE_CERT_PREFIX, ELECTORATE_SLOT_PREFIX, SAFETY_SLOT_FAMILIES};
 // Legible Emergence — fleet diagnostics as data (localize · explain · diagnose). `GroupStatus` is
 // reached via `FleetSnapshot.governed_groups` (the bare name is already the mesh-dashboard type).
 pub use emergent::{
@@ -617,27 +617,16 @@ pub(crate) struct TaskCtx {
     /// Electorate records refused (not adopted), so each is counted once — bounded at 4096.
     #[cfg(feature = "consensus")]
     pub(crate) electorate_refused: Arc<papaya::HashSet<Arc<str>>>,
-    /// P2's gate, per electorate group (`consensus::FenceState`): whether this node closed the group for its
-    /// retirement, the ordinary, retiring and genesis claims in flight, and the genesis attempts it touched and
-    /// adopted. Every claim, adoption and carry report on the group passes one `compute` on its key, so they are
-    /// ordered there (rounds 2 and 4 of #601's review). The durable record of the same facts is the acceptor
-    /// memory for the group's retirement and genesis slots, and the verified retirement.
+    /// P2's gate, per electorate group (`consensus::FenceState`): the genesis claims in flight, and the genesis
+    /// attempts this node touched and adopted. Every genesis claim and adoption on the group passes one `compute` on
+    /// its key, so they are ordered there (round 4 of #601's review). The durable record of `touched` is the acceptor
+    /// memory for the group's genesis slots.
     #[cfg(feature = "consensus")]
     pub(crate) electorate_fences: Arc<papaya::HashMap<Arc<str>, crate::consensus::FenceState>>,
-    /// P2: each group's verified retirement, cached once its certificate verified.
-    #[cfg(feature = "consensus")]
-    pub(crate) electorate_retired: Arc<papaya::HashMap<Arc<str>, Arc<electorate::Retirement>>>,
-    /// P2: `{group}\0{slot}` for every slot this node has seen a successor group decide — its proposals for the slot
-    /// stop carrying from the group's predecessors. In memory only: after a restart a proposal carries again,
-    /// which is safe and costs the reads.
-    #[cfg(feature = "consensus")]
-    pub(crate) electorate_carried: Arc<papaya::HashSet<Arc<str>>>,
-    /// P2: the highest genesis epoch with a committed record per group, and the groups with a committed retirement
-    /// record — both from the watched rescan of `consensus/committed/electorate/`.
+    /// P2: the highest genesis epoch with a committed record per group, from the watched rescan of
+    /// `consensus/committed/electorate/`.
     #[cfg(feature = "consensus")]
     pub(crate) electorate_epochs_known: Arc<papaya::HashMap<Arc<str>, u64>>,
-    #[cfg(feature = "consensus")]
-    pub(crate) electorate_retire_known: Arc<papaya::HashSet<Arc<str>>>,
     /// Watches `consensus/committed/electorate/` so the fleet's electorate list is rescanned only when it
     /// changed (round 2, finding 5); with the generation last scanned.
     #[cfg(feature = "consensus")]
@@ -1228,13 +1217,7 @@ impl GossipAgent {
             #[cfg(feature = "consensus")]
             electorate_fences: Arc::new(papaya::HashMap::new()),
             #[cfg(feature = "consensus")]
-            electorate_retired: Arc::new(papaya::HashMap::new()),
-            #[cfg(feature = "consensus")]
-            electorate_carried: Arc::new(papaya::HashSet::new()),
-            #[cfg(feature = "consensus")]
             electorate_epochs_known: Arc::new(papaya::HashMap::new()),
-            #[cfg(feature = "consensus")]
-            electorate_retire_known: Arc::new(papaya::HashSet::new()),
             #[cfg(feature = "consensus")]
             electorate_records_watch: Arc::new(std::sync::OnceLock::new()),
             #[cfg(feature = "consensus")]

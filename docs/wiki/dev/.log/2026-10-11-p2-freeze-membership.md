@@ -55,3 +55,17 @@
   follows retirements (`holds_default`); `Retirement::passes_default` is gone. The escape for a successor waiting on a
   predecessor that never retires is that the successor's own retirement is not held up. The listener's commit arm now
   records the skip (`note_decided_in`), which the #600 port had dropped (D4).
+- **Scope change (the maintainer's decision, 2026-10-11): P2 ships in 2.32.0 without migration.** The round-5
+  predecessor-first migration was preserved on branch `fix/p2-migration` (cced925a, pushed) and removed here:
+  `retire_electorate`, `Retirement`, `electorate/{g}/retire`, `CarryPrepare`/`CarryReport` and the lazy carry,
+  `ElectorateDecl::predecessors`, the `retire_to`/`predecessors` gateway fields, the default handover,
+  `electorate_carried`/`electorate_retired`/`electorate_retire_known`, the gate's `Retire` kind and closed state, and
+  their tests. Kept: genesis by every member, identity pinning, the certificate, tagged proposals, acceptor checks,
+  the gate (ordinary: the adopted epoch; genesis: opening/touched/adopted, a refused claim raising nothing), member-only
+  votes, the strict-majority floor, exclusive families pinned at both ends incl. cross-group, forged-record refusal,
+  declare's retries with door refusals `Refused`, genesis supersession, D5's fail-closed cluster check, and the
+  second-default refusal. Membership is fixed at genesis; a dead member lowers fault tolerance, a lost majority stops the
+  group; the default is set once and cannot move — stated in the design record §8.3, guide 04, threat model §7,
+  what-is-proven, the FAQ, deprecations §31, the CHANGELOG and the plan's P2 row. One stop with no escape remains
+  besides a lost majority: two default declarations made at once within gossip lag (fail closed; merging them is the
+  follow-up's work).

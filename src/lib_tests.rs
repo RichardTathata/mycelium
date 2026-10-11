@@ -173,13 +173,7 @@ fn spawn_handler(
         #[cfg(feature = "consensus")]
         electorate_fences: Arc::new(papaya::HashMap::new()),
         #[cfg(feature = "consensus")]
-        electorate_retired: Arc::new(papaya::HashMap::new()),
-        #[cfg(feature = "consensus")]
-        electorate_carried: Arc::new(papaya::HashSet::new()),
-        #[cfg(feature = "consensus")]
         electorate_epochs_known: Arc::new(papaya::HashMap::new()),
-        #[cfg(feature = "consensus")]
-        electorate_retire_known: Arc::new(papaya::HashSet::new()),
         #[cfg(feature = "consensus")]
         electorate_records_watch: Arc::new(std::sync::OnceLock::new()),
         #[cfg(feature = "consensus")]
@@ -1264,13 +1258,7 @@ async fn test_subscribe_notified_via_gossip() {
             #[cfg(feature = "consensus")]
             electorate_fences: Arc::new(papaya::HashMap::new()),
             #[cfg(feature = "consensus")]
-            electorate_retired: Arc::new(papaya::HashMap::new()),
-            #[cfg(feature = "consensus")]
-            electorate_carried: Arc::new(papaya::HashSet::new()),
-            #[cfg(feature = "consensus")]
             electorate_epochs_known: Arc::new(papaya::HashMap::new()),
-            #[cfg(feature = "consensus")]
-            electorate_retire_known: Arc::new(papaya::HashSet::new()),
             #[cfg(feature = "consensus")]
             electorate_records_watch: Arc::new(std::sync::OnceLock::new()),
             #[cfg(feature = "consensus")]
@@ -12448,7 +12436,7 @@ async fn a_cross_group_proposal_does_not_decide_for_an_electorate_group() {
 }
 
 /// **A forged electorate record does not change the electorate** (#601's review, finding 5). A committed
-/// `electorate/{group}/{epoch}` or `…/retire` entry written straight into the store — no consensus, no certificate,
+/// `electorate/{group}/{epoch}` entry written straight into the store — no consensus, no certificate,
 /// or a certificate that does not verify — is not adopted, and is counted once. Seen failing first: under c9131839 a KV write to
 /// `sys/govern/electorate/{group}` was the electorate.
 #[cfg(feature = "consensus")]
@@ -12467,22 +12455,13 @@ async fn a_forged_electorate_record_is_not_adopted() {
         supersedes: Some(crate::Superseded {
             epoch: 1, digest: crate::consensus::value_digest(&e1.encode()), envelope: [0; 32], members: e1.members.clone(),
         }),
-        predecessors: Default::default(),
     };
     let bogus = mycelium_core::serde_fixint::to_vec(&vec![Bytes::from_static(b"not a vote")]).unwrap();
     let before = crate::electorate_records_refused();
     assert!(a.kv().set(format!("consensus/committed/{}", crate::agent::electorate::genesis_slot("council", 2)), forged.encode()));
-    assert!(a.kv().set(crate::agent::electorate::cert_key("council", 2), bogus.clone()));
+    assert!(a.kv().set(crate::agent::electorate::cert_key("council", 2), bogus));
     poll_until(|| a.kv().get(&crate::agent::electorate::cert_key("council", 2)).is_some(), 2_000).await;
     assert_eq!(a.electorate("council"), Some(e1), "the forged epoch is not adopted");
-    assert!(crate::electorate_records_refused() > before, "and it is counted");
-    // A forged retirement is not adopted either: the group is not retired, and still decides.
-    let retire = crate::Retirement { group: "council".into(), epoch: 1, successor: "evil".into() };
-    let before = crate::electorate_records_refused();
-    assert!(a.kv().set(format!("consensus/committed/{}", crate::agent::electorate::retire_slot("council")), retire.encode()));
-    assert!(a.kv().set(crate::agent::electorate::retire_cert_key("council"), bogus));
-    poll_until(|| a.kv().get(&crate::agent::electorate::retire_cert_key("council")).is_some(), 2_000).await;
-    assert_eq!(a.electorate_retirement("council"), None, "the forged retirement is not adopted");
     assert!(crate::electorate_records_refused() > before, "and it is counted");
     a.shutdown_with_timeout(Duration::from_secs(5)).await;
 }
@@ -12533,10 +12512,9 @@ async fn the_governor_and_the_watcher_leave_an_electorate_group_alone() {
     a.shutdown_with_timeout(Duration::from_secs(5)).await;
 }
 
-/// **Under `[tls]` the certificate is signatures** (#601's review, finding 5; round 2, finding 4): a genesis and a
-/// retirement decided over authenticated consensus messages are adopted on every node — each verifies the deciding
-/// votes' signatures, the proposer's own included — and a forged retirement whose certificate would count as a
-/// majority is refused because its signatures do not belong to the voters they name. Seen failing first with the
+/// **Under `[tls]` the certificate is signatures** (#601's review, finding 5; round 2, finding 4): a genesis decided
+/// over authenticated consensus messages is adopted on every node — each verifies the deciding votes' signatures, the
+/// proposer's own included — and a forged superseding genesis whose certificate would count is refused because its signatures do not belong to the voters they name. Seen failing first with the
 /// certificate check counting votes without verifying their signer: the forged record was adopted.
 #[cfg(all(feature = "consensus", feature = "tls"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -12553,37 +12531,37 @@ async fn an_electorate_certificate_verifies_under_tls() {
     let e1 = declare(a, "council", false).await.expect("a signed genesis");
     epoch_converges(&agents, "council", 1).await;
 
-    // A forged retirement whose certificate **counts** as a majority of {A,B} — votes naming A and B — but every one
-    // of them is signed by C. Only signature checking refuses it: each vote's signer is not the voter it names.
-    let forged = crate::Retirement { group: "council".into(), epoch: e1.epoch, successor: "evil".into() };
-    let slot = crate::agent::electorate::retire_slot("council");
+    // A forged superseding genesis whose certificate **counts** — votes naming A and B, every member it names — but
+    // every one of them is signed by C. Only signature checking refuses it: each vote's signer is not the voter it names.
+    let forged = crate::ElectorateDecl {
+        epoch: 2,
+        supersedes: Some(crate::Superseded {
+            epoch: 1, digest: crate::consensus::value_digest(&e1.encode()), envelope: [0; 32], members: e1.members.clone(),
+        }),
+        ..e1.clone()
+    };
+    let slot = crate::agent::electorate::genesis_slot("council", 2);
+    let envelope = crate::consensus_life::Envelope::new(
+        &slot, forged.encode(), crate::consensus_life::Term::Permanent, 1, c.node_id().clone(), 1,
+    ).encode();
     let c_engine = crate::agent::electorate::engine(&c.task_ctx);
     let votes: Vec<Bytes> = [a, b].iter().map(|named| {
         let vote = crate::consensus::ConsensusMsg::VoteForValue {
             slot: Arc::from(slot.as_str()), ballot: 1, voter: named.node_id().clone(),
-            value_digest: crate::consensus::value_digest(&forged.encode()), locality: None,
+            value_digest: crate::consensus::value_digest(&envelope), locality: None,
         };
         c_engine.sign_payload(crate::consensus::encode_consensus_msg(&vote))
     }).collect();
     let before = crate::electorate_records_refused();
-    let cert = crate::agent::electorate::retire_cert_key("council");
-    assert!(c.kv().set(cert.clone(), mycelium_core::serde_fixint::to_vec(&votes).unwrap()));
+    let cert = crate::agent::electorate::cert_key("council", 2);
+    assert!(c.kv().set(cert.clone(), mycelium_core::serde_fixint::to_vec(&(envelope, votes)).unwrap()));
     assert!(c.kv().set(format!("consensus/committed/{slot}"), forged.encode()));
     poll_until(|| agents.iter().all(|n| n.kv().get(&format!("consensus/committed/{slot}")).is_some()
         && n.kv().get(&cert).is_some()), 10_000).await;
     for n in &agents {
-        assert_eq!(n.electorate_retirement("council"), None, "{} adopted a forged retirement", n.node_id());
+        assert_eq!(n.electorate("council").map(|d| d.epoch), Some(1), "{} adopted a forged genesis", n.node_id());
     }
     assert!(crate::electorate_records_refused() > before, "the forgery was refused, and counted");
-    // And a genuine retirement, decided over signed messages, is adopted everywhere (another group: the forged record
-    // still sits under council's retirement slot, where a proposer reads it as decided — a liveness matter, §8.5).
-    for n in [a, b] { n.mesh().join_group("board"); }
-    roster_converges(&agents, "board", &[a, b]).await;
-    declare(a, "board", false).await.expect("a signed genesis");
-    epoch_converges(&agents, "board", 1).await;
-    successor(&agents, a, "next", &[a, b], &["board"]).await;
-    let r = a.retire_electorate("board", "next").await.expect("a signed retirement");
-    assert_eq!(retirement_converges(&agents, "board").await, r);
     for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
     let _ = std::fs::remove_dir_all(&cert_dir);
 }
@@ -12653,27 +12631,25 @@ async fn electorate_line(n: usize) -> (Vec<GossipAgent>, Vec<crate::ConsensusLis
     (agents, listeners, serial)
 }
 
-/// **A refused claim through the gate lowers the fence again** (round 4 of #601's review, finding 4). A claim that
-/// passes the gate's raising kind and is then refused by the acceptor — here a promise at a ballot below the slot's
-/// decided floor — promised nothing, so it must leave no fence: an ordinary claim on the group passes afterwards.
+/// **A refused claim through the gate raises nothing** (round 4 of #601's review, finding 4 — in the one raising kind
+/// that ships, a genesis attempt). A genesis claim that passes the gate and is then refused by the acceptor — here a
+/// promise at a ballot below the slot's decided floor — promised nothing, so it must not record the attempt as
+/// touched: a claim on an earlier attempt still passes afterwards.
 #[cfg(feature = "consensus")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_refused_claim_through_the_gate_lowers_the_fence_again() {
     use crate::consensus::{prepare_slot, Gate, GateKind, PrepareOutcome};
     let (agents, _l, _serial) = electorate_mesh(1, |_| {}).await;
     let a = &agents[0];
-    a.mesh().join_group("council");
-    roster_converges(&agents, "council", &[a]).await;
-    declare(a, "council", false).await.expect("genesis");
     let engine = crate::agent::electorate::engine(&a.task_ctx);
-    let closing: Arc<str> = Arc::from(crate::agent::electorate::retire_slot("council").as_str());
-    assert!(a.kv().set(format!("consensus/decided/{closing}"), crate::consensus::encode_ballot(10)));
-    let raise = Gate { group: Arc::from("council"), epoch: 1, kind: GateKind::Retire };
+    let later: Arc<str> = Arc::from(crate::agent::electorate::genesis_slot("council", 3).as_str());
+    assert!(a.kv().set(format!("consensus/decided/{later}"), crate::consensus::encode_ballot(10)));
+    let raise = Gate { group: Arc::from("council"), epoch: 0, kind: GateKind::Genesis(3) };
     let refused = engine.claim_gated(Some(&raise),
-        || prepare_slot(&a.task_ctx.consensus_accepted, &closing, 5, a.node_id().id_hash(), 10));
+        || prepare_slot(&a.task_ctx.consensus_accepted, &later, 5, a.node_id().id_hash(), 10));
     assert!(matches!(refused, Some(PrepareOutcome::Refused { .. })), "the acceptor refused the promise: {refused:?}");
-    let ordinary = Gate { group: Arc::from("council"), epoch: 1, kind: GateKind::Ordinary };
-    assert_eq!(engine.claim_gated(Some(&ordinary), || 7), Some(7), "a refused claim left a fence behind");
+    let earlier = Gate { group: Arc::from("council"), epoch: 0, kind: GateKind::Genesis(2) };
+    assert_eq!(engine.claim_gated(Some(&earlier), || 7), Some(7), "a refused claim left the attempt touched");
     a.shutdown_with_timeout(Duration::from_secs(5)).await;
 }
 
@@ -12743,244 +12719,12 @@ async fn a_declaration_on_a_sparse_mesh_retries_until_decided() {
     for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
 }
 
-/// Every agent holds `group`'s verified retirement.
-#[cfg(feature = "consensus")]
-async fn retirement_converges(agents: &[GossipAgent], group: &str) -> crate::Retirement {
-    let ok = tokio::time::timeout(Duration::from_secs(30), async {
-        while !agents.iter().all(|a| a.electorate_retirement(group).is_some()) {
-            time::sleep(Duration::from_millis(10)).await;
-        }
-    }).await;
-    assert!(ok.is_ok(), "{group}'s retirement did not reach every node: {:?}; records refused {}",
-        agents.iter().map(|a| a.electorate_retirement(group).map(|r| r.successor)).collect::<Vec<_>>(),
-        crate::electorate_records_refused());
-    agents[0].electorate_retirement(group).unwrap()
-}
-
-/// Declares `group` = `members` as a successor of `preds` from `by` (predecessor-first, round 5), retried while
-/// undecided, and waits until every agent holds it.
-#[cfg(feature = "consensus")]
-async fn successor(agents: &[GossipAgent], by: &GossipAgent, group: &str, members: &[&GossipAgent], preds: &[&str]) -> crate::ElectorateDecl {
-    for m in members { m.mesh().join_group(group); }
-    roster_converges(agents, group, members).await;
-    let mut last = None;
-    for _ in 0..3 {
-        match by.declare_successor_electorate(group, preds).await {
-            Ok(d) => { epoch_converges(agents, group, d.epoch).await; return d; }
-            Err(crate::ElectorateError::NotDecided(why)) => last = Some(why),
-            Err(e) => panic!("the successor {group} was refused: {e}"),
-        }
-    }
-    panic!("the successor {group} was not decided: {last:?}")
-}
-
-/// **Two concurrent retirements decide one successor** (round 4: membership change is a migration). Two members
-/// retire the group to different successors at once: they are one slot, so exactly one retirement is decided,
-/// every node holds that one, and each caller is told which. A node outside the electorate cannot retire it — at its
-/// own door, and at every acceptor.
+/// **A second default is refused by name** (round 5). While `old` holds the fleet's exclusive default, a genesis
+/// declaring another default is refused at the proposer's door and by every acceptor — the default is set once, at
+/// genesis, and cannot move in this release.
 #[cfg(feature = "consensus")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn two_concurrent_retirements_decide_one_successor_and_a_non_member_cannot_retire() {
-    let (agents, _l, _serial) = electorate_mesh(4, |_| {}).await;
-    let (a, b, c, d) = (&agents[0], &agents[1], &agents[2], &agents[3]);
-    for n in [a, b, c] { n.mesh().join_group("council"); }
-    roster_converges(&agents, "council", &[a, b, c]).await;
-    let e1 = declare(a, "council", false).await.expect("genesis");
-    epoch_converges(&agents, "council", 1).await;
-
-    assert_eq!(d.retire_electorate("council", "mine").await, Err(crate::ElectorateError::NotAMember), "refused at D's door");
-    let forged = crate::Retirement { group: "council".into(), epoch: 1, successor: "mine".into() };
-    let scope = SignalScope::Group(Arc::from("council"));
-    let slot = crate::agent::electorate::retire_slot("council");
-    assert!(admits(&crate::agent::electorate::engine(&a.task_ctx), &scope, &slot, Some((1, e1.digest())), d.node_id(),
-        Some(&forged.encode())).is_err(), "an acceptor refuses a retirement whose proposer is not a member");
-
-    successor(&agents, d, "next-a", &[d], &["council"]).await;
-    successor(&agents, d, "next-b", &[d], &["council"]).await;
-    let (ra, rb) = tokio::join!(a.retire_electorate("council", "next-a"), b.retire_electorate("council", "next-b"));
-    let decided = retirement_converges(&agents, "council").await;
-    assert!(decided.successor == "next-a" || decided.successor == "next-b", "{decided:?}");
-    assert!(agents.iter().all(|n| n.electorate_retirement("council").as_ref() == Some(&decided)), "every node holds one retirement");
-    for (r, mine) in [(ra, "next-a"), (rb, "next-b")] {
-        match r {
-            Ok(got) => assert_eq!((got.successor.as_str(), &got), (mine, &decided), "an Ok is the decided retirement"),
-            Err(crate::ElectorateError::Retired { successor }) => assert_eq!(successor, decided.successor),
-            other => panic!("each caller learns the decided retirement: {other:?}"),
-        }
-    }
-    for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
-}
-
-/// **A retirement closes the group through a real ballot** (round 2's fence, round 4's retirement). A passes the door
-/// and promises its own ballot; while it waits for a quorum, A's acceptor accepts the group's retirement (B proposing
-/// it), which closes the group on A. When the quorum becomes reachable, A must not complete: its own claim is refused
-/// by its gate, and the proposal ends `ElectorateMismatch`, naming the close.
-#[cfg(feature = "consensus")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_proposer_closed_mid_ballot_does_not_complete() {
-    use crate::consensus::{consensus_kind, encode_consensus_msg, ConsensusMsg};
-    let (agents, mut listeners, _serial) = electorate_mesh(3, |_| {}).await;
-    let (a, b, c) = (&agents[0], &agents[1], &agents[2]);
-    for n in [a, b, c] { n.mesh().join_group("council"); }
-    roster_converges(&agents, "council", &[a, b, c]).await;
-    let e1 = declare(a, "council", false).await.expect("genesis");
-    epoch_converges(&agents, "council", 1).await;
-    successor(&agents, a, "next", &[a], &["council"]).await;
-    // B and C stop answering; A's listener stays (it is the acceptor the retirement closes).
-    let c_listener = listeners.remove(2);
-    drop(listeners.remove(1));
-    drop(c_listener);
-
-    let proposing = {
-        let a = a.consensus();
-        tokio::spawn(async move {
-            let cfg = ConsensusConfig { phase1_timeout: Duration::from_millis(1500), max_ballots: 3, ..ConsensusConfig::default() };
-            a.group_propose("council", "work/x", Bytes::from_static(b"before-the-close"), cfg).await
-        })
-    };
-    poll_until(|| a.task_ctx.consensus_accepted.pin().get("work/x").is_some_and(|s| s.promised > 0), 5_000).await;
-    let retire = crate::Retirement { group: "council".into(), epoch: 1, successor: "next".into() };
-    let slot = crate::agent::electorate::retire_slot("council");
-    let envelope = crate::consensus_life::Envelope::new(
-        &slot, retire.encode(), crate::consensus_life::Term::Permanent, 1, b.node_id().clone(), b.task_ctx.hlc.tick(),
-    ).encode();
-    let msg = ConsensusMsg::ProposeIn {
-        slot: Arc::from(slot.as_str()), ballot: 1, envelope, proposer: b.node_id().clone(),
-        epoch: 1, electorate: e1.digest(),
-    };
-    let payload = crate::agent::electorate::engine(&b.task_ctx).sign_payload(encode_consensus_msg(&msg));
-    let closed = tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            mycelium_core::ops::emit_signal(&b.task_ctx, Arc::from(consensus_kind::PROPOSE),
-                SignalScope::Group(Arc::from("council")), payload.clone());
-            for _ in 0..25 {
-                if a.task_ctx.consensus_accepted.pin().get(slot.as_str()).is_some_and(|s| s.accepted.is_some()) { return; }
-                time::sleep(Duration::from_millis(20)).await;
-            }
-        }
-    }).await;
-    assert!(closed.is_ok(), "A's acceptor never received the retirement");
-    let _c_again = c.consensus().start_consensus_listener(ConsensusConfig::default());
-    match proposing.await.unwrap() {
-        ConsensusResult::ElectorateMismatch { detail, .. } => assert!(detail.contains("closed"), "{detail}"),
-        other => panic!("a proposer closed mid-ballot must not complete, got {other:?}"),
-    }
-    assert!(a.consensus().consensus_get("work/x").is_none() && c.consensus().consensus_get("work/x").is_none(),
-        "nothing was decided after the close");
-    for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
-}
-
-/// **A value chosen in a retired group is carried by its successor** (round 4; round 5, predecessor-first). `old` =
-/// {A,B,C} declares the fleet's default; a lock value is **chosen and never committed** in it — accepted by A and B.
-/// `new` = {C,D,E} is declared **first**, naming `old`; until `old` has retired to it, `new` decides nothing. `old`
-/// retires to `new`, and `new` holds the default from that decision, though its own flag is false. D asks for the lock:
-/// `new`'s members hold nothing (C never accepted the value), so only the carry can stop D, and it does. And the skip
-/// (round 5, D4): E commits a leased slot of `new`, so it has seen `new` decide it; with A's and B's listeners stopped
-/// — `old` has no reachable majority — E decides the slot again once the lease ends, without asking `old`.
-#[cfg(feature = "consensus")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_value_chosen_in_a_retired_group_is_carried_by_its_successor() {
-    let (agents, mut listeners, _serial) = electorate_mesh(5, |_| {}).await;
-    let (a, b, c, d, e) = (&agents[0], &agents[1], &agents[2], &agents[3], &agents[4]);
-    for n in [a, b, c] { n.mesh().join_group("old"); }
-    roster_converges(&agents, "old", &[a, b, c]).await;
-    declare(a, "old", true).await.expect("genesis of old, the fleet's default");
-    epoch_converges(&agents, "old", 1).await;
-    let v = Bytes::from_static(b"held-by-a");
-    let slot: Arc<str> = Arc::from("lock/door");
-    for acceptor in [a, b] {
-        assert!(crate::agent::electorate::engine(&acceptor.task_ctx)
-            .accept_for_test("old", &slot, 5, &v, a.node_id()).await, "{} accepts v", acceptor.node_id());
-    }
-
-    let g = successor(&agents, c, "new", &[c, d, e], &["old"]).await;
-    assert!(g.predecessors.contains("old") && !g.exclusive_default);
-    let cfg = ConsensusConfig { phase1_timeout: Duration::from_millis(1500), max_ballots: 3, ..ConsensusConfig::default() };
-    match d.consensus().group_propose("new", "work/early", Bytes::from_static(b"x"), cfg.clone()).await {
-        ConsensusResult::ElectorateMismatch { detail, .. } => assert!(detail.contains("waiting"), "{detail}"),
-        other => panic!("a successor decides nothing before its predecessor retires to it: {other:?}"),
-    }
-
-    a.retire_electorate("old", "new").await.expect("old retires to new");
-    retirement_converges(&agents, "old").await;
-    match a.consensus().group_propose("old", "work/after", Bytes::from_static(b"x"), cfg.clone()).await {
-        ConsensusResult::ElectorateMismatch { detail, .. } => assert!(detail.contains("retired"), "{detail}"),
-        other => panic!("a retired group decides nothing: {other:?}"),
-    }
-    assert_eq!(crate::agent::electorate::exclusive_electorate(&d.task_ctx), Ok(Some("new".to_string())),
-        "the default followed the retirement");
-
-    let res = d.consensus().group_propose("new", &slot, Bytes::from_static(b"d-wants-it"), cfg.clone()).await;
-    assert!(matches!(res, ConsensusResult::Superseded { .. } | ConsensusResult::Committed { .. }), "{res:?}");
-    assert_eq!(d.consensus().consensus_get(&slot), Some(v.clone()), "the value chosen in old was carried, not overwritten");
-
-    // The skip: E decides a leased slot (the carry reads old), so E has seen new decide it.
-    let leased = ConsensusConfig { committed_lease_secs: Some(1), ..cfg };
-    assert!(matches!(e.consensus().group_propose("new", "work/leased", Bytes::from_static(b"first"), leased.clone()).await,
-        ConsensusResult::Committed { .. }), "the first decision of the slot in new");
-    drop(listeners.remove(1));
-    drop(listeners.remove(0));
-    time::sleep(Duration::from_millis(1600)).await; // the lease ends
-    let again = e.consensus().group_propose("new", "work/leased", Bytes::from_static(b"second"), leased).await;
-    assert!(matches!(again, ConsensusResult::Committed { .. }),
-        "decided in new, the slot needs no read of old — whose majority is gone: {again:?}");
-    for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
-}
-
-/// **A successor decides nothing until its predecessor's retirement is visible to it** (round 5, D1: the successor's
-/// genesis decided before the retirement reached its members). `new` is declared naming `old`, and `old` retires to
-/// it; D and E have not received the retirement yet (it is taken out of their stores). D's door refuses to propose,
-/// naming the wait, and E — an acceptor — refuses to answer a proposal on `new`. Once the retirement arrives, D's
-/// proposal carries the value chosen in `old`.
-#[cfg(feature = "consensus")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_successor_decides_nothing_until_its_predecessors_retirement_is_visible() {
-    let (agents, _l, _serial) = electorate_mesh(5, |_| {}).await;
-    let (a, b, c, d, e) = (&agents[0], &agents[1], &agents[2], &agents[3], &agents[4]);
-    for n in [a, b, c] { n.mesh().join_group("old"); }
-    roster_converges(&agents, "old", &[a, b, c]).await;
-    declare(a, "old", false).await.unwrap();
-    epoch_converges(&agents, "old", 1).await;
-    let v = Bytes::from_static(b"held-by-a");
-    let slot: Arc<str> = Arc::from("work/s");
-    for n in [a, b] { assert!(crate::agent::electorate::engine(&n.task_ctx).accept_for_test("old", &slot, 5, &v, a.node_id()).await); }
-    let g = successor(&agents, c, "new", &[c, d, e], &["old"]).await;
-    a.retire_electorate("old", "new").await.unwrap();
-    retirement_converges(&agents, "old").await;
-    // The retirement has not reached D and E (taken out of their stores, as gossip lag would leave it).
-    let keys = [format!("consensus/committed/{}", crate::agent::electorate::retire_slot("old")),
-                crate::agent::electorate::retire_cert_key("old")];
-    let held: Vec<Bytes> = keys.iter().map(|k| a.kv().get(k).expect("the retirement's records")).collect();
-    for n in [d, e] {
-        for k in &keys { n.task_ctx.kv_state.store.pin().remove(k.as_str()); }
-        n.task_ctx.electorate_retired.pin().remove("old");
-    }
-    let before = crate::electorate_waiting_refusals();
-    assert!(admits(&crate::agent::electorate::engine(&e.task_ctx), &SignalScope::Group(Arc::from("new")), &slot,
-        Some((g.epoch, g.digest())), d.node_id(), Some(&Bytes::from_static(b"d-wants-it"))).is_err(),
-        "an acceptor that cannot see the retirement does not answer");
-    assert!(crate::electorate_waiting_refusals() > before, "and counts it");
-    let cfg = ConsensusConfig { phase1_timeout: Duration::from_millis(1500), max_ballots: 3, ..ConsensusConfig::default() };
-    match d.consensus().group_propose("new", &slot, Bytes::from_static(b"d-wants-it"), cfg.clone()).await {
-        ConsensusResult::ElectorateMismatch { detail, .. } => assert!(detail.contains("waiting"), "{detail}"),
-        other => panic!("the proposer's door refuses while it cannot see the retirement: {other:?}"),
-    }
-    assert!(agents.iter().all(|n| n.consensus().consensus_get(&slot).is_none()), "nothing was decided");
-    // The retirement arrives (re-sent here, as gossip would deliver it); then the successor decides, carrying v.
-    for (k, v) in keys.iter().zip(&held) { assert!(a.kv().set(k.clone(), v.clone())); }
-    retirement_converges(&agents, "old").await;
-    let res = d.consensus().group_propose("new", &slot, Bytes::from_static(b"d-wants-it"), cfg).await;
-    assert!(matches!(res, ConsensusResult::Superseded { .. } | ConsensusResult::Committed { .. }), "{res:?}");
-    assert_eq!(d.consensus().consensus_get(&slot), Some(v));
-    for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
-}
-
-/// **A second live default is refused by name** (round 5, D1: a successor declared the default, then retired into).
-/// While `old` holds the fleet's default, a genesis declaring another default is refused at the door and by every
-/// acceptor; the default moves only by retirement, into a successor whose own flag is false.
-#[cfg(feature = "consensus")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_second_live_default_is_refused_by_name() {
+async fn a_second_default_is_refused_by_name() {
     let (agents, _l, _serial) = electorate_mesh(4, |_| {}).await;
     let (a, b, c, d) = (&agents[0], &agents[1], &agents[2], &agents[3]);
     for n in [a, b] { n.mesh().join_group("old"); }
@@ -12999,163 +12743,29 @@ async fn a_second_live_default_is_refused_by_name() {
     let slot = crate::agent::electorate::genesis_slot("new", 1);
     assert!(admits(&crate::agent::electorate::engine(&d.task_ctx), &SignalScope::Group(Arc::from("new")), &slot,
         Some((0, [0; 32])), c.node_id(), Some(&second.encode())).is_err(), "an acceptor refuses it too");
-    // The default moves by retirement.
-    let g = successor(&agents, c, "new", &[c, d], &["old"]).await;
-    assert!(!g.exclusive_default);
-    a.retire_electorate("old", "new").await.unwrap();
-    retirement_converges(&agents, "old").await;
+    assert!(agents.iter().all(|n| n.electorate("new").is_none()), "nothing was decided");
     for n in &agents {
-        assert_eq!(crate::agent::electorate::exclusive_electorate(&n.task_ctx), Ok(Some("new".to_string())), "{}", n.node_id());
-    }
-    drop(d.consensus().distributed_lock("door", Duration::from_secs(5)).await.expect("the lock decides in the successor"));
-    for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
-}
-
-/// **A successor that waits on a predecessor that never retires has an escape** (round 5, D2: no persistent wedge).
-/// `new` names `old` (the default) and `other`; `old` retires to it, `other` never does. `new` holds the default but
-/// decides nothing — the exclusive verbs are refused by name. The escape: `new`'s own retirement is not held up —
-/// declare `newer` naming `new`, retire `new` into it. `newer` holds the default, carries from `new` and, through it,
-/// from `old` (which retired to `new`), not from `other` (which did not), and the lock decides with `old`'s value.
-#[cfg(feature = "consensus")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_successor_waiting_on_a_predecessor_that_never_retires_has_an_escape() {
-    let (agents, _l, _serial) = electorate_mesh(5, |_| {}).await;
-    let (a, b, c, d, e) = (&agents[0], &agents[1], &agents[2], &agents[3], &agents[4]);
-    for n in [a, b] { n.mesh().join_group("old"); }
-    c.mesh().join_group("other");
-    roster_converges(&agents, "old", &[a, b]).await;
-    roster_converges(&agents, "other", &[c]).await;
-    declare(a, "old", true).await.unwrap();
-    declare(c, "other", false).await.unwrap();
-    epoch_converges(&agents, "old", 1).await;
-    epoch_converges(&agents, "other", 1).await;
-    let v = Bytes::from_static(b"held-by-a");
-    let slot: Arc<str> = Arc::from("lock/door");
-    for n in [a, b] { assert!(crate::agent::electorate::engine(&n.task_ctx).accept_for_test("old", &slot, 5, &v, a.node_id()).await); }
-    successor(&agents, d, "new", &[d, e], &["old", "other"]).await;
-    a.retire_electorate("old", "new").await.unwrap();
-    retirement_converges(&agents, "old").await;
-    assert_eq!(crate::agent::electorate::exclusive_electorate(&d.task_ctx), Ok(Some("new".to_string())));
-    match d.consensus().distributed_lock("door", Duration::from_secs(5)).await {
-        Err(crate::ConsistencyError::ElectorateMismatch { detail, .. }) => assert!(detail.contains("other"), "{detail}"),
-        other => panic!("new waits for other: {other:?}"),
-    }
-    successor(&agents, e, "newer", &[e], &["new"]).await;
-    d.retire_electorate("new", "newer").await.expect("a waiting successor can still retire");
-    retirement_converges(&agents, "new").await;
-    assert_eq!(crate::agent::electorate::exclusive_electorate(&e.task_ctx), Ok(Some("newer".to_string())));
-    let cfg = ConsensusConfig { phase1_timeout: Duration::from_millis(1500), max_ballots: 3, ..ConsensusConfig::default() };
-    let res = e.consensus().group_propose("newer", &slot, Bytes::from_static(b"e-wants-it"), cfg).await;
-    assert!(matches!(res, ConsensusResult::Superseded { .. } | ConsensusResult::Committed { .. }), "{res:?}");
-    assert_eq!(e.consensus().consensus_get(&slot), Some(v), "carried from old through new");
-    for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
-}
-
-/// **A merge carries every predecessor** (round 5, D3). `new` names `g1` and `g3`; it decides nothing until both have
-/// retired to it, and then carries a value chosen in each. A retirement to a successor that does not name the retiree
-/// is refused by name.
-#[cfg(feature = "consensus")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_merge_carries_every_predecessor() {
-    let (agents, _l, _serial) = electorate_mesh(5, |_| {}).await;
-    let (a, b, c, d, e) = (&agents[0], &agents[1], &agents[2], &agents[3], &agents[4]);
-    for n in [a, b] { n.mesh().join_group("g1"); }
-    for n in [c, d] { n.mesh().join_group("g3"); }
-    e.mesh().join_group("lone");
-    roster_converges(&agents, "g1", &[a, b]).await;
-    roster_converges(&agents, "g3", &[c, d]).await;
-    roster_converges(&agents, "lone", &[e]).await;
-    declare(a, "g1", false).await.unwrap();
-    declare(c, "g3", false).await.unwrap();
-    declare(e, "lone", false).await.unwrap();
-    epoch_converges(&agents, "g1", 1).await;
-    epoch_converges(&agents, "g3", 1).await;
-    epoch_converges(&agents, "lone", 1).await;
-    match a.retire_electorate("g1", "lone").await {
-        Err(crate::ElectorateError::Refused(why)) => assert!(why.contains("does not name"), "{why}"),
-        other => panic!("a retirement to a successor not naming the retiree is refused: {other:?}"),
-    }
-    let (v1, v3) = (Bytes::from_static(b"v1"), Bytes::from_static(b"v3"));
-    let (s1, s3): (Arc<str>, Arc<str>) = (Arc::from("work/s1"), Arc::from("work/s3"));
-    for n in [a, b] { assert!(crate::agent::electorate::engine(&n.task_ctx).accept_for_test("g1", &s1, 5, &v1, a.node_id()).await); }
-    for n in [c, d] { assert!(crate::agent::electorate::engine(&n.task_ctx).accept_for_test("g3", &s3, 5, &v3, c.node_id()).await); }
-    successor(&agents, e, "new", &[e], &["g1", "g3"]).await;
-    a.retire_electorate("g1", "new").await.unwrap();
-    retirement_converges(&agents, "g1").await;
-    let cfg = ConsensusConfig { phase1_timeout: Duration::from_millis(1500), max_ballots: 3, ..ConsensusConfig::default() };
-    match e.consensus().group_propose("new", &s1, Bytes::from_static(b"e-wants-it"), cfg.clone()).await {
-        ConsensusResult::ElectorateMismatch { detail, .. } => assert!(detail.contains("g3"), "{detail}"),
-        other => panic!("a merge decides nothing until every predecessor has retired: {other:?}"),
-    }
-    c.retire_electorate("g3", "new").await.unwrap();
-    retirement_converges(&agents, "g3").await;
-    for (s, v) in [(&s1, &v1), (&s3, &v3)] {
-        let res = e.consensus().group_propose("new", s, Bytes::from_static(b"e-wants-it"), cfg.clone()).await;
-        assert!(matches!(res, ConsensusResult::Superseded { .. } | ConsensusResult::Committed { .. }), "{res:?}");
-        assert_eq!(e.consensus().consensus_get(s), Some(v.clone()), "{s} was carried");
+        assert_eq!(crate::agent::electorate::exclusive_electorate(&n.task_ctx), Ok(Some("old".to_string())), "{}", n.node_id());
     }
     for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
 }
 
-/// **A close waits for the ordinary claims in flight, and only then reports** (round 4 of #601's review, finding 1's
-/// order: close first, then read). With an ordinary claim on the group between its gate decision and its claim, a
-/// close through the gate — a retirement's promise, or a member about to report to a successor's carry — does not
-/// complete; it completes once the claim is done. So any acceptance in flight is either finished before the close
-/// (and in the report read after it) or refused after it.
+/// **A tagged cluster-scoped proposal for an exclusive slot is refused while the default cannot be named** (round 5,
+/// D5). The fail-closed check skipped a message that named an electorate; it now refuses one tagged or not. Here the
+/// default cannot be named because this node's `consensus_electorate` names a group the fleet did not mark.
 #[cfg(feature = "consensus")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_close_waits_for_an_ordinary_claim_in_flight() {
-    use crate::consensus::{Gate, GateKind};
-    let (agents, _l, _serial) = electorate_mesh(1, |_| {}).await;
+async fn a_tagged_cluster_proposal_for_an_exclusive_slot_fails_closed() {
+    let (agents, _l, _serial) = electorate_mesh(1, |c| c.consensus_electorate = Some("elsewhere".into())).await;
     let a = &agents[0];
     a.mesh().join_group("council");
     roster_converges(&agents, "council", &[a]).await;
-    declare(a, "council", false).await.expect("genesis");
-    let engine = crate::agent::electorate::engine(&a.task_ctx);
-    let (tx, rx) = std::sync::mpsc::channel();
-    let ordinary = Gate { group: Arc::from("council"), epoch: 1, kind: GateKind::Ordinary };
-    let closer = engine.claim_gated(Some(&ordinary), || {
-        let ctx = Arc::clone(&a.task_ctx);
-        let t = std::thread::spawn(move || {
-            let close = Gate { group: Arc::from("council"), epoch: 1, kind: GateKind::Retire };
-            crate::agent::electorate::engine(&ctx).claim_gated(Some(&close), || ());
-            tx.send(()).unwrap();
-        });
-        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "the close did not wait for the claim in flight");
-        t
-    }).expect("the ordinary claim passed the gate");
-    rx.recv_timeout(Duration::from_secs(5)).expect("the close completes once the claim is done");
-    closer.join().unwrap();
-    a.shutdown_with_timeout(Duration::from_secs(5)).await;
-}
-
-/// **A declaration completes a pending retirement** (the closed group's way out; round 4, finding 5's concern). A
-/// retirement promised by a majority whose proposer never proposed it has closed them — membership is frozen, so the
-/// group stays closed — and `retire_electorate` from another member completes it (adopting whatever was accepted, or
-/// deciding its own), after which the successor can be declared.
-#[cfg(feature = "consensus")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_retirement_completes_a_pending_one() {
-    use crate::consensus::{consensus_kind, encode_consensus_msg, ConsensusMsg};
-    let (agents, _l, _serial) = electorate_mesh(3, |_| {}).await;
-    let (a, b, c) = (&agents[0], &agents[1], &agents[2]);
-    for n in [a, b, c] { n.mesh().join_group("council"); }
-    roster_converges(&agents, "council", &[a, b, c]).await;
     let e1 = declare(a, "council", false).await.expect("genesis");
-    epoch_converges(&agents, "council", 1).await;
-    successor(&agents, c, "next", &[c], &["council"]).await;
-    let slot = crate::agent::electorate::retire_slot("council");
-    let prepare = ConsensusMsg::PrepareIn {
-        slot: Arc::from(slot.as_str()), ballot: 3, proposer: b.node_id().clone(), epoch: 1, electorate: e1.digest(),
-    };
-    mycelium_core::ops::emit_signal(&b.task_ctx, Arc::from(consensus_kind::PROPOSE), SignalScope::Group(Arc::from("council")),
-        crate::agent::electorate::engine(&b.task_ctx).sign_payload(encode_consensus_msg(&prepare)));
-    poll_until(|| [a, c].iter().all(|n| n.task_ctx.consensus_accepted.pin().get(slot.as_str()).is_some_and(|s| s.promised > 0)), 20_000).await;
-    let quick = ConsensusConfig { phase1_timeout: Duration::from_millis(400), max_ballots: 1, ..ConsensusConfig::default() };
-    assert!(!matches!(a.consensus().group_propose("council", "work/y", Bytes::from_static(b"y"), quick).await,
-        ConsensusResult::Committed { .. }), "closed by the promised retirement");
-    let r = a.retire_electorate("council", "next").await.expect("the pending retirement is completed");
-    assert_eq!(r.successor, "next");
-    retirement_converges(&agents, "council").await;
-    for n in &agents { n.shutdown_with_timeout(Duration::from_secs(5)).await; }
+    assert!(crate::agent::electorate::exclusive_electorate(&a.task_ctx).is_err(), "the default cannot be named here");
+    let engine = crate::agent::electorate::engine(&a.task_ctx);
+    for named in [None, Some((e1.epoch, e1.digest()))] {
+        assert!(admits(&engine, &SignalScope::Cluster, "lock/x", named, a.node_id(), None).is_err(),
+            "a cluster-scoped lock/x is refused, named {named:?}");
+    }
+    a.shutdown_with_timeout(Duration::from_secs(5)).await;
 }

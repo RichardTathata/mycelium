@@ -440,17 +440,13 @@ a member of it ([guide 04 § Discovery is not an electorate](../guide/04-consens
 ```
 
 **409 `electorate_mismatch`** — the electorate and this node's view disagree; `detail` says how. Most often the group
-roster differs from the members (`GET /gateway/govern` lists each electorate's `members`, `predecessor` and
-`retired_to`; `GET /gateway/mesh/group?group=G` the roster): a node joined or left an electorate, whose membership is
-frozen — undo the move, or migrate (declare a successor naming the group, retire the group into it:
+roster differs from the members (`GET /gateway/govern` lists each electorate's `members`;
+`GET /gateway/mesh/group?group=G` the roster): a node joined or left an electorate, whose membership is fixed at
+genesis — undo the move (changing an electorate's members is not built in this release:
 [guide 04](../guide/04-consensus.md#discovery-is-not-an-electorate)). `mycelium::electorate_roster_mismatches` counts
-these. A `detail` naming a retirement means the group is retired (or closing): propose in its successor. **409
-`electorate_stale`** — a member holds a later electorate than this proposer (a superseded genesis); retry. **409
-`membership_frozen`** from `/gateway/govern/electorate` — the roster differs from an adopted electorate: migrate.
-**409 `retired`** — the group is retired; the body names the successor. A `detail` naming **waiting** means a successor whose predecessor's retirement has not reached
-this node yet: it decides nothing until it does (acceptors count these on `mycelium::electorate_waiting_refusals`).
-`mycelium::electorate_retirements_undecided` counts retirement attempts that ended undecided after members promised them —
-the group is closed until `retire_electorate` completes it from any member. A rising
+these. **409 `electorate_stale`** — a member holds a later electorate than this proposer (a superseded genesis);
+retry. **409 `membership_frozen`** from `/gateway/govern/electorate` — the roster differs from an adopted electorate.
+**409 `refused`** — a second default while one is held, or a door refusal. A rising
 `mycelium_electorate_records_refused_total` means an electorate record arrived that did not come through consensus —
 a forgery, or a write by hand.
 

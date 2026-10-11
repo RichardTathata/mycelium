@@ -526,7 +526,7 @@ leader, a single writer, anything a second holder would corrupt:
 | `quorum_size` | `0`, or a strict majority of the members | for an electorate group the engine raises a smaller quorum to a strict majority of its members |
 | `use_trust_slices` | optional | the electorate's member set is the vote filter; a declared slice only narrows it. Before P2 this row required identical `declare_trust` sets on every voter — node identities as the electorate's name |
 | `count_opaque_as_absent` | `false` (ignored for an electorate group) | a partition that reads as "everyone else is opaque" must not become a smaller quorum; on an electorate group the engine does not reduce the quorum for opacity |
-| membership | **frozen**; changed only by **migration, successor first** — declare the successor naming the group(s) it succeeds, then retire each into it (a decision of its majority, accepted only into a successor that names it, closing it at the retirement's promise) | the governor and the emergent watcher do not move an electorate group, and a changed roster is refused. The successor decides nothing until every predecessor's retirement to it is visible (fail closed), then carries each slot from a majority of every predecessor the first time it touches it, so safety per slot decided in the electorate holds across the migration (decision record §8.3). Migrating needs a reachable majority of each predecessor — a lost majority is unrecoverable |
+| membership | **fixed at genesis**; changing it is **not built in this release** (the migration follow-up) | the governor and the emergent watcher do not move an electorate group, and a changed roster is refused. A dead member lowers the group's fault tolerance for good; a lost majority stops the group — size the electorate for its lifetime's failures |
 | the effect | fenced **at the resource** with the commit's token | winning is not the grant; exclusivity is enforced by refusing a stale token |
 
 Outside that profile — automatic sizing, slices off, opacity reduction on, voters joining and
@@ -545,25 +545,16 @@ discovery's. What the code enforces: an empty or below-floor roster is refused
 moves a governed group's membership only through `/gateway/govern/group` (`govern:write`, audited),
 and — since post-360 plan row **P2** — a node with `consensus_require_electorate` refuses a
 safety-sensitive proposal outside an **electorate group**, pinned by member identity and **frozen**
-(the maintainer's decision, 2026-10-11): its members change only by **migration, successor first**
-(round 5) — a successor declared naming the groups it succeeds, which decides nothing until each has
-retired to it; a retirement decided by a majority of the group, accepted only into a successor that
-names it, closing the group at the retirement's promise; then the successor carries each slot, the
-first time it touches it, from a majority of every predecessor. Gossip lag can delay that order,
-never skip a step of it. So a value chosen in the electorate survives the migration, committed or
-not, with no bound on the slots. The fleet's exclusive default is declared once and moves only by
-retirement; two declarations within gossip lag are refused by name once seen, and merged. What it does not: an embedded `join_group` or a `grp/` write still moves a
+(the maintainer's decisions, 2026-10-11): its members are fixed at genesis, and **changing them is not
+built in this release** — a migration is the follow-up. A dead member lowers the group's fault
+tolerance; a lost majority stops the group, as in any consensus protocol. The fleet's exclusive
+default is set once, at genesis (a second is refused by name), and cannot move in this release; two
+declarations made at once within gossip lag stop the exclusive verbs (fail closed) with no escape until
+the follow-up. What it does not: an embedded `join_group` or a `grp/` write still moves a
 group's roster by LWW — for an electorate group the next proposal refuses the mismatch rather than
-counting it (detection, not prevention). **A retired member answers a successor's carry read-only and
-only after closing the group** — it promises nothing and accepts nothing more for the retired group;
-a *compromised* retired member could report falsely (omit or invent an acceptance), which is outside
-the crash-fault claim like every Byzantine member, and its report is bound to its signature under
-`[tls]`. **A forged electorate record** — a `consensus/committed/electorate/…` entry or certificate
-written straight into the store — is not adopted unless its certificate holds the signed votes of
-every member a genesis names, or of a majority of the group a retirement retires (under `[tls]`), and
-is counted (`mycelium::electorate_records_refused`); `sys/govern/electorate/` is not read.
-**Liveness:** migrating needs a reachable majority of the retired group — to retire it, and for the
-successor's first proposal on each slot — and losing a majority of an electorate is unrecoverable, as
-in any consensus protocol. Live reconfiguration (versioned electorates with joint-consensus
-transitions) is a later plan, not built; a consensus *service* (a fixed tier of nodes everyone must
-reach) is rejected.
+counting it (detection, not prevention). **A forged electorate record** — a
+`consensus/committed/electorate/…` entry or certificate written straight into the store — is not
+adopted unless its certificate holds the signed votes of every member the genesis names (under
+`[tls]`), and is counted (`mycelium::electorate_records_refused`); `sys/govern/electorate/` is not read.
+Live reconfiguration (versioned electorates with joint-consensus transitions) is a later plan, not
+built; a consensus *service* (a fixed tier of nodes everyone must reach) is rejected.

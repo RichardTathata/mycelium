@@ -146,14 +146,12 @@ proposer outside the group, and lets the gateway move a *governed* group's membe
 an audited governance route; and, since post-360 plan row P2, a node that sets
 `consensus_require_electorate` (the `secure-single-domain` profile requires it) refuses a lock, a
 leader election or any safety-sensitive proposal unless an **electorate group** decides it — one
-pinned by member identity and decided by every member it names, **frozen** once decided, never
-resized by the membership governor, refused while its roster differs from the member set. Its members
-change only by **migration, successor first**: a successor is declared naming the group, the group
-retires into it by a decision of its majority, and the successor — which decides nothing until that
-retirement is visible to it — carries each slot from a majority of the retired group the first time it
-touches it. So single-decree safety per slot decided in the electorate holds across the migration, a
-value chosen and never committed included; gossip lag can only delay it.
-Live reconfiguration (joint-consensus transitions under a live slot) is a later plan.
+pinned by member identity and decided by every member it names, **fixed at genesis**, never
+resized by the membership governor, refused while its roster differs from the member set. **Changing
+an electorate's members is not built in this release**: a dead member lowers the group's fault
+tolerance, a lost majority stops it, and a migration to another group is the follow-up. The fleet's
+exclusive default is set once, at genesis, and cannot move in this release. Live reconfiguration
+(joint-consensus transitions under a live slot) is a later plan.
 The decision and its reasons: [design/consensus-electorate.md](../design/consensus-electorate.md);
 the how-to: [04-consensus.md § Discovery is not an electorate](04-consensus.md#discovery-is-not-an-electorate).
 

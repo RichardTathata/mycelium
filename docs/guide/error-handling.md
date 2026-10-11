@@ -121,18 +121,15 @@ pub enum ConsistencyError {
   held was superseded. Nothing was decided by this proposal; retry, which reads the electorate in force. **409**
   `electorate_stale`.
 - `ElectorateMismatch` (P2) — the electorate and this node's view disagree: the roster differs from the members (a
-  node joined or left an electorate whose membership is frozen — undo it, or migrate), the group is retired or
-  closing (its retirement promised here; `detail` names the successor once known), a cross-group proposal over an
-  electorate group, a `consensus_electorate` that disagrees with the fleet's exclusive default (or a default that
-  cannot be named here: a retirement whose successor is not visible yet, two live defaults), a slot proposed on a group
-  that is not its home (a `lock/`-family slot off the fleet's electorate, `leader/{g}` off `g`), or a successor
-  **waiting** for a predecessor's retirement to it (retry once it arrives). `detail` says which;
-  nothing was proposed. **409** `electorate_mismatch`.
-- `ElectorateError` (from `declare_electorate`, `declare_successor_electorate`, `retire_electorate`) — `MembershipFrozen` (the group has an
-  electorate and the roster differs: migrate — **409** `membership_frozen`), `Retired { successor }` (**409**
-  `retired`), `NotAMember` (**403**), `InvalidGroup` (**400**), `Refused` (a precondition no retry changes — a second
-  default, a successor that does not name the retiree, a predecessor retired elsewhere, a door refusal; **409**
-  `refused`), `NotDecided` (after the bounded retries; **409** `not_decided`).
+  node joined or left an electorate whose membership is fixed at genesis — undo it; changing members is not built in
+  this release), a cross-group proposal over an electorate group, a `consensus_electorate` that disagrees with the
+  fleet's exclusive default (or two groups marked the default), a genesis that would be a second default, or a slot
+  proposed on a group that is not its home (a `lock/`-family slot off the fleet's electorate, `leader/{g}` off `g`).
+  `detail` says which; nothing was proposed. **409** `electorate_mismatch`.
+- `ElectorateError` (from `declare_electorate`) — `MembershipFrozen` (the group has an electorate and the roster
+  differs — **409** `membership_frozen`), `NotAMember` (**403**), `InvalidGroup` (**400**), `Refused` (a precondition
+  no retry changes — a second default, a door refusal; **409** `refused`), `NotDecided` (after the bounded retries;
+  **409** `not_decided`).
 - `TopologyUnsatisfied` — quorum has the right headcount but the Hard topology
   policy (e.g. "must span two racks") was not satisfied. Retry is unlikely to
   help unless nodes rejoin from the missing segments. If availability matters more than the spread

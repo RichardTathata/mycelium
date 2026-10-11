@@ -327,9 +327,8 @@ pub enum ConsensusResult {
     },
     /// **The electorate and what this node sees disagree, so nothing was proposed** (P2). Either the
     /// group roster differs from the member set (a member joined or left an electorate whose membership is
-    /// frozen — counted as a tripwire, never counted as a vote), the group is retired or closing (its
-    /// retirement promised here), a genesis or retirement value does not fit, the slot is not this group's
-    /// to decide, a cross-group proposal names an electorate group, a successor cannot read its predecessor
+    /// fixed at genesis — counted as a tripwire, never counted as a vote), a genesis value does not fit or would be
+    /// a second default, the slot is not this group's to decide, a cross-group proposal names an electorate group,
     /// yet, or this node's `consensus_electorate` disagrees with the fleet's exclusive default. `detail` says
     /// which.
     ElectorateMismatch {
@@ -357,7 +356,7 @@ pub enum ConsensusResult {
     },
 }
 
-use crate::agent::electorate::{ElectorateDecl, Retirement};
+use crate::agent::electorate::ElectorateDecl;
 
 /// What a proposal on an electorate group carries through the ballot loop (P2).
 #[derive(Clone, Debug)]
@@ -370,22 +369,16 @@ pub(crate) struct ElectorateTag {
     pub(crate) voters: AHashSet<u64>,
     /// A strict majority of the members; every member for a genesis.
     pub(crate) quorum: usize,
-    /// What the proposal is — an ordinary slot, the group's retirement, or a genesis attempt — with the
-    /// group, as the fence gate needs. A retirement's or a genesis's commit carries a certificate.
+    /// What the proposal is — an ordinary slot or a genesis attempt — with the group, as the gate needs. A
+    /// genesis's commit carries a certificate.
     pub(crate) gate:   Gate,
-    /// **The lazy carry** (round 4; design record §8): the retired predecessors whose majorities phase 1
-    /// also reads, nearest first — empty once this group has decided the slot, or when it has none.
-    pub(crate) predecessors: Vec<Arc<ElectorateDecl>>,
 }
 
 /// Which way a claim on an electorate group passes the gate (round 2 of #601's review, finding 1; round 4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GateKind {
-    /// An ordinary slot of the group: refused once this node has closed the group.
+    /// An ordinary slot of the group: passes while this node holds the epoch it names.
     Ordinary,
-    /// The group's retirement — or a carry report read from it: **closes the group for good** first, once no
-    /// ordinary claim is in flight. A refused claim leaves only what is durable closed (round 4, finding 4).
-    Retire,
     /// A genesis attempt at this epoch: refused once this node adopted an electorate for the group or touched a
     /// later attempt; it records the attempt it touched, which an adoption of an earlier one then refuses.
     Genesis(u64),
@@ -399,17 +392,11 @@ pub(crate) struct Gate {
     pub(crate) kind:  GateKind,
 }
 
-/// **The gate's key**, per electorate group (`TaskCtx::electorate_fences`): every claim, adoption and carry
-/// report on the group passes one `compute` on it, so their order is the order the safety argument needs. Pure
-/// data, rewritten whole by each `compute`.
+/// **The gate's key**, per electorate group (`TaskCtx::electorate_fences`): every genesis claim and adoption on the
+/// group passes one `compute` on it, so their order is the order the supersession argument needs (§8.4). Pure data,
+/// rewritten whole by each `compute`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct FenceState {
-    /// The group is closed for ordinary claims: this node promised its retirement or reported to a successor.
-    pub(crate) closed:   bool,
-    /// Ordinary claims between their gate decision and their claim.
-    pub(crate) inflight: u32,
-    /// Retirement claims (and carry reports) between raising `closed` and settling it.
-    pub(crate) closing:  u32,
     /// Genesis claims between their gate decision and their claim.
     pub(crate) opening:  u32,
     /// The highest genesis attempt this node's acceptor promised or accepted.
@@ -421,8 +408,7 @@ pub(crate) struct FenceState {
 impl ElectorateTag {
     /// Whether a member's refusal says this proposer is behind: the member is in this electorate and
     /// names a later epoch under another electorate's digest (a genesis that superseded this one). A member
-    /// that closed the group names this digest at the next epoch and is not evidence of staleness; a member
-    /// behind names an earlier epoch. Either simply does not vote.
+    /// behind names an earlier epoch, and simply does not vote.
     fn knows_a_later_electorate(&self, voter: &NodeId, epoch: u64, digest: &[u8; 32]) -> bool {
         self.voters.contains(&voter.id_hash()) && epoch > self.epoch && *digest != self.digest
     }
@@ -432,13 +418,12 @@ impl ElectorateTag {
             epoch: d.epoch, digest: d.digest(), quorum: d.quorum(),
             voters: d.members.iter().map(NodeId::id_hash).collect(),
             gate: Gate { group: Arc::from(d.group.as_str()), epoch: d.epoch, kind },
-            predecessors: Vec::new(),
         }
     }
 
-    /// Whether this proposal's commit carries a certificate: a genesis or a retirement.
+    /// Whether this proposal's commit carries a certificate: a genesis.
     fn certified(&self) -> bool {
-        matches!(self.gate.kind, GateKind::Genesis(_) | GateKind::Retire)
+        matches!(self.gate.kind, GateKind::Genesis(_))
     }
 
     /// Whether a refusal's sender may move this proposal: a member of its electorate (round 2, finding 5).
@@ -475,27 +460,12 @@ pub fn electorate_roster_mismatches() -> u64 {
     ROSTER_MISMATCHES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-static WAITING_REFUSALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Proposals an acceptor refused because a migration is not visible to it yet: a successor whose predecessors'
-/// retirements have not arrived, or a retirement naming a successor that does not (yet) name the retiree (round 5).
-pub fn electorate_waiting_refusals() -> u64 {
-    WAITING_REFUSALS.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-fn note_waiting(slot: &str, why: &str) {
-    WAITING_REFUSALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    #[cfg(feature = "metrics")]
-    metrics::counter!("mycelium_electorate_waiting_refusals_total").increment(1);
-    tracing::debug!(slot, why, "electorate: refusing a proposal while a migration is not visible here (fail closed)");
-}
-
 fn note_roster_mismatch(slot: &str, group: &str, epoch: u64) {
     ROSTER_MISMATCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     #[cfg(feature = "metrics")]
     metrics::counter!("mycelium_electorate_roster_mismatch_total").increment(1);
     tracing::warn!(slot, group, epoch, "electorate: the group roster differs from its electorate; not proposing \
-        (membership is frozen — migrate to a successor group to change it)");
+        (membership is fixed at genesis; changing it is not built in this release)");
 }
 
 /// `ElectorateStale` for a proposal a member of its electorate refused for another epoch.
@@ -508,12 +478,12 @@ fn stale_result(slot: Arc<str>, scope: &SignalScope, tag: Option<&ElectorateTag>
     ConsensusResult::ElectorateStale { slot, group, epoch: tag.map_or(0, |t| t.epoch), seen_epoch: seen }
 }
 
-/// `ElectorateMismatch` for a claim this node's own gate refused after the door: the group closed (its
-/// retirement was promised here) or the genesis attempt was overtaken while the proposal ran.
+/// `ElectorateMismatch` for a claim this node's own gate refused after the door: the genesis attempt was overtaken,
+/// or the electorate this proposal named was superseded here, while the proposal ran.
 fn gate_refused(slot: Arc<str>, tag: Option<&ElectorateTag>) -> ConsensusResult {
     let detail = match tag.map(|t| t.gate.kind) {
         Some(GateKind::Genesis(e)) => format!("genesis attempt {e} was overtaken here: this node adopted an electorate or touched a later attempt"),
-        _ => "the group was closed here while this proposal ran: a member promised its retirement".to_string(),
+        _ => "the electorate this proposal named is no longer the one held here".to_string(),
     };
     ConsensusResult::ElectorateMismatch { slot, group: tag.map(|t| Arc::clone(&t.gate.group)), detail: Arc::from(detail.as_str()) }
 }
@@ -760,80 +730,13 @@ pub(crate) enum ConsensusMsg {
         electorate: [u8; 32],
     },
     /// An acceptor's refusal of a proposal whose electorate is not its own — the epoch and digest it
-    /// holds (or the next epoch under the same digest, when it has closed the group for its retirement and
-    /// so answers it no more). Sent under `NACK`.
+    /// holds. Sent under `NACK`.
     StaleElectorate {
         slot:       Arc<str>,
         voter:      NodeId,
         epoch:      u64,
         electorate: [u8; 32],
     },
-    /// A successor's request to a member of a **retired** electorate group for a read-only report of what it
-    /// holds for `slot` — the lazy carry (P2, round 4 of #601's review; design record §8). Answered only by a
-    /// member of the retired `group`, only when the retirement verifies there, and only for a proposer in a
-    /// group that succeeds it; the member closes `group` for good (through its gate, after any ordinary claim
-    /// in flight) and puts the retirement on stable storage before it reports. It promises nothing. Sent under
-    /// `PROPOSE`, to each member individually. Appended last, like [`PrepareIn`](Self::PrepareIn).
-    CarryPrepare {
-        slot:     Arc<str>,
-        ballot:   u64,
-        proposer: NodeId,
-        group:    Arc<str>,
-    },
-    /// A retired group member's carry report: its promise for `slot` and to whom, and its latest acceptance,
-    /// read from its acceptor memory after it closed the group. Under `VOTE`, to the proposer.
-    CarryReport {
-        slot:             Arc<str>,
-        ballot:           u64,
-        voter:            NodeId,
-        group:            Arc<str>,
-        promised:         u64,
-        promised_to:      Option<u64>,
-        accepted_ballot:  u64,
-        accepted_digest:  Option<[u8; 32]>,
-        accepted_value:   Option<Bytes>,
-        /// Whether `accepted_value` is a decision envelope (row A) or a legacy value.
-        accepted_is_envelope: bool,
-    },
-}
-
-/// Releases an ordinary claim's in-flight registration on its group's gate key when the claim is done.
-struct InFlight<'a> {
-    fences: &'a papaya::HashMap<Arc<str>, FenceState>,
-    group:  &'a Arc<str>,
-}
-
-impl Drop for InFlight<'_> {
-    fn drop(&mut self) {
-        self.fences.pin().compute(Arc::clone(self.group), |cur| {
-            let s = cur.map(|(_, v)| *v).unwrap_or_default();
-            papaya::Operation::<FenceState, ()>::Insert(FenceState { inflight: s.inflight.saturating_sub(1), ..s })
-        });
-    }
-}
-
-thread_local! {
-    /// How deep this thread is in nested electorate verifications (`ViewDepth`).
-    static VIEW_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-/// One level of nested electorate verification; `enter` refuses past `CHAIN_LIMIT` levels.
-struct ViewDepth;
-
-impl ViewDepth {
-    fn enter() -> Option<Self> {
-        VIEW_DEPTH.with(|d| {
-            if d.get() >= crate::agent::electorate::CHAIN_LIMIT { return None; }
-            d.set(d.get() + 1);
-            Some(Self)
-        })
-    }
-}
-
-impl Drop for ViewDepth {
-    fn drop(&mut self) {
-        VIEW_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
-    }
 }
 
 /// Two digests combined — the key a refused record and its certificate are remembered under.
@@ -2021,7 +1924,7 @@ impl ConsensusEngine {
                 }
             let floor = self.floor(&slot);
             // Through the electorate's gate, inside the same `compute` as the claim (P2 round 2, finding 1): a
-            // retirement this node's acceptor promised since the door ends this proposal, by name.
+            // superseding genesis adopted here since the door ends this proposal, by name.
             let gate = tag.as_ref().map(|t| &t.gate);
             let claimed = self.claim_gated(gate, || {
                 claim_envelope(&self.task_ctx.consensus_accepted, &slot, ballot, &value, self.task_ctx.node_id.id_hash(), floor)
@@ -2061,7 +1964,7 @@ impl ConsensusEngine {
             self.emit_async(
                 Arc::from(consensus_kind::PROPOSE), scope.clone(), self.sign_payload(encode_consensus_msg(&propose_msg)),
             ).await;
-            // A genesis's or a retirement's commit carries its certificate: the signed votes that decided it,
+            // A genesis's commit carries its certificate: the signed votes that decided it,
             // this node's own included.
             let mut cert: Option<Vec<Bytes>> = tag.as_ref().filter(|t| t.certified()).map(|_| {
                 let own = ConsensusMsg::VoteForValue {
@@ -2191,20 +2094,16 @@ impl ConsensusEngine {
 
     // ── P2: electorate groups (`docs/design/consensus-electorate.md` §8) ─────────────────────────
 
-    /// The verified electorate for `group`: the highest genesis attempt whose committed record is well formed,
-    /// names the retirement that names this group (when it succeeds one), and whose certificate — the signed
-    /// votes of **every** member it names, at one ballot — verifies. Adopted only through the gate, so a node
-    /// whose acceptor touched a later attempt never adopts an earlier one (round 4, finding 3). A record that
-    /// does not verify is refused and counted ([`crate::electorate_records_refused`]); one whose certificate
-    /// or predecessor's retirement has not arrived yet is simply not adopted yet. Membership is frozen: once
+    /// The verified electorate for `group`: the highest genesis attempt whose committed record is well formed and
+    /// whose certificate — the signed votes of **every** member it names, at one ballot — verifies. Adopted only
+    /// through the gate, so a node whose acceptor touched a later attempt never adopts an earlier one (round 4,
+    /// finding 3). A record that does not verify is refused and counted ([`crate::electorate_records_refused`]); one
+    /// whose certificate has not arrived yet is simply not adopted yet. Membership is fixed at genesis: once
     /// adopted, a later attempt is adopted only by a node that never adopted, never voted for, this one.
     pub(crate) fn electorate_view(&self, group: &str) -> Option<Arc<ElectorateDecl>> {
         use crate::agent::electorate::{already_refused, cached, cert_key, check_genesis, genesis_slot, note_refused, refresh_records};
         refresh_records(&self.task_ctx);
         let cur = cached(&self.task_ctx, group);
-        // Verifying a successor's genesis reads its predecessor's electorate, which reads its own predecessor: a
-        // forged cycle of records must not recurse without end.
-        let Some(_depth) = ViewDepth::enter() else { return cur };
         let have = cur.as_ref().map_or(0, |d| d.epoch);
         let top = self.task_ctx.electorate_epochs_known.pin().get(group).copied().unwrap_or(0);
         for epoch in (have + 1..=top).rev() {
@@ -2240,103 +2139,6 @@ impl ConsensusEngine {
             return cached(&self.task_ctx, group);
         }
         cur
-    }
-
-    /// `group`'s verified retirement: its committed record (`electorate/{group}/retire`) names this electorate's
-    /// epoch and a successor, and its certificate — signed votes of a strict majority of the electorate, at one
-    /// ballot — verifies. Cached once verified.
-    pub(crate) fn retirement_view(&self, group: &str) -> Option<Arc<Retirement>> {
-        use crate::agent::electorate::{already_refused, note_refused, refresh_records, retire_cert_key, retire_slot, valid_group};
-        if let Some(r) = self.task_ctx.electorate_retired.pin().get(group) { return Some(Arc::clone(r)); }
-        refresh_records(&self.task_ctx);
-        if !self.task_ctx.electorate_retire_known.pin().contains(group) { return None; }
-        let d = self.electorate_view(group)?;
-        let slot = retire_slot(group);
-        let raw = self.get(&format!("{}{}", consensus_ns::COMMITTED, slot))?;
-        let digest = value_digest(&raw);
-        let Some(r) = Retirement::decode(&raw) else {
-            note_refused(&self.task_ctx, &slot, &digest, "the record does not decode as a retirement");
-            return None;
-        };
-        if r.group != group || r.epoch != d.epoch || !valid_group(&r.successor) || r.successor == group {
-            note_refused(&self.task_ctx, &slot, &digest, "the retirement does not match the electorate it retires");
-            return None;
-        }
-        let cert = self.get(&retire_cert_key(group))?;
-        let key = xor_digests(&digest, &value_digest(&cert));
-        if already_refused(&self.task_ctx, &slot, &key) { return None; }
-        if !self.certificate_holds(&slot, &digest, &cert, &d.members, d.quorum()) {
-            note_refused(&self.task_ctx, &slot, &key, "its certificate does not verify");
-            return None;
-        }
-        let r = Arc::new(r);
-        self.task_ctx.electorate_retired.pin().insert(Arc::from(group), Arc::clone(&r));
-        Some(r)
-    }
-
-    /// **Whether the successor `d` may decide** (P2 round 5, *predecessor-first*): every predecessor it names has a
-    /// verified retirement to it, visible here. `Err` names the first one this node is still waiting for. Fail
-    /// closed: until then `d` decides nothing, at the proposer's door and at every acceptor.
-    pub(crate) fn successor_ready(&self, d: &ElectorateDecl) -> Result<(), String> {
-        for p in &d.predecessors {
-            match self.retirement_view(p) {
-                Some(r) if r.successor == d.group => {}
-                Some(r) => return Err(format!("{} names {p} as a predecessor, but {p} retired to {}", d.group, r.successor)),
-                None => return Err(format!("{} is waiting for its predecessor {p}'s retirement to it (not visible here yet)", d.group)),
-            }
-        }
-        Ok(())
-    }
-
-    /// Whether a retirement `r` names a successor declared here that names `r.group` among its predecessors (round 5,
-    /// *predecessor-first*). `Err` says which is missing.
-    fn successor_names(&self, r: &Retirement) -> Result<(), String> {
-        match self.electorate_view(&r.successor) {
-            None => Err(format!("successor {} has no electorate visible here yet — it is declared first, naming {}",
-                r.successor, r.group)),
-            Some(s) if !s.predecessors.contains(&r.group) => Err(format!("successor {} does not name {} among its predecessors",
-                r.successor, r.group)),
-            Some(_) => Ok(()),
-        }
-    }
-
-    /// The retired electorates `d` carries from (round 5): every predecessor `d` names — each retired to `d`, which
-    /// [`successor_ready`](Self::successor_ready) checked — and, transitively, each of their predecessors that retired
-    /// to them. A predecessor's own predecessor that never retired to it is not in the chain: that predecessor never
-    /// decided anything (it waited for it), and the group that did not retire is still deciding on its own.
-    /// `Err` when one of `d`'s predecessors is not known here.
-    fn predecessor_chain(&self, d: &ElectorateDecl) -> Result<Vec<Arc<ElectorateDecl>>, String> {
-        let mut chain: Vec<Arc<ElectorateDecl>> = Vec::new();
-        let mut frontier: Vec<(String, String, bool)> = d.predecessors.iter().map(|p| (p.clone(), d.group.clone(), true)).collect();
-        while let Some((p, child, required)) = frontier.pop() {
-            if chain.len() >= crate::agent::electorate::CHAIN_LIMIT {
-                return Err(format!("{}'s predecessor chain is longer than {}", d.group, crate::agent::electorate::CHAIN_LIMIT));
-            }
-            if chain.iter().any(|c| c.group == p) { continue; }
-            let retired_here = self.retirement_view(&p).is_some_and(|r| r.successor == child);
-            if !retired_here {
-                if required { return Err(format!("{child} is waiting for its predecessor {p}'s retirement to it")); }
-                continue;
-            }
-            let pred = self.electorate_view(&p)
-                .ok_or_else(|| format!("{child} succeeds {p}, whose electorate is not known here yet"))?;
-            frontier.extend(pred.predecessors.iter().map(|q| (q.clone(), p.clone(), false)));
-            chain.push(pred);
-        }
-        Ok(chain)
-    }
-
-    /// The electorates that succeed `group`, nearest first — those whose members a retired member reports to.
-    fn successors_of(&self, group: &str) -> Vec<Arc<ElectorateDecl>> {
-        let mut out = Vec::new();
-        let mut at = group.to_string();
-        while out.len() < crate::agent::electorate::CHAIN_LIMIT {
-            let Some(r) = self.retirement_view(&at) else { break };
-            let Some(s) = self.electorate_view(&r.successor) else { break };
-            at = r.successor.clone();
-            out.push(s);
-        }
-        out
     }
 
     /// The highest genesis attempt of `group` this node's acceptor promised or accepted, from its memory (which
@@ -2387,67 +2189,22 @@ impl ConsensusEngine {
                 .is_some_and(|s| s.promised > 0 || s.accepted.is_some())
     }
 
-    /// Whether this node's acceptor durably closed `group`: it promised (or accepted) the group's retirement, or
-    /// holds the verified retirement. Read inside the gate's `compute`, so it must stay a pure read.
-    fn durably_closed(&self, group: &str) -> bool {
-        let slot = crate::agent::electorate::retire_slot(group);
-        self.task_ctx.consensus_accepted.pin().get(slot.as_str()).is_some_and(|s| s.promised > 0 || s.accepted.is_some())
-            || self.task_ctx.electorate_retired.pin().contains_key(group)
-    }
-
-    /// Whether `group` is closed here — retired, or its retirement promised by this node's acceptor.
-    fn closed(&self, group: &str) -> bool {
-        let _ = self.retirement_view(group); // verifies (and caches) a retirement that has arrived
-        self.task_ctx.electorate_fences.pin().get(group).is_some_and(|s| s.closed || s.closing > 0) || self.durably_closed(group)
-    }
-
-    /// Why `group` is closed, for a refusal.
-    fn closed_detail(&self, group: &str) -> String {
-        match self.retirement_view(group) {
-            Some(r) => format!("electorate group {group} is retired; its successor is {}", r.successor),
-            None => format!("electorate group {group} is closing: this node promised its retirement"),
-        }
-    }
-
     /// **Claim through the gate** (round 2 of #601's review, finding 1; made retry-safe in round 3, finding 5;
     /// round 4). The `compute` on the group's key only **decides**; the claim runs after it committed, with
     /// nothing inside a closure papaya may re-run:
     ///
-    /// - `Ordinary` passes while the group is not closed and this node holds `epoch`, and registers itself as
-    ///   **in flight** on the key; the claim runs, then the registration is released (a drop guard).
-    /// - `Retire` closes the group only when **no** ordinary claim is in flight (it yields and retries otherwise),
-    ///   then claims. So every ordinary claim either completed before the close or is refused after it — the
-    ///   order the retirement's fence and the carry's reports rest on (decision record §8). Afterwards the key
-    ///   keeps only what is durable: a claim the acceptor refused promised nothing, and leaves the group open
-    ///   (round 4, finding 4).
+    /// - `Ordinary` passes while this node holds `epoch` as its adopted electorate (a superseding genesis adopted
+    ///   since the door ends the proposal, by name).
     /// - `Genesis(e)` passes while this node adopted no electorate for the group and touched no later attempt,
-    ///   registered as opening (an adoption waits it out); afterwards it records `e` as touched if the acceptor
-    ///   now holds a promise or acceptance for it.
+    ///   registered as opening (an adoption waits it out); afterwards it records `e` as touched **only if** the
+    ///   acceptor now holds a promise or acceptance for it — a claim the acceptor refused promised nothing and
+    ///   raises nothing (round 4, finding 4, in the one raising kind that remains).
     ///
     /// `None` when the gate refused (nothing was claimed); otherwise what `claim` returned.
     pub(crate) fn claim_gated<T>(&self, gate: Option<&Gate>, claim: impl FnOnce() -> T) -> Option<T> {
         let Some(g) = gate else { return Some(claim()) };
         let fences = self.task_ctx.electorate_fences.pin();
         match g.kind {
-            GateKind::Retire => {
-                loop {
-                    let raised = fences.compute(Arc::clone(&g.group), |cur| {
-                        let s = cur.map(|(_, v)| *v).unwrap_or_default();
-                        if s.inflight > 0 { papaya::Operation::Abort(()) }
-                        else { papaya::Operation::Insert(FenceState { closed: true, closing: s.closing + 1, ..s }) }
-                    });
-                    if !matches!(raised, papaya::Compute::Aborted(())) { break; }
-                    std::thread::yield_now();
-                }
-                let out = claim();
-                let durable = self.durably_closed(&g.group);
-                fences.compute(Arc::clone(&g.group), |cur| {
-                    let s = cur.map(|(_, v)| *v).unwrap_or_default();
-                    let closing = s.closing.saturating_sub(1);
-                    papaya::Operation::<FenceState, ()>::Insert(FenceState { closed: durable || closing > 0, closing, ..s })
-                });
-                Some(out)
-            }
             GateKind::Genesis(epoch) => {
                 let durable = self.pending_genesis(&g.group).0;
                 let entered = fences.compute(Arc::clone(&g.group), |cur| {
@@ -2468,63 +2225,17 @@ impl ConsensusEngine {
                 Some(out)
             }
             GateKind::Ordinary => {
-                let entered = fences.compute(Arc::clone(&g.group), |cur| {
-                    let s = cur.map(|(_, v)| *v).unwrap_or_default();
-                    let closed = s.closed || s.closing > 0 || self.durably_closed(&g.group);
-                    let current = crate::agent::electorate::cached(&self.task_ctx, &g.group).map(|d| d.epoch) == Some(g.epoch);
-                    if closed || !current { papaya::Operation::Abort(()) }
-                    else { papaya::Operation::Insert(FenceState { inflight: s.inflight + 1, ..s }) }
-                });
-                if matches!(entered, papaya::Compute::Aborted(())) { return None; }
-                let _leave = InFlight { fences: &self.task_ctx.electorate_fences, group: &g.group };
-                Some(claim())
+                let current = crate::agent::electorate::cached(&self.task_ctx, &g.group).map(|d| d.epoch) == Some(g.epoch);
+                current.then(claim)
             }
-        }
-    }
-
-    /// Closes the retired electorate `d` for good on this node — through the gate, after any ordinary claim in
-    /// flight — and puts its retirement (record and certificate) on stable storage, so a restart still finds the
-    /// group closed. What a member does before it reports to a successor's carry. `false` when the retirement did
-    /// not reach the disk: the member then reports nothing.
-    async fn close_for_carry(&self, d: &ElectorateDecl) -> bool {
-        use crate::agent::electorate::{retire_cert_key, retire_slot};
-        if self.retirement_view(&d.group).is_none() { return false; }
-        let gate = Gate { group: Arc::from(d.group.as_str()), epoch: d.epoch, kind: GateKind::Retire };
-        let _ = self.claim_gated(Some(&gate), || ());
-        let Some(wal) = self.task_ctx.wal.get() else { return true };
-        for key in [format!("{}{}", consensus_ns::COMMITTED, retire_slot(&d.group)), retire_cert_key(&d.group)] {
-            let Some((value, timestamp)) = self.task_ctx.kv_state.store.pin().get(key.as_str())
-                .and_then(|e| e.data.clone().map(|v| (v, e.timestamp))) else { return false };
-            let entry = crate::framing::SyncEntry { key: Arc::from(key.as_str()), value, timestamp, is_tombstone: false };
-            if let Err(e) = wal.append_sync(entry).await {
-                tracing::error!(group = %d.group, error = %e, "consensus: a retirement did not reach stable storage; not reporting");
-                return false;
-            }
-        }
-        true
-    }
-
-    /// Whether this node has seen `group` decide `slot` — after which its proposals for it no longer carry from
-    /// a predecessor (the decision is held by a majority of `group`, at a ballot above every predecessor's).
-    /// In memory: after a restart a proposal carries again, which is safe (§8) and costs only the reads.
-    fn carried(&self, group: &str, slot: &str) -> bool {
-        self.task_ctx.electorate_carried.pin().contains(format!("{group}\u{0}{slot}").as_str())
-    }
-
-    /// Records that `group` decided `slot`, when `group` succeeds a retired one (see [`carried`](Self::carried)).
-    fn note_decided_in(&self, group: &str, slot: &str) {
-        if crate::agent::electorate::slot_names_group(slot).is_some() { return; }
-        if crate::agent::electorate::cached(&self.task_ctx, group).is_some_and(|d| !d.predecessors.is_empty()) {
-            self.task_ctx.electorate_carried.pin().insert(Arc::from(format!("{group}\u{0}{slot}").as_str()));
         }
     }
 
     /// Whether a certificate for an electorate record verifies. A certificate is the decided **decision envelope**
     /// (row A: the value Paxos decided, whose `value` is the record) and the signed `VoteForValue`s for it: the
     /// envelope must be for `slot` and carry the record whose digest is `digest`, and the votes must be for the
-    /// envelope's digest, at one ballot, from at least `need` of `electors` — every member for a genesis, a
-    /// strict majority of the retired electorate for a retirement. Without `[tls]` nothing is signed, and the
-    /// check is a shape.
+    /// envelope's digest, at one ballot, from at least `need` of `electors` — every member a genesis names. Without
+    /// `[tls]` nothing is signed, and the check is a shape.
     fn certificate_holds(&self, slot: &str, digest: &[u8; 32], raw: &Bytes, electors: &[NodeId], need: usize) -> bool {
         let Ok((envelope, votes)) = mycelium_core::serde_fixint::from_slice::<(Bytes, Vec<Bytes>)>(raw) else { return false };
         let Some(env) = crate::consensus_life::Envelope::decode(&envelope) else { return false };
@@ -2540,31 +2251,13 @@ impl ConsensusEngine {
         by_ballot.values().any(|v| v.len() >= need)
     }
 
-    /// Test-only: this node's acceptor accepts `value` for `slot` at `ballot` on electorate `group`, exactly as
-    /// its listener would on a `ProposeIn` — the claim gated, the record durable. Lets a test choose a value on a
-    /// chosen set of acceptors without a proposer committing it.
-    #[cfg(test)]
-    pub(crate) async fn accept_for_test(&self, group: &str, slot: &Arc<str>, ballot: u64, value: &Bytes, proposer: &NodeId) -> bool {
-        let Some(d) = self.electorate_view(group) else { return false };
-        let gate = Gate { group: Arc::from(group), epoch: d.epoch, kind: GateKind::Ordinary };
-        let floor = self.floor(slot);
-        // One envelope for one proposal, whichever acceptor accepts it: its token is the ballot, not this node's clock,
-        // so two acceptors given the same (slot, ballot, value, proposer) hold the same bytes, as they would from one
-        // proposer.
-        let envelope = crate::consensus_life::Envelope::new(
-            slot, value.clone(), crate::consensus_life::Term::Permanent, ballot, proposer.clone(), ballot,
-        ).encode();
-        self.claim_gated(Some(&gate), || claim_envelope(&self.task_ctx.consensus_accepted, slot, ballot, &envelope, proposer.id_hash(), floor))
-            == Some(true) && self.persist_acceptor(slot).await
-    }
-
     /// **The proposer's door for P2.** `Ok(Some(tag))` for a proposal on an electorate group (carrying
-    /// its epoch, digest, vote filter, quorum and the predecessors to carry from), `Ok(None)` for one outside
+    /// its epoch, digest, vote filter and quorum), `Ok(None)` for one outside
     /// any, or a refusal by name.
     fn electorate_door(
         &self, scope: &SignalScope, slot: &Arc<str>, value: &Bytes, config: &ConsensusConfig,
     ) -> Result<Option<ElectorateTag>, DoorRefusal> {
-        use crate::agent::electorate::{check_genesis, parse_genesis_slot, parse_retire_slot, slot_names_group, valid_group};
+        use crate::agent::electorate::{check_genesis, parse_genesis_slot};
         let me = &self.task_ctx.node_id;
         match scope {
             SignalScope::Group(group) => {
@@ -2573,8 +2266,8 @@ impl ConsensusEngine {
                 if let Some((_, epoch)) = parse_genesis_slot(slot).filter(|(g, _)| *g == &**group) {
                     if view.is_some() {
                         return Err(DoorRefusal::mismatch(Some(group), &format!(
-                            "membership is frozen: {group} has an electorate, and a genesis decides nothing more — \
-                             migrate to a successor group")));
+                            "membership is fixed at genesis: {group} has an electorate, and a genesis decides nothing \
+                             more — changing an electorate's members is not built in this release")));
                     }
                     let Some(next) = ElectorateDecl::decode(value).filter(|d| d.epoch == epoch) else {
                         return Err(DoorRefusal::mismatch(Some(group), "a genesis's value is not a genesis of its epoch"));
@@ -2585,7 +2278,7 @@ impl ConsensusEngine {
                         match crate::agent::electorate::live_default(&self.task_ctx) {
                             Ok(None) => {}
                             Ok(Some(g)) => return Err(DoorRefusal::mismatch(Some(group), &format!(
-                                "{g} already holds the fleet's exclusive default; the default moves only by retirement"))),
+                                "{g} already holds the fleet's exclusive default; it is set once, at genesis"))),
                             Err(e) => return Err(DoorRefusal::mismatch(Some(group), &e)),
                         }
                     }
@@ -2593,43 +2286,20 @@ impl ConsensusEngine {
                         epoch: 0, digest: [0; 32], quorum: next.members.len(),
                         voters: next.members.iter().map(NodeId::id_hash).collect(),
                         gate: Gate { group: Arc::clone(group), epoch: 0, kind: GateKind::Genesis(epoch) },
-                        predecessors: Vec::new(),
                     }));
-                }
-                if parse_retire_slot(slot).is_some_and(|g| g == &**group) {
-                    let Some(d) = view else { return Err(DoorRefusal::mismatch(Some(group), "no electorate to retire")) };
-                    if !d.contains(me) { return Err(DoorRefusal::NotAMember(Arc::clone(group))); }
-                    if let Some(r) = self.retirement_view(group) {
-                        return Err(DoorRefusal::mismatch(Some(group), &format!("{group} is already retired to {}", r.successor)));
-                    }
-                    let Some(r) = Retirement::decode(value).filter(|r| r.group == **group && r.epoch == d.epoch
-                        && valid_group(&r.successor) && r.successor != **group) else {
-                        return Err(DoorRefusal::mismatch(Some(group), "a retirement's value does not retire this electorate"));
-                    };
-                    // Predecessor-first (round 5): the successor is declared, naming this group, before it retires.
-                    if let Err(why) = self.successor_names(&r) { return Err(DoorRefusal::mismatch(Some(group), &why)); }
-                    // No roster check: the roster moving away from a frozen electorate is what a retirement is for.
-                    return Ok(Some(ElectorateTag::of(&d, GateKind::Retire)));
                 }
                 match view {
                     Some(d) => {
                         if !d.contains(me) { return Err(DoorRefusal::NotAMember(Arc::clone(group))); }
-                        if self.closed(group) { return Err(DoorRefusal::mismatch(Some(group), &self.closed_detail(group))); }
                         let roster = crate::agent::electorate::sorted_members(
                             crate::agent::helpers::group_members_ctx(&self.task_ctx, group));
                         if roster != d.members {
                             note_roster_mismatch(slot, group, d.epoch);
                             return Err(DoorRefusal::mismatch(Some(group),
-                                "the group roster differs from its electorate — membership is frozen; a member joined or \
-                                 left without a migration"));
+                                "the group roster differs from its electorate — membership is fixed at genesis; a member \
+                                 joined or left the group"));
                         }
-                        // A successor decides nothing until every predecessor has retired to it (round 5).
-                        if let Err(why) = self.successor_ready(&d) { return Err(DoorRefusal::mismatch(Some(group), &why)); }
-                        let mut tag = ElectorateTag::of(&d, GateKind::Ordinary);
-                        if !d.predecessors.is_empty() && slot_names_group(slot).is_none() && !self.carried(group, slot) {
-                            tag.predecessors = self.predecessor_chain(&d).map_err(|why| DoorRefusal::mismatch(Some(group), &why))?;
-                        }
-                        Ok(Some(tag))
+                        Ok(Some(ElectorateTag::of(&d, GateKind::Ordinary)))
                     }
                     None => match self.refuse_ungoverned(config, slot, Some(group)) {
                         Some(_) => Err(DoorRefusal::NotGoverned(Some(Arc::clone(group)))),
@@ -2712,7 +2382,7 @@ impl ConsensusEngine {
     /// **The acceptor's door for P2**: may this node answer a proposal for `slot` arriving under `scope`
     /// that names electorate `(epoch, digest)` — `None` for a legacy message, which names none? `Ok(gate)` to
     /// answer, the claim then made through that gate; `Err((epoch, digest))` — this node's own electorate (the
-    /// next epoch, under its own digest, when the group is closed here) — to refuse with `StaleElectorate`.
+    /// one it adopted) — to refuse with `StaleElectorate`.
     ///
     /// `proposed` is the proposal's value as it arrived — a decision envelope (`true`, row A) or a legacy value —
     /// and `None` for a prepare.
@@ -2720,7 +2390,7 @@ impl ConsensusEngine {
         &self, scope: &SignalScope, slot: &str, named: Option<(u64, [u8; 32])>, proposer: &NodeId, proposed: Option<(&Bytes, bool)>,
     ) -> Result<Option<Gate>, (u64, [u8; 32])> {
         let raw = proposed.map(|(b, env)| if env { raw_of(b) } else { Some(b.clone()) });
-        use crate::agent::electorate::{is_fleet_exclusive_slot, parse_genesis_slot, parse_retire_slot, valid_group};
+        use crate::agent::electorate::{is_fleet_exclusive_slot, parse_genesis_slot};
         let me = &self.task_ctx.node_id;
         let group = match scope {
             SignalScope::Group(g) => Arc::clone(g),
@@ -2741,8 +2411,8 @@ impl ConsensusEngine {
                 // is not answered: a lagging or pre-P2 proposer cannot decide one across the cluster.
                 let exclusive = crate::agent::electorate::SAFETY_SLOT_FAMILIES.iter().any(|f| slot.starts_with(f))
                     || is_fleet_exclusive_slot(slot);
-                // While the fleet's exclusive electorate cannot be named here — a retired default whose successor is not
-                // visible, or two live defaults — such a slot has no home, and is refused too (fail closed, round 4), a
+                // While the fleet's exclusive electorate cannot be named here — two groups marked the default, or a
+                // `consensus_electorate` that disagrees — such a slot has no home, and is refused too (fail closed), a
                 // tagged message as much as an untagged one (round 5, D5).
                 if exclusive {
                     match crate::agent::electorate::exclusive_electorate(&self.task_ctx) {
@@ -2767,57 +2437,32 @@ impl ConsensusEngine {
                 _ => Err((0, [0; 32])),
             };
         }
-        let retiring = parse_retire_slot(slot).is_some_and(|g| g == &*group);
         match (view, named) {
             // Not an electorate group here, and a legacy message: nothing changes — unless this node touched one of
             // the group's genesis attempts. Then it is an electorate in formation, and an untagged proposal is refused
             // until the genesis is adopted (round 3, finding 4).
-            (None, None) => if retiring || self.forming(&group) { Err((0, [0; 32])) } else { Ok(None) },
+            (None, None) => if self.forming(&group) { Err((0, [0; 32])) } else { Ok(None) },
             (None, Some(_)) | (Some(_), None) => Err(own),
             (Some(d), Some((epoch, digest))) => {
                 if epoch != d.epoch || digest != own.1 || !d.contains(me) || !d.contains(proposer) {
                     return Err(own);
                 }
-                let gate = |kind| Some(Gate { group: Arc::clone(&group), epoch: d.epoch, kind });
-                if retiring {
-                    // The retirement's value must retire this electorate to a successor already declared, naming this
-                    // group among its predecessors (round 5, predecessor-first).
-                    return match raw.map(|v| v.and_then(|v| Retirement::decode(&v))) {
-                        None => Ok(gate(GateKind::Retire)),
-                        Some(Some(r)) if r.group == *group && r.epoch == d.epoch && valid_group(&r.successor)
-                            && r.successor != *group => match self.successor_names(&r) {
-                                Ok(()) => Ok(gate(GateKind::Retire)),
-                                Err(why) => { note_waiting(slot, &why); Err(own) }
-                            },
-                        Some(_) => Err(own),
-                    };
-                }
-                if self.closed(&group) { return Err((d.epoch + 1, own.1)); }
-                // A successor answers nothing until every predecessor's retirement to it is visible here (round 5).
-                if let Err(why) = self.successor_ready(&d) { note_waiting(slot, &why); return Err((d.epoch + 1, own.1)); }
-                Ok(gate(GateKind::Ordinary))
+                Ok(Some(Gate { group: Arc::clone(&group), epoch: d.epoch, kind: GateKind::Ordinary }))
             }
         }
     }
 
     /// Whether this node's acceptor may accept `value` as genesis attempt `epoch` of `group` from `proposer`
-    /// (rounds 4–5): a well-formed genesis of that epoch naming both; the roster this node sees is its member set; each
-    /// predecessor it names is an electorate here not retired elsewhere; it declares the default only while no group
-    /// holds it; a genesis it
-    /// supersedes is the one this node accepted, when this node is among its members; and this node has accepted
-    /// no other value for the attempt.
+    /// (rounds 4–5): a well-formed genesis of that epoch naming both; the roster this node sees is its member set; it
+    /// declares the default only while no group holds it; a genesis it supersedes is the one this node accepted, when
+    /// this node is among its members; and this node has accepted no other value for the attempt.
     fn genesis_acceptable(&self, group: &str, epoch: u64, value: &Bytes, as_proposed: &Bytes, proposer: &NodeId) -> bool {
         use crate::agent::electorate::{check_genesis, genesis_slot, sorted_members};
         let me = &self.task_ctx.node_id;
         let Some(next) = ElectorateDecl::decode(value).filter(|d| d.epoch == epoch) else { return false };
         if check_genesis(group, &next).is_err() || !next.contains(me) || !next.contains(proposer) { return false; }
         if sorted_members(crate::agent::helpers::group_members_ctx(&self.task_ctx, group)) != next.members { return false; }
-        // Predecessor-first (round 5): each predecessor is an electorate here, not retired to another group.
-        if next.predecessors.iter().any(|p| self.electorate_view(p).is_none()
-            || self.retirement_view(p).is_some_and(|r| r.successor != group)) {
-            return false;
-        }
-        // One live default: a genesis may declare it only while no group holds it (round 5, D1/D2).
+        // One default: a genesis may declare it only while no group holds it (round 5).
         if next.exclusive_default && !matches!(crate::agent::electorate::live_default(&self.task_ctx), Ok(None)) { return false; }
         let held = |e: u64| self.task_ctx.consensus_accepted.pin().get(genesis_slot(group, e).as_str())
             .and_then(|s| s.accepted.as_ref().map(|(_, a)| a.clone()));
@@ -3188,18 +2833,6 @@ impl ConsensusEngine {
         // the only acceptances the legacy reading may set aside (below).
         let mut raw_ballots: Vec<u64> = Vec::new();
         let floor = self.floor(slot);
-        // **The lazy carry** (P2 round 4; design record §8): a successor's phase 1 also reads a strict majority of
-        // every retired predecessor. A predecessor this node belongs to is closed here first — before this node's
-        // own promise reads its memory, which is shared across the groups it serves — so its own report is
-        // complete.
-        let preds: &[Arc<ElectorateDecl>] = tag.map_or(&[], |t| t.predecessors.as_slice());
-        let mut heard: Vec<AHashSet<NodeId>> = vec![AHashSet::new(); preds.len()];
-        for (p, got) in preds.iter().zip(heard.iter_mut()) {
-            if p.contains(me) {
-                if !self.close_for_carry(p).await { return Phase1::Unrecorded; }
-                got.insert(me.clone());
-            }
-        }
         // This node's own promise passes the electorate's gate like any other claim (P2 round 2, finding 1).
         let gate = tag.map(|t| &t.gate);
         match self.claim_gated(gate, || prepare_slot(&self.task_ctx.consensus_accepted, slot, ballot, me.id_hash(), floor)) {
@@ -3216,9 +2849,8 @@ impl ConsensusEngine {
         if !self.persist_acceptor(slot).await { return Phase1::Unrecorded; }
         let mut promisers: AHashSet<NodeId> = AHashSet::new();
         promisers.insert(me.clone());
-        let carried = |heard: &[AHashSet<NodeId>]| preds.iter().zip(heard).all(|(p, got)| got.len() >= p.quorum());
 
-        if !(ready(&promisers) && carried(&heard)) {
+        if !ready(&promisers) {
             // Publish the ballot before asking, so a proposer drawing its next one starts above it
             // rather than colliding on it.
             self.raise_ballot(&format!("{}{}", consensus_ns::BALLOT, &**slot), ballot).await;
@@ -3232,15 +2864,6 @@ impl ConsensusEngine {
                 Arc::from(consensus_kind::PROPOSE), scope.clone(),
                 self.sign_payload(encode_consensus_msg(&prepare)),
             ).await;
-            // Each retired predecessor's members are asked one by one: they are not this group's members.
-            for p in preds {
-                let ask = self.sign_payload(encode_consensus_msg(&ConsensusMsg::CarryPrepare {
-                    slot: Arc::clone(slot), ballot, proposer: me.clone(), group: Arc::from(p.group.as_str()),
-                }));
-                for m in p.members.iter().filter(|m| *m != me) {
-                    self.emit_async(Arc::from(consensus_kind::PROPOSE), SignalScope::Individual(m.clone()), ask.clone()).await;
-                }
-            }
             let ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
             let sleep = mycelium_core::sim_seam::sleep_ms("consensus.prepare", ms);
             tokio::pin!(sleep);
@@ -3276,28 +2899,9 @@ impl ConsensusEngine {
                                 }
                                 promisers.insert(voter);
                             }
-                            // A retired predecessor's member reports what it holds (the lazy carry). Counted once per
-                            // member of the predecessor it names; a promise it holds above this ballot, or at it to
-                            // another proposer, means a ballot of the predecessor may sit above ours — move up first.
-                            Some(ConsensusMsg::CarryReport {
-                                slot: s, ballot: b, voter, group, promised, promised_to, accepted_ballot, accepted_digest,
-                                accepted_value, accepted_is_envelope,
-                            }) => {
-                                if s != *slot || b != ballot { continue; }
-                                let Some(i) = preds.iter().position(|p| *p.group == *group && p.contains(&voter)) else { continue };
-                                if promised > ballot || (promised == ballot && promised_to != Some(me.id_hash())) {
-                                    return Phase1::Refused(promised);
-                                }
-                                if accepted_ballot > 0 {
-                                    if accepted_digest.is_none() && accepted_value.is_none() { continue; }
-                                    if !accepted_is_envelope && accepted_value.is_some() { raw_ballots.push(accepted_ballot); }
-                                    reports.push(carry.report(slot, accepted_ballot, accepted_digest, accepted_value, accepted_is_envelope));
-                                }
-                                heard[i].insert(voter);
-                            }
                             _ => continue,
                         }
-                        if ready(&promisers) && carried(&heard) { break; }
+                        if ready(&promisers) { break; }
                     }
                     Some(sig) = nack_rx.recv() => {
                         // On an electorate group a refusal moves this proposal only from a member (P2 round 2,
@@ -3313,8 +2917,7 @@ impl ConsensusEngine {
                                 return Phase1::Refused(seen_ballot),
                             // A member of this proposal's electorate holds a **later** electorate (a genesis that
                             // superseded this one): this proposer is stale — stop, by name. A member behind it, or
-                            // one that closed the group (it names this electorate's own digest), simply does not
-                            // answer; a non-member's refusal is not evidence about this electorate at all.
+                            // simply does not answer; a non-member's refusal is not evidence about this electorate at all.
                             Some(ConsensusMsg::StaleElectorate { slot: s, voter, epoch, electorate })
                                 if s == *slot && tag.is_some_and(|t| t.knows_a_later_electorate(&voter, epoch, &electorate)) =>
                                 return Phase1::Stale(epoch),
@@ -3385,19 +2988,15 @@ impl ConsensusEngine {
                     ballot: self.read_ballot(ballot_key),
                 });
             }
-        // A genesis or a retirement: its certificate — the decided envelope and the signed votes for it — goes into
+        // A genesis: its certificate — the decided envelope and the signed votes for it — goes into
         // the store **before** the COMMIT leaves, so a node that learns the commit can verify it (P2).
-        let cert_at = crate::agent::electorate::parse_genesis_slot(slot).map(|(g, e)| crate::agent::electorate::cert_key(g, e))
-            .or_else(|| crate::agent::electorate::parse_retire_slot(slot).map(crate::agent::electorate::retire_cert_key));
+        let cert_at = crate::agent::electorate::parse_genesis_slot(slot).map(|(g, e)| crate::agent::electorate::cert_key(g, e));
         if let (Some(votes), Some(key)) = (cert, cert_at) {
             let Ok(encoded) = mycelium_core::serde_fixint::to_vec(&(value.clone(), votes.to_vec())) else { return None; };
             let upd = self.set_async(&key, Bytes::from(encoded)).await;
             let _ = self.persist_sync(slot, &upd, "electorate certificate").await;
         }
-        let res = self.commit_decision(scope, slot, ballot, value, commit_key, lease_ms).await;
-        // A successor has decided this slot: its proposals stop carrying from its predecessors (P2 round 4).
-        if let SignalScope::Group(g) = scope { self.note_decided_in(g, slot); }
-        Some(res)
+        Some(self.commit_decision(scope, slot, ballot, value, commit_key, lease_ms).await)
     }
 
     /// **Commit the decision envelope `envelope` at `ballot`** (design §3) — both commit paths
@@ -3848,8 +3447,8 @@ enum Phase1 {
     Unrecorded,
     /// A member of the proposal's electorate answered for another epoch (P2): carries the epoch it holds.
     Stale(u64),
-    /// This node's own promise was refused by its electorate gate (P2): the group closed here, or the genesis
-    /// attempt was overtaken, since the door.
+    /// This node's own promise was refused by its electorate gate (P2): the electorate it named, or the genesis
+    /// attempt, was overtaken here since the door.
     Closed,
 }
 
@@ -3915,8 +3514,6 @@ fn signer_authorized(msg: &ConsensusMsg, signer: &NodeId) -> bool {
         ConsensusMsg::PrepareIn { proposer, .. }     => proposer == signer,
         ConsensusMsg::ProposeIn { proposer, .. }     => proposer == signer,
         ConsensusMsg::StaleElectorate { voter, .. }  => voter == signer,
-        ConsensusMsg::CarryPrepare { proposer, .. }  => proposer == signer,
-        ConsensusMsg::CarryReport { voter, .. }      => voter == signer,
         ConsensusMsg::Commit { .. } | ConsensusMsg::Nack { .. } | ConsensusMsg::Promise { .. }
         | ConsensusMsg::PromiseTerm { .. } | ConsensusMsg::CommitTerm { .. } => true,
     }
@@ -4513,8 +4110,8 @@ async fn answer_prepare(
     ctx: &ConsensusEngine, slot: Arc<str>, ballot: u64, proposer: NodeId, form: SignatureForm, term: bool, gate: Option<Gate>,
 ) {
     let floor = ctx.floor(&slot);
-    // P2: the promise passes the electorate's gate, which only decides; a retirement's promise closes the group
-    // first. A gate that refused sends no promise (round 3, finding 5).
+    // P2: the promise passes the electorate's gate, which only decides. A gate that refused sends no promise
+    // (round 3, finding 5).
     let outcome = ctx.claim_gated(gate.as_ref(), || prepare_slot(&ctx.task_ctx.consensus_accepted, &slot, ballot, proposer.id_hash(), floor));
     let Some(outcome) = outcome else {
         if let Some(g) = &gate {
@@ -4595,38 +4192,6 @@ fn emit_refusal(
         Arc::from(consensus_kind::NACK),
         SignalScope::Individual(proposer),
         ctx.sign_payload_as(encode_consensus_msg(&nack), form),
-    );
-}
-
-/// A retired group's member answering a successor's [`CarryPrepare`](ConsensusMsg::CarryPrepare) (P2, round 4;
-/// design record §8): only a member of the retired `group`, only when the retirement verifies here, only for a
-/// proposer in a group that succeeds it, and never for a slot that names a group. The member closes the group for
-/// good and puts the retirement on stable storage first (`close_for_carry`), then reports its acceptor memory for
-/// the slot — read after the close, so an ordinary acceptance in flight is either in the report or refused.
-#[cfg(feature = "consensus")]
-async fn answer_carry(ctx: &ConsensusEngine, slot: Arc<str>, ballot: u64, proposer: NodeId, group: Arc<str>, form: SignatureForm) {
-    let me = &ctx.task_ctx.node_id;
-    let Some(d) = ctx.electorate_view(&group) else { return };
-    if !d.contains(me) || ctx.retirement_view(&group).is_none() { return; }
-    if crate::agent::electorate::slot_names_group(&slot).is_some() { return; }
-    if !ctx.successors_of(&group).iter().any(|s| s.contains(&proposer)) { return; }
-    if !ctx.close_for_carry(&d).await {
-        note_answer_unrecorded(&slot, ballot, "not reporting to a successor");
-        return;
-    }
-    let state = ctx.task_ctx.consensus_accepted.pin().get(&slot).cloned().unwrap_or_default();
-    let (accepted_ballot, held) = state.accepted.map_or((0, None), |(b, a)| (b, Some(a)));
-    let report = ConsensusMsg::CarryReport {
-        slot, ballot, voter: me.clone(), group,
-        promised: state.promised, promised_to: state.promised_to, accepted_ballot,
-        accepted_digest: held.as_ref().map(Accepted::digest),
-        accepted_is_envelope: matches!(held, Some(Accepted::Envelope(_))),
-        accepted_value: held.and_then(|a| a.value()),
-    };
-    ctx.emit(
-        Arc::from(consensus_kind::VOTE),
-        SignalScope::Individual(proposer),
-        ctx.sign_payload_as(encode_consensus_msg(&report), form),
     );
 }
 
@@ -4767,10 +4332,6 @@ pub(crate) async fn run_consensus_listener(
                             Ok(gate) => answer_prepare(&ctx, slot, ballot, proposer, form, true, gate).await,
                             Err(own) => refuse_stale(&ctx, slot, proposer, own, form),
                         }
-                        continue;
-                    }
-                    Some((ConsensusMsg::CarryPrepare { slot, ballot, proposer, group }, form)) => {
-                        answer_carry(&ctx, slot, ballot, proposer, group, form).await;
                         continue;
                     }
                     Some((ConsensusMsg::Propose { slot, ballot, value, proposer }, form)) => {
@@ -4990,9 +4551,6 @@ pub(crate) async fn run_consensus_listener(
                 let upd = ctx.kv_set_returning(key, record);
                 ctx.wal_try(&upd);
                 let _ = ctx.record_decided(&slot, ballot).await;
-                // A successor decided this slot: it stops carrying it from its predecessors (P2 round 4; the
-                // learner's half, which the round-4 port missed — round 5, D4).
-                if let SignalScope::Group(g) = &sig.scope { ctx.note_decided_in(g, &slot); }
             }
         }
     }

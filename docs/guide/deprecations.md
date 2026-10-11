@@ -45,7 +45,7 @@ the notice.
 | 22 | an alert keyed on one consensus-timeout `reason`; a second stop signal that waits; an untyped lost write | 2.31.0 | match the new reason set (§22); allow the grace period; catch `SupersededError` | No — a metric label, an exit code, a Python subclass |
 | 26 | an open gateway on a non-loopback `http_addr` | unreleased | a credential (`gateway_auth_token`, a token table or `[oidc]`), a loopback `http_addr`, or `gateway_allow_unauthenticated = true` | No — `start()` refuses, `InvalidField { field: "http_addr" }` |
 | 30 | `sys/quorum/` evidence from every node that relays a kind | unreleased | subscribe to the kind (a worker) or query it — `quorum_persistent(kind, window)` pins it for the window | No — fewer keys under `sys/quorum/` |
-| 31 | an exclusive outcome (lock, leader, consistent write) on the whole cluster or an undeclared group, under the secure profile; changing an electorate's members in place | unreleased | declare an electorate group (`declare_electorate`, one `exclusive_default`); change members by migration — `declare_successor_electorate`, then `retire_electorate` | Partly — new `ConsensusResult`/`CommitError`/`ConsistencyError` variants (a `_` arm must fail closed); otherwise `start()` refuses rev 4 without `consensus_require_electorate`, and proposals are refused by name |
+| 31 | an exclusive outcome (lock, leader, consistent write) on the whole cluster or an undeclared group, under the secure profile | unreleased | declare an electorate group (`declare_electorate`, one `exclusive_default`), sized for its lifetime — its members are fixed at genesis | Partly — new `ConsensusResult`/`CommitError`/`ConsistencyError` variants (a `_` arm must fail closed); otherwise `start()` refuses rev 4 without `consensus_require_electorate`, and proposals are refused by name |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -588,17 +588,16 @@ has lapsed forgets its senders at the next GC tick.
 `quorum_persistent(kind, window)` / `last_signal_persistent(kind)` at least once per window. Keys written before the
 upgrade stay; nothing collects `sys/quorum/`.
 
-## 31. A safety-sensitive proposal needs an electorate group; an electorate's members change only by migration (unreleased)
+## 31. A safety-sensitive proposal needs an electorate group, whose members are fixed at genesis (unreleased)
 
 **What changes.** Post-360 plan row P2 (`docs/design/consensus-electorate.md` §8). With `consensus_require_electorate`
 (env `GOSSIP_CONSENSUS_REQUIRE_ELECTORATE`; required by `profile = "secure-single-domain"` **rev 4**, guarantee
 `cons.safety_profile`), a lock, a leader election, a consistent write, a capability-authz policy, a commitment award or
 any proposal flagged `safety_sensitive` is refused `ElectorateNotGoverned` unless an **electorate group** decides it.
-An electorate is a genesis decided by every member it names, and is **frozen**: declaring a changed roster is
-`MembershipFrozen`. Changing who decides is a migration, **successor first**: `declare_successor_electorate(new,
-&[old])`, then `retire_electorate(old, new)`. The successor decides nothing until each named predecessor has retired to
-it, and then carries their decisions. The fleet's exclusive default is declared once (a second is refused while one
-holds it) and moves only by retirement.
+An electorate is a genesis decided by every member it names, and its membership is **fixed at genesis**: declaring a
+changed roster is `MembershipFrozen`, and **changing an electorate's members is not built in this release** (a
+migration is the follow-up). The fleet's exclusive default is set once, at genesis (a second is refused by name), and
+cannot move in this release.
 
 **Will the compiler tell me?** Partly. `ConsensusResult` (`#[non_exhaustive]`), `CommitError` and
 `ConsistencyError` gain `ElectorateNotGoverned`, `ElectorateStale` and `ElectorateMismatch` — a `_` arm must fail
@@ -606,8 +605,8 @@ closed. `ConsensusConfig` and `GossipConfig` gained fields (an exhaustive litera
 
 **Migration.** Under the secure profile: set `consensus_require_electorate = true` (rev 4 refuses `start()`
 otherwise), declare the electorate groups from their rosters (`POST /gateway/govern/electorate`), and mark one
-`exclusive_default` for the cluster-scoped verbs — only once every node runs this release. A `lock/`, `consistent/`,
+`exclusive_default` for the cluster-scoped verbs — once, only once every node runs this release. **Size each
+electorate for the failures it must survive for its whole life**: a dead member lowers its fault tolerance, and a lost
+majority stops it — including, for the default group, the cluster-scoped exclusive verbs. A `lock/`, `consistent/`,
 `capauthz/` or commitment-award slot proposed on any group but the fleet's default is refused, as is `leader/{g}` on
-any group but `g`. To move an electorate's members, migrate (guide 04, *Changing the members is a migration*), with a
-majority of the old electorate reachable until the successor has decided what it needs.
-
+any group but `g`.

@@ -69,10 +69,9 @@ this page is the index + the gate.
   `cons.safety_profile` is `consensus_require_electorate = true` — a lock, a leader election or a consistent
   write is then refused (`electorate_not_governed`) unless an **electorate group** decides it: declare each
   with `POST /gateway/govern/electorate` (`govern:write`, every member running the consensus listener), mark the one
-  the cluster-scoped locks use `"exclusive_default": true` — only once every node runs P2 — and change an electorate's
-  members only by migration, successor first (declare the successor, `{"group", "predecessors": [...]}`, then retire
-  the old group into it, `{"group", "retire_to"}`), with a
-  majority of the old electorate reachable until the successor has decided what it needs →
+  the cluster-scoped locks use `"exclusive_default": true` — once, only once every node runs P2. **An electorate's
+  members are fixed at genesis and the default cannot move in this release**: size each electorate for the failures
+  it must survive for its whole life (a lost majority stops it) →
   [guide 04 § Discovery is not an electorate](../guide/04-consensus.md). **What it does not cover, by
   construction:** the external prerequisites — network confinement, clock sync —
   which the report lists as `not_verifiable_here` and this checklist owns; and the at-rest cipher and

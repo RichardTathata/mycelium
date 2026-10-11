@@ -190,38 +190,22 @@ only from the members; the quorum is at least a strict majority, whatever `quoru
 and every member answers only a proposal naming its own electorate (`ElectorateStale` otherwise).
 Declaring a changed roster decides nothing: `MembershipFrozen` (`409 membership_frozen`).
 
-**Changing the members is a migration — successor first.** Declare the successor, naming the group(s)
-it succeeds, then retire each into it:
+**Changing an electorate's members is not built in this release** (the maintainer's decision,
+2026-10-11; a migration — retire the group into a successor that carries its decisions — is the
+follow-up, branch `fix/p2-migration`). Membership is fixed at genesis. What that means:
 
-```rust
-// 1. Form the successor's roster (POST /gateway/govern/group on each new member), then, on one of them:
-let g = agent.declare_successor_electorate("ledger-council-2", &["ledger-council"]).await?;
-//    POST /gateway/govern/electorate {"group":"ledger-council-2","predecessors":["ledger-council"]}
-assert!(g.predecessors.contains("ledger-council"));   // it decides nothing until ledger-council retires to it
-
-// 2. On a member of the old group — a decision of a strict majority of its members:
-agent.retire_electorate("ledger-council", "ledger-council-2").await?;
-//    POST /gateway/govern/electorate {"group":"ledger-council","retire_to":"ledger-council-2"}
-```
-
-The successor **decides nothing** — no slot, at any proposer or acceptor — until every group it names
-has retired to it and that retirement is visible there (`ElectorateMismatch`, "waiting for its
-predecessor …"). A retirement is accepted only into a successor whose genesis is visible and names the
-retiree: not visible yet, `retire_electorate` retries; visible and not naming it, `Refused`. Every
-member closes the old group when it promises the retirement, so once it is decided the old group
-decides nothing again. The successor **carries lazily**: its first proposal for each slot also reads
-what a strict majority of every predecessor holds and adopts the highest acceptance — so a lock held,
-or a value chosen and never committed, in the old group is still the answer in the new one
-([decision record §8.3](../design/consensus-electorate.md#83-membership-change-is-migration-predecessor-first--and-why-it-is-safe)).
-Naming two or more predecessors is a **merge**; it carries from all of them. When the old group holds
-the fleet's exclusive default, the successor holds it from the retirement on, whatever its own flag —
-the default is declared once and moves only by retirement. **What it needs:** a reachable strict
-majority of each predecessor — to retire it, and for the successor's first touch of each slot. Losing
-a majority of an electorate is unrecoverable, here and in any consensus protocol. **Escapes:** a
-successor waiting on a predecessor that will never retire can still retire itself — declare another
-successor naming it and retire it there; a retirement promised by a majority whose proposer died is
-completed by `retire_electorate` from any member; two defaults (declared within gossip lag) are merged
-into one successor naming both.
+- **A dead member lowers the group's fault tolerance.** A group of `n` tolerates `⌊(n − 1)/2⌋` members
+  down, and a dead member uses one for good. Size the electorate for the failures it must survive for
+  its whole life — three members tolerate one, five tolerate two.
+- **A lost majority stops the group.** It decides nothing again; nothing in this release recovers it.
+- **What you can do:** keep members alive (a member is its `NodeId` — replace hardware under the same
+  identity); size with margin from the start; and for work that can move, declare a **new** electorate
+  group with the members you want and move the work there yourself. The new group starts empty: a lock
+  held, or a value decided, in the old group is not carried.
+- **The fleet's exclusive default is set once, at genesis, and cannot move.** A second
+  `exclusive_default` genesis is refused by name while one is held. If the default group must change,
+  nothing is supported in this release — the cluster-scoped exclusive verbs stay with it, and stop if
+  it stops.
 
 **Requiring it.** Set `consensus_require_electorate = true` (env `GOSSIP_CONSENSUS_REQUIRE_ELECTORATE`;
 the `secure-single-domain` profile requires it, rev 4). A **safety-sensitive** proposal — flagged
@@ -229,8 +213,8 @@ the `secure-single-domain` profile requires it, rev 4). A **safety-sensitive** p
 `distributed_lock`, `LockService`, `elect_leader`, `consistent_set` and their gateway routes use — is
 then refused `ElectorateNotGoverned` (gateway `403 electorate_not_governed`) unless its scope is an
 electorate group. The cluster-scoped exclusive verbs (locks, `consistent_set`, the log claim,
-`mycelium-commitment`'s award, `set_capability_authz_via_consensus`) decide in the live default — the
-group that declared `exclusive_default`, or the successor it retired to: a fleet record, so every node agrees; `consensus_electorate` may only restate
+`mycelium-commitment`'s award, `set_capability_authz_via_consensus`) decide in the group that declared
+`exclusive_default` — a fleet record, so every node agrees; `consensus_electorate` may only restate
 it, and a node whose setting disagrees refuses them by name. Those slots have one home: a `lock/`,
 `consistent/`, `capauthz/`, commitment-award or log-claim slot proposed on any other group — and a
 `leader/{g}` slot on any group but `g` — is refused `ElectorateMismatch`. The proposer must be a member, so a lock

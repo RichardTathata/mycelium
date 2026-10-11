@@ -108,18 +108,12 @@ attempts — one that cannot complete is superseded by one keeping a strict majo
 (`ConsensusEngine::electorate_view`). The proposer's door (`electorate_door`) refuses a roster that differs from the
 member set by identity (`ElectorateMismatch`, roster tripwire), counts promises and votes only from the members, and
 holds the quorum at a strict majority; every Prepare/Propose names the epoch and digest (`PrepareIn`/`ProposeIn`), and
-an acceptor (`electorate_admits`) answers only its own — refusing `StaleElectorate` otherwise. Every claim, adoption
-and carry report on the group passes one `compute` on its gate key (`claim_gated`, `FenceState`), which only decides;
-the claim runs after it. **Membership change is migration, successor first** (round 5): the successor is declared
-first, naming its predecessors (a set — a merge), and decides nothing — door and acceptor, fail closed
-(`successor_ready`) — until each has retired to it; a retirement (`electorate/{group}/retire`, a majority's decision)
-is accepted only into a successor that names the retiree (`successor_names`), and **closes** the group at its promise —
-the close waits for ordinary claims in flight, and keeps only what is durable, so a refused claim leaves the group
-open; the default is declared once and follows retirements (`live_default`, `holds_default`); the successor's phase 1
-for each slot also reads a majority of every retired predecessor (`CarryPrepare`/`CarryReport` — a member closes the group and persists the retirement before it reports)
-and adopts the highest acceptance, until it has decided the slot. So single-decree safety per slot holds across a
-migration, a chosen-never-committed value included, with no bound on slots (decision record §8.3); migrating needs a
-reachable majority of the retired group. The governor
+an acceptor (`electorate_admits`) answers only its own — refusing `StaleElectorate` otherwise. Every genesis claim and
+adoption passes one `compute` on the group's gate key (`claim_gated`, `FenceState`), which only decides; the claim runs
+after it, and a refused claim raises nothing. **Membership is fixed at genesis, and changing it is not built in 2.32.0**
+(the maintainer's decision, 2026-10-11; the migration is the follow-up, branch `fix/p2-migration`): a dead member lowers
+the group's fault tolerance, a lost majority stops it. The fleet's default is set once, at genesis (a second refused by
+name, door and acceptor — `electorate::live_default`), and cannot move. The governor
 and the emergent watcher leave an electorate group alone. An embedded `grp/` write is refused at the next proposal,
 not prevented. Live reconfiguration (versioned electorates with joint consensus) is a later plan.
 
