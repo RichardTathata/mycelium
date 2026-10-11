@@ -112,7 +112,22 @@ an acceptor (`electorate_admits`) answers only its own — refusing `StaleElecto
 adoption passes one `compute` on the group's gate key (`claim_gated`, `FenceState`), which only decides; the claim runs
 after it, and a refused claim raises nothing. **Membership is fixed at genesis, and changing it is not built in 2.32.0**
 (the maintainer's decision, 2026-10-11; the migration is the follow-up, branch `fix/p2-migration`): a dead member lowers
-the group's fault tolerance, a lost majority stops it. The fleet's default is set once, at genesis (a second refused by
+the group's fault tolerance, a lost majority stops it, and a lost majority's repair (an operator-forced genesis from
+the survivors' durable records) is not built. **A member comes back with its state or not at all** (2026-10-11,
+correcting "replace hardware under the same identity"): its acceptor memory (`AcceptorSlot` per slot — promised
+ballot, proposer, acceptance) is written as `sys/consensus-accepted/{node}/{slot}` (`accepted_key`) by
+`persist_acceptor` with a forced fsync before a promise or vote leaves since 2.32.0 (the guards before the promise
+and the vote in `src/consensus.rs`; under `[persistence]` only — without it `persist_sync` answers "no promise was
+made" and the node votes with nothing on disk, so an electorate member must configure it), and restored **once, at
+start**, by `prewarm_accepted` (`src/agent/lifecycle.rs`, after the WAL replay and before any listener answers) from
+`{base_path}/{node_id}/kv/`; nothing refuses a start that finds no records. Anti-entropy does not close it: the
+record is gossiped and a peer's copy of this node's own record is applied to a fresh store as a repair
+(`mycelium-core/src/connection.rs`, `anti_entropy_repair_after_a_restart_is_not_a_namespace_violation`), but it
+reaches the files, not the running acceptor, until the next restart — and the node's first own write overwrites it
+by LWW. So a node started under its `NodeId` over an empty or older directory can re-promise below what it promised and
+forget what it accepted — two decided values. The operator rule: restore with the **latest** directory, or retire
+onto the removal ledger (`sys/membership/removed/`, enforced by `NodeId` at the connection, monotonic — so removing
+first forecloses the restore). The fleet's default is set once, at genesis (a second refused by
 name, door and acceptor — `electorate::live_default`), and cannot move. The governor
 and the emergent watcher leave an electorate group alone. An embedded `grp/` write is refused at the next proposal,
 not prevented. Live reconfiguration (versioned electorates with joint consensus) is a later plan.

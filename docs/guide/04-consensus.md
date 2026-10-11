@@ -198,10 +198,45 @@ follow-up, branch `fix/p2-migration`). Membership is fixed at genesis. What that
   down, and a dead member uses one for good. Size the electorate for the failures it must survive for
   its whole life — three members tolerate one, five tolerate two.
 - **A lost majority stops the group.** It decides nothing again; nothing in this release recovers it.
-- **What you can do:** keep members alive (a member is its `NodeId` — replace hardware under the same
-  identity); size with margin from the start; and for work that can move, declare a **new** electorate
-  group with the members you want and move the work there yourself. The new group starts empty: a lock
-  held, or a value decided, in the old group is not carried.
+  Repairing it is a disaster-recovery procedure — the survivors' durable acceptor records read off their
+  disks, a genesis forced by an operator, and every decision only the lost members had accepted stated
+  as possibly lost — which ordinary consensus cannot authorise for itself and which is **not built**
+  ([what-is-proven.md](../operations/what-is-proven.md), the third table).
+- **What you can do:** size with margin from the start; and for work that can move, declare a **new**
+  electorate group with the members you want and move the work there yourself. The new group starts
+  empty: a lock held, or a value decided, in the old group is not carried.
+- **A member that goes down comes back one of two ways — restored with its state, or retired. Never
+  reissue its identity over an empty store.** A member is its `NodeId`, and its acceptor memory — the
+  ballot it promised, to whom (since 2.30.0), and the value it accepted, per slot — is on its own disk
+  (`sys/consensus-accepted/{node}/{slot}`, in the WAL under `{persistence.base_path}/{node_id}/kv/`,
+  fsynced before the promise or vote leaves since 2.32.0) and is read back once at start, by
+  `prewarm_accepted`. **An electorate member must configure `[persistence]`:** without it nothing is on
+  disk and the node still answers (`persist_sync` reports "no promise was made"), so the hazard below
+  recurs on *every* restart, not only a reissue.
+  Nothing checks that the store it reads is the one the member had: a node started under the old
+  `NodeId` with an **empty or older** store starts with an empty or older memory, and can promise a
+  ballot it had already promised past, or report no acceptance where it had accepted — a quorum that
+  counts it can decide a **second value** for the slot, the one thing the protocol must never do.
+  - **Restore:** the same `NodeId`, the same certificate (or one reissued off-node — `mycelium tls
+    issue`), **and its persistence directory at its latest state** — `{persistence.base_path}/{node_id}/kv/`
+    (`snapshot.bin` + `wal.bin`), copied quiesced
+    ([deployment.md § Backup & restore](../operations/deployment.md#backup--restore)). Safe; nothing to
+    migrate. An **older copy is the empty-store hazard with a shorter reach** — every promise and vote
+    after the copy is forgotten. Anti-entropy does not close it: the record is gossiped, and a peer's
+    copy of this node's own record does reach a fresh **store** — but the acceptor's memory is loaded
+    once, at start, so the copy is not in the running acceptor until the next restart, and the node's
+    first own answer overwrites it by LWW.
+  - **Retire:** the directory is gone, or you cannot show it is the latest — put the `NodeId` on the
+    removal ledger (`sys/membership/removed/`,
+    [cert-rotation.md § Removing a member](../operations/cert-rotation.md)) and count the group one
+    member smaller for good — and **leave its `grp/` entry alone**: the proposer's door compares the
+    live group roster to the electorate's member set and refuses every proposal on a group whose roster
+    has moved (`ElectorateMismatch`), so tidying the dead member out of the group stops the group.
+    Migrating the group into a successor is the follow-up; until it ships, the
+    options are the two above: size for the whole life, or declare a new group and move the work.
+  - **Removal is permanent and fleet-wide.** A removed `NodeId` is dropped at every connection whatever
+    certificate it presents, and there is no un-removal — so **removing first forecloses the restore**.
+    Decide which it is before you sign.
 - **The fleet's exclusive default is set once, at genesis, and cannot move.** A second
   `exclusive_default` genesis is refused by name while one is held. If the default group must change,
   nothing is supported in this release — the cluster-scoped exclusive verbs stay with it, and stop if
