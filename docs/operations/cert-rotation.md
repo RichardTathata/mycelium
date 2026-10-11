@@ -93,10 +93,41 @@ verifies against the new key; a partner that cached the previous document within
 still verifies it against the key it was signed with (`SignedFacts::verify`), and the domain board's
 fields verify with `verify_any` against the known-key history. Nothing needs re-publishing.
 
+### A member that goes down: restore it with its state, or retire it — never reissue it empty
+
+A node's identity is its `NodeId`, and `mycelium tls issue` can reissue its certificate off-node — but for
+a member of a **consensus electorate group** (guide [04 § Discovery is not an
+electorate](../guide/04-consensus.md#discovery-is-not-an-electorate)) the identity is not the whole
+member. Since 2.30.0 its acceptor memory — the ballot it promised, to whom, and the value it accepted,
+per slot — is on its own disk (`sys/consensus-accepted/{node}/{slot}`, fsynced before a promise or vote
+leaves) and is read back once at start by `prewarm_accepted`. Nothing checks the store is the one the
+member had: started under the old `NodeId` over an **empty or older** store, it answers as a fresh
+acceptor — it can promise a ballot it had already promised past, or report no acceptance where it had
+accepted — and a quorum that counts it can decide a **second value** for the slot. Decide, before
+touching the identity:
+
+- **Restore** — same `NodeId`, same certificate or one reissued off-node, **and** its persistence
+  directory `{persistence.base_path}/{node_id}/kv/` (`snapshot.bin` + `wal.bin`) at its **latest** state,
+  copied quiesced ([deployment.md § Backup & restore](deployment.md#backup--restore)). Safe; nothing to
+  migrate. An older copy is the empty-store hazard with a shorter reach — every promise and vote after
+  the copy is forgotten — and anti-entropy does not repair it: the memory is read from the local store,
+  never from a peer.
+- **Retire** — the directory is gone, or you cannot show it is the latest: do **not** reissue the
+  identity. Remove the member (below) and count the group one member smaller for good; migrating the
+  group into a successor is the follow-up (until then: size for the whole life, or declare a new group
+  and move the work).
+- **Removal forecloses restore.** The ledger is monotonic — there is no un-removal — and a removed
+  `NodeId` is dropped at every connection whatever certificate it presents, so a restore after a removal
+  is a *new* member under a new identity, and the group has still lost one. Sign the removal only once
+  you know the state is gone.
+- **A lost majority** is not repaired by any of this: a disaster-recovery genesis forced from the
+  survivors' durable records is not built ([what-is-proven.md](what-is-proven.md), the third table).
+
 ### Removing a member (an operator's authority, C5)
 
 Self-revocation is a node's act; **removal** is an operator's, and it names *every* key the member
-ever held so the removed node cannot come back under an older one.
+ever held so the removed node cannot come back under an older one. For an electorate member, read the
+section above first: removal is permanent, and it forecloses a restore.
 
 1. **Before you need it:** every node attaches the operator authorities it will honour —
    `agent.with_membership_authorities(authorities, external)` (`src/agent/membership_ops.rs`) —

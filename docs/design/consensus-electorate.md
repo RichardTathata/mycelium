@@ -287,12 +287,42 @@ gossip lag and the second still in review; the work is preserved on branch `fix/
   `⌊(n − 1)/2⌋` members down; a dead member uses one of those for good. Size an electorate for the failures it must
   survive *for its lifetime*: three members tolerate one, five tolerate two.
 - **A lost majority stops the group.** It decides nothing again — as in any consensus protocol, a minority cannot know
-  what the majority decided. Nothing in this release recovers it.
-- **The options, then:** keep the members alive (replace hardware under the same node identity: a member is its
-  `NodeId`); size the group with the margin it needs from the start; and for work that can move, declare a **new**
-  electorate group with the members you want and move the work there yourself — new slots, decided by the new group.
-  Its slots start empty: nothing decided in the old group is carried, so an exclusive slot (a lock held, a value
-  chosen) is not continued in the new group. That is the follow-up's work.
+  what the majority decided. Nothing in this release recovers it, and nothing in consensus can: its repair is a
+  **disaster-recovery procedure** — an operator reads the survivors' durable acceptor records off their persistence
+  directories, forces a genesis from them, and states every decision only the lost members had accepted as possibly
+  lost. That procedure is **not built** (`docs/operations/what-is-proven.md`, the third table).
+- **The options, then:** size the group with the margin it needs from the start; and for work that can move, declare
+  a **new** electorate group with the members you want and move the work there yourself — new slots, decided by the
+  new group. Its slots start empty: nothing decided in the old group is carried, so an exclusive slot (a lock held, a
+  value chosen) is not continued in the new group. That is the follow-up's work.
+- **A member that goes down is restored with its state or retired — never reissued over an empty store.** An earlier
+  version of this bullet said *replace hardware under the same node identity*; that is unsafe as stated. A member is
+  its `NodeId` (a socket address, `mycelium-core/src/node_id.rs:20-22`), and `mycelium tls issue` can reissue its
+  certificate off-node, but since 2.30.0 the member's acceptor memory is **durable and node-local**: each slot's
+  promised ballot, the proposer it was promised to and the accepted value (`AcceptorSlot`) are written as
+  `sys/consensus-accepted/{node}/{slot}` (`accepted_key`, `src/consensus.rs:3552`) by `persist_acceptor`
+  (`src/consensus.rs:1331-1357`), handed to the WAL with a forced `fdatasync` before the promise or vote leaves
+  (`answer_prepare`, `src/consensus.rs:4121-4128`), and restored at the next start by `prewarm_accepted`
+  (`src/consensus.rs:3725-3743`) from the local store after the snapshot and WAL replay
+  (`src/agent/lifecycle.rs:215-217`, `:274`, `:349-354` — the directory is `{base_path}/{node_id}/kv/`,
+  `PersistenceConfig::base_path`, `mycelium-core/src/config.rs:394-397`). **There is no empty-acceptor guard:**
+  `prewarm_accepted` restores whatever it finds, the call site logs only when it found something, and the memory is
+  never fed from anti-entropy — so a node that takes the old `NodeId` with an empty store answers the next
+  `Prepare` as a fresh acceptor. It can promise a ballot below one it had already promised (so a slower proposer's
+  older ballot is granted after a newer one was), or report no acceptance where it had accepted a value (so a
+  proposer at a higher ballot is free to choose another) — and a quorum counting it decides a **second value** for the
+  slot. An older backup is the same hazard with a shorter reach: every promise and vote after the copy is forgotten.
+  Hence the fork, written into every operator page:
+  - **Restore** — same `NodeId`, same or off-node-reissued certificate, **and** `{base_path}/{node_id}/kv/`
+    (`snapshot.bin` + `wal.bin`) at its **latest** state, copied quiesced. Safe; no migration. (The record's
+    crash-survival is `an_acceptors_record_survives_a_crash_without_a_snapshot`.)
+  - **Retire** — the state is gone or not provably latest: never reissue the identity empty; sign a `MemberRemoval`
+    naming the `NodeId` and every key it held (`src/agent/membership_ops.rs:22-55`, published under
+    `sys/membership/removed/{node}`) and count the group one member smaller. Migrating the group is the follow-up.
+  - **Removal forecloses restore.** The ledger is monotonic — no un-removal (`src/membership.rs:20`); a removed key is
+    refused at the TLS handshake (`mycelium-core/src/tls.rs:570-579`) and a frame from a removed `NodeId` is dropped at
+    the connection whatever key it carries (`mycelium-core/src/connection.rs:392`, `:678`), so a certificate reissued
+    for the address does not readmit it. Decide restore or retire before signing.
 - **The fleet's exclusive default is set once, at genesis, and cannot move in this release.** A genesis declaring it is
   refused while any group holds it. If the default group must change — its majority is lost, or its members must be
   replaced — nothing is supported: the cluster-scoped exclusive verbs (locks, `consistent_set`, the commitment award,
@@ -361,7 +391,15 @@ attempt it holds; the argument above then needs every other adopter of `k` to re
   from a node with `consensus_require_electorate` off, is answered by every acceptor, so the slot can be decided both
   in the electorate and across the cluster. Use the pinned families for an exclusive outcome, or keep
   `consensus_require_electorate` on fleet-wide and propose through the exclusive verbs (`exclusive_propose`).
-- **Changing members** is not built (§8.3); a lost majority stops a group for good.
+- **Changing members** is not built (§8.3); a lost majority stops a group for good, and **its repair is not built
+  either** — a disaster-recovery genesis forced from the survivors' durable records, with the possibly-lost
+  decisions stated, is the follow-up's follow-up (`docs/operations/what-is-proven.md`, the third table).
+- **An acceptor restarted over an empty or older store is not detected.** The guarantee rests on each member's
+  durable acceptor record (§8.3): `prewarm_accepted` restores what it finds and `start()` does not refuse a known
+  electorate member whose store holds no records. A member reissued its `NodeId` over an empty directory, or
+  restored from an older backup, can promise below what it promised and forget what it accepted, and two values can
+  be decided. The rule is operational — restore with the latest directory, or retire onto the removal ledger — and a
+  start-time refusal (or warning) for an electorate member with no acceptor records would be the mechanical half.
 - **Without `[tls]` nothing is authenticated**, the certificates included.
 - **A forged commit record stops a proposer.** A `consensus/committed/electorate/…` entry written straight into the
   store is not adopted, but a proposer for that slot reads it as decided and ends `Superseded`, as for any slot — so a
@@ -382,7 +420,9 @@ the log claim, `mycelium-commitment`'s linearizable award, `set_capability_authz
 **default** electorate (`electorate::live_default`) — a fleet record — or across the cluster when no group declared one:
 
 - **Set once, at genesis.** A genesis may set `exclusive_default` only while no group holds the default — refused by
-  name otherwise, at the door and at every acceptor (round 5). It cannot move in this release (§8.3).
+  name otherwise, at the door and at every acceptor (round 5). It cannot move in this release (§8.3). Its members are
+  under §8.3's restore-or-retire rule like any electorate's, with the wider blast radius: a default member reissued
+  over an empty store endangers every cluster-scoped exclusive verb, not one group's slots.
 - **Fail closed.** While the default cannot be named here — two groups marked (§8.5), or a `consensus_electorate` that
   disagrees — every exclusive verb is refused by name, and every acceptor refuses a cluster-scoped proposal for an
   exclusive slot, tagged or not (round 5, D5). `consensus_electorate` may only restate the answer. An acceptor also

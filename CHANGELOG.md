@@ -9,6 +9,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Documentation: a lost electorate voter is restored with its state or retired — never reissued empty.**
+  2.32.0's pages said an electorate member could be replaced "under the same identity"; that is unsafe as
+  stated. Since 2.30.0 a member's promises and acceptances are durable on its own disk
+  (`sys/consensus-accepted/{node}/{slot}`, read once at start by `prewarm_accepted`), and nothing refuses a
+  start that finds none, so an acceptor reissued its `NodeId` over an empty or older store can promise below
+  what it promised and forget what it accepted — two decided values. The operator fork is now written on every
+  page an operator reads (guide 04, the design record §8.3/§8.5/§8.6, threat model §7, `what-is-proven.md`,
+  the FAQ, `cert-rotation.md`, `deployment.md`'s restore table, `production-readiness.md`,
+  `confined-fleet.md`, the wiki): **restore** — same `NodeId`, same or off-node-reissued certificate, and
+  `{persistence.base_path}/{node_id}/kv/` at its latest state; or **retire** — onto the removal ledger, which
+  forecloses the restore. A lost majority's repair (an operator-forced genesis from survivors' durable state)
+  is named as not built in `what-is-proven.md`'s third table. No code change.
+
 ## [2.32.0] — 2026-10-11
 
 **The 360 review's must-do list, and the post-360 hardening plan's first wave.** A gateway bound off loopback with no

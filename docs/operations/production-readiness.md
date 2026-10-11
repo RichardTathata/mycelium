@@ -146,7 +146,10 @@ this page is the index + the gate.
 - ☐ **You can remove a member** — an operator authority is configured
   (`with_membership_authorities`), the CA key is **off every node** (`ca_key_off_node` in the
   confinement report), and a signed `MemberRemoval` has been rehearsed: the removed keys are refused
-  at the TLS handshake and `sys/membership/removed/` carries the record. → [cert-rotation.md
+  at the TLS handshake and `sys/membership/removed/` carries the record. And you have decided the
+  rule for an electorate member that goes down: **restore it with its latest persistence directory,
+  or remove it — never reissue its identity over an empty or older store** (its promises and
+  acceptances live there; removal forecloses the restore). → [cert-rotation.md
   § Removing a member](cert-rotation.md), [confined-fleet.md](confined-fleet.md)
 
 ## 3 · Persistence & restart

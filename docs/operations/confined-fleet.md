@@ -103,7 +103,10 @@ holds the CA key can mint itself a new identity after it is removed, and its rep
 On every node, `agent.with_membership_authorities([membership_issuer], external)`, where `external` trusts your
 membership authority's key. To remove a member, sign a `MemberRemoval` naming the node and every identity key it has
 held, and offer it with `offer_member_removal` (to one node, or to each for speed); it spreads by gossip, and each
-node verifies it. A removal is permanent: the member comes back only under a new identity.
+node verifies it. A removal is permanent: the member comes back only under a new identity — so for a member
+of a consensus electorate group decide **restore or retire** first: a removed `NodeId` cannot be restored with
+its state, and a reissued one must never start over an empty or older persistence directory (its promises and
+acceptances live there; [cert-rotation.md § A member that goes down](cert-rotation.md)).
 
 Then read what the node itself can confirm:
 
