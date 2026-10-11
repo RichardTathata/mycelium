@@ -362,7 +362,7 @@ pub use agent::{
 };
 // Elastic group sizing (Track 2a).
 pub use agent::{MembershipAction, MembershipIntent, MEMBERSHIP_INTENT_TTL_MS, MEMBERSHIP_PREFIX};
-pub use agent::{electorate_records_refused, ElectorateDecl, ElectorateError, Predecessor, Retirement, Superseded, ELECTORATE_CERT_PREFIX, ELECTORATE_SLOT_PREFIX, SAFETY_SLOT_FAMILIES};
+pub use agent::{electorate_records_refused, electorate_retirements_undecided, ElectorateDecl, ElectorateError, Retirement, Superseded, ELECTORATE_CERT_PREFIX, ELECTORATE_SLOT_PREFIX, SAFETY_SLOT_FAMILIES};
 // Legible Emergence — fleet diagnostics as data (localize · explain · diagnose). `localize`
 // (`fleet_snapshot`) and `diagnose` (`fleet_diagnosis`) are node-local reads exposed here;
 // `explain` is intentionally gateway-only (`GET /gateway/explain`) — it is a cross-node `sys.explain`
@@ -415,7 +415,7 @@ pub use persistence::DataAtRestCipher;
 pub use persistence::OwnershipLock;
 pub use locality::LocalityPreference;
 #[cfg(feature = "consensus")]
-pub use consensus::{ConsensusConfig, ConsensusListenerHandle, ConsensusResult, GroupQuorum, consensus_kind, consensus_ns, electorate_roster_mismatches};
+pub use consensus::{ConsensusConfig, ConsensusListenerHandle, ConsensusResult, GroupQuorum, consensus_kind, consensus_ns, electorate_roster_mismatches, electorate_waiting_refusals};
 pub use mycelium_core::error::GossipError;
 // The contracts axis' receipt vocabulary (item 1 PR 2) — what an acknowledgement proves, by rung.
 pub use mycelium_core::receipt::{

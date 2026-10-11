@@ -526,7 +526,7 @@ leader, a single writer, anything a second holder would corrupt:
 | `quorum_size` | `0`, or a strict majority of the members | for an electorate group the engine raises a smaller quorum to a strict majority of its members |
 | `use_trust_slices` | optional | the electorate's member set is the vote filter; a declared slice only narrows it. Before P2 this row required identical `declare_trust` sets on every voter — node identities as the electorate's name |
 | `count_opaque_as_absent` | `false` (ignored for an electorate group) | a partition that reads as "everyone else is opaque" must not become a smaller quorum; on an electorate group the engine does not reduce the quorum for opacity |
-| membership | **frozen**; changed only by **migration** — retire the group to a successor (a decision of its majority, closing it at the retirement's promise), declare the successor (its genesis names the retirement) | the governor and the emergent watcher do not move an electorate group, and a changed roster is refused. The successor carries each slot from a majority of the retired group the first time it touches it, so safety per slot holds across the migration (decision record §8.3). Migrating needs a reachable majority of the retired group — a lost majority is unrecoverable |
+| membership | **frozen**; changed only by **migration, successor first** — declare the successor naming the group(s) it succeeds, then retire each into it (a decision of its majority, accepted only into a successor that names it, closing it at the retirement's promise) | the governor and the emergent watcher do not move an electorate group, and a changed roster is refused. The successor decides nothing until every predecessor's retirement to it is visible (fail closed), then carries each slot from a majority of every predecessor the first time it touches it, so safety per slot decided in the electorate holds across the migration (decision record §8.3). Migrating needs a reachable majority of each predecessor — a lost majority is unrecoverable |
 | the effect | fenced **at the resource** with the commit's token | winning is not the grant; exclusivity is enforced by refusing a stale token |
 
 Outside that profile — automatic sizing, slices off, opacity reduction on, voters joining and
@@ -545,11 +545,14 @@ discovery's. What the code enforces: an empty or below-floor roster is refused
 moves a governed group's membership only through `/gateway/govern/group` (`govern:write`, audited),
 and — since post-360 plan row **P2** — a node with `consensus_require_electorate` refuses a
 safety-sensitive proposal outside an **electorate group**, pinned by member identity and **frozen**
-(the maintainer's decision, 2026-10-11): its members change only by **migration** — a retirement
-decided by a majority of the group, closing it at the retirement's promise, then a successor whose
-genesis names the retirement and which carries each slot, the first time it touches it, from a
-majority of the retired group. So a chosen value survives the migration, committed or not, with no
-bound on the slots. What it does not: an embedded `join_group` or a `grp/` write still moves a
+(the maintainer's decision, 2026-10-11): its members change only by **migration, successor first**
+(round 5) — a successor declared naming the groups it succeeds, which decides nothing until each has
+retired to it; a retirement decided by a majority of the group, accepted only into a successor that
+names it, closing the group at the retirement's promise; then the successor carries each slot, the
+first time it touches it, from a majority of every predecessor. Gossip lag can delay that order,
+never skip a step of it. So a value chosen in the electorate survives the migration, committed or
+not, with no bound on the slots. The fleet's exclusive default is declared once and moves only by
+retirement; two declarations within gossip lag are refused by name once seen, and merged. What it does not: an embedded `join_group` or a `grp/` write still moves a
 group's roster by LWW — for an electorate group the next proposal refuses the mismatch rather than
 counting it (detection, not prevention). **A retired member answers a successor's carry read-only and
 only after closing the group** — it promises nothing and accepts nothing more for the retired group;

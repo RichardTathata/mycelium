@@ -475,6 +475,21 @@ pub fn electorate_roster_mismatches() -> u64 {
     ROSTER_MISMATCHES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+static WAITING_REFUSALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Proposals an acceptor refused because a migration is not visible to it yet: a successor whose predecessors'
+/// retirements have not arrived, or a retirement naming a successor that does not (yet) name the retiree (round 5).
+pub fn electorate_waiting_refusals() -> u64 {
+    WAITING_REFUSALS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn note_waiting(slot: &str, why: &str) {
+    WAITING_REFUSALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(feature = "metrics")]
+    metrics::counter!("mycelium_electorate_waiting_refusals_total").increment(1);
+    tracing::debug!(slot, why, "electorate: refusing a proposal while a migration is not visible here (fail closed)");
+}
+
 fn note_roster_mismatch(slot: &str, group: &str, epoch: u64) {
     ROSTER_MISMATCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     #[cfg(feature = "metrics")]
@@ -2204,11 +2219,6 @@ impl ConsensusEngine {
                 note_refused(&self.task_ctx, &slot, &digest, &format!("the record is not a well-formed genesis: {e}"));
                 continue;
             }
-            match self.predecessor_holds(group, &next) {
-                Ok(true) => {}
-                Ok(false) => continue, // the predecessor's retirement has not arrived here yet
-                Err(why) => { note_refused(&self.task_ctx, &slot, &digest, &why); continue; }
-            }
             // A certificate already refused is not verified again (round 2, finding 5): keyed by the record and the
             // certificate's own bytes, so a genuine certificate arriving later is still checked.
             let Some(cert) = self.get(&cert_key(group, epoch)) else { continue };
@@ -2232,22 +2242,9 @@ impl ConsensusEngine {
         cur
     }
 
-    /// Whether a genesis record names its predecessor correctly: when it names one, the predecessor's verified
-    /// retirement names this group, has this digest and passed the default this record carries. `Ok(false)` while
-    /// that retirement has not arrived (or verified) here yet; `Err` when it contradicts the record.
-    fn predecessor_holds(&self, group: &str, next: &ElectorateDecl) -> Result<bool, String> {
-        let Some(p) = &next.predecessor else { return Ok(true) };
-        let Some(r) = self.retirement_view(&p.group) else { return Ok(false) };
-        if r.successor != group || r.digest() != p.retirement || r.passes_default != next.exclusive_default {
-            return Err(format!("the genesis names {}'s retirement, which names {} (default passed: {})",
-                p.group, r.successor, r.passes_default));
-        }
-        Ok(true)
-    }
-
     /// `group`'s verified retirement: its committed record (`electorate/{group}/retire`) names this electorate's
-    /// epoch and a successor, passes the default exactly when the group held it, and its certificate — signed
-    /// votes of a strict majority of the electorate, at one ballot — verifies. Cached once verified.
+    /// epoch and a successor, and its certificate — signed votes of a strict majority of the electorate, at one
+    /// ballot — verifies. Cached once verified.
     pub(crate) fn retirement_view(&self, group: &str) -> Option<Arc<Retirement>> {
         use crate::agent::electorate::{already_refused, note_refused, refresh_records, retire_cert_key, retire_slot, valid_group};
         if let Some(r) = self.task_ctx.electorate_retired.pin().get(group) { return Some(Arc::clone(r)); }
@@ -2261,8 +2258,7 @@ impl ConsensusEngine {
             note_refused(&self.task_ctx, &slot, &digest, "the record does not decode as a retirement");
             return None;
         };
-        if r.group != group || r.epoch != d.epoch || !valid_group(&r.successor) || r.successor == group
-            || r.passes_default != d.exclusive_default {
+        if r.group != group || r.epoch != d.epoch || !valid_group(&r.successor) || r.successor == group {
             note_refused(&self.task_ctx, &slot, &digest, "the retirement does not match the electorate it retires");
             return None;
         }
@@ -2278,29 +2274,53 @@ impl ConsensusEngine {
         Some(r)
     }
 
-    /// The verified retirement that names `group` its successor, if any (the first by group name, should two).
-    pub(crate) fn predecessor_of(&self, group: &str) -> Option<Arc<Retirement>> {
-        crate::agent::electorate::refresh_records(&self.task_ctx);
-        let mut retired: Vec<Arc<str>> = self.task_ctx.electorate_retire_known.pin().iter().cloned().collect();
-        retired.sort();
-        retired.iter().filter_map(|g| self.retirement_view(g)).find(|r| r.successor == group)
+    /// **Whether the successor `d` may decide** (P2 round 5, *predecessor-first*): every predecessor it names has a
+    /// verified retirement to it, visible here. `Err` names the first one this node is still waiting for. Fail
+    /// closed: until then `d` decides nothing, at the proposer's door and at every acceptor.
+    pub(crate) fn successor_ready(&self, d: &ElectorateDecl) -> Result<(), String> {
+        for p in &d.predecessors {
+            match self.retirement_view(p) {
+                Some(r) if r.successor == d.group => {}
+                Some(r) => return Err(format!("{} names {p} as a predecessor, but {p} retired to {}", d.group, r.successor)),
+                None => return Err(format!("{} is waiting for its predecessor {p}'s retirement to it (not visible here yet)", d.group)),
+            }
+        }
+        Ok(())
     }
 
-    /// The retired electorates `d` succeeds, nearest first, each verified with the retirement `d`'s chain names.
-    /// `Err` when one is not known here — a successor that cannot read its predecessor cannot carry from it.
+    /// Whether a retirement `r` names a successor declared here that names `r.group` among its predecessors (round 5,
+    /// *predecessor-first*). `Err` says which is missing.
+    fn successor_names(&self, r: &Retirement) -> Result<(), String> {
+        match self.electorate_view(&r.successor) {
+            None => Err(format!("successor {} has no electorate visible here yet — it is declared first, naming {}",
+                r.successor, r.group)),
+            Some(s) if !s.predecessors.contains(&r.group) => Err(format!("successor {} does not name {} among its predecessors",
+                r.successor, r.group)),
+            Some(_) => Ok(()),
+        }
+    }
+
+    /// The retired electorates `d` carries from (round 5): every predecessor `d` names — each retired to `d`, which
+    /// [`successor_ready`](Self::successor_ready) checked — and, transitively, each of their predecessors that retired
+    /// to them. A predecessor's own predecessor that never retired to it is not in the chain: that predecessor never
+    /// decided anything (it waited for it), and the group that did not retire is still deciding on its own.
+    /// `Err` when one of `d`'s predecessors is not known here.
     fn predecessor_chain(&self, d: &ElectorateDecl) -> Result<Vec<Arc<ElectorateDecl>>, String> {
-        let mut chain = Vec::new();
-        let mut at = d.predecessor.clone();
-        while let Some(p) = at {
+        let mut chain: Vec<Arc<ElectorateDecl>> = Vec::new();
+        let mut frontier: Vec<(String, String, bool)> = d.predecessors.iter().map(|p| (p.clone(), d.group.clone(), true)).collect();
+        while let Some((p, child, required)) = frontier.pop() {
             if chain.len() >= crate::agent::electorate::CHAIN_LIMIT {
                 return Err(format!("{}'s predecessor chain is longer than {}", d.group, crate::agent::electorate::CHAIN_LIMIT));
             }
-            let pred = self.electorate_view(&p.group)
-                .ok_or_else(|| format!("{} succeeds {}, whose electorate is not known here yet", d.group, p.group))?;
-            if self.retirement_view(&p.group).is_none_or(|r| r.digest() != p.retirement) {
-                return Err(format!("{}'s retirement is not known here yet", p.group));
+            if chain.iter().any(|c| c.group == p) { continue; }
+            let retired_here = self.retirement_view(&p).is_some_and(|r| r.successor == child);
+            if !retired_here {
+                if required { return Err(format!("{child} is waiting for its predecessor {p}'s retirement to it")); }
+                continue;
             }
-            at = pred.predecessor.clone();
+            let pred = self.electorate_view(&p)
+                .ok_or_else(|| format!("{child} succeeds {p}, whose electorate is not known here yet"))?;
+            frontier.extend(pred.predecessors.iter().map(|q| (q.clone(), p.clone(), false)));
             chain.push(pred);
         }
         Ok(chain)
@@ -2494,7 +2514,7 @@ impl ConsensusEngine {
     /// Records that `group` decided `slot`, when `group` succeeds a retired one (see [`carried`](Self::carried)).
     fn note_decided_in(&self, group: &str, slot: &str) {
         if crate::agent::electorate::slot_names_group(slot).is_some() { return; }
-        if crate::agent::electorate::cached(&self.task_ctx, group).is_some_and(|d| d.predecessor.is_some()) {
+        if crate::agent::electorate::cached(&self.task_ctx, group).is_some_and(|d| !d.predecessors.is_empty()) {
             self.task_ctx.electorate_carried.pin().insert(Arc::from(format!("{group}\u{0}{slot}").as_str()));
         }
     }
@@ -2561,6 +2581,14 @@ impl ConsensusEngine {
                     };
                     check_genesis(group, &next).map_err(|e| DoorRefusal::mismatch(Some(group), &e.to_string()))?;
                     if !next.contains(me) { return Err(DoorRefusal::NotAMember(Arc::clone(group))); }
+                    if next.exclusive_default {
+                        match crate::agent::electorate::live_default(&self.task_ctx) {
+                            Ok(None) => {}
+                            Ok(Some(g)) => return Err(DoorRefusal::mismatch(Some(group), &format!(
+                                "{g} already holds the fleet's exclusive default; the default moves only by retirement"))),
+                            Err(e) => return Err(DoorRefusal::mismatch(Some(group), &e)),
+                        }
+                    }
                     return Ok(Some(ElectorateTag {
                         epoch: 0, digest: [0; 32], quorum: next.members.len(),
                         voters: next.members.iter().map(NodeId::id_hash).collect(),
@@ -2574,9 +2602,12 @@ impl ConsensusEngine {
                     if let Some(r) = self.retirement_view(group) {
                         return Err(DoorRefusal::mismatch(Some(group), &format!("{group} is already retired to {}", r.successor)));
                     }
-                    let fits = Retirement::decode(value).is_some_and(|r| r.group == **group && r.epoch == d.epoch
-                        && valid_group(&r.successor) && r.successor != **group && r.passes_default == d.exclusive_default);
-                    if !fits { return Err(DoorRefusal::mismatch(Some(group), "a retirement's value does not retire this electorate")); }
+                    let Some(r) = Retirement::decode(value).filter(|r| r.group == **group && r.epoch == d.epoch
+                        && valid_group(&r.successor) && r.successor != **group) else {
+                        return Err(DoorRefusal::mismatch(Some(group), "a retirement's value does not retire this electorate"));
+                    };
+                    // Predecessor-first (round 5): the successor is declared, naming this group, before it retires.
+                    if let Err(why) = self.successor_names(&r) { return Err(DoorRefusal::mismatch(Some(group), &why)); }
                     // No roster check: the roster moving away from a frozen electorate is what a retirement is for.
                     return Ok(Some(ElectorateTag::of(&d, GateKind::Retire)));
                 }
@@ -2592,8 +2623,10 @@ impl ConsensusEngine {
                                 "the group roster differs from its electorate — membership is frozen; a member joined or \
                                  left without a migration"));
                         }
+                        // A successor decides nothing until every predecessor has retired to it (round 5).
+                        if let Err(why) = self.successor_ready(&d) { return Err(DoorRefusal::mismatch(Some(group), &why)); }
                         let mut tag = ElectorateTag::of(&d, GateKind::Ordinary);
-                        if d.predecessor.is_some() && slot_names_group(slot).is_none() && !self.carried(group, slot) {
+                        if !d.predecessors.is_empty() && slot_names_group(slot).is_none() && !self.carried(group, slot) {
                             tag.predecessors = self.predecessor_chain(&d).map_err(|why| DoorRefusal::mismatch(Some(group), &why))?;
                         }
                         Ok(Some(tag))
@@ -2708,9 +2741,10 @@ impl ConsensusEngine {
                 // is not answered: a lagging or pre-P2 proposer cannot decide one across the cluster.
                 let exclusive = crate::agent::electorate::SAFETY_SLOT_FAMILIES.iter().any(|f| slot.starts_with(f))
                     || is_fleet_exclusive_slot(slot);
-                // While the fleet's exclusive electorate cannot be named here — a retired default whose successor has not
-                // formed, or two marked — such a slot has no home, and is refused too (fail closed, round 4).
-                if exclusive && named.is_none() {
+                // While the fleet's exclusive electorate cannot be named here — a retired default whose successor is not
+                // visible, or two live defaults — such a slot has no home, and is refused too (fail closed, round 4), a
+                // tagged message as much as an untagged one (round 5, D5).
+                if exclusive {
                     match crate::agent::electorate::exclusive_electorate(&self.task_ctx) {
                         Ok(Some(g)) => if let Some(d) = self.electorate_view(&g) { return Err((d.epoch, d.digest())); },
                         Err(_) => return Err((0, [0; 32])),
@@ -2746,25 +2780,30 @@ impl ConsensusEngine {
                 }
                 let gate = |kind| Some(Gate { group: Arc::clone(&group), epoch: d.epoch, kind });
                 if retiring {
-                    // The retirement's value must retire this electorate, to a successor that has none yet (so the
-                    // successor's genesis can name it).
+                    // The retirement's value must retire this electorate to a successor already declared, naming this
+                    // group among its predecessors (round 5, predecessor-first).
                     return match raw.map(|v| v.and_then(|v| Retirement::decode(&v))) {
                         None => Ok(gate(GateKind::Retire)),
                         Some(Some(r)) if r.group == *group && r.epoch == d.epoch && valid_group(&r.successor)
-                            && r.successor != *group && r.passes_default == d.exclusive_default
-                            && self.electorate_view(&r.successor).is_none() => Ok(gate(GateKind::Retire)),
+                            && r.successor != *group => match self.successor_names(&r) {
+                                Ok(()) => Ok(gate(GateKind::Retire)),
+                                Err(why) => { note_waiting(slot, &why); Err(own) }
+                            },
                         Some(_) => Err(own),
                     };
                 }
                 if self.closed(&group) { return Err((d.epoch + 1, own.1)); }
+                // A successor answers nothing until every predecessor's retirement to it is visible here (round 5).
+                if let Err(why) = self.successor_ready(&d) { note_waiting(slot, &why); return Err((d.epoch + 1, own.1)); }
                 Ok(gate(GateKind::Ordinary))
             }
         }
     }
 
     /// Whether this node's acceptor may accept `value` as genesis attempt `epoch` of `group` from `proposer`
-    /// (round 4): a well-formed genesis of that epoch naming both; the roster this node sees is its member set; it
-    /// names the retirement that names this group, if one does, and carries the default it passed; a genesis it
+    /// (rounds 4–5): a well-formed genesis of that epoch naming both; the roster this node sees is its member set; each
+    /// predecessor it names is an electorate here not retired elsewhere; it declares the default only while no group
+    /// holds it; a genesis it
     /// supersedes is the one this node accepted, when this node is among its members; and this node has accepted
     /// no other value for the attempt.
     fn genesis_acceptable(&self, group: &str, epoch: u64, value: &Bytes, as_proposed: &Bytes, proposer: &NodeId) -> bool {
@@ -2773,12 +2812,13 @@ impl ConsensusEngine {
         let Some(next) = ElectorateDecl::decode(value).filter(|d| d.epoch == epoch) else { return false };
         if check_genesis(group, &next).is_err() || !next.contains(me) || !next.contains(proposer) { return false; }
         if sorted_members(crate::agent::helpers::group_members_ctx(&self.task_ctx, group)) != next.members { return false; }
-        let named_right = match (self.predecessor_of(group), &next.predecessor) {
-            (Some(r), Some(p)) => p.group == r.group && p.retirement == r.digest() && next.exclusive_default == r.passes_default,
-            (None, None) => true,
-            _ => false,
-        };
-        if !named_right { return false; }
+        // Predecessor-first (round 5): each predecessor is an electorate here, not retired to another group.
+        if next.predecessors.iter().any(|p| self.electorate_view(p).is_none()
+            || self.retirement_view(p).is_some_and(|r| r.successor != group)) {
+            return false;
+        }
+        // One live default: a genesis may declare it only while no group holds it (round 5, D1/D2).
+        if next.exclusive_default && !matches!(crate::agent::electorate::live_default(&self.task_ctx), Ok(None)) { return false; }
         let held = |e: u64| self.task_ctx.consensus_accepted.pin().get(genesis_slot(group, e).as_str())
             .and_then(|s| s.accepted.as_ref().map(|(_, a)| a.clone()));
         // A member the superseded genesis names must hold exactly it: its record (by digest), or — after a restart,
@@ -4950,6 +4990,9 @@ pub(crate) async fn run_consensus_listener(
                 let upd = ctx.kv_set_returning(key, record);
                 ctx.wal_try(&upd);
                 let _ = ctx.record_decided(&slot, ballot).await;
+                // A successor decided this slot: it stops carrying it from its predecessors (P2 round 4; the
+                // learner's half, which the round-4 port missed — round 5, D4).
+                if let SignalScope::Group(g) = &sig.scope { ctx.note_decided_in(g, &slot); }
             }
         }
     }

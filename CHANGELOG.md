@@ -87,24 +87,33 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   electorate never changes: `GossipAgent::declare_electorate(group, exclusive_default)` /
   `POST /gateway/govern/electorate` (`govern:write`, audited only when something is decided) decides a genesis, and on a
   group with an electorate returns it unchanged or refuses `ElectorateError::MembershipFrozen` (`409
-  membership_frozen`). **Membership change is a migration:** `GossipAgent::retire_electorate(group, successor)` /
-  the same route with `{"group", "retire_to"}` retires the group — a decision of a strict majority of its members on
-  `electorate/{group}/retire` (`mycelium::Retirement`), passing the fleet's exclusive default to the successor when the
-  group held it; every member **closes** the group at the retirement's promise, so once it is chosen the group decides
-  nothing again (`409 retired`). The successor's genesis names the retirement (`ElectorateDecl::predecessor`), and the
-  successor **carries lazily**: its phase 1 for a slot also reads a strict majority of every retired predecessor
+  membership_frozen`). **Membership change is a migration, successor first** (round 5 of the review: the round-4
+  order, retire then declare, let gossip lag skip the carry): `GossipAgent::declare_successor_electorate(group,
+  predecessors)` / `{"group", "predecessors": [...]}` declares the successor naming the groups it succeeds
+  (`ElectorateDecl::predecessors`, a set — two or more is a merge); it **decides nothing**, at the door or any acceptor,
+  until each has retired to it and the retirement is visible there (fail closed; counted
+  `mycelium::electorate_waiting_refusals`). `GossipAgent::retire_electorate(group, successor)` / `{"group",
+  "retire_to"}` retires a group — a decision of a strict majority of its members on `electorate/{group}/retire`
+  (`mycelium::Retirement`), accepted only into a successor whose genesis is visible and names it; every member
+  **closes** the group at the retirement's promise, so once it is chosen the group decides nothing again (`409
+  retired`); an attempt that ends undecided after members promised it is counted
+  (`mycelium::electorate_retirements_undecided`) and audited at the gateway. The fleet's exclusive default is
+  declared once (a second is refused by name while one holds it) and moves only by retirement, into the successor
+  whatever its own flag. The successor **carries lazily**: its phase 1 for a slot also reads a strict majority of every
+  predecessor
   (`ConsensusMsg::CarryPrepare` / `CarryReport`, appended — wire v12; like `PrepareIn`/`ProposeIn`, they carry and flag
   row A's decision envelope, and an electorate's certificate is the decided envelope with the votes for it) — a retired
   member closes the group through its
   gate and puts the retirement on stable storage before it reports — and adopts the highest acceptance, until the
-  successor has decided the slot. **What holds:** single-decree safety per slot across a migration, a value chosen and
-  never committed included, **with no bound on the slots carried** (decision record §8.3 argues it). A genesis whose
+  successor has decided the slot. **What holds:** single-decree safety per slot decided in the electorate across a
+  migration — a merge included, a value chosen and never committed included — **with no bound on the slots carried**,
+  gossip lag able only to delay it (decision record §8.3 argues it). A genesis whose
   members no longer all answer is **superseded** by a declaration of the live roster from a member that holds it — the
   next epoch, keeping a strict majority of the pending genesis (`mycelium::Superseded`; §8.4 argues why at most one
   attempt is ever in force). Both calls retry an undecided attempt with a bounded backoff (eight tries, 250 ms
-  doubling to 4 s); a precondition no retry changes — the successor already has an electorate, the default asked for
-  is not the one the retirement passed, a superseding genesis that keeps no majority — is `ElectorateError::Refused`
-  (`409 refused`), returned at once. A proposal to an electorate group is refused `ElectorateMismatch` unless the roster equals the
+  doubling to 4 s); a precondition no retry changes — a door refusal, a second default, a successor that does not name
+  the retiree, a predecessor retired elsewhere, a superseding genesis that keeps no majority — is
+  `ElectorateError::Refused` (`409 refused`), returned at once; a retry that finds the retirement decided reports it. A proposal to an electorate group is refused `ElectorateMismatch` unless the roster equals the
   members **by identity** (counted: `mycelium::electorate_roster_mismatches`); promises and votes count only from the
   members; the quorum is a strict majority whatever `quorum_size` or opacity say; and every Prepare/Propose names the
   electorate's epoch and digest (`ConsensusMsg::PrepareIn`/`ProposeIn`/`StaleElectorate`, appended): an acceptor
@@ -117,16 +126,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   award — outside an electorate group, **`ConsensusResult::ElectorateNotGoverned`** (`403 electorate_not_governed`);
   off, it runs as before, counted. The cluster-scoped exclusive verbs — `distributed_lock`, `LockService`,
   `consistent_set`, the lock, consistent and log-claim routes, `mycelium-commitment`'s linearizable award,
-  `set_capability_authz_via_consensus` — decide in the group marked `exclusive_default` that is not retired (a fleet
-  record), via the new `ConsensusHandle::exclusive_propose[_receipt]`; while a retired default's successor has not
-  formed they are refused by name; `consensus_electorate` only restates the default, and a disagreeing setting is
+  `set_capability_authz_via_consensus` — decide in the live default (a fleet record), via the new
+  `ConsensusHandle::exclusive_propose[_receipt]`; while it cannot be named here — a retirement whose successor is not
+  visible yet, two defaults declared within gossip lag (the escape: merge them) — they are refused by name, and every
+  acceptor refuses a cluster-scoped exclusive slot, tagged or not; `consensus_electorate` only restates the default, and a disagreeing setting is
   refused. A fleet-exclusive slot is decided only in the fleet's electorate and `leader/{g}` only in `g` — at the door
   and at every acceptor, never by a cross-group proposal. `cons.safety_profile` (rev 2) is node-enforced and
   **`secure-single-domain` rev 4** requires it (rev 3 is P1's `gw.exposed_closed`). **Not claimed:** migrating needs a
-  reachable majority of the retired group — to retire it, and for the successor's first touch of each slot — and a
-  lost majority is unrecoverable; genesis assumes its members agree on the roster (two values for one attempt naming
-  different rosters are not ordered); a successor that already had an electorate when the retirement reached it does
-  not carry; without `[tls]` the certificates and carry reports are unauthenticated; the marking of the fleet's default
+  reachable majority of each predecessor — to retire it, and for the successor's first touch of each slot — and a
+  lost majority is unrecoverable; an ordinary slot also proposed under other scopes is outside the claim; genesis
+  assumes its members agree on the roster (two values for one attempt naming different rosters are not ordered); two
+  default declarations within gossip lag can both be decided (refused once seen; merged); a node's adoption of a
+  genesis rests on gossiped records after a restart (§8.4); without `[tls]` the certificates and carry reports are unauthenticated; the marking of the fleet's default
   is not itself a cluster-scoped decision (§8.6 says why the profile closes that window instead); live reconfiguration
   is the versioned-electorates plan, not built. **Removed before release:** rounds 2–3 built live one-member steps
   with a drain before each step (`StepPrepareAck`, `DrainPrepare`/`DrainPropose`, `StepRefused`, `StepAbort`, the
@@ -142,7 +153,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Some(b"d-wants-it"), right: Some(b"held-by-a")`), and, against the code before its fix, the same test's migration
   window — an acceptor answered a cluster-scoped `lock/` proposal while the retired default's successor had not formed
   (`a cluster-scoped exclusive slot is refused while the default's successor has not formed`); it now refuses one
-  whenever the fleet's exclusive electorate cannot be named. Seen failing first in earlier rounds, each on a toggle of the mechanism it pins:
+  whenever the fleet's exclusive electorate cannot be named. Round 5, reproduced against 98ff2a93 with tests in the
+  old API, as the review gives the interleavings: the successor formed before the retirement reached it (`the
+  successor carried nothing; left: Some(b"d-wants-it"), right: Some(b"held-by-a")`), the successor declared the
+  default and then retired into (`two values for one lock; left: Some(b"d-wants-it")`), the wedge (`the exclusive
+  verbs never recover: Err("the fleet's exclusive electorate old retired to new, which has not formed here yet …")`),
+  a merge (`work/s3: the merge did not carry it; left: Some(b"e-wants-it"), right: Some(b"v3")`); their tests in the
+  new order are `a_successor_decides_nothing_until_its_predecessors_retirement_is_visible`,
+  `a_second_live_default_is_refused_by_name`, `a_successor_waiting_on_a_predecessor_that_never_retires_has_an_escape`
+  and `a_merge_carries_every_predecessor`. And the skip (D4), on a toggle: with the `carried` skip removed,
+  `decided in new, the slot needs no read of old — whose majority is gone: Timeout { slot: "work/leased", … }` — the
+  round-4 port had also dropped the learner's half of the skip, now restored. Seen failing first in earlier rounds, each on a toggle of the mechanism it pins:
   `a_swap_without_a_migration_is_refused` (count rule: `Committed` on {A,B,D}), `votes_from_outside_the_electorate_
   are_not_counted` (filter unwired, and separately the quorum floor removed: `Committed` on forged votes),
   `a_cross_group_proposal_does_not_decide_for_an_electorate_group`, `a_cross_group_proposal_does_not_decide_an_

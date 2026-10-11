@@ -45,3 +45,13 @@
   lock-order.md` (row 57 now names `electorate_line` too). Outside the wiki: decision record §3/§4.2/§6/§7/§8, guide 04
   (migration how-to), threat model §7, `what-is-proven.md` (live reconfiguration: not built — the versioned-electorates
   plan), the plan's P2 row, FAQ, error-handling, diagnostics, production-readiness, CHANGELOG.
+- **Round 5 (review of 98ff2a93): predecessor-first.** The round-4 order (retire, then declare the successor naming the
+  retirement) let gossip lag skip the carry (D1, two interleavings), wedge the exclusive verbs for good (D2), and carry
+  one predecessor of a merge (D3) — each reproduced against 98ff2a93 before the fix. Now the successor is declared
+  first (`ElectorateDecl::predecessors`, a set), decides nothing until each predecessor's retirement to it is visible
+  (`ConsensusEngine::successor_ready`, door and acceptor, fail closed, `electorate_waiting_refusals`); a retirement is
+  accepted only into a successor that names the retiree (`successor_names`); the carry reads every predecessor and,
+  transitively, those that retired to them (`predecessor_chain`). The default is declared once (`live_default`) and
+  follows retirements (`holds_default`); `Retirement::passes_default` is gone. The escape for a successor waiting on a
+  predecessor that never retires is that the successor's own retirement is not held up. The listener's commit arm now
+  records the skip (`note_decided_in`), which the #600 port had dropped (D4).

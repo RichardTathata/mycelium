@@ -107,9 +107,9 @@ Since P2 (2026-10-10, §8):
 | **An electorate is pinned by identity, and frozen.** A proposal to an electorate group is refused `ElectorateMismatch` unless the roster equals the member set by identity (a swap is refused, counted on the roster tripwire); declaring a changed roster is refused `MembershipFrozen`; promises and votes count only from the members; the quorum is at least a strict majority, opacity and `quorum_size` notwithstanding | `ConsensusEngine::electorate_door`, `electorate_vote_filter`, `src/consensus.rs`; `electorate::declare_outcome` | `a_swap_without_a_migration_is_refused`; `votes_from_outside_the_electorate_are_not_counted`; `the_roster_is_the_vote_filter_and_a_trust_slice_only_narrows_it` |
 | **Acceptors answer only their own electorate.** `PrepareIn`/`ProposeIn` name the electorate's epoch and digest; an acceptor holding another refuses `StaleElectorate` | `ConsensusEngine::electorate_admits`, `refuse_stale`, the listener, `src/consensus.rs` | `an_undecided_genesis_is_superseded_by_one_naming_the_live_roster` |
 | **A genesis is a consensus decision of every member it names**, certified by their votes; one that cannot complete is superseded by one naming a strict majority of it; a forged record is not adopted | `electorate::declare_outcome`, `check_genesis`; `ConsensusEngine::electorate_view`, `genesis_acceptable`, `certificate_holds` | `an_undecided_genesis_is_superseded_by_one_naming_the_live_roster`; `a_forged_electorate_record_is_not_adopted`; `an_electorate_certificate_verifies_under_tls`; `a_genesis_supersedes_only_the_epoch_before_it_with_a_majority_of_it` |
-| **Membership change is migration.** A retirement — a decision of a majority, naming the successor — closes the group at its promise; the successor's genesis names it; the successor carries each slot from a majority of its predecessor until it has decided it | `electorate::retire_outcome`; `ConsensusEngine::claim_gated`, `retirement_view`, `prepare_phase` (the carry), `answer_carry` | `a_value_chosen_in_a_retired_group_is_carried_by_its_successor`; `two_concurrent_retirements_decide_one_successor_and_a_non_member_cannot_retire`; `a_proposer_closed_mid_ballot_does_not_complete`; `a_close_waits_for_an_ordinary_claim_in_flight`; `a_refused_claim_through_the_gate_lowers_the_fence_again`; `a_retirement_completes_a_pending_one` |
+| **Membership change is migration, predecessor first.** The successor is declared first, naming its predecessors, and decides nothing until each has retired to it (door and acceptor, fail closed); a retirement — a decision of a majority — is accepted only into a successor that names the retiree, and closes the group at its promise; the successor carries each slot from a majority of every predecessor until it has decided it | `electorate::declare_outcome`, `retire_outcome`; `ConsensusEngine::successor_ready`, `successor_names`, `claim_gated`, `retirement_view`, `predecessor_chain`, `prepare_phase` (the carry), `answer_carry` | `a_value_chosen_in_a_retired_group_is_carried_by_its_successor`; `a_successor_decides_nothing_until_its_predecessors_retirement_is_visible`; `a_merge_carries_every_predecessor`; `a_successor_waiting_on_a_predecessor_that_never_retires_has_an_escape`; `two_concurrent_retirements_decide_one_successor_and_a_non_member_cannot_retire`; `a_proposer_closed_mid_ballot_does_not_complete`; `a_close_waits_for_an_ordinary_claim_in_flight`; `a_refused_claim_through_the_gate_lowers_the_fence_again`; `a_retirement_completes_a_pending_one` |
 | **Nothing resizes an electorate group.** The governor does not roll on it; the emergent watcher defers to it; `/gateway/mesh/group` refuses it **403** `governed_group` | `membership_governor::converge`; `emergent_groups::governor_owned_groups`; `is_governed_group`, `src/agent/http.rs` | `the_governor_and_the_watcher_leave_an_electorate_group_alone` |
-| **The fleet's exclusive electorate is a fleet record.** The cluster-scoped exclusive verbs decide in the group marked `exclusive_default` that is not retired; a retirement passes the default to its successor; a disagreeing `consensus_electorate` is refused | `electorate::exclusive_electorate`; `exclusive_propose`, `src/agent/consensus_handle.rs`; `overlay_exclusive_propose`, `src/agent/http.rs` | `a_local_electorate_setting_that_disagrees_with_the_fleet_is_refused`; `a_safety_sensitive_proposal_is_decided_only_by_an_electorate_group`; `a_value_chosen_in_a_retired_group_is_carried_by_its_successor` |
+| **The fleet's exclusive electorate is a fleet record.** The cluster-scoped exclusive verbs decide in the live default: declared once (a second refused while one holds it), moved only by retirement into the successor whatever its own flag; a disagreeing `consensus_electorate` is refused | `electorate::live_default`, `exclusive_electorate`, `holds_default`; `exclusive_propose`, `src/agent/consensus_handle.rs`; `overlay_exclusive_propose`, `src/agent/http.rs` | `a_local_electorate_setting_that_disagrees_with_the_fleet_is_refused`; `a_safety_sensitive_proposal_is_decided_only_by_an_electorate_group`; `a_value_chosen_in_a_retired_group_is_carried_by_its_successor`; `a_second_live_default_is_refused_by_name` |
 | **A declaration retries an undecided attempt**, with a bounded backoff, on a sparse mesh too | `electorate::retrying` | `a_declaration_on_a_sparse_mesh_retries_until_decided` |
 | **A cross-group proposal does not decide for an electorate group** | `electorate_door` (`Groups`) | `a_cross_group_proposal_does_not_decide_for_an_electorate_group` |
 | **The secure profile checks it.** `cons.safety_profile` (rev 2) resolves `enforced` on `consensus_require_electorate`; `secure-single-domain` rev 4 requires it | `src/agent/guarantee.rs` | `the_consensus_safety_profile_resolves_on_the_electorate_requirement`; `the_secure_profile_refuses_an_open_node_by_name` |
@@ -215,7 +215,7 @@ v12, new message variants appended (§8.6).*
 
 ### 8.1 What an electorate group is
 
-A group whose electorate is an `ElectorateDecl { group, epoch, members, exclusive_default, supersedes, predecessor }` —
+A group whose electorate is an `ElectorateDecl { group, epoch, members, exclusive_default, supersedes, predecessors }` —
 the member set by identity, sorted — decided by **consensus** on the slot `electorate/{group}/{epoch}`
 (`src/agent/electorate.rs`):
 
@@ -227,17 +227,22 @@ the member set by identity, sorted — decided by **consensus** on the slot `ele
   before the commit leaves. A node adopts a genesis only when its certificate holds a vote from every member it names,
   at one ballot. A record that does not verify is not adopted and is counted (`mycelium::electorate_records_refused`):
   a forged declaration does not change the electorate.
-- **A retirement** (`Retirement { group, epoch, successor, passes_default }`, slot `electorate/{group}/retire`,
-  certificate `…/{group}/retire`) is a decision of a strict majority of the group's members, naming its **successor**.
-  It is the only way a group's electorate stops deciding (§8.3).
+- **A successor** names its **predecessors** (a set; two or more is a merge) in its genesis — declared *before* they
+  retire (§8.3).
+- **A retirement** (`Retirement { group, epoch, successor }`, slot `electorate/{group}/retire`, certificate
+  `…/{group}/retire`) is a decision of a strict majority of the group's members, naming a **successor** that already
+  names it. It is the only way a group's electorate stops deciding (§8.3).
 
 `GossipAgent::declare_electorate(group, exclusive_default)` / `POST /gateway/govern/electorate` (`govern:write`,
 audited when something is decided) proposes a genesis from the roster this node sees. On a group that has an
 electorate it decides nothing: it returns the electorate when the roster still matches, and
 `ElectorateError::MembershipFrozen` (HTTP 409 `membership_frozen`) when it does not.
-`GossipAgent::retire_electorate(group, successor)` / the same route with `{"group", "retire_to"}` retires it. Both
+`GossipAgent::declare_successor_electorate(group, predecessors)` / `{"group", "predecessors": [...]}` declares a
+successor; `GossipAgent::retire_electorate(group, successor)` / `{"group", "retire_to"}` retires a group into one. All
 retry an undecided attempt with a bounded backoff — eight tries, 250 ms doubling to 4 s (round 4, finding 8) — and
-return `NotDecided` only after it.
+return `NotDecided` only after it; a refusal no retry changes — a door refusal, a second default, a successor that does
+not name the retiree — is `Refused` at once, and a retry that finds the retirement already decided reports it (round 5,
+Q3).
 
 The electorate is named by the group; which nodes are in it is what the group decided. Nothing in configuration names
 a node (D1). Trust slices stay as an optional narrowing beneath the member set; they no longer name it (tension (b)).
@@ -283,65 +288,95 @@ So every ordinary claim either completed before the close or is refused after it
 the door stops at its next claim (`ElectorateMismatch`, naming the close), and an acceptor whose gate refused sends no
 promise.
 
-### 8.3 Membership change is migration — and why it is safe
+### 8.3 Membership change is migration, predecessor first — and why it is safe
 
-**The procedure** (guide 04 has the calls). To move from `G1` to a group with other members:
+*Revised in round 5 (2026-10-11) after #601's review of 98ff2a93 found the round-4 order — retire, then declare the
+successor naming the retirement — unsafe under gossip lag: a successor declared by members that had not yet received
+the retirement formed without a predecessor and carried nothing (D1), a successor declared the default and then
+retired into gave one lock two values (D1), the exclusive verbs could wedge for good (D2), and a merge carried only
+one predecessor (D3). The order is now reversed, so lag can only **delay** the carry, never skip it.*
 
-1. **Retire `G1`**, naming its successor `G2`: `retire_electorate("G1", "G2")`. A decision of a strict majority of
-   `G1`. When `G1` is the fleet's exclusive default, the retirement passes the default to `G2` (`passes_default`) — in
-   this one decision, so the fleet never has two defaults, and while `G2` has not formed the exclusive verbs are
-   refused rather than decided anywhere else.
-2. **Declare `G2`** from its roster: its genesis **names its predecessor** — `G1` and the retirement's digest — and
-   carries the default the retirement passed. Every member of `G2` checks it against the verified retirement; a
-   genesis that omits a retirement naming its group, or names one wrongly, is not accepted, and one recorded that way
-   is not adopted.
-3. **`G2` carries lazily.** A `G2` proposer's phase 1 for a slot — unless `G2` has already decided it, or the slot
-   names a group — also sends `CarryPrepare` to the members of `G1` (and of `G1`'s own predecessors, nearest first),
-   and needs a **report from a strict majority of each**, besides `G2`'s promise quorum. A retired member answers only
-   for its retired group, only when the retirement verifies there, only to a proposer in a successor: it **closes**
-   `G1` through its gate (after any ordinary claim in flight), puts the retirement record and certificate on stable
-   storage, and then reports its acceptor memory for the slot — its promise and its latest acceptance — read-only.
-   The proposer moves above any reported promise at or above its ballot, and adopts the **highest acceptance across
-   `G1`'s and `G2`'s reports**. Once this node has seen `G2` decide the slot, it never asks `G1` again.
+**The procedure** (guide 04 has the calls). To move from `G1` (and, for a merge, `G3`, …) to a group with other members:
 
-**Why no value is lost** (one slot `s`; crash faults; messages authenticated under `[tls]`):
+1. **Declare the successor first**, naming its predecessors as a set: `declare_successor_electorate("G2", &["G1"])`.
+   Its genesis is decided by every member it names, as any genesis is; each member checks that every named
+   predecessor is an electorate it can see and is not retired to another group. **G2 decides nothing** — no slot,
+   ordinary or exclusive, at the proposer's door or at any acceptor — until every named predecessor's verified
+   retirement **naming G2** is visible there (`successor_ready`). A proposer is refused by name (`ElectorateMismatch`,
+   "waiting for its predecessor …"); an acceptor does not answer and counts it (`electorate_waiting_refusals`). Fail
+   closed. G2's own electorate slots (its genesis, its retirement) are exempt, so G2 can always retire (§ escapes).
+2. **Retire each predecessor into it**: `retire_electorate("G1", "G2")` — a decision of a strict majority of G1. The
+   proposer and every G1 acceptor accept it only if **G2's decided genesis is visible to it and names G1**; not visible
+   yet is gossip (the call retries), visible and not naming G1 is refused by name. Every G1 member closes G1 at the
+   retirement's **promise**.
+3. **G2 carries lazily.** A G2 proposer's phase 1 for a slot — unless this node has seen G2 decide it, or the slot names
+   a group — also sends `CarryPrepare` to the members of **every** predecessor G2 names (and, transitively, of each of
+   their predecessors that retired to them), and needs a report from a strict majority of each, besides G2's promise
+   quorum. A retired member answers only for its retired group, only when the retirement verifies there, only to a
+   proposer in a successor: it closes the group through its gate, puts the retirement on stable storage, and reports its
+   acceptor memory for the slot, read-only. The proposer moves above any reported promise at or above its ballot and
+   adopts the **highest acceptance across all the reports**. Once this node has seen G2 decide the slot — its own commit
+   or a learned one — it stops asking (in memory: after a restart it carries again, which is safe).
 
-1. **After the retirement is chosen, no `G1` value can be chosen.** The retirement was promised by a strict majority
-   `P` of `G1`, and each member of `P` closed `G1` at that promise, durably (its acceptor record of the retirement
-   slot). A `G1` value chosen later would need a strict majority of `G1` accepting it, which intersects `P` at a member
-   that, being closed, accepts nothing — the gate orders a close after every ordinary claim in flight, so a member's
-   acceptance either finished before its promise or is refused after it.
-2. **The carry reads after the retirement is decided**, so there is no race between a report and the fence: `G2`
-   exists only by a genesis that names the verified retirement, and a retired member reports only once the retirement
-   verifies at it — and closes `G1` first. A reporter outside `P` closes `G1` at its report, through the same gate, and
-   puts the retirement on stable storage first, so after a restart it is still closed: any acceptance of its own
-   finished before its report (and is in it) or is refused.
-3. **A value chosen in `G1` is in the carry.** If `v` was chosen in `G1` at ballot `b`, a strict majority `M` of `G1`
-   accepted it; the carry reads a strict majority `R` of `G1`; `R ∩ M ≠ ∅`, and a member in both reports an acceptance
-   at a ballot `≥ b` (2) — whose value is `v`, since `G1`'s own phase 1 makes every `G1` acceptance above `b` carry `v`.
-4. **`G2`'s ballots are above every `G1` ballot that matters.** A `G1` acceptance at ballot `b'` needed a `G1` promise
-   majority at `b'`; it intersects `R`, and that member promised `b'` before its report (after it, it was closed), so it
-   reports `promised ≥ b'`; the carry proposer moves above it. So every `G1` acceptance a later carry could find is
-   below every `G2` ballot that decided anything — re-reading `G1` (after a restart forgets that `G2` decided `s`)
-   finds nothing that outranks `G2`'s decision, and is safe; it only costs the reads.
-5. **Within `G2`**, by induction over `G2`'s ballots: each `G2` proposer before `G2` decides `s` carries (3, 4) and so
-   proposes `v`; after `G2` decides `s`, `G2`'s own phase 1 over a strict majority of `G2` finds `v` at the top. A member
-   of both groups has one acceptor memory, so its `G2` promise also reports its `G1` acceptance — consistent with 3–4.
-6. **Chains.** A successor of a successor carries from every predecessor in the chain, each by a majority read; each
-   retirement closes its group the same way, so the argument applies link by link.
+**The ordering argument.** Every G2 decision needs, at its proposer and at a quorum of G2's acceptors, the verified
+retirement of each predecessor **to G2**; a retirement of G1 to G2 can be decided only by G1 members that see G2's genesis
+naming G1. So the facts arrive in one order — G2's genesis, then G1's retirement to it, then G2's first decision — and
+each step is checked by the nodes that take the next one. Gossip lag can hold a step back (a member that has not
+received the record refuses, and the operation is retried), but it cannot make a step happen without the one before it:
+there is no state in which G2 decides while a predecessor it names is still deciding, and no retirement that names a
+successor which does not carry from it. That is what the round-4 order lacked — there the successor's genesis was
+checked against whatever retirement its members happened to have seen.
 
-So **single-decree safety holds per slot across a migration** — a value chosen and never committed in `G1` included —
-with **no bound on the number of slots**: nothing is moved at retirement; each slot is carried when it is first
-touched. *Test:* `a_value_chosen_in_a_retired_group_is_carried_by_its_successor` — a lock value accepted by {A,B} of
-`old` and never committed; `old` retires to `new` = {C,D,E} (C never accepted it); D's request for the lock adopts the
-chosen value, and once `new` has decided it, E's proposal resolves with `old`'s members silent. The order a close and an
-ordinary claim take at the gate: `a_close_waits_for_an_ordinary_claim_in_flight`.
+**Why no value is lost** (one slot `s` decided only in the electorate — an exclusive slot, or one that names its group;
+crash faults; messages authenticated under `[tls]`):
 
-**Liveness, stated.** Migrating needs a **reachable strict majority of `G1`**: to retire it, and then for the first
-proposal of `G2` on each slot until `G2` has decided it (and of every predecessor in a chain). Losing a majority of an
-electorate is unrecoverable — in this design and in any consensus protocol: a minority cannot know what the majority
-decided. A retirement promised by a majority whose proposer died closes the group until a member completes it:
-`retire_electorate` from any member adopts what was accepted, or decides its own (`a_retirement_completes_a_pending_one`).
+1. **After G1's retirement is chosen, no G1 value can be chosen.** The retirement was promised by a strict majority `P`
+   of G1, each of which closed G1 at its promise, durably; a later G1 majority would need a closed member, and the gate
+   orders a close after every ordinary claim in flight.
+2. **G2's carry reads only after the retirement is decided**: G2 runs no phase 1 until the retirement is verified at the
+   proposer (step 1), and each reporter closes G1 and persists the retirement before it reports. A reporter outside `P`
+   closes G1 at its report, through the same gate.
+3. **A value chosen in G1 is in the carry**: chosen at ballot `b` means a strict majority `M` of G1 accepted it; the
+   carry reads a strict majority `R` of G1; a member of `R ∩ M` reports an acceptance at a ballot `≥ b`, which by G1's own
+   phase 1 is the chosen value.
+4. **G2's ballots end up above every G1 ballot that matters** (a reporter promised any G1 ballot before its report, and
+   the proposer moves above it), so re-reading G1 after a restart finds nothing that outranks a G2 decision.
+5. **Within G2**, by induction over its ballots: each proposer before G2 decides `s` carries and proposes the chosen
+   value; after, G2's own phase 1 finds it. A member of both groups has one acceptor memory; its G2 promise reports its
+   G1 acceptance too.
+6. **Merges and chains.** G2 carries from **every** predecessor it names — each was required to retire to it before G2
+   decided anything — so a merge of G1 and G3 carries both. A chain carries transitively through predecessors that
+   retired to their successor; a predecessor's own predecessor that never retired to it is not read, because that
+   predecessor decided nothing (it waited), and the group that did not retire is still deciding on its own.
+
+**The claim is for slots decided only in the electorate** (round 5, Q1). An ordinary slot is not homed: a legacy or
+untagged proposal under another scope (the whole cluster, another group) can reach G1's members as plain acceptors,
+outside G1's gate, and this design does not order those acceptances against the retirement. For an ordinary slot used
+only through the electorate group, the argument above holds as written; for one also proposed under other scopes it is
+not claimed.
+
+**Liveness, stated.** Migrating needs a reachable strict majority of each predecessor: to retire it, and for the
+successor's first touch of each slot. Losing a majority of an electorate is unrecoverable, here and in any consensus
+protocol.
+
+**Escapes from every wait** (round 5, D2):
+
+- *A successor waits on a predecessor that never retires* (it named one by mistake, or one whose majority is gone): G2
+  decides nothing, but its own retirement is exempt from the wait. Declare `G4` naming G2, retire G2 into it. G4 carries
+  from G2 and from each predecessor that did retire to G2 (and holds the default if one of them held it).
+  *Test:* `a_successor_waiting_on_a_predecessor_that_never_retires_has_an_escape`.
+- *A retirement promised by a majority whose proposer died* closes the group until a member completes it:
+  `retire_electorate` from any member adopts what was accepted, or decides its own; an attempt that ended undecided after
+  this node promised it is counted (`electorate_retirements_undecided`) and, at the gateway, audited.
+  *Test:* `a_retirement_completes_a_pending_one`.
+- *Two live defaults* (§8.6): merge them — declare one successor naming both, retire both into it.
+
+*Tests:* `a_value_chosen_in_a_retired_group_is_carried_by_its_successor` (the carry, the default following the
+retirement, and the skip — E decides a leased slot again with `old`'s majority gone; it fails with the skip removed),
+`a_successor_decides_nothing_until_its_predecessors_retirement_is_visible` (D1: the retirement not yet at D and E —
+D's door refuses, E does not answer, then the carry), `a_second_live_default_is_refused_by_name` (D1's default
+interleaving), `a_merge_carries_every_predecessor` (D3, and a retirement to a successor that does not name the retiree
+refused), `a_close_waits_for_an_ordinary_claim_in_flight`.
 
 ### 8.4 A genesis that cannot complete is superseded (round 4, finding 3)
 
@@ -368,6 +403,14 @@ genesis always has, that the values proposed for one attempt name one roster (§
 `an_undecided_genesis_is_superseded_by_one_naming_the_live_roster` — {A,B,C} accepted by A and B, C gone; the
 declaration of {A,B} decides epoch 2, and a proposal naming epoch 1 is refused, naming epoch 2.
 
+**What "adopted" rests on after a restart** (round 5, Q2). The gate's `adopted` is held in memory; after a restart it
+is re-derived from the committed genesis record and its certificate, which reach a node by gossip and are WAL-appended
+without an fsync of their own. A member that adopted attempt `k`, then lost those records in a crash before they reached
+its disk, could — until gossip re-supplies them — take part in a superseding attempt `k + 1` that it would otherwise
+refuse. Its acceptor memory (fsynced) still records that it accepted `k`, so it can only support a supersession of the
+attempt it holds; the argument above then needs every other adopter of `k` to refuse, which holds unless a majority of
+`k`'s members lost the records at once. Stated, not closed: persisting adoption would need a durable record per member.
+
 ### 8.5 What does not hold — stated
 
 - **The guarantee starts when genesis is chosen.** A member that has touched a genesis attempt refuses an untagged
@@ -377,10 +420,12 @@ declaration of {A,B} decides epoch 2, and a proposal naming epoch 1 is refused, 
   a genesis is declared — are not ordered against each other, and could each be decided by members that do not
   overlap. The second commit for one slot is counted by the commit-conflict tripwire. The roster is the governed
   group's, moved only through the governance route: declare a genesis once the roster is settled.
-- **A successor that already has an electorate does not carry.** A retirement is accepted only while its successor
-  has no electorate at the acceptor; a genesis decided before the retirement reached its members names no
-  predecessor, so the retired group's values are not carried into it — and a default the retirement passed to it is
-  then refused (`exclusive_electorate` names the successor that has not formed), never decided across the cluster.
+- **Two default declarations within gossip lag.** A genesis declaring the default is refused, at the door and at
+  every acceptor, while any group holds it (§8.6) — but two groups declared the default by members that had not yet
+  seen each other's genesis can both be decided. Until a node sees both it may decide an exclusive slot in either; once
+  it sees both, every exclusive verb is refused by name (fail closed, never decided across the cluster), and the escape
+  is a merge (§8.6). Declare the default once, and only when every node can see the fleet's records.
+- **Ordinary slots under other scopes** are outside §8.3's claim (Q1 there).
 - **Without `[tls]` nothing is authenticated**, the certificates and the carry reports included.
 - **A forged commit record stops a proposer.** A `consensus/committed/electorate/…` entry written straight into the
   store is not adopted, but a proposer for that slot reads it as decided and ends `Superseded`, as for any slot — so a
@@ -398,13 +443,29 @@ the value is the decision envelope, and they are answered with `PrepareAckTerm` 
 flags an envelope the same way.
 
 The cluster-scoped exclusive verbs (`distributed_lock`, `LockService`, `consistent_set`, the lock and consistent routes,
-the log claim, `mycelium-commitment`'s linearizable award, `set_capability_authz_via_consensus`) decide in the
-electorate group marked `exclusive_default` that is not retired — a fleet record — or across the cluster when none
-ever was. A retired default passed the default to its successor; until that successor has formed, the verbs are
-refused by name — and every acceptor refuses a cluster-scoped proposal for an exclusive slot in that window too (it
-fails closed whenever the fleet's exclusive electorate cannot be named). `consensus_electorate` may only restate the
-answer. Every acceptor refuses a cluster-scoped proposal for any exclusive slot once it knows a group is marked, and a
-group-scoped one on any group but the marked one.
+the log claim, `mycelium-commitment`'s linearizable award, `set_capability_authz_via_consensus`) decide in the **live
+default** (`electorate::live_default`) — a fleet record — or across the cluster when no group ever declared one:
+
+- **Declared once.** A genesis may set `exclusive_default` only while no group holds the default — refused by name
+  otherwise, at the door and at every acceptor (round 5, D1).
+- **Moved only by retirement.** A group **holds** the default if it declared it, or if a predecessor that held it
+  retired to it — whatever the successor's own flag says (the round-4 coupling between the flag and the retirement is
+  gone). The live default is the one holder that is not retired.
+- **Fail closed.** While a holder has retired to a successor this node cannot see yet, or two live groups hold it, every
+  exclusive verb is refused by name, and every acceptor refuses a cluster-scoped proposal for an exclusive slot —
+  tagged or not (round 5, D5). `consensus_electorate` may only restate the answer. An acceptor also refuses a
+  group-scoped proposal for an exclusive slot on any group but the live default.
+
+**No persisting state with zero or two defaults** (round 5, D2). *Zero:* before any declaration there is no default,
+and the verbs decide across the cluster (off the secure profile) or are refused (on it). After the first declaration,
+holding is conserved: a holder stops being live only by a retirement, and a retirement names a successor already
+declared, naming the retiree — so the successor holds the default from the moment the retirement is visible. The only
+zero a node can see is a retirement whose successor has not reached it yet: transient, refused meanwhile, ended by
+gossip. A successor still waiting for another predecessor holds the default but decides nothing; its escape is §8.3's
+(retire it into a successor naming it). *Two:* only by two default declarations within gossip lag (§8.5); retirements
+cannot create a second, since a successor holds only what its predecessors held and a merge of holders is one group.
+Two persist until the escape: **merge them** — declare one successor naming both, retire both into it; it holds the
+default once, and its carry reads both, so a slot decided in each window is carried at its highest acceptance.
 
 **Why the marking is not itself a cluster-scoped consensus decision (round 2, finding 2a).** A node that has not yet
 learned the mark can still propose, and answer, a cluster-scoped exclusive slot, so while the mark propagates a lock

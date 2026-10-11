@@ -278,7 +278,7 @@
       "subsystem": "consensus",
       "kind": "node_enforced",
       "promise": "an exclusive outcome — a lock, a leader, a consistent write, a commitment award, a capability-authz policy, any proposal marked safety-sensitive — is decided only by an electorate group: one pinned by member identity, decided by every member it names and frozen after, whose acceptors answer only for their own electorate",
-      "needs": "`consensus_require_electorate = true`; the electorates declared (`/gateway/govern/electorate`), one marked `exclusive_default` for the cluster-scoped verbs. Its members change only by migration — retire it to a successor, which carries each slot from a majority of the retired group — so safety per slot holds across the change (docs/design/consensus-electorate.md §8.3); migrating needs a reachable majority of the retired group. The effect is still the caller's to fence at the resource",
+      "needs": "`consensus_require_electorate = true`; the electorates declared (`/gateway/govern/electorate`), one marked `exclusive_default` for the cluster-scoped verbs. Its members change only by migration, successor first — declare the successor naming it, which decides nothing until the retirement into it is visible, then retire it; the successor carries each slot from a majority of every predecessor — so safety per slot decided in the electorate holds across the change (docs/design/consensus-electorate.md §8.3); migrating needs a reachable majority of each predecessor. The fleet's default is declared once and moves only by retirement. The effect is still the caller's to fence at the resource",
       "enforcement_points": [
         "consensus::propose (the engine's door)",
         "consensus::cross_propose"

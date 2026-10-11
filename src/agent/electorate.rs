@@ -9,15 +9,19 @@
 //! only when its certificate verifies; one that does not is counted ([`electorate_records_refused`]).
 //!
 //! **Membership is frozen** (the maintainer's decision, 2026-10-11). Once a genesis is adopted, the group's
-//! members never change. Changing who decides is a **migration** to another group:
+//! members never change. Changing who decides is a **migration** to another group, **successor first** (round 5):
 //!
-//! - **retire** the group — a decision of its members on the slot `electorate/{group}/retire`, naming its
-//!   successor ([`Retirement`]). Every member closes the group at the retirement's **promise**, so once the
-//!   retirement is chosen no value of the retired group can be chosen;
-//! - the successor's **genesis names its predecessor** and the retirement it was named by;
-//! - the successor **carries lazily**: its first proposal for a slot also reads a majority of each
-//!   predecessor (which answers read-only reports once retired) and adopts the highest acceptance found,
-//!   until the successor has decided the slot.
+//! - the successor's genesis **names its predecessors** (a set — a merge when two or more), and the successor decides
+//!   nothing — at the proposer's door or any acceptor — until each has retired to it and that retirement is visible
+//!   there;
+//! - each predecessor **retires** — a decision of its members on the slot `electorate/{group}/retire`, naming a
+//!   successor that already names it ([`Retirement`]). Every member closes the group at the retirement's **promise**,
+//!   so once the retirement is chosen no value of the retired group can be chosen;
+//! - the successor **carries lazily**: its first proposal for a slot also reads a majority of every predecessor
+//!   (which answers read-only reports once retired) and adopts the highest acceptance found, until the successor has
+//!   decided the slot.
+//!
+//! The fleet's exclusive default is declared once, by a genesis, and moves only by retirement (`live_default`).
 //!
 //! A genesis epoch counts **attempts**: a genesis whose members no longer all answer can be superseded by
 //! one at the next epoch naming the live roster — a majority of the one it supersedes, every one of which
@@ -28,6 +32,8 @@
 //! refuses any other by name (`ElectorateStale`). The rules and why they are safe are stated once, in the
 //! design record §8.
 
+#[cfg(feature = "consensus")]
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -80,16 +86,6 @@ pub struct Superseded {
     pub members: Vec<NodeId>,
 }
 
-/// The retired group an electorate succeeds, and the retirement that named it.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct Predecessor {
-    /// The retired group.
-    pub group: String,
-    /// The retirement's digest ([`Retirement::digest`]).
-    pub retirement: [u8; 32],
-}
-
 /// An electorate: the group, the genesis attempt that decided it, and **who** its members are. Frozen:
 /// nothing changes it once adopted.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -101,15 +97,18 @@ pub struct ElectorateDecl {
     pub epoch: u64,
     /// The members, sorted and without duplicates. Votes are counted only from these.
     pub members: Vec<NodeId>,
-    /// Whether this group is the fleet's electorate for the cluster-scoped exclusive verbs
-    /// (`distributed_lock`, `consistent_set`, the lock and consistent routes, the log claim). A fleet
-    /// record, so every node agrees on it; `consensus_electorate` may only restate it. A successor's
-    /// genesis carries what its predecessor's retirement passed on.
+    /// Whether this genesis **declares** the fleet's default electorate for the cluster-scoped exclusive verbs
+    /// (`distributed_lock`, `consistent_set`, the lock and consistent routes, the log claim) — accepted only
+    /// while no live default is visible anywhere. After that the default moves only by retirement: a successor
+    /// **holds** it when a predecessor that held it retired to it, whatever its own flag says
+    /// (`electorate::live_default`). `consensus_electorate` may only restate it.
     pub exclusive_default: bool,
     /// The pending genesis this one supersedes (epoch > 1 only).
     pub supersedes: Option<Superseded>,
-    /// The retired group this electorate succeeds, whose decisions it carries.
-    pub predecessor: Option<Predecessor>,
+    /// The groups this electorate **succeeds** — declared before they retire, so a retirement can only name a
+    /// successor that already names it (P2 round 5, *predecessor-first*). Two or more is a merge. The successor
+    /// decides nothing until each of them has retired to it, and then carries their decisions.
+    pub predecessors: std::collections::BTreeSet<String>,
 }
 
 impl ElectorateDecl {
@@ -149,14 +148,10 @@ impl ElectorateDecl {
                 }
             }
         }
-        match &self.predecessor {
-            None => h.update([0]),
-            Some(p) => {
-                h.update([1]);
-                h.update(p.group.as_bytes());
-                h.update([0]);
-                h.update(p.retirement);
-            }
+        for p in &self.predecessors {
+            h.update([1]);
+            h.update(p.as_bytes());
+            h.update([0]);
         }
         h.finalize().into()
     }
@@ -183,11 +178,9 @@ pub struct Retirement {
     pub group: String,
     /// The retired electorate's epoch.
     pub epoch: u64,
-    /// The successor group.
+    /// The successor group — which must already be declared, naming this group among its predecessors. When this
+    /// group holds the fleet's default, the successor holds it from this decision on.
     pub successor: String,
-    /// Whether the fleet's exclusive default passes to the successor — exactly when the retired group held
-    /// it, so the fleet never has two defaults, and the default moves in this one decision.
-    pub passes_default: bool,
 }
 
 impl Retirement {
@@ -200,7 +193,7 @@ impl Retirement {
         h.update([0]);
         h.update(self.epoch.to_le_bytes());
         h.update(self.successor.as_bytes());
-        h.update([0, u8::from(self.passes_default)]);
+        h.update([0]);
         h.finalize().into()
     }
 
@@ -322,7 +315,7 @@ pub(crate) fn check_genesis(group: &str, next: &ElectorateDecl) -> Result<(), El
     if next.members.windows(2).any(|w| w[0].to_string() >= w[1].to_string()) {
         return Err(ElectorateError::Refused("the member set is not sorted and unique".into()));
     }
-    if next.predecessor.as_ref().is_some_and(|p| !valid_group(&p.group) || p.group == group) {
+    if next.predecessors.iter().any(|p| !valid_group(p) || p == group) {
         return Err(ElectorateError::InvalidGroup);
     }
     match (next.epoch, &next.supersedes) {
@@ -512,37 +505,54 @@ pub(crate) fn is_safety_sensitive(config: &crate::consensus::ConsensusConfig, sl
 #[cfg(feature = "consensus")]
 pub(crate) const CHAIN_LIMIT: usize = 64;
 
-/// **Where the fleet's exclusive verbs decide** (finding 2 of #601's review): the electorate group marked
-/// `exclusive_default` that is not retired — a fleet record, so every node reads the same answer — or the whole
-/// cluster when none ever was. A retired default passed the default to its successor in its retirement, so
-/// while that successor has not formed (or does not name it) the verbs are refused rather than decided
-/// across the cluster. `consensus_electorate` may only restate the answer: a local setting that names another
-/// group, or names one when the fleet names none, is refused by name, as are two groups both marked.
+/// Whether `d` **holds** the fleet's default (P2 round 5): it declared it at genesis, or a predecessor that held it
+/// retired to it — the default follows the retirement whatever the successor's own flag says.
+#[cfg(feature = "consensus")]
+pub(crate) fn holds_default(ctx: &Arc<TaskCtx>, d: &ElectorateDecl) -> bool {
+    fn holds(ctx: &Arc<TaskCtx>, d: &ElectorateDecl, depth: usize) -> bool {
+        if d.exclusive_default { return true; }
+        if depth >= CHAIN_LIMIT { return false; }
+        d.predecessors.iter().any(|p| retirement(ctx, p).is_some_and(|r| r.successor == d.group)
+            && view(ctx, p).is_some_and(|pd| holds(ctx, &pd, depth + 1)))
+    }
+    holds(ctx, d, 0)
+}
+
+/// **The live default**, as the fleet's records say (no local setting): the one electorate group that holds the
+/// default and is not retired, or none when no group ever declared one. `Err` — fail closed — while a holder
+/// retired to a successor this node cannot see yet (gossip), or when two live groups hold it (two default
+/// declarations raced within gossip lag; the escape is to merge them: declare one successor naming both, retire
+/// both into it).
+#[cfg(feature = "consensus")]
+pub(crate) fn live_default(ctx: &Arc<TaskCtx>) -> Result<Option<String>, String> {
+    let views = all_views(ctx);
+    let mut live = Vec::new();
+    for d in views.iter().filter(|d| holds_default(ctx, d)) {
+        match retirement(ctx, &d.group) {
+            None => live.push(d.group.clone()),
+            Some(r) => match views.iter().find(|s| s.group == r.successor) {
+                None => return Err(format!(
+                    "the fleet's exclusive electorate {} retired to {}, which is not visible here yet", d.group, r.successor)),
+                Some(s) if !holds_default(ctx, s) => return Err(format!(
+                    "the fleet's exclusive electorate {} retired to {}, which does not name it", d.group, r.successor)),
+                Some(_) => {}
+            },
+        }
+    }
+    if live.len() > 1 {
+        return Err(format!("more than one live electorate group holds the fleet's exclusive default: {} — merge them: \
+                            declare one successor naming every one of them, then retire each into it", live.join(", ")));
+    }
+    Ok(live.into_iter().next())
+}
+
+/// **Where the fleet's exclusive verbs decide** (finding 2 of #601's review; round 5): the live default
+/// ([`live_default`]) — a fleet record, so every node reads the same answer once gossip has carried it — or the whole
+/// cluster when no group ever declared one. `consensus_electorate` may only restate it: a local setting that names
+/// another group, or names one when the fleet names none, is refused by name.
 #[cfg(feature = "consensus")]
 pub(crate) fn exclusive_electorate(ctx: &Arc<TaskCtx>) -> Result<Option<String>, String> {
-    let views = all_views(ctx);
-    let live: Vec<String> = views.iter()
-        .filter(|d| d.exclusive_default && retirement(ctx, &d.group).is_none())
-        .map(|d| d.group.clone()).collect();
-    if live.len() > 1 {
-        return Err(format!("more than one electorate group is marked the fleet's exclusive default: {}", live.join(", ")));
-    }
-    let fleet = live.into_iter().next();
-    // A retired default's successor chain must end at the live default (round 4: the default moves in the
-    // retirement, never two at once and never none while a migration is under way).
-    for d in views.iter().filter(|d| d.exclusive_default) {
-        let mut at = d.group.clone();
-        let mut hops = 0;
-        while let Some(r) = retirement(ctx, &at) {
-            if !r.passes_default || hops >= CHAIN_LIMIT { break; }
-            at = r.successor.clone();
-            hops += 1;
-        }
-        if hops > 0 && fleet.as_deref() != Some(at.as_str()) {
-            return Err(format!("the fleet's exclusive electorate {} retired to {at}, which has not formed here yet — \
-                                declare {at} (its genesis names the retirement)", d.group));
-        }
-    }
+    let fleet = live_default(ctx)?;
     match (ctx.config.consensus_electorate.as_deref(), fleet) {
         (None, fleet) => Ok(fleet),
         (Some(local), Some(fleet)) if local == fleet => Ok(Some(fleet)),
@@ -617,35 +627,50 @@ where
 ///   epoch; one naming this set is completed at its own epoch.
 #[cfg(feature = "consensus")]
 pub(crate) async fn declare_outcome(
-    ctx: &Arc<TaskCtx>, group: &str, exclusive_default: bool,
+    ctx: &Arc<TaskCtx>, group: &str, exclusive_default: bool, predecessors: &BTreeSet<String>,
 ) -> Result<(ElectorateDecl, Declared), ElectorateError> {
     use crate::consensus::ConsensusResult;
-    if !valid_group(group) { return Err(ElectorateError::InvalidGroup); }
+    if !valid_group(group) || predecessors.iter().any(|p| !valid_group(p) || p == group) {
+        return Err(ElectorateError::InvalidGroup);
+    }
     let engine = crate::agent::helpers::make_consensus_engine_ctx(ctx, false, false, 0, None);
     let roster = sorted_members(crate::agent::helpers::group_members_ctx(ctx, group));
     if let Some(r) = engine.retirement_view(group) {
         return Err(ElectorateError::Retired { successor: r.successor.clone() });
     }
     if let Some(cur) = engine.electorate_view(group) {
-        if cur.members == roster && cur.exclusive_default == exclusive_default {
+        if cur.members == roster && cur.exclusive_default == exclusive_default && cur.predecessors == *predecessors {
             return Ok(((*cur).clone(), Declared::Unchanged));
         }
         return Err(ElectorateError::MembershipFrozen { group: group.to_string() });
     }
     if !roster.contains(&ctx.node_id) { return Err(ElectorateError::NotAMember); }
-    let predecessor = engine.predecessor_of(group);
-    if let Some(r) = &predecessor && r.passes_default != exclusive_default {
-        return Err(ElectorateError::Refused(format!(
-            "{} retired to {group} {} the fleet's exclusive default: declare {group} with exclusive_default = {}",
-            r.group, if r.passes_default { "passing it" } else { "not passing" }, r.passes_default)));
+    // Predecessor-first (round 5): each predecessor is an electorate this node can see, not yet retired elsewhere.
+    for p in predecessors {
+        if engine.electorate_view(p).is_none() {
+            return Err(ElectorateError::NotDecided(format!("predecessor {p} has no electorate visible here yet")));
+        }
+        if let Some(r) = engine.retirement_view(p) && r.successor != group {
+            return Err(ElectorateError::Refused(format!("predecessor {p} is already retired to {}", r.successor)));
+        }
+    }
+    // Only one live default: a genesis may declare it only while no group holds it (round 5, D1/D2).
+    if exclusive_default {
+        match live_default(ctx) {
+            Ok(None) => {}
+            Ok(Some(g)) => return Err(ElectorateError::Refused(format!(
+                "{g} already holds the fleet's exclusive default; the default moves only by retirement — declare {group} \
+                 naming {g} as a predecessor, and retire {g} into it"))),
+            Err(e) => return Err(ElectorateError::Refused(e)),
+        }
     }
     let base = ElectorateDecl {
         group: group.to_string(), epoch: 1, members: roster, exclusive_default, supersedes: None,
-        predecessor: predecessor.as_ref().map(|r| Predecessor { group: r.group.clone(), retirement: r.digest() }),
+        predecessors: predecessors.clone(),
     };
     let (touched, pending) = engine.pending_genesis(group);
     let same_set = |t: &ElectorateDecl| t.members == base.members && t.exclusive_default == base.exclusive_default
-        && t.predecessor == base.predecessor;
+        && t.predecessors == base.predecessors;
     let next = match pending {
         // The pending genesis names this set, at the highest epoch this node touched: complete it.
         Some((t, _)) if t.epoch >= touched && same_set(&t) => t,
@@ -680,8 +705,20 @@ pub(crate) async fn declare_outcome(
         ConsensusResult::Superseded { .. } if after.is_some() =>
             Ok(((*after.unwrap_or_else(|| Arc::new(next.clone()))).clone(), Declared::Adopted)),
         ConsensusResult::NotAMember { .. } => Err(ElectorateError::NotAMember),
+        // A door refusal is a precondition a retry does not change (round 5, Q3).
+        ConsensusResult::ElectorateMismatch { detail, .. } => Err(ElectorateError::Refused(detail.to_string())),
+        ConsensusResult::ElectorateNotGoverned { .. } => Err(ElectorateError::Refused("not an electorate".into())),
         other => Err(ElectorateError::NotDecided(format!("{other:?}"))),
     }
+}
+
+static RETIREMENTS_UNDECIDED: AtomicU64 = AtomicU64::new(0);
+
+/// Retirement attempts that ended undecided after this node's acceptor had promised the retirement — so this node
+/// (and any member that promised it) has closed the group, which decides nothing until a retirement completes it
+/// (`retire_electorate` again, from any member). Counted and warned once per attempt (round 5, Q4).
+pub fn electorate_retirements_undecided() -> u64 {
+    RETIREMENTS_UNDECIDED.load(Ordering::Relaxed)
 }
 
 /// **Retire** `group` to `successor` — one attempt. See [`GossipAgent::retire_electorate`].
@@ -690,31 +727,48 @@ pub(crate) async fn retire_outcome(ctx: &Arc<TaskCtx>, group: &str, successor: &
     use crate::consensus::ConsensusResult;
     if !valid_group(group) || !valid_group(successor) || group == successor { return Err(ElectorateError::InvalidGroup); }
     let engine = crate::agent::helpers::make_consensus_engine_ctx(ctx, false, false, 0, None);
+    // A retry that finds the retirement already decided reports it (round 5, Q3).
     if let Some(r) = engine.retirement_view(group) {
         return if r.successor == successor { Ok((*r).clone()) } else { Err(ElectorateError::Retired { successor: r.successor.clone() }) };
     }
     let Some(cur) = engine.electorate_view(group) else {
-        return Err(ElectorateError::NotDecided(format!("{group} has no electorate to retire")));
+        return Err(ElectorateError::NotDecided(format!("{group} has no electorate visible here yet")));
     };
     if !cur.contains(&ctx.node_id) { return Err(ElectorateError::NotAMember); }
-    if engine.electorate_view(successor).is_some() {
-        return Err(ElectorateError::Refused(format!(
-            "{successor} already has an electorate: a successor is declared after the retirement names it, so its genesis \
-             can name the retirement")));
+    // Predecessor-first (round 5): the successor is declared first, naming this group. Not visible yet is gossip —
+    // retried; visible and not naming it is refused.
+    match engine.electorate_view(successor) {
+        None => return Err(ElectorateError::NotDecided(format!(
+            "successor {successor} has no electorate visible here yet — declare it first, naming {group} among its predecessors"))),
+        Some(s) if !s.predecessors.contains(group) => return Err(ElectorateError::Refused(format!(
+            "successor {successor} does not name {group} among its predecessors"))),
+        Some(_) => {}
     }
-    let r = Retirement { group: group.to_string(), epoch: cur.epoch, successor: successor.to_string(), passes_default: cur.exclusive_default };
+    let r = Retirement { group: group.to_string(), epoch: cur.epoch, successor: successor.to_string() };
+    let slot = retire_slot(group);
     let result = engine.propose(
-        crate::signal::SignalScope::Group(Arc::from(group)), Arc::from(retire_slot(group).as_str()), r.encode(),
+        crate::signal::SignalScope::Group(Arc::from(group)), Arc::from(slot.as_str()), r.encode(),
         cur.quorum(), decision_config(), None,
     ).await;
     let after = engine.retirement_view(group);
+    let undecided = |why: String| {
+        if ctx.consensus_accepted.pin().get(slot.as_str()).is_some_and(|s| s.promised > 0) {
+            RETIREMENTS_UNDECIDED.fetch_add(1, Ordering::Relaxed);
+            #[cfg(feature = "metrics")]
+            metrics::counter!("mycelium_electorate_retirements_undecided_total").increment(1);
+            tracing::warn!(group, successor, why, "electorate: a retirement attempt ended undecided after this node promised \
+                it — the group is closed here and decides nothing until a retirement completes (retire again from any member)");
+        }
+        ElectorateError::NotDecided(why)
+    };
     match (result, after) {
         (_, Some(done)) if done.successor == successor => Ok((*done).clone()),
         (_, Some(other)) => Err(ElectorateError::Retired { successor: other.successor.clone() }),
         (ConsensusResult::NotAMember { .. }, None) => Err(ElectorateError::NotAMember),
-        (ConsensusResult::Committed { .. }, None) => Err(ElectorateError::NotDecided(
+        (ConsensusResult::ElectorateMismatch { detail, .. }, None) => Err(ElectorateError::Refused(detail.to_string())),
+        (ConsensusResult::Committed { .. }, None) => Err(undecided(
             "committed, but its certificate did not reach the store — the retirement was not adopted yet".into())),
-        (other, None) => Err(ElectorateError::NotDecided(format!("{other:?}"))),
+        (other, None) => Err(undecided(format!("{other:?}"))),
     }
 }
 
@@ -728,29 +782,46 @@ impl GossipAgent {
     /// **Declare `group`'s electorate** — a governance act, decided by consensus (P2,
     /// `docs/design/consensus-electorate.md` §8). Reads the group's roster as this node sees it and proposes
     /// a **genesis** naming it, decided by **every** member named, each checking the set is the roster it sees.
+    /// `exclusive_default` declares the fleet's default electorate — refused while any group holds it.
     ///
     /// **Membership is frozen**: on a group that already has an electorate this decides nothing — it returns the
     /// electorate when the roster still matches, and [`ElectorateError::MembershipFrozen`] when it does not.
-    /// Changing who decides is a migration: [`retire_electorate`](Self::retire_electorate) to a successor, then
-    /// declare the successor (its genesis names the retirement, and carries the fleet's exclusive default when
-    /// the retired group held it). A pending genesis that can no longer complete (a member it names is gone) is
-    /// superseded by declaring the live roster from a member that holds it.
+    /// Changing who decides is a migration, **successor first**:
+    /// [`declare_successor_electorate`](Self::declare_successor_electorate), then
+    /// [`retire_electorate`](Self::retire_electorate) into it. A pending genesis that can no longer complete (a member
+    /// it names is gone) is superseded by declaring the live roster from a member that holds it.
     ///
-    /// Retries an undecided attempt with a bounded backoff (eight tries, 250 ms doubling to 4 s). Requires the
-    /// consensus listener on every member.
+    /// Retries an undecided attempt with a bounded backoff (eight tries, 250 ms doubling to 4 s); a refusal no retry
+    /// changes returns at once ([`ElectorateError::Refused`]). Requires the consensus listener on every member.
     #[cfg(feature = "consensus")]
     pub async fn declare_electorate(&self, group: &str, exclusive_default: bool) -> Result<ElectorateDecl, ElectorateError> {
-        retrying(|| async { declare_outcome(&self.task_ctx, group, exclusive_default).await.map(|(d, _)| d) }).await
+        let none = BTreeSet::new();
+        retrying(|| async { declare_outcome(&self.task_ctx, group, exclusive_default, &none).await.map(|(d, _)| d) }).await
     }
 
-    /// **Retire `group` to `successor`** — the first half of a migration (P2, §8). A decision of `group`'s
-    /// electorate (a strict majority), on `electorate/{group}/retire`. Every member closes `group` when it
-    /// promises the retirement, so once it is chosen `group` decides nothing again; its members then answer only
-    /// the successor's read-only carry reports. When `group` is the fleet's exclusive default, the default passes
-    /// to `successor` in this decision. Declare `successor` afterwards ([`declare_electorate`](Self::declare_electorate)).
+    /// **Declare a successor electorate** — the first step of a migration (P2 round 5, *predecessor-first*): a
+    /// genesis of `group`, from its roster, naming the groups it succeeds (two or more is a merge). Each predecessor
+    /// must be an electorate this node can see and not retired elsewhere. The successor **decides nothing** — no
+    /// slot, at the proposer or any acceptor — until every predecessor has retired to it
+    /// ([`retire_electorate`](Self::retire_electorate)) and that retirement is visible there; then each of its first
+    /// proposals per slot carries from a majority of every predecessor. When a predecessor holds the fleet's default,
+    /// the successor holds it from that retirement on.
+    #[cfg(feature = "consensus")]
+    pub async fn declare_successor_electorate(&self, group: &str, predecessors: &[&str]) -> Result<ElectorateDecl, ElectorateError> {
+        let preds: BTreeSet<String> = predecessors.iter().map(|p| p.to_string()).collect();
+        retrying(|| async { declare_outcome(&self.task_ctx, group, false, &preds).await.map(|(d, _)| d) }).await
+    }
+
+    /// **Retire `group` to `successor`** — the second step of a migration (P2, §8). `successor` must already be
+    /// declared, naming `group` among its predecessors (not yet visible here: retried; visible and not naming it:
+    /// refused). A decision of `group`'s electorate (a strict majority), on `electorate/{group}/retire`. Every member
+    /// closes `group` when it promises the retirement, so once it is chosen `group` decides nothing again; its members
+    /// then answer only the successor's read-only carry reports. When `group` holds the fleet's default, `successor`
+    /// holds it from this decision on.
     ///
     /// Needs a reachable majority of `group` — and the successor's first proposal for each slot needs one too,
-    /// until the successor has decided that slot. Retries an undecided attempt as `declare_electorate` does.
+    /// until the successor has decided that slot. Retries an undecided attempt as `declare_electorate` does; a retry
+    /// that finds the retirement decided reports it.
     #[cfg(feature = "consensus")]
     pub async fn retire_electorate(&self, group: &str, successor: &str) -> Result<Retirement, ElectorateError> {
         retrying(|| async { retire_outcome(&self.task_ctx, group, successor).await }).await
@@ -807,7 +878,7 @@ mod tests {
         unsorted.members.reverse();
         assert!(check_genesis("e", &unsorted).is_err());
         let mut own = g1.clone();
-        own.predecessor = Some(Predecessor { group: "e".into(), retirement: [0; 32] });
+        own.predecessors.insert("e".into());
         assert_eq!(check_genesis("e", &own), Err(ElectorateError::InvalidGroup), "a group does not succeed itself");
     }
 
@@ -820,12 +891,17 @@ mod tests {
         other.supersedes.as_mut().unwrap().members.pop();
         assert_ne!(g2.digest(), other.digest());
         let mut succ = g1.clone();
-        succ.predecessor = Some(Predecessor { group: "old".into(), retirement: [1; 32] });
+        succ.predecessors.insert("old".into());
         assert_ne!(g1.digest(), succ.digest());
         assert_eq!(ElectorateDecl::decode(&g2.encode()), Some(g2));
-        let r = Retirement { group: "old".into(), epoch: 1, successor: "new".into(), passes_default: true };
+        let r = Retirement { group: "old".into(), epoch: 1, successor: "new".into() };
         assert_eq!(Retirement::decode(&r.encode()), Some(r.clone()));
-        assert_ne!(r.digest(), Retirement { passes_default: false, ..r.clone() }.digest());
+        assert_ne!(r.digest(), Retirement { successor: "other".into(), ..r.clone() }.digest());
+        let mut merge = g1.clone();
+        merge.predecessors.extend(["a".to_string(), "b".to_string()]);
+        let mut one = g1.clone();
+        one.predecessors.insert("a".into());
+        assert_ne!(merge.digest(), one.digest(), "the digest commits to every predecessor");
     }
 
     #[test]

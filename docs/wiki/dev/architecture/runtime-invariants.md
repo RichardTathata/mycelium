@@ -110,11 +110,13 @@ member set by identity (`ElectorateMismatch`, roster tripwire), counts promises 
 holds the quorum at a strict majority; every Prepare/Propose names the epoch and digest (`PrepareIn`/`ProposeIn`), and
 an acceptor (`electorate_admits`) answers only its own — refusing `StaleElectorate` otherwise. Every claim, adoption
 and carry report on the group passes one `compute` on its gate key (`claim_gated`, `FenceState`), which only decides;
-the claim runs after it. **Membership change is migration:** a retirement (`electorate/{group}/retire`, a majority's
-decision naming the successor and passing the fleet's default) **closes** the group at its promise — the close waits
-for ordinary claims in flight, and keeps only what is durable, so a refused claim leaves the group open; the
-successor's genesis names the retirement; the successor's phase 1 for each slot also reads a majority of each retired
-predecessor (`CarryPrepare`/`CarryReport` — a member closes the group and persists the retirement before it reports)
+the claim runs after it. **Membership change is migration, successor first** (round 5): the successor is declared
+first, naming its predecessors (a set — a merge), and decides nothing — door and acceptor, fail closed
+(`successor_ready`) — until each has retired to it; a retirement (`electorate/{group}/retire`, a majority's decision)
+is accepted only into a successor that names the retiree (`successor_names`), and **closes** the group at its promise —
+the close waits for ordinary claims in flight, and keeps only what is durable, so a refused claim leaves the group
+open; the default is declared once and follows retirements (`live_default`, `holds_default`); the successor's phase 1
+for each slot also reads a majority of every retired predecessor (`CarryPrepare`/`CarryReport` — a member closes the group and persists the retirement before it reports)
 and adopts the highest acceptance, until it has decided the slot. So single-decree safety per slot holds across a
 migration, a chosen-never-committed value included, with no bound on slots (decision record §8.3); migrating needs a
 reachable majority of the retired group. The governor

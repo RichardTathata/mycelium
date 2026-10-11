@@ -70,7 +70,8 @@ this page is the index + the gate.
   write is then refused (`electorate_not_governed`) unless an **electorate group** decides it: declare each
   with `POST /gateway/govern/electorate` (`govern:write`, every member running the consensus listener), mark the one
   the cluster-scoped locks use `"exclusive_default": true` — only once every node runs P2 — and change an electorate's
-  members only by migration (retire it to a successor, `{"group", "retire_to"}`, then declare the successor), with a
+  members only by migration, successor first (declare the successor, `{"group", "predecessors": [...]}`, then retire
+  the old group into it, `{"group", "retire_to"}`), with a
   majority of the old electorate reachable until the successor has decided what it needs →
   [guide 04 § Discovery is not an electorate](../guide/04-consensus.md). **What it does not cover, by
   construction:** the external prerequisites — network confinement, clock sync —
