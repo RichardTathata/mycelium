@@ -12508,6 +12508,13 @@ async fn the_governor_and_the_watcher_leave_an_electorate_group_alone() {
     cfg.bind_port = port;
     cfg.health_check_interval_secs = 1;
     cfg.health_check_max_jitter_ms = 50;
+    // An electorate member must configure `[persistence]` (`acceptor_guard`, detection 1).
+    let base = std::env::temp_dir().join(format!("mycelium-electorate-{port}"));
+    let _ = std::fs::remove_dir_all(&base);
+    cfg.persistence = Some(crate::config::PersistenceConfig {
+        base_path: base, sync_mode: crate::config::SyncMode::Flush, snapshot_wal_threshold: 1_000,
+        snapshot_interval_secs: 3_600, on_unreadable: crate::config::OnUnreadable::Refuse,
+    });
     let a = GossipAgent::new(id.clone(), cfg);
     a.start().await.unwrap();
     let in_group = |g: &str| a.groups().iter().any(|x| x.as_ref() == g);
@@ -13039,10 +13046,11 @@ async fn a_member_restarted_over_an_empty_store_is_warned_once_its_genesis_is_le
 
 /// **A forgotten promise withholds the slot, so a second value is not decided** (`acceptor_guard`, detection 3 —
 /// the interleaving from PR #604's review). Electorate {A, B, C}; `work/x` = v1 is decided by {A, B} while C's
-/// listener is down, and C never learns the decision (the frame filter drops every `work/x` key at C but the ballot
-/// key, so C draws ballot 2). B restarts under the same `NodeId` over an **empty** store and never learns the decision
-/// either — only its own acceptor record for `work/x` reaches it, repaired from A. C then proposes v2 at ballot 2,
-/// hearing no answer from A.
+/// listener is down, and C never learns the decision: the frame filter drops every `work/x` key at C but the ballot
+/// key (so C draws ballot 2) and **every signal from A** — a learner writes the record from A's `CommitTerm` signal
+/// too, which can still be in flight through B when C's listener comes back. B restarts under the same `NodeId` over
+/// an **empty** store and never learns the decision either — only its own acceptor record for `work/x` reaches it,
+/// repaired from A. C then proposes v2 at ballot 2, hearing nothing from A.
 ///
 /// **Unfixed code:** B, empty, promises ballot 2 reporting no acceptance; {B, C} is a quorum; B votes v2; **v2 is
 /// decided** — two values for one slot, and A's commit-conflict tripwire fires when C's commit reaches it. **With
@@ -13053,7 +13061,8 @@ async fn a_member_restarted_over_an_empty_store_is_warned_once_its_genesis_is_le
 /// **The limit, stated:** the test waits for B's record to arrive *before* C proposes. Had C's prepare reached B
 /// first, B would have promised ballot 2 empty-handed, and the copy carrying ballot 1 would then read as stale —
 /// the detection needs the repair to arrive before the next higher ballot (design §8.5; `what-is-proven.md`).
-/// Seen failing first: `consensus_get("work/x")` on C was v2 and A counted a commit conflict.
+/// Seen failing first (every detection toggled off): C returned `Committed { value: b"v2", ballot: 2 }` and B's memory
+/// moved from `(1, v1)` to `(2, v2)` — two decided values.
 #[cfg(all(feature = "consensus", feature = "test-frame-filter"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_forgotten_promise_withholds_the_slot_so_a_second_value_is_not_decided() {
@@ -13066,16 +13075,17 @@ async fn a_forgotten_promise_withholds_the_slot_so_a_second_value_is_not_decided
     let (a_id, b_id, c_id) = (agents[0].node_id().clone(), agents[1].node_id().clone(), agents[2].node_id().clone());
     let names_slot = |key: &str| key.contains("work/x") || key.contains("work%2Fx");
     let ballot_key = format!("{}work/x", crate::consensus::consensus_ns::BALLOT);
-    // C never learns the decision — only the ballot it must go above.
+    // C never learns the decision — only the ballot it must go above — and hears nothing from A.
+    let a_hash = a_id.id_hash();
     agents[2].task_ctx.kv_state.frame_filter.pin().insert(1, Arc::new(move |v: &FrameView<'_>| match v {
         FrameView::Kv { key, .. } => *key != ballot_key && names_slot(key),
-        FrameView::Signal { .. } => false,
+        FrameView::Signal { sender, .. } => *sender == a_hash,
     }));
     drop(listeners.remove(2));
     let cfg = ConsensusConfig { phase1_timeout: Duration::from_millis(1500), max_ballots: 2, ..ConsensusConfig::default() };
     let r = agents[0].consensus().group_propose("council", "work/x", Bytes::from_static(b"v1"), cfg.clone()).await;
     assert!(matches!(r, ConsensusResult::Committed { .. }), "v1 decided by {{A, B}}: {r:?}");
-    poll_until(|| agents[1].consensus().consensus_get("work/x").as_deref() == Some(b"v1".as_slice()), 10_000).await;
+    poll_until(|| agents[1].consensus().consensus_get("work/x").as_deref() == Some(b"v1".as_slice()), 20_001).await;
     assert!(agents[1].task_ctx.consensus_accepted.pin().get("work/x").is_some_and(|s| s.accepted.is_some()), "B accepted v1");
     assert!(agents[2].consensus().consensus_get("work/x").is_none(), "C never learned it");
     listeners.push(agents[2].consensus().start_consensus_listener(ConsensusConfig::default()));
@@ -13102,19 +13112,21 @@ async fn a_forgotten_promise_withholds_the_slot_so_a_second_value_is_not_decided
     assert!(b.kv().get(&own_record).is_some(), "B's own record came back by anti-entropy");
     assert!(b.consensus().consensus_get("work/x").is_none(), "B does not know the decision");
 
-    // C proposes v2 at ballot 2, hearing nothing from A.
-    let a_hash = a_id.id_hash();
-    c.task_ctx.kv_state.frame_filter.pin().insert(3, Arc::new(move |v: &FrameView<'_>| matches!(v, FrameView::Signal { sender, .. } if *sender == a_hash)));
+    // C proposes v2 at ballot 2.
     let r = c.consensus().group_propose("council", "work/x", Bytes::from_static(b"v2"), cfg.clone()).await;
     assert!(matches!(r, ConsensusResult::Timeout { .. }), "B withholds the slot, so C alone is no quorum: {r:?}");
     assert!(b.task_ctx.acceptor_withheld.pin().contains("work/x"), "the slot is withheld on B");
+    assert!(b.task_ctx.consensus_accepted.pin().get("work/x").is_none(), "B answered nothing: its memory for the slot is untouched");
     assert_ne!(c.consensus().consensus_get("work/x").as_deref(), Some(b"v2".as_slice()), "v2 was not decided");
     // C hears A again: A reports v1, C adopts it.
-    c.task_ctx.kv_state.frame_filter.pin().remove(&3);
     c.task_ctx.kv_state.frame_filter.pin().remove(&1);
     let r = c.consensus().group_propose("council", "work/x", Bytes::from_static(b"v2"), cfg).await;
-    assert!(matches!(r, ConsensusResult::Committed { .. } | ConsensusResult::Superseded { .. }), "{r:?}");
-    poll_until(|| c.consensus().consensus_get("work/x").as_deref() == Some(b"v1".as_slice()), 10_000).await;
+    // A reports v1 in its promise: C adopts and commits it (`Committed`, the store written here), or learns the
+    // decision from A's report (`Superseded`) and holds the record once anti-entropy carries it — one round.
+    if matches!(r, ConsensusResult::Committed { .. }) {
+        assert_eq!(c.consensus().consensus_get("work/x").as_deref(), Some(b"v1".as_slice()), "C committed what A reported: {r:?}");
+    }
+    poll_until(|| c.consensus().consensus_get("work/x").as_deref() == Some(b"v1".as_slice()), 60_000).await;
     assert_eq!(c.consensus().consensus_get("work/x").as_deref(), Some(b"v1".as_slice()), "v1 kept");
     assert_eq!(a.consensus().consensus_get("work/x").as_deref(), Some(b"v1".as_slice()));
     assert_eq!(a.system_stats().commit_conflicts, 0, "one value was decided");

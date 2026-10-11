@@ -72,10 +72,7 @@ pub fn acceptor_promises_forgotten() -> u64 {
     PROMISES_FORGOTTEN.load(Ordering::Relaxed)
 }
 
-/// The refusal's text — one sentence, the same at every door.
-pub(crate) const PERSISTENCE_REQUIRED_DETAIL: &str =
-    "this node is a member of the electorate and has no [persistence]: its promises and acceptances would not survive \
-     a restart, and a member restarted empty can let two values be decided (guide 04 § Changing an electorate's members)";
+pub(crate) use super::electorate::PERSISTENCE_REQUIRED_DETAIL;
 
 /// Bound on the once-only notice set.
 const NOTICES_CAP: usize = 4096;

@@ -7833,6 +7833,14 @@ mod tests {
         cfg.bind_port = gossip_port;
         cfg.http_port = Some(http_port);
         cfg.gateway_auth_token = Some("t".into());
+        // The electorate route declares this node a member: a member must configure `[persistence]`.
+        let port = gossip_port;
+        let base = std::env::temp_dir().join(format!("mycelium-electorate-{port}"));
+        let _ = std::fs::remove_dir_all(&base);
+        cfg.persistence = Some(crate::config::PersistenceConfig {
+            base_path: base, sync_mode: crate::config::SyncMode::Flush, snapshot_wal_threshold: 1_000,
+            snapshot_interval_secs: 3_600, on_unreadable: crate::config::OnUnreadable::Refuse,
+        });
         let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
         agent.start().await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;

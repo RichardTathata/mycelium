@@ -553,7 +553,11 @@ tolerance; a lost majority stops the group, as in any consensus protocol, and it
 disaster-recovery genesis forced by an operator from the survivors' durable state — is not built. A
 member comes back **with its persistence directory at its latest state or not at all**: its promises and
 acceptances live there, and a member reissued its identity over an empty or older store is an acceptor
-that can contradict itself, which nothing at start detects (§7's table, row *a member that goes down*).
+that can contradict itself — detected, not prevented: a member without `[persistence]` is refused the
+electorate by name, an empty store is warned once its genesis is learned, and a forgotten promise that
+comes back by gossip withholds the slot until the next start, under the stated limit that the copy must
+arrive before the node answers a higher ballot (the design record §8.5; §7's table, row *a member that
+goes down*).
 The fleet's exclusive
 default is set once, at genesis (a second is refused by name), and cannot move in this release; two
 declarations made at once within gossip lag stop the exclusive verbs (fail closed) with no escape until

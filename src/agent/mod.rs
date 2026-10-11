@@ -91,7 +91,8 @@ pub(crate) mod timing_governor;
 pub(crate) mod membership_governor;
 pub(crate) mod electorate;
 /// The acceptor's memory guard (detection, never prevention): persistence required for an electorate member, an empty
-/// store warned, a forgotten promise withholding the slot.
+/// store warned, a forgotten promise withholding the slot. Consensus-only, like the memory it guards.
+#[cfg(feature = "consensus")]
 pub(crate) mod acceptor_guard;
 /// v3 item 4 PR 4a — `set_control_profile` and its tripwire, on `GossipAgent`.
 mod control_profile;
@@ -202,6 +203,7 @@ pub use tuning_governor::{
 pub(crate) use tuning_governor::TuningGovernor;
 pub use membership_governor::{MembershipAction, MembershipIntent, MEMBERSHIP_INTENT_TTL_MS, MEMBERSHIP_PREFIX};
 pub use electorate::{electorate_records_refused, ElectorateDecl, ElectorateError, Superseded, ELECTORATE_CERT_PREFIX, ELECTORATE_SLOT_PREFIX, SAFETY_SLOT_FAMILIES};
+#[cfg(feature = "consensus")]
 pub use acceptor_guard::{acceptor_memory_empty_for_electorate, acceptor_promises_forgotten, electorate_persistence_refused};
 // Legible Emergence — fleet diagnostics as data (localize · explain · diagnose). `GroupStatus` is
 // reached via `FleetSnapshot.governed_groups` (the bare name is already the mesh-dashboard type).

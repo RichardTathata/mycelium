@@ -405,18 +405,45 @@ attempt it holds; the argument above then needs every other adopter of `k` to re
 - **Changing members** is not built (§8.3); a lost majority stops a group for good, and **its repair is not built
   either** — a disaster-recovery genesis forced from the survivors' durable records, with the possibly-lost
   decisions stated, is the follow-up's follow-up (`docs/operations/what-is-proven.md`, the third table).
-- **An acceptor restarted over an empty or older store is not detected — nor a member without persistence.** The
-  guarantee rests on each member's durable acceptor record (§8.3): `prewarm_accepted` restores what it finds,
-  `start()` does not refuse a known electorate member whose store holds no records, and a member with no
-  `[persistence]` answers with nothing on disk (`persist_sync` returns `true`). A member reissued its `NodeId` over
-  an empty directory, restored from an older backup, or simply restarted without persistence, can promise below
-  what it promised and forget what it accepted, and two values can be decided. The rule is operational — configure
-  persistence; restore with the latest directory, or retire onto the removal ledger. The mechanical half, queued as
-  a code PR from #604's review: refuse genesis adoption for a member without `[persistence]`; warn by name when a
-  member of an adopted electorate holds zero own `sys/consensus-accepted/` records for it; and at
-  `connection.rs:66-68` compare an inbound copy of this node's own record against memory and warn when it holds a
-  promise or acceptance the node has forgotten — stated with what that cannot see (a promise whose gossip reached
-  no survivor; a stale copy whose forgotten answers were on slots since ended).
+- **An acceptor restarted over an empty or older store is detected, not prevented — and a member without
+  persistence is refused.** The guarantee rests on each member's durable acceptor record (§8.3): `prewarm_accepted`
+  restores what it finds, and a member reissued its `NodeId` over an empty directory, restored from an older backup,
+  or restarted without persistence, could promise below what it promised and forget what it accepted. Three
+  detections, each by name and counted, none a guard on a Layer I write (`src/agent/acceptor_guard.rs`; the
+  mechanical half #604 queued):
+  - **Persistence required** (deterministic). A node that would adopt, declare, propose or answer a genesis for an
+    electorate it is a member of with no `[persistence]` refuses by name — `ElectorateError::PersistenceRequired`,
+    `409 persistence_required` at `/gateway/govern/electorate`, a `DoorRefusal` at the proposer's door, no answer at
+    the acceptor's (so a genesis naming such a member is never decided) — counted on `electorate_persistence_refused`.
+    `persist_sync` returns `true` with nothing on disk when no WAL is configured, so such a member would forget on
+    **every** restart. A node outside the roster, and consensus outside an electorate, are untouched.
+  - **An empty store, warned.** Every member accepted the group's genesis, and the collector's `shrink_acceptor` keeps
+    `{promised}` rather than deleting, so a member that kept its store always holds at least the genesis slot's record.
+    A member of a *committed* genesis whose memory holds nothing for that slot is warned once per group and counted
+    (`acceptor_memory_empty_for_electorate`) — at `start()` from the records the store holds, and when the committed
+    record first arrives by gossip (an empty store has none at start). Warned, not refused: the record is read
+    unverified there, and a brand-new member legitimately holds nothing until its genesis is decided — firing only on a
+    committed genesis is how *not yet decided* is told from *decided, and I hold nothing*.
+  - **A forgotten promise withholds the slot.** On the core's inbound seam (`CoreCtx::inbound_observer`, called by
+    `connection::apply_inbound` for every inbound copy of a key under a prefix the agent named — core reports, decides
+    nothing), a peer's copy of this node's **own** acceptor record is compared with its memory for the slot,
+    independently of what LWW made of it in the store. Memory never lowers (a promise only rises; `shrink_acceptor`
+    raises `promised` to the ended ballot), so a copy whose promised or accepted ballot is **above** memory is an
+    answer this node gave and no longer holds: the slot is withheld — no prepare answered, no vote cast, no proposal
+    made by this node, as acceptor or proposer — **until the next start**, counted on `acceptor_promises_forgotten`.
+    A withheld slot never resumes without a restart: the memory that would make its answers safe is on disk (the copy
+    reached the store; an orderly shutdown snapshots it, and a crash before a snapshot leaves the next start to detect
+    it again), and refreshing it live would race the acceptor's own writes.
+
+  **What this cannot see, stated.** The third detection needs the copy to **arrive** — a promise whose gossip reached
+  no survivor is forgotten unseen — and to arrive **before** this node answers a higher ballot for the slot: once it
+  has promised `b+1` empty-handed, a copy carrying `b` is below memory and reads as a stale record. Between the restart
+  and the repair's arrival the hazard is open, and the test that shows the interleaving
+  (`a_forgotten_promise_withholds_the_slot_so_a_second_value_is_not_decided`) waits for the repair before the second
+  proposer prepares — detection with a fail-closed consequence on one slot, not a guarantee. The second detection
+  cannot tell an older backup from a kept store when the backup holds the genesis slot: forgotten answers on later
+  slots are the third detection's to see, under its limit. The operator rule is unchanged — configure persistence;
+  restore with the latest directory, or retire onto the removal ledger.
 - **Without `[tls]` nothing is authenticated**, the certificates included.
 - **A forged commit record stops a proposer.** A `consensus/committed/electorate/…` entry written straight into the
   store is not adopted, but a proposer for that slot reads it as decided and ends `Superseded`, as for any slot — so a

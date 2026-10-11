@@ -117,6 +117,25 @@ pub static RULES: &[RuleDescriptor] = &[
         summary: "Authority where the work happens: a protected call is checked at the provider whichever door it came through; with enforcement on and no evaluator it is refused, with it off nothing is checked.",
     },
     RuleDescriptor {
+        id: "cons.acceptor_memory", revision: 1, subsystem: "mycelium::agent::acceptor_guard", responsibilities: &[Response],
+        trigger: "an electorate adoption, declaration or genesis answer; a committed genesis found at start or arriving by gossip; an inbound copy of this node's own acceptor record; every prepare and proposal for a slot",
+        inputs: &[
+            Input { source: "`[persistence]` in the node's configuration", scope: "this node", freshness: "fixed at start" },
+            Input { source: "the acceptor memory (`TaskCtx::consensus_accepted`), restored once at start", scope: "this node", freshness: "local, atomic" },
+            Input { source: "a peer's copy of `sys/consensus-accepted/{me}/{slot}` and `consensus/committed/electorate/…`, as they arrive", scope: "one inbound update", freshness: "as gossiped; may be stale or forged" },
+        ],
+        outcomes: &[
+            Outcome { kind: Refusal, reasons: &["persistence_required", "slot_withheld"] },
+            Outcome { kind: Action, reasons: &["memory_empty_warned", "promise_forgotten_withheld"] },
+            Outcome { kind: NoAction, reasons: &["not_a_member", "copy_at_or_below_memory", "genesis_not_decided"] },
+        ],
+        effects: &["`TaskCtx::acceptor_withheld` (cleared only by a restart); the counters `electorate_persistence_refused`, `acceptor_memory_empty_for_electorate`, `acceptor_promises_forgotten`; never a Layer I write"],
+        guards: &[Guard::Other], may_trigger: &[], may_inhibit: &[], depends_on: &["kv.propagation"],
+        symbol: "acceptor_guard::{persistence_required, check_memory_for, install, withheld}", docs: "docs/design/consensus-electorate.md",
+        tests: &["a_member_without_persistence_is_refused_an_electorate_by_name", "a_member_restarted_over_an_empty_store_is_warned_once_its_genesis_is_learned", "a_forgotten_promise_withholds_the_slot_so_a_second_value_is_not_decided"], trace: CatalogueOnly,
+        summary: "An electorate member must keep its promises across a restart: no `[persistence]` is refused by name at every door, an empty store is warned once its genesis is known, and a peer's copy of this node's own record above its memory withholds the slot until the next start — detection, never prevention, and only of a copy that arrives before the next higher ballot.",
+    },
+    RuleDescriptor {
         id: "a2a.admission", revision: 1, subsystem: "mycelium::agent::a2a", responsibilities: &[Admission, Authority],
         trigger: "a request on `/a2a`",
         inputs: &[Input { source: "an optional bearer or federation credential", scope: "this request", freshness: "local" }],

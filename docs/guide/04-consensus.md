@@ -210,13 +210,27 @@ follow-up, branch `fix/p2-migration`). Membership is fixed at genesis. What that
   ballot it promised, to whom (since 2.30.0), and the value it accepted, per slot — is on its own disk
   (`sys/consensus-accepted/{node}/{slot}`, in the WAL under `{persistence.base_path}/{node_id}/kv/`,
   fsynced before the promise or vote leaves since 2.32.0) and is read back once at start, by
-  `prewarm_accepted`. **An electorate member must configure `[persistence]`:** without it nothing is on
-  disk and the node still answers (`persist_sync` reports "no promise was made"), so the hazard below
-  recurs on *every* restart, not only a reissue.
+  `prewarm_accepted`. **An electorate member must configure `[persistence]`**, and the node refuses to be
+  one without it: `declare_electorate` returns `ElectorateError::PersistenceRequired` (`409
+  persistence_required` at the gateway), the genesis is refused at the proposer's door and not answered
+  at the acceptor's, and a committed electorate naming the node is not adopted — each counted on
+  `electorate_persistence_refused`. Without persistence nothing would be on disk and the node would
+  still answer (`persist_sync` reports "no promise was made"), so the hazard below would recur on
+  *every* restart, not only a reissue.
   Nothing checks that the store it reads is the one the member had: a node started under the old
   `NodeId` with an **empty or older** store starts with an empty or older memory, and can promise a
   ballot it had already promised past, or report no acceptance where it had accepted — a quorum that
   counts it can decide a **second value** for the slot, the one thing the protocol must never do.
+  Two tripwires make it legible, by name (**detection, not prevention** — the fork below is still
+  yours): a member of a decided electorate that holds no acceptor record for the group's genesis slot
+  — every member accepted it, and the collector keeps the promise — is **warned once** when the
+  committed genesis is found, at start or on arrival (`acceptor_memory_empty_for_electorate`); and
+  when a peer's copy of the node's **own** acceptor record comes back by gossip carrying a promise or
+  acceptance above the node's memory, the node **withholds every answer for that slot until its next
+  start** (`acceptor_promises_forgotten`) — the repaired record is read then. That second tripwire only
+  sees a copy that arrives, and only before the node answers a higher ballot for the slot; between the
+  restart and the repair the hazard is open ([the design record
+  §8.5](../design/consensus-electorate.md)).
   - **Restore:** the same `NodeId`, the same certificate (or one reissued off-node — `mycelium tls
     issue`), **and its persistence directory at its latest state** — `{persistence.base_path}/{node_id}/kv/`
     (`snapshot.bin` + `wal.bin`), copied quiesced
@@ -225,7 +239,9 @@ follow-up, branch `fix/p2-migration`). Membership is fixed at genesis. What that
     after the copy is forgotten. Anti-entropy does not close it: the record is gossiped, and a peer's
     copy of this node's own record does reach a fresh **store** — but the acceptor's memory is loaded
     once, at start, so the copy is not in the running acceptor until the next restart, and the node's
-    first own answer overwrites it by LWW.
+    first own answer overwrites it by LWW. What the arriving copy does do is **withhold the slot** when
+    it holds more than the memory (above), so the node stops answering for it rather than contradicting
+    itself — restart it over the repaired store.
   - **Retire:** the directory is gone, or you cannot show it is the latest — put the `NodeId` on the
     removal ledger (`sys/membership/removed/`,
     [cert-rotation.md § Removing a member](../operations/cert-rotation.md)) and count the group one

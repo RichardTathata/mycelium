@@ -44,6 +44,11 @@ pub const SAFETY_SLOT_FAMILIES: &[&str] = &["lock/", "leader/", "consistent/", "
 
 static RECORDS_REFUSED: AtomicU64 = AtomicU64::new(0);
 
+/// [`ElectorateError::PersistenceRequired`]'s text — one sentence, the same at every door (`acceptor_guard`, detection 1).
+pub(crate) const PERSISTENCE_REQUIRED_DETAIL: &str =
+    "this node is a member of the electorate and has no [persistence]: its promises and acceptances would not survive \
+     a restart, and a member restarted empty can let two values be decided (guide 04 § Changing an electorate's members)";
+
 /// Electorate records this process refused to adopt — a committed `electorate/{group}/…` entry that is not
 /// a well-formed genesis, or whose certificate did not verify (a forgery, or a write that did not come through
 /// consensus). Each distinct record is counted once.
@@ -184,7 +189,7 @@ impl std::fmt::Display for ElectorateError {
             Self::NotDecided(why) => write!(f, "the electorate decision was not decided: {why}"),
             Self::Refused(why) => write!(f, "the electorate decision was refused: {why}"),
             Self::PersistenceRequired { group } => write!(
-                f, "electorate group {group}: {}", crate::agent::acceptor_guard::PERSISTENCE_REQUIRED_DETAIL),
+                f, "electorate group {group}: {PERSISTENCE_REQUIRED_DETAIL}"),
         }
     }
 }
