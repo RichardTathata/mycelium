@@ -542,7 +542,9 @@ impl ContractNet {
     /// node has it on disk.
     pub async fn commit_award_linearizable(&self, award: Award) -> Result<AwardedLinearizable, CommitmentRefusal> {
         let slot = award_key(&award.requirement);
-        match self.agent.consensus().cluster_propose_receipt(&slot, encode(&award), ConsensusConfig::default()).await {
+        // An award is an exclusive outcome (P2, #601's review): marked safety-sensitive and decided where the
+        // fleet decides those — its exclusive-default electorate group, or the whole cluster when none is declared.
+        match self.agent.consensus().exclusive_propose_receipt(&slot, encode(&award), ConsensusConfig::default()).await {
             Ok(commit) => Ok(AwardedLinearizable { award, commit }),
             Err(CommitError::Superseded { .. }) => {
                 let existing = self.award_of(&award.requirement).ok_or_else(|| {

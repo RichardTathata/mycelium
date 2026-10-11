@@ -112,6 +112,26 @@ pub enum ConsistencyError {
   read it as a refusal of the value.
 - `NotAMember` — this node is not in the group's roster, so it did not propose: its own vote would be one the
   electorate does not contain. Join the group (the same routes as above); nothing was decided.
+- `ElectorateNotGoverned` (P2) — the node requires an **electorate group** for an exclusive outcome
+  (`consensus_require_electorate`) and this safety-sensitive proposal's scope was the whole cluster (`group: None`)
+  or a group with no electorate declaration. Nothing was proposed. Declare the group (`declare_electorate`,
+  `POST /gateway/govern/electorate`) and, for the cluster-scoped lock and consistent verbs, mark one group
+  `exclusive_default`. Over HTTP **403** `electorate_not_governed`.
+- `ElectorateStale` (P2) — a member of the proposal's electorate holds a later one: a pending genesis this proposer
+  held was superseded. Nothing was decided by this proposal; retry, which reads the electorate in force. **409**
+  `electorate_stale`.
+- `ElectorateMismatch` (P2) — the electorate and this node's view disagree: the roster differs from the members (a
+  node joined or left an electorate whose membership is frozen — undo it, or migrate), the group is retired or
+  closing (its retirement promised here; `detail` names the successor once known), a cross-group proposal over an
+  electorate group, a `consensus_electorate` that disagrees with the fleet's exclusive default (or a retired default
+  whose successor has not formed), a slot proposed on a group that is not its home (a `lock/`-family slot off the
+  fleet's electorate, `leader/{g}` off `g`), or a successor that cannot read its predecessor yet. `detail` says which;
+  nothing was proposed. **409** `electorate_mismatch`.
+- `ElectorateError` (from `declare_electorate` / `retire_electorate`) — `MembershipFrozen` (the group has an
+  electorate and the roster differs: migrate — **409** `membership_frozen`), `Retired { successor }` (**409**
+  `retired`), `NotAMember` (**403**), `InvalidGroup` (**400**), `Refused` (a precondition no retry changes — the
+  successor already has an electorate, or the default asked for is not the one the retirement passed; **409**
+  `refused`), `NotDecided` (after the bounded retries; **409** `not_decided`).
 - `TopologyUnsatisfied` — quorum has the right headcount but the Hard topology
   policy (e.g. "must span two racks") was not satisfied. Retry is unlikely to
   help unless nodes rejoin from the missing segments. If availability matters more than the spread

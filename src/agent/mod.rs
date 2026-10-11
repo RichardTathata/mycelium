@@ -89,6 +89,7 @@ mod cluster_tuner;
 pub(crate) mod tuning_governor;
 pub(crate) mod timing_governor;
 pub(crate) mod membership_governor;
+pub(crate) mod electorate;
 /// v3 item 4 PR 4a — `set_control_profile` and its tripwire, on `GossipAgent`.
 mod control_profile;
 // The diagnostics module's *snapshot/view* surface (fleet snapshot, ViewConfidence, the `explain`
@@ -197,6 +198,7 @@ pub use tuning_governor::{
 #[cfg(test)]
 pub(crate) use tuning_governor::TuningGovernor;
 pub use membership_governor::{MembershipAction, MembershipIntent, MEMBERSHIP_INTENT_TTL_MS, MEMBERSHIP_PREFIX};
+pub use electorate::{electorate_records_refused, ElectorateDecl, ElectorateError, Predecessor, Retirement, Superseded, ELECTORATE_CERT_PREFIX, ELECTORATE_SLOT_PREFIX, SAFETY_SLOT_FAMILIES};
 // Legible Emergence — fleet diagnostics as data (localize · explain · diagnose). `GroupStatus` is
 // reached via `FleetSnapshot.governed_groups` (the bare name is already the mesh-dashboard type).
 pub use emergent::{
@@ -608,6 +610,42 @@ pub(crate) struct TaskCtx {
     /// member writes). Bounded at `consensus::VERIFIED_BALLOTS_CAP`; `compute` with a pure max.
     #[cfg(feature = "consensus")]
     pub(crate) consensus_verified_ballots: Arc<papaya::HashMap<Arc<str>, u64>>,
+    /// P2: the verified electorate per group (`electorate::view` refreshes it from the committed chain,
+    /// adopting an epoch only when its certificate verifies). Lock-free; a pure insert of a newer epoch.
+    #[cfg(feature = "consensus")]
+    pub(crate) electorates: Arc<papaya::HashMap<Arc<str>, Arc<electorate::ElectorateDecl>>>,
+    /// Electorate records refused (not adopted), so each is counted once — bounded at 4096.
+    #[cfg(feature = "consensus")]
+    pub(crate) electorate_refused: Arc<papaya::HashSet<Arc<str>>>,
+    /// P2's gate, per electorate group (`consensus::FenceState`): whether this node closed the group for its
+    /// retirement, the ordinary, retiring and genesis claims in flight, and the genesis attempts it touched and
+    /// adopted. Every claim, adoption and carry report on the group passes one `compute` on its key, so they are
+    /// ordered there (rounds 2 and 4 of #601's review). The durable record of the same facts is the acceptor
+    /// memory for the group's retirement and genesis slots, and the verified retirement.
+    #[cfg(feature = "consensus")]
+    pub(crate) electorate_fences: Arc<papaya::HashMap<Arc<str>, crate::consensus::FenceState>>,
+    /// P2: each group's verified retirement, cached once its certificate verified.
+    #[cfg(feature = "consensus")]
+    pub(crate) electorate_retired: Arc<papaya::HashMap<Arc<str>, Arc<electorate::Retirement>>>,
+    /// P2: `{group}\0{slot}` for every slot this node has seen a successor group decide — its proposals for the slot
+    /// stop carrying from the group's predecessors. In memory only: after a restart a proposal carries again,
+    /// which is safe and costs the reads.
+    #[cfg(feature = "consensus")]
+    pub(crate) electorate_carried: Arc<papaya::HashSet<Arc<str>>>,
+    /// P2: the highest genesis epoch with a committed record per group, and the groups with a committed retirement
+    /// record — both from the watched rescan of `consensus/committed/electorate/`.
+    #[cfg(feature = "consensus")]
+    pub(crate) electorate_epochs_known: Arc<papaya::HashMap<Arc<str>, u64>>,
+    #[cfg(feature = "consensus")]
+    pub(crate) electorate_retire_known: Arc<papaya::HashSet<Arc<str>>>,
+    /// Watches `consensus/committed/electorate/` so the fleet's electorate list is rescanned only when it
+    /// changed (round 2, finding 5); with the generation last scanned.
+    #[cfg(feature = "consensus")]
+    pub(crate) electorate_records_watch: Arc<std::sync::OnceLock<tokio::sync::watch::Receiver<u64>>>,
+    #[cfg(feature = "consensus")]
+    pub(crate) electorate_records_scanned: Arc<AtomicU64>,
+    #[cfg(feature = "consensus")]
+    pub(crate) electorate_groups_known: Arc<papaya::HashSet<Arc<str>>>,
     /// Proposals this node ended because the slot's next ballot would exceed `u64::MAX`
     /// (see `SystemStats::consensus_ballot_space_exhausted`).
     pub(crate) ballot_space_exhausted: Arc<AtomicU64>,
@@ -1183,6 +1221,26 @@ impl GossipAgent {
             decided_floor_anomalies_unrecorded: Arc::new(AtomicU64::new(0)),
             #[cfg(feature = "consensus")]
             consensus_verified_ballots: Arc::new(papaya::HashMap::new()),
+            #[cfg(feature = "consensus")]
+            electorates: Arc::new(papaya::HashMap::new()),
+            #[cfg(feature = "consensus")]
+            electorate_refused: Arc::new(papaya::HashSet::new()),
+            #[cfg(feature = "consensus")]
+            electorate_fences: Arc::new(papaya::HashMap::new()),
+            #[cfg(feature = "consensus")]
+            electorate_retired: Arc::new(papaya::HashMap::new()),
+            #[cfg(feature = "consensus")]
+            electorate_carried: Arc::new(papaya::HashSet::new()),
+            #[cfg(feature = "consensus")]
+            electorate_epochs_known: Arc::new(papaya::HashMap::new()),
+            #[cfg(feature = "consensus")]
+            electorate_retire_known: Arc::new(papaya::HashSet::new()),
+            #[cfg(feature = "consensus")]
+            electorate_records_watch: Arc::new(std::sync::OnceLock::new()),
+            #[cfg(feature = "consensus")]
+            electorate_records_scanned: Arc::new(AtomicU64::new(u64::MAX)),
+            #[cfg(feature = "consensus")]
+            electorate_groups_known: Arc::new(papaya::HashSet::new()),
             ballot_space_exhausted: Arc::new(AtomicU64::new(0)),
             event_ring: Arc::new(emergent::EventRing::default()),
             governed_group_conflicts: Arc::new(AtomicU64::new(0)),
@@ -1945,7 +2003,9 @@ impl GossipAgent {
     ) -> crate::consensus::ConsensusResult {
         let policy = capauthz::CapAuthzPolicy { required_roles: roles }.encode();
         let slot = format!("capauthz/{ns}/{name}");
-        let result = self.consensus().cluster_propose(&slot, policy.clone(), config).await;
+        // A cluster-wide authorisation policy is an exclusive outcome (P2): marked safety-sensitive and decided
+        // where the fleet decides those.
+        let result = self.consensus().exclusive_propose(&slot, policy.clone(), config).await;
         if matches!(result, crate::consensus::ConsensusResult::Committed { .. }) {
             // Apply the agreed policy to the key resolvers enforce on (D4). Idempotent under LWW.
             let _ = self.kv().set(capauthz::capauthz_key(ns, name), policy);

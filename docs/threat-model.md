@@ -522,10 +522,11 @@ leader, a single writer, anything a second holder would corrupt:
 
 | Setting | Required value | Why |
 |---|---|---|
-| `quorum_size` | a strict majority of the **fixed** voter set, stated explicitly | a derived quorum shrinks with the view |
-| `use_trust_slices` | `true`, with **every** voter calling `declare_trust` with the **same** set | the tally then counts only votes from the fixed *eligible* set (`consensus.rs`, pinned by `test_trust_slice_filters_votes`) |
-| `count_opaque_as_absent` | `false` | a partition that reads as "everyone else is opaque" must not become a smaller quorum |
-| membership | **fixed for the life of the slot**; drain and re-form to change it | there is no versioned electorate or transition protocol |
+| the electorate | an **electorate group** — `declare_electorate(group, exclusive_default)` / `POST /gateway/govern/electorate` — and `consensus_require_electorate = true` on every proposer (`secure-single-domain` rev 4 requires it); one group marked `exclusive_default` for the cluster-scoped locks | since P2 (2026-10-10) the electorate is pinned by **member identity**, a genesis decided by every member it names, and **frozen**; acceptors answer only their own electorate, and a safety-sensitive proposal anywhere else is refused (`ElectorateNotGoverned`) — named as a **group**, never as node identities in configuration ([decision record §8](design/consensus-electorate.md#8-p2s-design--the-electorate-group)) |
+| `quorum_size` | `0`, or a strict majority of the members | for an electorate group the engine raises a smaller quorum to a strict majority of its members |
+| `use_trust_slices` | optional | the electorate's member set is the vote filter; a declared slice only narrows it. Before P2 this row required identical `declare_trust` sets on every voter — node identities as the electorate's name |
+| `count_opaque_as_absent` | `false` (ignored for an electorate group) | a partition that reads as "everyone else is opaque" must not become a smaller quorum; on an electorate group the engine does not reduce the quorum for opacity |
+| membership | **frozen**; changed only by **migration** — retire the group to a successor (a decision of its majority, closing it at the retirement's promise), declare the successor (its genesis names the retirement) | the governor and the emergent watcher do not move an electorate group, and a changed roster is refused. The successor carries each slot from a majority of the retired group the first time it touches it, so safety per slot holds across the migration (decision record §8.3). Migrating needs a reachable majority of the retired group — a lost majority is unrecoverable |
 | the effect | fenced **at the resource** with the commit's token | winning is not the grant; exclusivity is enforced by refusing a stale token |
 
 Outside that profile — automatic sizing, slices off, opacity reduction on, voters joining and
@@ -539,10 +540,27 @@ of the whole protocol. Those are roadmap; the profile above is what ships.
 [`design/consensus-electorate.md`](design/consensus-electorate.md), adopted 2026-10-10). Gossip
 membership, capability groups and emergent groups are dynamic; the electorate for a safety-sensitive
 decision is a fixed set for the life of that decision, and quorum intersection is its property, not
-discovery's. What the code enforces today: an empty or below-floor roster is refused
-(`ElectorateUnavailable`), a proposer outside the group is refused (`NotAMember`), and the gateway
-moves a governed group's membership only through `/gateway/govern/group` (`govern:write`, audited).
-What it does not: an embedded `join_group` or a `grp/` write still moves a governed group by LWW, and
-nothing *requires* a governed group for a safety-sensitive proposal — that is post-360 plan row
-**P2**, not built. Versioned electorates with joint-consensus transitions are a later plan, not
-built; a consensus *service* (a fixed tier of nodes everyone must reach) is rejected.
+discovery's. What the code enforces: an empty or below-floor roster is refused
+(`ElectorateUnavailable`), a proposer outside the group is refused (`NotAMember`), the gateway
+moves a governed group's membership only through `/gateway/govern/group` (`govern:write`, audited),
+and — since post-360 plan row **P2** — a node with `consensus_require_electorate` refuses a
+safety-sensitive proposal outside an **electorate group**, pinned by member identity and **frozen**
+(the maintainer's decision, 2026-10-11): its members change only by **migration** — a retirement
+decided by a majority of the group, closing it at the retirement's promise, then a successor whose
+genesis names the retirement and which carries each slot, the first time it touches it, from a
+majority of the retired group. So a chosen value survives the migration, committed or not, with no
+bound on the slots. What it does not: an embedded `join_group` or a `grp/` write still moves a
+group's roster by LWW — for an electorate group the next proposal refuses the mismatch rather than
+counting it (detection, not prevention). **A retired member answers a successor's carry read-only and
+only after closing the group** — it promises nothing and accepts nothing more for the retired group;
+a *compromised* retired member could report falsely (omit or invent an acceptance), which is outside
+the crash-fault claim like every Byzantine member, and its report is bound to its signature under
+`[tls]`. **A forged electorate record** — a `consensus/committed/electorate/…` entry or certificate
+written straight into the store — is not adopted unless its certificate holds the signed votes of
+every member a genesis names, or of a majority of the group a retirement retires (under `[tls]`), and
+is counted (`mycelium::electorate_records_refused`); `sys/govern/electorate/` is not read.
+**Liveness:** migrating needs a reachable majority of the retired group — to retire it, and for the
+successor's first proposal on each slot — and losing a majority of an electorate is unrecoverable, as
+in any consensus protocol. Live reconfiguration (versioned electorates with joint-consensus
+transitions) is a later plan, not built; a consensus *service* (a fixed tier of nodes everyone must
+reach) is rejected.
