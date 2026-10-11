@@ -2,13 +2,14 @@
 
 **Generated** from the `RuleDescriptor`s each crate registers (`mycelium_core::rule`); do not edit. Regenerate with `UPDATE_RULE_CATALOGUE=1 cargo test -p mycelium-wasm-host --features stem --test rule_catalogue`. A rule is a decision point the substrate already has, described: what triggers it, what it reads, how it can end and why, what it writes, which guards it passes, how it may relate to other rules, where its code and tests are, and whether the decision trace records it. A descriptor executes nothing. A relationship is a hypothesis until a trace or a test shows it. The plan is `docs/plans/guarantees-and-rule-catalogue.md`.
 
-Schema `mycelium.rules/1` · 27 rules.
+Schema `mycelium.rules/1` · 28 rules.
 
 | Rule | Responsibilities | Trace | Summary |
 |---|---|---|---|
 | [`a2a.admission`](#a2aadmission) | Admission, Authority | catalogue only | An absent credential is anonymous and a present bearer's scopes are dropped: a bearer does not gate this route, an evaluator does. |
 | [`ae.preflight`](#aepreflight) | Authority | catalogue only | Permit, deny or indeterminate, recorded before the work runs; a refused mandate denies before policy runs, so a policy engine cannot launder a revocation. |
 | [`cap.match`](#capmatch) | Response | catalogue only | The one matching rule, shared by the resolver and the offline check: namespace, name, schema id, typed attribute constraints; opacity skips, it does not unmatch. |
+| [`cons.acceptor_memory`](#consacceptor_memory) | Response | catalogue only | An electorate member must keep its promises across a restart: no `[persistence]` is refused by name at every door, an empty store is warned once its genesis is known, and a peer's copy of this node's own record above its memory withholds the slot until the next start — detection, never prevention, and only of a copy that arrives before the next higher ballot. |
 | [`gateway.auth`](#gatewayauth) | Authority | catalogue only | Deny by default under `compliance`: a route needs its scope; with no credential model the gateway is open — on loopback only, since a non-loopback one refuses to start unless `gateway_allow_unauthenticated` waives it — and a table the build cannot enforce refuses to start. |
 | [`host.emit_admission`](#hostemit_admission) | Admission, Authority | catalogue only | A component emits only under `comp/{namespace}/…` or a kind the host listed for it, and never a protected RPC kind — an emit from inside the process would reach that kind's handlers unframed, past the door that checks authority. |
 | [`kv.expiry`](#kvexpiry) | Propagation | catalogue only | An advertisement its writer stopped refreshing leaves the view after its TTL; a stale view is possible in between. |
@@ -83,6 +84,26 @@ The one matching rule, shared by the resolver and the offline check: namespace, 
 - **May trigger:** [`prov.demand_response`](#provdemand_response)
 - **Depends on:** [`kv.propagation`](#kvpropagation)
 - **Code:** `capability::CapFilter::matches` · **Docs:** docs/guide/02-capabilities.md · **Tests:** `filter_matches_capability`, `constraint_matches_eq_ne`, `constraint_matches_ordering`
+
+## `cons.acceptor_memory`
+
+rev 1 · `mycelium::agent::acceptor_guard` · Response · trace: catalogue only
+
+An electorate member must keep its promises across a restart: no `[persistence]` is refused by name at every door, an empty store is warned once its genesis is known, and a peer's copy of this node's own record above its memory withholds the slot until the next start — detection, never prevention, and only of a copy that arrives before the next higher ballot.
+
+- **Trigger:** an electorate adoption, declaration or genesis answer; a committed genesis found at start or arriving by gossip; an inbound copy of this node's own acceptor record; every prepare and proposal for a slot
+- **Reads:**
+  - `[persistence]` in the node's configuration — scope: this node; freshness: fixed at start
+  - the acceptor memory (`TaskCtx::consensus_accepted`), restored once at start — scope: this node; freshness: local, atomic
+  - a peer's copy of `sys/consensus-accepted/{me}/{slot}` and `consensus/committed/electorate/…`, as they arrive — scope: one inbound update; freshness: as gossiped; may be stale or forged
+- **Outcomes:**
+  - Refusal: `persistence_required`, `slot_withheld`
+  - Action: `memory_empty_warned`, `promise_forgotten_withheld`
+  - NoAction: `not_a_member`, `copy_at_or_below_memory`, `genesis_not_decided`
+- **Effects:** `TaskCtx::acceptor_withheld` (cleared only by a restart); the counters `electorate_persistence_refused`, `acceptor_memory_empty_for_electorate`, `acceptor_promises_forgotten`; never a Layer I write
+- **Guards:** Other
+- **Depends on:** [`kv.propagation`](#kvpropagation)
+- **Code:** `acceptor_guard::{persistence_required, check_memory_for, install, withheld}` · **Docs:** docs/design/consensus-electorate.md · **Tests:** `a_member_without_persistence_is_refused_an_electorate_by_name`, `a_member_restarted_over_an_empty_store_is_warned_once_its_genesis_is_learned`, `a_forgotten_promise_withholds_the_slot_so_a_second_value_is_not_decided`
 
 ## `gateway.auth`
 

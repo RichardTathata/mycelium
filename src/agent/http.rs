@@ -1190,7 +1190,16 @@ fn feature_gated_counters() -> Vec<(&'static str, u64)> {
         #[cfg(not(feature = "consensus"))]
         { None }
     };
-    [identity_untagged, consensus_untagged, acceptor_unrecorded].into_iter().flatten().collect()
+    // The acceptor's memory guard (`acceptor_guard`): persistence refusals, an empty store, forgotten promises.
+    let acceptor_guard: [Option<(&'static str, u64)>; 3] = {
+        #[cfg(feature = "consensus")]
+        { [Some(("electorate_persistence_refused", crate::electorate_persistence_refused())),
+           Some(("acceptor_memory_empty_for_electorate", crate::acceptor_memory_empty_for_electorate())),
+           Some(("acceptor_promises_forgotten", crate::acceptor_promises_forgotten()))] }
+        #[cfg(not(feature = "consensus"))]
+        { [None, None, None] }
+    };
+    [identity_untagged, consensus_untagged, acceptor_unrecorded].into_iter().chain(acceptor_guard).flatten().collect()
 }
 
 /// `GET /gateway/audit` — query the tamper-evident audit trail (compliance, scope
@@ -1888,6 +1897,8 @@ async fn gw_govern_electorate_declare(
                 Json(json!({ "ok": false, "error": "membership_frozen", "message": e.to_string() }))).into_response(),
             E::Refused(_) => (StatusCode::CONFLICT,
                 Json(json!({ "ok": false, "error": "refused", "message": e.to_string() }))).into_response(),
+            E::PersistenceRequired { .. } => (StatusCode::CONFLICT,
+                Json(json!({ "ok": false, "error": "persistence_required", "message": e.to_string() }))).into_response(),
             e => (StatusCode::CONFLICT,
                 Json(json!({ "ok": false, "error": "not_decided", "message": e.to_string() }))).into_response(),
         };
@@ -7822,6 +7833,14 @@ mod tests {
         cfg.bind_port = gossip_port;
         cfg.http_port = Some(http_port);
         cfg.gateway_auth_token = Some("t".into());
+        // The electorate route declares this node a member: a member must configure `[persistence]`.
+        let port = gossip_port;
+        let base = std::env::temp_dir().join(format!("mycelium-electorate-{port}"));
+        let _ = std::fs::remove_dir_all(&base);
+        cfg.persistence = Some(crate::config::PersistenceConfig {
+            base_path: base, sync_mode: crate::config::SyncMode::Flush, snapshot_wal_threshold: 1_000,
+            snapshot_interval_secs: 3_600, on_unreadable: crate::config::OnUnreadable::Refuse,
+        });
         let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
         agent.start().await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -7923,6 +7942,38 @@ mod tests {
         agent.shutdown_with_timeout(Duration::from_secs(5)).await;
     }
 
+    /// **A member without `[persistence]` is refused an electorate at the gateway**: `POST /gateway/govern/electorate`
+    /// answers **409** `persistence_required`, names the group, decides nothing and records nothing (`acceptor_guard`,
+    /// detection 1). Seen failing first: 200, epoch 1.
+    #[cfg(all(feature = "gateway", feature = "consensus"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_member_without_persistence_is_refused_an_electorate_at_the_gateway() {
+        use axum::http::header::AUTHORIZATION;
+        let (gossip_port, http_port) = (alloc_port(), alloc_port());
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.gateway_auth_token = Some("t".into());
+        assert!(cfg.persistence.is_none());
+        let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
+        agent.start().await.unwrap();
+        let _listener = agent.consensus().start_consensus_listener(crate::consensus::ConsensusConfig::default());
+        agent.mesh().join_group("council");
+        let client = reqwest::Client::new();
+        let changes = || agent.task_ctx.governance_changes.load(std::sync::atomic::Ordering::Relaxed);
+        let before = (changes(), crate::electorate_persistence_refused());
+        let r = client.post(format!("http://127.0.0.1:{http_port}/gateway/govern/electorate")).header(AUTHORIZATION, "Bearer t")
+            .json(&serde_json::json!({"group": "council"})).send().await.unwrap();
+        assert_eq!(r.status(), 409);
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(body["error"], "persistence_required", "{body}");
+        assert!(body["message"].as_str().unwrap_or_default().contains("council"), "{body}");
+        assert!(agent.electorate("council").is_none(), "nothing was decided");
+        assert_eq!(changes(), before.0, "a refusal records nothing");
+        assert!(crate::electorate_persistence_refused() > before.1, "and is counted");
+        agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+    }
+
     /// **P2 at the gateway.** On a node that requires an electorate group for an exclusive outcome, the election and
     /// lock routes refuse an ungoverned scope **403** `electorate_not_governed` and decide nothing. `POST
     /// /gateway/govern/electorate` (`govern:write`) declares the group's electorate by consensus — here a genesis of
@@ -7941,6 +7992,13 @@ mod tests {
         cfg.http_port = Some(http_port);
         cfg.gateway_auth_token = Some("t".into());
         cfg.consensus_require_electorate = true;
+        // An electorate member must configure `[persistence]` (`acceptor_guard`, detection 1).
+        let base = std::env::temp_dir().join(format!("mycelium-gw-electorate-{gossip_port}"));
+        let _ = std::fs::remove_dir_all(&base);
+        cfg.persistence = Some(crate::config::PersistenceConfig {
+            base_path: base.clone(), sync_mode: crate::config::SyncMode::Flush, snapshot_wal_threshold: 1_000,
+            snapshot_interval_secs: 3_600, on_unreadable: crate::config::OnUnreadable::Refuse,
+        });
         let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
         agent.start().await.unwrap();
         let _listener = agent.consensus().start_consensus_listener(crate::consensus::ConsensusConfig::default());

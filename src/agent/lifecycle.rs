@@ -355,6 +355,9 @@ impl GossipAgent {
             // And which genesis attempts of each electorate group it touched (P2): the gate's record, which the
             // check for an electorate in formation reads without walking the memory.
             crate::agent::electorate::prewarm_genesis_touched(&self.task_ctx);
+            // A member of a decided electorate the store records, holding no acceptor memory for its genesis, is
+            // warned by name (`acceptor_guard`, detection 2 — a store emptier than the fleet's record of this node).
+            crate::agent::acceptor_guard::check_at_start(&self.task_ctx);
         }
         self.prewarm_peer_localities();
         self.advertise_locality();

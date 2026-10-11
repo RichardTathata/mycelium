@@ -1,4 +1,4 @@
-use crate::context::CoreCtx;
+use crate::context::{CoreCtx, InboundObserver};
 use crate::error::GossipError;
 use crate::framing::{
     dispatch_gossip_try_send, is_connection_closed,
@@ -120,7 +120,12 @@ fn flag_foreign_sys_write(
 }
 
 /// Applies an inbound update and runs the `sys/` tripwire on it: reads what a self-owned key held
-/// first (only for such keys — every other key costs one prefix test), applies, then judges.
+/// first (only for such keys — every other key costs one prefix test), applies, then judges. Then
+/// reports the arrival to the installed [`InboundObserver`] when the key is under one of its prefixes
+/// — after the apply and whatever LWW made of it, so an older copy of this node's own record that
+/// lost to a newer local write is still reported (the "repair" of `counts_as_foreign_write` is
+/// exactly the copy an acceptor restarted over an empty store must compare with its memory;
+/// `mycelium::agent::acceptor_guard`). Core reports; the observer decides.
 fn apply_inbound(
     kv_state: &crate::store::KvState,
     update: &GossipUpdate,
@@ -128,14 +133,18 @@ fn apply_inbound(
     self_node: &str,
     self_hash: u64,
     counter: &std::sync::atomic::AtomicU64,
+    observer: Option<&InboundObserver>,
 ) {
-    if !names_self_owned_sys_key(&update.key, self_node) {
+    if names_self_owned_sys_key(&update.key, self_node) {
+        let prior = kv_state.store.pin().get(update.key.as_ref()).map(|e| e.data.clone());
+        let outcome = apply_and_notify_reporting(kv_state, update);
+        flag_foreign_sys_write(update, origin, self_hash, prior.as_ref(), outcome, counter);
+    } else {
         apply_and_notify(kv_state, update);
-        return;
     }
-    let prior = kv_state.store.pin().get(update.key.as_ref()).map(|e| e.data.clone());
-    let outcome = apply_and_notify_reporting(kv_state, update);
-    flag_foreign_sys_write(update, origin, self_hash, prior.as_ref(), outcome, counter);
+    if let Some(o) = observer && o.watches(&update.key) {
+        (o.on_inbound)(update);
+    }
 }
 
 /// Shared state threaded into every inbound connection handler.
@@ -187,6 +196,7 @@ pub async fn handle_connection(
     let signal_handlers = Arc::clone(&task_ctx.signal_handlers);
     let kv_state        = Arc::clone(&task_ctx.kv_state);
     let sys_violations  = Arc::clone(&task_ctx.sys_namespace_violations);
+    let inbound_observer = task_ctx.inbound_observer.get().cloned();
     let wal             = task_ctx.wal.get().cloned();
     let tls             = task_ctx.tls.get().cloned();
     let mut socket = BufReader::with_capacity(8_192, crate::stall::StallGuard::new(socket));
@@ -659,7 +669,7 @@ pub async fn handle_connection(
                     };
                     // Apply (running the `sys/` tripwire), then persist (persistence.rs durability
                     // invariant 1). An anti-entropy entry names no writer: `Origin::Unknown`.
-                    apply_inbound(&kv_state, &update, Origin::Unknown, &node_id_str, self_hash, &sys_violations);
+                    apply_inbound(&kv_state, &update, Origin::Unknown, &node_id_str, self_hash, &sys_violations, inbound_observer.as_ref());
                     if let Some(ref wal) = wal {
                         let _ = wal.append(sync_entry_from(&update)).await;
                     }
@@ -813,7 +823,7 @@ pub async fn handle_connection(
                 if intern_keys { update.key = intern_key(update.key, intern_max_keys); }
                 // Apply (running the `sys/` tripwire), then persist (persistence.rs durability
                 // invariant 1). A gossip frame carries its originator's hash.
-                apply_inbound(&kv_state, &update, Origin::Sender(update.sender), &node_id_str, self_hash, &sys_violations);
+                apply_inbound(&kv_state, &update, Origin::Sender(update.sender), &node_id_str, self_hash, &sys_violations, inbound_observer.as_ref());
                 if let Some(ref wal) = wal {
                     let _ = wal.append(sync_entry_from(&update)).await;
                 }
@@ -946,7 +956,7 @@ pub async fn handle_connection(
                 if intern_keys { update.key = intern_key(update.key, intern_max_keys); }
                 // Apply (running the `sys/` tripwire), then persist (persistence.rs durability
                 // invariant 1). A gossip frame carries its originator's hash.
-                apply_inbound(&kv_state, &update, Origin::Sender(update.sender), &node_id_str, self_hash, &sys_violations);
+                apply_inbound(&kv_state, &update, Origin::Sender(update.sender), &node_id_str, self_hash, &sys_violations, inbound_observer.as_ref());
                 if let Some(ref wal) = wal {
                     let _ = wal.append(sync_entry_from(&update)).await;
                 }

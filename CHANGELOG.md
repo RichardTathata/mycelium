@@ -9,6 +9,43 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **An electorate member that restarts without its promises is detected: persistence required, an empty store
+  warned, a forgotten promise withholds the slot** (`src/agent/acceptor_guard.rs`; the code half of #604's
+  hazard — detection by name, never a guard on a Layer I write). A node that would adopt, declare, propose or
+  answer a genesis for an electorate it is a member of with no `[persistence]` refuses by name:
+  `ElectorateError::PersistenceRequired`, **409 `persistence_required`** at `/gateway/govern/electorate`, a door
+  refusal, no acceptor answer (so a genesis naming such a member is never decided); counted on
+  `electorate_persistence_refused`. A member of a committed genesis whose acceptor memory holds nothing for the
+  genesis slot — every member accepted it, and the collector keeps the promise — is **warned once** at `start()`
+  and when the record first arrives by gossip (`acceptor_memory_empty_for_electorate`); warned, not refused, since
+  the record is read unverified and a brand-new member holds nothing until genesis. And a peer's copy of this
+  node's **own** acceptor record arriving with a promise or acceptance above its memory — an answer it gave and
+  forgot — **withholds that slot until the next start**: no prepare answered, no vote cast, no proposal made
+  (`acceptor_promises_forgotten`; `Timeout` with reason `acceptor_withheld` for a proposer). The copy reaches the
+  agent through a new core seam, `CoreCtx::inbound_observer` (`InboundObserver { prefixes, on_inbound }`), which
+  `connection::apply_inbound` calls for every inbound update under a named prefix after the apply, whatever LWW
+  made of it — core reports, the agent decides. Five tests seen failing first (the declaration decided; 200 at the
+  gateway; epoch 1 adopted; nothing counted; **v2 committed at ballot 2 with B's memory moved from `(1, v1)` to
+  `(2, v2)`** — two decided values); the electorate test harness now configures persistence, as a member must.
+  **The limit, stated** (design §8.5, `what-is-proven.md`): the withholding needs the copy to arrive, and before
+  the node answers a higher ballot for the slot — between a restart and the repair the hazard is open; a withheld
+  slot never resumes without a restart — but the disk is repaired at detection: the merged record (the higher
+  promise, the higher acceptance) is written to the node's own key under `acceptor_records`, so the next start holds
+  the forgotten answers even where the node's own empty-handed write had beaten the copy by LWW, and
+  `persist_acceptor` writes nothing for a withheld slot (#605's review); memory is re-read under the lock and merged
+  again before the write, and an acceptance the copy carries at a ballot at or above memory's promise is forgotten
+  too — a vote cast at `b` the node would cast again for another value — unless the promise is the collector's floor
+  (the confirming review). The withheld check is re-run per ballot and
+  before the proposer's own vote; a cross-group timeout reports its real quorum; the once-only notices are one
+  bounded set per kind, and the adoption refusal is counted on every refused view. Counters on `GET /gateway/stats`;
+  `mycelium_acceptor_guard_total{event}`.
+  The module, its counters and the seam's installer exist only under `consensus` (a gateway-only build is untouched).
+  **Upgrade notes:** an electorate member without `[persistence]` is now refused — configure it (it was never
+  safe without); `ElectorateError` gained `PersistenceRequired` (`#[non_exhaustive]`, a `_` arm fails closed);
+  `CoreCtx` gained `inbound_observer` (an exhaustive literal breaks); `TaskCtx` gained two sets.
+
 ### Changed
 
 - **Documentation: a lost electorate voter is restored with its state or retired — never reissued empty.**

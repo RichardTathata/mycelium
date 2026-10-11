@@ -124,8 +124,19 @@ start**, by `prewarm_accepted` (`src/agent/lifecycle.rs`, after the WAL replay a
 record is gossiped and a peer's copy of this node's own record is applied to a fresh store as a repair
 (`mycelium-core/src/connection.rs`, `anti_entropy_repair_after_a_restart_is_not_a_namespace_violation`), but it
 reaches the files, not the running acceptor, until the next restart — and the node's first own write overwrites it
-by LWW. So a node started under its `NodeId` over an empty or older directory can re-promise below what it promised and
-forget what it accepted — two decided values. The operator rule: restore with the **latest** directory, or retire
+by LWW. So a node started under its `NodeId` over an empty or older directory could re-promise below what it promised
+and forget what it accepted — two decided values. **Detected, never prevented** (`src/agent/acceptor_guard.rs`,
+2026-10-11): a member with no `[persistence]` is refused the electorate by name at every door
+(`ElectorateError::PersistenceRequired`, counted); a member of a committed genesis holding no acceptor record for
+its genesis slot is warned once (`acceptor_memory_empty_for_electorate`); and a peer's copy of the node's own record
+arriving with a promise or acceptance above memory **withholds the slot until the next start**
+(`acceptor_promises_forgotten`, `TaskCtx::acceptor_withheld`, read at `answer_prepare`, the listener's vote path,
+`propose_inner` and `cross_propose_inner`). The copy reaches the agent through `CoreCtx::inbound_observer`, a seam
+core calls from `connection::apply_inbound` for every inbound update under a prefix the agent named — core reports
+the arrival and decides nothing (Layer I is not taught the acceptor's law). Do not "fix" the withheld slot by
+refreshing memory from the store live: that races the acceptor's own writes; the restart reads the repaired record.
+The limit: the third tripwire sees only a copy that arrives, and only before the node answers a higher ballot for
+the slot. The operator rule: restore with the **latest** directory, or retire
 onto the removal ledger (`sys/membership/removed/`, enforced by `NodeId` at the connection, monotonic — so removing
 first forecloses the restore). The fleet's default is set once, at genesis (a second refused by
 name, door and acceptor — `electorate::live_default`), and cannot move. The governor
