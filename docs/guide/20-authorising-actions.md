@@ -497,15 +497,16 @@ for e in &report.entries {
     println!("{:<28} {:?}", e.id, e.resolution); // Enforced · NotConfigured{missing} · NotInBuild{feature}
 }                                                 // · NotApplicable{because} · NotVerifiableHere{evidence}
 assert!(report.node_requirements_satisfied());    // every node-enforced guarantee that applies is enforced
-assert_eq!(report.unresolved(), ["cons.safety_profile", "net.confinement", "clock.sync"]); // yours to evidence
+assert_eq!(report.unresolved(), ["net.confinement", "clock.sync"]); // yours to evidence
 ```
 
 `NotApplicable` carries the role fact — a node with no `http_port` does not fail a gateway guarantee —
 and is never a waiver. `NotInBuild` is the state the four start-time refusals of 2.18.1 were missing:
 a setting whose enforcing code this build does not have reads so here rather than silently nothing. The
 strongest sentence the report makes is *node requirements satisfied*; what a node cannot see (network
-confinement, clock sync, the consensus profile a proposer picks per call) is listed as unresolved and
-never counted.
+confinement, clock sync) is listed as unresolved and never counted. The consensus safety profile was on
+that list until P2 (2026-10-10); it is a node fact now — `cons.safety_profile` resolves on
+`consensus_require_electorate` (guide 04 § *Discovery is not an electorate*).
 
 A companion registers its own guarantees **before `start()`**; a duplicate id, a core id, or a late
 registration is refused by name:
@@ -539,8 +540,10 @@ cfg.profile = Some("secure-single-domain".into());   // or GOSSIP_PROFILE=secure
 `start()` then returns `Err(InvalidField { field: "profile", .. })` naming each guarantee the profile
 requires that is not `enforced` (or `not_applicable` to this node's role), what is missing and where to
 read; `dev` (the default) requires nothing and the startup log says so. The required set is
-`mycelium::SECURE_SINGLE_DOMAIN_PROFILE` (rev 3: eighteen ids — rev 3 added `gw.exposed_closed`, unreleased), `mycelium::check_profile` runs it against
-any report, and `profile_named` resolves a name. The profile needs a `compliance` + `tls` build and — since
+`mycelium::SECURE_SINGLE_DOMAIN_PROFILE` (rev 4: nineteen ids — rev 3 added `gw.exposed_closed`, rev 4
+`cons.safety_profile`, both unreleased), `mycelium::check_profile` runs it against any report, and
+`profile_named` resolves a name. Rev 4's `cons.safety_profile` is `consensus_require_electorate = true`, so a lock
+or an election is decided only by an electorate group. The profile needs a `compliance` + `tls` build and — since
 rev 2 — a node certificate **issued off-node**, so the fleet CA's key is on no node:
 
 ```rust

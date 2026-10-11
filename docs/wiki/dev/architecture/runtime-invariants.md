@@ -92,6 +92,31 @@ sentinel, the top record and its marker); a lease's marker is collected after it
 renewal keeps the lineage), released by `release_leadership` (which also ends a renewal in flight); permanence is
 `LeaderTerm::Permanent`, by explicit opt-in.
 
+**Discovery is not an electorate; consensus is a protocol, not a service** (decided 2026-10-10 —
+[`docs/design/consensus-electorate.md`](../../../design/consensus-electorate.md); philosophy § *The corrected
+litmus*, *A protocol, not a service*). Group rosters are discovery — dynamic, eventually consistent — and quorums are
+counted from each proposer's view, so intersection across a roster change is not enforced; the supported profile
+(threat model §7) is a **fixed electorate per decision**. Do not "fix" this by teaching Layer I a guard on `grp/` or
+`consensus/`, and do not make a named node set "the consensus nodes". Enforced today: `resolve_electorate`
+(`src/agent/helpers.rs`, empty or below `MembershipIntent.min` → `ElectorateUnavailable`), `NotAMember` (above), and
+the gateway's `governed_group` refusal on `/gateway/mesh/group` with `/gateway/govern/group` as the audited route
+(`src/agent/http.rs`, `is_governed_group`). **Since P2 (2026-10-10, decision record §8):** an
+**electorate group** (`src/agent/electorate.rs`) is pinned by member identity and **frozen** (the maintainer's
+decision, 2026-10-11): a genesis on `electorate/{group}/{epoch}` decided by every member it names (the epoch counts
+attempts — one that cannot complete is superseded by one keeping a strict majority of it), certified under
+`consensus/electorate-cert/`, adopted only when the certificate verifies and through the gate
+(`ConsensusEngine::electorate_view`). The proposer's door (`electorate_door`) refuses a roster that differs from the
+member set by identity (`ElectorateMismatch`, roster tripwire), counts promises and votes only from the members, and
+holds the quorum at a strict majority; every Prepare/Propose names the epoch and digest (`PrepareIn`/`ProposeIn`), and
+an acceptor (`electorate_admits`) answers only its own — refusing `StaleElectorate` otherwise. Every genesis claim and
+adoption passes one `compute` on the group's gate key (`claim_gated`, `FenceState`), which only decides; the claim runs
+after it, and a refused claim raises nothing. **Membership is fixed at genesis, and changing it is not built in 2.32.0**
+(the maintainer's decision, 2026-10-11; the migration is the follow-up, branch `fix/p2-migration`): a dead member lowers
+the group's fault tolerance, a lost majority stops it. The fleet's default is set once, at genesis (a second refused by
+name, door and acceptor — `electorate::live_default`), and cannot move. The governor
+and the emergent watcher leave an electorate group alone. An embedded `grp/` write is refused at the next proposal,
+not prevented. Live reconfiguration (versioned electorates with joint consensus) is a later plan.
+
 ## Individual-scope routing: forwarding stays unconditional
 
 `SignalScope::Individual` carries RPC and consensus votes. The gossip loop sends directly to

@@ -45,6 +45,7 @@ the notice.
 | 22 | an alert keyed on one consensus-timeout `reason`; a second stop signal that waits; an untyped lost write | 2.31.0 | match the new reason set (§22); allow the grace period; catch `SupersededError` | No — a metric label, an exit code, a Python subclass |
 | 26 | an open gateway on a non-loopback `http_addr` | unreleased | a credential (`gateway_auth_token`, a token table or `[oidc]`), a loopback `http_addr`, or `gateway_allow_unauthenticated = true` | No — `start()` refuses, `InvalidField { field: "http_addr" }` |
 | 30 | `sys/quorum/` evidence from every node that relays a kind | unreleased | subscribe to the kind (a worker) or query it — `quorum_persistent(kind, window)` pins it for the window | No — fewer keys under `sys/quorum/` |
+| 31 | an exclusive outcome (lock, leader, consistent write) on the whole cluster or an undeclared group, under the secure profile | unreleased | declare an electorate group (`declare_electorate`, one `exclusive_default`), sized for its lifetime — its members are fixed at genesis | Partly — new `ConsensusResult`/`CommitError`/`ConsistencyError` variants (a `_` arm must fail closed); otherwise `start()` refuses rev 4 without `consensus_require_electorate`, and proposals are refused by name |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -538,7 +539,7 @@ who could reach the port. Loopback is `127.0.0.0/8`, `::1` and an IPv4-mapped lo
 whitespace-only `gateway_auth_token` (including `GOSSIP_GATEWAY_AUTH_TOKEN=""`), or a `token` in any
 `gateway_scoped_tokens` / `gateway_named_tokens` entry — on every address and in every profile; such a node used to
 start and, over HTTP/2, admit an empty bearer. Under
-`profile = "secure-single-domain"` the profile is **rev 3**, which adds `gw.exposed_closed` (with `gw.not_open` at rev 2): it refuses one node rev 2 admitted — a gateway whose only credential was a blank `gateway_auth_token`, which `gw.not_open` rev 1 read as enforced (and which `validate()` now refuses in every profile) — and otherwise names the waiver when `gateway_allow_unauthenticated` is set.
+`profile = "secure-single-domain"` the profile is now **rev 4** (rev 3 added `gw.exposed_closed`, rev 4 adds `cons.safety_profile` — §31). Rev 3's addition, `gw.exposed_closed` (with `gw.not_open` at rev 2), refuses one node rev 2 admitted — a gateway whose only credential was a blank `gateway_auth_token`, which `gw.not_open` rev 1 read as enforced (and which `validate()` now refuses in every profile) — and otherwise names the waiver when `gateway_allow_unauthenticated` is set.
 
 **Will the compiler tell me?** No — a start-time refusal. `GossipConfig` gained a field
 (`gateway_allow_unauthenticated`), so an exhaustive struct literal breaks; `..Default::default()` is unaffected.
@@ -586,3 +587,26 @@ has lapsed forgets its senders at the next GC tick.
 **Migration.** A node that must contribute evidence for a kind should subscribe to it (a worker), or call
 `quorum_persistent(kind, window)` / `last_signal_persistent(kind)` at least once per window. Keys written before the
 upgrade stay; nothing collects `sys/quorum/`.
+
+## 31. A safety-sensitive proposal needs an electorate group, whose members are fixed at genesis (unreleased)
+
+**What changes.** Post-360 plan row P2 (`docs/design/consensus-electorate.md` §8). With `consensus_require_electorate`
+(env `GOSSIP_CONSENSUS_REQUIRE_ELECTORATE`; required by `profile = "secure-single-domain"` **rev 4**, guarantee
+`cons.safety_profile`), a lock, a leader election, a consistent write, a capability-authz policy, a commitment award or
+any proposal flagged `safety_sensitive` is refused `ElectorateNotGoverned` unless an **electorate group** decides it.
+An electorate is a genesis decided by every member it names, and its membership is **fixed at genesis**: declaring a
+changed roster is `MembershipFrozen`, and **changing an electorate's members is not built in this release** (a
+migration is the follow-up). The fleet's exclusive default is set once, at genesis (a second is refused by name), and
+cannot move in this release.
+
+**Will the compiler tell me?** Partly. `ConsensusResult` (`#[non_exhaustive]`), `CommitError` and
+`ConsistencyError` gain `ElectorateNotGoverned`, `ElectorateStale` and `ElectorateMismatch` — a `_` arm must fail
+closed. `ConsensusConfig` and `GossipConfig` gained fields (an exhaustive literal breaks). The rest is refusals by name.
+
+**Migration.** Under the secure profile: set `consensus_require_electorate = true` (rev 4 refuses `start()`
+otherwise), declare the electorate groups from their rosters (`POST /gateway/govern/electorate`), and mark one
+`exclusive_default` for the cluster-scoped verbs — once, only once every node runs this release. **Size each
+electorate for the failures it must survive for its whole life**: a dead member lowers its fault tolerance, and a lost
+majority stops it — including, for the default group, the cluster-scoped exclusive verbs. A `lock/`, `consistent/`,
+`capauthz/` or commitment-award slot proposed on any group but the fleet's default is refused, as is `leader/{g}` on
+any group but `g`.

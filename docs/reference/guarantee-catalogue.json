@@ -274,15 +274,16 @@
     },
     {
       "id": "cons.safety_profile",
-      "revision": 1,
+      "revision": 2,
       "subsystem": "consensus",
-      "kind": "external_prerequisite",
-      "promise": "safety-sensitive agreement runs the supported profile: a fixed voter set, a strict-majority quorum, identical trust slices",
-      "needs": "chosen per proposal in `ConsensusConfig`; nothing validates it (plan §8)",
+      "kind": "node_enforced",
+      "promise": "an exclusive outcome — a lock, a leader, a consistent write, a commitment award, a capability-authz policy, any proposal marked safety-sensitive — is decided only by an electorate group: one pinned by member identity, decided by every member it names and frozen after, whose acceptors answer only for their own electorate",
+      "needs": "`consensus_require_electorate = true`; the electorates declared (`/gateway/govern/electorate`), one marked `exclusive_default` for the cluster-scoped verbs. Its members are fixed at genesis — changing them is not built in this release (docs/design/consensus-electorate.md §8.3): a dead member lowers the group's fault tolerance, a lost majority stops it. The fleet's default is set once, at genesis, and cannot move in this release. The effect is still the caller's to fence at the resource",
       "enforcement_points": [
-        "consensus::propose"
+        "consensus::propose (the engine's door)",
+        "consensus::cross_propose"
       ],
-      "docs": "docs/threat-model.md"
+      "docs": "docs/design/consensus-electorate.md"
     },
     {
       "id": "net.confinement",

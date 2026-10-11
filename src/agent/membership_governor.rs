@@ -205,6 +205,12 @@ fn converge(ctx: &Arc<TaskCtx>, kv: &KvHandle, spec: &ControlSpec, groups: &mut 
             super::intent::read_fresh_intent::<MembershipIntent>(kv, &key, me, MEMBERSHIP_INTENT_TTL_MS)
         else { continue };
         let group = intent.group.as_str();
+        // An electorate group (P2) moves only through governance: the governor does not roll on it — not
+        // toward the band, not even to honour a drain — so a slot never sees its electorate resized.
+        if super::electorate::view(ctx, group).is_some() {
+            debug!(group, "membership: an electorate group moves only through governance; not rolling on it");
+            continue;
+        }
         let state = groups.entry(group.to_string()).or_insert_with(|| GroupState {
             last_action_ms: None,
             settle: SettleState::Idle,

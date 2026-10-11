@@ -162,6 +162,14 @@ pub struct ConsensusConfig {
     ///
     /// `None` (default) = permanent commitment; behaviour is unchanged.
     pub committed_lease_secs: Option<u64>,
+
+    /// **This proposal decides an exclusive outcome** — a lock, a leader, a single writer, anything a
+    /// second holder would corrupt (post-360 plan row P2). A slot in a
+    /// [`SAFETY_SLOT_FAMILIES`](crate::SAFETY_SLOT_FAMILIES) family (`lock/`, `leader/`, `consistent/`)
+    /// is safety-sensitive whatever this says. On a node with `consensus_require_electorate`, a
+    /// safety-sensitive proposal whose scope is not an electorate group is refused
+    /// [`ConsensusResult::ElectorateNotGoverned`]. Default `false`.
+    pub safety_sensitive: bool,
 }
 
 impl Default for ConsensusConfig {
@@ -177,6 +185,7 @@ impl Default for ConsensusConfig {
             use_suggest_leader:      false,
             max_abstain_ballots:     0,
             committed_lease_secs:    None,
+            safety_sensitive:        false,
         }
     }
 }
@@ -292,6 +301,41 @@ pub enum ConsensusResult {
         slot:  Arc<str>,
         group: Arc<str>,
     },
+    /// **A safety-sensitive proposal named no electorate group, so nothing was proposed** (post-360
+    /// plan row P2, `docs/design/consensus-electorate.md` §8).
+    ///
+    /// The node requires (`consensus_require_electorate`) that an exclusive outcome be decided by a
+    /// group with an electorate declaration — a fixed set named as a group, whose membership moves only
+    /// through governance — and this proposal's scope was the whole cluster (`group: None`), whose
+    /// electorate is discovery, or a group with no declaration. Refused at the engine's door, before
+    /// anything leaves. Declare the electorate (`declare_electorate`, `/gateway/govern/electorate`),
+    /// or name one for the cluster-scoped verbs (`consensus_electorate`).
+    ElectorateNotGoverned {
+        slot:  Arc<str>,
+        group: Option<Arc<str>>,
+    },
+    /// **This proposal's electorate is not the acceptors'** (P2, #601's review). A proposal on an
+    /// electorate group carries the proposer's epoch and digest, and an acceptor answers only for its
+    /// own — so a proposer still holding a pending genesis that was superseded cannot gather a quorum
+    /// from members that adopted the later one. `epoch` is this proposer's, `seen_epoch` the one a member
+    /// of its electorate reported. Nothing was decided by this proposal; re-read the electorate and retry.
+    ElectorateStale {
+        slot:       Arc<str>,
+        group:      Arc<str>,
+        epoch:      u64,
+        seen_epoch: u64,
+    },
+    /// **The electorate and what this node sees disagree, so nothing was proposed** (P2). Either the
+    /// group roster differs from the member set (a member joined or left an electorate whose membership is
+    /// fixed at genesis — counted as a tripwire, never counted as a vote), a genesis value does not fit or would be
+    /// a second default, the slot is not this group's to decide, a cross-group proposal names an electorate group,
+    /// yet, or this node's `consensus_electorate` disagrees with the fleet's exclusive default. `detail` says
+    /// which.
+    ElectorateMismatch {
+        slot:   Arc<str>,
+        group:  Option<Arc<str>>,
+        detail: Arc<str>,
+    },
 
     /// Quorum size was met but the Hard topology gate was not satisfied — too
     /// few distinct domains at `spread_depth`. The proposal is **not** committed.
@@ -310,6 +354,149 @@ pub enum ConsensusResult {
         domains_required: usize,
         spread_depth:     usize,
     },
+}
+
+use crate::agent::electorate::ElectorateDecl;
+
+/// What a proposal on an electorate group carries through the ballot loop (P2).
+#[derive(Clone, Debug)]
+pub(crate) struct ElectorateTag {
+    /// The proposer's epoch (0 for a genesis).
+    pub(crate) epoch:  u64,
+    /// The electorate's digest (zero for a genesis).
+    pub(crate) digest: [u8; 32],
+    /// Votes are counted only from these members (`NodeId::id_hash`).
+    pub(crate) voters: AHashSet<u64>,
+    /// A strict majority of the members; every member for a genesis.
+    pub(crate) quorum: usize,
+    /// What the proposal is — an ordinary slot or a genesis attempt — with the group, as the gate needs. A
+    /// genesis's commit carries a certificate.
+    pub(crate) gate:   Gate,
+}
+
+/// Which way a claim on an electorate group passes the gate (round 2 of #601's review, finding 1; round 4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GateKind {
+    /// An ordinary slot of the group: passes while this node holds the epoch it names.
+    Ordinary,
+    /// A genesis attempt at this epoch: refused once this node adopted an electorate for the group or touched a
+    /// later attempt; it records the attempt it touched, which an adoption of an earlier one then refuses.
+    Genesis(u64),
+}
+
+/// A claim's electorate: the group, the epoch it is made at, and its kind.
+#[derive(Clone, Debug)]
+pub(crate) struct Gate {
+    pub(crate) group: Arc<str>,
+    pub(crate) epoch: u64,
+    pub(crate) kind:  GateKind,
+}
+
+/// **The gate's key**, per electorate group (`TaskCtx::electorate_fences`): every genesis claim and adoption on the
+/// group passes one `compute` on it, so their order is the order the supersession argument needs (§8.4). Pure data,
+/// rewritten whole by each `compute`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FenceState {
+    /// Genesis claims between their gate decision and their claim.
+    pub(crate) opening:  u32,
+    /// The highest genesis attempt this node's acceptor promised or accepted.
+    pub(crate) touched:  u64,
+    /// The genesis attempt this node adopted (0: none).
+    pub(crate) adopted:  u64,
+}
+
+impl ElectorateTag {
+    /// Whether a member's refusal says this proposer is behind: the member is in this electorate and
+    /// names a later epoch under another electorate's digest (a genesis that superseded this one). A member
+    /// behind names an earlier epoch, and simply does not vote.
+    fn knows_a_later_electorate(&self, voter: &NodeId, epoch: u64, digest: &[u8; 32]) -> bool {
+        self.voters.contains(&voter.id_hash()) && epoch > self.epoch && *digest != self.digest
+    }
+
+    fn of(d: &ElectorateDecl, kind: GateKind) -> Self {
+        Self {
+            epoch: d.epoch, digest: d.digest(), quorum: d.quorum(),
+            voters: d.members.iter().map(NodeId::id_hash).collect(),
+            gate: Gate { group: Arc::from(d.group.as_str()), epoch: d.epoch, kind },
+        }
+    }
+
+    /// Whether this proposal's commit carries a certificate: a genesis.
+    fn certified(&self) -> bool {
+        matches!(self.gate.kind, GateKind::Genesis(_))
+    }
+
+    /// Whether a refusal's sender may move this proposal: a member of its electorate (round 2, finding 5).
+    fn sent_by_member(&self, sender: &NodeId) -> bool {
+        self.voters.contains(&sender.id_hash())
+    }
+}
+
+/// Why the proposer's P2 door refused, before anything was sent.
+pub(crate) enum DoorRefusal {
+    NotGoverned(Option<Arc<str>>),
+    NotAMember(Arc<str>),
+    Mismatch { group: Option<Arc<str>>, detail: Arc<str> },
+}
+
+impl DoorRefusal {
+    fn mismatch(group: Option<&Arc<str>>, detail: &str) -> Self {
+        Self::Mismatch { group: group.cloned(), detail: Arc::from(detail) }
+    }
+    fn into_result(self, slot: Arc<str>) -> ConsensusResult {
+        match self {
+            Self::NotGoverned(group) => ConsensusResult::ElectorateNotGoverned { slot, group },
+            Self::NotAMember(group) => ConsensusResult::NotAMember { slot, group },
+            Self::Mismatch { group, detail } => ConsensusResult::ElectorateMismatch { slot, group, detail },
+        }
+    }
+}
+
+static ROSTER_MISMATCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Proposals refused because an electorate group's roster differed from its members — a member that joined
+/// or left an electorate whose membership is frozen (P2's tripwire).
+pub fn electorate_roster_mismatches() -> u64 {
+    ROSTER_MISMATCHES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn note_roster_mismatch(slot: &str, group: &str, epoch: u64) {
+    ROSTER_MISMATCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(feature = "metrics")]
+    metrics::counter!("mycelium_electorate_roster_mismatch_total").increment(1);
+    tracing::warn!(slot, group, epoch, "electorate: the group roster differs from its electorate; not proposing \
+        (membership is fixed at genesis; changing it is not built in this release)");
+}
+
+/// `ElectorateStale` for a proposal a member of its electorate refused for another epoch.
+fn stale_result(slot: Arc<str>, scope: &SignalScope, tag: Option<&ElectorateTag>, seen: u64) -> ConsensusResult {
+    let group = match scope {
+        SignalScope::Group(g) => Arc::clone(g),
+        SignalScope::Groups(gs) => gs.first().cloned().unwrap_or_else(|| Arc::from("")),
+        _ => Arc::from(""),
+    };
+    ConsensusResult::ElectorateStale { slot, group, epoch: tag.map_or(0, |t| t.epoch), seen_epoch: seen }
+}
+
+/// `ElectorateMismatch` for a claim this node's own gate refused after the door: the genesis attempt was overtaken,
+/// or the electorate this proposal named was superseded here, while the proposal ran.
+fn gate_refused(slot: Arc<str>, tag: Option<&ElectorateTag>) -> ConsensusResult {
+    let detail = match tag.map(|t| t.gate.kind) {
+        Some(GateKind::Genesis(e)) => format!("genesis attempt {e} was overtaken here: this node adopted an electorate or touched a later attempt"),
+        _ => "the electorate this proposal named is no longer the one held here".to_string(),
+    };
+    ConsensusResult::ElectorateMismatch { slot, group: tag.map(|t| Arc::clone(&t.gate.group)), detail: Arc::from(detail.as_str()) }
+}
+
+/// The voters a proposal counts: an electorate group's roster as it stood when the proposal began,
+/// narrowed by a declared trust slice when both apply (P2's tension (b): the electorate is named by the
+/// group; a trust slice stays available beneath it). Neither ⇒ no filter.
+fn electorate_vote_filter(trust: Option<AHashSet<u64>>, roster: Option<AHashSet<u64>>) -> Option<AHashSet<u64>> {
+    match (trust, roster) {
+        (Some(t), Some(r)) => Some(t.intersection(&r).copied().collect()),
+        (None, Some(r)) => Some(r),
+        (t, None) => t,
+    }
 }
 
 /// Wire payload carried inside `Signal.payload` for all consensus messages.
@@ -514,6 +701,49 @@ pub(crate) enum ConsensusMsg {
         ballot:   u64,
         envelope: Bytes,
     },
+    /// [`Prepare`](Self::Prepare) for a slot on an **electorate group** (P2), naming the proposer's
+    /// electorate: its `epoch` and `electorate` digest (`ElectorateDecl::digest`; zero for a genesis,
+    /// epoch 0). An acceptor answers only when both are its own; otherwise it refuses with
+    /// [`StaleElectorate`](Self::StaleElectorate).
+    ///
+    /// ## Compatibility
+    ///
+    /// Appended last, like `Prepare` in 2.30.0: a node predating it decodes an unknown variant as
+    /// `None` and ignores it, so a mixed electorate **times out rather than commits** until its members
+    /// are upgraded. Answered as [`PrepareTerm`](Self::PrepareTerm) is: [`PrepareAckTerm`](Self::PrepareAckTerm),
+    /// [`PromiseTerm`](Self::PromiseTerm).
+    PrepareIn {
+        slot:       Arc<str>,
+        ballot:     u64,
+        proposer:   NodeId,
+        epoch:      u64,
+        electorate: [u8; 32],
+    },
+    /// [`ProposeTerm`](Self::ProposeTerm) — the decision envelope — for a slot on an electorate group,
+    /// naming the proposer's electorate as [`PrepareIn`](Self::PrepareIn) does.
+    ProposeIn {
+        slot:       Arc<str>,
+        ballot:     u64,
+        envelope:   Bytes,
+        proposer:   NodeId,
+        epoch:      u64,
+        electorate: [u8; 32],
+    },
+    /// An acceptor's refusal of a proposal whose electorate is not its own — the epoch and digest it
+    /// holds. Sent under `NACK`.
+    StaleElectorate {
+        slot:       Arc<str>,
+        voter:      NodeId,
+        epoch:      u64,
+        electorate: [u8; 32],
+    },
+}
+
+/// Two digests combined — the key a refused record and its certificate are remembered under.
+fn xor_digests(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
+    let mut out = *a;
+    for (o, x) in out.iter_mut().zip(b.iter()) { *o ^= *x; }
+    out
 }
 
 /// SHA-256 of a proposal's value — what a [`VoteForValue`](ConsensusMsg::VoteForValue) commits its
@@ -1347,7 +1577,7 @@ impl ConsensusEngine {
     /// `bytes` unchanged when TLS is disabled (zero overhead on the non-TLS path).
     /// The signature is over [`consensus_signing_message`] of `bytes` — domain-tagged — while
     /// `msg_bytes` carries `bytes` as they are, so the frame is unchanged (wire v12).
-    fn sign_payload(&self, bytes: Bytes) -> Bytes {
+    pub(crate) fn sign_payload(&self, bytes: Bytes) -> Bytes {
         self.sign_payload_as(bytes, SignatureForm::Tagged)
     }
 
@@ -1517,6 +1747,20 @@ impl ConsensusEngine {
         let mut adopted_from: u64 = 0;
 
         let mut quorum_size = quorum_size;
+        // **P2: an exclusive outcome is decided by an electorate group, pinned by identity** (decision record
+        // §8), checked here for the same reason as the membership above: the library and the gateway both reach
+        // this door. It reads the caller's value, before it is wrapped in the decision envelope.
+        let mut opaque_recompute = opaque_recompute;
+        let tag = match self.electorate_door(&scope, &slot, &value, &config) {
+            Ok(tag) => tag,
+            Err(refused) => return refused.into_result(slot),
+        };
+        if let Some(t) = &tag {
+            // The quorum is a strict majority of the members (a genesis: all of them), whatever the caller
+            // computed — and opacity does not shrink it (#601's review, finding 3).
+            quorum_size = quorum_size.max(t.quorum);
+            opaque_recompute = None;
+        }
         // Register for BOUNDARY_TRANSPARENT signals so we can re-evaluate quorum
         // mid-ballot when previously-opaque members become available.
         // Watch for BOUNDARY_OPAQUE: a member going opaque shrinks active_members,
@@ -1542,6 +1786,8 @@ impl ConsensusEngine {
         } else {
             None
         };
+        // An electorate group's roster is the vote filter; a declared trust slice narrows it further.
+        let trust_set = electorate_vote_filter(trust_set, tag.as_ref().map(|t| t.voters.clone()));
 
         // Above the slot's decided ballot too: the ballot key is no longer reset at commit, but it is
         // gossiped and may lag what this node knows was decided.
@@ -1619,7 +1865,7 @@ impl ConsensusEngine {
             let phase1 = self.prepare_phase(
                 &mut vote_rx, &mut nack_rx, &scope, &slot, ballot, &value,
                 &|p: &AHashSet<NodeId>| p.len() >= needed,
-                trust_set.as_ref(), config.phase1_timeout, &carry,
+                trust_set.as_ref(), tag.as_ref(), config.phase1_timeout, &carry,
             ).await;
             let retry_floor = match phase1 {
                 Phase1::Ready(Phase1Choice::Keep) => None,
@@ -1647,6 +1893,8 @@ impl ConsensusEngine {
                     Some(seen)
                 }
                 Phase1::Unrecorded => return self.unrecorded(slot, _attempt + 1, quorum_size),
+                Phase1::Stale(seen) => return stale_result(slot, &scope, tag.as_ref(), seen),
+                Phase1::Closed => return gate_refused(slot, tag.as_ref()),
             };
             if let Some(floor) = retry_floor {
                 ballot_retry_pause(config.ballot_retry_jitter_ms).await;
@@ -1675,7 +1923,16 @@ impl ConsensusEngine {
                     return ConsensusResult::Superseded { slot, ballot: self.read_ballot(&ballot_key) };
                 }
             let floor = self.floor(&slot);
-            if !claim_envelope(&self.task_ctx.consensus_accepted, &slot, ballot, &value, self.task_ctx.node_id.id_hash(), floor) {
+            // Through the electorate's gate, inside the same `compute` as the claim (P2 round 2, finding 1): a
+            // superseding genesis adopted here since the door ends this proposal, by name.
+            let gate = tag.as_ref().map(|t| &t.gate);
+            let claimed = self.claim_gated(gate, || {
+                claim_envelope(&self.task_ctx.consensus_accepted, &slot, ballot, &value, self.task_ctx.node_id.id_hash(), floor)
+            });
+            if claimed.is_none() && tag.is_some() {
+                return gate_refused(slot, tag.as_ref());
+            }
+            if claimed != Some(true) {
                 // Already committed to a different value at this ballot. Cannot win here; move up
                 // rather than emit a proposal we are not entitled to support.
                 last = LastAttempt::Contended;
@@ -1694,13 +1951,28 @@ impl ConsensusEngine {
 
             self.raise_ballot(&ballot_key, ballot).await;
 
-            let propose_msg = ConsensusMsg::ProposeTerm {
-                slot: Arc::clone(&slot), ballot, envelope: value.clone(),
-                proposer: self.task_ctx.node_id.clone(),
+            let propose_msg = match &tag {
+                Some(t) => ConsensusMsg::ProposeIn {
+                    slot: Arc::clone(&slot), ballot, envelope: value.clone(),
+                    proposer: self.task_ctx.node_id.clone(), epoch: t.epoch, electorate: t.digest,
+                },
+                None => ConsensusMsg::ProposeTerm {
+                    slot: Arc::clone(&slot), ballot, envelope: value.clone(),
+                    proposer: self.task_ctx.node_id.clone(),
+                },
             };
             self.emit_async(
                 Arc::from(consensus_kind::PROPOSE), scope.clone(), self.sign_payload(encode_consensus_msg(&propose_msg)),
             ).await;
+            // A genesis's commit carries its certificate: the signed votes that decided it,
+            // this node's own included.
+            let mut cert: Option<Vec<Bytes>> = tag.as_ref().filter(|t| t.certified()).map(|_| {
+                let own = ConsensusMsg::VoteForValue {
+                    slot: Arc::clone(&slot), ballot, voter: self.task_ctx.node_id.clone(),
+                    value_digest: value_digest(&value), locality: None,
+                };
+                vec![self.sign_payload(encode_consensus_msg(&own))]
+            });
 
             // Voter dedup map per (slot, ballot). NodeId-keyed so each voter contributes
             // exactly once even if they re-emit; the Option<LocalityPath> value is required
@@ -1718,7 +1990,7 @@ impl ConsensusEngine {
             // Single-node quorum check before entering the collect loop.
             if let Some(res) = self.try_commit_if_ready(
                 &voters, quorum_size, group_name.as_deref(),
-                &scope, &slot, ballot, &value, &ballot_key, &commit_key, lease_ms,
+                &scope, &slot, ballot, &value, &ballot_key, &commit_key, lease_ms, cert.as_deref(),
             ).await {
                 return res;
             }
@@ -1735,11 +2007,14 @@ impl ConsensusEngine {
                 trust_set.as_ref(),
                 opaque_recompute.as_ref(),
                 lease_ms,
+                tag.as_ref(),
+                cert.as_mut(),
             ).await;
 
             let mut nack_ballot = 0u64;
             match outcome {
                 BallotOutcome::Committed(res) => return res,
+                BallotOutcome::Stale(seen) => return stale_result(slot, &scope, tag.as_ref(), seen),
                 BallotOutcome::NackHigher(b, reported) => {
                     // Refused at this ballot: another proposer is ahead — contention, however few
                     // votes had arrived (the review of #579).
@@ -1817,6 +2092,437 @@ impl ConsensusEngine {
         }
     }
 
+    // ── P2: electorate groups (`docs/design/consensus-electorate.md` §8) ─────────────────────────
+
+    /// The verified electorate for `group`: the highest genesis attempt whose committed record is well formed and
+    /// whose certificate — the signed votes of **every** member it names, at one ballot — verifies. Adopted only
+    /// through the gate, so a node whose acceptor touched a later attempt never adopts an earlier one (round 4,
+    /// finding 3). A record that does not verify is refused and counted ([`crate::electorate_records_refused`]); one
+    /// whose certificate has not arrived yet is simply not adopted yet. Membership is fixed at genesis: once
+    /// adopted, a later attempt is adopted only by a node that never adopted, never voted for, this one.
+    pub(crate) fn electorate_view(&self, group: &str) -> Option<Arc<ElectorateDecl>> {
+        use crate::agent::electorate::{already_refused, cached, cert_key, check_genesis, genesis_slot, note_refused, refresh_records};
+        refresh_records(&self.task_ctx);
+        let cur = cached(&self.task_ctx, group);
+        let have = cur.as_ref().map_or(0, |d| d.epoch);
+        let top = self.task_ctx.electorate_epochs_known.pin().get(group).copied().unwrap_or(0);
+        for epoch in (have + 1..=top).rev() {
+            let slot = genesis_slot(group, epoch);
+            let Some(raw) = self.get(&format!("{}{}", consensus_ns::COMMITTED, slot)) else { continue };
+            let digest = value_digest(&raw);
+            let Some(next) = ElectorateDecl::decode(&raw).filter(|d| d.epoch == epoch) else {
+                note_refused(&self.task_ctx, &slot, &digest, "the record does not decode as a genesis of this epoch");
+                continue;
+            };
+            if let Err(e) = check_genesis(group, &next) {
+                note_refused(&self.task_ctx, &slot, &digest, &format!("the record is not a well-formed genesis: {e}"));
+                continue;
+            }
+            // A certificate already refused is not verified again (round 2, finding 5): keyed by the record and the
+            // certificate's own bytes, so a genuine certificate arriving later is still checked.
+            let Some(cert) = self.get(&cert_key(group, epoch)) else { continue };
+            let key = xor_digests(&digest, &value_digest(&cert));
+            if already_refused(&self.task_ctx, &slot, &key) { continue; }
+            if !self.certificate_holds(&slot, &digest, &cert, &next.members, next.members.len()) {
+                note_refused(&self.task_ctx, &slot, &key, "its certificate does not verify");
+                continue;
+            }
+            if !self.adopt_through_gate(group, epoch) {
+                return cur; // this node touched a later attempt: it never adopts this one
+            }
+            let next = Arc::new(next);
+            let adopted = Arc::clone(&next);
+            self.task_ctx.electorates.pin().compute(Arc::from(group), |existing| match existing {
+                Some((_, e)) if e.epoch >= adopted.epoch => papaya::Operation::Abort(()),
+                _ => papaya::Operation::Insert(Arc::clone(&adopted)),
+            });
+            return cached(&self.task_ctx, group);
+        }
+        cur
+    }
+
+    /// The highest genesis attempt of `group` this node's acceptor promised or accepted, from its memory (which
+    /// survives a restart), and the highest one it accepted a readable value for — with the digest of what it
+    /// holds (the decision envelope, as accepted).
+    pub(crate) fn pending_genesis(&self, group: &str) -> (u64, Option<(ElectorateDecl, [u8; 32])>) {
+        let mut touched = 0;
+        let mut pending: Option<(ElectorateDecl, [u8; 32])> = None;
+        for (slot, s) in self.task_ctx.consensus_accepted.pin().iter() {
+            let Some((g, epoch)) = crate::agent::electorate::parse_genesis_slot(slot) else { continue };
+            if g != group || (s.promised == 0 && s.accepted.is_none()) { continue; }
+            touched = touched.max(epoch);
+            if let Some((_, a)) = &s.accepted
+                && let Some(d) = raw_accepted(a).and_then(|v| ElectorateDecl::decode(&v))
+                && pending.as_ref().is_none_or(|(p, _)| p.epoch < epoch) {
+                    pending = Some((d, a.digest()));
+                }
+        }
+        (touched, pending)
+    }
+
+    /// Adopts genesis attempt `epoch` of `group` through the gate: refused when this node's acceptor touched a
+    /// later attempt; waits out a genesis claim in flight, so a claim and an adoption are ordered on one key.
+    fn adopt_through_gate(&self, group: &str, epoch: u64) -> bool {
+        let durable = self.pending_genesis(group).0;
+        let fences = self.task_ctx.electorate_fences.pin();
+        loop {
+            let r = fences.compute(Arc::from(group), |cur| {
+                let s = cur.map(|(_, v)| *v).unwrap_or_default();
+                if s.opening > 0 { papaya::Operation::Abort(true) }
+                else if s.touched.max(durable) > epoch { papaya::Operation::Abort(false) }
+                else { papaya::Operation::Insert(FenceState { adopted: s.adopted.max(epoch), ..s }) }
+            });
+            match r {
+                papaya::Compute::Aborted(true) => std::thread::yield_now(),
+                papaya::Compute::Aborted(false) => return false,
+                _ => return true,
+            }
+        }
+    }
+
+    /// Whether this node touched a genesis attempt of `group` without adopting an electorate — an electorate in
+    /// formation. A lookup on the hot path of every untagged proposal: the gate key's `touched` (seeded at start by
+    /// `prewarm_genesis_touched`, raised by every genesis claim), and the first attempt's acceptor memory.
+    fn forming(&self, group: &str) -> bool {
+        self.task_ctx.electorate_fences.pin().get(group).is_some_and(|s| s.touched > 0)
+            || self.task_ctx.consensus_accepted.pin().get(crate::agent::electorate::genesis_slot(group, 1).as_str())
+                .is_some_and(|s| s.promised > 0 || s.accepted.is_some())
+    }
+
+    /// **Claim through the gate** (round 2 of #601's review, finding 1; made retry-safe in round 3, finding 5;
+    /// round 4). The `compute` on the group's key only **decides**; the claim runs after it committed, with
+    /// nothing inside a closure papaya may re-run:
+    ///
+    /// - `Ordinary` passes while this node holds `epoch` as its adopted electorate (a superseding genesis adopted
+    ///   since the door ends the proposal, by name).
+    /// - `Genesis(e)` passes while this node adopted no electorate for the group and touched no later attempt,
+    ///   registered as opening (an adoption waits it out); afterwards it records `e` as touched **only if** the
+    ///   acceptor now holds a promise or acceptance for it — a claim the acceptor refused promised nothing and
+    ///   raises nothing (round 4, finding 4, in the one raising kind that remains).
+    ///
+    /// `None` when the gate refused (nothing was claimed); otherwise what `claim` returned.
+    pub(crate) fn claim_gated<T>(&self, gate: Option<&Gate>, claim: impl FnOnce() -> T) -> Option<T> {
+        let Some(g) = gate else { return Some(claim()) };
+        let fences = self.task_ctx.electorate_fences.pin();
+        match g.kind {
+            GateKind::Genesis(epoch) => {
+                let durable = self.pending_genesis(&g.group).0;
+                let entered = fences.compute(Arc::clone(&g.group), |cur| {
+                    let s = cur.map(|(_, v)| *v).unwrap_or_default();
+                    if s.adopted > 0 || s.touched.max(durable) > epoch { papaya::Operation::Abort(()) }
+                    else { papaya::Operation::Insert(FenceState { opening: s.opening + 1, ..s }) }
+                });
+                if matches!(entered, papaya::Compute::Aborted(())) { return None; }
+                let out = claim();
+                let slot = crate::agent::electorate::genesis_slot(&g.group, epoch);
+                let holds = self.task_ctx.consensus_accepted.pin().get(slot.as_str())
+                    .is_some_and(|s| s.promised > 0 || s.accepted.is_some());
+                fences.compute(Arc::clone(&g.group), |cur| {
+                    let s = cur.map(|(_, v)| *v).unwrap_or_default();
+                    let touched = if holds { s.touched.max(epoch) } else { s.touched };
+                    papaya::Operation::<FenceState, ()>::Insert(FenceState { opening: s.opening.saturating_sub(1), touched, ..s })
+                });
+                Some(out)
+            }
+            GateKind::Ordinary => {
+                let current = crate::agent::electorate::cached(&self.task_ctx, &g.group).map(|d| d.epoch) == Some(g.epoch);
+                current.then(claim)
+            }
+        }
+    }
+
+    /// Whether a certificate for an electorate record verifies. A certificate is the decided **decision envelope**
+    /// (row A: the value Paxos decided, whose `value` is the record) and the signed `VoteForValue`s for it: the
+    /// envelope must be for `slot` and carry the record whose digest is `digest`, and the votes must be for the
+    /// envelope's digest, at one ballot, from at least `need` of `electors` — every member a genesis names. Without
+    /// `[tls]` nothing is signed, and the check is a shape.
+    fn certificate_holds(&self, slot: &str, digest: &[u8; 32], raw: &Bytes, electors: &[NodeId], need: usize) -> bool {
+        let Ok((envelope, votes)) = mycelium_core::serde_fixint::from_slice::<(Bytes, Vec<Bytes>)>(raw) else { return false };
+        let Some(env) = crate::consensus_life::Envelope::decode(&envelope) else { return false };
+        if *env.slot != *slot || env.value.as_ref().map(value_digest).as_ref() != Some(digest) { return false; }
+        let want = value_digest(&envelope);
+        let mut by_ballot: AHashMap<u64, AHashSet<NodeId>> = AHashMap::new();
+        for v in &votes {
+            if let Some(ConsensusMsg::VoteForValue { slot: s, ballot, voter, value_digest: d, .. }) = self.decode_verify(v)
+                && &*s == slot && d == want && electors.contains(&voter) {
+                    by_ballot.entry(ballot).or_default().insert(voter);
+                }
+        }
+        by_ballot.values().any(|v| v.len() >= need)
+    }
+
+    /// **The proposer's door for P2.** `Ok(Some(tag))` for a proposal on an electorate group (carrying
+    /// its epoch, digest, vote filter and quorum), `Ok(None)` for one outside
+    /// any, or a refusal by name.
+    pub(crate) fn electorate_door(
+        &self, scope: &SignalScope, slot: &Arc<str>, value: &Bytes, config: &ConsensusConfig,
+    ) -> Result<Option<ElectorateTag>, DoorRefusal> {
+        use crate::agent::electorate::{check_genesis, parse_genesis_slot};
+        let me = &self.task_ctx.node_id;
+        match scope {
+            SignalScope::Group(group) => {
+                self.check_slot_family(slot, group).map_err(|d| DoorRefusal::mismatch(Some(group), &d))?;
+                let view = self.electorate_view(group);
+                if let Some((_, epoch)) = parse_genesis_slot(slot).filter(|(g, _)| *g == &**group) {
+                    if view.is_some() {
+                        return Err(DoorRefusal::mismatch(Some(group), &format!(
+                            "membership is fixed at genesis: {group} has an electorate, and a genesis decides nothing \
+                             more — changing an electorate's members is not built in this release")));
+                    }
+                    let Some(next) = ElectorateDecl::decode(value).filter(|d| d.epoch == epoch) else {
+                        return Err(DoorRefusal::mismatch(Some(group), "a genesis's value is not a genesis of its epoch"));
+                    };
+                    check_genesis(group, &next).map_err(|e| DoorRefusal::mismatch(Some(group), &e.to_string()))?;
+                    if !next.contains(me) { return Err(DoorRefusal::NotAMember(Arc::clone(group))); }
+                    if next.exclusive_default {
+                        match crate::agent::electorate::live_default(&self.task_ctx) {
+                            Ok(None) => {}
+                            Ok(Some(g)) => return Err(DoorRefusal::mismatch(Some(group), &format!(
+                                "{g} already holds the fleet's exclusive default; it is set once, at genesis"))),
+                            Err(e) => return Err(DoorRefusal::mismatch(Some(group), &e)),
+                        }
+                    }
+                    return Ok(Some(ElectorateTag {
+                        epoch: 0, digest: [0; 32], quorum: next.members.len(),
+                        voters: next.members.iter().map(NodeId::id_hash).collect(),
+                        gate: Gate { group: Arc::clone(group), epoch: 0, kind: GateKind::Genesis(epoch) },
+                    }));
+                }
+                match view {
+                    Some(d) => {
+                        if !d.contains(me) { return Err(DoorRefusal::NotAMember(Arc::clone(group))); }
+                        let roster = crate::agent::electorate::sorted_members(
+                            crate::agent::helpers::group_members_ctx(&self.task_ctx, group));
+                        if roster != d.members {
+                            note_roster_mismatch(slot, group, d.epoch);
+                            return Err(DoorRefusal::mismatch(Some(group),
+                                "the group roster differs from its electorate — membership is fixed at genesis; a member \
+                                 joined or left the group"));
+                        }
+                        Ok(Some(ElectorateTag::of(&d, GateKind::Ordinary)))
+                    }
+                    None => match self.refuse_ungoverned(config, slot, Some(group)) {
+                        Some(_) => Err(DoorRefusal::NotGoverned(Some(Arc::clone(group)))),
+                        None => Ok(None),
+                    },
+                }
+            }
+            SignalScope::Groups(groups) => {
+                // A slot that names a group — `leader/{g}`, any `electorate/{g}/…` — is decided only under exactly
+                // `Group(g)`, whatever the default state or `consensus_require_electorate` (#601 final review, D1).
+                if let Some(g) = crate::agent::electorate::slot_names_group(slot) {
+                    return Err(DoorRefusal::mismatch(Some(&Arc::from(g)), &format!(
+                        "slot {slot} is decided only in group {g}'s own scope, never by a cross-group proposal")));
+                }
+                if let Some(g) = groups.iter().find(|g| self.electorate_view(g).is_some()) {
+                    return Err(DoorRefusal::mismatch(Some(g),
+                        "an electorate group decides only through its own electorate, never inside a cross-group proposal"));
+                }
+                // An exclusive slot's home is never a cross-group proposal (round 3, finding 3).
+                if let Some(why) = self.cross_group_slot_refusal(slot, groups) {
+                    return Err(DoorRefusal::mismatch(groups.first(), &why));
+                }
+                match self.refuse_ungoverned(config, slot, groups.first()) {
+                    Some(_) => Err(DoorRefusal::NotGoverned(groups.first().cloned())),
+                    None => Ok(None),
+                }
+            }
+            _ => {
+                // D1: a slot that names a group is never decided across the cluster — its votes would be signed at
+                // cluster scope and assemble a certificate the group's gate never saw.
+                if let Some(g) = crate::agent::electorate::slot_names_group(slot) {
+                    return Err(DoorRefusal::mismatch(Some(&Arc::from(g)), &format!(
+                        "slot {slot} is decided only in group {g}'s own scope, never across the cluster")));
+                }
+                if crate::agent::electorate::is_safety_sensitive(config, slot) {
+                    match crate::agent::electorate::exclusive_electorate(&self.task_ctx) {
+                        Ok(Some(g)) => return Err(DoorRefusal::Mismatch {
+                            group: Some(Arc::from(g.as_str())),
+                            detail: Arc::from(format!("the fleet decides exclusive outcomes in electorate group {g}, \
+                                                       not across the whole cluster").as_str()),
+                        }),
+                        Err(detail) => return Err(DoorRefusal::Mismatch { group: None, detail: Arc::from(detail.as_str()) }),
+                        Ok(None) => {}
+                    }
+                }
+                match self.refuse_ungoverned(config, slot, None) {
+                    Some(_) => Err(DoorRefusal::NotGoverned(None)),
+                    None => Ok(None),
+                }
+            }
+        }
+    }
+
+    /// Why a cross-group proposal may not decide `slot`: a slot that names its group, or a fleet-exclusive slot
+    /// while the fleet decides those in an electorate (or the setting disagrees). `None` when it may.
+    fn cross_group_slot_refusal(&self, slot: &str, groups: &[Arc<str>]) -> Option<String> {
+        use crate::agent::electorate::{exclusive_electorate, is_fleet_exclusive_slot, slot_names_group};
+        if let Some(named) = slot_names_group(slot) && !groups.iter().all(|g| &**g == named) {
+            return Some(format!("slot {slot} belongs to group {named}"));
+        }
+        if is_fleet_exclusive_slot(slot) {
+            return match exclusive_electorate(&self.task_ctx) {
+                Ok(None) => None,
+                Ok(Some(g)) => Some(format!("slot {slot} is decided in the fleet's electorate {g}, never by a cross-group proposal")),
+                Err(e) => Some(e),
+            };
+        }
+        None
+    }
+
+    /// **Which group may decide a slot** (round 2, finding 2c): a fleet-exclusive slot (`lock/`, `consistent/`,
+    /// `capauthz/`, a commitment award) only in the fleet's exclusive electorate, and a slot that names its
+    /// group (`leader/{g}`, `electorate/{g}/…`) only in that group — so two groups never decide one
+    /// `consensus/committed/{slot}`. `Err` says why not.
+    fn check_slot_family(&self, slot: &str, group: &str) -> Result<(), String> {
+        use crate::agent::electorate::{exclusive_electorate, is_fleet_exclusive_slot, slot_names_group};
+        if let Some(named) = slot_names_group(slot) && named != group {
+            return Err(format!("slot {slot} belongs to group {named}, not {group}"));
+        }
+        if is_fleet_exclusive_slot(slot) {
+            return match exclusive_electorate(&self.task_ctx) {
+                Ok(Some(g)) if g == group => Ok(()),
+                Ok(Some(g)) => Err(format!("slot {slot} is decided in the fleet's electorate {g}, not {group}")),
+                Ok(None) => Err(format!("slot {slot} is decided across the cluster (no electorate is the fleet's \
+                                         exclusive default), never in group {group}")),
+                Err(e) => Err(e),
+            };
+        }
+        Ok(())
+    }
+
+    /// **The acceptor's door for P2**: may this node answer a proposal for `slot` arriving under `scope`
+    /// that names electorate `(epoch, digest)` — `None` for a legacy message, which names none? `Ok(gate)` to
+    /// answer, the claim then made through that gate; `Err((epoch, digest))` — this node's own electorate (the
+    /// one it adopted) — to refuse with `StaleElectorate`.
+    ///
+    /// `proposed` is the proposal's value as it arrived — a decision envelope (`true`, row A) or a legacy value —
+    /// and `None` for a prepare.
+    pub(crate) fn electorate_admits(
+        &self, scope: &SignalScope, slot: &str, named: Option<(u64, [u8; 32])>, proposer: &NodeId, proposed: Option<(&Bytes, bool)>,
+    ) -> Result<Option<Gate>, (u64, [u8; 32])> {
+        let raw = proposed.map(|(b, env)| if env { raw_of(b) } else { Some(b.clone()) });
+        use crate::agent::electorate::{is_fleet_exclusive_slot, parse_genesis_slot};
+        let me = &self.task_ctx.node_id;
+        let group = match scope {
+            SignalScope::Group(g) => Arc::clone(g),
+            // Outside exactly `Group(g)` (#601 final review): a tagged message is never answered — the scope is not
+            // inside the signed payload, and only a group's scope runs the gate (D2) — nor is a slot that names a
+            // group, whatever the default state or `consensus_require_electorate` (D1): cluster-signed votes would
+            // otherwise assemble a certificate for `electorate/{g}/…` that the group's gate never saw.
+            _ if named.is_some() || crate::agent::electorate::slot_names_group(slot).is_some() => {
+                return Err(crate::agent::electorate::slot_names_group(slot)
+                    .and_then(|g| self.electorate_view(g))
+                    .map_or((0, [0; 32]), |d| (d.epoch, d.digest())));
+            }
+            SignalScope::Groups(gs) => {
+                // A cross-group proposal over an electorate group this node holds is not answered, nor one for an
+                // exclusive slot whose home is the fleet's electorate (round 3, finding 3).
+                if let Some(d) = gs.iter().find_map(|g| self.electorate_view(g)) {
+                    return Err((d.epoch, d.digest()));
+                }
+                return match self.cross_group_slot_refusal(slot, gs) {
+                    Some(_) => Err((0, [0; 32])),
+                    None => Ok(None),
+                };
+            }
+            _ => {
+                // A cluster-scoped proposal for an exclusive slot — every family, `capauthz/` and commitment
+                // awards included (round 2, finding 2b) — while the fleet decides those in an electorate group,
+                // is not answered: a lagging or pre-P2 proposer cannot decide one across the cluster.
+                let exclusive = crate::agent::electorate::SAFETY_SLOT_FAMILIES.iter().any(|f| slot.starts_with(f))
+                    || is_fleet_exclusive_slot(slot);
+                // While the fleet's exclusive electorate cannot be named here — two groups marked the default, or a
+                // `consensus_electorate` that disagrees — such a slot has no home, and is refused too (fail closed), a
+                // tagged message as much as an untagged one (round 5, D5).
+                if exclusive {
+                    match crate::agent::electorate::exclusive_electorate(&self.task_ctx) {
+                        Ok(Some(g)) => if let Some(d) = self.electorate_view(&g) { return Err((d.epoch, d.digest())); },
+                        Err(_) => return Err((0, [0; 32])),
+                        Ok(None) => {}
+                    }
+                }
+                return Ok(None);
+            }
+        };
+        let view = self.electorate_view(&group);
+        let own = view.as_ref().map_or((0, [0; 32]), |d| (d.epoch, d.digest()));
+        if self.check_slot_family(slot, &group).is_err() { return Err(own); }
+        if let Some((_, epoch)) = parse_genesis_slot(slot).filter(|(g, _)| *g == &*group) {
+            // A genesis attempt: answered by the members it names, none of which holds an electorate for the group.
+            if view.is_some() || named != Some((0, [0; 32])) { return Err(own); }
+            let gate = Gate { group: Arc::clone(&group), epoch: 0, kind: GateKind::Genesis(epoch) };
+            return match (raw, proposed) {
+                (None, _) => Ok(Some(gate)), // a prepare carries no value
+                (Some(Some(v)), Some((as_proposed, _))) if self.genesis_acceptable(&group, epoch, &v, as_proposed, proposer) => Ok(Some(gate)),
+                _ => Err((0, [0; 32])),
+            };
+        }
+        match (view, named) {
+            // Not an electorate group here, and a legacy message: nothing changes — unless this node touched one of
+            // the group's genesis attempts. Then it is an electorate in formation, and an untagged proposal is refused
+            // until the genesis is adopted (round 3, finding 4).
+            (None, None) => if self.forming(&group) { Err((0, [0; 32])) } else { Ok(None) },
+            (None, Some(_)) | (Some(_), None) => Err(own),
+            (Some(d), Some((epoch, digest))) => {
+                if epoch != d.epoch || digest != own.1 || !d.contains(me) || !d.contains(proposer) {
+                    return Err(own);
+                }
+                Ok(Some(Gate { group: Arc::clone(&group), epoch: d.epoch, kind: GateKind::Ordinary }))
+            }
+        }
+    }
+
+    /// Whether this node's acceptor may accept `value` as genesis attempt `epoch` of `group` from `proposer`
+    /// (rounds 4–5): a well-formed genesis of that epoch naming both; the roster this node sees is its member set; it
+    /// declares the default only while no group holds it; a genesis it supersedes is the one this node accepted, when
+    /// this node is among its members; and this node has accepted no other value for the attempt.
+    fn genesis_acceptable(&self, group: &str, epoch: u64, value: &Bytes, as_proposed: &Bytes, proposer: &NodeId) -> bool {
+        use crate::agent::electorate::{check_genesis, genesis_slot, sorted_members};
+        let me = &self.task_ctx.node_id;
+        let Some(next) = ElectorateDecl::decode(value).filter(|d| d.epoch == epoch) else { return false };
+        if check_genesis(group, &next).is_err() || !next.contains(me) || !next.contains(proposer) { return false; }
+        if sorted_members(crate::agent::helpers::group_members_ctx(&self.task_ctx, group)) != next.members { return false; }
+        // One default: a genesis may declare it only while no group holds it (round 5).
+        if next.exclusive_default && !matches!(crate::agent::electorate::live_default(&self.task_ctx), Ok(None)) { return false; }
+        let held = |e: u64| self.task_ctx.consensus_accepted.pin().get(genesis_slot(group, e).as_str())
+            .and_then(|s| s.accepted.as_ref().map(|(_, a)| a.clone()));
+        // A member the superseded genesis names must hold exactly it: its record (by digest), or — after a restart,
+        // when only the digest of what it accepted survives — the very envelope the declaring member holds.
+        if let Some(s) = &next.supersedes && s.members.contains(me) {
+            let holds = match held(s.epoch) {
+                Some(Accepted::DigestOnly(d)) => d == s.envelope,
+                Some(a) => raw_accepted(&a).is_some_and(|r| value_digest(&r) == s.digest),
+                None => false,
+            };
+            if !holds { return false; }
+        }
+        // One value per attempt: the same record (in any envelope), or after a restart the same envelope.
+        match held(epoch) {
+            None => true,
+            Some(Accepted::DigestOnly(d)) => d == value_digest(as_proposed),
+            Some(a) => raw_accepted(&a).is_some_and(|r| r == *value),
+        }
+    }
+
+    /// A safety-sensitive proposal to a scope that is not an electorate group: refused
+    /// [`ConsensusResult::ElectorateNotGoverned`] when the node requires an electorate
+    /// (`consensus_require_electorate`), otherwise counted and let through as before. `None` for a
+    /// proposal that is not safety-sensitive.
+    fn refuse_ungoverned(&self, config: &ConsensusConfig, slot: &Arc<str>, group: Option<&Arc<str>>) -> Option<ConsensusResult> {
+        if !crate::agent::electorate::is_safety_sensitive(config, slot) {
+            return None;
+        }
+        if self.task_ctx.config.consensus_require_electorate {
+            tracing::warn!(slot = %slot, group = ?group.map(|g| &**g),
+                "consensus: refusing a safety-sensitive proposal outside an electorate group");
+            return Some(ConsensusResult::ElectorateNotGoverned { slot: Arc::clone(slot), group: group.cloned() });
+        }
+        #[cfg(feature = "metrics")]
+        metrics::counter!("mycelium_consensus_ungoverned_safety_total").increment(1);
+        None
+    }
+
     /// Proposes `value` for `slot` requiring independent quorum from each group in `groups`.
     ///
     /// Commits only when every group reaches its configured [`GroupQuorum::quorum`] fraction.
@@ -1850,6 +2556,14 @@ impl ConsensusEngine {
                 slot,
                 ballots_tried: 0, votes_last_ballot: 0, quorum_required: 0,
             };
+        }
+
+        // P2, as at `propose_inner`'s door: an electorate group decides only through its own electorate, so a
+        // cross-group proposal naming one is refused by name; a safety-sensitive cross-group proposal is not an
+        // electorate, and is refused when the node requires one.
+        let scope_groups = SignalScope::Groups(groups.iter().map(|g| Arc::from(g.group.as_str())).collect());
+        if let Err(refused) = self.electorate_door(&scope_groups, &slot, &value, &config) {
+            return refused.into_result(slot);
         }
 
         let ballot_key = format!("{}{}", consensus_ns::BALLOT,    &*slot);
@@ -1925,7 +2639,7 @@ impl ConsensusEngine {
                     >= cross_group_quorum(gs.members.len(), gs.quorum_frac)
             });
             let phase1 = self.prepare_phase(
-                &mut vote_rx, &mut nack_rx, &scope, &slot, ballot, &value, &ready, None,
+                &mut vote_rx, &mut nack_rx, &scope, &slot, ballot, &value, &ready, None, None,
                 config.phase1_timeout, &carry,
             ).await;
             let retry_floor = match phase1 {
@@ -1951,6 +2665,9 @@ impl ConsensusEngine {
                     Some(seen)
                 }
                 Phase1::Unrecorded => return self.unrecorded(slot, _attempt + 1, 0),
+                // Unreachable: a cross-group proposal carries no electorate. Refused all the same.
+                Phase1::Stale(seen) => return stale_result(slot, &scope, None, seen),
+                Phase1::Closed => return gate_refused(slot, None),
             };
             if let Some(floor) = retry_floor {
                 ballot_retry_pause(config.ballot_retry_jitter_ms).await;
@@ -2127,6 +2844,7 @@ impl ConsensusEngine {
         current:   &Bytes,
         ready:     &(dyn Fn(&AHashSet<NodeId>) -> bool + Sync),
         trust_set: Option<&AHashSet<u64>>,
+        tag:       Option<&ElectorateTag>,
         timeout:   Duration,
         carry:     &Carry,
     ) -> Phase1 {
@@ -2136,9 +2854,12 @@ impl ConsensusEngine {
         // the only acceptances the legacy reading may set aside (below).
         let mut raw_ballots: Vec<u64> = Vec::new();
         let floor = self.floor(slot);
-        match prepare_slot(&self.task_ctx.consensus_accepted, slot, ballot, me.id_hash(), floor) {
-            PrepareOutcome::Refused { promised, .. } => return Phase1::Refused(promised),
-            PrepareOutcome::Promised(acc) => {
+        // This node's own promise passes the electorate's gate like any other claim (P2 round 2, finding 1).
+        let gate = tag.map(|t| &t.gate);
+        match self.claim_gated(gate, || prepare_slot(&self.task_ctx.consensus_accepted, slot, ballot, me.id_hash(), floor)) {
+            None => return Phase1::Closed,
+            Some(PrepareOutcome::Refused { promised, .. }) => return Phase1::Refused(promised),
+            Some(PrepareOutcome::Promised(acc)) => {
                 if let Some((b, a)) = acc {
                     let is_env = matches!(a, Accepted::Envelope(_));
                     if !is_env && a.value().is_some() { raw_ballots.push(b); }
@@ -2154,8 +2875,11 @@ impl ConsensusEngine {
             // Publish the ballot before asking, so a proposer drawing its next one starts above it
             // rather than colliding on it.
             self.raise_ballot(&format!("{}{}", consensus_ns::BALLOT, &**slot), ballot).await;
-            let prepare = ConsensusMsg::PrepareTerm {
-                slot: Arc::clone(slot), ballot, proposer: me.clone(),
+            let prepare = match tag {
+                Some(t) => ConsensusMsg::PrepareIn {
+                    slot: Arc::clone(slot), ballot, proposer: me.clone(), epoch: t.epoch, electorate: t.digest,
+                },
+                None => ConsensusMsg::PrepareTerm { slot: Arc::clone(slot), ballot, proposer: me.clone() },
             };
             self.emit_async(
                 Arc::from(consensus_kind::PROPOSE), scope.clone(),
@@ -2168,35 +2892,42 @@ impl ConsensusEngine {
                 tokio::select! { biased;
                     _ = &mut sleep => return Phase1::Short(promisers.len().saturating_sub(1)),
                     Some(sig) = vote_rx.recv() => {
-                        let Some(ConsensusMsg::PrepareAckTerm {
-                            slot: s, ballot: b, voter, accepted_ballot, accepted_digest,
-                            accepted, accepted_is_envelope, committed_digest,
-                        }) = self.decode_verify(&sig.payload) else { continue };
-                        if s != *slot || b != ballot { continue; }
-                        if let Some(ts) = trust_set
-                            && !ts.contains(&voter.id_hash()) { continue; }
-                        // A live commit of a different value ends this proposal. The same value — a
-                        // leased slot being renewed — is one promise like any other: no shortcut
-                        // past the quorum, whose reports still decide.
-                        let current_raw = raw_of(current);
-                        if committed_digest.is_some_and(|d| Some(d) != current_raw.as_ref().map(value_digest)) {
-                            return Phase1::DecidedOtherwise;
-                        }
-                        if accepted_ballot > 0 {
-                            // A digest is always sent with an acceptance; a value without one is
-                            // checked against its own digest by `choose_after_prepare`.
-                            if accepted_digest.is_none() && accepted.is_none() {
-                                // An acceptance we cannot identify constrains us without telling
-                                // us how: do not count this promiser.
-                                continue;
+                        match self.decode_verify(&sig.payload) {
+                            Some(ConsensusMsg::PrepareAckTerm {
+                                slot: s, ballot: b, voter, accepted_ballot, accepted_digest,
+                                accepted, accepted_is_envelope, committed_digest,
+                            }) => {
+                                if s != *slot || b != ballot { continue; }
+                                if let Some(ts) = trust_set
+                                    && !ts.contains(&voter.id_hash()) { continue; }
+                                // A live commit of a different value ends this proposal. The same value — a
+                                // leased slot being renewed — is one promise like any other: no shortcut
+                                // past the quorum, whose reports still decide.
+                                let current_raw = raw_of(current);
+                                if committed_digest.is_some_and(|d| Some(d) != current_raw.as_ref().map(value_digest)) {
+                                    return Phase1::DecidedOtherwise;
+                                }
+                                if accepted_ballot > 0 {
+                                    // A digest is always sent with an acceptance; a value without one is
+                                    // checked against its own digest by `choose_after_prepare`.
+                                    if accepted_digest.is_none() && accepted.is_none() {
+                                        // An acceptance we cannot identify constrains us without telling
+                                        // us how: do not count this promiser.
+                                        continue;
+                                    }
+                                    if !accepted_is_envelope && accepted.is_some() { raw_ballots.push(accepted_ballot); }
+                                    reports.push(carry.report(slot, accepted_ballot, accepted_digest, accepted, accepted_is_envelope));
+                                }
+                                promisers.insert(voter);
                             }
-                            if !accepted_is_envelope && accepted.is_some() { raw_ballots.push(accepted_ballot); }
-                            reports.push(carry.report(slot, accepted_ballot, accepted_digest, accepted, accepted_is_envelope));
+                            _ => continue,
                         }
-                        promisers.insert(voter);
                         if ready(&promisers) { break; }
                     }
                     Some(sig) = nack_rx.recv() => {
+                        // On an electorate group a refusal moves this proposal only from a member (P2 round 2,
+                        // finding 5): the sender is bound to the electorate, as votes are.
+                        if tag.is_some_and(|t| !t.sent_by_member(&sig.sender)) { continue; }
                         match self.decode_verify(&sig.payload) {
                             Some(ConsensusMsg::Promise { slot: s, seen_ballot, .. })
                             | Some(ConsensusMsg::PromiseTerm { slot: s, seen_ballot, .. })
@@ -2205,6 +2936,12 @@ impl ConsensusEngine {
                             Some(ConsensusMsg::Nack { slot: s, seen_ballot })
                                 if s == *slot && seen_ballot > ballot =>
                                 return Phase1::Refused(seen_ballot),
+                            // A member of this proposal's electorate holds a **later** electorate (a genesis that
+                            // superseded this one): this proposer is stale — stop, by name. A member behind it, or
+                            // simply does not answer; a non-member's refusal is not evidence about this electorate at all.
+                            Some(ConsensusMsg::StaleElectorate { slot: s, voter, epoch, electorate })
+                                if s == *slot && tag.is_some_and(|t| t.knows_a_later_electorate(&voter, epoch, &electorate)) =>
+                                return Phase1::Stale(epoch),
                             _ => {}
                         }
                     }
@@ -2259,6 +2996,7 @@ impl ConsensusEngine {
         ballot_key:  &str,
         commit_key:  &str,
         lease_ms:    Option<u64>,
+        cert:        Option<&[Bytes]>,
     ) -> Option<ConsensusResult> {
         if voters.len() < quorum_size { return None; }
         let (passes, _, _) = self.topology_check(voters, group_name);
@@ -2271,6 +3009,14 @@ impl ConsensusEngine {
                     ballot: self.read_ballot(ballot_key),
                 });
             }
+        // A genesis: its certificate — the decided envelope and the signed votes for it — goes into
+        // the store **before** the COMMIT leaves, so a node that learns the commit can verify it (P2).
+        let cert_at = crate::agent::electorate::parse_genesis_slot(slot).map(|(g, e)| crate::agent::electorate::cert_key(g, e));
+        if let (Some(votes), Some(key)) = (cert, cert_at) {
+            let Ok(encoded) = mycelium_core::serde_fixint::to_vec(&(value.clone(), votes.to_vec())) else { return None; };
+            let upd = self.set_async(&key, Bytes::from(encoded)).await;
+            let _ = self.persist_sync(slot, &upd, "electorate certificate").await;
+        }
         Some(self.commit_decision(scope, slot, ballot, value, commit_key, lease_ms).await)
     }
 
@@ -2443,6 +3189,8 @@ impl ConsensusEngine {
         trust_set:        Option<&AHashSet<u64>>,
         opaque_recompute: Option<&OpaqueRecompute>,
         lease_ms:         Option<u64>,
+        tag:              Option<&ElectorateTag>,
+        mut cert:         Option<&mut Vec<Bytes>>,
     ) -> BallotOutcome {
         let sleep = time::sleep_until(deadline);
         tokio::pin!(sleep);
@@ -2470,10 +3218,13 @@ impl ConsensusEngine {
                         // Trust-slice filtering: only count votes from declared peers.
                         if let Some(ts) = trust_set
                             && !ts.contains(&voter.id_hash()) { continue; }
+                        if let Some(c) = cert.as_deref_mut() && !voters.contains_key(&voter) {
+                            c.push(sig.payload.clone());
+                        }
                         voters.insert(voter, locality);
                         if let Some(res) = self.try_commit_if_ready(
                             voters, *quorum_size, group_name,
-                            scope, slot, ballot, value, ballot_key, commit_key, lease_ms,
+                            scope, slot, ballot, value, ballot_key, commit_key, lease_ms, cert.as_deref().map(Vec::as_slice),
                         ).await {
                             return BallotOutcome::Committed(res);
                         }
@@ -2483,6 +3234,8 @@ impl ConsensusEngine {
                     }
                 }
                 Some(sig) = nack_rx.recv() => {
+                    // On an electorate group only a member's refusal moves this ballot (P2 round 2, finding 5).
+                    if tag.is_some_and(|t| !t.sent_by_member(&sig.sender)) { continue; }
                     match self.decode_verify(&sig.payload) {
                         // A `Promise` refuses **and reports**: the proposer must adopt the accepted
                         // value at the next ballot instead of retrying with its own.
@@ -2494,6 +3247,9 @@ impl ConsensusEngine {
                         Some(ConsensusMsg::Nack { slot: s, seen_ballot })
                             if s == *slot && seen_ballot >= ballot =>
                             return BallotOutcome::NackHigher(seen_ballot, None),
+                        Some(ConsensusMsg::StaleElectorate { slot: s, voter, epoch, electorate })
+                            if s == *slot && tag.is_some_and(|t| t.knows_a_later_electorate(&voter, epoch, &electorate)) =>
+                            return BallotOutcome::Stale(epoch),
                         _ => {}
                     }
                 }
@@ -2512,7 +3268,7 @@ impl ConsensusEngine {
                         *quorum_size = if or.config_quorum > 0 { or.config_quorum } else { active / 2 + 1 };
                         if let Some(res) = self.try_commit_if_ready(
                             voters, *quorum_size, group_name,
-                            scope, slot, ballot, value, ballot_key, commit_key, lease_ms,
+                            scope, slot, ballot, value, ballot_key, commit_key, lease_ms, cert.as_deref().map(Vec::as_slice),
                         ).await {
                             return BallotOutcome::Committed(res);
                         }
@@ -2710,6 +3466,11 @@ enum Phase1 {
     /// This node's own promise did not reach stable storage, so the attempt stops before anything
     /// leaves: a promise a restart forgets is one this node can break.
     Unrecorded,
+    /// A member of the proposal's electorate answered for another epoch (P2): carries the epoch it holds.
+    Stale(u64),
+    /// This node's own promise was refused by its electorate gate (P2): the electorate it named, or the genesis
+    /// attempt, was overtaken here since the door.
+    Closed,
 }
 
 /// Outcome of `ConsensusEngine::collect_one_ballot`.
@@ -2725,6 +3486,8 @@ enum BallotOutcome {
     /// `phase1_timeout` elapsed. Caller may retry or surface TopologyUnsatisfied
     /// based on whether voters reached quorum-by-count.
     Timeout,
+    /// A member of the proposal's electorate answered for another epoch (P2).
+    Stale(u64),
 }
 
 // ── Wire encoding ─────────────────────────────────────────────────────────────
@@ -2769,6 +3532,9 @@ fn signer_authorized(msg: &ConsensusMsg, signer: &NodeId) -> bool {
         ConsensusMsg::PrepareTerm { proposer, .. }   => proposer == signer,
         ConsensusMsg::PrepareAckTerm { voter, .. }   => voter == signer,
         ConsensusMsg::ProposeTerm { proposer, .. }   => proposer == signer,
+        ConsensusMsg::PrepareIn { proposer, .. }     => proposer == signer,
+        ConsensusMsg::ProposeIn { proposer, .. }     => proposer == signer,
+        ConsensusMsg::StaleElectorate { voter, .. }  => voter == signer,
         ConsensusMsg::Commit { .. } | ConsensusMsg::Nack { .. } | ConsensusMsg::Promise { .. }
         | ConsensusMsg::PromiseTerm { .. } | ConsensusMsg::CommitTerm { .. } => true,
     }
@@ -3361,9 +4127,21 @@ pub(crate) fn untagged_consensus_signatures_accepted() -> u64 {
 /// the withheld answer is counted (`acceptor_answers_unrecorded`). The answer is signed in `form`,
 /// the form the prepare arrived in — see [`SignatureForm`].
 #[cfg(feature = "consensus")]
-async fn answer_prepare(ctx: &ConsensusEngine, slot: Arc<str>, ballot: u64, proposer: NodeId, form: SignatureForm, term: bool) {
+async fn answer_prepare(
+    ctx: &ConsensusEngine, slot: Arc<str>, ballot: u64, proposer: NodeId, form: SignatureForm, term: bool, gate: Option<Gate>,
+) {
     let floor = ctx.floor(&slot);
-    match prepare_slot(&ctx.task_ctx.consensus_accepted, &slot, ballot, proposer.id_hash(), floor) {
+    // P2: the promise passes the electorate's gate, which only decides. A gate that refused sends no promise
+    // (round 3, finding 5).
+    let outcome = ctx.claim_gated(gate.as_ref(), || prepare_slot(&ctx.task_ctx.consensus_accepted, &slot, ballot, proposer.id_hash(), floor));
+    let Some(outcome) = outcome else {
+        if let Some(g) = &gate {
+            let digest = crate::agent::electorate::cached(&ctx.task_ctx, &g.group).map_or([0; 32], |d| d.digest());
+            refuse_stale(ctx, slot, proposer, (g.epoch + 1, digest), form);
+        }
+        return;
+    };
+    match outcome {
         PrepareOutcome::Promised(acc) => {
             if !ctx.persist_acceptor(&slot).await {
                 note_answer_unrecorded(&slot, ballot, "not answering the prepare");
@@ -3435,6 +4213,33 @@ fn emit_refusal(
         Arc::from(consensus_kind::NACK),
         SignalScope::Individual(proposer),
         ctx.sign_payload_as(encode_consensus_msg(&nack), form),
+    );
+}
+
+/// The caller's value an acceptance holds — an envelope's value, a legacy value as it is; `None` when only the
+/// digest survived a restart.
+#[cfg(feature = "consensus")]
+fn raw_accepted(a: &Accepted) -> Option<Bytes> {
+    match a {
+        Accepted::Envelope(e) => raw_of(e),
+        Accepted::Full(v) => Some(v.clone()),
+        Accepted::DigestOnly(_) => None,
+    }
+}
+
+/// Refuses a proposal whose electorate is not this node's own, naming the electorate it holds (P2).
+#[cfg(feature = "consensus")]
+fn refuse_stale(ctx: &ConsensusEngine, slot: Arc<str>, proposer: NodeId, own: (u64, [u8; 32]), form: SignatureForm) {
+    #[cfg(feature = "metrics")]
+    metrics::counter!("mycelium_electorate_stale_refusals_total").increment(1);
+    tracing::debug!(slot = %slot, proposer = %proposer, epoch = own.0, "consensus: refusing a proposal for another electorate");
+    let refusal = ConsensusMsg::StaleElectorate {
+        slot, voter: ctx.task_ctx.node_id.clone(), epoch: own.0, electorate: own.1,
+    };
+    ctx.emit(
+        Arc::from(consensus_kind::NACK),
+        SignalScope::Individual(proposer),
+        ctx.sign_payload_as(encode_consensus_msg(&refusal), form),
     );
 }
 
@@ -3526,23 +4331,54 @@ pub(crate) async fn run_consensus_listener(
                 // `form` is how the request was signed; every answer below is signed the same way.
                 // `term`: the request came from an upgraded proposer (row A) — the value is a decision
                 // envelope, and every answer is the flagged form.
-                let (slot, ballot, value, proposer, form, term) = match ctx.decode_verify_form(&sig.payload) {
+                // P2: a proposal is answered only for this node's own electorate (`electorate_admits`) — a message
+                // without one on an electorate group, or one naming another, is refused by name.
+                let (slot, ballot, value, proposer, form, term, gate) = match ctx.decode_verify_form(&sig.payload) {
                     Some((ConsensusMsg::Prepare { slot, ballot, proposer }, form)) => {
-                        answer_prepare(&ctx, slot, ballot, proposer, form, false).await;
+                        match ctx.electorate_admits(&sig.scope, &slot, None, &proposer, None) {
+                            Ok(gate) => answer_prepare(&ctx, slot, ballot, proposer, form, false, gate).await,
+                            Err(own) => refuse_stale(&ctx, slot, proposer, own, form),
+                        }
                         continue;
                     }
                     Some((ConsensusMsg::PrepareTerm { slot, ballot, proposer }, form)) => {
-                        answer_prepare(&ctx, slot, ballot, proposer, form, true).await;
+                        match ctx.electorate_admits(&sig.scope, &slot, None, &proposer, None) {
+                            Ok(gate) => answer_prepare(&ctx, slot, ballot, proposer, form, true, gate).await,
+                            Err(own) => refuse_stale(&ctx, slot, proposer, own, form),
+                        }
                         continue;
                     }
-                    Some((ConsensusMsg::Propose { slot, ballot, value, proposer }, form)) =>
-                        (slot, ballot, value, proposer, form, false),
+                    Some((ConsensusMsg::PrepareIn { slot, ballot, proposer, epoch, electorate }, form)) => {
+                        match ctx.electorate_admits(&sig.scope, &slot, Some((epoch, electorate)), &proposer, None) {
+                            Ok(gate) => answer_prepare(&ctx, slot, ballot, proposer, form, true, gate).await,
+                            Err(own) => refuse_stale(&ctx, slot, proposer, own, form),
+                        }
+                        continue;
+                    }
+                    Some((ConsensusMsg::Propose { slot, ballot, value, proposer }, form)) => {
+                        match ctx.electorate_admits(&sig.scope, &slot, None, &proposer, Some((&value, false))) {
+                            Ok(gate) => (slot, ballot, value, proposer, form, false, gate),
+                            Err(own) => { refuse_stale(&ctx, slot, proposer, own, form); continue; }
+                        }
+                    }
                     Some((ConsensusMsg::ProposeTerm { slot, ballot, envelope, proposer }, form)) => {
                         // An envelope for another slot is not a proposal for this one.
                         if crate::consensus_life::Envelope::decode(&envelope).is_none_or(|e| *e.slot != *slot) {
                             continue;
                         }
-                        (slot, ballot, envelope, proposer, form, true)
+                        match ctx.electorate_admits(&sig.scope, &slot, None, &proposer, Some((&envelope, true))) {
+                            Ok(gate) => (slot, ballot, envelope, proposer, form, true, gate),
+                            Err(own) => { refuse_stale(&ctx, slot, proposer, own, form); continue; }
+                        }
+                    }
+                    Some((ConsensusMsg::ProposeIn { slot, ballot, envelope, proposer, epoch, electorate }, form)) => {
+                        if crate::consensus_life::Envelope::decode(&envelope).is_none_or(|e| *e.slot != *slot) {
+                            continue;
+                        }
+                        match ctx.electorate_admits(&sig.scope, &slot, Some((epoch, electorate)), &proposer, Some((&envelope, true))) {
+                            Ok(gate) => (slot, ballot, envelope, proposer, form, true, gate),
+                            Err(own) => { refuse_stale(&ctx, slot, proposer, own, form); continue; }
+                        }
                     }
                     _ => continue,
                 };
@@ -3557,11 +4393,20 @@ pub(crate) async fn run_consensus_listener(
                 let proposed_raw = if term { raw_of(&value) } else { Some(value.clone()) };
                 let decided_otherwise = ctx.live_digest(&slot).is_some_and(|d| Some(d) != proposed_raw.as_ref().map(value_digest));
                 let floor = ctx.floor(&slot);
-                let claimed = !decided_otherwise && if term {
-                    claim_envelope(&accepted, &slot, ballot, &value, proposer.id_hash(), floor)
-                } else {
-                    claim_vote(&accepted, &slot, ballot, &value, proposer.id_hash(), floor)
+                // Through the electorate's gate, in the same `compute` as the claim (P2 round 2, finding 1).
+                let gated = if decided_otherwise { Some(false) } else {
+                    ctx.claim_gated(gate.as_ref(), || if term {
+                        claim_envelope(&accepted, &slot, ballot, &value, proposer.id_hash(), floor)
+                    } else {
+                        claim_vote(&accepted, &slot, ballot, &value, proposer.id_hash(), floor)
+                    })
                 };
+                if gated.is_none() && let Some(g) = &gate {
+                    let digest = crate::agent::electorate::cached(&ctx.task_ctx, &g.group).map_or([0; 32], |d| d.digest());
+                    refuse_stale(&ctx, slot, proposer, (g.epoch + 1, digest), form);
+                    continue;
+                }
+                let claimed = gated == Some(true);
                 if !claimed {
                     // Report what we hold, so the proposer can **adopt** it at a higher ballot
                     // rather than overwrite it. A bare `Nack` says only "I have seen a ballot",
@@ -4657,5 +5502,22 @@ mod consensus_msg_auth_tests {
         assert!(may_cast_vote_digest(1, Some(a), 2, b));
         // A stale (lower) ballot is never votable.
         assert!(!may_cast_vote_digest(2, Some(a), 1, a));
+    }
+}
+
+#[cfg(test)]
+mod electorate_filter_tests {
+    use super::*;
+
+    /// P2's tension (b): an electorate group's roster is the vote filter, and a declared trust slice
+    /// only narrows it — a voter outside the roster never counts, whatever a slice says.
+    #[test]
+    fn the_roster_is_the_vote_filter_and_a_trust_slice_only_narrows_it() {
+        let set = |v: &[u64]| v.iter().copied().collect::<AHashSet<u64>>();
+        assert_eq!(electorate_vote_filter(None, None), None, "no electorate, no slice: no filter");
+        assert_eq!(electorate_vote_filter(Some(set(&[1, 9])), None), Some(set(&[1, 9])), "a slice alone, as before");
+        assert_eq!(electorate_vote_filter(None, Some(set(&[1, 2, 3]))), Some(set(&[1, 2, 3])));
+        assert_eq!(electorate_vote_filter(Some(set(&[1, 9])), Some(set(&[1, 2, 3]))), Some(set(&[1])),
+            "9 is in the slice but not the electorate: it does not count");
     }
 }

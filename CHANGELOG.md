@@ -76,6 +76,83 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`mycelium::OwnershipLock`** — the core's exclusive-ownership lock on `<file>.lock` (held by the KV WAL and the
   node-local journals), re-exported so a companion's own log refuses a second owner the same way. The tuple space
   and the blackboard take it on their WALs (row C, above). Additive.
+- **A consensus electorate is a governed group, pinned by identity and fixed at genesis** (post-360 plan row P2;
+  `docs/design/consensus-electorate.md` §8, revised through five rounds of #601's adversarial review; **the
+  maintainer's decisions, 2026-10-11: freeze membership, and ship P2 in 2.32.0 without migration**). An **electorate
+  group**'s electorate is an `ElectorateDecl { group, epoch, members, exclusive_default, supersedes }` decided by
+  consensus on `electorate/{group}/{epoch}`: a **genesis** names the roster and is decided by every member it names,
+  each checking it against the roster it sees. Each commit carries a certificate — the decided envelope and the
+  deciding votes (`consensus/electorate-cert/`, signed under `[tls]`) — and a node adopts a record only when it
+  verifies: one written straight into the store is not adopted and is counted (`mycelium::electorate_records_refused`).
+  `GossipAgent::declare_electorate(group, exclusive_default)` / `POST /gateway/govern/electorate` (`govern:write`,
+  audited only when something is decided) decides a genesis, and on a group with an electorate returns it unchanged or
+  refuses `ElectorateError::MembershipFrozen` (`409 membership_frozen`). **Changing an electorate's members is not built
+  in this release**: a dead member lowers the group's fault tolerance, a lost majority stops it; a migration to another
+  group is the follow-up (branch `fix/p2-migration`). A genesis whose members no longer all answer is **superseded** by a
+  declaration of the live roster from a member that holds it — the next epoch, keeping a strict majority of the pending
+  genesis (`mycelium::Superseded`; §8.4 argues why at most one attempt is ever in force, and states what adoption rests
+  on after a restart). `declare_electorate` retries an undecided attempt with a bounded backoff (eight tries, 250 ms
+  doubling to 4 s); a precondition no retry changes — a door refusal, a second default — is `ElectorateError::Refused`
+  (`409 refused`), returned at once. A proposal to an electorate group is refused `ElectorateMismatch` unless the roster
+  equals the members **by identity** (counted: `mycelium::electorate_roster_mismatches`); promises and votes count only
+  from the members; the quorum is a strict majority whatever `quorum_size` or opacity say; and every Prepare/Propose
+  names the electorate's epoch and digest (`ConsensusMsg::PrepareIn`/`ProposeIn`/`StaleElectorate`, appended — wire v12;
+  row A's envelope messages naming an electorate): an acceptor answers only its own electorate. Every genesis claim and
+  adoption on the group passes one `compute` on its gate key (`claim_gated`), which only decides — the claim runs after
+  it, and a refused claim raises nothing. The governor and the emergent watcher leave an electorate group alone;
+  `/gateway/mesh/group` refuses it `403 governed_group`. **`consensus_require_electorate`** (env
+  `GOSSIP_CONSENSUS_REQUIRE_ELECTORATE`, default off) refuses a **safety-sensitive** proposal —
+  `ConsensusConfig::safety_sensitive`, or `lock/`, `leader/`, `consistent/`, `capauthz/`, `electorate/`, a commitment
+  award — outside an electorate group, **`ConsensusResult::ElectorateNotGoverned`** (`403 electorate_not_governed`);
+  off, it runs as before, counted. The cluster-scoped exclusive verbs — `distributed_lock`, `LockService`,
+  `consistent_set`, the lock, consistent and log-claim routes, `mycelium-commitment`'s linearizable award,
+  `set_capability_authz_via_consensus` — decide in the group marked `exclusive_default` (a fleet record), via the new
+  `ConsensusHandle::exclusive_propose[_receipt]`. **The default is set once, at genesis**: a second `exclusive_default`
+  genesis is refused by name while one is held, at the door and at every acceptor, and the default cannot move in this
+  release. `consensus_electorate` only restates the default, and a disagreeing setting is refused; while the default
+  cannot be named, every acceptor refuses a cluster-scoped exclusive slot, tagged or not. A fleet-exclusive slot is
+  decided only in the fleet's electorate, and a slot that names a group (`leader/{g}`, `electorate/{g}/…`) only under
+  exactly `Group(g)` — at the door and at every acceptor, whatever the default state or `consensus_require_electorate`,
+  never across the cluster or by a cross-group proposal; a tagged proposal is answered only under a group's scope. `cons.safety_profile` (rev 2) is node-enforced and **`secure-single-domain` rev 4** requires it
+  (rev 3 is P1's `gw.exposed_closed`). **Not claimed:** changing an electorate's members, or moving the default (the
+  follow-up); a lost majority is unrecoverable; two default declarations made at once within gossip lag stop the
+  exclusive verbs with no escape in this release (group-scoped work outside the exclusive families keeps running); a
+  `safety_sensitive` slot outside the pinned families can also be decided by an untagged cluster-scoped proposal; genesis assumes its members agree on the roster; without `[tls]` the
+  certificates are unauthenticated; the marking of the fleet's default is not itself a cluster-scoped decision (§8.6
+  says why the profile closes that window instead); live reconfiguration is a later plan. **Removed before release:**
+  rounds 2–3 built live one-member steps with a drain before each step, withdrawn in round 4; rounds 4–5 built a
+  migration (retirement, a successor carrying lazily), moved to `fix/p2-migration` by the 2.32.0 decision. Seen failing
+  first in round 5, each on a toggle of its mechanism: `a_tagged_cluster_proposal_for_an_exclusive_slot_fails_closed`
+  (the `named.is_none()` condition restored: `a cluster-scoped lock/x is refused, named Some((1, …))`) and
+  `a_second_default_is_refused_by_name` (the default checks removed: `a second default is refused by name:
+  Ok(ElectorateDecl { group: "new", …, exclusive_default: true, … })`). Seen failing first in round 4, against
+  546a5cbd: `a_refused_claim_through_the_gate_lowers_the_fence_again` (`a refused claim left a fence behind; left: None,
+  right: Some(7)` — the test now pins the genesis gate, the one raising kind that ships),
+  `an_undecided_genesis_is_superseded_by_one_naming_the_live_roster` (`NotDecided("Timeout { slot:
+  \"electorate/council/1\", … votes_last_ballot: 1, quorum_required: 2 }")`) and
+  `a_declaration_on_a_sparse_mesh_retries_until_decided` (`NotDecided("Timeout { slot: \"electorate/council/1\",
+  ballots_tried: 3, votes_last_ballot: 0, quorum_required: 3 }")`). Seen failing first in earlier rounds, each on a
+  toggle of the mechanism it pins: `a_swap_without_a_migration_is_refused` (count rule: `Committed` on {A,B,D}),
+  `votes_from_outside_the_electorate_are_not_counted` (filter unwired, and separately the quorum floor removed:
+  `Committed` on forged votes), `a_cross_group_proposal_does_not_decide_for_an_electorate_group`,
+  `a_cross_group_proposal_does_not_decide_an_exclusive_slot` (`Committed { slot: "lock/x" }`),
+  `a_forged_electorate_record_is_not_adopted` and `an_electorate_certificate_verifies_under_tls` (certificate unchecked,
+  or votes counted without their signer: the forged record adopted),
+  `a_local_electorate_setting_that_disagrees_with_the_fleet_is_refused` (the lock decided locally); and against the
+  unfixed code `a_safety_sensitive_proposal_is_decided_only_by_an_electorate_group`, `the_governor_and_the_watcher_
+  leave_an_electorate_group_alone`, `an_exclusive_outcome_at_the_gateway_needs_an_electorate_group` and the guarantee
+  and profile pins. **Upgrade notes:** `ConsensusResult` (`#[non_exhaustive]`), `CommitError` and `ConsistencyError`
+  gain `ElectorateNotGoverned`, `ElectorateStale` and `ElectorateMismatch` — a `_` arm must fail closed;
+  `ConsensusConfig` and `GossipConfig` gained fields (an exhaustive literal breaks); a node under `profile =
+  "secure-single-domain"` must set `consensus_require_electorate = true` or it will not start, and then a lock or an
+  election on the whole cluster or an undeclared group is refused — declare the electorates and mark one
+  `exclusive_default`; a `mycelium-commitment` award and a capability-authz policy now decide where the locks do; **an
+  electorate's members cannot be changed in this release** — size each for its lifetime's failures; **rolling upgrade:**
+  an electorate whose members are not all on this release times out rather than commits (the new messages are ignored
+  by older nodes), and a pre-P2 node still proposes the exclusive verbs to the whole cluster — mark an
+  `exclusive_default` group only once every node runs this release; **a group-scoped proposal for a `lock/`,
+  `consistent/`, `capauthz/` or commitment-award slot is refused on any group but the fleet's exclusive electorate, and
+  `leader/{g}` on any group but `g`** (`ElectorateMismatch`).
 - **The KV namespace table is a gate now, not a lint item.** `scripts/check-kv-namespaces.sh` enumerates every
   KV prefix production code uses — slash-bearing `const`/`static` `&str` literals whatever their name, `format!`
   key heads, and the first literal of a KV call (`set*`, `get`, `delete*`, `scan_*`, `subscribe*`, `kv_*`,
