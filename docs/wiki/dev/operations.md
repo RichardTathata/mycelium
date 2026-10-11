@@ -39,7 +39,7 @@ the *diagnosis* agrees across nodes, while each keeps its own `view_confidence`)
   after that is counted (`late_attachments`) and warned about. The strongest sentence it says is *node
   requirements satisfied*, never *deployment verified*. `ConfinementReport` is now a view over it.
   **Profiles (I3):** `GossipConfig::profile` / `GOSSIP_PROFILE` selects `dev` (nothing required, said
-  loudly) or `secure-single-domain` (rev 4, unreleased — nineteen ids pinned by `the_secure_profiles_required_set_is_pinned`; rev 4 added `cons.safety_profile` (`consensus_require_electorate`, plan P2), rev 3 `gw.exposed_closed` (plan P1); rev 2 (v2.21.0) added `id.ca_key_off_node` and `persist.unreadable_refused`, announced in v2.20.0 per G12);
+  loudly) or `secure-single-domain` (rev 4, 2.32.0 — nineteen ids pinned by `the_secure_profiles_required_set_is_pinned`; rev 4 added `cons.safety_profile` (`consensus_require_electorate`, plan P2), rev 3 `gw.exposed_closed` (plan P1); rev 2 (v2.21.0) added `id.ca_key_off_node` and `persist.unreadable_refused`, announced in v2.20.0 per G12);
   under a profile `start()` refuses by name when a required guarantee is not `enforced` or
   `not_applicable` (`guarantee::check`), an unknown required id refuses, and an unknown name fails
   `validate()`. The report carries the profile, its revision and its required set.

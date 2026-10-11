@@ -159,7 +159,10 @@ alertable scalar, the snapshot field is the relational detail, and the diagnosis
   a higher ballot — contention, not failure; `blocked` ⇒ the slot's top acceptance is known only by digest (a
   record from before 2.30.0 — deprecations §21); `quorum_short` ⇒ members heard but **quorum not met**
   (overloaded members, or the quorum set is larger than live membership); `all_opaque` ⇒ every
-  member is shedding load (cross-check [fleet-opacity storm](#fleet-opacity-storm)). Dev-side, the
+  member is shedding load (cross-check [fleet-opacity storm](#fleet-opacity-storm)); and since 2.32.0
+  `unrecorded` ⇒ this node could not make its own promise or vote durable before sending it (a persistence fault —
+  read `/health`'s `persistence` block), `ballot_exhausted` ⇒ the slot's decided floor sits at the ballot ceiling,
+  which no history reaches — a forged floor (`/stats` `consensus_decided_floor_anomalies`). Dev-side, the
   returned `ConsensusResult::Timeout { ballots_tried, votes_last_ballot, quorum_required }` does **not**
   carry the label: in a single-group proposal `votes_last_ballot` counts the votes of the latest attempt whose vote
   phase ran out, the proposer's own included (`0` if none did), so a timeout whose last attempt ended earlier —
