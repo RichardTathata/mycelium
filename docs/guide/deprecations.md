@@ -563,11 +563,11 @@ only when:
   `signal_window_secs`; `quorum_persistent(kind, window)` pins it for `max(window, signal_window_secs)`;
   `last_signal_persistent` for one `signal_window_secs`. A `watch` renews its pin on every poll.
 
-Per kind, a node remembers at most 1024 senders it has written evidence for (`SIGNAL_LOG_MAX_SENDERS_PER_KIND`);
-past that the sender written longest ago gives way, so a kind never stops writing. Across kinds, at most 4096
-distinct `(kind, sender)` writes a second — past that the write is skipped and counted
-(`gossip_quorum_evidence_skipped_total`). A kind with no worker whose pin has lapsed forgets its senders at the
-next GC tick.
+Per kind, a node writes evidence for at most 1024 senders within the quorum window
+(`SIGNAL_LOG_MAX_SENDERS_PER_KIND`, `signal_window_secs`): a further sender is skipped and counted
+(`gossip_quorum_evidence_skipped_total`) until a slot's evidence ages out of the window, since evidence that old
+never counts toward a quorum. Across kinds, at most 4096 distinct `(kind, sender)` writes a second. A kind with
+no worker whose pin has lapsed forgets its senders at the next GC tick.
 
 **Who notices.**
 - **An observer outside a group.** A node reading `quorum_persistent("k", …)` for a kind its *members* emit used to
@@ -576,8 +576,8 @@ next GC tick.
   first query on (its own reads pin the kind).
 - **A poller slower than its window.** A reader polling `quorum_persistent` less often than its pin lasts sees a gap
   between pins; the pin lasts at least the window it asks about, so polling within that window keeps it.
-- **More than 4096 distinct `(kind, sender)` evidence writes in one second**: the excess is not recorded for that
-  second (each sender's next signal, a second later, is).
+- **More than 1024 senders on one kind within the window**, or more than 4096 distinct `(kind, sender)` evidence
+  writes in one second: the excess is not recorded.
 
 **Will the compiler tell me?** No — fewer keys under `sys/quorum/`.
 

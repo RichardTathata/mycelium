@@ -48,19 +48,7 @@ impl StallBound {
     /// The bound on batches being sent: `peer_write_stall_timeout_ms`, no floor (a sender cannot tell
     /// a slow link from a receiver applying what it read).
     pub fn write_from_config(cfg: &crate::config::GossipConfig) -> Self {
-        Self { stall: Duration::from_millis(write_stall_ms(cfg)), min_rate: 0 }
-    }
-}
-
-/// `peer_write_stall_timeout_ms`, with `0` resolved from `sync_mode` (#602's round 4, Q-c): under
-/// `flush` an anti-entropy batch waits behind the WAL writer, which may be taking a snapshot.
-pub fn write_stall_ms(cfg: &crate::config::GossipConfig) -> u64 {
-    match cfg.peer_write_stall_timeout_ms {
-        0 => match cfg.persistence.as_ref().map(|p| p.sync_mode) {
-            Some(crate::config::SyncMode::Flush) => 300_000,
-            _ => 60_000,
-        },
-        ms => ms,
+        Self { stall: Duration::from_millis(cfg.peer_write_stall_timeout_ms), min_rate: 0 }
     }
 }
 
@@ -227,11 +215,14 @@ mod tests {
 mod default_tests {
     use super::*;
 
+    /// The worst chunk apply measured by `worst_case_chunk_apply_with_an_fsync_wal` (round 5).
+    const WORST_CHUNK_APPLY: Duration = Duration::from_secs(760);
+
     /// #602's re-review, findings 2 and 3: the defaults cut healthy peers. A per-connection floor of
     /// 8 KiB/s tripped every sender of a joiner whose link is shared by eight peers at 512 kbit/s, and a
     /// 15 s no-progress bound on the writer was shorter than a peer's apply of one anti-entropy chunk
     /// into an fsync WAL (measured 2026-10-10 on a developer Mac: 41.8 s for 9 000 × 1 KiB, 329 s for
-    /// 70 000 × 64 B — 3.4 s for the worst chunk once round 3 group-committed it). The defaults must not
+    /// 70 000 × 64 B; round 5 re-measured the worst chunk, ~145 000 tombstones). The defaults must not
     /// cut either.
     #[test]
     fn the_defaults_do_not_cut_a_shared_link_or_a_slow_apply() {
@@ -241,14 +232,9 @@ mod default_tests {
         assert_eq!(r.min_rate, 1024, "a 1 KiB/s read floor by default");
         assert!(r.stall >= Duration::from_secs(60), "{:?}", r.stall);
         let w = StallBound::write_from_config(&cfg);
-        // Round 3: with group commit the worst chunk applies in 3.4 s (debug build); 329 s before it.
-        assert!(w.stall >= Duration::from_secs(34), "the writer must outlast a 3.4 s chunk apply with margin; got {:?}", w.stall);
-        // Round 4: under `flush` a batch waits behind a snapshot (7.8 s for 1 GiB, measured).
-        let mut flush = crate::config::GossipConfig::default();
-        flush.persistence = Some(crate::config::PersistenceConfig {
-            base_path: std::path::PathBuf::from("/nonexistent"), sync_mode: crate::config::SyncMode::Flush,
-            snapshot_wal_threshold: 1_000, snapshot_interval_secs: 60, on_unreadable: Default::default(),
-        });
-        assert_eq!(StallBound::write_from_config(&flush).stall, Duration::from_secs(300));
+        // A `flush` receiver applies a chunk entry by entry, one fsync each: the worst measured is
+        // WORST_CHUNK_APPLY (round 5); the default is 1.5 × that.
+        assert!(w.stall >= WORST_CHUNK_APPLY.mul_f64(1.5), "the writer must outlast a flush receiver's worst chunk apply; got {:?}", w.stall);
+
     }
 }

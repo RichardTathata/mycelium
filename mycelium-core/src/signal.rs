@@ -682,19 +682,21 @@ impl SignalLog {
     fn trim(&self, window: Duration) {
         let cutoff = Instant::now().checked_sub(window);
         let fresh = |t: &Instant| cutoff.is_none_or(|c| crate::sim_seam::mono_before(&c, t));
-        let to_remove: Vec<Arc<str>> = {
-            let guard = self.sender_log.pin();
-            guard.iter()
-                .filter_map(|(kind, arc)| {
-                    let mut log = arc.lock();
-                    log.retain(|_, (_, t)| fresh(t));
-                    if log.is_empty() { Some(Arc::clone(kind)) } else { None }
-                })
-                .collect()
-        };
+        // Each kind under its own log lock, removing the log only if it is still the table's and still
+        // empty — the evictor's discipline (#602's round 5, item 7a). A plain `remove` after the scan let
+        // a record that landed in between (under the same lock, after `retain`) go with the log.
         let guard = self.sender_log.pin();
-        for kind in to_remove {
-            guard.remove(&kind);
+        let arcs: Vec<(Arc<str>, Arc<Mutex<SenderEntries>>)> =
+            guard.iter().map(|(k, a)| (Arc::clone(k), Arc::clone(a))).collect();
+        for (kind, arc) in arcs {
+            let mut log = arc.lock();
+            log.retain(|_, (_, t)| fresh(t));
+            if log.is_empty() {
+                guard.compute(Arc::clone(&kind), |e| match e {
+                    Some((_, cur)) if Arc::ptr_eq(cur, &arc) => papaya::Operation::Remove,
+                    _ => papaya::Operation::Abort(()),
+                });
+            }
         }
     }
 }
@@ -738,19 +740,23 @@ impl SuppressionTable {
 struct QuorumEvidence {
     quorum_written: PapayaMap<Arc<str>, Instant>,
     /// Senders each kind has written evidence for, with when, at most
-    /// [`SIGNAL_LOG_MAX_SENDERS_PER_KIND`] per kind (#602's round 3, finding 2). The set **slides**
-    /// (round 4, finding 3): past the cap the senders written longest ago give way, an eighth per
-    /// pass, so a kind never stops writing; and a kind that has neither a worker nor a live pin loses
-    /// its set at the next trim. A sender is entered only when its write happens. What this bounds is
-    /// the memory and — with the rate table — the write rate; `sys/quorum/` keys already written stay.
+    /// [`SIGNAL_LOG_MAX_SENDERS_PER_KIND`] per kind (#602's round 3, finding 2). At the cap a new
+    /// sender is **skipped and counted** — the set does not slide, since a sliding set let forged
+    /// senders each write a permanent gossiped key (round 5, item 2) — and a slot frees only when its
+    /// sender's last write is older than the quorum window, because evidence that old never counts
+    /// toward a quorum anyway. A kind with neither a worker nor a live pin loses its set at the next
+    /// trim; a sender is entered only when its write happens. `sys/quorum/` keys already written stay.
     senders_written: PapayaMap<Arc<str>, Arc<PapayaMap<u64, Instant>>>,
     /// Evidence writes skipped by either bound (diagnostics).
     skipped: std::sync::atomic::AtomicU64,
+    /// The quorum window (`signal_window_secs`): a sender's slot frees once its last write is older.
+    window: Duration,
 }
 
 impl QuorumEvidence {
     fn new() -> Self {
-        Self { quorum_written: PapayaMap::new(), senders_written: PapayaMap::new(), skipped: std::sync::atomic::AtomicU64::new(0) }
+        Self { quorum_written: PapayaMap::new(), senders_written: PapayaMap::new(), skipped: std::sync::atomic::AtomicU64::new(0),
+               window: Duration::from_secs(600) }
     }
 
     fn skip(&self) -> Option<(Arc<str>, Bytes)> {
@@ -806,12 +812,16 @@ impl QuorumEvidence {
             };
             let senders = set.pin();
             if !senders.contains_key(&sender.id_hash()) && senders.len() >= SIGNAL_LOG_MAX_SENDERS_PER_KIND {
-                let mut by_age: Vec<(u64, Instant)> = senders.iter().map(|(h, t)| (*h, *t)).collect();
-                let n = (SIGNAL_LOG_MAX_SENDERS_PER_KIND / 8).max(1).min(by_age.len());
-                if n < by_age.len() {
-                    by_age.select_nth_unstable_by(n - 1, |a, b| mono_order(&a.1, &b.1));
+                // Free only the slots whose evidence has aged out of the window; none free → skip.
+                let window = self.window;
+                let aged: Vec<u64> = senders.iter()
+                    .filter(|(_, t)| crate::sim_seam::mono_span(t, &now) > window)
+                    .map(|(h, _)| *h)
+                    .collect();
+                for h in aged { senders.remove(&h); }
+                if senders.len() >= SIGNAL_LOG_MAX_SENDERS_PER_KIND {
+                    return self.skip();
                 }
-                for (h, _) in by_age.into_iter().take(n) { senders.remove(&h); }
             }
             senders.insert(sender.id_hash(), now);
         }
@@ -868,7 +878,7 @@ impl SignalHandlers {
             handlers:    HandlerTable::new(),
             log:         SignalLog::new(sender_log_window),
             suppression: SuppressionTable::new(),
-            evidence:    QuorumEvidence::new(),
+            evidence:    QuorumEvidence { window: sender_log_window, ..QuorumEvidence::new() },
         }
     }
 
@@ -2069,58 +2079,56 @@ mod bound_tests {
     }
 
     /// #602's round 3, finding 2: a random-sender flood on a kind this node works on wrote a
-    /// `sys/quorum/` key per forged sender at line rate — at the table's cap the write went ahead
-    /// unremembered. Evidence is bounded per kind by the log's sender cap, and the table bound holds.
+    /// `sys/quorum/` key per forged sender. Per kind, at most the sender cap of keys are written within
+    /// the quorum window (round 5: the set no longer slides), and the table bounds the rate.
     #[test]
     fn evidence_writes_are_bounded_per_kind_and_by_the_table() {
         let h = SignalHandlers::new(Duration::from_secs(600));
         let mut keep = Vec::new();
-        let mut written = 0usize;
+        let mut total = 0usize;
         let started = std::time::Instant::now();
         for k in 0..8 {
             let kind: Arc<str> = Arc::from(format!("worked.{k}"));
             keep.push(h.register(Arc::clone(&kind)));
+            let mut written = 0usize;
             for p in 0..(SIGNAL_LOG_MAX_SENDERS_PER_KIND as u16 + 500) {
                 let sender = id(1 + p);
                 h.deliver(&sig(&kind, sender.clone()));
                 written += usize::from(h.quorum_evidence_payload(&kind, &sender).is_some());
             }
+            assert!(written <= SIGNAL_LOG_MAX_SENDERS_PER_KIND,
+                    "{written} evidence keys for one kind within the window; the cap is {SIGNAL_LOG_MAX_SENDERS_PER_KIND}");
+            total += written;
         }
-        // The table bounds writes to its size per second (entries older than a second are reusable);
-        // the per-kind bound to 8 × the sender cap in all.
         let seconds = started.elapsed().as_secs() as usize + 1;
-        assert!(written <= SIGNAL_LOG_MAX_KINDS * seconds,
-                "{written} evidence writes in {seconds} s; the table bounds them at {SIGNAL_LOG_MAX_KINDS} a second");
-        assert!(written <= 8 * SIGNAL_LOG_MAX_SENDERS_PER_KIND);
+        assert!(total <= SIGNAL_LOG_MAX_KINDS * seconds, "{total} evidence writes in {seconds} s");
         assert!(h.evidence_entries() <= SIGNAL_LOG_MAX_KINDS);
     }
 
+
     #[test]
     fn one_kinds_evidence_is_bounded_by_the_sender_cap() {
-        // Round 3 bounded the keys a kind ever writes; round 4 made the set slide, so what stays
-        // bounded is the set (memory) and — through the table — the write rate.
         let h = SignalHandlers::new(Duration::from_secs(600));
         let kind: Arc<str> = Arc::from("worked");
         let _w = h.register(Arc::clone(&kind));
-        let started = std::time::Instant::now();
         let mut written = 0usize;
         for p in 0..(SIGNAL_LOG_MAX_SENDERS_PER_KIND as u16 * 3) {
             let sender = id(1 + p);
             h.deliver(&sig(&kind, sender.clone()));
             written += usize::from(h.quorum_evidence_payload(&kind, &sender).is_some());
         }
-        assert!(h.evidence_senders("worked") <= SIGNAL_LOG_MAX_SENDERS_PER_KIND, "{} senders held", h.evidence_senders("worked"));
-        let seconds = started.elapsed().as_secs() as usize + 1;
-        assert!(written <= SIGNAL_LOG_MAX_KINDS * seconds, "{written} writes in {seconds} s");
+        assert!(written <= SIGNAL_LOG_MAX_SENDERS_PER_KIND, "{written} evidence keys for one kind");
+        assert!(h.evidence_senders("worked") <= SIGNAL_LOG_MAX_SENDERS_PER_KIND);
     }
 
 
-    /// #602's round 4, finding 3: a kind's evidence sender set only grew — after 1024 distinct senders,
-    /// ever, the kind wrote no more evidence until a restart. The set slides: the sender written longest
-    /// ago gives way.
+
+    /// Round 5, item 2: the set does not slide — a forged sender past the cap writes nothing — but a
+    /// slot frees once its sender's last write is older than the quorum window, since evidence that old
+    /// never counts toward a quorum (round 4, finding 3: the set used to fill for good).
     #[test]
-    fn an_evidence_sender_set_slides() {
-        let h = SignalHandlers::new(Duration::from_secs(600));
+    fn a_sender_slot_frees_once_its_evidence_ages_out() {
+        let h = SignalHandlers::new(Duration::from_millis(300));
         let kind: Arc<str> = Arc::from("worked");
         let _w = h.register(Arc::clone(&kind));
         for p in 0..SIGNAL_LOG_MAX_SENDERS_PER_KIND as u16 {
@@ -2130,21 +2138,26 @@ mod bound_tests {
         }
         let late = id(30_000);
         h.deliver(&sig(&kind, late.clone()));
-        assert!(h.quorum_evidence_payload(&kind, &late).is_some(), "a new sender past the cap displaces the oldest");
+        assert!(h.quorum_evidence_payload(&kind, &late).is_none(), "past the cap a new sender is skipped");
+        std::thread::sleep(Duration::from_millis(900)); // three windows: every slot has aged out
+        h.deliver(&sig(&kind, late.clone()));
+        assert!(h.quorum_evidence_payload(&kind, &late).is_some(), "an aged-out slot frees");
     }
+
 
     /// Finding 3: the outer map grew with every kind ever pinned. A kind whose pin lapsed and that has
     /// no worker loses its sender set at the next trim.
     #[test]
     fn a_lapsed_kinds_evidence_set_is_pruned() {
-        let h = SignalHandlers::new(Duration::from_millis(100));
+        // A 500 ms window and a 1.5 s wait: round 5 saw the 100 ms version flake under load.
+        let h = SignalHandlers::new(Duration::from_millis(500));
         let kind: Arc<str> = Arc::from("asked");
         assert!(!h.quorum("asked", 1, Duration::from_secs(60))); // pins it
         h.deliver(&sig("asked", id(1)));
         assert!(h.quorum_evidence_payload(&kind, &id(1)).is_some());
         assert_eq!(h.evidence_kinds(), 1);
-        std::thread::sleep(Duration::from_millis(250));
-        h.trim_sender_log(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(1_500));
+        h.trim_sender_log(Duration::from_millis(500));
         assert_eq!(h.evidence_kinds(), 0, "no worker and a lapsed pin: the set goes");
     }
 }

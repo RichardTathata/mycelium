@@ -257,11 +257,13 @@ async fn worst_case_chunk_apply_with_an_fsync_wal() {
     // (entries, value bytes, tombstones, sync mode). The last two are the worst a chunk can hold: the
     // sender's chunk budget counts `key + value + 64` per entry, so ~145 000 tombstones with short
     // keys fill one (#602's round 3).
+    // Without group commit (#602's round 5: removed), a receiver appends and — under `flush` —
+    // fsyncs each record of a chunk while its read loop does not read. Recorded before: 0.78 s for
+    // 152 × 64 KiB, 41.8 s for 9 000 × 1 KiB, 329 s for 70 000 × 64 B (2026-10-10). This run measures
+    // the worst chunk a sender can build: ~145 000 tombstones (the sender's chunk budget counts
+    // `key + value + 64` per entry).
     for (entries, size, tomb, mode) in [
-        (152usize, 64 * 1024usize, false, SyncMode::Flush),
-        (9_000, 1024, false, SyncMode::Flush),
-        (70_000, 64, false, SyncMode::Flush),
-        (145_000, 0, true, SyncMode::Flush),
+        (145_000usize, 0usize, true, SyncMode::Flush),
         (145_000, 0, true, SyncMode::Async),
     ] {
         let px = alloc_port();
@@ -287,10 +289,10 @@ async fn worst_case_chunk_apply_with_an_fsync_wal() {
         let last = format!("t{}", entries - 1);
         assert!(until(Duration::from_secs(1200), || x.kv_state_for_tests().store.pin().contains_key(last.as_str())).await);
         let applied = started.elapsed();
-        // Wait for the WAL batch too: a ping round-trip on this connection means the loop is reading.
+        // A ping on this connection is read only once the chunk's last append returned.
         write_frame(&mut s, &wire_to_bytes(&WireMessage::Ping { sender: NodeId::new("127.0.0.1", 9).unwrap(), known_peers: vec![] })).await.unwrap();
         assert!(until(Duration::from_secs(1200), || x.peers().contains(&NodeId::new("127.0.0.1", 9).unwrap())).await);
-        println!("chunk of {entries} x {size} B{} ({} B framed), {mode:?}: store applied in {:?}, reading again (WAL batch done) in {:?}",
+        println!("chunk of {entries} x {size} B{} ({} B framed), {mode:?}: last entry applied in {:?}, reading again in {:?}",
                  if tomb { " tombstones" } else { "" }, frame.len(), applied, started.elapsed());
         x.shutdown().await;
         let _ = std::fs::remove_dir_all(&dir);
@@ -344,202 +346,6 @@ async fn one_byte_then_silence_is_closed_with_the_floor_off() {
     assert!(matches!(r, Ok(Ok(0)) | Ok(Err(_))), "one byte then silence must close; got {r:?}");
     assert_eq!(x.system_stats().inbound_frames_stalled, 1);
     x.shutdown().await;
-}
-
-/// Keeps writing `key` on `y` until `x` holds it, or `within` passes.
-async fn syncs(x: &GossipAgent, y: &GossipAgent, key: &str, within: Duration) -> bool {
-    let deadline = tokio::time::Instant::now() + within;
-    while tokio::time::Instant::now() < deadline {
-        let _ = y.kv().set(key, Bytes::from_static(b"ok"));
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        if x.kv().get(key).is_some() { return true; }
-    }
-    false
-}
-
-fn attack_config(px: u16) -> GossipConfig {
-    // Default-shaped, scaled: a writer idles out at 1 s and the handshake bound is 300 ms, so the
-    // preemption threshold (writer idle + handshake) is 1.3 s — as 30 s + 10 s is 40 s by default.
-    let mut cx = GossipConfig { bind_port: px, ..Default::default() };
-    cx.max_connections = 2;
-    cx.handshake_timeout_ms = 300;
-    cx.writer_idle_timeout_secs = 1;
-    cx
-}
-
-fn honest_config(py: u16, px: u16) -> GossipConfig {
-    GossipConfig {
-        bind_port: py,
-        bootstrap_peers: vec![NodeId::new("127.0.0.1", px).unwrap()],
-        reconnect_backoff_secs: 1,
-        writer_idle_timeout_secs: 1,
-        ..Default::default()
-    }
-}
-
-/// A connection that completed a valid frame and then keeps itself alive with a Ping every `every`.
-fn keepalive_attacker(px: u16, i: u16, every: Duration) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let Ok(mut s) = TcpStream::connect(("127.0.0.1", px)).await else { return };
-        let ping = wire_to_bytes(&WireMessage::Ping { sender: NodeId::new("127.0.0.2", 40_000 + i).unwrap(), known_peers: vec![] });
-        loop {
-            if write_frame(&mut s, &ping).await.is_err() { return; }
-            tokio::time::sleep(every).await;
-        }
-    })
-}
-
-/// #602's round 4, findings 1–2 and Q-e: attackers that talk **faster** than the threshold hold the
-/// slots they got from free permits — that is the stated residual — and the cap is reached; once an
-/// attacker's link goes quiet past the threshold, an honest newcomer that has delivered a valid frame
-/// preempts it and connects.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_honest_peer_connects_once_an_attackers_link_goes_quiet() {
-    let px = alloc_port();
-    let x = GossipAgent::new(NodeId::new("127.0.0.1", px).unwrap(), attack_config(px));
-    x.start().await.unwrap();
-    let fast = keepalive_attacker(px, 0, Duration::from_millis(200));
-    let quiet_later = keepalive_attacker(px, 1, Duration::from_millis(200));
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    // The cap is reached: a third connection is held off (it waits for a free permit, then times out).
-    let mut probe = TcpStream::connect(("127.0.0.1", px)).await.unwrap();
-    let mut buf = [0u8; 8];
-    let r = tokio::time::timeout(Duration::from_secs(3), probe.read(&mut buf)).await;
-    assert!(matches!(r, Ok(Ok(0)) | Ok(Err(_))), "with both permits held, a silent newcomer is closed; got {r:?}");
-    let py = alloc_port();
-    let y = GossipAgent::new(NodeId::new("127.0.0.1", py).unwrap(), honest_config(py, px));
-    y.start().await.unwrap();
-    assert!(!syncs(&x, &y, "bounds/held", Duration::from_secs(2)).await,
-            "attackers talking faster than the threshold keep their slots (the stated residual)");
-    assert_eq!(x.system_stats().inbound_connections_preempted, 0);
-    quiet_later.abort(); // its socket drops: a free permit, or a quiet link
-    assert!(syncs(&x, &y, "bounds/after-quiet", Duration::from_secs(10)).await,
-            "once an attacker's link goes quiet the honest peer connects");
-    fast.abort();
-    y.shutdown().await;
-    x.shutdown().await;
-}
-
-/// A quiet attacker link — one that completed a frame and then said nothing past the threshold — is
-/// preempted by an honest newcomer that has delivered a valid frame.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_quiet_link_past_the_threshold_is_preempted_by_a_peer_that_spoke() {
-    let px = alloc_port();
-    let x = GossipAgent::new(NodeId::new("127.0.0.1", px).unwrap(), attack_config(px));
-    x.start().await.unwrap();
-    // Two links that each send one Ping and then hold the socket in silence (inbound idle is 300 s).
-    let mut held = Vec::new();
-    for i in 0..2u16 {
-        let mut s = TcpStream::connect(("127.0.0.1", px)).await.unwrap();
-        let ping = wire_to_bytes(&WireMessage::Ping { sender: NodeId::new("127.0.0.2", 41_000 + i).unwrap(), known_peers: vec![] });
-        write_frame(&mut s, &ping).await.unwrap();
-        held.push(s);
-    }
-    tokio::time::sleep(Duration::from_millis(1_600)).await; // past 1.3 s
-    let py = alloc_port();
-    let y = GossipAgent::new(NodeId::new("127.0.0.1", py).unwrap(), honest_config(py, px));
-    y.start().await.unwrap();
-    assert!(syncs(&x, &y, "bounds/preempted-quiet", Duration::from_secs(10)).await);
-    assert!(x.system_stats().inbound_connections_preempted >= 1);
-    y.shutdown().await;
-    x.shutdown().await;
-}
-
-/// Round 4, finding 2: preemption ran at TCP accept, so a bare connect — on a TLS mesh, a non-member's
-/// SYN — closed a member's quiet link. A newcomer that never completes a frame preempts nothing.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_flood_of_silent_connects_preempts_nothing() {
-    let px = alloc_port();
-    let x = GossipAgent::new(NodeId::new("127.0.0.1", px).unwrap(), attack_config(px));
-    x.start().await.unwrap();
-    let mut held = Vec::new();
-    for i in 0..2u16 {
-        let mut s = TcpStream::connect(("127.0.0.1", px)).await.unwrap();
-        let ping = wire_to_bytes(&WireMessage::Ping { sender: NodeId::new("127.0.0.2", 42_000 + i).unwrap(), known_peers: vec![] });
-        write_frame(&mut s, &ping).await.unwrap();
-        held.push(s);
-    }
-    tokio::time::sleep(Duration::from_millis(1_600)).await; // both quiet past the threshold
-    let mut flood = Vec::new();
-    for _ in 0..30 {
-        if let Ok(s) = TcpStream::connect(("127.0.0.1", px)).await { flood.push(s); }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    tokio::time::sleep(Duration::from_millis(800)).await;
-    assert_eq!(x.system_stats().inbound_connections_preempted, 0,
-               "a connection that has completed no frame may not preempt");
-    x.shutdown().await;
-}
-
-/// Round 4, finding 1: with SWIM on there are no TCP pings, so an honest inbound link sits quiet up to
-/// the writer's idle bound — past the old 10 s threshold. Such a peer, talking within the window, is
-/// never preempted by attackers that speak once and wait.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn honest_peers_quiet_within_the_window_are_never_preempted() {
-    let px = alloc_port();
-    let mut cx = attack_config(px);
-    cx.max_connections = 3;
-    let x = GossipAgent::new(NodeId::new("127.0.0.1", px).unwrap(), cx);
-    x.start().await.unwrap();
-    let py = alloc_port();
-    let y = GossipAgent::new(NodeId::new("127.0.0.1", py).unwrap(), honest_config(py, px));
-    y.start().await.unwrap();
-    assert!(syncs(&x, &y, "bounds/window/warm", Duration::from_secs(10)).await);
-    let flood = tokio::spawn(async move {
-        for i in 0..40u16 {
-            if let Ok(mut s) = TcpStream::connect(("127.0.0.1", px)).await {
-                let ping = wire_to_bytes(&WireMessage::Ping { sender: NodeId::new("127.0.0.2", 43_000 + i).unwrap(), known_peers: vec![] });
-                let _ = write_frame(&mut s, &ping).await;
-                tokio::spawn(async move { tokio::time::sleep(Duration::from_secs(20)).await; drop(s); });
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    });
-    for i in 0..8 {
-        let key = format!("bounds/window/{i}");
-        assert!(y.kv().set(key.as_str(), Bytes::from_static(b"ok")));
-        tokio::time::sleep(Duration::from_millis(800)).await; // quiet 0.8 s: inside the 1.3 s window
-    }
-    let _ = flood.await;
-    for i in 0..8 {
-        let key = format!("bounds/window/{i}");
-        assert!(until(Duration::from_secs(5), || x.kv().get(&key).is_some()).await, "{key} lost");
-    }
-    assert_eq!(y.system_stats().dropped_frames, 0, "the honest peer's link was never closed under it");
-    y.shutdown().await;
-    x.shutdown().await;
-}
-
-/// The measurement behind `peer_write_stall_timeout_ms` under `sync_mode = "flush"` (#602's round 4,
-/// Q-c): an anti-entropy batch's `append_batch` waits on the WAL writer, and the writer may be in the
-/// middle of a snapshot, during which the receiver's read loop does not read. Times one snapshot of a
-/// store of 64 MiB, 256 MiB and 1 GiB of 1 KiB values. Run by hand:
-/// `cargo test --lib snapshot_of_a_large_store -- --ignored --nocapture`.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "a measurement, not a check; its result is recorded in docs/reference/configuration.md"]
-async fn snapshot_of_a_large_store() {
-    use crate::config::{OnUnreadable, PersistenceConfig, SyncMode};
-    for mib in [64usize, 256, 1024] {
-        let px = alloc_port();
-        let dir = std::env::temp_dir().join(format!("mycelium-snapshot-{px}"));
-        let mut cfg = GossipConfig { bind_port: px, ..Default::default() };
-        cfg.persistence = Some(PersistenceConfig {
-            base_path: dir.clone(), sync_mode: SyncMode::Async,
-            snapshot_wal_threshold: 5_000_000, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse,
-        });
-        let x = GossipAgent::new(NodeId::new("127.0.0.1", px).unwrap(), cfg);
-        x.start().await.unwrap();
-        let value = Bytes::from(vec![7u8; 1024]);
-        for i in 0..mib * 1024 {
-            let _ = x.kv().set(format!("s/{i}"), value.clone());
-        }
-        let wal = x.task_ctx_for_tests().wal.get().cloned().unwrap();
-        let started = std::time::Instant::now();
-        wal.trigger_snapshot().await.unwrap();
-        println!("snapshot of a {mib} MiB store ({} entries of 1 KiB): {:?}", mib * 1024, started.elapsed());
-        x.shutdown().await;
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 }
 
 /// Round 4: the opt-in per-source cap — a second connection from one address is closed at once.

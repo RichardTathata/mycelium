@@ -157,22 +157,17 @@ is itself a crown jewel (Boundary A).
   socket that connects and says nothing is closed after `handshake_timeout_ms`, a silent
   established one after `inbound_idle_timeout_secs`; a frame in flight must keep moving
   (`peer_read_stall_timeout_ms` receiving, `peer_write_stall_timeout_ms` sending) and, when
-  received, keep 1 KiB/s past the stall window (`peer_min_rate_bytes_per_sec`); at
-  `max_connections` a newcomer that has completed its handshake and a valid first frame may
-  **preempt** the connection whose last complete frame is oldest — if older than
-  `writer_idle_timeout_secs + handshake_timeout_ms`, not mid-frame, at most one per
-  `handshake_timeout_ms` — so a connection that holds a permit by going quiet gives it up,
-  while a bare connect (on a TLS mesh, a non-member's SYN) preempts nothing and an honest
-  link its writer still uses is never chosen. A peer that never reads cannot park a writer
-  or hold more than one anti-entropy reply; a stalled subscriber loses its own signals
-  rather than its kind's admission; the signal log holds at most 4096 sender-chosen kinds,
-  evicting the least recently seen; `sys/quorum/` evidence is written only for kinds this
-  node works on or asks about, bounded per kind and per second. **The residual, exactly:**
-  on a plaintext mesh, an attacker that took slots from free permits and talks on each more
-  often than `writer_idle_timeout_secs + handshake_timeout_ms` (40 s by default — a tiny
-  frame per slot per 40 s) holds those slots; preemption cannot tell it from a peer. The
-  remaining mitigation is the opt-in per-source cap, `max_connections_per_source` (off by
-  default, since a NAT shares an address); per-identity limits on a TLS mesh are not built.
+  received, keep 1 KiB/s past the stall window (`peer_min_rate_bytes_per_sec`). A peer that
+  never reads cannot park a writer or hold more than one anti-entropy reply; a stalled
+  subscriber loses its own signals rather than its kind's admission; the signal log holds at
+  most 4096 sender-chosen kinds, evicting the least recently seen; `sys/quorum/` evidence is
+  written only for kinds this node works on or asks about, bounded per kind and per second.
+  **The residual, plainly:** the accept path is bounded against *silent* and *slow*
+  connections; an attacker that **keeps talking** can hold the connection slots it obtained
+  from free permits, up to `max_connections`, and new peers are refused while it does.
+  Mitigations: mTLS — a non-member fails the handshake within `handshake_timeout_ms` and never
+  holds a slot past it — and the opt-in per-source cap `max_connections_per_source` (exact IPs;
+  an IPv6 /64 is not covered). Per-identity limits on a TLS mesh are not built.
 - **Key custody** — Mycelium provides hooks; the KMS/HSM and rotation are the
   operator's.
 

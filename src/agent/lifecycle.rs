@@ -605,7 +605,6 @@ impl GossipAgent {
             writer_timing:       mycelium_core::writer::WriterTiming::from_config(&self.config)
                 .counting(Arc::clone(&self.task_ctx.transport_bounds.outbound_stalls)),
             peer_list_tx:        self.peer_list_tx.clone(),
-            inbound_slot: None,
         };
         let lctx = ListenerContext {
             conn,

@@ -446,11 +446,6 @@ pub struct SystemStats {
     /// between frames. Rising with a healthy peer means the link is slower than the floor.
     pub inbound_frames_stalled: u64,
 
-    /// Cumulative inbound gossip connections closed to give their `max_connections` permit to a
-    /// newcomer: at the cap, the connection whose last complete frame is oldest — and at least
-    /// `handshake_timeout_ms` old — is closed (#602's round 3). Rising steadily means something holds
-    /// connections open without using them; a connection that talks more often than that is never chosen.
-    pub inbound_connections_preempted: u64,
 
     /// Cumulative outbound writer connections failed because the peer accepted no byte for
     /// `peer_write_stall_timeout_ms` (#602's re-review). Queued frames to that peer were dropped
