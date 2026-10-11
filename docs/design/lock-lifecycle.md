@@ -223,8 +223,11 @@ over (the committed entry present, data or tombstone, and not live). Without tha
 legacy way came back: the next upgraded proposal adopted the raw acceptance and re-committed it. A raw acceptance
 that is adopted (its decision not seen over) is wrapped in the adopter's lease — or, when the adopter asked for
 permanence, a 30 s lease — and **never** as permanent: an adopted legacy value has no original proposer in the
-scheme to release it, and a permanent wrap would make it unreleasable. Its holder re-elects itself the upgraded way
-within that window.
+scheme to release it, and a permanent wrap would make it unreleasable. The cost is stated: permanence is **not**
+kept for a legacy-origin value adopted while its decision is still in flight (its committed entry not yet arrived,
+or hidden by the visibility gap below). Such a slot, decided once by a 2.31 node, can take a different value after
+the 30 s wrap ends — a holder still on 2.31 cannot renew it the upgraded way. This window closes when every node is
+upgraded; a commit-once permanent slot should be decided after the upgrade completes.
 
 **The visibility gap, stated (review D7):** an upgraded node reads a slot the legacy way only while the slot has no
 sentinel. A decision an **older** proposer makes on a slot that already has records is invisible to upgraded
