@@ -1,10 +1,11 @@
 # Post-360 hardening — the next batch, and consensus as a protocol, not a service
 
-**Status:** adopted 2026-10-10, rev 1.5 (2026-10-12: Φ closed; P5 delivered). **R0 is being cut as v2.32.0 (2026-10-11)**, which delivers rows **G, P3, C, D,
+**Status:** adopted 2026-10-10, rev 1.6 (2026-10-12: Φ closed; P5, J and I delivered; rows K, L, M added from the Strands Box comparison). **R0 is being cut as v2.32.0 (2026-10-11)**, which delivers rows **G, P3, C, D,
 P1, A (with C1, C2), B (as narrowed 2026-10-11) and P2 (without migration, as decided 2026-10-11)** — each closed on
 evidence in §3.5. Open:
-E, F, H, I, J, and R0's private re-pin (P2's migration — close, enumerate, carry, complete — delivered after 2.32.0, §3.5;
-Φ delivered 2026-10-12, #607, §3.5; **P5**, the `http.rs` split, delivered after 2.32.0 too, §3.5). It follows the 2026-10-09 360 review and the eleven
+E, F, H, K, L, M (P2's migration — close, enumerate, carry, complete — delivered after 2.32.0, §3.5;
+Φ delivered 2026-10-12, #607, §3.5; **P5**, the `http.rs` split, J, hygiene, #608, and I, the private repository's items, private #30, delivered after
+2.32.0 too, §3.5; R0's private re-pin landed as private #29). It follows the 2026-10-09 360 review and the eleven
 PRs that addressed its must-do list (#582–#592, private #28); those are recorded in the CHANGELOG and are not
 repeated here. Rows close on evidence (verification policy rule 2): a row is closed by quoting each promise next to
 the code or test that delivers it, and a promise that is not delivered is written *not built*.
@@ -82,8 +83,11 @@ Four places strain that line today, and the rows in §3 address each:
 | **F** | Wire and crypto, one MINOR with a window | a TLS node refuses unsigned `Data` frames; the removal check reads a peer's key structurally, not by byte-scanning the certificate; KV `SignedData` is domain-tagged; each change carries a mixed-fleet window and an upgrade note in the 2.30.0 shape; the #585 and #587 windows close in the same MINOR | R0, ideally its own release |
 | **G** — *delivered 2.32.0 (#595), §3.5* | SDKs | Python whole-second timeouts and a non-truncating tuple `take`; path segments escaped; TypeScript `SupersededError`; one `scatterGather` default, documented; SSE reconnect is designed with a gateway resume point or recorded as not built | R0 |
 | **H** | Companions | the commitment deadline judged on the log's clock, not the offerer's; `award_of` verifies before it reports; the reason blob store bounded; caller-chosen `run_id` validated | R0 |
-| **I** | Private repo P3s | RA5 correction chains and competing corrections; attempt keys carry the operation id; a lock-order table; the outbox directory fsynced at create; Cedar policies schema-validated at load; the CI pin check refuses `[patch]`, `rev =` and multi-line tables | R0's re-pin |
+| **I** — *delivered (private #30), §3.5; Cedar narrower* | Private repo P3s | RA5 correction chains and competing corrections; attempt keys carry the operation id; a lock-order table; the outbox directory fsynced at create; Cedar policies schema-validated at load; the CI pin check refuses `[patch]`, `rev =` and multi-line tables | R0's re-pin |
 | **J** — *delivered (#608), §3.5* | Hygiene | the sim-seam gate's test-skip bug (the one the KV gate fixed in #591); every feature and bench linted or built by some CI step; the two CI jobs on `stable` pinned; unreferenced public items deprecated, not removed (nothing is removed on the 2.x line); only the duplicates that disagree are unified (`hex_line`'s whitespace, `now_ms` copies outside the seam) | — |
+| **K** | Policy over history | the action evaluator can decide on what an actor has already done, not only on the request: a bounded, read-only history view (the actor's recent decisions and executions from the evidence journal — `src/agent/evidence_journal.rs`) reaches `ActionEvaluator::evaluate` beside the envelope (`ActionEnvelope`, `src/agent/action_evaluator.rs:101`, which today carries no history); a rule such as *at most three posts in ten minutes* is expressible and tested in the reference evaluator and the AE contract suite (`mycelium::ae_contract`); the scope of a count is stated by name — **per node** (the journal is node-local and never gossiped) unless the design question in §5 is decided otherwise; a history that cannot be read is `Indeterminate`, never an empty history; replay records the history view as a decision input | design question §5 |
+| **L** | Credentials attached at egress | a secret need not enter a component's or an activation command's environment: an outbound request names a credential binding, and the egress gate (`EgressPolicy`, `mycelium-core/src/config.rs:280`, which today checks the host and every redirect hop) attaches it on the way out — bearer, header and basic forms at least — only to the host the binding names; a redirect off that host drops it; the binding's use is counted and its value never logged, traced or written to the evidence journal; the places a secret is read into the node today (`[[serve]].api_key_env`, federation credentials, an activation command's environment) are listed and each either moved behind a binding or stated as unchanged | — |
+| **M** | Activation commands confined | an `[[activation]]` command — today "not a sandbox: there is no allowlist and no confinement" (`docs/reference/unit-file.md:276`) and run with the stem's privileges — can be run under an OS confinement profile the unit file names (macOS Seatbelt first, Linux namespaces/Landlock or seccomp where available): filesystem access limited to the placed artifact's directory and declared paths, network limited to declared hosts or none; a profile the platform cannot apply refuses the activation by name, never runs it unconfined; the unconfined default stays, stated, and the guarantee report says which applies | — |
 
 ### 3.4 · Documentation follow-through
 
@@ -408,6 +412,37 @@ a line-map verifier (its script and output are in the PR body) maps every origin
   `check-kv-namespaces.sh` exempt the test files by their `*_tests.rs` names, which is why the module `tests`
   lives in `http_tests.rs` under `#[path]`.
 
+**I — the private repository's items (private PR #30, merged `b6d6faa`, 2026-10-12; two independent review rounds).**
+Each promise and what delivers it:
+- *"RA5 correction chains and competing corrections"* → `mycelium-ra/src/reconcile.rs`: a usage record's key is its
+  identity (a readable prefix plus the sha256 of the whole record, citation included), so a self-citation or a cycle
+  needs a hash fixed point; the usage in force is worked out by citation, so a chain resolves to its tip in every
+  arrival order; `Refusal::CompetingCorrections` names two corrections of one record (equal amounts included) and the
+  larger stands; a dangling correction can raise the cost, never lower it; an unmeasured correction supersedes
+  nothing; `StubConsumer` refuses a second correction and counts a byte-identical redelivery as a duplicate. Tests,
+  each seen failing first: chain, competing, self-citation, two-record cycle, a chain revisiting an amount, equal
+  amounts, unmeasured, redelivery. Stated: the key is a wire contract on serde_json's bytes and the exact field set; a
+  transport must not re-stamp `at_ms`; a dangling record keeps raising the cost after it is itself corrected.
+- *"attempt keys carry the operation id"* → `AttemptGuard` keys on `(operation_id, attempt_id)` in reserve, settle,
+  release and restore (two tests, seen failing first); substrate-minted attempt ids already embed the operation
+  (`mycelium-core/src/receipt.rs`), so only caller-chosen ids could collide; the AE correlator reports such a
+  collision `Incoherent { operation }` rather than merging it.
+- *"a lock-order table"* → the private `docs/wiki/dev/concurrency/lock-order.md` (five rows, one chain), gated by
+  `scripts/check-lock-table.py` matching `Type::field`, tuple fields, aliases and `use … as` names, with a self-test.
+  Stated: a struct with nested generics in its header is not parsed.
+- *"the outbox directory fsynced at create"* → `Outbox::open`, and `ExporterStore::open` too, sync the new directory
+  and its ancestors through an `fsync_dir` seam (two tests, seen failing first). The tests pin the calls; behaviour
+  under real power loss is **not built**.
+- *"Cedar policies schema-validated at load"* → **delivered narrower: a vocabulary check, not schema validation.**
+  `check_vocabulary` refuses a policy naming an action outside the catalogue, or an entity or `is`-type neither a
+  request nor the store can supply (ancestors of stored entities count as supplied), as
+  `BuildError::UnknownVocabulary`. A Cedar schema type-check of `context.*` is **not built** (the context's types are
+  undeclared, and open records need an experimental Cedar feature); template `when` literals are **not built**.
+- *"the CI pin check refuses `[patch]`, `rev =` and multi-line tables"* → `scripts/check-pin.py` parses every manifest,
+  the cargo config and the lockfile, and recognises the substrate by its git URL whatever the crate's name; its
+  self-test refuses every staged bypass, the three named ones among them (the old grep step passed all three). A build directory is skipped
+  only when git does not track its `CACHEDIR.TAG`.
+
 ## 4 · Decisions taken
 
 | # | Decision | Recorded |
@@ -424,6 +459,10 @@ a line-map verifier (its script and output are in the PR body) maps every origin
 - Should a consensus `Timeout` result carry its cause (today only a metric label)? Doc-coverage run 23, code gap 1.
 - Should the MCP bridge and LLM backend clients get timeouts? PR #590's review.
 - Versioned electorates with joint-consensus transitions: a later plan, under D1.
+- **Row K: what does "history" mean in a fleet?** The evidence journal is node-local, so a history-conditioned rule
+  counts what *this* enforcement point saw. A fleet-wide count needs either the consensus path (an agreed counter —
+  exact, slower, unavailable without a quorum) or a gossiped tally that detects an overrun after the fact (detection,
+  not prevention, the Layer I law). Decide before K is built, and say which on the rule.
 
 ## 6 · Recorded limits that stay limits
 
