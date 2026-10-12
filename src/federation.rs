@@ -422,6 +422,7 @@ pub fn verify_descriptor(
 /// Separate from [`verify_descriptor`] rather than replacing it, because a descriptor also pins its
 /// own `public_key`, and during an overlap that field legitimately lags the bundle's current key.
 #[cfg(feature = "tls")]
+#[deprecated(since = "2.33.0", note = "no caller, test, SDK or document in the repository references it (post-360 hardening row J, 2026-10-12); kept on the 2.x line — open an issue if you use it and it will be undeprecated")]
 pub fn verify_descriptor_rotating(
     descriptor: &DomainDescriptor,
     signature: &[u8],
@@ -437,6 +438,7 @@ pub fn verify_descriptor_rotating(
 
 /// Verify a policy the same way, against the key the bundle trusts for its domain.
 #[cfg(feature = "tls")]
+#[deprecated(since = "2.33.0", note = "no caller, test, SDK or document in the repository references it (post-360 hardening row J, 2026-10-12); kept on the 2.x line — open an issue if you use it and it will be undeprecated")]
 pub fn verify_policy(policy: &DomainPolicy, signature: &[u8], bundle: &TrustBundle) -> bool {
     let Some(trusted) = bundle.key_for(&policy.domain) else { return false };
     mycelium_core::tls::verify_bytes(trusted, &policy.canonical_bytes(), signature)

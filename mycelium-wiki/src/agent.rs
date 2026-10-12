@@ -97,6 +97,7 @@ impl CuratorBrain {
         Self { reconciler, ..Self::default() }
     }
     /// Add the LLM self-consistency pass to the periodic lint.
+    #[deprecated(since = "2.33.0", note = "no caller, test, SDK or document in the repository references it (post-360 hardening row J, 2026-10-12); kept on the 2.x line — open an issue if you use it and it will be undeprecated")]
     pub fn with_semantic_lint(mut self, linter: Box<dyn SemanticLinter>) -> Self {
         self.semantic_lint = Some(linter);
         self

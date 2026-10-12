@@ -426,6 +426,7 @@ impl Provisioner {
     }
 
     /// Disable resource-aware eligibility entirely (kind + budget checks remain).
+    #[deprecated(since = "2.33.0", note = "no caller, test, SDK or document in the repository references it (post-360 hardening row J, 2026-10-12); kept on the 2.x line — open an issue if you use it and it will be undeprecated")]
     pub fn disable_resource_policy(&mut self) {
         self.resource_policy = None;
     }
@@ -507,6 +508,7 @@ impl Provisioner {
     }
 
     /// The attached decision sink, if any.
+    #[deprecated(since = "2.33.0", note = "no caller, test, SDK or document in the repository references it (post-360 hardening row J, 2026-10-12); kept on the 2.x line — open an issue if you use it and it will be undeprecated")]
     pub fn decision_trace(&self) -> Option<Arc<DecisionSink>> {
         self.trace.as_ref().map(|t| Arc::clone(&t.sink))
     }

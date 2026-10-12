@@ -390,6 +390,7 @@ impl MeshHandle {
     }
 
     /// Like [`group_quorum`](Self::group_quorum) but accepts a pre-built member hash set.
+    #[deprecated(since = "2.33.0", note = "no caller, test, SDK or document in the repository references it (post-360 hardening row J, 2026-10-12); kept on the 2.x line — open an issue if you use it and it will be undeprecated")]
     pub fn group_quorum_prehashed(
         &self,
         member_hashes: &ahash::AHashSet<u64>,

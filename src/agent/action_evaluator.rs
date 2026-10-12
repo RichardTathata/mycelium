@@ -778,6 +778,7 @@ impl AeEvidence {
     /// [`AeEvidence::decision`] is carried separately: a reader taking the summary alone would see
     /// a failure where the fact is *unknown*.
     #[cfg(feature = "compliance")]
+    #[deprecated(since = "2.33.0", note = "no caller, test, SDK or document in the repository references it (post-360 hardening row J, 2026-10-12); kept on the 2.x line — open an issue if you use it and it will be undeprecated")]
     pub fn audit_outcome(&self) -> crate::AuditOutcome {
         match self.decision {
             DecisionKind::Permit => crate::AuditOutcome::Success,
