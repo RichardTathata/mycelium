@@ -921,7 +921,10 @@ impl GossipAgent {
 
     /// Wait, at most `bound`, until the gossip shard queues and every peer writer's queue are empty,
     /// then give the writers one short beat to put the last frames on the wire. Used once, by
-    /// [`Self::shutdown_with_timeout`], before the shutdown signal (#611).
+    /// [`Self::shutdown_with_timeout`], before the shutdown signal (#611). Best effort, not a delivery
+    /// guarantee: it reads queue emptiness, so a frame between a shard queue and a writer's queue, or one
+    /// applied on another thread and not yet enqueued, can be missed. Keys tombstoned only once the
+    /// shutdown signal wakes their tasks (`svc/` adverts, MCP tool keys) are not covered — plan §3.6.
     async fn flush_outbound_before_shutdown(&self, bound: Duration) {
         tokio::task::yield_now().await;
         let queued = || {

@@ -1,11 +1,11 @@
 # Post-360 hardening — the next batch, and consensus as a protocol, not a service
 
-**Status:** adopted 2026-10-10, rev 1.7 (2026-10-12: Φ closed; P5, J, I, H and E delivered; rows K, L, M added from the Strands Box comparison; rows N, O, P added — Strands agents on Mycelium, after an `a2a-sdk` probe). **R0 is being cut as v2.32.0 (2026-10-11)**, which delivers rows **G, P3, C, D,
+**Status:** adopted 2026-10-10, rev 1.8 (2026-10-12: Φ closed; P5, J, I, H, E and F delivered; rows K, L, M added from the Strands Box comparison; rows N, O, P added — Strands agents on Mycelium, after an `a2a-sdk` probe). **R0 is being cut as v2.32.0 (2026-10-11)**, which delivers rows **G, P3, C, D,
 P1, A (with C1, C2), B (as narrowed 2026-10-11) and P2 (without migration, as decided 2026-10-11)** — each closed on
 evidence in §3.5. Open:
-E, F, K, L, M, N, O, P (P2's migration — close, enumerate, carry, complete — delivered after 2.32.0, §3.5;
+F2, K, L, M, N, O, P, Q (P2's migration — close, enumerate, carry, complete — delivered after 2.32.0, §3.5;
 Φ delivered 2026-10-12, #607, §3.5; **P5**, the `http.rs` split, J, hygiene, #608, and I, the private repository's items, private #30, delivered after
-2.32.0 too, §3.5; H, the companions' four doors, #609, delivered after 2.32.0, §3.5; R0's private re-pin landed as private #29). It follows the 2026-10-09 360 review and the eleven
+2.32.0 too, §3.5; H, the companions' four doors, #609, E, the gateway remainder, #613, and F, wire and crypto with its window, #611, delivered after 2.32.0, §3.5; R0's private re-pin landed as private #29). It follows the 2026-10-09 360 review and the eleven
 PRs that addressed its must-do list (#582–#592, private #28); those are recorded in the CHANGELOG and are not
 repeated here. Rows close on evidence (verification policy rule 2): a row is closed by quoting each promise next to
 the code or test that delivers it, and a promise that is not delivered is written *not built*.
@@ -679,15 +679,12 @@ PR.
 
 Where the work stands at the end of 2026-10-12, so the next session starts here rather than from a conversation.
 
-**In flight (open PRs, each with an independent reviewer):**
-- **E** — #613, the gateway remainder (six promises); its first adversarial review answered in one fix round (§3.5).
-- **F** — #611, wire and crypto with its window; in its third fix round. That round narrows the unsigned-frame
-  exemption to a self-authenticating sealed identity record, stops an unauthenticated identity tombstone from wiping a
-  node's keys, counts every exempt frame, and fixes the dispatch gate's early stop. It adds row **F2** (the refusal
-  made unconditional in the MINOR after F), which lands with #611.
-- **N, O, P** — #614 records them with the `a2a-sdk` probe's evidence (`docs/plans/external/2026-10-12-a2a-sdk-probe/`).
+**In flight:** nothing. Every PR in the batch is merged — E as #613, F as #611 (each after its independent reviews;
+CI on F also caught a co-op demo regression its own changes caused, fixed in the PR by draining outbound
+queues before the shutdown signal), and N, O, P recorded by #614 with the `a2a-sdk` probe's evidence
+(`docs/plans/external/2026-10-12-a2a-sdk-probe/`).
 
-**Not started:** K (policy over history — decide §5's fleet question first), L (credentials attached at egress), M
+**Not started:** F2 (the unsigned-frame refusal made unconditional, the MINOR after F), K (policy over history — decide §5's fleet question first), L (credentials attached at egress), M
 (activation commands confined), N (A2A at the current specification — independent of E and F, and it carries a defect
 worth fixing on its own: the agent card names the gossip port), O and P (after N), §5's inference-routing question, and Q (revocation
 reaches every verifier — **high, pre-existing**: #611's third review reproduced on `main` that after
@@ -702,11 +699,21 @@ node, `review_revoked_key_still_verifies_kv_writes`; revocation is consulted onl
   is partly scanned as production (fails safe) — balance `()`/`[]`/`<>` across the header.
 - **I (private):** a Cedar schema type-check of `context.*` and template `when` literals; behaviour under real power
   loss behind the fsync pins.
-- **E (if it merges as reported):** a nonce cache for the caller envelope (a replay inside the freshness window is
+- **E:** a nonce cache for the caller envelope (a replay inside the freshness window is
   accepted); an acknowledged in-process mailbox; the SSE resume point (recorded since row G); and two `cap/` cases
   outside the row (#613's review, finding 6) — `capability/advertise` accepts a `/` in `ns` or `name` with 200 for an
   advert no reader can parse (`parse_cap_key` refuses it as malformed), and `ns = "locality", name = "self"` overwrites
   the node's own locality entry `cap/{node}/locality/self`.
+- **F:** the shutdown drain is best effort (it reads queue emptiness, so a frame between a shard queue and a writer
+  queue can be missed); and, **pre-existing (fails on `main` before F)**, retractions of keys the shutdown sweep does
+  not cover still lose the race to the shutdown signal — `svc/{kind}/{node}` from `mesh().advertise_persistent`
+  (`mycelium-core/src/mesh_handle.rs`) and MCP tool keys `tools/{name}/{node}` (`src/agent/mcp_handle.rs`) are
+  tombstoned only when the signal wakes their tasks, after the drain, so a persistent service advertised with a live
+  handle at shutdown is never retracted at its peers (#611's review, `review_svc_live_handle_at_shutdown_reaches_the_peers`,
+  3/3 on `main`). Fix: add `svc/{kind}/{self}` and `tools/*/{self}` to the shutdown sweep before the drain. Also
+  stated in F's §3.5 block: first sighting is trust on first use; with identity proofs off another member's identity
+  is writable under the writer's own signature; anti-entropy entries carry no author; role claims, audit records and
+  revocation events are signed untagged.
 - **B:** connection preemption and WAL group commit, removed in review.
 
 **Sources compared on 2026-10-12** (rows K–P and the open question came from these):
@@ -717,8 +724,8 @@ live policy; the privacy router) ·
 [Strands Agents 1.0](https://aws.amazon.com/blogs/opensource/introducing-strands-agents-1-0-production-ready-multi-agent-orchestration-made-simple/)
 (`SessionManager`, swarms and graphs, A2A — the framework rows N–P put on Mycelium).
 
-**Release:** nothing has been tagged since v2.32.0. The merged rows since (P2's migration #606, #604, #605, Φ, P5, J, H)
-and F's window are the next MINOR's material; F's window and E's refusals carry upgrade notes (`deprecations.md`
+**Release:** nothing has been tagged since v2.32.0. The merged rows since (P2's migration #606, #604, #605, Φ, P5, J, H, E, F)
+are the next MINOR's material; F's window and E's refusals carry upgrade notes (`deprecations.md`
 §35–§38). A release is cut only on the maintainer's word.
 
 ## 4 · Decisions taken
