@@ -946,7 +946,13 @@ accepts and what a signature is over.
   installed — first contact rests on it — and then publishes the legacy `sys/identity/{n}` and proof **signed**. Every
   other identity frame (a bare record, a proof alone, garbage, a tombstone) is refused under the flag like any
   unsigned frame. The first cut (#611's first fix round) exempted any identity frame whose `sender` named its key — and
-  `sender` is the writer's to choose; the second review reproduced impersonation and silencing through it. **It is bypassable through
+  `sender` is the writer's to choose; the second review reproduced impersonation and silencing through it. A record must also **contain every key the receiver already holds or has stored for `n`** — a node's
+  history only grows — so a genuine pre-rotation record replayed with a fresh timestamp is refused, whatever the flag
+  says, and counted (`kv_identity_stale_refused`; #611's third review, N4). What remains: **first sighting is trust on
+  first use** — with nothing held or stored for `n`, the first self-proving record is taken (the CA anchor of a direct
+  connection is what closes it); and with `require_identity_proofs` off a member that has already written a key into
+  `n`'s stored legacy record (under its own signature) makes `n`'s later unsigned sealed records stale here — they then
+  arrive signed or by anti-entropy. **It is bypassable through
   anti-entropy** (below).
 - **A peer certificate's key is read from its `SubjectPublicKeyInfo`, structurally** (`tls::ed25519_key_from_cert_der`),
   not by scanning the DER for the Ed25519 SPKI prefix. The scan returned the first match anywhere — a serial number,
@@ -969,7 +975,9 @@ accepts and what a signature is over.
   exchange (`health_check_interval_secs`, 10 s by default), hop by hop, rather than by gossip. Expect latency, not
   loss, and a noisy 2.32 log: **upgrade the fleet promptly**, not over days. An upgraded node's own legacy identity
   record is among these writes now (signed), so a 2.32 node that is not directly connected to it learns its key by
-  anti-entropy; a directly connected one has it from the TLS handshake.
+  anti-entropy; a directly connected one has it from the TLS handshake. Put plainly: **a 2.32 peer finds an upgraded
+  node only by anti-entropy unless it dialed that node itself, and until then the upgraded node's consensus messages
+  to it go unverified** (dropped as from an unknown signer).
 - **An upgraded node requiring signed frames drops a 2.32 peer's agent writes until that peer is upgraded** — set
   `kv_require_signed_frames` once every peer is past 2.32.
 - **A 2.31 node and an upgraded node do not verify each other's identity proofs or consensus messages** (§23 is

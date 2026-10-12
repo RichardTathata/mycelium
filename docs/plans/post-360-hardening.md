@@ -92,6 +92,7 @@ Four places strain that line today, and the rows in §3 address each:
 | **N** | A2A at the current specification | an A2A client built on the current `a2a-sdk` (1.2.2, the library Strands Agents uses) reaches Mycelium's skills through `/a2a`, with the same authority as today — **the 2026-10-12 probe found it cannot**: the card is served only at `/.well-known/agent.json` (the SDK reads `/.well-known/agent-card.json`, 404); the card's `url` is the node's **gossip** address, not its gateway, and omits `/a2a` (`src/agent/a2a.rs:445`, so the SDK's `send_message` failed with a network error); the methods are the pre-0.2 `tasks/send` / `tasks/sendSubscribe` / `tasks/get` / `tasks/cancel` (`SendMessage` and `message/send` both answer `-32601`); and the skill is chosen by a Mycelium-only `skillId` parameter that a standard client never sends. Promises: the card at `/.well-known/agent-card.json` (the old path kept for one release), naming the gateway's own URL and scheme (https under `gateway_tls`) with `/a2a` and its supported interfaces and protocol versions; the A2A 1.0 methods (`SendMessage`, `SendStreamingMessage`, `GetTask`, `CancelTask`) and the 0.3 names (`message/send`, `message/stream`) served beside the old ones, which stay for one release with a deprecation entry; a message reaches a skill without `skillId` (a declared default skill, or the skill named in the message's metadata — decided in the PR, stated on the card); every new method runs the same doors as `tasks/send` — the action evaluator, mandates, evidence, task ownership — and the C7 bypass matrix gains each new method; the probe becomes a CI test driving the real `a2a-sdk` client against a node | — |
 | **O** | A Strands session store on Mycelium | a companion package (Python, beside `langgraph-checkpoint-mycelium`) implementing Strands Agents' `SessionManager` over the Mycelium Python SDK, so an agent's conversation and state, and a swarm's shared memory, live in the fleet's KV rather than a file or a bucket; a save returns the SDK's receipt and its docs say which rung it names (a local application, not replication — the checkpointer's wording); an incomplete or unreadable session is an error, never an empty one; concurrent agents in one session do not lose each other's writes, or the limit is stated; its live suite runs in CI against a real node; pinned to a Strands release and re-checked when Strands changes the interface | — (N for the cross-host demo) |
 | **P** | A Strands fleet, demonstrated | a runnable example, in CI like the co-op demos, in which Strands agents on three Mycelium nodes plan one shared task (a constructive domain — food redistribution or a microgrid), keep their session and swarm memory in the fleet through O, and call fleet skills through `/a2a` (N): a call outside an agent's mandate is refused and the refusal is in the evidence journal; one node is stopped and the work resumes on another from the stored session; the README states what Strands provides and what Mycelium adds, and which properties the run shows versus which it does not | N, O |
+| **Q** | Revocation reaches every verifier | a key a node has revoked (`rotate_identity_on_compromise`, `sys/revoked/`) is filtered from the `peer_keys`-based KV `SignedData` verifier, from identity-proof chaining (`validate_and_merge_identity`'s trusted signer) and from the unsigned identity exemption (`connection::self_authenticating_identity`), not only from consensus and `known_verifying_keys`; a test that a `SignedData` signed by a revoked key is refused at a peer that has seen the revocation; `src/agent/revocation.rs`'s `revoke_key` doc made true (corrected in #611 to say what holds today) | — (independent of F2) |
 
 ### 3.4 · Documentation follow-through
 
@@ -656,7 +657,12 @@ PR.
   skips only an inline test module (fourth plant, seen passing the old gate); the per-frame warnings are rate-limited
   (`a_warning_gate_lets_one_through_per_interval_and_counts_the_rest`, a new helper, no fail-first run). **What
   remains with `require_identity_proofs` off:** another member's identity is writable under the writer's own
-  signature, detected not prevented.
+  signature, detected not prevented. **The third review:** N4 — a replayed pre-rotation sealed record replaced the
+  current one; an exempt record must now contain every key held or stored for the node, a stale one refused and counted
+  (`kv_identity_stale_refused`; `a_replayed_pre_rotation_sealed_record_does_not_replace_the_current_one`, the
+  reviewer's test, seen failing on 884f310f); first sighting stays trust on first use. L1 — the gate blanks string and
+  char literals before counting braces (fifth plant, seen passing the old gate; a multi-line string can still miscount,
+  stated). L2 — stated in §35. N5 — pre-existing, recorded as row Q, `revoke_key`'s doc corrected.
   `start()` warns when `kv_require_signed_frames` is inert (`kv_require_signed_frames_without_tls_is_inert`); the
   warning's emission itself is not asserted. (3, 5, 7) answered in the docs: the refusal is bypassable through
   anti-entropy; upgraded nodes sign tagged at once (the 2.32.0 shape) and reach 2.32 peers by anti-entropy only;
@@ -680,7 +686,11 @@ Where the work stands at the end of 2026-10-12, so the next session starts here 
 
 **Not started:** K (policy over history — decide §5's fleet question first), L (credentials attached at egress), M
 (activation commands confined), N (A2A at the current specification — independent of E and F, and it carries a defect
-worth fixing on its own: the agent card names the gossip port), O and P (after N), and §5's inference-routing question.
+worth fixing on its own: the agent card names the gossip port), O and P (after N), §5's inference-routing question, and Q (revocation
+reaches every verifier — **high, pre-existing**: #611's third review reproduced on `main` that after
+`rotate_identity_on_compromise` a peer lists the old key as revoked yet still applies a `SignedData` signed by it as the
+node, `review_revoked_key_still_verifies_kv_writes`; revocation is consulted only by consensus and
+`known_verifying_keys`).
 
 **Follow-ups recorded as not built in delivered rows (each in its §3.5 block):**
 - **H:** carry each named offer's signed bytes inside the close and award from that copy (today a member who deletes a

@@ -67,7 +67,9 @@ An attacker who controls one node process (RCE, stolen host) gains:
   twenty-four unsigned write sites — the quorum-evidence write among them — through the signer), a
   receiver with `kv_require_signed_frames` drops an unsigned `Data` frame — except a sealed identity
   record that authenticates itself (its proof verifies under a key it carries and chains to the keys the
-  receiver already holds for that node; counted, `kv_identity_exempt_frames`) — and one without it — the
+  receiver already holds for that node, and whose history contains every key held or stored for it, so a
+  replayed pre-rotation record is refused, `kv_identity_stale_refused`; counted, `kv_identity_exempt_frames`;
+  first sighting stays trust on first use) — and one without it — the
   default this release — applies it and counts it (`kv_unsigned_frames_accepted`). Plan row F2 makes the
   refusal unconditional. An identity tombstone removes no keys (it used to: one tombstone, unsigned or
   signed by any member as itself, silenced a member at every receiver). **What remains with

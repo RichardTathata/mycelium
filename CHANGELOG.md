@@ -310,6 +310,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `kv_identity_exempt_frames`); a node publishes it first, unsigned, then its legacy pair signed; and an identity
     tombstone removes no keys (it silenced a member, signed or not). The dispatch gate skips only an inline
     `#[cfg(test)] mod x { … }` (it stopped at an out-of-line `mod x;`), and both per-frame warnings are rate-limited.
+    **The third review (N4):** a node's genuine pre-rotation sealed record, replayed unsigned with a fresh timestamp,
+    still proved itself and replaced the current one; an exempt record must now contain every key the receiver holds
+    or has stored for the node, and a stale one is refused whatever the flag says (`kv_identity_stale_refused`). Seen
+    failing first on 884f310f: `a_replayed_pre_rotation_sealed_record_does_not_replace_the_current_one`. First sighting
+    remains trust on first use. The gate's brace counter blanks string and char literals (L1, a fifth plant). Plan row
+    Q records a pre-existing, high finding the review reproduced on `main`: revocation does not reach the KV verifier,
+    identity chaining or the exemption; `revoke_key`'s doc now says what holds.
     Seen failing first on 59d86368: `an_unsigned_identity_forgery_cannot_make_a_member_sign_as_another`,
     `an_identity_tombstone_does_not_erase_a_members_keys` (proofs off and on),
     `only_a_self_authenticating_sealed_identity_is_exempt_from_the_refusal`, and the gate's fourth plant. Seen failing first:
