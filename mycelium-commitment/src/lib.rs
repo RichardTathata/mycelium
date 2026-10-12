@@ -84,11 +84,16 @@
 //! **Which close counts.** A stream rather than one key, so a forged close cannot pre-empt the
 //! declarer's and an overwrite cannot erase it for good (#609's review, round 2). The checked path
 //! ([`ContractNet::close_of_verified`], [`ContractNet::plan_award_verified`]) takes the **earliest close
-//! that verifies under the declarer the caller pins**; forged entries are passed over, and if the
-//! declarer's own entry is overwritten the declarer closes again — `close` refuses
-//! [`CommitmentRefusal::AlreadyClosed`] only when a close verifying under its own key already exists.
-//! The unverified path ([`ContractNet::close_of`]) takes the earliest close that names the
-//! announcement's declarer, deadline and digest and is dated at or after the deadline — any member can
+//! that verifies under the declarer the caller pins** — earliest by the close's own signed
+//! `closed_at_ms`, tie-broken by its digest, never by stream key (round 3: any member writes keys, and a
+//! genuine close copied to a backdated key changes nothing). Forged entries are passed over. **Recovery
+//! re-asserts; it never re-decides** (round 3): if the declarer's close is overwritten, `close` re-appends
+//! the close that handle made, byte for byte, and a restarted declarer re-asserts the close it kept with
+//! [`ContractNet::reassert_close`] — a re-close never admits an offer the first close did not. A
+//! declarer that genuinely signs two different closes has equivocated: the earlier-dated counts, and both
+//! sit on the stream. The unverified path ([`ContractNet::close_of`]) takes the earliest close (the same
+//! order) that names the announcement's declarer, deadline and digest and is dated at or after the
+//! deadline — **a forged unsigned close dated at or after the deadline still steers it**; any member can
 //! append one, so that path is steerable, as its docs say. A close is refused by name before it would
 //! exceed one KV write ([`MAX_CLOSE_WRITE_BYTES`]) and read back after its append.
 //!
@@ -473,6 +478,9 @@ pub enum CommitmentRefusal {
     CloseTooLarge { bytes: usize, max: usize },
     /// The close was appended but is not in this node's store when read back: not written.
     CloseNotWritten,
+    /// [`ContractNet::reassert_close`] was given a close that does not close the current announcement
+    /// (another requirement, deadline or announcement digest, or dated before the deadline).
+    CloseNotForThisAnnouncement,
     /// The award slot holds a record that decodes as an award **for another requirement or
     /// operation** — somebody else's, not this requirement's award.
     SlotHoldsAnotherRecord { requirement: String, operation_id: String },
@@ -507,6 +515,7 @@ impl std::fmt::Display for CommitmentRefusal {
             Self::AlreadyClosed(c) => write!(f, "already closed at {} ms naming {} offer(s)", c.closed_at_ms, c.offers.len()),
             Self::CloseTooLarge { bytes, max } => write!(f, "the close is too large: {bytes} bytes, one KV write carries at most {max}"),
             Self::CloseNotWritten => f.write_str("the close was not in the store when read back — not written"),
+            Self::CloseNotForThisAnnouncement => f.write_str("that close does not close the current announcement"),
             Self::SlotHoldsAnotherRecord { requirement, operation_id } => write!(
                 f,
                 "the award slot holds a record for requirement {requirement:?} (operation {operation_id:?}), not this one's award"
@@ -550,11 +559,27 @@ impl AwardRule {
 pub struct ContractNet {
     agent: Arc<GossipAgent>,
     me: String,
+    /// The closes this handle minted, by requirement (shared by its clones; lock-order row 59): what
+    /// [`close`](Self::close) re-asserts when its own close is no longer on the stream. In memory only — a
+    /// declarer that restarts keeps the close `close` returned and calls
+    /// [`reassert_close`](Self::reassert_close).
+    minted: Arc<std::sync::Mutex<std::collections::HashMap<String, Close>>>,
 }
 
 impl ContractNet {
     pub fn new(agent: Arc<GossipAgent>, me: impl Into<String>) -> Self {
-        Self { agent, me: me.into() }
+        Self { agent, me: me.into(), minted: Arc::default() }
+    }
+
+    fn remembered_close(&self, requirement: &str) -> Option<Close> {
+        self.minted.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(requirement).cloned()
+    }
+
+    fn remember_close(&self, close: &Close) {
+        self.minted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(close.requirement.clone(), close.clone());
     }
 
     /// Who this handle acts as.
@@ -649,10 +674,18 @@ impl ContractNet {
     /// declarer closes, and only at or after `deadline_ms` on its own clock (`now_ms`).
     ///
     /// **Once — as this declarer reads it.** With a key, it is [`CommitmentRefusal::AlreadyClosed`] only
-    /// when a close of the current announcement verifying under that key already exists; without one,
-    /// only when the unverified path would already select a close. So a forged close written first, or
-    /// an overwrite of the declarer's own, never stops the declarer closing again: the worst a writer to
-    /// the stream does is make the declarer close twice. `AlreadyClosed` is a local read.
+    /// when a close of the current announcement verifying under that key is visible; without one, only
+    /// when the unverified path would already select a close. A forged close written first does not stop
+    /// the declarer's first close. `AlreadyClosed` is a local read.
+    ///
+    /// **Recovery re-asserts; it never re-decides.** If this declarer's close is no longer visible (it was
+    /// overwritten), calling `close` again re-appends **the close this handle made, byte for byte** — the
+    /// same offers, the same `closed_at_ms` — so a re-close never admits an offer the first did not (#609's
+    /// review, round 3). The handle remembers its closes in memory only: **keep the `Close` this returns**,
+    /// and after a restart re-assert it with [`reassert_close`](Self::reassert_close). A handle with no
+    /// memory of a close (a new one, or after a restart) cannot tell an overwritten close from none, and
+    /// `close` then mints a fresh one from what the node holds now — the residual, stated: a declarer that
+    /// restarts, does not keep its close, and has it overwritten everywhere, re-decides.
     ///
     /// The close is refused before writing when it would not fit one KV write
     /// ([`CommitmentRefusal::CloseTooLarge`], [`MAX_CLOSE_WRITE_BYTES`]), and read back after the append
@@ -671,12 +704,17 @@ impl ContractNet {
         if now_ms < announcement.deadline_ms {
             return Err(CommitmentRefusal::BeforeDeadline { deadline_ms: announcement.deadline_ms, now_ms });
         }
-        let existing = match key {
-            Some(k) => self.select_close(&announcement, Some(&k.verifying_key().to_bytes())),
-            None => self.select_close(&announcement, None),
-        };
-        if let Some(existing) = existing {
+        let own_key = key.map(|k| k.verifying_key().to_bytes());
+        if let Some(existing) = self.select_close(&announcement, own_key.as_ref()) {
             return Err(CommitmentRefusal::AlreadyClosed(Box::new(existing)));
+        }
+        // Not visible — overwritten, or never made. If this handle made it, re-assert **that** decision, byte
+        // for byte: a re-close never names an offer the first close did not (#609's review, round 3).
+        if let Some(original) = self.remembered_close(requirement)
+            && original.closes(&announcement)
+            && own_key.is_none_or(|k| verify_close(&original, &k))
+        {
+            return self.append_close(original);
         }
         let mut close = Close {
             requirement: requirement.to_string(),
@@ -690,6 +728,33 @@ impl ContractNet {
         if let Some(k) = key {
             close.signature = k.sign(&close.canonical_bytes()).to_bytes().to_vec();
         }
+        let close = self.append_close(close)?;
+        self.remember_close(&close);
+        Ok(close)
+    }
+
+    /// **Re-assert a close this declarer made**, byte for byte — the recovery for a declarer whose close
+    /// was overwritten on the stream and which no longer holds it in memory (it restarted): keep the
+    /// close [`close`](Self::close) returned, and pass it here. Refused unless it is this declarer's close
+    /// of the current announcement ([`CommitmentRefusal::NotTheDeclarer`],
+    /// [`CommitmentRefusal::CloseNotForThisAnnouncement`]); size-checked and read back like a close.
+    pub fn reassert_close(&self, close: &Close) -> Result<Close, CommitmentRefusal> {
+        let announcement = self.announcement(&close.requirement).ok_or(CommitmentRefusal::NotAnnounced)?;
+        if close.declarer != self.me {
+            return Err(CommitmentRefusal::NotTheDeclarer { declarer: close.declarer.clone(), me: self.me.clone() });
+        }
+        if !close.closes(&announcement) {
+            return Err(CommitmentRefusal::CloseNotForThisAnnouncement);
+        }
+        let close = self.append_close(close.clone())?;
+        self.remember_close(&close);
+        Ok(close)
+    }
+
+    /// Append a close's exact encoding to its stream: refused by name when it would not fit one KV write,
+    /// read back afterwards.
+    fn append_close(&self, close: Close) -> Result<Close, CommitmentRefusal> {
+        let requirement = close.requirement.as_str();
         let encoded = encode(&close);
         // The log key the append writes: `log/{stream}/{hlc:016x}/{node}`.
         let key_len = format!("log/{}/", closes_stream(requirement)).len() + 17 + self.agent.node_id().to_string().len();
@@ -722,17 +787,22 @@ impl ContractNet {
     }
 
     /// The earliest close of `announcement` (by its declarer, at or after its deadline, binding it) —
-    /// and, with `key`, verifying under it.
+    /// and, with `key`, verifying under it. **Earliest by the close's own `closed_at_ms`**, tie-broken by
+    /// its digest — never by stream key, which any member writes (#609's review, round 3): copying a
+    /// genuine close to a backdated key changes nothing. A declarer that genuinely signs two different
+    /// closes has equivocated; the earlier-dated one counts, and both are on the stream for anyone to see.
     fn select_close(&self, announcement: &Announcement, key: Option<&[u8; 32]>) -> Option<Close> {
         self.closes(&announcement.requirement)
             .into_iter()
             .map(|(_, c)| c)
-            .find(|c| c.closes(announcement) && key.is_none_or(|k| verify_close(c, k)))
+            .filter(|c| c.closes(announcement) && key.is_none_or(|k| verify_close(c, k)))
+            .min_by(|a, b| a.closed_at_ms.cmp(&b.closed_at_ms).then_with(|| a.sha256().cmp(&b.sha256())))
     }
 
-    /// The close the **unverified** path counts: the earliest on the stream that closes the current
-    /// announcement — names its declarer, its deadline and its digest, and is dated at or after the
-    /// deadline. Any member can append one that passes this read (see the crate doc).
+    /// The close the **unverified** path counts: the earliest (by `closed_at_ms`, then digest) that closes
+    /// the current announcement — names its declarer, its deadline and its digest, and is dated at or
+    /// after the deadline. Any member can append an unsigned one that passes this read and steers the
+    /// award (see the crate doc).
     pub fn close_of(&self, requirement: &str) -> Option<Close> {
         let announcement = self.announcement(requirement)?;
         self.select_close(&announcement, None)
@@ -1820,10 +1890,12 @@ mod tests {
         agent.shutdown().await;
     }
 
-    /// Round 2, N1: on the unverified path a forged close before the deadline, or one naming another
-    /// declarer, steered the award — `plan_award_from` checked neither.
+    /// Round 2, N1: on the unverified path a forged close dated before the deadline, or one naming another
+    /// declarer, steered the award — `plan_award_from` checked neither. What this does **not** show: a
+    /// forged unsigned close dated at or after the deadline, naming the announcement's declarer, still
+    /// steers the unverified path — that path is steerable by design, and says so.
     #[tokio::test]
-    async fn on_the_unverified_path_an_early_close_or_another_declarers_close_is_not_a_close() {
+    async fn on_the_unverified_path_a_close_dated_before_the_deadline_or_naming_another_declarer_is_refused() {
         let agent = live().await;
         let hub = ContractNet::new(Arc::clone(&agent), "hub");
         let mallory = ContractNet::new(Arc::clone(&agent), "a-mallory");
@@ -1892,6 +1964,96 @@ mod tests {
         assert!(matches!(hub.plan_award("x", AwardRule::LowestParticipant, now), Err(CommitmentRefusal::NotClosed)),
             "the earlier close does not close the new announcement");
         hub.close("x", Some(&key), now).expect("the new announcement is closed afresh");
+        agent.shutdown().await;
+    }
+
+    // ── #609's review, round 3 — each first written against d90c2d51's API and seen failing there ──
+
+    /// Round 3, finding 1: recovery from an overwrite must re-assert the declarer's original decision.
+    /// The hub closes naming driver-a; a late signed offer arrives; every close is overwritten; the hub
+    /// closes again. A re-close that recomputed from everything held now named the late offer, and the
+    /// checked path awarded it.
+    #[tokio::test]
+    async fn a_reclose_after_an_overwrite_never_admits_an_offer_the_first_close_did_not() {
+        let agent = live().await;
+        let keys = keys_for(&[("hub", 81), ("driver-a", 82), ("a-mallory", 83)]);
+        let resolve = |p: &str| keys.get(p).map(|k| k.verifying_key().to_bytes());
+        let hub = ContractNet::new(Arc::clone(&agent), "hub");
+        let a = ContractNet::new(Arc::clone(&agent), "driver-a");
+        let mallory = ContractNet::new(Arc::clone(&agent), "a-mallory");
+        let now = wall_now_ms();
+        hub.announce("rc", "1 crate", "any", now, now);
+        a.offer_signed("rc", "2 km", Some(&keys["driver-a"]), now).expect("announced");
+        hub.close("rc", Some(&keys["hub"]), now).expect("closes naming driver-a");
+        mallory.offer_signed("rc", "0 km", Some(&keys["a-mallory"]), now).expect("a late offer, signed");
+        overwrite_closes(&agent, "rc", serde_json::json!({ "requirement": "rc", "declarer": "hub", "offers": [] }));
+        let _ = hub.close("rc", Some(&keys["hub"]), now + 1);
+        let plan = hub.plan_award_verified("rc", AwardRule::LowestParticipant, now + 1, "hub", resolve).expect("plans");
+        assert_eq!(plan.participant, "driver-a", "the late offer was never in the hub's decision");
+        agent.shutdown().await;
+    }
+
+    /// Round 3, finding 2: with two signed closes on the stream, which counts was chosen by stream key —
+    /// a key any member writes. C1 decides driver-a; a second signed close C2 (naming a later offer too)
+    /// is planted at a backdated key; the checked plan must still answer driver-a, from C1.
+    #[tokio::test]
+    async fn a_second_signed_close_at_a_backdated_key_does_not_change_the_award() {
+        use ed25519_dalek::Signer;
+        let agent = live().await;
+        let keys = keys_for(&[("hub", 84), ("driver-a", 85), ("a-mallory", 86)]);
+        let resolve = |p: &str| keys.get(p).map(|k| k.verifying_key().to_bytes());
+        let hub = ContractNet::new(Arc::clone(&agent), "hub");
+        let a = ContractNet::new(Arc::clone(&agent), "driver-a");
+        let mallory = ContractNet::new(Arc::clone(&agent), "a-mallory");
+        let now = wall_now_ms();
+        hub.announce("newb", "1 crate", "any", now, now);
+        a.offer_signed("newb", "2 km", Some(&keys["driver-a"]), now).expect("announced");
+        let c1 = hub.close("newb", Some(&keys["hub"]), now).expect("C1");
+        let first = hub.plan_award_verified("newb", AwardRule::LowestParticipant, now, "hub", resolve).expect("plans under C1");
+        assert_eq!(first.participant, "driver-a");
+
+        mallory.offer_signed("newb", "0 km", Some(&keys["a-mallory"]), now).expect("a later offer");
+        let mut c2 = Close {
+            closed_at_ms: now + 5_000,
+            offers: hub.offers("newb").iter().map(|(h, o)| ClosedOffer::of(*h, o)).collect(),
+            signature: Vec::new(),
+            ..c1.clone()
+        };
+        c2.signature = keys["hub"].sign(&c2.canonical_bytes()).to_bytes().to_vec();
+        let _ = agent.kv().set("log/cn/newb/closes/0000000000010000/backdated", encode(&c2));
+
+        let again = hub.plan_award_verified("newb", AwardRule::LowestParticipant, now, "hub", resolve).expect("plans");
+        assert_eq!(again.participant, "driver-a", "the award planned under C1 is the award every later plan computes");
+        assert_eq!(again.close_sha256, c1.sha256(), "and it names C1");
+        agent.shutdown().await;
+    }
+
+    /// Round 3: a declarer that restarted (a fresh handle, no memory of its close) recovers an overwritten
+    /// close by re-asserting the close it kept — the same decision, never a new one. A close of another
+    /// announcement is refused by name. (New API: no head before round 3 had `reassert_close`.)
+    #[tokio::test]
+    async fn a_restarted_declarer_reasserts_the_close_it_kept() {
+        let agent = live().await;
+        let keys = keys_for(&[("hub", 87), ("driver-a", 88), ("a-mallory", 89)]);
+        let resolve = |p: &str| keys.get(p).map(|k| k.verifying_key().to_bytes());
+        let hub = ContractNet::new(Arc::clone(&agent), "hub");
+        let a = ContractNet::new(Arc::clone(&agent), "driver-a");
+        let mallory = ContractNet::new(Arc::clone(&agent), "a-mallory");
+        let now = wall_now_ms();
+        hub.announce("rs", "1 crate", "any", now, now);
+        a.offer_signed("rs", "2 km", Some(&keys["driver-a"]), now).expect("announced");
+        let kept = hub.close("rs", Some(&keys["hub"]), now).expect("closes; the caller keeps this");
+        mallory.offer_signed("rs", "0 km", Some(&keys["a-mallory"]), now).expect("a late offer");
+        overwrite_closes(&agent, "rs", serde_json::json!({ "requirement": "rs" }));
+
+        let restarted = ContractNet::new(Arc::clone(&agent), "hub");
+        assert_eq!(restarted.reassert_close(&kept).expect("re-asserted"), kept, "byte for byte");
+        let plan = restarted.plan_award_verified("rs", AwardRule::LowestParticipant, now, "hub", resolve).expect("plans");
+        assert_eq!((plan.participant.as_str(), plan.close_sha256.clone()), ("driver-a", kept.sha256()));
+
+        hub.announce("rs", "2 crates", "any", now, now + 1); // a new announcement under the same name
+        assert!(matches!(restarted.reassert_close(&kept), Err(CommitmentRefusal::CloseNotForThisAnnouncement)));
+        assert!(matches!(mallory.reassert_close(&kept), Err(CommitmentRefusal::NotTheDeclarer { .. })));
         agent.shutdown().await;
     }
 }
