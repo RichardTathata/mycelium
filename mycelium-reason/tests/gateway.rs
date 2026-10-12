@@ -941,28 +941,29 @@ async fn every_run_id_door_refuses_an_id_that_is_not_one_bounded_segment() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_blob_door_answers_507_when_the_store_is_at_its_quota() {
     let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(FsBlobStore::open_with_quota(dir.path(), 1000).unwrap());
+    // Sizes above one block cost their length; a smaller blob costs one block (4096).
+    let store = Arc::new(FsBlobStore::open_with_quota(dir.path(), 10_096).unwrap());
     let (agent, _, http_port) = start_gateway_node(Arc::clone(&store), None).await;
     let url = format!("http://127.0.0.1:{http_port}/gateway/reason/blob");
     let http = reqwest::Client::new();
 
-    let first = vec![1u8; 600];
+    let first = vec![1u8; 6000];
     let put = http.put(&url).body(first.clone()).send().await.unwrap();
     assert_eq!(put.status().as_u16(), 200);
-    assert_eq!(store.used_bytes(), 600);
+    assert_eq!(store.used_bytes(), 6000);
 
-    let put = http.put(&url).body(vec![2u8; 600]).send().await.unwrap();
+    let put = http.put(&url).body(vec![2u8; 6000]).send().await.unwrap();
     let status = put.status().as_u16();
     let body: serde_json::Value = put.json().await.unwrap_or_default();
     assert_eq!(status, 507, "past the quota: {body}");
     assert_eq!(body["error"], "quota_exceeded");
-    assert_eq!(store.used_bytes(), 600, "nothing was written");
+    assert_eq!(store.used_bytes(), 6000, "nothing was written");
 
     let put = http.put(&url).body(first).send().await.unwrap();
     assert_eq!(put.status().as_u16(), 200, "a blob already held costs nothing");
-    let put = http.put(&url).body(vec![3u8; 400]).send().await.unwrap();
-    assert_eq!(put.status().as_u16(), 200, "exactly the quota is allowed");
-    assert_eq!(store.used_bytes(), 1000);
+    let put = http.put(&url).body(vec![3u8; 100]).send().await.unwrap();
+    assert_eq!(put.status().as_u16(), 200, "a small blob costs one block — exactly the quota");
+    assert_eq!(store.used_bytes(), 10_096);
 
     agent.shutdown_with_timeout(Duration::from_secs(5)).await;
 }

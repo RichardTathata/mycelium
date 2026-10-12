@@ -19,7 +19,10 @@ All notable changes to this crate. It versions **independently** of the Mycelium
   PR's first head reserved per put, so racing puts of one blob grew the account N×len until reopen (#609's review,
   finding 2) — `concurrent_puts_of_one_digest_reserve_it_once` was seen failing 3/3 on it (38.8–50.9 MB counted
   against 16.8 MB on disk). `.tmp-*` files are removed at open as abandoned (one store per directory); a file added or
-  deleted by hand is credited at the next open. A put past the quota is `ErrorKind::QuotaExceeded` with nothing
+  deleted by hand is credited at the next open. **Each file costs at least one 4 KiB block** (`BLOB_FILE_MIN_COST`):
+  an 8-byte blob takes a block, an inode and an account entry, so a byte-only quota admitted 20,000 files under
+  160,000 bytes (the review's second round; `a_tiny_blob_costs_a_block` seen failing at 8). A filesystem with larger
+  blocks is under-counted by the difference. A put past the quota is `ErrorKind::QuotaExceeded` with nothing
   written; a blob already held costs nothing; replacing a damaged copy costs the growth. `quota_bytes()` / `used_bytes()` say where a store stands. The gateway answers **507
   `quota_exceeded`** (`{"error","detail"}`); the mesh write-back of a fetched blob that no longer fits is logged and
   the bytes are still returned. Nothing evicts — files are named by content address, so what to drop is the operator's
