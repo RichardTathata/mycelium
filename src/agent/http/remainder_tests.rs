@@ -36,7 +36,7 @@ async fn post_status(client: &reqwest::Client, url: &str, body: serde_json::Valu
 /// `interval_secs` and `lease_secs` reached a timer unbounded: any `u64` was a period (a refresh "every
 /// 30 years" is an advert that never refreshes and a requirement that never evaporates), and a value that
 /// was present but not a whole number fell back to the 30 s default without a word. Both routes refuse
-/// each now, by name; the bound is `MAX_CLIENT_TIMER_SECS`.
+/// each now, by name; the bound is `MAX_TIMER_PERIOD_SECS`.
 #[tokio::test]
 async fn client_timer_periods_are_bounded_at_both_routes() {
     let (agent, base, client) = gateway_agent().await;
@@ -236,8 +236,11 @@ async fn a_dropped_log_group_stream_saves_only_what_it_handed_on() {
     tokio::time::sleep(Duration::from_millis(300)).await; // the drain queues the other four
     drop(stream);
     tokio::time::sleep(Duration::from_millis(200)).await;
+    let cursor = agent.kv().get("clog/row-e.off/g/cursor").map(|b| String::from_utf8(b.to_vec()).unwrap());
+    assert_eq!(cursor.as_deref(), Some("0000000000000100/10.0.0.1:1"), "the cursor names the one entry handed on");
+    // The legacy offset sits one below it (a reader with only the offset re-delivers, never skips).
     let offset = agent.kv().get("clog/row-e.off/g/offset").map(|b| String::from_utf8(b.to_vec()).unwrap());
-    assert_eq!(offset.as_deref(), Some("0000000000000100"), "the offset names the one entry handed on");
+    assert_eq!(offset.as_deref(), Some("00000000000000ff"));
     agent.shutdown().await;
 }
 
@@ -291,4 +294,81 @@ async fn in_process_prompt_names_cannot_alias() {
     assert!(agent.kv().get("prompts/a/b/c").is_none() && agent.kv().get("prompts/a/").is_none());
     assert!(agent.llm().update_prompt("a", "b", t).is_ok(), "a plain pair still works");
     agent.shutdown().await;
+}
+
+// ── #613's review round ─────────────────────────────────────────────────────────
+
+/// Review finding 2: each mailbox stream kept its own in-flight set, so a second stream for the same kind
+/// found the first's handed-out, not-yet-acknowledged events live and delivered every one of them again.
+/// The set is shared per `(node, kind)`; what a dropped stream held un-acknowledged is released to the other.
+#[tokio::test]
+async fn two_mailbox_streams_for_one_kind_never_hand_out_one_event_twice() {
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    let agent = Arc::new(GossipAgent::new(id.clone(), cfg));
+    agent.start().await.unwrap();
+    for i in 0u8..10 {
+        assert!(agent.service().deliver_event(&id, "row-e.two", bytes::Bytes::from(vec![i])));
+    }
+    let (_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let mut a = Box::pin(super::mailbox_events(Arc::clone(&agent.task_ctx), Arc::from("row-e.two"), shutdown_rx.clone()));
+    let first = tokio::time::timeout(Duration::from_secs(5), a.next()).await.unwrap().expect("one event");
+    assert_eq!(first["payload_b64"], "AA==");
+    tokio::time::sleep(Duration::from_millis(300)).await; // A's drain hands the other nine to its channel
+
+    let mut b = Box::pin(super::mailbox_events(Arc::clone(&agent.task_ctx), Arc::from("row-e.two"), shutdown_rx));
+    let dup = tokio::time::timeout(Duration::from_millis(700), b.next()).await;
+    assert!(dup.is_err(), "stream B was handed an event stream A holds: {:?}", dup.ok().flatten());
+
+    // A drops with nine handed out and not acknowledged: they are B's now, in order.
+    drop(a);
+    for i in 1u8..10 {
+        let ev = tokio::time::timeout(Duration::from_secs(5), b.next()).await.expect("released to B").expect("an event");
+        use base64::Engine as _;
+        assert_eq!(ev["payload_b64"], base64::engine::general_purpose::STANDARD.encode([i]));
+    }
+    drop(b);
+    agent.shutdown().await;
+}
+
+/// Review finding 3: the cursor and the legacy offset are two KV writes and may arrive apart. A reader that
+/// saw the new offset before the new cursor read "everything through this HLC" and skipped a same-HLC
+/// sibling for ever. The offset is written one below the entry's HLC, so a reader that has only it
+/// re-delivers rather than skips.
+#[test]
+fn an_offset_that_arrives_before_its_cursor_never_skips_a_sibling() {
+    use mycelium_core::log_cursor::{self, LogRow};
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let port = alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+        agent.start().await.unwrap();
+        let row = |hlc: u64, node: &str| LogRow { hlc, suffix: Arc::from(format!("{hlc:016x}/{node}").as_str()), value: bytes::Bytes::new() };
+        let (a, b, c) = (row(0x100, "n1"), row(0x200, "n1"), row(0x200, "n2"));
+        let core = &agent.task_ctx.core;
+        log_cursor::record(core, "row-e.reorder", "g", &a);
+        log_cursor::record(core, "row-e.reorder", "g", &b);
+        // The new cursor has not arrived here: this node still holds the one before it.
+        assert!(agent.kv().set(log_cursor::cursor_key("row-e.reorder", "g"), a.suffix.as_bytes().to_vec()));
+        let pos = log_cursor::read_position(&agent.task_ctx.kv_state, "row-e.reorder", "g");
+        assert!(pos.precedes(&c), "the same-HLC sibling is still ahead (position {pos:?})");
+        agent.shutdown().await;
+    });
+}
+
+/// Review finding 5: a `[[serve]]` whose `ns` or `name` holds a `/` (or is empty) loaded, and then
+/// `register_prompt_skill` refused it as `InvalidName` on every reconcile tick, warning for ever.
+/// `validate()` refuses it by name at load.
+#[test]
+fn a_serve_name_that_cannot_be_a_prompt_skill_is_refused_at_load() {
+    let file = |ns: &str, name: &str| format!(
+        "[[serve]]\nns = \"{ns}\"\nname = \"{name}\"\nendpoint = \"http://127.0.0.1:1\"\nmodel = \"m\"\n");
+    assert!(crate::NodeCapabilityConfig::from_toml_str(&file("llm", "qwen/3")).is_err(), "a / in name");
+    assert!(crate::NodeCapabilityConfig::from_toml_str(&file("ll/m", "qwen3")).is_err(), "a / in ns");
+    assert!(crate::NodeCapabilityConfig::from_toml_str(&file("llm", "")).is_err(), "an empty name");
+    assert!(crate::NodeCapabilityConfig::from_toml_str(&file("llm", "qwen3")).is_ok());
 }

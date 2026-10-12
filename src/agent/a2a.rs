@@ -409,7 +409,8 @@ fn not_an_a2a_skill(kv: &crate::store::KvState, ns: &str, name: &str) -> Option<
     if is_infrastructure_capability(ns, name) {
         return Some("skill not found".into());
     }
-    let prompt_key = format!("{}{ns}/{name}", crate::signal::kv_ns::PROMPTS);
+    // A pair that cannot name a prompt skill has no template to find.
+    let prompt_key = super::helpers::prompt_kv_key(ns, name)?;
     if kv.store.pin().get(prompt_key.as_str()).and_then(|e| e.data.clone()).is_some_and(|b| !b.is_empty()) {
         return Some(format!("{ns}/{name} is a prompt skill: call it through POST /gateway/llm/call (llm:invoke)"));
     }

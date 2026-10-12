@@ -6,9 +6,10 @@
 //! cannot say which of two same-HLC entries it has passed, and the consumers that kept one delivered one
 //! of them and skipped the other for ever.
 //!
-//! **On the wire, two keys.** `clog/{stream}/{group}/offset` keeps its old value — the 16-hex HLC of the
-//! last entry handed on — so a node that predates this reads a position it understands (it skips a
-//! later same-HLC sibling, as it always did). Beside it, `clog/{stream}/{group}/cursor` holds the last
+//! **On the wire, two keys.** `clog/{stream}/{group}/offset` keeps its old format — a 16-hex HLC, read as
+//! *every entry through this HLC is done* — but is written **one below** the last entry's HLC, so a node
+//! that predates the cursor, or one whose cursor write has not arrived yet, re-delivers rather than skips
+//! (#613's review; [`record`]). Beside it, `clog/{stream}/{group}/cursor` holds the last
 //! entry's key suffix after `log/{stream}/` (`{hlc:016x}/{node}`). A reader takes the cursor when it is
 //! at least as far as the offset, and otherwise the offset, read as *every entry at or before this HLC*
 //! — which is what an older writer meant by it.
@@ -109,12 +110,18 @@ pub fn rows_after(kv: &KvState, stream: &str, pos: &LogPosition) -> Vec<LogRow> 
     rows
 }
 
-/// Record that `row` was handed on: the cursor, then the legacy offset (so a reader that sees the new
-/// offset also sees a cursor at least as far). Through the ordinary KV write path (applied, logged to
-/// the WAL when one is configured, gossiped).
+/// Record that `row` was handed on: the cursor, then the legacy offset. Through the ordinary KV write
+/// path (applied, logged to the WAL when one is configured, gossiped).
+///
+/// **The two are separate writes, and a peer may receive them in either order** (#613's review): only on
+/// the writing node is the cursor always at least as far as the offset. So the offset is written **one
+/// below** the entry's HLC: a reader that has the new offset and not yet the new cursor — or a node that
+/// predates the cursor and reads only the offset — resumes at the entry's HLC and **re-delivers** that
+/// entry and any same-HLC sibling, never skips one. An entry at HLC 0 is the one case the offset cannot
+/// express (it saturates at 0); HLCs are wall-clock based, so none is.
 pub fn record(ctx: &CoreCtx, stream: &str, group: &str, row: &LogRow) {
     let _ = crate::ops::kv_set(ctx, Arc::from(cursor_key(stream, group).as_str()), Bytes::from(row.suffix.as_bytes().to_vec()));
-    let _ = crate::ops::kv_set(ctx, Arc::from(offset_key(stream, group).as_str()), Bytes::from(format!("{:016x}", row.hlc).into_bytes()));
+    let _ = crate::ops::kv_set(ctx, Arc::from(offset_key(stream, group).as_str()), Bytes::from(format!("{:016x}", row.hlc.saturating_sub(1)).into_bytes()));
 }
 
 #[cfg(test)]

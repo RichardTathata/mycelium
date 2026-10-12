@@ -994,15 +994,18 @@ cannot see an exported item, so the next sweep is a session's work, not a gate.
 - **The mailbox stream deletes an event when it hands it on.** `GET /gateway/mailbox/{kind}` tombstoned each event
   as it entered its 256-slot channel; it now does so as the stream hands the event to the HTTP connection. A dropped
   stream loses only what the connection (and the kernel's socket buffers) had already accepted — not received: that
-  is all HTTP lets the gateway see — and the next stream delivers the rest. The in-process
-  `ServiceHandle::open_mailbox` is unchanged (it hands a plain receiver, and still deletes on entering its channel).
+  is all HTTP lets the gateway see — and the next stream delivers the rest. Two streams of one kind on one node share
+  one in-flight set, so neither hands out an event the other holds; what a dropped stream held un-acknowledged goes
+  to the other. The in-process `ServiceHandle::open_mailbox` is unchanged (it hands a plain receiver, and still
+  deletes on entering its channel).
 - **The log-group subscribe orders by `(hlc, key)` and records its position after the send.** Of two entries with
   one HLC, `GET /gateway/overlay/log/group/subscribe` and `KvHandle::subscribe_log_group` delivered one and skipped
   the other for ever; both now deliver both, in the core's order. The gateway records the group's position as the
   stream hands an entry on, not before queueing it — an entry queued (up to 64) or in flight at a drop is the next
   holder's to send. The position is kept at a new key, `clog/{stream}/{group}/cursor` (`{hlc:016x}/{node}`), beside
-  the old `clog/{stream}/{group}/offset`, which is still written (the HLC alone) so an older node reads a position it
-  understands. `GET /gateway/overlay/log/scan` and `…/log/subscribe` order same-HLC entries by key too.
+  the old `clog/{stream}/{group}/offset`, which is still written in its old format but **one below** the entry's HLC:
+  the two writes may reach a peer in either order, and a node that has only the offset — an older node, or one whose
+  cursor write has not arrived — then re-delivers that entry and its same-HLC siblings rather than skipping one. `GET /gateway/overlay/log/scan` and `…/log/subscribe` order same-HLC entries by key too.
 - **A prompt name holds no `/` and is not empty.** `prompts/{ns}/{name}` made `(a/b, c)` and `(a, b/c)` one key. The
   three `/gateway/prompts/{ns}/{name}` routes and `POST /gateway/llm/call` answer **400 `invalid_prompt_name`**
   (a `%2F` in a path segment arrives decoded, so it is refused too), `/gateway/llm/stream` sends an
@@ -1012,7 +1015,10 @@ cannot see an exported item, so the next sweep is a session's work, not a gate.
 - **A caller envelope older than 300 s plus the drift bound is refused.** `gateway_caller::verify` — every provider's
   receive path — reads the envelope's signed issue time: older than `CALLER_CONTEXT_MAX_AGE_MS` (300 s, the longest
   any gateway door waits) plus `max_clock_drift_ms`, or further ahead than `max_clock_drift_ms`, is
-  **`CallerError::Stale`** (code `stale`). Before, the time was signed and never read.
+  **`CallerError::Stale`** (code `stale`). With `max_clock_drift_ms = 0` — *no drift bound*, as everywhere else —
+  there is no future bound and the age bound is the 300 s alone. Before, the time was signed and never read.
+- **A `[[serve]]` whose `ns` or `name` is empty or holds a `/` is refused at load** by `validate()` (a served skill is a
+  prompt skill; it loaded, then failed `InvalidName` on every reconcile tick).
 - `GatewayPreflight::is_inert` is `#[deprecated(since = "2.33.0")]` (§37's note; nothing in the repository or the
   private companion calls it).
 
@@ -1021,10 +1027,15 @@ exhaustive `match` on it needs the arm; `CallerError` gained `Stale` (it is `#[n
 denies). A call to `is_inert` warns. The rest is refusals by name.
 
 **Migration.** A client sending `interval_secs` or `lease_secs` as a fraction, `0` or past an hour: send whole
-seconds in range (`mycelium-py` and `mycelium-ts` now round `interval_secs` up, as they did leases). A prompt skill
+seconds in range (`mycelium-py` and `mycelium-ts` now round `interval_secs` up, as they did leases, and refuse a
+period past 3600 s locally). The bound is these two routes' and a unit file's: `overlay/lock/acquire` and
+`overlay/elect`'s `ttl_secs` and `rpc/call`'s `timeout_secs` still clamp. A prompt skill
 whose `ns` or `name` holds a `/` never resolved (a `cap/` key with a `/` in its name was already refused as
-malformed); rename it. A provider whose callers queue work for more than 300 s before the provider reads it from
-`rpc_rx` (the check runs there, not at send) sees `stale`; that work's gateway caller stopped waiting long before.
+malformed); rename it. The 300 s window is the gateway's: no gateway door waits longer. An **in-process** caller
+(`rpc_call`, `rpc_call_with_mandate`) names its own timeout, and the check runs when the provider reads the request
+from `rpc_rx`, not at send — so a node-own request (a secure-profile gateway wraps its own RPCs in a self envelope)
+that waits behind a provider backlog longer than 300 s plus the drift bound is refused `stale` though its caller
+still waits. Keep such a provider's queue shorter than that, or time the caller out first.
 Nothing to do for the log group in a mixed fleet: an older node writes only the offset, and an upgraded reader takes
 the offset whenever it is ahead of the cursor. **What a drop still loses**, stated: a mailbox event or log-group
 entry the connection had accepted when it dropped — the gateway has no resume point (guide 10).

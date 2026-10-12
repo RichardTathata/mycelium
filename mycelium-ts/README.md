@@ -485,8 +485,8 @@ protected kind — is thrown, never reported as `"timeout"`.
     the timeout as *unknown*, not *not done*).
   - `mailbox` — the gateway deletes each event as its stream hands it to the HTTP connection (since post-360
     row E; before, as it queued it, up to 256 ahead of your loop), so a re-opened stream delivers everything
-    still queued when it dropped. What the connection had already accepted — written to the socket, not yet
-    read by you — is gone. An event that must not be lost needs an acknowledgement of your own — the sender
+    still queued when it dropped, and two streams of one kind never get the same event. What the connection had
+    already accepted — written to the socket, not yet read by you — is gone. An event that must not be lost needs an acknowledgement of your own — the sender
     keeps it until the receiver confirms — or a log or tuple space instead of a mailbox.
   - `subscribeLog` — pass `sinceHlc: entry.hlc + 1n` for the last handled entry (the cursor is inclusive).
   - `subscribeLogGroup` — re-subscribing contends for the group's claim again and resumes from the group's

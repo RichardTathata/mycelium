@@ -4,6 +4,18 @@ import { Federation } from "./federation";
 import { Artifacts } from "./artifacts";
 import { authHeaders, baseUrl, resolveToken, type AuthOptions } from "./auth";
 import { pathSegment, wholeSeconds } from "./wire";
+
+/** The node's bound on a re-assertion or lease period (`MAX_TIMER_PERIOD_SECS`): past it the gateway answers 400 `timer_out_of_range`. */
+export const MAX_TIMER_PERIOD_SECS = 3600;
+
+/** Whole seconds, rounded up, and refused locally past the node's 3600 s bound (post-360 row E). */
+function timerPeriod(secs: number, name: string): number {
+  const whole = wholeSeconds(secs, 1, name);
+  if (whole > MAX_TIMER_PERIOD_SECS) {
+    throw new Error(`${name} ${String(secs)} is past the node's bound of ${MAX_TIMER_PERIOD_SECS} seconds`);
+  }
+  return whole;
+}
 import {
   KvReceipt,
   CapabilityHandle,
@@ -280,8 +292,8 @@ export class MyceliumAgent {
     const data = await this._post("/gateway/capability/advertise", {
       ns,
       name,
-      interval_secs: wholeSeconds(options.intervalSecs ?? 30, 1, "intervalSecs"),
-      ...(options.leaseSecs !== undefined ? { lease_secs: wholeSeconds(options.leaseSecs, 1, "leaseSecs") } : {}),
+      interval_secs: timerPeriod(options.intervalSecs ?? 30, "intervalSecs"),
+      ...(options.leaseSecs !== undefined ? { lease_secs: timerPeriod(options.leaseSecs, "leaseSecs") } : {}),
       attributes: options.attributes ?? {},
       authorized_callers: options.authorizedCallers ?? [],
     }) as { handle_id: string };
@@ -312,8 +324,8 @@ export class MyceliumAgent {
   ): Promise<UnitHandle> {
     const data = (await this._post("/gateway/units/declare", {
       toml: tomlText,
-      interval_secs: wholeSeconds(options.intervalSecs ?? 30, 1, "intervalSecs"),
-      ...(options.leaseSecs !== undefined ? { lease_secs: wholeSeconds(options.leaseSecs, 1, "leaseSecs") } : {}),
+      interval_secs: timerPeriod(options.intervalSecs ?? 30, "intervalSecs"),
+      ...(options.leaseSecs !== undefined ? { lease_secs: timerPeriod(options.leaseSecs, "leaseSecs") } : {}),
     })) as {
       handle_id: string;
       principal: string | null;

@@ -252,3 +252,16 @@ def test_a_lease_or_ttl_the_gateway_cannot_read_is_refused_by_name(port, verb, b
     with pytest.raises(ValueError, match=field):
         call(MyceliumAgent("127.0.0.1", port), bad)
     assert _Stub.seen == []
+
+
+PERIODS = ["advertise_capability.interval_secs", "advertise_capability.lease_secs",
+           "declare_units.interval_secs", "declare_units.lease_secs"]
+
+
+@pytest.mark.parametrize("verb", PERIODS)
+def test_a_timer_period_past_the_nodes_bound_is_refused_locally(port, verb):
+    # #613's review: the node refuses a period past 3600 s (400 timer_out_of_range); the SDK says so first.
+    call, field = LEASES[verb]
+    with pytest.raises(ValueError, match=field):
+        call(MyceliumAgent("127.0.0.1", port), 3601)
+    assert _Stub.seen == []

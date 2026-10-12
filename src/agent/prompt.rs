@@ -46,13 +46,12 @@ pub enum PromptSkillError {
 }
 
 /// The KV key of the template for `ns`/`name`: `prompts/{ns}/{name}`, or
-/// [`PromptSkillError::InvalidName`] when either part is empty or contains a `/` — every door that
-/// builds the key goes through here, so no two pairs share one (post-360 hardening row E).
+/// [`PromptSkillError::InvalidName`] when either part is empty or contains a `/` — every builder of a
+/// `prompts/` key goes through here or `helpers::prompt_kv_key` beneath it, so no two pairs share one
+/// (post-360 hardening row E).
 pub(crate) fn prompt_key(ns: &str, name: &str) -> Result<String, PromptSkillError> {
-    if ns.is_empty() || name.is_empty() || ns.contains('/') || name.contains('/') {
-        return Err(PromptSkillError::InvalidName { ns: ns.to_owned(), name: name.to_owned() });
-    }
-    Ok(format!("{}{ns}/{name}", crate::signal::kv_ns::PROMPTS))
+    crate::agent::helpers::prompt_kv_key(ns, name)
+        .ok_or_else(|| PromptSkillError::InvalidName { ns: ns.to_owned(), name: name.to_owned() })
 }
 
 /// Returned by `register_prompt_skill`. Dropping retracts the skill immediately.

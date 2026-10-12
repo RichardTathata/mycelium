@@ -131,9 +131,13 @@ const DOMAIN_SEP: &[u8] = b"mycelium:gateway-caller:v1\n";
 pub(crate) const MAX_ENVELOPE_BYTES: usize = 8 * 1024;
 /// How old a caller envelope may be when a provider verifies it, before the clock-drift allowance:
 /// 300 s, the longest any gateway door waits for an answer (`SERVED_RPC_TTL_MS`), so an envelope
-/// older than this is answering no caller that still waits (post-360 hardening row E). [`verify`]
-/// refuses one issued more than this **plus** the node's `max_clock_drift_ms` ago, or more than
-/// `max_clock_drift_ms` ahead of its own clock ([`CallerError::Stale`]).
+/// older than this is answering no *gateway* caller that still waits (post-360 hardening row E). An
+/// in-process caller (`rpc_call`, `rpc_call_with_mandate`) names its own timeout, and the check runs
+/// when the provider reads the request from `rpc_rx`: behind a backlog longer than this, such a request
+/// is refused `stale` though its caller still waits. [`verify`] refuses one issued more than this
+/// **plus** the node's `max_clock_drift_ms` ago, or more than `max_clock_drift_ms` ahead of its own
+/// clock ([`CallerError::Stale`]); with `max_clock_drift_ms = 0` (no drift bound) only the age is
+/// bounded.
 pub const CALLER_CONTEXT_MAX_AGE_MS: u64 = 300_000;
 
 // ── Public types ─────────────────────────────────────────────────────────────
@@ -252,7 +256,9 @@ impl std::fmt::Display for CallerError {
             CallerError::Removed => write!(f, "the sending node has been removed from the mesh"),
             CallerError::Stale { issued_at_ms, now_ms } => write!(
                 f,
-                "caller context issued at {issued_at_ms} ms is outside the accepted window at {now_ms} ms                  (at most {CALLER_CONTEXT_MAX_AGE_MS} ms old plus the clock-drift bound, never beyond that bound ahead)"
+                "caller context issued at {issued_at_ms} ms is outside the accepted window at {now_ms} ms (at most \
+                 {CALLER_CONTEXT_MAX_AGE_MS} ms old plus the clock-drift bound, never beyond that bound ahead; \
+                 a drift bound of 0 bounds the age alone)"
             ),
             CallerError::Malformed(why) => write!(f, "caller context malformed: {why}"),
             CallerError::ViaMismatch { claimed, sender } => {
@@ -858,11 +864,14 @@ pub(crate) fn verify(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<GatewayCa
     // Post-360 row E: the envelope binds freshness. Its issue time is inside the signature (under
     // `tls`), and it is read here — before, it was signed and never checked, so a captured envelope and
     // payload verified for ever. Checked after the signature, so a forgery still answers as one.
+    // `max_clock_drift_ms = 0` means *no drift bound* (`hlc.rs`, `configuration.md`): then there is no
+    // future bound, and the age bound is `CALLER_CONTEXT_MAX_AGE_MS` alone (#613's review, finding 1 —
+    // an RPC frame does not make this node observe the sender's clock, so a zero tolerance refused
+    // every envelope from a gateway a few ms ahead).
     let now_ms = ctx.hlc.decision_now_ms();
     let drift = ctx.config.max_clock_drift_ms;
-    if now_ms.saturating_sub(env.t) > CALLER_CONTEXT_MAX_AGE_MS.saturating_add(drift)
-        || env.t.saturating_sub(now_ms) > drift
-    {
+    let too_far_ahead = drift != 0 && env.t.saturating_sub(now_ms) > drift;
+    if now_ms.saturating_sub(env.t) > CALLER_CONTEXT_MAX_AGE_MS.saturating_add(drift) || too_far_ahead {
         return Err(CallerError::Stale { issued_at_ms: env.t, now_ms });
     }
 
@@ -1343,6 +1352,31 @@ mod tests {
             assert_eq!(at(0), Err("stale"), "tls={tls}: issued at the epoch");
             a.shutdown().await;
         }
+    }
+
+    /// #613's review, finding 1: `max_clock_drift_ms = 0` means *no drift bound* (`hlc.rs`,
+    /// `configuration.md`), and RPC frames do not make the provider observe the sender's clock — so a
+    /// provider a few ms behind the gateway refused nearly every envelope as `stale`. With 0 there is no
+    /// future bound, and the age bound is `CALLER_CONTEXT_MAX_AGE_MS` alone.
+    #[tokio::test]
+    async fn a_zero_drift_bound_bounds_only_the_age() {
+        let port = crate::test_util::alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.max_clock_drift_ms = 0;
+        let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+        a.start().await.unwrap();
+        let now = a.task_ctx.hlc.decision_now_ms();
+        let app = Bytes::from_static(b"payload");
+        let at = |t: u64| {
+            let framed = frame_with_context_at(&a.task_ctx, "oidc:idp/alice", &[], app.clone(), None, None, t).unwrap();
+            verify(&a.task_ctx, &request_from(a.node_id(), "k", framed)).map(|c| c.is_some()).map_err(|e| e.code())
+        };
+        assert_eq!(at(now + 50), Ok(true), "a gateway 50 ms ahead of this provider");
+        assert_eq!(at(now + 3_600_000), Ok(true), "no drift bound: no future bound");
+        assert_eq!(at(now - CALLER_CONTEXT_MAX_AGE_MS + 1_000), Ok(true), "inside the age bound");
+        assert_eq!(at(now - CALLER_CONTEXT_MAX_AGE_MS - 1_000), Err("stale"), "the age bound alone");
+        a.shutdown().await;
     }
 
     /// Review finding 3: the built-in LLM provider refuses an unsigned context on a `tls` node

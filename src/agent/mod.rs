@@ -581,6 +581,9 @@ pub(crate) struct TaskCtx {
     /// every invoke signal → duplicate RPC responses).
     #[cfg(feature = "llm")]
     pub(crate) llm_dispatch_spawned: std::sync::atomic::AtomicBool,
+    /// The in-flight sets of the acked mailbox streams, one per `mailbox/{node}/{kind}/` prefix, held
+    /// weakly (`mailbox::open_mailbox_acked`; #613's review). Lock-free.
+    pub(crate) mailbox_in_flight: mailbox::MailboxInFlight,
 
     // ── Service layer ────────────────────────────────────────────────────────────
     /// Bulk-transport adapter: staging map, HTTP port, pooled HTTP client.
@@ -1345,6 +1348,7 @@ impl GossipAgent {
             llm_skills: std::sync::Arc::new(papaya::HashMap::new()),
             #[cfg(feature = "llm")]
             llm_dispatch_spawned: std::sync::atomic::AtomicBool::new(false),
+            mailbox_in_flight: Default::default(),
         });
         // The acceptor's forgotten-promise detector watches inbound copies of this node's own acceptor records
         // (`acceptor_guard`); installed before any connection exists, once, on the core seam.

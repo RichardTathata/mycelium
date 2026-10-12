@@ -581,6 +581,26 @@ PR.
   `mycelium-private`, grepped); the SSE resume point stays *not built* — the guide's and READMEs' loss sentences now
   match what a drop loses.
 
+- *#613's adversarial review, answered in one round* (each code fix with a test seen failing first on `80218501`):
+  1. `max_clock_drift_ms = 0` is *no drift bound* for the envelope too — no future bound, the age bound the 300 s
+     alone (`a_zero_drift_bound_bounds_only_the_age`, *was* `left: Err("stale") right: Ok(true)` for a gateway 50 ms
+     ahead).
+  2. Two mailbox streams of one kind share one in-flight set per `(node, kind)` (`TaskCtx::mailbox_in_flight`, held
+     weakly; an un-acked event released on drop wakes the others) —
+     `two_mailbox_streams_for_one_kind_never_hand_out_one_event_twice` (*was* stream B handed `AQ==`).
+  3. The legacy offset is written one below the entry's HLC, so a reader with the offset and not yet the cursor
+     re-delivers rather than skips; `record()`'s doc says what holds only on the writing node —
+     `an_offset_that_arrives_before_its_cursor_never_skips_a_sibling` (*was* `position ThroughHlc(512)`).
+  4. Every `prompts/` key builder goes through `helpers::prompt_kv_key` (`a2a.rs`, `llm.rs` included).
+  5. `validate()` refuses a `[[serve]]` name that is empty or holds a `/` — `a_serve_name_that_cannot_be_a_prompt_skill_is_refused_at_load`
+     (*was* accepted).
+  6. The two `cap/` cases are §3.6's follow-ups, not this row's.
+  7. §38 and the constant's doc state that the 300 s window is the gateway's: an in-process caller behind a backlog
+     longer than that is refused at dequeue.
+  8. "Never clamped" narrowed to the two routes and the unit file; lock/elect `ttl_secs` and `rpc/call`'s
+     `timeout_secs` still clamp; both SDKs refuse a period past 3600 locally (*was* sent; 4 py and 4 ts tests).
+  9. The `Stale` message's lost line continuation, the test doc's constant name, the `CONSUMER_LOG` doc.
+
 ### 3.6 · State of play and the next iteration (2026-10-12)
 
 Where the work stands at the end of 2026-10-12, so the next session starts here rather than from a conversation.

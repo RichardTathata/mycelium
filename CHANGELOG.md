@@ -192,7 +192,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   256-slot channel — a dropped stream had already deleted every queued event (#595's review); the in-process
   `open_mailbox` is unchanged. **The log-group subscribe keeps the core's `(hlc, key)` order** — of two same-HLC entries
   the gateway and `KvHandle::subscribe_log_group` delivered one and skipped the other for ever — through a position
-  kept as `(hlc, key)` at `clog/{stream}/{group}/cursor` beside the legacy HLC-only `…/offset` (still written; read when
+  kept as `(hlc, key)` at `clog/{stream}/{group}/cursor` beside the legacy HLC-only `…/offset` (still written, one below the entry's HLC so a reader that has only it re-delivers rather than skips; read when
   ahead of the cursor, so an older node and a newer one agree), and **records it after the entry is handed on**: at
   the gateway as the stream hands it to the connection (it was saved before queueing, so up to 64 queued entries were
   skipped by the next holder — found by row G), in process after the channel accepts it (it was saved before a send
@@ -206,7 +206,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   test by its real name. **Upgrade notes:** `PromptSkillError` gained `InvalidName` (an exhaustive `match` breaks);
   the 400s above; a provider reading a request from `rpc_rx` more than 300 s plus the drift bound after it was sent
   refuses it `stale`. **What a drop still loses:** a mailbox event or log-group entry the HTTP connection had accepted
-  — the gateway has no resume point (guide 10, *not built*).
+  — the gateway has no resume point (guide 10, *not built*). **Review round** (#613's adversarial review): `max_clock_drift_ms
+  = 0` means no drift bound for the envelope too (no future bound; the age bound is 300 s alone —
+  `a_zero_drift_bound_bounds_only_the_age`, seen failing first: `left: Err("stale") right: Ok(true)`); two mailbox
+  streams of one kind share one in-flight set, so neither hands out what the other holds, and a dropped stream's
+  un-acknowledged events go to the other (`two_mailbox_streams_for_one_kind_never_hand_out_one_event_twice`, seen failing
+  first: B was handed `AQ==`); the legacy offset is written one below the entry's HLC, so a peer that receives it before
+  the cursor re-delivers rather than skips (`an_offset_that_arrives_before_its_cursor_never_skips_a_sibling`, seen failing
+  first: `ThroughHlc(512)`); a `[[serve]]` name with a `/` is refused at load
+  (`a_serve_name_that_cannot_be_a_prompt_skill_is_refused_at_load`); every `prompts/` key builder (including `a2a.rs` and
+  the LLM provider) goes through one function; both SDKs refuse an `interval_secs`/`lease_secs` past 3600 locally (seen
+  failing first: 4 py, 4 ts); the 300 s window is stated as the gateway's (an in-process caller behind a backlog is
+  refused at dequeue); the bound's "never clamped" narrowed to the two routes it covers.
 
 - **Documentation: a lost electorate voter is restored with its state or retired — never reissued empty.**
   2.32.0's pages said an electorate member could be replaced "under the same identity"; that is unsafe as
