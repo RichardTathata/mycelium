@@ -41,6 +41,15 @@
 #   hid `append`'s `tokio::time::timeout`, worked round then by moving the method, and closed here
 #   with the skip `check-kv-namespaces.sh` took from the adversarial review of #591 (post-360 plan
 #   row J). The planted files in `scripts/test-check-sim-seams.sh` hold each shape.
+#   An attribute on a comma-terminated element — a struct field, an enum variant, a match arm, a
+#   struct-literal field — has neither a `;` nor a body: its skip ends at the `,` (or, for a last
+#   element with none, at the enclosing `}`). Without that, `signal.rs`'s `#[cfg(test)] trim_hook`
+#   field (#602) hid all of production `impl SignalLog` (row J's adversarial review, finding 1).
+#   STILL FAIL-OPEN, stated: a block comment or a string literal that spans lines and holds an
+#   unbalanced `{` or `}` inside a skipped item (the braces are counted per line, and the pieces of a
+#   multi-line literal look like code); a raw string whose interior holds `"#` for a one-hash
+#   delimiter. Each makes a skip end late or never. Block comments and raw strings closed on their own
+#   line are stripped before counting (planted: `skip_block_comment`, `skip_raw_string`).
 #
 #   `use tokio::time;` followed by `time::interval(…)` / `time::sleep(…)` WAS invisible to the
 #   `tokio::time::*` pattern — the same alias gap the `fs as <alias>` handling closes for the
@@ -153,31 +162,39 @@ alias_pattern() {
 # attributes, then its header up to a `;` that ends it (`mod x;`, `use …;`, a `const`) or the `{`
 # that opens its body, which ends at the matching `}` — braces counted at any indentation, with
 # string and char literals and `//` comments stripped first (the shape `check-kv-namespaces.sh`
-# uses). Two earlier versions were wrong in the safe direction: the first skipped "everything after
-# the first `#[cfg(test)]`", and a probe that appended a live `Instant::now` below a test module
-# sailed through; the second ran to the next column-0 `}`, so a one-line `#[cfg(test)] mod x;`, an
-# indented test-only method, or a test module closing its braces on its own line hid the production
-# code after it (2026-10-12, row J: nine files' counts rose when the skip was fixed — see the
-# baseline's history). Each shape is a planted file in `scripts/test-check-sim-seams.sh`, which is
-# the only way these are ever found.
+# uses). Three earlier versions failed open: the first skipped "everything after the first
+# `#[cfg(test)]`", and a probe that appended a live `Instant::now` below a test module sailed through;
+# the second ran to the next column-0 `}`, so a one-line `#[cfg(test)] mod x;`, an indented test-only
+# method, or a test module closing its braces on its own line hid the production code after it (row
+# J, 2026-10-12: of every file scanned, only `src/consensus.rs` moved, 0 -> 5); the third, row J's
+# first cut, ended only at a `;` or a body, so a `#[cfg(test)]` field hid the impl after it
+# (`signal.rs`, 8 -> 11 when fixed). Each shape is a planted file in `scripts/test-check-sim-seams.sh`,
+# which is the only way these are ever found.
 count_in() {
   local file="$1"
   awk '
     function braces(s,   t, o, c) {
       t = s
+      # Raw strings first (`r#"a " {"#` holds a quote the plain-string pattern would pair wrongly),
+      # then plain strings and chars, then block comments closed on this line, then a line comment.
+      gsub(/r#+"([^"]|"[^#])*"#+/, "", t)
       gsub(/"([^"\\]|\\.)*"/, "", t)
       gsub(/\047([^\047\\]|\\.)\047/, "", t)
+      gsub(/\/\*([^*]|\*+[^*\/])*\*+\//, "", t)
       sub(/\/\/.*$/, "", t)
       o = gsub(/\{/, "{", t); c = gsub(/\}/, "}", t)
       opens = o; closes = c
       semi = (t ~ /;[ \t]*$/)
+      comma = (t ~ /,[ \t]*$/)
     }
     # One line of a skipped item: returns once the item has ended.
     function skip_line(s) {
       braces(s)
       if (!started) {
         if (opens > 0) { started = 1; depth = opens - closes; if (depth <= 0) skip = 0; return }
-        if (semi) { skip = 0 }
+        # A field, a variant, a match arm or a struct-literal field ends at its `,` — or, the last
+        # one with no comma, at the enclosing block `}` (the row J review, finding 1).
+        if (semi || comma || closes > opens) { skip = 0 }
         return
       }
       depth += opens - closes

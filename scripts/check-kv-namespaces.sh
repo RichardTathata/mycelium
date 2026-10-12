@@ -59,9 +59,12 @@
 #
 #   WHAT IT CANNOT SEE — stated rather than glossed. A prefix assembled from pieces (`format!("{a}/{b}")`, a
 #   literal built with `concat!` or `+`), a key literal held in a `let` and passed later, a call whose literal
-#   sits two or more lines below the call, and a brace inside a raw string (`r#"{"#`) of a test item, which can
-#   end the skip early or late. It does not parse Rust; it closes the way this
-#   mistake has actually been made five times — a named constant or a format! key with no row.
+#   sits two or more lines below the call, and — inside a skipped test item — a block comment or string literal
+#   that spans lines and holds an unbalanced `{` or `}` (braces are counted per line), or a raw string whose
+#   interior holds `"#` for a one-hash delimiter; each can end the skip early or late. Block comments and raw
+#   strings closed on their own line are stripped first, and a `#[cfg(test)]` on a field, variant, match arm or
+#   struct-literal field ends at its `,` (row J review, findings 1-3; planted). It does not parse Rust; it
+#   closes the way this mistake has actually been made five times — a named constant or a format! key with no row.
 #
 #   THE ALLOW-LIST — `scripts/kv-namespaces-nonkeys.txt`, one entry per line, `<literal head>  # <reason>`.
 #   An entry admits every literal that starts with it. Each entry needs a reason; an entry that admits
@@ -144,6 +147,44 @@ pub const PLANTED_SLICE: &[&str] = &[
 // (finding 4).
 pub fn planted_multirow() -> String { format!("consensus/zforged/{}", 1) }
 pub const PLANTED_GOVERN: &str = "sys/govern/zanything";
+// A test-only field, variant, match arm and struct-literal field end at their `,` (row J review, findings
+// 1-2: a `#[cfg(test)]` field in signal.rs hid the impl after it from the seam gate, and this filter too).
+pub struct PlantedField {
+    #[cfg(test)]
+    hook: u8,
+}
+pub const PLANTED_AFTER_FIELD: &str = "zz-after-field/";
+pub enum PlantedEnum {
+    #[cfg(test)]
+    Probe,
+    Live,
+}
+pub const PLANTED_AFTER_VARIANT: &str = "zz-after-variant/";
+pub fn planted_arm(x: u8) -> String {
+    match x {
+        #[cfg(test)]
+        0 => String::new(),
+        _ => format!("zz-after-arm/{x}"),
+    }
+}
+pub fn planted_literal() -> PlantedLit {
+    PlantedLit {
+        #[cfg(test)]
+        hook: 0,
+        key: format!("zz-after-literal-field/{}", 1),
+    }
+}
+// A brace inside a block comment or a raw string with an interior quote is not code (finding 3).
+#[cfg(test)]
+mod planted_comment {
+    /* { */
+}
+pub const PLANTED_AFTER_COMMENT: &str = "zz-after-comment/";
+#[cfg(test)]
+mod planted_raw {
+    const R: &str = r#"a " {"#;
+}
+pub const PLANTED_AFTER_RAW: &str = "zz-after-raw/";
 RS
   printf '%s\n' 'pub fn planted_call(kv: &KvHandle) { kv.set("zz-planted-call/k", vec![]); }' \
     >> "$scratch/src/agent/intent.rs"
@@ -161,7 +202,9 @@ RS
   wants=('"zz-planted-const/"' '"sys/zz-planted-sys/{x}"' '"zz-planted-nextline/{x}"' '"zz-planted-call/k"'
          'sys/config/' 'STALE zz-stale-entry/' 'NO REASON zz-noreason/'
          '"zz-after-oneline/"' '"zz-after-indented/{}"' '"zz-planted-array/"' '"sys/zz-planted-array-sys/"'
-         '"zz-planted-slice/"' '"consensus/zforged/{}"' '"sys/govern/zanything"')
+         '"zz-planted-slice/"' '"consensus/zforged/{}"' '"sys/govern/zanything"'
+         '"zz-after-field/"' '"zz-after-variant/"' '"zz-after-arm/{x}"' '"zz-after-literal-field/{}"'
+         '"zz-after-comment/"' '"zz-after-raw/"')
   for want in "${wants[@]}"; do
     if ! printf '%s\n' "$out" | grep -qF -- "$want"; then
       echo "self-test FAIL: the planted tree's output does not name $want"; fails=1
@@ -202,19 +245,26 @@ LIST
 PROD_FILTER='
   function braces(s,   t, o, c) {
     t = s
+    # Raw strings first (a quote inside `r#"…"#` would pair wrongly), then plain strings and chars,
+    # then block comments closed on this line, then a line comment.
+    gsub(/r#+"([^"]|"[^#])*"#+/, "", t)
     gsub(/"([^"\\]|\\.)*"/, "", t)
     gsub(/\047([^\047\\]|\\.)\047/, "", t)
+    gsub(/\/\*([^*]|\*+[^*\/])*\*+\//, "", t)
     sub(/\/\/.*$/, "", t)
     o = gsub(/\{/, "{", t); c = gsub(/\}/, "}", t)
     opens = o; closes = c
     semi = (t ~ /;[ \t]*$/)
+    comma = (t ~ /,[ \t]*$/)
   }
   # One line of a skipped item: returns once the item has ended.
   function skip_line(s) {
     braces(s)
     if (!started) {
       if (opens > 0) { started = 1; depth = opens - closes; if (depth <= 0) skip = 0; return }
-      if (semi) { skip = 0 }
+      # A field, a variant, a match arm or a struct-literal field ends at its `,` — or, the last one
+      # with no comma, at the enclosing block `}` (the row J review, findings 1-2).
+      if (semi || comma || closes > opens) { skip = 0 }
       return
     }
     depth += opens - closes

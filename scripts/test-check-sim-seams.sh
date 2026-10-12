@@ -33,15 +33,31 @@ plant self_alias       $'use tokio::time::{self as t, Duration};\nfn f() { let _
 plant self_alias_lines $'use tokio::time::{\n    self as t,\n    Duration,\n};\nfn f() { let _ = t::Instant::now(); }' 2
 plant pub_crate_use    $'pub(crate) use tokio::{time as tt};\nfn f() { let _ = tt::sleep(d); }'
 # The test-item skip (post-360 row J, 2026-10-12; the shape check-kv-namespaces.sh took from #591's
-# review). Until then the skip ran from a `#[cfg(test)]` to the next column-0 `}`, so each of these
-# hid the production call after it (the old gate counted 0, 1, 0, 0): a one-line `mod x;`, a
-# test-only method inside an `impl` (the live case — `src/consensus.rs`'s `shrink_acceptor_for_test`
-# hid five timer sites from #600 until this fix), a test module closing its braces on its own line,
-# and a `#[cfg(test)]` followed by further attributes.
+# review). Until then the skip ran from a `#[cfg(test)]` to the next column-0 `}`, so the first three
+# hid the production call after them (the old gate counted 0, 1, 0): a one-line `mod x;`, a test-only
+# method inside an `impl` (the live case — `src/consensus.rs`'s `shrink_acceptor_for_test` hid five
+# timer sites from #600 until this fix), a test module closing its braces on its own line.
+# `skip_more_attrs` passes on every version (a regression guard, not a found bug) and
+# `skip_whole_module` is the control: a test module is still skipped whole.
 plant skip_oneline_mod  $'#[cfg(test)]\nmod tests;\npub fn production() { let _ = std::time::Instant::now(); }'
 plant skip_indented_fn  $'pub struct S;\nimpl S {\n    #[cfg(test)]\n    fn test_only(&self) { let _ = std::time::Instant::now(); }\n    pub fn production(&self) { let _ = std::time::Instant::now(); }\n}\npub fn after_impl() { let _ = std::time::Instant::now(); }' 2
 plant skip_oneline_body $'#[cfg(all(test, feature = "x"))]\nmod tests { fn t() { let _ = std::time::Instant::now(); } }\npub fn production() { let _ = std::time::Instant::now(); }'
 plant skip_more_attrs   $'#[cfg(test)]\n#[allow(dead_code)]\nmod tests {\n    fn t() { let _ = std::time::Instant::now(); }\n}\npub fn production() { let _ = std::time::Instant::now(); }'
 # ...and a test module is still skipped whole, braces inside its string literals notwithstanding.
 plant skip_whole_module $'#[cfg(test)]\nmod tests {\n    const S: &str = "}";\n    fn t() { let _ = std::time::Instant::now(); }\n}' 0
+# A `#[cfg(test)]` on a comma-terminated element — a struct field, an enum variant, a match arm, a
+# struct-literal field — has neither a `;` nor a body, so a skip that ends only at those ran on into
+# the next item (row J's adversarial review, finding 1: `mycelium-core/src/signal.rs`'s `#[cfg(test)]
+# trim_hook` field, #602, hid all of production `impl SignalLog` — three `Instant::now` sites). A last
+# field with no comma ends at the enclosing `}`.
+plant skip_field          $'pub struct S {\n    #[cfg(test)]\n    hook: u8,\n}\nimpl S { pub fn f(&self) { let _ = std::time::Instant::now(); } }'
+plant skip_last_field     $'pub struct S {\n    #[cfg(test)]\n    hook: u8\n}\npub fn f() { let _ = std::time::Instant::now(); }'
+plant skip_enum_variant   $'pub enum E {\n    #[cfg(test)]\n    Probe,\n    Live,\n}\npub fn f() { let _ = std::time::Instant::now(); }'
+plant skip_match_arm      $'fn f(x: u8) -> u8 {\n    match x {\n        #[cfg(test)]\n        0 => 0,\n        _ => { let _ = std::time::Instant::now(); 1 }\n    }\n}'
+plant skip_literal_field  $'fn f() -> S {\n    S {\n        #[cfg(test)]\n        hook: 0,\n        at: std::time::Instant::now(),\n    }\n}'
+# Brace counting must not see a brace inside a block comment or a raw string with an interior quote
+# (finding 3), or a test module's skip ends early and swallows production code — or, as here, never
+# ends at all.
+plant skip_block_comment  $'#[cfg(test)]\nmod tests {\n    /* { */\n    fn t() {}\n}\npub fn f() { let _ = std::time::Instant::now(); }'
+plant skip_raw_string     $'#[cfg(test)]\nmod tests {\n    const R: &str = r#"a " {"#;\n}\npub fn f() { let _ = std::time::Instant::now(); }'
 exit $fail

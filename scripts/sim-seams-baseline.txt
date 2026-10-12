@@ -12,7 +12,7 @@
 14 mycelium-core/src/persistence.rs
 2 mycelium-core/src/receipt.rs
 2 mycelium-core/src/schema_handle.rs
-8 mycelium-core/src/signal.rs
+11 mycelium-core/src/signal.rs
 3 mycelium-core/src/stall.rs
 2 mycelium-core/src/swim_membership.rs
 10 mycelium-core/src/swim.rs
