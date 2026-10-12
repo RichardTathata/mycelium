@@ -55,6 +55,7 @@ the notice.
 | 32 | an accept path, a writer and a signal log with no bound | 2.32.0 | `handshake_timeout_ms`, `inbound_idle_timeout_secs`, `peer_read_stall_timeout_ms`, `peer_write_stall_timeout_ms`, `peer_min_rate_bytes_per_sec`, `max_connections_per_source` | Partly — `GossipConfig`, `SystemStats` and `CoreCtx` gain fields; `WriterTiming` replaces a `Duration` in three `writer` functions; `validate()` refuses an idle timeout at or below the writer's |
 | 33 | a permanent `elect_leader`; a lock or leadership read from the three legacy keys | 2.32.0 (legacy keys still written; they stop at a later, governed MINOR) | renew by calling again, or `elect_leader_with(group, LeaderTerm::Permanent)`; `release_leadership`; upgrade every node | No — a leadership lapses after 30 s; an upgraded proposer times out until a quorum is upgraded |
 | 34 | "declare a new group and move the work yourself" as the way to change an electorate's members; a default that cannot move | unreleased (after 2.32.0) | `declare_successor_electorate` → `retire_electorate` → `complete_migration` (`POST /gateway/govern/electorate` with `predecessors` / `retire_to` / `complete`; `drop_predecessor` for one that never retires) | Partly — `ElectorateDecl` and `Retirement` gained fields, `ElectorateError` gained `Retired` (`#[non_exhaustive]`; a `_` arm must fail closed); otherwise refusals by name |
+| 36 | an award without a close; an offer, report or assessment read from another requirement's stream; `award_of_verified` against the writable head; an unbounded blob store; any string as a run id | unreleased (after 2.32.0; `mycelium-reason` 0.9.0) | `close(requirement, key, now_ms)` then award; `award_of_verified(requirement, declarer, resolve)`; `open_with_quota`; one bounded segment per run id | Partly — `TraceRecorder::new` returns `Result`, `award_of_verified` gained a parameter, `CommitmentRefusal` gained variants (`#[non_exhaustive]`); otherwise refusals by name (`NotClosed`, 507, 400) |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -913,19 +914,23 @@ answers 200, and the 413 `too_large` per-blob ceiling is unchanged. A caller-cho
 (non-empty, ≤ 128 bytes, ASCII letters, digits and `- _ . : @ +`, not `.` or `..`): `GET /gateway/reason/trace/{run_id}`
 and `POST /gateway/reason/route` answer **400 `bad_run_id`**, the façade `400 invalid_request_error` / `bad_run_id`
 (`param: "run_id"`); `TraceRecorder::new` returns `Result<_, RunIdError>`; `replay` reads only the key shape a recorder
-writes. `mycelium-commitment` (on the 2.x train): the deadline is judged on the **offer's log position** (the HLC the
-stream stamped, as wall-clock ms), not the offerer's `offered_at_ms`; `award_of` reports only a record naming its
-requirement and operation; `award_of_verified(requirement, resolve)` reports only an award the announcement's declarer
-signed.
+writes; run ids are validated, runs are not owned. `mycelium-commitment` (on the 2.x train): the declarer **closes**
+a requirement (`close(requirement, key, now_ms)`, at or after its deadline) and an award counts only the offers the
+close names — **no award before a close** (`NotClosed`); offers, reports and assessments are read only for their own
+requirement; `award_of` reports only a record naming its requirement and operation; `award_of_verified(requirement,
+declarer, resolve)` takes the declarer the caller trusts; `plan_award_verified` and
+`commit_award_linearizable_verified` are the checked path.
 
-**Will the compiler tell me?** For `TraceRecorder::new` yes (a `Result` where a value was). The rest is runtime: a
-`deadline_ms` expressed on a test clock (`100`) is now **long past** on the log's clock, so every offer is late —
-express deadlines as wall-clock ms on the mesh's clock; a 2.32.0 client sending a run id with `/` gets 400 where it
-got a trace of another run; a client that stored past 1 GiB gets 507 where it got 200.
+**Will the compiler tell me?** For `TraceRecorder::new` yes (a `Result` where a value was), and for
+`award_of_verified` (a `declarer` parameter). `CommitmentRefusal` gained variants (`#[non_exhaustive]`; a `_` arm must
+fail closed). The rest is runtime: an award without a close is refused `NotClosed`; a 2.32.0 client sending a run id
+with `/` gets 400 where it got a trace of another run; a client that stored past 1 GiB gets 507 where it got 200.
 
 **Migration.** Open the store with the quota your node needs (`BLOB_QUOTA_BYTES` on `reason_node`; a store holding
 more than its quota at open keeps every file and refuses only *new* puts). Run ids: fold `/` and whitespace at the
-client (`reheal_node` folds a model name's `/`). Deadlines: `now_ms + window` from the same clock the node's HLC reads.
+client (`reheal_node` folds a model name's `/`). Awards: the declarer calls `close(requirement, key, now_ms)` once
+the deadline has passed on its clock, then awards as before; a declarer with keys signs the close and plans with
+`plan_award_verified(requirement, rule, now_ms, declarer, resolve)`.
 The Python SDK and the LangGraph checkpointer are unchanged — a 507 or 400 surfaces as `httpx.HTTPStatusError` with
 the route's body.
 

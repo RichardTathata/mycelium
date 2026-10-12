@@ -179,7 +179,8 @@ client.chat.completions.create(model="llama3", messages=[{"role": "user", "conte
 and each attempt are recorded to the event-log overlay (`reason/{run_id}/{node}`, one
 substream per writer so same-millisecond writes from two nodes don't collide). A run id is **one
 bounded segment** — ≤ 128 bytes of ASCII letters, digits and `- _ . : @ +` — and every door refuses
-another with `400 bad_run_id` before routing or reading (a `/` reached another run's trace). `trace(run_id)`
+another with `400 bad_run_id` before routing or reading (a `/` reached another run's trace). Run ids are
+validated, **not owned**: any caller allowed to route can record into any valid run id. `trace(run_id)`
 replays and narrates it — a causal, replayable account of *why the fleet reasoned as it did*,
 readable from any node. Under the `compliance` feature the running trace hash can be anchored
 into the tamper-evident WS2 audit chain.

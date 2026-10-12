@@ -446,29 +446,44 @@ Each promise and what delivers it:
 **H — Companions (#TBD; read against the merged code).** The review's claims, each sized against the code:
 
 **H — Companions (#609; read against the merged code).** The review's claims, each sized against the code:
-- *The commitment deadline judged on the log's clock, not the offerer's* — **held as stated**: `plan_award_from`
-  filtered on `o.offered_at_ms <= deadline_ms`, a field the offerer writes (`mycelium-commitment/src/lib.rs`, the
-  `eligible` filter). Now `mycelium::hlc::physical_ms(*hlc) <= announcement.deadline_ms` over the offer's log
-  position — minted by `KvHandle::append` (`mycelium-core/src/kv_handle.rs`, `self.ctx.hlc.tick()`), monotone, never
-  below what the offerer's node observed; residual stated in the crate doc (the offerer's node's clock within
-  `max_clock_drift_ms`). Test `an_offers_deadline_is_judged_on_the_logs_clock_not_the_offerers_stamp` (both halves:
-  a backdated late offer refused, a future-stamped timely one awarded), seen failing first.
-- *`award_of` verifies before it reports* — **held, in two parts**. The read decoded whatever sat at
-  `cn/{r}/award` (consensus slot, then KV head) and returned it; `plan_award_from` then refused `AlreadyAwarded` on
-  it. Now `award_of` reports only a record whose `requirement` and `operation_id` name this requirement
-  (`award_of_reports_only_a_record_that_names_this_requirement_and_its_operation`, seen failing first: r1's award
-  copied to r2's slot was r2's award), and `award_of_verified(requirement, resolve)` reports only an award whose
-  declarer is the announcement's and whose signature verifies under that declarer's key
-  (`award_of_verified_reports_no_award_the_announcements_declarer_did_not_sign`: unsigned, mallory-signed naming the
-  hub, mallory-signed naming mallory — none reported; the hub's own — reported; a directory without the hub's key —
-  not). **Not built:** `award_of` cannot verify a signature without a key the crate does not hold, so the unverified
-  read stays (documented *unproven*), as `offers` stays beside `offers_verified`; the announcement head itself is
-  unsigned, so what is proven is *the party that announced accepted this offer* under the crate's standing
-  `require_identity_proofs` caveat.
+- *The commitment deadline judged on the log's clock, not the offerer's* — **held, and the first fix was wrong**.
+  `plan_award_from` filtered on `o.offered_at_ms <= deadline_ms`, a field the offerer writes. #609's first head judged
+  on `hlc::physical_ms` of the offer's log key; the review (comment 6117910561, finding 1) showed that segment is
+  offerer-written too — `kv().set("log/cn/closed/offers/0000000000010000/mallory", …)` won an award a minute late, and
+  the drift clamp applies to `Hlc::observe`, not stored keys. **No clock of the log is offerer-proof, so the promise is
+  delivered as the declarer's close** (`mycelium-commitment/src/lib.rs`: `Close`, `ClosedOffer`, `close`, `close_of`,
+  `verify_close`, `choose_award`): the declarer closes at or after the deadline on its own clock, naming every offer
+  its node holds by log position and SHA-256; an award counts only named offers, and none is made before a close
+  (`NotClosed`). Tests (each first seen failing on 461da69f): `a_backdated_log_key_does_not_make_a_late_offer_a_candidate`
+  (the review's key loses; the offer that arrived before the close wins), `an_award_before_the_requirement_is_closed_is_refused`;
+  and `no_offers_and_late_offers_are_visible_states_not_awards` pins the close's own refusals (before the deadline,
+  not the declarer, closed once). **The residual**: the declarer decides which offers arrived in time — a late close
+  admits late offers, an omitting one excludes; both show in the record and, signed, are attributable. The close is
+  unsigned on the plain path, like the head. Finding 6 (HLC contagion) no longer applies: no HLC decides lateness.
+- *`award_of` verifies before it reports* — **partial, stated**. `award_of` reports only a record whose
+  `requirement` and `operation_id` name this requirement (`award_of_reports_only_a_record_that_names_this_requirement_and_its_operation`,
+  seen failing on 2933073f). It cannot verify a signature without a key, so verification is
+  `award_of_verified(requirement, declarer, resolve)` with the declarer **pinned by the caller** — the first head read
+  it from the writable head and fell in two writes (finding 4;
+  `award_of_verified_checks_the_declarer_the_caller_pins_not_the_writable_head`, seen failing on 461da69f).
+  `plan_award_verified` decides `AlreadyAwarded` only from a verified award, and
+  `commit_award_linearizable_verified` reports a slot holding an unproven award as `UnprovenAwardHolds`
+  (`the_checked_path_needs_a_signed_close_and_is_not_blocked_by_a_forged_award`, new API); a slot holding another
+  requirement's record is `SlotHoldsAnotherRecord`, not `Encoding` (`a_slot_holding_another_requirements_award_says_so`,
+  seen failing on 461da69f). **Not built:** on the unverified path (`award_of`, `plan_award_from`, `award`,
+  `commit_award_linearizable`) **any member that can write `cn/{r}/award` can block an award** — stated in their docs;
+  a linearizable slot a forgery takes first stays taken. Sibling (finding 3): `offers`/`offers_verified`/`reports`/
+  `assessments` read only records naming their requirement
+  (`an_offer_report_or_assessment_naming_another_requirement_is_not_read_as_this_ones`, seen failing on 461da69f).
 - *The reason blob store bounded* — **narrower than stated**: a per-blob ceiling existed (`MAX_BLOB_BYTES`, 8 MiB, at
   `FsBlobStore::put` and the gateway's 413); the **total** did not. `mycelium-reason/src/blob.rs`:
-  `DEFAULT_BLOB_QUOTA_BYTES` (1 GiB), `open_with_quota`, `quota_bytes`/`used_bytes`, the atomic reservation before
-  the write (`reserve`/`release`), `ErrorKind::QuotaExceeded`; `src/http.rs` `gw_blob_put` → 507 `quota_exceeded`.
+  `DEFAULT_BLOB_QUOTA_BYTES` (1 GiB), `open_with_quota`, `quota_bytes`/`used_bytes`, the reservation **per digest**
+  before the write (`begin_write`/`end_write` over `account`, lock-order row 58 — the first head reserved per put and
+  grew N×len under racing puts of one blob, finding 2: `concurrent_puts_of_one_digest_reserve_it_once` seen failing
+  3/3 on 461da69f, the account at 38.8–50.9 MB against 16.8 MB on disk), released on every failure path
+  (`a_failed_write_releases_its_reservation` — a pin; it held on 461da69f too), `.tmp-*` removed at open
+  (`an_abandoned_temp_file_is_removed_at_open`, seen failing), `ErrorKind::QuotaExceeded`; `src/http.rs`
+  `gw_blob_put` → 507 `quota_exceeded`. A file added or deleted by hand is credited at the next open (stated).
   Doors enumerated (`grep -rn "\.put(" mycelium-reason/src`): the gateway PUT, `MeshBlobStore::put`, the mesh
   write-back in `MeshBlobStore::fetch` (logged, bytes still returned). Tests
   `a_store_refuses_a_put_past_its_quota_and_counts_what_it_holds` (unit),
@@ -485,7 +500,9 @@ Each promise and what delivers it:
   failing first). Now `validate_run_id` at every door (400 `bad_run_id`; `TraceRecorder::new` → `Result`), and
   `replay` reads only `{node}/{hlc}/{salt}` under the run, so a raw append under a deeper id (a member bypassing
   the recorder) is skipped — the read side closed as well as the write side. A `..` segment is refused at the door
-  (proved with a raw request: a conforming client resolves `%2E%2E` before sending).
+  (proved with a raw request: a conforming client resolves `%2E%2E` before sending). **Validated, not owned**
+  (finding 8): any `llm:invoke` caller can record into another tenant's valid run id — stated in the docs, not in this
+  row's promise.
 
 ## 4 · Decisions taken
 

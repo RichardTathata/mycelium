@@ -253,7 +253,10 @@ Nothing to persist: routing state is capability pheromone + **node-local** in-fl
   evicts: the files are named by content address, so what to drop is yours. A **`run_id`** is one bounded segment
   (≤ 128 bytes, ASCII letters, digits, `- _ . : @ +`): `GET trace/{run_id}` and `POST route` answer **400
   `bad_run_id`**, the façade `400 invalid_request_error`/`bad_run_id` — a run id with `/` used to write into another
-  run's trace, which `anchor` then sealed.
+  run's trace, which `anchor` then sealed. Run ids are validated, **runs are not owned**: any caller holding
+  `llm:invoke` can record into any valid run id, so a trace is a record of what was written under a name, not of who
+  owns it. The quota is accounted **per digest** (racing puts of one blob count it once); a file added or deleted by
+  hand is credited at the next open; `.tmp-*` files are removed at open as abandoned — one store per directory.
 - **What is exposed** (all under `/gateway/reason/`, all behind the gateway bearer since 2026-09-04):
   `POST route` and the **OpenAI-compatible façade** `POST v1/chat/completions` + `GET v1/models`
   (scope `llm:invoke` / `llm:read`) — point any OpenAI client at `http://node:HTTP_PORT/gateway/reason/v1`;
@@ -302,12 +305,15 @@ an absent section.
 - **The award is receipt-bearing.** Written with `set_with_receipt` under a stable operation
   identity, so its durability is whatever the receipt says and a retry is recognisable. One award per
   requirement; a second is refused and the first is never overwritten.
-- **The deadline is the mesh's clock (post-360 row H).** `deadline_ms` is compared against the offer's log
-  position — the HLC the stream stamped at append, as wall-clock ms — never the offerer's own stamp; express it as
-  `now + window` on the node's clock. An offerer's node clock within `max_clock_drift_ms` is the residual.
-- **Read an award with the check you need.** `award_of` reports only a record naming its requirement and
-  operation; `award_of_verified(requirement, resolve)` only one the announcement's declarer signed, under the key
-  your directory gives for that declarer.
+- **The declarer closes; then it awards (post-360 row H).** No stamp an offerer writes decides lateness — not
+  `offered_at_ms`, not the HLC in its log key (both are offerer-written). At or after `deadline_ms` on its own clock
+  the declarer calls `close(requirement, key, now_ms)`, recording at `cn/{requirement}/close` every offer its node
+  holds; an award counts only those and is refused `NotClosed` before a close. The residual is the declarer's: a late
+  or partial close shows in the record (`closed_at_ms`, the names) and, signed, is attributable.
+- **Read with the check you need.** Offers, reports and assessments are read only for their own requirement.
+  `award_of` reports only a record naming its requirement and operation; `award_of_verified(requirement, declarer,
+  resolve)` only one the declarer *you* name signed; `plan_award_verified` / `commit_award_linearizable_verified` are
+  the checked path. On the unverified path any member that can write `cn/{requirement}/award` can block an award.
 - **An unknown award is not "no award".** A linearizable round that reached no commit answers
   `AwardUnknown`; retry, and it resolves as `AlreadyAwarded` or a fresh commit.
 - **Retention is yours.** The log streams grow with traffic and the crate never prunes them. The

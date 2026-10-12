@@ -61,19 +61,19 @@ Design: `docs/plans/v3-contracts-axis.md` §6.9 (CN1–CN3, D39). Key facts:
   vehicle rather than a node, the directory is the operator's and the mesh knows nothing about it.
   And nothing here stops a member *writing* the forged offer: it stops it being awarded, which is
   detection-then-refusal at the decision point, not prevention at the medium.
-- **The deadline is judged on the log's clock, since 2026-10-12 (post-360 row H).** `offered_at_ms` is a field the
-  offerer writes into its own record, and the award filtered on it — so an offer appended after the deadline with a
-  backdated stamp was eligible and one appended in time with a future stamp was not; the offerer decided whether its
-  offer was late. `plan_award_from` now compares `hlc::physical_ms` of the offer's **log position** — the HLC
-  `KvHandle::append` minted, monotone, never below anything the offerer's node had observed (so a late offer cannot be
-  backdated past the announcement's arrival) — against `deadline_ms`, which is therefore a wall-clock value on the
-  mesh's clock. **Residual:** that HLC is the offerer's *node's* clock within `GossipConfig::max_clock_drift_ms`;
-  the free field is closed, the drift bound is not tightened.
-- **An award read back is checked like an offer (row H).** `award_of` reports only a record naming its requirement
-  and the operation `cn/{req}/award` — a record copied from another requirement's slot was reported as this one's
-  and blocked its award as `AlreadyAwarded`. `award_of_verified(requirement, resolve)` reports only an award whose
-  declarer is the announcement's and whose signature verifies under that declarer's key — the mirror of
-  `offers_verified`, and unsigned stays *unproven*, reported by the unverified read and by nothing else.
+- **The declarer's close decides which offers were in time, since 2026-10-12 (post-360 row H, #609).** No timestamp
+  an offerer writes can: `offered_at_ms` is a field of its record, and the HLC in an offer's log key is a key segment
+  any member can `set` (#609's first head judged on that and its review backdated one to `0000000000010000`). The
+  declarer `close`s at or after `deadline_ms` on its own clock, writing a `Close` at `cn/{req}/close` that names every
+  offer its node holds by log position and SHA-256; an award counts only named offers and is refused `NotClosed`
+  before a close. **Residual:** the declarer decides — a late or partial close is visible in the record and, signed,
+  attributable. The lesson: *a key segment is data, not a clock*.
+- **Reads are checked like offers (row H).** Offers, reports and assessments are read only when they name the
+  requirement whose stream holds them (a signed offer copied from another stream verified there). `award_of` reports
+  only a record naming its requirement and operation; `award_of_verified(requirement, declarer, resolve)` takes the
+  declarer **the caller pins** — a check against the writable head fell in two writes. `plan_award_verified` and
+  `commit_award_linearizable_verified` are the checked path; on the unverified path any member that can write the
+  award slot can block an award, and the docs say so.
 - **CN3 is the item-5 join.** The acceptor's own mandate is checked **before any write**; a stale
   holder's award is `Superseded { installed, presented }`. `MandateNotTheAcceptors` is separate:
   presenting somebody else's valid mandate is a different mistake from presenting your own expired
@@ -91,9 +91,14 @@ Design: `docs/plans/v3-contracts-axis.md` §6.9 (CN1–CN3, D39). Key facts:
 | **a forged offer is not a candidate when the declarer checks** — and *is* one when it does not | `a_forged_offer_is_not_a_candidate_when_the_declarer_checks_provenance` |
 | a signed award proves its declarer; an unsigned one proves nothing | `a_signed_award_proves_its_declarer_and_an_unsigned_one_proves_nothing` |
 | **CN2** — a whole-node recording replays deterministically | `a_whole_node_recording_of_a_linearizable_award_replays_under_the_scheduler_seam` |
-| the deadline is judged on the log's clock, not the offerer's stamp (row H) | `an_offers_deadline_is_judged_on_the_logs_clock_not_the_offerers_stamp` |
+| a backdated log key does not make a late offer a candidate; the close decides (row H) | `a_backdated_log_key_does_not_make_a_late_offer_a_candidate` |
+| no award before the close; only the declarer closes, at or after the deadline, once (row H) | `an_award_before_the_requirement_is_closed_is_refused`, `no_offers_and_late_offers_are_visible_states_not_awards` |
+| offers, reports and assessments are read only for their own requirement (row H) | `an_offer_report_or_assessment_naming_another_requirement_is_not_read_as_this_ones` |
+| a slot holding another requirement's award says so (row H) | `a_slot_holding_another_requirements_award_says_so` |
+| the checked path needs a signed close and is not blocked by a forged award (row H) | `the_checked_path_needs_a_signed_close_and_is_not_blocked_by_a_forged_award` |
+| `award_of_verified` checks the declarer the caller pins (row H) | `award_of_verified_checks_the_declarer_the_caller_pins_not_the_writable_head` |
 | `award_of` reports only a record naming its requirement and operation (row H) | `award_of_reports_only_a_record_that_names_this_requirement_and_its_operation` |
-| `award_of_verified` reports only an award the announcer signed (row H) | `award_of_verified_reports_no_award_the_announcements_declarer_did_not_sign` |
+| `award_of_verified` reports only an award the pinned declarer signed (row H) | `award_of_verified_reports_no_award_the_pinned_declarer_did_not_sign` |
 
 The third row is the honest one: the plain award path **does** admit two winners under a race, and
 the test asserts that rather than hiding it. Reach for the linearizable form when that matters.

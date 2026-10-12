@@ -11,25 +11,35 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **Companions: the commitment deadline on the log's clock, an award that is checked before it is reported, a
-  bounded blob store, a validated run id** (post-360 hardening row H, #609). `mycelium-commitment`: an offer's
-  deadline was judged on `offered_at_ms` — a field the **offerer** writes into its own record — so an offer appended
-  after the deadline with a backdated stamp was eligible and one appended in time with a future stamp was not; the
-  offerer chose whether its offer was late. `plan_award_from` now judges on the **log's clock**: `hlc::physical_ms`
-  of the offer's log position, minted by the substrate at append, monotone and never below anything the offerer's
-  node had observed (the residual, stated in the crate doc: it is the offerer's *node's* clock within
-  `max_clock_drift_ms`). `award_of` reports only a record naming its requirement and operation `cn/{r}/award` — a
-  record copied from another requirement's slot used to be reported as this one's and blocked its award as
-  `AlreadyAwarded` — and the new `award_of_verified(requirement, resolve)` reports an award only when the
-  announcement's declarer signed it (unsigned, signed under the writer's own key, or naming the writer as declarer:
-  not reported), the mirror of `offers_verified`. Deadlines are now wall-clock values on the mesh's clock (the crate's
-  tests and example already were). Seen failing first: `an_offers_deadline_is_judged_on_the_logs_clock_not_the_offerers_stamp`
-  (a backdated late offer awarded), `award_of_reports_only_a_record_that_names_this_requirement_and_its_operation`
-  (r1's award reported as r2's); `award_of_verified_reports_no_award_the_announcements_declarer_did_not_sign` as a
-  missing method. `mycelium-reason` **0.9.0** (its own changelog): the blob store bounded (`DEFAULT_BLOB_QUOTA_BYTES`
-  1 GiB, `open_with_quota`, 507 `quota_exceeded` at the gateway) and a caller-chosen `run_id` validated as one bounded
-  segment at every door (`validate_run_id`, `TraceRecorder::new` → `Result`, 400 `bad_run_id`) — a run id with `/`
-  wrote into another run's trace, which `anchor` then sealed. `docs/guide/deprecations.md` §36.
+- **Companions: the commitment deadline decided by the declarer's close, an award checked before it is reported,
+  offers read only for their own requirement, a bounded blob store, a validated run id** (post-360 hardening row H,
+  #609). `mycelium-commitment`: an offer's deadline was judged on `offered_at_ms`, a field the **offerer** writes —
+  so the offerer chose whether its offer was late. The first attempt (this PR's first head) judged on the HLC in the
+  offer's log key instead, and #609's review showed that is offerer-written too: any member can
+  `kv().set("log/cn/{r}/offers/0000000000010000/…")` and win an award a minute after the deadline; the "drift bound"
+  residual it stated was not a bound (the clamp applies to `Hlc::observe`, not to stored keys). Now no timestamp an offerer can write decides lateness: the **declarer closes** the requirement (`close(requirement, key, now_ms)`, at or after `deadline_ms` on its own clock), writing a `Close` at `cn/{r}/close` that names every offer its node holds by log position and SHA-256; an award counts only the offers the close names and is refused `NotClosed` before one exists.
+  The residual, stated: the declarer decides which offers arrived in time — a late or partial close is visible in the
+  close record (`closed_at_ms`, the names) and, signed, attributable. `offers()`/`offers_verified()`/`reports()`/
+  `assessments()` read only records naming their own requirement (a signed offer copied from another requirement's
+  stream verified there). `award_of` reports only a record naming its requirement and operation;
+  `award_of_verified(requirement, declarer, resolve)` only one the declarer **the caller pins** signed (a check
+  against the writable head fell in two writes); `plan_award_verified` is the checked path — a close the pinned
+  declarer signed, verified named offers, and only a verified award as `AlreadyAwarded` — while the unverified path is
+  documented as letting any member block an award; a linearizable slot holding another requirement's record is
+  `SlotHoldsAnotherRecord`, not `Encoding("…did not decode")`, and on the checked path one holding an unproven award is
+  `UnprovenAwardHolds`. New refusals `NotClosed`, `CloseUnproven`, `NotTheDeclarer`, `BeforeDeadline`,
+  `AlreadyClosed` (the enum is `#[non_exhaustive]`). Seen failing first (on 461da69f, the review's PoCs):
+  `a_backdated_log_key_does_not_make_a_late_offer_a_candidate` (`driver-a`, the backdated offer, awarded),
+  `an_offer_report_or_assessment_naming_another_requirement_is_not_read_as_this_ones`,
+  `award_of_verified_checks_the_declarer_the_caller_pins_not_the_writable_head`,
+  `a_slot_holding_another_requirements_award_says_so` (`Encoding`), `an_award_before_the_requirement_is_closed_is_refused`;
+  and on 2933073f `award_of_reports_only_a_record_that_names_this_requirement_and_its_operation`.
+  `mycelium-reason` **0.9.0** (its own changelog): the blob store bounded **per digest** (`DEFAULT_BLOB_QUOTA_BYTES`
+  1 GiB, `open_with_quota`, 507 `quota_exceeded`; racing puts of one blob count it once — the first head's per-put
+  reservation grew N×len, review finding 2) and a caller-chosen `run_id` validated as one bounded segment at every
+  door (`validate_run_id`, `TraceRecorder::new` → `Result`, 400 `bad_run_id`) — a run id with `/` wrote into another
+  run's trace, which `anchor` then sealed. Run ids are validated; runs are **not owned**. `docs/guide/deprecations.md`
+  §36.
 - **An electorate member that restarts without its promises is detected: persistence required, an empty store
   warned, a forgotten promise withholds the slot** (`src/agent/acceptor_guard.rs`; the code half of #604's
   hazard — detection by name, never a guard on a Layer I write). A node that would adopt, declare, propose or
