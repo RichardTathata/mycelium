@@ -303,10 +303,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     removal check **fails closed** on a certificate with no Ed25519 key. The window counters are **per node**
     (`TransportBounds`) and on `GET /stats` with `kv_signer_mismatch`; the guarantee report gains
     `mesh.signed_writes` (not required by `secure-single-domain` this release); `start()` warns when
-    `kv_require_signed_frames` is set without `[tls]`. A node's own identity record (`sys/identity{,-proof,-signed}/{sender}`)
-    is exempt from the refusal: it travels unsigned by design and carries its own proof. Seen failing first:
+    `kv_require_signed_frames` is set without `[tls]`. **The second review** found the first identity exemption (any
+    identity frame whose `sender` named its key) exploitable — `sender` is the writer's choice: impersonation with proofs
+    off and silencing in both postures, reproduced on three nodes. Now the only exempt unsigned frame is a sealed identity
+    record that authenticates itself (proof under its own key, chained to the keys held; counted as
+    `kv_identity_exempt_frames`); a node publishes it first, unsigned, then its legacy pair signed; and an identity
+    tombstone removes no keys (it silenced a member, signed or not). The dispatch gate skips only an inline
+    `#[cfg(test)] mod x { … }` (it stopped at an out-of-line `mod x;`), and both per-frame warnings are rate-limited.
+    Seen failing first on 59d86368: `an_unsigned_identity_forgery_cannot_make_a_member_sign_as_another`,
+    `an_identity_tombstone_does_not_erase_a_members_keys` (proofs off and on),
+    `only_a_self_authenticating_sealed_identity_is_exempt_from_the_refusal`, and the gate's fourth plant. Seen failing first:
     `a_signed_frame_whose_signer_is_not_its_sender_is_refused`, `quorum_evidence_reaches_a_peer_that_requires_signed_frames`,
-    `a_certificate_without_an_ed25519_key_is_refused_by_the_removal_check`, `a_nodes_own_identity_record_is_not_refused_as_unsigned`, and
+    `a_certificate_without_an_ed25519_key_is_refused_by_the_removal_check`, and
     `a_gateway_kv_delete_reaches_a_peer_that_requires_signed_frames` with that site toggled bare. **The opt-in refusal is
     bypassable through anti-entropy** (a `StateResponse` entry carries no author), and the unconditional refusal is
     plan row F2.

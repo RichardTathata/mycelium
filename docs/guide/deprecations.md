@@ -939,14 +939,23 @@ accepts and what a signature is over.
   the frame is dropped and counted (`kv_unsigned_frames_refused`, `outcome="refused"`). The guarantee report
   resolves it as `mesh.signed_writes` (`enforced` / `not_configured`); `secure-single-domain` does not require it
   this release. Plan row F2 — the next MINOR — refuses unconditionally. Without `[tls]` the setting is inert and
-  `start()` warns so. **Exempt:** a node's own identity record (`sys/identity{,-proof,-signed}/{sender}`) travels
-  unsigned by design — it is published before the TLS identity is installed, a signed one would be dropped as from
-  an unknown signer by every peer not yet holding the key, and it carries its own proof. **It is bypassable through
+  `start()` warns so. **Exempt:** one unsigned frame only — a sealed identity record
+  (`sys/identity-signed/{n}`, not a tombstone) that authenticates itself: its proof verifies under a key in its own
+  history and, when the receiver already holds keys for `n`, under one of those (counted, `kv_identity_exempt_frames`,
+  and noted at most once a minute per connection). A node publishes it first, unsigned, before its TLS identity is
+  installed — first contact rests on it — and then publishes the legacy `sys/identity/{n}` and proof **signed**. Every
+  other identity frame (a bare record, a proof alone, garbage, a tombstone) is refused under the flag like any
+  unsigned frame. The first cut (#611's first fix round) exempted any identity frame whose `sender` named its key — and
+  `sender` is the writer's to choose; the second review reproduced impersonation and silencing through it. **It is bypassable through
   anti-entropy** (below).
 - **A peer certificate's key is read from its `SubjectPublicKeyInfo`, structurally** (`tls::ed25519_key_from_cert_der`),
   not by scanning the DER for the Ed25519 SPKI prefix. The scan returned the first match anywhere — a serial number,
   a name, an extension — so a node holding the CA key could mint a certificate that anchors as another member and
   passes a removal of its own key. Local; no window.
+- **An identity tombstone removes no keys.** Before, one tombstone of `sys/identity/{n}` — unsigned, or signed by any
+  member as itself — made every receiver's identity watcher drop `n`'s keys, after which `n`'s signed writes were
+  dropped as from an unknown signer. Now a node's keys leave only through membership removal (the ledger) or
+  accumulate through a verified rotation. A node is also found by its sealed record alone, not only by the legacy one.
 - **§23 closes.** The bare identity proof and the bare consensus signature are refused; the two counters are gone.
 
 **Mixed fleet, direction by direction** (the 2.30.0 shape, §21):
@@ -958,7 +967,9 @@ accepts and what a signature is over.
   it**, and **logs a `warn` for every frame it drops** (`SignedData … failed Ed25519 verification`). Every write an
   upgraded node originates — the twenty-four kinds above included — reaches a 2.32 node by the next anti-entropy
   exchange (`health_check_interval_secs`, 10 s by default), hop by hop, rather than by gossip. Expect latency, not
-  loss, and a noisy 2.32 log: **upgrade the fleet promptly**, not over days.
+  loss, and a noisy 2.32 log: **upgrade the fleet promptly**, not over days. An upgraded node's own legacy identity
+  record is among these writes now (signed), so a 2.32 node that is not directly connected to it learns its key by
+  anti-entropy; a directly connected one has it from the TLS handshake.
 - **An upgraded node requiring signed frames drops a 2.32 peer's agent writes until that peer is upgraded** — set
   `kv_require_signed_frames` once every peer is past 2.32.
 - **A 2.31 node and an upgraded node do not verify each other's identity proofs or consensus messages** (§23 is
@@ -978,7 +989,12 @@ everywhere, set `kv_require_signed_frames = true`. Alerts on `mycelium_identity_
 
 **Not covered.** Anti-entropy: a `StateResponse` entry carries no author and no signature and is applied by LWW, so a
 member can still introduce a value for any key through a state reply — the residual the threat model's Boundary A
-states; the `sys/` tripwire does not count an entry for a key the victim holds nothing under. Role claims, audit
+states; the `sys/` tripwire does not count an entry for a key the victim holds nothing under. **With
+`require_identity_proofs` off** (the default), the identity of another member is still writable by a member under
+its **own** signature: a signed write of `sys/identity/{v}` from M is a valid frame (signer = sender = M), and an
+unproven legacy history is merged on first use — the anchor tripwire counts it (`identity_anchor_conflicts`), it
+does not prevent it. `require_identity_proofs` is what closes that; a replay of a genuine sealed record re-asserts
+only keys its node published (keys accumulate). Role claims, audit
 records and revocation events are still signed over untagged canonical bytes (`what-is-proven.md`).
 
 ## 36. Companion doors are bounded and checked: a blob quota, a one-segment run id, an award that names its requirement (unreleased, after 2.32.0)

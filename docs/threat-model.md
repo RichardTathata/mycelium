@@ -65,10 +65,15 @@ An attacker who controls one node process (RCE, stolen host) gains:
   carries a write attributed to someone else. **An unsigned frame is the other half, and it is opt-in
   this release:** under `[tls]` every KV write a node originates is signed (row F routed the agent's
   twenty-four unsigned write sites — the quorum-evidence write among them — through the signer), a
-  receiver with `kv_require_signed_frames` drops an unsigned `Data` frame — except a node's own identity
-  record, which travels unsigned and carries its own proof — and one without it — the default this
-  release — applies it and counts it (`kv_unsigned_frames_accepted`). Plan row F2 makes the
-  refusal unconditional. **The refusal is bypassable through anti-entropy:** a `StateResponse` entry
+  receiver with `kv_require_signed_frames` drops an unsigned `Data` frame — except a sealed identity
+  record that authenticates itself (its proof verifies under a key it carries and chains to the keys the
+  receiver already holds for that node; counted, `kv_identity_exempt_frames`) — and one without it — the
+  default this release — applies it and counts it (`kv_unsigned_frames_accepted`). Plan row F2 makes the
+  refusal unconditional. An identity tombstone removes no keys (it used to: one tombstone, unsigned or
+  signed by any member as itself, silenced a member at every receiver). **What remains with
+  `require_identity_proofs` off:** a member can write another member's legacy identity under its *own*
+  signature — a valid frame, signer = sender — and an unproven history merges on first use; the anchor
+  tripwire counts it (`identity_anchor_conflicts`) and does not stop it. The flag closes it. **The refusal is bypassable through anti-entropy:** a `StateResponse` entry
   carries no author and no signature and is applied by LWW, unsolicited, so a compromised member can
   introduce a value for any key — another member's included — through a state reply whatever this
   setting says. Detection covers part of it: signed `sys/` records (identity, roles, audit) fail

@@ -647,8 +647,16 @@ PR.
   (seen `Ok(())`). (8) `a_bare_2_32_kv_signature_is_accepted_and_counted_during_the_window`,
   `a_gateway_kv_delete_reaches_a_peer_that_requires_signed_frames` (seen failing with `kv_write` toggled bare),
   `the_row_f_window_counters_are_on_gateway_stats` — the counters are per node now (`TransportBounds`). (9)
-  a node's own identity record is exempt from the refusal (it travels unsigned and carries its own proof —
-  found by the fix round's own fleet test; `a_nodes_own_identity_record_is_not_refused_as_unsigned`, seen refused).
+  **The second review** reproduced impersonation and silencing through that round's identity exemption (it trusted
+  `sender`); the exemption is now a self-authenticating sealed record only (`connection::self_authenticating_identity`,
+  counted `kv_identity_exempt_frames`), a node publishes the sealed record first unsigned and its legacy pair signed,
+  and an identity tombstone removes no keys — `an_unsigned_identity_forgery_cannot_make_a_member_sign_as_another`,
+  `an_identity_tombstone_does_not_erase_a_members_keys` (both postures),
+  `only_a_self_authenticating_sealed_identity_is_exempt_from_the_refusal`, all seen failing on 59d86368; the gate
+  skips only an inline test module (fourth plant, seen passing the old gate); the per-frame warnings are rate-limited
+  (`a_warning_gate_lets_one_through_per_interval_and_counts_the_rest`, a new helper, no fail-first run). **What
+  remains with `require_identity_proofs` off:** another member's identity is writable under the writer's own
+  signature, detected not prevented.
   `start()` warns when `kv_require_signed_frames` is inert (`kv_require_signed_frames_without_tls_is_inert`); the
   warning's emission itself is not asserted. (3, 5, 7) answered in the docs: the refusal is bypassable through
   anti-entropy; upgraded nodes sign tagged at once (the 2.32.0 shape) and reach 2.32 peers by anti-entropy only;
