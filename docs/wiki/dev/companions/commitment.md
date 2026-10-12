@@ -64,10 +64,14 @@ Design: `docs/plans/v3-contracts-axis.md` §6.9 (CN1–CN3, D39). Key facts:
 - **The declarer's close decides which offers were in time, since 2026-10-12 (post-360 row H, #609).** No timestamp
   an offerer writes can: `offered_at_ms` is a field of its record, and the HLC in an offer's log key is a key segment
   any member can `set` (#609's first head judged on that and its review backdated one to `0000000000010000`). The
-  declarer `close`s at or after `deadline_ms` on its own clock, writing a `Close` at `cn/{req}/close` that names every
-  offer its node holds by log position and SHA-256; an award counts only named offers and is refused `NotClosed`
-  before a close. **Residual:** the declarer decides — a late or partial close is visible in the record and, signed,
-  attributable. The lesson: *a key segment is data, not a clock*.
+  declarer `close`s at or after `deadline_ms` on its own clock, appending a `Close` to `cn/{req}/closes` that names
+  every offer its node holds by log position and SHA-256 and binds the announcement (deadline, digest); an award
+  counts only named offers, records the close's digest (`Award::close_sha256`), and is refused `NotClosed` before a
+  close. **A stream, not one key** (round 2): the checked path takes the earliest close verifying under the pinned
+  declarer, so a forged close cannot pre-empt it and an overwrite is recovered by closing again; the unverified path
+  takes the earliest naming the announcement's declarer at or after the deadline, and is steerable. **Residual:** the
+  declarer decides; a signed close shows which offers it counted, not when it closed (`closed_at_ms` is its claim).
+  The lessons: *a key segment is data, not a clock*, and *one LWW key cannot hold both a forgery and the truth*.
 - **Reads are checked like offers (row H).** Offers, reports and assessments are read only when they name the
   requirement whose stream holds them (a signed offer copied from another stream verified there). `award_of` reports
   only a record naming its requirement and operation; `award_of_verified(requirement, declarer, resolve)` takes the
@@ -97,6 +101,11 @@ Design: `docs/plans/v3-contracts-axis.md` §6.9 (CN1–CN3, D39). Key facts:
 | a slot holding another requirement's award says so (row H) | `a_slot_holding_another_requirements_award_says_so` |
 | the checked path needs a signed close and is not blocked by a forged award (row H) | `the_checked_path_needs_a_signed_close_and_is_not_blocked_by_a_forged_award` |
 | `award_of_verified` checks the declarer the caller pins (row H) | `award_of_verified_checks_the_declarer_the_caller_pins_not_the_writable_head` |
+| a forged close written first does not stop the declarer's signed close (round 2) | `a_forged_close_written_first_does_not_stop_the_declarers_signed_close` |
+| an overwritten close is recovered by closing again (round 2) | `an_overwritten_close_is_recovered_by_the_declarer_closing_again` |
+| on the unverified path an early close or another declarer's is not a close (round 2) | `on_the_unverified_path_an_early_close_or_another_declarers_close_is_not_a_close` |
+| an oversize close is refused by name, not reported as written (round 2) | `an_oversize_close_is_refused_by_name_not_reported_as_written` |
+| an award names its close; a close binds its announcement (round 2) | `an_award_names_its_close_and_a_close_binds_its_announcement` |
 | `award_of` reports only a record naming its requirement and operation (row H) | `award_of_reports_only_a_record_that_names_this_requirement_and_its_operation` |
 | `award_of_verified` reports only an award the pinned declarer signed (row H) | `award_of_verified_reports_no_award_the_pinned_declarer_did_not_sign` |
 

@@ -17,9 +17,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   so the offerer chose whether its offer was late. The first attempt (this PR's first head) judged on the HLC in the
   offer's log key instead, and #609's review showed that is offerer-written too: any member can
   `kv().set("log/cn/{r}/offers/0000000000010000/…")` and win an award a minute after the deadline; the "drift bound"
-  residual it stated was not a bound (the clamp applies to `Hlc::observe`, not to stored keys). Now no timestamp an offerer can write decides lateness: the **declarer closes** the requirement (`close(requirement, key, now_ms)`, at or after `deadline_ms` on its own clock), writing a `Close` at `cn/{r}/close` that names every offer its node holds by log position and SHA-256; an award counts only the offers the close names and is refused `NotClosed` before one exists.
-  The residual, stated: the declarer decides which offers arrived in time — a late or partial close is visible in the
-  close record (`closed_at_ms`, the names) and, signed, attributable. `offers()`/`offers_verified()`/`reports()`/
+  residual it stated was not a bound (the clamp applies to `Hlc::observe`, not to stored keys). Now no timestamp an offerer can write decides lateness: the **declarer closes** the requirement (`close(requirement, key, now_ms)`, at or after `deadline_ms` on its own clock), appending a `Close` to `cn/{r}/closes` that names every offer its node holds by log position and SHA-256; an award counts only the offers the close names and is refused `NotClosed` before one exists.
+  Closes go on a stream (`cn/{r}/closes`), so neither a forged close written first nor an overwrite stops the declarer
+  (round 2): the checked path takes the earliest close verifying under the pinned declarer, and `close` refuses
+  `AlreadyClosed` only for one verifying under its own key; a close binds its announcement (deadline, digest), an award
+  records its close (`close_sha256`), and a close too large for one KV write is `CloseTooLarge` before writing. The
+  residual, stated: the declarer decides which offers arrived in time — a signed close shows which it counted, not
+  when it closed (`closed_at_ms` is its claim). `offers()`/`offers_verified()`/`reports()`/
   `assessments()` read only records naming their own requirement (a signed offer copied from another requirement's
   stream verified there). `award_of` reports only a record naming its requirement and operation;
   `award_of_verified(requirement, declarer, resolve)` only one the declarer **the caller pins** signed (a check
@@ -28,7 +32,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   documented as letting any member block an award; a linearizable slot holding another requirement's record is
   `SlotHoldsAnotherRecord`, not `Encoding("…did not decode")`, and on the checked path one holding an unproven award is
   `UnprovenAwardHolds`. New refusals `NotClosed`, `CloseUnproven`, `NotTheDeclarer`, `BeforeDeadline`,
-  `AlreadyClosed` (the enum is `#[non_exhaustive]`). Seen failing first (on 461da69f, the review's PoCs):
+  `AlreadyClosed`, `CloseTooLarge`, `CloseNotWritten` (the enum is `#[non_exhaustive]`); `Award` and `Close` gained
+  fields. Seen failing first on 9d4da849 (round 2): `a_forged_close_written_first_does_not_stop_the_declarers_signed_close`,
+  `an_overwritten_close_is_recovered_by_the_declarer_closing_again`,
+  `on_the_unverified_path_an_early_close_or_another_declarers_close_is_not_a_close`,
+  `an_oversize_close_is_refused_by_name_not_reported_as_written`, and `mycelium-reason`'s `a_tiny_blob_costs_a_block`.
+  Seen failing first (on 461da69f, round 1, the review's PoCs):
   `a_backdated_log_key_does_not_make_a_late_offer_a_candidate` (`driver-a`, the backdated offer, awarded),
   `an_offer_report_or_assessment_naming_another_requirement_is_not_read_as_this_ones`,
   `award_of_verified_checks_the_declarer_the_caller_pins_not_the_writable_head`,
@@ -36,7 +45,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and on 2933073f `award_of_reports_only_a_record_that_names_this_requirement_and_its_operation`.
   `mycelium-reason` **0.9.0** (its own changelog): the blob store bounded **per digest** (`DEFAULT_BLOB_QUOTA_BYTES`
   1 GiB, `open_with_quota`, 507 `quota_exceeded`; racing puts of one blob count it once — the first head's per-put
-  reservation grew N×len, review finding 2) and a caller-chosen `run_id` validated as one bounded segment at every
+  reservation grew N×len, review finding 2 — and each file costs at least one 4 KiB block) and a caller-chosen `run_id` validated as one bounded segment at every
   door (`validate_run_id`, `TraceRecorder::new` → `Result`, 400 `bad_run_id`) — a run id with `/` wrote into another
   run's trace, which `anchor` then sealed. Run ids are validated; runs are **not owned**. `docs/guide/deprecations.md`
   §36.

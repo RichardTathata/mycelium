@@ -915,15 +915,16 @@ answers 200, and the 413 `too_large` per-blob ceiling is unchanged. A caller-cho
 and `POST /gateway/reason/route` answer **400 `bad_run_id`**, the façade `400 invalid_request_error` / `bad_run_id`
 (`param: "run_id"`); `TraceRecorder::new` returns `Result<_, RunIdError>`; `replay` reads only the key shape a recorder
 writes; run ids are validated, runs are not owned. `mycelium-commitment` (on the 2.x train): the declarer **closes**
-a requirement (`close(requirement, key, now_ms)`, at or after its deadline) and an award counts only the offers the
-close names — **no award before a close** (`NotClosed`); offers, reports and assessments are read only for their own
+a requirement (`close(requirement, key, now_ms)`, at or after its deadline, appended to `cn/{requirement}/closes`) and
+an award counts only the offers the close names — **no award before a close** (`NotClosed`); a close too large for one
+KV write is `CloseTooLarge`; the blob quota charges each file at least one 4 KiB block; offers, reports and assessments are read only for their own
 requirement; `award_of` reports only a record naming its requirement and operation; `award_of_verified(requirement,
 declarer, resolve)` takes the declarer the caller trusts; `plan_award_verified` and
 `commit_award_linearizable_verified` are the checked path.
 
 **Will the compiler tell me?** For `TraceRecorder::new` yes (a `Result` where a value was), and for
-`award_of_verified` (a `declarer` parameter). `CommitmentRefusal` gained variants (`#[non_exhaustive]`; a `_` arm must
-fail closed). The rest is runtime: an award without a close is refused `NotClosed`; a 2.32.0 client sending a run id
+`award_of_verified` (a `declarer` parameter), and for an exhaustive `Award` literal (`close_sha256`). `CommitmentRefusal`
+gained variants (`#[non_exhaustive]`; a `_` arm must fail closed). The rest is runtime: an award without a close is refused `NotClosed`; a 2.32.0 client sending a run id
 with `/` gets 400 where it got a trace of another run; a client that stored past 1 GiB gets 507 where it got 200.
 
 **Migration.** Open the store with the quota your node needs (`BLOB_QUOTA_BYTES` on `reason_node`; a store holding

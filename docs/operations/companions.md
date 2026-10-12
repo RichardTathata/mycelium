@@ -255,7 +255,8 @@ Nothing to persist: routing state is capability pheromone + **node-local** in-fl
   `bad_run_id`**, the façade `400 invalid_request_error`/`bad_run_id` — a run id with `/` used to write into another
   run's trace, which `anchor` then sealed. Run ids are validated, **runs are not owned**: any caller holding
   `llm:invoke` can record into any valid run id, so a trace is a record of what was written under a name, not of who
-  owns it. The quota is accounted **per digest** (racing puts of one blob count it once); a file added or deleted by
+  owns it. The quota is accounted **per digest** (racing puts of one blob count it once), each file at least one 4 KiB
+  block (`BLOB_FILE_MIN_COST`, so the quota bounds files and memory, not just bytes); a file added or deleted by
   hand is credited at the next open; `.tmp-*` files are removed at open as abandoned — one store per directory.
 - **What is exposed** (all under `/gateway/reason/`, all behind the gateway bearer since 2026-09-04):
   `POST route` and the **OpenAI-compatible façade** `POST v1/chat/completions` + `GET v1/models`
@@ -307,9 +308,12 @@ an absent section.
   requirement; a second is refused and the first is never overwritten.
 - **The declarer closes; then it awards (post-360 row H).** No stamp an offerer writes decides lateness — not
   `offered_at_ms`, not the HLC in its log key (both are offerer-written). At or after `deadline_ms` on its own clock
-  the declarer calls `close(requirement, key, now_ms)`, recording at `cn/{requirement}/close` every offer its node
-  holds; an award counts only those and is refused `NotClosed` before a close. The residual is the declarer's: a late
-  or partial close shows in the record (`closed_at_ms`, the names) and, signed, is attributable.
+  the declarer calls `close(requirement, key, now_ms)`, appending to `cn/{requirement}/closes` a record of every offer
+  its node holds, bound to the announcement; an award counts only those and is refused `NotClosed` before a close.
+  **Sign the close** and award with `plan_award_verified`: the checked path takes the earliest close your key signed,
+  so a forged close cannot pre-empt yours, and if yours is overwritten you close again. A close too large for one KV
+  write is refused `CloseTooLarge` (compact the offer stream or narrow the market). The residual is the declarer's: a
+  signed close shows which offers it counted, not when it closed — `closed_at_ms` is the declarer's own claim.
 - **Read with the check you need.** Offers, reports and assessments are read only for their own requirement.
   `award_of` reports only a record naming its requirement and operation; `award_of_verified(requirement, declarer,
   resolve)` only one the declarer *you* name signed; `plan_award_verified` / `commit_award_linearizable_verified` are

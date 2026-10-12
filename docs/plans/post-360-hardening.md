@@ -454,12 +454,25 @@ Each promise and what delivers it:
   delivered as the declarer's close** (`mycelium-commitment/src/lib.rs`: `Close`, `ClosedOffer`, `close`, `close_of`,
   `verify_close`, `choose_award`): the declarer closes at or after the deadline on its own clock, naming every offer
   its node holds by log position and SHA-256; an award counts only named offers, and none is made before a close
-  (`NotClosed`). Tests (each first seen failing on 461da69f): `a_backdated_log_key_does_not_make_a_late_offer_a_candidate`
+  (`NotClosed`). **Round 2** (the review's confirming pass): one LWW key could not hold both a forged and a genuine
+  close — a member's unsigned close written first stopped the declarer closing, and an overwrite was permanent. Closes
+  now go on a stream `cn/{r}/closes`; the checked path takes the earliest close verifying under the pinned declarer
+  (`close_of_verified`), `close` refuses `AlreadyClosed` only for a close verifying under its own key (a local read),
+  the unverified path (`close_of`) requires the announcement's declarer, deadline and digest and a date at or after
+  the deadline, a close binds its announcement, an award records its close (`close_sha256`), and an oversize close is
+  `CloseTooLarge` before writing and read back after (`CloseNotWritten`). Seen failing on 9d4da849:
+  `a_forged_close_written_first_does_not_stop_the_declarers_signed_close` (`AlreadyClosed`),
+  `an_overwritten_close_is_recovered_by_the_declarer_closing_again` (`AlreadyClosed`),
+  `on_the_unverified_path_an_early_close_or_another_declarers_close_is_not_a_close` (the early forgery awarded),
+  `an_oversize_close_is_refused_by_name_not_reported_as_written` (`Ok`, nothing written);
+  `an_award_names_its_close_and_a_close_binds_its_announcement` is new API. Tests (round 1, each first seen failing on
+  461da69f): `a_backdated_log_key_does_not_make_a_late_offer_a_candidate`
   (the review's key loses; the offer that arrived before the close wins), `an_award_before_the_requirement_is_closed_is_refused`;
   and `no_offers_and_late_offers_are_visible_states_not_awards` pins the close's own refusals (before the deadline,
   not the declarer, closed once). **The residual**: the declarer decides which offers arrived in time — a late close
-  admits late offers, an omitting one excludes; both show in the record and, signed, are attributable. The close is
-  unsigned on the plain path, like the head. Finding 6 (HLC contagion) no longer applies: no HLC decides lateness.
+  admits late offers, an omitting one excludes; a signed close shows which offers it counted and makes that
+  attributable, but `closed_at_ms` is the declarer's own claim, not a measurement. The close is unsigned on the plain
+  path, like the head, and the plain path is steerable by any member that can append to the close stream. Finding 6 (HLC contagion) no longer applies: no HLC decides lateness.
 - *`award_of` verifies before it reports* — **partial, stated**. `award_of` reports only a record whose
   `requirement` and `operation_id` name this requirement (`award_of_reports_only_a_record_that_names_this_requirement_and_its_operation`,
   seen failing on 2933073f). It cannot verify a signature without a key, so verification is
@@ -482,7 +495,9 @@ Each promise and what delivers it:
   grew N×len under racing puts of one blob, finding 2: `concurrent_puts_of_one_digest_reserve_it_once` seen failing
   3/3 on 461da69f, the account at 38.8–50.9 MB against 16.8 MB on disk), released on every failure path
   (`a_failed_write_releases_its_reservation` — a pin; it held on 461da69f too), `.tmp-*` removed at open
-  (`an_abandoned_temp_file_is_removed_at_open`, seen failing), `ErrorKind::QuotaExceeded`; `src/http.rs`
+  (`an_abandoned_temp_file_is_removed_at_open`, seen failing), each file at least one 4 KiB block
+  (`BLOB_FILE_MIN_COST`, round 2 — an 8-byte blob cost 8 bytes of quota and a block, an inode and an account entry:
+  `a_tiny_blob_costs_a_block`, seen failing on 9d4da849 at 8), `ErrorKind::QuotaExceeded`; `src/http.rs`
   `gw_blob_put` → 507 `quota_exceeded`. A file added or deleted by hand is credited at the next open (stated).
   Doors enumerated (`grep -rn "\.put(" mycelium-reason/src`): the gateway PUT, `MeshBlobStore::put`, the mesh
   write-back in `MeshBlobStore::fetch` (logged, bytes still returned). Tests
