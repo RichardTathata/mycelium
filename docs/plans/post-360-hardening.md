@@ -82,7 +82,7 @@ Four places strain that line today, and the rows in §3 address each:
 | **E** | Gateway remainder | client-supplied timer periods (`interval_secs`) bounded; the log-group subscribe keeps the core's `(hlc, key)` tiebreak the mailbox deletes an entry only after the client has it (today it tombstones on entering the 256-slot channel, so a dropped stream loses queued events — #595's review); prompt keys cannot alias across `ns`/`name` (`prompts/{ns}/{name}` with a `/` in either); and saves the group offset only after the entry is sent (today it saves first, so an entry in flight when a stream drops is never re-sent — found by row G); the caller envelope binds freshness | P5 |
 | **F** | Wire and crypto, one MINOR with a window | a TLS node refuses unsigned `Data` frames; the removal check reads a peer's key structurally, not by byte-scanning the certificate; KV `SignedData` is domain-tagged; each change carries a mixed-fleet window and an upgrade note in the 2.30.0 shape; the #585 and #587 windows close in the same MINOR | R0, ideally its own release |
 | **G** — *delivered 2.32.0 (#595), §3.5* | SDKs | Python whole-second timeouts and a non-truncating tuple `take`; path segments escaped; TypeScript `SupersededError`; one `scatterGather` default, documented; SSE reconnect is designed with a gateway resume point or recorded as not built | R0 |
-| **H** | Companions | the commitment deadline judged on the log's clock, not the offerer's; `award_of` verifies before it reports; the reason blob store bounded; caller-chosen `run_id` validated | R0 |
+| **H** — *delivered after 2.32.0 (#TBD), §3.5* | Companions | the commitment deadline judged on the log's clock, not the offerer's; `award_of` verifies before it reports; the reason blob store bounded; caller-chosen `run_id` validated | R0 |
 | **I** — *delivered (private #30), §3.5; Cedar narrower* | Private repo P3s | RA5 correction chains and competing corrections; attempt keys carry the operation id; a lock-order table; the outbox directory fsynced at create; Cedar policies schema-validated at load; the CI pin check refuses `[patch]`, `rev =` and multi-line tables | R0's re-pin |
 | **J** — *delivered (#608), §3.5* | Hygiene | the sim-seam gate's test-skip bug (the one the KV gate fixed in #591); every feature and bench linted or built by some CI step; the two CI jobs on `stable` pinned; unreferenced public items deprecated, not removed (nothing is removed on the 2.x line); only the duplicates that disagree are unified (`hex_line`'s whitespace, `now_ms` copies outside the seam) | — |
 | **K** | Policy over history | the action evaluator can decide on what an actor has already done, not only on the request: a bounded, read-only history view (the actor's recent decisions and executions from the evidence journal — `src/agent/evidence_journal.rs`) reaches `ActionEvaluator::evaluate` beside the envelope (`ActionEnvelope`, `src/agent/action_evaluator.rs:101`, which today carries no history); a rule such as *at most three posts in ten minutes* is expressible and tested in the reference evaluator and the AE contract suite (`mycelium::ae_contract`); the scope of a count is stated by name — **per node** (the journal is node-local and never gossiped) unless the design question in §5 is decided otherwise; a history that cannot be read is `Indeterminate`, never an empty history; replay records the history view as a decision input | design question §5 |
@@ -442,6 +442,48 @@ Each promise and what delivers it:
   the cargo config and the lockfile, and recognises the substrate by its git URL whatever the crate's name; its
   self-test refuses every staged bypass, the three named ones among them (the old grep step passed all three). A build directory is skipped
   only when git does not track its `CACHEDIR.TAG`.
+
+**H — Companions (#TBD; read against the merged code).** The review's claims, each sized against the code:
+- *The commitment deadline judged on the log's clock, not the offerer's* — **held as stated**: `plan_award_from`
+  filtered on `o.offered_at_ms <= deadline_ms`, a field the offerer writes (`mycelium-commitment/src/lib.rs`, the
+  `eligible` filter). Now `mycelium::hlc::physical_ms(*hlc) <= announcement.deadline_ms` over the offer's log
+  position — minted by `KvHandle::append` (`mycelium-core/src/kv_handle.rs`, `self.ctx.hlc.tick()`), monotone, never
+  below what the offerer's node observed; residual stated in the crate doc (the offerer's node's clock within
+  `max_clock_drift_ms`). Test `an_offers_deadline_is_judged_on_the_logs_clock_not_the_offerers_stamp` (both halves:
+  a backdated late offer refused, a future-stamped timely one awarded), seen failing first.
+- *`award_of` verifies before it reports* — **held, in two parts**. The read decoded whatever sat at
+  `cn/{r}/award` (consensus slot, then KV head) and returned it; `plan_award_from` then refused `AlreadyAwarded` on
+  it. Now `award_of` reports only a record whose `requirement` and `operation_id` name this requirement
+  (`award_of_reports_only_a_record_that_names_this_requirement_and_its_operation`, seen failing first: r1's award
+  copied to r2's slot was r2's award), and `award_of_verified(requirement, resolve)` reports only an award whose
+  declarer is the announcement's and whose signature verifies under that declarer's key
+  (`award_of_verified_reports_no_award_the_announcements_declarer_did_not_sign`: unsigned, mallory-signed naming the
+  hub, mallory-signed naming mallory — none reported; the hub's own — reported; a directory without the hub's key —
+  not). **Not built:** `award_of` cannot verify a signature without a key the crate does not hold, so the unverified
+  read stays (documented *unproven*), as `offers` stays beside `offers_verified`; the announcement head itself is
+  unsigned, so what is proven is *the party that announced accepted this offer* under the crate's standing
+  `require_identity_proofs` caveat.
+- *The reason blob store bounded* — **narrower than stated**: a per-blob ceiling existed (`MAX_BLOB_BYTES`, 8 MiB, at
+  `FsBlobStore::put` and the gateway's 413); the **total** did not. `mycelium-reason/src/blob.rs`:
+  `DEFAULT_BLOB_QUOTA_BYTES` (1 GiB), `open_with_quota`, `quota_bytes`/`used_bytes`, the atomic reservation before
+  the write (`reserve`/`release`), `ErrorKind::QuotaExceeded`; `src/http.rs` `gw_blob_put` → 507 `quota_exceeded`.
+  Doors enumerated (`grep -rn "\.put(" mycelium-reason/src`): the gateway PUT, `MeshBlobStore::put`, the mesh
+  write-back in `MeshBlobStore::fetch` (logged, bytes still returned). Tests
+  `a_store_refuses_a_put_past_its_quota_and_counts_what_it_holds` (unit),
+  `the_blob_door_answers_507_when_the_store_is_at_its_quota` (gateway) — new API, so seen failing as a missing method.
+  **Not built:** eviction.
+- *Caller-chosen `run_id` validated* — **held, and wider than a path segment**: `run_id` is read from a client at
+  three doors (`grep -rn run_id mycelium-reason/src src mycelium-py/src mycelium-ts/src mycelium-wasm-host/src
+  mycelium-effects/src`: `GET /gateway/reason/trace/{run_id}`, `POST /gateway/reason/route` body,
+  `POST /gateway/reason/v1/chat/completions` body; the Rust API `TraceRecorder::new` and `replay`; nothing in
+  `src/`, the wasm host, effects or the SDKs reads one) and used as a **log-stream segment** `reason/{run_id}/{node}`,
+  never a filename — so `victim/x` wrote under `log/reason/victim/` and `replay("victim")` carried the injected event
+  (`a_run_id_with_a_slash_cannot_write_into_another_runs_trace`, seen failing first with two events, one mallory's);
+  `GET …/trace/victim%2Fx` answered 200 (`every_run_id_door_refuses_an_id_that_is_not_one_bounded_segment`, seen
+  failing first). Now `validate_run_id` at every door (400 `bad_run_id`; `TraceRecorder::new` → `Result`), and
+  `replay` reads only `{node}/{hlc}/{salt}` under the run, so a raw append under a deeper id (a member bypassing
+  the recorder) is skipped — the read side closed as well as the write side. A `..` segment is refused at the door
+  (proved with a raw request: a conforming client resolves `%2E%2E` before sending).
 
 ## 4 · Decisions taken
 

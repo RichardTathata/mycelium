@@ -115,7 +115,9 @@ pub enum CommitmentRefusal {
 Three worth reading closely:
 
 - **`NoOffers`** — *nobody offered before the deadline.* That is a **visible state, not a retry**. An
-  empty market is information about the market.
+  empty market is information about the market. *Before the deadline* is judged on the offer's **log
+  position** (the HLC the stream stamped when it was appended, as wall-clock ms), never on the stamp the
+  offerer wrote — so express `deadline_ms` on the mesh's clock, `now + window`.
 - **`AlreadyAwarded`** returns the existing award. One requirement, one award; a second is refused
   and the first is **never overwritten**.
 - **`AwardUnknown`** — the round reached no commit, so the award **may or may not** have committed

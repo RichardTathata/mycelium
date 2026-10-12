@@ -93,7 +93,7 @@ via wasm-host).
   log substreams `reason/{run_id}/{node}` — a shared stream collides same-ms HLC keys; optional WS2
   audit-chain anchoring under `compliance`), ③ **artifact-aware resume** (`require_model` demand half;
   install half is wasm-host's `model_deploy`). Plus a content-addressed **blob tier**
-  (`FsBlobStore`/`MeshBlobStore`/`spawn_blob_server`, ≤ 8 MiB v1) + `/gateway/reason/{blob,trace,route}`
+  (`FsBlobStore`/`MeshBlobStore`/`spawn_blob_server`, ≤ 8 MiB per blob; the store bounded at 1 GiB by default since 0.9.0, post-360 row H — `open_with_quota`, 507 `quota_exceeded`; a `run_id` one bounded segment at every door, 400 `bad_run_id`) + `/gateway/reason/{blob,trace,route}`
   routes (`route` is the load-aware routing surface, #132; the OpenAI-compatible façade `/gateway/reason/v1/{chat/completions,models}`
   joined in 0.6.0, below — `mycelium-reason/src/http.rs` holds the whole set). Zero core changes, zero new locks. **Python tier** (separate packages): the
   **`langgraph-checkpoint-mycelium`** `BaseCheckpointSaver` (index rows in KV `ckpt/`/`ckptw/`,

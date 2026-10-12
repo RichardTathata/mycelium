@@ -11,6 +11,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Companions: the commitment deadline on the log's clock, an award that is checked before it is reported, a
+  bounded blob store, a validated run id** (post-360 hardening row H, #TBD). `mycelium-commitment`: an offer's
+  deadline was judged on `offered_at_ms` — a field the **offerer** writes into its own record — so an offer appended
+  after the deadline with a backdated stamp was eligible and one appended in time with a future stamp was not; the
+  offerer chose whether its offer was late. `plan_award_from` now judges on the **log's clock**: `hlc::physical_ms`
+  of the offer's log position, minted by the substrate at append, monotone and never below anything the offerer's
+  node had observed (the residual, stated in the crate doc: it is the offerer's *node's* clock within
+  `max_clock_drift_ms`). `award_of` reports only a record naming its requirement and operation `cn/{r}/award` — a
+  record copied from another requirement's slot used to be reported as this one's and blocked its award as
+  `AlreadyAwarded` — and the new `award_of_verified(requirement, resolve)` reports an award only when the
+  announcement's declarer signed it (unsigned, signed under the writer's own key, or naming the writer as declarer:
+  not reported), the mirror of `offers_verified`. Deadlines are now wall-clock values on the mesh's clock (the crate's
+  tests and example already were). Seen failing first: `an_offers_deadline_is_judged_on_the_logs_clock_not_the_offerers_stamp`
+  (a backdated late offer awarded), `award_of_reports_only_a_record_that_names_this_requirement_and_its_operation`
+  (r1's award reported as r2's); `award_of_verified_reports_no_award_the_announcements_declarer_did_not_sign` as a
+  missing method. `mycelium-reason` **0.9.0** (its own changelog): the blob store bounded (`DEFAULT_BLOB_QUOTA_BYTES`
+  1 GiB, `open_with_quota`, 507 `quota_exceeded` at the gateway) and a caller-chosen `run_id` validated as one bounded
+  segment at every door (`validate_run_id`, `TraceRecorder::new` → `Result`, 400 `bad_run_id`) — a run id with `/`
+  wrote into another run's trace, which `anchor` then sealed. `docs/guide/deprecations.md` §36.
 - **An electorate member that restarts without its promises is detected: persistence required, an empty store
   warned, a forgotten promise withholds the slot** (`src/agent/acceptor_guard.rs`; the code half of #604's
   hazard — detection by name, never a guard on a Layer I write). A node that would adopt, declare, propose or

@@ -904,6 +904,31 @@ restore-or-retire rule): the carry set is complete because the group tag is in t
   carry at that slot, named; the claim is for slots decided only in the electorate (an ordinary slot also proposed
   under another scope is not enumerated); two default declarations within gossip lag are escaped by a merge.
 
+## 36. Companion doors are bounded and checked: a blob quota, a one-segment run id, an award that names its requirement (unreleased, after 2.32.0)
+
+**What changes.** Post-360 plan row H (#TBD). `mycelium-reason` 0.9.0: `FsBlobStore::open` is **bounded at 1 GiB**
+(`DEFAULT_BLOB_QUOTA_BYTES`; `open_with_quota(dir, bytes)` for another, `u64::MAX` for none, `0` refused) and
+`PUT /gateway/reason/blob` answers **507 `quota_exceeded`** when a put would pass it — a blob already held still
+answers 200, and the 413 `too_large` per-blob ceiling is unchanged. A caller-chosen **`run_id` is one bounded segment**
+(non-empty, ≤ 128 bytes, ASCII letters, digits and `- _ . : @ +`, not `.` or `..`): `GET /gateway/reason/trace/{run_id}`
+and `POST /gateway/reason/route` answer **400 `bad_run_id`**, the façade `400 invalid_request_error` / `bad_run_id`
+(`param: "run_id"`); `TraceRecorder::new` returns `Result<_, RunIdError>`; `replay` reads only the key shape a recorder
+writes. `mycelium-commitment` (on the 2.x train): the deadline is judged on the **offer's log position** (the HLC the
+stream stamped, as wall-clock ms), not the offerer's `offered_at_ms`; `award_of` reports only a record naming its
+requirement and operation; `award_of_verified(requirement, resolve)` reports only an award the announcement's declarer
+signed.
+
+**Will the compiler tell me?** For `TraceRecorder::new` yes (a `Result` where a value was). The rest is runtime: a
+`deadline_ms` expressed on a test clock (`100`) is now **long past** on the log's clock, so every offer is late —
+express deadlines as wall-clock ms on the mesh's clock; a 2.32.0 client sending a run id with `/` gets 400 where it
+got a trace of another run; a client that stored past 1 GiB gets 507 where it got 200.
+
+**Migration.** Open the store with the quota your node needs (`BLOB_QUOTA_BYTES` on `reason_node`; a store holding
+more than its quota at open keeps every file and refuses only *new* puts). Run ids: fold `/` and whitespace at the
+client (`reheal_node` folds a model name's `/`). Deadlines: `now_ms + window` from the same clock the node's HLC reads.
+The Python SDK and the LangGraph checkpointer are unchanged — a 507 or 400 surfaces as `httpx.HTTPStatusError` with
+the route's body.
+
 ## 37. Nineteen public items (eighteen names) nobody references are deprecated, not removed (unreleased, after 2.32.0)
 
 **What changes** (post-360 plan row J, PR #608). A sweep of every `pub fn` / `const` / `struct` / `enum` / `type`

@@ -246,6 +246,14 @@ Nothing to persist: routing state is capability pheromone + **node-local** in-fl
   **Upgrade order:** the checkpointer to 0.3.0 before the reason nodes to 0.7.0 (a 0.2.x checkpointer reads a
   503 or 502 as an unrelated HTTP error). A damaged copy on disk is repaired by putting the right bytes again —
   the next successful mesh fetch on that node does it.
+- **Bounded (0.9.0, post-360 row H).** The blob store holds at most its quota — **1 GiB** from `FsBlobStore::open`,
+  or `open_with_quota(dir, bytes)` (`reason_node` reads `BLOB_QUOTA_BYTES`; `u64::MAX` is no bound) — counted from
+  the files at open; `PUT blob` answers **507 `quota_exceeded`** past it (a blob already held is 200; 413 `too_large`
+  stays the 8 MiB per-blob ceiling) and the mesh write-back of a fetched blob that no longer fits is logged. Nothing
+  evicts: the files are named by content address, so what to drop is yours. A **`run_id`** is one bounded segment
+  (≤ 128 bytes, ASCII letters, digits, `- _ . : @ +`): `GET trace/{run_id}` and `POST route` answer **400
+  `bad_run_id`**, the façade `400 invalid_request_error`/`bad_run_id` — a run id with `/` used to write into another
+  run's trace, which `anchor` then sealed.
 - **What is exposed** (all under `/gateway/reason/`, all behind the gateway bearer since 2026-09-04):
   `POST route` and the **OpenAI-compatible façade** `POST v1/chat/completions` + `GET v1/models`
   (scope `llm:invoke` / `llm:read`) — point any OpenAI client at `http://node:HTTP_PORT/gateway/reason/v1`;
@@ -294,6 +302,12 @@ an absent section.
 - **The award is receipt-bearing.** Written with `set_with_receipt` under a stable operation
   identity, so its durability is whatever the receipt says and a retry is recognisable. One award per
   requirement; a second is refused and the first is never overwritten.
+- **The deadline is the mesh's clock (post-360 row H).** `deadline_ms` is compared against the offer's log
+  position — the HLC the stream stamped at append, as wall-clock ms — never the offerer's own stamp; express it as
+  `now + window` on the node's clock. An offerer's node clock within `max_clock_drift_ms` is the residual.
+- **Read an award with the check you need.** `award_of` reports only a record naming its requirement and
+  operation; `award_of_verified(requirement, resolve)` only one the announcement's declarer signed, under the key
+  your directory gives for that declarer.
 - **An unknown award is not "no award".** A linearizable round that reached no commit answers
   `AwardUnknown`; retry, and it resolves as `AlreadyAwarded` or a fresh commit.
 - **Retention is yours.** The log streams grow with traffic and the crate never prunes them. The

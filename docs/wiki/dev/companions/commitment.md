@@ -61,6 +61,19 @@ Design: `docs/plans/v3-contracts-axis.md` §6.9 (CN1–CN3, D39). Key facts:
   vehicle rather than a node, the directory is the operator's and the mesh knows nothing about it.
   And nothing here stops a member *writing* the forged offer: it stops it being awarded, which is
   detection-then-refusal at the decision point, not prevention at the medium.
+- **The deadline is judged on the log's clock, since 2026-10-12 (post-360 row H).** `offered_at_ms` is a field the
+  offerer writes into its own record, and the award filtered on it — so an offer appended after the deadline with a
+  backdated stamp was eligible and one appended in time with a future stamp was not; the offerer decided whether its
+  offer was late. `plan_award_from` now compares `hlc::physical_ms` of the offer's **log position** — the HLC
+  `KvHandle::append` minted, monotone, never below anything the offerer's node had observed (so a late offer cannot be
+  backdated past the announcement's arrival) — against `deadline_ms`, which is therefore a wall-clock value on the
+  mesh's clock. **Residual:** that HLC is the offerer's *node's* clock within `GossipConfig::max_clock_drift_ms`;
+  the free field is closed, the drift bound is not tightened.
+- **An award read back is checked like an offer (row H).** `award_of` reports only a record naming its requirement
+  and the operation `cn/{req}/award` — a record copied from another requirement's slot was reported as this one's
+  and blocked its award as `AlreadyAwarded`. `award_of_verified(requirement, resolve)` reports only an award whose
+  declarer is the announcement's and whose signature verifies under that declarer's key — the mirror of
+  `offers_verified`, and unsigned stays *unproven*, reported by the unverified read and by nothing else.
 - **CN3 is the item-5 join.** The acceptor's own mandate is checked **before any write**; a stale
   holder's award is `Superseded { installed, presented }`. `MandateNotTheAcceptors` is separate:
   presenting somebody else's valid mandate is a different mistake from presenting your own expired
@@ -78,6 +91,9 @@ Design: `docs/plans/v3-contracts-axis.md` §6.9 (CN1–CN3, D39). Key facts:
 | **a forged offer is not a candidate when the declarer checks** — and *is* one when it does not | `a_forged_offer_is_not_a_candidate_when_the_declarer_checks_provenance` |
 | a signed award proves its declarer; an unsigned one proves nothing | `a_signed_award_proves_its_declarer_and_an_unsigned_one_proves_nothing` |
 | **CN2** — a whole-node recording replays deterministically | `a_whole_node_recording_of_a_linearizable_award_replays_under_the_scheduler_seam` |
+| the deadline is judged on the log's clock, not the offerer's stamp (row H) | `an_offers_deadline_is_judged_on_the_logs_clock_not_the_offerers_stamp` |
+| `award_of` reports only a record naming its requirement and operation (row H) | `award_of_reports_only_a_record_that_names_this_requirement_and_its_operation` |
+| `award_of_verified` reports only an award the announcer signed (row H) | `award_of_verified_reports_no_award_the_announcements_declarer_did_not_sign` |
 
 The third row is the honest one: the plain award path **does** admit two winners under a race, and
 the test asserts that rather than hiding it. Reach for the linearizable form when that matters.
