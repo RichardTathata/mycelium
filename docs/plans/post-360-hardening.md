@@ -1,9 +1,10 @@
 # Post-360 hardening — the next batch, and consensus as a protocol, not a service
 
-**Status:** adopted 2026-10-10, rev 1.3. **R0 is being cut as v2.32.0 (2026-10-11)**, which delivers rows **G, P3, C, D,
+**Status:** adopted 2026-10-10, rev 1.4 (2026-10-12: Φ closed). **R0 is being cut as v2.32.0 (2026-10-11)**, which delivers rows **G, P3, C, D,
 P1, A (with C1, C2), B (as narrowed 2026-10-11) and P2 (without migration, as decided 2026-10-11)** — each closed on
-evidence in §3.5. Open: Φ (the philosophy paragraph is in, #594; the runtime-invariants page does not cite it yet),
-P5, E, F, H, I, J, and R0's private re-pin (P2's migration — close, enumerate, carry, complete — delivered after 2.32.0, §3.5). It follows the 2026-10-09 360 review and the eleven
+evidence in §3.5. Open:
+P5, E, F, H, I, J, and R0's private re-pin (P2's migration — close, enumerate, carry, complete — delivered after 2.32.0, §3.5;
+Φ delivered 2026-10-12, #607, §3.5). It follows the 2026-10-09 360 review and the eleven
 PRs that addressed its must-do list (#582–#592, private #28); those are recorded in the CHANGELOG and are not
 repeated here. Rows close on evidence (verification policy rule 2): a row is closed by quoting each promise next to
 the code or test that delivers it, and a promise that is not delivered is written *not built*.
@@ -58,7 +59,7 @@ Four places strain that line today, and the rows in §3 address each:
 | Row | Scope | Promises | Depends on |
 |---|---|---|---|
 | **R0** — *being cut: v2.32.0* | Release **2.32.0** once the merge train (#582–#592) is merged | the release runbook (`RELEASING.md`), step 2b on the branch released from; upgrade notes checked as one set (the deprecation windows from #585 and #587, `SystemStats`/`ConsensusResult` fields, `/api/tuple`, `rpc/respond`, `mycelium-reason` 0.8.0, the three SDK versions); the private companion re-pinned with `COMPATIBILITY.md` updated | the train |
-| **Φ** | Philosophy: "protocol, not service" | a paragraph in the corrected-litmus section stating §2's line, and the deployment rule that no shape may make a named node set the place agreement happens; the wiki's runtime-invariants page cites it | — |
+| **Φ** — *delivered 2026-10-12 (#607), §3.5* | Philosophy: "protocol, not service" | a paragraph in the corrected-litmus section stating §2's line, and the deployment rule that no shape may make a named node set the place agreement happens; the wiki's runtime-invariants page cites it | — |
 
 ### 3.2 · The external review's items (2026-10-10)
 
@@ -114,7 +115,7 @@ the *Since P2* paragraph — all in #601 except the two markers fixed here.
 
 **C1/C2's row, checked at the cut (2026-10-11):** the decision record `consensus-electorate.md` (*Roles and outputs
 decay* — "rows C1, C2 — **delivered**, PR #600", and its §4.1 table); philosophy's "A protocol, not a service" paragraph
-("post-360 plan rows C1 and C2, delivered" — no *not built* left for them; P2's *not built* stays, correctly); guide 04
+("post-360 plan rows C1 and C2, delivered" — no *not built* left for them; P2's *not built* stayed, correctly, until #607 struck it once the migration had landed, #606); guide 04
 (`elect_leader` "**Leased** (30 s by default, since 2.32.0)", `elect_leader_with`, `release_leadership`);
 `runtime-invariants.md` § *Acceptor memory* ("shrinks to a node-owned floor once its decision is over", C2's exact
 condition, the code named) — all done in #600.
@@ -290,6 +291,23 @@ withhold real frames with the test-only `test-frame-filter` (enabled in CI's def
 - **Stated limits:** two defaults declared concurrently within gossip lag stop the exclusive verbs fleet-wide with no
   escape in this release; a lost majority stops the group (for the default, the cluster-scoped exclusive verbs); genesis
   assumes the members agree on the roster; certificates are unauthenticated without `[tls]`.
+
+**Φ — Philosophy: "protocol, not service" (#594 the first paragraph; #607 its full statement; docs only).**
+- *A paragraph in the corrected-litmus section stating §2's line* — `docs/philosophy.md` § *The corrected litmus*, the
+  blockquote **A protocol, not a service**: "a *protocol* that every member of a group runs — whichever nodes are in
+  the group run it, roles form per ballot, the coalition dissolves when the decision completes, its state is ordinary
+  keys and signals, and Layers I and II know nothing of it. It is never a *service* that a named node provides" (§2's
+  two bullets, and D1).
+- *The deployment rule that no shape may make a named node set the place agreement happens* — the same paragraph,
+  bold: "no shape — a profile, a configuration default, a unit file, a governance route, a document — may make a named
+  node set the place where agreement happens", with how an electorate is named instead (a group, members fixed at
+  genesis, changed only by a migration that terminates) and what 2.32.0 enforces of it (P2, C1, C2) and what came
+  after (the migration, #606). No *not built* remains in the paragraph: C1/C2's was struck in #600 and P2's here, the
+  migration having landed.
+- *The wiki's runtime-invariants page cites it* — `docs/wiki/dev/architecture/runtime-invariants.md` § *Layer III
+  posture*, the paragraph **Discovery is not an electorate; consensus is a protocol, not a service**: one sentence
+  restating the rule with a relative link to `philosophy.md#the-corrected-litmus`.
+- **Stated, not a promise of this row:** the rule is a document's; the code that keeps it is P2's, closed above.
 
 **P1 — Refuse an exposed, unauthenticated gateway (#598).**
 - *`start()` refuses by name when the gateway binds a non-loopback address with no credential model, unless an explicit

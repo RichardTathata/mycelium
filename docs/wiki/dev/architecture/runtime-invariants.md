@@ -93,8 +93,11 @@ renewal keeps the lineage), released by `release_leadership` (which also ends a 
 `LeaderTerm::Permanent`, by explicit opt-in.
 
 **Discovery is not an electorate; consensus is a protocol, not a service** (decided 2026-10-10 —
-[`docs/design/consensus-electorate.md`](../../../design/consensus-electorate.md); philosophy § *The corrected
-litmus*, *A protocol, not a service*). Group rosters are discovery — dynamic, eventually consistent — and quorums are
+[`docs/design/consensus-electorate.md`](../../../design/consensus-electorate.md)). The rule itself is the
+philosophy's: a protocol every member runs, never a service a named node provides, and **no shape — a profile, a
+configuration default, a unit file, a governance route, a document — may make a named node set the place where
+agreement happens** ([*The corrected litmus* → *A protocol, not a service*](../../../philosophy.md#the-corrected-litmus),
+which also states what 2.32.0 enforces of it). Group rosters are discovery — dynamic, eventually consistent — and quorums are
 counted from each proposer's view, so intersection across a roster change is not enforced; the supported profile
 (threat model §7) is a **fixed electorate per decision**. Do not "fix" this by teaching Layer I a guard on `grp/` or
 `consensus/`, and do not make a named node set "the consensus nodes". Enforced today: `resolve_electorate`
@@ -157,9 +160,10 @@ The limit: the third tripwire sees only a copy that arrives, and only before the
 the slot. The operator rule: restore with the **latest** directory, or retire
 onto the removal ledger (`sys/membership/removed/`, enforced by `NodeId` at the connection, monotonic — so removing
 first forecloses the restore). The fleet's default is set once, at genesis (a second refused by
-name, door and acceptor — `electorate::live_default`), and cannot move. The governor
-and the emergent watcher leave an electorate group alone. An embedded `grp/` write is refused at the next proposal,
-not prevented. Live reconfiguration (versioned electorates with joint consensus) is a later plan.
+name, door and acceptor — `electorate::live_default`), and moves only by its holder's retirement to a successor
+(`Retirement::passes_default`, `src/agent/electorate.rs`, #606; `deprecations.md` §34). The governor
+and the emergent watcher leave an electorate group alone. An embedded `grp/` write, or a `POST /gateway/govern/group` move, is refused at the
+next proposal, not prevented. Live reconfiguration (versioned electorates with joint consensus) is a later plan.
 
 ## Individual-scope routing: forwarding stays unconditional
 
