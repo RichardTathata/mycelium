@@ -24,7 +24,10 @@
 //! Plus the **content-addressed blob tier** ([`FsBlobStore`], [`MeshBlobStore`],
 //! [`spawn_blob_server`]) and gateway routes ([`reason_router`], feature `gateway`) that
 //! the Python LangGraph checkpointer consumes: metadata gossips in KV, payloads stay in
-//! the blob tier and are fetched (verified) from whichever peer holds them.
+//! the blob tier and are fetched (verified) from whichever peer holds them. The store is
+//! **bounded** — one blob at most [`MAX_BLOB_BYTES`], the store at most its quota
+//! ([`DEFAULT_BLOB_QUOTA_BYTES`] unless [`FsBlobStore::open_with_quota`] says otherwise) — and a
+//! caller-chosen run id is **one bounded segment** ([`validate_run_id`]) at every door it enters.
 //!
 //! ## The substrate-native frame
 //!
@@ -67,8 +70,8 @@ mod route;
 mod trace;
 
 pub use blob::{
-    BLOB_FETCH_KIND, BlobId, BlobMiss, BlobServerHandle, DAMAGED_REPLY, FsBlobStore, LocalRead, MAX_BLOB_BYTES, MeshBlobStore,
-    spawn_blob_server,
+    BLOB_FETCH_KIND, BlobId, BlobMiss, BlobServerHandle, DAMAGED_REPLY, DEFAULT_BLOB_QUOTA_BYTES, FsBlobStore, LocalRead,
+    MAX_BLOB_BYTES, MeshBlobStore, spawn_blob_server,
 };
 #[cfg(feature = "gateway")]
 pub use http::{reason_router, reason_router_with};
@@ -78,6 +81,6 @@ pub use resume::{ModelDependency, ResumeError, require_model};
 #[cfg(feature = "llm")]
 pub use route::{ModelProfile, ModelReg, serve_model};
 pub use route::{InferenceRouter, ModelQuery, RouteError, Routed, RouterConfig, llm_meta};
-pub use trace::{TraceEvent, TraceRecorder, narrate, replay};
+pub use trace::{MAX_RUN_ID_BYTES, RunIdError, TraceEvent, TraceRecorder, narrate, replay, validate_run_id};
 #[cfg(feature = "knowledge")]
 pub use knowledge::{TraceAdapterError, observation, observations};

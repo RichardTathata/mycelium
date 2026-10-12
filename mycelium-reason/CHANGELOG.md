@@ -6,6 +6,37 @@ All notable changes to this crate. It versions **independently** of the Mycelium
 
 ---
 
+## [0.9.0] — 2026-10-12
+
+**Bounded, and every caller-chosen id one segment** (post-360 hardening row H, #TBD).
+
+- **The blob store is bounded.** `FsBlobStore` held a per-blob ceiling (`MAX_BLOB_BYTES`, 8 MiB) and **no total**: it
+  grew without limit under `PUT /gateway/reason/blob` and the mesh write-back. It now holds at most its quota —
+  `DEFAULT_BLOB_QUOTA_BYTES` (**1 GiB**) from `open`, or what `FsBlobStore::open_with_quota(dir, bytes)` says
+  (`u64::MAX` for no bound; `0` refused by name) — counted from the blob-named files at open plus every byte put since,
+  the space reserved atomically *before* a write so concurrent puts cannot overshoot, released if the write fails. A
+  put past it is `ErrorKind::QuotaExceeded` with nothing written; a blob already held costs nothing; replacing a damaged
+  copy costs the growth. `quota_bytes()` / `used_bytes()` say where a store stands. The gateway answers **507
+  `quota_exceeded`** (`{"error","detail"}`); the mesh write-back of a fetched blob that no longer fits is logged and
+  the bytes are still returned. Nothing evicts — files are named by content address, so what to drop is the operator's
+  call. `reason_node` reads an optional `BLOB_QUOTA_BYTES`.
+- **A run id is one bounded segment.** `reason/{run_id}/{node}` is the stream, so a run id carrying `/` wrote into
+  **another run's prefix**: a recorder for `victim/x` landed under `log/reason/victim/`, and `replay("victim")` — and
+  `anchor`, which seals what replay returns — carried the injected event as the victim's own; an empty or 10 KiB id was
+  written as given. `validate_run_id` (non-empty, ≤ `MAX_RUN_ID_BYTES` = 128 bytes, ASCII letters, digits and
+  `- _ . : @ +`, not `.`/`..`) now runs at every door: `TraceRecorder::new` returns `Result<_, RunIdError>`; `replay`
+  reads only keys of the one shape a recorder writes (`{node}/{hlc}/{salt}` under the run — a deeper key is
+  skipped with a warning) and replays nothing under an invalid id; `GET /gateway/reason/trace/{run_id}` and the
+  `run_id` of `POST /gateway/reason/route` answer **400 `bad_run_id`**, the façade `400 invalid_request_error` /
+  `bad_run_id` with `param: "run_id"` — each before anything is routed or read.
+- **Breaking (hence the MINOR):** `TraceRecorder::new` returns a `Result` (`?` or `.expect` at the call site);
+  `FsBlobStore::open` is bounded at 1 GiB by default — a node holding more at open refuses the next new put with
+  507 until it is opened with a larger quota (an existing file is never touched); `RunIdError` is `#[non_exhaustive]`.
+  `FsBlobStore` derives `Debug`.
+- Seen failing first: `tests/reason.rs::a_run_id_with_a_slash_cannot_write_into_another_runs_trace` (two events replayed
+  under `victim`, one of them mallory's), `tests/gateway.rs::every_run_id_door_refuses_an_id_that_is_not_one_bounded_segment`
+  (`GET …/trace/victim%2Fx` answered 200); the quota tests as a missing method. Requires `mycelium` ≥ 2.32.0.
+
 ## [0.8.0] — 2026-10-11
 
 **The façade acts as the HTTP client, under the evaluator.** `POST /gateway/reason/route` and

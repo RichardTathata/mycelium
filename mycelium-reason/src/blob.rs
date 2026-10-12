@@ -15,6 +15,7 @@
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -25,6 +26,12 @@ use tracing::{debug, warn};
 /// Hard per-blob ceiling: a blob must fit one RPC reply frame (KV/signal frames are
 /// size-gated at ~9.94 MiB; 8 MiB leaves envelope headroom).
 pub const MAX_BLOB_BYTES: usize = 8 * 1024 * 1024;
+
+/// The default bound on what one [`FsBlobStore`] holds in total: **1 GiB** (128 blobs at the per-blob
+/// ceiling). A store with no bound grew without limit under `PUT /gateway/reason/blob` and the mesh
+/// write-back (post-360 row H); [`FsBlobStore::open_with_quota`] sets another, and `u64::MAX` is no
+/// bound. The bound is the store's — the gateway answers **507 `quota_exceeded`** when a put would pass it.
+pub const DEFAULT_BLOB_QUOTA_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// RPC kind for peer blob fetch: 32-byte id in, blob bytes (or empty for miss) out.
 pub const BLOB_FETCH_KIND: &str = "reason.blob.fetch";
@@ -93,16 +100,75 @@ pub enum LocalRead {
 /// the next put of the right bytes),
 /// and reads verify the hash: [`get`](FsBlobStore::get) never returns bad data, and [`read`](FsBlobStore::read)
 /// says when a copy on disk is damaged rather than absent.
+///
+/// **Bounded.** The store holds at most [`quota_bytes`](FsBlobStore::quota_bytes) in total
+/// ([`DEFAULT_BLOB_QUOTA_BYTES`] unless [`open_with_quota`](FsBlobStore::open_with_quota) says
+/// otherwise): the bytes of every blob-named file at open, plus every byte put since. A put that would
+/// pass the bound is refused with `ErrorKind::QuotaExceeded` before anything is written, and the space
+/// is reserved atomically *before* the write, so concurrent puts cannot overshoot between them. A blob
+/// already held costs nothing; replacing a damaged copy costs the growth. Nothing here evicts: what to
+/// drop is the operator's decision, and the files are named by their content address.
+#[derive(Debug)]
 pub struct FsBlobStore {
     dir: PathBuf,
+    quota_bytes: u64,
+    /// The bytes held, as reserved: counted at open, reserved before each write, released on failure.
+    used_bytes: AtomicU64,
 }
 
 impl FsBlobStore {
-    /// Open a blob directory, creating it (and parents) if absent.
+    /// Open a blob directory, creating it (and parents) if absent, bounded at
+    /// [`DEFAULT_BLOB_QUOTA_BYTES`].
     pub fn open(dir: impl Into<PathBuf>) -> std::io::Result<Self> {
+        Self::open_with_quota(dir, DEFAULT_BLOB_QUOTA_BYTES)
+    }
+
+    /// [`open`](Self::open) with a total bound of `quota_bytes` (`u64::MAX` for none). A quota of `0`
+    /// is refused by name (`InvalidInput`): it would store nothing, and *no bound* is spelled
+    /// `u64::MAX`, not `0`. Counts what the directory already holds — every file named by a blob id
+    /// — so a reopened store starts from its real size; a put past the bound is
+    /// `ErrorKind::QuotaExceeded`.
+    pub fn open_with_quota(dir: impl Into<PathBuf>, quota_bytes: u64) -> std::io::Result<Self> {
+        if quota_bytes == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "a blob quota of 0 stores nothing; pass u64::MAX for no bound",
+            ));
+        }
         let dir = dir.into();
         std::fs::create_dir_all(&dir)?;
-        Ok(Self { dir })
+        let mut used: u64 = 0;
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let is_blob = entry.file_name().to_str().and_then(BlobId::from_hex).is_some();
+            if is_blob && let Ok(m) = entry.metadata() && m.is_file() {
+                used = used.saturating_add(m.len());
+            }
+        }
+        Ok(Self { dir, quota_bytes, used_bytes: AtomicU64::new(used) })
+    }
+
+    /// The total bound, in bytes (`u64::MAX` is none).
+    pub fn quota_bytes(&self) -> u64 {
+        self.quota_bytes
+    }
+
+    /// The bytes held, as the store accounts them: counted at open plus every byte put since.
+    pub fn used_bytes(&self) -> u64 {
+        self.used_bytes.load(Ordering::SeqCst)
+    }
+
+    /// Reserve `growth` bytes under the quota, atomically; `Err` when it would pass the bound.
+    fn reserve(&self, growth: u64) -> Result<(), u64> {
+        self.used_bytes
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
+                used.checked_add(growth).filter(|total| *total <= self.quota_bytes)
+            })
+            .map(|_| ())
+    }
+
+    fn release(&self, bytes: u64) {
+        let _ = self.used_bytes.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |used| Some(used.saturating_sub(bytes)));
     }
 
     fn path_of(&self, id: &BlobId) -> PathBuf {
@@ -112,7 +178,8 @@ impl FsBlobStore {
     /// Store `bytes`, returning their content address. Idempotent — storing bytes the store already
     /// holds is a no-op returning the same id, at the cost of reading the existing copy to compare (a
     /// copy that differs is damaged and is replaced). Rejects blobs over
-    /// [`MAX_BLOB_BYTES`] with `InvalidInput` (they could never travel the mesh).
+    /// [`MAX_BLOB_BYTES`] with `InvalidInput` (they could never travel the mesh), and a blob that
+    /// would take the store past its quota with `QuotaExceeded` — before anything is written.
     pub fn put(&self, bytes: &[u8]) -> std::io::Result<BlobId> {
         if bytes.len() > MAX_BLOB_BYTES {
             return Err(std::io::Error::new(
@@ -125,20 +192,40 @@ impl FsBlobStore {
         // A copy holding exactly these bytes is a no-op. Anything else at the path — damaged, truncated,
         // unreadable — is replaced: returning early because a file existed left damage unrepairable (S5).
         // The check compares the length first and the bytes only on a match — no second hash.
-        if std::fs::metadata(&path).is_ok_and(|m| m.len() == bytes.len() as u64)
-            && std::fs::read(&path).is_ok_and(|existing| existing == bytes)
-        {
+        let existing = std::fs::metadata(&path).ok().filter(|m| m.is_file()).map(|m| m.len());
+        if existing == Some(bytes.len() as u64) && std::fs::read(&path).is_ok_and(|existing| existing == bytes) {
             return Ok(id);
         }
-        static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        // The quota is reserved for the growth — the new bytes beyond whatever file the path holds (a
+        // damaged copy about to be replaced) — before the write, and released if the write fails.
+        let len = bytes.len() as u64;
+        let old_len = existing.unwrap_or(0);
+        let growth = len.saturating_sub(old_len);
+        if self.reserve(growth).is_err() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::QuotaExceeded,
+                format!(
+                    "blob is {len} bytes; the store holds {} of its {} byte quota",
+                    self.used_bytes(),
+                    self.quota_bytes
+                ),
+            ));
+        }
+        static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
         let tmp = self.dir.join(format!(
             ".tmp-{}-{}-{}",
             id.to_hex(),
             std::process::id(),
-            TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            TMP_SEQ.fetch_add(1, Ordering::Relaxed),
         ));
-        std::fs::write(&tmp, bytes)?;
-        std::fs::rename(&tmp, &path)?;
+        if let Err(e) = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, &path)) {
+            let _ = std::fs::remove_file(&tmp);
+            self.release(growth);
+            return Err(e);
+        }
+        if old_len > len {
+            self.release(old_len - len); // a damaged copy larger than the blob shrank the store
+        }
         Ok(id)
     }
 
@@ -473,6 +560,43 @@ mod tests {
         assert_eq!(BlobId::from_hex("zz"), None);
         assert_eq!(BlobId::from_hex(&"g".repeat(64)), None);
         assert_eq!(format!("{id}"), id.to_hex());
+    }
+
+    /// Post-360 row H: the store is bounded. A put past the quota is refused by name before anything is
+    /// written and reserves nothing; a blob already held costs nothing; a reopened store counts its
+    /// files; replacing a damaged copy costs only the growth. (Seen failing first as a missing method —
+    /// the store had a per-blob ceiling and no total.)
+    #[test]
+    fn a_store_refuses_a_put_past_its_quota_and_counts_what_it_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = FsBlobStore::open_with_quota(dir.path(), 100).unwrap();
+        assert_eq!((s.quota_bytes(), s.used_bytes()), (100, 0));
+        let a = s.put(&[1u8; 60]).unwrap();
+        assert_eq!(s.used_bytes(), 60);
+        let err = s.put(&[2u8; 50]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::QuotaExceeded, "{err}");
+        assert_eq!(s.used_bytes(), 60, "a refused put reserves nothing");
+        assert!(!s.contains(&BlobId::of(&[2u8; 50])), "and writes nothing");
+        assert_eq!(s.put(&[1u8; 60]).unwrap(), a, "a blob already held costs nothing");
+        assert_eq!(s.used_bytes(), 60);
+        assert!(s.put(&[3u8; 40]).is_ok(), "exactly the quota is allowed");
+        assert_eq!(s.used_bytes(), 100);
+        assert_eq!(s.put(&[4u8; 1]).unwrap_err().kind(), std::io::ErrorKind::QuotaExceeded);
+
+        // Damage a copy behind the store's back; a reopened store counts the files it finds, and
+        // repairing the copy costs only the growth, not a second 60.
+        std::fs::write(s.path_of(&a), b"rot").unwrap();
+        let s2 = FsBlobStore::open_with_quota(dir.path(), 100).unwrap();
+        assert_eq!(s2.used_bytes(), 43, "reopening counts the blob-named files on disk");
+        assert_eq!(s2.put(&[1u8; 60]).unwrap(), a);
+        assert_eq!(s2.used_bytes(), 100);
+        assert_eq!(s2.read(&a), LocalRead::Valid(Bytes::from(vec![1u8; 60])));
+
+        // A zero quota is refused by name; the default is the documented constant; MAX is no bound.
+        assert_eq!(FsBlobStore::open_with_quota(dir.path(), 0).unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(FsBlobStore::open(dir.path()).unwrap().quota_bytes(), DEFAULT_BLOB_QUOTA_BYTES);
+        let unbounded = FsBlobStore::open_with_quota(dir.path(), u64::MAX).unwrap();
+        assert!(unbounded.put(&[5u8; 1000]).is_ok());
     }
 
     #[test]

@@ -65,7 +65,12 @@ async fn main() {
         NodeId::new("127.0.0.1", bind_port).expect("BIND_PORT invalid"),
         cfg,
     ));
-    let store = Arc::new(FsBlobStore::open(&blob_dir).expect("BLOB_DIR must be creatable"));
+    // Bounded at 1 GiB unless `BLOB_QUOTA_BYTES` says otherwise (`u64::MAX` for no bound).
+    let store = match std::env::var("BLOB_QUOTA_BYTES") {
+        Ok(q) => FsBlobStore::open_with_quota(&blob_dir, q.parse().expect("BLOB_QUOTA_BYTES did not parse")),
+        Err(_) => FsBlobStore::open(&blob_dir),
+    };
+    let store = Arc::new(store.expect("BLOB_DIR must be creatable"));
 
     // Routes must be mounted BEFORE start — with_http_routes silently ignores late calls.
     agent.with_http_routes(reason_router(Arc::clone(&agent), Arc::clone(&store)));

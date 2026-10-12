@@ -18,11 +18,65 @@
 //! on replay, never duplicated into the value. Keep `detail` small: every record is a
 //! size-gated KV write that floods the fleet; payloads belong in the blob tier.
 
+use std::fmt;
 use std::sync::Arc;
 
 use mycelium::{GossipAgent, NodeId};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// The most bytes a run id may carry: it is a log-stream segment repeated in every record's key
+/// (and a 10 KiB id was written as given before post-360 row H).
+pub const MAX_RUN_ID_BYTES: usize = 128;
+
+/// Why a run id was refused. A run id is **one bounded path segment**: non-empty, at most
+/// [`MAX_RUN_ID_BYTES`] bytes, ASCII letters and digits and `- _ . : @ +`, and not `.` or `..`.
+///
+/// The stream is `reason/{run_id}/{node}`, so a run id carrying `/` wrote into **another run's
+/// prefix** — a recorder for `victim/x` landed under `log/reason/victim/`, and `replay("victim")`
+/// (and `anchor`, which seals what replay returns) carried the injected event as the victim's own.
+/// Every door that takes a caller-chosen id validates it before it is used ([`validate_run_id`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RunIdError {
+    /// An empty id names no run.
+    Empty,
+    /// More than [`MAX_RUN_ID_BYTES`] bytes.
+    TooLong { len: usize },
+    /// A character outside the segment alphabet — `/` and whitespace among them.
+    BadChar(char),
+    /// `.` or `..`: path-shaped, and never a run.
+    Reserved,
+}
+
+impl fmt::Display for RunIdError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => f.write_str("run id is empty"),
+            Self::TooLong { len } => write!(f, "run id is {len} bytes; the most is {MAX_RUN_ID_BYTES}"),
+            Self::BadChar(c) => write!(f, "run id carries {c:?}; one segment of ASCII letters, digits and - _ . : @ +"),
+            Self::Reserved => f.write_str("run id is `.` or `..`"),
+        }
+    }
+}
+impl std::error::Error for RunIdError {}
+
+/// Check a run id is one bounded segment (see [`RunIdError`]). Pure; the one rule every door applies.
+pub fn validate_run_id(run_id: &str) -> Result<(), RunIdError> {
+    if run_id.is_empty() {
+        return Err(RunIdError::Empty);
+    }
+    if run_id.len() > MAX_RUN_ID_BYTES {
+        return Err(RunIdError::TooLong { len: run_id.len() });
+    }
+    if run_id == "." || run_id == ".." {
+        return Err(RunIdError::Reserved);
+    }
+    match run_id.chars().find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '@' | '+'))) {
+        Some(c) => Err(RunIdError::BadChar(c)),
+        None => Ok(()),
+    }
+}
 
 /// Records reasoning events into this node's substream of run `run_id`
 /// (`reason/{run_id}/{node}` — see the module doc for why substreams).
@@ -53,8 +107,12 @@ pub struct TraceEvent {
 }
 
 impl TraceRecorder {
-    pub fn new(agent: Arc<GossipAgent>, run_id: impl Into<String>) -> Self {
-        Self { agent, run_id: run_id.into() }
+    /// A recorder for `run_id`, which must be one bounded segment ([`validate_run_id`]) — refused by
+    /// name before anything is written, since the id is a segment of every record's key.
+    pub fn new(agent: Arc<GossipAgent>, run_id: impl Into<String>) -> Result<Self, RunIdError> {
+        let run_id = run_id.into();
+        validate_run_id(&run_id)?;
+        Ok(Self { agent, run_id })
     }
 
     pub fn run_id(&self) -> &str {
@@ -159,7 +217,16 @@ impl TraceRecorder {
 /// and HLC-ordered (ties break on node id — equal stamps are concurrent events).
 /// Tolerant of undecodable entries (a foreign writer, a truncated record): skipped
 /// with a warning, never a panic — replay is a read path.
+///
+/// Reads only keys of the one shape a recorder writes under the run — `{node}/{hlc:016x}/{salt}` —
+/// so a record written under a deeper id (`{run_id}/x`, by a writer that bypassed
+/// [`validate_run_id`] with a raw append) is another run's record and is skipped, with a warning.
+/// An id that is not one bounded segment replays nothing: no recorder could have written under it.
 pub fn replay(agent: &GossipAgent, run_id: &str) -> Vec<TraceEvent> {
+    if let Err(e) = validate_run_id(run_id) {
+        tracing::warn!(run_id, error = %e, "trace replay refused: no recorder writes under such an id");
+        return Vec::new();
+    }
     // `kv().append`'s on-disk key contract is `log/{stream}/{hlc:016x}/{node}` — it salts the key
     // with the appending node id so two nodes appending in the same millisecond don't collide under
     // LWW (core audit 2026-07-15, BUG 4). Our stream is `reason/{run_id}/{node}`, so the full key is
@@ -172,7 +239,13 @@ pub fn replay(agent: &GossipAgent, run_id: &str) -> Vec<TraceEvent> {
         .scan_prefix(&prefix)
         .into_iter()
         .filter_map(|(key, value)| {
-            let hlc_hex = key.rsplit('/').nth(1)?;
+            let k: &str = &key;
+            let mut segments = k.strip_prefix(prefix.as_str())?.split('/');
+            let (_node, hlc_hex, _salt) = (segments.next()?, segments.next()?, segments.next()?);
+            if segments.next().is_some() {
+                tracing::warn!(run_id, %key, "skipping a trace key written under a deeper run id — not this run's record");
+                return None;
+            }
             let Ok(hlc) = u64::from_str_radix(hlc_hex, 16) else {
                 tracing::warn!(run_id, %key, "skipping trace key with a non-HLC suffix");
                 return None;
@@ -239,6 +312,25 @@ pub fn narrate(events: &[TraceEvent]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Post-360 row H: a run id is one bounded segment, refused by name otherwise.
+    #[test]
+    fn a_run_id_is_one_non_empty_bounded_segment() {
+        assert_eq!(validate_run_id("surplus-run-1"), Ok(()));
+        assert_eq!(validate_run_id("reheal-llama3:8b"), Ok(()));
+        assert_eq!(validate_run_id("thread_1.step+2@x"), Ok(()));
+        assert_eq!(validate_run_id(&"x".repeat(MAX_RUN_ID_BYTES)), Ok(()), "exactly the bound is allowed");
+        assert_eq!(validate_run_id(""), Err(RunIdError::Empty));
+        assert_eq!(validate_run_id("victim/x"), Err(RunIdError::BadChar('/')));
+        assert_eq!(validate_run_id("/victim"), Err(RunIdError::BadChar('/')));
+        assert_eq!(validate_run_id(".."), Err(RunIdError::Reserved));
+        assert_eq!(validate_run_id("."), Err(RunIdError::Reserved));
+        assert_eq!(validate_run_id("a b"), Err(RunIdError::BadChar(' ')));
+        assert_eq!(validate_run_id("a\n"), Err(RunIdError::BadChar('\n')));
+        assert_eq!(validate_run_id("ü"), Err(RunIdError::BadChar('ü')));
+        assert_eq!(validate_run_id(&"x".repeat(10 * 1024)), Err(RunIdError::TooLong { len: 10 * 1024 }));
+        assert_eq!(validate_run_id(&"x".repeat(MAX_RUN_ID_BYTES + 1)), Err(RunIdError::TooLong { len: MAX_RUN_ID_BYTES + 1 }));
+    }
 
     fn ev(hlc: u64, kind: &str, detail: serde_json::Value) -> TraceEvent {
         TraceEvent { hlc, node: "127.0.0.1:9000".into(), kind: kind.into(), detail }
