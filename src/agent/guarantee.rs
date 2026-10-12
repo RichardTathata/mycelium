@@ -753,6 +753,20 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
               #[cfg(not(feature = "tls"))]
               { let _ = c; Resolution::NotInBuild { feature: "tls" } }
           }),
+        g("mesh.signed_writes", 1, "transport", Node,
+          "an unsigned KV write frame is refused, so a member cannot write as another by not signing (anti-entropy state replies excepted)",
+          "`tls`; `[tls]`; `kv_require_signed_frames = true` (default off — post-360 row F's window; unconditional at row F2)",
+          &["connection::handle_connection (Data arm)"], "docs/guide/deprecations.md",
+          always,
+          |c| {
+              #[cfg(feature = "tls")]
+              {
+                  if c.config.tls.is_none() { return Resolution::NotConfigured { missing: "[tls] — nothing is signed without it" }; }
+                  if c.config.kv_require_signed_frames { Resolution::Enforced } else { Resolution::NotConfigured { missing: "kv_require_signed_frames = true" } }
+              }
+              #[cfg(not(feature = "tls"))]
+              { let _ = c; Resolution::NotInBuild { feature: "tls" } }
+          }),
         g("id.proofs_required", 1, "identity", Node,
           "an identity entry this node cannot authenticate is rejected (issuer binding rests on it)",
           "`tls`; `[tls]`; `require_identity_proofs = true` (default off)",

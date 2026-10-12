@@ -201,6 +201,19 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
     for (name, value) in feature_gated_counters() {
         body[name] = json!(value);
     }
+    // Post-360 plan row F's mixed-fleet window (`deprecations.md` §35), per node: KV signatures accepted
+    // in the bare (pre-2.33) form, unsigned KV `Data` frames a TLS node accepted or refused, and signed
+    // frames refused because their signer was not their sender. Frames, not peers. (2.32.0's
+    // `identity_untagged_proofs` and `consensus_untagged_signatures` went with the §23 window.)
+    #[cfg(feature = "tls")]
+    {
+        let b = &ctx.agent_ctx.transport_bounds;
+        let load = |c: &std::sync::atomic::AtomicU64| c.load(std::sync::atomic::Ordering::Relaxed);
+        body["kv_untagged_signatures"] = json!(load(&b.kv_untagged_signatures));
+        body["kv_unsigned_frames_accepted"] = json!(load(&b.kv_unsigned_accepted));
+        body["kv_unsigned_frames_refused"] = json!(load(&b.kv_unsigned_refused));
+        body["kv_signer_mismatch"] = json!(load(&b.kv_signer_mismatch));
+    }
     Json(body)
 }
 
@@ -208,21 +221,6 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
 /// increments it is compiled, so a reader never sees a `0` for a counter this build cannot raise.
 /// Returned as a list (possibly empty) so the caller's loop is the same in every build.
 pub(super) fn feature_gated_counters() -> Vec<(&'static str, u64)> {
-    // Post-360 plan row F's mixed-fleet window (`deprecations.md` §35): KV signatures accepted in the
-    // bare (pre-2.33) form, and unsigned KV `Data` frames a TLS node accepted or refused. Frames, not
-    // peers; still rising means a peer not yet upgraded. (2.32.0's `identity_untagged_proofs` and
-    // `consensus_untagged_signatures` went with the §23 window they counted.)
-    let kv_window: [Option<(&'static str, u64)>; 3] = {
-        #[cfg(feature = "tls")]
-        {
-            let (accepted, refused) = mycelium_core::connection::unsigned_kv_frames();
-            [Some(("kv_untagged_signatures", mycelium_core::connection::untagged_kv_signatures_accepted())),
-             Some(("kv_unsigned_frames_accepted", accepted)),
-             Some(("kv_unsigned_frames_refused", refused))]
-        }
-        #[cfg(not(feature = "tls"))]
-        { [None, None, None] }
-    };
     // Answers this node's acceptor withheld because its promise or acceptance did not reach the WAL.
     let acceptor_unrecorded: Option<(&'static str, u64)> = {
         #[cfg(feature = "consensus")]
@@ -239,5 +237,5 @@ pub(super) fn feature_gated_counters() -> Vec<(&'static str, u64)> {
         #[cfg(not(feature = "consensus"))]
         { [None, None, None] }
     };
-    kv_window.into_iter().chain([acceptor_unrecorded]).chain(acceptor_guard).flatten().collect()
+    [acceptor_unrecorded].into_iter().chain(acceptor_guard).flatten().collect()
 }

@@ -240,6 +240,7 @@ pub fn shard_for_key(key: &str, n_shards: usize) -> usize {
 /// Extracts the gossip shard routing key from a wire message.
 fn wire_msg_key(msg: &WireMessage) -> &str {
     match msg {
+        // signed-dispatch: allow (a match pattern, not a construction)
         WireMessage::Data(u)                    => &u.key,
         WireMessage::SignedData { update, .. }  => &update.key,
         WireMessage::Signal { kind, .. }        => kind,
@@ -553,6 +554,7 @@ pub fn make_kv_wire_msg(
         return WireMessage::SignedData { update, signer: sender_hash, signature: (sig_lo, sig_hi) };
     }
     let _ = (sender_hash, tls);
+    // signed-dispatch: allow (the plaintext arm — no identity to sign with)
     WireMessage::Data(update)
 }
 

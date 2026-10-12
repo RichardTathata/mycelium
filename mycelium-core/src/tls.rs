@@ -583,10 +583,14 @@ mod imp {
         removed: &crate::removal::RemovedSet,
         end_entity: &CertificateDer<'_>,
     ) -> Result<(), rustls::Error> {
-        if !removed.is_empty()
-            && let Some(key) = ed25519_key_from_cert_der(end_entity.as_ref())
-            && removed.is_key_removed(&key)
-        {
+        // Fail closed (#611's review, finding 6): every certificate this codebase issues or loads
+        // carries the node's Ed25519 identity key (`generate_node_cert`, `issue_node_cert`; `key_pem`
+        // is read as an Ed25519 PKCS8 key), so one without it is not a member's — a CA-key holder
+        // could otherwise mint a certificate for another algorithm and pass whatever the ledger says.
+        let Some(key) = ed25519_key_from_cert_der(end_entity.as_ref()) else {
+            return Err(rustls::Error::General("mycelium: a mesh certificate must carry an Ed25519 identity key".into()));
+        };
+        if removed.is_key_removed(&key) {
             return Err(rustls::Error::General("mycelium: this identity has been removed from the mesh".into()));
         }
         Ok(())
@@ -815,6 +819,22 @@ mod key_extract_tests {
             super::imp::refuse_if_removed(&removed, &cert).is_err(),
             "a removed member's certificate is refused whatever else its serial number says",
         );
+    }
+
+    /// **A certificate with no Ed25519 key is refused by the removal check** (#611's review, finding 6).
+    /// Every node certificate this codebase issues or loads carries the node's Ed25519 identity key
+    /// (`generate_node_cert`, `issue_node_cert`; `key_pem` is read as an Ed25519 PKCS8 key), so a
+    /// certificate without one is not a member's — but the check skipped it, failing open: a CA-key
+    /// holder could mint a P-256 certificate and pass whatever the ledger said. Seen failing first:
+    /// `Ok(())`, with the ledger empty and with it non-empty.
+    #[test]
+    fn a_certificate_without_an_ed25519_key_is_refused_by_the_removal_check() {
+        let p256 = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let cert = rustls::pki_types::CertificateDer::from(cert_with_planted_serial(&p256, vec![1, 2, 3]));
+        let removed = crate::removal::RemovedSet::default();
+        assert!(super::imp::refuse_if_removed(&removed, &cert).is_err(), "no Ed25519 key, no member — ledger empty");
+        removed.remove(&NodeId::new("127.0.0.1", 9002).unwrap(), [[5u8; 32]]);
+        assert!(super::imp::refuse_if_removed(&removed, &cert).is_err(), "and with removals on the ledger");
     }
 
     /// A certificate for a key that is not Ed25519 has no Ed25519 key to read, even when the

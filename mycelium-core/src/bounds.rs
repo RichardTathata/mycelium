@@ -46,6 +46,19 @@ pub struct TransportBounds {
     pub per_source_refused: AtomicU64,
     /// Inbound connections per source address — kept only when `max_connections_per_source` is set.
     per_source: Arc<papaya::HashMap<std::net::IpAddr, Arc<AtomicU64>>>,
+    /// KV `SignedData` frames this node accepted in the bare (pre-2.33) signature form — post-360 row
+    /// F's one-release window (`deprecations.md` §35). Frames, not peers. `GET /stats`
+    /// `kv_untagged_signatures`. Only a TLS node raises it.
+    pub kv_untagged_signatures: AtomicU64,
+    /// Unsigned KV `Data` frames this TLS node applied under the window (`kv_require_signed_frames`
+    /// off). `GET /stats` `kv_unsigned_frames_accepted`.
+    pub kv_unsigned_accepted: AtomicU64,
+    /// Unsigned KV `Data` frames this TLS node dropped because `kv_require_signed_frames` is set.
+    /// `GET /stats` `kv_unsigned_frames_refused`.
+    pub kv_unsigned_refused: AtomicU64,
+    /// `SignedData` frames dropped because their `signer` is not the update's `sender` (#611's review,
+    /// finding 1). `GET /stats` `kv_signer_mismatch`.
+    pub kv_signer_mismatch: AtomicU64,
 }
 
 /// One connection's place under the per-source cap; given back when dropped. It holds the very

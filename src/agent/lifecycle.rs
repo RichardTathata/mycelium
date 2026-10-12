@@ -174,6 +174,14 @@ impl GossipAgent {
             }
             _ => {}
         }
+        // #611's review, finding 9: `kv_require_signed_frames` without `[tls]` refuses nothing — no
+        // frame is signed, so none can be told apart. Inert like `require_identity_proofs`, and said so.
+        if self.config.kv_require_signed_frames_is_inert() {
+            tracing::warn!(
+                "start: kv_require_signed_frames is set without [tls] — it has no effect: nothing is signed \
+                 without a TLS identity, and an unsigned KV write is applied as before"
+            );
+        }
         // The lifecycle boundary (plan G13): every attachment is in and the configuration is what it
         // is. Resolve every registered guarantee against this node and say so, once, before traffic.
         self.task_ctx.started.store(true, std::sync::atomic::Ordering::Release);

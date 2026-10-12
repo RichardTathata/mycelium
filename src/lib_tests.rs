@@ -96,6 +96,8 @@ struct HandlerOpts {
     config:    GossipConfig,
     tls:       Option<Arc<crate::tls::NodeTls>>,
     peer_keys: Vec<(NodeId, Vec<[u8; 32]>)>,
+    /// The handler's per-node counters, shared so a test can read them.
+    bounds:    Arc<mycelium_core::bounds::TransportBounds>,
 }
 
 fn spawn_handler_with(
@@ -158,7 +160,7 @@ fn spawn_handler_with(
         kv_state,
         wal: std::sync::OnceLock::new(),
         sys_namespace_violations: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        transport_bounds: Arc::default(),
+        transport_bounds: Arc::clone(&opts.bounds),
         tls: {
             let cell = std::sync::OnceLock::new();
             if let Some(t) = opts.tls { let _ = cell.set(t); }
@@ -1122,11 +1124,11 @@ async fn a_tls_node_requiring_signed_frames_refuses_an_unsigned_data_frame() {
     let sk = SigningKey::from_bytes(&[73u8; 32]);
     let mut config = GossipConfig::default();
     config.kv_require_signed_frames = true;
-    let opts = HandlerOpts { config, tls: Some(tls), peer_keys: vec![(peer.clone(), vec![sk.verifying_key().to_bytes()])] };
+    let opts = HandlerOpts { config, tls: Some(tls), peer_keys: vec![(peer.clone(), vec![sk.verifying_key().to_bytes()])], ..Default::default() };
+    let bounds = Arc::clone(&opts.bounds);
     let _ = spawn_handler_with(reader, Arc::clone(&store), Arc::new(papaya::HashMap::new()), tx,
                                Arc::new(ShardedSeen::new(N_GOSSIP_SHARDS)), GossipConfig::default().default_ttl, opts);
 
-    let before = mycelium_core::connection::unsigned_kv_frames().1;
     let mut forged = data_update("unsigned/k", b"forged", 7311, false);
     forged.sender = peer.id_hash();
     send_wire(&mut writer, &WireMessage::Data(forged)).await;
@@ -1139,7 +1141,47 @@ async fn a_tls_node_requiring_signed_frames_refuses_an_unsigned_data_frame() {
     let s = Arc::clone(&store);
     poll_until(|| s.pin().get("unsigned/probe").is_some(), 500).await;
     assert!(store.pin().get("unsigned/k").is_none(), "an unsigned write is not applied by a node that requires signatures");
-    assert!(mycelium_core::connection::unsigned_kv_frames().1 > before, "and the refusal is counted");
+    assert_eq!(bounds.kv_unsigned_refused.load(Ordering::Relaxed), 1, "and the refusal is counted");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A node's own identity record travels unsigned, and is not refused** (found by the fix round's
+/// own fleet test: a node publishes `sys/identity{,-proof,-signed}/{self}` before its TLS identity is
+/// installed, and it must — a signed identity frame is dropped as from an unknown signer at every peer
+/// that does not hold the key yet, and is then not forwarded, so the key would reach a third node only
+/// by anti-entropy). The record carries its own proof, which `validate_and_merge_identity` checks
+/// (`require_identity_proofs` refuses an unproven one), so the unsigned-frame refusal exempts a record
+/// whose key names its sender — and counts nothing for it. Seen failing first: the record was refused.
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn a_nodes_own_identity_record_is_not_refused_as_unsigned() {
+    let (mut writer, reader) = loopback_pair().await;
+    let store: Arc<papaya::HashMap<Arc<str>, StoreEntry>> = Arc::new(papaya::HashMap::new());
+    let (tx, _rx) = mpsc::channel(10);
+    let me = NodeId::new("127.0.0.1", 7341).unwrap();
+    let peer = NodeId::new("127.0.0.1", 7342).unwrap();
+    let other = NodeId::new("127.0.0.1", 7343).unwrap();
+    let (tls, dir) = test_tls_identity("identity-unsigned", &me);
+    let mut config = GossipConfig::default();
+    config.kv_require_signed_frames = true;
+    let opts = HandlerOpts { config, tls: Some(tls), ..Default::default() };
+    let bounds = Arc::clone(&opts.bounds);
+    let _ = spawn_handler_with(reader, Arc::clone(&store), Arc::new(papaya::HashMap::new()), tx,
+                               Arc::new(ShardedSeen::new(N_GOSSIP_SHARDS)), GossipConfig::default().default_ttl, opts);
+    let own = format!("sys/identity-signed/{peer}");
+    let mut u = data_update(&own, b"sealed", 7341, false);
+    u.sender = peer.id_hash();
+    send_wire(&mut writer, &WireMessage::Data(u)).await;
+    // A record about someone else, sent unsigned, is still refused.
+    let foreign = format!("sys/identity/{other}");
+    let mut f = data_update(&foreign, b"keys", 7342, false);
+    f.sender = peer.id_hash();
+    send_wire(&mut writer, &WireMessage::Data(f)).await;
+    let s = Arc::clone(&store);
+    poll_until(|| s.pin().get(own.as_str()).is_some(), 500).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(store.pin().get(foreign.as_str()).is_none(), "an unsigned identity record about another node is refused");
+    assert_eq!(bounds.kv_unsigned_refused.load(Ordering::Relaxed), 1, "only the foreign record is counted");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1155,14 +1197,210 @@ async fn an_unsigned_data_frame_is_applied_and_counted_during_the_window() {
     let me = NodeId::new("127.0.0.1", 7313).unwrap();
     let (tls, dir) = test_tls_identity("unsigned-window", &me);
     let opts = HandlerOpts { tls: Some(tls), ..Default::default() };
+    let bounds = Arc::clone(&opts.bounds);
     let _ = spawn_handler_with(reader, Arc::clone(&store), Arc::new(papaya::HashMap::new()), tx,
                                Arc::new(ShardedSeen::new(N_GOSSIP_SHARDS)), GossipConfig::default().default_ttl, opts);
-    let before = mycelium_core::connection::unsigned_kv_frames().0;
     send_wire(&mut writer, &WireMessage::Data(data_update("window/k", b"v", 7313, false))).await;
     let s = Arc::clone(&store);
     poll_until(|| s.pin().get("window/k").is_some(), 500).await;
-    assert!(mycelium_core::connection::unsigned_kv_frames().0 > before, "accepted, and counted");
+    assert_eq!(bounds.kv_unsigned_accepted.load(Ordering::Relaxed), 1, "accepted, and counted");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A `SignedData` frame's signer must be its sender** (#611's review, finding 1). The arm verified
+/// the signature against `signer`'s key and applied the update as `update.sender`'s, so a member M could
+/// sign with its own key a write naming V as its originator — including V's own `sys/` keys — and it
+/// verified. Seen failing first: both of M's writes were applied.
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn a_signed_frame_whose_signer_is_not_its_sender_is_refused() {
+    use ed25519_dalek::SigningKey;
+    let (mut writer, reader) = loopback_pair().await;
+    let store: Arc<papaya::HashMap<Arc<str>, StoreEntry>> = Arc::new(papaya::HashMap::new());
+    let (tx, _rx) = mpsc::channel(10);
+    let m = NodeId::new("127.0.0.1", 7321).unwrap();
+    let v = NodeId::new("127.0.0.1", 7322).unwrap();
+    let m_sk = SigningKey::from_bytes(&[74u8; 32]);
+    let v_sk = SigningKey::from_bytes(&[75u8; 32]);
+    let opts = HandlerOpts {
+        peer_keys: vec![(m.clone(), vec![m_sk.verifying_key().to_bytes()]), (v.clone(), vec![v_sk.verifying_key().to_bytes()])],
+        ..Default::default()
+    };
+    let bounds = Arc::clone(&opts.bounds);
+    let _ = spawn_handler_with(reader, Arc::clone(&store), Arc::new(papaya::HashMap::new()), tx,
+                               Arc::new(ShardedSeen::new(N_GOSSIP_SHARDS)), GossipConfig::default().default_ttl, opts);
+
+    let signed_by_m_as_v = |key: &str, nonce: u64| {
+        let mut u = data_update(key, b"forged", nonce, false);
+        u.sender = v.id_hash();
+        let canonical = crate::framing::canonical_sign_bytes(&u);
+        signed_data_over(u, m.id_hash(), &m_sk, &crate::framing::kv_signing_message(&canonical))
+    };
+    let v_own_sys_key = format!("sys/role/{v}");
+    send_wire(&mut writer, &signed_by_m_as_v(&v_own_sys_key, 7321)).await;
+    send_wire(&mut writer, &signed_by_m_as_v("app/as-v", 7322)).await;
+    // V's own correctly signed write behind them, so "absent" means refused rather than not yet read.
+    let mut probe = data_update("app/probe", b"p", 7323, false);
+    probe.sender = v.id_hash();
+    let canonical = crate::framing::canonical_sign_bytes(&probe);
+    send_wire(&mut writer, &signed_data_over(probe, v.id_hash(), &v_sk, &crate::framing::kv_signing_message(&canonical))).await;
+
+    let s = Arc::clone(&store);
+    poll_until(|| s.pin().get("app/probe").is_some(), 500).await;
+    assert!(store.pin().get(v_own_sys_key.as_str()).is_none(), "M cannot write V's own sys/ key by naming V as sender");
+    assert!(store.pin().get("app/as-v").is_none(), "nor any key as V");
+    assert_eq!(bounds.kv_signer_mismatch.load(Ordering::Relaxed), 2, "each refusal is counted");
+}
+
+/// **The window, pinned: a bare 2.32 KV signature is accepted and counted** (#611's review, finding 8).
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn a_bare_2_32_kv_signature_is_accepted_and_counted_during_the_window() {
+    use ed25519_dalek::SigningKey;
+    let (mut writer, reader) = loopback_pair().await;
+    let store: Arc<papaya::HashMap<Arc<str>, StoreEntry>> = Arc::new(papaya::HashMap::new());
+    let (tx, _rx) = mpsc::channel(10);
+    let peer = NodeId::new("127.0.0.1", 7331).unwrap();
+    let sk = SigningKey::from_bytes(&[76u8; 32]);
+    let opts = HandlerOpts { peer_keys: vec![(peer.clone(), vec![sk.verifying_key().to_bytes()])], ..Default::default() };
+    let bounds = Arc::clone(&opts.bounds);
+    let _ = spawn_handler_with(reader, Arc::clone(&store), Arc::new(papaya::HashMap::new()), tx,
+                               Arc::new(ShardedSeen::new(N_GOSSIP_SHARDS)), GossipConfig::default().default_ttl, opts);
+    let mut u = data_update("bare/k", b"v", 7331, false);
+    u.sender = peer.id_hash();
+    let canonical = crate::framing::canonical_sign_bytes(&u);
+    send_wire(&mut writer, &signed_data_over(u, peer.id_hash(), &sk, &canonical)).await;
+    let s = Arc::clone(&store);
+    poll_until(|| s.pin().get("bare/k").is_some(), 500).await;
+    assert_eq!(bounds.kv_untagged_signatures.load(Ordering::Relaxed), 1, "accepted, and counted on this node");
+}
+
+/// Two TLS nodes that both require signed frames, with anti-entropy a minute away, peered and holding
+/// each other's identity keys — so a write reaches the other only by gossip, and only if it is signed.
+#[cfg(feature = "tls")]
+async fn signed_fleet_pair(tag: &str, http_a: Option<u16>) -> (GossipAgent, GossipAgent, NodeId, NodeId, std::path::PathBuf) {
+    use crate::config::TlsConfig;
+    let (port_a, port_b) = (alloc_port(), alloc_port());
+    let (node_a, node_b) = (NodeId::new("127.0.0.1", port_a).unwrap(), NodeId::new("127.0.0.1", port_b).unwrap());
+    let cert_dir = std::env::temp_dir().join(format!("myc-{tag}-{port_a}"));
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    let mk = |node: &NodeId, boots: Vec<NodeId>, http: Option<u16>| {
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = node.to_socket_addr().port();
+        cfg.bootstrap_peers = boots;
+        cfg.reconnect_backoff_secs = 1;
+        cfg.health_check_interval_secs = 60;
+        cfg.kv_require_signed_frames = true;
+        cfg.http_port = http;
+        cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+        GossipAgent::new(node.clone(), cfg)
+    };
+    let a = mk(&node_a, vec![], http_a);
+    let b = mk(&node_b, vec![node_a.clone()], None);
+    a.start().await.unwrap();
+    b.start().await.unwrap();
+    let ready = || b.task_ctx.peer_keys.pin().get(&node_a).is_some_and(|k| !k.is_empty())
+        && a.task_ctx.peer_keys.pin().get(&node_b).is_some_and(|k| !k.is_empty())
+        && !a.peers().is_empty() && !b.peers().is_empty();
+    for _ in 0..400 {
+        if ready() { break; }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(ready(), "the two nodes never peered and exchanged identities");
+    (a, b, node_a, node_b, cert_dir)
+}
+
+/// **Quorum evidence is signed** (#611's review, finding 2). The connection handler writes
+/// `sys/quorum/{kind}/{sender}` for a kind a local worker subscribes to and dispatched it as a bare
+/// `Data` frame — the one local writer the reroute missed, in a file the dispatch gate exempted
+/// whole. With both nodes requiring signatures, B's evidence about A's signal reaches A only if it is
+/// signed. Seen failing first: A never held B's evidence.
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn quorum_evidence_reaches_a_peer_that_requires_signed_frames() {
+    let (a, b, node_a, _node_b, cert_dir) = signed_fleet_pair("signed-quorum", None).await;
+    let _worker = b.task_ctx.signal_handlers.register_with_capacity(Arc::from("signed.evidence"), 8);
+    let prefix = format!("sys/quorum/signed.evidence/{node_a}");
+    let mut arrived = false;
+    for _ in 0..200 {
+        let _ = a.mesh().emit("signed.evidence", SignalScope::Cluster, Bytes::from_static(b"e"));
+        if !a.kv().scan_prefix(&prefix).is_empty() { arrived = true; break; }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(!b.kv().scan_prefix(&prefix).is_empty(), "B wrote its evidence");
+    assert!(arrived, "and A received it by gossip: the evidence write is signed");
+    assert_eq!(a.task_ctx.transport_bounds.kv_unsigned_refused.load(Ordering::Relaxed), 0,
+               "a fully upgraded fleet sends no unsigned frame under signal traffic of a subscribed kind");
+    assert_eq!(a.task_ctx.transport_bounds.kv_unsigned_accepted.load(Ordering::Relaxed), 0);
+    a.shutdown().await;
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+/// **A gateway write reaches a peer that requires signed frames** — a second of the twenty-three
+/// rerouted sites end to end (#611's review, finding 8): `DELETE /gateway/kv` tombstones through the
+/// gateway's own `kv_write`. Seen failing with that one site toggled back to a bare `Data` frame: B
+/// kept the value.
+#[cfg(all(feature = "tls", feature = "gateway"))]
+#[tokio::test]
+async fn a_gateway_kv_delete_reaches_a_peer_that_requires_signed_frames() {
+    let http_port = alloc_port();
+    let (a, b, _node_a, _node_b, cert_dir) = signed_fleet_pair("signed-gw", Some(http_port)).await;
+    assert!(a.kv().set("app/gw-delete", Bytes::from_static(b"v")));
+    for _ in 0..200 {
+        if b.kv().get("app/gw-delete").is_some() { break; }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(b.kv().get("app/gw-delete").is_some(), "the seed write arrived (ops::kv_set signs)");
+    let client = reqwest::Client::new();
+    let r = client.delete(format!("http://127.0.0.1:{http_port}/gateway/kv?key=app/gw-delete")).send().await.unwrap();
+    assert!(r.status().is_success(), "{}", r.status());
+    let mut gone = false;
+    for _ in 0..200 {
+        if b.kv().get("app/gw-delete").is_none() { gone = true; break; }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(gone, "the gateway's tombstone reached B by gossip");
+    a.shutdown().await;
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+/// **The window's counters are on `GET /stats`, per node** (#611's review, finding 8). The counters
+/// moved from process-global statics to the node's `TransportBounds`, so each node reports its own.
+#[cfg(all(feature = "tls", feature = "gateway"))]
+#[tokio::test]
+async fn the_row_f_window_counters_are_on_gateway_stats() {
+    use crate::config::TlsConfig;
+    let (port, http_port) = (alloc_port(), alloc_port());
+    let cert_dir = std::env::temp_dir().join(format!("myc-f-stats-{port}"));
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    cfg.http_port = Some(http_port);
+    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+    let a = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
+    a.start().await.unwrap();
+    let b = &a.task_ctx.transport_bounds;
+    b.kv_untagged_signatures.store(3, Ordering::Relaxed);
+    b.kv_unsigned_accepted.store(5, Ordering::Relaxed);
+    b.kv_unsigned_refused.store(7, Ordering::Relaxed);
+    b.kv_signer_mismatch.store(11, Ordering::Relaxed);
+    let client = reqwest::Client::new();
+    let mut stats = serde_json::Value::Null;
+    for _ in 0..80 {
+        if let Ok(r) = client.get(format!("http://127.0.0.1:{http_port}/stats")).send().await
+            && r.status().is_success() { stats = r.json().await.unwrap(); break; }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(stats["kv_untagged_signatures"], 3, "{stats}");
+    assert_eq!(stats["kv_unsigned_frames_accepted"], 5);
+    assert_eq!(stats["kv_unsigned_frames_refused"], 7);
+    assert_eq!(stats["kv_signer_mismatch"], 11);
+    assert!(stats.get("identity_untagged_proofs").is_none() && stats.get("consensus_untagged_signatures").is_none(),
+            "the §23 counters went with the window they counted");
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
 }
 
 /// **Every write a TLS node's agent originates is signed**, so a fleet that requires signed frames

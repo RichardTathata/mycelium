@@ -177,31 +177,20 @@ pub struct ConnContext {
     pub peer_list_tx: tokio::sync::watch::Sender<Arc<[NodeId]>>,
 }
 
-/// KV `SignedData` signatures this process accepted in the **untagged** (pre-2.33.0) form — a
-/// mixed-fleet allowance for one release (`docs/guide/deprecations.md` §35). Frames, not peers.
-/// Still rising means a peer still signs its writes the old way.
+/// A node's own identity record — `sys/identity/{n}`, `sys/identity-proof/{n}` or
+/// `sys/identity-signed/{n}` where `n` is the frame's `sender` — which travels unsigned by design and is
+/// exempt from the unsigned-frame refusal (post-360 row F, #611's fix round). It is published before
+/// the node's TLS identity is installed, and must be: a signed identity frame is dropped as from an
+/// unknown signer at every peer not yet holding the key, and not forwarded, so the key would reach a
+/// third node only by anti-entropy. The record carries its own proof, verified on merge
+/// (`validate_and_merge_identity`; `require_identity_proofs` refuses an unproven one).
 #[cfg(feature = "tls")]
-static UNTAGGED_KV_SIGNATURES_ACCEPTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// How many untagged KV signatures this process has accepted under the mixed-fleet allowance.
-#[cfg(feature = "tls")]
-pub fn untagged_kv_signatures_accepted() -> u64 {
-    UNTAGGED_KV_SIGNATURES_ACCEPTED.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-/// Unsigned KV `Data` frames a **TLS** node received: `(accepted, refused)`. Accepted under the
-/// one-release window (`kv_require_signed_frames = false`), refused once it is set
-/// (`docs/guide/deprecations.md` §35). Frames, not peers.
-#[cfg(feature = "tls")]
-static UNSIGNED_KV_FRAMES_ACCEPTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-#[cfg(feature = "tls")]
-static UNSIGNED_KV_FRAMES_REFUSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// How many unsigned KV `Data` frames this process, as a TLS node, has `(accepted, refused)`.
-#[cfg(feature = "tls")]
-pub fn unsigned_kv_frames() -> (u64, u64) {
-    (UNSIGNED_KV_FRAMES_ACCEPTED.load(std::sync::atomic::Ordering::Relaxed),
-     UNSIGNED_KV_FRAMES_REFUSED.load(std::sync::atomic::Ordering::Relaxed))
+fn is_own_identity_record(key: &str, sender: u64) -> bool {
+    use crate::signal::kv_ns;
+    [kv_ns::IDENTITY, kv_ns::IDENTITY_PROOF, kv_ns::IDENTITY_SIGNED].iter()
+        .find_map(|p| key.strip_prefix(p))
+        .and_then(|node| node.parse::<NodeId>().ok())
+        .is_some_and(|node| node.id_hash() == sender)
 }
 
 pub async fn handle_connection(
@@ -783,8 +772,9 @@ pub async fn handle_connection(
                             if let Some(ref wal) = wal {
                                 let _ = wal.append(sync_entry_from(&upd)).await;
                             }
+                            // Signed under `[tls]` like every local write (#611's review, finding 2).
                             dispatch_gossip_try_send(
-                                &gossip_txs, WireMessage::Data(upd),
+                                &gossip_txs, crate::framing::local_kv_wire_msg(&task_ctx, upd),
                                 node_id.id_hash(), ForwardHint::All, &kv_state.dropped_frames,
                             );
                         }
@@ -826,6 +816,7 @@ pub async fn handle_connection(
                 }
             }
 
+            // signed-dispatch: allow (receive path — the frame a peer sent, not a local write)
             WireMessage::Data(mut update) => {
                 #[cfg(any(test, feature = "test-frame-filter"))]
                 if crate::store::frame_filtered(&kv_state, &crate::store::FrameView::Kv { key: &update.key, sender: update.sender }) {
@@ -841,15 +832,15 @@ pub async fn handle_connection(
                 // One release: applied and counted unless `kv_require_signed_frames`, which refuses
                 // it (`docs/guide/deprecations.md` §35). The next MINOR refuses unconditionally.
                 #[cfg(feature = "tls")]
-                if tls.is_some() {
+                if tls.is_some() && !is_own_identity_record(&update.key, update.sender) {
                     if task_ctx.config.kv_require_signed_frames {
-                        UNSIGNED_KV_FRAMES_REFUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        task_ctx.transport_bounds.kv_unsigned_refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         #[cfg(feature = "metrics")]
                         metrics::counter!("mycelium_kv_unsigned_frames_total", "outcome" => "refused").increment(1);
                         tracing::debug!(from = %peer_addr, sender = update.sender, "refusing an unsigned KV Data frame (kv_require_signed_frames)");
                         continue;
                     }
-                    UNSIGNED_KV_FRAMES_ACCEPTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    task_ctx.transport_bounds.kv_unsigned_accepted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     #[cfg(feature = "metrics")]
                     metrics::counter!("mycelium_kv_unsigned_frames_total", "outcome" => "accepted").increment(1);
                 }
@@ -925,6 +916,7 @@ pub async fn handle_connection(
                         // zero-copy is unsafe. Re-encode at WIRE_VERSION for forwarding.
                         let fwd_update = GossipUpdate { ttl: fwd_ttl - 1, ..update.clone() };
                         let mut fwd_buf = BytesMut::with_capacity(256);
+                        // signed-dispatch: allow (forwarding a received v11 frame, re-encoded as it arrived)
                         crate::codec::encode_wire(&mut fwd_buf, &WireMessage::Data(fwd_update));
                         // Channel-readiness seam (item 6 PR 3): the drop is a kernel decision, so a recorded
                         // run replays it instead of needing the timing that caused it.
@@ -956,6 +948,20 @@ pub async fn handle_connection(
                 if task_ctx.removed.is_hash_removed(update.sender) || task_ctx.removed.is_hash_removed(signer) {
                     continue;
                 }
+                // #611's review, finding 1: the signature is checked against `signer`'s key, and the
+                // update is applied as `update.sender`'s — so the two must be one node. Every local
+                // writer signs as its own sender (`make_kv_wire_msg`); a frame that names another is a
+                // member writing as someone else under its own valid signature.
+                if signer != update.sender {
+                    task_ctx.transport_bounds.kv_signer_mismatch.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    #[cfg(feature = "metrics")]
+                    metrics::counter!("mycelium_kv_signer_mismatch_total").increment(1);
+                    warn!(
+                        "SignedData from {} signed by {:#x} names sender {:#x} (key {}); a frame's signer must be its sender, dropping",
+                        peer_addr, signer, update.sender, update.key
+                    );
+                    continue;
+                }
                 // Dedup by nonce (no early fast-path — SignedData has a non-zero variant tag).
                 let ts = crate::hlc::physical_ms(hlc.current()); // C11: dedup TTL, fails closed
                 if seen.mark_and_check(update.nonce, ts) {
@@ -981,7 +987,7 @@ pub async fn handle_connection(
                         let tagged = crate::framing::kv_signing_message(&canonical);
                         if !pub_key_set.iter().any(|k| crate::tls::verify_bytes(k, &tagged, &sig_bytes)) {
                             if pub_key_set.iter().any(|k| crate::tls::verify_bytes(k, &canonical, &sig_bytes)) {
-                                UNTAGGED_KV_SIGNATURES_ACCEPTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                task_ctx.transport_bounds.kv_untagged_signatures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 #[cfg(feature = "metrics")]
                                 metrics::counter!("mycelium_kv_untagged_signatures_total").increment(1);
                                 tracing::debug!(
