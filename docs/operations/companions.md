@@ -252,7 +252,7 @@ Nothing to persist: routing state is capability pheromone + **node-local** in-fl
   its `model` field becomes an `llm/{model}` route across the fleet and its API key is the gateway
   bearer. `GET trace/{run_id}` and `GET blob/{id}` (`llm:read`), `PUT blob` (`llm:write`). A
   scoped-token deployment grants these by name — `llm:invoke`, `llm:read`, `llm:write`
-  (`required_scope`, `src/agent/http.rs`). A family wildcard such as `llm:*` is **refused at start**:
+  (`required_scope`, `src/agent/http/authz.rs`). A family wildcard such as `llm:*` is **refused at start**:
   `validate()` accepts only exact scopes or the single `"*"`, because a family wildcard matched
   nothing at the gateway and admitted no one — [rbac.md](rbac.md) §2.
 - **Routing you can observe.** Each node ranks providers by advertised load (the pheromone) plus its

@@ -298,7 +298,7 @@ before.
 
 **The secure profile refuses rather than impersonates** (`gateway_caller_profile = secure`, the
 default; env `GOSSIP_GATEWAY_CALLER_PROFILE`). Four cases are CI-gated
-(`gateway_caller_tests`, `src/agent/http.rs`):
+(`gateway_caller_tests`, `src/agent/http/gateway_caller_tests.rs`):
 
 | Case | Where | Answer |
 |---|---|---|

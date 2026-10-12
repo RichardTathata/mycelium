@@ -234,7 +234,7 @@ token now gets `403 {"required_scope": "mesh:serve"}`.
 
 **Why.** Serving and calling were one scope, so a token that could serve could also reach the
 raw call routes; separating them is what lets a skill server hold *only* `mesh:serve` (closure plan
-C1, `src/agent/http.rs`).
+C1, `src/agent/http/authz.rs`).
 
 **Migration.** Reissue every serving client's token with `mesh:serve` (a named token,
 [rbac.md §1](../operations/rbac.md)); grep the gateway log for the warning to find the ones you

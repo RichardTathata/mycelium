@@ -185,7 +185,7 @@ system degrade gracefully or hard-fail on unexpected input?
 
 **13. Security**
 Check `src/tls.rs` (mTLS), Ed25519 signing in `src/consensus.rs`, input
-validation in `src/framing.rs` and `src/agent/http.rs`. Assess authentication,
+validation in `src/framing.rs` and `src/agent/http/`. Assess authentication,
 authorisation, secrets management, and whether the `tls` feature is usable
 without expert knowledge.
 
@@ -252,7 +252,7 @@ for CI? Are the 12 scenarios covering the right invariants?
 ### Operations
 
 **19. Observability**
-Check `src/agent/http.rs` for the `/metrics` endpoint and management dashboard.
+Check `src/agent/http/node.rs` for the `/metrics` endpoint and management dashboard.
 Are metrics, logs, and traces built into hot paths or absent? Can an operator
 understand what the cluster is doing in production without modifying it?
 

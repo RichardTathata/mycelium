@@ -120,6 +120,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **Under `sim`, each of these reads is now a recorded kernel choice**, so a recording made before this change that
   touches these paths would diverge on replay; the checked-in corpus is core-only and unaffected).
 
+- **`src/agent/http.rs` split by route family — behaviour-preserving (post-360 plan row P5, #NNN).** The
+  9,889-line gateway file is now the directory `src/agent/http/`: `mod.rs` (the handler state, listener, TLS,
+  router and public surface), **`authz.rs` — the one shared authorisation-and-evidence layer every family goes
+  through** (`gateway_auth`, `required_scope`, the AE preflight and its evidence records, the protected-kind /
+  protected-key / owned-stream refusals), and one file per family — `node.rs`, `mcp_bridge.rs`, `signals.rs`,
+  `caps.rs`, `mesh.rs`, `kv.rs`, `overlay.rs`, `govern.rs`, `compliance.rs`, `llm_bridge.rs`,
+  `federation_routes.rs` — with the three test modules in `http_tests.rs` (still module `tests`),
+  `gateway_caller_tests.rs` and `ae_seam_tests.rs`. No route added, removed or renamed, no scope changed, no
+  handler logic changed: every moved line is byte-identical to the original (checked by a script over the line
+  map), the only token added inside moved code being `pub(super)` on 153 column-0 items so the families and the
+  tests can still name one another; the public surface (`GatewayPreflight`, `GatewayRefusal`, the `pub(crate)`
+  preflight API `a2a.rs` and `provider_enforcement.rs` use) is re-exported from `mod.rs` unchanged, so no caller,
+  companion, example or test changed. Every gate that greps the file by path was re-pointed — the sim-seams
+  baseline (one row became four, 14 sites as before), the wiki-lint skill's router grep, the lock-order table's
+  three `HttpCtx` rows, the KV non-key notes — and the test that enumerates the governance routes from the
+  router now reads `mod.rs`.
+
 - **Documentation: a lost electorate voter is restored with its state or retired — never reissued empty.**
   2.32.0's pages said an electorate member could be replaced "under the same identity"; that is unsafe as
   stated. A member's promises and acceptances are durable on its own disk

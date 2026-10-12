@@ -382,7 +382,7 @@ root crate, so `cargo test --lib --no-default-features --features gateway` still
 on. Two consequences, found writing I1's refusal tests (`docs/plans/guarantees-and-rule-catalogue.md` §8):
 a test gated `#[cfg(not(feature = "tls"))]` is silently absent from every `--lib` run (the filter matched
 three tests and ran two), and **the root's non-`tls` code paths — every `#[cfg(not(feature = "tls"))]` arm
-in `lifecycle.rs`, `http.rs`, `confinement.rs` — are not exercised by the library suite at all.** They are
+in `lifecycle.rs`, `http/`, `confinement.rs` — are not exercised by the library suite at all.** They are
 exercised only by a plain build of the binary (`cargo build --no-default-features --features cli,gateway
 --bin mycelium`), which takes no dev-dependencies. That is how `a_tls_table_this_build_cannot_enforce_refuses_to_start`
 was verified: the binary started with a `[tls]` table and listened in plaintext before the fix, and refuses

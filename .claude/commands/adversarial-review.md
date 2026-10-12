@@ -23,7 +23,7 @@ it reads the diff and the code. Tell it its final message *is* the report.
 1. **The invariant and its doors.** From the diff, name every invariant the change establishes or alters (a
    bound, a refusal, a field name, a wire shape, a durability or ordering rule). For each, enumerate *from the
    code* every entry point that reads or writes the same thing — Rust setters and constructors, HTTP routes
-   (`src/agent/http.rs`, companions' routers), both SDKs (`mycelium-ts/src`, `mycelium-py/src`), config
+   (`src/agent/http/`, one file per route family, companions' routers), both SDKs (`mycelium-ts/src`, `mycelium-py/src`), config
    loading and env overrides (`mycelium-core/src/config.rs`), intents and governors, examples. Give the grep for
    each. Report every entry point the change did not cover and whether it now disagrees with the ones it did.
 2. **Siblings.** For each function the diff changes, find functions of the same shape (same handler family,

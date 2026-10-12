@@ -10,7 +10,7 @@ resource is *served*, never by teaching Layer I a higher-layer law. All shipped
 ## WS1 — RBAC / identity (`compliance` feature)
 
 Four layers, all additive/opt-in (`src/agent/rbac.rs`, gateway middleware in
-`src/agent/http.rs`):
+`src/agent/http/authz.rs`):
 1. **Signed role claims:** `advertise_roles` writes an Ed25519 `SignedRoleClaim` to
    `sys/role/{node}`; `roles_of` returns it only if the signature verifies against the
    node's identity key learned from the cluster — a forged KV write reads back `None`.
@@ -38,7 +38,7 @@ Four layers, all additive/opt-in (`src/agent/rbac.rs`, gateway middleware in
    `/bulk/{id}`, the A2A descriptor and `POST /a2a` (an optional bearer on it is resolved to the
    caller principal, an unrecognised one is 401 — item 5 below). Gates:
    `regression_node_level_routes_require_bearer_when_token_set`,
-   `node_level_routes_honour_scoped_tokens` (`src/agent/http.rs`).
+   `node_level_routes_honour_scoped_tokens` (`src/agent/http/http_tests.rs`).
 4. **`sys/` namespace tripwire (core, feature-free):** inbound writes naming *self* under
    `sys/identity|identity-signed|identity-proof|load|role|tuple|caller-context|consensus-accepted/{node}`
    → `warn!` + `sys_namespace_violations`, **only when the write changed what this node held and this
@@ -70,7 +70,7 @@ Four layers, all additive/opt-in (`src/agent/rbac.rs`, gateway middleware in
    (`-32020`), over-scoped assertion (intersection by construction), and a provider without
    the `sys/caller-context/{node}` marker (`-32021` / HTTP 412, naming it); `legacy` =
    node-as-caller for a rolling-upgrade window, `warn!` at start, plan §6.6 removal-ledger entry.
-   Gates: `gateway_caller_tests` (`src/agent/http.rs` — the four negative cases, the
+   Gates: `gateway_caller_tests` (`src/agent/http/gateway_caller_tests.rs` — the four negative cases, the
    `authorized_callers` gate under `tls`+`compliance` with a mesh forgery, `/a2a` principal
    resolution) + `agent::gateway_caller::tests` (framing, sign/verify, tamper, unknown signer).
    **Review-hardened before merge (2026-09-14, four findings):** a secure-profile gateway node
@@ -239,7 +239,7 @@ position*: the walk's starting head must be under a current key, older heads nee
 **The doors that take a KV key write application keys only (2.26.0 for `sys/`/`consensus/`, #544; every owned
 namespace in 2.27.0 — #549).** `POST`/`DELETE /gateway/kv`, `POST /gateway/kv/quorum` and
 `POST /gateway/overlay/consistent/set` refuse every key in a namespace the substrate or a companion owns —
-`OWNED_KV_PREFIXES` in `src/agent/http.rs`, kept in step with `src/lib.rs`'s ownership table by
+`OWNED_KV_PREFIXES` in `src/agent/http/authz.rs`, kept in step with `src/lib.rs`'s ownership table by
 `every_namespace_in_the_table_is_classified_for_the_raw_kv_routes` — **403** `protected_key`, naming the route that owns it where there is one; the checkpointer's `ckpt/`/`ckptw/`
 rows, the mesh manifest, the schema registry and an application's `agent/{node}/provision/…` report stay writable,
 and `POST /gateway/overlay/log/{append,compact}` refuse a stream under `cn/`, `wiki/` or `reason/` **403**
@@ -475,7 +475,7 @@ consulted.
 `GossipAgent::with_federation_clients` attaches one `FederationClient` per partner to the node, and five gateway
 routes drive them: `GET /gateway/federation/{domain,partners,catalog/{domain}}` under **`federation:read`**,
 `POST /gateway/federation/{connect,call}` under **`federation:invoke`** (`src/agent/federation_http.rs`, the
-consumer half; handlers in `src/agent/http.rs`). The SDKs do **not** re-implement the edge protocol: the
+consumer half; handlers in `src/agent/http/federation_routes.rs`). The SDKs do **not** re-implement the edge protocol: the
 signing key and the trust bundle stay in the node, so one implementation of the trust decisions serves all three
 languages — the alternative would have put credential minting into two more languages and the domain's private
 key into an SDK process.
@@ -517,7 +517,7 @@ service on everyone else — with two domains "per partner" and "per gateway" ar
 
 ## A named token is a token model (2026-09-23)
 
-`gateway_auth`'s open-gateway predicate (`src/agent/http.rs`) counted `gateway_auth_token` and
+`gateway_auth`'s open-gateway predicate (`src/agent/http/authz.rs`) counted `gateway_auth_token` and
 `gateway_scoped_tokens` and **not** `gateway_named_tokens`, which 2.10.0 added and `resolve_token` has honoured
 since. A deployment whose only credential model was named tokens therefore ran an **open gateway**: no bearer
 required, and `open_gateway_scopes` granting each request exactly the scope its route asks for — deny-by-default

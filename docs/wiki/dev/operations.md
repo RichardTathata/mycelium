@@ -82,7 +82,7 @@ evaporates (the 2026-07-20 scraper-fleet "stale w15 advert" finding: provider li
 from refresher liveness). Pass `lease_secs` and beat `POST /gateway/capability/{handle_id}/heartbeat`
 within every window (beat at `lease_secs/3`); a missed window retracts exactly as DELETE would.
 Omitting `lease_secs` keeps the old durable-until-DELETE semantics — correct only when the
-advertised capability's lifetime really is the node's. Canon: `src/agent/http.rs`
+advertised capability's lifetime really is the node's. Canon: `src/agent/http/caps.rs`
 (`gw_cap_advertise`); both SDK bridges expose it (`leaseSecs` + `handle.heartbeat()` in
 `mycelium-ts`, `lease_secs` + `handle.heartbeat()` in `mycelium-py`).
 

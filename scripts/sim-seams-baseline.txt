@@ -35,7 +35,10 @@
 4 src/agent/emergent_groups.rs
 1 src/agent/emergent.rs
 1 src/agent/helpers.rs
-14 src/agent/http.rs
+2 src/agent/http/authz.rs
+2 src/agent/http/caps.rs
+2 src/agent/http/mod.rs
+8 src/agent/http/overlay.rs
 7 src/agent/journal.rs
 1 src/agent/kv_quorum_ext.rs
 8 src/agent/lifecycle.rs

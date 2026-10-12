@@ -74,14 +74,14 @@ For every wiki-page claim that cites code, confirm the code still says it. Minim
   only reviews that allow-list's reasons**: each entry must really be a non-key (a seam stream, slot or ring
   name, schema tag, path) — an entry that is in fact a KV key is the finding; it needs a row instead.
 - **Endpoint/feature lists** (`docs/wiki/dev/operations.md`): spot-check against
-  `src/agent/http.rs` routes and `Cargo.toml` features. **And every URL a runbook or guide chapter tells an
+  the router in `src/agent/http/mod.rs` and `Cargo.toml` features. **And every URL a runbook or guide chapter tells an
   operator to call** — `grep -rnoE '(GET|POST|DELETE|PUT) /[A-Za-z0-9_/{}%.:-]+' docs/operations docs/guide
-  docs/wiki` — exists as a literal in `http.rs` **and its segment shape matches**: a `{param}` pattern matches
+  docs/wiki` — exists as a literal in `src/agent/http/mod.rs` (the router) **and its segment shape matches**: a `{param}` pattern matches
   one path segment, so a slash-bearing value needs a `{*tail}` capture (the plan's *identifiers in paths* rule,
   §9 — `/consensus/{*slot}` since 2026-09-06; before that the runbooks' literal lock URL 404ed for two months,
   ledger 2026-09-06). When in doubt, probe it with a test — the router, not the doc, is canon. **A brace list of
   routes (`govern/{timing,tuning,…}`) is a set**: diff it against every router route with that prefix
-  (`grep '.route("/govern/' src/agent/http.rs`), not member by member — checking each listed member exists let
+  (`grep '.route("/govern/' src/agent/http/mod.rs`), not member by member — checking each listed member exists let
   `/profile` go missing from 2026-09-18 and `/topology-override` from its first day (ledger 2026-10-07). A brace
   list under a **companion** prefix (`/gateway/reason/…`, `/gateway/wiki/…`) is diffed against that companion's
   router (`mycelium-<crate>/src/http.rs`) — the reason façade sat off its list for five weeks (ledger 2026-10-10).
