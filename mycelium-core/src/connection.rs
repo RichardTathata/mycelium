@@ -206,28 +206,88 @@ const SEALED_IDENTITY_V1: u8 = 1;
 /// The frame's `sender` plays no part — it is whatever the writer put there, which is what the first
 /// cut trusted. Everything else in the identity family (a bare `sys/identity/{n}`, a proof alone,
 /// garbage in the sealed slot, any tombstone) is refused under the flag like any unsigned frame.
+/// How an unsigned frame stands against the identity exemption ([`self_authenticating_identity`]).
 #[cfg(feature = "tls")]
-fn self_authenticating_identity(ctx: &CoreCtx, update: &GossipUpdate) -> bool {
-    use crate::signal::kv_ns;
-    if update.is_tombstone { return false; }
-    let Some(node) = update.key.strip_prefix(kv_ns::IDENTITY_SIGNED).and_then(|n| n.parse::<NodeId>().ok()) else {
-        return false;
-    };
-    let v = update.value.as_ref();
+#[derive(Debug, PartialEq, Eq)]
+enum IdentityFrame {
+    /// A sealed record that authenticates itself and supersedes what this node holds: exempt.
+    Exempt,
+    /// A sealed record that authenticates itself but whose history lacks a key this node already
+    /// holds or has stored for the node — a superseded record replayed (#611's third review, N4).
+    Stale,
+    /// Anything else: an ordinary unsigned frame.
+    Other,
+}
+
+/// Split a sealed identity record into `(history, proof)` — `helpers::parse_sealed_identity`'s rule.
+#[cfg(feature = "tls")]
+fn split_sealed(v: &[u8]) -> Option<(&[u8], &[u8])> {
     const PROOF: usize = 96;
-    if v.len() < 1 + 32 + PROOF || v[0] != SEALED_IDENTITY_V1 { return false; }
+    if v.len() < 1 + 32 + PROOF || v[0] != SEALED_IDENTITY_V1 { return None; }
     let (history, proof) = v[1..].split_at(v.len() - 1 - PROOF);
-    if history.is_empty() || !history.len().is_multiple_of(32) { return false; }
+    if history.is_empty() || !history.len().is_multiple_of(32) { return None; }
+    Some((history, proof))
+}
+
+/// Whether an unsigned frame is a **sealed identity record that authenticates itself** — the one
+/// unsigned frame a TLS node accepts whatever `kv_require_signed_frames` says (#611's second review).
+///
+/// A node publishes `sys/identity-signed/{self}` before its TLS identity is installed (it must: a
+/// *signed* identity frame is dropped as from an unknown signer at every peer that does not hold the
+/// key yet, and is then not forwarded). The record is `version ‖ history ‖ signer ‖ sig`, and it is
+/// exempt only when it proves itself at the transport:
+/// - the key is `sys/identity-signed/{n}`, and the frame is not a tombstone;
+/// - the value parses as a sealed record (version 1, a whole number of 32-byte keys, a 96-byte proof);
+/// - `signer` is one of the record's own keys, and `sig` verifies under it over
+///   `mycelium.identity/proof/1 ‖ u32 len ‖ history`;
+/// - when this node already holds keys for `n` — gossiped (`peer_keys`) or CA-anchored
+///   (`peer_anchor_keys`) — `signer` is one of them: a rotation chains to what is held, and a
+///   stranger's self-signed record for a known node is not a proof of anything;
+/// - **the history contains every key this node holds or has stored for `n`** (`peer_keys`,
+///   `peer_anchor_keys`, and the histories of the stored `sys/identity-signed/{n}` and
+///   `sys/identity/{n}`): a node's history only grows, so a record missing one is superseded — a
+///   genuine pre-rotation record replayed with a fresh timestamp (#611's third review, N4) — and is
+///   [`IdentityFrame::Stale`], refused whatever the flag says.
+///
+/// The frame's `sender` plays no part — it is whatever the writer put there, which is what the first
+/// cut trusted. Everything else in the identity family (a bare `sys/identity/{n}`, a proof alone,
+/// garbage in the sealed slot, any tombstone) is [`IdentityFrame::Other`]. **Still trust on first
+/// use:** the first record a node sees for `n`, with nothing held or stored for it, is accepted on its
+/// own proof — what `require_identity_proofs` cannot close either (first sighting has nothing to chain
+/// to); the CA anchor of a direct connection is what does.
+#[cfg(feature = "tls")]
+fn self_authenticating_identity(ctx: &CoreCtx, update: &GossipUpdate) -> IdentityFrame {
+    use crate::signal::kv_ns;
+    if update.is_tombstone { return IdentityFrame::Other; }
+    let Some(node) = update.key.strip_prefix(kv_ns::IDENTITY_SIGNED).and_then(|n| n.parse::<NodeId>().ok()) else {
+        return IdentityFrame::Other;
+    };
+    let Some((history, proof)) = split_sealed(update.value.as_ref()) else { return IdentityFrame::Other; };
     let mut signer = [0u8; 32];
     signer.copy_from_slice(&proof[..32]);
-    if !history.chunks_exact(32).any(|k| k == signer) { return false; }
+    if !history.chunks_exact(32).any(|k| k == signer) { return IdentityFrame::Other; }
     let mut message = IDENTITY_PROOF_DOMAIN.to_vec();
     message.extend_from_slice(&(history.len() as u32).to_le_bytes());
     message.extend_from_slice(history);
-    if !crate::tls::verify_bytes(&signer, &message, &proof[32..]) { return false; }
+    if !crate::tls::verify_bytes(&signer, &message, &proof[32..]) { return IdentityFrame::Other; }
     let gossiped = ctx.peer_keys.pin().get(&node).cloned().unwrap_or_default();
     let anchored = ctx.peer_anchor_keys.pin().get(&node).cloned().unwrap_or_default();
-    (gossiped.is_empty() && anchored.is_empty()) || gossiped.contains(&signer) || anchored.contains(&signer)
+    let held = !(gossiped.is_empty() && anchored.is_empty());
+    let chains = gossiped.contains(&signer) || anchored.contains(&signer);
+    if held && !chains {
+        return IdentityFrame::Other;
+    }
+    // History only grows: every key held or stored for `n` must be in this record (N4).
+    let store = ctx.kv_state.store.pin();
+    let stored = |prefix: &str| store.get(format!("{prefix}{node}").as_str()).and_then(|e| e.data.clone());
+    let stored_sealed = stored(kv_ns::IDENTITY_SIGNED);
+    let stored_bare = stored(kv_ns::IDENTITY);
+    let mut known: Vec<&[u8]> = Vec::new();
+    known.extend(gossiped.iter().map(|k| &k[..]));
+    known.extend(anchored.iter().map(|k| &k[..]));
+    if let Some((h, _)) = stored_sealed.as_deref().and_then(split_sealed) { known.extend(h.chunks_exact(32)); }
+    if let Some(b) = stored_bare.as_deref() { known.extend(b.chunks_exact(32)); }
+    if known.iter().all(|k| history.chunks_exact(32).any(|h| h == *k)) { IdentityFrame::Exempt } else { IdentityFrame::Stale }
 }
 
 pub async fn handle_connection(
@@ -874,7 +934,19 @@ pub async fn handle_connection(
                 // One release: applied and counted unless `kv_require_signed_frames`, which refuses
                 // it (`docs/guide/deprecations.md` §35). The next MINOR refuses unconditionally.
                 #[cfg(feature = "tls")]
-                if tls.is_some() && self_authenticating_identity(&task_ctx, &update) {
+                let identity_frame = if tls.is_some() { self_authenticating_identity(&task_ctx, &update) } else { IdentityFrame::Other };
+                #[cfg(feature = "tls")]
+                if identity_frame == IdentityFrame::Stale {
+                    // A superseded sealed record, replayed: refused whatever the flag says (N4).
+                    task_ctx.transport_bounds.kv_identity_stale_refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if let Some(suppressed) = identity_exempt_warn.admit(crate::sim_seam::mono_now_ns(), WARN_EVERY_NS) {
+                        warn!(from = %peer_addr, key = %update.key, suppressed,
+                            "refusing an unsigned sealed identity record whose history lacks a key already held for that node (a superseded record, replayed)");
+                    }
+                    continue;
+                }
+                #[cfg(feature = "tls")]
+                if identity_frame == IdentityFrame::Exempt {
                     // The one exemption: a sealed identity record that proves itself. Counted, and
                     // said at most once a minute per connection, so a replay or a probe is visible.
                     task_ctx.transport_bounds.kv_identity_exempt.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

@@ -107,7 +107,12 @@ impl SignedRevocation {
 
 /// Append a signed revocation of `revoked_key` for *this* node. Requires the `tls` identity (the
 /// revocation is signed by the current key). Returns `Err` without a tls identity. The write
-/// gossips; once propagated, every node's verify paths exclude `revoked_key`.
+/// gossips; once propagated, the paths that consult [`revoked_key_set`] exclude `revoked_key` —
+/// **today that is consensus verification and `helpers::known_verifying_keys` (role claims, the audit
+/// chain), not every verifier.** KV `SignedData` verification (which reads `peer_keys`), identity-proof
+/// chaining (`validate_and_merge_identity`'s trusted signer) and the unsigned identity exemption still
+/// accept a revoked key (#611's third review, N5 — reproduced on `main`); plan row Q,
+/// `docs/plans/post-360-hardening.md`, makes the sentence above true for all of them.
 pub(crate) fn revoke_key(
     ctx: &TaskCtx,
     revoked_key: [u8; 32],

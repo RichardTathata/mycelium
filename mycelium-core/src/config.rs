@@ -1191,7 +1191,9 @@ pub struct GossipConfig {
     ///
     /// **Exempt:** one unsigned frame only — a sealed identity record that authenticates itself (its
     /// proof verifies under a key in its own history and, when this node holds keys for the node,
-    /// under one of those; `connection::self_authenticating_identity`), counted as
+    /// under one of those, and whose history contains every key held or stored for it — a replayed
+    /// superseded record is refused and counted, `kv_identity_stale_refused`;
+    /// `connection::self_authenticating_identity`), counted as
     /// `kv_identity_exempt_frames`. A bare identity record, a proof alone or any tombstone is refused
     /// like any unsigned frame. With `require_identity_proofs` off a member can still write another's
     /// identity under its own signature (detected by the anchor tripwire, not prevented). **Not covered:** anti-entropy. A

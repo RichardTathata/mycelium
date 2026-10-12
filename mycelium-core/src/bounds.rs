@@ -63,6 +63,10 @@ pub struct TransportBounds {
     /// that authenticates itself (#611's second review). Every node's start publishes one, so a steady
     /// trickle is normal; a burst is someone replaying or probing. `GET /stats` `kv_identity_exempt_frames`.
     pub kv_identity_exempt: AtomicU64,
+    /// Unsigned sealed identity records refused because their history lacks a key this node already
+    /// holds or has stored for that node — a superseded record replayed (#611's third review, N4).
+    /// Refused whatever `kv_require_signed_frames` says. `GET /stats` `kv_identity_stale_refused`.
+    pub kv_identity_stale_refused: AtomicU64,
 }
 
 /// One connection's place under the per-source cap; given back when dropped. It holds the very

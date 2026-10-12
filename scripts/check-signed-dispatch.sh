@@ -20,8 +20,10 @@
 #   - a line carrying the marker `signed-dispatch: allow (<reason>)`, or directly below one — used for
 #     the receive-and-forward path, match-arm patterns and `make_kv_wire_msg`'s own plaintext arm.
 #   `--self-test` copies the tree, plants a bare dispatch in `mycelium-core/src/connection.rs`, one in
-#   a new agent file, one spelled through a `use`, and one after an out-of-line `#[cfg(test)] mod x;`,
-#   and requires the gate to name all four.
+#   a new agent file, one spelled through a `use`, one after an out-of-line `#[cfg(test)] mod x;`, and
+#   one after an inline test module holding `"{"` and `'{'`, and requires the gate to name all five.
+#   Brace counting blanks string and char literals one line at a time: a string spanning lines, or a raw
+#   string containing `"`, can still miscount (stated, not handled).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -35,6 +37,14 @@ imports = re.compile(r'WireMessage\s*::\s*(\*|Data\b|\{[^}]*\bData\b[^}]*\})')
 marker = 'signed-dispatch: allow'
 test_mod = re.compile(r'^\s*#\[cfg\((all\()?test\b')
 mod_inline = re.compile(r'^\s*(pub(\([^)]*\))?\s+)?mod\s+\w+\s*\{')
+# String and char literals are blanked before braces are counted (#611's third review, L1: a `"{"` in an
+# inline test module hid the next item). One line at a time — a string literal spanning lines, or a raw
+# string containing `"`, can still miscount; stated, not handled.
+string_lit = re.compile(r'"(?:\\.|[^"\\])*"')
+char_lit = re.compile(r"'(?:\\.|[^'\\])'")
+def strip_literals(line):
+    return char_lit.sub("' '", string_lit.sub('""', line)).split('//', 1)[0]
+
 hits = []
 dirs = ['src', 'mycelium-core/src'] + sorted(
     d + '/src' for d in os.listdir(root) if d.startswith('mycelium-') and d != 'mycelium-core' and os.path.isdir(os.path.join(root, d, 'src')))
@@ -60,10 +70,12 @@ for d in dirs:
                     j = next((k for k in range(i + 1, len(lines)) if not lines[k].startswith('#[')), None)
                     if j is not None and mod_inline.match(lines[j]):
                         depth = 0
+                        opened = False
                         for k in range(j, len(lines)):
-                            code_k = lines[k].split('//', 1)[0]
+                            code_k = strip_literals(lines[k])
+                            opened = opened or '{' in code_k
                             depth += code_k.count('{') - code_k.count('}')
-                            if depth <= 0 and '{' in ''.join(x.split('//', 1)[0] for x in lines[j:k + 1]):
+                            if depth <= 0 and opened:
                                 skip_until = k
                                 break
                         else:
@@ -95,11 +107,12 @@ if [ "${1:-}" = "--self-test" ]; then
     printf 'fn __planted_agent(u: GossipUpdate) -> WireMessage { WireMessage :: Data (u) }\n' > "$tmp/src/agent/__planted_agent.rs"
     printf 'use crate::framing::WireMessage::{self, Data};\nfn __planted_use(u: GossipUpdate) -> WireMessage { Data(u) }\n' > "$tmp/src/agent/__planted_use.rs"
     printf '#[cfg(test)]\nmod early_tests;\n\nfn __planted_after_mod(u: GossipUpdate) -> WireMessage { WireMessage::Data(u) }\n' > "$tmp/src/agent/__planted_after_mod.rs"
+    printf '#[cfg(test)]\nmod inline_tests {\n    const OPEN: &str = "{";\n    const C: char = %s;\n}\n\nfn __planted_after_brace(u: GossipUpdate) -> WireMessage { WireMessage::Data(u) }\n' "'{'" > "$tmp/src/agent/__planted_after_brace.rs"
     out=$(check_tree "$tmp" 2>&1) && { echo "check-signed-dispatch --self-test: the planted dispatches were NOT caught" >&2; exit 1; }
-    for want in "connection.rs:1:" "__planted_agent.rs:1:" "__planted_use.rs:2:" "__planted_after_mod.rs:4:"; do
+    for want in "connection.rs:1:" "__planted_agent.rs:1:" "__planted_use.rs:2:" "__planted_after_mod.rs:4:" "__planted_after_brace.rs:7:"; do
         grep -q "$want" <<<"$out" || { echo "check-signed-dispatch --self-test: $want not named" >&2; echo "$out" >&2; exit 1; }
     done
-    echo "check-signed-dispatch --self-test: all four planted bare dispatches were caught, by name"
+    echo "check-signed-dispatch --self-test: all five planted bare dispatches were caught, by name"
     exit 0
 fi
 

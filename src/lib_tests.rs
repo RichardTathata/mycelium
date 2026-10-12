@@ -1324,6 +1324,39 @@ async fn an_identity_tombstone_does_not_erase_a_members_keys() {
     }
 }
 
+/// **A replayed, superseded sealed record is not exempt** (#611's third review, N4, lifted from the
+/// reviewer's `review_replay_old_sealed_record_after_rotation`). C's genuine pre-rotation sealed record
+/// still proves itself — its signer is in its history and B still holds that key — so a member that
+/// kept a copy could replay it unsigned with a fresh timestamp and replace C's current record at B; a
+/// node joining later would then read the pre-rotation history. A node's history only grows, so an
+/// exempt record must now contain every key the receiver already holds or has stored for that node;
+/// one that does not is refused and counted (`kv_identity_stale_refused`). Seen failing first on
+/// 884f310f: "REPLAY: a genuine pre-rotation sealed record, replayed unsigned with a fresh timestamp,
+/// replaced C's current one".
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn a_replayed_pre_rotation_sealed_record_does_not_replace_the_current_one() {
+    let (a, b, c, _nb, nc, dir) = three_signed_nodes("replay-sealed", false).await;
+    let sealed_key = format!("sys/identity-signed/{nc}");
+    let mut old = None;
+    for _ in 0..200 { if let Some(v) = a.kv().get(&sealed_key) { old = Some(v); break; } tokio::time::sleep(Duration::from_millis(25)).await; }
+    let old = old.expect("A holds C's sealed record");
+    let k1 = c.rotate_identity(Duration::from_millis(500)).await.unwrap();
+    for _ in 0..200 {
+        if b.task_ctx.peer_keys.pin().get(&nc).is_some_and(|k| k.contains(&k1)) && b.kv().get(&sealed_key) != Some(old.clone()) { break; }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(b.task_ctx.peer_keys.pin().get(&nc).is_some_and(|k| k.contains(&k1)), "B learned C's rotated key");
+    forge_unsigned_as(&a, &nc, sealed_key.clone(), old.clone(), false);
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let b_holds_old = b.kv().get(&sealed_key) == Some(old.clone());
+    let stale = b.task_ctx.transport_bounds.kv_identity_stale_refused.load(Ordering::Relaxed);
+    a.shutdown().await; b.shutdown().await; c.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!b_holds_old, "REPLAY: a genuine pre-rotation sealed record, replayed unsigned with a fresh timestamp, replaced C's current one");
+    assert!(stale >= 1, "and the refusal is counted");
+}
+
 /// **The window: by default a TLS node still applies an unsigned frame, and counts it**, so a 2.32
 /// peer's agent writes (which it sends unsigned) keep arriving while the fleet upgrades. A node
 /// with no TLS identity has nothing to count — the plaintext posture is unchanged.
@@ -1526,6 +1559,7 @@ async fn the_row_f_window_counters_are_on_gateway_stats() {
     b.kv_unsigned_refused.store(7, Ordering::Relaxed);
     b.kv_signer_mismatch.store(11, Ordering::Relaxed);
     b.kv_identity_exempt.store(13, Ordering::Relaxed);
+    b.kv_identity_stale_refused.store(17, Ordering::Relaxed);
     let client = reqwest::Client::new();
     let mut stats = serde_json::Value::Null;
     for _ in 0..80 {
@@ -1538,6 +1572,7 @@ async fn the_row_f_window_counters_are_on_gateway_stats() {
     assert_eq!(stats["kv_unsigned_frames_refused"], 7);
     assert_eq!(stats["kv_signer_mismatch"], 11);
     assert_eq!(stats["kv_identity_exempt_frames"], 13);
+    assert_eq!(stats["kv_identity_stale_refused"], 17);
     assert!(stats.get("identity_untagged_proofs").is_none() && stats.get("consensus_untagged_signatures").is_none(),
             "the §23 counters went with the window they counted");
     a.shutdown().await;
