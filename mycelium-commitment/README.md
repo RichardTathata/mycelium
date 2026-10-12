@@ -27,6 +27,12 @@ naming somebody else and the deterministic rule would award them work they never
 forger fails because the key checked is the *named participant's*. Unsigned stays legal and unchanged
 (`offers()` + `plan_award`) — provenance is the declarer's decision, not this crate's policy.
 
+**The deadline is judged on the log's clock, and an award is read with the check you need (post-360 row H,
+2026-10-12).** `deadline_ms` is compared against the offer's log position — the HLC the stream stamped at append, as
+wall-clock ms — never the `offered_at_ms` the offerer wrote (which let an offerer backdate a late offer); express
+deadlines as `now + window` on the mesh's clock. `award_of` reports only a record that names its requirement and
+operation; `award_of_verified(requirement, resolve)` only an award the announcement's declarer signed.
+
 Built entirely on Mycelium's public API (`default-features = false`).
 
 ## Run the example
