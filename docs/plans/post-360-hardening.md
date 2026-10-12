@@ -463,9 +463,19 @@ Each promise and what delivers it:
   `CloseTooLarge` before writing and read back after (`CloseNotWritten`). Seen failing on 9d4da849:
   `a_forged_close_written_first_does_not_stop_the_declarers_signed_close` (`AlreadyClosed`),
   `an_overwritten_close_is_recovered_by_the_declarer_closing_again` (`AlreadyClosed`),
-  `on_the_unverified_path_an_early_close_or_another_declarers_close_is_not_a_close` (the early forgery awarded),
+  `on_the_unverified_path_a_close_dated_before_the_deadline_or_naming_another_declarer_is_refused` (the early forgery awarded),
   `an_oversize_close_is_refused_by_name_not_reported_as_written` (`Ok`, nothing written);
-  `an_award_names_its_close_and_a_close_binds_its_announcement` is new API. Tests (round 1, each first seen failing on
+  `an_award_names_its_close_and_a_close_binds_its_announcement` is new API. **Round 3:** the round-2 recovery
+  (re-close after an overwrite) recomputed from everything held and admitted a late offer, and "earliest" was by
+  stream key, which any member writes. Recovery now **re-asserts** — `close` re-appends the close the handle made,
+  byte for byte (`ContractNet::minted`, lock-order row 59), `reassert_close(&kept)` after a restart — and closes are
+  ordered by the signed `closed_at_ms`, then digest. Seen failing on d90c2d51:
+  `a_reclose_after_an_overwrite_never_admits_an_offer_the_first_close_did_not` (`a-mallory`),
+  `a_second_signed_close_at_a_backdated_key_does_not_change_the_award` (`a-mallory`);
+  `a_restarted_declarer_reasserts_the_close_it_kept` is new API. **Residual:** a declarer that restarts without
+  keeping its close and is overwritten everywhere re-decides (the handle cannot tell an overwritten close from none);
+  a declarer that signs two different closes has equivocated — the earlier-dated counts, both are on the stream; a
+  forged unsigned close dated at or after the deadline still steers the unverified path. Tests (round 1, each first seen failing on
   461da69f): `a_backdated_log_key_does_not_make_a_late_offer_a_candidate`
   (the review's key loses; the offer that arrived before the close wins), `an_award_before_the_requirement_is_closed_is_refused`;
   and `no_offers_and_late_offers_are_visible_states_not_awards` pins the close's own refusals (before the deadline,

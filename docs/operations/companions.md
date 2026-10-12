@@ -310,8 +310,11 @@ an absent section.
   `offered_at_ms`, not the HLC in its log key (both are offerer-written). At or after `deadline_ms` on its own clock
   the declarer calls `close(requirement, key, now_ms)`, appending to `cn/{requirement}/closes` a record of every offer
   its node holds, bound to the announcement; an award counts only those and is refused `NotClosed` before a close.
-  **Sign the close** and award with `plan_award_verified`: the checked path takes the earliest close your key signed,
-  so a forged close cannot pre-empt yours, and if yours is overwritten you close again. A close too large for one KV
+  **Sign the close, keep the `Close` it returns,** and award with `plan_award_verified`: the checked path takes the
+  earliest close (by its signed `closed_at_ms`) your key signed, so a forged close cannot pre-empt yours. If yours is
+  overwritten, calling `close` again on the same handle re-appends **the same close** (it never re-decides); after a
+  restart, pass the close you kept to `reassert_close`. A declarer that restarts without its close and is overwritten
+  everywhere re-decides — keep it. A close too large for one KV
   write is refused `CloseTooLarge` (compact the offer stream or narrow the market). The residual is the declarer's: a
   signed close shows which offers it counted, not when it closed — `closed_at_ms` is the declarer's own claim.
 - **Read with the check you need.** Offers, reports and assessments are read only for their own requirement.

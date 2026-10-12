@@ -68,8 +68,11 @@ Design: `docs/plans/v3-contracts-axis.md` §6.9 (CN1–CN3, D39). Key facts:
   every offer its node holds by log position and SHA-256 and binds the announcement (deadline, digest); an award
   counts only named offers, records the close's digest (`Award::close_sha256`), and is refused `NotClosed` before a
   close. **A stream, not one key** (round 2): the checked path takes the earliest close verifying under the pinned
-  declarer, so a forged close cannot pre-empt it and an overwrite is recovered by closing again; the unverified path
-  takes the earliest naming the announcement's declarer at or after the deadline, and is steerable. **Residual:** the
+  declarer — earliest by its signed `closed_at_ms`, then digest, never by stream key (round 3) — so a forged close
+  cannot pre-empt it; an overwrite is recovered by **re-asserting** the same close (`close` again on the same handle,
+  `reassert_close(&kept)` after a restart), never by re-deciding — the round-3 review showed a re-close that
+  recomputed admitted a late offer. The unverified path takes the earliest naming the announcement's declarer at or
+  after the deadline; a forged unsigned close dated at or after the deadline still steers it. **Residual:** the
   declarer decides; a signed close shows which offers it counted, not when it closed (`closed_at_ms` is its claim).
   The lessons: *a key segment is data, not a clock*, and *one LWW key cannot hold both a forgery and the truth*.
 - **Reads are checked like offers (row H).** Offers, reports and assessments are read only when they name the
@@ -103,7 +106,10 @@ Design: `docs/plans/v3-contracts-axis.md` §6.9 (CN1–CN3, D39). Key facts:
 | `award_of_verified` checks the declarer the caller pins (row H) | `award_of_verified_checks_the_declarer_the_caller_pins_not_the_writable_head` |
 | a forged close written first does not stop the declarer's signed close (round 2) | `a_forged_close_written_first_does_not_stop_the_declarers_signed_close` |
 | an overwritten close is recovered by closing again (round 2) | `an_overwritten_close_is_recovered_by_the_declarer_closing_again` |
-| on the unverified path an early close or another declarer's is not a close (round 2) | `on_the_unverified_path_an_early_close_or_another_declarers_close_is_not_a_close` |
+| a re-close after an overwrite never admits an offer the first close did not (round 3) | `a_reclose_after_an_overwrite_never_admits_an_offer_the_first_close_did_not` |
+| a second signed close at a backdated key does not change the award (round 3) | `a_second_signed_close_at_a_backdated_key_does_not_change_the_award` |
+| a restarted declarer re-asserts the close it kept (round 3) | `a_restarted_declarer_reasserts_the_close_it_kept` |
+| on the unverified path an early close or another declarer's is not a close (round 2) | `on_the_unverified_path_a_close_dated_before_the_deadline_or_naming_another_declarer_is_refused` |
 | an oversize close is refused by name, not reported as written (round 2) | `an_oversize_close_is_refused_by_name_not_reported_as_written` |
 | an award names its close; a close binds its announcement (round 2) | `an_award_names_its_close_and_a_close_binds_its_announcement` |
 | `award_of` reports only a record naming its requirement and operation (row H) | `award_of_reports_only_a_record_that_names_this_requirement_and_its_operation` |

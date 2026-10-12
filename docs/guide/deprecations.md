@@ -931,7 +931,9 @@ with `/` gets 400 where it got a trace of another run; a client that stored past
 more than its quota at open keeps every file and refuses only *new* puts). Run ids: fold `/` and whitespace at the
 client (`reheal_node` folds a model name's `/`). Awards: the declarer calls `close(requirement, key, now_ms)` once
 the deadline has passed on its clock, then awards as before; a declarer with keys signs the close and plans with
-`plan_award_verified(requirement, rule, now_ms, declarer, resolve)`.
+`plan_award_verified(requirement, rule, now_ms, declarer, resolve)`, and keeps the `Close` that `close` returns — an
+overwritten close is recovered by re-asserting it (`close` again on the same handle, `reassert_close(&kept)` after a
+restart), which never admits an offer the first close did not.
 The Python SDK and the LangGraph checkpointer are unchanged — a 507 or 400 surfaces as `httpx.HTTPStatusError` with
 the route's body.
 

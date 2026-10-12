@@ -19,8 +19,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `kv().set("log/cn/{r}/offers/0000000000010000/…")` and win an award a minute after the deadline; the "drift bound"
   residual it stated was not a bound (the clamp applies to `Hlc::observe`, not to stored keys). Now no timestamp an offerer can write decides lateness: the **declarer closes** the requirement (`close(requirement, key, now_ms)`, at or after `deadline_ms` on its own clock), appending a `Close` to `cn/{r}/closes` that names every offer its node holds by log position and SHA-256; an award counts only the offers the close names and is refused `NotClosed` before one exists.
   Closes go on a stream (`cn/{r}/closes`), so neither a forged close written first nor an overwrite stops the declarer
-  (round 2): the checked path takes the earliest close verifying under the pinned declarer, and `close` refuses
-  `AlreadyClosed` only for one verifying under its own key; a close binds its announcement (deadline, digest), an award
+  (round 2): the checked path takes the earliest close verifying under the pinned declarer — earliest by the signed
+  `closed_at_ms`, then digest, never by stream key (round 3) — and `close` refuses `AlreadyClosed` only for one
+  verifying under its own key; recovery from an overwrite **re-asserts** the declarer's original close byte for byte
+  (`close` again on the same handle, `reassert_close(&kept)` after a restart) and never re-decides (round 3: a re-close
+  that recomputed admitted a late offer — `a_reclose_after_an_overwrite_never_admits_an_offer_the_first_close_did_not`
+  and `a_second_signed_close_at_a_backdated_key_does_not_change_the_award` seen failing on d90c2d51); a close binds its announcement (deadline, digest), an award
   records its close (`close_sha256`), and a close too large for one KV write is `CloseTooLarge` before writing. The
   residual, stated: the declarer decides which offers arrived in time — a signed close shows which it counted, not
   when it closed (`closed_at_ms` is its claim). `offers()`/`offers_verified()`/`reports()`/
@@ -35,7 +39,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `AlreadyClosed`, `CloseTooLarge`, `CloseNotWritten` (the enum is `#[non_exhaustive]`); `Award` and `Close` gained
   fields. Seen failing first on 9d4da849 (round 2): `a_forged_close_written_first_does_not_stop_the_declarers_signed_close`,
   `an_overwritten_close_is_recovered_by_the_declarer_closing_again`,
-  `on_the_unverified_path_an_early_close_or_another_declarers_close_is_not_a_close`,
+  `on_the_unverified_path_a_close_dated_before_the_deadline_or_naming_another_declarer_is_refused`,
   `an_oversize_close_is_refused_by_name_not_reported_as_written`, and `mycelium-reason`'s `a_tiny_blob_costs_a_block`.
   Seen failing first (on 461da69f, round 1, the review's PoCs):
   `a_backdated_log_key_does_not_make_a_late_offer_a_candidate` (`driver-a`, the backdated offer, awarded),

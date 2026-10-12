@@ -2,7 +2,8 @@
 
 - `mycelium-commitment`: lateness is decided by the **declarer's close** (`close`, a `Close` appended to `cn/{r}/closes`
   naming every offer by log position and SHA-256 and binding the announcement; `NotClosed` before one; the checked
-  path takes the earliest close the pinned declarer signed, so a forgery or an overwrite never stops the declarer). The PR's first head judged on the HLC in the
+  path takes the earliest close the pinned declarer signed, by its signed `closed_at_ms`; recovery from an overwrite
+  re-asserts the original close byte for byte and never re-decides). The PR's first head judged on the HLC in the
   offer's log key; its review showed a key segment is offerer-written data, not a clock (backdated to
   `0000000000010000`, an award won a minute late). Residual: the declarer decides; a signed close shows which offers
   it counted, not when it closed (`closed_at_ms` is its claim). Reads filtered to their own requirement; `award_of_verified` takes a pinned declarer;
