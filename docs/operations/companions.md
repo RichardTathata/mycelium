@@ -246,6 +246,18 @@ Nothing to persist: routing state is capability pheromone + **node-local** in-fl
   **Upgrade order:** the checkpointer to 0.3.0 before the reason nodes to 0.7.0 (a 0.2.x checkpointer reads a
   503 or 502 as an unrelated HTTP error). A damaged copy on disk is repaired by putting the right bytes again —
   the next successful mesh fetch on that node does it.
+- **Bounded (0.9.0, post-360 row H).** The blob store holds at most its quota — **1 GiB** from `FsBlobStore::open`,
+  or `open_with_quota(dir, bytes)` (`reason_node` reads `BLOB_QUOTA_BYTES`; `u64::MAX` is no bound) — counted from
+  the files at open; `PUT blob` answers **507 `quota_exceeded`** past it (a blob already held is 200; 413 `too_large`
+  stays the 8 MiB per-blob ceiling) and the mesh write-back of a fetched blob that no longer fits is logged. Nothing
+  evicts: the files are named by content address, so what to drop is yours. A **`run_id`** is one bounded segment
+  (≤ 128 bytes, ASCII letters, digits, `- _ . : @ +`): `GET trace/{run_id}` and `POST route` answer **400
+  `bad_run_id`**, the façade `400 invalid_request_error`/`bad_run_id` — a run id with `/` used to write into another
+  run's trace, which `anchor` then sealed. Run ids are validated, **runs are not owned**: any caller holding
+  `llm:invoke` can record into any valid run id, so a trace is a record of what was written under a name, not of who
+  owns it. The quota is accounted **per digest** (racing puts of one blob count it once), each file at least one 4 KiB
+  block (`BLOB_FILE_MIN_COST`, so the quota bounds files and memory, not just bytes); a file added or deleted by
+  hand is credited at the next open; `.tmp-*` files are removed at open as abandoned — one store per directory.
 - **What is exposed** (all under `/gateway/reason/`, all behind the gateway bearer since 2026-09-04):
   `POST route` and the **OpenAI-compatible façade** `POST v1/chat/completions` + `GET v1/models`
   (scope `llm:invoke` / `llm:read`) — point any OpenAI client at `http://node:HTTP_PORT/gateway/reason/v1`;
@@ -294,6 +306,22 @@ an absent section.
 - **The award is receipt-bearing.** Written with `set_with_receipt` under a stable operation
   identity, so its durability is whatever the receipt says and a retry is recognisable. One award per
   requirement; a second is refused and the first is never overwritten.
+- **The declarer closes; then it awards (post-360 row H).** No stamp an offerer writes decides lateness — not
+  `offered_at_ms`, not the HLC in its log key (both are offerer-written). At or after `deadline_ms` on its own clock
+  the declarer calls `close(requirement, key, now_ms)`, appending to `cn/{requirement}/closes` a record of every offer
+  its node holds, bound to the announcement; an award counts only those and is refused `NotClosed` before a close.
+  **Sign the close, keep the `Close` it returns,** and award with `plan_award_verified`: the checked path takes the
+  earliest close (by its signed `closed_at_ms`) your key signed, so a forged close cannot pre-empt yours. If yours is
+  overwritten, calling `close` again on the same handle re-appends **the same close** (it never re-decides); after a
+  restart, pass the close you kept to `reassert_close`. A declarer that restarts without its close and is overwritten
+  everywhere re-decides — keep it. A close too large for one KV
+  write is refused `CloseTooLarge` (compact the offer stream or narrow the market). The residual is the declarer's: a
+  signed close shows which offers it counted, not when it closed — `closed_at_ms` is the declarer's own claim.
+- **Read with the check you need.** Offers, reports and assessments are read only for their own requirement.
+  `award_of` reports only a record naming its requirement and operation; `award_of_verified(requirement, declarer,
+  resolve)` only one the declarer *you* name signed; `plan_award_verified` / `commit_award_linearizable_verified` are
+  the checked path. On the unverified path any member that can write `cn/{requirement}/award` can block an award.
+  The checked path can still be steered by deletion: a close names offers by log position and hash, and the award re-reads them from the stream — so a member who deletes or rewrites another participant's named offer removes it from the candidates, and the award does not show it (the close and `close_sha256` are untouched). **Follow-up, not built:** carry each named offer's signed bytes inside the close and award from that copy.
 - **An unknown award is not "no award".** A linearizable round that reached no commit answers
   `AwardUnknown`; retry, and it resolves as `AlreadyAwarded` or a fresh commit.
 - **Retention is yours.** The log streams grow with traffic and the crate never prunes them. The

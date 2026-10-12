@@ -91,7 +91,7 @@ async fn main() {
     println!("coordinator: model ready — fable-mini served by {} provider(s)", providers.len());
 
     // ── (3) Wedges ① + ②: routed calls with a trace. ──
-    let trace = TraceRecorder::new(Arc::clone(&coord), "surplus-run-1");
+    let trace = TraceRecorder::new(Arc::clone(&coord), "surplus-run-1").expect("one bounded segment");
     trace.resume("fable-mini", 400, &providers);
     let router = InferenceRouter::new(
         Arc::clone(&coord),

@@ -3,9 +3,9 @@
 **Status:** adopted 2026-10-10, rev 1.6 (2026-10-12: Φ closed; P5, J and I delivered; rows K, L, M added from the Strands Box comparison). **R0 is being cut as v2.32.0 (2026-10-11)**, which delivers rows **G, P3, C, D,
 P1, A (with C1, C2), B (as narrowed 2026-10-11) and P2 (without migration, as decided 2026-10-11)** — each closed on
 evidence in §3.5. Open:
-E, F, H, K, L, M (P2's migration — close, enumerate, carry, complete — delivered after 2.32.0, §3.5;
+E, F, K, L, M (P2's migration — close, enumerate, carry, complete — delivered after 2.32.0, §3.5;
 Φ delivered 2026-10-12, #607, §3.5; **P5**, the `http.rs` split, J, hygiene, #608, and I, the private repository's items, private #30, delivered after
-2.32.0 too, §3.5; R0's private re-pin landed as private #29). It follows the 2026-10-09 360 review and the eleven
+2.32.0 too, §3.5; H, the companions' four doors, #609, delivered after 2.32.0, §3.5; R0's private re-pin landed as private #29). It follows the 2026-10-09 360 review and the eleven
 PRs that addressed its must-do list (#582–#592, private #28); those are recorded in the CHANGELOG and are not
 repeated here. Rows close on evidence (verification policy rule 2): a row is closed by quoting each promise next to
 the code or test that delivers it, and a promise that is not delivered is written *not built*.
@@ -82,7 +82,7 @@ Four places strain that line today, and the rows in §3 address each:
 | **E** | Gateway remainder | client-supplied timer periods (`interval_secs`) bounded; the log-group subscribe keeps the core's `(hlc, key)` tiebreak the mailbox deletes an entry only after the client has it (today it tombstones on entering the 256-slot channel, so a dropped stream loses queued events — #595's review); prompt keys cannot alias across `ns`/`name` (`prompts/{ns}/{name}` with a `/` in either); and saves the group offset only after the entry is sent (today it saves first, so an entry in flight when a stream drops is never re-sent — found by row G); the caller envelope binds freshness | P5 |
 | **F** | Wire and crypto, one MINOR with a window | a TLS node refuses unsigned `Data` frames; the removal check reads a peer's key structurally, not by byte-scanning the certificate; KV `SignedData` is domain-tagged; each change carries a mixed-fleet window and an upgrade note in the 2.30.0 shape; the #585 and #587 windows close in the same MINOR | R0, ideally its own release |
 | **G** — *delivered 2.32.0 (#595), §3.5* | SDKs | Python whole-second timeouts and a non-truncating tuple `take`; path segments escaped; TypeScript `SupersededError`; one `scatterGather` default, documented; SSE reconnect is designed with a gateway resume point or recorded as not built | R0 |
-| **H** | Companions | the commitment deadline judged on the log's clock, not the offerer's; `award_of` verifies before it reports; the reason blob store bounded; caller-chosen `run_id` validated | R0 |
+| **H** — *delivered after 2.32.0 (#609), §3.5* | Companions | the commitment deadline judged on the log's clock, not the offerer's; `award_of` verifies before it reports; the reason blob store bounded; caller-chosen `run_id` validated | R0 |
 | **I** — *delivered (private #30), §3.5; Cedar narrower* | Private repo P3s | RA5 correction chains and competing corrections; attempt keys carry the operation id; a lock-order table; the outbox directory fsynced at create; Cedar policies schema-validated at load; the CI pin check refuses `[patch]`, `rev =` and multi-line tables | R0's re-pin |
 | **J** — *delivered (#608), §3.5* | Hygiene | the sim-seam gate's test-skip bug (the one the KV gate fixed in #591); every feature and bench linted or built by some CI step; the two CI jobs on `stable` pinned; unreferenced public items deprecated, not removed (nothing is removed on the 2.x line); only the duplicates that disagree are unified (`hex_line`'s whitespace, `now_ms` copies outside the seam) | — |
 | **K** | Policy over history | the action evaluator can decide on what an actor has already done, not only on the request: a bounded, read-only history view (the actor's recent decisions and executions from the evidence journal — `src/agent/evidence_journal.rs`) reaches `ActionEvaluator::evaluate` beside the envelope (`ActionEnvelope`, `src/agent/action_evaluator.rs:101`, which today carries no history); a rule such as *at most three posts in ten minutes* is expressible and tested in the reference evaluator and the AE contract suite (`mycelium::ae_contract`); the scope of a count is stated by name — **per node** (the journal is node-local and never gossiped) unless the design question in §5 is decided otherwise; a history that cannot be read is `Indeterminate`, never an empty history; replay records the history view as a decision input | design question §5 |
@@ -442,6 +442,91 @@ Each promise and what delivers it:
   the cargo config and the lockfile, and recognises the substrate by its git URL whatever the crate's name; its
   self-test refuses every staged bypass, the three named ones among them (the old grep step passed all three). A build directory is skipped
   only when git does not track its `CACHEDIR.TAG`.
+
+**H — Companions (#609; read against the merged code).** The review's claims, each sized against the code:
+- *The commitment deadline judged on the log's clock, not the offerer's* — **held, and the first fix was wrong**.
+  `plan_award_from` filtered on `o.offered_at_ms <= deadline_ms`, a field the offerer writes. #609's first head judged
+  on `hlc::physical_ms` of the offer's log key; the review (comment 6117910561, finding 1) showed that segment is
+  offerer-written too — `kv().set("log/cn/closed/offers/0000000000010000/mallory", …)` won an award a minute late, and
+  the drift clamp applies to `Hlc::observe`, not stored keys. **No clock of the log is offerer-proof, so the promise is
+  delivered as the declarer's close** (`mycelium-commitment/src/lib.rs`: `Close`, `ClosedOffer`, `close`, `close_of`,
+  `verify_close`, `choose_award`): the declarer closes at or after the deadline on its own clock, naming every offer
+  its node holds by log position and SHA-256; an award counts only named offers, and none is made before a close
+  (`NotClosed`). **Round 2** (the review's confirming pass): one LWW key could not hold both a forged and a genuine
+  close — a member's unsigned close written first stopped the declarer closing, and an overwrite was permanent. Closes
+  now go on a stream `cn/{r}/closes`; the checked path takes the earliest close verifying under the pinned declarer
+  (`close_of_verified`), `close` refuses `AlreadyClosed` only for a close verifying under its own key (a local read),
+  the unverified path (`close_of`) requires the announcement's declarer, deadline and digest and a date at or after
+  the deadline, a close binds its announcement, an award records its close (`close_sha256`), and an oversize close is
+  `CloseTooLarge` before writing and read back after (`CloseNotWritten`). Seen failing on 9d4da849:
+  `a_forged_close_written_first_does_not_stop_the_declarers_signed_close` (`AlreadyClosed`),
+  `an_overwritten_close_is_recovered_by_the_declarer_closing_again` (`AlreadyClosed`),
+  `on_the_unverified_path_a_close_dated_before_the_deadline_or_naming_another_declarer_is_refused` (the early forgery awarded),
+  `an_oversize_close_is_refused_by_name_not_reported_as_written` (`Ok`, nothing written);
+  `an_award_names_its_close_and_a_close_binds_its_announcement` is new API. **Round 3:** the round-2 recovery
+  (re-close after an overwrite) recomputed from everything held and admitted a late offer, and "earliest" was by
+  stream key, which any member writes. Recovery now **re-asserts** — `close` re-appends the close the handle made,
+  byte for byte (`ContractNet::minted`, lock-order row 59), `reassert_close(&kept)` after a restart — and closes are
+  ordered by the signed `closed_at_ms`, then digest. Seen failing on d90c2d51:
+  `a_reclose_after_an_overwrite_never_admits_an_offer_the_first_close_did_not` (`a-mallory`),
+  `a_second_signed_close_at_a_backdated_key_does_not_change_the_award` (`a-mallory`);
+  `a_restarted_declarer_reasserts_the_close_it_kept` is new API. **Residual:** a declarer that restarts without
+  keeping its close and is overwritten everywhere re-decides (the handle cannot tell an overwritten close from none);
+  a declarer that signs two different closes has equivocated — the earlier-dated counts, both are on the stream; a
+  forged unsigned close dated at or after the deadline still steers the unverified path; and (the round-3 review,
+  stated rather than fixed) a close names offers by log position and hash, and the award re-reads them from the stream — so a member who deletes or rewrites another participant's named offer removes it from the candidates, and the award does not show it (the close and `close_sha256` are untouched). **Follow-up, not built:** carry each named offer's signed bytes inside the close and award from that copy. Tests (round 1, each first seen failing on
+  461da69f): `a_backdated_log_key_does_not_make_a_late_offer_a_candidate`
+  (the review's key loses; the offer that arrived before the close wins), `an_award_before_the_requirement_is_closed_is_refused`;
+  and `no_offers_and_late_offers_are_visible_states_not_awards` pins the close's own refusals (before the deadline,
+  not the declarer, closed once). **The residual**: the declarer decides which offers arrived in time — a late close
+  admits late offers, an omitting one excludes; a signed close shows which offers it counted and makes that
+  attributable, but `closed_at_ms` is the declarer's own claim, not a measurement. The close is unsigned on the plain
+  path, like the head, and the plain path is steerable by any member that can append to the close stream. Finding 6 (HLC contagion) no longer applies: no HLC decides lateness.
+- *`award_of` verifies before it reports* — **partial, stated**. `award_of` reports only a record whose
+  `requirement` and `operation_id` name this requirement (`award_of_reports_only_a_record_that_names_this_requirement_and_its_operation`,
+  seen failing on 2933073f). It cannot verify a signature without a key, so verification is
+  `award_of_verified(requirement, declarer, resolve)` with the declarer **pinned by the caller** — the first head read
+  it from the writable head and fell in two writes (finding 4;
+  `award_of_verified_checks_the_declarer_the_caller_pins_not_the_writable_head`, seen failing on 461da69f).
+  `plan_award_verified` decides `AlreadyAwarded` only from a verified award, and
+  `commit_award_linearizable_verified` reports a slot holding an unproven award as `UnprovenAwardHolds`
+  (`the_checked_path_needs_a_signed_close_and_is_not_blocked_by_a_forged_award`, new API); a slot holding another
+  requirement's record is `SlotHoldsAnotherRecord`, not `Encoding` (`a_slot_holding_another_requirements_award_says_so`,
+  seen failing on 461da69f). **Not built:** on the unverified path (`award_of`, `plan_award_from`, `award`,
+  `commit_award_linearizable`) **any member that can write `cn/{r}/award` can block an award** — stated in their docs;
+  a linearizable slot a forgery takes first stays taken. Sibling (finding 3): `offers`/`offers_verified`/`reports`/
+  `assessments` read only records naming their requirement
+  (`an_offer_report_or_assessment_naming_another_requirement_is_not_read_as_this_ones`, seen failing on 461da69f).
+- *The reason blob store bounded* — **narrower than stated**: a per-blob ceiling existed (`MAX_BLOB_BYTES`, 8 MiB, at
+  `FsBlobStore::put` and the gateway's 413); the **total** did not. `mycelium-reason/src/blob.rs`:
+  `DEFAULT_BLOB_QUOTA_BYTES` (1 GiB), `open_with_quota`, `quota_bytes`/`used_bytes`, the reservation **per digest**
+  before the write (`begin_write`/`end_write` over `account`, lock-order row 58 — the first head reserved per put and
+  grew N×len under racing puts of one blob, finding 2: `concurrent_puts_of_one_digest_reserve_it_once` seen failing
+  3/3 on 461da69f, the account at 38.8–50.9 MB against 16.8 MB on disk), released on every failure path
+  (`a_failed_write_releases_its_reservation` — a pin; it held on 461da69f too), `.tmp-*` removed at open
+  (`an_abandoned_temp_file_is_removed_at_open`, seen failing), each file at least one 4 KiB block
+  (`BLOB_FILE_MIN_COST`, round 2 — an 8-byte blob cost 8 bytes of quota and a block, an inode and an account entry:
+  `a_tiny_blob_costs_a_block`, seen failing on 9d4da849 at 8), `ErrorKind::QuotaExceeded`; `src/http.rs`
+  `gw_blob_put` → 507 `quota_exceeded`. A file added or deleted by hand is credited at the next open (stated).
+  Doors enumerated (`grep -rn "\.put(" mycelium-reason/src`): the gateway PUT, `MeshBlobStore::put`, the mesh
+  write-back in `MeshBlobStore::fetch` (logged, bytes still returned). Tests
+  `a_store_refuses_a_put_past_its_quota_and_counts_what_it_holds` (unit),
+  `the_blob_door_answers_507_when_the_store_is_at_its_quota` (gateway) — new API, so seen failing as a missing method.
+  **Not built:** eviction.
+- *Caller-chosen `run_id` validated* — **held, and wider than a path segment**: `run_id` is read from a client at
+  three doors (`grep -rn run_id mycelium-reason/src src mycelium-py/src mycelium-ts/src mycelium-wasm-host/src
+  mycelium-effects/src`: `GET /gateway/reason/trace/{run_id}`, `POST /gateway/reason/route` body,
+  `POST /gateway/reason/v1/chat/completions` body; the Rust API `TraceRecorder::new` and `replay`; nothing in
+  `src/`, the wasm host, effects or the SDKs reads one) and used as a **log-stream segment** `reason/{run_id}/{node}`,
+  never a filename — so `victim/x` wrote under `log/reason/victim/` and `replay("victim")` carried the injected event
+  (`a_run_id_with_a_slash_cannot_write_into_another_runs_trace`, seen failing first with two events, one mallory's);
+  `GET …/trace/victim%2Fx` answered 200 (`every_run_id_door_refuses_an_id_that_is_not_one_bounded_segment`, seen
+  failing first). Now `validate_run_id` at every door (400 `bad_run_id`; `TraceRecorder::new` → `Result`), and
+  `replay` reads only `{node}/{hlc}/{salt}` under the run, so a raw append under a deeper id (a member bypassing
+  the recorder) is skipped — the read side closed as well as the write side. A `..` segment is refused at the door
+  (proved with a raw request: a conforming client resolves `%2E%2E` before sending). **Validated, not owned**
+  (finding 8): any `llm:invoke` caller can record into another tenant's valid run id — stated in the docs, not in this
+  row's promise.
 
 ## 4 · Decisions taken
 

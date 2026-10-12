@@ -206,7 +206,9 @@ async fn reheal(agent: Arc<GossipAgent>, store: Arc<FsBlobStore>, model: String,
     // task's life — dropping it retracts the demand.
     let _dep = require_model(&agent, &model, Duration::from_secs(5));
     let mesh = MeshBlobStore::new(Arc::clone(&agent), Arc::clone(&store), Duration::from_secs(10));
-    let trace = TraceRecorder::new(Arc::clone(&agent), format!("reheal-{model}"));
+    // A run id is one bounded segment (`validate_run_id`); a model name may carry `/`, which is folded.
+    let run_id: String = format!("reheal-{model}").chars().map(|c| if c == '/' { '-' } else { c }).collect();
+    let trace = TraceRecorder::new(Arc::clone(&agent), run_id).expect("one bounded segment");
     let started = std::time::Instant::now();
 
     // Structural poll (~300 ms) — the assertion is "the advert appeared AND the blob

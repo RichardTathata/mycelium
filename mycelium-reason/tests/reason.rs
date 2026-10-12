@@ -234,8 +234,8 @@ async fn metadata_constraints_filter_candidates() {
 async fn trace_records_converge_across_nodes() {
     let (agent_a, agent_b) = start_pair().await;
 
-    let tr_a = TraceRecorder::new(Arc::clone(&agent_a), "run-xnode");
-    let tr_b = TraceRecorder::new(Arc::clone(&agent_b), "run-xnode");
+    let tr_a = TraceRecorder::new(Arc::clone(&agent_a), "run-xnode").unwrap();
+    let tr_b = TraceRecorder::new(Arc::clone(&agent_b), "run-xnode").unwrap();
     tr_a.tool_call("demand-forecast", true);
     tr_a.record("custom", serde_json::json!({ "step": 1 }));
     tr_b.tool_call("surplus-match", true);
@@ -342,7 +342,7 @@ async fn trace_record_replay_round_trips() {
     agent.start().await.expect("agent start");
 
     let run_id = "rung5-roundtrip";
-    let rec = TraceRecorder::new(Arc::clone(&agent), run_id);
+    let rec = TraceRecorder::new(Arc::clone(&agent), run_id).unwrap();
     rec.record("route", serde_json::json!({ "model": "m", "candidates": 1 }));
     rec.record("llm_call", serde_json::json!({ "provider": "127.0.0.1:9001", "ok": true }));
 
@@ -483,4 +483,34 @@ async fn probe_reservations_release_on_timeout_and_cancellation() {
 
     agent_a.shutdown_with_timeout(Duration::from_secs(5)).await;
     agent_b.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// Post-360 row H: a run id is **one path segment**. The stream is `reason/{run_id}/{node}`, so a run id
+/// carrying `/` wrote into another run's prefix — a recorder for `victim/x` landed under
+/// `log/reason/victim/`, and `replay("victim")` (and `anchor`, which seals what replay returns) carried
+/// the injected event as the victim's own. Replay now reads only keys of the one shape a recorder writes
+/// (`{node}/{hlc}/{salt}` under the run), and the recorder refuses such an id before it writes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_run_id_with_a_slash_cannot_write_into_another_runs_trace() {
+    let port = free_port();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+    agent.start().await.expect("agent start");
+    let node = agent.node_id().to_string();
+
+    // The victim's own event, in the shape `TraceRecorder::record` writes.
+    agent.kv().append(&format!("reason/victim/{node}"), br#"{"node":"me","kind":"route","detail":{"model":"m"}}"#.to_vec());
+    // What an unvalidated recorder for `victim/x` wrote: the same key shape, one segment deeper.
+    agent.kv().append(&format!("reason/victim/x/{node}"), br#"{"node":"mallory","kind":"route","detail":{"model":"forged"}}"#.to_vec());
+
+    let ok = poll_until(|| !replay(&agent, "victim").is_empty(), Duration::from_secs(5)).await;
+    assert!(ok, "the victim's own event replays");
+    let events = replay(&agent, "victim");
+    assert_eq!(events.len(), 1, "only the victim's own event replays, not the one injected under victim/x: {events:?}");
+    assert_eq!(events[0].detail["model"], "m");
+    assert!(replay(&agent, "victim/x").is_empty(), "nothing replays under an id no recorder could have written");
+    assert!(TraceRecorder::new(Arc::clone(&agent), "victim/x").is_err(), "and the recorder refuses the id before it writes");
+
+    agent.shutdown_with_timeout(Duration::from_secs(5)).await;
 }

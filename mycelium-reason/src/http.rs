@@ -50,7 +50,7 @@ use mycelium::{CapFilter, GossipAgent, ResolvedPrincipal};
 
 use crate::blob::{BlobId, BlobMiss, FsBlobStore, MAX_BLOB_BYTES, MeshBlobStore};
 use crate::route::{InferenceRouter, ModelQuery, RouteError, Routed, RouterConfig};
-use crate::trace::{TraceRecorder, narrate, replay};
+use crate::trace::{TraceRecorder, narrate, replay, validate_run_id};
 
 /// Shared route state: the agent (trace replay), the local-first/mesh-fallback store, and
 /// **one** router — shared so its in-flight reservations span every concurrent gateway
@@ -122,13 +122,18 @@ fn error_json(status: StatusCode, error: &str) -> Response {
 const ENFORCEMENT_POINT_ROUTE: &str = "gateway:reason/route";
 const ENFORCEMENT_POINT_CHAT: &str = "gateway:reason/v1/chat/completions";
 
-/// `PUT /gateway/reason/blob` — raw body in, `{"id":"<hex>"}` out. 413 over the ceiling.
+/// `PUT /gateway/reason/blob` — raw body in, `{"id":"<hex>"}` out. 413 `too_large` over the per-blob
+/// ceiling; **507 `quota_exceeded`** when the store's total bound would be passed
+/// (`FsBlobStore::open_with_quota`; a blob already held costs nothing and still answers 200).
 async fn gw_blob_put(State(s): State<ReasonState>, body: bytes::Bytes) -> Response {
     if body.len() > MAX_BLOB_BYTES {
         return error_json(StatusCode::PAYLOAD_TOO_LARGE, "too_large");
     }
     match s.blobs.put(&body) {
         Ok(id) => Json(json!({ "id": id.to_hex() })).into_response(),
+        Err(e) if e.kind() == std::io::ErrorKind::QuotaExceeded => {
+            (StatusCode::INSUFFICIENT_STORAGE, Json(json!({ "error": "quota_exceeded", "detail": e.to_string() }))).into_response()
+        }
         Err(e) => {
             tracing::warn!(error = %e, "gateway blob put failed");
             error_json(StatusCode::INTERNAL_SERVER_ERROR, "store_error")
@@ -160,6 +165,10 @@ async fn gw_blob_get(State(s): State<ReasonState>, Path(id): Path<String>) -> Re
 /// `GET /gateway/reason/trace/{run_id}` — the replayed run + its narrative, from this
 /// node's KV view (gossip-replicated: any node can serve any run's trace).
 async fn gw_trace_get(State(s): State<ReasonState>, Path(run_id): Path<String>) -> Response {
+    // One bounded segment, or 400 by name — an id with `/` read another run's prefix (row H).
+    if let Err(e) = validate_run_id(&run_id) {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "bad_run_id", "detail": e.to_string() }))).into_response();
+    }
     let events = replay(&s.agent, &run_id);
     let narrative = narrate(&events);
     let events_json: Vec<_> = events
@@ -190,8 +199,14 @@ async fn gw_route(
     let caller = caller.map(|Extension(c)| c);
     let query = ModelQuery::new(body.model);
     // Record a trace only when the caller supplied a run_id (rung 5); otherwise the
-    // route is untraced, exactly as before.
-    let recorder = body.run_id.map(|id| TraceRecorder::new(Arc::clone(&s.agent), id));
+    // route is untraced, exactly as before. The id is one bounded segment, or 400 by name before
+    // anything is routed (row H).
+    let recorder = match body.run_id.map(|id| TraceRecorder::new(Arc::clone(&s.agent), id)).transpose() {
+        Ok(recorder) => recorder,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": "bad_run_id", "detail": e.to_string() }))).into_response();
+        }
+    };
     match s.router.call_as(caller.as_ref(), ENFORCEMENT_POINT_ROUTE, &query, &body.input, &body.context, recorder.as_ref()).await {
         Ok(routed) => Json(json!({
             "output": routed.output,
@@ -372,7 +387,18 @@ async fn gw_openai_chat(
         );
     };
     let query = ModelQuery::new(body.model.clone());
-    let recorder = body.run_id.map(|id| TraceRecorder::new(Arc::clone(&s.agent), id));
+    let recorder = match body.run_id.map(|id| TraceRecorder::new(Arc::clone(&s.agent), id)).transpose() {
+        Ok(recorder) => recorder,
+        Err(e) => {
+            return openai_error(
+                StatusCode::BAD_REQUEST,
+                format!("run_id: {e}"),
+                "invalid_request_error",
+                "bad_run_id",
+                Some("run_id"),
+            );
+        }
+    };
     match s.router.call_as(caller.as_ref(), ENFORCEMENT_POINT_CHAT, &query, &input, &context, recorder.as_ref()).await {
         Ok(routed) => {
             let id = completion_id();

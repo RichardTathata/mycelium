@@ -27,6 +27,18 @@ naming somebody else and the deterministic rule would award them work they never
 forger fails because the key checked is the *named participant's*. Unsigned stays legal and unchanged
 (`offers()` + `plan_award`) — provenance is the declarer's decision, not this crate's policy.
 
+**The declarer closes; an award counts only what the close names (post-360 row H, 2026-10-12).** No stamp an offerer
+writes decides lateness — not `offered_at_ms`, and not the HLC in its log key, which any member can write. At or after
+the deadline on its own clock the declarer calls `close(requirement, key, now_ms)`, appending a record of every offer
+its node holds to `cn/{requirement}/closes`; an award is refused `NotClosed` before that. Sign the close: the checked
+path takes the earliest close (by its signed `closed_at_ms`) your key signed, so a forged one cannot pre-empt it. Keep
+the `Close` that `close` returns: an overwritten close is recovered by re-asserting it — `close` again on the same
+handle, or `reassert_close(&kept)` after a restart — which re-appends the same decision and never admits a later
+offer. Offers, reports and assessments are read only for their own requirement.
+`award_of_verified(requirement, declarer, resolve)` checks the declarer *you* name, and `plan_award_verified` is the
+checked path; on the unverified path any member that can write the award slot can block an award. The checked path is
+not unsteerable either: a close names offers by log position and hash, and the award re-reads them from the stream — so a member who deletes or rewrites another participant's named offer removes it from the candidates, and the award does not show it (the close and `close_sha256` are untouched). **Follow-up, not built:** carry each named offer's signed bytes inside the close and award from that copy.
+
 Built entirely on Mycelium's public API (`default-features = false`).
 
 ## Run the example

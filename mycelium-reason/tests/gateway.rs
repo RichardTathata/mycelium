@@ -82,7 +82,7 @@ async fn gateway_blob_roundtrip_and_trace_endpoint() {
 
     // Record a trace → the endpoint serves events + narrative. record() writes to the
     // local KV synchronously, but poll structurally anyway (parity with real replicas).
-    let tr = TraceRecorder::new(Arc::clone(&agent), "gw-run");
+    let tr = TraceRecorder::new(Arc::clone(&agent), "gw-run").unwrap();
     tr.tool_call("checkpoint-write", true);
     tr.resume("fable-mini", 250, &[agent.node_id().clone()]);
 
@@ -847,3 +847,123 @@ async fn a_damaged_local_copy_is_repaired_by_the_next_mesh_fetch() {
     a.shutdown_with_timeout(Duration::from_secs(5)).await;
 }
 
+
+/// Post-360 row H: every door that takes a caller-chosen `run_id` validates it as one bounded segment
+/// before it is used as a log-stream segment (`reason/{run_id}/{node}`): the trace GET, `/route`'s body
+/// and the façade's body. A `/` reached another run's prefix; an empty or 10 KiB id was written as given.
+/// Seen failing first: `GET /gateway/reason/trace/victim%2Fx` answered 200 with the victim's events.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_run_id_door_refuses_an_id_that_is_not_one_bounded_segment() {
+    let dir = tempfile::tempdir().unwrap();
+    let (agent, _, http_port) = start_gateway_node(Arc::new(FsBlobStore::open(dir.path()).unwrap()), None).await;
+    let url = format!("http://127.0.0.1:{http_port}");
+    let http = reqwest::Client::new();
+    let bad_ids: Vec<String> = vec!["victim/x".into(), "..".into(), "".into(), "x".repeat(10 * 1024), "a b".into()];
+
+    for id in &bad_ids {
+        let encoded: String = id.bytes().map(|b| format!("%{b:02X}")).collect();
+        let got = http.get(format!("{url}/gateway/reason/trace/{encoded}")).send().await.unwrap();
+        let status = got.status().as_u16();
+        let body: serde_json::Value = got.json().await.unwrap_or_default();
+        // An empty segment is axum's 404 (no such route), and a conforming client resolves `%2E%2E` as a
+        // double-dot segment before sending (so the router sees `/gateway/reason/`, 404 — the raw request
+        // below is what reaches the door); every other bad id is the route's own 400.
+        if id.is_empty() || id == ".." {
+            assert_eq!(status, 404, "{id:?} never reaches the door from a conforming client");
+        } else {
+            assert_eq!(status, 400, "trace GET for {id:?} must be refused: {body}");
+            assert_eq!(body["error"], "bad_run_id", "named refusal for {id:?}");
+        }
+
+        let got = http
+            .post(format!("{url}/gateway/reason/route"))
+            .json(&serde_json::json!({ "model": "m", "input": "hi", "run_id": id }))
+            .send()
+            .await
+            .unwrap();
+        let status = got.status().as_u16();
+        let body: serde_json::Value = got.json().await.unwrap_or_default();
+        assert_eq!(status, 400, "/route with run_id {id:?} must be refused before routing: {body}");
+        assert_eq!(body["error"], "bad_run_id");
+
+        let got = http
+            .post(format!("{url}/gateway/reason/v1/chat/completions"))
+            .json(&serde_json::json!({ "model": "m", "messages": [{ "role": "user", "content": "hi" }], "run_id": id }))
+            .send()
+            .await
+            .unwrap();
+        let status = got.status().as_u16();
+        let body: serde_json::Value = got.json().await.unwrap_or_default();
+        assert_eq!(status, 400, "the façade with run_id {id:?} must be refused before routing: {body}");
+        assert_eq!(body["error"]["code"], "bad_run_id");
+        assert_eq!(body["error"]["param"], "run_id");
+    }
+
+    // `..` as the server sees it — a raw request no URL parser has normalised — is refused at the door.
+    {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut raw = tokio::net::TcpStream::connect(("127.0.0.1", http_port)).await.unwrap();
+        raw.write_all(b"GET /gateway/reason/trace/.. HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").await.unwrap();
+        // Read until the status line and the body's refusal are in (the server need not close first).
+        let mut reply = Vec::new();
+        let mut buf = [0u8; 4096];
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let n = tokio::time::timeout_at(deadline, raw.read(&mut buf)).await.expect("a reply within 10 s").unwrap();
+            reply.extend_from_slice(&buf[..n]);
+            let so_far = String::from_utf8_lossy(&reply);
+            if n == 0 || so_far.contains("bad_run_id") || (so_far.contains("\r\n\r\n") && !so_far.starts_with("HTTP/1.1 400")) {
+                break;
+            }
+        }
+        let reply = String::from_utf8_lossy(&reply);
+        assert!(reply.starts_with("HTTP/1.1 400"), "a raw `..` segment is refused at the door: {reply}");
+        assert!(reply.contains("bad_run_id"), "{reply}");
+    }
+
+    // A plain id still routes (404 no_provider: nothing serves `m`) and still reads (an empty trace).
+    let got = http
+        .post(format!("{url}/gateway/reason/route"))
+        .json(&serde_json::json!({ "model": "m", "input": "hi", "run_id": "plain-run_1:ok" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(got.status().as_u16(), 404, "a valid id reaches the router");
+    let got = http.get(format!("{url}/gateway/reason/trace/plain-run_1:ok")).send().await.unwrap();
+    assert_eq!(got.status().as_u16(), 200);
+
+    agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// Post-360 row H: the blob door is bounded by the store's quota. A put that would pass it answers
+/// **507 `quota_exceeded`** and writes nothing; a blob already held still answers 200 (it costs
+/// nothing); the per-blob ceiling's 413 is unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_blob_door_answers_507_when_the_store_is_at_its_quota() {
+    let dir = tempfile::tempdir().unwrap();
+    // Sizes above one block cost their length; a smaller blob costs one block (4096).
+    let store = Arc::new(FsBlobStore::open_with_quota(dir.path(), 10_096).unwrap());
+    let (agent, _, http_port) = start_gateway_node(Arc::clone(&store), None).await;
+    let url = format!("http://127.0.0.1:{http_port}/gateway/reason/blob");
+    let http = reqwest::Client::new();
+
+    let first = vec![1u8; 6000];
+    let put = http.put(&url).body(first.clone()).send().await.unwrap();
+    assert_eq!(put.status().as_u16(), 200);
+    assert_eq!(store.used_bytes(), 6000);
+
+    let put = http.put(&url).body(vec![2u8; 6000]).send().await.unwrap();
+    let status = put.status().as_u16();
+    let body: serde_json::Value = put.json().await.unwrap_or_default();
+    assert_eq!(status, 507, "past the quota: {body}");
+    assert_eq!(body["error"], "quota_exceeded");
+    assert_eq!(store.used_bytes(), 6000, "nothing was written");
+
+    let put = http.put(&url).body(first).send().await.unwrap();
+    assert_eq!(put.status().as_u16(), 200, "a blob already held costs nothing");
+    let put = http.put(&url).body(vec![3u8; 100]).send().await.unwrap();
+    assert_eq!(put.status().as_u16(), 200, "a small blob costs one block — exactly the quota");
+    assert_eq!(store.used_bytes(), 10_096);
+
+    agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+}

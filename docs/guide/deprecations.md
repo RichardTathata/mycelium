@@ -55,6 +55,7 @@ the notice.
 | 32 | an accept path, a writer and a signal log with no bound | 2.32.0 | `handshake_timeout_ms`, `inbound_idle_timeout_secs`, `peer_read_stall_timeout_ms`, `peer_write_stall_timeout_ms`, `peer_min_rate_bytes_per_sec`, `max_connections_per_source` | Partly — `GossipConfig`, `SystemStats` and `CoreCtx` gain fields; `WriterTiming` replaces a `Duration` in three `writer` functions; `validate()` refuses an idle timeout at or below the writer's |
 | 33 | a permanent `elect_leader`; a lock or leadership read from the three legacy keys | 2.32.0 (legacy keys still written; they stop at a later, governed MINOR) | renew by calling again, or `elect_leader_with(group, LeaderTerm::Permanent)`; `release_leadership`; upgrade every node | No — a leadership lapses after 30 s; an upgraded proposer times out until a quorum is upgraded |
 | 34 | "declare a new group and move the work yourself" as the way to change an electorate's members; a default that cannot move | unreleased (after 2.32.0) | `declare_successor_electorate` → `retire_electorate` → `complete_migration` (`POST /gateway/govern/electorate` with `predecessors` / `retire_to` / `complete`; `drop_predecessor` for one that never retires) | Partly — `ElectorateDecl` and `Retirement` gained fields, `ElectorateError` gained `Retired` (`#[non_exhaustive]`; a `_` arm must fail closed); otherwise refusals by name |
+| 36 | an award without a close; an offer, report or assessment read from another requirement's stream; `award_of_verified` against the writable head; an unbounded blob store; any string as a run id | unreleased (after 2.32.0; `mycelium-reason` 0.9.0) | `close(requirement, key, now_ms)` then award; `award_of_verified(requirement, declarer, resolve)`; `open_with_quota`; one bounded segment per run id | Partly — `TraceRecorder::new` returns `Result`, `award_of_verified` gained a parameter, `CommitmentRefusal` gained variants (`#[non_exhaustive]`); otherwise refusals by name (`NotClosed`, 507, 400) |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -903,6 +904,38 @@ restore-or-retire rule): the carry set is complete because the group tag is in t
   sequential; a value a restarted predecessor member holds only by digest and no decision record resolves stops the
   carry at that slot, named; the claim is for slots decided only in the electorate (an ordinary slot also proposed
   under another scope is not enumerated); two default declarations within gossip lag are escaped by a merge.
+
+## 36. Companion doors are bounded and checked: a blob quota, a one-segment run id, an award that names its requirement (unreleased, after 2.32.0)
+
+**What changes.** Post-360 plan row H (#609). `mycelium-reason` 0.9.0: `FsBlobStore::open` is **bounded at 1 GiB**
+(`DEFAULT_BLOB_QUOTA_BYTES`; `open_with_quota(dir, bytes)` for another, `u64::MAX` for none, `0` refused) and
+`PUT /gateway/reason/blob` answers **507 `quota_exceeded`** when a put would pass it — a blob already held still
+answers 200, and the 413 `too_large` per-blob ceiling is unchanged. A caller-chosen **`run_id` is one bounded segment**
+(non-empty, ≤ 128 bytes, ASCII letters, digits and `- _ . : @ +`, not `.` or `..`): `GET /gateway/reason/trace/{run_id}`
+and `POST /gateway/reason/route` answer **400 `bad_run_id`**, the façade `400 invalid_request_error` / `bad_run_id`
+(`param: "run_id"`); `TraceRecorder::new` returns `Result<_, RunIdError>`; `replay` reads only the key shape a recorder
+writes; run ids are validated, runs are not owned. `mycelium-commitment` (on the 2.x train): the declarer **closes**
+a requirement (`close(requirement, key, now_ms)`, at or after its deadline, appended to `cn/{requirement}/closes`) and
+an award counts only the offers the close names — **no award before a close** (`NotClosed`); a close too large for one
+KV write is `CloseTooLarge`; the blob quota charges each file at least one 4 KiB block; offers, reports and assessments are read only for their own
+requirement; `award_of` reports only a record naming its requirement and operation; `award_of_verified(requirement,
+declarer, resolve)` takes the declarer the caller trusts; `plan_award_verified` and
+`commit_award_linearizable_verified` are the checked path — which a member can still steer by deletion: a close names offers by log position and hash, and the award re-reads them from the stream — so a member who deletes or rewrites another participant's named offer removes it from the candidates, and the award does not show it (the close and `close_sha256` are untouched). **Follow-up, not built:** carry each named offer's signed bytes inside the close and award from that copy.
+
+**Will the compiler tell me?** For `TraceRecorder::new` yes (a `Result` where a value was), and for
+`award_of_verified` (a `declarer` parameter), and for an exhaustive `Award` literal (`close_sha256`). `CommitmentRefusal`
+gained variants (`#[non_exhaustive]`; a `_` arm must fail closed). The rest is runtime: an award without a close is refused `NotClosed`; a 2.32.0 client sending a run id
+with `/` gets 400 where it got a trace of another run; a client that stored past 1 GiB gets 507 where it got 200.
+
+**Migration.** Open the store with the quota your node needs (`BLOB_QUOTA_BYTES` on `reason_node`; a store holding
+more than its quota at open keeps every file and refuses only *new* puts). Run ids: fold `/` and whitespace at the
+client (`reheal_node` folds a model name's `/`). Awards: the declarer calls `close(requirement, key, now_ms)` once
+the deadline has passed on its clock, then awards as before; a declarer with keys signs the close and plans with
+`plan_award_verified(requirement, rule, now_ms, declarer, resolve)`, and keeps the `Close` that `close` returns — an
+overwritten close is recovered by re-asserting it (`close` again on the same handle, `reassert_close(&kept)` after a
+restart), which never admits an offer the first close did not.
+The Python SDK and the LangGraph checkpointer are unchanged — a 507 or 400 surfaces as `httpx.HTTPStatusError` with
+the route's body.
 
 ## 37. Nineteen public items (eighteen names) nobody references are deprecated, not removed (unreleased, after 2.32.0)
 

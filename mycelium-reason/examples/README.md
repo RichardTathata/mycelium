@@ -59,7 +59,7 @@ BIND_PORT=7101 HTTP_PORT=8101 BLOB_DIR=/tmp/blobs-a \
 ```
 Required env: `BIND_PORT` (gossip port + node id), `HTTP_PORT` (HTTP gateway), `BLOB_DIR`
 (content-addressed blob dir). Optional: `BOOTSTRAP=host:port` (join a peer), `MODEL` (default
-`fable-mini`). Prints `reason node ready on <http_port>` once its gateway answers `/health`,
+`fable-mini`), `BLOB_QUOTA_BYTES` (the store's total bound; default 1 GiB, `18446744073709551615` for none). Prints `reason node ready on <http_port>` once its gateway answers `/health`,
 then parks until Ctrl-C / SIGTERM.
 
 **What it demonstrates.** Mounting the reason router before `start`, serving blobs to peers,

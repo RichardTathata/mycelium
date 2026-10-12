@@ -61,6 +61,27 @@ Design: `docs/plans/v3-contracts-axis.md` §6.9 (CN1–CN3, D39). Key facts:
   vehicle rather than a node, the directory is the operator's and the mesh knows nothing about it.
   And nothing here stops a member *writing* the forged offer: it stops it being awarded, which is
   detection-then-refusal at the decision point, not prevention at the medium.
+- **The declarer's close decides which offers were in time, since 2026-10-12 (post-360 row H, #609).** No timestamp
+  an offerer writes can: `offered_at_ms` is a field of its record, and the HLC in an offer's log key is a key segment
+  any member can `set` (#609's first head judged on that and its review backdated one to `0000000000010000`). The
+  declarer `close`s at or after `deadline_ms` on its own clock, appending a `Close` to `cn/{req}/closes` that names
+  every offer its node holds by log position and SHA-256 and binds the announcement (deadline, digest); an award
+  counts only named offers, records the close's digest (`Award::close_sha256`), and is refused `NotClosed` before a
+  close. **A stream, not one key** (round 2): the checked path takes the earliest close verifying under the pinned
+  declarer — earliest by its signed `closed_at_ms`, then digest, never by stream key (round 3) — so a forged close
+  cannot pre-empt it; an overwrite is recovered by **re-asserting** the same close (`close` again on the same handle,
+  `reassert_close(&kept)` after a restart), never by re-deciding — the round-3 review showed a re-close that
+  recomputed admitted a late offer. The unverified path takes the earliest naming the announcement's declarer at or
+  after the deadline; a forged unsigned close dated at or after the deadline still steers it. **Residual:** the
+  declarer decides; a signed close shows which offers it counted, not when it closed (`closed_at_ms` is its claim);
+  and a close names offers by log position and hash, and the award re-reads them from the stream — so a member who deletes or rewrites another participant's named offer removes it from the candidates, and the award does not show it (the close and `close_sha256` are untouched). **Follow-up, not built:** carry each named offer's signed bytes inside the close and award from that copy.
+  The lessons: *a key segment is data, not a clock*, and *one LWW key cannot hold both a forgery and the truth*.
+- **Reads are checked like offers (row H).** Offers, reports and assessments are read only when they name the
+  requirement whose stream holds them (a signed offer copied from another stream verified there). `award_of` reports
+  only a record naming its requirement and operation; `award_of_verified(requirement, declarer, resolve)` takes the
+  declarer **the caller pins** — a check against the writable head fell in two writes. `plan_award_verified` and
+  `commit_award_linearizable_verified` are the checked path; on the unverified path any member that can write the
+  award slot can block an award, and the docs say so.
 - **CN3 is the item-5 join.** The acceptor's own mandate is checked **before any write**; a stale
   holder's award is `Superseded { installed, presented }`. `MandateNotTheAcceptors` is separate:
   presenting somebody else's valid mandate is a different mistake from presenting your own expired
@@ -78,6 +99,22 @@ Design: `docs/plans/v3-contracts-axis.md` §6.9 (CN1–CN3, D39). Key facts:
 | **a forged offer is not a candidate when the declarer checks** — and *is* one when it does not | `a_forged_offer_is_not_a_candidate_when_the_declarer_checks_provenance` |
 | a signed award proves its declarer; an unsigned one proves nothing | `a_signed_award_proves_its_declarer_and_an_unsigned_one_proves_nothing` |
 | **CN2** — a whole-node recording replays deterministically | `a_whole_node_recording_of_a_linearizable_award_replays_under_the_scheduler_seam` |
+| a backdated log key does not make a late offer a candidate; the close decides (row H) | `a_backdated_log_key_does_not_make_a_late_offer_a_candidate` |
+| no award before the close; only the declarer closes, at or after the deadline, once (row H) | `an_award_before_the_requirement_is_closed_is_refused`, `no_offers_and_late_offers_are_visible_states_not_awards` |
+| offers, reports and assessments are read only for their own requirement (row H) | `an_offer_report_or_assessment_naming_another_requirement_is_not_read_as_this_ones` |
+| a slot holding another requirement's award says so (row H) | `a_slot_holding_another_requirements_award_says_so` |
+| the checked path needs a signed close and is not blocked by a forged award (row H) | `the_checked_path_needs_a_signed_close_and_is_not_blocked_by_a_forged_award` |
+| `award_of_verified` checks the declarer the caller pins (row H) | `award_of_verified_checks_the_declarer_the_caller_pins_not_the_writable_head` |
+| a forged close written first does not stop the declarer's signed close (round 2) | `a_forged_close_written_first_does_not_stop_the_declarers_signed_close` |
+| an overwritten close is recovered by closing again (round 2) | `an_overwritten_close_is_recovered_by_the_declarer_closing_again` |
+| a re-close after an overwrite never admits an offer the first close did not (round 3) | `a_reclose_after_an_overwrite_never_admits_an_offer_the_first_close_did_not` |
+| a second signed close at a backdated key does not change the award (round 3) | `a_second_signed_close_at_a_backdated_key_does_not_change_the_award` |
+| a restarted declarer re-asserts the close it kept (round 3) | `a_restarted_declarer_reasserts_the_close_it_kept` |
+| on the unverified path an early close or another declarer's is not a close (round 2) | `on_the_unverified_path_a_close_dated_before_the_deadline_or_naming_another_declarer_is_refused` |
+| an oversize close is refused by name, not reported as written (round 2) | `an_oversize_close_is_refused_by_name_not_reported_as_written` |
+| an award names its close; a close binds its announcement (round 2) | `an_award_names_its_close_and_a_close_binds_its_announcement` |
+| `award_of` reports only a record naming its requirement and operation (row H) | `award_of_reports_only_a_record_that_names_this_requirement_and_its_operation` |
+| `award_of_verified` reports only an award the pinned declarer signed (row H) | `award_of_verified_reports_no_award_the_pinned_declarer_did_not_sign` |
 
 The third row is the honest one: the plain award path **does** admit two winners under a race, and
 the test asserts that rather than hiding it. Reach for the linearizable form when that matters.

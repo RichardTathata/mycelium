@@ -2485,6 +2485,7 @@ dependencies = [
  "mycelium-sim",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 
@@ -2576,7 +2577,7 @@ dependencies = [
 
 [[package]]
 name = "mycelium-reason"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",

@@ -115,7 +115,10 @@ pub enum CommitmentRefusal {
 Three worth reading closely:
 
 - **`NoOffers`** — *nobody offered before the deadline.* That is a **visible state, not a retry**. An
-  empty market is information about the market.
+  empty market is information about the market. *Before the deadline* means **named by the declarer's
+  close**: at or after `deadline_ms` the declarer calls `close(requirement, key, now_ms)`, recording every offer
+  it holds, and an award counts only those — no stamp an offerer writes decides it, and there is no award before
+  a close (`NotClosed`).
 - **`AlreadyAwarded`** returns the existing award. One requirement, one award; a second is refused
   and the first is **never overwritten**.
 - **`AwardUnknown`** — the round reached no commit, so the award **may or may not** have committed

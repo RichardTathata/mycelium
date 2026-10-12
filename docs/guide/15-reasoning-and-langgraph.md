@@ -177,7 +177,10 @@ client.chat.completions.create(model="llama3", messages=[{"role": "user", "conte
 
 **Rung 5 — fleet-reasoning traces.** Pass a `run_id` to a routed call and the route decision
 and each attempt are recorded to the event-log overlay (`reason/{run_id}/{node}`, one
-substream per writer so same-millisecond writes from two nodes don't collide). `trace(run_id)`
+substream per writer so same-millisecond writes from two nodes don't collide). A run id is **one
+bounded segment** — ≤ 128 bytes of ASCII letters, digits and `- _ . : @ +` — and every door refuses
+another with `400 bad_run_id` before routing or reading (a `/` reached another run's trace). Run ids are
+validated, **not owned**: any caller allowed to route can record into any valid run id. `trace(run_id)`
 replays and narrates it — a causal, replayable account of *why the fleet reasoned as it did*,
 readable from any node. Under the `compliance` feature the running trace hash can be anchored
 into the tamper-evident WS2 audit chain.
@@ -319,8 +322,10 @@ layers — not several look-alike "LangChain examples." Pick by what you're doin
 
 - **Deterministic rungs use echo.** Rungs 0–5 prove wiring, not model quality; a real model
   is the Ollama variant / the a2a example.
-- **Blobs ≤ 8 MiB (v1).** The mesh blob fetch rides a single RPC frame; chunked transfer via
-  `bulk_call` is the named follow-up (the artifact library's `BlobRuntime` already streams
+- **Blobs ≤ 8 MiB (v1), the store ≤ its quota.** The mesh blob fetch rides a single RPC frame; chunked transfer via
+  `bulk_call` is the named follow-up. The store holds at most 1 GiB unless opened with another quota
+  (`FsBlobStore::open_with_quota`; `BLOB_QUOTA_BYTES` on `reason_node`), and `PUT blob` answers
+  `507 quota_exceeded` past it — nothing evicts (the artifact library's `BlobRuntime` already streams
   large models by ranged reads — that is the Ollama variant's path).
 - **Gossip-eventual metadata.** Cross-node reads see a checkpoint once its index row has
   gossiped in; read-your-writes holds only against the same node's gateway. Between the row
