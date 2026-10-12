@@ -138,7 +138,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Deprecated
 
-- **Eighteen public items nobody references, deprecated and not removed** (#608; `docs/guide/deprecations.md`
+- **Nineteen public items (eighteen names; `with_max_tokens` is two methods) nobody references, deprecated and not removed** (#608; `docs/guide/deprecations.md`
   §37, the sweep and its greps in the PR). `#[deprecated(since = "2.33.0")]` on
   `mycelium_core::MeshHandle::group_quorum_prehashed` · `mycelium_core::receipt::…::with_replica_sync` ·
   `mycelium_core::kv_ns::{MANDATE, CONSUMER_LOG, LOCK}` · `mycelium_effects::Counting::with_counts` ·
@@ -146,7 +146,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Provisioner::disable_resource_policy` · `Provisioner::decision_trace` · `mycelium_wiki::…::with_semantic_lint` ·
   `mycelium_wiki::lint::…::with_max_tokens` and `reconcile::…::with_max_tokens` · `RequestPrincipal::is_client` · `AgentStateMachine::set_task_id` ·
   `mycelium::federation::{verify_descriptor_rotating, verify_policy}` (`tls`) ·
-  `FederationClient::with_credential_lifetime` · `mycelium::knowledge::store::…::issuers_about`. Nothing is removed on the 2.x line; an issue naming a use undeprecates it. The sweep's nineteenth,
+  `FederationClient::with_credential_lifetime` · `mycelium::knowledge::store::…::issuers_about`. Nothing is removed on the 2.x line; an issue naming a use undeprecates it. The sweep's twentieth item,
   `AeEvidence::audit_outcome`, is called by the private companion and is not deprecated; `Preflight::is_inert`
   (`http.rs`) waits for rows P5/E.
 

@@ -50,6 +50,12 @@
 #   multi-line literal look like code); a raw string whose interior holds `"#` for a one-hash
 #   delimiter. Each makes a skip end late or never. Block comments and raw strings closed on their own
 #   line are stripped before counting (planted: `skip_block_comment`, `skip_raw_string`).
+#   A FALSE FAILURE, NEVER A HIDDEN SITE: a not-yet-started skip ends at the first trailing `,`, so a test item
+#   whose header spans lines — multi-line parameters, a `where` clause or generics, `let (a,`, a const array,
+#   `use a::{b,` — has the rest of its header and its body scanned as production. That over-counts; it cannot
+#   hide a production site. One dormant instance: `mycelium-core/src/persistence.rs:558–574`
+#   (`spawn_wal_writer_with_fault`, whose body holds no forbidden call). Follow-up (plan row J §3.5): balance
+#   `()`/`[]`/`<>` across an unstarted header before honouring a `,`.
 #
 #   `use tokio::time;` followed by `time::interval(…)` / `time::sleep(…)` WAS invisible to the
 #   `tokio::time::*` pattern — the same alias gap the `fs as <alias>` handling closes for the

@@ -904,14 +904,14 @@ restore-or-retire rule): the carry set is complete because the group tag is in t
   carry at that slot, named; the claim is for slots decided only in the electorate (an ordinary slot also proposed
   under another scope is not enumerated); two default declarations within gossip lag are escaped by a merge.
 
-## 37. Eighteen public items nobody references are deprecated, not removed (unreleased, after 2.32.0)
+## 37. Nineteen public items (eighteen names) nobody references are deprecated, not removed (unreleased, after 2.32.0)
 
 **What changes** (post-360 plan row J, PR #608). A sweep of every `pub fn` / `const` / `struct` / `enum` / `type`
 / `trait` in the library crates against every file in the repository — `src/`, every `mycelium-*` crate, `tests/`,
-`examples/`, both SDKs' sources and docs, and `docs/` — found nineteen items whose only occurrence in the tree is
+`examples/`, both SDKs' sources and docs, and `docs/` — found twenty items (nineteen names — `with_max_tokens` is two methods) whose only occurrence in the tree is
 their own definition (the grep for each is in the PR). The private companion repository was searched the same way:
 it calls one of them, `AeEvidence::audit_outcome` (`compliance`), so that one is **not** deprecated — the note below
-would be false for it, and its consumer builds with `-D warnings`. The other eighteen are used in neither. Each carries `#[deprecated(since = "2.33.0", note =
+would be false for it, and its consumer builds with `-D warnings`. The other nineteen items (eighteen names) are used in neither. Each carries `#[deprecated(since = "2.33.0", note =
 "…")]` with the same note: *no caller, test, SDK or document in the repository references it … kept on the 2.x line
 — open an issue if you use it and it will be undeprecated.* Nothing is removed; the 2.x line removes nothing.
 

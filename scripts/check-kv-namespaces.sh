@@ -63,7 +63,11 @@
 #   that spans lines and holds an unbalanced `{` or `}` (braces are counted per line), or a raw string whose
 #   interior holds `"#` for a one-hash delimiter; each can end the skip early or late. Block comments and raw
 #   strings closed on their own line are stripped first, and a `#[cfg(test)]` on a field, variant, match arm or
-#   struct-literal field ends at its `,` (row J review, findings 1-3; planted). It does not parse Rust; it
+#   struct-literal field ends at its `,` (row J review, findings 1-3; planted). The `,` rule errs loud, never
+#   quiet: a test item whose header spans lines (multi-line parameters, a `where` clause or generics, `let (a,`,
+#   a const array, `use a::{b,`) ends its skip at the first trailing `,`, and the rest is scanned as production —
+#   a false failure, never a hidden key (one dormant instance: `mycelium-core/src/persistence.rs:558–574`).
+#   Follow-up (plan row J §3.5): balance `()`/`[]`/`<>` across an unstarted header. It does not parse Rust; it
 #   closes the way this mistake has actually been made five times — a named constant or a format! key with no row.
 #
 #   THE ALLOW-LIST — `scripts/kv-namespaces-nonkeys.txt`, one entry per line, `<literal head>  # <reason>`.

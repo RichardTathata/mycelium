@@ -338,7 +338,11 @@ withhold real frames with the test-only `test-frame-filter` (enabled in CI's def
   Plants `skip_field`, `skip_last_field`, `skip_enum_variant`, `skip_match_arm`, `skip_literal_field`,
   `skip_block_comment`, `skip_raw_string`, each seen failing on the first cut (counted 0 for 1); the same six shapes
   in `check-kv-namespaces.sh --self-test`, each seen unnamed before its filter took the fix (latent there). The
-  remaining fail-open inputs are stated in both headers. **What it caught:** the `#[cfg(test)]` on `ConsensusEngine::shrink_acceptor_for_test`
+  remaining fail-open inputs are stated in both headers. **Follow-up, not built:** a not-yet-started skip ends at the
+  first trailing `,`, so a test item whose header spans lines (multi-line parameters, `where`, generics, `let (a,`, a
+  const array, `use a::{b,`) is partly scanned as production — a false failure, never a hidden site (one dormant
+  instance, `mycelium-core/src/persistence.rs:558–574`); the fix is to balance `()`/`[]`/`<>` across an unstarted
+  header before honouring the `,`. **What it caught:** the `#[cfg(test)]` on `ConsensusEngine::shrink_acceptor_for_test`
   (`src/consensus.rs:1592`, #600) hid the five timer sites after it to the `impl`'s close (`:4154`) — the gate
   counted 0 against a baseline of 5 since 2.32.0 and said only *progress*. Baseline rows moved: `capability_ops.rs`
   2→0, `intent.rs` 1→0 (the `now_ms` unification), `http.rs` 15→14 (stale on `main`). `signal.rs` stays 11: the old
@@ -351,10 +355,10 @@ withhold real frames with the test-only `test-frame-filter` (enabled in CI's def
   derives the table from the manifests and fails when a feature loses its step.
 - *The two CI jobs on `stable` pinned* — `effects` and `commitment` → `dtolnay/rust-toolchain@1.96.0`, the
   version `rust-toolchain.toml` and the other seventeen pin; `testing.md`'s toolchain paragraph counts them.
-- *Unreferenced public items deprecated, not removed* — eighteen, each with the whole-tree `grep -rnw` in the PR,
-  `#[deprecated(since = "2.33.0")]`, `deprecations.md` §37; nothing removed. The sweep found nineteen; the review
+- *Unreferenced public items deprecated, not removed* — nineteen items (eighteen names; `with_max_tokens` is two methods), each with the whole-tree `grep -rnw` in the PR,
+  `#[deprecated(since = "2.33.0")]`, `deprecations.md` §37; nothing removed. The sweep found twenty items (nineteen names); the review
   found the private companion calling `AeEvidence::audit_outcome`, which is therefore not deprecated (the private repo
-  was then searched for all nineteen: no other use). `Preflight::is_inert`
+  was then searched for all nineteen names: no other use). `Preflight::is_inert`
   (`src/agent/http.rs`) is the twentieth, left for rows P5/E, which own that file.
 - *Only the duplicates that disagree are unified* — `hex_line`: the wasm-host gateway's copy trimmed, the
   catalogue's did not (its caller did); one `pub(crate)` trimming decoder in `catalog.rs`, pinned by
