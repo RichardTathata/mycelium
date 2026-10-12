@@ -906,7 +906,7 @@ restore-or-retire rule): the carry set is complete because the group tag is in t
 
 ## 36. Companion doors are bounded and checked: a blob quota, a one-segment run id, an award that names its requirement (unreleased, after 2.32.0)
 
-**What changes.** Post-360 plan row H (#TBD). `mycelium-reason` 0.9.0: `FsBlobStore::open` is **bounded at 1 GiB**
+**What changes.** Post-360 plan row H (#609). `mycelium-reason` 0.9.0: `FsBlobStore::open` is **bounded at 1 GiB**
 (`DEFAULT_BLOB_QUOTA_BYTES`; `open_with_quota(dir, bytes)` for another, `u64::MAX` for none, `0` refused) and
 `PUT /gateway/reason/blob` answers **507 `quota_exceeded`** when a put would pass it — a blob already held still
 answers 200, and the 413 `too_large` per-blob ceiling is unchanged. A caller-chosen **`run_id` is one bounded segment**

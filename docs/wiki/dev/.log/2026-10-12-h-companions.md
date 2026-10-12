@@ -1,4 +1,4 @@
-## [2026-10-12] ingest | post-360 row H — the companions' four doors (#TBD)
+## [2026-10-12] ingest | post-360 row H — the companions' four doors (#609)
 
 - `mycelium-commitment`: the deadline is judged on the offer's **log position** (`hlc::physical_ms` of the HLC
   `append` minted), not the offerer's `offered_at_ms` — an offerer chose whether its own offer was late; `award_of`

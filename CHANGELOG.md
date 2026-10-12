@@ -12,7 +12,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - **Companions: the commitment deadline on the log's clock, an award that is checked before it is reported, a
-  bounded blob store, a validated run id** (post-360 hardening row H, #TBD). `mycelium-commitment`: an offer's
+  bounded blob store, a validated run id** (post-360 hardening row H, #609). `mycelium-commitment`: an offer's
   deadline was judged on `offered_at_ms` — a field the **offerer** writes into its own record — so an offer appended
   after the deadline with a backdated stamp was eligible and one appended in time with a future stamp was not; the
   offerer chose whether its offer was late. `plan_award_from` now judges on the **log's clock**: `hlc::physical_ms`

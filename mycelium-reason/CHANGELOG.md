@@ -8,7 +8,7 @@ All notable changes to this crate. It versions **independently** of the Mycelium
 
 ## [0.9.0] — 2026-10-12
 
-**Bounded, and every caller-chosen id one segment** (post-360 hardening row H, #TBD).
+**Bounded, and every caller-chosen id one segment** (post-360 hardening row H, #609).
 
 - **The blob store is bounded.** `FsBlobStore` held a per-blob ceiling (`MAX_BLOB_BYTES`, 8 MiB) and **no total**: it
   grew without limit under `PUT /gateway/reason/blob` and the mesh write-back. It now holds at most its quota —
