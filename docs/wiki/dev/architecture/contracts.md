@@ -83,7 +83,7 @@ snapshot of today.
 
 ## Where the contract shows up outside core
 
-- **The gateway** renders the receipt beside the old bool (`src/agent/http.rs::commit_json`) —
+- **The gateway** renders the receipt beside the old bool (`src/agent/http/overlay.rs::commit_json`) —
   `persisted` is exactly what it always was, and `local_durability` is *added* beside it, never
   derived back into it.
 - **Both SDKs** carry the vocabulary (`CommitResult.local_durability` / `localDurability`) and now

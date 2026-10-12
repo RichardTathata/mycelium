@@ -2,7 +2,7 @@
 //!
 //! **Server role** (`register_mcp_tool`): tools are registered under
 //! `tools/{name}/{node_id}` in the KV store. The HTTP `/mcp` endpoint
-//! (Phase 2, `http.rs`) scans this prefix for `tools/list` and routes
+//! (Phase 2, `http/mcp_bridge.rs`) scans this prefix for `tools/list` and routes
 //! `tools/call` invocations to the provider via `rpc_call`.
 //!
 //! **Client role** (`connect_mcp_server`): bridges an external MCP server's

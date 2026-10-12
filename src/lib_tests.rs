@@ -9889,7 +9889,7 @@ mod federation_gateway_verbs {
     }
 
     /// `federation:read` is not `federation:invoke`: a token that may *look* at the partners may
-    /// not spend this domain's credential on them. The table is pinned in `http.rs`; this is the
+    /// not spend this domain's credential on them. The table is pinned in `http/authz.rs`; this is the
     /// same rule at a live gateway, because a table nothing enforces is a comment.
     #[cfg(feature = "compliance")]
     #[tokio::test]
@@ -10104,7 +10104,7 @@ fn an_electorate_is_established_not_inferred() {
 /// the gateway, rather than a leader it elected by itself.
 ///
 /// The HTTP half is the half that matters most: the gateway is where the defect was found, because
-/// **there is no gateway route by which a node joins a group** (`grp_prefix` is read in `http.rs`
+/// **there is no gateway route by which a node joins a group** (`grp_prefix` is read in `http/overlay.rs`
 /// and written nowhere in the surface), so an HTTP caller's election could only ever reach the
 /// empty-roster path.
 #[cfg(all(feature = "consensus", feature = "gateway"))]

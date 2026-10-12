@@ -254,7 +254,7 @@ the answer is
  "not_enforced": ["[[lane]]"]}
 ```
 
-What the node refuses, and what it only records (`gw_units_declare`, `src/agent/http.rs`):
+What the node refuses, and what it only records (`gw_units_declare`, `src/agent/http/caps.rs`):
 
 - **400** — the text is not TOML, or the unit file's own `validate()` refuses it (an empty
   `principal`, a bad constraint operator, a `[[mandate]]` with no operations, …). Nothing is
@@ -332,7 +332,7 @@ unit file is checked, deployed and watched is
 ## The HTTP surface behind the SDKs — and what it does not return
 
 A raw-HTTP client (or an SDK reader checking what a verb really does) needs the routes and their
-shapes; the SDK READMEs carry the receipt narrative, this table carries the wire (`src/agent/http.rs`):
+shapes; the SDK READMEs carry the receipt narrative, this table carries the wire (`src/agent/http/`, one file per route family):
 
 | Route | Body → answer | What it proves |
 |---|---|---|
@@ -407,7 +407,7 @@ a scope matches exactly, or is the single `*`): `kv:read` / `kv:write` for the K
 `llm:read` / `llm:write` / `llm:invoke` for prompts and inference (`ReasonClient` included),
 `wiki:read` / `wiki:write`, `tuple:read` / `tuple:write`, `board:read` / `board:write`,
 `mcp:invoke` for `/mcp`, `federation:read` / `federation:invoke` for the `/gateway/federation/*`
-verbs, and `artifact:publish` for `POST /gateway/artifacts/publish`. The route → scope table is `required_scope` in `src/agent/http.rs`, read
+verbs, and `artifact:publish` for `POST /gateway/artifacts/publish`. The route → scope table is `required_scope` in `src/agent/http/authz.rs`, read
 through [rbac.md](../operations/rbac.md). Before these versions the bridges could not
 present a bearer at all — a token-protected node was unreachable from Python and TypeScript.
 

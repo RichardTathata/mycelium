@@ -103,7 +103,7 @@ counted from each proposer's view, so intersection across a roster change is not
 `consensus/`, and do not make a named node set "the consensus nodes". Enforced today: `resolve_electorate`
 (`src/agent/helpers.rs`, empty or below `MembershipIntent.min` → `ElectorateUnavailable`), `NotAMember` (above), and
 the gateway's `governed_group` refusal on `/gateway/mesh/group` with `/gateway/govern/group` as the audited route
-(`src/agent/http.rs`, `is_governed_group`). **Since P2 (2026-10-10, decision record §8):** an
+(`src/agent/http/govern.rs`, `is_governed_group`). **Since P2 (2026-10-10, decision record §8):** an
 **electorate group** (`src/agent/electorate.rs`) is pinned by member identity and **frozen** (the maintainer's
 decision, 2026-10-11): a genesis on `electorate/{group}/{epoch}` decided by every member it names (the epoch counts
 attempts — one that cannot complete is superseded by one keeping a strict majority of it), certified under
@@ -404,7 +404,7 @@ Two different patterns keep getting conflated because the word "consumer group" 
 
 - **Exact-once *ordered log consumption*** → `subscribe_log_group` / the gateway
   `/gateway/overlay/log/group/subscribe`. Contract: **at most one active consumer at a time**,
-  failover on death. Achieved (`src/agent/http.rs`; gate: overlay S11) by a **leased consensus
+  failover on death. Achieved (`src/agent/http/overlay.rs`; gate: overlay S11) by a **leased consensus
   claim with converged-holder confirmation**: before 2.30.0 `cluster_propose` committed **optimistically
   against a node's *local* committed view** (`src/consensus.rs`), so two near-simultaneous proposers could
   both commit. The prepare phase (2.30.0, `ConsensusMsg::Prepare`) closes that when the two quorums

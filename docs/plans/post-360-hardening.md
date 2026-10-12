@@ -1,10 +1,10 @@
 # Post-360 hardening — the next batch, and consensus as a protocol, not a service
 
-**Status:** adopted 2026-10-10, rev 1.4 (2026-10-12: Φ closed). **R0 is being cut as v2.32.0 (2026-10-11)**, which delivers rows **G, P3, C, D,
+**Status:** adopted 2026-10-10, rev 1.5 (2026-10-12: Φ closed; P5 delivered). **R0 is being cut as v2.32.0 (2026-10-11)**, which delivers rows **G, P3, C, D,
 P1, A (with C1, C2), B (as narrowed 2026-10-11) and P2 (without migration, as decided 2026-10-11)** — each closed on
 evidence in §3.5. Open:
-P5, E, F, H, I, J, and R0's private re-pin (P2's migration — close, enumerate, carry, complete — delivered after 2.32.0, §3.5;
-Φ delivered 2026-10-12, #607, §3.5). It follows the 2026-10-09 360 review and the eleven
+E, F, H, I, J, and R0's private re-pin (P2's migration — close, enumerate, carry, complete — delivered after 2.32.0, §3.5;
+Φ delivered 2026-10-12, #607, §3.5; **P5**, the `http.rs` split, delivered after 2.32.0 too, §3.5). It follows the 2026-10-09 360 review and the eleven
 PRs that addressed its must-do list (#582–#592, private #28); those are recorded in the CHANGELOG and are not
 repeated here. Rows close on evidence (verification policy rule 2): a row is closed by quoting each promise next to
 the code or test that delivers it, and a promise that is not delivered is written *not built*.
@@ -68,7 +68,7 @@ Four places strain that line today, and the rows in §3 address each:
 | **P1** — *delivered 2.32.0 (#598), §3.5* | Refuse an exposed, unauthenticated gateway | `start()` refuses by name when the gateway binds a non-loopback address with no credential model (no token, no token table, no `[oidc]`), unless an explicit insecure opt-in is set; the opt-in warns once at start; the guarantee report and the secure profile reflect it; loopback development is unchanged | R0 |
 | **P2** — *delivered 2.32.0 without migration (#601), §3.5* | A consensus electorate is a governed group | safety-sensitive consensus (the threat model §7 supported profile) requires a governed group, whose membership moves only through a governance route; the secure profile checks it; the electorate is named as a group, never as node identities; versioned electorates with joint-consensus transitions are recorded as protocol work for a later plan, not built here. **Two tensions P2 must resolve** (found while recording the decision, `docs/design/consensus-electorate.md`): (a) *governed is not fixed* — the opt-in `MembershipGovernor` exists to resize a governed group, a membership intent lapses after 5 minutes without re-publication, and the electorate floor after 30 s, so P2 must define an electorate group that does not resize while a slot is open (or exclude the governor from electorate groups); (b) the current §7 profile names voters by node identity (`declare_trust(group, &[NodeId])`), which D1 rules out as the *name* of an electorate — decide whether trust slices stay underneath as the vote filter. The gateway-only governance boundary (an embedded `join_group` or a `grp/` write still moves a governed group) is part of P2's scope. **The maintainer's decisions (2026-10-11), recorded on #601:** after its round-4 review, **freeze membership** — an electorate group's members never change once its genesis is decided (the live one-member steps with a drain before each, rounds 2–3, were removed); and after its round-5 review, **P2 ships in 2.32.0 without migration** — changing an electorate's members (retire into a successor that carries its decisions, built in rounds 4–5) is not built in that release; **delivered after it** as a migration that terminates — close, enumerate, carry, complete — with the default moving by retirement (`docs/design/consensus-electorate.md` §8.3, §4.2). | R0 |
 | **P3** — *delivered 2.32.0 (#596), §3.5* | `#![deny(unsafe_code)]` in `mycelium-core` | the one production site (`erasure.rs`'s volatile key wipe) replaced by `zeroize` (already in the tree) or carried as a single scoped `#[allow]` with its justification; test-only `set_var` sites scoped likewise | — |
-| **P5** | Split `src/agent/http.rs` (8,394 lines) by route family | behaviour-preserving; one shared authorisation-and-evidence layer every family goes through; the cross-door tests (the C7 bypass matrix, the public-surface check, the scope table) unchanged and green; the lock-order table and `required_scope` still complete | R0; before row E |
+| **P5** — *delivered after 2.32.0 (#610), §3.5* | Split `src/agent/http.rs` (8,394 lines at the review; 9,889 at the split) by route family | behaviour-preserving; one shared authorisation-and-evidence layer every family goes through; the cross-door tests (the C7 bypass matrix, the public-surface check, the scope table) unchanged and green; the lock-order table and `required_scope` still complete | R0; before row E |
 
 ### 3.3 · The batch
 
@@ -315,7 +315,7 @@ withhold real frames with the test-only `test-frame-filter` (enabled in CI's def
   naming the credentials and the opt-in), `guarantee::gateway_exposure` / `gateway_credential_model`;
   `src/lib_tests.rs` `an_exposed_gateway_with_no_credential_refuses_to_start` (`0.0.0.0` and `::`, and blank tokens
   refused at `validate()`: `mycelium-core/src/config.rs` `a_blank_gateway_token_is_refused_in_every_form`,
-  `src/agent/http.rs` `resolve_token_never_matches_an_empty_presented_bearer`).
+  `src/agent/http/http_tests.rs` `resolve_token_never_matches_an_empty_presented_bearer`).
 - *The opt-in warns once at start* — `lifecycle.rs` (`GatewayExposure::Waived` → one `tracing::warn!` in `start()`);
   the opt-in starting and classifying as `Waived` is tested
   (`an_exposed_gateway_starts_with_a_credential_on_loopback_or_with_the_opt_in`); **the warning itself is not asserted
@@ -359,7 +359,7 @@ withhold real frames with the test-only `test-frame-filter` (enabled in CI's def
   `#[deprecated(since = "2.33.0")]`, `deprecations.md` §37; nothing removed. The sweep found twenty items (nineteen names); the review
   found the private companion calling `AeEvidence::audit_outcome`, which is therefore not deprecated (the private repo
   was then searched for all nineteen names: no other use). `Preflight::is_inert`
-  (`src/agent/http.rs`) is the twentieth, left for rows P5/E, which own that file.
+  (`src/agent/http.rs`, now `src/agent/http/authz.rs`) is the twentieth, left for rows P5/E, which own that file.
 - *Only the duplicates that disagree are unified* — `hex_line`: the wasm-host gateway's copy trimmed, the
   catalogue's did not (its caller did); one `pub(crate)` trimming decoder in `catalog.rs`, pinned by
   `hex_line_ignores_edge_whitespace_and_refuses_everything_else`. `now_ms`: `capability_ops.rs` (`now_ms`,
@@ -370,6 +370,43 @@ withhold real frames with the test-only `test-frame-filter` (enabled in CI's def
   an old copy from a new one outside `sim`. Under `sim` each read is now a recorded kernel choice (an older recording
   touching these paths would diverge; the checked-in corpus is core-only and unaffected). The agreeing copies in
   `examples/` and `tests/` are left alone.
+
+**P5 — `src/agent/http.rs` split by route family (#610).** Read against the diff, not the description:
+a line-map verifier (its script and output are in the PR body) maps every original line to its new file and compares them.
+- *Behaviour-preserving* — the split is by **line range** from the original: every moved line is byte-identical
+  (the verifier's output is in the PR body); the only token added inside moved code is `pub(super)` on 153
+  column-0 items, plus `pub(super)` on `KvKeyQuery::key` (shared by `kv.rs` and the overlay's `consistent/get`).
+  The non-moved lines are listed one by one in the PR: `mod.rs`'s module declarations, the sibling-module imports
+  that keep `super::x` resolving one level down, the family re-imports and the unchanged re-exports; three
+  `include_str!` paths in `http_tests.rs` one directory deeper; and the governance-route enumeration test reading
+  `mod.rs` whole (it holds no test module) instead of slicing `http.rs` at its test module. No route added,
+  removed or renamed (the router moved as one block), no scope changed (`required_scope` moved as one block).
+- *One shared authorisation-and-evidence layer every family goes through* — `src/agent/http/authz.rs`: the
+  `gateway_auth` middleware (applied once to `/gateway` and once to the gated node routes in `mod.rs`, exactly as
+  before), `required_scope`, `ae_preflight` / `ae_record` / `ae_record_execution`, `refuse_protected_kind`,
+  `refuse_unobservable_kind`, `refuse_protected_key`, `refuse_owned_stream`, `dispatch_refused`. Every family
+  file reaches them through `use super::*;` — no family carries a copy.
+- *The cross-door tests unchanged and green* — `test_c7_the_bypass_matrix_no_door_runs_revoked_work`
+  (`src/lib_tests.rs`, untouched), `every_listed_public_path_is_mounted_and_public_and_gated_paths_are_not` (the
+  public-surface check; `mod.rs`'s comments still cite it as `the_public_surface_is_exactly_the_documented_list`, a name
+  no test has had since #587 — left byte-identical here, a wording fix for row E),
+  `required_scope_table_maps_families_and_denies_by_default`, `scope_admits_exact_and_wildcard_only`,
+  `every_governance_write_route_audits_its_change`, `node_level_routes_honour_scoped_tokens`, the `gateway_caller_tests`
+  and `ae_seam_tests` modules — all moved verbatim (de-indented) and run under
+  `cargo test --lib --features tls,metrics,a2a,llm`, `--features compliance` and
+  `--no-default-features --features gateway` (results in the PR).
+- *The lock-order table still complete* — `HttpCtx`'s three `Mutex` fields (`gateway_caps`, `lock_guards`,
+  `served_rpcs`) are rows 15, 16 and 55 of `docs/wiki/dev/concurrency/lock-order.md`, each now naming its file; no
+  `Mutex`/`RwLock` was added.
+- *`required_scope` still complete* — the table moved as one block (`authz.rs`); `required_scope_table_maps_families_and_denies_by_default`
+  and the public-surface test hold it to the router.
+- *Every gate that greps the path re-pointed* — `scripts/sim-seams-baseline.txt` (`15 src/agent/http.rs` → four
+  rows summing to 14, the count the single file had on the day: the 15 was one site stale before this change);
+  `scripts/kv-namespaces-nonkeys.txt`'s three notes; the wiki-lint skill's
+  `grep '.route("/govern/' src/agent/http/mod.rs`; `scripts/check-test-inventory.py` walks the new `#[path]`
+  test module (a planted unrunnable test in `http_tests.rs` was reported by file); `check-sim-seams.sh` and
+  `check-kv-namespaces.sh` exempt the test files by their `*_tests.rs` names, which is why the module `tests`
+  lives in `http_tests.rs` under `#[path]`.
 
 ## 4 · Decisions taken
 

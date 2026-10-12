@@ -120,7 +120,7 @@ curl http://NODE:PORT/gateway/kv/keys                                      # 401
 ```
 
 CI uses an in-process mock IdP (discovery + JWKS) — no live vendor dependency;
-see `src/agent/http.rs::test_gateway_oidc_jwt_maps_groups_to_scopes`.
+see `src/agent/http/http_tests.rs::test_gateway_oidc_jwt_maps_groups_to_scopes`.
 
 ---
 

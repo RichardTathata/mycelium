@@ -1781,7 +1781,7 @@ mod tests {
     /// input.
     ///
     /// What this does NOT prove: nothing here shows the gateway *has* a fence to consult. It does
-    /// not — it binds no mandate (see `http.rs`), so this path is reached by a resource-side
+    /// not — it binds no mandate (see `http/authz.rs`), so this path is reached by a resource-side
     /// enforcement point, which is AE2.
     #[test]
     fn a_superseded_mandate_is_denied_even_where_policy_would_allow() {

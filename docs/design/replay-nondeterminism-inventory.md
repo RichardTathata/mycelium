@@ -451,6 +451,18 @@ a gate that fires on correct code teaches people to update the baseline without 
 matches `#[cfg(all(test` followed by `,` or `)`, which cannot catch `feature = "test-util"`. One file moved:
 `src/agent/http.rs` **38 → 15**, and the total **181 → 158**. No production site changed.
 
+**2026-10-12 (plan row P5):** `src/agent/http.rs` is now the directory `src/agent/http/`, split by route family
+with no production site changed, so its one baseline row became four — `authz.rs` 2 (the AE preflight's two
+`fastrand` draws), `caps.rs` 2 (the handle-id mint, the lease watchdog's `tokio::time::timeout`), `mod.rs` 2 (the
+gateway certificate PEMs) and `overlay.rs` 8 (the lock and election draws and converge sleeps, the log-group
+consumer's `Instant::now` and sleeps) — **14 in all, as the single file counted on the day of the split**; the
+baseline's 15 for it was one site stale, lowered before this change and never regenerated. The `http.rs:NNNN` line
+numbers in the rows above are those of the single file at the dates they were written; the sites are the same.
+One caveat the split adds (#610's review): `check-sim-seams.sh` detects a `time`/`fs` alias **per file**, from that
+file's own `use` lines, while every family file inherits `mod.rs`'s imports through `use super::*;` — so an alias
+imported in `mod.rs` would hide a family's `<alias>::sleep(…)` from the gate. None exists today; import such a module
+in the family file that calls it.
+
 So the count in this section is the count *the checker can see*, and it has now been wrong in both directions.
 That is the argument for the baseline rather than for a number: what it makes visible is **movement**, and a
 movement nobody can explain is the finding.

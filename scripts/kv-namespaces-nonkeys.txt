@@ -24,8 +24,8 @@ knowledge/records     # knowledge/durable.rs RECORDS_STREAM: the durable record 
 knowledge/heads       # knowledge/durable.rs HEADS_STREAM: the head-checkpoint journal's seam stream (node-local)
 
 # ── consensus slot names (the key is consensus/{committed,ballot,decided,lease}/{slot}, which has rows)
-consistent/           # consensus_handle.rs + http.rs: the overlay-consistent KV write's slot
-leader/               # consensus_handle.rs + http.rs: the leader-election slot
+consistent/           # consensus_handle.rs + http/overlay.rs: the overlay-consistent KV write's slot
+leader/               # consensus_handle.rs + http/overlay.rs: the leader-election slot
 electorate/           # electorate.rs: the electorate slots `electorate/{group}/{epoch}` (a genesis), `…/{group}/retire` (a retirement), `…/{group}/carried/{predecessor}` (a migration's completion) and `…/{group}/drop/{predecessor}` (a dropped predecessor) (P2) — slot names; their values live under consensus/committed/
 capauthz/             # agent/mod.rs: the cluster-proposed capability-authz policy's slot (sys/capauthz/ has its own row)
 
@@ -63,7 +63,7 @@ refs/heads/           # mycelium-wiki git_store.rs: a git branch ref
 # ── relative segments matched after a row's prefix has been stripped
 pressure/             # mycelium-tuple-space http.rs: the tail of sys/tuple/{node}/{ns}/pressure/{stage}
 stage/                # mycelium-tuple-space http.rs: the tail of sys/tuple/{node}/{ns}/stage/{stage}/{metric}
-provision/            # agent/http.rs: the tail of agent/{node}/provision/{item}/error
+provision/            # agent/http/authz.rs: the tail of agent/{node}/provision/{item}/error
 
 # ── remainders matched after a known prefix is stripped
 end/                  # consensus_life.rs collectable: a release marker's remainder under consensus/life/{slot}/ (the key has a row)

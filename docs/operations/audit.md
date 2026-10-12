@@ -209,7 +209,7 @@ validated revocation for the key.
 The head `count` is also the cheap fleet-wide sanity check: if nodes disagree on a node's
 `root`/`count`, revocations haven't fully propagated yet (or one view is partitioned).
 
-*Code: `src/agent/http.rs::gw_transparency` (~708), `src/agent/transparency.rs`
+*Code: `src/agent/http/compliance.rs::gw_transparency`, `src/agent/transparency.rs`
 (`inclusion_proof`, `revocation_head`, `verify_inclusion`), `src/agent/revocation.rs`.*
 
 ---

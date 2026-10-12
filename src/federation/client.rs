@@ -580,7 +580,7 @@ impl FederationClient {
     /// it minted every credential under its own configured principal, the partner's evidence would
     /// record *the gateway's service account* for work it never asked for — the confused deputy
     /// item 7 removed inside a domain, reintroduced across one. So the principal comes from the
-    /// **authenticated local caller** and never from the request body; `src/agent/http.rs` is the
+    /// **authenticated local caller** and never from the request body; `src/agent/http/federation_routes.rs` is the
     /// one place in this crate that calls this, and that is where the rule is enforced.
     ///
     /// What this does **not** change: the credential still says *this domain vouches for this

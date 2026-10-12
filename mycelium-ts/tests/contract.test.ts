@@ -1,6 +1,6 @@
 /**
  * The SDK against the gateway's actual wire shapes, without a node (realignment repairs S1–S3; the
- * review's F06–F09). Each response here is what the Rust handler in `src/agent/http.rs` sends, and
+ * review's F06–F09). Each response here is what the Rust handler in `src/agent/http/` sends, and
  * each request assertion is what that handler's `Deserialize` struct accepts. A mocked `fetch`
  * captures the request and replays the response, so these run in CI's node-free `jest` step.
  *

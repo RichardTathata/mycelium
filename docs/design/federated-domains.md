@@ -340,7 +340,7 @@ neither. Minting under the gateway's own configured principal would record a ser
 partner's evidence for work it never asked for — §5's confused deputy, one boundary further out
 again — and reading the principal from the body would let any local holder of `federation:invoke`
 have this domain vouch for an identity nothing authenticated. `FederationClient::call_as` is the
-whole mechanism, and `src/agent/http.rs` is the only caller of it in this crate.
+whole mechanism, and `src/agent/http/federation_routes.rs` is the only caller of it in this crate.
 
 What the SDKs carry beyond the reply is the pair of fields a refusal needs: `sent` (did any byte
 cross) and `delivery` (`none` · `refused` · `completed` · `unknown`). Both raise a distinct type for
