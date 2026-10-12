@@ -1,9 +1,9 @@
 # Post-360 hardening — the next batch, and consensus as a protocol, not a service
 
-**Status:** adopted 2026-10-10, rev 1.6 (2026-10-12: Φ closed; P5, J and I delivered; rows K, L, M added from the Strands Box comparison). **R0 is being cut as v2.32.0 (2026-10-11)**, which delivers rows **G, P3, C, D,
+**Status:** adopted 2026-10-10, rev 1.7 (2026-10-12: Φ closed; P5, J and I delivered; rows K, L, M added from the Strands Box comparison; rows N, O, P added — Strands agents on Mycelium, after an `a2a-sdk` probe). **R0 is being cut as v2.32.0 (2026-10-11)**, which delivers rows **G, P3, C, D,
 P1, A (with C1, C2), B (as narrowed 2026-10-11) and P2 (without migration, as decided 2026-10-11)** — each closed on
 evidence in §3.5. Open:
-E, F, K, L, M (P2's migration — close, enumerate, carry, complete — delivered after 2.32.0, §3.5;
+E, F, K, L, M, N, O, P (P2's migration — close, enumerate, carry, complete — delivered after 2.32.0, §3.5;
 Φ delivered 2026-10-12, #607, §3.5; **P5**, the `http.rs` split, J, hygiene, #608, and I, the private repository's items, private #30, delivered after
 2.32.0 too, §3.5; H, the companions' four doors, #609, delivered after 2.32.0, §3.5; R0's private re-pin landed as private #29). It follows the 2026-10-09 360 review and the eleven
 PRs that addressed its must-do list (#582–#592, private #28); those are recorded in the CHANGELOG and are not
@@ -86,8 +86,11 @@ Four places strain that line today, and the rows in §3 address each:
 | **I** — *delivered (private #30), §3.5; Cedar narrower* | Private repo P3s | RA5 correction chains and competing corrections; attempt keys carry the operation id; a lock-order table; the outbox directory fsynced at create; Cedar policies schema-validated at load; the CI pin check refuses `[patch]`, `rev =` and multi-line tables | R0's re-pin |
 | **J** — *delivered (#608), §3.5* | Hygiene | the sim-seam gate's test-skip bug (the one the KV gate fixed in #591); every feature and bench linted or built by some CI step; the two CI jobs on `stable` pinned; unreferenced public items deprecated, not removed (nothing is removed on the 2.x line); only the duplicates that disagree are unified (`hex_line`'s whitespace, `now_ms` copies outside the seam) | — |
 | **K** | Policy over history | the action evaluator can decide on what an actor has already done, not only on the request: a bounded, read-only history view (the actor's recent decisions and executions from the evidence journal — `src/agent/evidence_journal.rs`) reaches `ActionEvaluator::evaluate` beside the envelope (`ActionEnvelope`, `src/agent/action_evaluator.rs:101`, which today carries no history); a rule such as *at most three posts in ten minutes* is expressible and tested in the reference evaluator and the AE contract suite (`mycelium::ae_contract`); the scope of a count is stated by name — **per node** (the journal is node-local and never gossiped) unless the design question in §5 is decided otherwise; a history that cannot be read is `Indeterminate`, never an empty history; replay records the history view as a decision input | design question §5 |
-| **L** | Credentials attached at egress | a secret need not enter a component's or an activation command's environment: an outbound request names a credential binding, and the egress gate (`EgressPolicy`, `mycelium-core/src/config.rs:280`, which today checks the host and every redirect hop) attaches it on the way out — bearer, header and basic forms at least — only to the host the binding names; a redirect off that host drops it; the binding's use is counted and its value never logged, traced or written to the evidence journal; the places a secret is read into the node today (`[[serve]].api_key_env`, federation credentials, an activation command's environment) are listed and each either moved behind a binding or stated as unchanged | — |
-| **M** | Activation commands confined | an `[[activation]]` command — today "not a sandbox: there is no allowlist and no confinement" (`docs/reference/unit-file.md:276`) and run with the stem's privileges — can be run under an OS confinement profile the unit file names (macOS Seatbelt first, Linux namespaces/Landlock or seccomp where available): filesystem access limited to the placed artifact's directory and declared paths, network limited to declared hosts or none; a profile the platform cannot apply refuses the activation by name, never runs it unconfined; the unconfined default stays, stated, and the guarantee report says which applies | — |
+| **L** | Credentials attached at egress | a secret need not enter a component's or an activation command's environment: an outbound request names a credential binding, and the egress gate (`EgressPolicy`, `mycelium-core/src/config.rs:280`, which today checks the host and every redirect hop) attaches it on the way out — bearer, header and basic forms at least — only to the host the binding names; a redirect off that host drops it; the binding's use is counted and its value never logged, traced or written to the evidence journal; the places a secret is read into the node today (`[[serve]].api_key_env`, federation credentials, an activation command's environment) are listed and each either moved behind a binding or stated as unchanged *From NVIDIA OpenShell (2026-10-12):* the component holds an opaque placeholder and never the value — the gate resolves the placeholder only at an endpoint the binding authorises — so a leaked environment or log carries nothing usable. | — |
+| **M** | Activation commands confined | an `[[activation]]` command — today "not a sandbox: there is no allowlist and no confinement" (`docs/reference/unit-file.md:276`) and run with the stem's privileges — can be run under an OS confinement profile the unit file names (macOS Seatbelt first, Linux namespaces/Landlock or seccomp where available): filesystem access limited to the placed artifact's directory and declared paths, network limited to declared hosts or none; a profile the platform cannot apply refuses the activation by name, never runs it unconfined; the unconfined default stays, stated, and the guarantee report says which applies *From NVIDIA OpenShell (2026-10-12):* a profile's filesystem and syscall limits are fixed for the activation's life and its network allow-list may change live (OpenShell's split: filesystem and process locked at creation, network hot-reloadable); OpenShell itself (containers, seccomp, an unprivileged identity; needs Docker) is a candidate backend for a stem, beside a native Seatbelt/Landlock profile, rather than something to rebuild. | — |
+| **N** | A2A at the current specification | an A2A client built on the current `a2a-sdk` (1.2.2, the library Strands Agents uses) reaches Mycelium's skills through `/a2a`, with the same authority as today — **the 2026-10-12 probe found it cannot**: the card is served only at `/.well-known/agent.json` (the SDK reads `/.well-known/agent-card.json`, 404); the card's `url` is the node's **gossip** address, not its gateway, and omits `/a2a` (`src/agent/a2a.rs:445`, so the SDK's `send_message` failed with a network error); the methods are the pre-0.2 `tasks/send` / `tasks/sendSubscribe` / `tasks/get` / `tasks/cancel` (`SendMessage` and `message/send` both answer `-32601`); and the skill is chosen by a Mycelium-only `skillId` parameter that a standard client never sends. Promises: the card at `/.well-known/agent-card.json` (the old path kept for one release), naming the gateway's own URL and scheme (https under `gateway_tls`) with `/a2a` and its supported interfaces and protocol versions; the A2A 1.0 methods (`SendMessage`, `SendStreamingMessage`, `GetTask`, `CancelTask`) and the 0.3 names (`message/send`, `message/stream`) served beside the old ones, which stay for one release with a deprecation entry; a message reaches a skill without `skillId` (a declared default skill, or the skill named in the message's metadata — decided in the PR, stated on the card); every new method runs the same doors as `tasks/send` — the action evaluator, mandates, evidence, task ownership — and the C7 bypass matrix gains each new method; the probe becomes a CI test driving the real `a2a-sdk` client against a node | — |
+| **O** | A Strands session store on Mycelium | a companion package (Python, beside `langgraph-checkpoint-mycelium`) implementing Strands Agents' `SessionManager` over the Mycelium Python SDK, so an agent's conversation and state, and a swarm's shared memory, live in the fleet's KV rather than a file or a bucket; a save returns the SDK's receipt and its docs say which rung it names (a local application, not replication — the checkpointer's wording); an incomplete or unreadable session is an error, never an empty one; concurrent agents in one session do not lose each other's writes, or the limit is stated; its live suite runs in CI against a real node; pinned to a Strands release and re-checked when Strands changes the interface | — (N for the cross-host demo) |
+| **P** | A Strands fleet, demonstrated | a runnable example, in CI like the co-op demos, in which Strands agents on three Mycelium nodes plan one shared task (a constructive domain — food redistribution or a microgrid), keep their session and swarm memory in the fleet through O, and call fleet skills through `/a2a` (N): a call outside an agent's mandate is refused and the refusal is in the evidence journal; one node is stopped and the work resumes on another from the stored session; the README states what Strands provides and what Mycelium adds, and which properties the run shows versus which it does not | N, O |
 
 ### 3.4 · Documentation follow-through
 
@@ -528,6 +531,46 @@ Each promise and what delivers it:
   (finding 8): any `llm:invoke` caller can record into another tenant's valid run id — stated in the docs, not in this
   row's promise.
 
+### 3.6 · State of play and the next iteration (2026-10-12)
+
+Where the work stands at the end of 2026-10-12, so the next session starts here rather than from a conversation.
+
+**In flight (open PRs, each with an independent reviewer):**
+- **E** — #613, the gateway remainder (six promises); under its first adversarial review.
+- **F** — #611, wire and crypto with its window; in its third fix round. That round narrows the unsigned-frame
+  exemption to a self-authenticating sealed identity record, stops an unauthenticated identity tombstone from wiping a
+  node's keys, counts every exempt frame, and fixes the dispatch gate's early stop. It adds row **F2** (the refusal
+  made unconditional in the MINOR after F), which lands with #611.
+- **N, O, P** — #614 records them with the `a2a-sdk` probe's evidence (`docs/plans/external/2026-10-12-a2a-sdk-probe/`).
+
+**Not started:** K (policy over history — decide §5's fleet question first), L (credentials attached at egress), M
+(activation commands confined), N (A2A at the current specification — independent of E and F, and it carries a defect
+worth fixing on its own: the agent card names the gossip port), O and P (after N), and §5's inference-routing question.
+
+**Follow-ups recorded as not built in delivered rows (each in its §3.5 block):**
+- **H:** carry each named offer's signed bytes inside the close and award from that copy (today a member who deletes a
+  named offer steers the checked path); a declarer that restarts without keeping its close can re-decide.
+- **J:** the seam and KV gates end an unstarted skip at the first trailing `,`, so a test item with a multi-line header
+  is partly scanned as production (fails safe) — balance `()`/`[]`/`<>` across the header.
+- **I (private):** a Cedar schema type-check of `context.*` and template `when` literals; behaviour under real power
+  loss behind the fsync pins.
+- **E (if it merges as reported):** a nonce cache for the caller envelope (a replay inside the freshness window is
+  accepted); an acknowledged in-process mailbox; the SSE resume point (recorded since row G); `cap/` keys alias across
+  `ns`/`name` the way `prompts/` did, refused today only because a `/` in a name is malformed.
+- **B:** connection preemption and WAL group commit, removed in review.
+
+**Sources compared on 2026-10-12** (rows K–P and the open question came from these):
+[Strands Box and Dogwood](https://aws.amazon.com/blogs/opensource/introducing-strands-box-ai-agent-sandboxes-powered-by-dogwood/)
+(policy over an agent's history; credentials attached at egress; OS containment) ·
+[NVIDIA OpenShell](https://docs.nvidia.com/openshell/latest/about/overview.html) (credential placeholders; fixed versus
+live policy; the privacy router) ·
+[Strands Agents 1.0](https://aws.amazon.com/blogs/opensource/introducing-strands-agents-1-0-production-ready-multi-agent-orchestration-made-simple/)
+(`SessionManager`, swarms and graphs, A2A — the framework rows N–P put on Mycelium).
+
+**Release:** nothing has been tagged since v2.32.0. The merged rows since (P2's migration #606, #604, #605, Φ, P5, J, H)
+and F's window are the next MINOR's material; F's window and E's refusals carry upgrade notes (`deprecations.md`
+§35–§38). A release is cut only on the maintainer's word.
+
 ## 4 · Decisions taken
 
 | # | Decision | Recorded |
@@ -544,6 +587,10 @@ Each promise and what delivers it:
 - Should a consensus `Timeout` result carry its cause (today only a metric label)? Doc-coverage run 23, code gap 1.
 - Should the MCP bridge and LLM backend clients get timeouts? PR #590's review.
 - Versioned electorates with joint-consensus transitions: a later plan, under D1.
+- **Inference routing as policy (from OpenShell's privacy router, 2026-10-12).** `mycelium-reason` routes a model
+  call by capacity and reservation; nothing decides whether a request *may* leave the domain, or to which model, by the
+  data it carries. The façade already runs the action preflight, so it is the natural enforcement point. Decide whether
+  this becomes a row (the evaluator sees the route's destination and a data classification) or stays out of scope.
 - **Row K: what does "history" mean in a fleet?** The evidence journal is node-local, so a history-conditioned rule
   counts what *this* enforcement point saw. A fleet-wide count needs either the consensus path (an agreed counter —
   exact, slower, unavailable without a quorum) or a gossiped tally that detects an overrun after the fact (detection,
