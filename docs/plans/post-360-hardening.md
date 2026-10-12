@@ -445,6 +445,7 @@ Each promise and what delivers it:
 
 **H — Companions (#TBD; read against the merged code).** The review's claims, each sized against the code:
 
+
 **H — Companions (#609; read against the merged code).** The review's claims, each sized against the code:
 - *The commitment deadline judged on the log's clock, not the offerer's* — **held, and the first fix was wrong**.
   `plan_award_from` filtered on `o.offered_at_ms <= deadline_ms`, a field the offerer writes. #609's first head judged
