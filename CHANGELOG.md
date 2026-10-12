@@ -294,12 +294,32 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `a_bare_proof_signed_by_the_victim_is_refused_and_flagged`,
     `a_consensus_signature_verifies_only_in_the_tagged_form`, `an_acceptor_answers_only_a_tagged_request`.
 
+  - **#611's review, fixed before merge.** A `SignedData` frame's **signer is bound to its sender**: the arm verified
+    against `signer`'s key and applied the update as `update.sender`'s, so a member's own valid signature carried a
+    write attributed to anyone, `sys/` keys included — now dropped and counted (`kv_signer_mismatch`,
+    `mycelium_kv_signer_mismatch_total`). The connection handler's **quorum-evidence write** was a twenty-fourth bare
+    dispatch, in a file the first gate exempted whole; it is signed, and the gate now exempts only marked receive
+    paths, catches any spelling (a `use`-imported `Data(` too) and plants three dispatches in its self-test. The
+    removal check **fails closed** on a certificate with no Ed25519 key. The window counters are **per node**
+    (`TransportBounds`) and on `GET /stats` with `kv_signer_mismatch`; the guarantee report gains
+    `mesh.signed_writes` (not required by `secure-single-domain` this release); `start()` warns when
+    `kv_require_signed_frames` is set without `[tls]`. A node's own identity record (`sys/identity{,-proof,-signed}/{sender}`)
+    is exempt from the refusal: it travels unsigned by design and carries its own proof. Seen failing first:
+    `a_signed_frame_whose_signer_is_not_its_sender_is_refused`, `quorum_evidence_reaches_a_peer_that_requires_signed_frames`,
+    `a_certificate_without_an_ed25519_key_is_refused_by_the_removal_check`, `a_nodes_own_identity_record_is_not_refused_as_unsigned`, and
+    `a_gateway_kv_delete_reaches_a_peer_that_requires_signed_frames` with that site toggled bare. **The opt-in refusal is
+    bypassable through anti-entropy** (a `StateResponse` entry carries no author), and the unconditional refusal is
+    plan row F2.
+
   **Upgrade notes** (`docs/guide/deprecations.md` §35, the 2.30.0 shape): **upgrade from 2.32, not 2.31** — a 2.31
   node and an upgraded node verify neither each other's identity proofs nor their consensus messages. **An upgraded
   node's KV writes reach a 2.32 peer only by anti-entropy until that peer is upgraded** (a 2.32 verifier drops the
   tagged `SignedData` as a bad signature, and does not forward it). **An upgraded node with
   `kv_require_signed_frames` drops a 2.32 peer's agent writes until every peer is upgraded** — set it once
-  `kv_unsigned_frames_accepted` and `kv_untagged_signatures` stop rising fleet-wide. `GossipConfig` gained a field
+  `kv_unsigned_frames_accepted` and `kv_untagged_signatures` stop rising fleet-wide. **Upgrade promptly:** until a 2.32
+  peer is upgraded it receives upgraded nodes' writes only by anti-entropy and logs a warning per dropped frame. A 2.31
+  node upgraded straight past 2.32 is worse off than one with no proof (its bare proof is refused, so its writes are
+  dropped as from an unknown signer). `GossipConfig` gained a field
   (an exhaustive literal breaks). Remove alerts on the two removed metrics. The next MINOR refuses unsigned frames
   and bare KV signatures unconditionally.
 

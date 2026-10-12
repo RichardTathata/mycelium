@@ -80,7 +80,8 @@ Four places strain that line today, and the rows in §3 address each:
 | **C** — *delivered 2.32.0 (#597), §3.5* | Companion WALs (tuple space, blackboard) | compaction is crash-durable (temp file and directory fsynced); a torn or undecodable record poisons the writer and is refused at open rather than silently dropping every later record; one owner per file | R0 |
 | **D** — *delivered 2.32.0 (#599), §3.5* | WASM execution limits | epoch interruption bounds a guest call; guest code runs off the runtime's worker threads; a trap does not recompile the component on every call | R0 |
 | **E** — *delivered (#613), §3.5* | Gateway remainder | client-supplied timer periods (`interval_secs`) bounded; the log-group subscribe keeps the core's `(hlc, key)` tiebreak the mailbox deletes an entry only after the client has it (today it tombstones on entering the 256-slot channel, so a dropped stream loses queued events — #595's review); prompt keys cannot alias across `ns`/`name` (`prompts/{ns}/{name}` with a `/` in either); and saves the group offset only after the entry is sent (today it saves first, so an entry in flight when a stream drops is never re-sent — found by row G); the caller envelope binds freshness | P5 |
-| **F** — *delivered, unreleased (#611), §3.5* | Wire and crypto, one MINOR with a window | a TLS node refuses unsigned `Data` frames; the removal check reads a peer's key structurally, not by byte-scanning the certificate; KV `SignedData` is domain-tagged; each change carries a mixed-fleet window and an upgrade note in the 2.30.0 shape; the #585 and #587 windows close in the same MINOR | R0, ideally its own release |
+| **F** — *delivered, unreleased (#611), §3.5 (window; the flip is F2)* | Wire and crypto, one MINOR with a window | a TLS node refuses unsigned `Data` frames; the removal check reads a peer's key structurally, not by byte-scanning the certificate; KV `SignedData` is domain-tagged; each change carries a mixed-fleet window and an upgrade note in the 2.30.0 shape; the #585 and #587 windows close in the same MINOR | R0, ideally its own release |
+| **F2** | The refusal unconditional (the MINOR after F) | a TLS node refuses an unsigned `Data` frame and a bare KV `SignedData` signature whatever `kv_require_signed_frames` says (the setting retired or kept as a no-op, stated); the window counters `kv_unsigned_frames_accepted` and `kv_untagged_signatures` stop rising or are removed, stated in `deprecations.md`; `mesh.signed_writes` resolves `enforced` under `[tls]` and is considered for `secure-single-domain`'s required set; the anti-entropy residual (an unsigned, authorless `StateResponse`) is either closed or restated | F released |
 | **G** — *delivered 2.32.0 (#595), §3.5* | SDKs | Python whole-second timeouts and a non-truncating tuple `take`; path segments escaped; TypeScript `SupersededError`; one `scatterGather` default, documented; SSE reconnect is designed with a gateway resume point or recorded as not built | R0 |
 | **H** — *delivered after 2.32.0 (#609), §3.5* | Companions | the commitment deadline judged on the log's clock, not the offerer's; `award_of` verifies before it reports; the reason blob store bounded; caller-chosen `run_id` validated | R0 |
 | **I** — *delivered (private #30), §3.5; Cedar narrower* | Private repo P3s | RA5 correction chains and competing corrections; attempt keys carry the operation id; a lock-order table; the outbox directory fsynced at create; Cedar policies schema-validated at load; the CI pin check refuses `[patch]`, `rev =` and multi-line tables | R0's re-pin |
@@ -606,7 +607,7 @@ PR.
   identity and `kv_require_signed_frames` the frame is dropped and counted (`unsigned_kv_frames`);
   `a_tls_node_requiring_signed_frames_refuses_an_unsigned_data_frame` (seen applying the forged key on the unfixed
   arm). **Not unconditional in this release** — the refusal is the setting, default off, which is the window
-  (next bullet but one); the unconditional refusal is the next MINOR's, *not built*. The twenty-three agent write
+  (next bullet but one); the unconditional refusal is row F2's, *not built*. The twenty-three agent write
   sites that sent bare `Data` frames sign (`framing::local_kv_wire_msg`; `scripts/check-signed-dispatch.sh` in
   `make check` and CI, with `--self-test`); `an_agent_write_reaches_a_peer_that_requires_signed_frames` (seen
   failing with the refusal built and the sites unrouted). **Not covered:** anti-entropy entries carry no author.
@@ -626,7 +627,7 @@ PR.
   `GET /stats` and as metrics; `deprecations.md` §35 states each direction ("an upgraded node's KV writes reach a
   2.32 peer only by anti-entropy until that peer is upgraded"; "an upgraded node requiring signed frames drops a
   2.32 peer's agent writes until that peer is upgraded"); CHANGELOG `[Unreleased]` § Security. The certificate read
-  is local and has no window. **The window counters are not asserted on `/stats` by a test** — the accessors are.
+  is local and has no window. The window counters are asserted on `/stats` (`the_row_f_window_counters_are_on_gateway_stats`).
 - *The #585 and #587 windows close in the same MINOR* — §23 (#585: the identity proof and the consensus signature)
   is closed: `helpers::validate_and_merge_identity` and `consensus::verify_consensus_signature` accept the tagged
   form only, `SignatureForm`/`sign_payload_as` removed, both counters removed;
@@ -635,6 +636,23 @@ PR.
   failing against the allowance). **#587 opened no window** (its commit, CHANGELOG entry and §25 accept nothing
   for one release; the consensus-signature tag the brief attributed to it is #585's second half) — so nothing
   was closed for it.
+- *#611's review, fixed before merge* — (1) a signed frame's signer bound to its sender:
+  `connection.rs` `SignedData` arm, `kv_signer_mismatch`; `a_signed_frame_whose_signer_is_not_its_sender_is_refused`
+  (seen applying V's own `sys/role/` key and an app key under M's signature). (2) the quorum-evidence write
+  signed and the gate narrowed to marked receive paths, any spelling, with a three-plant self-test (connection.rs,
+  a new agent file, a `use`-spelled `Data(`); `quorum_evidence_reaches_a_peer_that_requires_signed_frames` (seen:
+  A never held B's evidence; the 6081c9e6 gate called a tree with all three plants clean). (4) the flip is row F2;
+  `mesh.signed_writes` in the guarantee report, not in `secure-single-domain`. (6) the removal check fails closed
+  on a certificate with no Ed25519 key; `a_certificate_without_an_ed25519_key_is_refused_by_the_removal_check`
+  (seen `Ok(())`). (8) `a_bare_2_32_kv_signature_is_accepted_and_counted_during_the_window`,
+  `a_gateway_kv_delete_reaches_a_peer_that_requires_signed_frames` (seen failing with `kv_write` toggled bare),
+  `the_row_f_window_counters_are_on_gateway_stats` — the counters are per node now (`TransportBounds`). (9)
+  a node's own identity record is exempt from the refusal (it travels unsigned and carries its own proof —
+  found by the fix round's own fleet test; `a_nodes_own_identity_record_is_not_refused_as_unsigned`, seen refused).
+  `start()` warns when `kv_require_signed_frames` is inert (`kv_require_signed_frames_without_tls_is_inert`); the
+  warning's emission itself is not asserted. (3, 5, 7) answered in the docs: the refusal is bypassable through
+  anti-entropy; upgraded nodes sign tagged at once (the 2.32.0 shape) and reach 2.32 peers by anti-entropy only;
+  revocation events join the untagged list.
 - *Documentation follow-through* — `deprecations.md` §35 and the §23 closure note; `docs/threat-model.md` Boundary A;
   `what-is-proven.md`'s KV residual moved to the CI table (role claims and audit records remain in the third);
   `configuration.md`'s `kv_require_signed_frames` row; the identity-authentication and federated-domains records

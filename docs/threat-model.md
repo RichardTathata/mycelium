@@ -55,17 +55,26 @@ An attacker who controls one node process (RCE, stolen host) gains:
   could be published as the victim's identity proof (CHANGELOG, 2.32.0). Since the release after
   2.32.0 (post-360 plan row F) KV `SignedData` is signed under `mycelium.kv/update/1` too, and the
   2.32.0 allowance for bare identity proofs and consensus signatures is closed; a bare KV signature is
-  accepted for one release, counted (`deprecations.md` §35). Role claims and audit records are still
+  accepted for one release, counted (`deprecations.md` §35). Role claims, audit records and revocation
+  events (`src/agent/revocation.rs`) are still
   signed over untagged canonical bytes — a residual recorded in `docs/operations/what-is-proven.md`;
-  neither can begin with another domain's tag, so the tagged verifiers stay closed to them.
-- **Cannot write as another member by not signing — where the receiver says so.** Under `[tls]` every KV
-  write a node originates is signed (row F routed the agent's twenty-three unsigned write sites through
-  the signer); a receiver with `kv_require_signed_frames` drops an unsigned `Data` frame, and one
-  without it applies the frame and counts it (`kv_unsigned_frames_accepted`) — the one-release window;
-  the next MINOR refuses unconditionally. **Residual:** anti-entropy. A `StateResponse` entry carries no
-  author and no signature and is applied by LWW, so a compromised member can still introduce a value for
-  any key through a state reply; detection (the `sys/` tripwire, signed `sys/` records verified at read)
-  is what covers it.
+  none can begin with another domain's tag, so the tagged verifiers stay closed to them.
+- **Cannot gossip a write *as another member*: a signed frame's signer must be its sender** (row F,
+  #611's review). A `SignedData` frame is verified against its `signer`'s key and dropped when `signer`
+  is not the update's `sender` (`kv_signer_mismatch`), so a member's own valid signature no longer
+  carries a write attributed to someone else. **An unsigned frame is the other half, and it is opt-in
+  this release:** under `[tls]` every KV write a node originates is signed (row F routed the agent's
+  twenty-four unsigned write sites — the quorum-evidence write among them — through the signer), a
+  receiver with `kv_require_signed_frames` drops an unsigned `Data` frame — except a node's own identity
+  record, which travels unsigned and carries its own proof — and one without it — the default this
+  release — applies it and counts it (`kv_unsigned_frames_accepted`). Plan row F2 makes the
+  refusal unconditional. **The refusal is bypassable through anti-entropy:** a `StateResponse` entry
+  carries no author and no signature and is applied by LWW, unsolicited, so a compromised member can
+  introduce a value for any key — another member's included — through a state reply whatever this
+  setting says. Detection covers part of it: signed `sys/` records (identity, roles, audit) fail
+  verification at read, and the `sys/` tripwire counts a remote write to a key *this* node owns — but it
+  does **not** count an entry for a key the victim holds nothing under, so a fresh key planted in another
+  member's namespace is not flagged anywhere.
 - **Cannot pass for another member's certificate key.** The removal check and the handshake anchor read
   a peer certificate's key from its `SubjectPublicKeyInfo`, structurally (row F); before, a byte-scan
   returned the first Ed25519 SPKI pattern anywhere in the DER, so a node holding the CA key could mint a
