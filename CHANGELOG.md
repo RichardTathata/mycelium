@@ -89,6 +89,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Documentation: the philosophy's "A protocol, not a service" paragraph states the post-360 plan's line in full**
+  (row Φ, #607; no code change): consensus is a protocol every member of a group runs, never a service a named
+  node provides; no shape — a profile, a configuration default, a unit file, a governance route, a document — may
+  make a named node set the place where agreement happens; an electorate is a group whose members are fixed at
+  genesis and change only by a migration that terminates; and what 2.32.0 enforces of it (the governed electorate,
+  leased leadership, collected acceptor state) with the migration after it. The wiki's runtime-invariants page
+  § Layer III cites it.
 - **Documentation: a lost electorate voter is restored with its state or retired — never reissued empty.**
   2.32.0's pages said an electorate member could be replaced "under the same identity"; that is unsafe as
   stated. A member's promises and acceptances are durable on its own disk
