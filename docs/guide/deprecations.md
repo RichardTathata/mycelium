@@ -1142,3 +1142,39 @@ still waits. Keep such a provider's queue shorter than that, or time the caller 
 Nothing to do for the log group in a mixed fleet: an older node writes only the offset, and an upgraded reader takes
 the offset whenever it is ahead of the cursor. **What a drop still loses**, stated: a mailbox event or log-group
 entry the connection had accepted when it dropped — the gateway has no resume point (guide 10).
+
+## 39. Revocation reaches every verifier, is per node, and a node cannot revoke the key it signs with (unreleased, after 2.32.0)
+
+**What changes** (post-360 plan row Q). A key revoked with `revoke_identity_key`, `rotate_identity_on_compromise`
+or `POST /gateway/identity/revoke` used to be excluded only by consensus and the `known_verifying_keys` paths (role
+claims, the audit chain). Now, at every node that has seen and validated the revocation:
+
+- **A KV write signed by the revoked key is refused** (`SignedData` from the node under that key is dropped and
+  counted, `GET /stats` `kv_revoked_key_refused`). A peer that had kept writing under a key its node then revoked —
+  a compromised key in use, or a node whose operator revoked the key it was still using — has those writes refused.
+- **An identity record whose proof is signed by the revoked key chains nothing**: its keys are not merged, and an
+  unsigned sealed record signed by it is refused whatever `kv_require_signed_frames` says (counted the same way).
+- **Revocation is per node.** Node N's revocation of key k removes k from N's trusted set only. It used to be one
+  fleet-wide set, so a member that claimed another's key in its own identity record and revoked it under its own
+  name silenced the owner.
+- **Who may revoke.** A revocation counts when signed by a key the reader **holds** for N (proved, chained, or
+  CA-anchored) and naming a key it holds for N. It used to be the *current* key of the raw `sys/identity/{N}` value,
+  which any member can write. Any key N still has can revoke N's others; a contested identity (the thief revokes the
+  new key, the owner the old) fails closed: neither verifies, at every node, whatever the arrival order.
+- **A node cannot revoke the key it signs with**, nor a key that is not its own: `revoke_identity_key` returns
+  `GossipError::InvalidField { field: "revoked_key", .. }`, and `POST /gateway/identity/revoke` answers **422**.
+  Rotate first (`rotate_identity`), then revoke the old key, or use `rotate_identity_on_compromise`.
+- A `tls` build without `compliance` now honours revocations it receives (it still cannot issue one).
+- Once validated at a node a revocation is never withdrawn there: a later tombstone or overwrite of
+  `sys/revocation/…` does not restore the key (it used to, because the set was re-read from the live KV).
+
+**Will the compiler tell me?** No — the API shape is unchanged. `CoreCtx` gained the `revoked_keys` field (an
+exhaustive struct literal breaks; only tests build one).
+
+**Migration.** Nothing, unless a node revoked the key it was still signing with (its writes stopped verifying for
+roles and consensus already; now they stop for KV too, and the call is refused). A script calling
+`POST /gateway/identity/revoke` with the current key gets 422: rotate first. **What is not covered**, stated: a
+revoked key's certificate still completes the mTLS handshake (only removal refuses there); what a revoked key
+signed before the revocation reached a node stays applied there (detection, not prevention); after a restart a
+revocation is re-validated from the store, so one whose record was tombstoned before the restart is lost at that
+node (the revoking node restores it by revoking again — a fresh write wins over the tombstone); and the order between a thief and the owner is a race no rule here decides.

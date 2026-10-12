@@ -215,6 +215,9 @@ enum IdentityFrame {
     /// A sealed record that authenticates itself but whose history lacks a key this node already
     /// holds or has stored for the node — a superseded record replayed (#611's third review, N4).
     Stale,
+    /// A sealed record whose signer is a key its node has revoked (post-360 plan row Q): refused and
+    /// counted whatever `kv_require_signed_frames` says, like [`Self::Stale`].
+    Revoked,
     /// Anything else: an ordinary unsigned frame.
     Other,
 }
@@ -240,6 +243,8 @@ fn split_sealed(v: &[u8]) -> Option<(&[u8], &[u8])> {
 /// - the value parses as a sealed record (version 1, a whole number of 32-byte keys, a 96-byte proof);
 /// - `signer` is one of the record's own keys, and `sig` verifies under it over
 ///   `mycelium.identity/proof/1 ‖ u32 len ‖ history`;
+/// - `signer` is not a key `n` has revoked here, nor a removed member's key (post-360 plan row Q) —
+///   such a record is [`IdentityFrame::Revoked`], refused whatever the flag says;
 /// - when this node already holds keys for `n` — gossiped (`peer_keys`) or CA-anchored
 ///   (`peer_anchor_keys`) — `signer` is one of them: a rotation chains to what is held, and a
 ///   stranger's self-signed record for a known node is not a proof of anything;
@@ -270,6 +275,10 @@ fn self_authenticating_identity(ctx: &CoreCtx, update: &GossipUpdate) -> Identit
     message.extend_from_slice(&(history.len() as u32).to_le_bytes());
     message.extend_from_slice(history);
     if !crate::tls::verify_bytes(&signer, &message, &proof[32..]) { return IdentityFrame::Other; }
+    // Post-360 plan row Q: a key `n` has revoked proves nothing for `n`, first sighting or not.
+    if ctx.revoked_keys.is_revoked(&node, &signer) || ctx.removed.is_key_removed(&signer) {
+        return IdentityFrame::Revoked;
+    }
     let gossiped = ctx.peer_keys.pin().get(&node).cloned().unwrap_or_default();
     let anchored = ctx.peer_anchor_keys.pin().get(&node).cloned().unwrap_or_default();
     let held = !(gossiped.is_empty() && anchored.is_empty());
@@ -946,6 +955,16 @@ pub async fn handle_connection(
                     continue;
                 }
                 #[cfg(feature = "tls")]
+                if identity_frame == IdentityFrame::Revoked {
+                    // Signed by a key its node has revoked (row Q): refused whatever the flag says.
+                    task_ctx.transport_bounds.kv_revoked_key_refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if let Some(suppressed) = identity_exempt_warn.admit(crate::sim_seam::mono_now_ns(), WARN_EVERY_NS) {
+                        warn!(from = %peer_addr, key = %update.key, suppressed,
+                            "sealed identity record signed by a key its node has revoked — refused");
+                    }
+                    continue;
+                }
+                #[cfg(feature = "tls")]
                 if identity_frame == IdentityFrame::Exempt {
                     // The one exemption: a sealed identity record that proves itself. Counted, and
                     // said at most once a minute per connection, so a replay or a probe is visible.
@@ -1097,10 +1116,15 @@ pub async fn handle_connection(
                 // Signature verification: the signer's key must be known (fail-closed below).
                 #[cfg(feature = "tls")]
                 {
-                    let guard = task_ctx.peer_keys.pin();
                     // Retained key set per node (WS5): try every published key so a
-                    // rotated-in signature verifies even before the old key ages out.
-                    if let Some((_, pub_key_set)) = guard.iter().find(|(k, _)| k.id_hash() == signer) {
+                    // rotated-in signature verifies even before the old key ages out — every key the
+                    // node still holds, that is: not one it has revoked (post-360 plan row Q).
+                    let found = task_ctx.peer_keys.pin().iter()
+                        .find(|(k, _)| k.id_hash() == signer)
+                        .map(|(node, held)| (node.clone(), held.clone()));
+                    if let Some((signer_node, held)) = found {
+                        let mut pub_key_set = held.clone();
+                        task_ctx.retain_trusted(&signer_node, &mut pub_key_set);
                         let canonical = canonical_sign_bytes(&update);
                         let (lo, hi)  = &signature;
                         let mut sig_bytes = [0u8; 64];
@@ -1122,10 +1146,26 @@ pub async fn handle_connection(
                                     peer_addr, signer
                                 );
                             } else {
-                                warn!(
-                                    "SignedData from {} (signer={:#x}) failed Ed25519 verification, dropping",
-                                    peer_addr, signer
-                                );
+                                // Row Q: say so when the signature is good under a key the node has
+                                // revoked — a compromised key still in use, counted for the operator.
+                                // Only on this failure path; a valid frame pays nothing for it.
+                                let revoked_signed = pub_key_set.len() < held.len() && held.iter()
+                                    .filter(|k| !pub_key_set.contains(k))
+                                    .any(|k| crate::tls::verify_bytes(k, &tagged, &sig_bytes) || crate::tls::verify_bytes(k, &canonical, &sig_bytes));
+                                if revoked_signed {
+                                    task_ctx.transport_bounds.kv_revoked_key_refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    if let Some(suppressed) = signer_mismatch_warn.admit(crate::sim_seam::mono_now_ns(), WARN_EVERY_NS) {
+                                        warn!(
+                                            "SignedData from {} (signer={:#x}, key {}) is signed by a key its node has revoked, dropping ({} more suppressed since the last warning)",
+                                            peer_addr, signer, update.key, suppressed
+                                        );
+                                    }
+                                } else {
+                                    warn!(
+                                        "SignedData from {} (signer={:#x}) failed Ed25519 verification, dropping",
+                                        peer_addr, signer
+                                    );
+                                }
                                 continue;
                             }
                         }

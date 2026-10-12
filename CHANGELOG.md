@@ -256,6 +256,33 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Security
 
 - **Dependency: `quinn-proto` 0.11.15 → 0.11.18** (RUSTSEC-2026-0338, -0339, -0340, -0341, -0342: two remote panics on crafted STREAM/ACK_FREQUENCY frames, a stream-reassembly memory guard and a zero-length DATAGRAM buffer bypass, unbounded connection-ID retirements). Reached through `reqwest`'s HTTP/3 client (`async-openai`, `object_store`, `jsonschema`, `reqwest-eventsource`); a lockfile change only, no API change.
+- **A revoked key stops verifying at every verifier, revocation is per node, and only a holder of a node's keys can
+  revoke them** (post-360 plan row Q). After `rotate_identity_on_compromise`, a peer listed the old key as revoked yet
+  still held it in `peer_keys` — all the KV `SignedData` arm read — so a write signed by the revoked key as its node
+  was applied (#611's independent review, reproduced on 7c967ba3); identity-proof chaining
+  (`validate_and_merge_identity`'s trusted signer) and the unsigned identity exemption
+  (`connection::self_authenticating_identity`) accepted it the same way. Now one answer, `CoreCtx::trusted_keys` /
+  `retain_trusted` (held, minus the keys the node revoked, minus removed members' keys), is read by every verifier of
+  a node's key: the KV arm (refusals counted, `kv_revoked_key_refused`), the exemption (a sealed record signed by a
+  revoked key is refused whatever the flag says), identity chaining and first sighting, consensus, gateway caller
+  envelopes (in every `tls` build), `known_verifying_keys` (roles, audit, capability authorization) and the knowledge
+  layer's member keys. Validated revocations live in `CoreCtx::revoked_keys` (lock-free, monotonic), refreshed by the
+  identity watcher on any `sys/identity*` or `sys/revocation/` change and after the startup identity prewarm. **Who
+  may revoke** was the other half: a revocation counted when signed by the *current* key of the raw
+  `sys/identity/{N}` value — any member can write it — and the revoked set was one fleet-wide set of keys, so a member
+  could revoke another's key by rewriting its identity, or by claiming the key in its own record and revoking it as
+  its own; with revocation reaching the KV verifier either would have silenced the victim fleet-wide. A revocation now
+  counts only when signed by a key the reader holds for N and naming a key it holds for N, and removes it from N's set
+  only. A node cannot revoke the key it signs with (`revoke_identity_key` errs, `POST /gateway/identity/revoke` 422).
+  Seen failing first on 7c967ba3: `a_kv_write_signed_by_a_revoked_key_is_refused_once_the_revocation_is_seen`,
+  `an_identity_record_chained_through_a_revoked_key_is_not_merged`, `a_sealed_record_signed_by_a_revoked_key_is_not_exempt`,
+  `a_revocation_still_filters_after_the_verifier_restarts`, `a_member_cannot_revoke_another_members_key_by_rewriting_its_identity`,
+  `a_key_one_member_claims_and_revokes_stays_trusted_for_its_owner`, `revoking_the_key_a_node_signs_with_is_refused`.
+  **Stated, not built:** a revoked key's certificate still completes the mTLS handshake (only removal is refused
+  there); a write verified before the revocation reached a node stays applied (detection, not prevention); a thief
+  holding the old key can revoke the new one before the owner's revocation lands — both then count and the identity
+  fails closed, recovery being removal and a fresh identity. Upgrade notes in `deprecations.md` §39. Wire **v12**
+  unchanged.
 - **Wire and crypto, one MINOR with a window (post-360 plan row F).** Wire **v12** unchanged — no frame changes
   shape; what changes is what a node accepts and what a signature is over. Three changes and one closure:
   - **KV `SignedData` is domain-tagged.** A KV write is signed over `mycelium.kv/update/1 ‖ u32 len ‖ canonical`

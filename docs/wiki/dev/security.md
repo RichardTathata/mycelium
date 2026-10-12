@@ -347,7 +347,14 @@ publish `sys/identity/{self}` = `new‖old` → wait → activate.
 every verify path tries the set. Caveat: a retired key still verifies — compromise needs
 explicit **revocation** (WS-D shipped the CT-style revocation log + `/gateway/transparency`
 inclusion proofs, PRs #77–#82; revocation is now also applied on the consensus verify path,
-audit 2026-07-15 pass 3).
+audit 2026-07-15 pass 3). **Since post-360 plan row Q** revocation reaches *every* verifier of a node's key through
+one answer, `CoreCtx::trusted_keys` / `retain_trusted` (`mycelium-core/src/context.rs`): held keys minus the keys
+that node revoked (`CoreCtx::revoked_keys`, `mycelium-core/src/removal.rs`, per node and monotonic) minus removed
+members' keys — read by the KV `SignedData` arm, the unsigned identity exemption, identity chaining
+(`helpers::validate_and_merge_identity_with_revocations`), consensus, caller envelopes, `known_verifying_keys` and the
+knowledge member keys. A revocation counts only when signed by a key the reader *holds* for the node (never the raw
+`sys/identity/{N}` value, which any member can write) and removes the key from that node's set only
+(`src/agent/revocation.rs` module doc has the rule, its order and its residuals).
 
 > **`sys/identity` authentication — partially closed (WS-E, in progress).** `sys/identity/{node}`
 > is a plain Layer-I KV value with **no signature**, and `merge_peer_keys` **accumulates** any key

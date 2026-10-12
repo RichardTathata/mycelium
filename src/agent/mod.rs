@@ -126,7 +126,9 @@ mod mcp_handle;
 mod rbac;
 #[cfg(feature = "compliance")]
 pub(crate) mod audit;
-#[cfg(feature = "compliance")]
+/// Key revocation: validated under `tls` (every verifier of a node's key consults it — post-360 plan
+/// row Q); issued under `compliance`.
+#[cfg(feature = "tls")]
 pub(crate) mod revocation;
 #[cfg(feature = "compliance")]
 mod knowledge_keys;
@@ -1181,6 +1183,7 @@ impl GossipAgent {
             peer_keys: Arc::new(papaya::HashMap::new()),
             peer_anchor_keys: Arc::new(papaya::HashMap::new()),
             removed: Arc::new(mycelium_core::removal::RemovedSet::default()),
+            revoked_keys: Arc::new(mycelium_core::removal::RevokedKeys::default()),
             identity_anchor_conflicts: Arc::new(AtomicU64::new(0)),
             peers: Arc::clone(&peers_arc),
             rate_throttle: Arc::new(papaya::HashMap::new()),
@@ -1986,9 +1989,11 @@ impl GossipAgent {
     /// **Revoke** one of this node's own verifying keys cluster-wide (WS-D / D1) — for a key known
     /// to be *compromised*, where WS5 rotation alone is insufficient (a rotated-away key stays
     /// trusted for verification). Writes a signed revocation to `sys/revocation/{self}/{key}`,
-    /// signed by the **current** identity key; once it gossips, every node's retained-key verify
-    /// paths (role claims, audit chain) **exclude** `revoked_key`, so anything it signed fails
-    /// verification — "sub-second revocation", bounded by gossip latency.
+    /// signed by the **current** identity key; once it gossips, **every verifier of this node's key**
+    /// at each peer that validates it excludes `revoked_key` — KV writes, identity records, consensus,
+    /// role claims, the audit chain, caller envelopes, knowledge records (post-360 plan row Q) — so
+    /// anything it signed fails verification — "sub-second revocation", bounded by gossip latency.
+    /// Refuses the key this node signs with (rotate first) and a key that is not this node's.
     ///
     /// Typical flow: detect compromise → [`rotate_identity`](Self::rotate_identity) to a fresh key
     /// → `revoke_identity_key(old_key)` (signed by the new current key). Requires the `tls` identity.
@@ -2000,7 +2005,8 @@ impl GossipAgent {
     /// WS-B). [`rotate_identity`](Self::rotate_identity) alone is *hygiene*: the retired key stays
     /// accepted (WS5 retained-set), so it does **not** contain a compromise. This rotates to a
     /// fresh key, then revokes the old one *with the new key*, so the old key stops verifying
-    /// cluster-wide (roles, audit, **and consensus**). Use when the current key may be compromised.
+    /// cluster-wide (KV writes, identity records, roles, audit, **and consensus** — row Q). Use
+    /// when the current key may be compromised.
     /// Returns the new verifying key.
     #[cfg(feature = "compliance")]
     pub async fn rotate_identity_on_compromise(

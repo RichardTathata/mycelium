@@ -1754,19 +1754,10 @@ impl ConsensusEngine {
                     key_set = crate::agent::helpers::parse_identity_keys(&b);
                 }
             }
-            // WS-D: exclude validly-revoked keys on the consensus verify path too. The revocation
-            // module's guarantee — "a key signed by a revoked key fails verification cluster-wide" —
-            // was applied only by `helpers::known_verifying_keys` (role-claim / audit paths); consensus
-            // built its own `key_set` and skipped it, so a key an operator rotated away from AND revoked
-            // still validated `Vote`/`Propose` messages, defeating the operator's remediation (audit
-            // 2026-07-15 pass 3). Mirror `known_verifying_keys` here.
-            #[cfg(feature = "compliance")]
-            {
-                let revoked = crate::agent::revocation::revoked_key_set(&self.task_ctx);
-                if !revoked.is_empty() {
-                    key_set.retain(|k| !revoked.contains(k));
-                }
-            }
+            // WS-D: exclude validly-revoked keys on the consensus verify path too (audit 2026-07-15
+            // pass 3). Since post-360 plan row Q: the keys `signer` itself has revoked, read through the
+            // one answer every verifier of a node's key uses, in every `tls` build.
+            self.task_ctx.retain_trusted(&signed.signer, &mut key_set);
             if !verify_consensus_signature(&key_set, &signed.msg_bytes, &signed.signature) {
                 tracing::warn!("dropping consensus msg: bad/unknown signature from {}", signed.signer);
                 return None;

@@ -111,10 +111,11 @@ pub(super) fn parse_hex32(s: &str) -> Option<[u8; 32]> {
 ///
 /// Operator-facing key revocation, the compromise-remediation trigger. Body:
 /// `{ "revoked_key": "<64 hex>", "reason": "..."? }`. Writes a signed revocation (signed by this
-/// node's **current** key) which all verify paths — roles, audit, **and consensus** — then exclude
-/// cluster-wide. Only this node's own historical keys can be revoked (the signer must hold the
-/// current key), so this remediates *this* node's compromised key: rotate to a fresh key first,
-/// then revoke the old one (or use `rotate_identity_on_compromise`, which does both).
+/// node's **current** key) which every verifier of this node's key — KV writes, identity records,
+/// roles, audit, **and consensus** — then excludes at each node that validates it (post-360 plan row
+/// Q). Only this node's own keys can be revoked, and not the one it signs with (422), so this
+/// remediates *this* node's compromised key: rotate to a fresh key first, then revoke the old one
+/// (or use `rotate_identity_on_compromise`, which does both).
 #[cfg(feature = "compliance")]
 pub(super) async fn gw_identity_revoke(
     State(ctx): State<Arc<HttpCtx>>,

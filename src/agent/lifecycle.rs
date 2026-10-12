@@ -869,9 +869,14 @@ impl GossipAgent {
         for node_id in nodes {
             let get = |prefix: &str| kv_get(&self.task_ctx, &format!("{prefix}{node_id}"));
             identity_resync(
-                &self.task_ctx.peer_keys, &self.task_ctx.peer_anchor_keys, &self.task_ctx.identity_anchor_conflicts,
+                &self.task_ctx.peer_keys, &self.task_ctx.peer_anchor_keys, &self.task_ctx.revoked_keys,
+                &self.task_ctx.identity_anchor_conflicts,
                 &node_id, get(kv_ns::IDENTITY), get(kv_ns::IDENTITY_SIGNED), get(kv_ns::IDENTITY_PROOF), require);
         }
+        // Post-360 plan row Q: the revocations in the store, validated against the identities just
+        // established — after them, so a revocation whose signer the store's own identity records make
+        // a held key counts at restart as it did before.
+        super::revocation::refresh(&self.task_ctx);
     }
 
     /// Subscribes to `sys/identity*` changes and mirrors verified keys into `task_ctx.peer_keys` as
@@ -887,18 +892,28 @@ impl GossipAgent {
         // `sys/identity-proof/` and `sys/identity-signed/`, so a record arriving after another
         // re-validates the node.
         let mut rx      = kv_subscribe_prefix(&self.task_ctx, Arc::<str>::from("sys/identity"));
+        // Post-360 plan row Q: a revocation arriving, or an identity record that makes a revocation's
+        // signer a held key, re-validates the revocations.
+        let mut rev_rx  = kv_subscribe_prefix(&self.task_ctx, Arc::<str>::from(super::revocation::REVOCATION_PREFIX));
         let shutdown_rx = self.shutdown_tx.subscribe();
         let peer_keys   = Arc::clone(&self.task_ctx.peer_keys);
         let anchor_keys = Arc::clone(&self.task_ctx.peer_anchor_keys);
+        let revoked     = Arc::clone(&self.task_ctx.revoked_keys);
         let conflicts   = Arc::clone(&self.task_ctx.identity_anchor_conflicts);
         let require_proofs = self.task_ctx.config.require_identity_proofs;
         let kv_state    = Arc::clone(&self.kv_state);
+        let core        = Arc::clone(&self.task_ctx.core);
         self.spawn_task(async move {
             let mut shutdown_rx = shutdown_rx;
             loop {
                 tokio::select! { biased;
                     _ = shutdown_rx.wait_for(|v| *v) => break,
                     res = rx.changed() => { if res.is_err() { break; } }
+                    res = rev_rx.changed() => {
+                        if res.is_err() { break; }
+                        super::revocation::refresh(&core);
+                        continue;
+                    }
                 }
                 // Re-sync from one store snapshot, so a decision never straddles a write.
                 let store_guard = kv_state.store.pin();
@@ -912,9 +927,11 @@ impl GossipAgent {
                 }
                 for node_id in nodes {
                     let get = |prefix: &str| store_guard.get(format!("{prefix}{node_id}").as_str()).and_then(|e| e.data.clone());
-                    identity_resync(&peer_keys, &anchor_keys, &conflicts, &node_id,
+                    identity_resync(&peer_keys, &anchor_keys, &revoked, &conflicts, &node_id,
                         get(kv_ns::IDENTITY), get(kv_ns::IDENTITY_SIGNED), get(kv_ns::IDENTITY_PROOF), require_proofs);
                 }
+                drop(store_guard);
+                super::revocation::refresh(&core);
             }
         });
     }
@@ -1059,6 +1076,7 @@ impl GossipAgent {
 fn identity_resync(
     peer_keys: &papaya::HashMap<crate::node_id::NodeId, Vec<[u8; 32]>>,
     anchor_keys: &papaya::HashMap<crate::node_id::NodeId, std::collections::HashSet<[u8; 32]>>,
+    revoked: &mycelium_core::removal::RevokedKeys,
     conflicts: &std::sync::atomic::AtomicU64,
     node_id: &crate::node_id::NodeId,
     bare: Option<Bytes>,
@@ -1071,6 +1089,6 @@ fn identity_resync(
         sealed.as_deref(), &bare, legacy_proof.as_deref(), require_proofs);
     let keys = super::helpers::parse_identity_keys(history);
     if !keys.is_empty() {
-        super::helpers::validate_and_merge_identity(peer_keys, anchor_keys, conflicts, node_id, history, &keys, proof, require_proofs);
+        super::helpers::validate_and_merge_identity_with_revocations(peer_keys, anchor_keys, revoked, conflicts, node_id, history, &keys, proof, require_proofs);
     }
 }

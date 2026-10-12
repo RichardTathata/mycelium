@@ -203,6 +203,11 @@ pub struct CoreCtx {
     /// handshake. Empty until an operator removes someone.
     pub removed: Arc<crate::removal::RemovedSet>,
 
+    /// **Revoked keys, per node** (post-360 plan row Q): what `sys/revocation/` has validly said here.
+    /// Every verifier of a node's key reads it through [`CoreCtx::trusted_keys`]; maintained by the
+    /// root crate's revocation module. Empty until a node revokes one of its keys.
+    pub revoked_keys: Arc<crate::removal::RevokedKeys>,
+
     // ── Networking ───────────────────────────────────────────────────────────────
     /// Live peer table shared with the HTTP gateway for peer-count-based quorum sizing. The value
     /// is when the peer was last heard from.
@@ -251,6 +256,31 @@ impl CoreCtx {
 }
 
 impl CoreCtx {
+    /// The keys this node **currently trusts** to have signed for `node` (post-360 plan row Q): the
+    /// retained set in `peer_keys` (every key `node` has proved, chained or been CA-anchored with),
+    /// minus every key `node` has revoked here and every removed member's key. The one answer every
+    /// verifier of a node's key uses — the KV `SignedData` arm, identity-proof chaining, the unsigned
+    /// identity exemption, consensus, and the root crate's `known_verifying_keys` — so a revocation
+    /// reaches all of them at once.
+    ///
+    /// A revocation seen *after* a write was verified does not un-apply that write (detection, not
+    /// prevention); every verification after it is seen refuses.
+    pub fn trusted_keys(&self, node: &NodeId) -> Vec<[u8; 32]> {
+        let mut keys = self.peer_keys.pin().get(node).cloned().unwrap_or_default();
+        self.retain_trusted(node, &mut keys);
+        keys
+    }
+
+    /// Drop from `keys` (held for `node`) every key `node` has revoked and every removed member's key.
+    pub fn retain_trusted(&self, node: &NodeId, keys: &mut Vec<[u8; 32]>) {
+        if !self.revoked_keys.is_empty() {
+            keys.retain(|k| !self.revoked_keys.is_revoked(node, k));
+        }
+        if !self.removed.is_empty() {
+            keys.retain(|k| !self.removed.is_key_removed(k));
+        }
+    }
+
     /// The attached decision sink, if any (plan I7).
     pub fn decision_sink(&self) -> Option<&crate::decision::DecisionSink> {
         self.decision_sink.get().map(|a| a.as_ref())

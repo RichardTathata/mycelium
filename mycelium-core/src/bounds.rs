@@ -67,6 +67,10 @@ pub struct TransportBounds {
     /// holds or has stored for that node — a superseded record replayed (#611's third review, N4).
     /// Refused whatever `kv_require_signed_frames` says. `GET /stats` `kv_identity_stale_refused`.
     pub kv_identity_stale_refused: AtomicU64,
+    /// `SignedData` frames and unsigned sealed identity records refused because the key that signed
+    /// them is one their node has revoked (post-360 plan row Q) — a compromised key still in use, or a
+    /// record signed before the revocation replayed. `GET /stats` `kv_revoked_key_refused`.
+    pub kv_revoked_key_refused: AtomicU64,
 }
 
 /// One connection's place under the per-source cap; given back when dropped. It holds the very
