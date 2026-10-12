@@ -452,24 +452,35 @@ mod imp {
     }
 
     /// Extract the Ed25519 public key from a node cert's `SubjectPublicKeyInfo` (audit 2026-07-15,
-    /// identity-authentication Phase 1a — `docs/design/identity-authentication.md`).
+    /// identity-authentication Phase 1a — `docs/design/identity-authentication.md`), read from its
+    /// **structural position** by the X.509 parser rustls itself uses (post-360 plan row F, 2.33.0).
     ///
-    /// The trust anchor for peer identity is the **CA-signed cert**: rustls validates the peer's cert
-    /// against the cluster CA during the handshake, so by the time this runs the DER is a well-formed,
-    /// CA-issued Ed25519 cert produced by [`generate_node_cert`]. That makes a targeted, length-checked
-    /// scan for the fixed Ed25519 SPKI prefix both safe (the input is validated) and dependency-free
-    /// (no x509 parser needed). The Ed25519 SPKI is exactly
-    /// `30 2A 30 05 06 03 2B 65 70 03 21 00 ‖ key[32]` — OID `1.3.101.112` then a 33-byte BIT STRING
-    /// (0 unused bits + the 32-byte key). Returns `None` for a non-Ed25519 or malformed input (never
-    /// panics — the slice access is bounds-checked).
+    /// Before 2.33.0 this scanned the DER for the fixed Ed25519 SPKI prefix and returned the 32 bytes
+    /// after its first occurrence, on the argument that the certificate had already been validated
+    /// against the cluster CA. That argument covered the issuer, not the bytes: a certificate's serial
+    /// number, names and extensions are the issuer's to choose and precede the real SPKI in the
+    /// encoding, so a member holding the CA key — every node, before `secure-single-domain` rev 2 —
+    /// could mint a certificate that *reads* as another member's key at the handshake anchor
+    /// (`GossipStream::peer_ed25519_key`) and passes a removal of its own (`refuse_if_removed`).
+    /// `key_extract_tests::a_planted_key_pattern_in_the_serial_does_not_fool_the_structural_read` is
+    /// the plant, seen failing on the scan.
+    ///
+    /// RFC 8410 admits exactly one encoding for an Ed25519 SPKI —
+    /// `30 2A 30 05 06 03 2B 65 70 03 21 00 ‖ key[32]` (OID `1.3.101.112`, no parameters, a 33-byte
+    /// BIT STRING with 0 unused bits) — so the parsed SPKI is compared whole against that header.
+    /// Returns `None` for anything that is not a certificate carrying exactly that: a malformed
+    /// input, a certificate for another algorithm, or an SPKI of another shape. Never panics.
     pub fn ed25519_key_from_cert_der(der: &[u8]) -> Option<[u8; 32]> {
-        // OID 1.3.101.112 (Ed25519) followed by BIT STRING tag+len+unused-bits: `06 03 2B 65 70 03 21 00`.
-        const SPKI_PREFIX: &[u8] = &[0x06, 0x03, 0x2B, 0x65, 0x70, 0x03, 0x21, 0x00];
-        let start = der.windows(SPKI_PREFIX.len()).position(|w| w == SPKI_PREFIX)? + SPKI_PREFIX.len();
-        let bytes = der.get(start..start + 32)?;
-        let mut key = [0u8; 32];
-        key.copy_from_slice(bytes);
-        Some(key)
+        // SEQUENCE(42) { SEQUENCE(5) { OID 1.3.101.112 }, BIT STRING(33) { 0 unused bits, key } }
+        const ED25519_SPKI_HEADER: [u8; 12] = [0x30, 0x2A, 0x30, 0x05, 0x06, 0x03, 0x2B, 0x65, 0x70, 0x03, 0x21, 0x00];
+        let der = CertificateDer::from(der);
+        let cert = webpki::EndEntityCert::try_from(&der).ok()?;
+        let spki = cert.subject_public_key_info();
+        let (header, key) = spki.as_ref().split_at_checked(ED25519_SPKI_HEADER.len())?;
+        if header != ED25519_SPKI_HEADER {
+            return None;
+        }
+        key.try_into().ok()
     }
 
     /// Install the process-wide ring crypto provider exactly once (idempotent).
@@ -568,14 +579,18 @@ mod imp {
     }
 
     /// Refuse a certificate whose identity key belongs to a removed member (closure plan C5).
-    fn refuse_if_removed(
+    pub(super) fn refuse_if_removed(
         removed: &crate::removal::RemovedSet,
         end_entity: &CertificateDer<'_>,
     ) -> Result<(), rustls::Error> {
-        if !removed.is_empty()
-            && let Some(key) = ed25519_key_from_cert_der(end_entity.as_ref())
-            && removed.is_key_removed(&key)
-        {
+        // Fail closed (#611's review, finding 6): every certificate this codebase issues or loads
+        // carries the node's Ed25519 identity key (`generate_node_cert`, `issue_node_cert`; `key_pem`
+        // is read as an Ed25519 PKCS8 key), so one without it is not a member's — a CA-key holder
+        // could otherwise mint a certificate for another algorithm and pass whatever the ledger says.
+        let Some(key) = ed25519_key_from_cert_der(end_entity.as_ref()) else {
+            return Err(rustls::Error::General("mycelium: a mesh certificate must carry an Ed25519 identity key".into()));
+        };
+        if removed.is_key_removed(&key) {
             return Err(rustls::Error::General("mycelium: this identity has been removed from the mesh".into()));
         }
         Ok(())
@@ -736,11 +751,102 @@ mod key_extract_tests {
 
     #[test]
     fn returns_none_on_absent_or_truncated_pattern_without_panic() {
-        assert_eq!(ed25519_key_from_cert_der(&[0u8; 8]), None); // no SPKI prefix
-        // Prefix present but fewer than 32 key bytes follow → None, no panic (bounds-checked).
+        assert_eq!(ed25519_key_from_cert_der(&[0u8; 8]), None); // not a certificate
+        // The Ed25519 SPKI prefix with fewer than 32 key bytes after it — not a certificate either.
         let truncated = [0x06, 0x03, 0x2B, 0x65, 0x70, 0x03, 0x21, 0x00, 0x01, 0x02];
         assert_eq!(ed25519_key_from_cert_der(&truncated), None);
         assert_eq!(ed25519_key_from_cert_der(&[]), None);
+    }
+
+    /// `06 03 2B 65 70 03 21 00` — the Ed25519 SPKI prefix the byte-scan (pre-2.33.0) looked for.
+    const SPKI_PREFIX: [u8; 8] = [0x06, 0x03, 0x2B, 0x65, 0x70, 0x03, 0x21, 0x00];
+
+    /// A self-signed certificate for `key` (any algorithm rcgen signs with) whose **serial number**
+    /// is `planted` — bytes the issuer chooses freely, and which precede the real
+    /// `SubjectPublicKeyInfo` in the encoding.
+    fn cert_with_planted_serial(key: &KeyPair, planted: Vec<u8>) -> Vec<u8> {
+        let mut params = rcgen::CertificateParams::new(vec![]).unwrap();
+        params.subject_alt_names = vec![rcgen::SanType::IpAddress("127.0.0.1".parse().unwrap())];
+        params.not_before = rcgen::date_time_ymd(2024, 1, 1);
+        params.not_after = rcgen::date_time_ymd(2099, 1, 1);
+        params.serial_number = Some(rcgen::SerialNumber::from(planted));
+        params.self_signed(key).unwrap().der().to_vec()
+    }
+
+    fn rcgen_key(signing: &SigningKey) -> KeyPair {
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
+        KeyPair::try_from(signing.to_pkcs8_der().unwrap().as_bytes()).unwrap()
+    }
+
+    /// **The removal check reads the key the certificate is actually for** (post-360 plan row F).
+    ///
+    /// Before 2.33.0 `ed25519_key_from_cert_der` scanned the DER for the Ed25519 SPKI prefix and
+    /// returned the first 32 bytes after it — wherever in the certificate that was. A certificate
+    /// whose serial number carries `prefix ‖ V's key` reads as **V's**, whatever key it was issued
+    /// for. The removal check (`refuse_if_removed`) and the handshake anchor
+    /// (`GossipStream::peer_ed25519_key`) both read the key this way, so a member holding the CA key
+    /// — the default posture before `secure-single-domain` rev 2, where every node holds it — could
+    /// mint itself a certificate that anchors as another member and passes a removal of its own
+    /// key. Now the key is read from the `SubjectPublicKeyInfo`'s structural position by the X.509
+    /// parser rustls uses. Seen failing first: the planted key came back.
+    #[test]
+    fn a_planted_key_pattern_in_the_serial_does_not_fool_the_structural_read() {
+        let victim = SigningKey::from_bytes(&[7u8; 32]).verifying_key().to_bytes();
+        let attacker = SigningKey::from_bytes(&[9u8; 32]);
+        let mut planted = SPKI_PREFIX.to_vec();
+        planted.extend_from_slice(&victim);
+        let forgery = cert_with_planted_serial(&rcgen_key(&attacker), planted);
+        assert_eq!(
+            ed25519_key_from_cert_der(&forgery),
+            Some(attacker.verifying_key().to_bytes()),
+            "the key read from a certificate is the key it was issued for, not a pattern in its serial",
+        );
+    }
+
+    /// The same plant, through the check that matters: the attacker's own key is on the removal
+    /// ledger, and the decoy in the serial is a key that is not. Seen failing first: `Ok(())`.
+    #[test]
+    fn a_removed_member_hiding_its_key_behind_a_planted_pattern_is_still_refused() {
+        let attacker = SigningKey::from_bytes(&[11u8; 32]);
+        let decoy = SigningKey::from_bytes(&[12u8; 32]).verifying_key().to_bytes();
+        let mut planted = SPKI_PREFIX.to_vec();
+        planted.extend_from_slice(&decoy);
+        let forgery = cert_with_planted_serial(&rcgen_key(&attacker), planted);
+        let removed = crate::removal::RemovedSet::default();
+        removed.remove(&NodeId::new("127.0.0.1", 9001).unwrap(), [attacker.verifying_key().to_bytes()]);
+        let cert = rustls::pki_types::CertificateDer::from(forgery);
+        assert!(
+            super::imp::refuse_if_removed(&removed, &cert).is_err(),
+            "a removed member's certificate is refused whatever else its serial number says",
+        );
+    }
+
+    /// **A certificate with no Ed25519 key is refused by the removal check** (#611's review, finding 6).
+    /// Every node certificate this codebase issues or loads carries the node's Ed25519 identity key
+    /// (`generate_node_cert`, `issue_node_cert`; `key_pem` is read as an Ed25519 PKCS8 key), so a
+    /// certificate without one is not a member's — but the check skipped it, failing open: a CA-key
+    /// holder could mint a P-256 certificate and pass whatever the ledger said. Seen failing first:
+    /// `Ok(())`, with the ledger empty and with it non-empty.
+    #[test]
+    fn a_certificate_without_an_ed25519_key_is_refused_by_the_removal_check() {
+        let p256 = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let cert = rustls::pki_types::CertificateDer::from(cert_with_planted_serial(&p256, vec![1, 2, 3]));
+        let removed = crate::removal::RemovedSet::default();
+        assert!(super::imp::refuse_if_removed(&removed, &cert).is_err(), "no Ed25519 key, no member — ledger empty");
+        removed.remove(&NodeId::new("127.0.0.1", 9002).unwrap(), [[5u8; 32]]);
+        assert!(super::imp::refuse_if_removed(&removed, &cert).is_err(), "and with removals on the ledger");
+    }
+
+    /// A certificate for a key that is not Ed25519 has no Ed25519 key to read, even when the
+    /// pattern the scan looked for sits in its serial number. Seen failing first: the decoy came back.
+    #[test]
+    fn a_non_ed25519_certificate_has_no_ed25519_key_whatever_its_serial_carries() {
+        let decoy = SigningKey::from_bytes(&[13u8; 32]).verifying_key().to_bytes();
+        let mut planted = SPKI_PREFIX.to_vec();
+        planted.extend_from_slice(&decoy);
+        let p256 = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let cert = cert_with_planted_serial(&p256, planted);
+        assert_eq!(ed25519_key_from_cert_der(&cert), None);
     }
 }
 

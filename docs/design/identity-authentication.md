@@ -119,6 +119,12 @@ for the fixed Ed25519 SPKI (`06 03 2B 65 70 03 21 00 ‖ key[32]`) is therefore 
 round-trip test (`key_extract_tests::extracts_the_key_from_a_real_generated_cert`) that proves it
 against actual generated certs, plus a no-panic-on-malformed test.
 
+> **Amended (post-360 plan row F).** "The input is validated" covered the issuer, not the bytes: a node holding
+> the CA key (every node before `secure-single-domain` rev 2) chooses its certificate's serial number, names and
+> extensions, all of which precede the SPKI. A serial carrying `prefix ‖ V's key` read as V's key, at the handshake
+> anchor and at the removal check. The key is now read from the SPKI's structural position by the X.509 parser
+> rustls uses (`key_extract_tests::a_planted_key_pattern_in_the_serial_does_not_fool_the_structural_read`).
+
 **Phase 1b — the wiring (not yet done; more invasive than first estimated).** Implementation
 surfaced two constraints the first draft missed:
 - **Cross-crate direction.** The handshake completes inside `mycelium-core`'s `run_peer_writer`,
@@ -226,7 +232,9 @@ are operational choices to document, not code.
 ## 7. Code impact map
 
 - `mycelium-core/src/tls.rs` — extract Ed25519 key from a peer cert DER
-  (**done, 1a:** `ed25519_key_from_cert_der`, zero-dep length-checked SPKI scan; no parser dep).
+  (**done, 1a:** `ed25519_key_from_cert_der` — a length-checked SPKI scan until post-360 row F, which
+  replaced it with a structural read through `rustls-webpki`, already in the tree: the scan matched the
+  prefix anywhere in the DER, including a serial number the issuer chooses).
 - `mycelium-core/src/stream.rs` / `connection.rs` / `writer.rs` — surface the validated peer cert
   post-handshake to the connection setup so the key can be harvested.
 - `src/agent/context.rs` (`TaskCtx`) — an anchored-keys map (or a tag on `peer_keys`).

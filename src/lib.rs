@@ -492,6 +492,7 @@ pub mod fuzz_internals {
     /// secondary-index + live-count surfaces the decode-only targets never reach (audit 2026-07-15 sweep).
     pub fn wire_frame_apply(bytes: &[u8]) -> bool {
         match mycelium_core::codec::decode_wire(bytes) {
+            // signed-dispatch: allow (a match pattern in the fuzz harness)
             Ok(mycelium_core::framing::WireMessage::Data(upd)) => {
                 let kv  = mycelium_core::store::KvState::new(0);
                 let hlc = mycelium_core::hlc::Hlc::with_max_drift(0);

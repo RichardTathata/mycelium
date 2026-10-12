@@ -107,10 +107,29 @@ the caller owns the message's domain. **Mixed fleet, one release:** the bare for
 proposer's rounds complete; a 2.31 node cannot verify a tagged signature, so a 2.32 proposer times out at
 un-upgraded acceptors, and a 2.31 verifier counts every 2.32 peer's proof as an `identity_anchor_conflicts`
 hit, re-raised on every `sys/identity*` event, with the peer's handshake key still anchored
-(`docs/guide/deprecations.md` §23 has every direction). The counters count validations, not peers. The tagging
-covers the identity proof and the consensus payload only: KV `SignedData`, role claims and audit records are
-still untagged (`what-is-proven.md`). Tests: `a_signed_consensus_answer_is_not_an_identity_proof`,
-`an_acceptor_answers_in_the_signature_form_of_the_request`, seen failing first.
+(`docs/guide/deprecations.md` §23 has every direction). The counters count validations, not peers. Tests:
+`a_signed_consensus_answer_is_not_an_identity_proof`, seen failing first. **Closed by post-360 row F
+(unreleased after 2.32.0, §35):** the bare forms are refused, `SignatureForm`/`sign_payload_as` and both
+counters are gone, and an acceptor answers only a tagged request (`an_acceptor_answers_only_a_tagged_request`,
+`a_bare_identity_proof_is_refused_now_the_window_is_closed`). Row F also tags **KV `SignedData`**
+(`mycelium.kv/update/1`, `framing::kv_signing_message`; the bare 2.32 form accepted for one release, counted as
+`kv_untagged_signatures`), so only role claims, audit records and revocation events are still untagged
+(`what-is-proven.md`).
+
+**Row F's other two (2026-10-12).** Under `[tls]` an unsigned `Data` frame was applied — and the node itself sent
+twenty-four kinds of write unsigned (twenty-three in the agent; #611's review found the connection handler's
+quorum-evidence write in a file the first gate exempted whole) (membership, mailboxes, state machines, opacity, the gateway's routes, the
+soft-state advertiser), so a refusal would have dropped a fleet's own traffic. Every write site now goes through
+`framing::local_kv_wire_msg`, `scripts/check-signed-dispatch.sh` keeps a bare dispatch from returning, and
+`kv_require_signed_frames` refuses the frame (default off for one release: applied and counted as
+`kv_unsigned_frames_accepted`; plan row F2 flips it). The review's first finding was worse than the unsigned
+frame: a **signed** frame's `signer` was never bound to its `sender`, so a member's own valid signature carried a
+write attributed to anyone — now refused (`kv_signer_mismatch`). Anti-entropy is the stated residual — a
+`StateResponse` entry carries no author, so the opt-in refusal is bypassable there.
+And the certificate key: `tls::ed25519_key_from_cert_der` now reads the SPKI structurally (rustls-webpki), because
+the byte-scan's premise — "the cert is CA-validated" — covered the issuer, not the bytes; a node holding the CA key
+chooses its certificate's serial. **The lesson:** a safety argument of the form "the input is validated" has to
+say *by whom*, and whether the validator is the adversary.
 
 ## The identity-proof window, and a diagnosis that was wrong (2026-09-24)
 
@@ -426,9 +445,10 @@ states for descriptors: *the bundle decides which key, never the document.* `Par
 day. Two refusals, both meaning **nothing was sent**: `Tls(PinMismatch)` and `Tls(PlaintextEndpoint)`, and
 neither is a `DeliveryUnknown`, which would say *it may have run* and bar an at-most-once caller from retrying.
 **The lesson worth keeping** is where the SPKI comes from: `mycelium_core::tls::ed25519_key_from_cert_der`
-finds a key by **scanning the DER for the Ed25519 SPKI prefix**, which is sound *because its input is already
-CA-validated* — and that premise is exactly what is absent at a pinning verifier, whose input is whatever an
-attacker sent. A plant puts the victim's key bytes in an attacker-signed certificate's **serial number** (it
+found a key by **scanning the DER for the Ed25519 SPKI prefix**, argued sound *because its input is already
+CA-validated* — a premise absent at a pinning verifier, whose input is whatever an attacker sent, and (post-360
+row F found) false inside the mesh too, where a node holding the CA key mints the certificate; the core read is
+structural since. A plant puts the victim's key bytes in an attacker-signed certificate's **serial number** (it
 precedes the real SPKI in the encoding) and asserts the scan is fooled while the structural read is not. The
 same reasoning admits `ed25519_spki_sha256`, which *writes* the RFC 8410 encoding for an already-trusted key —
 the safe direction — gated by a test that it equals the structural read of a real certificate. Gate:

@@ -240,6 +240,7 @@ pub fn shard_for_key(key: &str, n_shards: usize) -> usize {
 /// Extracts the gossip shard routing key from a wire message.
 fn wire_msg_key(msg: &WireMessage) -> &str {
     match msg {
+        // signed-dispatch: allow (a match pattern, not a construction)
         WireMessage::Data(u)                    => &u.key,
         WireMessage::SignedData { update, .. }  => &update.key,
         WireMessage::Signal { kind, .. }        => kind,
@@ -506,15 +507,39 @@ pub fn canonical_sign_bytes(u: &GossipUpdate) -> Vec<u8> {
     crate::codec::canonical_update_bytes(u)
 }
 
+/// The domain tag of a KV `SignedData` signature (post-360 plan row F, 2.33.0): the signed message
+/// is `mycelium.kv/update/1 ‖ u32 len ‖ canonical` ([`kv_signing_message`]), beside the identity
+/// proof's `mycelium.identity/proof/1`, the consensus payload's `mycelium.consensus/msg/1` and the
+/// mandate's `mycelium.mandate/possession/1`, so a signature a node makes for one purpose is not a
+/// signature for another. The frame is unchanged (wire v12): `SignedData` carries the same bytes;
+/// only the message under the signature gains the prefix.
+pub const KV_UPDATE_DOMAIN: &[u8] = b"mycelium.kv/update/1";
+
+/// The message a KV `SignedData` signature is made and verified over: [`KV_UPDATE_DOMAIN`], then the
+/// canonical bytes' length as a little-endian `u32`, then the canonical bytes
+/// ([`canonical_sign_bytes`]). Same shape as `helpers::identity_proof_message` and
+/// `consensus::consensus_signing_message`.
+#[cfg_attr(not(feature = "tls"), allow(dead_code))]
+pub fn kv_signing_message(canonical: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(KV_UPDATE_DOMAIN.len() + 4 + canonical.len());
+    out.extend_from_slice(KV_UPDATE_DOMAIN);
+    out.extend_from_slice(&(canonical.len() as u32).to_le_bytes());
+    out.extend_from_slice(canonical);
+    out
+}
+
 /// Wraps `update` in the appropriate `WireMessage` variant for local-origination dispatch.
 ///
 /// When `tls` is `Some` (i.e. the `tls` feature is enabled and TLS is configured),
-/// signs the hop-invariant fields with the node's Ed25519 key and returns
+/// signs the hop-invariant fields with the node's Ed25519 key — over
+/// [`kv_signing_message`] of the canonical bytes, domain-tagged since 2.33.0 — and returns
 /// `WireMessage::SignedData`. Otherwise returns `WireMessage::Data`.
 ///
-/// Used by `dispatch_update`, `dispatch_update_async`, and the consensus engine's
-/// KV write helpers so signing is applied consistently at every locally-originated
-/// write site.
+/// Every locally-originated KV write goes through here (or [`local_kv_wire_msg`], which reads the
+/// identity off the context): `ops.rs`, the consensus engine's KV write helpers, and the agent's
+/// own writers (membership, mailboxes, state machines, opacity, the gateway's routes, the soft-state
+/// advertiser). `scripts/check-signed-dispatch.sh` keeps a bare `WireMessage::Data(` from
+/// reappearing at a write site, because a TLS node that requires signed frames would drop it.
 pub fn make_kv_wire_msg(
     update:      GossipUpdate,
     sender_hash: u64,
@@ -523,13 +548,21 @@ pub fn make_kv_wire_msg(
     #[cfg(feature = "tls")]
     if let Some(t) = tls {
         let canonical  = canonical_sign_bytes(&update);
-        let sig_bytes  = crate::tls::sign_bytes(&t.signing_key(), &canonical);
+        let sig_bytes  = crate::tls::sign_bytes(&t.signing_key(), &kv_signing_message(&canonical));
         let sig_lo: [u8; 32] = sig_bytes[..32].try_into().expect("signature is 64 bytes");
         let sig_hi: [u8; 32] = sig_bytes[32..].try_into().expect("signature is 64 bytes");
         return WireMessage::SignedData { update, signer: sender_hash, signature: (sig_lo, sig_hi) };
     }
     let _ = (sender_hash, tls);
+    // signed-dispatch: allow (the plaintext arm — no identity to sign with)
     WireMessage::Data(update)
+}
+
+/// [`make_kv_wire_msg`] for a write this node originates, with the identity read off `ctx`: signed
+/// when the node has one (`CoreCtx::tls`), a bare `Data` frame otherwise.
+pub fn local_kv_wire_msg(ctx: &crate::context::CoreCtx, update: GossipUpdate) -> WireMessage {
+    let tls = ctx.tls.get().map(Arc::as_ref);
+    make_kv_wire_msg(update, ctx.node_id.id_hash(), tls)
 }
 
 /// Projects the persistence-relevant fields from a [`GossipUpdate`] into a
@@ -788,6 +821,47 @@ mod tests {
         );
     }
 
+
+    /// **A KV signature is over the tagged message, not the bare canonical bytes** (post-360 plan
+    /// row F). Before 2.33.0 `make_kv_wire_msg` signed `canonical_sign_bytes` as they were, so a
+    /// signature the node made for any other purpose over bytes that parse as an update — or a KV
+    /// signature presented elsewhere — read as the other. Seen failing first: the signature
+    /// verified over the bare bytes and not over the tagged message.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn a_kv_signature_is_over_the_tagged_message_not_the_bare_bytes() {
+        let dir = std::env::temp_dir().join(format!("myc-kv-tag-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let node = crate::node_id::NodeId::new("127.0.0.1", 9301).unwrap();
+        let cfg = crate::config::TlsConfig { auto_cert_dir: dir.clone(), ..Default::default() };
+        let tls = crate::tls::load_or_generate(&cfg, &node, Arc::new(crate::removal::RemovedSet::default())).unwrap();
+        let vk = tls.verifying_key_bytes();
+        let u = GossipUpdate {
+            nonce: 7, sender: node.id_hash(), ttl: 3, is_tombstone: false,
+            timestamp: 1234, key: Arc::from("tagged/k"), value: Bytes::from_static(b"v"),
+        };
+        let canonical = canonical_sign_bytes(&u);
+        let WireMessage::SignedData { update, signer, signature: (lo, hi) } = make_kv_wire_msg(u.clone(), node.id_hash(), Some(&tls))
+            else { panic!("a tls node signs its writes") };
+        assert_eq!(signer, node.id_hash());
+        assert_eq!(update.key.as_ref(), "tagged/k");
+        let mut sig = [0u8; 64];
+        sig[..32].copy_from_slice(&lo);
+        sig[32..].copy_from_slice(&hi);
+        assert!(crate::tls::verify_bytes(&vk, &kv_signing_message(&canonical), &sig), "signed over the tagged message");
+        assert!(!crate::tls::verify_bytes(&vk, &canonical, &sig), "and not over the bare canonical bytes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The tagged message is the tag, the length, the bytes — pinned so the shape cannot drift from
+    /// the identity proof's and the consensus payload's.
+    #[test]
+    fn kv_signing_message_is_the_tag_then_the_length_then_the_bytes() {
+        let m = kv_signing_message(b"abc");
+        assert_eq!(&m[..20], b"mycelium.kv/update/1");
+        assert_eq!(&m[20..24], &3u32.to_le_bytes());
+        assert_eq!(&m[24..], b"abc");
+    }
 
     #[test]
     fn make_kv_wire_msg_no_tls_returns_data() {

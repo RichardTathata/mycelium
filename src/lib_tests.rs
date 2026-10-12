@@ -85,6 +85,30 @@ fn spawn_handler(
     seen: Arc<ShardedSeen>,
     max_ttl: u8,
 ) -> (Arc<watch::Sender<bool>>, tokio::task::JoinHandle<Result<(), GossipError>>) {
+    spawn_handler_with(socket, store, peers, gossip_tx, seen, max_ttl, HandlerOpts::default())
+}
+
+/// What a connection handler under test is configured with, beyond the defaults: the node's
+/// `GossipConfig`, its TLS identity (a node with one is "a TLS node" to the handler — the stream
+/// itself can stay plaintext, the handler does not look), and the peer keys it already knows.
+#[derive(Default)]
+struct HandlerOpts {
+    config:    GossipConfig,
+    tls:       Option<Arc<crate::tls::NodeTls>>,
+    peer_keys: Vec<(NodeId, Vec<[u8; 32]>)>,
+    /// The handler's per-node counters, shared so a test can read them.
+    bounds:    Arc<mycelium_core::bounds::TransportBounds>,
+}
+
+fn spawn_handler_with(
+    socket: TcpStream,
+    store: Arc<papaya::HashMap<Arc<str>, StoreEntry>>,
+    peers: Arc<papaya::HashMap<NodeId, Instant>>,
+    gossip_tx: mpsc::Sender<(Bytes, u64, crate::framing::ForwardHint)>,
+    seen: Arc<ShardedSeen>,
+    max_ttl: u8,
+    opts: HandlerOpts,
+) -> (Arc<watch::Sender<bool>>, tokio::task::JoinHandle<Result<(), GossipError>>) {
     use crate::connection::handle_connection;
     use crate::signal::{Boundary, SignalHandlers};
     use crate::agent::{TaskCtx, BulkTransport};
@@ -136,9 +160,13 @@ fn spawn_handler(
         kv_state,
         wal: std::sync::OnceLock::new(),
         sys_namespace_violations: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        transport_bounds: Arc::default(),
-        tls: std::sync::OnceLock::new(),
-        peer_keys: Arc::new(papaya::HashMap::new()),
+        transport_bounds: Arc::clone(&opts.bounds),
+        tls: {
+            let cell = std::sync::OnceLock::new();
+            if let Some(t) = opts.tls { let _ = cell.set(t); }
+            cell
+        },
+        peer_keys: Arc::new(opts.peer_keys.into_iter().collect()),
         peer_anchor_keys: Arc::new(papaya::HashMap::new()),
         removed: Arc::new(mycelium_core::removal::RemovedSet::default()),
         identity_anchor_conflicts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -149,8 +177,8 @@ fn spawn_handler(
         soft_state_advertised: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         shutdown_tx: Arc::new(shutdown_tx_inner),
         task_handles: Arc::new(std::sync::Mutex::new(tokio::task::JoinSet::new())),
-        config: Arc::new(crate::config::GossipConfig::default()),
-        hot: Arc::new(mycelium_core::context::HotConfig::from_config(&crate::config::GossipConfig::default())),
+        hot: Arc::new(mycelium_core::context::HotConfig::from_config(&opts.config)),
+        config: Arc::new(opts.config),
     });
     let task_ctx = Arc::new(TaskCtx {
         #[cfg(feature = "consensus")]
@@ -996,6 +1024,633 @@ async fn test_upsert_propagates() {
 
     let s = Arc::clone(&store);
     poll_until(|| s.pin().get("k").and_then(|e| e.data.clone()) == Some(Bytes::from_static(b"v")), 200).await;
+}
+
+// ── KV `SignedData` is domain-tagged (post-360 plan row F) ─────────────────────
+
+/// A TLS identity for a handler test, generated into its own directory.
+#[cfg(feature = "tls")]
+fn test_tls_identity(tag: &str, node: &NodeId) -> (Arc<crate::tls::NodeTls>, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("myc-{tag}-{}-{}", node.to_socket_addr().port(), std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let cfg = crate::config::TlsConfig { auto_cert_dir: dir.clone(), ..Default::default() };
+    let tls = crate::tls::load_or_generate(&cfg, node, Arc::new(mycelium_core::removal::RemovedSet::default())).unwrap();
+    (Arc::new(tls), dir)
+}
+
+/// A `SignedData` frame for `update`, signed by `sk` over `message` — whatever message the test
+/// wants the signature to be over.
+#[cfg(feature = "tls")]
+fn signed_data_over(update: GossipUpdate, signer: u64, sk: &ed25519_dalek::SigningKey, message: &[u8]) -> WireMessage {
+    let sig = crate::tls::sign_bytes(sk, message);
+    let lo: [u8; 32] = sig[..32].try_into().unwrap();
+    let hi: [u8; 32] = sig[32..].try_into().unwrap();
+    WireMessage::SignedData { update, signer, signature: (lo, hi) }
+}
+
+/// **A signature over the tagged message is accepted at the connection** (post-360 plan row F).
+/// Seen failing first: the 2.32 verifier checked the bare canonical bytes only, so the tagged
+/// frame was dropped as a bad signature and the key never applied.
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn a_tagged_kv_signature_is_accepted_at_the_connection() {
+    use ed25519_dalek::SigningKey;
+    let (mut writer, reader) = loopback_pair().await;
+    let store: Arc<papaya::HashMap<Arc<str>, StoreEntry>> = Arc::new(papaya::HashMap::new());
+    let (tx, _rx) = mpsc::channel(10);
+    let peer = NodeId::new("127.0.0.1", 7301).unwrap();
+    let sk = SigningKey::from_bytes(&[71u8; 32]);
+    let opts = HandlerOpts { peer_keys: vec![(peer.clone(), vec![sk.verifying_key().to_bytes()])], ..Default::default() };
+    let _ = spawn_handler_with(reader, Arc::clone(&store), Arc::new(papaya::HashMap::new()), tx,
+                               Arc::new(ShardedSeen::new(N_GOSSIP_SHARDS)), GossipConfig::default().default_ttl, opts);
+
+    let mut u = data_update("tagged/k", b"v", 7301, false);
+    u.sender = peer.id_hash();
+    let canonical = crate::framing::canonical_sign_bytes(&u);
+    send_wire(&mut writer, &signed_data_over(u, peer.id_hash(), &sk, &crate::framing::kv_signing_message(&canonical))).await;
+
+    let s = Arc::clone(&store);
+    poll_until(|| s.pin().get("tagged/k").and_then(|e| e.data.clone()) == Some(Bytes::from_static(b"v")), 500).await;
+}
+
+/// **A signature under another domain's tag is not a KV signature.** The point of the tag: a
+/// consensus payload signed by this node over bytes that happen to be an update cannot be replayed
+/// as a KV write. Dropped, and not counted as the 2.32 form either.
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn a_signature_under_another_tag_is_not_a_kv_signature() {
+    use ed25519_dalek::SigningKey;
+    let (mut writer, reader) = loopback_pair().await;
+    let store: Arc<papaya::HashMap<Arc<str>, StoreEntry>> = Arc::new(papaya::HashMap::new());
+    let (tx, _rx) = mpsc::channel(10);
+    let peer = NodeId::new("127.0.0.1", 7302).unwrap();
+    let sk = SigningKey::from_bytes(&[72u8; 32]);
+    let opts = HandlerOpts { peer_keys: vec![(peer.clone(), vec![sk.verifying_key().to_bytes()])], ..Default::default() };
+    let _ = spawn_handler_with(reader, Arc::clone(&store), Arc::new(papaya::HashMap::new()), tx,
+                               Arc::new(ShardedSeen::new(N_GOSSIP_SHARDS)), GossipConfig::default().default_ttl, opts);
+
+    let mut u = data_update("other-tag/k", b"v", 7302, false);
+    u.sender = peer.id_hash();
+    let canonical = crate::framing::canonical_sign_bytes(&u);
+    let mut as_consensus = b"mycelium.consensus/msg/1".to_vec();
+    as_consensus.extend_from_slice(&(canonical.len() as u32).to_le_bytes());
+    as_consensus.extend_from_slice(&canonical);
+    send_wire(&mut writer, &signed_data_over(u, peer.id_hash(), &sk, &as_consensus)).await;
+    // A control frame behind it, so "absent" means dropped rather than not yet read.
+    let mut probe = data_update("other-tag/probe", b"p", 7303, false);
+    probe.sender = peer.id_hash();
+    let probe_canonical = crate::framing::canonical_sign_bytes(&probe);
+    send_wire(&mut writer, &signed_data_over(probe, peer.id_hash(), &sk, &crate::framing::kv_signing_message(&probe_canonical))).await;
+
+    let s = Arc::clone(&store);
+    poll_until(|| s.pin().get("other-tag/probe").is_some(), 500).await;
+    assert!(store.pin().get("other-tag/k").is_none(), "a consensus-tagged signature is not a KV signature");
+}
+
+/// **A TLS node that requires signed frames refuses an unsigned `Data` frame** (post-360 plan row
+/// F). Before 2.33.0 the `Data` arm of the connection handler applied a frame whatever the node's
+/// posture, so under `[tls]` a member could write any key under any other member's `sender` hash by
+/// not signing. Seen failing first: the unsigned key was applied.
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn a_tls_node_requiring_signed_frames_refuses_an_unsigned_data_frame() {
+    use ed25519_dalek::SigningKey;
+    let (mut writer, reader) = loopback_pair().await;
+    let store: Arc<papaya::HashMap<Arc<str>, StoreEntry>> = Arc::new(papaya::HashMap::new());
+    let (tx, _rx) = mpsc::channel(10);
+    let me = NodeId::new("127.0.0.1", 7311).unwrap();
+    let peer = NodeId::new("127.0.0.1", 7312).unwrap();
+    let (tls, dir) = test_tls_identity("unsigned-refused", &me);
+    let sk = SigningKey::from_bytes(&[73u8; 32]);
+    let mut config = GossipConfig::default();
+    config.kv_require_signed_frames = true;
+    let opts = HandlerOpts { config, tls: Some(tls), peer_keys: vec![(peer.clone(), vec![sk.verifying_key().to_bytes()])], ..Default::default() };
+    let bounds = Arc::clone(&opts.bounds);
+    let _ = spawn_handler_with(reader, Arc::clone(&store), Arc::new(papaya::HashMap::new()), tx,
+                               Arc::new(ShardedSeen::new(N_GOSSIP_SHARDS)), GossipConfig::default().default_ttl, opts);
+
+    let mut forged = data_update("unsigned/k", b"forged", 7311, false);
+    forged.sender = peer.id_hash();
+    send_wire(&mut writer, &WireMessage::Data(forged)).await;
+    // A signed control frame behind it, so "absent" means refused rather than not yet read.
+    let mut probe = data_update("unsigned/probe", b"p", 7312, false);
+    probe.sender = peer.id_hash();
+    let canonical = crate::framing::canonical_sign_bytes(&probe);
+    send_wire(&mut writer, &signed_data_over(probe, peer.id_hash(), &sk, &crate::framing::kv_signing_message(&canonical))).await;
+
+    let s = Arc::clone(&store);
+    poll_until(|| s.pin().get("unsigned/probe").is_some(), 500).await;
+    assert!(store.pin().get("unsigned/k").is_none(), "an unsigned write is not applied by a node that requires signatures");
+    assert_eq!(bounds.kv_unsigned_refused.load(Ordering::Relaxed), 1, "and the refusal is counted");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A sealed identity record (`version ‖ history ‖ signer ‖ sig`) for `sk`'s key, signed by `signer`.
+#[cfg(feature = "tls")]
+fn sealed_record(history_keys: &[[u8; 32]], signer: &ed25519_dalek::SigningKey) -> Vec<u8> {
+    use ed25519_dalek::Signer;
+    let history: Vec<u8> = history_keys.iter().flatten().copied().collect();
+    let sig = signer.sign(&crate::agent::helpers::identity_proof_message(&history)).to_bytes();
+    let proof = crate::agent::helpers::encode_identity_proof(&signer.verifying_key().to_bytes(), &sig);
+    crate::agent::helpers::encode_sealed_identity(&history, &proof)
+}
+
+/// **Only a self-authenticating sealed identity record is exempt from the unsigned-frame refusal**
+/// (#611's second review). The first cut exempted any `sys/identity{,-proof,-signed}/{n}` frame whose
+/// `sender` was `n` — and `sender` is whatever the frame's writer puts there, so a member could garble
+/// a victim's sealed record and proof, publish the victim's bare identity as its own key, or tombstone
+/// it, all unsigned and all exempt. Now the exemption is the sealed record alone, not a tombstone,
+/// whose proof verifies under a key in its own history and — when this node already holds keys for
+/// `n` — under one of those. Everything else in the family is refused like any unsigned frame, and
+/// the exempt frames are counted. Seen failing first: garbage in the sealed slot, a bare identity, a
+/// proof alone and a tombstone were all applied.
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn only_a_self_authenticating_sealed_identity_is_exempt_from_the_refusal() {
+    use ed25519_dalek::SigningKey;
+    let (mut writer, reader) = loopback_pair().await;
+    let store: Arc<papaya::HashMap<Arc<str>, StoreEntry>> = Arc::new(papaya::HashMap::new());
+    let (tx, _rx) = mpsc::channel(32);
+    let me = NodeId::new("127.0.0.1", 7341).unwrap();
+    let fresh = NodeId::new("127.0.0.1", 7342).unwrap();   // a node this receiver has never seen
+    let known = NodeId::new("127.0.0.1", 7343).unwrap();   // a node whose key this receiver holds
+    let fresh_sk = SigningKey::from_bytes(&[77u8; 32]);
+    let known_sk = SigningKey::from_bytes(&[78u8; 32]);
+    let other_sk = SigningKey::from_bytes(&[79u8; 32]);
+    let (tls, dir) = test_tls_identity("identity-exempt", &me);
+    let mut config = GossipConfig::default();
+    config.kv_require_signed_frames = true;
+    let opts = HandlerOpts { config, tls: Some(tls), peer_keys: vec![(known.clone(), vec![known_sk.verifying_key().to_bytes()])], ..Default::default() };
+    let bounds = Arc::clone(&opts.bounds);
+    let _ = spawn_handler_with(reader, Arc::clone(&store), Arc::new(papaya::HashMap::new()), tx,
+                               Arc::new(ShardedSeen::new(N_GOSSIP_SHARDS)), GossipConfig::default().default_ttl, opts);
+    let mut nonce = 7400u64;
+    let mut send = |key: String, value: Vec<u8>, tomb: bool, sender: &NodeId| {
+        nonce += 1;
+        let mut u = data_update(&key, &value, nonce, tomb);
+        u.sender = sender.id_hash();
+        u.timestamp = nonce; // later frames win LWW
+        WireMessage::Data(u)
+    };
+    let refused: Vec<String> = vec![
+        format!("sys/identity-signed/{fresh}"),   // garbage in the sealed slot
+        format!("sys/identity/{known}"),          // a bare identity
+        format!("sys/identity-proof/{known}"),    // a proof alone
+        format!("sys/identity-signed/{known}"),   // a tombstone
+        format!("sys/identity-signed/{known}"),   // valid in itself, but signed by a key `known` does not hold here
+    ];
+    let msgs = vec![
+        send(refused[0].clone(), b"garbage".to_vec(), false, &fresh),
+        send(refused[1].clone(), other_sk.verifying_key().to_bytes().to_vec(), false, &known),
+        send(refused[2].clone(), vec![0u8; 96], false, &known),
+        send(refused[3].clone(), Vec::new(), true, &known),
+        send(refused[4].clone(), sealed_record(&[other_sk.verifying_key().to_bytes()], &other_sk), false, &known),
+    ];
+    for m in &msgs { send_wire(&mut writer, m).await; }
+    // Exempt: a first-contact sealed record that proves itself, and a rotation for `known` that chains to its held key.
+    let first_contact = format!("sys/identity-signed/{fresh}");
+    let first = send(first_contact.clone(), sealed_record(&[fresh_sk.verifying_key().to_bytes()], &fresh_sk), false, &fresh);
+    let rotation_key = format!("sys/identity-signed/{known}");
+    let rot = send(rotation_key.clone(),
+        sealed_record(&[other_sk.verifying_key().to_bytes(), known_sk.verifying_key().to_bytes()], &known_sk), false, &known);
+    send_wire(&mut writer, &first).await;
+    send_wire(&mut writer, &rot).await;
+    let s = Arc::clone(&store);
+    poll_until(|| s.pin().get(first_contact.as_str()).is_some_and(|e| e.data.is_some())
+        && s.pin().get(rotation_key.as_str()).is_some_and(|e| e.data.is_some()), 1000).await;
+    for k in &refused[1..3] {
+        assert!(store.pin().get(k.as_str()).is_none(), "{k}: not a self-authenticating sealed record, refused");
+    }
+    assert_eq!(bounds.kv_unsigned_refused.load(Ordering::Relaxed), 5, "garbage, bare, proof, tombstone and the unchained record");
+    assert_eq!(bounds.kv_identity_exempt.load(Ordering::Relaxed), 2, "and the two exempt frames are counted");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Three TLS nodes requiring signed frames, B and C each bootstrapped to A, anti-entropy a minute away.
+/// Returns once B holds C's key — **first contact** between B and C rests on what reaches B by gossip.
+#[cfg(feature = "tls")]
+async fn three_signed_nodes(tag: &str, proofs: bool) -> (GossipAgent, GossipAgent, GossipAgent, NodeId, NodeId, std::path::PathBuf) {
+    use crate::config::TlsConfig;
+    let ports = (alloc_port(), alloc_port(), alloc_port());
+    let (na, nb, nc) = (NodeId::new("127.0.0.1", ports.0).unwrap(), NodeId::new("127.0.0.1", ports.1).unwrap(), NodeId::new("127.0.0.1", ports.2).unwrap());
+    let cert_dir = std::env::temp_dir().join(format!("myc-{tag}-{}", ports.0));
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    let mk = |node: &NodeId, boots: Vec<NodeId>| {
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = node.to_socket_addr().port();
+        cfg.bootstrap_peers = boots;
+        cfg.reconnect_backoff_secs = 1;
+        cfg.health_check_interval_secs = 60;
+        cfg.kv_require_signed_frames = true;
+        cfg.require_identity_proofs = proofs;
+        cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+        GossipAgent::new(node.clone(), cfg)
+    };
+    let a = mk(&na, vec![]);
+    let b = mk(&nb, vec![na.clone()]);
+    let c = mk(&nc, vec![na.clone()]);
+    a.start().await.unwrap(); b.start().await.unwrap(); c.start().await.unwrap();
+    let knows = |x: &GossipAgent, n: &NodeId| x.task_ctx.peer_keys.pin().get(n).is_some_and(|k| !k.is_empty());
+    for _ in 0..600 {
+        if knows(&b, &nc) && knows(&b, &na) && knows(&c, &nb) && knows(&a, &nc) && !b.peers().is_empty() && !c.peers().is_empty() { break; }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(knows(&b, &nc) && knows(&c, &nb), "first contact: B and C never learned each other's key");
+    (a, b, c, nb, nc, cert_dir)
+}
+
+/// A frame A forges in C's name: unsigned, `sender` = C.
+#[cfg(feature = "tls")]
+fn forge_unsigned_as(a: &GossipAgent, victim: &NodeId, key: String, value: Bytes, tomb: bool) {
+    let mut u = crate::framing::make_gossip_update(&a.node_id, a.task_ctx.default_ttl, Arc::from(key.as_str()), value, tomb, &a.task_ctx.hlc);
+    u.sender = victim.id_hash();
+    crate::framing::dispatch_gossip_try_send(&a.task_ctx.gossip_txs, crate::framing::WireMessage::Data(u), a.node_id.id_hash(),
+        crate::framing::ForwardHint::All, &a.task_ctx.kv_state.dropped_frames);
+}
+
+/// **The reviewer's impersonation, lifted** (#611's second review). With proofs off, A garbled C's
+/// sealed record and proof and published C's bare identity as A's own key — all unsigned with
+/// `sender` = C, all exempt — so B merged A's key into C's set, and A's write signed as C landed.
+/// Seen failing first on 59d86368: "IMPERSONATION: A wrote as C at a node requiring signed frames".
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn an_unsigned_identity_forgery_cannot_make_a_member_sign_as_another() {
+    let (a, b, c, _nb, nc, dir) = three_signed_nodes("forge-imp", false).await;
+    let a_vk = a.task_ctx.tls.get().unwrap().signing_key().verifying_key().to_bytes();
+    forge_unsigned_as(&a, &nc, format!("sys/identity-signed/{nc}"), Bytes::from_static(b"x"), false);
+    forge_unsigned_as(&a, &nc, format!("sys/identity-proof/{nc}"), Bytes::from_static(b"x"), false);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    forge_unsigned_as(&a, &nc, format!("sys/identity/{nc}"), Bytes::copy_from_slice(&a_vk), false);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!b.task_ctx.peer_keys.pin().get(&nc).is_some_and(|k| k.contains(&a_vk)), "A's key did not enter C's set at B");
+    let mut u = crate::framing::make_gossip_update(&a.node_id, a.task_ctx.default_ttl, Arc::from("forged/as-c"), Bytes::from_static(b"by-A"), false, &a.task_ctx.hlc);
+    u.sender = nc.id_hash();
+    let msg = crate::framing::make_kv_wire_msg(u, nc.id_hash(), a.task_ctx.tls.get().map(Arc::as_ref));
+    crate::framing::dispatch_gossip_try_send(&a.task_ctx.gossip_txs, msg, a.node_id.id_hash(),
+        crate::framing::ForwardHint::All, &a.task_ctx.kv_state.dropped_frames);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let landed = b.kv().get("forged/as-c").is_some();
+    a.shutdown().await; b.shutdown().await; c.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!landed, "IMPERSONATION: A wrote as C at a node requiring signed frames");
+}
+
+/// **The reviewer's silencing, lifted, in both postures** (#611's second review, and the watcher's
+/// own pre-existing rule): one tombstone of `sys/identity/{C}` — unsigned and exempt under the first
+/// cut, or signed by any member as itself — made B's identity watcher drop C's keys, after which C's
+/// signed writes were dropped at B as from an unknown signer. A tombstone no longer removes keys: they
+/// leave only by membership removal or a verified rotation. Seen failing first on 59d86368: "DOS: an
+/// unsigned forged tombstone erased C's key at B", with proofs off and with proofs on.
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn an_identity_tombstone_does_not_erase_a_members_keys() {
+    for proofs in [false, true] {
+        let (a, b, c, _nb, nc, dir) = three_signed_nodes(if proofs { "forge-tomb-p" } else { "forge-tomb" }, proofs).await;
+        forge_unsigned_as(&a, &nc, format!("sys/identity/{nc}"), Bytes::new(), true);
+        // And the same tombstone signed by A as itself — a member's own write, signer == sender.
+        assert!(a.kv().delete(format!("sys/identity/{nc}")));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let forgotten = b.task_ctx.peer_keys.pin().get(&nc).is_none_or(|k| k.is_empty());
+        let _ = c.kv().set("after/c", b"v".to_vec());
+        let mut arrived = false;
+        for _ in 0..120 {
+            if b.kv().get("after/c").is_some() { arrived = true; break; }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        a.shutdown().await; b.shutdown().await; c.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!forgotten, "proofs={proofs} DOS: an identity tombstone erased C's key at B");
+        assert!(arrived, "proofs={proofs}: and C's later signed write reached B by gossip");
+    }
+}
+
+/// **A replayed, superseded sealed record is not exempt** (#611's third review, N4, lifted from the
+/// reviewer's `review_replay_old_sealed_record_after_rotation`). C's genuine pre-rotation sealed record
+/// still proves itself — its signer is in its history and B still holds that key — so a member that
+/// kept a copy could replay it unsigned with a fresh timestamp and replace C's current record at B; a
+/// node joining later would then read the pre-rotation history. A node's history only grows, so an
+/// exempt record must now contain every key the receiver already holds or has stored for that node;
+/// one that does not is refused and counted (`kv_identity_stale_refused`). Seen failing first on
+/// 884f310f: "REPLAY: a genuine pre-rotation sealed record, replayed unsigned with a fresh timestamp,
+/// replaced C's current one".
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn a_replayed_pre_rotation_sealed_record_does_not_replace_the_current_one() {
+    let (a, b, c, _nb, nc, dir) = three_signed_nodes("replay-sealed", false).await;
+    let sealed_key = format!("sys/identity-signed/{nc}");
+    let mut old = None;
+    for _ in 0..200 { if let Some(v) = a.kv().get(&sealed_key) { old = Some(v); break; } tokio::time::sleep(Duration::from_millis(25)).await; }
+    let old = old.expect("A holds C's sealed record");
+    let k1 = c.rotate_identity(Duration::from_millis(500)).await.unwrap();
+    for _ in 0..200 {
+        if b.task_ctx.peer_keys.pin().get(&nc).is_some_and(|k| k.contains(&k1)) && b.kv().get(&sealed_key) != Some(old.clone()) { break; }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(b.task_ctx.peer_keys.pin().get(&nc).is_some_and(|k| k.contains(&k1)), "B learned C's rotated key");
+    forge_unsigned_as(&a, &nc, sealed_key.clone(), old.clone(), false);
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let b_holds_old = b.kv().get(&sealed_key) == Some(old.clone());
+    let stale = b.task_ctx.transport_bounds.kv_identity_stale_refused.load(Ordering::Relaxed);
+    a.shutdown().await; b.shutdown().await; c.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!b_holds_old, "REPLAY: a genuine pre-rotation sealed record, replayed unsigned with a fresh timestamp, replaced C's current one");
+    assert!(stale >= 1, "and the refusal is counted");
+}
+
+/// **A capability retracted as its node shuts down reaches the peers** (#611, found by CI's co-op
+/// demo 04). A capability's soft-state task tombstones its key when the handle drops; a node that
+/// drops the handle and shuts down at once (a provider killed mid-run) raced the shutdown signal, and
+/// since row F signs that tombstone — slow enough in a debug build to lose the race — the writers had
+/// stopped before it was queued, so peers kept the dead provider's capability until its TTL and routed
+/// RPCs to it. Graceful shutdown now waits, bounded, for retractions already queued to reach the
+/// writers before it stops them. Seen failing first: B still resolved A's capability.
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn a_capability_retracted_at_shutdown_reaches_the_peers() {
+    use crate::capability::{CapFilter, Capability};
+    let (a, b, node_a, _node_b, cert_dir) = signed_fleet_pair("retract-at-shutdown", None).await;
+    let reg = a.capabilities().advertise_capability(Capability::new("route", "retract"), Duration::from_secs(30));
+    let resolves_a = || b.capabilities().resolve(&CapFilter::new("route", "retract")).iter().any(|(n, _)| *n == node_a);
+    for _ in 0..200 { if resolves_a() { break; } tokio::time::sleep(Duration::from_millis(25)).await; }
+    assert!(resolves_a(), "B saw A's capability");
+    drop(reg);
+    a.shutdown().await;
+    let mut gone = false;
+    for _ in 0..80 { if !resolves_a() { gone = true; break; } tokio::time::sleep(Duration::from_millis(25)).await; }
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    assert!(gone, "B still resolves the capability A retracted as it shut down");
+}
+
+/// **The window: by default a TLS node still applies an unsigned frame, and counts it**, so a 2.32
+/// peer's agent writes (which it sends unsigned) keep arriving while the fleet upgrades. A node
+/// with no TLS identity has nothing to count — the plaintext posture is unchanged.
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn an_unsigned_data_frame_is_applied_and_counted_during_the_window() {
+    let (mut writer, reader) = loopback_pair().await;
+    let store: Arc<papaya::HashMap<Arc<str>, StoreEntry>> = Arc::new(papaya::HashMap::new());
+    let (tx, _rx) = mpsc::channel(10);
+    let me = NodeId::new("127.0.0.1", 7313).unwrap();
+    let (tls, dir) = test_tls_identity("unsigned-window", &me);
+    let opts = HandlerOpts { tls: Some(tls), ..Default::default() };
+    let bounds = Arc::clone(&opts.bounds);
+    let _ = spawn_handler_with(reader, Arc::clone(&store), Arc::new(papaya::HashMap::new()), tx,
+                               Arc::new(ShardedSeen::new(N_GOSSIP_SHARDS)), GossipConfig::default().default_ttl, opts);
+    send_wire(&mut writer, &WireMessage::Data(data_update("window/k", b"v", 7313, false))).await;
+    let s = Arc::clone(&store);
+    poll_until(|| s.pin().get("window/k").is_some(), 500).await;
+    assert_eq!(bounds.kv_unsigned_accepted.load(Ordering::Relaxed), 1, "accepted, and counted");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A `SignedData` frame's signer must be its sender** (#611's review, finding 1). The arm verified
+/// the signature against `signer`'s key and applied the update as `update.sender`'s, so a member M could
+/// sign with its own key a write naming V as its originator — including V's own `sys/` keys — and it
+/// verified. Seen failing first: both of M's writes were applied.
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn a_signed_frame_whose_signer_is_not_its_sender_is_refused() {
+    use ed25519_dalek::SigningKey;
+    let (mut writer, reader) = loopback_pair().await;
+    let store: Arc<papaya::HashMap<Arc<str>, StoreEntry>> = Arc::new(papaya::HashMap::new());
+    let (tx, _rx) = mpsc::channel(10);
+    let m = NodeId::new("127.0.0.1", 7321).unwrap();
+    let v = NodeId::new("127.0.0.1", 7322).unwrap();
+    let m_sk = SigningKey::from_bytes(&[74u8; 32]);
+    let v_sk = SigningKey::from_bytes(&[75u8; 32]);
+    let opts = HandlerOpts {
+        peer_keys: vec![(m.clone(), vec![m_sk.verifying_key().to_bytes()]), (v.clone(), vec![v_sk.verifying_key().to_bytes()])],
+        ..Default::default()
+    };
+    let bounds = Arc::clone(&opts.bounds);
+    let _ = spawn_handler_with(reader, Arc::clone(&store), Arc::new(papaya::HashMap::new()), tx,
+                               Arc::new(ShardedSeen::new(N_GOSSIP_SHARDS)), GossipConfig::default().default_ttl, opts);
+
+    let signed_by_m_as_v = |key: &str, nonce: u64| {
+        let mut u = data_update(key, b"forged", nonce, false);
+        u.sender = v.id_hash();
+        let canonical = crate::framing::canonical_sign_bytes(&u);
+        signed_data_over(u, m.id_hash(), &m_sk, &crate::framing::kv_signing_message(&canonical))
+    };
+    let v_own_sys_key = format!("sys/role/{v}");
+    send_wire(&mut writer, &signed_by_m_as_v(&v_own_sys_key, 7321)).await;
+    send_wire(&mut writer, &signed_by_m_as_v("app/as-v", 7322)).await;
+    // V's own correctly signed write behind them, so "absent" means refused rather than not yet read.
+    let mut probe = data_update("app/probe", b"p", 7323, false);
+    probe.sender = v.id_hash();
+    let canonical = crate::framing::canonical_sign_bytes(&probe);
+    send_wire(&mut writer, &signed_data_over(probe, v.id_hash(), &v_sk, &crate::framing::kv_signing_message(&canonical))).await;
+
+    let s = Arc::clone(&store);
+    poll_until(|| s.pin().get("app/probe").is_some(), 500).await;
+    assert!(store.pin().get(v_own_sys_key.as_str()).is_none(), "M cannot write V's own sys/ key by naming V as sender");
+    assert!(store.pin().get("app/as-v").is_none(), "nor any key as V");
+    assert_eq!(bounds.kv_signer_mismatch.load(Ordering::Relaxed), 2, "each refusal is counted");
+}
+
+/// **The window, pinned: a bare 2.32 KV signature is accepted and counted** (#611's review, finding 8).
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn a_bare_2_32_kv_signature_is_accepted_and_counted_during_the_window() {
+    use ed25519_dalek::SigningKey;
+    let (mut writer, reader) = loopback_pair().await;
+    let store: Arc<papaya::HashMap<Arc<str>, StoreEntry>> = Arc::new(papaya::HashMap::new());
+    let (tx, _rx) = mpsc::channel(10);
+    let peer = NodeId::new("127.0.0.1", 7331).unwrap();
+    let sk = SigningKey::from_bytes(&[76u8; 32]);
+    let opts = HandlerOpts { peer_keys: vec![(peer.clone(), vec![sk.verifying_key().to_bytes()])], ..Default::default() };
+    let bounds = Arc::clone(&opts.bounds);
+    let _ = spawn_handler_with(reader, Arc::clone(&store), Arc::new(papaya::HashMap::new()), tx,
+                               Arc::new(ShardedSeen::new(N_GOSSIP_SHARDS)), GossipConfig::default().default_ttl, opts);
+    let mut u = data_update("bare/k", b"v", 7331, false);
+    u.sender = peer.id_hash();
+    let canonical = crate::framing::canonical_sign_bytes(&u);
+    send_wire(&mut writer, &signed_data_over(u, peer.id_hash(), &sk, &canonical)).await;
+    let s = Arc::clone(&store);
+    poll_until(|| s.pin().get("bare/k").is_some(), 500).await;
+    assert_eq!(bounds.kv_untagged_signatures.load(Ordering::Relaxed), 1, "accepted, and counted on this node");
+}
+
+/// Two TLS nodes that both require signed frames, with anti-entropy a minute away, peered and holding
+/// each other's identity keys — so a write reaches the other only by gossip, and only if it is signed.
+#[cfg(feature = "tls")]
+async fn signed_fleet_pair(tag: &str, http_a: Option<u16>) -> (GossipAgent, GossipAgent, NodeId, NodeId, std::path::PathBuf) {
+    use crate::config::TlsConfig;
+    let (port_a, port_b) = (alloc_port(), alloc_port());
+    let (node_a, node_b) = (NodeId::new("127.0.0.1", port_a).unwrap(), NodeId::new("127.0.0.1", port_b).unwrap());
+    let cert_dir = std::env::temp_dir().join(format!("myc-{tag}-{port_a}"));
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    let mk = |node: &NodeId, boots: Vec<NodeId>, http: Option<u16>| {
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = node.to_socket_addr().port();
+        cfg.bootstrap_peers = boots;
+        cfg.reconnect_backoff_secs = 1;
+        cfg.health_check_interval_secs = 60;
+        cfg.kv_require_signed_frames = true;
+        cfg.http_port = http;
+        cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+        GossipAgent::new(node.clone(), cfg)
+    };
+    let a = mk(&node_a, vec![], http_a);
+    let b = mk(&node_b, vec![node_a.clone()], None);
+    a.start().await.unwrap();
+    b.start().await.unwrap();
+    let ready = || b.task_ctx.peer_keys.pin().get(&node_a).is_some_and(|k| !k.is_empty())
+        && a.task_ctx.peer_keys.pin().get(&node_b).is_some_and(|k| !k.is_empty())
+        && !a.peers().is_empty() && !b.peers().is_empty();
+    for _ in 0..400 {
+        if ready() { break; }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(ready(), "the two nodes never peered and exchanged identities");
+    (a, b, node_a, node_b, cert_dir)
+}
+
+/// **Quorum evidence is signed** (#611's review, finding 2). The connection handler writes
+/// `sys/quorum/{kind}/{sender}` for a kind a local worker subscribes to and dispatched it as a bare
+/// `Data` frame — the one local writer the reroute missed, in a file the dispatch gate exempted
+/// whole. With both nodes requiring signatures, B's evidence about A's signal reaches A only if it is
+/// signed. Seen failing first: A never held B's evidence.
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn quorum_evidence_reaches_a_peer_that_requires_signed_frames() {
+    let (a, b, node_a, _node_b, cert_dir) = signed_fleet_pair("signed-quorum", None).await;
+    let _worker = b.task_ctx.signal_handlers.register_with_capacity(Arc::from("signed.evidence"), 8);
+    let prefix = format!("sys/quorum/signed.evidence/{node_a}");
+    let mut arrived = false;
+    for _ in 0..200 {
+        let _ = a.mesh().emit("signed.evidence", SignalScope::Cluster, Bytes::from_static(b"e"));
+        if !a.kv().scan_prefix(&prefix).is_empty() { arrived = true; break; }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(!b.kv().scan_prefix(&prefix).is_empty(), "B wrote its evidence");
+    assert!(arrived, "and A received it by gossip: the evidence write is signed");
+    assert_eq!(a.task_ctx.transport_bounds.kv_unsigned_refused.load(Ordering::Relaxed), 0,
+               "a fully upgraded fleet sends no unsigned frame under signal traffic of a subscribed kind");
+    assert_eq!(a.task_ctx.transport_bounds.kv_unsigned_accepted.load(Ordering::Relaxed), 0);
+    a.shutdown().await;
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+/// **A gateway write reaches a peer that requires signed frames** — a second of the twenty-three
+/// rerouted sites end to end (#611's review, finding 8): `DELETE /gateway/kv` tombstones through the
+/// gateway's own `kv_write`. Seen failing with that one site toggled back to a bare `Data` frame: B
+/// kept the value.
+#[cfg(all(feature = "tls", feature = "gateway"))]
+#[tokio::test]
+async fn a_gateway_kv_delete_reaches_a_peer_that_requires_signed_frames() {
+    let http_port = alloc_port();
+    let (a, b, _node_a, _node_b, cert_dir) = signed_fleet_pair("signed-gw", Some(http_port)).await;
+    assert!(a.kv().set("app/gw-delete", Bytes::from_static(b"v")));
+    for _ in 0..200 {
+        if b.kv().get("app/gw-delete").is_some() { break; }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(b.kv().get("app/gw-delete").is_some(), "the seed write arrived (ops::kv_set signs)");
+    let client = reqwest::Client::new();
+    let r = client.delete(format!("http://127.0.0.1:{http_port}/gateway/kv?key=app/gw-delete")).send().await.unwrap();
+    assert!(r.status().is_success(), "{}", r.status());
+    let mut gone = false;
+    for _ in 0..200 {
+        if b.kv().get("app/gw-delete").is_none() { gone = true; break; }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(gone, "the gateway's tombstone reached B by gossip");
+    a.shutdown().await;
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+/// **The window's counters are on `GET /stats`, per node** (#611's review, finding 8). The counters
+/// moved from process-global statics to the node's `TransportBounds`, so each node reports its own.
+#[cfg(all(feature = "tls", feature = "gateway"))]
+#[tokio::test]
+async fn the_row_f_window_counters_are_on_gateway_stats() {
+    use crate::config::TlsConfig;
+    let (port, http_port) = (alloc_port(), alloc_port());
+    let cert_dir = std::env::temp_dir().join(format!("myc-f-stats-{port}"));
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    cfg.http_port = Some(http_port);
+    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+    let a = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
+    a.start().await.unwrap();
+    let b = &a.task_ctx.transport_bounds;
+    b.kv_untagged_signatures.store(3, Ordering::Relaxed);
+    b.kv_unsigned_accepted.store(5, Ordering::Relaxed);
+    b.kv_unsigned_refused.store(7, Ordering::Relaxed);
+    b.kv_signer_mismatch.store(11, Ordering::Relaxed);
+    b.kv_identity_exempt.store(13, Ordering::Relaxed);
+    b.kv_identity_stale_refused.store(17, Ordering::Relaxed);
+    let client = reqwest::Client::new();
+    let mut stats = serde_json::Value::Null;
+    for _ in 0..80 {
+        if let Ok(r) = client.get(format!("http://127.0.0.1:{http_port}/stats")).send().await
+            && r.status().is_success() { stats = r.json().await.unwrap(); break; }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(stats["kv_untagged_signatures"], 3, "{stats}");
+    assert_eq!(stats["kv_unsigned_frames_accepted"], 5);
+    assert_eq!(stats["kv_unsigned_frames_refused"], 7);
+    assert_eq!(stats["kv_signer_mismatch"], 11);
+    assert_eq!(stats["kv_identity_exempt_frames"], 13);
+    assert_eq!(stats["kv_identity_stale_refused"], 17);
+    assert!(stats.get("identity_untagged_proofs").is_none() && stats.get("consensus_untagged_signatures").is_none(),
+            "the §23 counters went with the window they counted");
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+/// **Every write a TLS node's agent originates is signed**, so a fleet that requires signed frames
+/// still hears its members. A mailbox delivery was one of the twenty-three agent write sites that
+/// built a bare `Data` frame (`scripts/check-signed-dispatch.sh`); with B requiring signatures and
+/// anti-entropy a minute away, A's delivery reaches B only by gossip, which needs it signed.
+/// Seen failing first (with the refusal built and the sites not yet rerouted): B never held the key.
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn an_agent_write_reaches_a_peer_that_requires_signed_frames() {
+    use crate::config::TlsConfig;
+    let (port_a, port_b) = (alloc_port(), alloc_port());
+    let (node_a, node_b) = (NodeId::new("127.0.0.1", port_a).unwrap(), NodeId::new("127.0.0.1", port_b).unwrap());
+    let cert_dir = std::env::temp_dir().join(format!("myc-signed-agent-writes-{port_a}"));
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    let mk = |node: &NodeId, boots: Vec<NodeId>| {
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = node.to_socket_addr().port();
+        cfg.bootstrap_peers = boots;
+        cfg.reconnect_backoff_secs = 1;
+        cfg.health_check_interval_secs = 60; // anti-entropy is not what carries the write
+        cfg.kv_require_signed_frames = true;
+        cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+        GossipAgent::new(node.clone(), cfg)
+    };
+    let a = mk(&node_a, vec![]);
+    let b = mk(&node_b, vec![node_a.clone()]);
+    a.start().await.unwrap();
+    b.start().await.unwrap();
+    // B must hold A's key before A writes, or a signed frame is dropped as an unknown signer.
+    let b_knows_a = || b.task_ctx.peer_keys.pin().get(&node_a).is_some_and(|k| !k.is_empty());
+    let a_knows_b = || a.task_ctx.peer_keys.pin().get(&node_b).is_some_and(|k| !k.is_empty());
+    for _ in 0..400 {
+        if b_knows_a() && a_knows_b() && !a.peers().is_empty() && !b.peers().is_empty() { break; }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(b_knows_a() && a_knows_b(), "the two nodes never exchanged identities");
+
+    assert!(a.service().deliver_event(&node_b, "signed-kind", Bytes::from_static(b"hello")));
+    let prefix = format!("mailbox/{node_b}/signed-kind/");
+    let mut arrived = false;
+    for _ in 0..200 {
+        if !b.kv().scan_prefix(&prefix).is_empty() { arrived = true; break; }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(arrived, "a mailbox delivery from a TLS node reaches a peer that requires signed frames");
+    a.shutdown().await;
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
 }
 
 #[tokio::test]
@@ -9270,49 +9925,41 @@ mod identity_proof_default {
         assert_eq!(counter.load(Ordering::SeqCst), 1, "and the attempt is counted");
     }
 
-    /// **The one-release allowance, pinned.** A proof signed the pre-2.32.0 way — bare, over the
-    /// history — is still accepted while `require_identity_proofs` is **off**, so a fleet upgrades
-    /// node by node; it is counted so an operator can see which peers still sign that way. With the
-    /// flag on it is refused: that posture says every proof must be one, and a bare signature over
-    /// 32-aligned bytes is what any other signing path could have made (the test above). The
-    /// allowance closes in the next MINOR (`docs/guide/deprecations.md` §23); when it does, the
-    /// first half of this test flips and should be rewritten, not kept passing.
+    /// **The 2.32.0 window is closed** (post-360 plan row F, `docs/guide/deprecations.md` §23/§35).
+    /// A proof signed the pre-2.32.0 way — bare, over the history — was accepted for one release
+    /// while `require_identity_proofs` was off, counted on `identity_untagged_proofs`. In 2.33.0 it
+    /// is refused in both postures: only a signature over `identity_proof_message` is a proof. Seen
+    /// failing first: with the flag off the bare proof still established the key.
     #[test]
-    fn an_untagged_proof_is_accepted_only_while_proofs_are_not_required() {
-        use crate::agent::helpers::untagged_identity_proofs_accepted;
+    fn a_bare_identity_proof_is_refused_now_the_window_is_closed() {
         let node = NodeId::new("127.0.0.1", 7121).unwrap();
         let sk = SigningKey::from_bytes(&[62u8; 32]);
         let vk = sk.verifying_key().to_bytes();
         let history = vk.to_vec();
         let old_form = encode_identity_proof(&vk, &sk.sign(&history).to_bytes());
 
-        let before = untagged_identity_proofs_accepted();
-        let (pk, anchor, counter) = (keys(), anchors(), std::sync::atomic::AtomicU64::new(0));
-        validate_and_merge_identity(&pk, &anchor, &counter, &node, &history, &[vk], Some(&old_form), false);
-        assert!(pk.pin().get(&node).is_some_and(|v| v.contains(&vk)), "flag off: a 2.31 peer's proof still establishes it");
-        assert_eq!(counter.load(Ordering::SeqCst), 0, "not a conflict");
-        assert!(untagged_identity_proofs_accepted() > before, "but counted, so the operator can see the un-upgraded peer");
+        for require in [false, true] {
+            let (pk, anchor, counter) = (keys(), anchors(), std::sync::atomic::AtomicU64::new(0));
+            validate_and_merge_identity(&pk, &anchor, &counter, &node, &history, &[vk], Some(&old_form), require);
+            assert!(pk.pin().get(&node).is_none(), "require_identity_proofs={require}: a bare signature is not a proof");
+            assert_eq!(counter.load(Ordering::SeqCst), 1, "and the refusal is counted as a conflict");
+        }
 
-        let (pk, anchor, counter) = (keys(), anchors(), std::sync::atomic::AtomicU64::new(0));
-        validate_and_merge_identity(&pk, &anchor, &counter, &node, &history, &[vk], Some(&old_form), true);
-        assert!(pk.pin().get(&node).is_none(), "flag on: only a tagged proof is a proof");
-        assert_eq!(counter.load(Ordering::SeqCst), 1);
-
-        // And the tagged form is what the flag accepts.
+        // The tagged form is what both postures accept.
         let new_form = encode_identity_proof(&vk, &sk.sign(&identity_proof_message(&history)).to_bytes());
-        let (pk, anchor, counter) = (keys(), anchors(), std::sync::atomic::AtomicU64::new(0));
-        validate_and_merge_identity(&pk, &anchor, &counter, &node, &history, &[vk], Some(&new_form), true);
-        assert!(pk.pin().get(&node).is_some_and(|v| v.contains(&vk)));
-        assert_eq!(counter.load(Ordering::SeqCst), 0);
+        for require in [false, true] {
+            let (pk, anchor, counter) = (keys(), anchors(), std::sync::atomic::AtomicU64::new(0));
+            validate_and_merge_identity(&pk, &anchor, &counter, &node, &history, &[vk], Some(&new_form), require);
+            assert!(pk.pin().get(&node).is_some_and(|v| v.contains(&vk)));
+            assert_eq!(counter.load(Ordering::SeqCst), 0);
+        }
     }
 
-    /// **The allowance is no quieter than an unsigned forgery** (the adversarial review of #585,
-    /// F4a). With the flag off, a bare proof signed by the victim's own key — the forged answer of
-    /// the test above — merged on `signer_trusted` without the anchor tripwire, so in a CA-anchored
-    /// fleet it was silent where an unsigned forgery trips `identity_anchor_conflicts`. The bare
-    /// branch now runs the same tripwire. Seen failing first: the counter stayed at 0.
+    /// **A bare proof signed by a victim's own key is refused, not merged** (the adversarial review
+    /// of #585, F4a, re-read after the window closed). Under the 2.32 allowance such a proof merged on
+    /// `signer_trusted` and only the anchor tripwire flagged it; now it is not a proof at all.
     #[test]
-    fn a_bare_proof_under_the_allowance_still_trips_the_anchor_tripwire() {
+    fn a_bare_proof_signed_by_the_victim_is_refused_and_flagged() {
         let victim = NodeId::new("127.0.0.1", 7122).unwrap();
         let v_sk = SigningKey::from_bytes(&[65u8; 32]);
         let v_vk = v_sk.verifying_key().to_bytes();
@@ -9324,16 +9971,19 @@ mod identity_proof_default {
         anchor.pin().insert(victim.clone(), std::collections::HashSet::from([v_vk]));
         let bare = encode_identity_proof(&v_vk, &v_sk.sign(&history).to_bytes());
         validate_and_merge_identity(&pk, &anchor, &counter, &victim, &history, &[v_vk, a_vk], Some(&bare), false);
-        assert_eq!(counter.load(Ordering::SeqCst), 1, "a key the anchor does not hold trips the tripwire, bare proof or none");
+        assert!(pk.pin().get(&victim).is_none_or(|v| !v.contains(&a_vk)), "A's key does not enter V's set");
+        assert_eq!(counter.load(Ordering::SeqCst), 1, "and the refusal is flagged");
     }
 
-    /// **The consensus side of the same window.** A payload is signed under its own tag now, and a
-    /// bare signature — a 2.31 node's — still verifies for one release, told apart so it can be
-    /// counted. A signature under the identity tag, or any other, is neither.
+    /// **The consensus side: the bare form no longer verifies** (post-360 plan row F closes the
+    /// 2.32.0 window, `deprecations.md` §23/§35). A payload is signed under its own tag; a bare
+    /// signature — a 2.31 node's — was accepted for one release and counted; a signature under the
+    /// identity tag, or any other, never was. Seen failing first (in the 2.32 API's form,
+    /// `== None`): the bare signature still verified as `Some(Untagged)`.
     #[cfg(feature = "consensus")]
     #[test]
-    fn a_consensus_signature_verifies_tagged_first_and_bare_for_one_release() {
-        use crate::consensus::{consensus_signing_message, verify_consensus_signature, SignatureForm};
+    fn a_consensus_signature_verifies_only_in_the_tagged_form() {
+        use crate::consensus::{consensus_signing_message, verify_consensus_signature};
         let sk = SigningKey::from_bytes(&[63u8; 32]);
         let vk = sk.verifying_key().to_bytes();
         let other = SigningKey::from_bytes(&[64u8; 32]).verifying_key().to_bytes();
@@ -9341,11 +9991,11 @@ mod identity_proof_default {
         let tagged = sk.sign(&consensus_signing_message(payload)).to_bytes();
         let bare = sk.sign(payload).to_bytes();
         let as_identity = sk.sign(&identity_proof_message(payload)).to_bytes();
-        assert_eq!(verify_consensus_signature(&[other, vk], payload, &tagged), Some(SignatureForm::Tagged));
-        assert_eq!(verify_consensus_signature(&[vk], payload, &bare), Some(SignatureForm::Untagged), "2.31's form, for one release");
-        assert_eq!(verify_consensus_signature(&[vk], payload, &as_identity), None, "a signature under another tag is not a consensus signature");
-        assert_eq!(verify_consensus_signature(&[other], payload, &tagged), None);
-        assert_eq!(verify_consensus_signature(&[], payload, &tagged), None, "no key, no verification");
+        assert!(verify_consensus_signature(&[other, vk], payload, &tagged));
+        assert!(!verify_consensus_signature(&[vk], payload, &bare), "2.31's bare form: the window is closed");
+        assert!(!verify_consensus_signature(&[vk], payload, &as_identity), "a signature under another tag is not a consensus signature");
+        assert!(!verify_consensus_signature(&[other], payload, &tagged));
+        assert!(!verify_consensus_signature(&[], payload, &tagged), "no key, no verification");
     }
 }
 
@@ -10248,20 +10898,18 @@ async fn a_non_member_cannot_propose_to_a_group_on_either_surface() {
     b.shutdown().await;
 }
 
-/// **An acceptor answers in the signature form of the request it verified** (the adversarial
-/// review of #585, F1). A 2.31 proposer verifies bare signatures only, so an acceptor that answered
-/// every request tagged dropped out of every un-upgraded proposer's rounds — the opposite of what
-/// the allowance promised. Now a bare-signed `Prepare` or `Propose` gets a bare-signed answer while
-/// the allowance is open, and a tagged one a tagged answer. Driven through the running listener,
-/// the way a frame from the network arrives. Seen failing first: the ack to a bare prepare
-/// verified as `Tagged`.
+/// **An acceptor answers only a tagged request, and answers it tagged** (post-360 plan row F
+/// closes the 2.32.0 window, `deprecations.md` §23/§35). Under the window a bare-signed `Prepare` —
+/// a 2.31 proposer's — got a bare answer (the adversarial review of #585, F1); now a bare request does
+/// not verify and is not answered. Driven through the running listener, the way a frame from the
+/// network arrives. Seen failing first: the bare prepare was answered.
 #[cfg(all(feature = "tls", feature = "consensus"))]
 #[tokio::test]
-async fn an_acceptor_answers_in_the_signature_form_of_the_request() {
+async fn an_acceptor_answers_only_a_tagged_request() {
     use crate::config::TlsConfig;
     use crate::consensus::{
         consensus_kind, consensus_signing_message, encode_consensus_msg, verify_consensus_signature,
-        ConsensusMsg, SignatureForm, SignedConsensusMsg,
+        ConsensusMsg, SignedConsensusMsg,
     };
     let port = alloc_port();
     let id = NodeId::new("127.0.0.1", port).unwrap();
@@ -10278,12 +10926,9 @@ async fn an_acceptor_answers_in_the_signature_form_of_the_request() {
     let mut acks = a.task_ctx.signal_handlers.register_with_capacity(Arc::from(consensus_kind::VOTE), 8);
 
     // A prepare as a proposer of each era signs it, addressed to this node as the acceptor.
-    let send = |ballot: u64, form: SignatureForm| {
+    let send = |ballot: u64, tagged: bool| {
         let bytes = encode_consensus_msg(&ConsensusMsg::Prepare { slot: Arc::from("reply-form"), ballot, proposer: id.clone() });
-        let message = match form {
-            SignatureForm::Tagged => consensus_signing_message(&bytes),
-            SignatureForm::Untagged => bytes.to_vec(),
-        };
+        let message = if tagged { consensus_signing_message(&bytes) } else { bytes.to_vec() };
         let signed = SignedConsensusMsg {
             msg_bytes: bytes,
             signer: id.clone(),
@@ -10294,19 +10939,15 @@ async fn an_acceptor_answers_in_the_signature_form_of_the_request() {
             Bytes::from(mycelium_core::serde_fixint::to_vec(&signed).unwrap()),
         );
     };
-    let form_of = |payload: &Bytes| {
-        let signed: SignedConsensusMsg = mycelium_core::serde_fixint::from_slice(payload).expect("a signed answer");
-        verify_consensus_signature(&[my_key], &signed.msg_bytes, &signed.signature)
-    };
 
-    send(3, SignatureForm::Untagged);
-    let ack = tokio::time::timeout(Duration::from_secs(5), acks.recv()).await.expect("answered").expect("open");
-    assert_eq!(form_of(&ack.payload), Some(SignatureForm::Untagged),
-               "a 2.31 proposer verifies bare only: the answer to its bare prepare is bare");
+    send(3, false);
+    assert!(tokio::time::timeout(Duration::from_secs(2), acks.recv()).await.is_err(),
+            "a bare (2.31) prepare is not answered: the window is closed");
 
-    send(4, SignatureForm::Tagged);
+    send(4, true);
     let ack = tokio::time::timeout(Duration::from_secs(5), acks.recv()).await.expect("answered").expect("open");
-    assert_eq!(form_of(&ack.payload), Some(SignatureForm::Tagged), "a tagged request is answered tagged");
+    let signed: SignedConsensusMsg = mycelium_core::serde_fixint::from_slice(&ack.payload).expect("a signed answer");
+    assert!(verify_consensus_signature(&[my_key], &signed.msg_bytes, &signed.signature), "a tagged request is answered tagged");
 
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&cert_dir);

@@ -46,6 +46,27 @@ pub struct TransportBounds {
     pub per_source_refused: AtomicU64,
     /// Inbound connections per source address — kept only when `max_connections_per_source` is set.
     per_source: Arc<papaya::HashMap<std::net::IpAddr, Arc<AtomicU64>>>,
+    /// KV `SignedData` frames this node accepted in the bare (pre-2.33) signature form — post-360 row
+    /// F's one-release window (`deprecations.md` §35). Frames, not peers. `GET /stats`
+    /// `kv_untagged_signatures`. Only a TLS node raises it.
+    pub kv_untagged_signatures: AtomicU64,
+    /// Unsigned KV `Data` frames this TLS node applied under the window (`kv_require_signed_frames`
+    /// off). `GET /stats` `kv_unsigned_frames_accepted`.
+    pub kv_unsigned_accepted: AtomicU64,
+    /// Unsigned KV `Data` frames this TLS node dropped because `kv_require_signed_frames` is set.
+    /// `GET /stats` `kv_unsigned_frames_refused`.
+    pub kv_unsigned_refused: AtomicU64,
+    /// `SignedData` frames dropped because their `signer` is not the update's `sender` (#611's review,
+    /// finding 1). `GET /stats` `kv_signer_mismatch`.
+    pub kv_signer_mismatch: AtomicU64,
+    /// Unsigned frames this TLS node accepted under the identity exemption: a sealed identity record
+    /// that authenticates itself (#611's second review). Every node's start publishes one, so a steady
+    /// trickle is normal; a burst is someone replaying or probing. `GET /stats` `kv_identity_exempt_frames`.
+    pub kv_identity_exempt: AtomicU64,
+    /// Unsigned sealed identity records refused because their history lacks a key this node already
+    /// holds or has stored for that node — a superseded record replayed (#611's third review, N4).
+    /// Refused whatever `kv_require_signed_frames` says. `GET /stats` `kv_identity_stale_refused`.
+    pub kv_identity_stale_refused: AtomicU64,
 }
 
 /// One connection's place under the per-source cap; given back when dropped. It holds the very
@@ -230,5 +251,47 @@ mod tests {
         assert!(!b.reply_in_flight(&id(1)), "the last frame released the slot");
         assert!(b.claim_reply(&id(1)).is_some());
         assert_eq!(b.anti_entropy_replies_skipped.load(Ordering::Relaxed), 1);
+    }
+}
+
+/// A warning gate for a frame a peer can send in a loop (#611's second review): the first occurrence
+/// is let through, then at most one per `every_ns`, each reporting how many were suppressed since the
+/// last. Owned by one connection's task, so no lock. The time comes from the caller (the clock seam).
+#[derive(Default, Debug)]
+pub struct WarnGate {
+    last_ns: Option<u64>,
+    suppressed: u64,
+}
+
+impl WarnGate {
+    /// `Some(suppressed)` when a warning may be emitted now, `None` when it is suppressed (and counted).
+    pub fn admit(&mut self, now_ns: u64, every_ns: u64) -> Option<u64> {
+        match self.last_ns {
+            Some(last) if now_ns.saturating_sub(last) < every_ns => {
+                self.suppressed += 1;
+                None
+            }
+            _ => {
+                self.last_ns = Some(now_ns);
+                Some(std::mem::take(&mut self.suppressed))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod warn_gate_tests {
+    use super::WarnGate;
+
+    /// The first warning passes, the next within the interval are suppressed and counted, and the
+    /// first after it reports how many were swallowed.
+    #[test]
+    fn a_warning_gate_lets_one_through_per_interval_and_counts_the_rest() {
+        let mut g = WarnGate::default();
+        assert_eq!(g.admit(1_000, 100), Some(0));
+        assert_eq!(g.admit(1_050, 100), None);
+        assert_eq!(g.admit(1_099, 100), None);
+        assert_eq!(g.admit(1_100, 100), Some(2));
+        assert_eq!(g.admit(1_150, 100), None);
     }
 }

@@ -177,6 +177,119 @@ pub struct ConnContext {
     pub peer_list_tx: tokio::sync::watch::Sender<Arc<[NodeId]>>,
 }
 
+/// How often a per-connection warning gate lets a repeated warning through.
+const WARN_EVERY_NS: u64 = 60_000_000_000;
+
+/// The domain tag of an identity proof — the same bytes as `mycelium::agent::helpers::IDENTITY_PROOF_DOMAIN`
+/// (the agent's own encoder is what the identity-exemption tests sign with, so a drift fails them).
+#[cfg(feature = "tls")]
+const IDENTITY_PROOF_DOMAIN: &[u8] = b"mycelium.identity/proof/1";
+/// The sealed identity record's version byte (`helpers::SEALED_IDENTITY_V1`).
+#[cfg(feature = "tls")]
+const SEALED_IDENTITY_V1: u8 = 1;
+
+/// Whether an unsigned frame is a **sealed identity record that authenticates itself** — the one
+/// unsigned frame a TLS node accepts whatever `kv_require_signed_frames` says (#611's second review).
+///
+/// A node publishes `sys/identity-signed/{self}` before its TLS identity is installed (it must: a
+/// *signed* identity frame is dropped as from an unknown signer at every peer that does not hold the
+/// key yet, and is then not forwarded). The record is `version ‖ history ‖ signer ‖ sig`, and it is
+/// exempt only when it proves itself at the transport:
+/// - the key is `sys/identity-signed/{n}`, and the frame is not a tombstone;
+/// - the value parses as a sealed record (version 1, a whole number of 32-byte keys, a 96-byte proof);
+/// - `signer` is one of the record's own keys, and `sig` verifies under it over
+///   `mycelium.identity/proof/1 ‖ u32 len ‖ history`;
+/// - when this node already holds keys for `n` — gossiped (`peer_keys`) or CA-anchored
+///   (`peer_anchor_keys`) — `signer` is one of them: a rotation chains to what is held, and a
+///   stranger's self-signed record for a known node is not a proof of anything.
+///
+/// The frame's `sender` plays no part — it is whatever the writer put there, which is what the first
+/// cut trusted. Everything else in the identity family (a bare `sys/identity/{n}`, a proof alone,
+/// garbage in the sealed slot, any tombstone) is refused under the flag like any unsigned frame.
+/// How an unsigned frame stands against the identity exemption ([`self_authenticating_identity`]).
+#[cfg(feature = "tls")]
+#[derive(Debug, PartialEq, Eq)]
+enum IdentityFrame {
+    /// A sealed record that authenticates itself and supersedes what this node holds: exempt.
+    Exempt,
+    /// A sealed record that authenticates itself but whose history lacks a key this node already
+    /// holds or has stored for the node — a superseded record replayed (#611's third review, N4).
+    Stale,
+    /// Anything else: an ordinary unsigned frame.
+    Other,
+}
+
+/// Split a sealed identity record into `(history, proof)` — `helpers::parse_sealed_identity`'s rule.
+#[cfg(feature = "tls")]
+fn split_sealed(v: &[u8]) -> Option<(&[u8], &[u8])> {
+    const PROOF: usize = 96;
+    if v.len() < 1 + 32 + PROOF || v[0] != SEALED_IDENTITY_V1 { return None; }
+    let (history, proof) = v[1..].split_at(v.len() - 1 - PROOF);
+    if history.is_empty() || !history.len().is_multiple_of(32) { return None; }
+    Some((history, proof))
+}
+
+/// Whether an unsigned frame is a **sealed identity record that authenticates itself** — the one
+/// unsigned frame a TLS node accepts whatever `kv_require_signed_frames` says (#611's second review).
+///
+/// A node publishes `sys/identity-signed/{self}` before its TLS identity is installed (it must: a
+/// *signed* identity frame is dropped as from an unknown signer at every peer that does not hold the
+/// key yet, and is then not forwarded). The record is `version ‖ history ‖ signer ‖ sig`, and it is
+/// exempt only when it proves itself at the transport:
+/// - the key is `sys/identity-signed/{n}`, and the frame is not a tombstone;
+/// - the value parses as a sealed record (version 1, a whole number of 32-byte keys, a 96-byte proof);
+/// - `signer` is one of the record's own keys, and `sig` verifies under it over
+///   `mycelium.identity/proof/1 ‖ u32 len ‖ history`;
+/// - when this node already holds keys for `n` — gossiped (`peer_keys`) or CA-anchored
+///   (`peer_anchor_keys`) — `signer` is one of them: a rotation chains to what is held, and a
+///   stranger's self-signed record for a known node is not a proof of anything;
+/// - **the history contains every key this node holds or has stored for `n`** (`peer_keys`,
+///   `peer_anchor_keys`, and the histories of the stored `sys/identity-signed/{n}` and
+///   `sys/identity/{n}`): a node's history only grows, so a record missing one is superseded — a
+///   genuine pre-rotation record replayed with a fresh timestamp (#611's third review, N4) — and is
+///   [`IdentityFrame::Stale`], refused whatever the flag says.
+///
+/// The frame's `sender` plays no part — it is whatever the writer put there, which is what the first
+/// cut trusted. Everything else in the identity family (a bare `sys/identity/{n}`, a proof alone,
+/// garbage in the sealed slot, any tombstone) is [`IdentityFrame::Other`]. **Still trust on first
+/// use:** the first record a node sees for `n`, with nothing held or stored for it, is accepted on its
+/// own proof — what `require_identity_proofs` cannot close either (first sighting has nothing to chain
+/// to); the CA anchor of a direct connection is what does.
+#[cfg(feature = "tls")]
+fn self_authenticating_identity(ctx: &CoreCtx, update: &GossipUpdate) -> IdentityFrame {
+    use crate::signal::kv_ns;
+    if update.is_tombstone { return IdentityFrame::Other; }
+    let Some(node) = update.key.strip_prefix(kv_ns::IDENTITY_SIGNED).and_then(|n| n.parse::<NodeId>().ok()) else {
+        return IdentityFrame::Other;
+    };
+    let Some((history, proof)) = split_sealed(update.value.as_ref()) else { return IdentityFrame::Other; };
+    let mut signer = [0u8; 32];
+    signer.copy_from_slice(&proof[..32]);
+    if !history.chunks_exact(32).any(|k| k == signer) { return IdentityFrame::Other; }
+    let mut message = IDENTITY_PROOF_DOMAIN.to_vec();
+    message.extend_from_slice(&(history.len() as u32).to_le_bytes());
+    message.extend_from_slice(history);
+    if !crate::tls::verify_bytes(&signer, &message, &proof[32..]) { return IdentityFrame::Other; }
+    let gossiped = ctx.peer_keys.pin().get(&node).cloned().unwrap_or_default();
+    let anchored = ctx.peer_anchor_keys.pin().get(&node).cloned().unwrap_or_default();
+    let held = !(gossiped.is_empty() && anchored.is_empty());
+    let chains = gossiped.contains(&signer) || anchored.contains(&signer);
+    if held && !chains {
+        return IdentityFrame::Other;
+    }
+    // History only grows: every key held or stored for `n` must be in this record (N4).
+    let store = ctx.kv_state.store.pin();
+    let stored = |prefix: &str| store.get(format!("{prefix}{node}").as_str()).and_then(|e| e.data.clone());
+    let stored_sealed = stored(kv_ns::IDENTITY_SIGNED);
+    let stored_bare = stored(kv_ns::IDENTITY);
+    let mut known: Vec<&[u8]> = Vec::new();
+    known.extend(gossiped.iter().map(|k| &k[..]));
+    known.extend(anchored.iter().map(|k| &k[..]));
+    if let Some((h, _)) = stored_sealed.as_deref().and_then(split_sealed) { known.extend(h.chunks_exact(32)); }
+    if let Some(b) = stored_bare.as_deref() { known.extend(b.chunks_exact(32)); }
+    if known.iter().all(|k| history.chunks_exact(32).any(|h| h == *k)) { IdentityFrame::Exempt } else { IdentityFrame::Stale }
+}
+
 pub async fn handle_connection(
     socket: GossipStream,
     peer_addr: SocketAddr,
@@ -204,6 +317,11 @@ pub async fn handle_connection(
     let mut shutdown_rx = shutdown.subscribe();
     // BytesMut: recv_buf.split().freeze() at TTL_OFFSET is O(1) for zero-copy forwarding.
     let mut recv_buf: BytesMut = BytesMut::with_capacity(2_048);
+    // Per-connection warning gates (#611's second review): a frame a peer can send in a loop is
+    // counted every time and named at most once per `WARN_EVERY_NS`.
+    #[cfg(feature = "tls")]
+    let mut identity_exempt_warn = crate::bounds::WarnGate::default();
+    let mut signer_mismatch_warn = crate::bounds::WarnGate::default();
     let node_id_str = node_id.to_string();
     let self_hash   = node_id.id_hash();
     // Per-connection anti-entropy rate limit. StateRequest triggers an O(store_size) scan;
@@ -756,8 +874,9 @@ pub async fn handle_connection(
                             if let Some(ref wal) = wal {
                                 let _ = wal.append(sync_entry_from(&upd)).await;
                             }
+                            // Signed under `[tls]` like every local write (#611's review, finding 2).
                             dispatch_gossip_try_send(
-                                &gossip_txs, WireMessage::Data(upd),
+                                &gossip_txs, crate::framing::local_kv_wire_msg(&task_ctx, upd),
                                 node_id.id_hash(), ForwardHint::All, &kv_state.dropped_frames,
                             );
                         }
@@ -799,6 +918,7 @@ pub async fn handle_connection(
                 }
             }
 
+            // signed-dispatch: allow (receive path — the frame a peer sent, not a local write)
             WireMessage::Data(mut update) => {
                 #[cfg(any(test, feature = "test-frame-filter"))]
                 if crate::store::frame_filtered(&kv_state, &crate::store::FrameView::Kv { key: &update.key, sender: update.sender }) {
@@ -807,6 +927,44 @@ pub async fn handle_connection(
                 // Closure plan C5: a write originated by a removed member is not applied or forwarded.
                 if task_ctx.removed.is_hash_removed(update.sender) {
                     continue;
+                }
+                // Post-360 plan row F: a TLS node signs every KV write it originates, so an unsigned
+                // `Data` frame at a TLS node is either a peer still on 2.32 (whose agent sent its own
+                // writes unsigned) or a member writing under another's `sender` hash by not signing.
+                // One release: applied and counted unless `kv_require_signed_frames`, which refuses
+                // it (`docs/guide/deprecations.md` §35). The next MINOR refuses unconditionally.
+                #[cfg(feature = "tls")]
+                let identity_frame = if tls.is_some() { self_authenticating_identity(&task_ctx, &update) } else { IdentityFrame::Other };
+                #[cfg(feature = "tls")]
+                if identity_frame == IdentityFrame::Stale {
+                    // A superseded sealed record, replayed: refused whatever the flag says (N4).
+                    task_ctx.transport_bounds.kv_identity_stale_refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if let Some(suppressed) = identity_exempt_warn.admit(crate::sim_seam::mono_now_ns(), WARN_EVERY_NS) {
+                        warn!(from = %peer_addr, key = %update.key, suppressed,
+                            "sealed identity record lacks keys already held for its node — refused (a replay, or the node restarted without its stored history, or was re-keyed)");
+                    }
+                    continue;
+                }
+                #[cfg(feature = "tls")]
+                if identity_frame == IdentityFrame::Exempt {
+                    // The one exemption: a sealed identity record that proves itself. Counted, and
+                    // said at most once a minute per connection, so a replay or a probe is visible.
+                    task_ctx.transport_bounds.kv_identity_exempt.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if let Some(suppressed) = identity_exempt_warn.admit(crate::sim_seam::mono_now_ns(), WARN_EVERY_NS) {
+                        tracing::info!(from = %peer_addr, key = %update.key, suppressed,
+                            "accepted an unsigned, self-authenticating sealed identity record (the one unsigned frame a TLS node takes)");
+                    }
+                } else if tls.is_some() {
+                    if task_ctx.config.kv_require_signed_frames {
+                        task_ctx.transport_bounds.kv_unsigned_refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        #[cfg(feature = "metrics")]
+                        metrics::counter!("mycelium_kv_unsigned_frames_total", "outcome" => "refused").increment(1);
+                        tracing::debug!(from = %peer_addr, sender = update.sender, "refusing an unsigned KV Data frame (kv_require_signed_frames)");
+                        continue;
+                    }
+                    task_ctx.transport_bounds.kv_unsigned_accepted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    #[cfg(feature = "metrics")]
+                    metrics::counter!("mycelium_kv_unsigned_frames_total", "outcome" => "accepted").increment(1);
                 }
                 // Nonce was already checked and inserted by the early-dedup path above
                 // for FrameVersion::Current. For FrameVersion::Previous, check now.
@@ -880,6 +1038,7 @@ pub async fn handle_connection(
                         // zero-copy is unsafe. Re-encode at WIRE_VERSION for forwarding.
                         let fwd_update = GossipUpdate { ttl: fwd_ttl - 1, ..update.clone() };
                         let mut fwd_buf = BytesMut::with_capacity(256);
+                        // signed-dispatch: allow (forwarding a received v11 frame, re-encoded as it arrived)
                         crate::codec::encode_wire(&mut fwd_buf, &WireMessage::Data(fwd_update));
                         // Channel-readiness seam (item 6 PR 3): the drop is a kernel decision, so a recorded
                         // run replays it instead of needing the timing that caused it.
@@ -911,14 +1070,31 @@ pub async fn handle_connection(
                 if task_ctx.removed.is_hash_removed(update.sender) || task_ctx.removed.is_hash_removed(signer) {
                     continue;
                 }
+                // #611's review, finding 1: the signature is checked against `signer`'s key, and the
+                // update is applied as `update.sender`'s — so the two must be one node. Every local
+                // writer signs as its own sender (`make_kv_wire_msg`); a frame that names another is a
+                // member writing as someone else under its own valid signature.
+                if signer != update.sender {
+                    task_ctx.transport_bounds.kv_signer_mismatch.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    #[cfg(feature = "metrics")]
+                    metrics::counter!("mycelium_kv_signer_mismatch_total").increment(1);
+                    // Rate-limited per connection (#611's second review, N3): a peer sending these in a
+                    // loop is counted on every frame and named once a minute, not logged per frame.
+                    if let Some(suppressed) = signer_mismatch_warn.admit(crate::sim_seam::mono_now_ns(), WARN_EVERY_NS) {
+                        warn!(
+                            "SignedData from {} signed by {:#x} names sender {:#x} (key {}); a frame's signer must be its sender, dropping ({} more suppressed since the last warning)",
+                            peer_addr, signer, update.sender, update.key, suppressed
+                        );
+                    }
+                    continue;
+                }
                 // Dedup by nonce (no early fast-path — SignedData has a non-zero variant tag).
                 let ts = crate::hlc::physical_ms(hlc.current()); // C11: dedup TTL, fails closed
                 if seen.mark_and_check(update.nonce, ts) {
                     continue;
                 }
 
-                // Signature verification — fail-open: accept frames whose signer's public
-                // key is not yet in peer_keys (key hasn't gossiped yet).
+                // Signature verification: the signer's key must be known (fail-closed below).
                 #[cfg(feature = "tls")]
                 {
                     let guard = task_ctx.peer_keys.pin();
@@ -930,12 +1106,28 @@ pub async fn handle_connection(
                         let mut sig_bytes = [0u8; 64];
                         sig_bytes[..32].copy_from_slice(lo);
                         sig_bytes[32..].copy_from_slice(hi);
-                        if !pub_key_set.iter().any(|k| crate::tls::verify_bytes(k, &canonical, &sig_bytes)) {
-                            warn!(
-                                "SignedData from {} (signer={:#x}) failed Ed25519 verification, dropping",
-                                peer_addr, signer
-                            );
-                            continue;
+                        // The tagged message first (`kv_signing_message`, 2.33.0); then the bare
+                        // canonical bytes — the pre-2.33.0 form, accepted for **one release** so a
+                        // fleet upgrades node by node, counted so an operator can see which peers
+                        // still sign that way (`docs/guide/deprecations.md` §35).
+                        let tagged = crate::framing::kv_signing_message(&canonical);
+                        if !pub_key_set.iter().any(|k| crate::tls::verify_bytes(k, &tagged, &sig_bytes)) {
+                            if pub_key_set.iter().any(|k| crate::tls::verify_bytes(k, &canonical, &sig_bytes)) {
+                                task_ctx.transport_bounds.kv_untagged_signatures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                #[cfg(feature = "metrics")]
+                                metrics::counter!("mycelium_kv_untagged_signatures_total").increment(1);
+                                tracing::debug!(
+                                    "SignedData from {} (signer={:#x}) carries an untagged (pre-2.33.0) signature; \
+                                     accepted for one release (docs/guide/deprecations.md §35)",
+                                    peer_addr, signer
+                                );
+                            } else {
+                                warn!(
+                                    "SignedData from {} (signer={:#x}) failed Ed25519 verification, dropping",
+                                    peer_addr, signer
+                                );
+                                continue;
+                            }
                         }
                     }
                     // Unknown signer → fail-closed. The value will arrive via anti-entropy

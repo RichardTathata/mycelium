@@ -1842,7 +1842,8 @@ impl GossipAgent {
     /// the consensus payload (`mycelium.consensus/msg/1 ‖ …`) and a mandate possession
     /// (`mycelium.mandate/possession/1 ‖ …`) are verified over tagged messages, so a signature made
     /// here cannot be mistaken for one of those unless `msg` begins with that exact tag, which no
-    /// caller should produce. KV `SignedData`, role claims and audit records are still verified
+    /// caller should produce. KV `SignedData` is tagged too (`mycelium.kv/update/1`, post-360 row F;
+    /// the bare form accepted for one release). Role claims, audit records and revocation events are still verified
     /// over untagged canonical bytes (`docs/operations/what-is-proven.md`), so a message that could
     /// parse as one of those is the caller's to avoid. AgentFacts signs canonical JSON, whose first
     /// byte is `{`, so it is safe by shape as well as by rule.

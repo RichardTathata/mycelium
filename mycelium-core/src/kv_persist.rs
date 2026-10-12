@@ -8,7 +8,7 @@
 //! probe can distinguish "process up" from "soft state hydrated".
 
 use crate::context::CoreCtx;
-use crate::framing::{dispatch_gossip_send, dispatch_gossip_try_send, ForwardHint, WireMessage};
+use crate::framing::{dispatch_gossip_send, dispatch_gossip_try_send, ForwardHint};
 use crate::store::apply_and_notify;
 use bytes::Bytes;
 use std::{sync::Arc, time::Duration};
@@ -62,7 +62,7 @@ pub async fn run_kv_persist_task(
                     first_tick = false;
                 }
                 dispatch_gossip_try_send(
-                    &ctx.gossip_txs, WireMessage::Data(update),
+                    &ctx.gossip_txs, crate::framing::local_kv_wire_msg(&ctx, update),
                     ctx.node_id.id_hash(), ForwardHint::All, &ctx.kv_state.dropped_frames,
                 );
             }
@@ -71,9 +71,13 @@ pub async fn run_kv_persist_task(
     let tombstone = crate::framing::make_gossip_update(
         &ctx.node_id, ctx.default_ttl, Arc::clone(&kv_key), Bytes::new(), true, &ctx.hlc,
     );
+    // Sign BEFORE the local apply (#611: the co-op provisioning demo). This tombstone runs as the
+    // handle drops, often while the agent is shutting down; `shutdown_with_timeout` re-tombstones only
+    // owned keys still live in the store, so once this apply lands the key is ours to deliver. Signing
+    // after the apply put the (slow, in a debug build) signature between the apply and the send, the
+    // shutdown signal landed in that gap, and the tombstone never left — peers kept a dead provider's
+    // capability until its TTL. Signing first keeps apply → send as tight as the unsigned frame was.
+    let msg = crate::framing::local_kv_wire_msg(&ctx, tombstone.clone());
     apply_and_notify(&ctx.kv_state, &tombstone);
-    dispatch_gossip_send(
-        &ctx.gossip_txs, WireMessage::Data(tombstone),
-        ctx.node_id.id_hash(), ForwardHint::All,
-    ).await;
+    dispatch_gossip_send(&ctx.gossip_txs, msg, ctx.node_id.id_hash(), ForwardHint::All).await;
 }

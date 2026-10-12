@@ -81,8 +81,9 @@ impl GossipStream {
     /// `Some` only for an **outbound** TLS connection (the client side), where we dialed a known
     /// `NodeId` so the key can be correlated to it; `None` for plaintext or the inbound (server)
     /// side (whose peer `NodeId` isn't yet known — the cert SAN carries only the IP). rustls has
-    /// already validated the cert against the cluster CA before this runs, so the DER is a
-    /// well-formed CA-issued Ed25519 cert and the length-checked SPKI scan is safe.
+    /// already validated the cert against the cluster CA before this runs; the key is read from the
+    /// certificate's `SubjectPublicKeyInfo` structurally (`tls::ed25519_key_from_cert_der`), never
+    /// from a pattern elsewhere in the DER.
     #[cfg(feature = "tls")]
     pub fn peer_ed25519_key(&self) -> Option<[u8; 32]> {
         match self {

@@ -253,6 +253,99 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (post-360 row E): referenced nowhere in the repository, the SDKs or the private companion (`grep -rn is_inert`
   over both trees).
 
+### Security
+
+- **Wire and crypto, one MINOR with a window (post-360 plan row F).** Wire **v12** unchanged — no frame changes
+  shape; what changes is what a node accepts and what a signature is over. Three changes and one closure:
+  - **KV `SignedData` is domain-tagged.** A KV write is signed over `mycelium.kv/update/1 ‖ u32 len ‖ canonical`
+    (`framing::kv_signing_message`), beside 2.32.0's identity and consensus tags. The one signer
+    (`make_kv_wire_msg`) and the one verifier (`connection::handle_connection`) were enumerated by
+    `grep -rn "canonical_sign_bytes(" src mycelium-core/src mycelium-*/src fuzz`. **Window, one release:** the bare
+    2.32 form is accepted and counted (`GET /stats` `kv_untagged_signatures`, `mycelium_kv_untagged_signatures_total`).
+    Seen failing first: `a_kv_signature_is_over_the_tagged_message_not_the_bare_bytes`,
+    `a_tagged_kv_signature_is_accepted_at_the_connection`, `a_signature_under_another_tag_is_not_a_kv_signature`.
+  - **A TLS node can refuse an unsigned `Data` frame.** Under `[tls]` the `Data` arm applied a frame whatever the
+    node's posture, so a member could write under another member's `sender` hash by not signing. Enumerating the
+    writers (`grep -rn "WireMessage::Data(" src mycelium-core/src mycelium-*/src`) found **twenty-three agent write
+    sites that never signed** — membership, mailboxes, state machines, opacity, the gateway's log/KV/offset routes,
+    MCP tombstones, the soft-state advertiser; all go through `framing::local_kv_wire_msg` now, and
+    `scripts/check-signed-dispatch.sh` (make check, CI, with a planted self-test) refuses a new bare dispatch.
+    `kv_require_signed_frames` (`GOSSIP_KV_REQUIRE_SIGNED_FRAMES`) drops the frame; **window, one release:** it
+    defaults to `false`, and an unsigned frame is applied and counted (`kv_unsigned_frames_accepted` /
+    `kv_unsigned_frames_refused`, `mycelium_kv_unsigned_frames_total{outcome}`). Seen failing first:
+    `a_tls_node_requiring_signed_frames_refuses_an_unsigned_data_frame`,
+    `an_unsigned_data_frame_is_applied_and_counted_during_the_window`, and
+    `an_agent_write_reaches_a_peer_that_requires_signed_frames` (with the refusal built and the sites not yet
+    rerouted). **Not covered:** anti-entropy — a `StateResponse` entry carries no author or signature.
+  - **A peer certificate's key is read structurally.** `tls::ed25519_key_from_cert_der` scanned the DER for the
+    Ed25519 SPKI prefix and returned the first match — in a serial number, a name or an extension the issuer
+    chooses — so a node holding the CA key could mint a certificate that anchors as another member
+    (`GossipStream::peer_ed25519_key`) or passes a removal of its own key (`refuse_if_removed`). It now reads the
+    `SubjectPublicKeyInfo` with `rustls-webpki` (already in the tree) and compares it with RFC 8410's one Ed25519
+    encoding. Local, no window. Seen failing first:
+    `a_planted_key_pattern_in_the_serial_does_not_fool_the_structural_read`,
+    `a_removed_member_hiding_its_key_behind_a_planted_pattern_is_still_refused`,
+    `a_non_ed25519_certificate_has_no_ed25519_key_whatever_its_serial_carries`.
+  - **2.32.0's §23 window closes.** A bare identity proof is refused in both `require_identity_proofs` postures, a
+    bare consensus signature does not verify, an acceptor answers only a tagged request (`SignatureForm` and
+    `sign_payload_as` removed), and the two counters `identity_untagged_proofs` / `consensus_untagged_signatures`
+    (and their metrics) are removed. Seen failing first against the allowance:
+    `a_bare_identity_proof_is_refused_now_the_window_is_closed`,
+    `a_bare_proof_signed_by_the_victim_is_refused_and_flagged`,
+    `a_consensus_signature_verifies_only_in_the_tagged_form`, `an_acceptor_answers_only_a_tagged_request`.
+
+  - **#611's review, fixed before merge.** A `SignedData` frame's **signer is bound to its sender**: the arm verified
+    against `signer`'s key and applied the update as `update.sender`'s, so a member's own valid signature carried a
+    write attributed to anyone, `sys/` keys included — now dropped and counted (`kv_signer_mismatch`,
+    `mycelium_kv_signer_mismatch_total`). The connection handler's **quorum-evidence write** was a twenty-fourth bare
+    dispatch, in a file the first gate exempted whole; it is signed, and the gate now exempts only marked receive
+    paths, catches any spelling (a `use`-imported `Data(` too) and plants three dispatches in its self-test. The
+    removal check **fails closed** on a certificate with no Ed25519 key. The window counters are **per node**
+    (`TransportBounds`) and on `GET /stats` with `kv_signer_mismatch`; the guarantee report gains
+    `mesh.signed_writes` (not required by `secure-single-domain` this release); `start()` warns when
+    `kv_require_signed_frames` is set without `[tls]`. **The second review** found the first identity exemption (any
+    identity frame whose `sender` named its key) exploitable — `sender` is the writer's choice: impersonation with proofs
+    off and silencing in both postures, reproduced on three nodes. Now the only exempt unsigned frame is a sealed identity
+    record that authenticates itself (proof under its own key, chained to the keys held; counted as
+    `kv_identity_exempt_frames`); a node publishes it first, unsigned, then its legacy pair signed; and an identity
+    tombstone removes no keys (it silenced a member, signed or not). The dispatch gate skips only an inline
+    `#[cfg(test)] mod x { … }` (it stopped at an out-of-line `mod x;`), and both per-frame warnings are rate-limited.
+    **The third review (N4):** a node's genuine pre-rotation sealed record, replayed unsigned with a fresh timestamp,
+    still proved itself and replaced the current one; an exempt record must now contain every key the receiver holds
+    or has stored for the node, and a stale one is refused whatever the flag says (`kv_identity_stale_refused`). Seen
+    failing first on 884f310f: `a_replayed_pre_rotation_sealed_record_does_not_replace_the_current_one`. First sighting
+    remains trust on first use. The gate's brace counter blanks string and char literals (L1, a fifth plant). Plan row
+    Q records a pre-existing, high finding the review reproduced on `main`: revocation does not reach the KV verifier,
+    identity chaining or the exemption; `revoke_key`'s doc now says what holds.
+  - **CI's co-op demo 04 (provisioning) found a shutdown race row F made reliable.** A capability's soft-state task
+    tombstones its key when the handle drops; a provider dropped and shut down at once raced the shutdown signal, and
+    the signed tombstone — slower to build in a debug build than the unsigned frame it replaced — lost every time, so
+    peers kept the dead provider's capability until its TTL and the worker's RPCs timed out. Graceful shutdown now
+    waits (bounded, 250 ms) for queued gossip and writer frames to drain before signalling (`flush_outbound_before_shutdown`),
+    and the soft-state and MCP tombstones are signed before their local apply. Seen failing first:
+    `a_capability_retracted_at_shutdown_reaches_the_peers` ("B still resolves the capability A retracted as it shut
+    down"); the 6081c9e6 export also fails demo 04 locally, origin/main passes it — CI's one green run there was timing.
+    Seen failing first on 59d86368: `an_unsigned_identity_forgery_cannot_make_a_member_sign_as_another`,
+    `an_identity_tombstone_does_not_erase_a_members_keys` (proofs off and on),
+    `only_a_self_authenticating_sealed_identity_is_exempt_from_the_refusal`, and the gate's fourth plant. Seen failing first:
+    `a_signed_frame_whose_signer_is_not_its_sender_is_refused`, `quorum_evidence_reaches_a_peer_that_requires_signed_frames`,
+    `a_certificate_without_an_ed25519_key_is_refused_by_the_removal_check`, and
+    `a_gateway_kv_delete_reaches_a_peer_that_requires_signed_frames` with that site toggled bare. **The opt-in refusal is
+    bypassable through anti-entropy** (a `StateResponse` entry carries no author), and the unconditional refusal is
+    plan row F2.
+
+  **Upgrade notes** (`docs/guide/deprecations.md` §35, the 2.30.0 shape): **upgrade from 2.32, not 2.31** — a 2.31
+  node and an upgraded node verify neither each other's identity proofs nor their consensus messages. **An upgraded
+  node's KV writes reach a 2.32 peer only by anti-entropy until that peer is upgraded** (a 2.32 verifier drops the
+  tagged `SignedData` as a bad signature, and does not forward it). **An upgraded node with
+  `kv_require_signed_frames` drops a 2.32 peer's agent writes until every peer is upgraded** — set it once
+  `kv_unsigned_frames_accepted` and `kv_untagged_signatures` stop rising fleet-wide. **Upgrade promptly:** until a 2.32
+  peer is upgraded it receives upgraded nodes' writes only by anti-entropy and logs a warning per dropped frame. A 2.31
+  node upgraded straight past 2.32 is worse off than one with no proof (its bare proof is refused, so its writes are
+  dropped as from an unknown signer). `GossipConfig` gained a field
+  (an exhaustive literal breaks). Remove alerts on the two removed metrics. The next MINOR refuses unsigned frames
+  and bare KV signatures unconditionally.
+
 ## [2.32.0] — 2026-10-11
 
 **The 360 review's must-do list, and the post-360 hardening plan's first wave.** A gateway bound off loopback with no

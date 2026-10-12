@@ -52,11 +52,41 @@ An attacker who controls one node process (RCE, stolen host) gains:
   signature as an identity proof: the identity proof is signed under `mycelium.identity/proof/1`
   and a consensus payload under `mycelium.consensus/msg/1`, so neither reads as the other. Before
   2.32.0 both were bare, and a victim's signed consensus answer, carrying proposer-chosen bytes,
-  could be published as the victim's identity proof (CHANGELOG, 2.32.0). KV `SignedData`, role
-  claims and audit records are still signed over untagged canonical bytes — a residual recorded in
-  `docs/operations/what-is-proven.md`; none of them can begin with the identity tag (a KV update's
-  second word is the signer's own id hash, a serialized record's first word a small length), so the
-  proof side stays closed.
+  could be published as the victim's identity proof (CHANGELOG, 2.32.0). Since the release after
+  2.32.0 (post-360 plan row F) KV `SignedData` is signed under `mycelium.kv/update/1` too, and the
+  2.32.0 allowance for bare identity proofs and consensus signatures is closed; a bare KV signature is
+  accepted for one release, counted (`deprecations.md` §35). Role claims, audit records and revocation
+  events (`src/agent/revocation.rs`) are still
+  signed over untagged canonical bytes — a residual recorded in `docs/operations/what-is-proven.md`;
+  none can begin with another domain's tag, so the tagged verifiers stay closed to them.
+- **Cannot gossip a write *as another member*: a signed frame's signer must be its sender** (row F,
+  #611's review). A `SignedData` frame is verified against its `signer`'s key and dropped when `signer`
+  is not the update's `sender` (`kv_signer_mismatch`), so a member's own valid signature no longer
+  carries a write attributed to someone else. **An unsigned frame is the other half, and it is opt-in
+  this release:** under `[tls]` every KV write a node originates is signed (row F routed the agent's
+  twenty-four unsigned write sites — the quorum-evidence write among them — through the signer), a
+  receiver with `kv_require_signed_frames` drops an unsigned `Data` frame — except a sealed identity
+  record that authenticates itself (its proof verifies under a key it carries and chains to the keys the
+  receiver already holds for that node, and whose history contains every key held or stored for it, so a
+  replayed pre-rotation record is refused, `kv_identity_stale_refused`; counted, `kv_identity_exempt_frames`;
+  first sighting stays trust on first use) — and one without it — the
+  default this release — applies it and counts it (`kv_unsigned_frames_accepted`). Plan row F2 makes the
+  refusal unconditional. An identity tombstone removes no keys (it used to: one tombstone, unsigned or
+  signed by any member as itself, silenced a member at every receiver). **What remains with
+  `require_identity_proofs` off:** a member can write another member's legacy identity under its *own*
+  signature — a valid frame, signer = sender — and an unproven history merges on first use; the anchor
+  tripwire counts it (`identity_anchor_conflicts`) and does not stop it. The flag closes it. **The refusal is bypassable through anti-entropy:** a `StateResponse` entry
+  carries no author and no signature and is applied by LWW, unsolicited, so a compromised member can
+  introduce a value for any key — another member's included — through a state reply whatever this
+  setting says. Detection covers part of it: signed `sys/` records (identity, roles, audit) fail
+  verification at read, and the `sys/` tripwire counts a remote write to a key *this* node owns — but it
+  does **not** count an entry for a key the victim holds nothing under, so a fresh key planted in another
+  member's namespace is not flagged anywhere.
+- **Cannot pass for another member's certificate key.** The removal check and the handshake anchor read
+  a peer certificate's key from its `SubjectPublicKeyInfo`, structurally (row F); before, a byte-scan
+  returned the first Ed25519 SPKI pattern anywhere in the DER, so a node holding the CA key could mint a
+  certificate whose serial number carried another member's key and anchor as that member, or pass a
+  removal of its own key.
 - **Read of all replicated KV state** that reached this node via gossip — i.e. the
   twin state. This is the worst single-node outcome: the map is replicated, so one
   node sees (much of) it.

@@ -2530,6 +2530,7 @@ dependencies = [
  "ring",
  "rustls",
  "rustls-pemfile",
+ "rustls-webpki",
  "serde",
  "serde_json",
  "socket2 0.5.9",

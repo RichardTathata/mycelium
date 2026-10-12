@@ -80,7 +80,8 @@ Four places strain that line today, and the rows in §3 address each:
 | **C** — *delivered 2.32.0 (#597), §3.5* | Companion WALs (tuple space, blackboard) | compaction is crash-durable (temp file and directory fsynced); a torn or undecodable record poisons the writer and is refused at open rather than silently dropping every later record; one owner per file | R0 |
 | **D** — *delivered 2.32.0 (#599), §3.5* | WASM execution limits | epoch interruption bounds a guest call; guest code runs off the runtime's worker threads; a trap does not recompile the component on every call | R0 |
 | **E** — *delivered (#613), §3.5* | Gateway remainder | client-supplied timer periods (`interval_secs`) bounded; the log-group subscribe keeps the core's `(hlc, key)` tiebreak the mailbox deletes an entry only after the client has it (today it tombstones on entering the 256-slot channel, so a dropped stream loses queued events — #595's review); prompt keys cannot alias across `ns`/`name` (`prompts/{ns}/{name}` with a `/` in either); and saves the group offset only after the entry is sent (today it saves first, so an entry in flight when a stream drops is never re-sent — found by row G); the caller envelope binds freshness | P5 |
-| **F** | Wire and crypto, one MINOR with a window | a TLS node refuses unsigned `Data` frames; the removal check reads a peer's key structurally, not by byte-scanning the certificate; KV `SignedData` is domain-tagged; each change carries a mixed-fleet window and an upgrade note in the 2.30.0 shape; the #585 and #587 windows close in the same MINOR | R0, ideally its own release |
+| **F** — *delivered, unreleased (#611), §3.5 (window; the flip is F2)* | Wire and crypto, one MINOR with a window | a TLS node refuses unsigned `Data` frames; the removal check reads a peer's key structurally, not by byte-scanning the certificate; KV `SignedData` is domain-tagged; each change carries a mixed-fleet window and an upgrade note in the 2.30.0 shape; the #585 and #587 windows close in the same MINOR | R0, ideally its own release |
+| **F2** | The refusal unconditional (the MINOR after F) | a TLS node refuses an unsigned `Data` frame and a bare KV `SignedData` signature whatever `kv_require_signed_frames` says (the setting retired or kept as a no-op, stated); the window counters `kv_unsigned_frames_accepted` and `kv_untagged_signatures` stop rising or are removed, stated in `deprecations.md`; `mesh.signed_writes` resolves `enforced` under `[tls]` and is considered for `secure-single-domain`'s required set; the anti-entropy residual (an unsigned, authorless `StateResponse`) is either closed or restated | F released |
 | **G** — *delivered 2.32.0 (#595), §3.5* | SDKs | Python whole-second timeouts and a non-truncating tuple `take`; path segments escaped; TypeScript `SupersededError`; one `scatterGather` default, documented; SSE reconnect is designed with a gateway resume point or recorded as not built | R0 |
 | **H** — *delivered after 2.32.0 (#609), §3.5* | Companions | the commitment deadline judged on the log's clock, not the offerer's; `award_of` verifies before it reports; the reason blob store bounded; caller-chosen `run_id` validated | R0 |
 | **I** — *delivered (private #30), §3.5; Cedar narrower* | Private repo P3s | RA5 correction chains and competing corrections; attempt keys carry the operation id; a lock-order table; the outbox directory fsynced at create; Cedar policies schema-validated at load; the CI pin check refuses `[patch]`, `rev =` and multi-line tables | R0's re-pin |
@@ -91,6 +92,7 @@ Four places strain that line today, and the rows in §3 address each:
 | **N** | A2A at the current specification | an A2A client built on the current `a2a-sdk` (1.2.2, the library Strands Agents uses) reaches Mycelium's skills through `/a2a`, with the same authority as today — **the 2026-10-12 probe found it cannot**: the card is served only at `/.well-known/agent.json` (the SDK reads `/.well-known/agent-card.json`, 404); the card's `url` is the node's **gossip** address, not its gateway, and omits `/a2a` (`src/agent/a2a.rs:445`, so the SDK's `send_message` failed with a network error); the methods are the pre-0.2 `tasks/send` / `tasks/sendSubscribe` / `tasks/get` / `tasks/cancel` (`SendMessage` and `message/send` both answer `-32601`); and the skill is chosen by a Mycelium-only `skillId` parameter that a standard client never sends. Promises: the card at `/.well-known/agent-card.json` (the old path kept for one release), naming the gateway's own URL and scheme (https under `gateway_tls`) with `/a2a` and its supported interfaces and protocol versions; the A2A 1.0 methods (`SendMessage`, `SendStreamingMessage`, `GetTask`, `CancelTask`) and the 0.3 names (`message/send`, `message/stream`) served beside the old ones, which stay for one release with a deprecation entry; a message reaches a skill without `skillId` (a declared default skill, or the skill named in the message's metadata — decided in the PR, stated on the card); every new method runs the same doors as `tasks/send` — the action evaluator, mandates, evidence, task ownership — and the C7 bypass matrix gains each new method; the probe becomes a CI test driving the real `a2a-sdk` client against a node | — |
 | **O** | A Strands session store on Mycelium | a companion package (Python, beside `langgraph-checkpoint-mycelium`) implementing Strands Agents' `SessionManager` over the Mycelium Python SDK, so an agent's conversation and state, and a swarm's shared memory, live in the fleet's KV rather than a file or a bucket; a save returns the SDK's receipt and its docs say which rung it names (a local application, not replication — the checkpointer's wording); an incomplete or unreadable session is an error, never an empty one; concurrent agents in one session do not lose each other's writes, or the limit is stated; its live suite runs in CI against a real node; pinned to a Strands release and re-checked when Strands changes the interface | — (N for the cross-host demo) |
 | **P** | A Strands fleet, demonstrated | a runnable example, in CI like the co-op demos, in which Strands agents on three Mycelium nodes plan one shared task (a constructive domain — food redistribution or a microgrid), keep their session and swarm memory in the fleet through O, and call fleet skills through `/a2a` (N): a call outside an agent's mandate is refused and the refusal is in the evidence journal; one node is stopped and the work resumes on another from the stored session; the README states what Strands provides and what Mycelium adds, and which properties the run shows versus which it does not | N, O |
+| **Q** | Revocation reaches every verifier | a key a node has revoked (`rotate_identity_on_compromise`, `sys/revoked/`) is filtered from the `peer_keys`-based KV `SignedData` verifier, from identity-proof chaining (`validate_and_merge_identity`'s trusted signer) and from the unsigned identity exemption (`connection::self_authenticating_identity`), not only from consensus and `known_verifying_keys`; a test that a `SignedData` signed by a revoked key is refused at a peer that has seen the revocation; `src/agent/revocation.rs`'s `revoke_key` doc made true (corrected in #611 to say what holds today) | — (independent of F2) |
 
 ### 3.4 · Documentation follow-through
 
@@ -601,6 +603,78 @@ PR.
      `timeout_secs` still clamp; both SDKs refuse a period past 3600 locally (*was* sent; 4 py and 4 ts tests).
   9. The `Stale` message's lost line continuation, the test doc's constant name, the `CONSUMER_LOG` doc.
 
+**F — Wire and crypto, one MINOR with a window (#611, unreleased after 2.32.0).** Read against the branch's code.
+- *A TLS node refuses unsigned `Data` frames* — `mycelium-core/src/connection.rs`, the `Data` arm: under a TLS
+  identity and `kv_require_signed_frames` the frame is dropped and counted (`unsigned_kv_frames`);
+  `a_tls_node_requiring_signed_frames_refuses_an_unsigned_data_frame` (seen applying the forged key on the unfixed
+  arm). **Not unconditional in this release** — the refusal is the setting, default off, which is the window
+  (next bullet but one); the unconditional refusal is row F2's, *not built*. The twenty-three agent write
+  sites that sent bare `Data` frames sign (`framing::local_kv_wire_msg`; `scripts/check-signed-dispatch.sh` in
+  `make check` and CI, with `--self-test`); `an_agent_write_reaches_a_peer_that_requires_signed_frames` (seen
+  failing with the refusal built and the sites unrouted). **Not covered:** anti-entropy entries carry no author.
+- *The removal check reads a peer's key structurally, not by byte-scanning the certificate* —
+  `mycelium-core/src/tls.rs` `ed25519_key_from_cert_der` (`webpki::EndEntityCert::subject_public_key_info`, compared
+  with RFC 8410's header), used by `refuse_if_removed` and `stream.rs` `peer_ed25519_key`;
+  `a_planted_key_pattern_in_the_serial_does_not_fool_the_structural_read`,
+  `a_removed_member_hiding_its_key_behind_a_planted_pattern_is_still_refused`,
+  `a_non_ed25519_certificate_has_no_ed25519_key_whatever_its_serial_carries` — all three seen failing on the scan.
+- *KV `SignedData` is domain-tagged* — `framing::kv_signing_message` (`mycelium.kv/update/1 ‖ u32 len ‖ canonical`),
+  signed in `make_kv_wire_msg`, verified in `connection.rs`'s `SignedData` arm;
+  `a_kv_signature_is_over_the_tagged_message_not_the_bare_bytes`, `a_tagged_kv_signature_is_accepted_at_the_connection`,
+  `a_signature_under_another_tag_is_not_a_kv_signature` (seen failing first).
+- *Each change carries a mixed-fleet window and an upgrade note in the 2.30.0 shape* — the bare KV signature
+  accepted and counted (`kv_untagged_signatures`), the unsigned frame accepted and counted
+  (`kv_unsigned_frames_accepted`; `an_unsigned_data_frame_is_applied_and_counted_during_the_window`), both on
+  `GET /stats` and as metrics; `deprecations.md` §35 states each direction ("an upgraded node's KV writes reach a
+  2.32 peer only by anti-entropy until that peer is upgraded"; "an upgraded node requiring signed frames drops a
+  2.32 peer's agent writes until that peer is upgraded"); CHANGELOG `[Unreleased]` § Security. The certificate read
+  is local and has no window. The window counters are asserted on `/stats` (`the_row_f_window_counters_are_on_gateway_stats`).
+- *The #585 and #587 windows close in the same MINOR* — §23 (#585: the identity proof and the consensus signature)
+  is closed: `helpers::validate_and_merge_identity` and `consensus::verify_consensus_signature` accept the tagged
+  form only, `SignatureForm`/`sign_payload_as` removed, both counters removed;
+  `a_bare_identity_proof_is_refused_now_the_window_is_closed`, `a_bare_proof_signed_by_the_victim_is_refused_and_flagged`,
+  `a_consensus_signature_verifies_only_in_the_tagged_form`, `an_acceptor_answers_only_a_tagged_request` (seen
+  failing against the allowance). **#587 opened no window** (its commit, CHANGELOG entry and §25 accept nothing
+  for one release; the consensus-signature tag the brief attributed to it is #585's second half) — so nothing
+  was closed for it.
+- *#611's review, fixed before merge* — (1) a signed frame's signer bound to its sender:
+  `connection.rs` `SignedData` arm, `kv_signer_mismatch`; `a_signed_frame_whose_signer_is_not_its_sender_is_refused`
+  (seen applying V's own `sys/role/` key and an app key under M's signature). (2) the quorum-evidence write
+  signed and the gate narrowed to marked receive paths, any spelling, with a three-plant self-test (connection.rs,
+  a new agent file, a `use`-spelled `Data(`); `quorum_evidence_reaches_a_peer_that_requires_signed_frames` (seen:
+  A never held B's evidence; the 6081c9e6 gate called a tree with all three plants clean). (4) the flip is row F2;
+  `mesh.signed_writes` in the guarantee report, not in `secure-single-domain`. (6) the removal check fails closed
+  on a certificate with no Ed25519 key; `a_certificate_without_an_ed25519_key_is_refused_by_the_removal_check`
+  (seen `Ok(())`). (8) `a_bare_2_32_kv_signature_is_accepted_and_counted_during_the_window`,
+  `a_gateway_kv_delete_reaches_a_peer_that_requires_signed_frames` (seen failing with `kv_write` toggled bare),
+  `the_row_f_window_counters_are_on_gateway_stats` — the counters are per node now (`TransportBounds`). (9)
+  **The second review** reproduced impersonation and silencing through that round's identity exemption (it trusted
+  `sender`); the exemption is now a self-authenticating sealed record only (`connection::self_authenticating_identity`,
+  counted `kv_identity_exempt_frames`), a node publishes the sealed record first unsigned and its legacy pair signed,
+  and an identity tombstone removes no keys — `an_unsigned_identity_forgery_cannot_make_a_member_sign_as_another`,
+  `an_identity_tombstone_does_not_erase_a_members_keys` (both postures),
+  `only_a_self_authenticating_sealed_identity_is_exempt_from_the_refusal`, all seen failing on 59d86368; the gate
+  skips only an inline test module (fourth plant, seen passing the old gate); the per-frame warnings are rate-limited
+  (`a_warning_gate_lets_one_through_per_interval_and_counts_the_rest`, a new helper, no fail-first run). **What
+  remains with `require_identity_proofs` off:** another member's identity is writable under the writer's own
+  signature, detected not prevented. **The third review:** N4 — a replayed pre-rotation sealed record replaced the
+  current one; an exempt record must now contain every key held or stored for the node, a stale one refused and counted
+  (`kv_identity_stale_refused`; `a_replayed_pre_rotation_sealed_record_does_not_replace_the_current_one`, the
+  reviewer's test, seen failing on 884f310f); first sighting stays trust on first use. L1 — the gate blanks string and
+  char literals before counting braces (fifth plant, seen passing the old gate; a multi-line string can still miscount,
+  stated). L2 — stated in §35. N5 — pre-existing, recorded as row Q, `revoke_key`'s doc corrected. **CI's co-op
+  demo 04** exposed a shutdown race the signed retraction made reliable (a provider's capability tombstone, sent as
+  its handle dropped during shutdown, never left); graceful shutdown now drains queued frames before signalling —
+  `a_capability_retracted_at_shutdown_reaches_the_peers`, seen failing first; the co-op suite 13/13 locally.
+  `start()` warns when `kv_require_signed_frames` is inert (`kv_require_signed_frames_without_tls_is_inert`); the
+  warning's emission itself is not asserted. (3, 5, 7) answered in the docs: the refusal is bypassable through
+  anti-entropy; upgraded nodes sign tagged at once (the 2.32.0 shape) and reach 2.32 peers by anti-entropy only;
+  revocation events join the untagged list.
+- *Documentation follow-through* — `deprecations.md` §35 and the §23 closure note; `docs/threat-model.md` Boundary A;
+  `what-is-proven.md`'s KV residual moved to the CI table (role claims and audit records remain in the third);
+  `configuration.md`'s `kv_require_signed_frames` row; the identity-authentication and federated-domains records
+  amended; wiki `dev/security.md`; `docs/wiki/dev/.log/2026-10-12-f-wire-crypto.md`.
+
 ### 3.6 · State of play and the next iteration (2026-10-12)
 
 Where the work stands at the end of 2026-10-12, so the next session starts here rather than from a conversation.
@@ -615,7 +689,11 @@ Where the work stands at the end of 2026-10-12, so the next session starts here 
 
 **Not started:** K (policy over history — decide §5's fleet question first), L (credentials attached at egress), M
 (activation commands confined), N (A2A at the current specification — independent of E and F, and it carries a defect
-worth fixing on its own: the agent card names the gossip port), O and P (after N), and §5's inference-routing question.
+worth fixing on its own: the agent card names the gossip port), O and P (after N), §5's inference-routing question, and Q (revocation
+reaches every verifier — **high, pre-existing**: #611's third review reproduced on `main` that after
+`rotate_identity_on_compromise` a peer lists the old key as revoked yet still applies a `SignedData` signed by it as the
+node, `review_revoked_key_still_verifies_kv_writes`; revocation is consulted only by consensus and
+`known_verifying_keys`).
 
 **Follow-ups recorded as not built in delivered rows (each in its §3.5 block):**
 - **H:** carry each named offer's signed bytes inside the close and award from that copy (today a member who deletes a

@@ -30,7 +30,7 @@
 //!
 //! `mailbox/{target_node_id}/{kind}/{hlc_ts:016x}` → `sender_node_id_len(2 LE) | sender_bytes | payload`
 
-use crate::framing::{ForwardHint, WireMessage, dispatch_gossip_try_send, make_gossip_update};
+use crate::framing::{ForwardHint, dispatch_gossip_try_send, make_gossip_update};
 use crate::node_id::NodeId;
 use crate::store::{apply_and_notify, scan_kv_prefix};
 use bytes::{BufMut, Bytes, BytesMut};
@@ -186,7 +186,7 @@ fn tombstone(ctx: &Arc<TaskCtx>, key: Arc<str>) {
     apply_and_notify(&ctx.kv_state, &update);
     dispatch_gossip_try_send(
         &ctx.gossip_txs,
-        WireMessage::Data(update),
+        crate::framing::local_kv_wire_msg(ctx, update),
         ctx.node_id.id_hash(),
         ForwardHint::All,
         &ctx.kv_state.dropped_frames,
@@ -316,7 +316,7 @@ pub(crate) fn deliver_event_ctx(
         wal.append_try(crate::framing::sync_entry_from(&update));
     }
     dispatch_gossip_try_send(
-        &ctx.gossip_txs, WireMessage::Data(update),
+        &ctx.gossip_txs, crate::framing::local_kv_wire_msg(ctx, update),
         self_node_id.id_hash(), ForwardHint::All, &ctx.kv_state.dropped_frames,
     )
 }

@@ -19,7 +19,7 @@ use tokio::{sync::watch, task::JoinHandle};
 
 use crate::CapFilter;
 use crate::NodeId;
-use crate::framing::{dispatch_gossip_try_send, ForwardHint, WireMessage, make_gossip_update};
+use crate::framing::{dispatch_gossip_try_send, ForwardHint, make_gossip_update};
 use crate::signal::{SignalScope, signal_kind};
 use crate::store::apply_and_notify;
 use super::capability_ops::{resolve_filter_against_kv, subscribe_prefix_on_kv};
@@ -465,7 +465,7 @@ impl AgentStateMachine {
         apply_and_notify(&self.ctx.kv_state, &update);
         dispatch_gossip_try_send(
             &self.ctx.gossip_txs,
-            WireMessage::Data(update),
+            crate::framing::local_kv_wire_msg(&self.ctx, update),
             self.ctx.node_id.id_hash(),
             ForwardHint::All,
             &self.ctx.kv_state.dropped_frames,
@@ -520,7 +520,7 @@ impl AgentStateMachine {
         apply_and_notify(&self.ctx.kv_state, &update);
         dispatch_gossip_try_send(
             &self.ctx.gossip_txs,
-            WireMessage::Data(update),
+            crate::framing::local_kv_wire_msg(&self.ctx, update),
             self.ctx.node_id.id_hash(),
             ForwardHint::All,
             &self.ctx.kv_state.dropped_frames,
@@ -544,7 +544,7 @@ impl AgentStateMachine {
         apply_and_notify(&self.ctx.kv_state, &update);
         dispatch_gossip_try_send(
             &self.ctx.gossip_txs,
-            WireMessage::Data(update),
+            crate::framing::local_kv_wire_msg(&self.ctx, update),
             self.ctx.node_id.id_hash(),
             ForwardHint::All,
             &self.ctx.kv_state.dropped_frames,
