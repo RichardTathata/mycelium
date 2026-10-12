@@ -12,7 +12,7 @@
 14 mycelium-core/src/persistence.rs
 2 mycelium-core/src/receipt.rs
 2 mycelium-core/src/schema_handle.rs
-11 mycelium-core/src/signal.rs
+8 mycelium-core/src/signal.rs
 3 mycelium-core/src/stall.rs
 2 mycelium-core/src/swim_membership.rs
 10 mycelium-core/src/swim.rs
@@ -31,13 +31,11 @@
 5 src/agent/a2a.rs
 2 src/agent/bulk.rs
 9 src/agent/capability_handle.rs
-2 src/agent/capability_ops.rs
 3 src/agent/consensus_handle.rs
 4 src/agent/emergent_groups.rs
 1 src/agent/emergent.rs
 1 src/agent/helpers.rs
-15 src/agent/http.rs
-1 src/agent/intent.rs
+14 src/agent/http.rs
 7 src/agent/journal.rs
 1 src/agent/kv_quorum_ext.rs
 8 src/agent/lifecycle.rs

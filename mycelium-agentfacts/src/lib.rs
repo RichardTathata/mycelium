@@ -18,7 +18,6 @@
 
 #![deny(unsafe_code)]
 
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use mycelium::{Capability, GossipAgent};
@@ -34,8 +33,10 @@ pub use crdt::{
 pub use http::agent_facts_router;
 pub use knowledge::{ClaimError, claim, subject_for};
 
+/// Unix-ms now, through the substrate's replay seam (`mycelium::sim_seam::wall_now_ms`, the one
+/// wall clock every `now_ms` reads — post-360 row J, 2026-10-12).
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    mycelium::sim_seam::wall_now_ms()
 }
 
 fn b64() -> base64::engine::general_purpose::GeneralPurpose {

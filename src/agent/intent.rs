@@ -31,12 +31,11 @@ pub trait FleetIntent:
     fn target(&self) -> Option<&NodeId>;
 }
 
-/// Unix-ms now (saturating to 0 before the epoch).
+/// Unix-ms now (saturating to 0 before the epoch), through the replay seam —
+/// [`mycelium_core::sim_seam::wall_now_ms`], the one wall clock (post-360 row J, 2026-10-12;
+/// before it this read `SystemTime::now()` directly and an intent's stamp could not replay).
 pub fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    mycelium_core::sim_seam::wall_now_ms()
 }
 
 /// Publish `intent` (stamped now) to `key`, gossiped via the KV substrate. Any entity with a

@@ -185,13 +185,11 @@ pub(super) fn scan_cap_by_ns_name(
     result
 }
 
-/// Returns current wall-clock milliseconds for max_age comparisons.
+/// Returns current wall-clock milliseconds for max_age comparisons — [`now_ms`], which was a
+/// second copy of it in this file until post-360 row J (2026-10-12).
 #[inline]
 fn age_now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+    now_ms()
 }
 
 /// True if the capability entry is older than `max_age` based on its HLC timestamp.
@@ -415,17 +413,40 @@ pub(super) async fn run_consolidated_opacity_watcher(
     }
 }
 
+/// Unix-ms now, through the replay seam — the one wall clock every `now_ms` copy reads
+/// ([`mycelium_core::sim_seam::wall_now_ms`]; saturates to 0 before the epoch). Until post-360
+/// row J (2026-10-12) this and `intent::now_ms` read `SystemTime::now()` directly, so under `sim`
+/// a recording could not replay the freshness decisions that depend on them.
 pub(super) fn now_ms() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+    mycelium_core::sim_seam::wall_now_ms()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every `now_ms` is the seam's clock (post-360 row J): the agent's two copies and the
+    /// federation edge's agree with `sim_seam::wall_now_ms` to the millisecond scale, and read
+    /// Unix milliseconds, not seconds or nanoseconds. The structural half of the pin is the
+    /// sim-seam gate's baseline: a direct `SystemTime::now()` reappearing in either file is `+1`.
+    #[test]
+    fn every_now_ms_is_the_seams_wall_clock() {
+        let seam_before = mycelium_core::sim_seam::wall_now_ms();
+        let a = now_ms();
+        let mut reads = vec![("capability_ops", a), ("intent", crate::agent::intent::now_ms())];
+        #[cfg(feature = "tls")]
+        reads.push(("federation::edge", crate::federation::edge::now_ms()));
+        let seam_after = mycelium_core::sim_seam::wall_now_ms();
+        for (name, v) in reads {
+            assert!(
+                (seam_before..=seam_after).contains(&v),
+                "{name}::now_ms() = {v} is not between two seam reads {seam_before}..={seam_after}"
+            );
+        }
+        // 2020-01-01T00:00:00Z in ms: a seconds or nanoseconds clock fails here.
+        assert!(a > 1_577_836_800_000, "not Unix milliseconds: {a}");
+        assert!(a < 1_577_836_800_000 * 1_000, "not Unix milliseconds: {a}");
+    }
 
     #[test]
     fn parse_cap_key_extracts_components() {

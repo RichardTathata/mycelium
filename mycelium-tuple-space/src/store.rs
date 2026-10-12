@@ -900,10 +900,11 @@ impl TupleStore {
     }
 }
 
+/// Unix-ms now, through the substrate's replay seam (`mycelium::sim_seam::wall_now_ms`, the one
+/// wall clock every `now_ms` reads — post-360 row J, 2026-10-12; a direct `SystemTime::now()`
+/// before it). Saturates to 0 before the epoch.
 pub(crate) fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64)
+    mycelium::sim_seam::wall_now_ms()
 }
 
 // ─── WAL ─────────────────────────────────────────────────────────────────────
