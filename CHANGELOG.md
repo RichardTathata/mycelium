@@ -255,6 +255,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **Dependency: `quinn-proto` 0.11.15 → 0.11.18** (RUSTSEC-2026-0338, -0339, -0340, -0341, -0342: two remote panics on crafted STREAM/ACK_FREQUENCY frames, a stream-reassembly memory guard and a zero-length DATAGRAM buffer bypass, unbounded connection-ID retirements). Reached through `reqwest`'s HTTP/3 client (`async-openai`, `object_store`, `jsonschema`, `reqwest-eventsource`); a lockfile change only, no API change.
 - **Wire and crypto, one MINOR with a window (post-360 plan row F).** Wire **v12** unchanged — no frame changes
   shape; what changes is what a node accepts and what a signature is over. Three changes and one closure:
   - **KV `SignedData` is domain-tagged.** A KV write is signed over `mycelium.kv/update/1 ‖ u32 len ‖ canonical`
