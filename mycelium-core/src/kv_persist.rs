@@ -8,7 +8,7 @@
 //! probe can distinguish "process up" from "soft state hydrated".
 
 use crate::context::CoreCtx;
-use crate::framing::{dispatch_gossip_send, dispatch_gossip_try_send, ForwardHint, WireMessage};
+use crate::framing::{dispatch_gossip_send, dispatch_gossip_try_send, ForwardHint};
 use crate::store::apply_and_notify;
 use bytes::Bytes;
 use std::{sync::Arc, time::Duration};
@@ -62,7 +62,7 @@ pub async fn run_kv_persist_task(
                     first_tick = false;
                 }
                 dispatch_gossip_try_send(
-                    &ctx.gossip_txs, WireMessage::Data(update),
+                    &ctx.gossip_txs, crate::framing::local_kv_wire_msg(&ctx, update),
                     ctx.node_id.id_hash(), ForwardHint::All, &ctx.kv_state.dropped_frames,
                 );
             }
@@ -73,7 +73,7 @@ pub async fn run_kv_persist_task(
     );
     apply_and_notify(&ctx.kv_state, &tombstone);
     dispatch_gossip_send(
-        &ctx.gossip_txs, WireMessage::Data(tombstone),
+        &ctx.gossip_txs, crate::framing::local_kv_wire_msg(&ctx, tombstone),
         ctx.node_id.id_hash(), ForwardHint::All,
     ).await;
 }

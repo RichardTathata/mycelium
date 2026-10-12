@@ -177,6 +177,33 @@ pub struct ConnContext {
     pub peer_list_tx: tokio::sync::watch::Sender<Arc<[NodeId]>>,
 }
 
+/// KV `SignedData` signatures this process accepted in the **untagged** (pre-2.33.0) form — a
+/// mixed-fleet allowance for one release (`docs/guide/deprecations.md` §35). Frames, not peers.
+/// Still rising means a peer still signs its writes the old way.
+#[cfg(feature = "tls")]
+static UNTAGGED_KV_SIGNATURES_ACCEPTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many untagged KV signatures this process has accepted under the mixed-fleet allowance.
+#[cfg(feature = "tls")]
+pub fn untagged_kv_signatures_accepted() -> u64 {
+    UNTAGGED_KV_SIGNATURES_ACCEPTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Unsigned KV `Data` frames a **TLS** node received: `(accepted, refused)`. Accepted under the
+/// one-release window (`kv_require_signed_frames = false`), refused once it is set
+/// (`docs/guide/deprecations.md` §35). Frames, not peers.
+#[cfg(feature = "tls")]
+static UNSIGNED_KV_FRAMES_ACCEPTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(feature = "tls")]
+static UNSIGNED_KV_FRAMES_REFUSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many unsigned KV `Data` frames this process, as a TLS node, has `(accepted, refused)`.
+#[cfg(feature = "tls")]
+pub fn unsigned_kv_frames() -> (u64, u64) {
+    (UNSIGNED_KV_FRAMES_ACCEPTED.load(std::sync::atomic::Ordering::Relaxed),
+     UNSIGNED_KV_FRAMES_REFUSED.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 pub async fn handle_connection(
     socket: GossipStream,
     peer_addr: SocketAddr,
@@ -808,6 +835,24 @@ pub async fn handle_connection(
                 if task_ctx.removed.is_hash_removed(update.sender) {
                     continue;
                 }
+                // Post-360 plan row F: a TLS node signs every KV write it originates, so an unsigned
+                // `Data` frame at a TLS node is either a peer still on 2.32 (whose agent sent its own
+                // writes unsigned) or a member writing under another's `sender` hash by not signing.
+                // One release: applied and counted unless `kv_require_signed_frames`, which refuses
+                // it (`docs/guide/deprecations.md` §35). The next MINOR refuses unconditionally.
+                #[cfg(feature = "tls")]
+                if tls.is_some() {
+                    if task_ctx.config.kv_require_signed_frames {
+                        UNSIGNED_KV_FRAMES_REFUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        #[cfg(feature = "metrics")]
+                        metrics::counter!("mycelium_kv_unsigned_frames_total", "outcome" => "refused").increment(1);
+                        tracing::debug!(from = %peer_addr, sender = update.sender, "refusing an unsigned KV Data frame (kv_require_signed_frames)");
+                        continue;
+                    }
+                    UNSIGNED_KV_FRAMES_ACCEPTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    #[cfg(feature = "metrics")]
+                    metrics::counter!("mycelium_kv_unsigned_frames_total", "outcome" => "accepted").increment(1);
+                }
                 // Nonce was already checked and inserted by the early-dedup path above
                 // for FrameVersion::Current. For FrameVersion::Previous, check now.
                 if frame_version == FrameVersion::Previous {
@@ -917,8 +962,7 @@ pub async fn handle_connection(
                     continue;
                 }
 
-                // Signature verification — fail-open: accept frames whose signer's public
-                // key is not yet in peer_keys (key hasn't gossiped yet).
+                // Signature verification: the signer's key must be known (fail-closed below).
                 #[cfg(feature = "tls")]
                 {
                     let guard = task_ctx.peer_keys.pin();
@@ -930,12 +974,28 @@ pub async fn handle_connection(
                         let mut sig_bytes = [0u8; 64];
                         sig_bytes[..32].copy_from_slice(lo);
                         sig_bytes[32..].copy_from_slice(hi);
-                        if !pub_key_set.iter().any(|k| crate::tls::verify_bytes(k, &canonical, &sig_bytes)) {
-                            warn!(
-                                "SignedData from {} (signer={:#x}) failed Ed25519 verification, dropping",
-                                peer_addr, signer
-                            );
-                            continue;
+                        // The tagged message first (`kv_signing_message`, 2.33.0); then the bare
+                        // canonical bytes — the pre-2.33.0 form, accepted for **one release** so a
+                        // fleet upgrades node by node, counted so an operator can see which peers
+                        // still sign that way (`docs/guide/deprecations.md` §35).
+                        let tagged = crate::framing::kv_signing_message(&canonical);
+                        if !pub_key_set.iter().any(|k| crate::tls::verify_bytes(k, &tagged, &sig_bytes)) {
+                            if pub_key_set.iter().any(|k| crate::tls::verify_bytes(k, &canonical, &sig_bytes)) {
+                                UNTAGGED_KV_SIGNATURES_ACCEPTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                #[cfg(feature = "metrics")]
+                                metrics::counter!("mycelium_kv_untagged_signatures_total").increment(1);
+                                tracing::debug!(
+                                    "SignedData from {} (signer={:#x}) carries an untagged (pre-2.33.0) signature; \
+                                     accepted for one release (docs/guide/deprecations.md §35)",
+                                    peer_addr, signer
+                                );
+                            } else {
+                                warn!(
+                                    "SignedData from {} (signer={:#x}) failed Ed25519 verification, dropping",
+                                    peer_addr, signer
+                                );
+                                continue;
+                            }
                         }
                     }
                     // Unknown signer → fail-closed. The value will arrive via anti-entropy

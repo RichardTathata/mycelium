@@ -1169,6 +1169,29 @@ pub struct GossipConfig {
     #[serde(default)]
     pub require_identity_proofs: bool,
 
+    /// **A TLS node refuses an unsigned KV `Data` frame** (post-360 plan row F, 2.33.0).
+    ///
+    /// Under `[tls]` a node signs every KV write it originates (`WireMessage::SignedData`, signature
+    /// over `mycelium.kv/update/1 ‖ len ‖ canonical`), and a receiver drops a `SignedData` frame whose
+    /// signature does not verify. An unsigned `Data` frame was applied regardless — so a member could
+    /// write a key under any other member's `sender` hash simply by not signing. Before 2.33.0 the
+    /// node's own agent sent twenty-three kinds of write unsigned (membership, mailboxes, state
+    /// machines, opacity, the gateway's routes, the soft-state advertiser), so a refusal would have
+    /// dropped a 2.32 fleet's own traffic; 2.33.0 signs every one of them.
+    ///
+    /// **The window, one release:** with this `false` (the default in 2.33.0) a TLS node applies an
+    /// unsigned `Data` frame and counts it (`SystemStats`/`GET /stats` `kv_unsigned_frames_accepted`,
+    /// `mycelium_kv_unsigned_frames_total{outcome="accepted"}`); with it `true` the frame is dropped
+    /// and counted as refused (`kv_unsigned_frames_refused`). Set it once every peer is on 2.33.0 —
+    /// an upgraded node that requires signed frames drops a 2.32 peer's agent writes until that peer
+    /// is upgraded. The next MINOR refuses unconditionally (`docs/guide/deprecations.md` §35).
+    /// Inert without `[tls]`, where nothing is signed.
+    ///
+    /// **Not covered:** anti-entropy. A `StateResponse` entry carries no author and no signature, and
+    /// is applied by LWW whatever this says — the residual `docs/threat-model.md` Boundary A states.
+    #[serde(default)]
+    pub kv_require_signed_frames: bool,
+
     /// Gateway caller identity profile (item 7). `Secure` (default): every gateway-originated
     /// dispatch carries an auth-layer-constructed, node-attested `GatewayCaller`, and a provider
     /// that cannot enforce it is refused explicitly. `Legacy`: the pre-item-7 node-as-caller
@@ -1377,6 +1400,7 @@ impl Default for GossipConfig {
             gateway_named_tokens:          Vec::new(),
             gateway_identity_issuer:       None,
             require_identity_proofs:       false,
+            kv_require_signed_frames:      false,
             gateway_caller_profile:        GatewayCallerProfile::Secure,
             protected_rpc_kinds:           Vec::new(),
             control_max_staleness_ms:      30_000,
@@ -2026,6 +2050,9 @@ impl GossipConfig {
         }
         if let Ok(v) = env::var("GOSSIP_REQUIRE_IDENTITY_PROOFS") {
             self.require_identity_proofs = matches!(v.as_str(), "1" | "true" | "TRUE" | "yes");
+        }
+        if let Ok(v) = env::var("GOSSIP_KV_REQUIRE_SIGNED_FRAMES") {
+            self.kv_require_signed_frames = matches!(v.as_str(), "1" | "true" | "TRUE" | "yes");
         }
         if let Ok(v) = env::var("GOSSIP_MEMBERSHIP_COOLDOWN_SECS") {
             self.membership_cooldown_secs = Some(v.parse().map_err(GossipError::Parse)?);

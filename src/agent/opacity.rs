@@ -1,4 +1,4 @@
-use crate::framing::{dispatch_gossip_try_send, make_gossip_update, ForwardHint, WireMessage};
+use crate::framing::{dispatch_gossip_try_send, make_gossip_update, ForwardHint};
 use crate::signal::{
     decode_load_state, encode_load_state, kv_ns, LoadState, OpacityHandle, OpacityHint,
     OpacityState,
@@ -459,7 +459,7 @@ where
                             let written_at_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
                             let upd = make_gossip_update(&ctx.node_id, ctx.default_ttl, Arc::clone(&load_key), encode_load_state(&LoadState { fill_ratio, is_opaque: true, written_at_ms }), false, &ctx.hlc);
                             apply_and_notify(&ctx.kv_state, &upd);
-                            dispatch_gossip_try_send(&ctx.gossip_txs, WireMessage::Data(upd), ctx.node_id.id_hash(), ForwardHint::All, &ctx.kv_state.dropped_frames);
+                            dispatch_gossip_try_send(&ctx.gossip_txs, crate::framing::local_kv_wire_msg(&ctx, upd), ctx.node_id.id_hash(), ForwardHint::All, &ctx.kv_state.dropped_frames);
                         }
                         OpacityTransition::GoTransparent => {
                             last_action_ms = Some(now_ms);
@@ -467,7 +467,7 @@ where
                             is_opaque = false;
                             let upd = make_gossip_update(&ctx.node_id, ctx.default_ttl, Arc::clone(&load_key), Bytes::new(), true, &ctx.hlc);
                             apply_and_notify(&ctx.kv_state, &upd);
-                            dispatch_gossip_try_send(&ctx.gossip_txs, WireMessage::Data(upd), ctx.node_id.id_hash(), ForwardHint::All, &ctx.kv_state.dropped_frames);
+                            dispatch_gossip_try_send(&ctx.gossip_txs, crate::framing::local_kv_wire_msg(&ctx, upd), ctx.node_id.id_hash(), ForwardHint::All, &ctx.kv_state.dropped_frames);
                         }
                         OpacityTransition::Hold => {}
                     }

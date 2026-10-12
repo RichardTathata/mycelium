@@ -298,7 +298,7 @@ async fn run_group_membership_task(
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     use crate::framing::{
-        dispatch_gossip_send, dispatch_gossip_try_send, ForwardHint, WireMessage,
+        dispatch_gossip_send, dispatch_gossip_try_send, ForwardHint,
         make_gossip_update,
     };
     use crate::store::apply_and_notify;
@@ -321,7 +321,7 @@ async fn run_group_membership_task(
         );
         apply_and_notify(&ctx.kv_state, &upd);
         dispatch_gossip_try_send(
-            &ctx.gossip_txs, WireMessage::Data(upd),
+            &ctx.gossip_txs, crate::framing::local_kv_wire_msg(&ctx, upd),
             ctx.node_id.id_hash(), ForwardHint::All, &ctx.kv_state.dropped_frames,
         );
     };
@@ -336,7 +336,7 @@ async fn run_group_membership_task(
         );
         apply_and_notify(&ctx.kv_state, &upd);
         dispatch_gossip_try_send(
-            &ctx.gossip_txs, WireMessage::Data(upd),
+            &ctx.gossip_txs, crate::framing::local_kv_wire_msg(&ctx, upd),
             ctx.node_id.id_hash(), ForwardHint::All, &ctx.kv_state.dropped_frames,
         );
     };
@@ -346,7 +346,7 @@ async fn run_group_membership_task(
         );
         apply_and_notify(&ctx.kv_state, &upd);
         dispatch_gossip_try_send(
-            &ctx.gossip_txs, WireMessage::Data(upd),
+            &ctx.gossip_txs, crate::framing::local_kv_wire_msg(&ctx, upd),
             ctx.node_id.id_hash(), ForwardHint::All, &ctx.kv_state.dropped_frames,
         );
     };
@@ -418,7 +418,7 @@ async fn run_group_membership_task(
         );
         apply_and_notify(&ctx.kv_state, &upd);
         dispatch_gossip_send(
-            &ctx.gossip_txs, WireMessage::Data(upd),
+            &ctx.gossip_txs, crate::framing::local_kv_wire_msg(&ctx, upd),
             ctx.node_id.id_hash(), ForwardHint::All,
         ).await;
     }
@@ -433,7 +433,7 @@ async fn run_group_membership_task(
 /// effect of `GossipAgent::{join_group, leave_group}` from a spawned task
 /// without holding an agent reference.
 pub(crate) fn emit_membership(ctx: &TaskCtx, own: &NodeId, group: &Arc<str>, leaving: bool) {
-    use crate::framing::{dispatch_gossip_try_send, ForwardHint, WireMessage, make_gossip_update};
+    use crate::framing::{dispatch_gossip_try_send, ForwardHint, make_gossip_update};
     use crate::store::apply_and_notify;
     let key: Arc<str> = Arc::from(format!("grp/{}/{}", group, own).as_str());
     let payload = if leaving { Bytes::new() } else { Bytes::from_static(&[1u8]) };
@@ -442,7 +442,7 @@ pub(crate) fn emit_membership(ctx: &TaskCtx, own: &NodeId, group: &Arc<str>, lea
     );
     apply_and_notify(&ctx.kv_state, &upd);
     dispatch_gossip_try_send(
-        &ctx.gossip_txs, WireMessage::Data(upd),
+        &ctx.gossip_txs, crate::framing::local_kv_wire_msg(ctx, upd),
         ctx.node_id.id_hash(), ForwardHint::All, &ctx.kv_state.dropped_frames,
     );
     if leaving {

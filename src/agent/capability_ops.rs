@@ -275,7 +275,7 @@ pub(crate) fn subscribe_prefix_on_kv(
 /// Writes `LoadState { is_opaque: true }` to `opacity_key` in the local KV
 /// store and fans it out over gossip.
 fn write_opacity_key(ctx: &TaskCtx, opacity_key: &Arc<str>) {
-    use crate::framing::{dispatch_gossip_try_send, ForwardHint, WireMessage, make_gossip_update};
+    use crate::framing::{dispatch_gossip_try_send, ForwardHint, make_gossip_update};
     use crate::store::apply_and_notify;
     let payload = encode_load_state(&LoadState {
         fill_ratio: 1.0, is_opaque: true, written_at_ms: now_ms(),
@@ -285,7 +285,7 @@ fn write_opacity_key(ctx: &TaskCtx, opacity_key: &Arc<str>) {
     );
     apply_and_notify(&ctx.kv_state, &upd);
     dispatch_gossip_try_send(
-        &ctx.gossip_txs, WireMessage::Data(upd),
+        &ctx.gossip_txs, crate::framing::local_kv_wire_msg(ctx, upd),
         ctx.node_id.id_hash(), ForwardHint::All, &ctx.kv_state.dropped_frames,
     );
 }
@@ -294,14 +294,14 @@ fn write_opacity_key(ctx: &TaskCtx, opacity_key: &Arc<str>) {
 /// gossip. Used by the consolidated watcher when a requirement becomes
 /// satisfied or is retracted.
 fn clear_opacity_key(ctx: &TaskCtx, opacity_key: &Arc<str>) {
-    use crate::framing::{dispatch_gossip_try_send, ForwardHint, WireMessage, make_gossip_update};
+    use crate::framing::{dispatch_gossip_try_send, ForwardHint, make_gossip_update};
     use crate::store::apply_and_notify;
     let upd = make_gossip_update(
         &ctx.node_id, ctx.default_ttl, Arc::clone(opacity_key), Bytes::new(), true, &ctx.hlc,
     );
     apply_and_notify(&ctx.kv_state, &upd);
     dispatch_gossip_try_send(
-        &ctx.gossip_txs, WireMessage::Data(upd),
+        &ctx.gossip_txs, crate::framing::local_kv_wire_msg(ctx, upd),
         ctx.node_id.id_hash(), ForwardHint::All, &ctx.kv_state.dropped_frames,
     );
 }

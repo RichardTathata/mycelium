@@ -9,7 +9,7 @@
 //! tools into the Mycelium mesh. Discovered tools are written to KV under the
 //! same `tools/` namespace and calls are proxied outbound to the remote server.
 
-use crate::framing::{dispatch_gossip_send, make_gossip_update, ForwardHint, WireMessage};
+use crate::framing::{dispatch_gossip_send, make_gossip_update, ForwardHint};
 use crate::signal::Signal;
 use super::rpc::{RpcRequest, rpc_respond_ctx};
 use super::gateway_caller::{self, RequestPrincipal};
@@ -193,7 +193,7 @@ where
     apply_and_notify(&ctx.kv_state, &tombstone);
     dispatch_gossip_send(
         &ctx.gossip_txs,
-        WireMessage::Data(tombstone),
+        crate::framing::local_kv_wire_msg(&ctx, tombstone),
         ctx.node_id.id_hash(),
         ForwardHint::All,
     )
@@ -301,7 +301,7 @@ pub(super) async fn run_mcp_client_task(
         apply_and_notify(&ctx.kv_state, &tombstone);
         dispatch_gossip_send(
             &ctx.gossip_txs,
-            WireMessage::Data(tombstone),
+            crate::framing::local_kv_wire_msg(&ctx, tombstone),
             ctx.node_id.id_hash(),
             ForwardHint::All,
         )

@@ -227,7 +227,7 @@ pub(super) async fn gw_kv_quorum(
 
 /// Applies a KV write (set or delete) and fans out to gossip peers.
 pub(super) fn kv_write(ctx: &Arc<TaskCtx>, key: Arc<str>, value: Bytes, tombstone: bool) -> bool {
-    use crate::framing::{dispatch_gossip_try_send, make_gossip_update, ForwardHint, WireMessage};
+    use crate::framing::{dispatch_gossip_try_send, make_gossip_update, ForwardHint};
     use crate::store::apply_and_notify;
     let update = make_gossip_update(&ctx.node_id, ctx.default_ttl, key, value, tombstone, &ctx.hlc);
     apply_and_notify(&ctx.kv_state, &update); // apply, then persist (persistence.rs invariant 1)
@@ -236,7 +236,7 @@ pub(super) fn kv_write(ctx: &Arc<TaskCtx>, key: Arc<str>, value: Bytes, tombston
     }
     dispatch_gossip_try_send(
         &ctx.gossip_txs,
-        WireMessage::Data(update),
+        crate::framing::local_kv_wire_msg(ctx, update),
         ctx.node_id.id_hash(),
         ForwardHint::All,
         &ctx.kv_state.dropped_frames,

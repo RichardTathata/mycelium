@@ -85,6 +85,28 @@ fn spawn_handler(
     seen: Arc<ShardedSeen>,
     max_ttl: u8,
 ) -> (Arc<watch::Sender<bool>>, tokio::task::JoinHandle<Result<(), GossipError>>) {
+    spawn_handler_with(socket, store, peers, gossip_tx, seen, max_ttl, HandlerOpts::default())
+}
+
+/// What a connection handler under test is configured with, beyond the defaults: the node's
+/// `GossipConfig`, its TLS identity (a node with one is "a TLS node" to the handler — the stream
+/// itself can stay plaintext, the handler does not look), and the peer keys it already knows.
+#[derive(Default)]
+struct HandlerOpts {
+    config:    GossipConfig,
+    tls:       Option<Arc<crate::tls::NodeTls>>,
+    peer_keys: Vec<(NodeId, Vec<[u8; 32]>)>,
+}
+
+fn spawn_handler_with(
+    socket: TcpStream,
+    store: Arc<papaya::HashMap<Arc<str>, StoreEntry>>,
+    peers: Arc<papaya::HashMap<NodeId, Instant>>,
+    gossip_tx: mpsc::Sender<(Bytes, u64, crate::framing::ForwardHint)>,
+    seen: Arc<ShardedSeen>,
+    max_ttl: u8,
+    opts: HandlerOpts,
+) -> (Arc<watch::Sender<bool>>, tokio::task::JoinHandle<Result<(), GossipError>>) {
     use crate::connection::handle_connection;
     use crate::signal::{Boundary, SignalHandlers};
     use crate::agent::{TaskCtx, BulkTransport};
@@ -137,8 +159,12 @@ fn spawn_handler(
         wal: std::sync::OnceLock::new(),
         sys_namespace_violations: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         transport_bounds: Arc::default(),
-        tls: std::sync::OnceLock::new(),
-        peer_keys: Arc::new(papaya::HashMap::new()),
+        tls: {
+            let cell = std::sync::OnceLock::new();
+            if let Some(t) = opts.tls { let _ = cell.set(t); }
+            cell
+        },
+        peer_keys: Arc::new(opts.peer_keys.into_iter().collect()),
         peer_anchor_keys: Arc::new(papaya::HashMap::new()),
         removed: Arc::new(mycelium_core::removal::RemovedSet::default()),
         identity_anchor_conflicts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -149,8 +175,8 @@ fn spawn_handler(
         soft_state_advertised: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         shutdown_tx: Arc::new(shutdown_tx_inner),
         task_handles: Arc::new(std::sync::Mutex::new(tokio::task::JoinSet::new())),
-        config: Arc::new(crate::config::GossipConfig::default()),
-        hot: Arc::new(mycelium_core::context::HotConfig::from_config(&crate::config::GossipConfig::default())),
+        hot: Arc::new(mycelium_core::context::HotConfig::from_config(&opts.config)),
+        config: Arc::new(opts.config),
     });
     let task_ctx = Arc::new(TaskCtx {
         #[cfg(feature = "consensus")]
@@ -996,6 +1022,196 @@ async fn test_upsert_propagates() {
 
     let s = Arc::clone(&store);
     poll_until(|| s.pin().get("k").and_then(|e| e.data.clone()) == Some(Bytes::from_static(b"v")), 200).await;
+}
+
+// ── KV `SignedData` is domain-tagged (post-360 plan row F) ─────────────────────
+
+/// A TLS identity for a handler test, generated into its own directory.
+#[cfg(feature = "tls")]
+fn test_tls_identity(tag: &str, node: &NodeId) -> (Arc<crate::tls::NodeTls>, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("myc-{tag}-{}-{}", node.to_socket_addr().port(), std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let cfg = crate::config::TlsConfig { auto_cert_dir: dir.clone(), ..Default::default() };
+    let tls = crate::tls::load_or_generate(&cfg, node, Arc::new(mycelium_core::removal::RemovedSet::default())).unwrap();
+    (Arc::new(tls), dir)
+}
+
+/// A `SignedData` frame for `update`, signed by `sk` over `message` — whatever message the test
+/// wants the signature to be over.
+#[cfg(feature = "tls")]
+fn signed_data_over(update: GossipUpdate, signer: u64, sk: &ed25519_dalek::SigningKey, message: &[u8]) -> WireMessage {
+    let sig = crate::tls::sign_bytes(sk, message);
+    let lo: [u8; 32] = sig[..32].try_into().unwrap();
+    let hi: [u8; 32] = sig[32..].try_into().unwrap();
+    WireMessage::SignedData { update, signer, signature: (lo, hi) }
+}
+
+/// **A signature over the tagged message is accepted at the connection** (post-360 plan row F).
+/// Seen failing first: the 2.32 verifier checked the bare canonical bytes only, so the tagged
+/// frame was dropped as a bad signature and the key never applied.
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn a_tagged_kv_signature_is_accepted_at_the_connection() {
+    use ed25519_dalek::SigningKey;
+    let (mut writer, reader) = loopback_pair().await;
+    let store: Arc<papaya::HashMap<Arc<str>, StoreEntry>> = Arc::new(papaya::HashMap::new());
+    let (tx, _rx) = mpsc::channel(10);
+    let peer = NodeId::new("127.0.0.1", 7301).unwrap();
+    let sk = SigningKey::from_bytes(&[71u8; 32]);
+    let opts = HandlerOpts { peer_keys: vec![(peer.clone(), vec![sk.verifying_key().to_bytes()])], ..Default::default() };
+    let _ = spawn_handler_with(reader, Arc::clone(&store), Arc::new(papaya::HashMap::new()), tx,
+                               Arc::new(ShardedSeen::new(N_GOSSIP_SHARDS)), GossipConfig::default().default_ttl, opts);
+
+    let mut u = data_update("tagged/k", b"v", 7301, false);
+    u.sender = peer.id_hash();
+    let canonical = crate::framing::canonical_sign_bytes(&u);
+    send_wire(&mut writer, &signed_data_over(u, peer.id_hash(), &sk, &crate::framing::kv_signing_message(&canonical))).await;
+
+    let s = Arc::clone(&store);
+    poll_until(|| s.pin().get("tagged/k").and_then(|e| e.data.clone()) == Some(Bytes::from_static(b"v")), 500).await;
+}
+
+/// **A signature under another domain's tag is not a KV signature.** The point of the tag: a
+/// consensus payload signed by this node over bytes that happen to be an update cannot be replayed
+/// as a KV write. Dropped, and not counted as the 2.32 form either.
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn a_signature_under_another_tag_is_not_a_kv_signature() {
+    use ed25519_dalek::SigningKey;
+    let (mut writer, reader) = loopback_pair().await;
+    let store: Arc<papaya::HashMap<Arc<str>, StoreEntry>> = Arc::new(papaya::HashMap::new());
+    let (tx, _rx) = mpsc::channel(10);
+    let peer = NodeId::new("127.0.0.1", 7302).unwrap();
+    let sk = SigningKey::from_bytes(&[72u8; 32]);
+    let opts = HandlerOpts { peer_keys: vec![(peer.clone(), vec![sk.verifying_key().to_bytes()])], ..Default::default() };
+    let _ = spawn_handler_with(reader, Arc::clone(&store), Arc::new(papaya::HashMap::new()), tx,
+                               Arc::new(ShardedSeen::new(N_GOSSIP_SHARDS)), GossipConfig::default().default_ttl, opts);
+
+    let mut u = data_update("other-tag/k", b"v", 7302, false);
+    u.sender = peer.id_hash();
+    let canonical = crate::framing::canonical_sign_bytes(&u);
+    let mut as_consensus = b"mycelium.consensus/msg/1".to_vec();
+    as_consensus.extend_from_slice(&(canonical.len() as u32).to_le_bytes());
+    as_consensus.extend_from_slice(&canonical);
+    send_wire(&mut writer, &signed_data_over(u, peer.id_hash(), &sk, &as_consensus)).await;
+    // A control frame behind it, so "absent" means dropped rather than not yet read.
+    let mut probe = data_update("other-tag/probe", b"p", 7303, false);
+    probe.sender = peer.id_hash();
+    let probe_canonical = crate::framing::canonical_sign_bytes(&probe);
+    send_wire(&mut writer, &signed_data_over(probe, peer.id_hash(), &sk, &crate::framing::kv_signing_message(&probe_canonical))).await;
+
+    let s = Arc::clone(&store);
+    poll_until(|| s.pin().get("other-tag/probe").is_some(), 500).await;
+    assert!(store.pin().get("other-tag/k").is_none(), "a consensus-tagged signature is not a KV signature");
+}
+
+/// **A TLS node that requires signed frames refuses an unsigned `Data` frame** (post-360 plan row
+/// F). Before 2.33.0 the `Data` arm of the connection handler applied a frame whatever the node's
+/// posture, so under `[tls]` a member could write any key under any other member's `sender` hash by
+/// not signing. Seen failing first: the unsigned key was applied.
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn a_tls_node_requiring_signed_frames_refuses_an_unsigned_data_frame() {
+    use ed25519_dalek::SigningKey;
+    let (mut writer, reader) = loopback_pair().await;
+    let store: Arc<papaya::HashMap<Arc<str>, StoreEntry>> = Arc::new(papaya::HashMap::new());
+    let (tx, _rx) = mpsc::channel(10);
+    let me = NodeId::new("127.0.0.1", 7311).unwrap();
+    let peer = NodeId::new("127.0.0.1", 7312).unwrap();
+    let (tls, dir) = test_tls_identity("unsigned-refused", &me);
+    let sk = SigningKey::from_bytes(&[73u8; 32]);
+    let mut config = GossipConfig::default();
+    config.kv_require_signed_frames = true;
+    let opts = HandlerOpts { config, tls: Some(tls), peer_keys: vec![(peer.clone(), vec![sk.verifying_key().to_bytes()])] };
+    let _ = spawn_handler_with(reader, Arc::clone(&store), Arc::new(papaya::HashMap::new()), tx,
+                               Arc::new(ShardedSeen::new(N_GOSSIP_SHARDS)), GossipConfig::default().default_ttl, opts);
+
+    let before = mycelium_core::connection::unsigned_kv_frames().1;
+    let mut forged = data_update("unsigned/k", b"forged", 7311, false);
+    forged.sender = peer.id_hash();
+    send_wire(&mut writer, &WireMessage::Data(forged)).await;
+    // A signed control frame behind it, so "absent" means refused rather than not yet read.
+    let mut probe = data_update("unsigned/probe", b"p", 7312, false);
+    probe.sender = peer.id_hash();
+    let canonical = crate::framing::canonical_sign_bytes(&probe);
+    send_wire(&mut writer, &signed_data_over(probe, peer.id_hash(), &sk, &crate::framing::kv_signing_message(&canonical))).await;
+
+    let s = Arc::clone(&store);
+    poll_until(|| s.pin().get("unsigned/probe").is_some(), 500).await;
+    assert!(store.pin().get("unsigned/k").is_none(), "an unsigned write is not applied by a node that requires signatures");
+    assert!(mycelium_core::connection::unsigned_kv_frames().1 > before, "and the refusal is counted");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **The window: by default a TLS node still applies an unsigned frame, and counts it**, so a 2.32
+/// peer's agent writes (which it sends unsigned) keep arriving while the fleet upgrades. A node
+/// with no TLS identity has nothing to count — the plaintext posture is unchanged.
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn an_unsigned_data_frame_is_applied_and_counted_during_the_window() {
+    let (mut writer, reader) = loopback_pair().await;
+    let store: Arc<papaya::HashMap<Arc<str>, StoreEntry>> = Arc::new(papaya::HashMap::new());
+    let (tx, _rx) = mpsc::channel(10);
+    let me = NodeId::new("127.0.0.1", 7313).unwrap();
+    let (tls, dir) = test_tls_identity("unsigned-window", &me);
+    let opts = HandlerOpts { tls: Some(tls), ..Default::default() };
+    let _ = spawn_handler_with(reader, Arc::clone(&store), Arc::new(papaya::HashMap::new()), tx,
+                               Arc::new(ShardedSeen::new(N_GOSSIP_SHARDS)), GossipConfig::default().default_ttl, opts);
+    let before = mycelium_core::connection::unsigned_kv_frames().0;
+    send_wire(&mut writer, &WireMessage::Data(data_update("window/k", b"v", 7313, false))).await;
+    let s = Arc::clone(&store);
+    poll_until(|| s.pin().get("window/k").is_some(), 500).await;
+    assert!(mycelium_core::connection::unsigned_kv_frames().0 > before, "accepted, and counted");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **Every write a TLS node's agent originates is signed**, so a fleet that requires signed frames
+/// still hears its members. A mailbox delivery was one of the twenty-three agent write sites that
+/// built a bare `Data` frame (`scripts/check-signed-dispatch.sh`); with B requiring signatures and
+/// anti-entropy a minute away, A's delivery reaches B only by gossip, which needs it signed.
+/// Seen failing first (with the refusal built and the sites not yet rerouted): B never held the key.
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn an_agent_write_reaches_a_peer_that_requires_signed_frames() {
+    use crate::config::TlsConfig;
+    let (port_a, port_b) = (alloc_port(), alloc_port());
+    let (node_a, node_b) = (NodeId::new("127.0.0.1", port_a).unwrap(), NodeId::new("127.0.0.1", port_b).unwrap());
+    let cert_dir = std::env::temp_dir().join(format!("myc-signed-agent-writes-{port_a}"));
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    let mk = |node: &NodeId, boots: Vec<NodeId>| {
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = node.to_socket_addr().port();
+        cfg.bootstrap_peers = boots;
+        cfg.reconnect_backoff_secs = 1;
+        cfg.health_check_interval_secs = 60; // anti-entropy is not what carries the write
+        cfg.kv_require_signed_frames = true;
+        cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+        GossipAgent::new(node.clone(), cfg)
+    };
+    let a = mk(&node_a, vec![]);
+    let b = mk(&node_b, vec![node_a.clone()]);
+    a.start().await.unwrap();
+    b.start().await.unwrap();
+    // B must hold A's key before A writes, or a signed frame is dropped as an unknown signer.
+    let b_knows_a = || b.task_ctx.peer_keys.pin().get(&node_a).is_some_and(|k| !k.is_empty());
+    let a_knows_b = || a.task_ctx.peer_keys.pin().get(&node_b).is_some_and(|k| !k.is_empty());
+    for _ in 0..400 {
+        if b_knows_a() && a_knows_b() && !a.peers().is_empty() && !b.peers().is_empty() { break; }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(b_knows_a() && a_knows_b(), "the two nodes never exchanged identities");
+
+    assert!(a.service().deliver_event(&node_b, "signed-kind", Bytes::from_static(b"hello")));
+    let prefix = format!("mailbox/{node_b}/signed-kind/");
+    let mut arrived = false;
+    for _ in 0..200 {
+        if !b.kv().scan_prefix(&prefix).is_empty() { arrived = true; break; }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(arrived, "a mailbox delivery from a TLS node reaches a peer that requires signed frames");
+    a.shutdown().await;
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
 }
 
 #[tokio::test]

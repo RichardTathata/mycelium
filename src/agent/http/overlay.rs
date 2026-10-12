@@ -244,7 +244,7 @@ pub(super) async fn gw_overlay_consistent_set(
             crate::store::apply_and_notify(&ctx.agent_ctx.kv_state, &update);
             crate::framing::dispatch_gossip_try_send(
                 &ctx.agent_ctx.gossip_txs,
-                crate::framing::WireMessage::Data(update),
+                crate::framing::local_kv_wire_msg(&ctx.agent_ctx, update),
                 ctx.agent_ctx.node_id.id_hash(),
                 crate::framing::ForwardHint::All,
                 &ctx.agent_ctx.kv_state.dropped_frames,
@@ -570,7 +570,7 @@ pub(super) async fn gw_overlay_log_append(
     crate::store::apply_and_notify(&ctx.agent_ctx.kv_state, &update);
     crate::framing::dispatch_gossip_try_send(
         &ctx.agent_ctx.gossip_txs,
-        crate::framing::WireMessage::Data(update),
+        crate::framing::local_kv_wire_msg(&ctx.agent_ctx, update),
         ctx.agent_ctx.node_id.id_hash(),
         crate::framing::ForwardHint::All,
         &ctx.agent_ctx.kv_state.dropped_frames,
@@ -629,7 +629,7 @@ pub(super) async fn gw_overlay_log_compact(
                 crate::store::apply_and_notify(&ctx.agent_ctx.kv_state, &update);
                 crate::framing::dispatch_gossip_try_send(
                     &ctx.agent_ctx.gossip_txs,
-                    crate::framing::WireMessage::Data(update),
+                    crate::framing::local_kv_wire_msg(&ctx.agent_ctx, update),
                     ctx.agent_ctx.node_id.id_hash(),
                     crate::framing::ForwardHint::All,
                     &ctx.agent_ctx.kv_state.dropped_frames,
