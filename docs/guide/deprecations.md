@@ -952,7 +952,10 @@ accepts and what a signature is over.
   first use** — with nothing held or stored for `n`, the first self-proving record is taken (the CA anchor of a direct
   connection is what closes it); and with `require_identity_proofs` off a member that has already written a key into
   `n`'s stored legacy record (under its own signature) makes `n`'s later unsigned sealed records stale here — they then
-  arrive signed or by anti-entropy. **It is bypassable through
+  arrive signed or by anti-entropy. The same refusal meets a legitimate node that rotated and then restarted
+  without persistence (its start-time history is only its current key) or was re-keyed from scratch: its sealed record
+  is counted stale where peers hold older keys for it, and the warning names that observation, not an attack. Peers
+  that already hold its current key lose nothing; its signed writes still verify. **It is bypassable through
   anti-entropy** (below).
 - **A peer certificate's key is read from its `SubjectPublicKeyInfo`, structurally** (`tls::ed25519_key_from_cert_der`),
   not by scanning the DER for the Ed25519 SPKI prefix. The scan returned the first match anywhere — a serial number,

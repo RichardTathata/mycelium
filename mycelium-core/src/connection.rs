@@ -941,7 +941,7 @@ pub async fn handle_connection(
                     task_ctx.transport_bounds.kv_identity_stale_refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     if let Some(suppressed) = identity_exempt_warn.admit(crate::sim_seam::mono_now_ns(), WARN_EVERY_NS) {
                         warn!(from = %peer_addr, key = %update.key, suppressed,
-                            "refusing an unsigned sealed identity record whose history lacks a key already held for that node (a superseded record, replayed)");
+                            "sealed identity record lacks keys already held for its node — refused (a replay, or the node restarted without its stored history, or was re-keyed)");
                     }
                     continue;
                 }
