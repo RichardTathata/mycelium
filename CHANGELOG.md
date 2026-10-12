@@ -96,6 +96,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   genesis and change only by a migration that terminates; and what 2.32.0 enforces of it (the governed electorate,
   leased leadership, collected acceptor state) with the migration after it. The wiki's runtime-invariants page
   § Layer III cites it.
+
+- **Hygiene, post-360 plan row J** (#608). The sim-seam gate's test-item skip now covers exactly the item a
+  `#[cfg(test)]` / `#[cfg(all(test, …))]` attribute applies to, at any indentation (the brace-counting skip
+  `check-kv-namespaces.sh` took from #591's review); until now it ran to the next column-0 `}`, and the `#[cfg(test)]`
+  on `ConsensusEngine::shrink_acceptor_for_test` (#600) had hidden the five timer sites after it in
+  `src/consensus.rs` — the gate counted 0 against a baseline of 5 and reported only *progress*, so a new direct clock
+  read in that `impl` would have passed since 2.32.0. Planted shapes in `scripts/test-check-sim-seams.sh`: three fail
+  on the old gate; `skip_more_attrs` passes on every version (a guard) and `skip_whole_module` is the control. Its first cut here ended a skip only at a `;` or a body, so a `#[cfg(test)]` on a comma-terminated element ran into the next item — `mycelium-core/src/signal.rs`'s `#[cfg(test)] trim_hook` field (#602) hid all of production `impl SignalLog`, three `Instant::now` sites (`:671`, `:673`, `:693`) that the old gate also lost at #602 (its count fell 11 → 8 with no site removed); found by the PR's adversarial review. The skip now also ends at a trailing `,` or an unbalanced `}`, and strips block comments and raw strings before counting braces; the same fix and plants are in `check-kv-namespaces.sh`, where the hole was latent. What still fails open (a multi-line comment or string holding an unbalanced brace inside a test item; a raw string containing `"#`) is stated in both headers. The baseline: `signal.rs` stays 11, `capability_ops.rs` 2→0 and `intent.rs` 1→0 (below), `http.rs` 15→14
+  (stale on `main`). Every Cargo feature and both
+  bench targets are now linted by a CI step on their own (`otel`, `--benches`; `metrics` on tuple-space, blackboard,
+  effects and wiki; guardrails `gateway,metrics-export`; reason `compliance`; the coop examples' `metrics`, a
+  `cargo check` in the coop-smoke job) — before, only the test-universe job's
+  `--all-features -- --list` compile touched them (and the wiki's `metrics` lint found `mycelium` built with `metrics` and without `gateway` failing `-D warnings` — `mod emergent`'s allowance (`not(any(gateway, metrics))`, `src/agent/mod.rs:106`) lifts under `metrics` alone and the six explain items only `/gateway/explain` reads were dead; each now carries `cfg_attr(not(gateway), allow(dead_code))` and `cargo clippy --lib --no-default-features --features metrics` is a named line (embedded job, `make check`)); the `effects` and `commitment` jobs are pinned to `1.96.0` like
+  every other (they floated on `stable`). Two duplicates that disagreed are one definition: `hex_line` in
+  `mycelium-wasm-host` (the gateway's copy trimmed, the catalogue's did not — one `pub(crate)` decoder, trimming,
+  pinned by a test) and `now_ms` (`capability_ops.rs`'s two copies and `intent.rs`'s read `SystemTime::now()`
+  directly while `federation/edge.rs` read the seam — every copy in `src/`, `mycelium-tuple-space` and
+  `mycelium-agentfacts` now reads `sim_seam::wall_now_ms`, so a recording replays an intent's stamp and a
+  capability's freshness; the baseline rows for the two `src/` files drop to zero, which is the structural pin, and
+  `every_now_ms_is_the_seams_wall_clock` checks they read the seam's clock — it cannot tell the old copies from the
+  new outside `sim`. The tuple-space and agentfacts copies sit outside the gate's scan and are pinned by no gate.
+  **Under `sim`, each of these reads is now a recorded kernel choice**, so a recording made before this change that
+  touches these paths would diverge on replay; the checked-in corpus is core-only and unaffected).
+
 - **Documentation: a lost electorate voter is restored with its state or retired — never reissued empty.**
   2.32.0's pages said an electorate member could be replaced "under the same identity"; that is unsafe as
   stated. A member's promises and acceptances are durable on its own disk
@@ -111,6 +135,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `{persistence.base_path}/{node_id}/kv/` at its latest state; or **retire** — onto the removal ledger, which
   forecloses the restore. A lost majority's repair (an operator-forced genesis from survivors' durable state)
   is named as not built in `what-is-proven.md`'s third table. No code change.
+
+### Deprecated
+
+- **Nineteen public items (eighteen names; `with_max_tokens` is two methods) nobody references, deprecated and not removed** (#608; `docs/guide/deprecations.md`
+  §37, the sweep and its greps in the PR). `#[deprecated(since = "2.33.0")]` on
+  `mycelium_core::MeshHandle::group_quorum_prehashed` · `mycelium_core::receipt::…::with_replica_sync` ·
+  `mycelium_core::kv_ns::{MANDATE, CONSUMER_LOG, LOCK}` · `mycelium_effects::Counting::with_counts` ·
+  `mycelium_sim::bundle::…::path_for` · `mycelium_wasm_host::MeshArtifactSource::cached_len` ·
+  `Provisioner::disable_resource_policy` · `Provisioner::decision_trace` · `mycelium_wiki::…::with_semantic_lint` ·
+  `mycelium_wiki::lint::…::with_max_tokens` and `reconcile::…::with_max_tokens` · `RequestPrincipal::is_client` · `AgentStateMachine::set_task_id` ·
+  `mycelium::federation::{verify_descriptor_rotating, verify_policy}` (`tls`) ·
+  `FederationClient::with_credential_lifetime` · `mycelium::knowledge::store::…::issuers_about`. Nothing is removed on the 2.x line; an issue naming a use undeprecates it. The sweep's twentieth item,
+  `AeEvidence::audit_outcome`, is called by the private companion and is not deprecated; `Preflight::is_inert`
+  (`http.rs`) waits for rows P5/E.
 
 ## [2.32.0] — 2026-10-11
 

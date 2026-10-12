@@ -31,7 +31,7 @@ use mycelium::GossipAgent;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::catalog::{publish_installable, InstallableEntry};
+use crate::catalog::{hex_line, publish_installable, InstallableEntry};
 use crate::tools::kind_name;
 
 /// The route's state: whose entries it admits, and which key a local librarian owns.
@@ -54,14 +54,6 @@ pub fn artifact_router(agent: Arc<GossipAgent>, trusted: Vec<[u8; 32]>, libraria
 struct PublishBody {
     /// One manifest line: lowercase hex of `InstallableEntry::encode()`.
     entry_hex: String,
-}
-
-fn hex_line(s: &str) -> Option<Vec<u8>> {
-    let s = s.trim();
-    if !s.len().is_multiple_of(2) || !s.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    (0..s.len() / 2).map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok()).collect()
 }
 
 fn hex(bytes: &[u8]) -> String {

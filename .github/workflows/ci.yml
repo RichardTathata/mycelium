@@ -166,7 +166,13 @@ jobs:
       # Compliance-gated code (WS1–WS5) is invisible to the line above; `make check` has
       # linted it since 2026-07-22 but CI never did (2026-09-04 wiki-lint finding).
       - run: cargo clippy --lib --tests --features compliance -- -D warnings
-      - run: cargo clippy -p mycelium-tuple-space --features gateway --all-targets -- -D warnings
+      # `otel` and the two bench targets were built by no CI step until post-360 row J (2026-10-12) — only
+      # the test-universe job's `--all-features -- --list` compile touched them, which is neither a lint nor
+      # a build of the feature on its own. `gateway_overhead` requires `gateway,test-util`; `throughput` is
+      # also checked by the embedded job's `cargo check --all-targets --no-default-features`.
+      - run: cargo clippy --lib --features otel -- -D warnings
+      - run: cargo clippy --benches --features gateway,test-util -- -D warnings
+      - run: cargo clippy -p mycelium-tuple-space --features gateway,metrics --all-targets -- -D warnings
       # Core's own test code is a separate lint scope (`-p mycelium-core --lib
       # --tests`): the Test job RUNS core's suite but nothing linted it after
       # the 2026-07-11 restructure left this only in a comment (2026-07-21
@@ -231,6 +237,9 @@ jobs:
       # with the gateway really off -- the catcher for code used only under `gateway`/`tls`, which is dead
       # here (lint 2026-10-06; `make check` has run it locally since 2026-07-03).
       - run: cargo clippy --lib --no-default-features -- -D warnings
+      # `metrics` without `gateway` (row J, 2026-10-12): no step built it, and `mod emergent`'s dead-code allowance
+      # (`not(any(gateway, metrics))`) left the gateway-only explain items dead there — found by the wiki's `metrics` lint.
+      - run: cargo clippy --lib --no-default-features --features metrics -- -D warnings
       # Every target compiles without default features: an example that uses an optional feature must declare it as
       # `required-features`, or this fails. A compile check, not clippy: examples have never been linted in CI.
       - run: cargo check --all-targets --no-default-features
@@ -362,7 +371,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: ./scripts/ci-retest.sh -p mycelium-blackboard --features gateway
-      - run: cargo clippy -p mycelium-blackboard --features gateway --all-targets -- -D warnings
+      - run: cargo clippy -p mycelium-blackboard --features gateway,metrics --all-targets -- -D warnings
       # The community-microgrid worked example (rd shared / in competitive), Docker-free.
       - run: ./mycelium-blackboard/ci_smoke.sh
 
@@ -374,7 +383,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.96.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -383,7 +392,7 @@ jobs:
       - run: cargo clippy -p mycelium-effects --features tuple-space --all-targets -- -D warnings
       # The gateway-side composition constructor (composed-effect.md §9) needs the attesting build.
       - run: cargo test -p mycelium-effects --features tuple-space,envelope --test '*'
-      - run: cargo clippy -p mycelium-effects --features tuple-space,envelope --all-targets -- -D warnings
+      - run: cargo clippy -p mycelium-effects --features tuple-space,envelope,metrics --all-targets -- -D warnings
       # The example is the crate's decisive demonstration (guide 18 § Rung 4); the catalogue said it
       # ran in CI and it did not (2026-09-27).
       - run: scripts/example-case.sh cargo run -p mycelium-effects --example destination_commit
@@ -395,7 +404,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.96.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -418,7 +427,7 @@ jobs:
       - run: cargo clippy -p mycelium-wiki --all-targets -- -D warnings
       # Phase 2 — the Mycelium control plane (curator election + failover, single-writer apply).
       - run: ./scripts/ci-retest.sh -p mycelium-wiki --features control-plane
-      - run: cargo clippy -p mycelium-wiki --features control-plane --all-targets -- -D warnings
+      - run: cargo clippy -p mycelium-wiki --features control-plane,metrics --all-targets -- -D warnings
       # Phase 3 — the LLM curator (the 3-way reconcile; the EchoBackend test proves the backend wiring).
       - run: ./scripts/ci-retest.sh -p mycelium-wiki --features llm
       - run: cargo clippy -p mycelium-wiki --features llm --all-targets -- -D warnings
@@ -463,7 +472,7 @@ jobs:
       - run: ./scripts/ci-retest.sh -p mycelium-reason --features llm
       - run: ./scripts/ci-retest.sh -p mycelium-reason --features llm,gateway,ollama,knowledge
       - run: cargo clippy -p mycelium-reason --all-targets -- -D warnings
-      - run: cargo clippy -p mycelium-reason --features llm,gateway,ollama,knowledge --all-targets -- -D warnings
+      - run: cargo clippy -p mycelium-reason --features llm,gateway,ollama,knowledge,compliance --all-targets -- -D warnings
       # The fleet-reasoning worked example (all three wedges, three-node mesh), Docker-free.
       - run: ./mycelium-reason/ci_smoke.sh
 
@@ -484,7 +493,7 @@ jobs:
       - run: ./scripts/ci-retest.sh -p mycelium-guardrails
       - run: ./scripts/ci-retest.sh -p mycelium-guardrails --features compliance
       - run: cargo clippy -p mycelium-guardrails --all-targets -- -D warnings
-      - run: cargo clippy -p mycelium-guardrails --features compliance --all-targets -- -D warnings
+      - run: cargo clippy -p mycelium-guardrails --features compliance,gateway,metrics-export --all-targets -- -D warnings
       # PR 2 — the guardrail-wedge worked example + policy-audit verification tool: an unauthorized
       # agent structurally stopped at the provider gate, with a tamper-evident cryptographic proof
       # reconstructed by a neutral observer node (honest framing — provable-stopping, not global).
@@ -688,6 +697,9 @@ jobs:
       # isn't dominated by the build. `wasm` is opt-in (examples/coop/Cargo.toml) so the other ten
       # demos build without wasmtime locally; here we warm everything.
       - run: cargo build -p mycelium-coop-examples --features wasm
+      # The crate's `metrics` feature (forwarded to `mycelium/metrics` for the Ops Console tab) was built by no step on
+      # its own until post-360 row J; a check, without `wasm`, so it adds no wasmtime build.
+      - run: cargo check -p mycelium-coop-examples --features metrics --bins
       # Every demo `ci_smoke.sh` runs (thirteen, 2026-10-07), end-to-end as local in-process clusters: mailbox↔LLM,
       # stigmergy, elastic-intent, the WASM autonomic flagship (+ failover),
       # cross-domain AgentFacts, identity rotation, cross-group consensus,

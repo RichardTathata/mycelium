@@ -14,7 +14,6 @@
 //! own whole-doc VC. **Push intra-domain (here); pull at the edge** (the M16-A endpoint).
 
 use std::collections::BTreeMap;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use mycelium::GossipAgent;
 use serde::{Deserialize, Serialize};
@@ -23,8 +22,10 @@ use serde_json::{json, Value};
 /// KV prefix owned by the per-field AgentFacts CRDT layer: `facts/{node}/{field}`.
 pub const FACTS_PREFIX: &str = "facts/";
 
+/// Unix-ms now, through the substrate's replay seam (`mycelium::sim_seam::wall_now_ms`, the one
+/// wall clock every `now_ms` reads — post-360 row J, 2026-10-12).
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    mycelium::sim_seam::wall_now_ms()
 }
 
 fn field_key(node: &str, field: &str) -> String {

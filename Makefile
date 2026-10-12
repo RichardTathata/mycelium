@@ -172,6 +172,7 @@ check:
 	cargo clippy --lib --tests --features tls,metrics,a2a,llm -- -D warnings
 	cargo clippy --lib --tests --features compliance -- -D warnings
 	cargo clippy --lib --no-default-features -- -D warnings
+	cargo clippy --lib --no-default-features --features metrics -- -D warnings  # metrics without gateway: a half-live `emergent` (row J)
 	cargo clippy -p mycelium-core --lib --tests -- -D warnings
 	cargo clippy -p mycelium-sim --all-targets -- -D warnings   # the replay harness (item 6)
 	cargo clippy -p mycelium-core --lib --tests --features sim -- -D warnings  # the seams' OTHER arm
@@ -206,6 +207,8 @@ gate-knowledge:
 ## coverage is what scripts/check-test-inventory.py proves. The Python line needs pytest and the two
 ## Python packages installed (pip install -e mycelium-py -e langgraph-checkpoint-mycelium pytest pytest-asyncio).
 check-full: check
+	cargo clippy --lib --features otel -- -D warnings                  # the one root feature no other line builds (row J)
+	cargo clippy --benches --features gateway,test-util -- -D warnings  # both bench targets (gateway_overhead needs these features)
 	cargo test  --lib --features tls,metrics,a2a,llm,test-frame-filter   # + the row-A frame-filter tests
 	cargo test  --lib --features compliance,a2a   # the audit chain + both gateway enforcement points
 	cargo test  --features tls,a2a --test '*'           # every root integration test, by discovery (rule 3)

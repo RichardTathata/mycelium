@@ -26,7 +26,10 @@ cargo test --lib --no-default-features --features gateway   # consensus-free emb
 cargo test -p mycelium-core                                 # the substrate suite (codec/framing/hlc/store/swim) — RUNS as of 2026-07-11
 cargo clippy -p mycelium-core --lib --tests -- -D warnings  # core's own tests are a separate lint scope
 cargo clippy --lib --no-default-features -- -D warnings     # minimal embed — catches feature-gated dead code
+cargo clippy --lib --no-default-features --features metrics -- -D warnings  # metrics without gateway: `emergent` half-live, its explain items gateway-only (row J, 2026-10-12)
 cargo clippy -p mycelium-wasm-host --all-targets -- -D warnings   # wasm-host embeds mycelium default-features=false
+cargo clippy --lib --features otel -- -D warnings                 # `make check-full` + CI's clippy job: the one root feature no other line built (row J, 2026-10-12)
+cargo clippy --benches --features gateway,test-util -- -D warnings  # …and both bench targets; `gateway_overhead` needs these features
 cargo test -p mycelium-gateway-free-tests                   # the one test build of `mycelium` without `gateway` (or `tls`) — run alone (R8, 2026-10-05)
 cargo test -p mycelium-tls-free-tests                       # …and the one with `gateway` and without `tls` — run alone (2026-10-08)
 ./scripts/check-kv-namespaces.sh                            # D7's forbidden prefixes · every KV prefix in production code has a src/lib.rs row or a declared non-key · the front door's two lists
@@ -42,8 +45,17 @@ ring names, schema tags, git paths, relative segments). A stale or reasonless en
 lint missed live prefixes five times, the last four governor keys rowless since June. What it cannot see is in
 the script's header (a prefix built from pieces, a literal two lines below its call). Its test-item skip covers
 exactly the item a `#[cfg(test)]` attribute applies to (to its `;` or matching `}`, at any indentation) — the
-column-0-`}` skip `check-sim-seams.sh` still uses hid production code after a one-line `#[cfg(test)] mod x;` or an
-indented `#[cfg(test)] fn` (the adversarial review of #591).
+column-0-`}` skip `check-sim-seams.sh` used until 2026-10-12 hid production code after a one-line `#[cfg(test)]
+mod x;` or an indented `#[cfg(test)] fn` (the adversarial review of #591). **Closed by post-360 row J** (#608):
+the seam gate took the same skip, and the shapes are planted in `scripts/test-check-sim-seams.sh`. What it had
+hidden: the `#[cfg(test)]` on `ConsensusEngine::shrink_acceptor_for_test` (#600) swallowed `impl ConsensusEngine`
+to its close, five timer sites included — the gate counted 0 against a baseline of 5 and said *progress*. A
+baseline that falls when no site moved is the signal; it had been showing since 2.32.0. **And the second lesson:**
+both skips first ended only at a `;` or a body, so a `#[cfg(test)]` on a field, variant, match arm or
+struct-literal field ran into the next item — `signal.rs`'s `trim_hook` field (#602) hid all of production
+`impl SignalLog` from the seam gate, which is why its count had fallen 11 → 8 with no site removed (#608's
+adversarial review). Both gates now also end a skip at a trailing `,` or an unbalanced `}`; both headers state
+what still fails open.
 
 **`make check-full` is NOT the whole CI gate — a green local run does not prove CI is green.** The
 block above is the *Rust lib + clippy* set (CI runs its test lines through `scripts/ci-retest.sh`, the compliance
@@ -389,7 +401,8 @@ negative feature gate.
 because a new stable ships new clippy lints that redden `-D warnings` on unrelated PRs the
 moment a runner picks up a newer stable than a dev has locally — it bit twice in one session
 (`int_plus_one`, `manual_is_multiple_of`; analysis Runs 28–29). To upgrade: bump the file
-**and** the 10 CI `@1.96.0` refs together, in their own PR, after running the full
+**and** every CI `@1.96.0` ref together (19 as of 2026-10-12 — the `effects` and `commitment` jobs floated on
+`@stable` until post-360 row J), in their own PR, after running the full
 `-D warnings` matrix on the new version — never let it float again.
 
 ## Multi-node consensus tests need listeners everywhere

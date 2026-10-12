@@ -30,13 +30,32 @@
 #   through a type alias, is invisible to it. That is a real gap, and the honest mitigation is that
 #   the baseline makes *movement* visible even when it cannot attribute it.
 #
-#   The test-module skip runs from a `#[cfg(test)]` to the next `}` at column 0. That is right for a
-#   top-level item and WRONG for a `#[cfg(test)]` on an item *inside* an `impl` or `mod`: the skip
-#   then swallows the rest of the enclosing block, and production code after the gated item goes
-#   uncounted. Found 2026-09-18 when a test-only method inside `impl Journal` hid `append`'s
-#   `tokio::time::timeout` — the baseline dropped by one for a file whose sites had not changed.
-#   Put test-only methods in a separate top-level `#[cfg(test)] impl` block; a baseline that moves
-#   when no site moved is the signal that someone did not.
+#   The test-item skip covers exactly the item a `#[cfg(test)]` / `#[cfg(all(test, …))]` attribute
+#   applies to — further attributes, then the header to the `;` that ends it or the `{` that opens
+#   its body, which ends at the matching `}` at any indentation (braces counted with string and
+#   char literals and `//` comments stripped first). Until 2026-10-12 it ran to the next `}` at
+#   column 0 instead: right for a top-level `mod tests { … }`, WRONG for everything else. A
+#   one-line `#[cfg(test)] mod x;`, a test-only method inside an `impl`, or a test module whose
+#   braces close on their own line each hid the production code after them to the end of the
+#   enclosing block (or the file) — found 2026-09-18 when a test-only method inside `impl Journal`
+#   hid `append`'s `tokio::time::timeout`, worked round then by moving the method, and closed here
+#   with the skip `check-kv-namespaces.sh` took from the adversarial review of #591 (post-360 plan
+#   row J). The planted files in `scripts/test-check-sim-seams.sh` hold each shape.
+#   An attribute on a comma-terminated element — a struct field, an enum variant, a match arm, a
+#   struct-literal field — has neither a `;` nor a body: its skip ends at the `,` (or, for a last
+#   element with none, at the enclosing `}`). Without that, `signal.rs`'s `#[cfg(test)] trim_hook`
+#   field (#602) hid all of production `impl SignalLog` (row J's adversarial review, finding 1).
+#   STILL FAIL-OPEN, stated: a block comment or a string literal that spans lines and holds an
+#   unbalanced `{` or `}` inside a skipped item (the braces are counted per line, and the pieces of a
+#   multi-line literal look like code); a raw string whose interior holds `"#` for a one-hash
+#   delimiter. Each makes a skip end late or never. Block comments and raw strings closed on their own
+#   line are stripped before counting (planted: `skip_block_comment`, `skip_raw_string`).
+#   A FALSE FAILURE, NEVER A HIDDEN SITE: a not-yet-started skip ends at the first trailing `,`, so a test item
+#   whose header spans lines — multi-line parameters, a `where` clause or generics, `let (a,`, a const array,
+#   `use a::{b,` — has the rest of its header and its body scanned as production. That over-counts; it cannot
+#   hide a production site. One dormant instance: `mycelium-core/src/persistence.rs:558–574`
+#   (`spawn_wal_writer_with_fault`, whose body holds no forbidden call). Follow-up (plan row J §3.5): balance
+#   `()`/`[]`/`<>` across an unstarted header before honouring a `,`.
 #
 #   `use tokio::time;` followed by `time::interval(…)` / `time::sleep(…)` WAS invisible to the
 #   `tokio::time::*` pattern — the same alias gap the `fs as <alias>` handling closes for the
@@ -51,7 +70,7 @@
 # EXEMPT
 #   `mycelium-sim/**` and `sim_seam.rs` (the seams themselves — §6 exempts the seam
 #   implementations, which is where these calls are supposed to live), test files, and each
-#   top-level `#[cfg(test)]` item —
+#   `#[cfg(test)]` / `#[cfg(all(test, …))]` item, at any indentation —
 #   a test that reads the real clock is doing its job. Note "each item", not "everything after the
 #   first": production code below a test module is still production code.
 #
@@ -145,27 +164,64 @@ alias_pattern() {
 
 # Count forbidden sites outside test code.
 #
-# Skips each top-level `#[cfg(test)]` item, from its attribute to the closing brace in column 0 —
-# NOT "everything after the first one". The first version of this did the latter, and a probe that
-# appended a live `Instant::now` below a test module sailed through: code after a test module is
-# ordinary production code, and Rust is perfectly happy to put it there. Found by testing the
-# checker against a deliberately planted site, which is the only way these are ever found.
+# Skips exactly the item a `#[cfg(test)]` / `#[cfg(all(test, …))]` attribute applies to: further
+# attributes, then its header up to a `;` that ends it (`mod x;`, `use …;`, a `const`) or the `{`
+# that opens its body, which ends at the matching `}` — braces counted at any indentation, with
+# string and char literals and `//` comments stripped first (the shape `check-kv-namespaces.sh`
+# uses). Three earlier versions failed open: the first skipped "everything after the first
+# `#[cfg(test)]`", and a probe that appended a live `Instant::now` below a test module sailed through;
+# the second ran to the next column-0 `}`, so a one-line `#[cfg(test)] mod x;`, an indented test-only
+# method, or a test module closing its braces on its own line hid the production code after it (row
+# J, 2026-10-12: of every file scanned, only `src/consensus.rs` moved, 0 -> 5); the third, row J's
+# first cut, ended only at a `;` or a body, so a `#[cfg(test)]` field hid the impl after it
+# (`signal.rs`, 8 -> 11 when fixed). Each shape is a planted file in `scripts/test-check-sim-seams.sh`,
+# which is the only way these are ever found.
 count_in() {
   local file="$1"
   awk '
-    /^[[:space:]]*#\[cfg\(test\)\]/ { skip = 1 }
-    # ...and the `all(...)` spelling. `#[cfg(all(test, feature = "x"))]` is a test module by every
-    # meaning the EXEMPT section gives, but the bare pattern above never matched it, so nine such
-    # modules were counted as production and their sites sat in the baseline as if admitted. Found
-    # 2026-09-25 when a new test in the `http.rs` module `#[cfg(all(test, feature = "tls", feature =
-    # "compliance"))]` module tripped the gate (+4) for `tokio::time` calls in test setup.
-    # `test` must be followed by `,` or `)` so `feature = "test-util"` cannot match.
-    /^[[:space:]]*#\[cfg\(all\(test[,)]/ { skip = 1 }
-    skip && /^}/                       { skip = 0; next }
+    function braces(s,   t, o, c) {
+      t = s
+      # Raw strings first (`r#"a " {"#` holds a quote the plain-string pattern would pair wrongly),
+      # then plain strings and chars, then block comments closed on this line, then a line comment.
+      gsub(/r#+"([^"]|"[^#])*"#+/, "", t)
+      gsub(/"([^"\\]|\\.)*"/, "", t)
+      gsub(/\047([^\047\\]|\\.)\047/, "", t)
+      gsub(/\/\*([^*]|\*+[^*\/])*\*+\//, "", t)
+      sub(/\/\/.*$/, "", t)
+      o = gsub(/\{/, "{", t); c = gsub(/\}/, "}", t)
+      opens = o; closes = c
+      semi = (t ~ /;[ \t]*$/)
+      comma = (t ~ /,[ \t]*$/)
+    }
+    # One line of a skipped item: returns once the item has ended.
+    function skip_line(s) {
+      braces(s)
+      if (!started) {
+        if (opens > 0) { started = 1; depth = opens - closes; if (depth <= 0) skip = 0; return }
+        # A field, a variant, a match arm or a struct-literal field ends at its `,` — or, the last
+        # one with no comma, at the enclosing block `}` (the row J review, finding 1).
+        if (semi || comma || closes > opens) { skip = 0 }
+        return
+      }
+      depth += opens - closes
+      if (depth <= 0) skip = 0
+    }
+    skip {
+      if (!started && $0 ~ /^[ \t]*#\[/) next
+      skip_line($0); next
+    }
+    # `test` must be followed by `,` or `)` so `feature = "test-util"` cannot match; `any(test, …)`
+    # is production under a feature and is not skipped.
+    /^[ \t]*#\[cfg\((all\()?test[,)]/ {
+      skip = 1; started = 0; depth = 0
+      rest = $0; sub(/^[ \t]*#\[cfg\([^]]*\)\][ \t]*/, "", rest)
+      if (rest != "") skip_line(rest)
+      next
+    }
     # Comments are prose, not calls. A doc comment that *names* `SystemTime::now` to explain why it
     # is no longer called would otherwise count as a call — which it did, on this very file.
-    /^[[:space:]]*\/\//                { next }
-    !skip                              { print }
+    /^[ \t]*\/\// { next }
+    { print }
   ' "$file" | grep -cE "$PATTERN$(alias_pattern "$file")" || true
 }
 

@@ -1360,6 +1360,7 @@ pub mod kv_ns {
     /// and the content ref move in one `update-ref` transaction. A mandate that lived only in KV
     /// would be a fact everyone agrees on and nothing enforces, which is the failure the record's
     /// decisive invariant is written against.
+    #[deprecated(since = "2.33.0", note = "no caller, test, SDK or document in the repository references it (post-360 hardening row J, 2026-10-12); kept on the 2.x line — open an issue if you use it and it will be undeprecated")]
     pub const MANDATE: &str = "mandate/";
 
     /// **Reserved** for durable wiki proposals (v3 item 5 PR 1) — a stream under [`LOG`]'s
@@ -1496,6 +1497,7 @@ pub mod kv_ns {
     /// Key: `clog/{stream}/{group}/offset`. Value: 16-char hex HLC of the last
     /// processed entry. Written by `GossipAgent::subscribe_log_group` after each
     /// entry is successfully delivered.
+    #[deprecated(since = "2.33.0", note = "no caller, test, SDK or document in the repository references it (post-360 hardening row J, 2026-10-12); kept on the 2.x line — open an issue if you use it and it will be undeprecated")]
     pub const CONSUMER_LOG: &str = "clog/";
 
     /// Distributed lock state.
@@ -1503,6 +1505,7 @@ pub mod kv_ns {
     /// Key: `lock/{name}`. Value: JSON `{"holder":"ip:port","token":u64,"expires_ms":u64}`.
     /// Written by `GossipAgent::distributed_lock`; tombstoned when the returned
     /// `LockGuard` is dropped.
+    #[deprecated(since = "2.33.0", note = "no caller, test, SDK or document in the repository references it (post-360 hardening row J, 2026-10-12); kept on the 2.x line — open an issue if you use it and it will be undeprecated")]
     pub const LOCK: &str = "lock/";
 
     /// Prompt template namespace.

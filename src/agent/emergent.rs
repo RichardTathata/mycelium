@@ -610,6 +610,7 @@ pub(crate) const EXPLAIN_RPC_KIND: &str = "sys.explain";
 /// How long the fan-out waits on each peer before giving up on it. Short — an `explain` is
 /// interactive — and, crucially, a peer that misses it becomes a *named non-responder* (RT3),
 /// never a silent gap.
+#[cfg_attr(not(feature = "gateway"), allow(dead_code))] // read only by `/gateway/explain` (row J: dead under `metrics` alone)
 const EXPLAIN_FANOUT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Cap on the number of peers one `explain` fans out to. Bounds the concurrent `sys.explain` RPCs
@@ -617,11 +618,13 @@ const EXPLAIN_FANOUT_TIMEOUT: Duration = Duration::from_secs(2);
 /// become an O(N) storm). Peers beyond the cap are *named* (`not_queried`), never silently dropped —
 /// the same RT3 honesty as `non_responders`. Raise only if you genuinely need a wider single-shot
 /// view; the local ring + a handful of peers already reconstruct most incidents.
+#[cfg_attr(not(feature = "gateway"), allow(dead_code))] // read only by `/gateway/explain` (row J: dead under `metrics` alone)
 const EXPLAIN_MAX_FANOUT: usize = 32;
 
 /// Pick the deterministic subset of peers an `explain` fans out to (capped at `cap`), plus the count
 /// skipped. Sorted by identity so the subset is *stable* across repeated queries; the skipped count
 /// is surfaced so a capped fan-out is never mistaken for a complete one. **Pure** — unit-tested.
+#[cfg_attr(not(feature = "gateway"), allow(dead_code))] // read only by `/gateway/explain` (row J: dead under `metrics` alone)
 fn select_explain_targets(mut peers: Vec<crate::node_id::NodeId>, cap: usize) -> (Vec<crate::node_id::NodeId>, usize) {
     peers.sort_by_key(|p| p.to_string());
     let not_queried = peers.len().saturating_sub(cap);
@@ -634,6 +637,7 @@ fn select_explain_targets(mut peers: Vec<crate::node_id::NodeId>, cap: usize) ->
 /// `non_responders` is the view telling you the reconstruction is partial *exactly where* it says,
 /// rather than silently dropping the events of the nodes that matter most during an incident.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(not(feature = "gateway"), allow(dead_code))] // read only by `/gateway/explain` (row J: dead under `metrics` alone)
 pub struct ExplainResult {
     /// The node that assembled this view (the observer).
     pub observer:       String,
@@ -660,6 +664,7 @@ pub struct ExplainResult {
 /// "governor capped → auto-join re-added → governor drained" with **no code knowledge**). An
 /// unknown kind falls back to its raw string, so a newly-added event type is surfaced, never
 /// silently dropped.
+#[cfg_attr(not(feature = "gateway"), allow(dead_code))] // read only by `/gateway/explain` (row J: dead under `metrics` alone)
 pub fn narrate(events: &[Event]) -> Vec<String> {
     events.iter().map(|e| {
         let gloss = match e.kind.as_str() {
@@ -722,6 +727,7 @@ pub async fn run_explain_responder(
 /// `non_responder` while every reply that does arrive still lands in `events`. The fan-out is
 /// **capped** so an operator query on a large fleet stays a bounded action, not an O(N) RPC storm;
 /// skipped peers are surfaced as `not_queried`, never silently dropped.
+#[cfg_attr(not(feature = "gateway"), allow(dead_code))] // read only by `/gateway/explain` (row J: dead under `metrics` alone)
 pub async fn assemble_explain(ctx: &Arc<TaskCtx>, since: u64) -> ExplainResult {
     let mut events = ctx.event_ring.since(since);
 

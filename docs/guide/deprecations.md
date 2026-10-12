@@ -903,3 +903,42 @@ restore-or-retire rule): the carry set is complete because the group tag is in t
   sequential; a value a restarted predecessor member holds only by digest and no decision record resolves stops the
   carry at that slot, named; the claim is for slots decided only in the electorate (an ordinary slot also proposed
   under another scope is not enumerated); two default declarations within gossip lag are escaped by a merge.
+
+## 37. Nineteen public items (eighteen names) nobody references are deprecated, not removed (unreleased, after 2.32.0)
+
+**What changes** (post-360 plan row J, PR #608). A sweep of every `pub fn` / `const` / `struct` / `enum` / `type`
+/ `trait` in the library crates against every file in the repository — `src/`, every `mycelium-*` crate, `tests/`,
+`examples/`, both SDKs' sources and docs, and `docs/` — found twenty items (nineteen names — `with_max_tokens` is two methods) whose only occurrence in the tree is
+their own definition (the grep for each is in the PR). The private companion repository was searched the same way:
+it calls one of them, `AeEvidence::audit_outcome` (`compliance`), so that one is **not** deprecated — the note below
+would be false for it, and its consumer builds with `-D warnings`. The other nineteen items (eighteen names) are used in neither. Each carries `#[deprecated(since = "2.33.0", note =
+"…")]` with the same note: *no caller, test, SDK or document in the repository references it … kept on the 2.x line
+— open an issue if you use it and it will be undeprecated.* Nothing is removed; the 2.x line removes nothing.
+
+`mycelium_core::MeshHandle::group_quorum_prehashed` · `mycelium_core::receipt::…::with_replica_sync` ·
+`mycelium_core::kv_ns::{MANDATE, CONSUMER_LOG, LOCK}` · `mycelium_effects::Counting::with_counts` ·
+`mycelium_sim::bundle::…::path_for` · `mycelium_wasm_host::MeshArtifactSource::cached_len` ·
+`Provisioner::disable_resource_policy` · `Provisioner::decision_trace` · `mycelium_wiki::…::with_semantic_lint` ·
+`mycelium_wiki::lint::…::with_max_tokens` and `reconcile::…::with_max_tokens` · `RequestPrincipal::is_client` · `AgentStateMachine::set_task_id` ·
+`mycelium::federation::{verify_descriptor_rotating, verify_policy}` (`tls`) ·
+`FederationClient::with_credential_lifetime` · `mycelium::knowledge::store::…::issuers_about`.
+
+A twentieth candidate, `Preflight::is_inert` in `src/agent/http.rs`, is left as it is until that file's split (row P5) and
+row E, which touch the file.
+
+**Will the compiler tell me?** Yes — every use site of a deprecated item warns, and a crate built with
+`-D warnings` fails on it; that is the whole mechanism, and it is why the items are deprecated rather than removed.
+
+**Migration.** None is needed for an item you do not call. For one you do: the three `kv_ns` constants are the
+namespaces' *vocabulary*, not the namespaces — `lock/`, `clog/` and `mandate/` are live and owned, their rows in
+`src/lib.rs` § KV namespace ownership unchanged, and the owners write the literals (a `grep -rn '"lock/'` finds
+them); write the literal, as they do. For a builder knob (`with_replica_sync`, `with_counts`, `with_semantic_lint`,
+`with_max_tokens`, `with_credential_lifetime`) or an accessor (`cached_len`, `decision_trace`, `is_client`,
+`issuers_about`), keep calling it — the warning is the request to say so on an issue, after which
+the attribute comes off in the next MINOR. `verify_descriptor_rotating` / `verify_policy` have `verify_descriptor`
+and `TrustBundle::key_for` beside them; `set_task_id` has the `"current"` default it documents; `path_for` is
+`root.join(name)`; `disable_resource_policy` is `Provisioner::with_resource_policy` with a permissive policy, or
+the default.
+
+**Not built:** an automated sweep in CI. The grep above is a one-off (`scripts/` holds no copy); rustc's `dead_code`
+cannot see an exported item, so the next sweep is a session's work, not a gate.

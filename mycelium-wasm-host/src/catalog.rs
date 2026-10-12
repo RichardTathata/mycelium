@@ -538,8 +538,15 @@ impl std::fmt::Display for ManifestError {
 
 impl std::error::Error for ManifestError {}
 
-/// Decode one even-length lowercase/uppercase hex line.
-fn hex_line(s: &str) -> Option<Vec<u8>> {
+/// Decode one even-length lowercase/uppercase hex line, whitespace at either end ignored.
+///
+/// The one hex-line decoder in this crate (post-360 row J, 2026-10-12): `gateway.rs` carried its
+/// own copy that trimmed, while this one did not — [`Manifest::parse`] trims each line before
+/// calling it, so both callers always saw trimmed input, and the two agreed by accident of their
+/// callers rather than by definition. Trimming lives here now; interior whitespace is still a
+/// malformed line.
+pub(crate) fn hex_line(s: &str) -> Option<Vec<u8>> {
+    let s = s.trim();
     if !s.len().is_multiple_of(2) {
         return None;
     }
@@ -619,6 +626,21 @@ impl InstallableCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one hex-line decoder's contract (post-360 row J): whitespace at either end is
+    /// ignored — the manifest reader trims its lines and the gateway's `entry_hex` may carry a
+    /// trailing newline — while interior whitespace, an odd length and a non-hex digit are each
+    /// a malformed line; both cases are accepted.
+    #[test]
+    fn hex_line_ignores_edge_whitespace_and_refuses_everything_else() {
+        assert_eq!(hex_line("0aFF"), Some(vec![0x0a, 0xff]));
+        assert_eq!(hex_line("  0aff\n"), Some(vec![0x0a, 0xff]), "edge whitespace is ignored");
+        assert_eq!(hex_line("\t0AFF \r\n"), Some(vec![0x0a, 0xff]));
+        assert_eq!(hex_line("0a  ff"), None, "interior whitespace is malformed (even length, so not the odd-length refusal)");
+        assert_eq!(hex_line("0af"), None, "odd length is malformed");
+        assert_eq!(hex_line("0agg"), None, "a non-hex digit is malformed");
+        assert_eq!(hex_line(""), Some(Vec::new()), "the empty line decodes to nothing; the caller refuses it");
+    }
 
     fn cap(ns: &str, name: &str) -> Capability {
         Capability::new(ns, name)
