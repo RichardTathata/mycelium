@@ -53,18 +53,20 @@
 //!
 //! # Why this does not reuse `ed25519_key_from_cert_der`
 //!
-//! `mycelium_core::tls::ed25519_key_from_cert_der` finds a key by **scanning the DER for the
-//! Ed25519 SPKI byte prefix**, and its doc states the safety argument exactly: the input has
-//! already been validated against the cluster CA, so the bytes are a well-formed cert this
-//! codebase generated.
-//!
-//! Here there is no CA, and the input is **whatever an attacker put on the wire**. A scan matches
-//! that prefix anywhere in the certificate — in a subject, an extension, an issuer name an
-//! attacker chooses freely — so an attacker could carry the partner's public key as *data* inside
-//! a certificate whose actual key is their own, and the pin would match a key that is not signing
-//! the handshake. [`spki_sha256`] therefore reads the SPKI from its **structural position**, using
-//! the X.509 parser rustls itself uses. The plant in this module's tests builds that certificate
-//! and asserts the two disagree.
+//! Until 2.33.0 `mycelium_core::tls::ed25519_key_from_cert_der` found a key by **scanning the DER
+//! for the Ed25519 SPKI byte prefix**, on the argument that its input had already been validated
+//! against the cluster CA. Here there is no CA, and the input is **whatever an attacker put on the
+//! wire**. A scan matches that prefix anywhere in the certificate — in a subject, an extension, an
+//! issuer name an attacker chooses freely — so an attacker could carry the partner's public key as
+//! *data* inside a certificate whose actual key is their own, and the pin would match a key that
+//! is not signing the handshake. [`spki_sha256`] therefore reads the SPKI from its **structural
+//! position**, using the X.509 parser rustls itself uses. The plant in this module's tests builds
+//! that certificate. It was first written to assert that the scan is fooled while the structural
+//! read is not; the post-360 review's row F found the scan's premise also false inside the mesh (a
+//! node holding the CA key chooses the serial of the certificate it mints), so the core read is
+//! structural now too, and the plant asserts that **neither** read is fooled. This module still
+//! does not reuse it: a pin is the digest of the whole SPKI, for a key of any algorithm, and
+//! `ed25519_key_from_cert_der` answers only for Ed25519.
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::CryptoProvider;
@@ -299,23 +301,21 @@ mod tests {
         assert_eq!(spki_sha256(&[0x30, 0x82, 0xff, 0xff]), None, "a plausible DER header is not a certificate");
     }
 
-    /// **The plant, and the reason this module does not reuse `ed25519_key_from_cert_der`.**
+    /// **The plant.** An attacker puts the *victim's* Ed25519 SPKI bytes somewhere they choose
+    /// inside a certificate — here the serial number, which precedes the real
+    /// `SubjectPublicKeyInfo` in the encoding and whose content is theirs to pick — and signs the
+    /// certificate with their own key.
     ///
-    /// An attacker puts the *victim's* Ed25519 SPKI bytes somewhere they choose inside a
-    /// certificate — here the serial number, which precedes the real `SubjectPublicKeyInfo` in the
-    /// encoding and whose content is theirs to pick — and signs the certificate with their own key.
-    ///
-    /// The byte-scan extraction returns the **victim's** key, because it finds the first occurrence
-    /// of the prefix and has no idea where it is in the structure. Pinning on that would accept an
+    /// A byte-scan extraction returned the **victim's** key, because it found the first occurrence
+    /// of the prefix and had no idea where it was in the structure; pinning on that would accept an
     /// endpoint holding the attacker's private key as though it were the partner. The structural
     /// extraction returns the attacker's key, so the pin does not match and the handshake is
-    /// refused.
-    ///
-    /// What this does **not** say: `ed25519_key_from_cert_der` is not wrong where it is used. Its
-    /// input has already been validated against the cluster CA, which is exactly the premise that
-    /// is absent here.
+    /// refused. Since 2.33.0 (post-360 plan row F) `ed25519_key_from_cert_der` reads structurally
+    /// too, so this asserts that both reads agree on the attacker's key; the plant against the
+    /// scan itself lives beside that function
+    /// (`tls::key_extract_tests::a_planted_key_pattern_in_the_serial_does_not_fool_the_structural_read`).
     #[test]
-    fn a_planted_key_pattern_fools_the_byte_scan_and_not_the_structural_read() {
+    fn a_planted_key_pattern_fools_neither_read() {
         let victim = ed25519_key();
         let victim_cert = cert_with(&victim, "partner.example");
         let victim_key = mycelium_core::tls::ed25519_key_from_cert_der(&victim_cert)
@@ -332,14 +332,13 @@ mod tests {
         params.serial_number = Some(rcgen::SerialNumber::from(planted));
         let forgery = params.self_signed(&attacker).unwrap().der().to_vec();
 
-        // The scan is fooled: it reports the victim's key from a certificate the victim never saw.
-        assert_eq!(
-            mycelium_core::tls::ed25519_key_from_cert_der(&forgery),
-            Some(victim_key),
-            "the plant is only decisive if the scan actually falls for it",
-        );
+        // The core read is not fooled: it reports the key the forgery was issued for.
+        let attacker_key = mycelium_core::tls::ed25519_key_from_cert_der(&forgery).expect("an Ed25519 certificate");
+        assert_ne!(attacker_key, victim_key, "the key read from the forgery is the attacker's, not the pattern in its serial");
+        assert_eq!(ed25519_spki_sha256(&attacker_key), spki_sha256(&forgery).unwrap(),
+                   "and it agrees with the structural pin");
 
-        // The structural read is not: the pin is the attacker's key, so it does not match the
+        // The structural pin is the attacker's key, so it does not match the
         // victim's pin and the endpoint is refused.
         let victim_pin = spki_sha256(&victim_cert).unwrap();
         let forged_pin = spki_sha256(&forgery).expect("the forgery is a well-formed certificate");

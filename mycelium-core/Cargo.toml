@@ -17,7 +17,7 @@ categories = ["network-programming", "asynchronous"]
 [features]
 default = []
 # mTLS transport, Ed25519 node identity, signed KV/consensus payloads, hot rotation.
-tls = ["dep:tokio-rustls", "dep:rustls", "dep:rcgen", "dep:rustls-pemfile", "dep:ed25519-dalek", "dep:rand_core", "dep:arc-swap", "dep:ring", "dep:zeroize"]
+tls = ["dep:tokio-rustls", "dep:rustls", "dep:rcgen", "dep:rustls-pemfile", "dep:ed25519-dalek", "dep:rand_core", "dep:arc-swap", "dep:ring", "dep:zeroize", "dep:webpki"]
 # Prometheus gauge/counter emission from the store/connection paths (no-op without).
 metrics = ["dep:metrics"]
 # Signed-identity surface the compliance layer builds on (audit/RBAC live upstream).
@@ -75,6 +75,10 @@ ring           = { version = "0.17", optional = true }
 # is the audited volatile-write-plus-fence it replaced a hand-rolled `write_volatile` loop with.
 # Already in-tree under `tls` via ed25519-dalek and rustls — no new compiled crate.
 zeroize        = { version = "1",    optional = true }
+# The X.509 parser rustls itself uses, for reading a peer certificate's `SubjectPublicKeyInfo` from
+# its structural position (post-360 plan row F; it replaced a byte-scan for the Ed25519 SPKI prefix).
+# Already in the tree via `rustls` — declaring it adds no new compiled crate.
+webpki         = { package = "rustls-webpki", version = "0.103", optional = true }
 
 # Prometheus metrics (optional — "metrics" feature)
 metrics = { version = "0.24", optional = true }
