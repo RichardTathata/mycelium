@@ -22,9 +22,20 @@ use std::sync::Arc;
 
 use ed25519_dalek::SigningKey;
 use mycelium::{GossipAgent, GossipConfig, LocalApplication, NodeId};
-use mycelium_commitment::{verify_assessment, verify_award, AwardRule, CommitmentRefusal, ContractNet, Offer, Outcome};
+use mycelium_commitment::{verify_assessment, verify_award, verify_close, AwardRule, CommitmentRefusal, ContractNet, Offer, Outcome};
 
 const PICKUPS: usize = 6;
+/// How long offers stay open, on the hub's wall clock. Short, so the example runs in well under a second
+/// while still closing *after* its deadline rather than claiming to.
+const WINDOW_MS: u64 = 300;
+
+/// Sleep until the hub's clock reads `deadline_ms`, so the close is honestly at or after it.
+async fn wait_for(deadline_ms: u64) {
+    let now = now_ms();
+    if deadline_ms > now {
+        tokio::time::sleep(std::time::Duration::from_millis(deadline_ms - now)).await;
+    }
+}
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
@@ -54,12 +65,15 @@ async fn main() {
         .map(|(d, k)| (d.me().to_string(), k.verifying_key().to_bytes()))
         .collect();
     let resolve = |participant: &str| directory.get(participant).copied();
+    // The hub signs its closes and awards; a participant checking them pins "hub" and this key.
+    let hub_key = SigningKey::from_bytes(&[12u8; 32]);
+    let resolve_with_hub = |name: &str| if name == "hub" { Some(hub_key.verifying_key().to_bytes()) } else { resolve(name) };
 
     // ── Announce: the hub declares each pickup — terms, a deadline for offers, what satisfies it.
     let t0 = now_ms();
     let pickups: Vec<String> = (0..PICKUPS).map(|i| format!("pickup-{i}")).collect();
     for (i, p) in pickups.iter().enumerate() {
-        hub.announce(p, format!("{} crates from donor {i}", 1 + i % 3), "delivered to the pantry before close", t0 + 1_000, t0);
+        hub.announce(p, format!("{} crates from donor {i}", 1 + i % 3), "delivered to the pantry before close", t0 + WINDOW_MS, t0);
     }
     println!("hub: announced {PICKUPS} pickups");
 
@@ -70,7 +84,7 @@ async fn main() {
         for (i, p) in pickups.iter().enumerate() {
             if i == 0 || i % drivers.len() == d {
                 driver
-                    .offer_signed(p, format!("{} km", 2 + (i + d) % 5), Some(&driver_keys[d]), t0 + 10)
+                    .offer_signed(p, format!("{} km", 2 + (i + d) % 5), Some(&driver_keys[d]), now_ms())
                     .expect("announced");
                 offers += 1;
             }
@@ -78,18 +92,19 @@ async fn main() {
     }
     println!("drivers: {offers} offers made");
 
-    // ── Close: at the deadline the hub says which offers arrived in time — every offer it holds, by log
-    //    position and digest. No stamp a driver writes decides lateness; the hub's close does.
+    // ── Close: once its own clock passes the deadline, the hub says which offers arrived in time — every
+    //    offer it holds, by log position and digest. No stamp a driver writes decides lateness.
+    wait_for(t0 + WINDOW_MS).await;
     for p in &pickups {
-        let close = hub.close(p, None, t0 + 1_000).expect("the hub closes at the deadline");
+        let close = hub.close(p, None, now_ms()).expect("the hub closes at or after the deadline");
         assert!(!close.offers.is_empty(), "every pickup had an offer by its close");
     }
-    println!("hub: closed {PICKUPS} pickups at the deadline");
+    println!("hub: closed {PICKUPS} pickups after the deadline");
 
     // ── Award: one per pickup, by the rule over the offers the close names, each a receipt-bearing write.
     let mut awards = Vec::new();
     for p in &pickups {
-        let awarded = hub.award(p, AwardRule::LowestParticipant, t0 + 20).await.expect("every pickup had an offer");
+        let awarded = hub.award(p, AwardRule::LowestParticipant, now_ms()).await.expect("every pickup had an offer");
         assert_eq!(awarded.receipt.application, LocalApplication::Applied, "the award is a receipt, not a hopeful write");
         assert_eq!(awarded.receipt.operation_id.as_str(), format!("cn/{p}/award"));
         println!("hub: awarded {p} → {} (receipt {}, durability {:?})",
@@ -100,7 +115,7 @@ async fn main() {
     for (i, a) in awards.iter().enumerate().skip(1) {
         assert_eq!(a.participant, drivers[i % drivers.len()].me(), "an uncontested pickup goes to its only offerer");
     }
-    match hub.award(&pickups[0], AwardRule::LowestParticipant, t0 + 30).await {
+    match hub.award(&pickups[0], AwardRule::LowestParticipant, now_ms()).await {
         Err(CommitmentRefusal::AlreadyAwarded(existing)) => {
             println!("hub: a second award of {} refused — it stands with {}", pickups[0], existing.participant);
         }
@@ -110,13 +125,13 @@ async fn main() {
     // ── Report: each awardee reports against its award's operation id.
     for a in &awards {
         let driver = drivers.iter().find(|d| d.me() == a.participant).unwrap();
-        driver.report(&a.requirement, Outcome::Fulfilled, a.operation_id.clone(), t0 + 100);
+        driver.report(&a.requirement, Outcome::Fulfilled, a.operation_id.clone(), now_ms());
     }
     // ── Assess: the auditor, not the hub, signs off — and one unsigned view for contrast.
     for a in &awards {
-        auditor.assess(&a.requirement, true, "pantry confirmed receipt", Some(&auditor_key), t0 + 200);
+        auditor.assess(&a.requirement, true, "pantry confirmed receipt", Some(&auditor_key), now_ms());
     }
-    hub.assess(&pickups[0], true, "the hub's own, unsigned view", None, t0 + 201);
+    hub.assess(&pickups[0], true, "the hub's own, unsigned view", None, now_ms());
 
     let public = auditor_key.verifying_key().to_bytes();
     for a in &awards {
@@ -139,8 +154,9 @@ async fn main() {
     // agree it was correct. This is the crate's first rule (*no component assigns another
     // participant's obligation*) being defeated by a field anyone can write.
     let contested = "pickup-forged";
-    hub.announce(contested, "4 crates from the market", "delivered to the pantry before close", t0 + 1_000, t0);
-    drivers[1].offer_signed(contested, "6 km", Some(&driver_keys[1]), t0 + 10).expect("announced");
+    let t1 = now_ms();
+    hub.announce(contested, "4 crates from the market", "delivered to the pantry before close", t1 + WINDOW_MS, t1);
+    drivers[1].offer_signed(contested, "6 km", Some(&driver_keys[1]), now_ms()).expect("announced");
     let forged = {
         use ed25519_dalek::Signer;
         let stranger = SigningKey::from_bytes(&[99u8; 32]);
@@ -148,27 +164,29 @@ async fn main() {
             requirement: contested.to_string(),
             participant: "driver-a".to_string(),
             bid: "0 km".to_string(),
-            offered_at_ms: t0 + 11,
+            offered_at_ms: now_ms(),
             signature: Vec::new(),
         };
         let sig = stranger.sign(&o.canonical_bytes()).to_bytes().to_vec();
         Offer { signature: sig, ..o }
     };
     agent.kv().append(&format!("cn/{contested}/offers"), serde_json::to_vec(&forged).unwrap());
-    hub.close(contested, None, t0 + 1_000).expect("the hub closes; the forgery arrived in time, so it is named");
+    // The hub closes this one **signed**, so a checker can hold the close to the hub's key.
+    wait_for(t1 + WINDOW_MS).await;
+    let close = hub.close(contested, Some(&hub_key), now_ms()).expect("the hub closes; the forgery arrived in time, so it is named");
+    assert!(verify_close(&close, &hub_key.verifying_key().to_bytes()), "a signed close proves who decided what was in time");
 
-    let unchecked = hub.plan_award(contested, AwardRule::LowestParticipant, t0 + 20).expect("plans");
+    let unchecked = hub.plan_award(contested, AwardRule::LowestParticipant, now_ms()).expect("plans");
     assert_eq!(unchecked.participant, "driver-a", "unchecked, the forged offer wins");
-    let verified = hub.offers_verified(contested, resolve);
+    // The checked path: the close must verify under the hub's key, and only offers their participants
+    // signed are candidates.
     let checked = hub
-        .plan_award_from(contested, AwardRule::LowestParticipant, t0 + 20, verified)
-        .expect("plans from the verified set");
+        .plan_award_verified(contested, AwardRule::LowestParticipant, now_ms(), "hub", resolve_with_hub)
+        .expect("plans on the checked path");
     assert_eq!(checked.participant, "driver-b", "checked, only an offer its participant signed is a candidate");
-    let awarded = hub.commit_award(checked.signed(&SigningKey::from_bytes(&[12u8; 32]))).await.expect("commits");
-    assert!(
-        verify_award(&awarded.award, &SigningKey::from_bytes(&[12u8; 32]).verifying_key().to_bytes()),
-        "and the award proves which declarer made it",
-    );
+    assert_eq!(checked.close_sha256, close.sha256(), "and the award names the close it was chosen from");
+    let awarded = hub.commit_award(checked.signed(&hub_key)).await.expect("commits");
+    assert!(verify_award(&awarded.award, &hub_key.verifying_key().to_bytes()), "and the award proves which declarer made it");
     println!("hub: a forged offer naming driver-a was not a candidate — {contested} → {}", awarded.award.participant);
 
     println!("{PICKUPS} pickups: announced, offered, awarded once each with a receipt, reported, and assessed by a third party.");

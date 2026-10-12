@@ -29,8 +29,10 @@ forger fails because the key checked is the *named participant's*. Unsigned stay
 
 **The declarer closes; an award counts only what the close names (post-360 row H, 2026-10-12).** No stamp an offerer
 writes decides lateness — not `offered_at_ms`, and not the HLC in its log key, which any member can write. At or after
-the deadline on its own clock the declarer calls `close(requirement, key, now_ms)`, naming every offer its node holds;
-an award is refused `NotClosed` before that. Offers, reports and assessments are read only for their own requirement.
+the deadline on its own clock the declarer calls `close(requirement, key, now_ms)`, appending a record of every offer
+its node holds to `cn/{requirement}/closes`; an award is refused `NotClosed` before that. Sign the close: the checked
+path takes the earliest close your key signed, so a forged one cannot pre-empt it and an overwritten one is recovered
+by closing again. Offers, reports and assessments are read only for their own requirement.
 `award_of_verified(requirement, declarer, resolve)` checks the declarer *you* name, and `plan_award_verified` is the
 checked path; on the unverified path any member that can write the award slot can block an award.
 
