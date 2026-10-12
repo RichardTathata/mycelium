@@ -187,6 +187,10 @@ const LEASES: Record<string, Lease> = {
   "advertiseCapability.leaseSecs": [(a, t) => a.advertiseCapability("ns", "n", { leaseSecs: t }), "lease_secs", "leaseSecs"],
   "declareUnits.leaseSecs":        [(a, t) => a.declareUnits("", { leaseSecs: t }), "lease_secs", "leaseSecs"],
   "distributedLock.ttlSecs":       [(a, t) => a.distributedLock("jobs", { ttlSecs: t }), "ttl_secs", "ttlSecs"],
+  // Post-360 row E: the gateway refuses an `interval_secs` that is not a whole number (it fell back to
+  // 30 s without a word before), so the SDK rounds it up as it does a lease.
+  "advertiseCapability.intervalSecs": [(a, t) => a.advertiseCapability("ns", "n", { intervalSecs: t }), "interval_secs", "intervalSecs"],
+  "declareUnits.intervalSecs":        [(a, t) => a.declareUnits("", { intervalSecs: t }), "interval_secs", "intervalSecs"],
 };
 
 describe.each(Object.keys(LEASES))("%s", (verb) => {

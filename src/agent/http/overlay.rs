@@ -591,16 +591,14 @@ pub(super) async fn gw_overlay_log_scan(
     use base64::Engine as _;
     let from = q.from.unwrap_or(0);
     let to   = q.to.unwrap_or(u64::MAX);
-    let prefix = format!("log/{}/", q.stream);
-    let mut entries: Vec<LogEntry> = crate::store::scan_kv_prefix(&ctx.agent_ctx.kv_state, &prefix)
+    // `(hlc, key)`: the core's order (`KvHandle::scan_log`), so two same-HLC entries come back in the
+    // same order on every node and every call (post-360 row E).
+    let entries: Vec<LogEntry> = mycelium_core::log_cursor::rows_after(
+            &ctx.agent_ctx.kv_state, &q.stream, &mycelium_core::log_cursor::LogPosition::Start)
         .into_iter()
-        .filter_map(|(k, v)| {
-            let suffix = k.strip_prefix(&prefix)?;
-            let hlc    = u64::from_str_radix(suffix.split('/').next()?, 16).ok()?;
-            if hlc >= from && hlc < to { Some(LogEntry { hlc, value: v }) } else { None }
-        })
+        .filter(|r| r.hlc >= from && r.hlc < to)
+        .map(|r| LogEntry { hlc: r.hlc, value: r.value })
         .collect();
-    entries.sort_by_key(|e| e.hlc);
     let arr: Vec<serde_json::Value> = entries.iter().map(|e| json!({
         "hlc":       e.hlc,
         "value_b64": base64::engine::general_purpose::STANDARD.encode(&e.value),
@@ -659,18 +657,13 @@ pub(super) async fn gw_overlay_log_subscribe(
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(256);
     tokio::spawn(async move {
         loop {
-            let entries = {
-                let mut es: Vec<LogEntry> = crate::store::scan_kv_prefix(&kv_state, &prefix)
-                    .into_iter()
-                    .filter_map(|(k, v)| {
-                        let suffix = k.strip_prefix(&prefix)?;
-                        let hlc    = u64::from_str_radix(suffix.split('/').next()?, 16).ok()?;
-                        if hlc >= last_seen { Some(LogEntry { hlc, value: v }) } else { None }
-                    })
-                    .collect();
-                es.sort_by_key(|e| e.hlc);
-                es
-            };
+            // `(hlc, key)` order, as the core's `subscribe_log` (post-360 row E).
+            let entries: Vec<LogEntry> = mycelium_core::log_cursor::rows_after(
+                    &kv_state, &stream_name, &mycelium_core::log_cursor::LogPosition::Start)
+                .into_iter()
+                .filter(|r| r.hlc >= last_seen)
+                .map(|r| LogEntry { hlc: r.hlc, value: r.value })
+                .collect();
             for entry in entries {
                 use base64::Engine as _;
                 // `saturating_add`: the HLC is parsed from the (any-node-writable) log key, so a
@@ -722,16 +715,32 @@ pub(super) async fn gw_overlay_log_group_subscribe(
     Query(q):   Query<LogGroupSubscribeQuery>,
     State(ctx): State<Arc<HttpCtx>>,
 ) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
-    let stream_name = q.stream.clone();
-    let group_name  = q.group.clone();
-    let kv_state    = Arc::clone(&ctx.agent_ctx.kv_state);
-    let task_ctx    = Arc::clone(&ctx.agent_ctx);
+    Sse::new(log_group_events(Arc::clone(&ctx.agent_ctx), q.stream, q.group).map(|data| Ok(Event::default().data(data.to_string()))))
+        .keep_alive(KeepAlive::default())
+}
 
-    let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
+/// The event stream behind `GET /gateway/overlay/log/group/subscribe`: each item is one entry's data object.
+#[cfg(feature = "consensus")]
+pub(super) fn log_group_events(
+    task_ctx:    Arc<TaskCtx>,
+    stream_name: String,
+    group_name:  String,
+) -> impl futures_util::Stream<Item = serde_json::Value> {
+    use mycelium_core::log_cursor::{self, LogPosition, LogRow};
+    let kv_state    = Arc::clone(&task_ctx.kv_state);
+    // False once this consumer has lost the claim: what is still queued is not handed on (nor
+    // recorded) — the next holder delivers it.
+    let active      = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let still_active = Arc::clone(&active);
+    let (record_ctx, record_stream, record_group) = (Arc::clone(&task_ctx), stream_name.clone(), group_name.clone());
+    // Checked again as each entry is handed on: a client too slow to drain the channel stalls the task's
+    // send, and with it the lease renewal — a lease that lapsed meanwhile may be another consumer's now.
+    let claim_check = (Arc::clone(&task_ctx), format!("clog/{stream_name}/{group_name}/claim"),
+                       Bytes::from(task_ctx.node_id.to_string().into_bytes()));
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<(serde_json::Value, LogRow)>(64);
     tokio::spawn(async move {
         let claim_slot = format!("clog/{stream_name}/{group_name}/claim");
-        let offset_key = format!("clog/{stream_name}/{group_name}/offset");
-        let prefix     = format!("log/{stream_name}/");
         // Stable claim value = holder id only (no expiry inside the value), so a re-propose is the
         // "same value" the lease path re-endorses; the lease governs expiry + failover.
         let holder: Bytes = Bytes::from(task_ctx.node_id.to_string().into_bytes());
@@ -768,11 +777,11 @@ pub(super) async fn gw_overlay_log_group_subscribe(
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
-        // Resume from the persisted offset (LWW read; the sole holder is the only writer).
-        let mut offset: u64 = kv_state.store.pin().get(offset_key.as_str())
-            .and_then(|e| e.data.clone())
-            .and_then(|b| std::str::from_utf8(&b).ok().and_then(|s| u64::from_str_radix(s, 16).ok()))
-            .unwrap_or(0);
+        // Resume from the group's recorded position (LWW read; the sole holder is the only writer),
+        // `(hlc, key)` — the order the core sorts a log by (post-360 row E, `log_cursor`). The
+        // position below is this task's *queued* position; the recorded one moves only as the stream
+        // hands an entry on (the `map` after the channel).
+        let mut position: LogPosition = log_cursor::read_position(&kv_state, &stream_name, &group_name);
         let renew_every = Duration::from_secs((lease_secs / 3).max(1));
         let mut last_renew = std::time::Instant::now();
 
@@ -786,43 +795,22 @@ pub(super) async fn gw_overlay_log_group_subscribe(
                 let still_me = crate::consensus::live_committed_value(
                         &kv_state, &claim_slot, crate::consensus::causal_now_ms(&task_ctx.hlc))
                     .as_deref() == Some(holder.as_ref());
-                if !still_me { return; }
+                if !still_me {
+                    active.store(false, std::sync::atomic::Ordering::Release);
+                    return;
+                }
             }
 
-            let mut entries: Vec<LogEntry> = crate::store::scan_kv_prefix(&kv_state, &prefix)
-                .into_iter()
-                .filter_map(|(k, v)| {
-                    let suffix = k.strip_prefix(&prefix)?;
-                    let hlc    = u64::from_str_radix(suffix.split('/').next()?, 16).ok()?;
-                    if hlc > offset { Some(LogEntry { hlc, value: v }) } else { None }
-                })
-                .collect();
-            entries.sort_by_key(|e| e.hlc);
-
-            if let Some(entry) = entries.into_iter().next() {
-                offset = entry.hlc;
-                // Persist the offset (LWW; sole writer) so a replacement consumer resumes on failover.
-                let offset_key_arc: Arc<str> = Arc::from(offset_key.as_str());
-                let update = crate::framing::make_gossip_update(
-                    &task_ctx.node_id, task_ctx.default_ttl,
-                    offset_key_arc, Bytes::from(format!("{:016x}", entry.hlc).into_bytes()),
-                    false, &task_ctx.hlc,
-                );
-                crate::store::apply_and_notify(&task_ctx.kv_state, &update);
-                crate::framing::dispatch_gossip_try_send(
-                    &task_ctx.gossip_txs,
-                    crate::framing::WireMessage::Data(update),
-                    task_ctx.node_id.id_hash(),
-                    crate::framing::ForwardHint::All,
-                    &task_ctx.kv_state.dropped_frames,
-                );
+            let next = log_cursor::rows_after(&kv_state, &stream_name, &position).into_iter().next();
+            if let Some(row) = next {
+                position = LogPosition::past(&row);
                 use base64::Engine as _;
                 let data = json!({
                     "stream":    stream_name,
-                    "hlc":       entry.hlc,
-                    "value_b64": base64::engine::general_purpose::STANDARD.encode(&entry.value),
+                    "hlc":       row.hlc,
+                    "value_b64": base64::engine::general_purpose::STANDARD.encode(&row.value),
                 });
-                if tx.send(Event::default().data(data.to_string())).await.is_err() { return; }
+                if tx.send((data, row)).await.is_err() { return; }
             } else {
                 // Idle: the drain loop otherwise only notices a disconnected client via a failed
                 // `tx.send`, which never fires while the stream is idle — so the task looped forever
@@ -836,7 +824,20 @@ pub(super) async fn gw_overlay_log_group_subscribe(
         }
     });
 
-    Sse::new(ReceiverStream::new(rx).map(Ok::<_, Infallible>)).keep_alive(KeepAlive::default())
+    ReceiverStream::new(rx)
+        .take_while(move |_| {
+            let (ctx, slot, holder) = &claim_check;
+            still_active.load(std::sync::atomic::Ordering::Acquire)
+                && crate::consensus::live_committed_value(&ctx.kv_state, slot, crate::consensus::causal_now_ms(&ctx.hlc))
+                    .as_deref() == Some(holder.as_ref())
+        })
+        .map(move |(data, row)| {
+            // Post-360 row E: the position moves as the stream hands the entry to the connection, not
+            // when it was queued — an entry queued (up to 64) or in flight when the stream dropped is
+            // the next holder's to send.
+            log_cursor::record(&record_ctx.core, &record_stream, &record_group, &row);
+            data
+        })
 }
 
 // ── Overlay: reliable delivery ────────────────────────────────────────────────

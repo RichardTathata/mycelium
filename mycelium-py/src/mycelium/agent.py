@@ -495,7 +495,7 @@ class MyceliumAgent:
         ns:                 str,
         name:               str,
         *,
-        interval_secs:      int                    = 30,
+        interval_secs:      float                  = 30,
         lease_secs:         float                  | None = None,
         attributes:         dict[str, Any]         | None = None,
         authorized_callers: list[str]              | None = None,
@@ -509,7 +509,8 @@ class MyceliumAgent:
         Args:
             ns:                 Capability namespace (e.g. ``"compute"``).
             name:               Capability name (e.g. ``"gpu"``).
-            interval_secs:      Re-assertion interval.
+            interval_secs:      Re-assertion interval, sent in whole seconds (a
+                                fraction rounds up); the node accepts 1–3600.
             lease_secs:         If set, binds the advertisement to THIS
                                 process's liveness: the node retracts it
                                 unless :meth:`CapabilityHandle.heartbeat` is
@@ -529,7 +530,8 @@ class MyceliumAgent:
             A :class:`CapabilityHandle`; call :meth:`CapabilityHandle.drop`
             or use as a context manager to retract.
         """
-        body: dict[str, Any] = {"ns": ns, "name": name, "interval_secs": interval_secs}
+        # Whole seconds (post-360 row E): the gateway refuses a fraction, which it once replaced with 30.
+        body: dict[str, Any] = {"ns": ns, "name": name, "interval_secs": whole_seconds(interval_secs, name="interval_secs")}
         if lease_secs is not None:
             # Whole seconds (0.2.10): the gateway reads `as_u64()`, and a fraction left the advert unleased.
             body["lease_secs"] = whole_seconds(lease_secs, name="lease_secs")
@@ -551,7 +553,7 @@ class MyceliumAgent:
         self,
         toml_text: str,
         *,
-        interval_secs: int = 30,
+        interval_secs: float = 30,
         lease_secs:    float | None = None,
     ) -> "UnitHandle":
         """Declare a unit file's capabilities, requirements and groups on the node, under one handle.
@@ -563,7 +565,7 @@ class MyceliumAgent:
         reported in :attr:`UnitHandle.not_enforced`. Drop the handle (or exit its context) to retract the whole
         unit; with ``lease_secs``, call :meth:`UnitHandle.heartbeat` within every window.
         """
-        body: dict[str, Any] = {"toml": toml_text, "interval_secs": interval_secs}
+        body: dict[str, Any] = {"toml": toml_text, "interval_secs": whole_seconds(interval_secs, name="interval_secs")}
         if lease_secs is not None:
             body["lease_secs"] = whole_seconds(lease_secs, name="lease_secs")  # as advertise_capability
         with self._pool.sync() as c:

@@ -956,8 +956,8 @@ would be false for it, and its consumer builds with `-D warnings`. The other nin
 `mycelium::federation::{verify_descriptor_rotating, verify_policy}` (`tls`) ·
 `FederationClient::with_credential_lifetime` · `mycelium::knowledge::store::…::issuers_about`.
 
-A twentieth candidate, `Preflight::is_inert` (`GatewayPreflight::is_inert`, now in `src/agent/http/authz.rs`), is left as it is until that file's split (row P5) and
-row E, which touch the file.
+A twentieth candidate, `Preflight::is_inert` (`GatewayPreflight::is_inert`, now in `src/agent/http/authz.rs`), was left as it was until that file's split (row P5) and
+row E, which touch the file; row E deprecated it with the same note (§38).
 
 **Will the compiler tell me?** Yes — every use site of a deprecated item warns, and a crate built with
 `-D warnings` fails on it; that is the whole mechanism, and it is why the items are deprecated rather than removed.
@@ -975,3 +975,56 @@ the default.
 
 **Not built:** an automated sweep in CI. The grep above is a one-off (`scripts/` holds no copy); rustc's `dead_code`
 cannot see an exported item, so the next sweep is a session's work, not a gate.
+
+## 38. The gateway remainder: timer periods bounded, a dropped stream loses less, prompt names, a fresh envelope (unreleased, after 2.32.0)
+
+**What changes** (post-360 plan row E). Six things a gateway client or a provider can see:
+
+- **`interval_secs` and `lease_secs` are bounded** on `POST /gateway/capability/advertise` and
+  `POST /gateway/units/declare`: absent means the default (30 s; no lease), present must be a whole number of
+  seconds in `1..=3600` (`MAX_TIMER_PERIOD_SECS`), and anything else answers **400 `timer_out_of_range`** naming
+  the field. Before, any `u64` was a period, `0` was silently `1`, and a value that was not a whole number (`0.5`,
+  `"30"`) was silently 30 s. A unit file's `[[capability]] ttl_secs` is held to the same range by
+  `NodeCapabilityConfig::validate()`, so a stem or `units/declare` refuses `ttl_secs = 0` (a 1 ms re-assert loop)
+  or `> 3600` by name.
+- **A gateway advert says how often it is refreshed.** `capability/advertise` now gossips a `CapEntry` carrying
+  `refresh_interval_ms`, as an in-process advert always has, instead of a bare `Capability` every reader timed with
+  the legacy 60 s default. An advert refreshed every 600 s no longer reads as stale between beats; one refreshed
+  every second evaporates 3 s after its refresher stops, not 3 minutes. Every reader already decodes both forms.
+- **The mailbox stream deletes an event when it hands it on.** `GET /gateway/mailbox/{kind}` tombstoned each event
+  as it entered its 256-slot channel; it now does so as the stream hands the event to the HTTP connection. A dropped
+  stream loses only what the connection (and the kernel's socket buffers) had already accepted — not received: that
+  is all HTTP lets the gateway see — and the next stream delivers the rest. The in-process
+  `ServiceHandle::open_mailbox` is unchanged (it hands a plain receiver, and still deletes on entering its channel).
+- **The log-group subscribe orders by `(hlc, key)` and records its position after the send.** Of two entries with
+  one HLC, `GET /gateway/overlay/log/group/subscribe` and `KvHandle::subscribe_log_group` delivered one and skipped
+  the other for ever; both now deliver both, in the core's order. The gateway records the group's position as the
+  stream hands an entry on, not before queueing it — an entry queued (up to 64) or in flight at a drop is the next
+  holder's to send. The position is kept at a new key, `clog/{stream}/{group}/cursor` (`{hlc:016x}/{node}`), beside
+  the old `clog/{stream}/{group}/offset`, which is still written (the HLC alone) so an older node reads a position it
+  understands. `GET /gateway/overlay/log/scan` and `…/log/subscribe` order same-HLC entries by key too.
+- **A prompt name holds no `/` and is not empty.** `prompts/{ns}/{name}` made `(a/b, c)` and `(a, b/c)` one key. The
+  three `/gateway/prompts/{ns}/{name}` routes and `POST /gateway/llm/call` answer **400 `invalid_prompt_name`**
+  (a `%2F` in a path segment arrives decoded, so it is refused too), `/gateway/llm/stream` sends an
+  `invalid_prompt_name` error event, and in process `register_prompt_skill`, `update_prompt` and
+  `call_prompt_skill` return `PromptSkillError::InvalidName`, `get_prompt` returns `None`, `delete_prompt` deletes
+  nothing, and `list_prompts` skips a key no valid pair builds.
+- **A caller envelope older than 300 s plus the drift bound is refused.** `gateway_caller::verify` — every provider's
+  receive path — reads the envelope's signed issue time: older than `CALLER_CONTEXT_MAX_AGE_MS` (300 s, the longest
+  any gateway door waits) plus `max_clock_drift_ms`, or further ahead than `max_clock_drift_ms`, is
+  **`CallerError::Stale`** (code `stale`). Before, the time was signed and never read.
+- `GatewayPreflight::is_inert` is `#[deprecated(since = "2.33.0")]` (§37's note; nothing in the repository or the
+  private companion calls it).
+
+**Will the compiler tell me?** Partly. `PromptSkillError` gained `InvalidName` and is not `#[non_exhaustive]`, so an
+exhaustive `match` on it needs the arm; `CallerError` gained `Stale` (it is `#[non_exhaustive]`; your `_` arm already
+denies). A call to `is_inert` warns. The rest is refusals by name.
+
+**Migration.** A client sending `interval_secs` or `lease_secs` as a fraction, `0` or past an hour: send whole
+seconds in range (`mycelium-py` and `mycelium-ts` now round `interval_secs` up, as they did leases). A prompt skill
+whose `ns` or `name` holds a `/` never resolved (a `cap/` key with a `/` in its name was already refused as
+malformed); rename it. A provider whose callers queue work for more than 300 s before the provider reads it from
+`rpc_rx` (the check runs there, not at send) sees `stale`; that work's gateway caller stopped waiting long before.
+Nothing to do for the log group in a mixed fleet: an older node writes only the offset, and an upgraded reader takes
+the offset whenever it is ahead of the cursor. **What a drop still loses**, stated: a mailbox event or log-group
+entry the connection had accepted when it dropped — the gateway has no resume point (guide 10).

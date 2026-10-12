@@ -17,7 +17,14 @@
 //!   HLC key before delivery, so causal happens-before is preserved.
 //! - **Tombstone-on-delivery**: entries are deleted from the KV store
 //!   immediately after delivery and the tombstone is gossiped, preventing
-//!   redelivery on restart.
+//!   redelivery on restart. *Delivery* differs by consumer: the in-process
+//!   [`ServiceHandle::open_mailbox`](crate::ServiceHandle::open_mailbox) deletes an
+//!   entry when it enters the receiver's channel (the library cannot see a plain
+//!   `mpsc::Receiver` being read, so a receiver dropped with events queued loses
+//!   them); the gateway's `GET /gateway/mailbox/{kind}` deletes one only when its
+//!   stream hands the event to the HTTP connection ([`open_mailbox_acked`], post-360
+//!   hardening row E), so a dropped stream loses at most what the connection had
+//!   already accepted.
 //!
 //! ## KV namespace
 //!
@@ -39,6 +46,47 @@ pub struct MeshEvent {
     pub payload: Bytes,
     /// Packed HLC timestamp from the delivery key — useful for causal ordering.
     pub hlc_ts:  u64,
+}
+
+/// A mailbox event whose entry is deleted only when [`MailboxAck::ack`] is called — the consumer says
+/// it has handed the event on (post-360 hardening row E). Dropping it un-acked leaves the entry in the
+/// store; once the mailbox itself is dropped, the next one opened delivers it again.
+#[cfg_attr(not(feature = "gateway"), allow(dead_code))] // the gateway's mailbox stream is the one consumer
+pub(crate) struct AckedEvent {
+    pub(crate) event: MeshEvent,
+    pub(crate) ack:   MailboxAck,
+}
+
+/// Deletes one delivered mailbox entry. See [`AckedEvent`].
+#[cfg_attr(not(feature = "gateway"), allow(dead_code))] // the gateway's mailbox stream is the one consumer
+pub(crate) struct MailboxAck {
+    ctx:       Arc<TaskCtx>,
+    key:       Arc<str>,
+    in_flight: InFlight,
+}
+
+/// The keys an acked mailbox has handed to its consumer and not yet had acknowledged: the drain skips
+/// them so an entry is never queued twice while its first delivery is outstanding.
+type InFlight = Arc<papaya::HashMap<Arc<str>, ()>>;
+
+#[cfg_attr(not(feature = "gateway"), allow(dead_code))] // the gateway's mailbox stream is the one consumer
+impl MailboxAck {
+    /// The consumer has the event: delete its entry. The tombstone lands **before** the key leaves
+    /// the in-flight set, so a drain that no longer sees the key in flight sees it deleted
+    /// (`drain_prefix` checks in that order).
+    pub(crate) fn ack(self) {
+        tombstone(&self.ctx, Arc::clone(&self.key));
+        self.in_flight.pin().remove(&self.key);
+    }
+}
+
+/// Where a drain hands its events.
+enum Sink {
+    /// The in-process mailbox: an entry is deleted as it enters the channel.
+    Immediate(mpsc::Sender<MeshEvent>),
+    /// The gateway's mailbox: an entry is deleted when the consumer acks it.
+    #[cfg_attr(not(feature = "gateway"), allow(dead_code))]
+    Acked { tx: mpsc::Sender<AckedEvent>, in_flight: InFlight },
 }
 
 /// Cancels the corresponding [`ServiceHandle::open_mailbox`]
@@ -90,16 +138,22 @@ fn tombstone(ctx: &Arc<TaskCtx>, key: Arc<str>) {
 const DRAIN_CHUNK: usize = 64;
 
 /// Delivers up to `DRAIN_CHUNK` mailbox entries in HLC key order, tombstoning
-/// each on delivery. Yields between chunks so the tokio runtime can run other
-/// tasks. Stops early if the receiver has been dropped.
+/// each on delivery (or, for an acked sink, when the consumer acks it). Yields
+/// between chunks so the tokio runtime can run other tasks. Stops early if the
+/// receiver has been dropped.
 async fn drain_prefix(
     ctx:    &Arc<TaskCtx>,
     prefix: &Arc<str>,
     kind:   &Arc<str>,
-    tx:     &mpsc::Sender<MeshEvent>,
+    sink:   &Sink,
 ) {
     loop {
         let mut entries = scan_kv_prefix(&ctx.kv_state, prefix.as_ref());
+        if let Sink::Acked { in_flight, .. } = sink {
+            // Handed on and not yet acked: not this drain's to send again.
+            let pinned = in_flight.pin();
+            entries.retain(|(key, _)| !pinned.contains_key(key));
+        }
         if entries.is_empty() { break; }
         // sort_unstable is fine — keys are unique HLC timestamps.
         entries.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
@@ -113,10 +167,26 @@ async fn drain_prefix(
             let ts_hex = key.strip_prefix(prefix.as_ref()).unwrap_or("");
             let hlc_ts = u64::from_str_radix(ts_hex, 16).unwrap_or(0);
             let event  = MeshEvent { kind: Arc::clone(kind), sender, payload, hlc_ts };
-            if tx.send(event).await.is_err() {
-                return; // receiver dropped
+            match sink {
+                Sink::Immediate(tx) => {
+                    if tx.send(event).await.is_err() {
+                        return; // receiver dropped
+                    }
+                    tombstone(ctx, key);
+                }
+                Sink::Acked { tx, in_flight } => {
+                    // The scan above may predate an ack that has since run: an entry acked after the
+                    // scan was tombstoned before it left the in-flight set, so re-check both, in the
+                    // order `MailboxAck::ack` writes them.
+                    if in_flight.pin().contains_key(&key) { continue; }
+                    if ctx.kv_state.store.pin().get(key.as_ref()).is_none_or(|e| e.data.is_none()) { continue; }
+                    in_flight.pin().insert(Arc::clone(&key), ());
+                    let ack = MailboxAck { ctx: Arc::clone(ctx), key, in_flight: Arc::clone(in_flight) };
+                    if tx.send(AckedEvent { event, ack }).await.is_err() {
+                        return; // receiver dropped: the entry stays for the next mailbox
+                    }
+                }
             }
-            tombstone(ctx, key);
         }
         // Yield so the runtime can service other tasks between chunks.
         tokio::task::yield_now().await;
@@ -127,13 +197,13 @@ async fn mailbox_task(
     ctx:         Arc<TaskCtx>,
     prefix:      Arc<str>,
     kind:        Arc<str>,
-    tx:          mpsc::Sender<MeshEvent>,
+    sink:        Sink,
     mut cancel_rx:   oneshot::Receiver<()>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     mut watcher:     tokio::sync::watch::Receiver<u64>,
 ) {
     // Deliver any entries already present before we started watching.
-    drain_prefix(&ctx, &prefix, &kind, &tx).await;
+    drain_prefix(&ctx, &prefix, &kind, &sink).await;
 
     loop {
         tokio::select! { biased;
@@ -142,7 +212,7 @@ async fn mailbox_task(
                 if result.is_err() || *shutdown_rx.borrow() { break; }
             }
             _ = watcher.changed() => {
-                drain_prefix(&ctx, &prefix, &kind, &tx).await;
+                drain_prefix(&ctx, &prefix, &kind, &sink).await;
             }
         }
     }
@@ -195,7 +265,32 @@ pub(crate) fn open_mailbox_ctx(
     let watcher = super::capability_ops::subscribe_prefix_on_kv(
         &ctx.kv_state, Arc::clone(&prefix),
     );
-    tokio::spawn(mailbox_task(ctx, prefix, kind, tx, cancel_rx, shutdown_rx, watcher));
+    tokio::spawn(mailbox_task(ctx, prefix, kind, Sink::Immediate(tx), cancel_rx, shutdown_rx, watcher));
+    (MailboxHandle { _cancel: cancel_tx }, rx)
+}
+
+/// [`open_mailbox_ctx`] for a consumer that says when it has handed an event on: each entry is
+/// deleted when its [`AckedEvent::ack`] is acked, never when it enters the channel (post-360
+/// hardening row E — the gateway's mailbox stream). Entries handed on and not yet acked are not
+/// queued again while this mailbox lives; once it is dropped, they are the next mailbox's.
+#[cfg_attr(not(feature = "gateway"), allow(dead_code))] // the gateway's mailbox stream is the one consumer
+pub(crate) fn open_mailbox_acked(
+    ctx:          Arc<TaskCtx>,
+    self_node_id: &NodeId,
+    kind:         Arc<str>,
+    capacity:     usize,
+    shutdown_rx:  tokio::sync::watch::Receiver<bool>,
+) -> (MailboxHandle, mpsc::Receiver<AckedEvent>) {
+    let prefix: Arc<str> = Arc::from(
+        format!("mailbox/{}/{}/", self_node_id, kind).as_str(),
+    );
+    let (cancel_tx, cancel_rx) = oneshot::channel();
+    let (tx, rx)               = mpsc::channel(capacity);
+    let watcher = super::capability_ops::subscribe_prefix_on_kv(
+        &ctx.kv_state, Arc::clone(&prefix),
+    );
+    let sink = Sink::Acked { tx, in_flight: Arc::new(papaya::HashMap::new()) };
+    tokio::spawn(mailbox_task(ctx, prefix, kind, sink, cancel_rx, shutdown_rx, watcher));
     (MailboxHandle { _cancel: cancel_tx }, rx)
 }
 

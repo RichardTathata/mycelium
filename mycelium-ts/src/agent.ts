@@ -280,7 +280,7 @@ export class MyceliumAgent {
     const data = await this._post("/gateway/capability/advertise", {
       ns,
       name,
-      interval_secs: options.intervalSecs ?? 30,
+      interval_secs: wholeSeconds(options.intervalSecs ?? 30, 1, "intervalSecs"),
       ...(options.leaseSecs !== undefined ? { lease_secs: wholeSeconds(options.leaseSecs, 1, "leaseSecs") } : {}),
       attributes: options.attributes ?? {},
       authorized_callers: options.authorizedCallers ?? [],
@@ -312,7 +312,7 @@ export class MyceliumAgent {
   ): Promise<UnitHandle> {
     const data = (await this._post("/gateway/units/declare", {
       toml: tomlText,
-      interval_secs: options.intervalSecs ?? 30,
+      interval_secs: wholeSeconds(options.intervalSecs ?? 30, 1, "intervalSecs"),
       ...(options.leaseSecs !== undefined ? { lease_secs: wholeSeconds(options.leaseSecs, 1, "leaseSecs") } : {}),
     })) as {
       handle_id: string;

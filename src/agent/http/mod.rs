@@ -58,7 +58,7 @@
 //!   reliable delivery) · `govern.rs` (governance + the fleet reads) · `compliance.rs` (audit, transparency,
 //!   revoke) · `llm_bridge.rs` · `federation_routes.rs`
 //! - `http_tests.rs` (module `tests`), `gateway_caller_tests.rs`, `ae_seam_tests.rs` — the test modules, as
-//!   they were
+//!   they were; `remainder_tests.rs` — post-360 row E's
 //!
 //! Every family file opens with `use super::*;`, and this file glob-imports every family back, so the
 //! families, the imports below and the sibling `agent` modules named below are one namespace — a handler
@@ -446,7 +446,7 @@ pub(super) async fn run_http_server(
 
     let listener = prepared.listener;
     // The one place the public surface is stated in code; the test
-    // `the_public_surface_is_exactly_the_documented_list` holds the router to it.
+    // `every_listed_public_path_is_mounted_and_public_and_gated_paths_are_not` holds the router to it.
     info!(public_paths = ?PUBLIC_PATHS, companion_public_paths = ?COMPANION_PUBLIC_PATHS,
           "gateway: the paths answered without a credential (the companions' only when mounted)");
 
@@ -470,7 +470,7 @@ pub(super) async fn run_http_server(
 /// `docs/operations/rbac.md` lists it (M16 edge criterion: what a probe, load balancer or scraper
 /// needs; the A2A descriptor and `/a2a`, which an A2A peer reaches without a Mycelium credential;
 /// `/bulk/{id}`, a capability URL). The router above mounts exactly these outside `gateway_auth`;
-/// `the_public_surface_is_exactly_the_documented_list` asserts it against a running gateway. A
+/// `every_listed_public_path_is_mounted_and_public_and_gated_paths_are_not` asserts it against a running gateway. A
 /// companion route mounted outside `/gateway/`, `/a2a`, `/federation/` is public by construction
 /// and belongs here or under the prefix — never silently elsewhere.
 pub(crate) const PUBLIC_PATHS: &[&str] = &[
@@ -568,6 +568,10 @@ async fn shutdown_signal(mut rx: watch::Receiver<bool>) {
 #[cfg(test)]
 #[path = "http_tests.rs"]
 mod tests;
+
+/// Post-360 hardening row E: the gateway remainder, one test per promise.
+#[cfg(test)]
+mod remainder_tests;
 
 /// Item 7 gates (`docs/plans/v3-contracts-axis.md` §6.4, D27): the four negative cases the
 /// secure profile must refuse, the `authorized_callers` gate, and the `/a2a` principal.

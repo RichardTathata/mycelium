@@ -514,6 +514,7 @@ impl GatewayPreflight {
 
     /// `true` when no evaluator is attached (or none can be in this build): nothing was decided
     /// and nothing will be recorded.
+    #[deprecated(since = "2.33.0", note = "no caller, test, SDK or document in the repository or the private companion references it (post-360 hardening row E, 2026-10-12); kept on the 2.x line — open an issue if you use it and it will be undeprecated")]
     pub fn is_inert(&self) -> bool {
         #[cfg(feature = "tls")]
         return matches!(self.inner, Preflight::Inert);

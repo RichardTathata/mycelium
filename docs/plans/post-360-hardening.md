@@ -1,6 +1,6 @@
 # Post-360 hardening — the next batch, and consensus as a protocol, not a service
 
-**Status:** adopted 2026-10-10, rev 1.7 (2026-10-12: Φ closed; P5, J and I delivered; rows K, L, M added from the Strands Box comparison; rows N, O, P added — Strands agents on Mycelium, after an `a2a-sdk` probe). **R0 is being cut as v2.32.0 (2026-10-11)**, which delivers rows **G, P3, C, D,
+**Status:** adopted 2026-10-10, rev 1.7 (2026-10-12: Φ closed; P5, J, I, H and E delivered; rows K, L, M added from the Strands Box comparison; rows N, O, P added — Strands agents on Mycelium, after an `a2a-sdk` probe). **R0 is being cut as v2.32.0 (2026-10-11)**, which delivers rows **G, P3, C, D,
 P1, A (with C1, C2), B (as narrowed 2026-10-11) and P2 (without migration, as decided 2026-10-11)** — each closed on
 evidence in §3.5. Open:
 E, F, K, L, M, N, O, P (P2's migration — close, enumerate, carry, complete — delivered after 2.32.0, §3.5;
@@ -79,7 +79,7 @@ Four places strain that line today, and the rows in §3 address each:
 | **B** — *delivered 2.32.0 as narrowed (#602), §3.5* | Core resource bounds | a handshake and idle timeout on the gossip accept path, and read-progress bounds with a 1 KiB/s floor — **the accept path is bounded against silent and slow connections; an attacker that keeps talking can hold the connection slots it obtained from free permits**, mitigated by mTLS (a non-member fails the handshake within `handshake_timeout_ms`) and an opt-in per-source cap (narrowed by the maintainer's decision, 2026-10-11, after review rounds 3–5 of #602 found connection preemption could displace honest peers); connect, write and flush timeouts on the outbound writer, and no unbounded pile of anti-entropy replies behind a stalled peer; one stalled SSE or serve subscriber cannot veto admission of its kind node-wide; the signal log is bounded per sender-chosen kind; a stopped agent leaks no task context (`RpcRequestRx` ends at shutdown, as its doc says) | R0 |
 | **C** — *delivered 2.32.0 (#597), §3.5* | Companion WALs (tuple space, blackboard) | compaction is crash-durable (temp file and directory fsynced); a torn or undecodable record poisons the writer and is refused at open rather than silently dropping every later record; one owner per file | R0 |
 | **D** — *delivered 2.32.0 (#599), §3.5* | WASM execution limits | epoch interruption bounds a guest call; guest code runs off the runtime's worker threads; a trap does not recompile the component on every call | R0 |
-| **E** | Gateway remainder | client-supplied timer periods (`interval_secs`) bounded; the log-group subscribe keeps the core's `(hlc, key)` tiebreak the mailbox deletes an entry only after the client has it (today it tombstones on entering the 256-slot channel, so a dropped stream loses queued events — #595's review); prompt keys cannot alias across `ns`/`name` (`prompts/{ns}/{name}` with a `/` in either); and saves the group offset only after the entry is sent (today it saves first, so an entry in flight when a stream drops is never re-sent — found by row G); the caller envelope binds freshness | P5 |
+| **E** — *delivered (#PR), §3.5* | Gateway remainder | client-supplied timer periods (`interval_secs`) bounded; the log-group subscribe keeps the core's `(hlc, key)` tiebreak the mailbox deletes an entry only after the client has it (today it tombstones on entering the 256-slot channel, so a dropped stream loses queued events — #595's review); prompt keys cannot alias across `ns`/`name` (`prompts/{ns}/{name}` with a `/` in either); and saves the group offset only after the entry is sent (today it saves first, so an entry in flight when a stream drops is never re-sent — found by row G); the caller envelope binds freshness | P5 |
 | **F** | Wire and crypto, one MINOR with a window | a TLS node refuses unsigned `Data` frames; the removal check reads a peer's key structurally, not by byte-scanning the certificate; KV `SignedData` is domain-tagged; each change carries a mixed-fleet window and an upgrade note in the 2.30.0 shape; the #585 and #587 windows close in the same MINOR | R0, ideally its own release |
 | **G** — *delivered 2.32.0 (#595), §3.5* | SDKs | Python whole-second timeouts and a non-truncating tuple `take`; path segments escaped; TypeScript `SupersededError`; one `scatterGather` default, documented; SSE reconnect is designed with a gateway resume point or recorded as not built | R0 |
 | **H** — *delivered after 2.32.0 (#609), §3.5* | Companions | the commitment deadline judged on the log's clock, not the offerer's; `award_of` verifies before it reports; the reason blob store bounded; caller-chosen `run_id` validated | R0 |
@@ -531,12 +531,62 @@ Each promise and what delivers it:
   (finding 8): any `llm:invoke` caller can record into another tenant's valid run id — stated in the docs, not in this
   row's promise.
 
+**E — the gateway remainder (#PR, after 2.32.0).** The row's cell runs several items together; read as six promises
+(the cell's sentence "the log-group subscribe keeps the core's `(hlc, key)` tiebreak the mailbox deletes…" is two,
+and its trailing "and saves the group offset only after the entry is sent" belongs to the log group, as row G found
+it). Each test below was run on the code before its fix and failed with the line quoted; the fail-first runs are in the
+PR.
+- *Client-supplied timer periods (`interval_secs`) bounded* — `src/agent/http/caps.rs` `timer_secs` (absent →
+  default; a whole number in `1..=MAX_TIMER_PERIOD_SECS` = 3600; else 400 `timer_out_of_range` naming the field) on
+  both routes that read `interval_secs` and `lease_secs` (`gw_cap_advertise`, `gw_units_declare`);
+  `NodeCapabilityConfig::validate()` holds a unit file's `ttl_secs` to the same range (`src/capability_config.rs`).
+  Tests: `client_timer_periods_are_bounded_at_both_routes` (*was* `left: 200 right: 400 — capability/advertise
+  interval_secs=1000000000: past the bound`), `a_unit_files_ttl_is_bounded_by_validate` (*was* `ttl_secs = 0` accepted).
+  On the way: a gateway advert now gossips a `CapEntry` carrying its period (`a_gateway_advert_declares_the_period_it_refreshes_at`,
+  *was* a bare `Capability` that `CapEntry::decode` refused); both SDKs send `interval_secs` as whole seconds
+  (`test_a_lease_or_ttl_is_sent_in_whole_seconds[…interval_secs]`, `advertiseCapability.intervalSecs sends 1.5 as 2`,
+  *was* `1.5` sent as given). The other gateway timers were already clamped (`timeout_secs`, `ttl_secs`, `timeout_ms`).
+- *The log-group subscribe keeps the core's `(hlc, key)` tiebreak* — `mycelium-core/src/log_cursor.rs`
+  (`LogPosition`, `rows_after`, `read_position`, `record`), used by the gateway (`src/agent/http/overlay.rs`
+  `log_group_events`) and in process (`KvHandle::subscribe_log_group`); `log/scan` and `log/subscribe` sort the same
+  way. Tests: `the_log_group_keeps_the_cores_hlc_key_tiebreak` (*was* `left: ["b", "c"] right: ["a", "b", "c"]`),
+  `the_in_process_log_group_keeps_the_tiebreak` (*was* `left: ["a", "c"]`), and `log_cursor`'s two unit tests (the
+  order; the cursor read only when at least as far as the legacy offset, which is still written for older nodes).
+- *The mailbox deletes an entry only after the client has it, not on entering the 256-slot channel* —
+  `src/agent/mailbox.rs` `open_mailbox_acked` / `MailboxAck` / `Sink::Acked`, acked in `mailbox_events`'s `map` as the
+  stream yields (`src/agent/http/mesh.rs`). "The client has it" is stated as *handed to the HTTP connection*: written
+  to the socket is not received, and guide 10 and both SDK READMEs say what a drop still loses. Test:
+  `a_dropped_mailbox_stream_loses_only_what_it_handed_on` (*was* `left: 0 right: 9 — only the event the stream handed
+  on is deleted`). **Not changed:** the in-process `ServiceHandle::open_mailbox`, which hands a plain `mpsc::Receiver`
+  and still deletes on enqueue (the module doc says so).
+- *Prompt keys cannot alias across `ns`/`name`* — `src/agent/prompt.rs` `prompt_key` (an empty part or a `/` →
+  `PromptSkillError::InvalidName`), at every door that builds the key: the three `/gateway/prompts/{ns}/{name}` routes
+  and `llm/call` (400 `invalid_prompt_name`), `llm/stream` (an error event), `LlmHandle`'s six verbs. Tests:
+  `prompt_keys_cannot_alias_across_ns_and_name` (*was* `left: 200 right: 400 — the other pair never reads the first
+  pair's template (PUT answered 200 OK)`), `in_process_prompt_names_cannot_alias` (*was* `update_prompt("a/b", "c")`
+  accepted).
+- *The log-group subscribe saves the group offset only after the entry is sent* — the gateway records in the stream's
+  `map` after the channel, behind a `take_while` that stops a consumer that lost the claim; the core records after
+  `tx.send` succeeds and exits when idle with its receiver gone. Tests:
+  `a_dropped_log_group_stream_saves_only_what_it_handed_on` (*was* `left: Some("0000000000000104") right:
+  Some("0000000000000100")`), `the_in_process_log_group_records_only_after_the_send` (*was* `left:
+  Some(b"0000000000000100") right: None`).
+- *The caller envelope binds freshness* — `src/agent/gateway_caller.rs` `verify`: issued more than
+  `CALLER_CONTEXT_MAX_AGE_MS` (300 s) plus `max_clock_drift_ms` ago or more than `max_clock_drift_ms` ahead →
+  `CallerError::Stale`; one verifier for every receive path. Test: `a_stale_or_future_envelope_is_refused` (*was*
+  `left: Ok(Some(1791791309573)) right: Err("stale") — tls=false: two hours old`). **Not built:** a nonce cache, so a
+  replay inside the window is not refused.
+- *Left for this row by P5* — `mod.rs` cites `every_listed_public_path_is_mounted_and_public_and_gated_paths_are_not`;
+  `GatewayPreflight::is_inert` `#[deprecated(since = "2.33.0")]` (no reference in this repository or
+  `mycelium-private`, grepped); the SSE resume point stays *not built* — the guide's and READMEs' loss sentences now
+  match what a drop loses.
+
 ### 3.6 · State of play and the next iteration (2026-10-12)
 
 Where the work stands at the end of 2026-10-12, so the next session starts here rather than from a conversation.
 
 **In flight (open PRs, each with an independent reviewer):**
-- **E** — #613, the gateway remainder (six promises); under its first adversarial review.
+- **E** — #613, the gateway remainder (six promises); its first adversarial review answered in one fix round (§3.5).
 - **F** — #611, wire and crypto with its window; in its third fix round. That round narrows the unsigned-frame
   exemption to a self-authenticating sealed identity record, stops an unauthenticated identity tombstone from wiping a
   node's keys, counts every exempt frame, and fixes the dispatch gate's early stop. It adds row **F2** (the refusal
@@ -555,8 +605,10 @@ worth fixing on its own: the agent card names the gossip port), O and P (after N
 - **I (private):** a Cedar schema type-check of `context.*` and template `when` literals; behaviour under real power
   loss behind the fsync pins.
 - **E (if it merges as reported):** a nonce cache for the caller envelope (a replay inside the freshness window is
-  accepted); an acknowledged in-process mailbox; the SSE resume point (recorded since row G); `cap/` keys alias across
-  `ns`/`name` the way `prompts/` did, refused today only because a `/` in a name is malformed.
+  accepted); an acknowledged in-process mailbox; the SSE resume point (recorded since row G); and two `cap/` cases
+  outside the row (#613's review, finding 6) — `capability/advertise` accepts a `/` in `ns` or `name` with 200 for an
+  advert no reader can parse (`parse_cap_key` refuses it as malformed), and `ns = "locality", name = "self"` overwrites
+  the node's own locality entry `cap/{node}/locality/self`.
 - **B:** connection preemption and WAL group commit, removed in review.
 
 **Sources compared on 2026-10-12** (rows K–P and the open question came from these):

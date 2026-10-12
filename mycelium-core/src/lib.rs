@@ -28,6 +28,7 @@ pub mod decision;
 pub mod kv_handle;
 pub mod kv_persist;
 pub mod locality;
+pub mod log_cursor;
 pub mod mesh_handle;
 pub mod bounds;
 pub mod erasure;

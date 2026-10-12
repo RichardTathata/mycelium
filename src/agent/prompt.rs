@@ -38,6 +38,21 @@ pub enum PromptSkillError {
     LlmError(String),
     #[error("RPC error: {0}")]
     Rpc(#[from] crate::agent::rpc::RpcError),
+    /// `ns` or `name` is empty or contains a `/`: the template key `prompts/{ns}/{name}` would be
+    /// shared with another pair (`(a/b, c)` and `(a, b/c)` are one key), so it is refused (post-360
+    /// hardening row E).
+    #[error("invalid prompt skill name {ns:?}/{name:?}: neither part may be empty or contain '/'")]
+    InvalidName { ns: String, name: String },
+}
+
+/// The KV key of the template for `ns`/`name`: `prompts/{ns}/{name}`, or
+/// [`PromptSkillError::InvalidName`] when either part is empty or contains a `/` — every door that
+/// builds the key goes through here, so no two pairs share one (post-360 hardening row E).
+pub(crate) fn prompt_key(ns: &str, name: &str) -> Result<String, PromptSkillError> {
+    if ns.is_empty() || name.is_empty() || ns.contains('/') || name.contains('/') {
+        return Err(PromptSkillError::InvalidName { ns: ns.to_owned(), name: name.to_owned() });
+    }
+    Ok(format!("{}{ns}/{name}", crate::signal::kv_ns::PROMPTS))
 }
 
 /// Returned by `register_prompt_skill`. Dropping retracts the skill immediately.

@@ -10,8 +10,7 @@ pub(super) fn llm_get_prompt_from_kv(
     ns: &str,
     name: &str,
 ) -> Option<crate::agent::prompt::PromptTemplate> {
-    use crate::signal::kv_ns;
-    let key = format!("{}{}/{}", kv_ns::PROMPTS, ns, name);
+    let key = crate::agent::prompt::prompt_key(ns, name).ok()?;
     let bytes = kv_state.store.pin().get(key.as_str())
         .and_then(|e| e.data.clone())?;
     serde_json::from_slice(&bytes).ok()
@@ -31,7 +30,6 @@ pub(super) async fn gw_prompts_list(
         let mut parts = rest.splitn(2, '/');
         let ns   = parts.next()?.to_owned();
         let name = parts.next()?.to_owned();
-        if name.is_empty() { return None; }
         llm_get_prompt_from_kv(&ctx.agent_ctx.kv_state, &ns, &name).map(|t| {
             serde_json::json!({
                 "ns":          ns,
@@ -46,11 +44,22 @@ pub(super) async fn gw_prompts_list(
     axum::Json(entries)
 }
 
+/// The 400 every prompt door answers for a `ns`/`name` pair that is not a prompt skill's: an empty
+/// part, or a `/` in either (post-360 hardening row E — `prompts/{ns}/{name}` would be another pair's
+/// key; a `%2F` in a path segment arrives here decoded).
+#[cfg(feature = "llm")]
+pub(super) fn refuse_prompt_name(ns: &str, name: &str) -> Option<axum::response::Response> {
+    crate::agent::prompt::prompt_key(ns, name).err().map(|e| (StatusCode::BAD_REQUEST, Json(json!({
+        "ok": false, "error": "invalid_prompt_name", "message": e.to_string(),
+    }))).into_response())
+}
+
 #[cfg(feature = "llm")]
 pub(super) async fn gw_prompt_get(
     State(ctx): State<Arc<HttpCtx>>,
     axum::extract::Path((ns, name)): axum::extract::Path<(String, String)>,
 ) -> impl IntoResponse {
+    if let Some(refused) = refuse_prompt_name(&ns, &name) { return refused; }
     match llm_get_prompt_from_kv(&ctx.agent_ctx.kv_state, &ns, &name) {
         Some(t) => axum::Json(serde_json::to_value(t).unwrap_or_default())
                        .into_response(),
@@ -64,8 +73,10 @@ pub(super) async fn gw_prompt_put(
     axum::extract::Path((ns, name)): axum::extract::Path<(String, String)>,
     axum::Json(body): axum::Json<crate::agent::prompt::PromptTemplate>,
 ) -> impl IntoResponse {
-    use crate::signal::kv_ns;
-    let kv_key = format!("{}{}/{}", kv_ns::PROMPTS, ns, name);
+    let kv_key = match crate::agent::prompt::prompt_key(&ns, &name) {
+        Ok(k) => k,
+        Err(_) => return refuse_prompt_name(&ns, &name).unwrap_or_else(|| StatusCode::BAD_REQUEST.into_response()),
+    };
     match serde_json::to_vec(&body) {
         Ok(bytes) => {
             kv_write(&ctx.agent_ctx, Arc::from(kv_key.as_str()), Bytes::from(bytes), false);
@@ -80,10 +91,12 @@ pub(super) async fn gw_prompt_delete(
     State(ctx): State<Arc<HttpCtx>>,
     axum::extract::Path((ns, name)): axum::extract::Path<(String, String)>,
 ) -> impl IntoResponse {
-    use crate::signal::kv_ns;
-    let key = format!("{}{}/{}", kv_ns::PROMPTS, ns, name);
+    let key = match crate::agent::prompt::prompt_key(&ns, &name) {
+        Ok(k) => k,
+        Err(_) => return refuse_prompt_name(&ns, &name).unwrap_or_else(|| StatusCode::BAD_REQUEST.into_response()),
+    };
     kv_write(&ctx.agent_ctx, Arc::from(key.as_str()), Bytes::new(), true);
-    axum::Json(serde_json::json!({"ok": true}))
+    axum::Json(serde_json::json!({"ok": true})).into_response()
 }
 
 #[cfg(feature = "llm")]
@@ -115,6 +128,7 @@ pub(super) async fn gw_llm_call(
     let caller = caller.map(|Extension(c)| c);
     use crate::signal::signal_kind;
 
+    if let Some(refused) = refuse_prompt_name(&body.ns, &body.name) { return refused; }
     let timeout = gateway_rpc_timeout_ms(body.timeout_ms);
     let filter  = CapFilter::new(body.ns.as_str(), body.name.as_str());
     let providers = resolve_cap_providers(&ctx.agent_ctx.kv_state, &filter);
@@ -239,6 +253,11 @@ pub(super) async fn gw_llm_stream(
     let providers = resolve_cap_providers(&ctx.agent_ctx.kv_state, &filter);
 
     let event = match providers.into_iter().next() {
+        // Post-360 row E: the stream's own error channel, as for every other refusal here.
+        _ if crate::agent::prompt::prompt_key(&body.ns, &body.name).is_err() => {
+            let data = serde_json::json!({"type":"error","error":"invalid_prompt_name"}).to_string();
+            Event::default().data(data)
+        }
         None => {
             let data = serde_json::json!({"type":"error","error":"no_provider"}).to_string();
             Event::default().data(data)

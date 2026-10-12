@@ -226,6 +226,10 @@ LEASES = {
     "advertise_capability.lease_secs": (lambda a, t: a.advertise_capability("ns", "n", lease_secs=t), "lease_secs"),
     "declare_units.lease_secs":        (lambda a, t: a.declare_units("", lease_secs=t), "lease_secs"),
     "distributed_lock.ttl_secs":       (lambda a, t: a.distributed_lock("jobs", ttl_secs=t), "ttl_secs"),
+    # Post-360 row E: the gateway refuses an `interval_secs` that is not a whole number (it fell back to
+    # 30 s without a word before), so the SDK rounds it up as it does a lease.
+    "advertise_capability.interval_secs": (lambda a, t: a.advertise_capability("ns", "n", interval_secs=t), "interval_secs"),
+    "declare_units.interval_secs":        (lambda a, t: a.declare_units("", interval_secs=t), "interval_secs"),
 }
 
 

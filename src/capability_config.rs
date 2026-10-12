@@ -657,10 +657,26 @@ pub struct PresenceDecl {
     pub max_providers: Option<usize>,
 }
 
+/// The longest period a declared or client-supplied re-assertion timer may run at, in seconds — a
+/// `[[capability]]`'s `ttl_secs`, and the gateway's `interval_secs` and `lease_secs` (post-360
+/// hardening row E). An hour: an advert or a requirement refreshed less often than that is one its
+/// readers time as alive for three hours after its refresher died (the 3× evaporation window), and a
+/// zero period is a busy loop (the timer seam floors it at 1 ms). Values outside `1..=` this are
+/// refused by name, never clamped.
+pub const MAX_TIMER_PERIOD_SECS: u64 = 3_600;
+
 impl NodeCapabilityConfig {
     /// Every refusal the loader makes, by name. Called by [`load_from_file`](Self::load_from_file)
     /// after parsing; call it yourself on a config built in code.
     pub fn validate(&self) -> Result<(), GossipError> {
+        for c in &self.capabilities {
+            if !(1..=MAX_TIMER_PERIOD_SECS).contains(&c.ttl_secs) {
+                return Err(invalid("capability", format!(
+                    "{}/{}: ttl_secs = {} is outside 1..={MAX_TIMER_PERIOD_SECS} (it is the period the capability re-asserts at)",
+                    c.ns, c.name, c.ttl_secs
+                )));
+            }
+        }
         if let Some(p) = &self.principal
             && p.trim().is_empty()
         {

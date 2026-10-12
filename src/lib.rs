@@ -143,7 +143,7 @@
 //! | `cap/{node}/{ns}/loading`          | Provisioning in progress; `pct` attr 0–100, written by `mycelium-wasm-host`'s `Provisioner` (read by `mycelium-reason`'s `ModelDependency::loading_progress`) |
 //! | `svc/{kind}/{node}`                | Persistent capability advertisements (`advertise_persistent`; tombstoned on handle drop) |
 //! | `log/{stream}/{hlc_hex}`           | Append-only KV log entries (`KvHandle::append`)              |
-//! | `clog/{…}`                         | Consumer positions for group log subscription (`subscribe_log_group`) |
+//! | `clog/{…}`                         | Consumer positions for group log subscription (`subscribe_log_group`): `…/cursor` the `(hlc, key)`, `…/offset` the HLC alone (`log_cursor`) |
 //! | `lock/{name}`                      | Distributed lock state (JSON holder/token/expiry; tombstoned on `LockGuard` drop) |
 //! | `prompts/{ns}/{name}`              | LLM prompt templates (`llm` feature; configuration — the `cap/` entry is the presence heartbeat) |
 //! | `skills/{ns}/{name}/{node}/input\|output` | SkillRunner skill registrations (signal-kind routing for `skill.invoke`) |
