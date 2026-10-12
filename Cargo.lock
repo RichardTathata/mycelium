@@ -2485,6 +2485,7 @@ dependencies = [
  "mycelium-sim",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 

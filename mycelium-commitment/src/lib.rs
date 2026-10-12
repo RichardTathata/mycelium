@@ -65,17 +65,34 @@
 //!
 //! Heads and terms are in the gossip KV; offers, reports and assessments are the companion's streams
 //! under one prefix (`cn/`, registered in `mycelium`'s namespace table). Time enters through the
-//! caller (`now_ms`), so every decision here is pure in time and a harness can drive it — with one
-//! deliberate exception: **the deadline is judged on the log's clock**, the HLC the stream stamped
-//! when an offer was appended, not on the stamp the offerer wrote into its record (post-360 row H;
-//! an offerer used to choose whether its own offer was late). That HLC is minted by the substrate,
-//! monotone, and never below anything the offerer's node had already observed — so a late offer
-//! cannot be backdated past the announcement's arrival — but it is the offerer's *node's* clock
-//! within the mesh's drift bound (`GossipConfig::max_clock_drift_ms`), which is the residual.
+//! caller (`now_ms`), so every decision here is pure in time and a harness can drive it.
 //!
-//! An award read back is checked the same way an offer is: [`ContractNet::award_of`] reports only a
-//! record that names its requirement and operation, and [`ContractNet::award_of_verified`] only one
-//! the announcement's declarer signed.
+//! ## Which offers were in time: the declarer's close (post-360 row H)
+//!
+//! **No timestamp an offerer can write decides whether its offer was late.** `offered_at_ms` is a
+//! field the offerer writes; so is the HLC segment of an offer's log key (`log/cn/{r}/offers/{hlc}/…`
+//! is a KV key any member can `set` with any number in it — #609's review backdated one to
+//! `0000000000010000` and won an award a minute after the deadline). So the deadline is not judged
+//! on either. The **declarer closes** the requirement ([`ContractNet::close`]) — at or after
+//! `deadline_ms` on its own clock (the `now_ms` it passes) — writing a [`Close`] record at
+//! `cn/{requirement}/close` that names every offer the declarer's node holds at that moment, each by
+//! its log position and the SHA-256 of its encoding. An award counts **only offers the close names**,
+//! and is refused ([`CommitmentRefusal::NotClosed`]) before a close exists. An offer that reaches the
+//! stream after the close is not a candidate whatever its key or stamp says.
+//!
+//! **The residual, stated.** The declarer decides which offers arrived in time: one that closes late
+//! admits late offers, and one that omits an offer it held excludes it. Both are visible — the close
+//! record carries `closed_at_ms` beside the announcement's `deadline_ms` and names exactly what it
+//! counted — and, signed ([`ContractNet::close`] with a key), attributable to the declarer; the
+//! verified path ([`ContractNet::plan_award_verified`]) requires that signature. Unsigned, the close
+//! is like the announcement head: declarer-owned by convention, writable by any member through the
+//! Rust API or a peer (the gateway's KV doors refuse `cn/`). The HLC-contagion question the review
+//! raised (one fast member pulling every node's HLC forward) does not apply: no HLC decides lateness.
+//!
+//! An award read back is checked too: [`ContractNet::award_of`] reports only a record that names its
+//! requirement and operation, and [`ContractNet::award_of_verified`] only one the declarer **the caller
+//! names** signed. Offers, reports and assessments are read only when they name the requirement whose
+//! stream holds them.
 
 #![deny(unsafe_code)]
 
@@ -94,6 +111,9 @@ fn head_key(requirement: &str) -> String {
 fn award_key(requirement: &str) -> String {
     format!("{CN_PREFIX}{requirement}/award")
 }
+fn close_key(requirement: &str) -> String {
+    format!("{CN_PREFIX}{requirement}/close")
+}
 fn offers_stream(requirement: &str) -> String {
     format!("cn/{requirement}/offers")
 }
@@ -111,10 +131,9 @@ pub struct Announcement {
     pub declarer: String,
     pub terms: String,
     pub criteria: String,
-    /// Offers whose **log position** is after this are not considered by an award: the HLC the
-    /// stream stamped when the offer was appended, read as wall-clock ms (`hlc::physical_ms`) —
-    /// never the `offered_at_ms` the offerer wrote into its own record. So a deadline is expressed on
-    /// the mesh's clock, and an offerer decides *whether* to offer, not whether its offer was late.
+    /// When offers close, on the declarer's clock: the declarer may [`close`](ContractNet::close) the
+    /// requirement at or after it, and an award counts only the offers the close names. No stamp an
+    /// offerer writes — `offered_at_ms` or its log key's HLC — is compared against it.
     pub deadline_ms: u64,
     pub announced_at_ms: u64,
 }
@@ -125,8 +144,8 @@ pub struct Offer {
     pub requirement: String,
     pub participant: String,
     pub bid: String,
-    /// The offerer's own stamp — part of the signed record, **not** what the deadline is judged on
-    /// (that is the offer's log position; see [`Announcement::deadline_ms`]).
+    /// The offerer's own stamp — part of the signed record, **not** what decides lateness (the
+    /// declarer's [`Close`] does; see the crate doc).
     pub offered_at_ms: u64,
     /// Ed25519 over [`Offer::canonical_bytes`]; empty means unsigned.
     ///
@@ -161,6 +180,68 @@ pub fn verify_offer(offer: &Offer, key: &[u8; 32]) -> bool {
     let Ok(vk) = VerifyingKey::from_bytes(key) else { return false };
     let Ok(sig) = Signature::from_slice(&offer.signature) else { return false };
     vk.verify(&offer.canonical_bytes(), &sig).is_ok()
+}
+
+/// One offer as a [`Close`] names it: its log position and the SHA-256 of its encoding, so a copy of
+/// the record at another position, or another record at this position, is not the offer named.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClosedOffer {
+    pub hlc: u64,
+    /// Lowercase hex SHA-256 of the offer's encoding (`serde_json`, signature included).
+    pub sha256: String,
+}
+
+impl ClosedOffer {
+    /// How a close names the offer at `hlc`.
+    pub fn of(hlc: u64, offer: &Offer) -> Self {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(encode(offer));
+        Self { hlc, sha256: digest.iter().map(|b| format!("{b:02x}")).collect() }
+    }
+}
+
+/// The declarer's close: **which offers arrived in time**, in the declarer's own words (post-360 row H).
+/// Written once, at `cn/{requirement}/close`, at or after the deadline on the declarer's clock; an award
+/// counts only the offers it names. See the crate doc for what this does and does not establish.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Close {
+    pub requirement: String,
+    pub declarer: String,
+    /// When the declarer closed, on its own clock — beside the announcement's `deadline_ms`, the
+    /// record of a late close.
+    pub closed_at_ms: u64,
+    /// Every offer the declarer's node held when it closed.
+    pub offers: Vec<ClosedOffer>,
+    /// Ed25519 over [`Close::canonical_bytes`], by the declarer; empty means unsigned.
+    #[serde(default)]
+    pub signature: Vec<u8>,
+}
+
+impl Close {
+    /// The bytes a signature covers: the record with its signature emptied, as canonical JSON.
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        let unsigned = Close { signature: Vec::new(), ..self.clone() };
+        serde_json::to_vec(&unsigned).unwrap_or_default()
+    }
+
+    /// Whether the declarer signed at all. `false` means *unproven*, not *forged*.
+    pub fn is_signed(&self) -> bool {
+        !self.signature.is_empty()
+    }
+
+    /// Whether this close names the offer at `hlc`.
+    pub fn names(&self, hlc: u64, offer: &Offer) -> bool {
+        let named = ClosedOffer::of(hlc, offer);
+        self.offers.contains(&named)
+    }
+}
+
+/// Verify a close against the **declarer's** Ed25519 public key. `false` for an unsigned one.
+pub fn verify_close(close: &Close, key: &[u8; 32]) -> bool {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    let Ok(vk) = VerifyingKey::from_bytes(key) else { return false };
+    let Ok(sig) = Signature::from_slice(&close.signature) else { return false };
+    vk.verify(&close.canonical_bytes(), &sig).is_ok()
 }
 
 /// The acceptance: one participant's offer, taken, once.
@@ -319,6 +400,23 @@ pub enum CommitmentRefusal {
     MandateNotTheAcceptors { holder: String, acceptor: String },
     /// A record in the medium did not decode.
     Encoding(String),
+    /// The requirement has no [`Close`]: the declarer has not said which offers arrived in time, so
+    /// nothing can be awarded yet (post-360 row H).
+    NotClosed,
+    /// The verified path found a close that the declarer it was told to trust did not sign.
+    CloseUnproven,
+    /// Only the announcement's declarer closes a requirement.
+    NotTheDeclarer { declarer: String, me: String },
+    /// A close before the deadline, on the declarer's clock.
+    BeforeDeadline { deadline_ms: u64, now_ms: u64 },
+    /// The requirement is already closed; the close is returned, never rewritten.
+    AlreadyClosed(Box<Close>),
+    /// The award slot holds a record that decodes as an award **for another requirement or
+    /// operation** — somebody else's, not this requirement's award.
+    SlotHoldsAnotherRecord { requirement: String, operation_id: String },
+    /// The award slot holds an award the declarer the caller trusts did not sign: the slot is taken
+    /// and nothing proves by whom. A linearizable slot stays taken — visible, not repairable here.
+    UnprovenAwardHolds(Box<Award>),
 }
 
 impl std::fmt::Display for CommitmentRefusal {
@@ -338,6 +436,22 @@ impl std::fmt::Display for CommitmentRefusal {
                 write!(f, "the mandate names {holder} as holder, but the acceptor is {acceptor}")
             }
             Self::Encoding(e) => write!(f, "a record did not decode: {e}"),
+            Self::NotClosed => f.write_str("the declarer has not closed the requirement — no award before the close"),
+            Self::CloseUnproven => f.write_str("the close is not signed by the declarer the caller trusts"),
+            Self::NotTheDeclarer { declarer, me } => write!(f, "only the declarer {declarer} closes the requirement, not {me}"),
+            Self::BeforeDeadline { deadline_ms, now_ms } => {
+                write!(f, "the deadline is {deadline_ms} ms and the declarer's clock reads {now_ms} ms — too early to close")
+            }
+            Self::AlreadyClosed(c) => write!(f, "already closed at {} ms naming {} offer(s)", c.closed_at_ms, c.offers.len()),
+            Self::SlotHoldsAnotherRecord { requirement, operation_id } => write!(
+                f,
+                "the award slot holds a record for requirement {requirement:?} (operation {operation_id:?}), not this one's award"
+            ),
+            Self::UnprovenAwardHolds(a) => write!(
+                f,
+                "the award slot holds an award to {} naming declarer {} that the trusted declarer did not sign",
+                a.participant, a.declarer
+            ),
         }
     }
 }
@@ -452,14 +566,60 @@ impl ContractNet {
         Some(self.agent.kv().append(&offers_stream(requirement), encode(&o)))
     }
 
-    /// Every offer on the requirement, with its log position, in log order.
+    /// Every offer on the requirement, with its log position, in log order — only records that name
+    /// **this** requirement: a signed offer copied from another requirement's stream is that
+    /// requirement's offer, not this one's (#609's review, finding 3).
     pub fn offers(&self, requirement: &str) -> Vec<(u64, Offer)> {
         self.agent
             .kv()
             .scan_log(&offers_stream(requirement), 0, u64::MAX)
             .into_iter()
             .filter_map(|e| decode::<Offer>(&e.value).map(|o| (e.hlc, o)))
+            .filter(|(_, o)| o.requirement == requirement)
             .collect()
+    }
+
+    /// **Close** the requirement: the declarer's statement of which offers arrived in time — every offer
+    /// this node holds now, named by log position and digest — written at `cn/{requirement}/close`,
+    /// signed with `key` when one is given. Only the announcement's declarer closes, only at or after
+    /// `deadline_ms` on its own clock (`now_ms`), and only once: a second close is
+    /// [`CommitmentRefusal::AlreadyClosed`] with the first. See the crate doc for the residual.
+    pub fn close(
+        &self,
+        requirement: &str,
+        key: Option<&ed25519_dalek::SigningKey>,
+        now_ms: u64,
+    ) -> Result<Close, CommitmentRefusal> {
+        use ed25519_dalek::Signer;
+        let announcement = self.announcement(requirement).ok_or(CommitmentRefusal::NotAnnounced)?;
+        if announcement.declarer != self.me {
+            return Err(CommitmentRefusal::NotTheDeclarer { declarer: announcement.declarer, me: self.me.clone() });
+        }
+        if now_ms < announcement.deadline_ms {
+            return Err(CommitmentRefusal::BeforeDeadline { deadline_ms: announcement.deadline_ms, now_ms });
+        }
+        if let Some(existing) = self.close_of(requirement) {
+            return Err(CommitmentRefusal::AlreadyClosed(Box::new(existing)));
+        }
+        let mut close = Close {
+            requirement: requirement.to_string(),
+            declarer: self.me.clone(),
+            closed_at_ms: now_ms,
+            offers: self.offers(requirement).iter().map(|(hlc, o)| ClosedOffer::of(*hlc, o)).collect(),
+            signature: Vec::new(),
+        };
+        if let Some(k) = key {
+            close.signature = k.sign(&close.canonical_bytes()).to_bytes().to_vec();
+        }
+        let _ = self.agent.kv().set(close_key(requirement).as_str(), encode(&close));
+        Ok(close)
+    }
+
+    /// The close, if the requirement has one that names it. Unverified — see
+    /// [`plan_award_verified`](Self::plan_award_verified) for the path that checks its signature.
+    pub fn close_of(&self, requirement: &str) -> Option<Close> {
+        let close: Close = self.agent.kv().get(&close_key(requirement)).and_then(|b| decode(&b))?;
+        (close.requirement == requirement).then_some(close)
     }
 
     /// The offers whose signature verifies under the key `resolve` gives for the participant they
@@ -498,8 +658,14 @@ impl ContractNet {
     /// this crate's policy: pass [`offers_verified`](Self::offers_verified) and a forged offer is
     /// not a candidate; pass [`offers`](Self::offers) and you get today's behaviour, unchanged.
     ///
-    /// The deadline and the already-awarded check still apply — they are the requirement's, not the
-    /// candidate set's.
+    /// The close and the already-awarded check still apply — they are the requirement's, not the
+    /// candidate set's: only offers the declarer's [`Close`] names count, and there is no award before a
+    /// close ([`CommitmentRefusal::NotClosed`]).
+    ///
+    /// **Unverified, stated plainly.** This path reads the close and any existing award without a
+    /// signature check, so **any member able to write `cn/{requirement}/award` or
+    /// `cn/{requirement}/close` can block or steer an award here** — a forged award is `AlreadyAwarded`
+    /// for good. A declarer that holds keys uses [`plan_award_verified`](Self::plan_award_verified).
     pub fn plan_award_from(
         &self,
         requirement: &str,
@@ -507,16 +673,53 @@ impl ContractNet {
         now_ms: u64,
         candidates: Vec<(u64, Offer)>,
     ) -> Result<Award, CommitmentRefusal> {
-        let announcement = self.announcement(requirement).ok_or(CommitmentRefusal::NotAnnounced)?;
+        self.announcement(requirement).ok_or(CommitmentRefusal::NotAnnounced)?;
         if let Some(existing) = self.award_of(requirement) {
             return Err(CommitmentRefusal::AlreadyAwarded(Box::new(existing)));
         }
-        // The deadline is judged on the **log's clock**: the HLC the stream stamped when the offer was
-        // appended, read as wall-clock ms — never on the `offered_at_ms` the offerer wrote into its own
-        // record, which let an offerer backdate a late offer or future-stamp a timely one (post-360 row H).
+        let close = self.close_of(requirement).ok_or(CommitmentRefusal::NotClosed)?;
+        self.choose_award(requirement, rule, now_ms, candidates, &close)
+    }
+
+    /// **Plan an award on the checked path**: the close must be signed by `declarer` — the declarer
+    /// *the caller* pins, not the one the writable head names — the candidates are the offers whose
+    /// signature verifies ([`offers_verified`](Self::offers_verified)) and that the close names, and
+    /// only an award `declarer` signed ([`award_of_verified`](Self::award_of_verified)) counts as
+    /// already made. An unsigned or foreign record at the award slot does not block it here (the plain
+    /// KV commit then overwrites it; a linearizable slot a forgery holds stays taken and
+    /// [`commit_award_linearizable_verified`](Self::commit_award_linearizable_verified) says so).
+    pub fn plan_award_verified(
+        &self,
+        requirement: &str,
+        rule: AwardRule,
+        now_ms: u64,
+        declarer: &str,
+        resolve: impl Fn(&str) -> Option<[u8; 32]>,
+    ) -> Result<Award, CommitmentRefusal> {
+        self.announcement(requirement).ok_or(CommitmentRefusal::NotAnnounced)?;
+        if let Some(existing) = self.award_of_verified(requirement, declarer, &resolve) {
+            return Err(CommitmentRefusal::AlreadyAwarded(Box::new(existing)));
+        }
+        let close = self.close_of(requirement).ok_or(CommitmentRefusal::NotClosed)?;
+        if close.declarer != declarer || !resolve(declarer).is_some_and(|k| verify_close(&close, &k)) {
+            return Err(CommitmentRefusal::CloseUnproven);
+        }
+        let candidates = self.offers_verified(requirement, &resolve);
+        self.choose_award(requirement, rule, now_ms, candidates, &close)
+    }
+
+    /// The rule over the candidates the close names.
+    fn choose_award(
+        &self,
+        requirement: &str,
+        rule: AwardRule,
+        now_ms: u64,
+        candidates: Vec<(u64, Offer)>,
+        close: &Close,
+    ) -> Result<Award, CommitmentRefusal> {
         let eligible: Vec<(u64, Offer)> = candidates
             .into_iter()
-            .filter(|(hlc, _)| mycelium::hlc::physical_ms(*hlc) <= announcement.deadline_ms)
+            .filter(|(hlc, o)| o.requirement == requirement && close.names(*hlc, o))
             .collect();
         let (offer_hlc, offer) = rule.choose(&eligible).cloned().ok_or(CommitmentRefusal::NoOffers)?;
         Ok(Award {
@@ -560,17 +763,62 @@ impl ContractNet {
     /// [`CommitmentRefusal::AwardUnknown`]: the award may have committed elsewhere, and a retry
     /// resolves it. The commit receipt says what the cluster agreed and, separately, whether this
     /// node has it on disk.
+    ///
+    /// The committed record is reported **as what it is**: this requirement's award is `AlreadyAwarded`
+    /// (unverified — any member that commits a forgery first holds the slot; see
+    /// [`commit_award_linearizable_verified`](Self::commit_award_linearizable_verified)), a record for
+    /// another requirement or operation is [`CommitmentRefusal::SlotHoldsAnotherRecord`], and only bytes
+    /// that are not an award at all are `Encoding`.
     pub async fn commit_award_linearizable(&self, award: Award) -> Result<AwardedLinearizable, CommitmentRefusal> {
+        self.commit_linearizable_inner(award, None).await
+    }
+
+    /// [`commit_award_linearizable`](Self::commit_award_linearizable) on the checked path: a committed
+    /// award counts as `AlreadyAwarded` only when `declarer` signed it; one nobody trusted signed is
+    /// [`CommitmentRefusal::UnprovenAwardHolds`] — the slot is taken, and this says so rather than
+    /// reporting it as the award.
+    pub async fn commit_award_linearizable_verified(
+        &self,
+        award: Award,
+        declarer: &str,
+        resolve: impl Fn(&str) -> Option<[u8; 32]>,
+    ) -> Result<AwardedLinearizable, CommitmentRefusal> {
+        // The declarer is pinned, so its key is resolved once, before the round — nothing to hold across it.
+        let key = resolve(declarer);
+        self.commit_linearizable_inner(award, Some((declarer, key))).await
+    }
+
+    async fn commit_linearizable_inner(
+        &self,
+        award: Award,
+        trusted: Option<(&str, Option<[u8; 32]>)>,
+    ) -> Result<AwardedLinearizable, CommitmentRefusal> {
         let slot = award_key(&award.requirement);
         // An award is an exclusive outcome (P2, #601's review): marked safety-sensitive and decided where the
         // fleet decides those — its exclusive-default electorate group, or the whole cluster when none is declared.
         match self.agent.consensus().exclusive_propose_receipt(&slot, encode(&award), ConsensusConfig::default()).await {
             Ok(commit) => Ok(AwardedLinearizable { award, commit }),
             Err(CommitError::Superseded { .. }) => {
-                let existing = self.award_of(&award.requirement).ok_or_else(|| {
-                    CommitmentRefusal::Encoding("superseded, but the committed award did not decode".into())
-                })?;
-                Err(CommitmentRefusal::AlreadyAwarded(Box::new(existing)))
+                let committed: Award = self
+                    .agent
+                    .consensus()
+                    .consensus_get(&slot)
+                    .and_then(|b| decode(&b))
+                    .ok_or_else(|| CommitmentRefusal::Encoding("superseded, and the committed record is not an award".into()))?;
+                if committed.requirement != award.requirement || committed.operation_id != slot {
+                    return Err(CommitmentRefusal::SlotHoldsAnotherRecord {
+                        requirement: committed.requirement,
+                        operation_id: committed.operation_id,
+                    });
+                }
+                match trusted {
+                    Some((declarer, key))
+                        if committed.declarer != declarer || !key.is_some_and(|k| verify_award(&committed, &k)) =>
+                    {
+                        Err(CommitmentRefusal::UnprovenAwardHolds(Box::new(committed)))
+                    }
+                    _ => Err(CommitmentRefusal::AlreadyAwarded(Box::new(committed))),
+                }
             }
             Err(CommitError::DeliveryUnknown { ballots_tried, .. }) => Err(CommitmentRefusal::AwardUnknown { ballots_tried }),
             Err(other) => Err(CommitmentRefusal::NotCommitted(other.to_string())),
@@ -622,8 +870,8 @@ impl ContractNet {
     /// reported, and does not block an award as `AlreadyAwarded`. Whether the declarer it names made
     /// it needs the declarer's key, which this crate does not hold: that is
     /// [`award_of_verified`](Self::award_of_verified), and an award read here is **unproven** in the
-    /// crate's usual sense — a claim, until a signature under the announcement's declarer says
-    /// otherwise.
+    /// crate's usual sense — a claim, until a signature under the declarer the caller trusts says
+    /// otherwise. Any member can write a record that passes this read.
     pub fn award_of(&self, requirement: &str) -> Option<Award> {
         let slot = award_key(requirement);
         let award: Award = self
@@ -635,26 +883,24 @@ impl ContractNet {
         (award.requirement == requirement && award.operation_id == slot).then_some(award)
     }
 
-    /// The award, if the requirement has one **and the announcement's declarer signed it** — the
-    /// read a participant that cares about provenance should make before acting on an acceptance.
+    /// The award, if the requirement has one **and `declarer` signed it** — the read a participant
+    /// that cares about provenance should make before acting on an acceptance.
     ///
-    /// Reported only when [`award_of`](Self::award_of)'s checks pass, the award's `declarer` is the
-    /// declarer the announcement head names, and the signature verifies under the key `resolve`
-    /// gives for that declarer. An unsigned award is not reported, nor one signed by anybody else —
-    /// a member that writes an award naming the declarer under its own valid key, or naming itself as
-    /// declarer, does not pass, because the key checked is the *announcer's*. `resolve` returning
-    /// `None` drops the award: a key we cannot find is not a key we may assume. Where the key comes
-    /// from is the caller's business, as for [`offers_verified`](Self::offers_verified).
-    ///
-    /// The announcement head is itself unsigned and declarer-owned by convention, so what this
-    /// establishes is *the party that announced the requirement accepted this offer*, under the
-    /// same `require_identity_proofs` caveat every signature in this crate carries.
-    pub fn award_of_verified(&self, requirement: &str, resolve: impl Fn(&str) -> Option<[u8; 32]>) -> Option<Award> {
-        let announcement = self.announcement(requirement)?;
+    /// `declarer` is **pinned by the caller** — whom the caller knows to have announced the
+    /// requirement — never read from the announcement head, which is unsigned and writable: a check
+    /// against the head fell in two writes (rewrite the head's declarer, then sign the award with that
+    /// key; #609's review, finding 4). Reported only when [`award_of`](Self::award_of)'s checks pass,
+    /// the award names `declarer`, and its signature verifies under the key `resolve` gives for
+    /// `declarer`. `resolve` returning `None` drops the award: a key we cannot find is not a key we may
+    /// assume. The `require_identity_proofs` caveat every signature in this crate carries applies.
+    pub fn award_of_verified(
+        &self,
+        requirement: &str,
+        declarer: &str,
+        resolve: impl Fn(&str) -> Option<[u8; 32]>,
+    ) -> Option<Award> {
         let award = self.award_of(requirement)?;
-        (award.declarer == announcement.declarer
-            && resolve(&award.declarer).is_some_and(|k| verify_award(&award, &k)))
-        .then_some(award)
+        (award.declarer == declarer && resolve(declarer).is_some_and(|k| verify_award(&award, &k))).then_some(award)
     }
 
     /// **Report** against an award's operation: what became of the work, or that it is unknown.
@@ -669,13 +915,14 @@ impl ContractNet {
         self.agent.kv().append(&reports_stream(requirement), encode(&r))
     }
 
-    /// Every report on the requirement, in log order.
+    /// Every report on the requirement, in log order — only records that name this requirement.
     pub fn reports(&self, requirement: &str) -> Vec<Report> {
         self.agent
             .kv()
             .scan_log(&reports_stream(requirement), 0, u64::MAX)
             .into_iter()
-            .filter_map(|e| decode(&e.value))
+            .filter_map(|e| decode::<Report>(&e.value))
+            .filter(|r| r.requirement == requirement)
             .collect()
     }
 
@@ -704,13 +951,14 @@ impl ContractNet {
         self.agent.kv().append(&assessments_stream(requirement), encode(&a))
     }
 
-    /// Every assessment on the requirement, in log order.
+    /// Every assessment on the requirement, in log order — only records that name this requirement.
     pub fn assessments(&self, requirement: &str) -> Vec<Assessment> {
         self.agent
             .kv()
             .scan_log(&assessments_stream(requirement), 0, u64::MAX)
             .into_iter()
-            .filter_map(|e| decode(&e.value))
+            .filter_map(|e| decode::<Assessment>(&e.value))
+            .filter(|a| a.requirement == requirement)
             .collect()
     }
 }
@@ -727,8 +975,8 @@ mod tests {
     use super::*;
     use mycelium::{GossipConfig, NodeId};
 
-    /// A deadline far in the future on the log's clock (2096), so an offer appended now is eligible —
-    /// a constant, so the sim-replay test's recording and replay announce the same bytes.
+    /// A fixed deadline (2096 in ms) the tests close at — a constant, so the sim-replay test's recording
+    /// and replay announce and close with the same bytes.
     const FAR_DEADLINE: u64 = 4_000_000_000_000;
 
     fn offer(participant: &str) -> Offer {
@@ -768,6 +1016,7 @@ mod tests {
         hub.announce("pickup-1", "2 crates, 14:00", "delivered before 15:00", FAR_DEADLINE, 0);
         assert!(a.offer("pickup-1", "5 km", 1).is_some());
         assert!(b.offer("pickup-1", "9 km", 2).is_some());
+        hub.close("pickup-1", None, FAR_DEADLINE).expect("the declarer closes");
 
         let awarded = hub.award("pickup-1", AwardRule::LowestParticipant, 50).await.expect("awarded");
         assert_eq!(awarded.award.participant, "driver-a", "the lowest participant, not the first offer");
@@ -789,13 +1038,16 @@ mod tests {
         let hub = ContractNet::new(Arc::clone(&agent), "hub");
         let d = ContractNet::new(Arc::clone(&agent), "driver-a");
         assert!(matches!(hub.award("nothing", AwardRule::LowestParticipant, 0).await, Err(CommitmentRefusal::NotAnnounced)));
-        // A deadline 100 ms after the epoch is long past on the log's clock, which is what the deadline
-        // is judged on: an offer appended now is late whatever `now_ms` it carries.
         hub.announce("pickup-2", "1 crate", "any time today", 100, 0);
-        assert!(matches!(hub.award("pickup-2", AwardRule::LowestParticipant, 10).await, Err(CommitmentRefusal::NoOffers)));
-        d.offer("pickup-2", "late", 101); // appended after the deadline
+        assert!(matches!(hub.award("pickup-2", AwardRule::LowestParticipant, 10).await, Err(CommitmentRefusal::NotClosed)));
+        assert!(matches!(hub.close("pickup-2", None, 10), Err(CommitmentRefusal::BeforeDeadline { .. })), "not before the deadline");
+        assert!(matches!(d.close("pickup-2", None, 100), Err(CommitmentRefusal::NotTheDeclarer { .. })), "only the declarer closes");
+        hub.close("pickup-2", None, 100).expect("closed at the deadline, naming nothing");
+        assert!(matches!(hub.award("pickup-2", AwardRule::LowestParticipant, 100).await, Err(CommitmentRefusal::NoOffers)));
+        d.offer("pickup-2", "late", 50); // appended after the close, with an early stamp
         assert!(matches!(hub.award("pickup-2", AwardRule::LowestParticipant, 200).await, Err(CommitmentRefusal::NoOffers)),
-            "an offer after the deadline is not considered");
+            "an offer after the close is not considered, whatever its stamp");
+        assert!(matches!(hub.close("pickup-2", None, 300), Err(CommitmentRefusal::AlreadyClosed(_))), "closed once");
         assert_eq!(hub.offers("pickup-2").len(), 1, "but it is on the record");
         agent.shutdown().await;
     }
@@ -815,6 +1067,7 @@ mod tests {
 
         hub_a.announce("plain", "1 crate", "any", FAR_DEADLINE, 0);
         d.offer("plain", "3 km", 1);
+        hub_a.close("plain", None, FAR_DEADLINE).unwrap();
         let plan_a = hub_a.plan_award("plain", AwardRule::LowestParticipant, 10).unwrap();
         let plan_b = hub_b.plan_award("plain", AwardRule::LowestParticipant, 11).unwrap();
         assert!(hub_a.commit_award(plan_a).await.is_ok());
@@ -823,6 +1076,7 @@ mod tests {
 
         hub_a.announce("linear", "1 crate", "any", FAR_DEADLINE, 0);
         d.offer("linear", "3 km", 1);
+        hub_a.close("linear", None, FAR_DEADLINE).unwrap();
         let plan_a = hub_a.plan_award("linear", AwardRule::LowestParticipant, 10).unwrap();
         let plan_b = hub_b.plan_award("linear", AwardRule::LowestParticipant, 11).unwrap();
         let first = hub_a.commit_award_linearizable(plan_a).await.expect("the first round commits");
@@ -871,6 +1125,7 @@ mod tests {
             let d = ContractNet::new(Arc::clone(&agent), "driver-a");
             hub.announce("replayed", "1 crate", "any", FAR_DEADLINE, 0);
             d.offer("replayed", "2 km", 1);
+            hub.close("replayed", None, FAR_DEADLINE).expect("closes");
             let awarded = hub.award_linearizable("replayed", AwardRule::LowestParticipant, 10).await.expect("awarded");
             agent.shutdown().await;
             let ctx = take().expect("the kernel was installed on this thread");
@@ -926,6 +1181,7 @@ mod tests {
         let d = ContractNet::new(Arc::clone(&agent), "driver-a");
         hub.announce("mandated", "2 crates", "before close", FAR_DEADLINE, 0);
         d.offer("mandated", "4 km", 1);
+        hub.close("mandated", None, FAR_DEADLINE).unwrap();
         let authority = ResourceAuthority::new("redistribution/pickups", 2);
 
         let stale = mandate_for("driver-a", 1);
@@ -963,6 +1219,7 @@ mod tests {
         let auditor = ContractNet::new(Arc::clone(&agent), "food-bank-auditor");
         hub.announce("pickup-3", "3 crates", "signed off by the receiving pantry", FAR_DEADLINE, 0);
         d.offer("pickup-3", "2 km", 1);
+        hub.close("pickup-3", None, FAR_DEADLINE).unwrap();
         let awarded = hub.award("pickup-3", AwardRule::LowestParticipant, 10).await.unwrap();
 
         d.report("pickup-3", Outcome::Fulfilled, awarded.award.operation_id.clone(), 20);
@@ -1040,6 +1297,7 @@ mod tests {
 
         // 1. Unchecked, the forgery wins — which is the defect, stated as a test rather than a
         //    worry. This is today's behaviour for a declarer that does not check.
+        hub.close("pickup-9", None, FAR_DEADLINE).unwrap();
         let unchecked = hub.plan_award("pickup-9", AwardRule::LowestParticipant, 10).expect("plans");
         assert_eq!(unchecked.participant, "driver-a", "the unchecked path awards the forged offer");
 
@@ -1084,6 +1342,7 @@ mod tests {
 
         hub.announce("pickup-11", "1 crate", "pantry signs off", FAR_DEADLINE, 0);
         d.offer("pickup-11", "2 km", 1);
+        hub.close("pickup-11", None, FAR_DEADLINE).unwrap();
         let plan = hub.plan_award("pickup-11", AwardRule::LowestParticipant, 10).expect("plans");
         assert!(!plan.is_signed(), "a planned award is unsigned until the declarer signs it");
 
@@ -1114,35 +1373,6 @@ mod tests {
             .unwrap_or(0)
     }
 
-    /// Post-360 row H: the deadline is judged on the **log's clock** — the HLC the stream stamped when
-    /// the offer was appended — never on the `offered_at_ms` the offerer wrote into its own record.
-    /// Before this, an offer appended after the deadline with a backdated stamp was eligible and one
-    /// appended in time with a future stamp was not: the offerer chose whether its offer was late.
-    #[tokio::test]
-    async fn an_offers_deadline_is_judged_on_the_logs_clock_not_the_offerers_stamp() {
-        let agent = live().await;
-        let hub = ContractNet::new(Arc::clone(&agent), "hub");
-        let d = ContractNet::new(Arc::clone(&agent), "driver-a");
-        let now = wall_now_ms();
-
-        // 1. Offers closed a minute ago on the log's clock; the offer appended now claims time 0.
-        hub.announce("closed", "1 crate", "any", now - 60_000, now - 120_000);
-        d.offer("closed", "backdated", 0).expect("announced");
-        assert!(
-            matches!(hub.plan_award("closed", AwardRule::LowestParticipant, now), Err(CommitmentRefusal::NoOffers)),
-            "an offer appended after the deadline is late whatever stamp it carries",
-        );
-
-        // 2. Offers open for another minute; the offer appended now claims the end of time.
-        hub.announce("open", "1 crate", "any", now + 60_000, now);
-        d.offer("open", "future-stamped", u64::MAX).expect("announced");
-        let award = hub
-            .plan_award("open", AwardRule::LowestParticipant, now)
-            .expect("an offer appended before the deadline is eligible whatever stamp it carries");
-        assert_eq!(award.participant, "driver-a");
-        agent.shutdown().await;
-    }
-
     /// Row H: `award_of` reports only a record that names **this** requirement and its operation. A
     /// record at `cn/{r}/award` copied from another requirement's slot — any member can write the head —
     /// was reported as r's award, and blocked r's own award as `AlreadyAwarded`.
@@ -1156,6 +1386,8 @@ mod tests {
         hub.announce("r2", "2 crates", "any", now + 60_000, now);
         d.offer("r1", "1 km", now).expect("announced");
         d.offer("r2", "2 km", now).expect("announced");
+        hub.close("r1", None, now + 60_000).unwrap();
+        hub.close("r2", None, now + 60_000).unwrap();
         let r1 = hub.award("r1", AwardRule::LowestParticipant, now).await.expect("r1 awarded").award;
 
         // r1's award, written at r2's slot by a member that can write the head.
@@ -1166,12 +1398,12 @@ mod tests {
         agent.shutdown().await;
     }
 
-    /// Row H: `award_of_verified` reports an award only when the **announcement's declarer** signed it.
+    /// Row H: `award_of_verified` reports an award only when the declarer **the caller pins** signed it.
     /// A member that writes an award naming the declarer — unsigned, or signed under its own key — or
     /// naming itself as declarer under its own valid key, is not reported; the declarer's own signed
     /// award is. (Seen failing first as a missing method: the only read was the unverified one.)
     #[tokio::test]
-    async fn award_of_verified_reports_no_award_the_announcements_declarer_did_not_sign() {
+    async fn award_of_verified_reports_no_award_the_pinned_declarer_did_not_sign() {
         use ed25519_dalek::SigningKey;
         let agent = live().await;
         let hub = ContractNet::new(Arc::clone(&agent), "hub");
@@ -1199,18 +1431,187 @@ mod tests {
         // Unsigned, naming the hub.
         mallory.commit_award(forged("hub")).await.expect("any member can write the head");
         assert!(hub.award_of("r").is_some(), "the unverified read reports it — unproven, as documented");
-        assert!(hub.award_of_verified("r", resolve).is_none(), "unsigned is unproven");
+        assert!(hub.award_of_verified("r", "hub", resolve).is_none(), "unsigned is unproven");
         // Signed by mallory, naming the hub: a valid signature under the wrong key.
         mallory.commit_award(forged("hub").signed(&mallory_key)).await.expect("written");
-        assert!(hub.award_of_verified("r", resolve).is_none(), "the declarer's key is checked, not the writer's");
+        assert!(hub.award_of_verified("r", "hub", resolve).is_none(), "the declarer's key is checked, not the writer's");
         // Signed by mallory, naming mallory: a valid signature by a party that did not announce r.
         mallory.commit_award(forged("mallory").signed(&mallory_key)).await.expect("written");
-        assert!(hub.award_of_verified("r", resolve).is_none(), "the award's declarer must be the announcement's");
+        assert!(hub.award_of_verified("r", "hub", resolve).is_none(), "the award's declarer must be the announcement's");
         // The hub's own, signed — and a directory without the hub's key still proves nothing.
         hub.commit_award(forged("hub").signed(&hub_key)).await.expect("written");
-        let proven = hub.award_of_verified("r", resolve).expect("the announcer's signed award is reported");
+        let proven = hub.award_of_verified("r", "hub", resolve).expect("the announcer's signed award is reported");
         assert_eq!((proven.declarer.as_str(), proven.participant.as_str()), ("hub", "mallory"));
-        assert!(hub.award_of_verified("r", |_| None).is_none(), "a key we cannot find is not a key we may assume");
+        assert!(hub.award_of_verified("r", "hub", |_| None).is_none(), "a key we cannot find is not a key we may assume");
+        agent.shutdown().await;
+    }
+
+    // ── #609's review, round 1 — each first written against 461da69f's API and seen failing there ──
+
+    /// Review finding 1: the HLC in an offer's log key is a number the offerer writes — any member can
+    /// `kv().set("log/cn/{r}/offers/{hlc}/{node}", …)` with a backdated segment. An offer that reached the
+    /// stream after the requirement closed is not a candidate, whatever its key says.
+    #[tokio::test]
+    async fn a_backdated_log_key_does_not_make_a_late_offer_a_candidate() {
+        let agent = live().await;
+        let hub = ContractNet::new(Arc::clone(&agent), "hub");
+        let honest = ContractNet::new(Arc::clone(&agent), "driver-b");
+        let now = wall_now_ms();
+        hub.announce("closed", "1 crate", "any", now + 60_000, now);
+        honest.offer("closed", "3 km", now).expect("announced");
+        hub.close("closed", None, now + 60_000).expect("the declarer closes at the deadline, naming the honest offer");
+        let late = Offer { requirement: "closed".into(), participant: "driver-a".into(), bid: "0 km".into(), offered_at_ms: 1, signature: Vec::new() };
+        let _ = agent.kv().set("log/cn/closed/offers/0000000000010000/mallory", encode(&late));
+        let award = hub.plan_award("closed", AwardRule::LowestParticipant, now + 60_000).expect("the honest offer arrived in time");
+        assert_eq!(award.participant, "driver-b", "the backdated offer reached the stream late and is not a candidate");
+        agent.shutdown().await;
+    }
+
+    /// Review finding 3: a signed offer copied from another requirement's stream verified as a candidate
+    /// there — its signature covers `requirement`, but nothing compared it. Same shape for reports and
+    /// assessments.
+    #[tokio::test]
+    async fn an_offer_report_or_assessment_naming_another_requirement_is_not_read_as_this_ones() {
+        use ed25519_dalek::SigningKey;
+        let agent = live().await;
+        let hub = ContractNet::new(Arc::clone(&agent), "hub");
+        let a = ContractNet::new(Arc::clone(&agent), "driver-a");
+        let key = SigningKey::from_bytes(&[41u8; 32]);
+        let pk = key.verifying_key().to_bytes();
+        let now = wall_now_ms();
+        hub.announce("r1", "1 crate", "any", FAR_DEADLINE, now);
+        hub.announce("r2", "1 crate", "any", FAR_DEADLINE, now);
+        a.offer_signed("r1", "1 km", Some(&key), now).expect("announced");
+        let r1_offer = a.offers("r1").pop().expect("r1 has the offer").1;
+        agent.kv().append("cn/r2/offers", encode(&r1_offer));
+        assert!(a.offers("r2").is_empty(), "r1's offer is not an offer on r2");
+        assert!(hub.offers_verified("r2", |_| Some(pk)).is_empty(), "nor a verified candidate there");
+        a.report("r1", Outcome::Fulfilled, "cn/r1/award", now);
+        let r1_report = a.reports("r1").pop().expect("r1 has the report");
+        agent.kv().append("cn/r2/reports", encode(&r1_report));
+        assert!(a.reports("r2").is_empty(), "r1's report is not a report on r2");
+        a.assess("r1", true, "ok", Some(&key), now);
+        let r1_assessment = a.assessments("r1").pop().expect("r1 has the assessment");
+        agent.kv().append("cn/r2/assessments", encode(&r1_assessment));
+        assert!(a.assessments("r2").is_empty(), "r1's assessment is not an assessment of r2");
+        agent.shutdown().await;
+    }
+
+    /// Review finding 4: `award_of_verified` read the declarer from the writable head `cn/{r}`, so it
+    /// fell in two writes — overwrite the head's declarer, then sign the award with that key.
+    #[tokio::test]
+    async fn award_of_verified_checks_the_declarer_the_caller_pins_not_the_writable_head() {
+        use ed25519_dalek::SigningKey;
+        let agent = live().await;
+        let hub = ContractNet::new(Arc::clone(&agent), "hub");
+        let mallory = ContractNet::new(Arc::clone(&agent), "mallory");
+        let hub_key = SigningKey::from_bytes(&[42u8; 32]);
+        let mallory_key = SigningKey::from_bytes(&[43u8; 32]);
+        let dir: std::collections::HashMap<&str, [u8; 32]> =
+            [("hub", hub_key.verifying_key().to_bytes()), ("mallory", mallory_key.verifying_key().to_bytes())].into_iter().collect();
+        let now = wall_now_ms();
+        hub.announce("r", "1 crate", "any", FAR_DEADLINE, now);
+        mallory.announce("r", "1 crate", "any", FAR_DEADLINE, now); // write 1: the head now names mallory
+        let forged = Award {
+            requirement: "r".into(), participant: "mallory".into(), declarer: "mallory".into(), offer_hlc: 0,
+            awarded_at_ms: now, operation_id: award_key("r"), signature: Vec::new(),
+        }
+        .signed(&mallory_key);
+        mallory.commit_award(forged).await.expect("write 2");
+        assert!(hub.award_of_verified("r", "hub", |p| dir.get(p).copied()).is_none(), "the hub announced r; mallory's award is not proven");
+        assert!(hub.award_of_verified("r", "mallory", |p| dir.get(p).copied()).is_some(), "it proves only what it is: mallory's own");
+        agent.shutdown().await;
+    }
+
+    /// Review finding 5: a committed record that names another requirement surfaced as
+    /// `Encoding("superseded, but the committed award did not decode")` — it decodes; it is somebody else's.
+    #[tokio::test]
+    async fn a_slot_holding_another_requirements_award_says_so() {
+        let agent = live().await;
+        let hub = ContractNet::new(Arc::clone(&agent), "hub");
+        let now = wall_now_ms();
+        let r1 = Award {
+            requirement: "r1".into(), participant: "driver-a".into(), declarer: "hub".into(), offer_hlc: 0,
+            awarded_at_ms: now, operation_id: award_key("r1"), signature: Vec::new(),
+        };
+        agent.consensus().exclusive_propose_receipt(&award_key("r2"), encode(&r1), ConsensusConfig::default()).await.expect("r1's award committed at r2's slot");
+        let r2 = Award { requirement: "r2".into(), operation_id: award_key("r2"), ..r1 };
+        let e = hub.commit_award_linearizable(r2).await.expect_err("the slot is taken");
+        let said = e.to_string();
+        assert!(!matches!(e, CommitmentRefusal::Encoding(_)), "it decoded; it is not an encoding failure: {said}");
+        assert!(said.contains("r1"), "the refusal names what the slot holds: {said}");
+        assert!(matches!(e, CommitmentRefusal::SlotHoldsAnotherRecord { ref requirement, .. } if requirement == "r1"));
+        agent.shutdown().await;
+    }
+
+    /// Review round 1: an award before the requirement is closed is refused — the declarer has not yet
+    /// said which offers arrived in time.
+    #[tokio::test]
+    async fn an_award_before_the_requirement_is_closed_is_refused() {
+        let agent = live().await;
+        let hub = ContractNet::new(Arc::clone(&agent), "hub");
+        let d = ContractNet::new(Arc::clone(&agent), "driver-a");
+        let now = wall_now_ms();
+        hub.announce("open", "1 crate", "any", now + 60_000, now);
+        d.offer("open", "1 km", now).expect("announced");
+        assert!(hub.plan_award("open", AwardRule::LowestParticipant, now).is_err(), "no award before the close");
+        assert!(matches!(hub.plan_award("open", AwardRule::LowestParticipant, now), Err(CommitmentRefusal::NotClosed)));
+        agent.shutdown().await;
+    }
+
+    /// Review round 1, findings 1, 4 and 5 on the checked path: `plan_award_verified` requires a close
+    /// the pinned declarer signed, counts only verified offers the close names, and is not blocked by
+    /// an unsigned award at the slot — where the unverified path is, as its doc says. A linearizable slot
+    /// a forgery took is reported as `UnprovenAwardHolds`, not as the award.
+    #[tokio::test]
+    async fn the_checked_path_needs_a_signed_close_and_is_not_blocked_by_a_forged_award() {
+        use ed25519_dalek::SigningKey;
+        let agent = live().await;
+        let hub = ContractNet::new(Arc::clone(&agent), "hub");
+        let d = ContractNet::new(Arc::clone(&agent), "driver-b");
+        let mallory = ContractNet::new(Arc::clone(&agent), "mallory");
+        let hub_key = SigningKey::from_bytes(&[51u8; 32]);
+        let d_key = SigningKey::from_bytes(&[52u8; 32]);
+        let dir: std::collections::HashMap<&str, [u8; 32]> =
+            [("hub", hub_key.verifying_key().to_bytes()), ("driver-b", d_key.verifying_key().to_bytes())].into_iter().collect();
+        let resolve = |p: &str| dir.get(p).copied();
+        let now = wall_now_ms();
+
+        hub.announce("p", "1 crate", "any", now, now);
+        d.offer_signed("p", "2 km", Some(&d_key), now).expect("announced");
+        // An unsigned close — a member's, or the declarer's without a key — is not proof on this path.
+        let _ = agent.kv().set(close_key("p").as_str(), encode(&Close {
+            requirement: "p".into(), declarer: "hub".into(), closed_at_ms: now, offers: Vec::new(), signature: Vec::new(),
+        }));
+        assert!(matches!(hub.plan_award_verified("p", AwardRule::LowestParticipant, now, "hub", resolve), Err(CommitmentRefusal::CloseUnproven)));
+        let _ = agent.kv().delete(close_key("p").as_str());
+        let close = hub.close("p", Some(&hub_key), now).expect("the hub closes, signed");
+        assert!(verify_close(&close, &hub_key.verifying_key().to_bytes()));
+
+        // A forged unsigned award at the slot: blocks the unverified path for good, not the checked one.
+        let forged = Award {
+            requirement: "p".into(), participant: "mallory".into(), declarer: "hub".into(), offer_hlc: 0,
+            awarded_at_ms: now, operation_id: award_key("p"), signature: Vec::new(),
+        };
+        mallory.commit_award(forged.clone()).await.expect("any member can write the head");
+        assert!(matches!(hub.plan_award("p", AwardRule::LowestParticipant, now), Err(CommitmentRefusal::AlreadyAwarded(_))),
+            "the unverified path lets any member block an award — stated, not hidden");
+        let plan = hub.plan_award_verified("p", AwardRule::LowestParticipant, now, "hub", resolve).expect("the checked path plans");
+        assert_eq!(plan.participant, "driver-b");
+        hub.commit_award(plan.signed(&hub_key)).await.expect("the plain commit overwrites the forgery");
+        assert_eq!(hub.award_of_verified("p", "hub", resolve).map(|a| a.participant), Some("driver-b".to_string()));
+
+        // A linearizable slot a forgery took first stays taken, and says so.
+        hub.announce("q", "1 crate", "any", now, now);
+        d.offer_signed("q", "2 km", Some(&d_key), now).expect("announced");
+        hub.close("q", Some(&hub_key), now).unwrap();
+        let plan_q = hub.plan_award_verified("q", AwardRule::LowestParticipant, now, "hub", resolve).unwrap().signed(&hub_key);
+        let forged_q = Award { requirement: "q".into(), operation_id: award_key("q"), ..forged };
+        mallory.commit_award_linearizable(forged_q).await.expect("the forgery commits first");
+        match hub.commit_award_linearizable_verified(plan_q, "hub", resolve).await {
+            Err(CommitmentRefusal::UnprovenAwardHolds(a)) => assert_eq!(a.participant, "mallory"),
+            other => panic!("expected UnprovenAwardHolds, got {other:?}"),
+        }
         agent.shutdown().await;
     }
 }

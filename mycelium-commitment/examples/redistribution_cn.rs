@@ -78,7 +78,15 @@ async fn main() {
     }
     println!("drivers: {offers} offers made");
 
-    // ── Award: one per pickup, by the rule, each a receipt-bearing write.
+    // ── Close: at the deadline the hub says which offers arrived in time — every offer it holds, by log
+    //    position and digest. No stamp a driver writes decides lateness; the hub's close does.
+    for p in &pickups {
+        let close = hub.close(p, None, t0 + 1_000).expect("the hub closes at the deadline");
+        assert!(!close.offers.is_empty(), "every pickup had an offer by its close");
+    }
+    println!("hub: closed {PICKUPS} pickups at the deadline");
+
+    // ── Award: one per pickup, by the rule over the offers the close names, each a receipt-bearing write.
     let mut awards = Vec::new();
     for p in &pickups {
         let awarded = hub.award(p, AwardRule::LowestParticipant, t0 + 20).await.expect("every pickup had an offer");
@@ -147,6 +155,7 @@ async fn main() {
         Offer { signature: sig, ..o }
     };
     agent.kv().append(&format!("cn/{contested}/offers"), serde_json::to_vec(&forged).unwrap());
+    hub.close(contested, None, t0 + 1_000).expect("the hub closes; the forgery arrived in time, so it is named");
 
     let unchecked = hub.plan_award(contested, AwardRule::LowestParticipant, t0 + 20).expect("plans");
     assert_eq!(unchecked.participant, "driver-a", "unchecked, the forged offer wins");

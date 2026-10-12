@@ -19,6 +19,8 @@ bytes         = "1"
 ed25519-dalek = "2"
 serde         = { version = "1.0", features = ["derive"] }
 serde_json    = "1.0"
+# The close record names each offer by the SHA-256 of its encoding (post-360 row H, #609's review).
+sha2          = "0.10"
 tokio         = { version = "1.35", features = ["rt"] }
 
 [dev-dependencies]
