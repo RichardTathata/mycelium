@@ -315,7 +315,7 @@ withhold real frames with the test-only `test-frame-filter` (enabled in CI's def
   naming the credentials and the opt-in), `guarantee::gateway_exposure` / `gateway_credential_model`;
   `src/lib_tests.rs` `an_exposed_gateway_with_no_credential_refuses_to_start` (`0.0.0.0` and `::`, and blank tokens
   refused at `validate()`: `mycelium-core/src/config.rs` `a_blank_gateway_token_is_refused_in_every_form`,
-  `src/agent/http.rs` `resolve_token_never_matches_an_empty_presented_bearer`).
+  `src/agent/http/http_tests.rs` `resolve_token_never_matches_an_empty_presented_bearer`).
 - *The opt-in warns once at start* — `lifecycle.rs` (`GatewayExposure::Waived` → one `tracing::warn!` in `start()`);
   the opt-in starting and classifying as `Waived` is tested
   (`an_exposed_gateway_starts_with_a_credential_on_loopback_or_with_the_opt_in`); **the warning itself is not asserted
@@ -359,7 +359,7 @@ withhold real frames with the test-only `test-frame-filter` (enabled in CI's def
   `#[deprecated(since = "2.33.0")]`, `deprecations.md` §37; nothing removed. The sweep found twenty items (nineteen names); the review
   found the private companion calling `AeEvidence::audit_outcome`, which is therefore not deprecated (the private repo
   was then searched for all nineteen names: no other use). `Preflight::is_inert`
-  (`src/agent/http.rs`) is the twentieth, left for rows P5/E, which own that file.
+  (`src/agent/http.rs`, now `src/agent/http/authz.rs`) is the twentieth, left for rows P5/E, which own that file.
 - *Only the duplicates that disagree are unified* — `hex_line`: the wasm-host gateway's copy trimmed, the
   catalogue's did not (its caller did); one `pub(crate)` trimming decoder in `catalog.rs`, pinned by
   `hex_line_ignores_edge_whitespace_and_refuses_everything_else`. `now_ms`: `capability_ops.rs` (`now_ms`,

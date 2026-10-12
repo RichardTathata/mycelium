@@ -923,7 +923,7 @@ would be false for it, and its consumer builds with `-D warnings`. The other nin
 `mycelium::federation::{verify_descriptor_rotating, verify_policy}` (`tls`) ·
 `FederationClient::with_credential_lifetime` · `mycelium::knowledge::store::…::issuers_about`.
 
-A twentieth candidate, `Preflight::is_inert` in `src/agent/http.rs`, is left as it is until that file's split (row P5) and
+A twentieth candidate, `Preflight::is_inert` (`GatewayPreflight::is_inert`, now in `src/agent/http/authz.rs`), is left as it is until that file's split (row P5) and
 row E, which touch the file.
 
 **Will the compiler tell me?** Yes — every use site of a deprecated item warns, and a crate built with
