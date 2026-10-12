@@ -317,6 +317,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     remains trust on first use. The gate's brace counter blanks string and char literals (L1, a fifth plant). Plan row
     Q records a pre-existing, high finding the review reproduced on `main`: revocation does not reach the KV verifier,
     identity chaining or the exemption; `revoke_key`'s doc now says what holds.
+  - **CI's co-op demo 04 (provisioning) found a shutdown race row F made reliable.** A capability's soft-state task
+    tombstones its key when the handle drops; a provider dropped and shut down at once raced the shutdown signal, and
+    the signed tombstone — slower to build in a debug build than the unsigned frame it replaced — lost every time, so
+    peers kept the dead provider's capability until its TTL and the worker's RPCs timed out. Graceful shutdown now
+    waits (bounded, 250 ms) for queued gossip and writer frames to drain before signalling (`flush_outbound_before_shutdown`),
+    and the soft-state and MCP tombstones are signed before their local apply. Seen failing first:
+    `a_capability_retracted_at_shutdown_reaches_the_peers` ("B still resolves the capability A retracted as it shut
+    down"); the 6081c9e6 export also fails demo 04 locally, origin/main passes it — CI's one green run there was timing.
     Seen failing first on 59d86368: `an_unsigned_identity_forgery_cannot_make_a_member_sign_as_another`,
     `an_identity_tombstone_does_not_erase_a_members_keys` (proofs off and on),
     `only_a_self_authenticating_sealed_identity_is_exempt_from_the_refusal`, and the gate's fourth plant. Seen failing first:

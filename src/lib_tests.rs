@@ -1357,6 +1357,31 @@ async fn a_replayed_pre_rotation_sealed_record_does_not_replace_the_current_one(
     assert!(stale >= 1, "and the refusal is counted");
 }
 
+/// **A capability retracted as its node shuts down reaches the peers** (#611, found by CI's co-op
+/// demo 04). A capability's soft-state task tombstones its key when the handle drops; a node that
+/// drops the handle and shuts down at once (a provider killed mid-run) raced the shutdown signal, and
+/// since row F signs that tombstone — slow enough in a debug build to lose the race — the writers had
+/// stopped before it was queued, so peers kept the dead provider's capability until its TTL and routed
+/// RPCs to it. Graceful shutdown now waits, bounded, for retractions already queued to reach the
+/// writers before it stops them. Seen failing first: B still resolved A's capability.
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn a_capability_retracted_at_shutdown_reaches_the_peers() {
+    use crate::capability::{CapFilter, Capability};
+    let (a, b, node_a, _node_b, cert_dir) = signed_fleet_pair("retract-at-shutdown", None).await;
+    let reg = a.capabilities().advertise_capability(Capability::new("route", "retract"), Duration::from_secs(30));
+    let resolves_a = || b.capabilities().resolve(&CapFilter::new("route", "retract")).iter().any(|(n, _)| *n == node_a);
+    for _ in 0..200 { if resolves_a() { break; } tokio::time::sleep(Duration::from_millis(25)).await; }
+    assert!(resolves_a(), "B saw A's capability");
+    drop(reg);
+    a.shutdown().await;
+    let mut gone = false;
+    for _ in 0..80 { if !resolves_a() { gone = true; break; } tokio::time::sleep(Duration::from_millis(25)).await; }
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    assert!(gone, "B still resolves the capability A retracted as it shut down");
+}
+
 /// **The window: by default a TLS node still applies an unsigned frame, and counts it**, so a 2.32
 /// peer's agent writes (which it sends unsigned) keep arriving while the fleet upgrades. A node
 /// with no TLS identity has nothing to count — the plaintext posture is unchanged.

@@ -662,7 +662,10 @@ PR.
   (`kv_identity_stale_refused`; `a_replayed_pre_rotation_sealed_record_does_not_replace_the_current_one`, the
   reviewer's test, seen failing on 884f310f); first sighting stays trust on first use. L1 — the gate blanks string and
   char literals before counting braces (fifth plant, seen passing the old gate; a multi-line string can still miscount,
-  stated). L2 — stated in §35. N5 — pre-existing, recorded as row Q, `revoke_key`'s doc corrected.
+  stated). L2 — stated in §35. N5 — pre-existing, recorded as row Q, `revoke_key`'s doc corrected. **CI's co-op
+  demo 04** exposed a shutdown race the signed retraction made reliable (a provider's capability tombstone, sent as
+  its handle dropped during shutdown, never left); graceful shutdown now drains queued frames before signalling —
+  `a_capability_retracted_at_shutdown_reaches_the_peers`, seen failing first; the co-op suite 13/13 locally.
   `start()` warns when `kv_require_signed_frames` is inert (`kv_require_signed_frames_without_tls_is_inert`); the
   warning's emission itself is not asserted. (3, 5, 7) answered in the docs: the refusal is bypassable through
   anti-entropy; upgraded nodes sign tagged at once (the 2.32.0 shape) and reach 2.32 peers by anti-entropy only;

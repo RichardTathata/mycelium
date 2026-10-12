@@ -190,10 +190,12 @@ where
     let tombstone = make_gossip_update(
         &ctx.node_id, ctx.default_ttl, kv_key, Bytes::new(), true, &ctx.hlc,
     );
+    // Signed before the local apply, as `kv_persist`'s tombstone is (#611): this runs at shutdown.
+    let msg = crate::framing::local_kv_wire_msg(&ctx, tombstone.clone());
     apply_and_notify(&ctx.kv_state, &tombstone);
     dispatch_gossip_send(
         &ctx.gossip_txs,
-        crate::framing::local_kv_wire_msg(&ctx, tombstone),
+        msg,
         ctx.node_id.id_hash(),
         ForwardHint::All,
     )
@@ -298,10 +300,11 @@ pub(super) async fn run_mcp_client_task(
         let tombstone = make_gossip_update(
             &ctx.node_id, ctx.default_ttl, kv_key, Bytes::new(), true, &ctx.hlc,
         );
+        let msg = crate::framing::local_kv_wire_msg(&ctx, tombstone.clone());
         apply_and_notify(&ctx.kv_state, &tombstone);
         dispatch_gossip_send(
             &ctx.gossip_txs,
-            crate::framing::local_kv_wire_msg(&ctx, tombstone),
+            msg,
             ctx.node_id.id_hash(),
             ForwardHint::All,
         )

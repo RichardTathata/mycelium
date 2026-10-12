@@ -919,6 +919,28 @@ impl GossipAgent {
         });
     }
 
+    /// Wait, at most `bound`, until the gossip shard queues and every peer writer's queue are empty,
+    /// then give the writers one short beat to put the last frames on the wire. Used once, by
+    /// [`Self::shutdown_with_timeout`], before the shutdown signal (#611).
+    async fn flush_outbound_before_shutdown(&self, bound: Duration) {
+        tokio::task::yield_now().await;
+        let queued = || {
+            self.task_ctx.gossip_txs.iter().any(|tx| tx.capacity() < tx.max_capacity())
+                || self.peer_writers.pin().iter().any(|(_, w)| w.tx.capacity() < w.tx.max_capacity())
+        };
+        let step_ms = 5u64;
+        let mut waited = 0u64;
+        let mut saw_queue = false;
+        while queued() && waited < bound.as_millis() as u64 {
+            saw_queue = true;
+            mycelium_core::sim_seam::sleep_ms("shutdown-flush", step_ms).await;
+            waited += step_ms;
+        }
+        if saw_queue {
+            mycelium_core::sim_seam::sleep_ms("shutdown-flush", 10).await;
+        }
+    }
+
     /// Signals all background tasks to stop and waits up to `timeout` for them to exit.
     ///
     /// Tasks that have not exited within the timeout are logged as warnings and abandoned.
@@ -972,6 +994,13 @@ impl GossipAgent {
             AgentState::Running as u8, AgentState::Stopped as u8,
             Ordering::AcqRel, Ordering::Acquire,
         );
+        // Retractions queued above — the sweep's tombstones, and a soft-state task's own tombstone
+        // when its handle dropped just before this shutdown — must reach the writers before the
+        // shutdown signal stops them (#611, found by the co-op provisioning demo: a signed tombstone,
+        // slower to build than the unsigned frame it replaced, lost that race every time, and peers
+        // routed RPCs to a dead provider until its capability's TTL). Bounded; a node with nothing
+        // queued pays one yield.
+        self.flush_outbound_before_shutdown(Duration::from_millis(250)).await;
         let _ = self.shutdown_tx.send(true);
         // Signal all peer writer tasks to exit. They run as detached tasks and exit
         // via peer_shutdown or the global shutdown signal already sent above.
