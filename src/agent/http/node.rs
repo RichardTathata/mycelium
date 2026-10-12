@@ -208,20 +208,20 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
 /// increments it is compiled, so a reader never sees a `0` for a counter this build cannot raise.
 /// Returned as a list (possibly empty) so the caller's loop is the same in every build.
 pub(super) fn feature_gated_counters() -> Vec<(&'static str, u64)> {
-    // The 2.32.0 mixed-fleet allowance: signature validations accepted in the bare (pre-2.32.0)
-    // form. Still rising means a peer not yet upgraded; the allowance closes in the next MINOR
-    // (`deprecations.md` §23).
-    let identity_untagged: Option<(&'static str, u64)> = {
+    // Post-360 plan row F's mixed-fleet window (`deprecations.md` §35): KV signatures accepted in the
+    // bare (pre-2.33) form, and unsigned KV `Data` frames a TLS node accepted or refused. Frames, not
+    // peers; still rising means a peer not yet upgraded. (2.32.0's `identity_untagged_proofs` and
+    // `consensus_untagged_signatures` went with the §23 window they counted.)
+    let kv_window: [Option<(&'static str, u64)>; 3] = {
         #[cfg(feature = "tls")]
-        { Some(("identity_untagged_proofs", crate::agent::helpers::untagged_identity_proofs_accepted())) }
+        {
+            let (accepted, refused) = mycelium_core::connection::unsigned_kv_frames();
+            [Some(("kv_untagged_signatures", mycelium_core::connection::untagged_kv_signatures_accepted())),
+             Some(("kv_unsigned_frames_accepted", accepted)),
+             Some(("kv_unsigned_frames_refused", refused))]
+        }
         #[cfg(not(feature = "tls"))]
-        { None }
-    };
-    let consensus_untagged: Option<(&'static str, u64)> = {
-        #[cfg(all(feature = "tls", feature = "consensus"))]
-        { Some(("consensus_untagged_signatures", crate::consensus::untagged_consensus_signatures_accepted())) }
-        #[cfg(not(all(feature = "tls", feature = "consensus")))]
-        { None }
+        { [None, None, None] }
     };
     // Answers this node's acceptor withheld because its promise or acceptance did not reach the WAL.
     let acceptor_unrecorded: Option<(&'static str, u64)> = {
@@ -239,5 +239,5 @@ pub(super) fn feature_gated_counters() -> Vec<(&'static str, u64)> {
         #[cfg(not(feature = "consensus"))]
         { [None, None, None] }
     };
-    [identity_untagged, consensus_untagged, acceptor_unrecorded].into_iter().chain(acceptor_guard).flatten().collect()
+    kv_window.into_iter().chain([acceptor_unrecorded]).chain(acceptor_guard).flatten().collect()
 }

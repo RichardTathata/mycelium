@@ -9486,49 +9486,41 @@ mod identity_proof_default {
         assert_eq!(counter.load(Ordering::SeqCst), 1, "and the attempt is counted");
     }
 
-    /// **The one-release allowance, pinned.** A proof signed the pre-2.32.0 way — bare, over the
-    /// history — is still accepted while `require_identity_proofs` is **off**, so a fleet upgrades
-    /// node by node; it is counted so an operator can see which peers still sign that way. With the
-    /// flag on it is refused: that posture says every proof must be one, and a bare signature over
-    /// 32-aligned bytes is what any other signing path could have made (the test above). The
-    /// allowance closes in the next MINOR (`docs/guide/deprecations.md` §23); when it does, the
-    /// first half of this test flips and should be rewritten, not kept passing.
+    /// **The 2.32.0 window is closed** (post-360 plan row F, `docs/guide/deprecations.md` §23/§35).
+    /// A proof signed the pre-2.32.0 way — bare, over the history — was accepted for one release
+    /// while `require_identity_proofs` was off, counted on `identity_untagged_proofs`. In 2.33.0 it
+    /// is refused in both postures: only a signature over `identity_proof_message` is a proof. Seen
+    /// failing first: with the flag off the bare proof still established the key.
     #[test]
-    fn an_untagged_proof_is_accepted_only_while_proofs_are_not_required() {
-        use crate::agent::helpers::untagged_identity_proofs_accepted;
+    fn a_bare_identity_proof_is_refused_now_the_window_is_closed() {
         let node = NodeId::new("127.0.0.1", 7121).unwrap();
         let sk = SigningKey::from_bytes(&[62u8; 32]);
         let vk = sk.verifying_key().to_bytes();
         let history = vk.to_vec();
         let old_form = encode_identity_proof(&vk, &sk.sign(&history).to_bytes());
 
-        let before = untagged_identity_proofs_accepted();
-        let (pk, anchor, counter) = (keys(), anchors(), std::sync::atomic::AtomicU64::new(0));
-        validate_and_merge_identity(&pk, &anchor, &counter, &node, &history, &[vk], Some(&old_form), false);
-        assert!(pk.pin().get(&node).is_some_and(|v| v.contains(&vk)), "flag off: a 2.31 peer's proof still establishes it");
-        assert_eq!(counter.load(Ordering::SeqCst), 0, "not a conflict");
-        assert!(untagged_identity_proofs_accepted() > before, "but counted, so the operator can see the un-upgraded peer");
+        for require in [false, true] {
+            let (pk, anchor, counter) = (keys(), anchors(), std::sync::atomic::AtomicU64::new(0));
+            validate_and_merge_identity(&pk, &anchor, &counter, &node, &history, &[vk], Some(&old_form), require);
+            assert!(pk.pin().get(&node).is_none(), "require_identity_proofs={require}: a bare signature is not a proof");
+            assert_eq!(counter.load(Ordering::SeqCst), 1, "and the refusal is counted as a conflict");
+        }
 
-        let (pk, anchor, counter) = (keys(), anchors(), std::sync::atomic::AtomicU64::new(0));
-        validate_and_merge_identity(&pk, &anchor, &counter, &node, &history, &[vk], Some(&old_form), true);
-        assert!(pk.pin().get(&node).is_none(), "flag on: only a tagged proof is a proof");
-        assert_eq!(counter.load(Ordering::SeqCst), 1);
-
-        // And the tagged form is what the flag accepts.
+        // The tagged form is what both postures accept.
         let new_form = encode_identity_proof(&vk, &sk.sign(&identity_proof_message(&history)).to_bytes());
-        let (pk, anchor, counter) = (keys(), anchors(), std::sync::atomic::AtomicU64::new(0));
-        validate_and_merge_identity(&pk, &anchor, &counter, &node, &history, &[vk], Some(&new_form), true);
-        assert!(pk.pin().get(&node).is_some_and(|v| v.contains(&vk)));
-        assert_eq!(counter.load(Ordering::SeqCst), 0);
+        for require in [false, true] {
+            let (pk, anchor, counter) = (keys(), anchors(), std::sync::atomic::AtomicU64::new(0));
+            validate_and_merge_identity(&pk, &anchor, &counter, &node, &history, &[vk], Some(&new_form), require);
+            assert!(pk.pin().get(&node).is_some_and(|v| v.contains(&vk)));
+            assert_eq!(counter.load(Ordering::SeqCst), 0);
+        }
     }
 
-    /// **The allowance is no quieter than an unsigned forgery** (the adversarial review of #585,
-    /// F4a). With the flag off, a bare proof signed by the victim's own key — the forged answer of
-    /// the test above — merged on `signer_trusted` without the anchor tripwire, so in a CA-anchored
-    /// fleet it was silent where an unsigned forgery trips `identity_anchor_conflicts`. The bare
-    /// branch now runs the same tripwire. Seen failing first: the counter stayed at 0.
+    /// **A bare proof signed by a victim's own key is refused, not merged** (the adversarial review
+    /// of #585, F4a, re-read after the window closed). Under the 2.32 allowance such a proof merged on
+    /// `signer_trusted` and only the anchor tripwire flagged it; now it is not a proof at all.
     #[test]
-    fn a_bare_proof_under_the_allowance_still_trips_the_anchor_tripwire() {
+    fn a_bare_proof_signed_by_the_victim_is_refused_and_flagged() {
         let victim = NodeId::new("127.0.0.1", 7122).unwrap();
         let v_sk = SigningKey::from_bytes(&[65u8; 32]);
         let v_vk = v_sk.verifying_key().to_bytes();
@@ -9540,16 +9532,19 @@ mod identity_proof_default {
         anchor.pin().insert(victim.clone(), std::collections::HashSet::from([v_vk]));
         let bare = encode_identity_proof(&v_vk, &v_sk.sign(&history).to_bytes());
         validate_and_merge_identity(&pk, &anchor, &counter, &victim, &history, &[v_vk, a_vk], Some(&bare), false);
-        assert_eq!(counter.load(Ordering::SeqCst), 1, "a key the anchor does not hold trips the tripwire, bare proof or none");
+        assert!(pk.pin().get(&victim).is_none_or(|v| !v.contains(&a_vk)), "A's key does not enter V's set");
+        assert_eq!(counter.load(Ordering::SeqCst), 1, "and the refusal is flagged");
     }
 
-    /// **The consensus side of the same window.** A payload is signed under its own tag now, and a
-    /// bare signature — a 2.31 node's — still verifies for one release, told apart so it can be
-    /// counted. A signature under the identity tag, or any other, is neither.
+    /// **The consensus side: the bare form no longer verifies** (post-360 plan row F closes the
+    /// 2.32.0 window, `deprecations.md` §23/§35). A payload is signed under its own tag; a bare
+    /// signature — a 2.31 node's — was accepted for one release and counted; a signature under the
+    /// identity tag, or any other, never was. Seen failing first (in the 2.32 API's form,
+    /// `== None`): the bare signature still verified as `Some(Untagged)`.
     #[cfg(feature = "consensus")]
     #[test]
-    fn a_consensus_signature_verifies_tagged_first_and_bare_for_one_release() {
-        use crate::consensus::{consensus_signing_message, verify_consensus_signature, SignatureForm};
+    fn a_consensus_signature_verifies_only_in_the_tagged_form() {
+        use crate::consensus::{consensus_signing_message, verify_consensus_signature};
         let sk = SigningKey::from_bytes(&[63u8; 32]);
         let vk = sk.verifying_key().to_bytes();
         let other = SigningKey::from_bytes(&[64u8; 32]).verifying_key().to_bytes();
@@ -9557,11 +9552,11 @@ mod identity_proof_default {
         let tagged = sk.sign(&consensus_signing_message(payload)).to_bytes();
         let bare = sk.sign(payload).to_bytes();
         let as_identity = sk.sign(&identity_proof_message(payload)).to_bytes();
-        assert_eq!(verify_consensus_signature(&[other, vk], payload, &tagged), Some(SignatureForm::Tagged));
-        assert_eq!(verify_consensus_signature(&[vk], payload, &bare), Some(SignatureForm::Untagged), "2.31's form, for one release");
-        assert_eq!(verify_consensus_signature(&[vk], payload, &as_identity), None, "a signature under another tag is not a consensus signature");
-        assert_eq!(verify_consensus_signature(&[other], payload, &tagged), None);
-        assert_eq!(verify_consensus_signature(&[], payload, &tagged), None, "no key, no verification");
+        assert!(verify_consensus_signature(&[other, vk], payload, &tagged));
+        assert!(!verify_consensus_signature(&[vk], payload, &bare), "2.31's bare form: the window is closed");
+        assert!(!verify_consensus_signature(&[vk], payload, &as_identity), "a signature under another tag is not a consensus signature");
+        assert!(!verify_consensus_signature(&[other], payload, &tagged));
+        assert!(!verify_consensus_signature(&[], payload, &tagged), "no key, no verification");
     }
 }
 
@@ -10464,20 +10459,18 @@ async fn a_non_member_cannot_propose_to_a_group_on_either_surface() {
     b.shutdown().await;
 }
 
-/// **An acceptor answers in the signature form of the request it verified** (the adversarial
-/// review of #585, F1). A 2.31 proposer verifies bare signatures only, so an acceptor that answered
-/// every request tagged dropped out of every un-upgraded proposer's rounds — the opposite of what
-/// the allowance promised. Now a bare-signed `Prepare` or `Propose` gets a bare-signed answer while
-/// the allowance is open, and a tagged one a tagged answer. Driven through the running listener,
-/// the way a frame from the network arrives. Seen failing first: the ack to a bare prepare
-/// verified as `Tagged`.
+/// **An acceptor answers only a tagged request, and answers it tagged** (post-360 plan row F
+/// closes the 2.32.0 window, `deprecations.md` §23/§35). Under the window a bare-signed `Prepare` —
+/// a 2.31 proposer's — got a bare answer (the adversarial review of #585, F1); now a bare request does
+/// not verify and is not answered. Driven through the running listener, the way a frame from the
+/// network arrives. Seen failing first: the bare prepare was answered.
 #[cfg(all(feature = "tls", feature = "consensus"))]
 #[tokio::test]
-async fn an_acceptor_answers_in_the_signature_form_of_the_request() {
+async fn an_acceptor_answers_only_a_tagged_request() {
     use crate::config::TlsConfig;
     use crate::consensus::{
         consensus_kind, consensus_signing_message, encode_consensus_msg, verify_consensus_signature,
-        ConsensusMsg, SignatureForm, SignedConsensusMsg,
+        ConsensusMsg, SignedConsensusMsg,
     };
     let port = alloc_port();
     let id = NodeId::new("127.0.0.1", port).unwrap();
@@ -10494,12 +10487,9 @@ async fn an_acceptor_answers_in_the_signature_form_of_the_request() {
     let mut acks = a.task_ctx.signal_handlers.register_with_capacity(Arc::from(consensus_kind::VOTE), 8);
 
     // A prepare as a proposer of each era signs it, addressed to this node as the acceptor.
-    let send = |ballot: u64, form: SignatureForm| {
+    let send = |ballot: u64, tagged: bool| {
         let bytes = encode_consensus_msg(&ConsensusMsg::Prepare { slot: Arc::from("reply-form"), ballot, proposer: id.clone() });
-        let message = match form {
-            SignatureForm::Tagged => consensus_signing_message(&bytes),
-            SignatureForm::Untagged => bytes.to_vec(),
-        };
+        let message = if tagged { consensus_signing_message(&bytes) } else { bytes.to_vec() };
         let signed = SignedConsensusMsg {
             msg_bytes: bytes,
             signer: id.clone(),
@@ -10510,19 +10500,15 @@ async fn an_acceptor_answers_in_the_signature_form_of_the_request() {
             Bytes::from(mycelium_core::serde_fixint::to_vec(&signed).unwrap()),
         );
     };
-    let form_of = |payload: &Bytes| {
-        let signed: SignedConsensusMsg = mycelium_core::serde_fixint::from_slice(payload).expect("a signed answer");
-        verify_consensus_signature(&[my_key], &signed.msg_bytes, &signed.signature)
-    };
 
-    send(3, SignatureForm::Untagged);
-    let ack = tokio::time::timeout(Duration::from_secs(5), acks.recv()).await.expect("answered").expect("open");
-    assert_eq!(form_of(&ack.payload), Some(SignatureForm::Untagged),
-               "a 2.31 proposer verifies bare only: the answer to its bare prepare is bare");
+    send(3, false);
+    assert!(tokio::time::timeout(Duration::from_secs(2), acks.recv()).await.is_err(),
+            "a bare (2.31) prepare is not answered: the window is closed");
 
-    send(4, SignatureForm::Tagged);
+    send(4, true);
     let ack = tokio::time::timeout(Duration::from_secs(5), acks.recv()).await.expect("answered").expect("open");
-    assert_eq!(form_of(&ack.payload), Some(SignatureForm::Tagged), "a tagged request is answered tagged");
+    let signed: SignedConsensusMsg = mycelium_core::serde_fixint::from_slice(&ack.payload).expect("a signed answer");
+    assert!(verify_consensus_signature(&[my_key], &signed.msg_bytes, &signed.signature), "a tagged request is answered tagged");
 
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&cert_dir);

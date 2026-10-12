@@ -406,23 +406,6 @@ pub(crate) fn identity_proof_message(history: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Proof **validations** this node accepted in the **untagged** (pre-2.32.0) form — a mixed-fleet
-/// allowance for one release, taken only while `require_identity_proofs` is off
-/// (`validate_and_merge_identity`). Validations, not peers: the identity watcher re-validates
-/// every record on every `sys/identity*` change, so one un-upgraded peer raises this repeatedly.
-/// Still rising means a peer still signs its proof the old way; the allowance closes in the next
-/// MINOR (`docs/guide/deprecations.md` §23).
-#[cfg(feature = "tls")]
-static UNTAGGED_IDENTITY_PROOFS_ACCEPTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// How many untagged identity-proof validations this process has accepted under the mixed-fleet
-/// allowance (re-validations included — see the counter's doc).
-#[cfg(feature = "tls")]
-#[cfg_attr(not(feature = "gateway"), allow(dead_code))] // read by the gateway's stats route
-pub(crate) fn untagged_identity_proofs_accepted() -> u64 {
-    UNTAGGED_IDENTITY_PROOFS_ACCEPTED.load(std::sync::atomic::Ordering::Relaxed)
-}
-
 /// Encode a proof value: `signer_key(32) ‖ signature(64)` = 96 bytes.
 #[cfg(feature = "tls")]
 pub(crate) fn encode_identity_proof(signer_key: &[u8; 32], sig: &[u8; 64]) -> Vec<u8> {
@@ -530,11 +513,9 @@ pub(crate) fn resolve_identity_record<'a>(
 /// accept-and-flag path (rollout tolerance).
 ///
 /// The proof is a signature over [`identity_proof_message`]. A bare signature over the history —
-/// the pre-2.32.0 form — is accepted for **one release**, counted
-/// ([`untagged_identity_proofs_accepted`]) and warned about, and **only while `require_proofs` is
-/// off**: that flag is the posture that says every proof must be one, and a bare signature over
-/// 32-aligned bytes is exactly what any other signing path could have produced. A fleet running
-/// with the flag on must be upgraded as a whole, as the flag's own contract already requires.
+/// the pre-2.32.0 form, accepted for one release while `require_proofs` was off — is refused since
+/// the release after 2.32.0 (post-360 plan row F; `docs/guide/deprecations.md` §23/§35): a bare
+/// signature over 32-aligned bytes is exactly what any other signing path could have produced.
 #[cfg(feature = "tls")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_and_merge_identity(
@@ -568,25 +549,7 @@ pub(crate) fn validate_and_merge_identity(
         return;
     };
 
-    let mut sig_ok = crate::tls::verify_bytes(&signer, &identity_proof_message(history_bytes), &sig);
-    if !sig_ok && !require_proofs && crate::tls::verify_bytes(&signer, history_bytes, &sig) {
-        // The pre-2.32.0 form, from a peer not yet upgraded. One release, counted, never under
-        // `require_identity_proofs` — see the function doc.
-        sig_ok = true;
-        // No quieter than an unsigned forgery: the anchor tripwire the no-proof path runs (a key
-        // the CA anchor does not hold trips `identity_anchor_conflicts`) runs here too, since a
-        // bare signature by a trusted key is exactly what a forged answer carries (the adversarial
-        // review of #585, F4a).
-        flag_identity_anchor_conflict(anchor_keys, conflict_counter, node, kv_keys);
-        UNTAGGED_IDENTITY_PROOFS_ACCEPTED.fetch_add(1, Ordering::Relaxed);
-        #[cfg(feature = "metrics")]
-        metrics::counter!("mycelium_identity_untagged_proofs_total").increment(1);
-        tracing::warn!(
-            node = %node,
-            "accepted an untagged (pre-2.32.0) identity proof; this allowance closes in the next \
-             MINOR — upgrade the peer (docs/guide/deprecations.md §23)"
-        );
-    }
+    let sig_ok = crate::tls::verify_bytes(&signer, &identity_proof_message(history_bytes), &sig);
     let anchor = anchor_keys.pin().get(node).cloned().unwrap_or_default();
     let current = peer_keys.pin().get(node).cloned().unwrap_or_default();
     let established = !anchor.is_empty() || !current.is_empty();

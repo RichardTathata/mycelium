@@ -1716,21 +1716,9 @@ impl ConsensusEngine {
     /// The signature is over [`consensus_signing_message`] of `bytes` — domain-tagged — while
     /// `msg_bytes` carries `bytes` as they are, so the frame is unchanged (wire v12).
     pub(crate) fn sign_payload(&self, bytes: Bytes) -> Bytes {
-        self.sign_payload_as(bytes, SignatureForm::Tagged)
-    }
-
-    /// [`sign_payload`](Self::sign_payload) in the given form: `Untagged` signs the payload bare,
-    /// as a 2.31 node does, for an answer to a request that arrived bare (see [`SignatureForm`]).
-    /// Only an acceptor's answers take `Untagged`; a proposer's own messages are always tagged.
-    fn sign_payload_as(&self, bytes: Bytes, form: SignatureForm) -> Bytes {
-        #[cfg(not(feature = "tls"))]
-        let _ = form;
         #[cfg(feature = "tls")]
         if let Some(tls) = self.task_ctx.tls.get() {
-            let sig = match form {
-                SignatureForm::Tagged => crate::tls::sign_bytes(&tls.signing_key(), &consensus_signing_message(&bytes)),
-                SignatureForm::Untagged => crate::tls::sign_bytes(&tls.signing_key(), &bytes),
-            };
+            let sig = crate::tls::sign_bytes(&tls.signing_key(), &consensus_signing_message(&bytes));
             let signed = SignedConsensusMsg {
                 msg_bytes:  bytes.clone(),
                 signer:     self.task_ctx.node_id.clone(),
@@ -1745,13 +1733,9 @@ impl ConsensusEngine {
 
     /// Decodes `payload` as a `ConsensusMsg`, verifying its Ed25519 signature
     /// first when TLS is enabled. Returns `None` on bad signature or decode failure.
+    /// Only the domain-tagged signature verifies (the 2.32.0 bare-form allowance is closed —
+    /// `docs/guide/deprecations.md` §23/§35).
     fn decode_verify(&self, payload: &Bytes) -> Option<ConsensusMsg> {
-        self.decode_verify_form(payload).map(|(msg, _)| msg)
-    }
-
-    /// [`decode_verify`](Self::decode_verify), also saying which [`SignatureForm`] verified — so an
-    /// acceptor can answer in the same form. Without TLS every message reads as `Tagged`.
-    fn decode_verify_form(&self, payload: &Bytes) -> Option<(ConsensusMsg, SignatureForm)> {
         #[cfg(feature = "tls")]
         if self.task_ctx.tls.get().is_some() {
             let signed: SignedConsensusMsg =
@@ -1783,24 +1767,9 @@ impl ConsensusEngine {
                     key_set.retain(|k| !revoked.contains(k));
                 }
             }
-            let form = verify_consensus_signature(&key_set, &signed.msg_bytes, &signed.signature);
-            match form {
-                Some(SignatureForm::Tagged) => {}
-                Some(SignatureForm::Untagged) => {
-                    // A peer not yet on 2.32.0. One release, counted — see `SignatureForm`.
-                    UNTAGGED_CONSENSUS_SIGNATURES_ACCEPTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    #[cfg(feature = "metrics")]
-                    metrics::counter!("mycelium_consensus_untagged_signatures_total").increment(1);
-                    tracing::debug!(
-                        signer = %signed.signer,
-                        "accepted an untagged (pre-2.32.0) consensus signature; this allowance closes \
-                         in the next MINOR (docs/guide/deprecations.md §23)"
-                    );
-                }
-                None => {
-                    tracing::warn!("dropping consensus msg: bad/unknown signature from {}", signed.signer);
-                    return None;
-                }
+            if !verify_consensus_signature(&key_set, &signed.msg_bytes, &signed.signature) {
+                tracing::warn!("dropping consensus msg: bad/unknown signature from {}", signed.signer);
+                return None;
             }
             let msg = decode_consensus_msg(&signed.msg_bytes)?;
             // Bind the message's CLAIMED authority to the VERIFIED signer. The signature proves only
@@ -1815,9 +1784,9 @@ impl ConsensusEngine {
                 );
                 return None;
             }
-            return Some((msg, form?));
+            return Some(msg);
         }
-        decode_consensus_msg(payload).map(|msg| (msg, SignatureForm::Tagged))
+        decode_consensus_msg(payload)
     }
 
     // ── Proposer ─────────────────────────────────────────────────────────────
@@ -5003,37 +4972,14 @@ pub(crate) fn consensus_signing_message(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Which form a verified consensus signature took.
-///
-/// `Untagged` is the pre-2.32.0 form — a bare signature over the payload — accepted for **one
-/// release** so a fleet can upgrade node by node (a 2.31 acceptor's votes still count at a 2.32
-/// proposer, and a 2.31 proposer's proposals are still answered); counted in
-/// [`untagged_consensus_signatures_accepted`] and closed in the next MINOR
-/// (`docs/guide/deprecations.md` §23). A 2.31 node cannot verify a tagged signature, so while any
-/// node is un-upgraded a 2.32 proposer's messages are dropped there — the same shape as 2.30.0's
-/// `Prepare` window.
-/// An acceptor **answers in the form of the request it verified** (`sign_payload_as`): a 2.31
-/// proposer verifies bare only, so its bare `Prepare`/`Propose` gets a bare answer and its rounds
-/// complete; a tagged request gets a tagged answer. Found by the adversarial review of #585 — the
-/// first cut answered everything tagged, which dropped a 2.32 acceptor out of every un-upgraded
-/// proposer's rounds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(not(feature = "tls"), allow(dead_code))] // `Untagged` is only ever verified under `tls`
-pub(crate) enum SignatureForm { Tagged, Untagged }
-
-/// Verifies `sig` over `msg_bytes` against any key in `keys`: the tagged form first, then the
-/// untagged one. `None` when neither verifies, or when there is no key to verify against.
+/// Verifies `sig` over [`consensus_signing_message`] of `msg_bytes` against any key in `keys`. The
+/// bare form — a signature over `msg_bytes` themselves, a 2.31 node's — was accepted for one release
+/// (2.32.0) and is refused since (post-360 plan row F, `docs/guide/deprecations.md` §23/§35). `false`
+/// when nothing verifies, or when there is no key to verify against.
 #[cfg(feature = "tls")]
-pub(crate) fn verify_consensus_signature(keys: &[[u8; 32]], msg_bytes: &[u8], sig: &[u8]) -> Option<SignatureForm> {
-    if keys.is_empty() { return None; }
+pub(crate) fn verify_consensus_signature(keys: &[[u8; 32]], msg_bytes: &[u8], sig: &[u8]) -> bool {
     let tagged = consensus_signing_message(msg_bytes);
-    if keys.iter().any(|k| crate::tls::verify_bytes(k, &tagged, sig)) {
-        return Some(SignatureForm::Tagged);
-    }
-    if keys.iter().any(|k| crate::tls::verify_bytes(k, msg_bytes, sig)) {
-        return Some(SignatureForm::Untagged);
-    }
-    None
+    keys.iter().any(|k| crate::tls::verify_bytes(k, &tagged, sig))
 }
 
 /// Answers this node's acceptor **withheld** because its record did not reach the WAL — a prepare
@@ -5051,18 +4997,6 @@ pub(crate) fn acceptor_answers_unrecorded() -> u64 {
     ACCEPTOR_ANSWERS_UNRECORDED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Consensus signatures this process accepted in the untagged (pre-2.32.0) form — see
-/// [`SignatureForm`]. Non-zero means a peer is not yet upgraded.
-#[cfg(feature = "tls")]
-static UNTAGGED_CONSENSUS_SIGNATURES_ACCEPTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// How many untagged consensus signatures this process has accepted under the mixed-fleet allowance.
-#[cfg(feature = "tls")]
-#[cfg_attr(not(feature = "gateway"), allow(dead_code))] // read by the gateway's stats route
-pub(crate) fn untagged_consensus_signatures_accepted() -> u64 {
-    UNTAGGED_CONSENSUS_SIGNATURES_ACCEPTED.load(std::sync::atomic::Ordering::Relaxed)
-}
-
 // ── Voter task ───────────────────────────────────────────────────────────────
 
 /// Answers a [`Prepare`](ConsensusMsg::Prepare): promise and report, or refuse and say what was
@@ -5071,11 +5005,10 @@ pub(crate) fn untagged_consensus_signatures_accepted() -> u64 {
 /// commit reach — because a proposer chooses its value on the strength of it, and a restart must
 /// not let this node break it. Until 2.32.0 this said "handed to the WAL" and was not: the record
 /// was applied and gossiped only. A promise that does not reach the WAL is **not answered**, and
-/// the withheld answer is counted (`acceptor_answers_unrecorded`). The answer is signed in `form`,
-/// the form the prepare arrived in — see [`SignatureForm`].
+/// the withheld answer is counted (`acceptor_answers_unrecorded`).
 #[cfg(feature = "consensus")]
 async fn answer_prepare(
-    ctx: &ConsensusEngine, slot: Arc<str>, ballot: u64, proposer: NodeId, form: SignatureForm, term: bool, gate: Option<Gate>,
+    ctx: &ConsensusEngine, slot: Arc<str>, ballot: u64, proposer: NodeId, term: bool, gate: Option<Gate>,
 ) {
     // A slot whose forgotten promise was detected is not answered until the next start (`acceptor_guard`).
     if crate::agent::acceptor_guard::withheld(&ctx.task_ctx, &slot) { return; }
@@ -5086,7 +5019,7 @@ async fn answer_prepare(
     let Some(outcome) = outcome else {
         if let Some(g) = &gate {
             let digest = crate::agent::electorate::cached(&ctx.task_ctx, &g.group).map_or([0; 32], |d| d.digest());
-            refuse_stale(ctx, slot, proposer, (g.epoch + 1, digest), form);
+            refuse_stale(ctx, slot, proposer, (g.epoch + 1, digest));
         }
         return;
     };
@@ -5120,11 +5053,11 @@ async fn answer_prepare(
             ctx.emit(
                 Arc::from(consensus_kind::VOTE),
                 SignalScope::Individual(proposer),
-                ctx.sign_payload_as(encode_consensus_msg(&ack), form),
+                ctx.sign_payload(encode_consensus_msg(&ack)),
             );
         }
         PrepareOutcome::Refused { promised, accepted } => {
-            emit_refusal(ctx, &slot, promised, accepted, proposer, form, term, false);
+            emit_refusal(ctx, &slot, promised, accepted, proposer, term, false);
         }
     }
 }
@@ -5136,7 +5069,7 @@ async fn answer_prepare(
 #[allow(clippy::too_many_arguments)]
 fn emit_refusal(
     ctx: &ConsensusEngine, slot: &Arc<str>, seen: u64, held: Option<(u64, Accepted)>,
-    proposer: NodeId, form: SignatureForm, term: bool, with_nack: bool,
+    proposer: NodeId, term: bool, with_nack: bool,
 ) {
     let accepted_ballot = held.as_ref().map(|(b, _)| *b).unwrap_or(0);
     let refusal = if term {
@@ -5154,14 +5087,14 @@ fn emit_refusal(
     ctx.emit(
         Arc::from(consensus_kind::NACK),
         SignalScope::Individual(proposer.clone()),
-        ctx.sign_payload_as(encode_consensus_msg(&refusal), form),
+        ctx.sign_payload(encode_consensus_msg(&refusal)),
     );
     if !with_nack { return; }
     let nack = ConsensusMsg::Nack { slot: Arc::clone(slot), seen_ballot: seen };
     ctx.emit(
         Arc::from(consensus_kind::NACK),
         SignalScope::Individual(proposer),
-        ctx.sign_payload_as(encode_consensus_msg(&nack), form),
+        ctx.sign_payload(encode_consensus_msg(&nack)),
     );
 }
 
@@ -5178,7 +5111,7 @@ fn raw_accepted(a: &Accepted) -> Option<Bytes> {
 
 /// Refuses a proposal whose electorate is not this node's own, naming the electorate it holds (P2).
 #[cfg(feature = "consensus")]
-fn refuse_stale(ctx: &ConsensusEngine, slot: Arc<str>, proposer: NodeId, own: (u64, [u8; 32]), form: SignatureForm) {
+fn refuse_stale(ctx: &ConsensusEngine, slot: Arc<str>, proposer: NodeId, own: (u64, [u8; 32])) {
     #[cfg(feature = "metrics")]
     metrics::counter!("mycelium_electorate_stale_refusals_total").increment(1);
     tracing::debug!(slot = %slot, proposer = %proposer, epoch = own.0, "consensus: refusing a proposal for another electorate");
@@ -5188,7 +5121,7 @@ fn refuse_stale(ctx: &ConsensusEngine, slot: Arc<str>, proposer: NodeId, own: (u
     ctx.emit(
         Arc::from(consensus_kind::NACK),
         SignalScope::Individual(proposer),
-        ctx.sign_payload_as(encode_consensus_msg(&refusal), form),
+        ctx.sign_payload(encode_consensus_msg(&refusal)),
     );
 }
 
@@ -5200,7 +5133,6 @@ fn refuse_stale(ctx: &ConsensusEngine, slot: Arc<str>, proposer: NodeId, own: (u
 #[cfg(feature = "consensus")]
 async fn answer_manifest(
     ctx: &ConsensusEngine, group: Arc<str>, successor: Arc<str>, proposer: NodeId, after: Option<Arc<str>>, nonce: u64,
-    form: SignatureForm,
 ) {
     let me = &ctx.task_ctx.node_id;
     let Some(d) = ctx.electorate_view(&group) else { return };
@@ -5217,7 +5149,7 @@ async fn answer_manifest(
     ctx.emit(
         Arc::from(consensus_kind::VOTE),
         SignalScope::Individual(proposer),
-        ctx.sign_payload_as(encode_consensus_msg(&page), form),
+        ctx.sign_payload(encode_consensus_msg(&page)),
     );
 }
 
@@ -5306,76 +5238,75 @@ pub(crate) async fn run_consensus_listener(
                 }
                 consecutive_abstains = 0;
 
-                // `form` is how the request was signed; every answer below is signed the same way.
                 // `term`: the request came from an upgraded proposer (row A) — the value is a decision
                 // envelope, and every answer is the flagged form.
                 // P2: a proposal is answered only for this node's own electorate (`electorate_admits`) — a message
                 // without one on an electorate group, or one naming another, is refused by name.
-                let (slot, ballot, value, proposer, form, term, gate) = match ctx.decode_verify_form(&sig.payload) {
-                    Some((ConsensusMsg::Prepare { slot, ballot, proposer }, form)) => {
+                let (slot, ballot, value, proposer, term, gate) = match ctx.decode_verify(&sig.payload) {
+                    Some(ConsensusMsg::Prepare { slot, ballot, proposer }) => {
                         match ctx.electorate_admits(&sig.scope, &slot, None, &proposer, None, None) {
-                            Ok(gate) => answer_prepare(&ctx, slot, ballot, proposer, form, false, gate).await,
-                            Err(own) => refuse_stale(&ctx, slot, proposer, own, form),
+                            Ok(gate) => answer_prepare(&ctx, slot, ballot, proposer, false, gate).await,
+                            Err(own) => refuse_stale(&ctx, slot, proposer, own),
                         }
                         continue;
                     }
-                    Some((ConsensusMsg::PrepareTerm { slot, ballot, proposer }, form)) => {
+                    Some(ConsensusMsg::PrepareTerm { slot, ballot, proposer }) => {
                         match ctx.electorate_admits(&sig.scope, &slot, None, &proposer, None, None) {
-                            Ok(gate) => answer_prepare(&ctx, slot, ballot, proposer, form, true, gate).await,
-                            Err(own) => refuse_stale(&ctx, slot, proposer, own, form),
+                            Ok(gate) => answer_prepare(&ctx, slot, ballot, proposer, true, gate).await,
+                            Err(own) => refuse_stale(&ctx, slot, proposer, own),
                         }
                         continue;
                     }
-                    Some((ConsensusMsg::PrepareIn { slot, ballot, proposer, epoch, electorate }, form)) => {
+                    Some(ConsensusMsg::PrepareIn { slot, ballot, proposer, epoch, electorate }) => {
                         match ctx.electorate_admits(&sig.scope, &slot, Some((epoch, electorate)), &proposer, None, None) {
-                            Ok(gate) => answer_prepare(&ctx, slot, ballot, proposer, form, true, gate).await,
-                            Err(own) => refuse_stale(&ctx, slot, proposer, own, form),
+                            Ok(gate) => answer_prepare(&ctx, slot, ballot, proposer, true, gate).await,
+                            Err(own) => refuse_stale(&ctx, slot, proposer, own),
                         }
                         continue;
                     }
-                    Some((ConsensusMsg::CarryPrepare { slot, ballot, proposer, epoch, electorate, predecessor }, form)) => {
+                    Some(ConsensusMsg::CarryPrepare { slot, ballot, proposer, epoch, electorate, predecessor }) => {
                         match ctx.electorate_admits(&sig.scope, &slot, Some((epoch, electorate)), &proposer, None, Some(&predecessor)) {
-                            Ok(gate) => answer_prepare(&ctx, slot, ballot, proposer, form, true, gate).await,
-                            Err(own) => refuse_stale(&ctx, slot, proposer, own, form),
+                            Ok(gate) => answer_prepare(&ctx, slot, ballot, proposer, true, gate).await,
+                            Err(own) => refuse_stale(&ctx, slot, proposer, own),
                         }
                         continue;
                     }
-                    Some((ConsensusMsg::CarryManifestRequest { group, successor, proposer, after, nonce }, form)) => {
-                        answer_manifest(&ctx, group, successor, proposer, after, nonce, form).await;
+                    Some(ConsensusMsg::CarryManifestRequest { group, successor, proposer, after, nonce }) => {
+                        answer_manifest(&ctx, group, successor, proposer, after, nonce).await;
                         continue;
                     }
-                    Some((ConsensusMsg::Propose { slot, ballot, value, proposer }, form)) => {
+                    Some(ConsensusMsg::Propose { slot, ballot, value, proposer }) => {
                         match ctx.electorate_admits(&sig.scope, &slot, None, &proposer, Some((&value, false)), None) {
-                            Ok(gate) => (slot, ballot, value, proposer, form, false, gate),
-                            Err(own) => { refuse_stale(&ctx, slot, proposer, own, form); continue; }
+                            Ok(gate) => (slot, ballot, value, proposer, false, gate),
+                            Err(own) => { refuse_stale(&ctx, slot, proposer, own); continue; }
                         }
                     }
-                    Some((ConsensusMsg::ProposeTerm { slot, ballot, envelope, proposer }, form)) => {
+                    Some(ConsensusMsg::ProposeTerm { slot, ballot, envelope, proposer }) => {
                         // An envelope for another slot is not a proposal for this one.
                         if crate::consensus_life::Envelope::decode(&envelope).is_none_or(|e| *e.slot != *slot) {
                             continue;
                         }
                         match ctx.electorate_admits(&sig.scope, &slot, None, &proposer, Some((&envelope, true)), None) {
-                            Ok(gate) => (slot, ballot, envelope, proposer, form, true, gate),
-                            Err(own) => { refuse_stale(&ctx, slot, proposer, own, form); continue; }
+                            Ok(gate) => (slot, ballot, envelope, proposer, true, gate),
+                            Err(own) => { refuse_stale(&ctx, slot, proposer, own); continue; }
                         }
                     }
-                    Some((ConsensusMsg::ProposeIn { slot, ballot, envelope, proposer, epoch, electorate }, form)) => {
+                    Some(ConsensusMsg::ProposeIn { slot, ballot, envelope, proposer, epoch, electorate }) => {
                         if crate::consensus_life::Envelope::decode(&envelope).is_none_or(|e| *e.slot != *slot) {
                             continue;
                         }
                         match ctx.electorate_admits(&sig.scope, &slot, Some((epoch, electorate)), &proposer, Some((&envelope, true)), None) {
-                            Ok(gate) => (slot, ballot, envelope, proposer, form, true, gate),
-                            Err(own) => { refuse_stale(&ctx, slot, proposer, own, form); continue; }
+                            Ok(gate) => (slot, ballot, envelope, proposer, true, gate),
+                            Err(own) => { refuse_stale(&ctx, slot, proposer, own); continue; }
                         }
                     }
-                    Some((ConsensusMsg::CarryPropose { slot, ballot, envelope, proposer, epoch, electorate, predecessor }, form)) => {
+                    Some(ConsensusMsg::CarryPropose { slot, ballot, envelope, proposer, epoch, electorate, predecessor }) => {
                         if crate::consensus_life::Envelope::decode(&envelope).is_none_or(|e| *e.slot != *slot) {
                             continue;
                         }
                         match ctx.electorate_admits(&sig.scope, &slot, Some((epoch, electorate)), &proposer, Some((&envelope, true)), Some(&predecessor)) {
-                            Ok(gate) => (slot, ballot, envelope, proposer, form, true, gate),
-                            Err(own) => { refuse_stale(&ctx, slot, proposer, own, form); continue; }
+                            Ok(gate) => (slot, ballot, envelope, proposer, true, gate),
+                            Err(own) => { refuse_stale(&ctx, slot, proposer, own); continue; }
                         }
                     }
                     _ => continue,
@@ -5403,7 +5334,7 @@ pub(crate) async fn run_consensus_listener(
                 };
                 if gated.is_none() && let Some(g) = &gate {
                     let digest = crate::agent::electorate::cached(&ctx.task_ctx, &g.group).map_or([0; 32], |d| d.digest());
-                    refuse_stale(&ctx, slot, proposer, (g.epoch + 1, digest), form);
+                    refuse_stale(&ctx, slot, proposer, (g.epoch + 1, digest));
                     continue;
                 }
                 let claimed = gated == Some(true);
@@ -5415,7 +5346,7 @@ pub(crate) async fn run_consensus_listener(
                     // `None` after a restart: the durable record carries the digest, not the value,
                     // so this node can refuse a conflicting vote but cannot help the proposer adopt.
                     let state = accepted.pin().get(&slot).cloned().unwrap_or_default();
-                    emit_refusal(&ctx, &slot, state.promised.max(floor), state.accepted, proposer, form, term, true);
+                    emit_refusal(&ctx, &slot, state.promised.max(floor), state.accepted, proposer, term, true);
                 } else {
                     // **Durable before the vote leaves.** A vote that reaches a proposer while this
                     // node's acceptance is unrecorded is exactly the memory a restart would lose —
@@ -5451,7 +5382,7 @@ pub(crate) async fn run_consensus_listener(
                     ctx.emit(
                         Arc::from(consensus_kind::VOTE),
                         sig.scope.clone(),
-                        ctx.sign_payload_as(encode_consensus_msg(&bound), form),
+                        ctx.sign_payload(encode_consensus_msg(&bound)),
                     );
                     // And the legacy form, so a proposer predating `VoteForValue` still sees a
                     // vote it understands. It is unbound and therefore unsafe to count — which is
@@ -5466,7 +5397,7 @@ pub(crate) async fn run_consensus_listener(
                     ctx.emit(
                         Arc::from(consensus_kind::VOTE),
                         sig.scope,
-                        ctx.sign_payload_as(encode_consensus_msg(&vote), form),
+                        ctx.sign_payload(encode_consensus_msg(&vote)),
                     );
                 }
             }
