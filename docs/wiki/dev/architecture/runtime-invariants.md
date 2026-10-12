@@ -413,7 +413,10 @@ Two different patterns keep getting conflated because the word "consumer group" 
   LWW-by-HLC, so the *converged* holder is deterministic: after committing, read the converged
   committed holder (`live_committed_value`) and only that node consumes; losers stand by **without
   releasing** (a tombstone would clear the winner's claim). The winner drains a **private** offset
-  (exact-once by construction) and renews the lease → a standby takes over on death.
+  (exact-once by construction) and renews the lease → a standby takes over on death. The position is the
+  last entry's **`(hlc, key)`** — an HLC-only offset skipped a same-HLC sibling for ever — and it is
+  **recorded as the stream hands the entry on**, not when it is queued (post-360 row E,
+  `mycelium-core/src/log_cursor.rs`; `clog/{stream}/{group}/cursor` beside the legacy `…/offset`).
   **Reusable lesson:** a consensus-backed lock is not mutually exclusive on the *propose return* —
   confirm via the converged committed value. The `mycelium-core` library
   `KvHandle::subscribe_log_group` is the **best-effort** version (LWW claim, no consensus — can

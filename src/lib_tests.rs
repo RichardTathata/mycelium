@@ -254,6 +254,7 @@ fn spawn_handler(
         llm_skills: std::sync::Arc::new(papaya::HashMap::new()),
         #[cfg(feature = "llm")]
         llm_dispatch_spawned: std::sync::atomic::AtomicBool::new(false),
+        mailbox_in_flight: Default::default(),
     });
     let ctx = ConnContext {
         task_ctx: Arc::clone(&task_ctx.core),
@@ -1360,6 +1361,7 @@ async fn test_subscribe_notified_via_gossip() {
             llm_skills: std::sync::Arc::new(papaya::HashMap::new()),
             #[cfg(feature = "llm")]
             llm_dispatch_spawned: std::sync::atomic::AtomicBool::new(false),
+            mailbox_in_flight: Default::default(),
         });
         let ctx = ConnContext {
             task_ctx: Arc::clone(&task_ctx.core),

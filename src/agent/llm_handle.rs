@@ -38,7 +38,7 @@ impl LlmHandle {
         backend:  Arc<dyn llm::LlmBackend>,
     ) -> Result<prompt::PromptSkillHandle, prompt::PromptSkillError> {
         // 1. Write template to KV — configuration, not heartbeat.
-        let kv_key = format!("{}{}/{}", kv_ns::PROMPTS, ns, name);
+        let kv_key = prompt::prompt_key(ns, name)?;
         let bytes  = serde_json::to_vec(&template)
             .map_err(|e| prompt::PromptSkillError::LlmError(e.to_string()))?;
         kv_set(&self.ctx, Arc::from(kv_key.as_str()), Bytes::from(bytes));
@@ -93,6 +93,7 @@ impl LlmHandle {
         context: HashMap<String, String>,
         timeout: Duration,
     ) -> Result<String, prompt::PromptSkillError> {
+        prompt::prompt_key(ns, name)?;
         let providers = CapabilitiesHandle { ctx: Arc::clone(&self.ctx) }
             .resolve(&CapFilter::new(ns, name));
         let (target, _) = providers.into_iter().next()
@@ -134,7 +135,7 @@ impl LlmHandle {
         name:     &str,
         template: prompt::PromptTemplate,
     ) -> Result<(), prompt::PromptSkillError> {
-        let kv_key = format!("{}{}/{}", kv_ns::PROMPTS, ns, name);
+        let kv_key = prompt::prompt_key(ns, name)?;
         let bytes  = serde_json::to_vec(&template)
             .map_err(|e| prompt::PromptSkillError::LlmError(e.to_string()))?;
         kv_set(&self.ctx, Arc::from(kv_key.as_str()), Bytes::from(bytes));
@@ -142,9 +143,10 @@ impl LlmHandle {
     }
 
     /// Retrieve the current prompt template from the local KV snapshot.
-    /// Synchronous — reads in-memory state, same as `kv().get()`.
+    /// Synchronous — reads in-memory state, same as `kv().get()`. `None` for a name that cannot be a
+    /// prompt skill's (empty, or containing `/`).
     pub fn get_prompt(&self, ns: &str, name: &str) -> Option<prompt::PromptTemplate> {
-        let key = format!("{}{}/{}", kv_ns::PROMPTS, ns, name);
+        let key = prompt::prompt_key(ns, name).ok()?;
         let bytes = self.ctx.kv_state.store.pin().get(key.as_str())
             .and_then(|e| e.data.clone())?;
         serde_json::from_slice(&bytes).ok()
@@ -159,16 +161,21 @@ impl LlmHandle {
                 let mut parts = rest.splitn(2, '/');
                 let ns   = parts.next()?.to_owned();
                 let name = parts.next()?.to_owned();
-                if name.is_empty() { return None; }
+                // A key no valid pair builds (an empty part, or a third segment) names no skill.
+                prompt::prompt_key(&ns, &name).ok()?;
                 Some((ns, name))
             })
             .collect()
     }
 
     /// Tombstone the prompt template KV entry. The skill becomes unreachable
-    /// once all serving nodes' capability entries expire (≤30s).
+    /// once all serving nodes' capability entries expire (≤30s). A name that cannot be a prompt
+    /// skill's (empty, or containing `/`) deletes nothing.
     pub fn delete_prompt(&self, ns: &str, name: &str) {
-        let key = format!("{}{}/{}", kv_ns::PROMPTS, ns, name);
+        let Ok(key) = prompt::prompt_key(ns, name) else {
+            tracing::warn!(ns, name, "delete_prompt: not a prompt skill name (empty, or contains '/'); nothing deleted");
+            return;
+        };
         kv_delete(&self.ctx, Arc::from(key.as_str()));
     }
 }

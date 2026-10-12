@@ -1492,11 +1492,14 @@ pub mod kv_ns {
     /// compacted by `GossipAgent::compact_log`.
     pub const LOG: &str = "log/";
 
-    /// Consumer group offset cursors.
+    /// Consumer group positions (`crate::log_cursor`).
     ///
-    /// Key: `clog/{stream}/{group}/offset`. Value: 16-char hex HLC of the last
-    /// processed entry. Written by `GossipAgent::subscribe_log_group` after each
-    /// entry is successfully delivered.
+    /// Keys: `clog/{stream}/{group}/cursor` — the last entry handed on, as its key after
+    /// `log/{stream}/` (`{hlc:016x}/{node}`), the `(hlc, key)` position; and
+    /// `clog/{stream}/{group}/offset` — a 16-char hex HLC one below that entry's, the legacy
+    /// HLC-only position older nodes read. Written by `subscribe_log_group` and the gateway's
+    /// log-group stream after each entry is handed on (post-360 row E); the consensus claim is
+    /// `clog/{stream}/{group}/claim`.
     #[deprecated(since = "2.33.0", note = "no caller, test, SDK or document in the repository references it (post-360 hardening row J, 2026-10-12); kept on the 2.x line — open an issue if you use it and it will be undeprecated")]
     pub const CONSUMER_LOG: &str = "clog/";
 

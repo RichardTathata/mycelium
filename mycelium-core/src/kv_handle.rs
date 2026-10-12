@@ -586,7 +586,10 @@ impl KvHandle {
     /// is *not* mutually exclusive: under concurrent cross-node consumers it can briefly admit
     /// two active consumers, so an entry may be delivered more than once. For a *consensus*-backed
     /// single-active claim (true exact-once), use the gateway endpoint
-    /// `GET /gateway/overlay/log/group/subscribe`. Offset is persisted at `clog/{stream}/{group}/offset`.
+    /// `GET /gateway/overlay/log/group/subscribe`. The group's position is the last entry's `(hlc, key)`
+    /// ([`log_cursor`](crate::log_cursor)), recorded at `clog/{stream}/{group}/cursor` and, HLC only, at
+    /// `clog/{stream}/{group}/offset`, **after** the entry enters the receiver's channel (capacity 64):
+    /// entries queued when the receiver is dropped are lost to this group.
     pub async fn subscribe_log_group(
         &self,
         stream: &str,
@@ -615,33 +618,23 @@ impl KvHandle {
                 );
                 let _           = kv_set(&handle.ctx, lock_key, lock_value);
 
-                // Read current offset.
-                let offset_key = format!("clog/{stream}/{group}/offset");
-                let offset: u64 = handle
-                    .get(&offset_key)
-                    .and_then(|b| {
-                        std::str::from_utf8(&b).ok()
-                            .and_then(|s| u64::from_str_radix(s, 16).ok())
-                    })
-                    .unwrap_or(0);
-
-                // `saturating_add`: `offset` is parsed from the `clog/.../offset` KV value, which any
-                // node can write under detection-not-prevention. A corrupt/hostile `u64::MAX` must not
-                // panic here (overflow-checks) or wrap to 0 (release → silent re-scan from the start) —
-                // the peer-supplied-arithmetic family (audit 2026-07-15; cf. is_fresh, SWIM incarnation).
-                let next = handle.scan_log(&stream, offset.saturating_add(1), u64::MAX)
+                // The group's position, `(hlc, key)` — the order `scan_log` sorts by. An HLC-only
+                // offset (`offset + 1`) skipped an entry sharing its HLC with the last one handed on
+                // (post-360 row E; `crate::log_cursor`). Comparisons only: a hostile offset of
+                // `u64::MAX` reads as "everything consumed", never an overflow (audit 2026-07-15).
+                let position = crate::log_cursor::read_position(&handle.ctx.kv_state, &stream, &group);
+                let next = crate::log_cursor::rows_after(&handle.ctx.kv_state, &stream, &position)
                     .into_iter()
                     .next();
 
-                if let Some(entry) = next {
-                    let new_offset = format!("{:016x}", entry.hlc);
-                    let _ = kv_set(
-                        &handle.ctx,
-                        Arc::from(offset_key.as_str()),
-                        Bytes::from(new_offset.into_bytes()),
-                    );
-                    if tx.send(entry).await.is_err() { return; }
+                if let Some(row) = next {
+                    // Handed on first, recorded after (post-360 row E): an entry sent to a receiver
+                    // that is gone is not consumed.
+                    if tx.send(LogEntry { hlc: row.hlc, value: row.value.clone() }).await.is_err() { return; }
+                    crate::log_cursor::record(&handle.ctx, &stream, &group, &row);
                 } else {
+                    // Idle: a dropped receiver is otherwise noticed only by a failed send.
+                    if tx.is_closed() { return; }
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             }

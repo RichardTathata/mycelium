@@ -51,7 +51,7 @@ One block per capability the unit advertises.
 | `name` | string | required | Capability name, e.g. `"inference"`. |
 | `probe_url` | string | absent | HTTP GET probed for liveness; a 2xx keeps the capability advertised. Absent means always-alive. Honoured by `run_capability_probes`, not by a stem. |
 | `probe_timeout_secs` | integer | `3` | Probe request timeout, in seconds. |
-| `ttl_secs` | integer | `30` | Re-assertion TTL of the advertisement, in seconds. |
+| `ttl_secs` | integer | `30` | Re-assertion TTL of the advertisement, in seconds: `1`–`3600` (`MAX_TIMER_PERIOD_SECS`), refused by `validate()` otherwise. |
 | `attrs` | table of values | empty | Static attributes. A value is a string, integer, float, boolean, or `{ version = "x.y.z" }`. A bare string stays text. |
 | `schema_id` | string | absent | The schema this capability advertises. A requirement with a `schema_id` matches only the same id. |
 

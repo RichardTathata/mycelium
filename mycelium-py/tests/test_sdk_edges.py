@@ -226,6 +226,10 @@ LEASES = {
     "advertise_capability.lease_secs": (lambda a, t: a.advertise_capability("ns", "n", lease_secs=t), "lease_secs"),
     "declare_units.lease_secs":        (lambda a, t: a.declare_units("", lease_secs=t), "lease_secs"),
     "distributed_lock.ttl_secs":       (lambda a, t: a.distributed_lock("jobs", ttl_secs=t), "ttl_secs"),
+    # Post-360 row E: the gateway refuses an `interval_secs` that is not a whole number (it fell back to
+    # 30 s without a word before), so the SDK rounds it up as it does a lease.
+    "advertise_capability.interval_secs": (lambda a, t: a.advertise_capability("ns", "n", interval_secs=t), "interval_secs"),
+    "declare_units.interval_secs":        (lambda a, t: a.declare_units("", interval_secs=t), "interval_secs"),
 }
 
 
@@ -247,4 +251,26 @@ def test_a_lease_or_ttl_the_gateway_cannot_read_is_refused_by_name(port, verb, b
     call, field = LEASES[verb]
     with pytest.raises(ValueError, match=field):
         call(MyceliumAgent("127.0.0.1", port), bad)
+    assert _Stub.seen == []
+
+
+PERIODS = ["advertise_capability.interval_secs", "advertise_capability.lease_secs",
+           "declare_units.interval_secs", "declare_units.lease_secs"]
+
+
+@pytest.mark.parametrize("verb", PERIODS)
+def test_a_timer_period_past_the_nodes_bound_is_refused_locally(port, verb):
+    # #613's review: the node refuses a period past 3600 s (400 timer_out_of_range); the SDK says so first.
+    call, field = LEASES[verb]
+    with pytest.raises(ValueError, match=field):
+        call(MyceliumAgent("127.0.0.1", port), 3601)
+    assert _Stub.seen == []
+
+
+@pytest.mark.parametrize("verb", PERIODS)
+def test_a_zero_timer_period_is_refused_locally(port, verb):
+    # The node refuses 0 (400 timer_out_of_range); the SDK refuses it too rather than rounding it to 1.
+    call, field = LEASES[verb]
+    with pytest.raises(ValueError, match=field):
+        call(MyceliumAgent("127.0.0.1", port), 0)
     assert _Stub.seen == []

@@ -911,6 +911,9 @@ pub struct GossipConfig {
     /// Bound on how far ahead of the local wall clock a *remote* HLC stamp
     /// may pull this node's clock, in milliseconds. `0` disables the bound.
     ///
+    /// The gateway caller envelope's freshness check (`gateway_caller::verify`) reads it too: an envelope
+    /// may be up to 300 s plus this old and this far ahead; with `0`, 300 s old and 300 s ahead.
+    ///
     /// Set via `GOSSIP_MAX_CLOCK_DRIFT_MS`. Default **300 000** (5 minutes).
     ///
     /// `Hlc::observe` clamps remote physical time to `wall_now + this bound`

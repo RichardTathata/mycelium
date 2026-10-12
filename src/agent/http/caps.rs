@@ -55,7 +55,10 @@ pub(super) async fn gw_cap_advertise(
 
     let ns   = match body["ns"].as_str()   { Some(s) => s.to_string(), None => return (StatusCode::BAD_REQUEST, Json(json!({"error":"missing ns"}))).into_response() };
     let name = match body["name"].as_str() { Some(s) => s.to_string(), None => return (StatusCode::BAD_REQUEST, Json(json!({"error":"missing name"}))).into_response() };
-    let interval_secs = body["interval_secs"].as_u64().unwrap_or(30);
+    let (interval_secs, lease_secs) = match (timer_secs(&body, "interval_secs"), timer_secs(&body, "lease_secs")) {
+        (Ok(i), Ok(l)) => (i.unwrap_or(DEFAULT_INTERVAL_SECS), l),
+        (Err(refused), _) | (_, Err(refused)) => return *refused,
+    };
 
     let mut cap = Capability::new(ns.as_str(), name.as_str());
 
@@ -83,14 +86,18 @@ pub(super) async fn gw_cap_advertise(
         cap = cap.with_authorized_callers(list);
     }
 
-    let interval = Duration::from_secs(interval_secs.max(1));
+    let interval = Duration::from_secs(interval_secs);
     let kv_key: Arc<str> = Arc::from(
         format!("cap/{}/{}/{}", ctx.agent_ctx.node_id, cap.namespace, cap.name).as_str()
     );
-    let cap_arc = Arc::new(cap);
+    // The advert carries the period it is refreshed at, as an in-process advert does
+    // (`CapabilitiesHandle::advertise_capability`): a bare `Capability` is timed by every reader
+    // with the legacy 60 s default, so a slower refresh read as stale between beats and a faster one
+    // lingered three minutes after its refresher died (post-360 row E).
+    let entry = Arc::new(crate::capability::CapEntry { capability: cap, refresh_interval_ms: interval_secs * 1_000 });
     let payload_fn: mycelium_core::kv_persist::PersistPayloadFn = {
-        let cap = Arc::clone(&cap_arc);
-        Arc::new(move || cap.encode())
+        let entry = Arc::clone(&entry);
+        Arc::new(move || entry.encode())
     };
 
     let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
@@ -104,12 +111,35 @@ pub(super) async fn gw_cap_advertise(
     // Lease mode: the watchdog retracts through the same path as DELETE (map
     // removal drops the cancel sender). `remove` returning `None` means the
     // caller already retracted — exit without noise.
-    let heartbeat = body["lease_secs"].as_u64().map(|secs| lease_watchdog(&ctx, &handle_id, secs));
+    let heartbeat = lease_secs.map(|secs| lease_watchdog(&ctx, &handle_id, secs));
 
     ctx.gateway_caps.lock().unwrap_or_else(|e| e.into_inner())
         .insert(handle_id.clone(), GatewayCapHandle { _cancel: cancel_tx, heartbeat, _held: None });
 
     Json(json!({ "handle_id": handle_id })).into_response()
+}
+
+/// `interval_secs` when a request names none.
+pub(super) const DEFAULT_INTERVAL_SECS: u64 = 30;
+
+/// A client-supplied timer period in whole seconds (post-360 hardening row E): `Ok(None)` when the
+/// field is absent or `null`, `Ok(Some(n))` for an integer in `1..=MAX_TIMER_PERIOD_SECS`, and a 400
+/// naming the field otherwise. Before this, any `u64` was a period and a value that was present but not
+/// a whole number (`0.5`, `"30"`) fell back to the default without a word.
+pub(super) fn timer_secs(body: &serde_json::Value, field: &str) -> Result<Option<u64>, Box<axum::response::Response>> {
+    use crate::capability_config::MAX_TIMER_PERIOD_SECS;
+    match &body[field] {
+        serde_json::Value::Null => Ok(None),
+        // `30.0` is a whole number too; `0.5` and `"30"` are not.
+        v => match v.as_u64().or_else(|| v.as_f64().filter(|f| f.fract() == 0.0 && (0.0..=MAX_TIMER_PERIOD_SECS as f64).contains(f)).map(|f| f as u64)) {
+            Some(n) if (1..=MAX_TIMER_PERIOD_SECS).contains(&n) => Ok(Some(n)),
+            _ => Err(Box::new((StatusCode::BAD_REQUEST, Json(json!({
+                "error": "timer_out_of_range",
+                "field": field,
+                "message": format!("{field} must be a whole number of seconds in 1..={MAX_TIMER_PERIOD_SECS}, got {v}"),
+            }))).into_response())),
+        },
+    }
 }
 
 /// An opaque gateway handle id. One mint for every handle kind, so the replay inventory counts
@@ -196,11 +226,14 @@ pub(super) async fn gw_units_declare(
         Ok(d) => d,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid unit file", "detail": e}))).into_response(),
     };
-    let interval = Duration::from_secs(body["interval_secs"].as_u64().unwrap_or(30).max(1));
+    let (interval, lease_secs) = match (timer_secs(&body, "interval_secs"), timer_secs(&body, "lease_secs")) {
+        (Ok(i), Ok(l)) => (Duration::from_secs(i.unwrap_or(DEFAULT_INTERVAL_SECS)), l),
+        (Err(refused), _) | (_, Err(refused)) => return *refused,
+    };
     let caps = crate::agent::CapabilitiesHandle { ctx: Arc::clone(&ctx.agent_ctx) };
     let mut held: Vec<Box<dyn std::any::Any + Send>> = Vec::new();
     for c in &units.capabilities {
-        held.push(Box::new(caps.advertise_capability(c.build_capability_public(), Duration::from_secs(c.ttl_secs.max(1)))));
+        held.push(Box::new(caps.advertise_capability(c.build_capability_public(), Duration::from_secs(c.ttl_secs))));
     }
     for f in filters {
         held.push(Box::new(caps.declare_requirement(f, interval)));
@@ -214,7 +247,7 @@ pub(super) async fn gw_units_declare(
     if !units.rules.is_empty() { not_enforced.push("[[rule]]"); }
 
     let handle_id = new_handle_id();
-    let heartbeat = body["lease_secs"].as_u64().map(|secs| lease_watchdog(&ctx, &handle_id, secs));
+    let heartbeat = lease_secs.map(|secs| lease_watchdog(&ctx, &handle_id, secs));
     let (cancel_tx, _cancel_rx) = oneshot::channel::<()>();
     ctx.gateway_caps.lock().unwrap_or_else(|e| e.into_inner())
         .insert(handle_id.clone(), GatewayCapHandle { _cancel: cancel_tx, heartbeat, _held: Some(Box::new(held)) });

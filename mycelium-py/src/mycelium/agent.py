@@ -56,6 +56,21 @@ from httpx_sse import aconnect_sse
 
 from ._pool import ClientPool, base_url, path_segment, whole_seconds
 
+#: The node's bound on a re-assertion or lease period (``MAX_TIMER_PERIOD_SECS``): past it, the
+#: gateway answers 400 ``timer_out_of_range``.
+MAX_TIMER_PERIOD_SECS = 3600
+
+
+def _timer_period(secs: float, name: str) -> int:
+    """Whole seconds, rounded up; refused locally at 0 or past the node's 3600 s bound, as the node refuses them
+    (post-360 row E)."""
+    if not isinstance(secs, bool) and isinstance(secs, (int, float)) and secs == 0:
+        raise ValueError(f"{name} must be at least 1 second (the node refuses 0), not {secs!r}")
+    whole = whole_seconds(secs, name=name)
+    if whole > MAX_TIMER_PERIOD_SECS:
+        raise ValueError(f"{name} {secs!r} is past the node's bound of {MAX_TIMER_PERIOD_SECS} seconds")
+    return whole
+
 
 class ProtectedKindError(PermissionError):
     """The gateway refused a **protected** RPC kind on a raw mesh route (HTTP 403 ``protected_kind``).
@@ -495,7 +510,7 @@ class MyceliumAgent:
         ns:                 str,
         name:               str,
         *,
-        interval_secs:      int                    = 30,
+        interval_secs:      float                  = 30,
         lease_secs:         float                  | None = None,
         attributes:         dict[str, Any]         | None = None,
         authorized_callers: list[str]              | None = None,
@@ -509,7 +524,8 @@ class MyceliumAgent:
         Args:
             ns:                 Capability namespace (e.g. ``"compute"``).
             name:               Capability name (e.g. ``"gpu"``).
-            interval_secs:      Re-assertion interval.
+            interval_secs:      Re-assertion interval, sent in whole seconds (a
+                                fraction rounds up); the node accepts 1–3600.
             lease_secs:         If set, binds the advertisement to THIS
                                 process's liveness: the node retracts it
                                 unless :meth:`CapabilityHandle.heartbeat` is
@@ -529,10 +545,11 @@ class MyceliumAgent:
             A :class:`CapabilityHandle`; call :meth:`CapabilityHandle.drop`
             or use as a context manager to retract.
         """
-        body: dict[str, Any] = {"ns": ns, "name": name, "interval_secs": interval_secs}
+        # Whole seconds (post-360 row E): the gateway refuses a fraction, which it once replaced with 30.
+        body: dict[str, Any] = {"ns": ns, "name": name, "interval_secs": _timer_period(interval_secs, "interval_secs")}
         if lease_secs is not None:
             # Whole seconds (0.2.10): the gateway reads `as_u64()`, and a fraction left the advert unleased.
-            body["lease_secs"] = whole_seconds(lease_secs, name="lease_secs")
+            body["lease_secs"] = _timer_period(lease_secs, "lease_secs")
         if attributes:
             body["attributes"] = attributes
         if authorized_callers:
@@ -551,7 +568,7 @@ class MyceliumAgent:
         self,
         toml_text: str,
         *,
-        interval_secs: int = 30,
+        interval_secs: float = 30,
         lease_secs:    float | None = None,
     ) -> "UnitHandle":
         """Declare a unit file's capabilities, requirements and groups on the node, under one handle.
@@ -563,9 +580,9 @@ class MyceliumAgent:
         reported in :attr:`UnitHandle.not_enforced`. Drop the handle (or exit its context) to retract the whole
         unit; with ``lease_secs``, call :meth:`UnitHandle.heartbeat` within every window.
         """
-        body: dict[str, Any] = {"toml": toml_text, "interval_secs": interval_secs}
+        body: dict[str, Any] = {"toml": toml_text, "interval_secs": _timer_period(interval_secs, "interval_secs")}
         if lease_secs is not None:
-            body["lease_secs"] = whole_seconds(lease_secs, name="lease_secs")  # as advertise_capability
+            body["lease_secs"] = _timer_period(lease_secs, "lease_secs")  # as advertise_capability
         with self._pool.sync() as c:
             resp = c.post("/gateway/units/declare", json=body)
             resp.raise_for_status()

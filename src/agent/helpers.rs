@@ -773,3 +773,15 @@ mod electorate_intent_tests {
         assert_eq!(declared_electorate_min(&agent.task_ctx, "absent"), 0, "no intent, no floor");
     }
 }
+
+/// The KV key of the prompt template for `ns`/`name` — `prompts/{ns}/{name}` — or `None` when either
+/// part is empty or contains a `/`, which would make it another pair's key too (`(a/b, c)` and
+/// `(a, b/c)`). Every builder of a `prompts/` key goes through here (post-360 row E; `prompt::prompt_key`
+/// is its `llm` wrapper).
+#[cfg_attr(not(any(feature = "llm", feature = "a2a")), allow(dead_code))]
+pub(crate) fn prompt_kv_key(ns: &str, name: &str) -> Option<String> {
+    if ns.is_empty() || name.is_empty() || ns.contains('/') || name.contains('/') {
+        return None;
+    }
+    Some(format!("{}{ns}/{name}", crate::signal::kv_ns::PROMPTS))
+}

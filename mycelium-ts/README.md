@@ -483,15 +483,17 @@ protected kind — is thrown, never reported as `"timeout"`.
     best-effort. Use a mailbox or a log for anything that must arrive.
   - `rpcServe` — a request that arrives in the gap reaches no server; its caller times out (and must treat
     the timeout as *unknown*, not *not done*).
-  - `mailbox` — **at-most-once across a drop.** The gateway tombstones each event as it queues it for the
-    stream (up to 256 ahead of your loop), before you have read it, so the events queued or in flight when the
-    stream drops are gone; a re-opened stream delivers only what was still undelivered. An event that must not
-    be lost needs an acknowledgement of your own — the sender keeps it until the receiver confirms — or a log
-    or tuple space instead of a mailbox.
+  - `mailbox` — the gateway deletes each event as its stream hands it to the HTTP connection (since post-360
+    row E; before, as it queued it, up to 256 ahead of your loop), so a re-opened stream delivers everything
+    still queued when it dropped, and two streams of one kind never get the same event — though a connected but
+    stalled stream holds the events it has claimed from its siblings until it reads them or its connection drops. What the connection had
+    already accepted — written to the socket, not yet read by you — is gone. An event that must not be lost needs an acknowledgement of your own — the sender
+    keeps it until the receiver confirms — or a log or tuple space instead of a mailbox.
   - `subscribeLog` — pass `sinceHlc: entry.hlc + 1n` for the last handled entry (the cursor is inclusive).
   - `subscribeLogGroup` — re-subscribing contends for the group's claim again and resumes from the group's
-    persisted offset, which advances when the gateway **sends** an entry, not when you finish it: an entry in
-    flight when the stream dropped is not sent again.
+    recorded position, which moves when the gateway's stream hands an entry to the HTTP connection (since
+    post-360 row E; before, as it queued it), not when you finish it: entries still queued when the stream
+    dropped are sent again; one the connection had already accepted is not.
 
 ### Migrating from 0.1.x
 

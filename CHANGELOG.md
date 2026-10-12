@@ -179,6 +179,46 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   three `HttpCtx` rows, the KV non-key notes — and the test that enumerates the governance routes from the
   router now reads `mod.rs`.
 
+- **The gateway remainder (post-360 plan row E, #613).** Six promises, each with a test seen failing on the code
+  before it (`src/agent/http/remainder_tests.rs`, `gateway_caller::tests::a_stale_or_future_envelope_is_refused`,
+  `mycelium-core/src/log_cursor.rs`; `docs/guide/deprecations.md` §38). **Client timer periods are bounded:**
+  `capability/advertise` and `units/declare` take `interval_secs` and `lease_secs` as whole seconds in `1..=3600`
+  (`MAX_TIMER_PERIOD_SECS`) and answer 400 `timer_out_of_range` naming the field otherwise — any `u64` was a period, and
+  `0.5` or `"30"` silently became 30 s; a unit file's `ttl_secs` is held to the same range by `validate()` (`0` was a
+  1 ms re-assert loop); a gateway advert gossips a `CapEntry` with its own `refresh_interval_ms` instead of a bare
+  `Capability` every reader timed at the legacy 60 s; both SDKs send `interval_secs` in whole seconds, rounded up
+  (unreleased `mycelium-py` / `mycelium-ts`). **The mailbox stream deletes an event as it hands it to the HTTP
+  connection** (`mailbox::open_mailbox_acked`, an in-flight set so nothing is queued twice), not as it enters the
+  256-slot channel — a dropped stream had already deleted every queued event (#595's review); the in-process
+  `open_mailbox` is unchanged. **The log-group subscribe keeps the core's `(hlc, key)` order** — of two same-HLC entries
+  the gateway and `KvHandle::subscribe_log_group` delivered one and skipped the other for ever — through a position
+  kept as `(hlc, key)` at `clog/{stream}/{group}/cursor` beside the legacy HLC-only `…/offset` (still written, one below the entry's HLC so a reader that has only it re-delivers rather than skips; read when
+  ahead of the cursor, so an older node and a newer one agree), and **records it after the entry is handed on**: at
+  the gateway as the stream hands it to the connection (it was saved before queueing, so up to 64 queued entries were
+  skipped by the next holder — found by row G), in process after the channel accepts it (it was saved before a send
+  to a receiver already gone); `log/scan` and `log/subscribe` order same-HLC entries by key too. **Prompt keys cannot
+  alias:** an empty `ns`/`name` or one with a `/` is refused at the three prompt routes and `llm/call` (400
+  `invalid_prompt_name`), `llm/stream` (an error event) and in process (`PromptSkillError::InvalidName`) —
+  `prompts/{ns}/{name}` made `(a/b, c)` and `(a, b/c)` one key. **The caller envelope binds freshness:**
+  `gateway_caller::verify` refuses an envelope issued more than `CALLER_CONTEXT_MAX_AGE_MS` (300 s) plus
+  `max_clock_drift_ms` ago, or more than `max_clock_drift_ms` ahead (`CallerError::Stale`, code `stale`); the issue
+  time was signed and never read, so a captured envelope verified for ever. Also: `mod.rs` cites the public-surface
+  test by its real name. **Upgrade notes:** `PromptSkillError` gained `InvalidName` (an exhaustive `match` breaks);
+  the 400s above; a provider reading a request from `rpc_rx` more than 300 s plus the drift bound after it was sent
+  refuses it `stale`. **What a drop still loses:** a mailbox event or log-group entry the HTTP connection had accepted
+  — the gateway has no resume point (guide 10, *not built*). **Review round** (#613's adversarial review): `max_clock_drift_ms
+  = 0` means no drift bound for the envelope too (the age bound is 300 s alone, and at most 300 s ahead —
+  `a_zero_drift_bound_bounds_only_the_age`, seen failing first: `left: Err("stale") right: Ok(true)`); two mailbox
+  streams of one kind share one in-flight set, so neither hands out what the other holds, and a dropped stream's
+  un-acknowledged events go to the other (`two_mailbox_streams_for_one_kind_never_hand_out_one_event_twice`, seen failing
+  first: B was handed `AQ==`); the legacy offset is written one below the entry's HLC, so a peer that receives it before
+  the cursor re-delivers rather than skips (`an_offset_that_arrives_before_its_cursor_never_skips_a_sibling`, seen failing
+  first: `ThroughHlc(512)`); a `[[serve]]` name with a `/` is refused at load
+  (`a_serve_name_that_cannot_be_a_prompt_skill_is_refused_at_load`); every `prompts/` key builder (including `a2a.rs` and
+  the LLM provider) goes through one function; both SDKs refuse an `interval_secs`/`lease_secs` of 0 or past 3600 locally (seen
+  failing first: 4 py, 4 ts); the 300 s window is stated as the gateway's (an in-process caller behind a backlog is
+  refused at dequeue); the bound's "never clamped" narrowed to the two routes it covers.
+
 - **Documentation: a lost electorate voter is restored with its state or retired — never reissued empty.**
   2.32.0's pages said an electorate member could be replaced "under the same identity"; that is unsafe as
   stated. A member's promises and acceptances are durable on its own disk
@@ -207,7 +247,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `mycelium::federation::{verify_descriptor_rotating, verify_policy}` (`tls`) ·
   `FederationClient::with_credential_lifetime` · `mycelium::knowledge::store::…::issuers_about`. Nothing is removed on the 2.x line; an issue naming a use undeprecates it. The sweep's twentieth item,
   `AeEvidence::audit_outcome`, is called by the private companion and is not deprecated; `Preflight::is_inert`
-  (`http.rs`) waits for rows P5/E.
+  (`http.rs`) waited for rows P5/E.
+
+- **`GatewayPreflight::is_inert`** (`src/agent/http/authz.rs`), `#[deprecated(since = "2.33.0")]` with §37's note
+  (post-360 row E): referenced nowhere in the repository, the SDKs or the private companion (`grep -rn is_inert`
+  over both trees).
 
 ## [2.32.0] — 2026-10-11
 

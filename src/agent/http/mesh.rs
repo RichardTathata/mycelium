@@ -387,21 +387,38 @@ pub(super) async fn gw_scatter(
 /// `GET /gateway/mailbox/{kind}` — SSE stream of mailbox events for this node.
 ///
 /// Streams events as `{"sender": "IP:PORT", "kind": "…", "payload_b64": "…"}`.
-/// The subscription is torn down when the client disconnects.
+/// The subscription is torn down when the client disconnects. Each event's entry is deleted when
+/// this stream hands it to the HTTP connection — not when the client reads it: what the connection
+/// (or the kernel's socket buffers) had accepted when it drops is lost, the rest stay for the next
+/// stream (post-360 hardening row E).
 pub(super) async fn gw_mailbox_subscribe(
     Path(kind):  Path<String>,
     State(ctx):  State<Arc<HttpCtx>>,
 ) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
-    let kind_arc: Arc<str> = Arc::from(kind.as_str());
-    let (handle, rx) = super::mailbox::open_mailbox_ctx(
-        Arc::clone(&ctx.agent_ctx),
-        &ctx.agent_ctx.node_id,
+    let events = mailbox_events(Arc::clone(&ctx.agent_ctx), Arc::from(kind.as_str()), ctx.shutdown_rx.clone());
+    Sse::new(events.map(|data| {
+        let kind = data["kind"].as_str().unwrap_or_default().to_string();
+        Ok(Event::default().event(kind).data(data.to_string()))
+    }))
+    .keep_alive(KeepAlive::default())
+}
+
+/// The event stream behind `GET /gateway/mailbox/{kind}`: each item is one event's data object.
+pub(super) fn mailbox_events(
+    agent_ctx:   Arc<TaskCtx>,
+    kind_arc:    Arc<str>,
+    shutdown_rx: watch::Receiver<bool>,
+) -> impl futures_util::Stream<Item = serde_json::Value> {
+    let self_id = agent_ctx.node_id.clone();
+    let (handle, rx) = super::mailbox::open_mailbox_acked(
+        agent_ctx,
+        &self_id,
         Arc::clone(&kind_arc),
         256,
-        ctx.shutdown_rx.clone(),
+        shutdown_rx,
     );
 
-    let stream = ReceiverStream::new(rx).map(move |event: super::mailbox::MeshEvent| {
+    ReceiverStream::new(rx).map(move |super::mailbox::AckedEvent { event, ack }| {
         use base64::Engine as _;
         let _ = &handle; // keep the MailboxHandle alive for the duration of the stream
         let payload_b64 = base64::engine::general_purpose::STANDARD.encode(&event.payload);
@@ -410,12 +427,11 @@ pub(super) async fn gw_mailbox_subscribe(
             "kind":        event.kind.as_ref(),
             "payload_b64": payload_b64,
         });
-        Ok(Event::default()
-            .event(event.kind.as_ref())
-            .data(data.to_string()))
-    });
-
-    Sse::new(stream).keep_alive(KeepAlive::default())
+        // Post-360 row E: the entry is deleted now, as the stream hands the event to the connection —
+        // not when it entered the 256-slot channel, which lost every queued event on a drop.
+        ack.ack();
+        data
+    })
 }
 
 /// `POST /gateway/mailbox/deliver` — deliver an event to a target node's mailbox.

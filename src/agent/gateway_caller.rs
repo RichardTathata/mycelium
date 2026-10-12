@@ -23,8 +23,10 @@
 //! `principal ‖ via ‖ scopes ‖ issued_at ‖ sha256(payload)`. A struct with a principal name and
 //! a digest supplied by anyone else is not evidence — the provider verifies the signer against
 //! the keys it knows for `via` (`sys/identity`, anchors, minus revocations) and rejects a
-//! mismatch, an unknown signer, an unsigned envelope on an authenticated mesh, or a `via` that is
-//! not the frame's sender. **Any rejection denies; nothing ever falls back to the node.**
+//! mismatch, an unknown signer, an unsigned envelope on an authenticated mesh, a `via` that is
+//! not the frame's sender, or an envelope issued outside the freshness window
+//! ([`CALLER_CONTEXT_MAX_AGE_MS`] plus the drift bound behind, the drift bound ahead — post-360 row E).
+//! **Any rejection denies; nothing ever falls back to the node.**
 //!
 //! **Where it rides.** Inside the RPC payload, after the 8-byte nonce — the wire (v12) is
 //! unchanged: `[0x00 'G' 'W' 'C' 0x01] ‖ u16be len ‖ envelope JSON ‖ application payload`.
@@ -127,6 +129,16 @@ pub fn federation_principal(origin_domain: &str, principal: &str) -> String {
 const DOMAIN_SEP: &[u8] = b"mycelium:gateway-caller:v1\n";
 /// Upper bound on an envelope: a principal, a node id, a few scopes.
 pub(crate) const MAX_ENVELOPE_BYTES: usize = 8 * 1024;
+/// How old a caller envelope may be when a provider verifies it, before the clock-drift allowance:
+/// 300 s, the longest any gateway door waits for an answer (`SERVED_RPC_TTL_MS`), so an envelope
+/// older than this is answering no *gateway* caller that still waits (post-360 hardening row E). An
+/// in-process caller (`rpc_call`, `rpc_call_with_mandate`) names its own timeout, and the check runs
+/// when the provider reads the request from `rpc_rx`: behind a backlog longer than this, such a request
+/// is refused `stale` though its caller still waits. [`verify`] refuses one issued more than this
+/// **plus** the node's `max_clock_drift_ms` ago, or more than `max_clock_drift_ms` ahead of its own
+/// clock ([`CallerError::Stale`]); with `max_clock_drift_ms = 0` (no drift bound) the age bound is this
+/// alone, and an envelope may be at most this far ahead.
+pub const CALLER_CONTEXT_MAX_AGE_MS: u64 = 300_000;
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -209,6 +221,16 @@ pub enum CallerError {
     Missing,
     /// The sending node has been removed from the mesh by an operator (closure plan C5).
     Removed,
+    /// The envelope's issue time is outside the window this node accepts: older than
+    /// [`CALLER_CONTEXT_MAX_AGE_MS`] plus the drift bound, or further ahead than the drift bound
+    /// (post-360 hardening row E). Under `tls` the time is inside the signature, so a captured
+    /// envelope cannot be re-dated; without it the time is carried, as the rest of the envelope is.
+    Stale {
+        /// The envelope's `issued_at_ms`.
+        issued_at_ms: u64,
+        /// This node's decision clock when it verified (`Hlc::decision_now_ms`).
+        now_ms: u64,
+    },
 }
 
 impl CallerError {
@@ -223,6 +245,7 @@ impl CallerError {
             CallerError::BadSignature => "bad_signature",
             CallerError::Missing => "missing",
             CallerError::Removed => "removed",
+            CallerError::Stale { .. } => "stale",
         }
     }
 }
@@ -231,6 +254,12 @@ impl std::fmt::Display for CallerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CallerError::Removed => write!(f, "the sending node has been removed from the mesh"),
+            CallerError::Stale { issued_at_ms, now_ms } => write!(
+                f,
+                "caller context issued at {issued_at_ms} ms is outside the accepted window at {now_ms} ms (at most \
+                 {CALLER_CONTEXT_MAX_AGE_MS} ms old plus the clock-drift bound, never beyond that bound ahead; \
+                 with a drift bound of 0, at most that age either way)"
+            ),
             CallerError::Malformed(why) => write!(f, "caller context malformed: {why}"),
             CallerError::ViaMismatch { claimed, sender } => {
                 write!(f, "caller context names gateway {claimed} but the frame came from {sender}")
@@ -539,7 +568,19 @@ pub(crate) fn frame_with_context_and_mandate(
 ) -> Option<Bytes> {
     // A caller envelope's issue time is checked against a lifetime by whoever receives it, so it
     // must come from a clock that moves. See `Hlc::decision_now_ms`.
-    let issued_at_ms = ctx.hlc.decision_now_ms();
+    frame_with_context_at(ctx, principal, scopes, app, mandate, resource, ctx.hlc.decision_now_ms())
+}
+
+/// [`frame_with_context_and_mandate`] at a given issue time — the one place an envelope is built.
+pub(crate) fn frame_with_context_at(
+    ctx: &TaskCtx,
+    principal: &str,
+    scopes: &[String],
+    app: Bytes,
+    mandate: Option<&serde_json::Value>,
+    resource: Option<&str>,
+    issued_at_ms: u64,
+) -> Option<Bytes> {
     let via = ctx.node_id.to_string();
     let (k, sig) = attest(ctx, principal, &via, scopes, issued_at_ms, &app);
     let env = Envelope {
@@ -819,6 +860,23 @@ pub(crate) fn verify(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<GatewayCa
         let _ = ctx;
         CallerAttestation::UnauthenticatedMesh
     };
+
+    // Post-360 row E: the envelope binds freshness. Its issue time is inside the signature (under
+    // `tls`), and it is read here — before, it was signed and never checked, so a captured envelope and
+    // payload verified for ever. Checked after the signature, so a forgery still answers as one.
+    // `max_clock_drift_ms = 0` means *no drift bound* (`hlc.rs`, `configuration.md`): then there is no
+    // future bound, and the age bound is `CALLER_CONTEXT_MAX_AGE_MS` alone (#613's review, finding 1 —
+    // an RPC frame does not make this node observe the sender's clock, so a zero tolerance refused
+    // every envelope from a gateway a few ms ahead).
+    let now_ms = ctx.hlc.decision_now_ms();
+    let drift = ctx.config.max_clock_drift_ms;
+    // With no drift bound the future is still bounded — by the age bound, so a far-future envelope
+    // (a re-dated replay on an unsigned mesh) is refused (#613's final review).
+    let ahead_bound = if drift == 0 { CALLER_CONTEXT_MAX_AGE_MS } else { drift };
+    let too_far_ahead = env.t.saturating_sub(now_ms) > ahead_bound;
+    if now_ms.saturating_sub(env.t) > CALLER_CONTEXT_MAX_AGE_MS.saturating_add(drift) || too_far_ahead {
+        return Err(CallerError::Stale { issued_at_ms: env.t, now_ms });
+    }
 
     Ok(Some(GatewayCaller {
         principal: env.p,
@@ -1269,6 +1327,59 @@ mod tests {
             let req = request_from(a.node_id(), "k", raw_frame(&forged, b"payload"));
             assert_eq!(verify(&a.task_ctx, &req), Err(CallerError::UnknownSigner));
         }
+        a.shutdown().await;
+    }
+
+    /// Post-360 row E: the envelope binds freshness. Its issue time was signed but never read, so a
+    /// captured envelope and payload verified for ever. Now `verify` refuses one issued further back
+    /// than [`CALLER_CONTEXT_MAX_AGE_MS`] plus the node's drift bound, or further ahead than the drift
+    /// bound — signed (the time is the gateway's) and unsigned (the time is carried) alike.
+    #[tokio::test]
+    async fn a_stale_or_future_envelope_is_refused() {
+        for tls in [false, true] {
+            #[cfg(not(feature = "tls"))]
+            if tls { continue; }
+            let a = agent(tls);
+            a.start().await.unwrap();
+            let now = a.task_ctx.hlc.decision_now_ms();
+            let drift = a.task_ctx.config.max_clock_drift_ms;
+            let app = Bytes::from_static(b"payload");
+            let at = |t: u64| {
+                let framed = frame_with_context_at(&a.task_ctx, "oidc:idp/alice", &["mesh:write".into()], app.clone(), None, None, t).unwrap();
+                verify(&a.task_ctx, &request_from(a.node_id(), "k", framed)).map(|c| c.map(|c| c.issued_at_ms)).map_err(|e| e.code())
+            };
+            assert_eq!(at(now), Ok(Some(now)), "tls={tls}: a fresh envelope verifies");
+            assert_eq!(at(now - 60_000), Ok(Some(now - 60_000)), "tls={tls}: a minute in flight is fine");
+            assert_eq!(at(now - 2 * 3_600_000 - drift), Err("stale"), "tls={tls}: two hours old");
+            assert_eq!(at(now + drift + 60_000), Err("stale"), "tls={tls}: from beyond the drift bound");
+            assert_eq!(at(0), Err("stale"), "tls={tls}: issued at the epoch");
+            a.shutdown().await;
+        }
+    }
+
+    /// #613's review, finding 1: `max_clock_drift_ms = 0` means *no drift bound* (`hlc.rs`,
+    /// `configuration.md`), and RPC frames do not make the provider observe the sender's clock — so a
+    /// provider a few ms behind the gateway refused nearly every envelope as `stale`. With 0 there is no
+    /// future bound, and the age bound is `CALLER_CONTEXT_MAX_AGE_MS` alone.
+    #[tokio::test]
+    async fn a_zero_drift_bound_bounds_only_the_age() {
+        let port = crate::test_util::alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.max_clock_drift_ms = 0;
+        let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+        a.start().await.unwrap();
+        let now = a.task_ctx.hlc.decision_now_ms();
+        let app = Bytes::from_static(b"payload");
+        let at = |t: u64| {
+            let framed = frame_with_context_at(&a.task_ctx, "oidc:idp/alice", &[], app.clone(), None, None, t).unwrap();
+            verify(&a.task_ctx, &request_from(a.node_id(), "k", framed)).map(|c| c.is_some()).map_err(|e| e.code())
+        };
+        assert_eq!(at(now + 50), Ok(true), "a gateway 50 ms ahead of this provider");
+        assert_eq!(at(now + CALLER_CONTEXT_MAX_AGE_MS - 1_000), Ok(true), "ahead, inside the age bound");
+        assert_eq!(at(now + 3_600_000), Err("stale"), "far ahead: with no drift bound the future is bounded by the age bound");
+        assert_eq!(at(now - CALLER_CONTEXT_MAX_AGE_MS + 1_000), Ok(true), "inside the age bound");
+        assert_eq!(at(now - CALLER_CONTEXT_MAX_AGE_MS - 1_000), Err("stale"), "the age bound alone");
         a.shutdown().await;
     }
 

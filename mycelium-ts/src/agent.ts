@@ -17,6 +17,21 @@ import {
   CommitResult,
 } from "./types";
 
+/** The node's bound on a re-assertion or lease period (`MAX_TIMER_PERIOD_SECS`): past it the gateway answers 400 `timer_out_of_range`. */
+export const MAX_TIMER_PERIOD_SECS = 3600;
+
+/** Whole seconds, rounded up; refused locally at 0 or past the node's 3600 s bound, as the node refuses them (post-360 row E). */
+function timerPeriod(secs: number, name: string): number {
+  if (secs === 0) {
+    throw new Error(`${name} must be at least 1 second (the node refuses 0), not 0`);
+  }
+  const whole = wholeSeconds(secs, 1, name);
+  if (whole > MAX_TIMER_PERIOD_SECS) {
+    throw new Error(`${name} ${String(secs)} is past the node's bound of ${MAX_TIMER_PERIOD_SECS} seconds`);
+  }
+  return whole;
+}
+
 function b64(buf: Buffer | Uint8Array): string {
   return Buffer.from(buf).toString("base64");
 }
@@ -280,8 +295,8 @@ export class MyceliumAgent {
     const data = await this._post("/gateway/capability/advertise", {
       ns,
       name,
-      interval_secs: options.intervalSecs ?? 30,
-      ...(options.leaseSecs !== undefined ? { lease_secs: wholeSeconds(options.leaseSecs, 1, "leaseSecs") } : {}),
+      interval_secs: timerPeriod(options.intervalSecs ?? 30, "intervalSecs"),
+      ...(options.leaseSecs !== undefined ? { lease_secs: timerPeriod(options.leaseSecs, "leaseSecs") } : {}),
       attributes: options.attributes ?? {},
       authorized_callers: options.authorizedCallers ?? [],
     }) as { handle_id: string };
@@ -312,8 +327,8 @@ export class MyceliumAgent {
   ): Promise<UnitHandle> {
     const data = (await this._post("/gateway/units/declare", {
       toml: tomlText,
-      interval_secs: options.intervalSecs ?? 30,
-      ...(options.leaseSecs !== undefined ? { lease_secs: wholeSeconds(options.leaseSecs, 1, "leaseSecs") } : {}),
+      interval_secs: timerPeriod(options.intervalSecs ?? 30, "intervalSecs"),
+      ...(options.leaseSecs !== undefined ? { lease_secs: timerPeriod(options.leaseSecs, "leaseSecs") } : {}),
     })) as {
       handle_id: string;
       principal: string | null;

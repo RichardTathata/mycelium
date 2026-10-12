@@ -657,10 +657,28 @@ pub struct PresenceDecl {
     pub max_providers: Option<usize>,
 }
 
+/// The longest period a declared or client-supplied re-assertion timer may run at, in seconds — a
+/// `[[capability]]`'s `ttl_secs`, and the gateway's `interval_secs` and `lease_secs` (post-360
+/// hardening row E). An hour: an advert or a requirement refreshed less often than that is one its
+/// readers time as alive for three hours after its refresher died (the 3× evaporation window), and a
+/// zero period is a busy loop (the timer seam floors it at 1 ms). On the two routes this bounds
+/// (`capability/advertise`, `units/declare`) and in a unit file, a value outside `1..=` this is refused by
+/// name, never clamped; the gateway's other timers (`overlay/lock/acquire` and `overlay/elect`'s
+/// `ttl_secs`, `rpc/call`'s `timeout_secs`) still clamp.
+pub const MAX_TIMER_PERIOD_SECS: u64 = 3_600;
+
 impl NodeCapabilityConfig {
     /// Every refusal the loader makes, by name. Called by [`load_from_file`](Self::load_from_file)
     /// after parsing; call it yourself on a config built in code.
     pub fn validate(&self) -> Result<(), GossipError> {
+        for c in &self.capabilities {
+            if !(1..=MAX_TIMER_PERIOD_SECS).contains(&c.ttl_secs) {
+                return Err(invalid("capability", format!(
+                    "{}/{}: ttl_secs = {} is outside 1..={MAX_TIMER_PERIOD_SECS} (it is the period the capability re-asserts at)",
+                    c.ns, c.name, c.ttl_secs
+                )));
+            }
+        }
         if let Some(p) = &self.principal
             && p.trim().is_empty()
         {
@@ -756,6 +774,12 @@ impl NodeCapabilityConfig {
         }
         for (i, sv) in self.serves.iter().enumerate() {
             let at = format!("[{i}] {}/{}", sv.ns, sv.name);
+            // A served skill is a prompt skill: its template key is `prompts/{ns}/{name}`, which a `/` (or an
+            // empty part) would share with another pair — `register_prompt_skill` refuses it, so refuse it at
+            // load rather than on every reconcile tick (#613's review, finding 5).
+            if [&sv.ns, &sv.name].iter().any(|p| p.is_empty() || p.contains('/')) {
+                return Err(invalid("serve", format!("{at}: ns and name must be non-empty and contain no '/' (a served skill is a prompt skill)")));
+            }
             if sv.endpoint.trim().is_empty() || sv.model.trim().is_empty() {
                 return Err(invalid("serve", format!("{at}: an endpoint and a model are both required")));
             }

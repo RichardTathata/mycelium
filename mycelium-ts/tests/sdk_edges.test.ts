@@ -187,6 +187,10 @@ const LEASES: Record<string, Lease> = {
   "advertiseCapability.leaseSecs": [(a, t) => a.advertiseCapability("ns", "n", { leaseSecs: t }), "lease_secs", "leaseSecs"],
   "declareUnits.leaseSecs":        [(a, t) => a.declareUnits("", { leaseSecs: t }), "lease_secs", "leaseSecs"],
   "distributedLock.ttlSecs":       [(a, t) => a.distributedLock("jobs", { ttlSecs: t }), "ttl_secs", "ttlSecs"],
+  // Post-360 row E: the gateway refuses an `interval_secs` that is not a whole number (it fell back to
+  // 30 s without a word before), so the SDK rounds it up as it does a lease.
+  "advertiseCapability.intervalSecs": [(a, t) => a.advertiseCapability("ns", "n", { intervalSecs: t }), "interval_secs", "intervalSecs"],
+  "declareUnits.intervalSecs":        [(a, t) => a.declareUnits("", { intervalSecs: t }), "interval_secs", "intervalSecs"],
 };
 
 describe.each(Object.keys(LEASES))("%s", (verb) => {
@@ -208,4 +212,24 @@ describe.each(Object.keys(LEASES))("%s", (verb) => {
     expect(String(err?.message)).toContain(option);
     expect(seen).toEqual([]);
   });
+});
+
+// #613's review: the node refuses a period past 3600 s (400 timer_out_of_range); the SDK says so first.
+test.each(["advertiseCapability.intervalSecs", "advertiseCapability.leaseSecs",
+           "declareUnits.intervalSecs", "declareUnits.leaseSecs"])("%s refuses a period past 3600 s, before any request", async (verb) => {
+  const [call, , option] = LEASES[verb];
+  stub({ ok: true, handle_id: "h" });
+  const err = await caught(() => call(new MyceliumAgent("127.0.0.1", 1, 1000), 3601));
+  expect(String(err?.message)).toContain(option);
+  expect(seen).toEqual([]);
+});
+
+// The node refuses 0 (400 timer_out_of_range); the SDK refuses it too rather than rounding it to 1.
+test.each(["advertiseCapability.intervalSecs", "advertiseCapability.leaseSecs",
+           "declareUnits.intervalSecs", "declareUnits.leaseSecs"])("%s refuses a period of 0, before any request", async (verb) => {
+  const [call, , option] = LEASES[verb];
+  stub({ ok: true, handle_id: "h" });
+  const err = await caught(() => call(new MyceliumAgent("127.0.0.1", 1, 1000), 0));
+  expect(String(err?.message)).toContain(option);
+  expect(seen).toEqual([]);
 });

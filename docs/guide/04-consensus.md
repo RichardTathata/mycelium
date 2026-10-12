@@ -826,14 +826,19 @@ agent.kv().compact_log("events", checkpoint_hlc);
 
 #### Consumer Groups (`subscribe_log_group`)
 
-At most one consumer per group advances at a time. The offset (`clog/{stream}/{group}/offset`)
-is persisted in the gossip KV so any node can take over if the current holder fails.
+At most one consumer per group advances at a time. The group's position — the last entry handed on, as
+`(hlc, key)`, the order `scan_log` sorts by, so two entries sharing an HLC are both delivered — is persisted in
+the gossip KV (`clog/{stream}/{group}/cursor`, with an HLC one below the entry's at `clog/{stream}/{group}/offset` for older
+nodes) so any node can take over if the current holder fails. It is recorded **after** the entry is handed on:
+in process, once the entry is in the receiver's channel (capacity 64, so entries queued when the receiver is
+dropped are lost to the group); at the gateway, once its stream hands the entry to the HTTP connection (post-360
+row E).
 
 ```rust
 let mut rx = agent.kv().subscribe_log_group("events", "workers").await;
 while let Some(entry) = rx.recv().await {
     process(&entry);
-    // offset committed before next entry is delivered
+    // the position was recorded when this entry entered the channel, not when process() returned
 }
 ```
 

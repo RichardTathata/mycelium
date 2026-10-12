@@ -303,8 +303,16 @@ async fn handle_llm_invoke(
         return;
     }
 
-    // Read template fresh from KV
-    let kv_key = format!("prompts/{}", skill_id);
+    // Read template fresh from KV. `skill_id` is the registry's "ns/name" (registration refuses any other
+    // shape); built through the one key builder all the same.
+    let Some(kv_key) = skill_id.split_once('/').and_then(|(ns, name)| super::helpers::prompt_kv_key(ns, name)) else {
+        let err = serde_json::to_vec(&LlmInvokeError {
+            error: "invalid_prompt_name".into(),
+            detail: format!("{skill_id} is not a prompt skill name"),
+        }).unwrap_or_default();
+        rpc_respond_ctx(&ctx, &req, Bytes::from(err));
+        return;
+    };
     let template_bytes = ctx.kv_state.store.pin().get(kv_key.as_str())
         .and_then(|e| e.data.clone());
     let template_bytes = match template_bytes {
