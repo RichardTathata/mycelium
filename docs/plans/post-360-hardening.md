@@ -83,7 +83,7 @@ Four places strain that line today, and the rows in §3 address each:
 | **G** — *delivered 2.32.0 (#595), §3.5* | SDKs | Python whole-second timeouts and a non-truncating tuple `take`; path segments escaped; TypeScript `SupersededError`; one `scatterGather` default, documented; SSE reconnect is designed with a gateway resume point or recorded as not built | R0 |
 | **H** | Companions | the commitment deadline judged on the log's clock, not the offerer's; `award_of` verifies before it reports; the reason blob store bounded; caller-chosen `run_id` validated | R0 |
 | **I** | Private repo P3s | RA5 correction chains and competing corrections; attempt keys carry the operation id; a lock-order table; the outbox directory fsynced at create; Cedar policies schema-validated at load; the CI pin check refuses `[patch]`, `rev =` and multi-line tables | R0's re-pin |
-| **J** | Hygiene | the sim-seam gate's test-skip bug (the one the KV gate fixed in #591); every feature and bench linted or built by some CI step; the two CI jobs on `stable` pinned; unreferenced public items deprecated, not removed (nothing is removed on the 2.x line); only the duplicates that disagree are unified (`hex_line`'s whitespace, `now_ms` copies outside the seam) | — |
+| **J** — *delivered (#608), §3.5* | Hygiene | the sim-seam gate's test-skip bug (the one the KV gate fixed in #591); every feature and bench linted or built by some CI step; the two CI jobs on `stable` pinned; unreferenced public items deprecated, not removed (nothing is removed on the 2.x line); only the duplicates that disagree are unified (`hex_line`'s whitespace, `now_ms` copies outside the seam) | — |
 
 ### 3.4 · Documentation follow-through
 
@@ -325,6 +325,35 @@ withhold real frames with the test-only `test-frame-filter` (enabled in CI's def
   `the_secure_profile_names_the_unauthenticated_opt_in`, and the report states in the start test above.
 - *Loopback development is unchanged* — the `127.0.0.1` case of the start test (`not_applicable`) and
   `loopback_is_127_slash_8_and_colon_colon_1_and_nothing_else`.
+
+**J — Hygiene (#608, after 2.32.0).**
+- *The sim-seam gate's test-skip bug (the one the KV gate fixed in #591)* — `scripts/check-sim-seams.sh` `count_in`
+  takes `check-kv-namespaces.sh`'s brace-counting skip (exactly the item the attribute applies to, at any
+  indentation); `scripts/test-check-sim-seams.sh` plants the five shapes (`skip_oneline_mod`, `skip_indented_fn`,
+  `skip_oneline_body`, `skip_more_attrs`, `skip_whole_module`), seen failing on the old gate (counted 0, 1, 0 for
+  1, 2, 1). **What it caught:** the `#[cfg(test)]` on `ConsensusEngine::shrink_acceptor_for_test`
+  (`src/consensus.rs:1592`, #600) hid the five timer sites after it to the `impl`'s close (`:4154`) — the gate
+  counted 0 against a baseline of 5 since 2.32.0 and said only *progress*. Baseline rows moved: `capability_ops.rs`
+  2→0, `intent.rs` 1→0 (the `now_ms` unification), `signal.rs` 11→8, `http.rs` 15→14 (stale before this PR — the
+  old gate reported both on `main`).
+- *Every feature and bench linted or built by some CI step* — the table is in the PR; the uncovered ones (`otel`,
+  `gateway_overhead`; `metrics` on tuple-space, blackboard, effects, wiki; guardrails `gateway`, `metrics-export`;
+  reason `compliance`) are each on an existing job's clippy line (`.github/workflows/ci.yml`; the two root lines
+  also in `make check-full`). **What it caught:** the wiki's `metrics` lint found `mycelium` built with `metrics` and without `gateway` failing `-D warnings` — `mod emergent`'s allowance (`not(any(gateway, metrics))`, `src/agent/mod.rs:106`) lifts under `metrics` alone and the six explain items only `/gateway/explain` reads were dead; each now carries `cfg_attr(not(gateway), allow(dead_code))` and `cargo clippy --lib --no-default-features --features metrics` is a named line (embedded job, `make check`). `mycelium-core/test-support`: the root crate's dev-dependency, every root test step;
+  `throughput`: the embedded job's `cargo check --all-targets --no-default-features`. **Not built:** a check that
+  derives the table from the manifests and fails when a feature loses its step.
+- *The two CI jobs on `stable` pinned* — `effects` and `commitment` → `dtolnay/rust-toolchain@1.96.0`, the
+  version `rust-toolchain.toml` and the other seventeen pin; `testing.md`'s toolchain paragraph counts them.
+- *Unreferenced public items deprecated, not removed* — nineteen, each with the whole-tree `grep -rnw` in the PR,
+  `#[deprecated(since = "2.33.0")]`, `deprecations.md` §37; nothing removed. `Preflight::is_inert`
+  (`src/agent/http.rs`) is the twentieth, left for rows P5/E, which own that file.
+- *Only the duplicates that disagree are unified* — `hex_line`: the wasm-host gateway's copy trimmed, the
+  catalogue's did not (its caller did); one `pub(crate)` trimming decoder in `catalog.rs`, pinned by
+  `hex_line_ignores_edge_whitespace_and_refuses_everything_else`. `now_ms`: `capability_ops.rs` (`now_ms`,
+  `age_now_ms`), `intent.rs`, tuple-space `store.rs`, agentfacts `crdt.rs`/`lib.rs` read `SystemTime::now()`;
+  `federation/edge.rs` read the seam; every one reads `sim_seam::wall_now_ms` now — the baseline rows are the
+  structural pin and `every_now_ms_is_the_seams_wall_clock` the behavioural one. The agreeing copies in
+  `examples/` and `tests/` are left alone.
 
 ## 4 · Decisions taken
 
