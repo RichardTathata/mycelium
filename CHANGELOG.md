@@ -120,7 +120,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **Under `sim`, each of these reads is now a recorded kernel choice**, so a recording made before this change that
   touches these paths would diverge on replay; the checked-in corpus is core-only and unaffected).
 
-- **`src/agent/http.rs` split by route family — behaviour-preserving (post-360 plan row P5, #NNN).** The
+- **`src/agent/http.rs` split by route family — behaviour-preserving (post-360 plan row P5, #610).** The
   9,889-line gateway file is now the directory `src/agent/http/`: `mod.rs` (the handler state, listener, TLS,
   router and public surface), **`authz.rs` — the one shared authorisation-and-evidence layer every family goes
   through** (`gateway_auth`, `required_scope`, the AE preflight and its evidence records, the protected-kind /

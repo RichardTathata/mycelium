@@ -4,7 +4,7 @@
 surface), `authz.rs` (the shared authorisation-and-evidence layer), `node.rs`, `mcp_bridge.rs`, `signals.rs`,
 `caps.rs`, `mesh.rs`, `kv.rs`, `overlay.rs`, `govern.rs`, `compliance.rs`, `llm_bridge.rs`,
 `federation_routes.rs`, and the test modules `http_tests.rs` (module `tests`), `gateway_caller_tests.rs`,
-`ae_seam_tests.rs`. Moved by line range, byte-identical, no behaviour change (post-360 plan row P5, #NNN).
+`ae_seam_tests.rs`. Moved by line range, byte-identical, no behaviour change (post-360 plan row P5, #610).
 
 Pages touched: `dev/security.md`, `dev/operations.md`, `dev/architecture/contracts.md`,
 `dev/architecture/runtime-invariants.md`, `dev/concurrency/lock-order.md` (rows 15, 16, 55 name their files),
