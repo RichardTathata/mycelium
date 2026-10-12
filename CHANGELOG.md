@@ -207,7 +207,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the 400s above; a provider reading a request from `rpc_rx` more than 300 s plus the drift bound after it was sent
   refuses it `stale`. **What a drop still loses:** a mailbox event or log-group entry the HTTP connection had accepted
   — the gateway has no resume point (guide 10, *not built*). **Review round** (#613's adversarial review): `max_clock_drift_ms
-  = 0` means no drift bound for the envelope too (no future bound; the age bound is 300 s alone —
+  = 0` means no drift bound for the envelope too (the age bound is 300 s alone, and at most 300 s ahead —
   `a_zero_drift_bound_bounds_only_the_age`, seen failing first: `left: Err("stale") right: Ok(true)`); two mailbox
   streams of one kind share one in-flight set, so neither hands out what the other holds, and a dropped stream's
   un-acknowledged events go to the other (`two_mailbox_streams_for_one_kind_never_hand_out_one_event_twice`, seen failing
@@ -215,7 +215,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the cursor re-delivers rather than skips (`an_offset_that_arrives_before_its_cursor_never_skips_a_sibling`, seen failing
   first: `ThroughHlc(512)`); a `[[serve]]` name with a `/` is refused at load
   (`a_serve_name_that_cannot_be_a_prompt_skill_is_refused_at_load`); every `prompts/` key builder (including `a2a.rs` and
-  the LLM provider) goes through one function; both SDKs refuse an `interval_secs`/`lease_secs` past 3600 locally (seen
+  the LLM provider) goes through one function; both SDKs refuse an `interval_secs`/`lease_secs` of 0 or past 3600 locally (seen
   failing first: 4 py, 4 ts); the 300 s window is stated as the gateway's (an in-process caller behind a backlog is
   refused at dequeue); the bound's "never clamped" narrowed to the two routes it covers.
 

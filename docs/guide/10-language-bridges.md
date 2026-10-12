@@ -362,7 +362,7 @@ connection drops. A client re-opens it in a loop, and what it misses in the gap 
 |---|---|
 | signals (`on_signal` / `onSignal`, `/signals/{kind}`) | nothing emitted in the gap is delivered later — signals are best-effort |
 | `rpc_serve` / `rpcServe` | a request that arrived in the gap reached no server; its caller timed out, which is *unknown*, not *not done* |
-| `mailbox` | the gateway deletes each event as its stream **hands it to the HTTP connection** (`src/agent/http/mesh.rs`, `open_mailbox_acked`; since post-360 row E — before, as it queued it, up to 256 ahead of the client), so the re-opened stream delivers everything still queued at the drop; two streams of one kind never hand out the same event (one in-flight set per kind), and what one dropped holding goes to the other. What the connection had accepted — written to the socket, in the kernel's buffers, not yet read — is gone: handed to the connection is not received. An event that must not be lost needs an application-level acknowledgement, or a log or tuple space instead |
+| `mailbox` | the gateway deletes each event as its stream **hands it to the HTTP connection** (`src/agent/http/mesh.rs`, `open_mailbox_acked`; since post-360 row E — before, as it queued it, up to 256 ahead of the client), so the re-opened stream delivers everything still queued at the drop; two streams of one kind never hand out the same event (one in-flight set per kind), and what one dropped holding goes to the other. A connected but stalled stream holds the events it has claimed from its siblings until it reads them or its connection drops. What the connection had accepted — written to the socket, in the kernel's buffers, not yet read — is gone: handed to the connection is not received. An event that must not be lost needs an application-level acknowledgement, or a log or tuple space instead |
 | `subscribe_log` / `subscribeLog` | resume with `since` = the last handled entry's `hlc + 1` (the cursor is inclusive) |
 | `subscribe_log_group` / `subscribeLogGroup` | contends for the group's claim again and resumes from the group's recorded position — the last entry's `(hlc, key)` — which moves when the stream **hands the entry to the HTTP connection** (since post-360 row E; before, as it queued it, up to 64 ahead), not when the client finishes it: entries still queued at the drop are sent again, one the connection had accepted is not |
 
@@ -375,7 +375,7 @@ row G and decision D4).
 `units/declare`, `overlay/lock/acquire`) get whole seconds from both SDKs, a fraction rounded up (`mycelium-py`
 0.2.10, `mycelium-ts` 0.2.0/0.2.4; `interval_secs` since post-360 row E, unreleased; the tuple `take` keeps `0`, its poll); a negative, non-finite or past-`u64`
 value is refused by name before any request. `capability/advertise` and `units/declare` hold `interval_secs` and
-`lease_secs` to `1..=3600` (both SDKs refuse a larger value locally) and answer **400 `timer_out_of_range`** naming the field otherwise — a value that is
+`lease_secs` to `1..=3600` (both SDKs refuse `0` and a larger value locally) and answer **400 `timer_out_of_range`** naming the field otherwise — a value that is
 not a whole number included, which they used to replace with 30 s ([deprecations.md §38](deprecations.md)). `/gateway/kv/quorum` reads `timeout_secs` as a float and is sent as
 given. A caller-supplied value that becomes one path segment — a kind, a prompt's `ns`/`name`, a run or blob id,
 a domain, a handle or guard id — is percent-encoded, and a value that cannot be one segment (`.`, `..`, empty, a

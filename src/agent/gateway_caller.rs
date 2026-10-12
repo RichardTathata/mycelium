@@ -136,8 +136,8 @@ pub(crate) const MAX_ENVELOPE_BYTES: usize = 8 * 1024;
 /// when the provider reads the request from `rpc_rx`: behind a backlog longer than this, such a request
 /// is refused `stale` though its caller still waits. [`verify`] refuses one issued more than this
 /// **plus** the node's `max_clock_drift_ms` ago, or more than `max_clock_drift_ms` ahead of its own
-/// clock ([`CallerError::Stale`]); with `max_clock_drift_ms = 0` (no drift bound) only the age is
-/// bounded.
+/// clock ([`CallerError::Stale`]); with `max_clock_drift_ms = 0` (no drift bound) the age bound is this
+/// alone, and an envelope may be at most this far ahead.
 pub const CALLER_CONTEXT_MAX_AGE_MS: u64 = 300_000;
 
 // ── Public types ─────────────────────────────────────────────────────────────
@@ -258,7 +258,7 @@ impl std::fmt::Display for CallerError {
                 f,
                 "caller context issued at {issued_at_ms} ms is outside the accepted window at {now_ms} ms (at most \
                  {CALLER_CONTEXT_MAX_AGE_MS} ms old plus the clock-drift bound, never beyond that bound ahead; \
-                 a drift bound of 0 bounds the age alone)"
+                 with a drift bound of 0, at most that age either way)"
             ),
             CallerError::Malformed(why) => write!(f, "caller context malformed: {why}"),
             CallerError::ViaMismatch { claimed, sender } => {
@@ -870,7 +870,10 @@ pub(crate) fn verify(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<GatewayCa
     // every envelope from a gateway a few ms ahead).
     let now_ms = ctx.hlc.decision_now_ms();
     let drift = ctx.config.max_clock_drift_ms;
-    let too_far_ahead = drift != 0 && env.t.saturating_sub(now_ms) > drift;
+    // With no drift bound the future is still bounded — by the age bound, so a far-future envelope
+    // (a re-dated replay on an unsigned mesh) is refused (#613's final review).
+    let ahead_bound = if drift == 0 { CALLER_CONTEXT_MAX_AGE_MS } else { drift };
+    let too_far_ahead = env.t.saturating_sub(now_ms) > ahead_bound;
     if now_ms.saturating_sub(env.t) > CALLER_CONTEXT_MAX_AGE_MS.saturating_add(drift) || too_far_ahead {
         return Err(CallerError::Stale { issued_at_ms: env.t, now_ms });
     }
@@ -1373,7 +1376,8 @@ mod tests {
             verify(&a.task_ctx, &request_from(a.node_id(), "k", framed)).map(|c| c.is_some()).map_err(|e| e.code())
         };
         assert_eq!(at(now + 50), Ok(true), "a gateway 50 ms ahead of this provider");
-        assert_eq!(at(now + 3_600_000), Ok(true), "no drift bound: no future bound");
+        assert_eq!(at(now + CALLER_CONTEXT_MAX_AGE_MS - 1_000), Ok(true), "ahead, inside the age bound");
+        assert_eq!(at(now + 3_600_000), Err("stale"), "far ahead: with no drift bound the future is bounded by the age bound");
         assert_eq!(at(now - CALLER_CONTEXT_MAX_AGE_MS + 1_000), Ok(true), "inside the age bound");
         assert_eq!(at(now - CALLER_CONTEXT_MAX_AGE_MS - 1_000), Err("stale"), "the age bound alone");
         a.shutdown().await;

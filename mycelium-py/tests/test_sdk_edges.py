@@ -265,3 +265,12 @@ def test_a_timer_period_past_the_nodes_bound_is_refused_locally(port, verb):
     with pytest.raises(ValueError, match=field):
         call(MyceliumAgent("127.0.0.1", port), 3601)
     assert _Stub.seen == []
+
+
+@pytest.mark.parametrize("verb", PERIODS)
+def test_a_zero_timer_period_is_refused_locally(port, verb):
+    # The node refuses 0 (400 timer_out_of_range); the SDK refuses it too rather than rounding it to 1.
+    call, field = LEASES[verb]
+    with pytest.raises(ValueError, match=field):
+        call(MyceliumAgent("127.0.0.1", port), 0)
+    assert _Stub.seen == []

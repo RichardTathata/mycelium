@@ -269,13 +269,14 @@ async fn mailbox_task(
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     mut watcher:     tokio::sync::watch::Receiver<u64>,
 ) {
-    // Deliver any entries already present before we started watching.
-    drain_prefix(&ctx, &prefix, &kind, &sink).await;
-    // An acked mailbox also looks again when another stream of it lets an event go un-acked.
+    // An acked mailbox also looks again when another stream of it lets an event go un-acked. Subscribed
+    // **before** the first drain, so a release during it is seen (#613's final review).
     let mut released = match &sink {
         Sink::Acked { in_flight, .. } => Some(in_flight.released.subscribe()),
         Sink::Immediate(_) => None,
     };
+    // Deliver any entries already present before we started watching.
+    drain_prefix(&ctx, &prefix, &kind, &sink).await;
 
     loop {
         tokio::select! { biased;

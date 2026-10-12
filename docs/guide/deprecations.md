@@ -1016,7 +1016,7 @@ cannot see an exported item, so the next sweep is a session's work, not a gate.
   receive path — reads the envelope's signed issue time: older than `CALLER_CONTEXT_MAX_AGE_MS` (300 s, the longest
   any gateway door waits) plus `max_clock_drift_ms`, or further ahead than `max_clock_drift_ms`, is
   **`CallerError::Stale`** (code `stale`). With `max_clock_drift_ms = 0` — *no drift bound*, as everywhere else —
-  there is no future bound and the age bound is the 300 s alone. Before, the time was signed and never read.
+  the age bound is the 300 s alone, and an envelope may be at most 300 s ahead. Before, the time was signed and never read.
 - **A `[[serve]]` whose `ns` or `name` is empty or holds a `/` is refused at load** by `validate()` (a served skill is a
   prompt skill; it loaded, then failed `InvalidName` on every reconcile tick).
 - `GatewayPreflight::is_inert` is `#[deprecated(since = "2.33.0")]` (§37's note; nothing in the repository or the
@@ -1028,7 +1028,7 @@ denies). A call to `is_inert` warns. The rest is refusals by name.
 
 **Migration.** A client sending `interval_secs` or `lease_secs` as a fraction, `0` or past an hour: send whole
 seconds in range (`mycelium-py` and `mycelium-ts` now round `interval_secs` up, as they did leases, and refuse a
-period past 3600 s locally). The bound is these two routes' and a unit file's: `overlay/lock/acquire` and
+period of 0 or past 3600 s locally). The bound is these two routes' and a unit file's: `overlay/lock/acquire` and
 `overlay/elect`'s `ttl_secs` and `rpc/call`'s `timeout_secs` still clamp. A prompt skill
 whose `ns` or `name` holds a `/` never resolved (a `cap/` key with a `/` in its name was already refused as
 malformed); rename it. The 300 s window is the gateway's: no gateway door waits longer. An **in-process** caller

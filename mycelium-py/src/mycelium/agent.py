@@ -62,7 +62,10 @@ MAX_TIMER_PERIOD_SECS = 3600
 
 
 def _timer_period(secs: float, name: str) -> int:
-    """Whole seconds, rounded up, and refused locally past the node's 3600 s bound (post-360 row E)."""
+    """Whole seconds, rounded up; refused locally at 0 or past the node's 3600 s bound, as the node refuses them
+    (post-360 row E)."""
+    if not isinstance(secs, bool) and isinstance(secs, (int, float)) and secs == 0:
+        raise ValueError(f"{name} must be at least 1 second (the node refuses 0), not {secs!r}")
     whole = whole_seconds(secs, name=name)
     if whole > MAX_TIMER_PERIOD_SECS:
         raise ValueError(f"{name} {secs!r} is past the node's bound of {MAX_TIMER_PERIOD_SECS} seconds")

@@ -223,3 +223,13 @@ test.each(["advertiseCapability.intervalSecs", "advertiseCapability.leaseSecs",
   expect(String(err?.message)).toContain(option);
   expect(seen).toEqual([]);
 });
+
+// The node refuses 0 (400 timer_out_of_range); the SDK refuses it too rather than rounding it to 1.
+test.each(["advertiseCapability.intervalSecs", "advertiseCapability.leaseSecs",
+           "declareUnits.intervalSecs", "declareUnits.leaseSecs"])("%s refuses a period of 0, before any request", async (verb) => {
+  const [call, , option] = LEASES[verb];
+  stub({ ok: true, handle_id: "h" });
+  const err = await caught(() => call(new MyceliumAgent("127.0.0.1", 1, 1000), 0));
+  expect(String(err?.message)).toContain(option);
+  expect(seen).toEqual([]);
+});
