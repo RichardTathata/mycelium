@@ -80,7 +80,7 @@ Four places strain that line today, and the rows in §3 address each:
 | **C** — *delivered 2.32.0 (#597), §3.5* | Companion WALs (tuple space, blackboard) | compaction is crash-durable (temp file and directory fsynced); a torn or undecodable record poisons the writer and is refused at open rather than silently dropping every later record; one owner per file | R0 |
 | **D** — *delivered 2.32.0 (#599), §3.5* | WASM execution limits | epoch interruption bounds a guest call; guest code runs off the runtime's worker threads; a trap does not recompile the component on every call | R0 |
 | **E** — *delivered (#613), §3.5* | Gateway remainder | client-supplied timer periods (`interval_secs`) bounded; the log-group subscribe keeps the core's `(hlc, key)` tiebreak the mailbox deletes an entry only after the client has it (today it tombstones on entering the 256-slot channel, so a dropped stream loses queued events — #595's review); prompt keys cannot alias across `ns`/`name` (`prompts/{ns}/{name}` with a `/` in either); and saves the group offset only after the entry is sent (today it saves first, so an entry in flight when a stream drops is never re-sent — found by row G); the caller envelope binds freshness | P5 |
-| **F** | Wire and crypto, one MINOR with a window | a TLS node refuses unsigned `Data` frames; the removal check reads a peer's key structurally, not by byte-scanning the certificate; KV `SignedData` is domain-tagged; each change carries a mixed-fleet window and an upgrade note in the 2.30.0 shape; the #585 and #587 windows close in the same MINOR | R0, ideally its own release |
+| **F** — *delivered, unreleased (#PRNUM), §3.5* | Wire and crypto, one MINOR with a window | a TLS node refuses unsigned `Data` frames; the removal check reads a peer's key structurally, not by byte-scanning the certificate; KV `SignedData` is domain-tagged; each change carries a mixed-fleet window and an upgrade note in the 2.30.0 shape; the #585 and #587 windows close in the same MINOR | R0, ideally its own release |
 | **G** — *delivered 2.32.0 (#595), §3.5* | SDKs | Python whole-second timeouts and a non-truncating tuple `take`; path segments escaped; TypeScript `SupersededError`; one `scatterGather` default, documented; SSE reconnect is designed with a gateway resume point or recorded as not built | R0 |
 | **H** — *delivered after 2.32.0 (#609), §3.5* | Companions | the commitment deadline judged on the log's clock, not the offerer's; `award_of` verifies before it reports; the reason blob store bounded; caller-chosen `run_id` validated | R0 |
 | **I** — *delivered (private #30), §3.5; Cedar narrower* | Private repo P3s | RA5 correction chains and competing corrections; attempt keys carry the operation id; a lock-order table; the outbox directory fsynced at create; Cedar policies schema-validated at load; the CI pin check refuses `[patch]`, `rev =` and multi-line tables | R0's re-pin |
@@ -600,6 +600,45 @@ PR.
   8. "Never clamped" narrowed to the two routes and the unit file; lock/elect `ttl_secs` and `rpc/call`'s
      `timeout_secs` still clamp; both SDKs refuse a period past 3600 locally (*was* sent; 4 py and 4 ts tests).
   9. The `Stale` message's lost line continuation, the test doc's constant name, the `CONSUMER_LOG` doc.
+
+**F — Wire and crypto, one MINOR with a window (#PRNUM, unreleased after 2.32.0).** Read against the branch's code.
+- *A TLS node refuses unsigned `Data` frames* — `mycelium-core/src/connection.rs`, the `Data` arm: under a TLS
+  identity and `kv_require_signed_frames` the frame is dropped and counted (`unsigned_kv_frames`);
+  `a_tls_node_requiring_signed_frames_refuses_an_unsigned_data_frame` (seen applying the forged key on the unfixed
+  arm). **Not unconditional in this release** — the refusal is the setting, default off, which is the window
+  (next bullet but one); the unconditional refusal is the next MINOR's, *not built*. The twenty-three agent write
+  sites that sent bare `Data` frames sign (`framing::local_kv_wire_msg`; `scripts/check-signed-dispatch.sh` in
+  `make check` and CI, with `--self-test`); `an_agent_write_reaches_a_peer_that_requires_signed_frames` (seen
+  failing with the refusal built and the sites unrouted). **Not covered:** anti-entropy entries carry no author.
+- *The removal check reads a peer's key structurally, not by byte-scanning the certificate* —
+  `mycelium-core/src/tls.rs` `ed25519_key_from_cert_der` (`webpki::EndEntityCert::subject_public_key_info`, compared
+  with RFC 8410's header), used by `refuse_if_removed` and `stream.rs` `peer_ed25519_key`;
+  `a_planted_key_pattern_in_the_serial_does_not_fool_the_structural_read`,
+  `a_removed_member_hiding_its_key_behind_a_planted_pattern_is_still_refused`,
+  `a_non_ed25519_certificate_has_no_ed25519_key_whatever_its_serial_carries` — all three seen failing on the scan.
+- *KV `SignedData` is domain-tagged* — `framing::kv_signing_message` (`mycelium.kv/update/1 ‖ u32 len ‖ canonical`),
+  signed in `make_kv_wire_msg`, verified in `connection.rs`'s `SignedData` arm;
+  `a_kv_signature_is_over_the_tagged_message_not_the_bare_bytes`, `a_tagged_kv_signature_is_accepted_at_the_connection`,
+  `a_signature_under_another_tag_is_not_a_kv_signature` (seen failing first).
+- *Each change carries a mixed-fleet window and an upgrade note in the 2.30.0 shape* — the bare KV signature
+  accepted and counted (`kv_untagged_signatures`), the unsigned frame accepted and counted
+  (`kv_unsigned_frames_accepted`; `an_unsigned_data_frame_is_applied_and_counted_during_the_window`), both on
+  `GET /stats` and as metrics; `deprecations.md` §35 states each direction ("an upgraded node's KV writes reach a
+  2.32 peer only by anti-entropy until that peer is upgraded"; "an upgraded node requiring signed frames drops a
+  2.32 peer's agent writes until that peer is upgraded"); CHANGELOG `[Unreleased]` § Security. The certificate read
+  is local and has no window. **The window counters are not asserted on `/stats` by a test** — the accessors are.
+- *The #585 and #587 windows close in the same MINOR* — §23 (#585: the identity proof and the consensus signature)
+  is closed: `helpers::validate_and_merge_identity` and `consensus::verify_consensus_signature` accept the tagged
+  form only, `SignatureForm`/`sign_payload_as` removed, both counters removed;
+  `a_bare_identity_proof_is_refused_now_the_window_is_closed`, `a_bare_proof_signed_by_the_victim_is_refused_and_flagged`,
+  `a_consensus_signature_verifies_only_in_the_tagged_form`, `an_acceptor_answers_only_a_tagged_request` (seen
+  failing against the allowance). **#587 opened no window** (its commit, CHANGELOG entry and §25 accept nothing
+  for one release; the consensus-signature tag the brief attributed to it is #585's second half) — so nothing
+  was closed for it.
+- *Documentation follow-through* — `deprecations.md` §35 and the §23 closure note; `docs/threat-model.md` Boundary A;
+  `what-is-proven.md`'s KV residual moved to the CI table (role claims and audit records remain in the third);
+  `configuration.md`'s `kv_require_signed_frames` row; the identity-authentication and federated-domains records
+  amended; wiki `dev/security.md`; `docs/wiki/dev/.log/2026-10-12-f-wire-crypto.md`.
 
 ### 3.6 · State of play and the next iteration (2026-10-12)
 

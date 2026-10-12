@@ -253,6 +253,56 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (post-360 row E): referenced nowhere in the repository, the SDKs or the private companion (`grep -rn is_inert`
   over both trees).
 
+### Security
+
+- **Wire and crypto, one MINOR with a window (post-360 plan row F).** Wire **v12** unchanged — no frame changes
+  shape; what changes is what a node accepts and what a signature is over. Three changes and one closure:
+  - **KV `SignedData` is domain-tagged.** A KV write is signed over `mycelium.kv/update/1 ‖ u32 len ‖ canonical`
+    (`framing::kv_signing_message`), beside 2.32.0's identity and consensus tags. The one signer
+    (`make_kv_wire_msg`) and the one verifier (`connection::handle_connection`) were enumerated by
+    `grep -rn "canonical_sign_bytes(" src mycelium-core/src mycelium-*/src fuzz`. **Window, one release:** the bare
+    2.32 form is accepted and counted (`GET /stats` `kv_untagged_signatures`, `mycelium_kv_untagged_signatures_total`).
+    Seen failing first: `a_kv_signature_is_over_the_tagged_message_not_the_bare_bytes`,
+    `a_tagged_kv_signature_is_accepted_at_the_connection`, `a_signature_under_another_tag_is_not_a_kv_signature`.
+  - **A TLS node can refuse an unsigned `Data` frame.** Under `[tls]` the `Data` arm applied a frame whatever the
+    node's posture, so a member could write under another member's `sender` hash by not signing. Enumerating the
+    writers (`grep -rn "WireMessage::Data(" src mycelium-core/src mycelium-*/src`) found **twenty-three agent write
+    sites that never signed** — membership, mailboxes, state machines, opacity, the gateway's log/KV/offset routes,
+    MCP tombstones, the soft-state advertiser; all go through `framing::local_kv_wire_msg` now, and
+    `scripts/check-signed-dispatch.sh` (make check, CI, with a planted self-test) refuses a new bare dispatch.
+    `kv_require_signed_frames` (`GOSSIP_KV_REQUIRE_SIGNED_FRAMES`) drops the frame; **window, one release:** it
+    defaults to `false`, and an unsigned frame is applied and counted (`kv_unsigned_frames_accepted` /
+    `kv_unsigned_frames_refused`, `mycelium_kv_unsigned_frames_total{outcome}`). Seen failing first:
+    `a_tls_node_requiring_signed_frames_refuses_an_unsigned_data_frame`,
+    `an_unsigned_data_frame_is_applied_and_counted_during_the_window`, and
+    `an_agent_write_reaches_a_peer_that_requires_signed_frames` (with the refusal built and the sites not yet
+    rerouted). **Not covered:** anti-entropy — a `StateResponse` entry carries no author or signature.
+  - **A peer certificate's key is read structurally.** `tls::ed25519_key_from_cert_der` scanned the DER for the
+    Ed25519 SPKI prefix and returned the first match — in a serial number, a name or an extension the issuer
+    chooses — so a node holding the CA key could mint a certificate that anchors as another member
+    (`GossipStream::peer_ed25519_key`) or passes a removal of its own key (`refuse_if_removed`). It now reads the
+    `SubjectPublicKeyInfo` with `rustls-webpki` (already in the tree) and compares it with RFC 8410's one Ed25519
+    encoding. Local, no window. Seen failing first:
+    `a_planted_key_pattern_in_the_serial_does_not_fool_the_structural_read`,
+    `a_removed_member_hiding_its_key_behind_a_planted_pattern_is_still_refused`,
+    `a_non_ed25519_certificate_has_no_ed25519_key_whatever_its_serial_carries`.
+  - **2.32.0's §23 window closes.** A bare identity proof is refused in both `require_identity_proofs` postures, a
+    bare consensus signature does not verify, an acceptor answers only a tagged request (`SignatureForm` and
+    `sign_payload_as` removed), and the two counters `identity_untagged_proofs` / `consensus_untagged_signatures`
+    (and their metrics) are removed. Seen failing first against the allowance:
+    `a_bare_identity_proof_is_refused_now_the_window_is_closed`,
+    `a_bare_proof_signed_by_the_victim_is_refused_and_flagged`,
+    `a_consensus_signature_verifies_only_in_the_tagged_form`, `an_acceptor_answers_only_a_tagged_request`.
+
+  **Upgrade notes** (`docs/guide/deprecations.md` §35, the 2.30.0 shape): **upgrade from 2.32, not 2.31** — a 2.31
+  node and an upgraded node verify neither each other's identity proofs nor their consensus messages. **An upgraded
+  node's KV writes reach a 2.32 peer only by anti-entropy until that peer is upgraded** (a 2.32 verifier drops the
+  tagged `SignedData` as a bad signature, and does not forward it). **An upgraded node with
+  `kv_require_signed_frames` drops a 2.32 peer's agent writes until every peer is upgraded** — set it once
+  `kv_unsigned_frames_accepted` and `kv_untagged_signatures` stop rising fleet-wide. `GossipConfig` gained a field
+  (an exhaustive literal breaks). Remove alerts on the two removed metrics. The next MINOR refuses unsigned frames
+  and bare KV signatures unconditionally.
+
 ## [2.32.0] — 2026-10-11
 
 **The 360 review's must-do list, and the post-360 hardening plan's first wave.** A gateway bound off loopback with no

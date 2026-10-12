@@ -52,11 +52,25 @@ An attacker who controls one node process (RCE, stolen host) gains:
   signature as an identity proof: the identity proof is signed under `mycelium.identity/proof/1`
   and a consensus payload under `mycelium.consensus/msg/1`, so neither reads as the other. Before
   2.32.0 both were bare, and a victim's signed consensus answer, carrying proposer-chosen bytes,
-  could be published as the victim's identity proof (CHANGELOG, 2.32.0). KV `SignedData`, role
-  claims and audit records are still signed over untagged canonical bytes — a residual recorded in
-  `docs/operations/what-is-proven.md`; none of them can begin with the identity tag (a KV update's
-  second word is the signer's own id hash, a serialized record's first word a small length), so the
-  proof side stays closed.
+  could be published as the victim's identity proof (CHANGELOG, 2.32.0). Since the release after
+  2.32.0 (post-360 plan row F) KV `SignedData` is signed under `mycelium.kv/update/1` too, and the
+  2.32.0 allowance for bare identity proofs and consensus signatures is closed; a bare KV signature is
+  accepted for one release, counted (`deprecations.md` §35). Role claims and audit records are still
+  signed over untagged canonical bytes — a residual recorded in `docs/operations/what-is-proven.md`;
+  neither can begin with another domain's tag, so the tagged verifiers stay closed to them.
+- **Cannot write as another member by not signing — where the receiver says so.** Under `[tls]` every KV
+  write a node originates is signed (row F routed the agent's twenty-three unsigned write sites through
+  the signer); a receiver with `kv_require_signed_frames` drops an unsigned `Data` frame, and one
+  without it applies the frame and counts it (`kv_unsigned_frames_accepted`) — the one-release window;
+  the next MINOR refuses unconditionally. **Residual:** anti-entropy. A `StateResponse` entry carries no
+  author and no signature and is applied by LWW, so a compromised member can still introduce a value for
+  any key through a state reply; detection (the `sys/` tripwire, signed `sys/` records verified at read)
+  is what covers it.
+- **Cannot pass for another member's certificate key.** The removal check and the handshake anchor read
+  a peer certificate's key from its `SubjectPublicKeyInfo`, structurally (row F); before, a byte-scan
+  returned the first Ed25519 SPKI pattern anywhere in the DER, so a node holding the CA key could mint a
+  certificate whose serial number carried another member's key and anchor as that member, or pass a
+  removal of its own key.
 - **Read of all replicated KV state** that reached this node via gossip — i.e. the
   twin state. This is the worst single-node outcome: the map is replicated, so one
   node sees (much of) it.

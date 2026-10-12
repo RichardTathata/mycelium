@@ -266,9 +266,9 @@ may have run* and bar an at-most-once caller from retrying): `Tls(PinMismatch)` 
 the latter because pins configured against an `http://` URL are refused rather than silently downgraded.
 
 The design note worth carrying: the SPKI is read from its **structural position** by the X.509 parser rustls
-already uses. `mycelium_core::tls::ed25519_key_from_cert_der` *scans* for the Ed25519 SPKI prefix and is sound
-because its input is CA-validated first — a premise that is absent at a pinning verifier, whose input is
-attacker-chosen. A plant puts the victim's key bytes in an attacker-signed certificate's serial number and
+already uses. `mycelium_core::tls::ed25519_key_from_cert_der` *scanned* for the Ed25519 SPKI prefix, argued
+sound because its input is CA-validated first — a premise absent at a pinning verifier, whose input is
+attacker-chosen, and (post-360 plan row F) false inside the mesh as well, so it reads structurally too now. A plant puts the victim's key bytes in an attacker-signed certificate's serial number and
 asserts the scan is fooled while the structural read is not. Gate:
 `a_pinned_federation_link_talks_only_to_the_key_the_bundle_names`, two gateways running the same edge and
 differing only in their TLS key. Still **not** claimed: caller authentication stays the credential (a second

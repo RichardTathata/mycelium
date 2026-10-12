@@ -43,7 +43,7 @@ the notice.
 | 20 | `/gateway/mesh/group` on a governed group | 2.29.0 | `/gateway/govern/group` (`govern:write`) | No — HTTP 403 `governed_group` |
 | 21 | consensus without a prepare phase (a mixed fleet) | 2.30.0 | upgrade a quorum of each group's acceptors; handle `Superseded` | No — wire behaviour; `Timeout` until a quorum is upgraded |
 | 22 | an alert keyed on one consensus-timeout `reason`; a second stop signal that waits; an untyped lost write | 2.31.0 | match the new reason set (§22); allow the grace period; catch `SupersededError` | No — a metric label, an exit code, a Python subclass |
-| 23 | a bare (untagged) identity proof or consensus signature | 2.32.0 (accepted until the next MINOR) | the tagged form every 2.32 node writes — upgrade the fleet | No — counted (`identity_untagged_proofs`, `consensus_untagged_signatures`); an upgraded proposer times out until a quorum is upgraded |
+| 23 | a bare (untagged) identity proof or consensus signature | 2.32.0 (accepted for one release) — **refused since 2.33.0** (§35) | the tagged form every 2.32 node writes — upgrade the fleet to 2.32 before 2.33 | No — refused; the two counters are removed (§35) |
 | 24 | a group proposal from a node outside the group's roster | 2.32.0 | join the group first | No — `#[non_exhaustive]` enums gain `NotAMember`; HTTP 403 `not_a_member` |
 | 25 | protected kinds on the SSE doors; `rpc/respond` for a request not yours; another identity's A2A task; `/api/tuple`; a policy-free LLM door | 2.32.0 | the decision trace or evidence journal; one bearer per serve loop; the creating bearer; `/gateway/tuple/overview` | No — HTTP 403 / 404 and JSON-RPC `-32004`; `SystemStats` and `RouteError` grow (an exhaustive literal or `match` breaks) |
 | 26 | an open gateway on a non-loopback `http_addr` | 2.32.0 | a credential (`gateway_auth_token`, a token table or `[oidc]`), a loopback `http_addr`, or `gateway_allow_unauthenticated = true` | No — `start()` refuses, `InvalidField { field: "http_addr" }` |
@@ -55,6 +55,7 @@ the notice.
 | 32 | an accept path, a writer and a signal log with no bound | 2.32.0 | `handshake_timeout_ms`, `inbound_idle_timeout_secs`, `peer_read_stall_timeout_ms`, `peer_write_stall_timeout_ms`, `peer_min_rate_bytes_per_sec`, `max_connections_per_source` | Partly — `GossipConfig`, `SystemStats` and `CoreCtx` gain fields; `WriterTiming` replaces a `Duration` in three `writer` functions; `validate()` refuses an idle timeout at or below the writer's |
 | 33 | a permanent `elect_leader`; a lock or leadership read from the three legacy keys | 2.32.0 (legacy keys still written; they stop at a later, governed MINOR) | renew by calling again, or `elect_leader_with(group, LeaderTerm::Permanent)`; `release_leadership`; upgrade every node | No — a leadership lapses after 30 s; an upgraded proposer times out until a quorum is upgraded |
 | 34 | "declare a new group and move the work yourself" as the way to change an electorate's members; a default that cannot move | unreleased (after 2.32.0) | `declare_successor_electorate` → `retire_electorate` → `complete_migration` (`POST /gateway/govern/electorate` with `predecessors` / `retire_to` / `complete`; `drop_predecessor` for one that never retires) | Partly — `ElectorateDecl` and `Retirement` gained fields, `ElectorateError` gained `Retired` (`#[non_exhaustive]`; a `_` arm must fail closed); otherwise refusals by name |
+| 35 | an unsigned KV `Data` frame at a TLS node; a bare KV `SignedData` signature; a certificate whose key was read by a byte-scan | unreleased (after 2.32.0): unsigned and bare accepted for one release, counted; the scan removed | `kv_require_signed_frames = true` once every peer is upgraded; the tagged form every upgraded node writes | No — counted (`kv_unsigned_frames_accepted`/`_refused`, `kv_untagged_signatures`); `GossipConfig` gains a field (an exhaustive literal breaks) |
 | 36 | an award without a close; an offer, report or assessment read from another requirement's stream; `award_of_verified` against the writable head; an unbounded blob store; any string as a run id | unreleased (after 2.32.0; `mycelium-reason` 0.9.0) | `close(requirement, key, now_ms)` then award; `award_of_verified(requirement, declarer, resolve)`; `open_with_quota`; one bounded segment per run id | Partly — `TraceRecorder::new` returns `Result`, `award_of_verified` gained a parameter, `CommitmentRefusal` gained variants (`#[non_exhaustive]`); otherwise refusals by name (`NotClosed`, 507, 400) |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
@@ -434,7 +435,14 @@ allow the grace period if the orderly shutdown matters (the stem's trace and its
 persistence). Existing
 `except httpx.HTTPStatusError` handlers keep catching a lost write; catch `SupersededError` to tell it apart.
 
-## 23. Identity proofs and consensus signatures are domain-tagged: the bare form is accepted for one release (2.32.0)
+## 23. Identity proofs and consensus signatures are domain-tagged: the bare form is accepted for one release (2.32.0) — closed after 2.32.0 (§35)
+
+> **Closed.** The allowance below held for 2.32.0 only. From the release after it (§35) a bare identity proof is
+> refused whatever `require_identity_proofs` says, a bare consensus signature does not verify, an acceptor no longer
+> answers in the bare form, and the counters `identity_untagged_proofs` / `consensus_untagged_signatures`
+> (`mycelium_identity_untagged_proofs_total`, `mycelium_consensus_untagged_signatures_total`) are removed — nothing in
+> the SDKs or the shipped dashboards read them. **Upgrade a 2.31 fleet to 2.32 before going further**: a 2.31 node and
+> a node past 2.32 cannot verify each other's proofs or consensus messages at all.
 
 **What changes.** An identity proof is a signature over `mycelium.identity/proof/1 ‖ len ‖ history`, and a
 consensus payload's signature is over `mycelium.consensus/msg/1 ‖ len ‖ bytes`; before 2.32.0 both were bare
@@ -904,6 +912,56 @@ restore-or-retire rule): the carry set is complete because the group tag is in t
   sequential; a value a restarted predecessor member holds only by digest and no decision record resolves stops the
   carry at that slot, named; the claim is for slots decided only in the electorate (an ordinary slot also proposed
   under another scope is not enumerated); two default declarations within gossip lag are escaped by a merge.
+
+## 35. Wire and crypto: a TLS node can refuse unsigned KV frames, KV signatures are domain-tagged, a certificate's key is read structurally, and §23 closes (unreleased, after 2.32.0)
+
+Post-360 plan row F. Wire **v12** unchanged — no frame gains or loses a byte; what changes is which frames a node
+accepts and what a signature is over.
+
+**What changes.**
+- **KV `SignedData` is domain-tagged.** A node signs `mycelium.kv/update/1 ‖ u32 len ‖ canonical` rather than the
+  canonical update bytes bare (`framing::kv_signing_message`), beside the identity proof's and the consensus
+  payload's tags (§23). **One release:** an upgraded receiver verifies the tagged form first and still accepts the
+  bare 2.32 form, counted (`GET /stats` `kv_untagged_signatures`, `mycelium_kv_untagged_signatures_total`). Frames,
+  not peers.
+- **Every write a TLS node's agent originates is signed.** Twenty-three write sites — membership, mailboxes, state
+  machines, opacity, the gateway's log/KV/offset routes, MCP tombstones, the soft-state advertiser — built a bare
+  `Data` frame and never signed, even under `[tls]`. They now go through `framing::local_kv_wire_msg`.
+- **A TLS node can refuse an unsigned `Data` frame.** Before, the frame was applied whatever the node's posture, so a
+  member could write under another member's `sender` hash by not signing. **One release:**
+  `kv_require_signed_frames` (`GOSSIP_KV_REQUIRE_SIGNED_FRAMES`) defaults to `false`; an unsigned frame is applied
+  and counted (`kv_unsigned_frames_accepted`; `mycelium_kv_unsigned_frames_total{outcome="accepted"}`). Set it and
+  the frame is dropped and counted (`kv_unsigned_frames_refused`, `outcome="refused"`). The next MINOR refuses
+  unconditionally. Inert without `[tls]`.
+- **A peer certificate's key is read from its `SubjectPublicKeyInfo`, structurally** (`tls::ed25519_key_from_cert_der`),
+  not by scanning the DER for the Ed25519 SPKI prefix. The scan returned the first match anywhere — a serial number,
+  a name, an extension — so a node holding the CA key could mint a certificate that anchors as another member and
+  passes a removal of its own key. Local; no window.
+- **§23 closes.** The bare identity proof and the bare consensus signature are refused; the two counters are gone.
+
+**Mixed fleet, direction by direction** (the 2.30.0 shape, §21):
+- **A 2.32 node's KV writes at an upgraded node: accepted, counted** — its `SignedData` as the bare form, its
+  agent's unsigned `Data` frames as unsigned (refused instead if the upgraded node sets `kv_require_signed_frames`).
+- **An upgraded node's KV writes at a 2.32 node: dropped as a bad signature until that node is upgraded.** A 2.32
+  verifier checks the bare bytes only, so it drops (and does not forward) an upgraded peer's `SignedData`; the value
+  arrives by **anti-entropy** instead, within a health-check interval. Expect gossip latency, not loss, from
+  upgraded writers to un-upgraded readers, and `SignedData … failed Ed25519 verification` warnings on the 2.32 side.
+- **An upgraded node requiring signed frames drops a 2.32 peer's agent writes until that peer is upgraded** — set
+  `kv_require_signed_frames` once every peer is past 2.32.
+- **A 2.31 node and an upgraded node do not verify each other's identity proofs or consensus messages** (§23 is
+  closed): upgrade through 2.32.
+
+**Will the compiler tell me?** Only for an exhaustive `GossipConfig` literal (a new field). The rest is wire
+behaviour.
+
+**Migration.** Upgrade from 2.32, not from 2.31. Watch `kv_untagged_signatures` and `kv_unsigned_frames_accepted` on
+upgraded nodes: a value still rising means a peer still signs the old way or not at all. When both stop rising
+everywhere, set `kv_require_signed_frames = true`. Alerts on `mycelium_identity_untagged_proofs_total` or
+`mycelium_consensus_untagged_signatures_total` should be removed.
+
+**Not covered.** Anti-entropy: a `StateResponse` entry carries no author and no signature and is applied by LWW, so a
+member can still introduce a value for any key through a state reply — the residual the threat model's Boundary A
+states. Role claims and audit records are still signed over untagged canonical bytes (`what-is-proven.md`).
 
 ## 36. Companion doors are bounded and checked: a blob quota, a one-segment run id, an award that names its requirement (unreleased, after 2.32.0)
 
