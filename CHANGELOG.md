@@ -179,7 +179,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   three `HttpCtx` rows, the KV non-key notes — and the test that enumerates the governance routes from the
   router now reads `mod.rs`.
 
-- **The gateway remainder (post-360 plan row E, #PR).** Six promises, each with a test seen failing on the code
+- **The gateway remainder (post-360 plan row E, #613).** Six promises, each with a test seen failing on the code
   before it (`src/agent/http/remainder_tests.rs`, `gateway_caller::tests::a_stale_or_future_envelope_is_refused`,
   `mycelium-core/src/log_cursor.rs`; `docs/guide/deprecations.md` §38). **Client timer periods are bounded:**
   `capability/advertise` and `units/declare` take `interval_secs` and `lease_secs` as whole seconds in `1..=3600`
