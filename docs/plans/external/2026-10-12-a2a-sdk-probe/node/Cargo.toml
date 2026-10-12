@@ -1,0 +1,11 @@
+[package]
+name = "a2a-probe-node"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+mycelium = { path = "../../../../..", features = ["a2a"] }
+tokio = { version = "1", features = ["full"] }
+
+[workspace]

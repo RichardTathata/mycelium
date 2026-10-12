@@ -1,0 +1,16 @@
+a2a-sdk 1.2.2
+GET /.well-known/agent-card.json: HTTP 404 
+GET /.well-known/agent.json: HTTP 200 {"name":"Mycelium/127.0.0.1:53031","url":"http://127.0.0.1:53031","version":"1.0.0","capabilities":{"streaming":true},"skills":[{"id":"depot/dispatch","name":"depot/dispatch","description":""}]}
+resolver(default path): FAILED AgentCardResolutionError Failed to fetch agent card from http://127.0.0.1:53032/.well-known/agent-card.json (HTTP 404): Client error '404 Not Found' for url 'http://127.0.0.1:53032/.well-known/agent-card.json'
+For more inform
+resolver(legacy path): OK name= Mycelium/127.0.0.1:53031 interfaces= [('http://127.0.0.1:53031', 'JSONRPC', '0.3.0')]
+POST /a2a SendMessage: HTTP 200 {"error":{"code":-32601,"message":"method not found"},"id":1,"jsonrpc":"2.0"}
+POST /a2a message/send: HTTP 200 {"error":{"code":-32601,"message":"method not found"},"id":1,"jsonrpc":"2.0"}
+POST /a2a tasks/send: HTTP 200 {"id":1,"jsonrpc":"2.0","result":{"artifacts":[{"parts":[{"text":"dispatched","type":"text"}]}],"id":"eefbf3a7-e445-4690-bae5-04e3a44f3870","status":{"state":"completed"}}}
+sdk: card at /.well-known/agent-card.json: FAILED AgentCardResolutionError: Failed to fetch agent card from http://127.0.0.1:53032/.well-known/agent-card.json (HTTP 404): Client error '404 Not Found' for url 'http://127.0.0.1:53032/.wel
+sdk: card at /.well-known/agent.json: parsed name='Mycelium/127.0.0.1:53031' interfaces=1
+sdk: client created BaseClient
+
+# send.py (the SDK client built from the card, then send_message)
+card interface url: ['http://127.0.0.1:53031']
+sdk send_message: FAILED A2AClientError Network communication error:
