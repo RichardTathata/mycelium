@@ -697,6 +697,9 @@ jobs:
       # isn't dominated by the build. `wasm` is opt-in (examples/coop/Cargo.toml) so the other ten
       # demos build without wasmtime locally; here we warm everything.
       - run: cargo build -p mycelium-coop-examples --features wasm
+      # The crate's `metrics` feature (forwarded to `mycelium/metrics` for the Ops Console tab) was built by no step on
+      # its own until post-360 row J; a check, without `wasm`, so it adds no wasmtime build.
+      - run: cargo check -p mycelium-coop-examples --features metrics --bins
       # Every demo `ci_smoke.sh` runs (thirteen, 2026-10-07), end-to-end as local in-process clusters: mailbox↔LLM,
       # stigmergy, elastic-intent, the WASM autonomic flagship (+ failover),
       # cross-domain AgentFacts, identity rotation, cross-group consensus,

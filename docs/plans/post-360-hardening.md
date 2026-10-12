@@ -329,30 +329,42 @@ withhold real frames with the test-only `test-frame-filter` (enabled in CI's def
 **J — Hygiene (#608, after 2.32.0).**
 - *The sim-seam gate's test-skip bug (the one the KV gate fixed in #591)* — `scripts/check-sim-seams.sh` `count_in`
   takes `check-kv-namespaces.sh`'s brace-counting skip (exactly the item the attribute applies to, at any
-  indentation); `scripts/test-check-sim-seams.sh` plants the five shapes (`skip_oneline_mod`, `skip_indented_fn`,
-  `skip_oneline_body`, `skip_more_attrs`, `skip_whole_module`), seen failing on the old gate (counted 0, 1, 0 for
-  1, 2, 1). **What it caught:** the `#[cfg(test)]` on `ConsensusEngine::shrink_acceptor_for_test`
+  indentation); `scripts/test-check-sim-seams.sh` plants the shapes — `skip_oneline_mod`, `skip_indented_fn`,
+  `skip_oneline_body` seen failing on the old gate (counted 0, 1, 0 for 1, 2, 1), `skip_more_attrs` a guard that passes
+  on every version, `skip_whole_module` the control. **The review round (findings 1–3):** the first cut ended a skip
+  only at a `;` or a body, so a `#[cfg(test)]` on a comma-terminated element hid the next item — live in
+  `mycelium-core/src/signal.rs:400–401` (`trim_hook`, #602), which hid all of production `impl SignalLog` (`:671`,
+  `:673`, `:693`); the skip also ends at a trailing `,` or an unbalanced `}` and strips block comments and raw strings.
+  Plants `skip_field`, `skip_last_field`, `skip_enum_variant`, `skip_match_arm`, `skip_literal_field`,
+  `skip_block_comment`, `skip_raw_string`, each seen failing on the first cut (counted 0 for 1); the same six shapes
+  in `check-kv-namespaces.sh --self-test`, each seen unnamed before its filter took the fix (latent there). The
+  remaining fail-open inputs are stated in both headers. **What it caught:** the `#[cfg(test)]` on `ConsensusEngine::shrink_acceptor_for_test`
   (`src/consensus.rs:1592`, #600) hid the five timer sites after it to the `impl`'s close (`:4154`) — the gate
   counted 0 against a baseline of 5 since 2.32.0 and said only *progress*. Baseline rows moved: `capability_ops.rs`
-  2→0, `intent.rs` 1→0 (the `now_ms` unification), `signal.rs` 11→8, `http.rs` 15→14 (stale before this PR — the
-  old gate reported both on `main`).
+  2→0, `intent.rs` 1→0 (the `now_ms` unification), `http.rs` 15→14 (stale on `main`). `signal.rs` stays 11: the old
+  gate's 8 on `main` was the `trim_hook` field hiding three sites since #602, not sites removed.
 - *Every feature and bench linted or built by some CI step* — the table is in the PR; the uncovered ones (`otel`,
   `gateway_overhead`; `metrics` on tuple-space, blackboard, effects, wiki; guardrails `gateway`, `metrics-export`;
-  reason `compliance`) are each on an existing job's clippy line (`.github/workflows/ci.yml`; the two root lines
+  reason `compliance`; the coop examples' `metrics`, a `cargo check` in the coop-smoke job) are each on an existing job's line (`.github/workflows/ci.yml`; the two root lines
   also in `make check-full`). **What it caught:** the wiki's `metrics` lint found `mycelium` built with `metrics` and without `gateway` failing `-D warnings` — `mod emergent`'s allowance (`not(any(gateway, metrics))`, `src/agent/mod.rs:106`) lifts under `metrics` alone and the six explain items only `/gateway/explain` reads were dead; each now carries `cfg_attr(not(gateway), allow(dead_code))` and `cargo clippy --lib --no-default-features --features metrics` is a named line (embedded job, `make check`). `mycelium-core/test-support`: the root crate's dev-dependency, every root test step;
   `throughput`: the embedded job's `cargo check --all-targets --no-default-features`. **Not built:** a check that
   derives the table from the manifests and fails when a feature loses its step.
 - *The two CI jobs on `stable` pinned* — `effects` and `commitment` → `dtolnay/rust-toolchain@1.96.0`, the
   version `rust-toolchain.toml` and the other seventeen pin; `testing.md`'s toolchain paragraph counts them.
-- *Unreferenced public items deprecated, not removed* — nineteen, each with the whole-tree `grep -rnw` in the PR,
-  `#[deprecated(since = "2.33.0")]`, `deprecations.md` §37; nothing removed. `Preflight::is_inert`
+- *Unreferenced public items deprecated, not removed* — eighteen, each with the whole-tree `grep -rnw` in the PR,
+  `#[deprecated(since = "2.33.0")]`, `deprecations.md` §37; nothing removed. The sweep found nineteen; the review
+  found the private companion calling `AeEvidence::audit_outcome`, which is therefore not deprecated (the private repo
+  was then searched for all nineteen: no other use). `Preflight::is_inert`
   (`src/agent/http.rs`) is the twentieth, left for rows P5/E, which own that file.
 - *Only the duplicates that disagree are unified* — `hex_line`: the wasm-host gateway's copy trimmed, the
   catalogue's did not (its caller did); one `pub(crate)` trimming decoder in `catalog.rs`, pinned by
   `hex_line_ignores_edge_whitespace_and_refuses_everything_else`. `now_ms`: `capability_ops.rs` (`now_ms`,
   `age_now_ms`), `intent.rs`, tuple-space `store.rs`, agentfacts `crdt.rs`/`lib.rs` read `SystemTime::now()`;
-  `federation/edge.rs` read the seam; every one reads `sim_seam::wall_now_ms` now — the baseline rows are the
-  structural pin and `every_now_ms_is_the_seams_wall_clock` the behavioural one. The agreeing copies in
+  `federation/edge.rs` read the seam; every one reads `sim_seam::wall_now_ms` now. Pinned structurally for the two
+  `src/` files only (their baseline rows at 0); the tuple-space and agentfacts copies are outside the gate's scan and
+  **pinned by no gate**; `every_now_ms_is_the_seams_wall_clock` checks the clock's unit and agreement but cannot tell
+  an old copy from a new one outside `sim`. Under `sim` each read is now a recorded kernel choice (an older recording
+  touching these paths would diverge; the checked-in corpus is core-only and unaffected). The agreeing copies in
   `examples/` and `tests/` are left alone.
 
 ## 4 · Decisions taken

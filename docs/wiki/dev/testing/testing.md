@@ -50,7 +50,12 @@ mod x;` or an indented `#[cfg(test)] fn` (the adversarial review of #591). **Clo
 the seam gate took the same skip, and the shapes are planted in `scripts/test-check-sim-seams.sh`. What it had
 hidden: the `#[cfg(test)]` on `ConsensusEngine::shrink_acceptor_for_test` (#600) swallowed `impl ConsensusEngine`
 to its close, five timer sites included — the gate counted 0 against a baseline of 5 and said *progress*. A
-baseline that falls when no site moved is the signal; it had been showing since 2.32.0.
+baseline that falls when no site moved is the signal; it had been showing since 2.32.0. **And the second lesson:**
+both skips first ended only at a `;` or a body, so a `#[cfg(test)]` on a field, variant, match arm or
+struct-literal field ran into the next item — `signal.rs`'s `trim_hook` field (#602) hid all of production
+`impl SignalLog` from the seam gate, which is why its count had fallen 11 → 8 with no site removed (#608's
+adversarial review). Both gates now also end a skip at a trailing `,` or an unbalanced `}`; both headers state
+what still fails open.
 
 **`make check-full` is NOT the whole CI gate — a green local run does not prove CI is green.** The
 block above is the *Rust lib + clippy* set (CI runs its test lines through `scripts/ci-retest.sh`, the compliance
