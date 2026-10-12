@@ -920,7 +920,7 @@ an award counts only the offers the close names — **no award before a close** 
 KV write is `CloseTooLarge`; the blob quota charges each file at least one 4 KiB block; offers, reports and assessments are read only for their own
 requirement; `award_of` reports only a record naming its requirement and operation; `award_of_verified(requirement,
 declarer, resolve)` takes the declarer the caller trusts; `plan_award_verified` and
-`commit_award_linearizable_verified` are the checked path.
+`commit_award_linearizable_verified` are the checked path — which a member can still steer by deletion: a close names offers by log position and hash, and the award re-reads them from the stream — so a member who deletes or rewrites another participant's named offer removes it from the candidates, and the award does not show it (the close and `close_sha256` are untouched). **Follow-up, not built:** carry each named offer's signed bytes inside the close and award from that copy.
 
 **Will the compiler tell me?** For `TraceRecorder::new` yes (a `Result` where a value was), and for
 `award_of_verified` (a `declarer` parameter), and for an exhaustive `Award` literal (`close_sha256`). `CommitmentRefusal`

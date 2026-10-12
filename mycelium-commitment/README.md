@@ -36,7 +36,8 @@ the `Close` that `close` returns: an overwritten close is recovered by re-assert
 handle, or `reassert_close(&kept)` after a restart — which re-appends the same decision and never admits a later
 offer. Offers, reports and assessments are read only for their own requirement.
 `award_of_verified(requirement, declarer, resolve)` checks the declarer *you* name, and `plan_award_verified` is the
-checked path; on the unverified path any member that can write the award slot can block an award.
+checked path; on the unverified path any member that can write the award slot can block an award. The checked path is
+not unsteerable either: a close names offers by log position and hash, and the award re-reads them from the stream — so a member who deletes or rewrites another participant's named offer removes it from the candidates, and the award does not show it (the close and `close_sha256` are untouched). **Follow-up, not built:** carry each named offer's signed bytes inside the close and award from that copy.
 
 Built entirely on Mycelium's public API (`default-features = false`).
 

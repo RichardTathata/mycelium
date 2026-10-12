@@ -321,6 +321,7 @@ an absent section.
   `award_of` reports only a record naming its requirement and operation; `award_of_verified(requirement, declarer,
   resolve)` only one the declarer *you* name signed; `plan_award_verified` / `commit_award_linearizable_verified` are
   the checked path. On the unverified path any member that can write `cn/{requirement}/award` can block an award.
+  The checked path can still be steered by deletion: a close names offers by log position and hash, and the award re-reads them from the stream — so a member who deletes or rewrites another participant's named offer removes it from the candidates, and the award does not show it (the close and `close_sha256` are untouched). **Follow-up, not built:** carry each named offer's signed bytes inside the close and award from that copy.
 - **An unknown award is not "no award".** A linearizable round that reached no commit answers
   `AwardUnknown`; retry, and it resolves as `AlreadyAwarded` or a fresh commit.
 - **Retention is yours.** The log streams grow with traffic and the crate never prunes them. The

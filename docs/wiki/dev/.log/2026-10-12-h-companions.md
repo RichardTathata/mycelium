@@ -15,3 +15,4 @@
   Validated, not owned.
 - Pages: `dev/companions/commitment.md`, `dev/companions/companions.md`, `dev/concurrency/lock-order.md` (row 58),
   `operations/companions.md`, guides 15 and 24, `deprecations.md` §36 (+ index row), the plan's §3.5 H block.
+- Round 3's confirmation, stated not fixed: a close names offers by log position and hash, and the award re-reads them from the stream — so a member who deletes or rewrites another participant's named offer removes it from the candidates, and the award does not show it (the close and `close_sha256` are untouched). **Follow-up, not built:** carry each named offer's signed bytes inside the close and award from that copy.

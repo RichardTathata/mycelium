@@ -97,6 +97,13 @@
 //! append one, so that path is steerable, as its docs say. A close is refused by name before it would
 //! exceed one KV write ([`MAX_CLOSE_WRITE_BYTES`]) and read back after its append.
 //!
+//! **The checked path can still be steered by deletion** (#609's review, round 3): a close names offers by
+//! log position and hash, and the award re-reads them from the stream — so a member who deletes or
+//! rewrites another participant's named, signed offer removes it from the candidates, and the award does
+//! not show it (the close and the award's `close_sha256` are untouched). That is not a lateness break —
+//! no late offer gets in — but it is a member steering the checked path. **Follow-up, not built:** carry
+//! each named offer's signed bytes inside the close and award from that copy.
+//!
 //! **The residual, stated:** the declarer decides which offers arrived in time. A signed close establishes **which offers the declarer counted** and that it bound this announcement; it does **not** establish when the declarer closed — `closed_at_ms` is the declarer's own claim, checked against nothing but the deadline it names. A declarer that closes late admits late offers; one
 //! that omits an offer excludes it; a signed close makes either attributable to the declarer, not
 //! detectable from the record alone. Unsigned, the close is like the announcement head: declarer-owned by
@@ -892,6 +899,11 @@ impl ContractNet {
     /// already made. An unsigned or foreign record at the award slot does not block it here (the plain
     /// KV commit then overwrites it; a linearizable slot a forgery holds stays taken and
     /// [`commit_award_linearizable_verified`](Self::commit_award_linearizable_verified) says so).
+    ///
+    /// **Not unsteerable:** a close names offers by log position and hash, and the award re-reads them from the
+    /// stream — so a member who deletes or rewrites another participant's named offer removes it from the
+    /// candidates, and the award does not show it (the close and `close_sha256` are untouched). Follow-up, not
+    /// built: carry each named offer's signed bytes inside the close and award from that copy (crate doc).
     pub fn plan_award_verified(
         &self,
         requirement: &str,
@@ -1890,10 +1902,11 @@ mod tests {
         agent.shutdown().await;
     }
 
-    /// Round 2, N1: on the unverified path a forged close dated before the deadline, or one naming another
-    /// declarer, steered the award — `plan_award_from` checked neither. What this does **not** show: a
-    /// forged unsigned close dated at or after the deadline, naming the announcement's declarer, still
-    /// steers the unverified path — that path is steerable by design, and says so.
+    /// Round 2, N1 — **what it proves, and only that:** on the unverified path a forged close dated
+    /// *before* the deadline, or one naming another declarer, is refused (`plan_award_from` checked
+    /// neither). It does **not** prove the unverified path unsteerable: a forger that dates its unsigned
+    /// close at the deadline itself (or later) and names the announcement's declarer passes `close_of` and
+    /// still steers that path — steerable by design, as its docs say.
     #[tokio::test]
     async fn on_the_unverified_path_a_close_dated_before_the_deadline_or_naming_another_declarer_is_refused() {
         let agent = live().await;

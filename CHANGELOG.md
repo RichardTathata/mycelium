@@ -27,7 +27,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and `a_second_signed_close_at_a_backdated_key_does_not_change_the_award` seen failing on d90c2d51); a close binds its announcement (deadline, digest), an award
   records its close (`close_sha256`), and a close too large for one KV write is `CloseTooLarge` before writing. The
   residual, stated: the declarer decides which offers arrived in time — a signed close shows which it counted, not
-  when it closed (`closed_at_ms` is its claim). `offers()`/`offers_verified()`/`reports()`/
+  when it closed (`closed_at_ms` is its claim); and a close names offers by log position and hash, and the award re-reads them from the stream — so a member who deletes or rewrites another participant's named offer removes it from the candidates, and the award does not show it (the close and `close_sha256` are untouched). **Follow-up, not built:** carry each named offer's signed bytes inside the close and award from that copy. `offers()`/`offers_verified()`/`reports()`/
   `assessments()` read only records naming their own requirement (a signed offer copied from another requirement's
   stream verified there). `award_of` reports only a record naming its requirement and operation;
   `award_of_verified(requirement, declarer, resolve)` only one the declarer **the caller pins** signed (a check

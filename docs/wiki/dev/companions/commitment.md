@@ -73,7 +73,8 @@ Design: `docs/plans/v3-contracts-axis.md` §6.9 (CN1–CN3, D39). Key facts:
   `reassert_close(&kept)` after a restart), never by re-deciding — the round-3 review showed a re-close that
   recomputed admitted a late offer. The unverified path takes the earliest naming the announcement's declarer at or
   after the deadline; a forged unsigned close dated at or after the deadline still steers it. **Residual:** the
-  declarer decides; a signed close shows which offers it counted, not when it closed (`closed_at_ms` is its claim).
+  declarer decides; a signed close shows which offers it counted, not when it closed (`closed_at_ms` is its claim);
+  and a close names offers by log position and hash, and the award re-reads them from the stream — so a member who deletes or rewrites another participant's named offer removes it from the candidates, and the award does not show it (the close and `close_sha256` are untouched). **Follow-up, not built:** carry each named offer's signed bytes inside the close and award from that copy.
   The lessons: *a key segment is data, not a clock*, and *one LWW key cannot hold both a forgery and the truth*.
 - **Reads are checked like offers (row H).** Offers, reports and assessments are read only when they name the
   requirement whose stream holds them (a signed offer copied from another stream verified there). `award_of` reports

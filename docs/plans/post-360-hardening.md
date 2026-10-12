@@ -476,7 +476,8 @@ Each promise and what delivers it:
   `a_restarted_declarer_reasserts_the_close_it_kept` is new API. **Residual:** a declarer that restarts without
   keeping its close and is overwritten everywhere re-decides (the handle cannot tell an overwritten close from none);
   a declarer that signs two different closes has equivocated — the earlier-dated counts, both are on the stream; a
-  forged unsigned close dated at or after the deadline still steers the unverified path. Tests (round 1, each first seen failing on
+  forged unsigned close dated at or after the deadline still steers the unverified path; and (the round-3 review,
+  stated rather than fixed) a close names offers by log position and hash, and the award re-reads them from the stream — so a member who deletes or rewrites another participant's named offer removes it from the candidates, and the award does not show it (the close and `close_sha256` are untouched). **Follow-up, not built:** carry each named offer's signed bytes inside the close and award from that copy. Tests (round 1, each first seen failing on
   461da69f): `a_backdated_log_key_does_not_make_a_late_offer_a_candidate`
   (the review's key loses; the offer that arrived before the close wins), `an_award_before_the_requirement_is_closed_is_refused`;
   and `no_offers_and_late_offers_are_visible_states_not_awards` pins the close's own refusals (before the deadline,
