@@ -3,9 +3,9 @@
 **Status:** adopted 2026-10-10, rev 1.6 (2026-10-12: Φ closed; P5, J and I delivered; rows K, L, M added from the Strands Box comparison). **R0 is being cut as v2.32.0 (2026-10-11)**, which delivers rows **G, P3, C, D,
 P1, A (with C1, C2), B (as narrowed 2026-10-11) and P2 (without migration, as decided 2026-10-11)** — each closed on
 evidence in §3.5. Open:
-E, F, H, K, L, M (P2's migration — close, enumerate, carry, complete — delivered after 2.32.0, §3.5;
+E, F, K, L, M (P2's migration — close, enumerate, carry, complete — delivered after 2.32.0, §3.5;
 Φ delivered 2026-10-12, #607, §3.5; **P5**, the `http.rs` split, J, hygiene, #608, and I, the private repository's items, private #30, delivered after
-2.32.0 too, §3.5; R0's private re-pin landed as private #29). It follows the 2026-10-09 360 review and the eleven
+2.32.0 too, §3.5; H, the companions' four doors, #609, delivered after 2.32.0, §3.5; R0's private re-pin landed as private #29). It follows the 2026-10-09 360 review and the eleven
 PRs that addressed its must-do list (#582–#592, private #28); those are recorded in the CHANGELOG and are not
 repeated here. Rows close on evidence (verification policy rule 2): a row is closed by quoting each promise next to
 the code or test that delivers it, and a promise that is not delivered is written *not built*.
@@ -442,9 +442,6 @@ Each promise and what delivers it:
   the cargo config and the lockfile, and recognises the substrate by its git URL whatever the crate's name; its
   self-test refuses every staged bypass, the three named ones among them (the old grep step passed all three). A build directory is skipped
   only when git does not track its `CACHEDIR.TAG`.
-
-**H — Companions (#TBD; read against the merged code).** The review's claims, each sized against the code:
-
 
 **H — Companions (#609; read against the merged code).** The review's claims, each sized against the code:
 - *The commitment deadline judged on the log's clock, not the offerer's* — **held, and the first fix was wrong**.
