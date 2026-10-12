@@ -605,7 +605,7 @@ fn external(evidence: &'static str) -> impl Fn(&TaskCtx) -> Resolution + Send + 
 }
 
 /// Whether this configuration names a gateway **credential model** — the same set `gateway_auth`
-/// counts (`src/agent/http.rs`): `gateway_auth_token`, and under `compliance` a scoped or named token
+/// counts (`src/agent/http/authz.rs`): `gateway_auth_token`, and under `compliance` a scoped or named token
 /// table or `[oidc]`. Without `compliance` those three are refused at `start()`, so only the token
 /// counts. A blank token (`GOSSIP_GATEWAY_AUTH_TOKEN=""`) is not a credential here: a secret anyone can
 /// guess closes nothing (and `validate()` refuses one in every form, so a started node never holds one). One predicate for `gw.not_open`, `gw.exposed_closed` and `start()`'s refusal.

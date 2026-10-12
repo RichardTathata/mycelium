@@ -26,7 +26,7 @@
 //!
 //! ## Endpoints
 //!
-//! The embedded HTTP gateway (`src/agent/http.rs`) exposes `GET /bulk/{id}`.
+//! The embedded HTTP gateway (`src/agent/http/node.rs`) exposes `GET /bulk/{id}`.
 //! Applications that run their own HTTP server must add an equivalent route
 //! using [`ServiceHandle::bulk_staging_get`].
 //!

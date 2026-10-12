@@ -63,7 +63,7 @@
 //! layer is the only constructor. *Enforcing component:* [`verify`] on the provider's receive
 //! path, reached through `request_principal` / `request_authorized`. *Failure behaviour:* deny
 //! with a [`CallerError`]; the secure gateway refuses a provider without the marker. *Detecting
-//! test:* `gateway_caller_tests` in `src/agent/http.rs` — the four negative cases and the
+//! test:* `gateway_caller_tests` in `src/agent/http/gateway_caller_tests.rs` — the four negative cases and the
 //! `authorized_callers` gate.
 
 use crate::node_id::NodeId;
@@ -276,7 +276,7 @@ impl RequestPrincipal {
 // ── Auth layer → dispatch ────────────────────────────────────────────────────
 
 /// What the gateway auth layer resolved for one HTTP request: the principal and the authority
-/// granted for the request. **Constructed only by the auth middleware in `http.rs`** — the fields
+/// granted for the request. **Constructed only by the auth middleware in `http/authz.rs`** — the fields
 /// are crate-private, so a companion can read it (axum's `Extension<ResolvedPrincipal>` on a route
 /// merged with `with_http_routes`) and hand it on (`ServiceHandle::rpc_call_as`,
 /// `GossipAgent::gateway_preflight`), never make one up.

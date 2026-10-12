@@ -2318,17 +2318,37 @@ async fn test_gateway_control_profile_round_trip() {
     agent.shutdown_with_timeout(Duration::from_secs(5)).await;
 }
 
-/// Every governance write route — enumerated from the router in `mod.rs`, so a new one is covered the day it
+/// Every governance write route — enumerated from the router in `mod.rs` and every family file, so a new one is covered the day it
 /// lands — records one audit attempt per accepted change (#549's review: `govern/profile` recorded none).
 #[cfg(feature = "gateway")]
 #[tokio::test]
 async fn every_governance_write_route_audits_its_change() {
     use axum::http::header::AUTHORIZATION;
-    // Every `"/govern/…"` route literal in `mod.rs` (the router; it holds no test module, so the whole file is
-    // production), whatever its layout (a chained `.route(`, a feature-gated `let gateway = gateway.route(`, a
-    // call split across lines); `/govern` alone is the read route. Scope-map and doc lines carry
-    // `/gateway/govern/`, not a bare `"/govern/`.
-    let production = include_str!("mod.rs");
+    // Every `"/govern/…"` route literal in the module's production files — `mod.rs` (the router) and every family
+    // file; the test files are not read — whatever its layout (a chained `.route(`, a feature-gated
+    // `let gateway = gateway.route(`, a call split across lines); `/govern` alone is the read route. Scope-map and
+    // doc lines carry `/gateway/govern/`, not a bare `"/govern/`. The routes are mounted in `mod.rs` only: a family
+    // file with a `.route(` of its own would be a second router, so none may have one.
+    let families: [(&str, &str); 12] = [
+        ("authz.rs", include_str!("authz.rs")), ("caps.rs", include_str!("caps.rs")),
+        ("compliance.rs", include_str!("compliance.rs")), ("federation_routes.rs", include_str!("federation_routes.rs")),
+        ("govern.rs", include_str!("govern.rs")), ("kv.rs", include_str!("kv.rs")),
+        ("llm_bridge.rs", include_str!("llm_bridge.rs")), ("mcp_bridge.rs", include_str!("mcp_bridge.rs")),
+        ("mesh.rs", include_str!("mesh.rs")), ("node.rs", include_str!("node.rs")),
+        ("overlay.rs", include_str!("overlay.rs")), ("signals.rs", include_str!("signals.rs")),
+    ];
+    for (name, src) in families {
+        assert!(!src.contains(".route("), "{name} mounts a route outside the router in mod.rs");
+    }
+    // …and the list above is every production file in the directory, so a new family is read too.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/agent/http");
+    let on_disk: std::collections::BTreeSet<String> = std::fs::read_dir(&dir).expect("src/agent/http")
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| n.ends_with(".rs") && n != "mod.rs" && !n.ends_with("_tests.rs"))
+        .collect();
+    let listed_files: std::collections::BTreeSet<String> = families.iter().map(|(n, _)| n.to_string()).collect();
+    assert_eq!(on_disk, listed_files, "a production file in src/agent/http/ this test does not read");
+    let production: String = std::iter::once(include_str!("mod.rs")).chain(families.iter().map(|(_, s)| *s)).collect();
     let routed: std::collections::BTreeSet<String> = production.split("\"/govern/").skip(1)
         .filter_map(|rest| rest.split('"').next())
         .map(|r| format!("/gateway/govern/{r}"))

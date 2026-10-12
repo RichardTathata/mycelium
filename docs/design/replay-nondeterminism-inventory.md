@@ -458,6 +458,10 @@ gateway certificate PEMs) and `overlay.rs` 8 (the lock and election draws and co
 consumer's `Instant::now` and sleeps) — **14 in all, as the single file counted on the day of the split**; the
 baseline's 15 for it was one site stale, lowered before this change and never regenerated. The `http.rs:NNNN` line
 numbers in the rows above are those of the single file at the dates they were written; the sites are the same.
+One caveat the split adds (#610's review): `check-sim-seams.sh` detects a `time`/`fs` alias **per file**, from that
+file's own `use` lines, while every family file inherits `mod.rs`'s imports through `use super::*;` — so an alias
+imported in `mod.rs` would hide a family's `<alias>::sleep(…)` from the gate. None exists today; import such a module
+in the family file that calls it.
 
 So the count in this section is the count *the checker can see*, and it has now been wrong in both directions.
 That is the argument for the baseline rather than for a number: what it makes visible is **movement**, and a
