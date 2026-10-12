@@ -12,10 +12,11 @@
 //! it is re-implemented here only because `mycelium-wasm-host` carries wasmtime
 //! unconditionally.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -103,17 +104,43 @@ pub enum LocalRead {
 ///
 /// **Bounded.** The store holds at most [`quota_bytes`](FsBlobStore::quota_bytes) in total
 /// ([`DEFAULT_BLOB_QUOTA_BYTES`] unless [`open_with_quota`](FsBlobStore::open_with_quota) says
-/// otherwise): the bytes of every blob-named file at open, plus every byte put since. A put that would
-/// pass the bound is refused with `ErrorKind::QuotaExceeded` before anything is written, and the space
-/// is reserved atomically *before* the write, so concurrent puts cannot overshoot between them. A blob
-/// already held costs nothing; replacing a damaged copy costs the growth. Nothing here evicts: what to
-/// drop is the operator's decision, and the files are named by their content address.
+/// otherwise), accounted **per digest**: every blob-named file at open, plus each new digest put since,
+/// counted once. A digest is reserved before its first write — a put of a digest already on disk or
+/// already being written by another put reserves nothing — so concurrent puts of one blob count it once,
+/// and puts of different blobs cannot together pass the bound; a reservation that never reached the disk
+/// is released on every failure path. A put that would pass the bound is refused with
+/// `ErrorKind::QuotaExceeded` before anything is written. Replacing a damaged copy costs its growth.
+///
+/// **What the account does not see.** A file added or deleted behind the store's back is credited at the
+/// next open, not before: the account is a view of what *this store* wrote, rescanned only at open (a
+/// rescan on every refusal would make each put at the bound a directory walk). One store per directory —
+/// `.tmp-*` files are removed at open as abandoned, which would fail another live store's write. Nothing
+/// here evicts: what to drop is the operator's decision, and the files are named by their content address.
 #[derive(Debug)]
 pub struct FsBlobStore {
     dir: PathBuf,
     quota_bytes: u64,
-    /// The bytes held, as reserved: counted at open, reserved before each write, released on failure.
-    used_bytes: AtomicU64,
+    /// The per-digest account (lock-order row 58): a leaf, held for a map update, never across I/O.
+    account: Mutex<Account>,
+}
+
+/// What the store has counted against its quota.
+#[derive(Debug, Default)]
+struct Account {
+    /// The bytes counted: the sum of every entry's `len`.
+    used: u64,
+    held: HashMap<BlobId, Held>,
+}
+
+/// One digest's place in the account.
+#[derive(Debug, Clone, Copy)]
+struct Held {
+    /// The bytes counted for it.
+    len: u64,
+    /// Puts writing it now.
+    writers: u32,
+    /// A put of it has reached the disk (or it was there at open).
+    on_disk: bool,
 }
 
 impl FsBlobStore {
@@ -137,15 +164,27 @@ impl FsBlobStore {
         }
         let dir = dir.into();
         std::fs::create_dir_all(&dir)?;
-        let mut used: u64 = 0;
+        let mut account = Account::default();
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
-            let is_blob = entry.file_name().to_str().and_then(BlobId::from_hex).is_some();
-            if is_blob && let Ok(m) = entry.metadata() && m.is_file() {
-                used = used.saturating_add(m.len());
+            let Ok(m) = entry.metadata() else { continue };
+            if !m.is_file() {
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with(".tmp-") {
+                // A temp file at open was left by a write that never renamed it (a crash): abandoned by
+                // definition. Removed; counted only if it cannot be.
+                if std::fs::remove_file(entry.path()).is_err() {
+                    account.used = account.used.saturating_add(m.len());
+                }
+            } else if let Some(id) = BlobId::from_hex(&name) {
+                account.used = account.used.saturating_add(m.len());
+                account.held.insert(id, Held { len: m.len(), writers: 0, on_disk: true });
             }
         }
-        Ok(Self { dir, quota_bytes, used_bytes: AtomicU64::new(used) })
+        Ok(Self { dir, quota_bytes, account: Mutex::new(account) })
     }
 
     /// The total bound, in bytes (`u64::MAX` is none).
@@ -153,22 +192,48 @@ impl FsBlobStore {
         self.quota_bytes
     }
 
-    /// The bytes held, as the store accounts them: counted at open plus every byte put since.
+    /// The bytes held, as the store accounts them: the files at open plus each digest put since, once.
     pub fn used_bytes(&self) -> u64 {
-        self.used_bytes.load(Ordering::SeqCst)
+        self.lock_account().used
     }
 
-    /// Reserve `growth` bytes under the quota, atomically; `Err` when it would pass the bound.
-    fn reserve(&self, growth: u64) -> Result<(), u64> {
-        self.used_bytes
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
-                used.checked_add(growth).filter(|total| *total <= self.quota_bytes)
-            })
-            .map(|_| ())
+    fn lock_account(&self) -> MutexGuard<'_, Account> {
+        self.account.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn release(&self, bytes: u64) {
-        let _ = self.used_bytes.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |used| Some(used.saturating_sub(bytes)));
+    /// Join the writers of `id`, reserving what it adds to the account: its length for a digest the
+    /// account does not hold, its growth for a copy being repaired, nothing for one already held or
+    /// already being written. `Err(used)` when that would pass the bound — and then nothing is joined.
+    fn begin_write(&self, id: BlobId, len: u64) -> Result<(), u64> {
+        let mut a = self.lock_account();
+        let counted = a.held.get(&id).map_or(0, |h| h.len);
+        let growth = len.saturating_sub(counted);
+        let total = a.used.checked_add(growth).filter(|t| *t <= self.quota_bytes).ok_or(a.used)?;
+        a.used = total;
+        let h = a.held.entry(id).or_insert(Held { len: 0, writers: 0, on_disk: false });
+        h.len = h.len.max(len);
+        h.writers += 1;
+        Ok(())
+    }
+
+    /// Leave the writers of `id`. On success the digest is on disk, counted at its length. On failure, the
+    /// last writer of a digest that never reached the disk releases its whole reservation.
+    fn end_write(&self, id: BlobId, len: u64, ok: bool) {
+        let mut a = self.lock_account();
+        let Some(mut h) = a.held.get(&id).copied() else { return };
+        h.writers = h.writers.saturating_sub(1);
+        if ok {
+            h.on_disk = true;
+            if h.len > len && h.writers == 0 {
+                a.used = a.used.saturating_sub(h.len - len); // a larger damaged copy was replaced
+                h.len = len;
+            }
+        } else if h.writers == 0 && !h.on_disk {
+            a.used = a.used.saturating_sub(h.len);
+            a.held.remove(&id);
+            return;
+        }
+        a.held.insert(id, h);
     }
 
     fn path_of(&self, id: &BlobId) -> PathBuf {
@@ -179,7 +244,8 @@ impl FsBlobStore {
     /// holds is a no-op returning the same id, at the cost of reading the existing copy to compare (a
     /// copy that differs is damaged and is replaced). Rejects blobs over
     /// [`MAX_BLOB_BYTES`] with `InvalidInput` (they could never travel the mesh), and a blob that
-    /// would take the store past its quota with `QuotaExceeded` — before anything is written.
+    /// would take the store past its quota with `QuotaExceeded` — before anything is written. The
+    /// account is per digest (see the type's doc): racing puts of one blob count it once.
     pub fn put(&self, bytes: &[u8]) -> std::io::Result<BlobId> {
         if bytes.len() > MAX_BLOB_BYTES {
             return Err(std::io::Error::new(
@@ -196,19 +262,13 @@ impl FsBlobStore {
         if existing == Some(bytes.len() as u64) && std::fs::read(&path).is_ok_and(|existing| existing == bytes) {
             return Ok(id);
         }
-        // The quota is reserved for the growth — the new bytes beyond whatever file the path holds (a
-        // damaged copy about to be replaced) — before the write, and released if the write fails.
+        // Reserved per digest before the write (nothing for a digest held or being written), released by
+        // the last failing writer of a digest that never reached the disk.
         let len = bytes.len() as u64;
-        let old_len = existing.unwrap_or(0);
-        let growth = len.saturating_sub(old_len);
-        if self.reserve(growth).is_err() {
+        if let Err(used) = self.begin_write(id, len) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::QuotaExceeded,
-                format!(
-                    "blob is {len} bytes; the store holds {} of its {} byte quota",
-                    self.used_bytes(),
-                    self.quota_bytes
-                ),
+                format!("blob is {len} bytes; the store holds {used} of its {} byte quota", self.quota_bytes),
             ));
         }
         static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -218,15 +278,12 @@ impl FsBlobStore {
             std::process::id(),
             TMP_SEQ.fetch_add(1, Ordering::Relaxed),
         ));
-        if let Err(e) = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, &path)) {
+        let written = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, &path));
+        if written.is_err() {
             let _ = std::fs::remove_file(&tmp);
-            self.release(growth);
-            return Err(e);
         }
-        if old_len > len {
-            self.release(old_len - len); // a damaged copy larger than the blob shrank the store
-        }
-        Ok(id)
+        self.end_write(id, len, written.is_ok());
+        written.map(|()| id)
     }
 
     /// Read the blob for `id`, verifying the content address. A hash mismatch (disk
@@ -597,6 +654,70 @@ mod tests {
         assert_eq!(FsBlobStore::open(dir.path()).unwrap().quota_bytes(), DEFAULT_BLOB_QUOTA_BYTES);
         let unbounded = FsBlobStore::open_with_quota(dir.path(), u64::MAX).unwrap();
         assert!(unbounded.put(&[5u8; 1000]).is_ok());
+    }
+
+    /// Review round 1 of #609, finding 2: N racing puts of one new digest each reserved its length and
+    /// one file resulted, so the account grew N×len until reopen — a client could exhaust the quota with
+    /// one blob. Reservation is per digest: afterwards the account equals what is on disk.
+    #[test]
+    fn concurrent_puts_of_one_digest_reserve_it_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Arc::new(FsBlobStore::open_with_quota(dir.path(), u64::MAX).unwrap());
+        // 64 rounds of one new 256 KiB blob put by 16 threads released together. One overlap between a
+        // presence check and another thread's rename is enough to inflate the account.
+        for round in 0..64u32 {
+            let blob: Arc<Vec<u8>> = Arc::new((0..256 * 1024u32).map(|i| (i ^ round) as u8).collect());
+            let start = Arc::new(std::sync::Barrier::new(16));
+            let workers: Vec<_> = (0..16)
+                .map(|_| {
+                    let (s, blob, start) = (Arc::clone(&s), Arc::clone(&blob), Arc::clone(&start));
+                    std::thread::spawn(move || {
+                        start.wait();
+                        s.put(&blob).unwrap();
+                    })
+                })
+                .collect();
+            for w in workers {
+                w.join().unwrap();
+            }
+        }
+        let on_disk: u64 = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_str().and_then(BlobId::from_hex).is_some())
+            .map(|e| e.metadata().unwrap().len())
+            .sum();
+        assert_eq!(on_disk, 64 * 256 * 1024, "one file per blob");
+        assert_eq!(s.used_bytes(), on_disk, "the account is what is on disk, not N×len");
+    }
+
+    /// Review round 1, finding 2: every failure path releases its reservation. A write into a directory
+    /// that refuses it leaves the account where it was. (A pin: 461da69f released on this path too.)
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_write_releases_its_reservation() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let s = FsBlobStore::open_with_quota(dir.path(), 1000).unwrap();
+        s.put(&[1u8; 100]).unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let failed = s.put(&[2u8; 100]);
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(failed.is_err(), "a read-only directory refuses the write");
+        assert_eq!(s.used_bytes(), 100, "the failed write released what it reserved");
+        assert!(s.put(&[2u8; 900]).is_ok(), "and the space is there for the next put");
+    }
+
+    /// Review round 1, finding 7: a `.tmp-*` file left by a crash is abandoned by definition — removed at
+    /// open, so it is neither counted against nor hidden from the quota.
+    #[test]
+    fn an_abandoned_temp_file_is_removed_at_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join(format!(".tmp-{}-1-0", BlobId::of(b"x").to_hex()));
+        std::fs::write(&stale, vec![0u8; 500]).unwrap();
+        let s = FsBlobStore::open_with_quota(dir.path(), 1000).unwrap();
+        assert!(!stale.exists(), "removed at open");
+        assert_eq!(s.used_bytes(), 0);
     }
 
     #[test]

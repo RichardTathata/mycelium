@@ -13,10 +13,14 @@ All notable changes to this crate. It versions **independently** of the Mycelium
 - **The blob store is bounded.** `FsBlobStore` held a per-blob ceiling (`MAX_BLOB_BYTES`, 8 MiB) and **no total**: it
   grew without limit under `PUT /gateway/reason/blob` and the mesh write-back. It now holds at most its quota —
   `DEFAULT_BLOB_QUOTA_BYTES` (**1 GiB**) from `open`, or what `FsBlobStore::open_with_quota(dir, bytes)` says
-  (`u64::MAX` for no bound; `0` refused by name) — counted from the blob-named files at open plus every byte put since,
-  the space reserved atomically *before* a write so concurrent puts cannot overshoot, released if the write fails. A
-  put past it is `ErrorKind::QuotaExceeded` with nothing written; a blob already held costs nothing; replacing a damaged
-  copy costs the growth. `quota_bytes()` / `used_bytes()` say where a store stands. The gateway answers **507
+  (`u64::MAX` for no bound; `0` refused by name) — accounted **per digest**: the blob-named files at open plus each new
+  digest put since, counted once, reserved before its first write (a put of a digest already on disk or already being
+  written reserves nothing) and released by the last failing writer of a digest that never reached the disk. This
+  PR's first head reserved per put, so racing puts of one blob grew the account N×len until reopen (#609's review,
+  finding 2) — `concurrent_puts_of_one_digest_reserve_it_once` was seen failing 3/3 on it (38.8–50.9 MB counted
+  against 16.8 MB on disk). `.tmp-*` files are removed at open as abandoned (one store per directory); a file added or
+  deleted by hand is credited at the next open. A put past the quota is `ErrorKind::QuotaExceeded` with nothing
+  written; a blob already held costs nothing; replacing a damaged copy costs the growth. `quota_bytes()` / `used_bytes()` say where a store stands. The gateway answers **507
   `quota_exceeded`** (`{"error","detail"}`); the mesh write-back of a fetched blob that no longer fits is logged and
   the bytes are still returned. Nothing evicts — files are named by content address, so what to drop is the operator's
   call. `reason_node` reads an optional `BLOB_QUOTA_BYTES`.
@@ -28,7 +32,8 @@ All notable changes to this crate. It versions **independently** of the Mycelium
   reads only keys of the one shape a recorder writes (`{node}/{hlc}/{salt}` under the run — a deeper key is
   skipped with a warning) and replays nothing under an invalid id; `GET /gateway/reason/trace/{run_id}` and the
   `run_id` of `POST /gateway/reason/route` answer **400 `bad_run_id`**, the façade `400 invalid_request_error` /
-  `bad_run_id` with `param: "run_id"` — each before anything is routed or read.
+  `bad_run_id` with `param: "run_id"` — each before anything is routed or read. **Validated, not owned:** any caller
+  holding `llm:invoke` can record into any valid run id; a trace says what was written under a name, not who owns it.
 - **Breaking (hence the MINOR):** `TraceRecorder::new` returns a `Result` (`?` or `.expect` at the call site);
   `FsBlobStore::open` is bounded at 1 GiB by default — a node holding more at open refuses the next new put with
   507 until it is opened with a larger quota (an existing file is never touched); `RunIdError` is `#[non_exhaustive]`.

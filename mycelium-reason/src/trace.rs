@@ -36,6 +36,10 @@ pub const MAX_RUN_ID_BYTES: usize = 128;
 /// prefix** — a recorder for `victim/x` landed under `log/reason/victim/`, and `replay("victim")`
 /// (and `anchor`, which seals what replay returns) carried the injected event as the victim's own.
 /// Every door that takes a caller-chosen id validates it before it is used ([`validate_run_id`]).
+///
+/// **Validated, not owned.** A run id names a run; nothing records who started it, so any caller able
+/// to record (`llm:invoke` at the gateway) can append to any valid run id — a trace is what was written
+/// under a name, not proof of whose run it was.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RunIdError {
