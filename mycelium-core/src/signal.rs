@@ -1430,6 +1430,12 @@ pub mod kv_ns {
     /// exists to close. Deliberately not a `sys/identity/` sub-prefix, so an [`IDENTITY`] scan
     /// never sees it.
     pub const IDENTITY_SIGNED: &str = "sys/identity-signed/";
+    /// A node's **certificate record** (post-360 plan row Q, `docs/design/revocation-authority.md`):
+    /// `sys/identity-cert/{node}/{key-hex}` = the DER of a certificate the fleet CA issued for that
+    /// key, naming the node by a `mycelium://{node}` URI. The only source of key standing; one record
+    /// per key, so two facts never share an LWW slot. Self-authenticating (the CA signed it), so it is
+    /// exempt from the unsigned-frame refusal like the sealed identity record.
+    pub const IDENTITY_CERT: &str = "sys/identity-cert/";
 
     /// **This node's acceptor record, so a restart cannot make it equivocate.**
     ///

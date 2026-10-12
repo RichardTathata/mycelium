@@ -1143,38 +1143,45 @@ Nothing to do for the log group in a mixed fleet: an older node writes only the 
 the offset whenever it is ahead of the cursor. **What a drop still loses**, stated: a mailbox event or log-group
 entry the connection had accepted when it dropped — the gateway has no resume point (guide 10).
 
-## 39. Revocation reaches every verifier, is per node, and a node cannot revoke the key it signs with (unreleased, after 2.32.0)
+## 39. Revocation reaches every verifier, and only a newer certificate of a node can revoke its keys (unreleased, after 2.32.0)
 
-**What changes** (post-360 plan row Q). A key revoked with `revoke_identity_key`, `rotate_identity_on_compromise`
-or `POST /gateway/identity/revoke` used to be excluded only by consensus and the `known_verifying_keys` paths (role
-claims, the audit chain). Now, at every node that has seen and validated the revocation:
+**What changes** (post-360 plan row Q; decision record `docs/design/revocation-authority.md` rev 3):
 
-- **A KV write signed by the revoked key is refused** (`SignedData` from the node under that key is dropped and
-  counted, `GET /stats` `kv_revoked_key_refused`). A peer that had kept writing under a key its node then revoked —
-  a compromised key in use, or a node whose operator revoked the key it was still using — has those writes refused.
-- **An identity record whose proof is signed by the revoked key chains nothing**: its keys are not merged, and an
-  unsigned sealed record signed by it is refused whatever `kv_require_signed_frames` says (counted the same way).
-- **Revocation is per node.** Node N's revocation of key k removes k from N's trusted set only. It used to be one
-  fleet-wide set, so a member that claimed another's key in its own identity record and revoked it under its own
-  name silenced the owner.
-- **Who may revoke.** A revocation counts when signed by a key the reader **holds** for N (proved, chained, or
-  CA-anchored) and naming a key it holds for N. It used to be the *current* key of the raw `sys/identity/{N}` value,
-  which any member can write. Any key N still has can revoke N's others; a contested identity (the thief revokes the
-  new key, the owner the old) fails closed: neither verifies, at every node, whatever the arrival order.
+- **Every verifier of a node's key honours revocation**: KV `SignedData` (refused, `kv_revoked_key_refused`), identity
+  records and the unsigned identity exemption, consensus, role claims and the audit chain, caller envelopes, knowledge
+  records and `mycelium-agentfacts`. Consensus no longer falls back to the raw `sys/identity/{signer}` value: a signer
+  with no trusted key is refused.
+- **Certificates now name their node and their issuance.** `generate_node_cert` (start in the development posture,
+  `rotate_identity`, `mycelium tls issue`) adds a URI SAN `mycelium://<node>` and writes the issuance time (ms) as the
+  serial; `notBefore`/`notAfter` are unchanged. Each node publishes its certificate at
+  `sys/identity-cert/{node}/{key-hex}`.
+- **A node with a certificate record trusts exactly its anchored keys it has not revoked.** No other key verifies as
+  it — not a key from a bare or poisoned `sys/identity/`, a first-sighted record, a legacy handshake anchor, or a
+  retired key that never had a URI-SAN certificate. **Historical records** (audit, role claims, knowledge records)
+  signed by a key of the node that never had such a certificate — a key retired before the upgrade — read as
+  unverified once the node is re-anchored.
+- **Who may revoke:** a revocation of key P counts only when signed by an anchored key of the node issued after P's
+  certificate (or P has no standing). A thief holding an old key cannot revoke a newer one; a CA re-issue outranks
+  every older key.
+- **Revocations are written at `sys/revocation/{node}/{P-hex}/{S-hex}`** as the v1 bytes followed by a trailer (the
+  revoker, the certificates, a second signature). A 2.32 node reads the v1 prefix and applies its old rule. Records at
+  the old path are still read, under the new rule.
 - **A node cannot revoke the key it signs with**, nor a key that is not its own: `revoke_identity_key` returns
   `GossipError::InvalidField { field: "revoked_key", .. }`, and `POST /gateway/identity/revoke` answers **422**.
-  Rotate first (`rotate_identity`), then revoke the old key, or use `rotate_identity_on_compromise`.
-- A `tls` build without `compliance` now honours revocations it receives (it still cannot issue one).
-- Once validated at a node a revocation is never withdrawn there: a later tombstone or overwrite of
-  `sys/revocation/…` does not restore the key (it used to, because the set was re-read from the live KV).
+- **New on `GET /stats`:** `identity_cert_future`, `identity_records_over_cap`, `revocation_journal_refused`. **New
+  guarantee:** `id.revocation_authority`. **New file:** `{persistence}/identity/revocations.journal`.
 
-**Will the compiler tell me?** No — the API shape is unchanged. `CoreCtx` gained the `revoked_keys` field (an
-exhaustive struct literal breaks; only tests build one).
+**Will the compiler tell me?** Only for an exhaustive struct literal of `CoreCtx` (it gained `key_standing`) or of
+`RotationMaterial` (it gained `node_cert_der`). The rest is behaviour.
 
-**Migration.** Nothing, unless a node revoked the key it was still signing with (its writes stopped verifying for
-roles and consensus already; now they stop for KV too, and the call is refused). A script calling
-`POST /gateway/identity/revoke` with the current key gets 422: rotate first. **What is not covered**, stated: a
-revoked key's certificate still completes the mTLS handshake (only removal refuses there); what a revoked key
-signed before the revocation reached a node stays applied there (detection, not prevention); after a restart a
-revocation is re-validated from the store, so one whose record was tombstoned before the restart is lost at that
-node (the revoking node restores it by revoking again — a fresh write wins over the tombstone); and the order between a thief and the owner is a race no rule here decides.
+**Migration — required.** **Re-issue every node's certificate** so it carries the URI SAN: a development-posture
+node (`auto_cert_dir` with the CA key) does it itself at its next start; a node on a pre-issued certificate needs
+`mycelium tls issue` and a restart with the new certificate. **The window, until a node is re-anchored:** no revocation
+of its keys counts at upgraded nodes, so keys it revoked before the upgrade **verify again there**, and its keys are
+judged as before row Q (TOFU, proofs-off poisoning). At start a re-anchored node re-issues each of its own v1
+revocations under its current key, so they count again. A script calling `POST /gateway/identity/revoke` with the
+current key gets 422: rotate first. **What is not covered:** a holder of the fleet CA key (every node in the
+development posture) can issue a certificate that outranks any node's key; the secure posture cannot rotate and
+recovers by re-issue only; a retired key verifies until revoked; unsigned `Data` and anti-entropy; the mTLS handshake
+does not refuse a revoked key; a node without persistence forgets, across a restart, a revocation hidden fleet-wide
+while it was down, until the owner republishes it.

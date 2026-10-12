@@ -61,6 +61,18 @@ pub(crate) fn member_keys_of(ctx: &super::TaskCtx) -> HashMap<NodeId, MemberKeys
             }
         }
     }
+    // Row Q: an anchored node's certified keys are retained (attributable) too, even when no identity
+    // record put them in `peer_keys`.
+    for node in ctx.key_standing.nodes() {
+        if let Some(s) = ctx.key_standing.get(&node) {
+            let entry = out.entry(node.clone()).or_default();
+            for k in s.anchored.iter().flatten() {
+                if !entry.retained.contains(k) {
+                    entry.retained.push(*k);
+                }
+            }
+        }
+    }
     if let Some(t) = ctx.tls.get() {
         let entry = out.entry(ctx.node_id.clone()).or_default();
         let cur = t.verifying_key_bytes();
@@ -73,6 +85,10 @@ pub(crate) fn member_keys_of(ctx: &super::TaskCtx) -> HashMap<NodeId, MemberKeys
     for (node, entry) in out.iter_mut() {
         let mut trusted = entry.retained.clone();
         ctx.retain_trusted(node, &mut trusted);
+        if node == &ctx.node_id && let Some(t) = ctx.tls.get() {
+            let cur = t.verifying_key_bytes();
+            if !trusted.contains(&cur) { trusted.push(cur); }
+        }
         entry.revoked = entry.retained.iter().filter(|k| !trusted.contains(*k)).copied().collect();
     }
     out

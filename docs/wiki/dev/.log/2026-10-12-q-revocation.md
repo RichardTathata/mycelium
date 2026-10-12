@@ -16,3 +16,17 @@
 - Pages touched: `dev/security.md` § WS5 (the revocation paragraph). Outside the wiki: `src/agent/revocation.rs`
   module doc, `docs/threat-model.md`, `docs/operations/what-is-proven.md`, `docs/guide/deprecations.md` §39,
   `CHANGELOG.md`, `docs/plans/post-360-hardening.md` (row Q, §3.5, §3.6).
+
+## [2026-10-12] ingest | row Q rev 3: standing from certificate records (after #616's review and two design reviews)
+
+- #616's first fix ("any held key may revoke any other, for ever") was reviewed: it turned identity poisoning, first
+  sighting after a restart and any leaked retired key into permanent silencing, and a restart bypassed the chaining fix.
+  The decision record `docs/design/revocation-authority.md` went through rev 1 → rev 2 (the reviewer's minimal sound set)
+  → rev 3 (three named simplifications, then succession links cut because every successor in the tree is certified).
+- Built: certificate records (`sys/identity-cert/`), certificates naming their node by URI with issuance in the serial
+  (`mycelium-core/src/tls.rs`), `KeyStanding` replacing `RevokedKeys`, the fold in `src/agent/revocation.rs` (anchored ⇒
+  trusted = anchored, successor-only by issuance, `(P, S)` self-contained v2 records behind the unchanged v1 bytes, a
+  bounded journal failing closed, owner republish, the tripwire on the new prefixes), consensus's raw fallback removed,
+  agentfacts on `trusted_identity_keys`, guarantee `id.revocation_authority`.
+- Pages touched: `dev/security.md` § WS5. Outside the wiki: the design record, threat model, runbook
+  (`docs/operations/cert-rotation.md`), `what-is-proven.md`, `deprecations.md` §39, CHANGELOG, the plan.

@@ -528,7 +528,7 @@ pub(crate) fn validate_and_merge_identity(
     proof: Option<&[u8]>,
     require_proofs: bool,
 ) {
-    validate_and_merge_identity_with_revocations(peer_keys, anchor_keys, &mycelium_core::removal::RevokedKeys::default(),
+    validate_and_merge_identity_with_revocations(peer_keys, anchor_keys, &mycelium_core::removal::KeyStanding::default(),
         conflict_counter, node, history_bytes, kv_keys, proof, require_proofs);
 }
 
@@ -542,7 +542,7 @@ pub(crate) fn validate_and_merge_identity(
 pub(crate) fn validate_and_merge_identity_with_revocations(
     peer_keys: &papaya::HashMap<crate::node_id::NodeId, Vec<[u8; 32]>>,
     anchor_keys: &papaya::HashMap<crate::node_id::NodeId, std::collections::HashSet<[u8; 32]>>,
-    revoked: &mycelium_core::removal::RevokedKeys,
+    revoked: &mycelium_core::removal::KeyStanding,
     conflict_counter: &std::sync::atomic::AtomicU64,
     node: &crate::node_id::NodeId,
     history_bytes: &[u8],
@@ -614,7 +614,8 @@ pub(crate) fn validate_and_merge_identity_with_revocations(
 /// the `compliance` verify paths (role claims, audit chain).
 #[cfg(feature = "compliance")]
 pub(crate) fn known_verifying_keys(ctx: &TaskCtx, node: &crate::node_id::NodeId) -> Vec<[u8; 32]> {
-    let mut keys: Vec<[u8; 32]> = ctx.peer_keys.pin().get(node).cloned().unwrap_or_default();
+    // Post-360 plan row Q: an anchored node's anchored keys, a legacy node's retained set.
+    let mut keys: Vec<[u8; 32]> = ctx.trusted_keys(node);
     if node == &ctx.node_id
         && let Some(t) = ctx.tls.get()
     {

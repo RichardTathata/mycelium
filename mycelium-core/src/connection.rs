@@ -34,9 +34,14 @@ use tracing::{error, warn};
 /// record's two other forms, `sys/identity-signed/{node}` and `sys/identity-proof/{node}`, written
 /// only by the node itself at start and on rotation, like `sys/identity/`. None is a sub-prefix of
 /// another (`sys/identity/` does not match `sys/identity-signed/…`).
-const SELF_OWNED_SYS_PREFIXES: [&str; 8] = [
+/// Post-360 plan row Q adds the certificate record (`sys/identity-cert/{node}/{key}`) and the
+/// revocation log (`sys/revocation/{node}/…`): only the node writes either, and a peer overwriting or
+/// tombstoning one is hiding the node's standing or its revocations (`docs/design/revocation-authority.md`
+/// §4; the owner republishes).
+const SELF_OWNED_SYS_PREFIXES: [&str; 10] = [
     "sys/identity/", "sys/load/", "sys/role/", "sys/tuple/", "sys/caller-context/",
     "sys/consensus-accepted/", "sys/identity-signed/", "sys/identity-proof/",
+    "sys/identity-cert/", "sys/revocation/",
 ];
 
 /// Whether `key` lies in a `sys/` namespace this node owns — a self-owned prefix whose node-id
@@ -215,8 +220,9 @@ enum IdentityFrame {
     /// A sealed record that authenticates itself but whose history lacks a key this node already
     /// holds or has stored for the node — a superseded record replayed (#611's third review, N4).
     Stale,
-    /// A sealed record whose signer is a key its node has revoked (post-360 plan row Q): refused and
-    /// counted whatever `kv_require_signed_frames` says, like [`Self::Stale`].
+    /// A sealed record whose signer is a key its node has revoked, or — for a node a certificate record
+    /// anchors — a key without standing (post-360 plan row Q): refused and counted whatever
+    /// `kv_require_signed_frames` says, like [`Self::Stale`].
     Revoked,
     /// Anything else: an ordinary unsigned frame.
     Other,
@@ -264,6 +270,9 @@ fn split_sealed(v: &[u8]) -> Option<(&[u8], &[u8])> {
 fn self_authenticating_identity(ctx: &CoreCtx, update: &GossipUpdate) -> IdentityFrame {
     use crate::signal::kv_ns;
     if update.is_tombstone { return IdentityFrame::Other; }
+    if let Some(rest) = update.key.strip_prefix(kv_ns::IDENTITY_CERT) {
+        return if certificate_record_proves_itself(ctx, rest, update.value.as_ref()) { IdentityFrame::Exempt } else { IdentityFrame::Other };
+    }
     let Some(node) = update.key.strip_prefix(kv_ns::IDENTITY_SIGNED).and_then(|n| n.parse::<NodeId>().ok()) else {
         return IdentityFrame::Other;
     };
@@ -275,14 +284,16 @@ fn self_authenticating_identity(ctx: &CoreCtx, update: &GossipUpdate) -> Identit
     message.extend_from_slice(&(history.len() as u32).to_le_bytes());
     message.extend_from_slice(history);
     if !crate::tls::verify_bytes(&signer, &message, &proof[32..]) { return IdentityFrame::Other; }
-    // Post-360 plan row Q: a key `n` has revoked proves nothing for `n`, first sighting or not.
-    if ctx.revoked_keys.is_revoked(&node, &signer) || ctx.removed.is_key_removed(&signer) {
+    // Post-360 plan row Q: a key `n` has revoked proves nothing for `n`, first sighting or not; and
+    // for a node a certificate record anchors, a key without standing proves nothing either.
+    if ctx.key_standing.is_distrusted(&node, &signer) || ctx.removed.is_key_removed(&signer) {
         return IdentityFrame::Revoked;
     }
     let gossiped = ctx.peer_keys.pin().get(&node).cloned().unwrap_or_default();
     let anchored = ctx.peer_anchor_keys.pin().get(&node).cloned().unwrap_or_default();
-    let held = !(gossiped.is_empty() && anchored.is_empty());
-    let chains = gossiped.contains(&signer) || anchored.contains(&signer);
+    let certified = ctx.key_standing.get(&node).and_then(|s| s.anchored.clone()).unwrap_or_default();
+    let held = !(gossiped.is_empty() && anchored.is_empty() && certified.is_empty());
+    let chains = gossiped.contains(&signer) || anchored.contains(&signer) || certified.contains(&signer);
     if held && !chains {
         return IdentityFrame::Other;
     }
@@ -297,6 +308,20 @@ fn self_authenticating_identity(ctx: &CoreCtx, update: &GossipUpdate) -> Identit
     if let Some((h, _)) = stored_sealed.as_deref().and_then(split_sealed) { known.extend(h.chunks_exact(32)); }
     if let Some(b) = stored_bare.as_deref() { known.extend(b.chunks_exact(32)); }
     if known.iter().all(|k| history.chunks_exact(32).any(|h| h == *k)) { IdentityFrame::Exempt } else { IdentityFrame::Stale }
+}
+
+/// Whether `sys/identity-cert/{rest}` = `der` is a certificate record that proves itself (post-360
+/// plan row Q): the fleet CA issued it and it is valid now ([`crate::tls::NodeTls::verify_member_cert`]),
+/// it names the node of its path by URI, and its key is the one its path names. Everything else under
+/// the prefix is an ordinary unsigned frame.
+#[cfg(feature = "tls")]
+fn certificate_record_proves_itself(ctx: &CoreCtx, rest: &str, der: &[u8]) -> bool {
+    let Some((node, key_hex)) = rest.split_once('/') else { return false };
+    let Ok(node) = node.parse::<NodeId>() else { return false };
+    let Some(tls) = ctx.tls.get() else { return false };
+    let Some(id) = crate::tls::cert_identity(der) else { return false };
+    let hex: String = id.key.iter().map(|b| format!("{b:02x}")).collect();
+    hex == key_hex && id.node_uris.contains(&crate::tls::node_uri(&node)) && tls.verify_member_cert(der)
 }
 
 pub async fn handle_connection(
@@ -960,7 +985,7 @@ pub async fn handle_connection(
                     task_ctx.transport_bounds.kv_revoked_key_refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     if let Some(suppressed) = identity_exempt_warn.admit(crate::sim_seam::mono_now_ns(), WARN_EVERY_NS) {
                         warn!(from = %peer_addr, key = %update.key, suppressed,
-                            "sealed identity record signed by a key its node has revoked — refused");
+                            "sealed identity record signed by a key its node has revoked, or without standing for a certificate-anchored node — refused");
                     }
                     continue;
                 }
@@ -1121,10 +1146,15 @@ pub async fn handle_connection(
                     // node still holds, that is: not one it has revoked (post-360 plan row Q).
                     let found = task_ctx.peer_keys.pin().iter()
                         .find(|(k, _)| k.id_hash() == signer)
-                        .map(|(node, held)| (node.clone(), held.clone()));
-                    if let Some((signer_node, held)) = found {
-                        let mut pub_key_set = held.clone();
-                        task_ctx.retain_trusted(&signer_node, &mut pub_key_set);
+                        .map(|(node, held)| (node.clone(), held.clone()))
+                        .or_else(|| task_ctx.key_standing.node_by_hash(signer).map(|n| (n, Vec::new())));
+                    if let Some((signer_node, mut held)) = found {
+                        // What this node trusts for the signer (row Q): an anchored node's anchored,
+                        // unrevoked keys, or a legacy node's retained set minus its revocations.
+                        let pub_key_set = task_ctx.trusted_keys(&signer_node);
+                        if let Some(standing) = task_ctx.key_standing.get(&signer_node) {
+                            held.extend(standing.anchored.iter().flatten().copied());
+                        }
                         let canonical = canonical_sign_bytes(&update);
                         let (lo, hi)  = &signature;
                         let mut sig_bytes = [0u8; 64];
@@ -1149,7 +1179,7 @@ pub async fn handle_connection(
                                 // Row Q: say so when the signature is good under a key the node has
                                 // revoked — a compromised key still in use, counted for the operator.
                                 // Only on this failure path; a valid frame pays nothing for it.
-                                let revoked_signed = pub_key_set.len() < held.len() && held.iter()
+                                let revoked_signed = held.iter()
                                     .filter(|k| !pub_key_set.contains(k))
                                     .any(|k| crate::tls::verify_bytes(k, &tagged, &sig_bytes) || crate::tls::verify_bytes(k, &canonical, &sig_bytes));
                                 if revoked_signed {

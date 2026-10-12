@@ -783,7 +783,7 @@ fn verifying_keys_for(ctx: &TaskCtx, node: &NodeId) -> Vec<[u8; 32]> {
     }
     #[cfg(not(feature = "compliance"))]
     {
-        let mut keys: Vec<[u8; 32]> = ctx.peer_keys.pin().get(node).cloned().unwrap_or_default();
+        let mut keys: Vec<[u8; 32]> = ctx.trusted_keys(node);
         if node == &ctx.node_id
             && let Some(t) = ctx.tls.get()
         {

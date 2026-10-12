@@ -87,25 +87,17 @@ pub fn publish_field(agent: &GossipAgent, field: &str, value: Value) -> bool {
     agent.kv().set(field_key(&agent.node_id().to_string(), field), sf.encode())
 }
 
-/// This node's view of `node`'s verifying-key **history**, read from the gossiped
-/// `sys/identity/{node}` entry: a concatenation of 32-byte keys (`32 × N`) — current key first,
-/// retained priors after (WS5 multi-key archival, same layout `helpers::parse_identity_keys`
-/// produces). Empty if not yet learned or malformed (empty / non-multiple-of-32). Every verify
-/// path tries the whole set so a field signed before an identity rotation still verifies — the
-/// retained-key-set posture the connection/consensus/rbac/audit paths already use.
+/// The verifying keys this node **trusts for `node` now** — `GossipAgent::trusted_identity_keys`
+/// (post-360 plan row Q): for a node with a certificate record, its anchored keys it has not
+/// revoked; for a legacy node, its retained identity keys minus any revocation. Every verify path
+/// tries the whole set, so a field signed before an identity rotation still verifies while the old
+/// key is trusted. Never the raw `sys/identity/{node}` value, which any member can write and which
+/// knows nothing of revocation. Empty for a node id that does not parse or is not yet learned.
 fn peer_identity_keys(agent: &GossipAgent, node: &str) -> Vec<[u8; 32]> {
-    let Some(bytes) = agent.kv().get(&format!("sys/identity/{node}")) else { return Vec::new() };
-    if bytes.is_empty() || !bytes.len().is_multiple_of(32) {
-        return Vec::new();
+    match node.parse() {
+        Ok(n) => agent.trusted_identity_keys(&n),
+        Err(_) => Vec::new(),
     }
-    bytes
-        .chunks_exact(32)
-        .map(|c| {
-            let mut a = [0u8; 32];
-            a.copy_from_slice(c);
-            a
-        })
-        .collect()
 }
 
 /// Read and **verify** `node`'s published AgentFacts fields from the local gossip view, returning
@@ -162,9 +154,15 @@ pub fn domain_facts(agent: &GossipAgent, ttl_ms: u64) -> Vec<NodeFacts> {
     let mut out = Vec::new();
     for (node, fields) in by_node {
         let keys = peer_identity_keys(agent, &node);
-        // The published key is the node's *current* identity (first in the history); fields are
-        // verified against the whole retained set so pre-rotation signatures still pass.
-        let Some(current) = keys.first().copied() else { continue };
+        // The published key is the node's *current* identity — first in its published history, if the
+        // node trusts that key (the history is a plain KV value; only its order is read from it, never
+        // which keys count) — else this node's own current key for itself, else any trusted key. Fields
+        // are verified against the whole trusted set, so pre-rotation signatures still pass.
+        let history_first = agent.kv().get(&format!("sys/identity/{node}"))
+            .and_then(|b| (b.len() >= 32).then(|| <[u8; 32]>::try_from(&b[..32]).ok()).flatten())
+            .filter(|k| keys.contains(k));
+        let own = (agent.node_id().to_string() == node).then(|| agent.identity_public_key()).flatten();
+        let Some(current) = history_first.or(own).or_else(|| keys.first().copied()) else { continue };
         let verified: Vec<SignedField> = fields.into_iter().filter(|sf| sf.verify_any(&keys)).collect();
         if verified.is_empty() {
             continue;
@@ -258,6 +256,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&cert_dir);
     }
 
+    /// **A field signed by a key written into the raw identity entry does not verify** (post-360 plan
+    /// row Q). This crate verified against the raw `sys/identity/{node}` value, which any member can
+    /// write and which knows nothing of revocation; it reads the node's trusted keys now. Seen failing
+    /// first on e5c2c27e: "a key written into the raw identity entry signed a verified field".
+    #[tokio::test]
+    async fn a_field_signed_by_a_key_written_into_the_raw_identity_does_not_verify() {
+        let cert_dir = std::env::temp_dir().join(format!("myc-crdt-raw-{}", alloc_port()));
+        let _ = std::fs::remove_dir_all(&cert_dir);
+        let (agent, _p) = tls_agent(None, &cert_dir).await;
+        let me = agent.node_id().to_string();
+        wait_identity(&agent, &me).await;
+        let intruder = ed25519_dalek::SigningKey::from_bytes(&[0x3c; 32]);
+        let current = agent.identity_public_key().unwrap();
+        let _ = agent.kv().set(format!("sys/identity/{me}"), [intruder.verifying_key().to_bytes(), current].concat());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let issued_at_ms = now_ms();
+        let value = json!("intruder");
+        let canonical = SignedField::canonical("owner", &value, issued_at_ms);
+        let signature = {
+            use ed25519_dalek::Signer;
+            intruder.sign(&canonical).to_bytes().to_vec()
+        };
+        let forged = SignedField { field: "owner".into(), value, issued_at_ms, signature };
+        let _ = agent.kv().set(field_key(&me, "owner"), forged.encode());
+        let verified = read_verified_fields(&agent, &me, 60_000).get("owner").cloned();
+        agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+        let _ = std::fs::remove_dir_all(&cert_dir);
+        assert_eq!(verified, None, "a key written into the raw identity entry signed a verified field");
+    }
+
     #[tokio::test]
     async fn intra_domain_field_gossips_and_verifies_cross_node() {
         // A publishes a field; B reads + verifies it after intra-domain gossip — the PUSH path.
@@ -317,7 +345,7 @@ mod tests {
 
         // The history entry now carries both keys (current first).
         let keys = peer_identity_keys(&agent, &me);
-        assert!(keys.first() == Some(&new_key) && keys.contains(&old_key), "new‖old retained");
+        assert!(keys.contains(&new_key) && keys.contains(&old_key), "both keys trusted after a rotation");
 
         // The pre-rotation field (still signed by the old key) must still verify against the set.
         assert_eq!(

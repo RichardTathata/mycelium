@@ -169,7 +169,7 @@ fn spawn_handler_with(
         peer_keys: Arc::new(opts.peer_keys.into_iter().collect()),
         peer_anchor_keys: Arc::new(papaya::HashMap::new()),
         removed: Arc::new(mycelium_core::removal::RemovedSet::default()),
-        revoked_keys: Arc::new(mycelium_core::removal::RevokedKeys::default()),
+        key_standing: Arc::new(mycelium_core::removal::KeyStanding::default()),
         identity_anchor_conflicts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         peers: Arc::new(papaya::HashMap::new()),
         rate_throttle: Arc::new(papaya::HashMap::new()),
@@ -260,6 +260,8 @@ fn spawn_handler_with(
         provider_enforcement: std::sync::atomic::AtomicBool::new(false),
         #[cfg(feature = "tls")]
         membership: std::sync::OnceLock::new(),
+        #[cfg(feature = "tls")]
+        identity_ledger: Arc::new(crate::agent::revocation::IdentityLedger::default()),
         #[cfg(feature = "a2a")]
         a2a_mounted: std::sync::atomic::AtomicBool::new(false),
         guarantees: parking_lot::Mutex::new(crate::agent::guarantee::core_guarantees()),
@@ -1373,7 +1375,7 @@ async fn a_replayed_pre_rotation_sealed_record_does_not_replace_the_current_one(
 
 /// A `SignedData` frame A sends in `as_node`'s name, signed by `sk` — what a holder of one of
 /// `as_node`'s keys can put on the wire.
-#[cfg(all(feature = "tls", feature = "compliance"))]
+#[cfg(feature = "tls")]
 fn send_signed_as(a: &GossipAgent, as_node: &NodeId, sk: &ed25519_dalek::SigningKey, key: &str, value: &'static [u8]) {
     let mut u = crate::framing::make_gossip_update(&a.node_id, a.task_ctx.default_ttl, Arc::from(key), Bytes::from_static(value), false, &a.task_ctx.hlc);
     u.sender = as_node.id_hash();
@@ -1404,7 +1406,7 @@ async fn revocation_seen(x: &GossipAgent, node: &NodeId, old: [u8; 32], new: [u8
 }
 
 /// Poll `ok` for up to three seconds.
-#[cfg(all(feature = "tls", feature = "compliance"))]
+#[cfg(feature = "tls")]
 async fn within_3s(mut ok: impl FnMut() -> bool) -> bool {
     for _ in 0..120 { if ok() { return true; } tokio::time::sleep(Duration::from_millis(25)).await; }
     ok()
@@ -1624,6 +1626,394 @@ async fn revoking_the_key_a_node_signs_with_is_refused() {
     let _ = std::fs::remove_dir_all(&dir);
     assert!(refused, "revoking the key this node signs with must be refused");
     assert!(!recorded, "and nothing is recorded");
+}
+
+// ── Row Q rev 3 (`docs/design/revocation-authority.md`): who may revoke, judged by certificates ──
+
+/// A certificate the fleet CA in `cert_dir` issues for `key` as `node`, naming it by URI and dated
+/// `issued_ms` in its serial — what `generate_node_cert` makes, minted here so a test can be a CA
+/// holder (the development posture puts `ca-key.pem` on every node).
+#[cfg(feature = "tls")]
+fn mint_member_cert(cert_dir: &std::path::Path, node: &NodeId, key: &ed25519_dalek::SigningKey, issued_ms: u64) -> Vec<u8> {
+    use ed25519_dalek::pkcs8::EncodePrivateKey;
+    let ca_key = rcgen::KeyPair::from_pem(&std::fs::read_to_string(cert_dir.join("ca-key.pem")).unwrap()).unwrap();
+    let mut ca_params = rcgen::CertificateParams::new(vec![]).unwrap();
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    ca_params.not_before = rcgen::date_time_ymd(2024, 1, 1);
+    ca_params.not_after = rcgen::date_time_ymd(2099, 1, 1);
+    let ca = ca_params.self_signed(&ca_key).unwrap();
+    let pkcs8 = key.to_pkcs8_der().unwrap();
+    let kp = rcgen::KeyPair::try_from(pkcs8.as_bytes()).unwrap();
+    let mut p = rcgen::CertificateParams::new(vec![]).unwrap();
+    p.subject_alt_names = vec![
+        rcgen::SanType::IpAddress(node.to_socket_addr().ip()),
+        rcgen::SanType::URI(rcgen::Ia5String::try_from(format!("mycelium://{node}")).unwrap()),
+    ];
+    p.serial_number = Some(rcgen::SerialNumber::from(issued_ms));
+    p.not_before = rcgen::date_time_ymd(2024, 1, 1);
+    p.not_after = rcgen::date_time_ymd(2099, 1, 1);
+    p.signed_by(&kp, &ca, &ca_key).unwrap().der().to_vec()
+}
+
+#[cfg(feature = "tls")]
+fn hex_key(k: &[u8; 32]) -> String {
+    k.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A v2 revocation record of `revoked` for `node`, signed by `sk`, carrying `certs` — the layout
+/// `docs/design/revocation-authority.md` §2.3 fixes (the v1 bytes, a marker, the trailer), built here
+/// from the layout alone so the test does not lean on the module it tests. Returns `(path, bytes)`.
+#[cfg(feature = "tls")]
+fn revocation_v2_by(node: &NodeId, revoked: [u8; 32], sk: &ed25519_dalek::SigningKey, certs: Vec<Vec<u8>>) -> (String, Vec<u8>) {
+    use sha2::{Digest, Sha256};
+    #[derive(serde::Serialize)]
+    struct Event { node_id: NodeId, hlc: u64, revoked_key: [u8; 32], reason: Option<String> }
+    #[derive(serde::Serialize)]
+    struct Signed<'a> { event: &'a Event, sig: Vec<u8> }
+    #[derive(serde::Serialize)]
+    struct Trailer { revoker: [u8; 32], certs: Vec<Vec<u8>>, sig: Vec<u8> }
+    let event = Event { node_id: node.clone(), hlc: 1, revoked_key: revoked, reason: None };
+    let canonical = mycelium_core::serde_fixint::to_vec(&event).unwrap();
+    let revoker = sk.verifying_key().to_bytes();
+    let mut h = Sha256::new();
+    h.update((canonical.len() as u32).to_le_bytes());
+    h.update(&canonical);
+    h.update(revoker);
+    for c in &certs { h.update((c.len() as u32).to_le_bytes()); h.update(c); }
+    let mut msg = b"mycelium.identity/revoke/2".to_vec();
+    msg.extend_from_slice(&h.finalize());
+    let mut out = mycelium_core::serde_fixint::to_vec(&Signed { event: &event, sig: crate::tls::sign_bytes(sk, &canonical).to_vec() }).unwrap();
+    out.extend_from_slice(b"MYCREV2\0");
+    out.extend_from_slice(&mycelium_core::serde_fixint::to_vec(&Trailer { revoker, certs, sig: crate::tls::sign_bytes(sk, &msg).to_vec() }).unwrap());
+    (format!("sys/revocation/{node}/{}/{}", hex_key(&revoked), hex_key(&revoker)), out)
+}
+
+/// Re-send `c`'s write until `b` has it (a writer whose connection a restart broke loses its first frame).
+#[cfg(feature = "tls")]
+async fn plant_lands(c: &GossipAgent, b: &GossipAgent, key: &str) -> bool {
+    for i in 0..20 {
+        let _ = c.kv().set(key.to_string(), format!("plant-{i}").into_bytes());
+        if within_3s(|| b.kv().get(key).is_some()).await { return true; }
+    }
+    false
+}
+
+#[cfg(all(feature = "tls", feature = "compliance", unix))]
+fn persisted(base: &std::path::Path) -> crate::config::PersistenceConfig {
+    use crate::config::{OnUnreadable, PersistenceConfig, SyncMode};
+    PersistenceConfig { base_path: base.to_path_buf(), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 1_000, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse }
+}
+
+/// Restart `b` over its own configuration and wait for it to have a peer again.
+#[cfg(all(feature = "tls", feature = "compliance", unix))]
+async fn restart(b: GossipAgent) -> GossipAgent {
+    let (id, cfg) = (b.node_id.clone(), b.config.clone());
+    b.shutdown().await;
+    drop(b);
+    let b = GossipAgent::new(id, cfg);
+    b.start().await.unwrap();
+    let _ = within_3s(|| !b.peers().is_empty()).await;
+    b
+}
+
+/// **A key a member poisoned into another's identity neither revokes nor signs for it** (row Q rev 3,
+/// #616's review finding 2 with proofs off). A garbles C's sealed record and proof and writes C's bare
+/// identity as `ka ‖ k0` — its own signed writes, which proofs-off accepts — so B holds `ka` for C; A
+/// then revokes C's `k0` under `ka` and writes as C under `ka`. On 7c967ba3's successor `e5c2c27e` the
+/// held-key rule counted the revocation (C silenced) and the write landed. C has a certificate record,
+/// so its trusted keys are exactly its anchored keys: `ka` is none. Seen failing first on e5c2c27e:
+/// "POISON: a key A wrote into C's identity revoked C's key at B".
+#[cfg(all(feature = "tls", feature = "compliance"))]
+#[tokio::test]
+async fn a_poisoned_identity_key_neither_revokes_nor_signs_for_an_anchored_member() {
+    let (a, b, c, _nb, nc, dir) = three_signed_nodes("rev3-poison", false).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let a_sk = a.task_ctx.tls.get().unwrap().signing_key();
+    let ka = a_sk.verifying_key().to_bytes();
+    let k0 = c.identity_public_key().unwrap();
+    let _ = a.kv().set(format!("sys/identity-signed/{nc}"), b"x".to_vec());
+    let _ = a.kv().set(format!("sys/identity-proof/{nc}"), b"x".to_vec());
+    let _ = a.kv().set(format!("sys/identity/{nc}"), [ka, k0].concat());
+    let _ = within_3s(|| b.task_ctx.peer_keys.pin().get(&nc).is_some_and(|k| k.contains(&ka))).await;
+    let _ = a.kv().set(crate::agent::revocation::revocation_key(&nc, &k0), revocation_signed_by(&nc, k0, &a_sk));
+    let (p2, v2) = revocation_v2_by(&nc, k0, &a_sk, vec![]);
+    let _ = a.kv().set(p2.clone(), v2);
+    let _ = within_3s(|| b.kv().get(&p2).is_some()).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    send_signed_as(&a, &nc, &a_sk, "poison/as-c", b"by-ka");
+    let plant = plant_lands(&c, &b, "poison/plant").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let k0_trusted = crate::agent::helpers::known_verifying_keys(&b.task_ctx, &nc).contains(&k0);
+    let landed = b.kv().get("poison/as-c").is_some();
+    a.shutdown().await; b.shutdown().await; c.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(k0_trusted, "POISON: a key A wrote into C's identity revoked C's key at B");
+    assert!(plant, "C's writes still arrive at B");
+    assert!(!landed, "POISON: a key A wrote into C's identity signs as C at B");
+}
+
+/// **A first-sighted key after a restart cannot revoke an anchored member's key** (row Q rev 3, #616's
+/// review finding 2 with proofs on). A writes a self-signed sealed record `[ka]` for C; B refuses it
+/// live but stores it, and after B restarts it is a first sighting — on e5c2c27e `ka` entered C's set
+/// and A's revocation of C's `k0` under `ka` counted, silencing C. Seen failing first on e5c2c27e:
+/// "FIRST SIGHT: after B restarted, a self-signed key revoked C's anchored key".
+#[cfg(all(feature = "tls", feature = "compliance", unix))]
+#[tokio::test]
+async fn a_first_sighted_key_after_a_restart_cannot_revoke_an_anchored_member() {
+    let base = std::env::temp_dir().join(format!("myc-rev3-fs-{}-{}", std::process::id(), alloc_port()));
+    let _ = std::fs::remove_dir_all(&base);
+    let data = base.join("data");
+    let (a, b, c, _nb, nc, dir) = three_signed_nodes_with("rev3-first", true, |cfg, _| cfg.persistence = Some(persisted(&data))).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let a_sk = a.task_ctx.tls.get().unwrap().signing_key();
+    let ka = a_sk.verifying_key().to_bytes();
+    let k0 = c.identity_public_key().unwrap();
+    let sealed = format!("sys/identity-signed/{nc}");
+    let forged = sealed_record(&[ka], &a_sk);
+    let _ = a.kv().set(sealed.clone(), forged.clone());
+    let _ = within_3s(|| b.kv().get(&sealed).is_some_and(|v| v.as_ref() == forged.as_slice())).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let b = restart(b).await;
+    let _ = a.kv().set(crate::agent::revocation::revocation_key(&nc, &k0), revocation_signed_by(&nc, k0, &a_sk));
+    let (p2, v2) = revocation_v2_by(&nc, k0, &a_sk, vec![]);
+    let _ = a.kv().set(p2.clone(), v2);
+    let _ = within_3s(|| b.kv().get(&p2).is_some()).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let plant = plant_lands(&c, &b, "first/plant").await;
+    let k0_trusted = crate::agent::helpers::known_verifying_keys(&b.task_ctx, &nc).contains(&k0);
+    let ka_trusted = crate::agent::helpers::known_verifying_keys(&b.task_ctx, &nc).contains(&ka);
+    a.shutdown().await; b.shutdown().await; c.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&base);
+    assert!(k0_trusted, "FIRST SIGHT: after B restarted, a self-signed key revoked C's anchored key");
+    assert!(!ka_trusted, "and the self-signed key is not trusted for C");
+    assert!(plant, "C's writes still arrive at B");
+}
+
+/// **A fork from a revoked key is not trusted after the verifier restarts** (row Q rev 3, #616's review
+/// finding 1). C rotates on compromise; the thief writes a sealed record `[ka, k1, k0]` signed by the
+/// revoked `k0`. Live, B refused it; after B restarts it was a first sighting, `ka` entered C's set, and
+/// the thief's write as C landed. Seen failing first on e5c2c27e: "RESTART: a key chained through C's
+/// revoked key signs as C after B restarted".
+#[cfg(all(feature = "tls", feature = "compliance", unix))]
+#[tokio::test]
+async fn a_fork_from_a_revoked_key_is_not_trusted_after_the_verifier_restarts() {
+    let base = std::env::temp_dir().join(format!("myc-rev3-fork-{}-{}", std::process::id(), alloc_port()));
+    let _ = std::fs::remove_dir_all(&base);
+    let data = base.join("data");
+    let (a, b, c, _nb, nc, dir) = three_signed_nodes_with("rev3-fork", true, |cfg, _| cfg.persistence = Some(persisted(&data))).await;
+    let k0_sk = c.task_ctx.tls.get().unwrap().signing_key();
+    let k0 = k0_sk.verifying_key().to_bytes();
+    let k1 = c.rotate_identity_on_compromise(Duration::from_millis(500)).await.unwrap();
+    let seen = revocation_seen(&b, &nc, k0, k1).await;
+    let thief = ed25519_dalek::SigningKey::from_bytes(&[0x6a; 32]);
+    let ka = thief.verifying_key().to_bytes();
+    let sealed = format!("sys/identity-signed/{nc}");
+    let forged = sealed_record(&[ka, k1, k0], &k0_sk);
+    let _ = a.kv().set(sealed.clone(), forged.clone());
+    let _ = within_3s(|| b.kv().get(&sealed).is_some_and(|v| v.as_ref() == forged.as_slice())).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let b = restart(b).await;
+    let plant = plant_lands(&c, &b, "fork/plant").await;
+    send_signed_as(&a, &nc, &thief, "fork/as-c", b"by-ka");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let landed = b.kv().get("fork/as-c").is_some();
+    let ka_trusted = crate::agent::helpers::known_verifying_keys(&b.task_ctx, &nc).contains(&ka);
+    a.shutdown().await; b.shutdown().await; c.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&base);
+    assert!(seen && plant, "B saw the revocation, and C's write under its new key arrived after the restart");
+    assert!(!ka_trusted, "RESTART: a key chained through C's revoked key is trusted for C after B restarted");
+    assert!(!landed, "RESTART: a key chained through C's revoked key signs as C after B restarted");
+}
+
+/// **A retired key cannot revoke its successor, and rotation continues** (row Q rev 3, #616's review
+/// finding 3). After `rotate_identity_on_compromise`, a thief holding the old `k0` revokes `k1` under
+/// `k0`. On e5c2c27e any held key revoked any other, so C was silenced and could not rotate on. Authority
+/// now flows only to the past: `k0`'s certificate is older than `k1`'s. Seen failing first on e5c2c27e:
+/// "THIEF: a retired key revoked its successor at B".
+#[cfg(all(feature = "tls", feature = "compliance"))]
+#[tokio::test]
+async fn a_retired_key_cannot_revoke_its_successor_and_rotation_continues() {
+    let (a, b, c, _nb, nc, dir) = three_signed_nodes("rev3-thief", false).await;
+    let k0_sk = c.task_ctx.tls.get().unwrap().signing_key();
+    let k0 = k0_sk.verifying_key().to_bytes();
+    let k1 = c.rotate_identity_on_compromise(Duration::from_millis(500)).await.unwrap();
+    let seen = revocation_seen(&b, &nc, k0, k1).await;
+    let k0_cert = a.kv().get(&format!("sys/identity-cert/{nc}/{}", hex_key(&k0))).map(|b| b.to_vec()).into_iter().collect();
+    let _ = a.kv().set(crate::agent::revocation::revocation_key(&nc, &k1), revocation_signed_by(&nc, k1, &k0_sk));
+    let (p2, v2) = revocation_v2_by(&nc, k1, &k0_sk, k0_cert);
+    let _ = a.kv().set(p2.clone(), v2);
+    let _ = within_3s(|| b.kv().get(&p2).is_some()).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let k1_trusted = crate::agent::helpers::known_verifying_keys(&b.task_ctx, &nc).contains(&k1);
+    let plant = plant_lands(&c, &b, "thief/plant").await;
+    let k2 = c.rotate_identity(Duration::from_millis(500)).await;
+    let k2_trusted = match &k2 {
+        Ok(k2) => within_3s(|| crate::agent::helpers::known_verifying_keys(&b.task_ctx, &nc).contains(k2)).await,
+        Err(_) => false,
+    };
+    let plant2 = plant_lands(&c, &b, "thief/plant-after-k2").await;
+    a.shutdown().await; b.shutdown().await; c.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(seen, "B saw k0 revoked");
+    assert!(k1_trusted, "THIEF: a retired key revoked its successor at B");
+    assert!(plant, "C's writes under k1 still arrive");
+    assert!(k2_trusted && plant2, "C rotates on to k2, which B trusts, and its writes arrive ({k2:?})");
+}
+
+/// **A revocation hidden while the verifier was down still counts** (row Q rev 3: the journal, and the
+/// `(P, S)` slot). B counted C's revocation of `k0`; C is down, so nothing republishes it; A tombstones
+/// every revocation record of C's and B takes the tombstones; B restarts. On e5c2c27e the revocation was
+/// re-read from the store at restart, found missing, and `k0` verified again. Seen failing first on
+/// e5c2c27e: "HIDDEN: after B restarted, the hidden revocation no longer counted".
+#[cfg(all(feature = "tls", feature = "compliance", unix))]
+#[tokio::test]
+async fn a_revocation_hidden_while_the_verifier_was_down_still_counts() {
+    let base = std::env::temp_dir().join(format!("myc-rev3-hide-{}-{}", std::process::id(), alloc_port()));
+    let _ = std::fs::remove_dir_all(&base);
+    let data = base.join("data");
+    let (a, b, c, _nb, nc, dir) = three_signed_nodes_with("rev3-hide", false, |cfg, _| cfg.persistence = Some(persisted(&data))).await;
+    let k0_sk = c.task_ctx.tls.get().unwrap().signing_key();
+    let k0 = k0_sk.verifying_key().to_bytes();
+    let k1 = c.rotate_identity_on_compromise(Duration::from_millis(500)).await.unwrap();
+    let seen = revocation_seen(&b, &nc, k0, k1).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    c.shutdown().await;
+    let records: Vec<String> = a.kv().scan_prefix(&format!("sys/revocation/{nc}/")).into_iter().map(|(k, _)| k.to_string()).collect();
+    for k in &records { assert!(a.kv().delete(k.clone())); }
+    let hidden = within_3s(|| records.iter().all(|k| b.kv().get(k).is_none())).await;
+    let b = restart(b).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let plant = plant_lands(&a, &b, "hide/plant-a").await;
+    send_signed_as(&a, &nc, &k0_sk, "hide/as-c", b"by-k0");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let k0_trusted = crate::agent::helpers::known_verifying_keys(&b.task_ctx, &nc).contains(&k0);
+    let landed = b.kv().get("hide/as-c").is_some();
+    a.shutdown().await; b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&base);
+    assert!(seen && !records.is_empty() && hidden && plant, "counted, hidden at B ({hidden}), B back ({plant})");
+    assert!(!k0_trusted, "HIDDEN: after B restarted, the hidden revocation no longer counted");
+    assert!(!landed, "HIDDEN: after B restarted, C's revoked key signed C's writes");
+}
+
+/// **A node built with `tls` and without `compliance` honours a revocation it receives** (row Q rev 3,
+/// #616's review finding 7). C rotates (`rotate_identity`, a `tls` verb) and writes its revocation of
+/// `k0` itself, signed by `k1` and carrying `k1`'s certificate. On e5c2c27e the revocation module was
+/// compiled under `compliance` only, so a `tls` build ignored it and a write signed by `k0` as C landed.
+/// Seen failing first on e5c2c27e under `--features tls`: "TLS-ONLY: C's revoked key still signs C's
+/// writes at B".
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn a_tls_only_node_honours_a_revocation() {
+    let (a, b, c, _nb, nc, dir) = three_signed_nodes("rev3-tls", false).await;
+    let k0_sk = c.task_ctx.tls.get().unwrap().signing_key();
+    let k0 = k0_sk.verifying_key().to_bytes();
+    let _ = c.rotate_identity(Duration::from_millis(500)).await.unwrap();
+    let k1_sk = c.task_ctx.tls.get().unwrap().signing_key();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    let k1_cert = mint_member_cert(&dir, &nc, &k1_sk, now);
+    let (path, bytes) = revocation_v2_by(&nc, k0, &k1_sk, vec![k1_cert]);
+    let _ = c.kv().set(path.clone(), bytes);
+    let _ = within_3s(|| b.kv().get(&path).is_some()).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    send_signed_as(&a, &nc, &k0_sk, "tlsonly/as-c", b"by-k0");
+    let plant = plant_lands(&c, &b, "tlsonly/plant").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let landed = b.kv().get("tlsonly/as-c").is_some();
+    a.shutdown().await; b.shutdown().await; c.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(plant, "C's writes under k1 arrive at B");
+    assert!(!landed, "TLS-ONLY: C's revoked key still signs C's writes at B");
+}
+
+/// **A certificate issued in the future outranks nothing** (row Q rev 3, the design review's attack 2).
+/// A, holding the CA key (the development posture), mints a certificate for C dated a day ahead, writes
+/// it as C's certificate record and revokes C's `k0` under it. Its issuance is past `wall_now_ms` plus
+/// the skew bound, so it is counted (`identity_cert_future`) and ignored. A guard on the new path: on
+/// e5c2c27e certificate records did not exist, so nothing here could happen.
+#[cfg(all(feature = "tls", feature = "compliance"))]
+#[tokio::test]
+async fn a_certificate_issued_in_the_future_outranks_nothing() {
+    let (a, b, c, _nb, nc, dir) = three_signed_nodes("rev3-future", false).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let k0 = c.identity_public_key().unwrap();
+    let kx = ed25519_dalek::SigningKey::from_bytes(&[0x7c; 32]);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    let future = mint_member_cert(&dir, &nc, &kx, now + 86_400_000);
+    let _ = a.kv().set(format!("sys/identity-cert/{nc}/{}", hex_key(&kx.verifying_key().to_bytes())), future.clone());
+    let (path, bytes) = revocation_v2_by(&nc, k0, &kx, vec![future]);
+    let _ = a.kv().set(path.clone(), bytes);
+    let _ = within_3s(|| b.kv().get(&path).is_some()).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let trusted = crate::agent::helpers::known_verifying_keys(&b.task_ctx, &nc);
+    let counted = b.task_ctx.identity_ledger.cert_future.load(Ordering::Relaxed);
+    a.shutdown().await; b.shutdown().await; c.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(trusted.contains(&k0), "a future-dated certificate's revocation did not count");
+    assert!(!trusted.contains(&kx.verifying_key().to_bytes()), "and its key is not trusted");
+    assert!(counted >= 1, "the future certificate was counted");
+}
+
+/// **A legacy IP-only certificate anchors nothing** (row Q rev 3, the design review's attack 5). A mints
+/// for C a CA-signed certificate without the URI SAN (what every certificate before row Q was), for a
+/// key of its own, and revokes C's `k0` under it. It names a host, not a node, so it gives no standing.
+/// A guard on the new path, as above.
+#[cfg(all(feature = "tls", feature = "compliance"))]
+#[tokio::test]
+async fn a_legacy_ip_only_certificate_anchors_nothing() {
+    use ed25519_dalek::pkcs8::EncodePrivateKey;
+    let (a, b, c, _nb, nc, dir) = three_signed_nodes("rev3-legacy", false).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let k0 = c.identity_public_key().unwrap();
+    let kx = ed25519_dalek::SigningKey::from_bytes(&[0x7d; 32]);
+    let ca_key = rcgen::KeyPair::from_pem(&std::fs::read_to_string(dir.join("ca-key.pem")).unwrap()).unwrap();
+    let mut ca_params = rcgen::CertificateParams::new(vec![]).unwrap();
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    ca_params.not_before = rcgen::date_time_ymd(2024, 1, 1);
+    ca_params.not_after = rcgen::date_time_ymd(2099, 1, 1);
+    let ca = ca_params.self_signed(&ca_key).unwrap();
+    let kp = rcgen::KeyPair::try_from(kx.to_pkcs8_der().unwrap().as_bytes()).unwrap();
+    let mut p = rcgen::CertificateParams::new(vec![]).unwrap();
+    p.subject_alt_names = vec![rcgen::SanType::IpAddress(nc.to_socket_addr().ip())];
+    p.serial_number = Some(rcgen::SerialNumber::from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64));
+    let legacy = p.signed_by(&kp, &ca, &ca_key).unwrap().der().to_vec();
+    let _ = a.kv().set(format!("sys/identity-cert/{nc}/{}", hex_key(&kx.verifying_key().to_bytes())), legacy.clone());
+    let (path, bytes) = revocation_v2_by(&nc, k0, &kx, vec![legacy]);
+    let _ = a.kv().set(path.clone(), bytes);
+    let _ = within_3s(|| b.kv().get(&path).is_some()).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let trusted = crate::agent::helpers::known_verifying_keys(&b.task_ctx, &nc);
+    a.shutdown().await; b.shutdown().await; c.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(trusted.contains(&k0) && !trusted.contains(&kx.verifying_key().to_bytes()), "an IP-only certificate gave no standing");
+}
+
+/// **An owner republishes its overwritten records** (row Q rev 3, attack 4). A overwrites C's certificate
+/// record with garbage; C's watcher sees its own record changed and writes it back, and the tripwire
+/// counts the foreign write. A guard on the new path.
+#[cfg(all(feature = "tls", feature = "compliance"))]
+#[tokio::test]
+async fn an_owner_republishes_its_overwritten_certificate_record() {
+    let (a, b, c, _nb, nc, dir) = three_signed_nodes("rev3-republish", false).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let k0 = c.identity_public_key().unwrap();
+    let key = format!("sys/identity-cert/{nc}/{}", hex_key(&k0));
+    let original = c.kv().get(&key).expect("C published its certificate record");
+    let before = c.task_ctx.sys_namespace_violations.load(Ordering::Relaxed);
+    let _ = a.kv().set(key.clone(), b"garbage".to_vec());
+    let restored = {
+        let mut ok = false;
+        for _ in 0..200 {
+            if b.kv().get(&key).as_deref() == Some(original.as_ref()) && c.task_ctx.sys_namespace_violations.load(Ordering::Relaxed) > before { ok = true; break; }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        ok
+    };
+    a.shutdown().await; b.shutdown().await; c.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(restored, "C rewrote its certificate record after A overwrote it, and the tripwire counted it");
 }
 
 /// **A capability retracted as its node shuts down reaches the peers** (#611, found by CI's co-op
@@ -2172,7 +2562,7 @@ async fn test_subscribe_notified_via_gossip() {
             peer_keys: Arc::new(papaya::HashMap::new()),
             peer_anchor_keys: Arc::new(papaya::HashMap::new()),
             removed: Arc::new(mycelium_core::removal::RemovedSet::default()),
-            revoked_keys: Arc::new(mycelium_core::removal::RevokedKeys::default()),
+            key_standing: Arc::new(mycelium_core::removal::KeyStanding::default()),
             identity_anchor_conflicts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             peers: Arc::new(papaya::HashMap::new()),
             rate_throttle: Arc::new(papaya::HashMap::new()),
@@ -2263,6 +2653,8 @@ async fn test_subscribe_notified_via_gossip() {
         provider_enforcement: std::sync::atomic::AtomicBool::new(false),
         #[cfg(feature = "tls")]
         membership: std::sync::OnceLock::new(),
+        #[cfg(feature = "tls")]
+        identity_ledger: Arc::new(crate::agent::revocation::IdentityLedger::default()),
         #[cfg(feature = "a2a")]
         a2a_mounted: std::sync::atomic::AtomicBool::new(false),
         guarantees: parking_lot::Mutex::new(crate::agent::guarantee::core_guarantees()),

@@ -514,10 +514,12 @@ scope:* an attestation is bound to the digest of the exact object it vouches for
 **retains** earlier keys (WS5) so that a signature made before a routine rotation still verifies, **minus the
 revocations that reader has received and validated** (WS-D) — since post-360 plan row Q at *every* verifier of a
 node's key (KV writes, identity records and the unsigned identity exemption, consensus, role claims and the audit
-chain, gateway caller envelopes, knowledge records), per node (N's revocation removes a key from N's set only), and
-counted only when signed by a key the reader *holds* for N — never by the current key of the raw
-`sys/identity/{N}` value, which any member can write. A thief holding a compromised key can revoke the new one too:
-both then count and the identity fails closed. Two consequences the rules must state rather than
+chain, gateway caller envelopes, knowledge records, `mycelium-agentfacts`). **Who may revoke** rests on certificate
+records (`docs/design/revocation-authority.md`): a node with one trusts exactly its anchored, unrevoked keys, and a
+revocation counts only when signed by an anchored key issued after the revoked key's — so a poisoned or first-sighted
+key revokes nothing and a thief holding a retired key cannot revoke its successor. It does **not** hold against a
+holder of the fleet CA key (every node in the development posture, or a CA compromise), nor for a node whose
+certificate predates row Q; the mTLS handshake does not refuse a revoked key. Two consequences the rules must state rather than
 assume: (i) *rotation is not revocation* — requiring the signer's *current* key would reject legitimate history;
 (ii) *revocation reaches a reader only when the revocation does* — a disconnected reader keeps trusting a revoked
 key until it reconnects (Boundary D's residual, in key form), so "excluded everywhere" means everywhere the

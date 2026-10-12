@@ -127,6 +127,18 @@
       "docs": "docs/operations/cert-rotation.md"
     },
     {
+      "id": "id.revocation_authority",
+      "revision": 1,
+      "subsystem": "identity",
+      "kind": "node_enforced",
+      "promise": "a revocation of this node's keys counts only when a newer certificate the fleet CA issued for it signs it, and no one without the CA key can issue one",
+      "needs": "`tls`; `[tls] cert_pem` + `key_pem` with a certificate naming the node by URI (`mycelium://<node>`, issued by `mycelium tls issue` since post-360 row Q); no `ca-key.pem` in this node's certificate directory",
+      "enforcement_points": [
+        "revocation (post-360 plan row Q)"
+      ],
+      "docs": "docs/design/revocation-authority.md"
+    },
+    {
       "id": "ae.authorised_at_seam",
       "revision": 1,
       "subsystem": "authority",

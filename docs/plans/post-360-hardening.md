@@ -675,55 +675,51 @@ PR.
   `configuration.md`'s `kv_require_signed_frames` row; the identity-authentication and federated-domains records
   amended; wiki `dev/security.md`; `docs/wiki/dev/.log/2026-10-12-f-wire-crypto.md`.
 
-**Q — Revocation reaches every verifier (#616, after 2.32.0).** Read against the branch's code. The verifiers were
-enumerated first (`grep -rn "peer_keys\|known_verifying_keys\|revoked_key_set\|verify_bytes" src mycelium-core/src
-mycelium-*/src`, then every file that verifies a signature, `grep -rln "verify_bytes\|\.verify(&"`); the PR body
-has the table. Every verifier of a *node's* key now reads one answer, `CoreCtx::trusted_keys` / `retain_trusted`
-(`mycelium-core/src/context.rs`: held minus the keys that node revoked minus removed members' keys), over
-`CoreCtx::revoked_keys` (`mycelium-core/src/removal.rs` `RevokedKeys`: per node, papaya, monotonic). The verifiers of
-*external* keys (operator removals' authority keys, federation partners' pinned keys, publishers' catalogue keys,
-`mycelium-commitment`'s caller-supplied resolver) do not read node identity keys and are unchanged.
-- *Filtered from the `peer_keys`-based KV `SignedData` verifier* — `connection.rs`'s `SignedData` arm verifies
-  against `retain_trusted(signer_node, held)`; a signature good only under a revoked key is counted
-  (`kv_revoked_key_refused`, `GET /stats`); `a_kv_write_signed_by_a_revoked_key_is_refused_once_the_revocation_is_seen`
-  (#611's reviewer's test, lifted; seen failing on 7c967ba3 with its message, "REVOKED KEY: C's revoked key still signs
-  C's KV writes at B"), with a plant (C's write under its new key arrives).
-- *From identity-proof chaining (`validate_and_merge_identity`'s trusted signer)* — `helpers::
-  validate_and_merge_identity_with_revocations`: a proof signed by a key the node revoked chains nothing, established
-  or first sighting (a record whose keys are all held already is a quiet no-op, so a node's own rotation record,
-  signed by the key it then revoked, is not a conflict on every resync); `an_identity_record_chained_through_a_revoked_key_is_not_merged`
-  (seen failing first).
-- *From the unsigned identity exemption (`connection::self_authenticating_identity`)* — a new
-  `IdentityFrame::Revoked`, refused and counted whatever `kv_require_signed_frames` says;
-  `a_sealed_record_signed_by_a_revoked_key_is_not_exempt` (seen failing first).
-- *Not only consensus and `known_verifying_keys`* — consensus (`consensus.rs` `decode_verify`), `known_verifying_keys`
-  (roles, audit, capauthz, caller envelopes under `compliance`), caller envelopes without `compliance`
-  (`gateway_caller::verifying_keys_for`) and the knowledge member keys (`knowledge_keys::member_keys_of`) read the same
-  answer; the revocation module is compiled under `tls`, so a TLS build without `compliance` honours revocations it
-  receives. Existing revocation tests unchanged and green (`test_wsd_revoked_key_is_rejected_by_peer_verification`, the
-  knowledge `Revoked` test, the C5 removal test — which now asserts through `retain_trusted`).
+**Q — Revocation reaches every verifier (#616, after 2.32.0; decision record `docs/design/revocation-authority.md`
+rev 3).** #616's first head (`e5c2c27e`) wired every verifier to one answer and was right about that; its adversarial
+review found the *authority* behind it wrong (any held key revoked any other, for ever — a poisoned key, a first
+sighting after a restart or any leaked retired key silenced a node, and a restart bypassed the chaining fix). Two design
+reviews later (rev 1 narrowed; rev 2 the reviewer's minimal sound set; rev 3 its three named changes, plus links cut as
+unproduced), the row closes as follows. The verifiers were enumerated with
+`grep -rn "peer_keys\|known_verifying_keys\|revoked_key_set\|verify_bytes" src mycelium-core/src mycelium-*/src` and
+`grep -rln "verify_bytes\|\.verify(&"`; the PR body has the table.
+- *Filtered from the `peer_keys`-based KV `SignedData` verifier* — `connection.rs`'s arm verifies against
+  `CoreCtx::trusted_keys` (an anchored node's anchored, unrevoked keys; a legacy node's retained set);
+  `a_kv_write_signed_by_a_revoked_key_is_refused_once_the_revocation_is_seen` (seen failing on 7c967ba3).
+- *From identity-proof chaining* — `validate_and_merge_identity_with_revocations` (a revoked signer chains nothing), and
+  for an anchored node no chained key verifies unless a certificate anchors it;
+  `an_identity_record_chained_through_a_revoked_key_is_not_merged` (7c967ba3) and
+  `a_fork_from_a_revoked_key_is_not_trusted_after_the_verifier_restarts` (the review's restart bypass; seen failing on
+  e5c2c27e).
+- *From the unsigned identity exemption* — `self_authenticating_identity` refuses a sealed record whose signer the node
+  revoked or, for an anchored node, has no standing; `a_sealed_record_signed_by_a_revoked_key_is_not_exempt` (7c967ba3).
+- *Not only consensus and `known_verifying_keys`* — consensus (`decode_verify`, its raw-KV fallback removed),
+  `known_verifying_keys`, caller envelopes, knowledge keys and `mycelium-agentfacts` read `trusted_keys`;
+  agentfacts' `a_field_signed_by_a_key_written_into_the_raw_identity_does_not_verify` (seen failing on e5c2c27e);
+  `a_tls_only_node_honours_a_revocation` (a `tls` build; passes on e5c2c27e too — the review's finding 7 was coverage).
 - *A test that a `SignedData` signed by a revoked key is refused at a peer that has seen the revocation* — the first
-  bullet's test; and after the verifier restarts from its persisted store,
-  `a_revocation_still_filters_after_the_verifier_restarts` (the prewarm validates identities, then revocations against
-  them — `lifecycle.rs` `prewarm_peer_keys`; seen failing first).
-- *`revoke_key`'s doc made true* — `src/agent/revocation.rs` module and `revoke_key` docs state the reach, the order
-  (a revocation seen after a write was applied does not un-apply it; every verification after it refuses) and the
-  rule below.
-- **Who may revoke (found while enumerating, fixed here because the row would have made it worse).** A revocation
-  counted when signed by the *current* key of the raw `sys/identity/{N}` value — any member can write it — and the set
-  was one fleet-wide set of keys. Now it counts only when signed by a key the reader *holds* for N and naming a key it
-  holds for N, and removes it from N's set only: `a_member_cannot_revoke_another_members_key_by_rewriting_its_identity`
-  (under `require_identity_proofs`; seen failing first, "DOS: A revoked C's key at B by rewriting C's identity"),
-  `a_key_one_member_claims_and_revokes_stays_trusted_for_its_owner` (seen failing first). A node cannot revoke the key
-  it signs with (`revoking_the_key_a_node_signs_with_is_refused`, seen failing first; `POST /gateway/identity/revoke`
-  answers 422). `deprecations.md` §39.
-- **Not built, stated:** a revoked key's certificate still completes the mTLS handshake (only removal is refused
-  there; a per-node check needs the certificate's node identity); a thief holding a compromised key can revoke the
-  new one before the owner's revocation lands — both count and the identity fails closed, recovery being removal and
-  a fresh identity; with `require_identity_proofs` off a bare identity write still puts a member's key in another's
-  set (the identity-poisoning residual), and whoever can do that can revoke as that node; a revocation whose record is
-  tombstoned before a restart is lost at that node until the owner revokes again; consensus's fallback to the raw
-  `sys/identity/{N}` value when `peer_keys` holds nothing for a signer is pre-existing and outside this row.
+  bullet's, and across the verifier's restart `a_revocation_still_filters_after_the_verifier_restarts`, and with the
+  revocation hidden while the verifier was down `a_revocation_hidden_while_the_verifier_was_down_still_counts` (the
+  journal; seen failing on e5c2c27e).
+- *`revoke_key`'s doc made true* — `src/agent/revocation.rs`'s module doc states standing, who may revoke, the records,
+  order, restart and hiding; `rotate_identity_on_compromise` and `revoke_identity_key` state what they rely on and do
+  not cover.
+- **Who may revoke (the review's findings 2 and 3).** Standing only from certificate records
+  (`sys/identity-cert/{node}/{key}`, a CA-issued certificate naming the node by URI, issuance in the serial, bounded by
+  `wall_now_ms` plus the skew — `identity_cert_future`); an anchored node trusts exactly its anchored keys; a revocation
+  of P counts only when signed by an anchored key issued after P's. `a_poisoned_identity_key_neither_revokes_nor_signs_for_an_anchored_member`,
+  `a_first_sighted_key_after_a_restart_cannot_revoke_an_anchored_member`, `a_retired_key_cannot_revoke_its_successor_and_rotation_continues`
+  (each seen failing on e5c2c27e); `a_certificate_issued_in_the_future_outranks_nothing`, `a_legacy_ip_only_certificate_anchors_nothing`
+  (guards on the new path). Revocations keyed `(P, S)`, self-contained, the v1 bytes first (`a_v2_record_is_a_v1_record_followed_by_a_trailer_both_readers_decode`);
+  owner republish and the tripwire (`an_owner_republishes_its_overwritten_certificate_record`, seen failing on e5c2c27e).
+  `deprecations.md` §39; guarantee `id.revocation_authority`.
+- **Not built, stated:** no protection against a holder of the fleet CA key (every node in the development posture);
+  the secure posture cannot rotate (recovery is re-issue only); a node with a pre-row-Q certificate has no standing
+  until re-issued, and keys it revoked before the upgrade verify again at upgraded nodes until then; a retired key that
+  never had a URI-SAN certificate stops verifying for a re-anchored node (its history reads as unverified); unsigned
+  `Data` and anti-entropy; the mTLS handshake does not refuse a revoked key (follow-up, now that the URI SAN exists); a
+  node without persistence forgets a revocation hidden while it was down until the owner republishes; the fold walks
+  every node with records on each change (bounded per node, not per-node incremental).
 
 ### 3.6 · State of play and the next iteration (2026-10-12)
 
@@ -761,9 +757,9 @@ worth fixing on its own: the agent card names the gossip port), O and P (after N
   is writable under the writer's own signature; anti-entropy entries carry no author; role claims, audit records and
   revocation events are signed untagged.
 - **B:** connection preemption and WAL group commit, removed in review.
-- **Q:** the mTLS handshake does not refuse a revoked key's certificate; consensus falls back to the raw
-  `sys/identity/{N}` value when `peer_keys` holds nothing for a signer (pre-existing); a contested identity (thief and
-  owner each revoking) fails closed with recovery left to removal.
+- **Q:** the mTLS handshake does not refuse a revoked key's certificate (possible now the certificate names its node);
+  revocation authority rests on the CA key's custody (the development posture gives every node the CA key); the fold is
+  not per-node incremental.
 
 **Sources compared on 2026-10-12** (rows K–P and the open question came from these):
 [Strands Box and Dogwood](https://aws.amazon.com/blogs/opensource/introducing-strands-box-ai-agent-sandboxes-powered-by-dogwood/)

@@ -802,6 +802,31 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
               #[cfg(not(feature = "tls"))]
               { let _ = c; Resolution::NotInBuild { feature: "tls" } }
           }),
+        g("id.revocation_authority", 1, "identity", Node,
+          "a revocation of this node's keys counts only when a newer certificate the fleet CA issued for it signs it, and no one without the CA key can issue one",
+          "`tls`; `[tls] cert_pem` + `key_pem` with a certificate naming the node by URI (`mycelium://<node>`, issued by `mycelium tls issue` since post-360 row Q); no `ca-key.pem` in this node's certificate directory",
+          &["revocation (post-360 plan row Q)"], "docs/design/revocation-authority.md",
+          always,
+          |c| {
+              #[cfg(feature = "tls")]
+              {
+                  match &c.config.tls {
+                      None => Resolution::NotConfigured { missing: "[tls]" },
+                      Some(t) if t.cert_pem.is_none() || t.auto_cert_dir.join("ca-key.pem").exists() => Resolution::NotConfigured {
+                          missing: "the CA private key is on this node (the development posture): anyone holding it can issue a certificate that outranks every node's key, so revocation authority is only as strong as the CA key's custody",
+                      },
+                      Some(_) => match c.tls.get().map(|tls| tls.node_cert_der()) {
+                          None => Resolution::NotConfigured { missing: "the node's certificate is judged once its identity loads (start())" },
+                          Some(der) if mycelium_core::tls::cert_identity(&der).is_some_and(|id| id.node_uris.contains(&mycelium_core::tls::node_uri(&c.node_id))) => Resolution::Enforced,
+                          Some(_) => Resolution::NotConfigured {
+                              missing: "this node's certificate does not name it by URI (mycelium://<node>): re-issue it with `mycelium tls issue` — until then no revocation of its keys counts at upgraded peers, and keys it revoked before the upgrade verify again there",
+                          },
+                      },
+                  }
+              }
+              #[cfg(not(feature = "tls"))]
+              { let _ = c; Resolution::NotInBuild { feature: "tls" } }
+          }),
         g("ae.authorised_at_seam", 1, "authority", Node,
           "every gateway dispatch is authorised by policy before it runs — permit, deny or indeterminate",
           "`gateway` + `tls`; `with_action_evaluator`",

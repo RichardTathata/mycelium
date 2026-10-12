@@ -203,10 +203,11 @@ pub struct CoreCtx {
     /// handshake. Empty until an operator removes someone.
     pub removed: Arc<crate::removal::RemovedSet>,
 
-    /// **Revoked keys, per node** (post-360 plan row Q): what `sys/revocation/` has validly said here.
-    /// Every verifier of a node's key reads it through [`CoreCtx::trusted_keys`]; maintained by the
-    /// root crate's revocation module. Empty until a node revokes one of its keys.
-    pub revoked_keys: Arc<crate::removal::RevokedKeys>,
+    /// **Key standing, per node** (post-360 plan row Q, `docs/design/revocation-authority.md`): which
+    /// keys a certificate record anchors for a node, and which it has revoked. Every verifier of a
+    /// node's key reads it through [`CoreCtx::trusted_keys`]; written by the root crate's fold. Empty
+    /// until a certificate record or a revocation is judged.
+    pub key_standing: Arc<crate::removal::KeyStanding>,
 
     // ── Networking ───────────────────────────────────────────────────────────────
     /// Live peer table shared with the HTTP gateway for peer-count-based quorum sizing. The value
@@ -256,25 +257,36 @@ impl CoreCtx {
 }
 
 impl CoreCtx {
-    /// The keys this node **currently trusts** to have signed for `node` (post-360 plan row Q): the
-    /// retained set in `peer_keys` (every key `node` has proved, chained or been CA-anchored with),
-    /// minus every key `node` has revoked here and every removed member's key. The one answer every
-    /// verifier of a node's key uses — the KV `SignedData` arm, identity-proof chaining, the unsigned
-    /// identity exemption, consensus, and the root crate's `known_verifying_keys` — so a revocation
-    /// reaches all of them at once.
+    /// The keys this node **currently trusts** to have signed for `node` (post-360 plan row Q,
+    /// `docs/design/revocation-authority.md`). For a node with a certificate record naming it
+    /// (anchored): exactly its anchored keys that it has not revoked. For a legacy node: the retained
+    /// set in `peer_keys`, as before row Q. Removed members' keys are never trusted. The one answer
+    /// every verifier of a node's key uses — the KV `SignedData` arm, the unsigned identity exemption,
+    /// identity chaining, consensus, caller envelopes, `known_verifying_keys`, knowledge records.
     ///
     /// A revocation seen *after* a write was verified does not un-apply that write (detection, not
     /// prevention); every verification after it is seen refuses.
     pub fn trusted_keys(&self, node: &NodeId) -> Vec<[u8; 32]> {
-        let mut keys = self.peer_keys.pin().get(node).cloned().unwrap_or_default();
+        let mut keys: Vec<[u8; 32]> = match self.key_standing.get(node) {
+            Some(s) if s.anchored.is_some() => {
+                s.anchored.iter().flatten().filter(|k| !s.revoked.contains(*k)).copied().collect()
+            }
+            _ => self.peer_keys.pin().get(node).cloned().unwrap_or_default(),
+        };
         self.retain_trusted(node, &mut keys);
         keys
     }
 
-    /// Drop from `keys` (held for `node`) every key `node` has revoked and every removed member's key.
+    /// Drop from `keys` (offered for `node`) every key this node does not trust for it: revoked by
+    /// `node`, not among an anchored node's anchored keys, or a removed member's. This node's own
+    /// current key is always kept for itself (its certificate record may not have been judged yet).
     pub fn retain_trusted(&self, node: &NodeId, keys: &mut Vec<[u8; 32]>) {
-        if !self.revoked_keys.is_empty() {
-            keys.retain(|k| !self.revoked_keys.is_revoked(node, k));
+        if !self.key_standing.is_empty() {
+            #[cfg(feature = "tls")]
+            let own = (node == &self.node_id).then(|| self.tls.get().map(|t| t.verifying_key_bytes())).flatten();
+            #[cfg(not(feature = "tls"))]
+            let own: Option<[u8; 32]> = None;
+            keys.retain(|k| Some(*k) == own || !self.key_standing.is_distrusted(node, k));
         }
         if !self.removed.is_empty() {
             keys.retain(|k| !self.removed.is_key_removed(k));

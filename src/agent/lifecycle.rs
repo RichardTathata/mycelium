@@ -400,6 +400,12 @@ impl GossipAgent {
                     let sealed = super::helpers::encode_sealed_identity(&history, &proof);
                     let sealed_key = format!("{}{}", kv_ns::IDENTITY_SIGNED, self.node_id);
                     let _ = kv_set(&self.task_ctx, Arc::from(sealed_key.as_str()), Bytes::from(sealed));
+                    // Post-360 plan row Q: this node's certificate record — the only source of its keys'
+                    // standing. Also published unsigned, before the identity is installed: it proves
+                    // itself (the CA signed it), so it is exempt like the sealed record. In the
+                    // development posture `load_or_generate` re-issued the certificate for the current key
+                    // just now, with the URI SAN — the node re-anchors itself at every start.
+                    super::revocation::publish_own_certificate(&self.task_ctx, &self.task_ctx.identity_ledger, &arc_tls);
                     let _ = self.task_ctx.tls.set(Arc::clone(&arc_tls));
                     // The legacy pair (what a node older than Phase 3b reads), published SIGNED now that
                     // the identity is installed: a bare `sys/identity/` or proof is not
@@ -425,10 +431,26 @@ impl GossipAgent {
                             t.set_anchor_sink(sink);
                         }
                     }
+                    // Post-360 plan row Q: the journal of counted revocations, read before the first
+                    // fold so a revocation hidden while this node was down still counts.
+                    if let Some(p) = &self.config.persistence {
+                        let path = p.base_path.join("identity").join("revocations.journal");
+                        if let Err(e) = self.task_ctx.identity_ledger.open_journal(&path) {
+                            return Err(crate::error::GossipError::InvalidField {
+                                field: "persistence",
+                                reason: format!("the revocation journal {} cannot be opened: {e}", path.display()),
+                            });
+                        }
+                    }
                     // Seed peer_keys from any sys/identity/ entries already in the local store.
                     self.prewarm_peer_keys();
+                    // Row Q: take up this node's own revocations (re-issuing v1 ones under its anchored
+                    // key), then fold again.
+                    super::revocation::adopt_own_revocations(&self.task_ctx);
+                    super::revocation::refresh(&self.task_ctx);
                     // Watch for future identity publications from peers.
                     self.start_identity_watcher();
+                    self.start_identity_maintenance();
                 }
                 Err(e) => return Err(e),
             }
@@ -869,14 +891,36 @@ impl GossipAgent {
         for node_id in nodes {
             let get = |prefix: &str| kv_get(&self.task_ctx, &format!("{prefix}{node_id}"));
             identity_resync(
-                &self.task_ctx.peer_keys, &self.task_ctx.peer_anchor_keys, &self.task_ctx.revoked_keys,
+                &self.task_ctx.peer_keys, &self.task_ctx.peer_anchor_keys, &self.task_ctx.key_standing,
                 &self.task_ctx.identity_anchor_conflicts,
                 &node_id, get(kv_ns::IDENTITY), get(kv_ns::IDENTITY_SIGNED), get(kv_ns::IDENTITY_PROOF), require);
         }
-        // Post-360 plan row Q: the revocations in the store, validated against the identities just
-        // established — after them, so a revocation whose signer the store's own identity records make
-        // a held key counts at restart as it did before.
+        // Post-360 plan row Q: standing and revocations from the store's certificate records,
+        // revocations and journal — computed whole, before any verifier reads it.
         super::revocation::refresh(&self.task_ctx);
+    }
+
+    /// Post-360 plan row Q: the owner's side, on the timer seam — every `max(60 s,
+    /// health_check_interval_secs)`, republish this node's certificate and revocation records if they
+    /// are missing or overwritten, and fold again (so a certificate issued ahead of the clock is
+    /// re-judged once the clock reaches it).
+    #[cfg(feature = "tls")]
+    fn start_identity_maintenance(&self) {
+        let ctx = Arc::clone(&self.task_ctx);
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
+        let period_ms = self.task_ctx.config.health_check_interval_secs.max(60).saturating_mul(1000);
+        self.spawn_task(async move {
+            let mut tick = mycelium_core::sim_seam::interval_ms("identity/maintenance", period_ms, tokio::time::MissedTickBehavior::Skip);
+            tick.tick().await;
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {}
+                    _ = shutdown_rx.wait_for(|v| *v) => break,
+                }
+                super::revocation::republish_own(&ctx, &ctx.identity_ledger);
+                super::revocation::refresh(&ctx);
+            }
+        });
     }
 
     /// Subscribes to `sys/identity*` changes and mirrors verified keys into `task_ctx.peer_keys` as
@@ -892,17 +936,18 @@ impl GossipAgent {
         // `sys/identity-proof/` and `sys/identity-signed/`, so a record arriving after another
         // re-validates the node.
         let mut rx      = kv_subscribe_prefix(&self.task_ctx, Arc::<str>::from("sys/identity"));
-        // Post-360 plan row Q: a revocation arriving, or an identity record that makes a revocation's
-        // signer a held key, re-validates the revocations.
+        // Post-360 plan row Q: a certificate record (`sys/identity-cert/`, inside the prefix above) or a
+        // revocation arriving refolds key standing; and a change to this node's own records republishes
+        // them if they were overwritten or tombstoned.
         let mut rev_rx  = kv_subscribe_prefix(&self.task_ctx, Arc::<str>::from(super::revocation::REVOCATION_PREFIX));
         let shutdown_rx = self.shutdown_tx.subscribe();
         let peer_keys   = Arc::clone(&self.task_ctx.peer_keys);
         let anchor_keys = Arc::clone(&self.task_ctx.peer_anchor_keys);
-        let revoked     = Arc::clone(&self.task_ctx.revoked_keys);
+        let standing    = Arc::clone(&self.task_ctx.key_standing);
         let conflicts   = Arc::clone(&self.task_ctx.identity_anchor_conflicts);
         let require_proofs = self.task_ctx.config.require_identity_proofs;
         let kv_state    = Arc::clone(&self.kv_state);
-        let core        = Arc::clone(&self.task_ctx.core);
+        let ctx         = Arc::clone(&self.task_ctx);
         self.spawn_task(async move {
             let mut shutdown_rx = shutdown_rx;
             loop {
@@ -911,7 +956,8 @@ impl GossipAgent {
                     res = rx.changed() => { if res.is_err() { break; } }
                     res = rev_rx.changed() => {
                         if res.is_err() { break; }
-                        super::revocation::refresh(&core);
+                        super::revocation::republish_own(&ctx, &ctx.identity_ledger);
+                        super::revocation::refresh(&ctx);
                         continue;
                     }
                 }
@@ -927,11 +973,12 @@ impl GossipAgent {
                 }
                 for node_id in nodes {
                     let get = |prefix: &str| store_guard.get(format!("{prefix}{node_id}").as_str()).and_then(|e| e.data.clone());
-                    identity_resync(&peer_keys, &anchor_keys, &revoked, &conflicts, &node_id,
+                    identity_resync(&peer_keys, &anchor_keys, &standing, &conflicts, &node_id,
                         get(kv_ns::IDENTITY), get(kv_ns::IDENTITY_SIGNED), get(kv_ns::IDENTITY_PROOF), require_proofs);
                 }
                 drop(store_guard);
-                super::revocation::refresh(&core);
+                super::revocation::republish_own(&ctx, &ctx.identity_ledger);
+                super::revocation::refresh(&ctx);
             }
         });
     }
@@ -1059,6 +1106,10 @@ impl GossipAgent {
         {
             warn!("shutdown: the WAL writer did not exit within {:?}", timeout);
         }
+        // Post-360 plan row Q: release the revocation journal, so an agent restarted over the same
+        // directory in this process can own it.
+        #[cfg(feature = "tls")]
+        self.task_ctx.identity_ledger.close_journal();
     }
 
     /// Signals all background tasks to stop and waits for them to exit.
@@ -1076,7 +1127,7 @@ impl GossipAgent {
 fn identity_resync(
     peer_keys: &papaya::HashMap<crate::node_id::NodeId, Vec<[u8; 32]>>,
     anchor_keys: &papaya::HashMap<crate::node_id::NodeId, std::collections::HashSet<[u8; 32]>>,
-    revoked: &mycelium_core::removal::RevokedKeys,
+    revoked: &mycelium_core::removal::KeyStanding,
     conflicts: &std::sync::atomic::AtomicU64,
     node_id: &crate::node_id::NodeId,
     bare: Option<Bytes>,

@@ -58,9 +58,15 @@ rotation are signed by different keys.
 
 ### Compromise remediation — rotate *and* revoke (SOC 2 WS-B)
 
-A signed revocation of the old key is validated cluster-wide and excluded on **every**
-verify path — role claims, the audit chain, **and consensus** — so the old key stops
-verifying everywhere. Two ways:
+A signed revocation of the old key is validated at every node it reaches and excluded on **every**
+verify path — KV writes, identity records, role claims, the audit chain, caller envelopes, knowledge
+records **and consensus** — so the old key stops verifying there. **Who may revoke** (post-360 plan
+row Q, [`docs/design/revocation-authority.md`](../design/revocation-authority.md)): a revocation
+counts only when signed by a key of the node that a **certificate record** anchors
+(`sys/identity-cert/{node}/{key}`, a certificate the fleet CA issued naming the node by
+`mycelium://<node>`) and that was **issued after** the revoked key's certificate — authority flows only
+to the past, so a thief holding an old key cannot revoke the new one. A node with such a record trusts
+exactly its anchored, unrevoked keys. Two ways:
 
 - **One call:** `agent.rotate_identity_on_compromise(propagation)` — rotates to a fresh key,
   then revokes the outgoing one *with the new key*. Use this when the current key may be
@@ -81,6 +87,25 @@ every record it signed fails `BadSignature`, the fold stops at genesis and the n
 seq 0. Seal a checkpoint with the **new** key (`agent.audit_checkpoint()`) and prune
 (`agent.audit_prune_to_checkpoint()`) **before** the restart, so the head anchors at the checkpoint
 ([audit.md §1, §5](audit.md)).
+
+**What revocation does not protect against — read before relying on it:**
+
+- **A CA holder.** In the development posture (`auto_cert_dir`) `ca-key.pem` sits beside every node's
+  key and rotation needs it: any member, or anyone who compromises a host, can issue a certificate dated
+  *now* that outranks every key of any node. A certificate dated past the clock plus the skew bound is
+  ignored (`identity_cert_future`), which stops "for ever", not "now". A CA compromise is the same in
+  any posture. The guarantee `id.revocation_authority` reports `not_configured` while the CA key is on
+  the node.
+- **The secure posture cannot rotate** (`rotate_identity` needs the CA key). Recovery there is
+  **re-issue only**: `mycelium tls issue` a new certificate (it is issued after every earlier one, so the
+  new key outranks them), restart the node with it, then `POST /gateway/identity/revoke` the old key.
+- **A retired key still verifies until it is revoked.** `rotate_identity` alone is hygiene.
+- **Unsigned `Data` and anti-entropy** carry no signature to refuse: set `kv_require_signed_frames`
+  (row F2 makes it unconditional); anti-entropy entries carry no author at all.
+- **A node with a legacy certificate** (issued before row Q, without the URI) has no standing: no
+  revocation of its keys counts at upgraded nodes, and keys it revoked before the upgrade verify again
+  there until it is re-issued. **Re-issue every node's certificate as part of the upgrade**
+  (`deprecations.md` §39). A development-posture node re-issues its own at every start.
 
 **Ownership limit (by design):** only the node itself, holding its *current* key, can revoke
 its own keys — the coordinator-free trade-off. A **fully-compromised or offline** node is the

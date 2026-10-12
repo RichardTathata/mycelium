@@ -2,7 +2,7 @@
 
 **Generated** from `core_guarantees()` (`src/agent/guarantee.rs`); do not edit. Regenerate with `UPDATE_GUARANTEE_CATALOGUE=1 cargo test --lib --features compliance,a2a the_checked_in_guarantee_catalogue_is_current`. A guarantee is a claim the startup report resolves against the node as built and configured — `enforced` · `not_configured` (the setting named) · `not_in_build` (the feature named) · `not_applicable` (the role fact named) · `not_verifiable_here` (external prerequisites, never counted). The plan is `docs/plans/guarantees-and-rule-catalogue.md`; the live report is `guarantee_report()` / `GET /gateway/guarantees`.
 
-Schema `mycelium.guarantees/1` · 26 core guarantees.
+Schema `mycelium.guarantees/1` · 27 core guarantees.
 
 ## The descriptors
 
@@ -18,6 +18,7 @@ Schema `mycelium.guarantees/1` · 26 core guarantees.
 | `mesh.signed_writes` | 1 | transport | NodeEnforced | an unsigned KV write frame is refused (a self-authenticating sealed identity record excepted), so a member cannot write as another by not signing — anti-entropy state replies excepted, and another member's identity stays writable under the writer's own signature unless `require_identity_proofs` | `tls`; `[tls]`; `kv_require_signed_frames = true` (default off — post-360 row F's window; unconditional at row F2) | `connection::handle_connection (Data arm)` | `docs/guide/deprecations.md` |
 | `id.proofs_required` | 1 | identity | NodeEnforced | an identity entry this node cannot authenticate is rejected (issuer binding rests on it) | `tls`; `[tls]`; `require_identity_proofs = true` (default off) | `lifecycle (identity-proof check)` | `docs/design/identity-authentication.md` |
 | `id.ca_key_off_node` | 1 | identity | NodeEnforced | the fleet CA's private key is not on this node, so a removed member cannot mint itself a new identity here | `tls`; `[tls] cert_pem` + `key_pem` (a node certificate issued off-node: `mycelium tls issue`); no `ca-key.pem` in this node's certificate directory | `membership removal (closure plan C5)` | `docs/operations/cert-rotation.md` |
+| `id.revocation_authority` | 1 | identity | NodeEnforced | a revocation of this node's keys counts only when a newer certificate the fleet CA issued for it signs it, and no one without the CA key can issue one | `tls`; `[tls] cert_pem` + `key_pem` with a certificate naming the node by URI (`mycelium://<node>`, issued by `mycelium tls issue` since post-360 row Q); no `ca-key.pem` in this node's certificate directory | `revocation (post-360 plan row Q)` | `docs/design/revocation-authority.md` |
 | `ae.authorised_at_seam` | 1 | authority | NodeEnforced | every gateway dispatch is authorised by policy before it runs — permit, deny or indeterminate | `gateway` + `tls`; `with_action_evaluator` | `http::ae_preflight` | `docs/guide/20-authorising-actions.md` |
 | `ae.recorded_before_dispatch` | 1 | authority | NodeEnforced | every authorisation decision is journalled, fsynced, before dispatch | `gateway` + `tls`; `with_action_evaluator` and `with_evidence_journal` | `http::ae_record` | `docs/guide/20-authorising-actions.md` |
 | `prov.enforcement` | 1 | authority | NodeEnforced | protected work (`mcp.invoke`, `skill.invoke`, …) is authorised where it runs, not only at a gateway | `gateway` + `tls`; `with_provider_enforcement` (with an evaluator; without one every protected call is refused) | `provider_enforcement::check` | `docs/guide/20-authorising-actions.md` |
@@ -51,6 +52,7 @@ Each guarantee's resolution on an **unstarted** node (nothing attached) under th
 | `mesh.signed_writes` | not_configured | not_configured | not_configured | not_configured |
 | `id.proofs_required` | not_configured | not_configured | not_configured | not_configured |
 | `id.ca_key_off_node` | not_configured | not_configured | not_configured | not_configured |
+| `id.revocation_authority` | not_configured | not_configured | not_configured | not_configured |
 | `ae.authorised_at_seam` | not_applicable | not_applicable | not_applicable | not_configured |
 | `ae.recorded_before_dispatch` | not_applicable | not_applicable | not_applicable | not_configured |
 | `prov.enforcement` | not_configured | not_configured | not_configured | not_configured |

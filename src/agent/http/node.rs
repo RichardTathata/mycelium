@@ -216,6 +216,12 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
         body["kv_identity_exempt_frames"] = json!(load(&b.kv_identity_exempt));
         body["kv_identity_stale_refused"] = json!(load(&b.kv_identity_stale_refused));
         body["kv_revoked_key_refused"] = json!(load(&b.kv_revoked_key_refused));
+        // Post-360 plan row Q: certificate records issued past the skew bound (ignored), records past a
+        // cap (skipped), and counted revocations the journal could not take (the node saturated).
+        let l = &ctx.agent_ctx.identity_ledger;
+        body["identity_cert_future"] = json!(load(&l.cert_future));
+        body["identity_records_over_cap"] = json!(load(&l.over_cap));
+        body["revocation_journal_refused"] = json!(load(&l.journal_refused));
     }
     Json(body)
 }
