@@ -754,7 +754,7 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
               { let _ = c; Resolution::NotInBuild { feature: "tls" } }
           }),
         g("mesh.signed_writes", 1, "transport", Node,
-          "an unsigned KV write frame is refused, so a member cannot write as another by not signing (anti-entropy state replies excepted)",
+          "an unsigned KV write frame is refused (a self-authenticating sealed identity record excepted), so a member cannot write as another by not signing — anti-entropy state replies excepted, and another member's identity stays writable under the writer's own signature unless `require_identity_proofs`",
           "`tls`; `[tls]`; `kv_require_signed_frames = true` (default off — post-360 row F's window; unconditional at row F2)",
           &["connection::handle_connection (Data arm)"], "docs/guide/deprecations.md",
           always,

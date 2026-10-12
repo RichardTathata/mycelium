@@ -387,23 +387,30 @@ impl GossipAgent {
                         .map(|b| super::helpers::parse_identity_keys(&b))
                         .unwrap_or_default();
                     let history = super::helpers::encode_identity_history(vk, &existing);
-                    let _ = kv_set(&self.task_ctx, Arc::from(id_key.as_str()),
-                                   Bytes::from(history.clone()));
-                    // identity-auth Phase 2: publish a signed proof (signed by the current key)
-                    // so peers can authenticate this entry against the CA anchor / a trusted key.
+                    // identity-auth Phase 2: a proof signed by the current key, so peers can
+                    // authenticate the history against the CA anchor / a trusted key.
                     let proof = super::helpers::sign_identity_proof(&arc_tls, &history);
-                    let proof_key = format!("{}{}", kv_ns::IDENTITY_PROOF, self.node_id);
-                    let _ = kv_set(&self.task_ctx, Arc::from(proof_key.as_str()),
-                                   Bytes::from(proof.clone()));
-                    // identity-auth Phase 3b: the same keys and the same proof, **sealed into one
-                    // record**. The pair above is two gossip messages with no ordering between
-                    // them, so a peer requiring proofs can see the identity first and hold no key
-                    // until the proof lands. One record cannot arrive half-way. The pair is still
-                    // written, because a node older than this release only reads that.
+                    // Phase 3b: the keys and the proof **sealed into one record**, which cannot arrive
+                    // half-way. Published FIRST and UNSIGNED (the TLS identity is not installed yet):
+                    // it is the one unsigned frame a TLS node accepts whatever `kv_require_signed_frames`
+                    // says, because it authenticates itself (#611's second review,
+                    // `connection::self_authenticating_identity`), and a signed identity frame would be
+                    // dropped as from an unknown signer by every peer that does not hold the key yet.
+                    // First contact rests on this record.
                     let sealed = super::helpers::encode_sealed_identity(&history, &proof);
                     let sealed_key = format!("{}{}", kv_ns::IDENTITY_SIGNED, self.node_id);
                     let _ = kv_set(&self.task_ctx, Arc::from(sealed_key.as_str()), Bytes::from(sealed));
-                    let _ = self.task_ctx.tls.set(arc_tls);
+                    let _ = self.task_ctx.tls.set(Arc::clone(&arc_tls));
+                    // The legacy pair (what a node older than Phase 3b reads), published SIGNED now that
+                    // the identity is installed: a bare `sys/identity/` or proof is not
+                    // self-authenticating, so a node requiring signed frames refuses it unsigned. A peer
+                    // that learned the key from the sealed record verifies these; one that has not yet
+                    // drops them as from an unknown signer and takes them from anti-entropy.
+                    let _ = kv_set(&self.task_ctx, Arc::from(id_key.as_str()),
+                                   Bytes::from(history.clone()));
+                    let proof_key = format!("{}{}", kv_ns::IDENTITY_PROOF, self.node_id);
+                    let _ = kv_set(&self.task_ctx, Arc::from(proof_key.as_str()),
+                                   Bytes::from(proof));
                     // identity-auth Phase 1b: install the anchor sink so the outbound writer
                     // records each directly-connected peer's CA-validated key into the anchor
                     // maps + peer_keys. Installed before any writer spawns.
@@ -837,52 +844,48 @@ impl GossipAgent {
         }
     }
 
-    /// Reads all `sys/identity/{node_id}` KV entries already in the local store
-    /// and inserts their 32-byte public keys into `task_ctx.peer_keys`.
-    /// Called at startup after TLS is initialised, before listeners are spawned.
+    /// Reads every node's identity already in the local store and merges its verified keys into
+    /// `task_ctx.peer_keys`. Called at startup after TLS is initialised, before listeners are spawned.
     ///
-    /// **The enumeration is keyed on the legacy `sys/identity/` prefix on purpose, and that is safe
-    /// only while every node still writes it.** Phase 3b's sealed record is *preferred* per node,
-    /// but nodes are *found* here. The day the legacy write is dropped (a release after every node
-    /// publishes a sealed record), this scan — and the watcher's — must enumerate
-    /// `IDENTITY_SIGNED` as well, or a sealed-only peer becomes invisible rather than rejected.
-    /// Invisible is worse: rejection is counted, absence is not.
+    /// A node is **found** by either record — the legacy `sys/identity/{n}` or the sealed
+    /// `sys/identity-signed/{n}` — since #611's second review: under `kv_require_signed_frames` a node's
+    /// bare record is refused at gossip (it is not self-authenticating) and arrives by anti-entropy,
+    /// while its sealed record is the one unsigned frame a TLS node accepts, so first contact rests on
+    /// the sealed record. Tombstones are not read: a tombstone removes nobody's keys
+    /// ([`identity_resync`]).
     #[cfg(feature = "tls")]
     fn prewarm_peer_keys(&self) {
-        let prefix = kv_ns::IDENTITY;
-        for (key, bytes) in kv_scan_prefix(&self.task_ctx, prefix) {
-            let Some(node_id_str) = key.strip_prefix(prefix) else { continue };
-            let Ok(node_id) = node_id_str.parse::<crate::node_id::NodeId>() else { continue };
-            // 32 bytes = one key, 64 = current‖previous (rotation window).
-            // Prefer the sealed record (Phase 3b) over the legacy pair; under
-            // `require_identity_proofs` the pair is not accepted at all — see
-            // `helpers::resolve_identity_record`.
-            let require = self.task_ctx.config.require_identity_proofs;
-            let sealed = kv_get(&self.task_ctx, &format!("{}{}", kv_ns::IDENTITY_SIGNED, node_id));
-            let legacy_proof = kv_get(&self.task_ctx, &format!("{}{}", kv_ns::IDENTITY_PROOF, node_id));
-            let (history, proof) = super::helpers::resolve_identity_record(
-                sealed.as_deref(), &bytes, legacy_proof.as_deref(), require);
-            let keys = super::helpers::parse_identity_keys(history);
-            if !keys.is_empty() {
-                super::helpers::validate_and_merge_identity(
-                    &self.task_ctx.peer_keys, &self.task_ctx.peer_anchor_keys,
-                    &self.task_ctx.identity_anchor_conflicts,
-                    &node_id, history, &keys, proof, require);
+        let require = self.task_ctx.config.require_identity_proofs;
+        let mut nodes: Vec<crate::node_id::NodeId> = Vec::new();
+        for prefix in [kv_ns::IDENTITY, kv_ns::IDENTITY_SIGNED] {
+            for (key, _) in kv_scan_prefix(&self.task_ctx, prefix) {
+                if let Some(n) = key.strip_prefix(prefix).and_then(|s| s.parse::<crate::node_id::NodeId>().ok())
+                    && !nodes.contains(&n)
+                {
+                    nodes.push(n);
+                }
             }
+        }
+        for node_id in nodes {
+            let get = |prefix: &str| kv_get(&self.task_ctx, &format!("{prefix}{node_id}"));
+            identity_resync(
+                &self.task_ctx.peer_keys, &self.task_ctx.peer_anchor_keys, &self.task_ctx.identity_anchor_conflicts,
+                &node_id, get(kv_ns::IDENTITY), get(kv_ns::IDENTITY_SIGNED), get(kv_ns::IDENTITY_PROOF), require);
         }
     }
 
-    /// Subscribes to `sys/identity/` prefix changes and mirrors verifying keys
-    /// into `task_ctx.peer_keys` as peers publish them via anti-entropy gossip.
-    /// On each notification, re-scans the full prefix so removals (tombstones) are
-    /// also caught; the prefix is small (one entry per cluster node).
+    /// Subscribes to `sys/identity*` changes and mirrors verified keys into `task_ctx.peer_keys` as
+    /// peers publish them. On each notification, re-scans the identity records of every node found
+    /// by either record ([`Self::prewarm_peer_keys`]). **A tombstone removes no keys** (#611's second
+    /// review): one tombstone of `sys/identity/{n}` — unsigned, or signed by any member as itself —
+    /// used to drop `n`'s keys here, after which `n`'s signed writes were dropped as from an unknown
+    /// signer. A node's keys leave only through membership removal (the ledger, refused at the
+    /// handshake and the connection) or a verified rotation, which accumulates.
     #[cfg(feature = "tls")]
     fn start_identity_watcher(&self) {
-        // Subscribe to the broader `sys/identity` prefix (no trailing slash) so BOTH
-        // `sys/identity/` and `sys/identity-proof/` changes re-trigger the re-scan — a proof
-        // arriving after its identity then re-validates the entry (matters under Phase 3, where an
-        // unsigned entry is rejected until its proof is seen). The scan below still filters to
-        // `sys/identity/` entries.
+        // The broader `sys/identity` prefix (no trailing slash) covers `sys/identity/`,
+        // `sys/identity-proof/` and `sys/identity-signed/`, so a record arriving after another
+        // re-validates the node.
         let mut rx      = kv_subscribe_prefix(&self.task_ctx, Arc::<str>::from("sys/identity"));
         let shutdown_rx = self.shutdown_tx.subscribe();
         let peer_keys   = Arc::clone(&self.task_ctx.peer_keys);
@@ -897,36 +900,20 @@ impl GossipAgent {
                     _ = shutdown_rx.wait_for(|v| *v) => break,
                     res = rx.changed() => { if res.is_err() { break; } }
                 }
-                // Re-sync peer_keys from the current store snapshot. Accumulate
-                // (union) published keys so rotation never drops a still-needed
-                // historical key; a tombstone removes the node entirely.
+                // Re-sync from one store snapshot, so a decision never straddles a write.
                 let store_guard = kv_state.store.pin();
+                let mut nodes: Vec<crate::node_id::NodeId> = Vec::new();
                 for (key, entry) in store_guard.iter() {
-                    let Some(suffix) = key.strip_prefix(kv_ns::IDENTITY) else { continue };
-                    let Ok(node_id) = suffix.parse::<crate::node_id::NodeId>() else { continue };
-                    match &entry.data {
-                        Some(b) => {
-                            // The sealed record (Phase 3b) first, then the legacy pair — both read
-                            // from the same store snapshot, so this decision never straddles a
-                            // write. Under `require_proofs` the pair is not accepted: it is two
-                            // messages, which is the window this exists to close.
-                            let sealed = store_guard
-                                .get(format!("{}{}", kv_ns::IDENTITY_SIGNED, node_id).as_str())
-                                .and_then(|e| e.data.clone());
-                            let legacy_proof = store_guard
-                                .get(format!("{}{}", kv_ns::IDENTITY_PROOF, node_id).as_str())
-                                .and_then(|e| e.data.clone());
-                            let (history, proof) = super::helpers::resolve_identity_record(
-                                sealed.as_deref(), b, legacy_proof.as_deref(), require_proofs);
-                            let keys = super::helpers::parse_identity_keys(history);
-                            if !keys.is_empty() {
-                                super::helpers::validate_and_merge_identity(
-                                    &peer_keys, &anchor_keys, &conflicts,
-                                    &node_id, history, &keys, proof, require_proofs);
-                            }
-                        }
-                        None => { peer_keys.pin().remove(&node_id); }
-                    }
+                    if entry.data.is_none() { continue; }
+                    let found = [kv_ns::IDENTITY, kv_ns::IDENTITY_SIGNED].iter()
+                        .find_map(|p| key.strip_prefix(p))
+                        .and_then(|s| s.parse::<crate::node_id::NodeId>().ok());
+                    if let Some(n) = found && !nodes.contains(&n) { nodes.push(n); }
+                }
+                for node_id in nodes {
+                    let get = |prefix: &str| store_guard.get(format!("{prefix}{node_id}").as_str()).and_then(|e| e.data.clone());
+                    identity_resync(&peer_keys, &anchor_keys, &conflicts, &node_id,
+                        get(kv_ns::IDENTITY), get(kv_ns::IDENTITY_SIGNED), get(kv_ns::IDENTITY_PROOF), require_proofs);
                 }
             }
         });
@@ -1029,5 +1016,29 @@ impl GossipAgent {
     /// Uses a 5-second timeout; tasks that do not exit are aborted and logged.
     pub async fn shutdown(&self) {
         self.shutdown_with_timeout(Duration::from_secs(5)).await;
+    }
+}
+
+/// Validate one node's identity from its live records and merge what verifies (the sealed record
+/// first, then the legacy pair — `helpers::resolve_identity_record`). Absent or tombstoned records
+/// contribute nothing and **remove nothing**: keys accumulate, and leave only by membership removal.
+#[cfg(feature = "tls")]
+#[allow(clippy::too_many_arguments)]
+fn identity_resync(
+    peer_keys: &papaya::HashMap<crate::node_id::NodeId, Vec<[u8; 32]>>,
+    anchor_keys: &papaya::HashMap<crate::node_id::NodeId, std::collections::HashSet<[u8; 32]>>,
+    conflicts: &std::sync::atomic::AtomicU64,
+    node_id: &crate::node_id::NodeId,
+    bare: Option<Bytes>,
+    sealed: Option<Bytes>,
+    legacy_proof: Option<Bytes>,
+    require_proofs: bool,
+) {
+    let bare = bare.unwrap_or_default();
+    let (history, proof) = super::helpers::resolve_identity_record(
+        sealed.as_deref(), &bare, legacy_proof.as_deref(), require_proofs);
+    let keys = super::helpers::parse_identity_keys(history);
+    if !keys.is_empty() {
+        super::helpers::validate_and_merge_identity(peer_keys, anchor_keys, conflicts, node_id, history, &keys, proof, require_proofs);
     }
 }

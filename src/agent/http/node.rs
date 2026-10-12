@@ -213,6 +213,7 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
         body["kv_unsigned_frames_accepted"] = json!(load(&b.kv_unsigned_accepted));
         body["kv_unsigned_frames_refused"] = json!(load(&b.kv_unsigned_refused));
         body["kv_signer_mismatch"] = json!(load(&b.kv_signer_mismatch));
+        body["kv_identity_exempt_frames"] = json!(load(&b.kv_identity_exempt));
     }
     Json(body)
 }

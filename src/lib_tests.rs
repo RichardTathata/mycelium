@@ -1145,44 +1145,183 @@ async fn a_tls_node_requiring_signed_frames_refuses_an_unsigned_data_frame() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// **A node's own identity record travels unsigned, and is not refused** (found by the fix round's
-/// own fleet test: a node publishes `sys/identity{,-proof,-signed}/{self}` before its TLS identity is
-/// installed, and it must — a signed identity frame is dropped as from an unknown signer at every peer
-/// that does not hold the key yet, and is then not forwarded, so the key would reach a third node only
-/// by anti-entropy). The record carries its own proof, which `validate_and_merge_identity` checks
-/// (`require_identity_proofs` refuses an unproven one), so the unsigned-frame refusal exempts a record
-/// whose key names its sender — and counts nothing for it. Seen failing first: the record was refused.
+/// A sealed identity record (`version ‖ history ‖ signer ‖ sig`) for `sk`'s key, signed by `signer`.
+#[cfg(feature = "tls")]
+fn sealed_record(history_keys: &[[u8; 32]], signer: &ed25519_dalek::SigningKey) -> Vec<u8> {
+    use ed25519_dalek::Signer;
+    let history: Vec<u8> = history_keys.iter().flatten().copied().collect();
+    let sig = signer.sign(&crate::agent::helpers::identity_proof_message(&history)).to_bytes();
+    let proof = crate::agent::helpers::encode_identity_proof(&signer.verifying_key().to_bytes(), &sig);
+    crate::agent::helpers::encode_sealed_identity(&history, &proof)
+}
+
+/// **Only a self-authenticating sealed identity record is exempt from the unsigned-frame refusal**
+/// (#611's second review). The first cut exempted any `sys/identity{,-proof,-signed}/{n}` frame whose
+/// `sender` was `n` — and `sender` is whatever the frame's writer puts there, so a member could garble
+/// a victim's sealed record and proof, publish the victim's bare identity as its own key, or tombstone
+/// it, all unsigned and all exempt. Now the exemption is the sealed record alone, not a tombstone,
+/// whose proof verifies under a key in its own history and — when this node already holds keys for
+/// `n` — under one of those. Everything else in the family is refused like any unsigned frame, and
+/// the exempt frames are counted. Seen failing first: garbage in the sealed slot, a bare identity, a
+/// proof alone and a tombstone were all applied.
 #[cfg(feature = "tls")]
 #[tokio::test]
-async fn a_nodes_own_identity_record_is_not_refused_as_unsigned() {
+async fn only_a_self_authenticating_sealed_identity_is_exempt_from_the_refusal() {
+    use ed25519_dalek::SigningKey;
     let (mut writer, reader) = loopback_pair().await;
     let store: Arc<papaya::HashMap<Arc<str>, StoreEntry>> = Arc::new(papaya::HashMap::new());
-    let (tx, _rx) = mpsc::channel(10);
+    let (tx, _rx) = mpsc::channel(32);
     let me = NodeId::new("127.0.0.1", 7341).unwrap();
-    let peer = NodeId::new("127.0.0.1", 7342).unwrap();
-    let other = NodeId::new("127.0.0.1", 7343).unwrap();
-    let (tls, dir) = test_tls_identity("identity-unsigned", &me);
+    let fresh = NodeId::new("127.0.0.1", 7342).unwrap();   // a node this receiver has never seen
+    let known = NodeId::new("127.0.0.1", 7343).unwrap();   // a node whose key this receiver holds
+    let fresh_sk = SigningKey::from_bytes(&[77u8; 32]);
+    let known_sk = SigningKey::from_bytes(&[78u8; 32]);
+    let other_sk = SigningKey::from_bytes(&[79u8; 32]);
+    let (tls, dir) = test_tls_identity("identity-exempt", &me);
     let mut config = GossipConfig::default();
     config.kv_require_signed_frames = true;
-    let opts = HandlerOpts { config, tls: Some(tls), ..Default::default() };
+    let opts = HandlerOpts { config, tls: Some(tls), peer_keys: vec![(known.clone(), vec![known_sk.verifying_key().to_bytes()])], ..Default::default() };
     let bounds = Arc::clone(&opts.bounds);
     let _ = spawn_handler_with(reader, Arc::clone(&store), Arc::new(papaya::HashMap::new()), tx,
                                Arc::new(ShardedSeen::new(N_GOSSIP_SHARDS)), GossipConfig::default().default_ttl, opts);
-    let own = format!("sys/identity-signed/{peer}");
-    let mut u = data_update(&own, b"sealed", 7341, false);
-    u.sender = peer.id_hash();
-    send_wire(&mut writer, &WireMessage::Data(u)).await;
-    // A record about someone else, sent unsigned, is still refused.
-    let foreign = format!("sys/identity/{other}");
-    let mut f = data_update(&foreign, b"keys", 7342, false);
-    f.sender = peer.id_hash();
-    send_wire(&mut writer, &WireMessage::Data(f)).await;
+    let mut nonce = 7400u64;
+    let mut send = |key: String, value: Vec<u8>, tomb: bool, sender: &NodeId| {
+        nonce += 1;
+        let mut u = data_update(&key, &value, nonce, tomb);
+        u.sender = sender.id_hash();
+        u.timestamp = nonce; // later frames win LWW
+        WireMessage::Data(u)
+    };
+    let refused: Vec<String> = vec![
+        format!("sys/identity-signed/{fresh}"),   // garbage in the sealed slot
+        format!("sys/identity/{known}"),          // a bare identity
+        format!("sys/identity-proof/{known}"),    // a proof alone
+        format!("sys/identity-signed/{known}"),   // a tombstone
+        format!("sys/identity-signed/{known}"),   // valid in itself, but signed by a key `known` does not hold here
+    ];
+    let msgs = vec![
+        send(refused[0].clone(), b"garbage".to_vec(), false, &fresh),
+        send(refused[1].clone(), other_sk.verifying_key().to_bytes().to_vec(), false, &known),
+        send(refused[2].clone(), vec![0u8; 96], false, &known),
+        send(refused[3].clone(), Vec::new(), true, &known),
+        send(refused[4].clone(), sealed_record(&[other_sk.verifying_key().to_bytes()], &other_sk), false, &known),
+    ];
+    for m in &msgs { send_wire(&mut writer, m).await; }
+    // Exempt: a first-contact sealed record that proves itself, and a rotation for `known` that chains to its held key.
+    let first_contact = format!("sys/identity-signed/{fresh}");
+    let first = send(first_contact.clone(), sealed_record(&[fresh_sk.verifying_key().to_bytes()], &fresh_sk), false, &fresh);
+    let rotation_key = format!("sys/identity-signed/{known}");
+    let rot = send(rotation_key.clone(),
+        sealed_record(&[other_sk.verifying_key().to_bytes(), known_sk.verifying_key().to_bytes()], &known_sk), false, &known);
+    send_wire(&mut writer, &first).await;
+    send_wire(&mut writer, &rot).await;
     let s = Arc::clone(&store);
-    poll_until(|| s.pin().get(own.as_str()).is_some(), 500).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(store.pin().get(foreign.as_str()).is_none(), "an unsigned identity record about another node is refused");
-    assert_eq!(bounds.kv_unsigned_refused.load(Ordering::Relaxed), 1, "only the foreign record is counted");
+    poll_until(|| s.pin().get(first_contact.as_str()).is_some_and(|e| e.data.is_some())
+        && s.pin().get(rotation_key.as_str()).is_some_and(|e| e.data.is_some()), 1000).await;
+    for k in &refused[1..3] {
+        assert!(store.pin().get(k.as_str()).is_none(), "{k}: not a self-authenticating sealed record, refused");
+    }
+    assert_eq!(bounds.kv_unsigned_refused.load(Ordering::Relaxed), 5, "garbage, bare, proof, tombstone and the unchained record");
+    assert_eq!(bounds.kv_identity_exempt.load(Ordering::Relaxed), 2, "and the two exempt frames are counted");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Three TLS nodes requiring signed frames, B and C each bootstrapped to A, anti-entropy a minute away.
+/// Returns once B holds C's key — **first contact** between B and C rests on what reaches B by gossip.
+#[cfg(feature = "tls")]
+async fn three_signed_nodes(tag: &str, proofs: bool) -> (GossipAgent, GossipAgent, GossipAgent, NodeId, NodeId, std::path::PathBuf) {
+    use crate::config::TlsConfig;
+    let ports = (alloc_port(), alloc_port(), alloc_port());
+    let (na, nb, nc) = (NodeId::new("127.0.0.1", ports.0).unwrap(), NodeId::new("127.0.0.1", ports.1).unwrap(), NodeId::new("127.0.0.1", ports.2).unwrap());
+    let cert_dir = std::env::temp_dir().join(format!("myc-{tag}-{}", ports.0));
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    let mk = |node: &NodeId, boots: Vec<NodeId>| {
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = node.to_socket_addr().port();
+        cfg.bootstrap_peers = boots;
+        cfg.reconnect_backoff_secs = 1;
+        cfg.health_check_interval_secs = 60;
+        cfg.kv_require_signed_frames = true;
+        cfg.require_identity_proofs = proofs;
+        cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+        GossipAgent::new(node.clone(), cfg)
+    };
+    let a = mk(&na, vec![]);
+    let b = mk(&nb, vec![na.clone()]);
+    let c = mk(&nc, vec![na.clone()]);
+    a.start().await.unwrap(); b.start().await.unwrap(); c.start().await.unwrap();
+    let knows = |x: &GossipAgent, n: &NodeId| x.task_ctx.peer_keys.pin().get(n).is_some_and(|k| !k.is_empty());
+    for _ in 0..600 {
+        if knows(&b, &nc) && knows(&b, &na) && knows(&c, &nb) && knows(&a, &nc) && !b.peers().is_empty() && !c.peers().is_empty() { break; }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(knows(&b, &nc) && knows(&c, &nb), "first contact: B and C never learned each other's key");
+    (a, b, c, nb, nc, cert_dir)
+}
+
+/// A frame A forges in C's name: unsigned, `sender` = C.
+#[cfg(feature = "tls")]
+fn forge_unsigned_as(a: &GossipAgent, victim: &NodeId, key: String, value: Bytes, tomb: bool) {
+    let mut u = crate::framing::make_gossip_update(&a.node_id, a.task_ctx.default_ttl, Arc::from(key.as_str()), value, tomb, &a.task_ctx.hlc);
+    u.sender = victim.id_hash();
+    crate::framing::dispatch_gossip_try_send(&a.task_ctx.gossip_txs, crate::framing::WireMessage::Data(u), a.node_id.id_hash(),
+        crate::framing::ForwardHint::All, &a.task_ctx.kv_state.dropped_frames);
+}
+
+/// **The reviewer's impersonation, lifted** (#611's second review). With proofs off, A garbled C's
+/// sealed record and proof and published C's bare identity as A's own key — all unsigned with
+/// `sender` = C, all exempt — so B merged A's key into C's set, and A's write signed as C landed.
+/// Seen failing first on 59d86368: "IMPERSONATION: A wrote as C at a node requiring signed frames".
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn an_unsigned_identity_forgery_cannot_make_a_member_sign_as_another() {
+    let (a, b, c, _nb, nc, dir) = three_signed_nodes("forge-imp", false).await;
+    let a_vk = a.task_ctx.tls.get().unwrap().signing_key().verifying_key().to_bytes();
+    forge_unsigned_as(&a, &nc, format!("sys/identity-signed/{nc}"), Bytes::from_static(b"x"), false);
+    forge_unsigned_as(&a, &nc, format!("sys/identity-proof/{nc}"), Bytes::from_static(b"x"), false);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    forge_unsigned_as(&a, &nc, format!("sys/identity/{nc}"), Bytes::copy_from_slice(&a_vk), false);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!b.task_ctx.peer_keys.pin().get(&nc).is_some_and(|k| k.contains(&a_vk)), "A's key did not enter C's set at B");
+    let mut u = crate::framing::make_gossip_update(&a.node_id, a.task_ctx.default_ttl, Arc::from("forged/as-c"), Bytes::from_static(b"by-A"), false, &a.task_ctx.hlc);
+    u.sender = nc.id_hash();
+    let msg = crate::framing::make_kv_wire_msg(u, nc.id_hash(), a.task_ctx.tls.get().map(Arc::as_ref));
+    crate::framing::dispatch_gossip_try_send(&a.task_ctx.gossip_txs, msg, a.node_id.id_hash(),
+        crate::framing::ForwardHint::All, &a.task_ctx.kv_state.dropped_frames);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let landed = b.kv().get("forged/as-c").is_some();
+    a.shutdown().await; b.shutdown().await; c.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!landed, "IMPERSONATION: A wrote as C at a node requiring signed frames");
+}
+
+/// **The reviewer's silencing, lifted, in both postures** (#611's second review, and the watcher's
+/// own pre-existing rule): one tombstone of `sys/identity/{C}` — unsigned and exempt under the first
+/// cut, or signed by any member as itself — made B's identity watcher drop C's keys, after which C's
+/// signed writes were dropped at B as from an unknown signer. A tombstone no longer removes keys: they
+/// leave only by membership removal or a verified rotation. Seen failing first on 59d86368: "DOS: an
+/// unsigned forged tombstone erased C's key at B", with proofs off and with proofs on.
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn an_identity_tombstone_does_not_erase_a_members_keys() {
+    for proofs in [false, true] {
+        let (a, b, c, _nb, nc, dir) = three_signed_nodes(if proofs { "forge-tomb-p" } else { "forge-tomb" }, proofs).await;
+        forge_unsigned_as(&a, &nc, format!("sys/identity/{nc}"), Bytes::new(), true);
+        // And the same tombstone signed by A as itself — a member's own write, signer == sender.
+        assert!(a.kv().delete(format!("sys/identity/{nc}")));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let forgotten = b.task_ctx.peer_keys.pin().get(&nc).is_none_or(|k| k.is_empty());
+        let _ = c.kv().set("after/c", b"v".to_vec());
+        let mut arrived = false;
+        for _ in 0..120 {
+            if b.kv().get("after/c").is_some() { arrived = true; break; }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        a.shutdown().await; b.shutdown().await; c.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!forgotten, "proofs={proofs} DOS: an identity tombstone erased C's key at B");
+        assert!(arrived, "proofs={proofs}: and C's later signed write reached B by gossip");
+    }
 }
 
 /// **The window: by default a TLS node still applies an unsigned frame, and counts it**, so a 2.32
@@ -1386,6 +1525,7 @@ async fn the_row_f_window_counters_are_on_gateway_stats() {
     b.kv_unsigned_accepted.store(5, Ordering::Relaxed);
     b.kv_unsigned_refused.store(7, Ordering::Relaxed);
     b.kv_signer_mismatch.store(11, Ordering::Relaxed);
+    b.kv_identity_exempt.store(13, Ordering::Relaxed);
     let client = reqwest::Client::new();
     let mut stats = serde_json::Value::Null;
     for _ in 0..80 {
@@ -1397,6 +1537,7 @@ async fn the_row_f_window_counters_are_on_gateway_stats() {
     assert_eq!(stats["kv_unsigned_frames_accepted"], 5);
     assert_eq!(stats["kv_unsigned_frames_refused"], 7);
     assert_eq!(stats["kv_signer_mismatch"], 11);
+    assert_eq!(stats["kv_identity_exempt_frames"], 13);
     assert!(stats.get("identity_untagged_proofs").is_none() && stats.get("consensus_untagged_signatures").is_none(),
             "the §23 counters went with the window they counted");
     a.shutdown().await;

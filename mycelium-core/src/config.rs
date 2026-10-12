@@ -1189,8 +1189,12 @@ pub struct GossipConfig {
     /// `[tls]` it is inert, and `start()` warns ([`Self::kv_require_signed_frames_is_inert`]). The
     /// guarantee report resolves it as `mesh.signed_writes`.
     ///
-    /// **Exempt:** a node's own identity record (`sys/identity{,-proof,-signed}/{sender}`), which
-    /// travels unsigned by design and carries its own proof. **Not covered:** anti-entropy. A
+    /// **Exempt:** one unsigned frame only — a sealed identity record that authenticates itself (its
+    /// proof verifies under a key in its own history and, when this node holds keys for the node,
+    /// under one of those; `connection::self_authenticating_identity`), counted as
+    /// `kv_identity_exempt_frames`. A bare identity record, a proof alone or any tombstone is refused
+    /// like any unsigned frame. With `require_identity_proofs` off a member can still write another's
+    /// identity under its own signature (detected by the anchor tripwire, not prevented). **Not covered:** anti-entropy. A
     /// `StateResponse` entry carries no author and no signature, and is applied by LWW whatever this
     /// says — the refusal is bypassable there (`docs/threat-model.md` Boundary A).
     #[serde(default)]

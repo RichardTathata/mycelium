@@ -95,7 +95,7 @@
       "revision": 1,
       "subsystem": "transport",
       "kind": "node_enforced",
-      "promise": "an unsigned KV write frame is refused, so a member cannot write as another by not signing (anti-entropy state replies excepted)",
+      "promise": "an unsigned KV write frame is refused (a self-authenticating sealed identity record excepted), so a member cannot write as another by not signing — anti-entropy state replies excepted, and another member's identity stays writable under the writer's own signature unless `require_identity_proofs`",
       "needs": "`tls`; `[tls]`; `kv_require_signed_frames = true` (default off — post-360 row F's window; unconditional at row F2)",
       "enforcement_points": [
         "connection::handle_connection (Data arm)"

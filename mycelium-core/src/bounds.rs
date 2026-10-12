@@ -59,6 +59,10 @@ pub struct TransportBounds {
     /// `SignedData` frames dropped because their `signer` is not the update's `sender` (#611's review,
     /// finding 1). `GET /stats` `kv_signer_mismatch`.
     pub kv_signer_mismatch: AtomicU64,
+    /// Unsigned frames this TLS node accepted under the identity exemption: a sealed identity record
+    /// that authenticates itself (#611's second review). Every node's start publishes one, so a steady
+    /// trickle is normal; a burst is someone replaying or probing. `GET /stats` `kv_identity_exempt_frames`.
+    pub kv_identity_exempt: AtomicU64,
 }
 
 /// One connection's place under the per-source cap; given back when dropped. It holds the very
@@ -243,5 +247,47 @@ mod tests {
         assert!(!b.reply_in_flight(&id(1)), "the last frame released the slot");
         assert!(b.claim_reply(&id(1)).is_some());
         assert_eq!(b.anti_entropy_replies_skipped.load(Ordering::Relaxed), 1);
+    }
+}
+
+/// A warning gate for a frame a peer can send in a loop (#611's second review): the first occurrence
+/// is let through, then at most one per `every_ns`, each reporting how many were suppressed since the
+/// last. Owned by one connection's task, so no lock. The time comes from the caller (the clock seam).
+#[derive(Default, Debug)]
+pub struct WarnGate {
+    last_ns: Option<u64>,
+    suppressed: u64,
+}
+
+impl WarnGate {
+    /// `Some(suppressed)` when a warning may be emitted now, `None` when it is suppressed (and counted).
+    pub fn admit(&mut self, now_ns: u64, every_ns: u64) -> Option<u64> {
+        match self.last_ns {
+            Some(last) if now_ns.saturating_sub(last) < every_ns => {
+                self.suppressed += 1;
+                None
+            }
+            _ => {
+                self.last_ns = Some(now_ns);
+                Some(std::mem::take(&mut self.suppressed))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod warn_gate_tests {
+    use super::WarnGate;
+
+    /// The first warning passes, the next within the interval are suppressed and counted, and the
+    /// first after it reports how many were swallowed.
+    #[test]
+    fn a_warning_gate_lets_one_through_per_interval_and_counts_the_rest() {
+        let mut g = WarnGate::default();
+        assert_eq!(g.admit(1_000, 100), Some(0));
+        assert_eq!(g.admit(1_050, 100), None);
+        assert_eq!(g.admit(1_099, 100), None);
+        assert_eq!(g.admit(1_100, 100), Some(2));
+        assert_eq!(g.admit(1_150, 100), None);
     }
 }
