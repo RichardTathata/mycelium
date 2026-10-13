@@ -93,6 +93,12 @@ cfg.tls = Some(TlsConfig {
 // `cert_path`, which do not exist and did not compile; doc-coverage run 17.)
 ```
 
+**Which posture the first snippet sets up.** `TlsConfig::default()` is the **development posture**: the fleet CA's
+private key (`ca-key.pem`) sits in every node's `auto_cert_dir`, so one compromised host can mint a certificate for
+every node in the fleet, and key revocation cannot recover a stolen identity. A node in that posture logs a warning at
+start naming this, unless it runs `profile = "dev"`, which accepts it. The second snippet, a certificate issued on a
+separate CA host, is the **production posture** (`id.ca_key_off_node`; [cert-rotation.md](../operations/cert-rotation.md)).
+
 All gossip TCP connections between nodes now require mutual TLS. A node
 without a valid certificate cannot join the mesh.
 

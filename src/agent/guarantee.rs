@@ -525,7 +525,27 @@ pub(crate) fn config_digest(cfg: &crate::config::GossipConfig) -> String {
 }
 
 /// Log the report as one block — one line per entry, then the summary.
+/// The warning a node logs at start when the fleet CA's private key is on it (or `start()` is about to
+/// mint one here) and it was not explicitly started under the `dev` profile (post-360 plan row T).
+pub(crate) const CA_KEY_ON_NODE_WARNING: &str = "the fleet CA's private key is on this node (`ca-key.pem` in \
+    `auto_cert_dir`, the development default): one compromised host can then mint a certificate for every node \
+    in the fleet, and key revocation cannot recover a stolen identity. Issue node certificates on a separate CA \
+    host with `mycelium tls issue` and give this node `[tls] cert_pem` + `key_pem` \
+    (docs/operations/cert-rotation.md); set `profile = \"dev\"` to accept this for development";
+
+/// Whether `r` calls for [`CA_KEY_ON_NODE_WARNING`]: `id.ca_key_off_node` is unmet because of `[tls]`
+/// itself (not because there is no TLS at all), and the node was not explicitly started as `dev`.
+pub(crate) fn ca_key_on_node_warning(r: &GuaranteeReport) -> Option<&'static str> {
+    let entry = r.entry("id.ca_key_off_node")?;
+    let on_node = matches!(&entry.resolution, Resolution::NotConfigured { missing } if *missing != "[tls]");
+    let explicit_dev = r.profile.as_ref().is_some_and(|p| p.name == "dev" && p.selected);
+    (on_node && !explicit_dev).then_some(CA_KEY_ON_NODE_WARNING)
+}
+
 pub(crate) fn log_report(r: &GuaranteeReport) {
+    if let Some(w) = ca_key_on_node_warning(r) {
+        tracing::warn!(guarantee = "id.ca_key_off_node", "{w}");
+    }
     for e in &r.entries {
         tracing::info!(
             guarantee = e.id, kind = ?e.kind, state = e.resolution.state(),
@@ -792,9 +812,9 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
               { let _ = c; Resolution::NotInBuild { feature: "tls" } }
           }),
         g("id.ca_key_off_node", 1, "identity", Node,
-          "the fleet CA's private key is not on this node, so a removed member cannot mint itself a new identity here",
+          "the fleet CA's private key is not on this node — with it here, one compromised host can mint a certificate for every node in the fleet, so a removed member can mint itself a new identity and key revocation cannot recover a stolen identity (post-360 plan row T)",
           "`tls`; `[tls] cert_pem` + `key_pem` (a node certificate issued off-node: `mycelium tls issue`); no `ca-key.pem` in this node's certificate directory",
-          &["membership removal (closure plan C5)"], "docs/operations/cert-rotation.md",
+          &["membership removal (closure plan C5)", "key revocation (post-360 plan row Q)"], "docs/operations/cert-rotation.md",
           always,
           |c| {
               #[cfg(feature = "tls")]
@@ -1063,6 +1083,30 @@ mod tests {
     }
     fn state(r: &GuaranteeReport, id: &str) -> &'static str {
         r.entry(id).unwrap_or_else(|| panic!("{id} registered")).resolution.state()
+    }
+
+    /// **Post-360 plan row T.** A node holding the fleet CA key (the `auto_cert_dir` default) is told so
+    /// prominently at start, with the consequence and the remedy — unless it was explicitly started as
+    /// `dev`. A node without `[tls]`, or with a pre-issued certificate and no CA key, gets no warning.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn a_node_holding_the_ca_key_is_warned_unless_it_chose_dev() {
+        use crate::config::TlsConfig;
+        let dir = std::env::temp_dir().join(format!("myc-row-t-{}", crate::test_util::alloc_port()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("ca-key.pem"), b"placeholder").unwrap();
+        let with_ca_key = |profile: Option<&str>| {
+            let mut cfg = GossipConfig::default();
+            cfg.tls = Some(TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() });
+            cfg.profile = profile.map(str::to_string);
+            agent(cfg).guarantee_report()
+        };
+        let w = ca_key_on_node_warning(&with_ca_key(None)).expect("no profile: warned");
+        assert!(w.contains("every node") && w.contains("mycelium tls issue"), "names the consequence and the remedy: {w}");
+        assert!(ca_key_on_node_warning(&with_ca_key(Some("secure-single-domain"))).is_some(), "a non-dev profile: warned");
+        assert!(ca_key_on_node_warning(&with_ca_key(Some("dev"))).is_none(), "an explicit dev profile accepts it");
+        assert!(ca_key_on_node_warning(&agent(GossipConfig::default()).guarantee_report()).is_none(), "no [tls]: nothing to warn about");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Every core id is unique, and the registry starts with exactly the core set.
