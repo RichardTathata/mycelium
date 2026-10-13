@@ -2707,35 +2707,61 @@ fn a_stream_with_a_skipped_slot_verifies_under_verify_linked() {
         "the contiguous verifier reports the skip as a gap");
 }
 
-/// **A seal refuses to step over more than `MAX_SEAL_SKIP` occupied slots** (the review's N-C). A planted
-/// contiguous run directly after the head made one seal walk all of it under the chain lock. Past 4 096
-/// slots the seal is refused, loudly; a short run is still stepped over. Seen failing first on 3898c77c:
-/// "a seal walked a run longer than the cap".
+/// **A planted run of any length leaves the node sealing, and is reported** (the N-A–N-D check's high:
+/// 2d33c84b refused to seal past 4 096 occupied slots, so 4 097 cheap writes stopped a node's audit
+/// trail while governance went on unaudited). The first free slot is found outside the audit lock in
+/// one ordered pass; the lock is held only for an O(1) check of the head's slot per attempt — the bound
+/// stated and measured here: while one seal steps over a 50 000-record run, another thread never waits
+/// 50 ms for the lock. The run is counted with the other unverified records. Seen failing first on
+/// 2d33c84b: "a planted run stopped the node's audit trail".
 #[cfg(feature = "compliance")]
 #[tokio::test]
-async fn a_seal_refuses_to_walk_a_run_longer_than_the_cap() {
-    use crate::{audit_key, AuditAction, AuditOutcome};
+async fn a_planted_run_of_any_length_leaves_the_node_sealing_and_is_reported() {
+    use crate::{audit_key, AuditAction, AuditOutcome, AuditRecord, SignedAuditRecord};
+    const RUN: u64 = 50_000;
     let port = alloc_port();
     let id = NodeId::new("127.0.0.1", port).unwrap();
-    let dir = std::env::temp_dir().join(format!("myc-q8-cap-{port}"));
+    let dir = std::env::temp_dir().join(format!("myc-q9-run-{port}"));
     let _ = std::fs::remove_dir_all(&dir);
     let mut cfg = GossipConfig::default();
     cfg.bind_port = port;
     cfg.tls = Some(crate::config::TlsConfig { auto_cert_dir: dir.clone(), ..Default::default() });
     let a = GossipAgent::new(id.clone(), cfg);
     a.start().await.unwrap();
-    let _ = a.audit(AuditAction::Invoke, "p", "t0", AuditOutcome::Success, None).unwrap();
-    // A short run (3 slots) is stepped over.
-    for seq in 1..=3u64 { let _ = a.kv().set(audit_key(&id, seq), b"planted".to_vec()); }
-    let short = a.audit(AuditAction::Invoke, "p", "after-short", AuditOutcome::Success, None);
-    let landed_at_4 = a.audit_stream(&id).iter().any(|r| r.record.seq == 4);
-    // A run one longer than the cap directly after the head (5 ..= 5 + 4096) is refused.
-    for seq in 5..=(5 + 4_096u64) { let _ = a.kv().set(audit_key(&id, seq), b"planted".to_vec()); }
-    let long = a.audit(AuditAction::Invoke, "p", "after-long", AuditOutcome::Success, None);
+    let h0 = a.audit(AuditAction::Invoke, "p", "t0", AuditOutcome::Success, None).unwrap();
+    let other = ed25519_dalek::SigningKey::from_bytes(&[0x33; 32]);
+    for seq in 1..=RUN {
+        let r = AuditRecord { node_id: id.clone(), seq, hlc: 1, principal: "x".into(), action: AuditAction::Admin, target: "x".into(), outcome: AuditOutcome::Success, detail: None, prev_hash: h0 };
+        let _ = a.kv().set(audit_key(&id, seq), SignedAuditRecord::sign(r, &other).encode());
+    }
+    // Garbage at the next free slot is not a record and occupies nothing.
+    let _ = a.kv().set(audit_key(&id, RUN + 1), b"garbage".to_vec());
+    let chain = Arc::clone(&a.task_ctx.audit_chain);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let prober = {
+        let (chain, stop) = (Arc::clone(&chain), Arc::clone(&stop));
+        std::thread::spawn(move || {
+            let mut worst = Duration::ZERO;
+            while !stop.load(Ordering::Relaxed) {
+                let t = std::time::Instant::now();
+                drop(chain.lock().unwrap());
+                worst = worst.max(t.elapsed());
+                std::thread::yield_now();
+            }
+            worst
+        })
+    };
+    let sealed = a.audit(AuditAction::Admin, "p", "after-run", AuditOutcome::Success, None);
+    stop.store(true, Ordering::Relaxed);
+    let worst = prober.join().unwrap();
+    let last = a.audit_stream(&id).last().map(|r| (r.record.seq, r.record.prev_hash));
+    let (count, range) = { let g = chain.lock().unwrap(); (g.unverified_count, g.unverified) };
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(short.is_ok() && landed_at_4, "a short run is stepped over");
-    assert!(long.is_err(), "a seal walked a run longer than the cap");
+    assert!(sealed.is_ok(), "a planted run stopped the node's audit trail: {sealed:?}");
+    assert_eq!(last, Some((RUN + 1, h0)), "sealed at the first free slot (over the garbage), linked to the head by hash");
+    assert_eq!((count, range), (RUN, Some((1, RUN))), "the skipped run is reported");
+    assert!(worst < Duration::from_millis(50), "the lock was held for {worst:?} while the seal stepped over the run");
 }
 
 /// **A capability retracted as its node shuts down reaches the peers** (#611, found by CI's co-op

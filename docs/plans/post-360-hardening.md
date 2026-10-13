@@ -735,7 +735,7 @@ unproduced), the row closes as follows. The verifiers were enumerated with
   `a_far_away_unverified_record_is_reported_not_followed`, `an_audit_record_whose_key_and_body_disagree_is_ignored`,
   `a_peers_write_into_a_nodes_audit_stream_trips_the_tripwire`, `one_planted_record_does_not_leave_the_rest_of_the_stream_unverifiable`).
   **The H1/M1 review's N-A–N-D**: `verify_linked` public (`a_stream_with_a_skipped_slot_verifies_under_verify_linked`),
-  the tripwire test controlled, the seal skip capped at 4 096 (`a_seal_refuses_to_walk_a_run_longer_than_the_cap`), kept
+  the tripwire test controlled, the seal never refused by planted records, the free slot found outside the lock (`a_planted_run_of_any_length_leaves_the_node_sealing_and_is_reported`), kept
   records' removal documented, and the checkpoint-boundary residual fixed (case (c) of
   `recover_chain_head_anchors_at_a_checkpoint_or_reports_the_gap`).
 - **Not built, stated:** no protection against a holder of the fleet CA key (every node in the development posture);

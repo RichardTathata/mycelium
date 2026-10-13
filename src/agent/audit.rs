@@ -27,9 +27,6 @@ use sha2::{Digest, Sha256};
 /// KV prefix for the cluster-wide audit trail. One sub-stream per node.
 pub const AUDIT_PREFIX: &str = "sys/audit/";
 
-/// The longest run of occupied slots a seal steps over (post-360 plan row Q). Past it the seal is
-/// refused, loudly, rather than walk an attacker-sized run under the chain lock.
-pub(crate) const MAX_SEAL_SKIP: u64 = 4_096;
 
 /// KV key for a single record: `sys/audit/{node}/{seq:016x}`. Zero-padded hex
 /// seq gives lexicographic = chronological order within a node's stream.
@@ -62,11 +59,36 @@ pub(crate) struct AuditChainState {
     /// Keys under this node's stream that are not `{seq:016x}` or whose record names another seq or
     /// node: never read into the stream, counted (`GET /stats` `audit_malformed_keys`).
     pub(crate) malformed: u64,
+    /// The unverified records as sorted, disjoint, inclusive seq runs — so a run a seal later steps
+    /// over is not counted twice.
+    pub(crate) unverified_runs: Vec<(u64, u64)>,
 }
 
 impl AuditChainState {
     pub(crate) fn new() -> Self {
-        Self { next_seq: 0, last_hash: [0u8; 32], unverified: None, unverified_count: 0, malformed: 0 }
+        Self { next_seq: 0, last_hash: [0u8; 32], unverified: None, unverified_count: 0, malformed: 0, unverified_runs: Vec::new() }
+    }
+
+    /// Record the unverified seqs `lo..=hi`: merged into the runs, the count raised by what was not
+    /// already counted, the range widened. Cost: a binary search plus the runs it merges.
+    pub(crate) fn add_unverified(&mut self, lo: u64, hi: u64) {
+        let i = self.unverified_runs.partition_point(|&(_, h)| h.saturating_add(1) < lo);
+        let (mut new_lo, mut new_hi) = (lo, hi);
+        let mut already = 0u64;
+        let mut j = i;
+        while j < self.unverified_runs.len() && self.unverified_runs[j].0 <= hi.saturating_add(1) {
+            let (a, b) = self.unverified_runs[j];
+            let (ol, oh) = (a.max(lo), b.min(hi));
+            if ol <= oh { already += oh - ol + 1; }
+            new_lo = new_lo.min(a);
+            new_hi = new_hi.max(b);
+            j += 1;
+        }
+        self.unverified_runs.splice(i..j, [(new_lo, new_hi)]);
+        self.unverified_count = self.unverified_count.saturating_add((hi - lo + 1).saturating_sub(already));
+        let first = self.unverified_runs.first().map(|r| r.0).unwrap_or(lo);
+        let last = self.unverified_runs.last().map(|r| r.1).unwrap_or(hi);
+        self.unverified = Some((first, last));
     }
 }
 
@@ -290,6 +312,17 @@ pub trait AuditSink: Send + Sync + 'static {
     fn export(&self, record: &SignedAuditRecord);
 }
 
+/// Whether `seq`'s slot in this node's stream holds a record of this node at that seq — what a seal
+/// must not overwrite. Garbage at the key, or a record naming another seq or node, is not a record of
+/// the stream (`read_stream_checked`) and occupies nothing.
+fn slot_holds_record(ctx: &TaskCtx, seq: u64) -> bool {
+    let key = audit_key(&ctx.node_id, seq);
+    ctx.kv_state.store.pin().get(key.as_str())
+        .and_then(|e| e.data.clone())
+        .and_then(|b| SignedAuditRecord::decode(&b))
+        .is_some_and(|sr| sr.record.seq == seq && sr.record.node_id == ctx.node_id)
+}
+
 /// Seal one event into `ctx`'s tamper-evident audit chain and write it to
 /// `sys/audit/{self}/{seq}`. Returns the record's content hash.
 ///
@@ -317,23 +350,49 @@ pub(crate) fn seal_and_write(
     // Build the record and advance the chain head under the lock — the only part
     // that must be serialised (each record's prev_hash is the prior record's
     // content hash). Signing and the KV write happen *outside* the lock.
-    let (record, key, content) = {
-        let mut guard = ctx.audit_chain.lock().unwrap_or_else(|e| e.into_inner());
-        // Post-360 plan row Q: never seal over an existing record. A slot something already occupies
-        // (a record recovery could not verify, kept and reported) is skipped — only the contiguous run
-        // of occupied slots from here, never a jump to a far-away record — and the chain links across
-        // it by hash. The sequence never wraps: exhaustion refuses, loudly.
-        let mut seq = guard.next_seq;
-        let mut skipped = 0u64;
-        let occupied = |seq: u64| ctx.kv_state.store.pin().get(audit_key(&ctx.node_id, seq).as_str()).is_some_and(|e| e.data.is_some());
-        while occupied(seq) {
-            skipped += 1;
-            if skipped > MAX_SEAL_SKIP {
-                tracing::error!(node = %ctx.node_id, from = guard.next_seq, skipped,
-                    "audit: more than {MAX_SEAL_SKIP} consecutive slots after the chain head hold records that do not verify; refusing to seal — remove them (docs/operations/audit.md)");
-                return Err(crate::error::GossipError::InvalidField { field: "audit", reason: format!("more than {MAX_SEAL_SKIP} consecutive audit slots are occupied by records that do not verify") });
+    // Post-360 plan row Q: never seal over an existing record, and never refuse because of planted
+    // ones. The lock is held only for an O(1) check of the head's slot. If a record of this node
+    // already occupies it (one recovery could not verify — kept, reported), the first free slot after
+    // it is found **outside the lock**, in one ordered pass over the strict-read stream; the head moves
+    // there, the skipped run is reported with the other unverified records, and the chain links across
+    // it by hash. Garbage at a key is not a record and occupies nothing. The sequence never wraps.
+    let mut fields = Some((principal.into(), target.into(), detail));
+    let (record, key, content) = loop {
+        let start = {
+            let mut guard = ctx.audit_chain.lock().unwrap_or_else(|e| e.into_inner());
+            let seq = guard.next_seq;
+            if !slot_holds_record(ctx, seq) {
+                let Some(after) = seq.checked_add(1) else {
+                    tracing::error!(node = %ctx.node_id, "audit: the sequence is exhausted; refusing to seal (a record would wrap onto genesis)");
+                    return Err(crate::error::GossipError::InvalidField { field: "audit", reason: "the audit sequence is exhausted".into() });
+                };
+                let (principal, target, detail) = fields.take().expect("taken once, on the iteration that breaks");
+                let record = AuditRecord {
+                    node_id:   ctx.node_id.clone(),
+                    seq,
+                    hlc,
+                    principal,
+                    action,
+                    target,
+                    outcome,
+                    detail,
+                    prev_hash: guard.last_hash,
+                };
+                let content = record.content_hash();
+                guard.next_seq  = after;
+                guard.last_hash = content;
+                break (record, audit_key(&ctx.node_id, seq), content);
             }
-            seq = match seq.checked_add(1) {
+            seq
+        };
+        // Outside the lock: the first free slot at or after `start`.
+        let (records, _) = read_stream_checked(ctx, &ctx.node_id);
+        let mut free = start;
+        for r in records.iter().map(|r| r.record.seq).filter(|s| *s >= start) {
+            if r != free {
+                break;
+            }
+            free = match free.checked_add(1) {
                 Some(n) => n,
                 None => {
                     tracing::error!(node = %ctx.node_id, "audit: the sequence is exhausted; refusing to seal (a record would wrap onto genesis)");
@@ -341,28 +400,15 @@ pub(crate) fn seal_and_write(
                 }
             };
         }
-        let Some(after) = seq.checked_add(1) else {
-            tracing::error!(node = %ctx.node_id, "audit: the sequence is exhausted; refusing to seal (a record would wrap onto genesis)");
-            return Err(crate::error::GossipError::InvalidField { field: "audit", reason: "the audit sequence is exhausted".into() });
-        };
-        if skipped > 0 {
-            tracing::warn!(node = %ctx.node_id, skipped, seq, "audit: sealing past slots already occupied by records that did not verify (kept, reported)");
+        let mut guard = ctx.audit_chain.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.next_seq == start && free > start {
+            guard.next_seq = free;
+            let run = free - start;
+            guard.add_unverified(start, free - 1);
+            tracing::error!(node = %ctx.node_id, skipped = run, from = start, to = free - 1,
+                "audit: sealing past {run} slots (seqs {start}..={}) held by records of this node that do not verify; they are kept and reported, never sealed over", free - 1);
         }
-        let record = AuditRecord {
-            node_id:   ctx.node_id.clone(),
-            seq,
-            hlc,
-            principal: principal.into(),
-            action,
-            target:    target.into(),
-            outcome,
-            detail,
-            prev_hash: guard.last_hash,
-        };
-        let content = record.content_hash();
-        guard.next_seq  = after;
-        guard.last_hash = content;
-        (record, audit_key(&ctx.node_id, seq), content)
+        // Loop: the head's slot is checked again under the lock (another seal may have moved it).
     };
 
     let signed = SignedAuditRecord::sign(record, &tls.signing_key());
@@ -559,6 +605,10 @@ pub struct AuditSegments {
 /// of `keys`, at a seq past the head and linked to it by hash. Seqs may jump (a seal skips a slot
 /// occupied by a record that did not verify); hashes may not. Returns which records verify — the
 /// prefix and the tail linked to it — and which do not; every record verified ⇔ `unverified` empty.
+///
+/// **The anchor is the caller's to trust:** take `(anchor_seq, anchor_prev)` from a checkpoint whose
+/// signature you verified (`SignedAuditCheckpoint::verify_any` under the node's keys), or `(0, [0; 32])`
+/// for a stream from genesis. A record is judged against it, not the anchor against anything.
 pub fn verify_linked(records: &[SignedAuditRecord], owner: &NodeId, keys: &[[u8; 32]], anchor_seq: u64, anchor_prev: [u8; 32]) -> AuditSegments {
     walk(records, owner, keys, anchor_seq, anchor_prev)
 }
@@ -660,6 +710,8 @@ pub(crate) struct RecoveredHead {
     pub(crate) unverified_count: u64,
     /// Keys under the stream that are not records of it.
     pub(crate) malformed: u64,
+    /// The unverified seqs as sorted, disjoint, inclusive runs.
+    pub(crate) unverified_runs: Vec<(u64, u64)>,
 }
 
 /// Fold this node's **own** persisted stream to the chain head a restart must resume from.
@@ -695,6 +747,13 @@ pub(crate) fn recover_chain_head(ctx: &TaskCtx) -> Option<RecoveredHead> {
         None => (anchor_seq, anchor_prev),
     };
     let unverified_range = seg.unverified.first().zip(seg.unverified.last()).map(|(a, b)| (*a, *b));
+    let mut unverified_runs: Vec<(u64, u64)> = Vec::new();
+    for &q in &seg.unverified {
+        match unverified_runs.last_mut() {
+            Some((_, hi)) if hi.checked_add(1) == Some(q) => *hi = q,
+            _ => unverified_runs.push((q, q)),
+        }
+    }
     Some(RecoveredHead {
         next_seq,
         last_hash,
@@ -703,6 +762,7 @@ pub(crate) fn recover_chain_head(ctx: &TaskCtx) -> Option<RecoveredHead> {
         unverified_range,
         unverified_count: seg.unverified.len() as u64,
         malformed,
+        unverified_runs,
     })
 }
 
@@ -718,6 +778,7 @@ pub(crate) fn restore_chain_head(ctx: &TaskCtx) {
         guard.unverified = head.unverified_range;
         guard.unverified_count = head.unverified_count;
         guard.malformed = head.malformed;
+        guard.unverified_runs = head.unverified_runs.clone();
     }
     if head.malformed > 0 {
         tracing::error!(node = %ctx.node_id, keys = head.malformed,

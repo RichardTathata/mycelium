@@ -311,7 +311,10 @@ on `38da0472`):
 - **N-A:** the hash-walk rule is public, `verify_linked`, one implementation with the node's own; the contiguous
   verifiers are unchanged and their docs point at it (`deprecations.md` §39, `docs/operations/audit.md`).
 - **N-B:** the tripwire test holds the counter quiet first and asserts a delta of exactly one per write.
-- **N-C:** a seal steps over at most 4 096 occupied slots and refuses past that.
+- **N-C, revised (the N-A–N-D check's high):** a cap that refused to seal let 4 097 cheap writes stop a node's audit
+  trail. A seal never refuses because of planted records: it finds the first free slot outside the audit lock in one
+  ordered pass (the lock held only for an O(1) check of the head's slot per attempt — measured: under 50 ms of lock
+  wait while one seal steps over a 50 000-record run), seals there, and reports the run; garbage occupies nothing.
 - **N-D:** kept, unverified records stay until an operator removes them; `docs/operations/audit.md` says how.
 - **The pre-existing checkpoint-boundary residual is fixed:** a pruned stream whose boundary record was removed anchors
   at the newest checkpoint below its first record, so numbering resumes at the boundary, not at genesis.
