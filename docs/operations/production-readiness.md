@@ -64,7 +64,7 @@ this page is the index + the gate.
   started from a certificate **issued where the CA key lives** — `mycelium tls issue --ca-dir <ca>
   --node <ip:port> --out <dir>` on the issuer's host, then `[tls] cert_pem` + `key_pem` on the node with
   `ca-cert.pem` (never `ca-key.pem`) in its `auto_cert_dir` → [cert-rotation.md § Issuing node
-  certificates off-node](cert-rotation.md). A node that re-signs its own certificate with the CA key at
+  certificates off-node](cert-rotation.md). A node holding the CA key also logs one warning at start naming the consequence (one compromised host mints every node's identity; revocation cannot recover it) unless it runs `profile = "dev"` (post-360 row T). A node that re-signs its own certificate with the CA key at
   start refuses to start under the profile, naming `id.ca_key_off_node`. **Rev 3's addition is a setting too:**
   `cons.safety_profile` is `consensus_require_electorate = true` — a lock, a leader election or a consistent
   write is then refused (`electorate_not_governed`) unless an **electorate group** decides it: declare each

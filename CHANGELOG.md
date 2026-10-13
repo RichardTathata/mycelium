@@ -9,6 +9,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **A node holding the fleet CA key says so loudly at start** (post-360 plan row T). In the development posture
+  (`TlsConfig::default()`, `ca-key.pem` in `auto_cert_dir`) one compromised host can mint a certificate for every node
+  and key revocation cannot recover a stolen identity; until now that was one unmet `id.ca_key_off_node` line in the
+  start-time report, worded for member removal alone. Now `start()` logs a warning naming the consequence and the
+  remedy (`mycelium tls issue` on a separate CA host, then `[tls] cert_pem` + `key_pem`), unless the node runs
+  `profile = "dev"`; the guarantee's promise names identity compromise and revocation (catalogue regenerated); the
+  security guide and production-readiness page say which posture each snippet sets up. No behaviour change beyond the
+  log line. Test: `a_node_holding_the_ca_key_is_warned_unless_it_chose_dev`.
+
 ### Fixed
 
 - **The A2A agent card names the gateway's `/a2a` endpoint, not the gossip port** (plan row N, its standalone defect). `/.well-known/agent.json`'s `url` was built from the node's gossip address with no path, so an A2A client that follows the card — the current `a2a-sdk`, which Strands Agents uses — posted to the gossip listener and failed with a network error (the 2026-10-12 probe, `docs/plans/external/2026-10-12-a2a-sdk-probe/`). It is now the gateway's scheme (`https` under `gateway_tls`), host (`http_addr`, or the node's own address when the gateway binds every interface), port and `/a2a`. Test: `the_agent_card_names_the_gateways_a2a_endpoint_not_the_gossip_port`. The rest of row N (the current card path and A2A 1.0 methods) is still open.
