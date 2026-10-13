@@ -432,6 +432,28 @@ fn card_skill_ids(kv: &crate::store::KvState) -> std::collections::HashSet<Strin
     skill_ids
 }
 
+/// The URL an A2A client reaches this node's `/a2a` at: the gateway's scheme (`https` under
+/// `gateway_tls`), the advertised host and port, and `/a2a`. It used to be the node's **gossip**
+/// address with no path, which an A2A client following the card could not use (plan row N).
+///
+/// The host is `http_addr` when the gateway binds one address. A gateway bound to every interface
+/// (`0.0.0.0`, `::`) is advertised at the node's own address, the one its peers already reach it by.
+fn a2a_endpoint_url(ctx: &TaskCtx) -> String {
+    let cfg = &ctx.config;
+    let scheme = if cfg.gateway_tls.is_some() { "https" } else { "http" };
+    let node_ip = ctx.node_id.to_socket_addr().ip();
+    let ip = match cfg.http_addr.parse::<std::net::IpAddr>() {
+        Ok(ip) if !ip.is_unspecified() => ip,
+        _ => node_ip,
+    };
+    let host = match ip {
+        std::net::IpAddr::V6(v6) => format!("[{v6}]"),
+        std::net::IpAddr::V4(v4) => v4.to_string(),
+    };
+    let port = cfg.http_port.unwrap_or_else(|| ctx.node_id.to_socket_addr().port());
+    format!("{scheme}://{host}:{port}/a2a")
+}
+
 async fn agent_card_handler(State(state): State<A2aState>) -> impl IntoResponse {
     let kv = &state.task_ctx.kv_state;
     let skill_ids = card_skill_ids(kv);
@@ -443,7 +465,7 @@ async fn agent_card_handler(State(state): State<A2aState>) -> impl IntoResponse 
     let node_addr = state.task_ctx.node_id.to_string();
     let card = AgentCard {
         name:         format!("Mycelium/{}", node_addr),
-        url:          format!("http://{}", node_addr),
+        url:          a2a_endpoint_url(&state.task_ctx),
         version:      "1.0.0".into(),
         capabilities: A2aCapabilities { streaming: true },
         skills,
@@ -857,6 +879,34 @@ pub(crate) fn a2a_router_full(
 mod tests {
     use super::*;
     use crate::{GossipAgent, GossipConfig, NodeId};
+
+    /// **The card named the gossip port.** Its `url` was built from the node's gossip address, so an A2A
+    /// client that follows the card (the current `a2a-sdk`, which Strands Agents uses) posted to the gossip
+    /// listener without `/a2a` and failed with a network error (plan row N; the 2026-10-12 probe,
+    /// `docs/plans/external/2026-10-12-a2a-sdk-probe/`). The card now names the gateway: its scheme
+    /// (`https` under `gateway_tls`), the advertised host, its port and `/a2a`.
+    #[tokio::test]
+    async fn the_agent_card_names_the_gateways_a2a_endpoint_not_the_gossip_port() {
+        let card_url = |cfg: GossipConfig, node: NodeId| async move {
+            let agent = GossipAgent::new(node, cfg);
+            let state = A2aState { task_ctx: Arc::clone(&agent.task_ctx), tasks: Arc::new(papaya::HashMap::new()) };
+            let resp = agent_card_handler(State(state)).await.into_response();
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.expect("body");
+            let v: Value = serde_json::from_slice(&body).expect("card json");
+            v["url"].as_str().expect("url").to_string()
+        };
+        let mut cfg = GossipConfig::default();
+        cfg.http_port = Some(9092);
+        cfg.http_addr = "127.0.0.1".into();
+        assert_eq!(card_url(cfg, NodeId::new("127.0.0.1", 8091).unwrap()).await, "http://127.0.0.1:9092/a2a",
+            "the card must name the gateway's /a2a, not the gossip port");
+
+        // A gateway bound to every interface is reached at the node's own address.
+        let mut cfg = GossipConfig::default();
+        cfg.http_port = Some(9092);
+        cfg.http_addr = "0.0.0.0".into();
+        assert_eq!(card_url(cfg, NodeId::new("10.0.0.7", 8091).unwrap()).await, "http://10.0.0.7:9092/a2a");
+    }
 
     fn make_ctx() -> Arc<TaskCtx> {
         let agent = GossipAgent::new(
