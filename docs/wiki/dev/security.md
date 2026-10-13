@@ -204,8 +204,11 @@ resolved a TOML file that never named it to `bool`'s `false`, not the struct's d
 (`a_config_file_that_never_names_identity_proofs_requires_them`); and the environment override read any
 value but `1`/`true`/`TRUE`/`yes` as `false`, so a typo silently disabled a security default — now strict.
 **The general lesson:** a field-level `#[serde(default)]` on a `bool` is `false`, whatever the struct's
-`Default` says; a default flip touches both. Mixed fleet: a pre-2.14.0 node (no sealed record) is cut
-off from gossip-learned keys; `false` stays as the explicit opt-out.
+`Default` says; a default flip touches both. Mixed fleet: since 2.33.0 only a tagged proof is accepted either way, so the default newly refuses
+only a pre-2.3.0 node (no proof), the one `false` re-admits. **Rotation laundering** (#623's review): `rotate_identity`
+built the new history from the raw `sys/identity/{self}` and signed it with the trusted prior key, so a planted key
+entered the sealed record — now built from `revocation::own_history`
+(`rotation_does_not_launder_a_poisoned_bare_identity_into_the_history`).
 
 ### What is pinned
 

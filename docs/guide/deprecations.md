@@ -61,7 +61,7 @@ the notice.
 | 38 | a fractional, zero or past-an-hour `interval_secs`/`lease_secs`; a prompt `ns`/`name` that is empty or holds `/`; a caller envelope older than 300 s plus the drift bound; `GatewayPreflight::is_inert` | 2.33.0 (`mycelium-py` 0.2.11, `mycelium-ts` 0.2.5) | whole seconds in `1..=3600`; a one-segment prompt name; a fresh envelope (keep a provider's backlog under 300 s) | Partly — `PromptSkillError` gained `InvalidName`, `CallerError` `Stale`, `is_inert` warns; otherwise HTTP 400 `timer_out_of_range` / `invalid_prompt_name`, `stale` |
 | 39 | a revoked key verifying at a KV, identity, consensus, envelope or knowledge verifier; a revocation signed by any key the node held; a certificate without `mycelium://<node>` | 2.33.0 | re-issue every node's certificate (`mycelium tls issue`, or a development node's next start); rotate before `identity/revoke` | Partly — `CoreCtx` and `RotationMaterial` gained fields; otherwise behaviour (a pre-row-Q certificate has no standing until re-issued; 422 on revoking the current key) |
 | 40 | `kv_require_signed_frames` (an unsigned KV frame or a bare KV signature accepted at a TLS node); the counters `kv_unsigned_frames_accepted` / `kv_untagged_signatures` | 2.34.0 (unreleased) — §35's window closed | nothing: a TLS node refuses both whatever the setting says; read `kv_unsigned_frames_refused` / `kv_untagged_signatures_refused`; upgrade from 2.33.x, not 2.32 | **Yes** for code naming the field — `#[deprecated]`; otherwise no — a no-op, warned at `start()` when set; the two counters stay at zero |
-| 41 | an identity this node cannot authenticate merged by default (a bare `sys/identity/{n}` key list, a legacy pair without a sealed record); `GOSSIP_REQUIRE_IDENTITY_PROOFS` read leniently | the release after 2.33.0 (post-360 row S) | upgrade every node to 2.14.0 or later (they write the sealed record); `require_identity_proofs = false` as an explicit opt-out for a mixed-fleet window | No — behaviour: a pre-2.14.0 peer's key is not learned (counted, `identity_anchor_conflicts`); a malformed `GOSSIP_REQUIRE_IDENTITY_PROOFS` refuses by name |
+| 41 | an identity this node cannot authenticate merged by default (a bare `sys/identity/{n}` key list, a legacy pair without a sealed record); `GOSSIP_REQUIRE_IDENTITY_PROOFS` read leniently | the release after 2.33.0 (post-360 row S) | nothing from 2.33.x (2.3.0–2.31.x peers are unlearnable since 2.33.0 either way); `require_identity_proofs = false` re-admits only a node from before 2.3.0 | No — behaviour: a proofless (pre-2.3.0) peer's key is not learned (counted, `identity_anchor_conflicts`); a `GOSSIP_REQUIRE_IDENTITY_PROOFS` value other than `1`/`true`/`TRUE`/`yes`/`0`/`false`/`FALSE`/`no` (empty included) refuses by name |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -1319,24 +1319,34 @@ signature — and every receiver merged that key into the victim's set. The key 
 set (forged audit history, a steered checkpoint anchor) and, for a node on a legacy certificate (one with no URI SAN,
 so no standing), verified live writes as that node. The 2.14.0 attempt to make this the default was reverted after a
 Docker leader-election failure that was wrongly blamed on it (the flag is inert without TLS, and that suite runs
-none); the ordering window the revert named is closed by the sealed record, which every TLS node has written since
-2.14.0.
+none); the ordering window the revert named is closed by the sealed record (one entry, written since 2.14.0).
 
-**A mixed fleet.** A node only accepts what its peers publish:
+**A mixed fleet — row S cuts off nobody 2.33.0 did not already cut off, except a node from before 2.3.0.**
+Since 2.33.0 (§35, row F) a proof is accepted only in its tagged form, in either posture
+(`helpers::identity_proof_message`; 2.32.0 is the first release that writes it):
 
-- a peer from **before 2.14.0** writes no sealed record (before 2.3.0, no proof at all), so an upgraded node holds
-  **no key** for it from gossip — only the certificate key a *direct* connection anchors at the handshake — so its
-  writes relayed through other nodes are dropped as from an unknown signer: it is cut off until upgraded;
-- a **2.14.0–2.33.x** peer writes the sealed record, so an upgraded node learns its keys exactly as before; that peer
-  itself still runs with proofs off unless configured, so the residual stays open *at it* until it is upgraded;
+- a **2.32.0 or later** peer writes a tagged proof in its sealed record and is learned exactly as before;
+- a **2.3.0–2.31.x** peer writes an untagged proof, and has not been learned from gossip since 2.33.0 **with or without
+  this flag** — only the certificate key a *direct* connection anchors at the handshake; this release changes nothing
+  for it, and `false` does not re-admit it;
+- a peer from **before 2.3.0** writes no proof at all. 2.33.0's default accepted it on first use; this default refuses
+  it, so an upgraded node holds no gossip-learned key for it and drops its relayed writes as from an unknown signer.
+  It is the **one** node `require_identity_proofs = false` re-admits;
 - a node without `[tls]` publishes and reads no identity: the setting is inert there, nothing warns or refuses, and
   the guarantee report names `[tls]` as what is missing.
 
+An un-upgraded 2.33 peer itself still runs with proofs off unless configured, so the residual stays open *at it*.
+
+**The environment variable is strict.** `GOSSIP_REQUIRE_IDENTITY_PROOFS` accepts exactly `1`, `true`, `TRUE`, `yes`
+(on) and `0`, `false`, `FALSE`, `no` (off). Everything else is refused at configuration time by name — including
+`True`/`False`, `Yes`/`No`, `on`/`off` and an **empty** value (for example an unset `${VAR}` in a compose file), all
+of which the old parse read silently as off. This matches `GOSSIP_GATEWAY_ALLOW_UNAUTHENTICATED`, which also refuses
+an empty value; unset the variable to take the default.
+
 **Will the compiler tell me?** No — it is behaviour. `GossipConfig::default()` changed one field's value.
 
-**Migration.** Upgrade every node to 2.14.0 or later before this release reaches a fleet that relies on its older
-nodes (the supported rolling-upgrade window is one release, so a fleet upgrading from 2.33.x is unaffected). To keep
-a pre-2.14.0 node in the fleet for a window, set `require_identity_proofs = false` (or
-`GOSSIP_REQUIRE_IDENTITY_PROOFS=0`) on the upgraded nodes, knowing it reopens the residual above; remove it once the
-fleet is upgraded. A TLS-less development fleet needs nothing. **Not closed:** first sighting of a node never seen
+**Migration.** Nothing, for a fleet upgrading from 2.33.x: every peer it can learn already proves. To keep a node from
+before 2.3.0 for a window, set `require_identity_proofs = false` (or `GOSSIP_REQUIRE_IDENTITY_PROOFS=0`) on the
+upgraded nodes, knowing it reopens the residual above; remove it once that node is upgraded. A TLS-less development
+fleet needs nothing. **Not closed:** first sighting of a node never seen
 is trust on first use with or without proofs (anchors close it); anti-entropy entries carry no author.

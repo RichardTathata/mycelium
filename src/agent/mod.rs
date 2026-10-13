@@ -1947,12 +1947,14 @@ impl GossipAgent {
         //    old-key signature over this entry was never implemented; peers accept the
         //    new key purely because the KV entry is unauthenticated and accumulated. See
         //    docs/design/identity-authentication.md (audit 2026-07-15 pass 3).
+        //
+        //    Post-360 plan row S (#623's review, finding 1): the prior keys come from what this node can
+        //    show it held — its current key, its certificate-anchored keys and its own verified sealed
+        //    record (`revocation::own_history`, the source the start path uses) — never the raw
+        //    `sys/identity/{self}` value, which any member can write. Read raw, a key a member planted
+        //    there was re-signed here by the trusted prior key and laundered into the sealed record.
         let id_key = format!("sys/identity/{}", self.node_id);
-        let existing = self
-            .kv()
-            .get(&id_key)
-            .map(|b| helpers::parse_identity_keys(&b))
-            .unwrap_or_default();
+        let existing = revocation::own_history(&self.task_ctx);
         let history = helpers::encode_identity_history(new_vk, &existing);
         let _ = self.kv().set(id_key, Bytes::from(history.clone()));
         // identity-auth Phase 2: sign the new history with the CURRENT (pre-cutover = prior)

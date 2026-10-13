@@ -802,6 +802,18 @@ and `start_identity_watcher`, both through `identity_resync` → `resolve_identi
 `peer_keys` only at the handshake anchor (`record_peer_anchor`, CA-validated); `self_authenticating_identity` (the
 unsigned exemption) and the own-history build read no flag; `mycelium-agentfacts` reads the raw value for order only,
 filtered by trusted keys. The config value has three sources — `Default`, serde, the environment — each tested.
+**#623's review found a writer the grep missed** (it searched `kv_ns::IDENTITY`, not `format!("sys/identity/{}")`):
+`rotate_identity` built the new history from the raw `sys/identity/{self}` value and signed it with the trusted prior
+key into the sealed record, laundering a planted key into C's authenticated history at every peer, with proofs on.
+Now built from `revocation::own_history` — `rotation_does_not_launder_a_poisoned_bare_identity_into_the_history`
+(seen failing on 1e0a648e: "LAUNDERED: after C rotated, A's poisoned key is in C's history set at B"; its legacy-
+certificate twin is a guard, since a rotation re-anchors the node). Re-grep (`"sys/identity/`, `format!("sys/identity/{`,
+`kv_ns::IDENTITY`): `lifecycle.rs` start path — writes only, history from `own_history_at_start`; the identity watcher
+and prewarm — gated by the flag; `mod.rs` rotation — fixed; `mycelium-agentfacts` `crdt.rs:161` — order only, filtered
+by trusted keys; `connection.rs:307` (the unsigned exemption's `Stale` check) — reads the stored bare list only as keys
+a new record must *contain*, so it grants nothing, but a member's planted bare list makes a genuine unsigned sealed
+record count as `Stale` at gossip (refused; it still arrives by anti-entropy) — a liveness residual since 2.33.0,
+read from the code and not reproduced, recorded, not changed here; the rest are tests, examples' wait conditions and the tripwire's prefix list.
 - *The 2.14.0 attempt re-examined first* — `8b588c68` (#368) flipped it; `7cb3b872` (#372) reverted it for the
   Docker suite's `S12 leader election … Nodes disagree on leader`; `12a69598` (#373) corrected the diagnosis (the flag
   is inert without TLS and that suite runs none) and shipped the sealed record, the precondition the revert named; the
@@ -821,9 +833,12 @@ filtered by trusted keys. The config value has three sources — `Default`, serd
   `by_default_a_poisoned_identity_key_does_not_sign_for_a_legacy_certificate_node` (C on an IP-only certificate; seen
   failing: "IMPERSONATION: by default, a key A wrote into C's identity signs as C at B").
 - *A mixed-fleet window in the 2.30.0 shape, `false` an explicit opt-out* — `deprecations.md` §41.
-  **Corrected against the code:** the cell says a node from before **2.3.0** is cut off; under the flag only the
-  sealed record is accepted, so it is a node from before **2.14.0** (2.3.0–2.13.x write the legacy pair only), and
-  only for keys learned from gossip — a direct connection still anchors its certificate key.
+  **The boundary (the PR's first statement, "before 2.14.0", corrected by #623's review, finding 2):** since 2.33.0
+  (row F) only a tagged proof is accepted, in either posture (`helpers::identity_proof_message`), so a 2.3.0–2.31.x
+  peer is not learned from gossip with or without the flag. Row S cuts off nobody 2.33.0 did not already cut off
+  except a node from **before 2.3.0** (no proof at all), the one node `false` re-admits — as the cell said. A direct
+  connection still anchors any peer's certificate key. The strict environment parse refuses an empty value, as
+  `GOSSIP_GATEWAY_ALLOW_UNAUTHENTICATED` does; §41 names the refused spellings (finding 3).
   `an_explicit_false_still_opts_out_of_identity_proofs` (a guard; passes on 4251d50a too). A TLS-less node: inert,
   no warning, no refusal; the report names `[tls]` as missing.
 - *`id.proofs_required` resolves `enforced` by default* — `id_proofs_required_resolves_enforced_by_default` (seen
@@ -833,8 +848,10 @@ filtered by trusted keys. The config value has three sources — `Default`, serd
   `observability.md`; `docs/threat-model.md` Boundary A; `what-is-proven.md` (the residual moved from the third table
   to the CI table); the design records that cited the default; wiki `dev/security.md`, `dev/operations.md`,
   `dev/companions/commitment.md`; `docs/wiki/dev/.log/2026-10-13-s-proofs-default.md`.
-- **Not built, stated:** first sighting of a node never seen stays trust on first use (anchors close it); a pre-2.14.0
-  peer is not learned from gossip; an un-upgraded 2.33 peer keeps proofs off until it is upgraded or configured, so
+- *Finding 4* — `examples/identity_one_record.rs`'s "opt-in under test" comment corrected.
+- **Not built, stated:** first sighting of a node never seen stays trust on first use (anchors close it); a pre-2.3.0
+  peer is not learned from gossip; a planted bare list can make a genuine unsigned sealed record `Stale` at gossip
+  (`connection.rs:307`, anti-entropy still delivers it); an un-upgraded 2.33 peer keeps proofs off until it is upgraded or configured, so
   the residual stays open *at it*; anti-entropy entries carry no author.
 
 ### 3.6 · State of play and the next iteration (2026-10-12)

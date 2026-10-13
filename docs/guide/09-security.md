@@ -424,10 +424,11 @@ record and write a bare `sys/identity/{node}` key list naming its own key — a 
 own signature — and every receiver merged the key into that node's set. It then verified forged
 audit history for the node and, for a node on a pre-2.33 certificate, signed live writes as it.
 
-**A mixed fleet.** A node from **before 2.14.0** writes no sealed record (before 2.3.0, no proof at
-all), so an upgraded node holds no key for it and drops its signed writes until it is upgraded. A
-2.14.0–2.33.x node writes the sealed record and is learned as before. During such a window, or on a
-TLS-less development fleet where it changes nothing anyway, opt out explicitly:
+**A mixed fleet.** Since 2.33.0 only a tagged proof is accepted, with or without this flag, so a
+2.3.0–2.31.x node (untagged proof) is already not learned from gossip, and a 2.32.0 or later node is
+learned as before. The default adds only a node from **before 2.3.0**, which writes no proof at all.
+To keep such a node for a window — or on a TLS-less development fleet, where it changes nothing
+anyway — opt out explicitly:
 
 ```toml
 require_identity_proofs = false     # or GOSSIP_REQUIRE_IDENTITY_PROOFS=0 (a strict boolean)

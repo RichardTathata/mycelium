@@ -237,10 +237,10 @@ sealed record and proof and write a bare `sys/identity/{node}` key list naming i
 frame under its own signature — and every receiver merged the key: it then verified forged audit
 history for that node and, for a node still on a pre-2.33 certificate, signed live writes as it.
 
-**Before you upgrade into it.** Every node must run a release that writes the sealed record
-(**2.14.0 or later**). A node on an older release publishes only the pair (before **v2.3.0**, no
-proof at all); upgraded nodes will not learn its keys from gossip and will drop its relayed writes.
-Check:
+**Before you upgrade into it.** Since 2.33.0 a proof is accepted only in its tagged form, with or
+without this flag, so every node you can learn from gossip already runs **2.32.0 or later** and
+proves. The default adds only a node from before **v2.3.0** (no proof at all), which `false`
+re-admits. Check:
 
 ```bash
 # One sealed record per node, or set require_identity_proofs = false until you are.

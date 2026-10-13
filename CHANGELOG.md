@@ -64,9 +64,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `GossipConfig::default()` said (it now has its own serde default), and `GOSSIP_REQUIRE_IDENTITY_PROOFS` read any
   value but `1`/`true`/`TRUE`/`yes` as `false`, so a typo turned the check off (now a strict boolean that refuses
   anything else by name). The guarantee `id.proofs_required` resolves `enforced` on a TLS node that says nothing
-  (catalogue regenerated). **Upgrade note:** a peer from before 2.14.0 writes no sealed record and is not learned
-  from gossip until upgraded; `require_identity_proofs = false` (or `GOSSIP_REQUIRE_IDENTITY_PROOFS=0`) is the
-  explicit opt-out for that window and is inert on a TLS-less fleet. **Not closed:** first sighting of a node never
+  (catalogue regenerated). **Rotation no longer launders a planted key** (the PR's review): `rotate_identity` built the
+  new history from the raw `sys/identity/{self}` value — any member can write it — and signed it with the trusted
+  prior key into the sealed record, so with proofs on a key a member planted there still entered the node's history
+  at every peer; it now builds it from what the node can show it held (`revocation::own_history`, as the start path
+  does) — `rotation_does_not_launder_a_poisoned_bare_identity_into_the_history`, seen failing on the PR's first head.
+  **Upgrade note:** row S cuts off nobody 2.33.0 did not already cut off except a node from
+  before 2.3.0, which publishes no proof at all: since 2.33.0 only a tagged proof is accepted in either posture, so a
+  2.3.0–2.31.x peer was already not learned from gossip, with or without this flag. `require_identity_proofs = false`
+  (or `GOSSIP_REQUIRE_IDENTITY_PROOFS=0`) re-admits only the pre-2.3.0 node, and is inert on a TLS-less fleet. The
+  environment variable now refuses `True`/`False`, `on`/`off` and an empty value by name. **Not closed:** first sighting of a node never
   seen is trust on first use; anti-entropy entries carry no author. Tests (each seen failing first on 4251d50a):
   `the_default_requires_identity_proofs`, `a_config_file_that_never_names_identity_proofs_requires_them`,
   `the_identity_proofs_setting_parses_strictly_from_the_environment`,

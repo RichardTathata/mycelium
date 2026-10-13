@@ -1144,12 +1144,14 @@ pub struct GossipConfig {
     /// messages with no ordering between them. **Phase 3b removed it by construction** (2.14.0): the
     /// sealed record above is one KV entry, and one entry cannot arrive in two parts.
     ///
-    /// **A mixed fleet.** A node only accepts what its peers publish. A peer from **before 2.14.0**
-    /// publishes only the legacy pair (before 2.3.0, no proof at all), so a node with this set learns
-    /// no key for it from gossip — only what a direct connection anchors at the handshake — and drops
-    /// its relayed signed writes as from an unknown signer until it is upgraded.
-    /// A 2.14.0–2.33.x peer writes the sealed record and is learned as before. Set `false` (or
-    /// `GOSSIP_REQUIRE_IDENTITY_PROOFS=0`, a strict boolean) as an explicit opt-out for that window.
+    /// **A mixed fleet.** Since 2.33.0 a proof is accepted only in its tagged form, in either posture,
+    /// so a 2.3.0–2.31.x peer (untagged proof) is not learned from gossip with or without this flag —
+    /// only what a direct connection anchors at the handshake. A 2.32.0 or later peer proves and is
+    /// learned as before. What this default adds is a peer from **before 2.3.0**, which publishes no
+    /// proof at all: 2.33.0 accepted it on first use, this refuses it. `false` (or
+    /// `GOSSIP_REQUIRE_IDENTITY_PROOFS=0`, a strict boolean — an empty value is refused, as for
+    /// `GOSSIP_GATEWAY_ALLOW_UNAUTHENTICATED`) re-admits only that node.
+    ///
     /// **Without `[tls]` it is inert** — no identity is published or read — and nothing warns or
     /// refuses; the guarantee report says `not_configured` with `[tls]` as what is missing.
     ///

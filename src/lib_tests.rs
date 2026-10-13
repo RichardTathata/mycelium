@@ -1437,6 +1437,66 @@ async fn by_default_a_poisoned_identity_key_does_not_reach_the_history_set() {
     assert!(!held, "by default, A's key does not enter C's set at B");
 }
 
+/// **Rotation does not launder a member's key into a node's signed history** (#623's review, finding
+/// 1, its probe lifted). `rotate_identity` built the new history from the raw `sys/identity/{self}`
+/// value — any member can write it — and signed it with the trusted prior key into the sealed record,
+/// so a key A planted there became part of C's authenticated history at every peer, with proofs on.
+/// The history now comes from what C can show it held (`revocation::own_history`), as the start path's
+/// does. Seen failing first on 1e0a648e: "LAUNDERED: after C rotated, A's poisoned key is in C's
+/// history set at B".
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn rotation_does_not_launder_a_poisoned_bare_identity_into_the_history() {
+    let (a, b, c, _nb, nc, dir) = three_signed_nodes_tweaked("s-rotlaunder", false, proofs_by_default, proofs_by_default).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (a_sk, _held) = poison_identity(&a, &b, &c, &nc).await;
+    let ka = a_sk.verifying_key().to_bytes();
+    let c_has = within_3s(|| c.kv().get(&format!("sys/identity/{nc}")).is_some_and(|v| v.len() >= 32 && v[..32] == ka)).await;
+    let before = b.task_ctx.history_keys(&nc).contains(&ka);
+    let k1 = c.rotate_identity(Duration::from_millis(500)).await.unwrap();
+    let learned_k1 = within_3s(|| b.task_ctx.peer_keys.pin().get(&nc).is_some_and(|k| k.contains(&k1))).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let after = b.task_ctx.history_keys(&nc).contains(&ka);
+    let in_peer = b.task_ctx.peer_keys.pin().get(&nc).is_some_and(|k| k.contains(&ka));
+    a.shutdown().await; b.shutdown().await; c.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(c_has && !before && learned_k1, "setup: C holds the poisoned bare list, B does not trust it yet, and B learns C's rotated key");
+    assert!(!after, "LAUNDERED: after C rotated, A's poisoned key is in C's history set at B");
+    assert!(!in_peer, "and not in C's key set at B");
+}
+
+/// [`rotation_does_not_launder_a_poisoned_bare_identity_into_the_history`] on a legacy certificate,
+/// where the laundered key would also be *live* trust: a write A signs as C under it must not land at
+/// B after C rotates (#623's review, its second probe). **A guard, not a regression test:** it passes
+/// on 1e0a648e too, because the rotation itself issues C a certificate naming it (row Q), so after it C
+/// is anchored and its trusted keys are its anchored keys, whatever its history holds. The laundering
+/// reaches the history set, which the test above pins.
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn rotation_does_not_launder_a_poisoned_key_into_live_trust_on_a_legacy_certificate() {
+    let (a, b, c, _nb, nc, dir) = three_signed_nodes_tweaked("s-rotlegacy", false, proofs_by_default, |cfg, n| {
+        proofs_by_default(cfg, n);
+        legacy_certificate_for(cfg, n);
+    }).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (a_sk, _held) = poison_identity(&a, &b, &c, &nc).await;
+    let ka = a_sk.verifying_key().to_bytes();
+    let c_has = within_3s(|| c.kv().get(&format!("sys/identity/{nc}")).is_some_and(|v| v.len() >= 32 && v[..32] == ka)).await;
+    let k1 = c.rotate_identity(Duration::from_millis(500)).await.unwrap();
+    let learned_k1 = within_3s(|| b.task_ctx.peer_keys.pin().get(&nc).is_some_and(|k| k.contains(&k1))).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let trusted = b.task_ctx.trusted_keys(&nc).contains(&ka);
+    send_signed_as(&a, &nc, &a_sk, "poison/rot-legacy-as-c", b"by-ka");
+    let plant = plant_lands(&c, &b, "poison/rot-legacy-plant").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let landed = b.kv().get("poison/rot-legacy-as-c").is_some();
+    a.shutdown().await; b.shutdown().await; c.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(c_has && learned_k1 && plant, "setup: C holds the poisoned list, B learns k1, and C's own writes arrive");
+    assert!(!landed, "IMPERSONATION after rotation: a key A wrote into C's identity signs as C at B");
+    assert!(!trusted, "and it is not among C's trusted keys at B");
+}
+
 /// **Post-360 plan row S: `false` is still an opt-out.** A verifier configured with an explicit
 /// `require_identity_proofs = false` (the TOML spelling an operator writes) is back on the pre-row-S
 /// rule — the residual the two tests above close by default reproduces, which is what an opt-out

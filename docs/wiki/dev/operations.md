@@ -71,8 +71,8 @@ are never cleartext — reuse the node cert or supply a hostname cert.
 peers reject an identity overwrite whose proof doesn't chain to a trusted key (`identity_anchor_conflicts`
 counts rejections, on `/stats`). `require_identity_proofs` (`GOSSIP_REQUIRE_IDENTITY_PROOFS`, a strict boolean, default **on** since
 post-360 row S) also rejects entries it cannot authenticate: only the sealed record (one entry since
-2.14.0) is merged, so the two-write window that kept it off is closed by construction. A pre-2.14.0
-node is not learned from gossip; `false` is the explicit opt-out ([security](security.md)
+2.14.0) is merged, so the two-write window that kept it off is closed by construction. The default
+newly refuses only a pre-2.3.0 node (no proof); `false` is the explicit opt-out ([security](security.md)
 §identity-proof default, [cert-rotation](../../operations/cert-rotation.md), `deprecations.md` §41).
 
 **Bridged capability adverts need a lease.** `POST /gateway/capability/advertise` spawns the
