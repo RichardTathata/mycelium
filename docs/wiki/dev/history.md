@@ -22,7 +22,7 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
-## Post-360 row F2: the refusal unconditional — 2026-10-13 (#F2PR, unreleased)
+## Post-360 row F2: the refusal unconditional — 2026-10-13 (#624, unreleased)
 
 A TLS node refuses an unsigned KV `Data` frame and a bare (pre-2.33) KV `SignedData` signature whatever
 `kv_require_signed_frames` says; the setting is a retired no-op (`#[deprecated]`, warned at `start()` when set); row F's
