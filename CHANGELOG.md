@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The A2A agent card names the gateway's `/a2a` endpoint, not the gossip port** (plan row N, its standalone defect). `/.well-known/agent.json`'s `url` was built from the node's gossip address with no path, so an A2A client that follows the card — the current `a2a-sdk`, which Strands Agents uses — posted to the gossip listener and failed with a network error (the 2026-10-12 probe, `docs/plans/external/2026-10-12-a2a-sdk-probe/`). It is now the gateway's scheme (`https` under `gateway_tls`), host (`http_addr`, or the node's own address when the gateway binds every interface), port and `/a2a`. Test: `the_agent_card_names_the_gateways_a2a_endpoint_not_the_gossip_port`. The rest of row N (the current card path and A2A 1.0 methods) is still open.
+
 ## [2.33.0] — 2026-10-13
 
 **The post-360 hardening plan's second wave: revocation at every verifier, wire and crypto with a window, and an
