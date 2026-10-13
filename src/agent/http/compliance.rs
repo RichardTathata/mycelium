@@ -47,6 +47,7 @@ pub(super) async fn gw_audit(
     for node in nodes {
         let records = super::audit::read_stream(tc, &node);
         let verify  = super::audit::verify_stream(tc, &node);
+        let seg     = super::audit::segments(tc, &node);
         let head_hash = records.last().map(|sr| hex32(&sr.record.content_hash()));
         let shown: Vec<_> = records
             .iter()
@@ -72,6 +73,15 @@ pub(super) async fn gw_audit(
             "count":        records.len(),
             "verified":     verify.is_ok(),
             "verify_error": verify.err().map(|e| format!("{e:?}")),
+            // Post-360 plan row Q: which records verify (the prefix and the tail linked to it) and
+            // which do not — kept, never sealed over.
+            "segments": {
+                "verified": seg.linked.len(),
+                "unverified": seg.unverified.len(),
+                "unverified_seqs": seg.unverified.iter().take(64).collect::<Vec<_>>(),
+                "malformed_keys": seg.malformed,
+                "head_seq": seg.head.map(|(s, _)| s),
+            },
             "head_hash":    head_hash,
             "records":      shown,
         }));
@@ -111,10 +121,11 @@ pub(super) fn parse_hex32(s: &str) -> Option<[u8; 32]> {
 ///
 /// Operator-facing key revocation, the compromise-remediation trigger. Body:
 /// `{ "revoked_key": "<64 hex>", "reason": "..."? }`. Writes a signed revocation (signed by this
-/// node's **current** key) which all verify paths — roles, audit, **and consensus** — then exclude
-/// cluster-wide. Only this node's own historical keys can be revoked (the signer must hold the
-/// current key), so this remediates *this* node's compromised key: rotate to a fresh key first,
-/// then revoke the old one (or use `rotate_identity_on_compromise`, which does both).
+/// node's **current** key) which every verifier of this node's key — KV writes, identity records,
+/// roles, audit, **and consensus** — then excludes at each node that validates it (post-360 plan row
+/// Q). Only this node's own keys can be revoked, and not the one it signs with (422), so this
+/// remediates *this* node's compromised key: rotate to a fresh key first, then revoke the old one
+/// (or use `rotate_identity_on_compromise`, which does both).
 #[cfg(feature = "compliance")]
 pub(super) async fn gw_identity_revoke(
     State(ctx): State<Arc<HttpCtx>>,

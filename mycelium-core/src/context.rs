@@ -203,6 +203,12 @@ pub struct CoreCtx {
     /// handshake. Empty until an operator removes someone.
     pub removed: Arc<crate::removal::RemovedSet>,
 
+    /// **Key standing, per node** (post-360 plan row Q, `docs/design/revocation-authority.md`): which
+    /// keys a certificate record anchors for a node, and which it has revoked. Every verifier of a
+    /// node's key reads it through [`CoreCtx::trusted_keys`]; written by the root crate's fold. Empty
+    /// until a certificate record or a revocation is judged.
+    pub key_standing: Arc<crate::removal::KeyStanding>,
+
     // ── Networking ───────────────────────────────────────────────────────────────
     /// Live peer table shared with the HTTP gateway for peer-count-based quorum sizing. The value
     /// is when the peer was last heard from.
@@ -251,6 +257,69 @@ impl CoreCtx {
 }
 
 impl CoreCtx {
+    /// The keys this node **currently trusts** to have signed for `node` (post-360 plan row Q,
+    /// `docs/design/revocation-authority.md`). For a node with a certificate record naming it
+    /// (anchored): exactly its anchored keys that it has not revoked. For a legacy node: the retained
+    /// set in `peer_keys`, as before row Q. Removed members' keys are never trusted. The one answer
+    /// every verifier of a node's key uses — the KV `SignedData` arm, the unsigned identity exemption,
+    /// identity chaining, consensus, caller envelopes, `known_verifying_keys`, knowledge records.
+    ///
+    /// A revocation seen *after* a write was verified does not un-apply that write (detection, not
+    /// prevention); every verification after it is seen refuses.
+    pub fn trusted_keys(&self, node: &NodeId) -> Vec<[u8; 32]> {
+        let mut keys: Vec<[u8; 32]> = match self.key_standing.get(node) {
+            Some(s) if s.anchored.is_some() => {
+                s.anchored.iter().flatten().filter(|k| !s.revoked.contains(*k)).copied().collect()
+            }
+            _ => self.peer_keys.pin().get(node).cloned().unwrap_or_default(),
+        };
+        self.retain_trusted(node, &mut keys);
+        keys
+    }
+
+    /// The keys this node accepts as **having signed history** for `node` (post-360 plan row Q, the
+    /// final review's finding 1): every key it holds for the node — its retained set in `peer_keys` and
+    /// its anchored keys — minus the keys the node revoked and removed members' keys. **Verify-only**:
+    /// audit-chain recovery and verification read it, so a record sealed under a key retired before
+    /// the node was re-anchored still verifies; live writes and signatures are admitted only under
+    /// [`Self::trusted_keys`]. A key reaches `peer_keys` only through an identity record the identity
+    /// watcher validated — and a node's own record is built from its certificate records and its own
+    /// verified sealed record, never the raw `sys/identity/{node}` value (the confirming review's N2) —
+    /// so with `require_identity_proofs` a member cannot add a key to another's history. With proofs off
+    /// (the default) a bare identity record still can, as before row Q: that is the documented
+    /// identity-poisoning residual, and it reaches history verification.
+    pub fn history_keys(&self, node: &NodeId) -> Vec<[u8; 32]> {
+        let mut keys: Vec<[u8; 32]> = self.peer_keys.pin().get(node).cloned().unwrap_or_default();
+        if let Some(s) = self.key_standing.get(node) {
+            for k in s.anchored.iter().flatten() {
+                if !keys.contains(k) {
+                    keys.push(*k);
+                }
+            }
+            keys.retain(|k| !s.revoked.contains(k));
+        }
+        if !self.removed.is_empty() {
+            keys.retain(|k| !self.removed.is_key_removed(k));
+        }
+        keys
+    }
+
+    /// Drop from `keys` (offered for `node`) every key this node does not trust for it: revoked by
+    /// `node`, not among an anchored node's anchored keys, or a removed member's. This node's own
+    /// current key is always kept for itself (its certificate record may not have been judged yet).
+    pub fn retain_trusted(&self, node: &NodeId, keys: &mut Vec<[u8; 32]>) {
+        if !self.key_standing.is_empty() {
+            #[cfg(feature = "tls")]
+            let own = (node == &self.node_id).then(|| self.tls.get().map(|t| t.verifying_key_bytes())).flatten();
+            #[cfg(not(feature = "tls"))]
+            let own: Option<[u8; 32]> = None;
+            keys.retain(|k| Some(*k) == own || !self.key_standing.is_distrusted(node, k));
+        }
+        if !self.removed.is_empty() {
+            keys.retain(|k| !self.removed.is_key_removed(k));
+        }
+    }
+
     /// The attached decision sink, if any (plan I7).
     pub fn decision_sink(&self) -> Option<&crate::decision::DecisionSink> {
         self.decision_sink.get().map(|a| a.as_ref())

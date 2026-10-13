@@ -1,11 +1,11 @@
 # Post-360 hardening — the next batch, and consensus as a protocol, not a service
 
-**Status:** adopted 2026-10-10, rev 1.8 (2026-10-12: Φ closed; P5, J, I, H, E and F delivered; rows K, L, M added from the Strands Box comparison; rows N, O, P added — Strands agents on Mycelium, after an `a2a-sdk` probe). **R0 is being cut as v2.32.0 (2026-10-11)**, which delivers rows **G, P3, C, D,
+**Status:** adopted 2026-10-10, rev 1.8 (2026-10-12: Φ closed; P5, J, I, H, E and F delivered; rows K, L, M added from the Strands Box comparison; rows N, O, P added — Strands agents on Mycelium, after an `a2a-sdk` probe; Q delivered). **R0 is being cut as v2.32.0 (2026-10-11)**, which delivers rows **G, P3, C, D,
 P1, A (with C1, C2), B (as narrowed 2026-10-11) and P2 (without migration, as decided 2026-10-11)** — each closed on
 evidence in §3.5. Open:
-F2, K, L, M, N, O, P, Q (P2's migration — close, enumerate, carry, complete — delivered after 2.32.0, §3.5;
+F2, K, L, M, N, O, P (P2's migration — close, enumerate, carry, complete — delivered after 2.32.0, §3.5;
 Φ delivered 2026-10-12, #607, §3.5; **P5**, the `http.rs` split, J, hygiene, #608, and I, the private repository's items, private #30, delivered after
-2.32.0 too, §3.5; H, the companions' four doors, #609, E, the gateway remainder, #613, and F, wire and crypto with its window, #611, delivered after 2.32.0, §3.5; R0's private re-pin landed as private #29). It follows the 2026-10-09 360 review and the eleven
+2.32.0 too, §3.5; H, the companions' four doors, #609, E, the gateway remainder, #613, F, wire and crypto with its window, #611, and Q, revocation at every verifier, #616, delivered after 2.32.0, §3.5; R0's private re-pin landed as private #29). It follows the 2026-10-09 360 review and the eleven
 PRs that addressed its must-do list (#582–#592, private #28); those are recorded in the CHANGELOG and are not
 repeated here. Rows close on evidence (verification policy rule 2): a row is closed by quoting each promise next to
 the code or test that delivers it, and a promise that is not delivered is written *not built*.
@@ -92,7 +92,7 @@ Four places strain that line today, and the rows in §3 address each:
 | **N** | A2A at the current specification | an A2A client built on the current `a2a-sdk` (1.2.2, the library Strands Agents uses) reaches Mycelium's skills through `/a2a`, with the same authority as today — **the 2026-10-12 probe found it cannot**: the card is served only at `/.well-known/agent.json` (the SDK reads `/.well-known/agent-card.json`, 404); the card's `url` is the node's **gossip** address, not its gateway, and omits `/a2a` (`src/agent/a2a.rs:445`, so the SDK's `send_message` failed with a network error); the methods are the pre-0.2 `tasks/send` / `tasks/sendSubscribe` / `tasks/get` / `tasks/cancel` (`SendMessage` and `message/send` both answer `-32601`); and the skill is chosen by a Mycelium-only `skillId` parameter that a standard client never sends. Promises: the card at `/.well-known/agent-card.json` (the old path kept for one release), naming the gateway's own URL and scheme (https under `gateway_tls`) with `/a2a` and its supported interfaces and protocol versions; the A2A 1.0 methods (`SendMessage`, `SendStreamingMessage`, `GetTask`, `CancelTask`) and the 0.3 names (`message/send`, `message/stream`) served beside the old ones, which stay for one release with a deprecation entry; a message reaches a skill without `skillId` (a declared default skill, or the skill named in the message's metadata — decided in the PR, stated on the card); every new method runs the same doors as `tasks/send` — the action evaluator, mandates, evidence, task ownership — and the C7 bypass matrix gains each new method; the probe becomes a CI test driving the real `a2a-sdk` client against a node | — |
 | **O** | A Strands session store on Mycelium | a companion package (Python, beside `langgraph-checkpoint-mycelium`) implementing Strands Agents' `SessionManager` over the Mycelium Python SDK, so an agent's conversation and state, and a swarm's shared memory, live in the fleet's KV rather than a file or a bucket; a save returns the SDK's receipt and its docs say which rung it names (a local application, not replication — the checkpointer's wording); an incomplete or unreadable session is an error, never an empty one; concurrent agents in one session do not lose each other's writes, or the limit is stated; its live suite runs in CI against a real node; pinned to a Strands release and re-checked when Strands changes the interface | — (N for the cross-host demo) |
 | **P** | A Strands fleet, demonstrated | a runnable example, in CI like the co-op demos, in which Strands agents on three Mycelium nodes plan one shared task (a constructive domain — food redistribution or a microgrid), keep their session and swarm memory in the fleet through O, and call fleet skills through `/a2a` (N): a call outside an agent's mandate is refused and the refusal is in the evidence journal; one node is stopped and the work resumes on another from the stored session; the README states what Strands provides and what Mycelium adds, and which properties the run shows versus which it does not | N, O |
-| **Q** | Revocation reaches every verifier | a key a node has revoked (`rotate_identity_on_compromise`, `sys/revoked/`) is filtered from the `peer_keys`-based KV `SignedData` verifier, from identity-proof chaining (`validate_and_merge_identity`'s trusted signer) and from the unsigned identity exemption (`connection::self_authenticating_identity`), not only from consensus and `known_verifying_keys`; a test that a `SignedData` signed by a revoked key is refused at a peer that has seen the revocation; `src/agent/revocation.rs`'s `revoke_key` doc made true (corrected in #611 to say what holds today) | — (independent of F2) |
+| **Q** — *delivered (#616), §3.5* | Revocation reaches every verifier | a key a node has revoked (`rotate_identity_on_compromise`, `sys/revoked/`) is filtered from the `peer_keys`-based KV `SignedData` verifier, from identity-proof chaining (`validate_and_merge_identity`'s trusted signer) and from the unsigned identity exemption (`connection::self_authenticating_identity`), not only from consensus and `known_verifying_keys`; a test that a `SignedData` signed by a revoked key is refused at a peer that has seen the revocation; `src/agent/revocation.rs`'s `revoke_key` doc made true (corrected in #611 to say what holds today) | — (independent of F2) |
 
 ### 3.4 · Documentation follow-through
 
@@ -675,6 +675,78 @@ PR.
   `configuration.md`'s `kv_require_signed_frames` row; the identity-authentication and federated-domains records
   amended; wiki `dev/security.md`; `docs/wiki/dev/.log/2026-10-12-f-wire-crypto.md`.
 
+**Q — Revocation reaches every verifier (#616, after 2.32.0; decision record `docs/design/revocation-authority.md`
+rev 3).** #616's first head (`e5c2c27e`) wired every verifier to one answer and was right about that; its adversarial
+review found the *authority* behind it wrong (any held key revoked any other, for ever — a poisoned key, a first
+sighting after a restart or any leaked retired key silenced a node, and a restart bypassed the chaining fix). Two design
+reviews later (rev 1 narrowed; rev 2 the reviewer's minimal sound set; rev 3 its three named changes, plus links cut as
+unproduced), the row closes as follows. The verifiers were enumerated with
+`grep -rn "peer_keys\|known_verifying_keys\|revoked_key_set\|verify_bytes" src mycelium-core/src mycelium-*/src` and
+`grep -rln "verify_bytes\|\.verify(&"`; the PR body has the table.
+- *Filtered from the `peer_keys`-based KV `SignedData` verifier* — `connection.rs`'s arm verifies against
+  `CoreCtx::trusted_keys` (an anchored node's anchored, unrevoked keys; a legacy node's retained set);
+  `a_kv_write_signed_by_a_revoked_key_is_refused_once_the_revocation_is_seen` (seen failing on 7c967ba3).
+- *From identity-proof chaining* — `validate_and_merge_identity_with_revocations` (a revoked signer chains nothing), and
+  for an anchored node no chained key verifies unless a certificate anchors it;
+  `an_identity_record_chained_through_a_revoked_key_is_not_merged` (7c967ba3) and
+  `a_fork_from_a_revoked_key_is_not_trusted_after_the_verifier_restarts` (the review's restart bypass; seen failing on
+  e5c2c27e).
+- *From the unsigned identity exemption* — `self_authenticating_identity` refuses a sealed record whose signer the node
+  revoked or, for an anchored node, has no standing; `a_sealed_record_signed_by_a_revoked_key_is_not_exempt` (7c967ba3).
+- *Not only consensus and `known_verifying_keys`* — consensus (`decode_verify`, its raw-KV fallback removed),
+  `known_verifying_keys`, caller envelopes, knowledge keys and `mycelium-agentfacts` read `trusted_keys`;
+  agentfacts' `a_field_signed_by_a_key_written_into_the_raw_identity_does_not_verify` (seen failing on e5c2c27e);
+  `a_tls_only_node_honours_a_revocation` (a `tls` build; passes on e5c2c27e too — the review's finding 7 was coverage).
+- *A test that a `SignedData` signed by a revoked key is refused at a peer that has seen the revocation* — the first
+  bullet's, and across the verifier's restart `a_revocation_still_filters_after_the_verifier_restarts`, and with the
+  revocation hidden while the verifier was down `a_revocation_hidden_while_the_verifier_was_down_still_counts` (the
+  journal; seen failing on e5c2c27e).
+- *`revoke_key`'s doc made true* — `src/agent/revocation.rs`'s module doc states standing, who may revoke, the records,
+  order, restart and hiding; `rotate_identity_on_compromise` and `revoke_identity_key` state what they rely on and do
+  not cover.
+- **Who may revoke (the review's findings 2 and 3).** Standing only from certificate records
+  (`sys/identity-cert/{node}/{key}`, a CA-issued certificate naming the node by URI, issuance in the serial, bounded by
+  `wall_now_ms` plus the skew — `identity_cert_future`); an anchored node trusts exactly its anchored keys; a revocation
+  of P counts only when signed by an anchored key issued after P's. `a_poisoned_identity_key_neither_revokes_nor_signs_for_an_anchored_member`,
+  `a_first_sighted_key_after_a_restart_cannot_revoke_an_anchored_member`, `a_retired_key_cannot_revoke_its_successor_and_rotation_continues`
+  (each seen failing on e5c2c27e); `a_certificate_issued_in_the_future_outranks_nothing`, `a_legacy_ip_only_certificate_anchors_nothing`
+  (guards on the new path). Revocations keyed `(P, S)`, self-contained, the v1 bytes first (`a_v2_record_is_a_v1_record_followed_by_a_trailer_both_readers_decode`);
+  owner republish and the tripwire (`an_owner_republishes_its_overwritten_certificate_record`, seen failing on e5c2c27e).
+  `deprecations.md` §39; guarantee `id.revocation_authority`.
+- **The final review's round** (`38da0472`; named fixes only, each seen failing there): history verifies under a
+  verify-only held-minus-revoked set (`an_audit_chain_sealed_under_a_key_without_a_certificate_record_survives_restarts`);
+  first-issuance ranking, counted-stays-counted and the start refusal (`a_revoked_key_restored_at_its_node_does_not_regain_trust_at_a_peer`,
+  `a_node_whose_key_pem_names_a_retired_key_refuses_to_start`); the fold's cost bounded before checks
+  (`junk_revocation_records_keep_a_fold_bounded`); the clock-step floor (`a_rotation_after_the_clock_steps_back_still_outranks_its_predecessor`);
+  adoption only under the node's own keys (`an_owner_does_not_adopt_a_revocation_planted_through_its_raw_identity`);
+  idempotent revocation (`revoking_one_key_twice_writes_one_record`); `compute` merges (inspection — a race no test
+  reproduces); the three test labels corrected. **The confirming review's N1–N2** (seen failing on 39cfb571):
+  provisional revocations of unanchored keys and no signer the node counted as revoked
+  (`a_thiefs_revocation_judged_before_the_successors_certificate_does_not_lock_in`), the own certificate anchoring
+  first at start (`a_planted_record_does_not_refuse_a_start_whose_own_certificate_record_is_missing`), the start
+  history from the node's own records (`a_raw_identity_value_a_member_writes_does_not_enter_the_owners_history`);
+  N3 (the certificate cache clears rather than evicting) and N4 (a CA holder can refuse a node's start) stated.
+  **The N1/N2 check's NEW-1 and NEW-2** (seen failing on 4908ecd3): audit recovery never seals over an existing record,
+  reporting the unverified prefix (`an_audit_genesis_survives_an_upgrade_after_an_old_version_rotation`); the
+  revoked-signer rule dropped (`two_compromise_rotations_learned_out_of_order_leave_the_oldest_key_revoked`).
+  **The safety net's review, H1/M1/L1/L2** (seen failing on 81b70a2e): strict key/body reading, skip-occupied sealing
+  with `checked_add`, the audit prefixes self-owned, segment-by-segment verification, a real unverified count, pruning
+  that keeps unverified records (`a_forged_high_seq_record_neither_pushes_nor_wraps_the_numbering`,
+  `a_far_away_unverified_record_is_reported_not_followed`, `an_audit_record_whose_key_and_body_disagree_is_ignored`,
+  `a_peers_write_into_a_nodes_audit_stream_trips_the_tripwire`, `one_planted_record_does_not_leave_the_rest_of_the_stream_unverifiable`).
+  **The H1/M1 review's N-A–N-D**: `verify_linked` public (`a_stream_with_a_skipped_slot_verifies_under_verify_linked`),
+  the tripwire test controlled, the seal never refused by planted records, the free slot found outside the lock (`a_planted_run_of_any_length_leaves_the_node_sealing_and_is_reported`), kept
+  records' removal documented, and the checkpoint-boundary residual fixed (case (c) of
+  `recover_chain_head_anchors_at_a_checkpoint_or_reports_the_gap`).
+- **Not built, stated:** no protection against a holder of the fleet CA key (every node in the development posture);
+  the secure posture cannot rotate (recovery is re-issue only); a node with a pre-row-Q certificate has no standing
+  until re-issued, and keys it revoked before the upgrade verify again at upgraded nodes until then; a retired key that
+  never had a URI-SAN certificate stops verifying *live* signatures for a re-anchored node (history — the audit chain —
+  verifies under the held-minus-revoked set, the final review's round); unsigned
+  `Data` and anti-entropy; the mTLS handshake does not refuse a revoked key (follow-up, now that the URI SAN exists); a
+  node without persistence forgets a revocation hidden while it was down until the owner republishes; the fold walks
+  every node with records on each change (bounded per node, not per-node incremental).
+
 ### 3.6 · State of play and the next iteration (2026-10-12)
 
 Where the work stands at the end of 2026-10-12, so the next session starts here rather than from a conversation.
@@ -686,11 +758,7 @@ queues before the shutdown signal), and N, O, P recorded by #614 with the `a2a-s
 
 **Not started:** F2 (the unsigned-frame refusal made unconditional, the MINOR after F), K (policy over history — decide §5's fleet question first), L (credentials attached at egress), M
 (activation commands confined), N (A2A at the current specification — independent of E and F, and it carries a defect
-worth fixing on its own: the agent card names the gossip port), O and P (after N), §5's inference-routing question, and Q (revocation
-reaches every verifier — **high, pre-existing**: #611's third review reproduced on `main` that after
-`rotate_identity_on_compromise` a peer lists the old key as revoked yet still applies a `SignedData` signed by it as the
-node, `review_revoked_key_still_verifies_kv_writes`; revocation is consulted only by consensus and
-`known_verifying_keys`).
+worth fixing on its own: the agent card names the gossip port), O and P (after N), and §5's inference-routing question. (Q, revocation at every verifier, is delivered — #616, §3.5.)
 
 **Follow-ups recorded as not built in delivered rows (each in its §3.5 block):**
 - **H:** carry each named offer's signed bytes inside the close and award from that copy (today a member who deletes a
@@ -715,6 +783,9 @@ node, `review_revoked_key_still_verifies_kv_writes`; revocation is consulted onl
   is writable under the writer's own signature; anti-entropy entries carry no author; role claims, audit records and
   revocation events are signed untagged.
 - **B:** connection preemption and WAL group commit, removed in review.
+- **Q:** the mTLS handshake does not refuse a revoked key's certificate (possible now the certificate names its node);
+  revocation authority rests on the CA key's custody (the development posture gives every node the CA key); the fold is
+  not per-node incremental.
 
 **Sources compared on 2026-10-12** (rows K–P and the open question came from these):
 [Strands Box and Dogwood](https://aws.amazon.com/blogs/opensource/introducing-strands-box-ai-agent-sandboxes-powered-by-dogwood/)

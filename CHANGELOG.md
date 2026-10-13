@@ -256,6 +256,72 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Security
 
 - **Dependency: `quinn-proto` 0.11.15 → 0.11.18** (RUSTSEC-2026-0338, -0339, -0340, -0341, -0342: two remote panics on crafted STREAM/ACK_FREQUENCY frames, a stream-reassembly memory guard and a zero-length DATAGRAM buffer bypass, unbounded connection-ID retirements). Reached through `reqwest`'s HTTP/3 client (`async-openai`, `object_store`, `jsonschema`, `reqwest-eventsource`); a lockfile change only, no API change.
+- **A revoked key stops verifying at every verifier, and only a newer certificate of the node can revoke it**
+  (post-360 plan row Q, #616; decision record `docs/design/revocation-authority.md` rev 3). After
+  `rotate_identity_on_compromise` a peer listed the old key as revoked yet still applied a `SignedData` signed by it
+  (#611's review): the KV arm, identity chaining and the unsigned identity exemption read `peer_keys` raw. Now every
+  verifier of a node's key reads one answer, `CoreCtx::trusted_keys` — the KV arm (`kv_revoked_key_refused`), the
+  exemption, chaining, consensus (whose fallback to the raw `sys/identity/` value is gone), caller envelopes,
+  `known_verifying_keys`, knowledge keys and `mycelium-agentfacts` (which verified against the raw value). **Who may
+  revoke** is decided by **certificate records**: a node publishes `sys/identity-cert/{node}/{key}` (its certificate,
+  which now names the node by a `mycelium://<node>` URI and carries its issuance time in the serial); a node with one
+  trusts exactly its anchored keys it has not revoked, and a revocation of key P counts only when signed by an anchored
+  key issued after P's (or P has no standing). So a poisoned, first-sighted or legacy key neither signs nor revokes for
+  an anchored node, and a thief holding a retired key cannot revoke its successor — #616's first fix let any held key
+  revoke any other, for ever, and its review showed that silenced a node from a poisoned key, from a first sighting
+  after a restart, or from any leaked retired key, and let a restart bypass the chaining fix. Revocations live at
+  `sys/revocation/{node}/{P}/{S}` (one per pair, so a later write cannot replace the owner's), as the v1 bytes plus a
+  trailer carrying the certificates they rest on (a 2.32 node still reads the prefix); counted ones are journaled
+  (`{persistence}/identity/revocations.journal`, bounded, failing closed when full), so a revocation hidden while a
+  node was down still counts after its restart; the owner republishes its records, and the `sys/` tripwire counts a
+  peer's write to them; a certificate issued past the clock plus the skew bound is ignored and counted
+  (`identity_cert_future`). New `/stats`: `identity_cert_future`, `identity_records_over_cap`,
+  `revocation_journal_refused`; new guarantee `id.revocation_authority`. Seen failing first on e5c2c27e (#616's first
+  head): `a_poisoned_identity_key_neither_revokes_nor_signs_for_an_anchored_member`,
+  `a_first_sighted_key_after_a_restart_cannot_revoke_an_anchored_member`,
+  `a_fork_from_a_revoked_key_is_not_trusted_after_the_verifier_restarts`,
+  `a_retired_key_cannot_revoke_its_successor_and_rotation_continues`,
+  `a_revocation_hidden_while_the_verifier_was_down_still_counts`, `an_owner_republishes_its_overwritten_certificate_record`,
+  agentfacts' `a_field_signed_by_a_key_written_into_the_raw_identity_does_not_verify`; and on 7c967ba3 (before #616),
+  `a_kv_write_signed_by_a_revoked_key_is_refused_once_the_revocation_is_seen` and the other six #616 tests. **Stated,
+  not built:** no protection against a holder of the fleet CA key (every node in the development posture); in the secure
+  posture rotation cannot run and recovery is re-issue only; a retired key verifies until revoked; unsigned `Data` and
+  anti-entropy are not covered; a node with a pre-row-Q certificate has no standing until re-issued, and keys it revoked
+  before the upgrade verify again at upgraded nodes until then; the mTLS handshake does not refuse a revoked key. **The
+  final review's round** (each seen failing first on 38da0472): history verifies under a separate verify-only set —
+  every key held minus revoked ones — so a node's audit chain sealed under a key without a certificate record keeps
+  verifying and its genesis is never re-sealed (`an_audit_chain_sealed_under_a_key_without_a_certificate_record_survives_restarts`);
+  a key ranks by its first issuance and a counted revocation stays counted, and a node starting with a key its own
+  records show revoked refuses to start (`a_revoked_key_restored_at_its_node_does_not_regain_trust_at_a_peer`,
+  `a_node_whose_key_pem_names_a_retired_key_refuses_to_start`); a revocation record carries at most two certificates,
+  judged certificates are cached, and the caps apply before any check (`junk_revocation_records_keep_a_fold_bounded`,
+  3.6 s → under 250 ms); a rotation issues strictly after the node's newest issuance
+  (`a_rotation_after_the_clock_steps_back_still_outranks_its_predecessor`); a node adopts only revocations its own
+  current or anchored keys signed (`an_owner_does_not_adopt_a_revocation_planted_through_its_raw_identity`); revoking
+  one key twice keeps one record (`revoking_one_key_twice_writes_one_record`). **The confirming review** (each seen
+  failing on 39cfb571): a revocation of a key with no anchor yet is provisional — re-judged every fold, never journaled
+  — and a signer the node counted as revoked signs nothing, so a thief's revocation judged before the successor's
+  certificate does not lock in (`a_thiefs_revocation_judged_before_the_successors_certificate_does_not_lock_in`); at
+  start the node's own certificate anchors first (`a_planted_record_does_not_refuse_a_start_whose_own_certificate_record_is_missing`);
+  the history a node republishes at start comes from its own records, never the raw identity value
+  (`a_raw_identity_value_a_member_writes_does_not_enter_the_owners_history`). **The N1/N2 check** (each seen failing on
+  4908ecd3): audit recovery never seals over an existing record — records that do not verify are kept, reported
+  (`audit_unverified_records` on `/stats`, `audit_unverified` in the guarantee report) and numbering resumes after them,
+  so a node upgraded after an old-version rotation keeps its genesis and reports its pre-upgrade prefix unverified
+  (`an_audit_genesis_survives_an_upgrade_after_an_old_version_rotation`); the revoked-signer rule is dropped, so two
+  compromise rotations learned out of order leave the oldest key revoked
+  (`two_compromise_rotations_learned_out_of_order_leave_the_oldest_key_revoked`). **The safety net's review** (each seen
+  failing on 81b70a2e): only `{seq:016x}` keys whose record names that seq are read into a stream
+  (`an_audit_record_whose_key_and_body_disagree_is_ignored`); a far-away unverified record is reported, not followed,
+  and a seal skips an occupied slot and never wraps (`a_forged_high_seq_record_neither_pushes_nor_wraps_the_numbering`,
+  `a_far_away_unverified_record_is_reported_not_followed`); `sys/audit/` and `sys/audit-checkpoint/` trip the `sys/`
+  tripwire (`a_peers_write_into_a_nodes_audit_stream_trips_the_tripwire`); a stream reads segment by segment
+  (`audit_segments`, `GET /gateway/audit` `segments`) and `/stats` counts unverified records
+  (`one_planted_record_does_not_leave_the_rest_of_the_stream_unverifiable`); pruning keeps unverified records. **The
+  H1/M1 review:** a public `verify_linked` follows the hash links, the contiguous verifiers unchanged and pointing at it
+  (`a_stream_with_a_skipped_slot_verifies_under_verify_linked`); a planted run of any length leaves the node sealing — the free slot found outside the audit lock, slot by slot, the run reported (`a_planted_run_of_any_length_leaves_the_node_sealing_and_is_reported`, `a_seal_over_one_planted_record_costs_the_run_not_the_stream`); a pruned stream whose boundary record was removed anchors at the
+  newest checkpoint below it. Upgrade notes in `deprecations.md` §39.
+  Wire **v12** unchanged.
 - **Wire and crypto, one MINOR with a window (post-360 plan row F).** Wire **v12** unchanged — no frame changes
   shape; what changes is what a node accepts and what a signature is over. Three changes and one closure:
   - **KV `SignedData` is domain-tagged.** A KV write is signed over `mycelium.kv/update/1 ‖ u32 len ‖ canonical`

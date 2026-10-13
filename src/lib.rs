@@ -101,7 +101,8 @@
 //! | `sys/audit/{node}/{seq}`            | WS2 audit — per-node hash-chained, Ed25519-signed tamper-evident record (`compliance`) |
 //! | `audit/{ts_unix_nanos}/{node}`      | SkillRunner's **plain** audit trail *without* `compliance` (`src/bin/skillrunner/audit.rs`) — unsigned, time-keyed JSON; with `compliance` the same records go to `sys/audit/…` instead |
 //! | `sys/audit-checkpoint/{node}/{seq}` | WS-D audit — signed mid-chain boundary enabling export-then-prune retention (`compliance`) |
-//! | `sys/revocation/{node}/{key-hex}`   | WS-D — signed key revocation; excluded on all verify paths incl. consensus (`compliance`) |
+//! | `sys/revocation/{node}/{key-hex}[/{revoker-hex}]` | WS-D — signed key revocation; post-360 row Q: keyed `(revoked, revoker)`, the v1 bytes then a trailer carrying the certificates it rests on; counts only when signed by an anchored key issued after the revoked one's; honoured by every verifier of a node's key (`tls`) |
+//! | `sys/identity-cert/{node}/{key-hex}` | post-360 row Q — a node's **certificate record**: the DER of a CA-issued certificate naming the node by `mycelium://<node>`, issuance (ms) in the serial; the only source of key standing (`tls`) |
 //! | `sys/capauthz/{ns}/{name}`          | Gossip-level capability-authz policy (`required_roles`; resolve-time enforcement) (`compliance`) |
 //! | `sys/config/{param}`               | `ClusterTuner` advisory config (WS-C M9) — a fleet recommendation a node may adopt, today `writer_channel_depth` (u64 LE), written only when it changes (`src/agent/cluster_tuner.rs`, `CONFIG_PREFIX`) |
 //! | `sys/govern/timing`                 | Timing governor — the fleet timing intent (evaporating soft state; local-wins), written through `POST /gateway/govern/timing` (`src/agent/timing_governor.rs`, `TIMING_INTENT_KEY`) |
@@ -386,8 +387,8 @@ pub use agent::{PromptTemplate, PromptSkillError, PromptSkillHandle, LlmBackend,
 pub use agent::{role_key, RoleClaim, SignedRoleClaim, ROLE_PREFIX};
 #[cfg(feature = "compliance")]
 pub use agent::{
-    audit_key, audit_stream_prefix, verify_chain, verify_chain_keys, verify_stream_from_genesis,
-    AuditAction, AuditOutcome, AuditRecord, AuditSink, AuditVerifyError, SignedAuditRecord,
+    audit_key, audit_stream_prefix, verify_chain, verify_chain_keys, verify_linked, verify_stream_from_genesis,
+    AuditAction, AuditOutcome, AuditRecord, AuditSegments, AuditSink, AuditVerifyError, SignedAuditRecord,
     AUDIT_PREFIX,
 };
 #[cfg(feature = "compliance")]

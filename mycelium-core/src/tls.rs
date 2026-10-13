@@ -36,6 +36,14 @@ pub struct NodeTls {
     /// captures long-lived map `Arc`s, independent of the swapped cert/config).
     #[cfg(feature = "tls")]
     peer_anchor_sink: std::sync::OnceLock<AnchorSink>,
+    /// This node's current certificate (DER), published as its certificate record
+    /// (`sys/identity-cert/{node}/{key}`, post-360 plan row Q). Rotates with the identity.
+    #[cfg(feature = "tls")]
+    node_cert: arc_swap::ArcSwap<Vec<u8>>,
+    /// The fleet CA's chain check, without the removal check — what a certificate record is judged
+    /// by (`verify_member_cert`). Fixed for the node's life: rotation reuses the CA.
+    #[cfg(feature = "tls")]
+    cert_verifier: std::sync::Arc<dyn rustls::server::danger::ClientCertVerifier>,
 }
 
 #[cfg(feature = "tls")]
@@ -88,6 +96,24 @@ impl NodeTls {
         self.server_config.store(m.server_config);
         self.client_config.store(m.client_config);
         self.gateway_server_config.store(m.gateway_server_config);
+        self.node_cert.store(std::sync::Arc::new(m.node_cert_der));
+    }
+
+    /// This node's current certificate, DER (post-360 plan row Q: the node's certificate record).
+    pub fn node_cert_der(&self) -> Vec<u8> {
+        self.node_cert.load().as_ref().clone()
+    }
+
+    /// Whether `der` is a certificate the fleet CA issued and that is valid now (chain and
+    /// validity dates, judged at the wall clock through the seam) — the check a certificate record
+    /// must pass before its key has any standing (post-360 plan row Q). The removal check is not
+    /// part of it: a removed member's keys are filtered where keys are read.
+    pub fn verify_member_cert(&self, der: &[u8]) -> bool {
+        let cert = rustls::pki_types::CertificateDer::from(der);
+        let now = rustls::pki_types::UnixTime::since_unix_epoch(std::time::Duration::from_millis(
+            crate::sim_seam::wall_now_ms(),
+        ));
+        self.cert_verifier.verify_client_cert(&cert, &[], now).is_ok()
     }
 }
 
@@ -100,6 +126,129 @@ pub struct RotationMaterial {
     client_config: std::sync::Arc<rustls::ClientConfig>,
     signing_key: std::sync::Arc<ed25519_dalek::SigningKey>,
     gateway_server_config: std::sync::Arc<rustls::ServerConfig>,
+    /// The new key's certificate, DER — published as its certificate record before the cutover.
+    pub node_cert_der: Vec<u8>,
+}
+
+/// What a node certificate says about whose key it is (post-360 plan row Q): its Ed25519 key, the
+/// `mycelium://{node}` URIs among its subject alternative names, and its issuance time — carried in
+/// the serial number as milliseconds since the epoch by `generate_node_cert`, because `notBefore` is
+/// whole seconds (two certificates one rotation apart would tie) and dating it *now* would make a
+/// peer whose clock is behind refuse the handshake. `issued_ms` is `None` for a serial that is not
+/// such a time (every certificate issued before row Q: a 20-byte digest).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CertIdentity {
+    pub key: [u8; 32],
+    pub node_uris: Vec<String>,
+    pub issued_ms: Option<u64>,
+}
+
+/// The issuance time a new certificate carries: the wall clock, but strictly after `floor_ms` (the
+/// newest issuance among the node's own certificates), so a clock stepped back never mints a key that
+/// ranks below one it succeeds (post-360 plan row Q).
+pub fn issuance_after(floor_ms: u64) -> u64 {
+    crate::sim_seam::wall_now_ms().max(floor_ms.saturating_add(1))
+}
+
+/// The URI a node certificate names its node by: `mycelium://{node}`.
+pub fn node_uri(node: &crate::node_id::NodeId) -> String {
+    format!("mycelium://{node}")
+}
+
+/// Read a certificate's [`CertIdentity`]. The key is read by the X.509 parser rustls uses
+/// (`ed25519_key_from_cert_der`); the serial and the subject alternative names by a minimal,
+/// bounds-checked DER walk of the `TBSCertificate` (the parser exposes neither). `None` for anything
+/// that is not a certificate carrying an Ed25519 key. Says nothing about who issued it: judge the
+/// chain with [`NodeTls::verify_member_cert`] first. Never panics.
+#[cfg(feature = "tls")]
+pub fn cert_identity(der: &[u8]) -> Option<CertIdentity> {
+    let key = imp::ed25519_key_from_cert_der(der)?;
+    let (tag, cert, _) = der_tlv(der)?;
+    if tag != 0x30 { return None; }
+    let (tag, tbs, _) = der_tlv(cert)?;
+    if tag != 0x30 { return None; }
+    let mut rest = tbs;
+    let (mut tag, mut body, mut next) = der_tlv(rest)?;
+    if tag == 0xA0 {
+        // [0] EXPLICIT version
+        rest = next;
+        (tag, body, next) = der_tlv(rest)?;
+    }
+    if tag != 0x02 { return None; }
+    let issued_ms = {
+        let mut b = body;
+        while b.len() > 1 && b[0] == 0 { b = &b[1..]; }
+        if b.is_empty() || b.len() > 8 || b[0] & 0x80 != 0 {
+            None
+        } else {
+            let mut v = 0u64;
+            for &x in b { v = (v << 8) | x as u64; }
+            (v > 0).then_some(v)
+        }
+    };
+    rest = next;
+    // signature, issuer, validity, subject, subjectPublicKeyInfo
+    for _ in 0..5 {
+        let (_, _, n) = der_tlv(rest)?;
+        rest = n;
+    }
+    let mut node_uris = Vec::new();
+    while !rest.is_empty() {
+        let (tag, body, n) = der_tlv(rest)?;
+        rest = n;
+        if tag != 0xA3 { continue; }
+        // [3] EXPLICIT Extensions ::= SEQUENCE OF Extension
+        let (tag, mut exts, _) = der_tlv(body)?;
+        if tag != 0x30 { return None; }
+        while !exts.is_empty() {
+            let (tag, ext, n) = der_tlv(exts)?;
+            exts = n;
+            if tag != 0x30 { return None; }
+            let (tag, oid, mut e) = der_tlv(ext)?;
+            if tag != 0x06 { return None; }
+            if oid != [0x55, 0x1D, 0x11] { continue; } // 2.5.29.17 subjectAltName
+            let (mut tag, mut value, mut n2) = der_tlv(e)?;
+            if tag == 0x01 {
+                // critical BOOLEAN
+                e = n2;
+                (tag, value, n2) = der_tlv(e)?;
+            }
+            let _ = n2;
+            if tag != 0x04 { return None; }
+            let (tag, mut names, _) = der_tlv(value)?;
+            if tag != 0x30 { return None; }
+            while !names.is_empty() {
+                let (tag, name, n3) = der_tlv(names)?;
+                names = n3;
+                if tag == 0x86 {
+                    // [6] IMPLICIT IA5String: uniformResourceIdentifier
+                    if let Ok(uri) = std::str::from_utf8(name) { node_uris.push(uri.to_string()); }
+                }
+            }
+        }
+    }
+    Some(CertIdentity { key, node_uris, issued_ms })
+}
+
+/// One DER TLV: `(tag, content, rest)`. Single-byte tags, definite lengths of at most four length
+/// bytes; `None` on anything else or on a length past the input.
+#[cfg(feature = "tls")]
+fn der_tlv(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+    let (&tag, rest) = input.split_first()?;
+    if tag & 0x1F == 0x1F { return None; }
+    let (&first, mut rest) = rest.split_first()?;
+    let len = if first < 0x80 {
+        first as usize
+    } else {
+        let n = (first & 0x7F) as usize;
+        if n == 0 || n > 4 || rest.len() < n { return None; }
+        let mut l = 0usize;
+        for &b in &rest[..n] { l = (l << 8) | b as usize; }
+        rest = &rest[n..];
+        l
+    };
+    if rest.len() < len { return None; }
+    Some((tag, &rest[..len], &rest[len..]))
 }
 
 #[cfg(feature = "tls")]
@@ -261,13 +410,14 @@ mod imp {
             }
             None => {
                 let (ca_cert_der, ca_key_pair) = load_or_create_ca(cfg)?;
-                let node_cert_der = generate_node_cert(node_id, &signing_key, &ca_key_pair)?;
+                let node_cert_der = generate_node_cert(node_id, &signing_key, &ca_key_pair, super::issuance_after(0))?;
                 (ca_cert_der, node_cert_der)
             }
         };
 
         // ── 4. Build rustls configs ───────────────────────────────────────
-        let (server_config, client_config, gateway_server_config) =
+        let cert_bytes = node_cert_der.as_ref().to_vec();
+        let (server_config, client_config, gateway_server_config, cert_verifier) =
             build_rustls_configs(node_cert_der, &signing_key, ca_cert_der, removed)?;
 
         Ok(NodeTls {
@@ -276,6 +426,8 @@ mod imp {
             signing_key: arc_swap::ArcSwap::from_pointee(signing_key),
             gateway_server_config: arc_swap::ArcSwap::from_pointee(gateway_server_config),
             peer_anchor_sink: std::sync::OnceLock::new(),
+            node_cert: arc_swap::ArcSwap::from_pointee(cert_bytes),
+            cert_verifier,
         })
     }
 
@@ -290,6 +442,19 @@ mod imp {
         node_id: &NodeId,
         removed: Arc<crate::removal::RemovedSet>,
     ) -> Result<super::RotationMaterial, GossipError> {
+        generate_rotation_after(cfg, node_id, removed, 0)
+    }
+
+    /// [`generate_rotation`], with the new certificate issued strictly after `issued_floor_ms` — the
+    /// newest issuance among this node's own certificates (post-360 plan row Q: a clock stepped back
+    /// must not mint a successor that ranks below its predecessor, or the predecessor's revocation
+    /// would not count).
+    pub fn generate_rotation_after(
+        cfg: &TlsConfig,
+        node_id: &NodeId,
+        removed: Arc<crate::removal::RemovedSet>,
+        issued_floor_ms: u64,
+    ) -> Result<super::RotationMaterial, GossipError> {
         let signing_key = generate_key()?;
         let verifying_key = signing_key.verifying_key().to_bytes();
 
@@ -299,8 +464,9 @@ mod imp {
         save_key_raw(&signing_key, &auto_key_path)?;
 
         let (ca_cert_der, ca_key_pair) = load_existing_ca(cfg)?;
-        let node_cert_der = generate_node_cert(node_id, &signing_key, &ca_key_pair)?;
-        let (server_config, client_config, gateway_server_config) =
+        let node_cert_der = generate_node_cert(node_id, &signing_key, &ca_key_pair, super::issuance_after(issued_floor_ms))?;
+        let cert_bytes = node_cert_der.as_ref().to_vec();
+        let (server_config, client_config, gateway_server_config, _) =
             build_rustls_configs(node_cert_der, &signing_key, ca_cert_der, removed)?;
 
         Ok(super::RotationMaterial {
@@ -309,6 +475,7 @@ mod imp {
             client_config: Arc::new(client_config),
             signing_key: Arc::new(signing_key),
             gateway_server_config: Arc::new(gateway_server_config),
+            node_cert_der: cert_bytes,
         })
     }
 
@@ -326,7 +493,7 @@ mod imp {
         let ca_cfg = TlsConfig { auto_cert_dir: ca_dir.to_path_buf(), ..TlsConfig::default() };
         let (_ca_cert_der, ca_key_pair) = load_existing_ca(&ca_cfg)?;
         let signing_key = generate_key()?;
-        let node_cert_der = generate_node_cert(node_id, &signing_key, &ca_key_pair)?;
+        let node_cert_der = generate_node_cert(node_id, &signing_key, &ca_key_pair, super::issuance_after(0))?;
         fs::create_dir_all(out_dir).map_err(|e| err(format!("TLS: create {out_dir:?}: {e}")))?;
         let sanitized = node_id.as_str().replace([':', '.'], "_");
         let cert_path = out_dir.join(format!("{sanitized}.cert.pem"));
@@ -412,6 +579,7 @@ mod imp {
         node_id: &NodeId,
         signing_key: &SigningKey,
         ca_key_pair: &KeyPair,
+        issued_ms: u64,
     ) -> Result<CertificateDer<'static>, GossipError> {
         use ed25519_dalek::pkcs8::EncodePrivateKey;
 
@@ -426,7 +594,14 @@ mod imp {
         let ip: std::net::IpAddr = node_id.to_socket_addr().ip();
         let mut params = CertificateParams::new(vec![])
             .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: node cert params: {e}") })?;
-        params.subject_alt_names = vec![SanType::IpAddress(ip)];
+        // Post-360 plan row Q: the node's NodeId as a URI, so a certificate names *its node* and not
+        // just a host (nodes on one host share the IP), and the issuance time in the serial — the
+        // order a CA re-issue outranks earlier keys by. `notBefore` keeps its fixed date: dating it
+        // now would make a peer whose clock is behind refuse the handshake.
+        let uri = rcgen::Ia5String::try_from(super::node_uri(node_id))
+            .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: node URI: {e}") })?;
+        params.subject_alt_names = vec![SanType::IpAddress(ip), SanType::URI(uri)];
+        params.serial_number = Some(rcgen::SerialNumber::from(issued_ms));
         params.not_before = rcgen::date_time_ymd(2024, 1, 1);
         params.not_after  = rcgen::date_time_ymd(2099, 1, 1);
 
@@ -526,7 +701,7 @@ mod imp {
         signing_key: &SigningKey,
         ca_cert_der: CertificateDer<'static>,
         removed: Arc<crate::removal::RemovedSet>,
-    ) -> Result<(ServerConfig, ClientConfig, ServerConfig), GossipError> {
+    ) -> Result<(ServerConfig, ClientConfig, ServerConfig, Arc<dyn rustls::server::danger::ClientCertVerifier>), GossipError> {
         use ed25519_dalek::pkcs8::EncodePrivateKey;
 
         ensure_crypto_provider();
@@ -550,6 +725,7 @@ mod imp {
             .build()
             .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: build client verifier: {e}") })?;
 
+        let chain_verifier = Arc::clone(&verifier);
         // Closure plan C5: a removed member's certificate is refused at the handshake.
         let verifier: Arc<dyn rustls::server::danger::ClientCertVerifier> =
             Arc::new(RemovalAwareClientVerifier { inner: verifier, removed: Arc::clone(&removed) });
@@ -575,7 +751,7 @@ mod imp {
             .with_client_auth_cert(vec![node_cert_der], key_der)
             .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: build client config: {e}") })?;
 
-        Ok((server_config, client_config, gateway_server_config))
+        Ok((server_config, client_config, gateway_server_config, chain_verifier))
     }
 
     /// Refuse a certificate whose identity key belongs to a removed member (closure plan C5).
@@ -726,7 +902,7 @@ mod imp {
 }
 
 #[cfg(feature = "tls")]
-pub use imp::{ed25519_key_from_cert_der, gateway_server_config_from_pem, generate_rotation, issue_node_cert, load_or_generate, sign_bytes, verify_bytes};
+pub use imp::{ed25519_key_from_cert_der, gateway_server_config_from_pem, generate_rotation, generate_rotation_after, issue_node_cert, load_or_generate, sign_bytes, verify_bytes};
 
 #[cfg(all(test, feature = "tls"))]
 mod key_extract_tests {
@@ -744,7 +920,7 @@ mod key_extract_tests {
         let expected = signing.verifying_key().to_bytes();
         let ca = KeyPair::generate().unwrap();
         let node = NodeId::new("127.0.0.1", 9000).unwrap();
-        let cert = generate_node_cert(&node, &signing, &ca).unwrap();
+        let cert = generate_node_cert(&node, &signing, &ca, 1).unwrap();
         assert_eq!(ed25519_key_from_cert_der(cert.as_ref()), Some(expected),
             "extracted SPKI key must equal the cert's Ed25519 verifying key");
     }

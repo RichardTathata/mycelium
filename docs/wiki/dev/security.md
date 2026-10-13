@@ -347,7 +347,14 @@ publish `sys/identity/{self}` = `new‖old` → wait → activate.
 every verify path tries the set. Caveat: a retired key still verifies — compromise needs
 explicit **revocation** (WS-D shipped the CT-style revocation log + `/gateway/transparency`
 inclusion proofs, PRs #77–#82; revocation is now also applied on the consensus verify path,
-audit 2026-07-15 pass 3).
+audit 2026-07-15 pass 3). **Since post-360 plan row Q** revocation reaches *every* verifier
+of a node's key through one answer, `CoreCtx::trusted_keys` (`mycelium-core/src/context.rs`), over
+`CoreCtx::key_standing` (`mycelium-core/src/removal.rs`). Standing comes only from **certificate records**
+(`sys/identity-cert/{node}/{key}`: the CA-issued certificate naming the node by `mycelium://<node>`, issuance in the
+serial): an anchored node trusts exactly its anchored, unrevoked keys; a revocation of P counts only when signed by an
+anchored key issued after P's. Records are keyed `(P, S)`, self-contained, journaled when counted, republished by the
+owner. The decision record is `docs/design/revocation-authority.md` (rev 3, three design reviews); its limits — the CA
+holder, the secure posture's re-issue-only recovery, legacy certificates — are stated there and in the runbook.
 
 > **`sys/identity` authentication — partially closed (WS-E, in progress).** `sys/identity/{node}`
 > is a plain Layer-I KV value with **no signature**, and `merge_peer_keys` **accumulates** any key

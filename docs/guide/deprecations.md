@@ -1142,3 +1142,71 @@ still waits. Keep such a provider's queue shorter than that, or time the caller 
 Nothing to do for the log group in a mixed fleet: an older node writes only the offset, and an upgraded reader takes
 the offset whenever it is ahead of the cursor. **What a drop still loses**, stated: a mailbox event or log-group
 entry the connection had accepted when it dropped — the gateway has no resume point (guide 10).
+
+## 39. Revocation reaches every verifier, and only a newer certificate of a node can revoke its keys (unreleased, after 2.32.0)
+
+**What changes** (post-360 plan row Q; decision record `docs/design/revocation-authority.md` rev 3):
+
+- **Every verifier of a node's key honours revocation**: KV `SignedData` (refused, `kv_revoked_key_refused`), identity
+  records and the unsigned identity exemption, consensus, role claims and the audit chain, caller envelopes, knowledge
+  records and `mycelium-agentfacts`. Consensus no longer falls back to the raw `sys/identity/{signer}` value: a signer
+  with no trusted key is refused.
+- **Certificates now name their node and their issuance.** `generate_node_cert` (start in the development posture,
+  `rotate_identity`, `mycelium tls issue`) adds a URI SAN `mycelium://<node>` and writes the issuance time (ms) as the
+  serial; `notBefore`/`notAfter` are unchanged. Each node publishes its certificate at
+  `sys/identity-cert/{node}/{key-hex}`.
+- **A node with a certificate record trusts exactly its anchored keys it has not revoked.** No other key verifies as
+  it — not a key from a bare or poisoned `sys/identity/`, a first-sighted record, a legacy handshake anchor, or a
+  retired key that never had a URI-SAN certificate. **What still reads as unverified** once the node is re-anchored:
+  anything *live* signed by such a key — a KV write, a role claim (`roles_of`), a caller envelope, a consensus
+  message, and a knowledge record's present standing (it stays attributable). **History still verifies**: the audit
+  chain is recovered and verified under every key the node held minus the keys it revoked, so a chain sealed under a
+  pre-upgrade key keeps verifying and its genesis is never re-sealed. Anything signed by a **revoked** key reads as
+  unverified everywhere, history included.
+- **Who may revoke:** a revocation of key P counts only when signed by an anchored key of the node issued after P's
+  certificate (or P has no standing). A thief holding an old key cannot revoke a newer one; a CA re-issue outranks
+  every older key.
+- **Revocations are written at `sys/revocation/{node}/{P-hex}/{S-hex}`** as the v1 bytes followed by a trailer (the
+  revoker, the certificates, a second signature). A 2.32 node reads the v1 prefix and applies its old rule. Records at
+  the old path are still read, under the new rule.
+- **Only `{seq:016x}` keys whose record names that seq are read as audit records** (anything else under
+  `sys/audit/{node}/` is counted, `audit_malformed_keys`, and ignored); **a seal skips a slot an unverified record
+  occupies** and never wraps (an exhausted sequence refuses the seal); a peer's write into `sys/audit/{node}/` or
+  `sys/audit-checkpoint/{node}/` trips the `sys/` tripwire; **`audit_segments`** (and `segments` on
+  `GET /gateway/audit`) reads a stream segment by segment; `audit_unverified_records` counts records;
+  `audit_prune_to_checkpoint` prunes only records that verify. **Seqs may now jump** over a skipped slot: the public
+  contiguous verifiers (`verify_chain`, `verify_chain_keys`, `verify_stream_from_genesis`) report that as
+  `SequenceGap` — they are unchanged, nothing is removed on 2.x — and an external verifier of an `AuditSink` export
+  should use the new `verify_linked`, which follows the hash links. A planted run of any length no longer stops sealing: the seal finds the first free slot outside the audit lock and reports the run. Kept, unverified records stay until an operator removes them (`docs/operations/audit.md`). A
+  pruned stream whose boundary record was removed anchors at the newest checkpoint below its first record.
+- **An audit stream is never sealed over.** A node whose own persisted audit records do not verify at start (a planted
+  record, or — after upgrading a node that rotated on a version before row Q, whose rotation record is signed by the
+  prior key — its pre-upgrade records) keeps them untouched, resumes numbering after the last of them, and reports
+  them: an error log naming the seq range, `GET /stats` `audit_unverified_records` / `audit_unverified_from_seq`, the
+  guarantee report's `audit_unverified`. `audit_verify` keeps saying the stream holds records that do not verify.
+  **Nothing is destroyed;** the pre-upgrade prefix reads as unverified until the node's history is re-anchored.
+  (Before, the next seal overwrote the first record that did not verify.)
+- **A node refuses to start with a key its own records show revoked** — a key file restored from a backup, or
+  `key_pem` naming a key a rotation retired: `start()` returns `GossipError::InvalidField { field: "tls", .. }` and
+  logs it by name. Start it with its current key, or have the operator issue a new one.
+- **A node cannot revoke the key it signs with**, nor a key that is not its own: `revoke_identity_key` returns
+  `GossipError::InvalidField { field: "revoked_key", .. }`, and `POST /gateway/identity/revoke` answers **422**.
+- **New on `GET /stats`:** `identity_cert_future`, `identity_records_over_cap`, `revocation_journal_refused`. **New
+  guarantee:** `id.revocation_authority`. **New file:** `{persistence}/identity/revocations.journal`.
+
+**Will the compiler tell me?** Only for an exhaustive struct literal of `CoreCtx` (it gained `key_standing`) or of
+`RotationMaterial` (it gained `node_cert_der`). The rest is behaviour.
+
+**Migration — required.** **Re-issue every node's certificate** so it carries the URI SAN: a development-posture
+node (`auto_cert_dir` with the CA key) does it itself at its next start; a node on a pre-issued certificate needs
+`mycelium tls issue` and a restart with the new certificate. **The window, until a node is re-anchored:** no revocation
+of its keys counts at upgraded nodes, so keys it revoked before the upgrade **verify again there**, and its keys are
+judged as before row Q (TOFU, proofs-off poisoning). At start a re-anchored node re-issues each of its own v1
+revocations under its current key, so they count again. A script calling `POST /gateway/identity/revoke` with the
+current key gets 422: rotate first. **What is not covered:** a holder of the fleet CA key (every node in the
+development posture) can issue a certificate that outranks any node's key; the secure posture cannot rotate and
+recovers by re-issue only; a retired key verifies until revoked; unsigned `Data` and anti-entropy; the mTLS handshake
+does not refuse a revoked key; a node without persistence forgets, across a restart, a revocation hidden fleet-wide
+while it was down, until the owner republishes it; a holder of the CA key can make a node refuse to start (loud,
+recovered by a re-issue); junk certificates for many nodes can churn the bounded certificate cache (a fold then costs
+on the order of a second).

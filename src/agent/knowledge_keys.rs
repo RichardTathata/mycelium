@@ -52,14 +52,24 @@ impl GossipAgent {
 
 /// The member-key snapshot behind [`GossipAgent::knowledge_member_keys`], from a task context.
 pub(crate) fn member_keys_of(ctx: &super::TaskCtx) -> HashMap<NodeId, MemberKeys> {
-    let revoked = super::revocation::revoked_key_set(ctx);
-
     let mut out: HashMap<NodeId, MemberKeys> = HashMap::new();
     for (node, keys) in ctx.peer_keys.pin().iter() {
         let entry = out.entry(node.clone()).or_default();
         for k in keys {
             if !entry.retained.contains(k) {
                 entry.retained.push(*k);
+            }
+        }
+    }
+    // Row Q: an anchored node's certified keys are retained (attributable) too, even when no identity
+    // record put them in `peer_keys`.
+    for node in ctx.key_standing.nodes() {
+        if let Some(s) = ctx.key_standing.get(&node) {
+            let entry = out.entry(node.clone()).or_default();
+            for k in s.anchored.iter().flatten() {
+                if !entry.retained.contains(k) {
+                    entry.retained.push(*k);
+                }
             }
         }
     }
@@ -70,8 +80,16 @@ pub(crate) fn member_keys_of(ctx: &super::TaskCtx) -> HashMap<NodeId, MemberKeys
             entry.retained.insert(0, cur);
         }
     }
-    for entry in out.values_mut() {
-        entry.revoked = entry.retained.iter().filter(|k| revoked.contains(*k)).copied().collect();
+    // Post-360 plan row Q: a key is revoked *for the node that revoked it* (and a removed member's
+    // keys for everyone) — the same answer every other verifier of a node's key reads.
+    for (node, entry) in out.iter_mut() {
+        let mut trusted = entry.retained.clone();
+        ctx.retain_trusted(node, &mut trusted);
+        if node == &ctx.node_id && let Some(t) = ctx.tls.get() {
+            let cur = t.verifying_key_bytes();
+            if !trusted.contains(&cur) { trusted.push(cur); }
+        }
+        entry.revoked = entry.retained.iter().filter(|k| !trusted.contains(*k)).copied().collect();
     }
     out
 }

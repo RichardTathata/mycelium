@@ -35,17 +35,26 @@ union of those streams.
 **The head survives a restart with `[persistence]`.** At `start()` — after the identity is
 loaded and persisted state replayed, before anything can seal — the node folds its own
 persisted stream, verified from genesis (or the newest signed checkpoint, §5) under its
-retained keys, and resumes sealing at the next `seq` (`audit::restore_chain_head`). A record
-that does not verify is logged at `error` and sealed over, never used as the link; without
-persistence there is nothing to recover from and the stream restarts at seq 0 (peers' copies
-are not consulted). A stream whose first present record has no anchor — seq 0 deleted by
-hand with no checkpoint at the first record — folds nothing: the head stays at genesis, the
-log names `SequenceGap`, and nothing is overwritten because nothing is at seq 0 (`audit_verify`
-reports the same gap). **Rotate-and-revoke before a restart** ([cert-rotation.md](cert-rotation.md)
-§ Compromise remediation): a revoked key verifies nowhere, so every record it signed fails
-`BadSignature`, the fold stops at genesis and the next seal overwrites seq 0 — seal a checkpoint
-with the **new** key and `audit_prune_to_checkpoint()` **before** restarting, so the head anchors
-at that checkpoint instead.
+retained keys, and resumes sealing after the last record that verifies (`audit::restore_chain_head`).
+**Nothing existing is ever sealed over** (post-360 plan row Q): a record that does not verify is kept
+untouched and reported — an `error` log naming the node and the seq range, `GET /stats`
+`audit_unverified_records` (a count) and `audit_unverified_from_seq`, the guarantee report's
+`audit_unverified` — and a seal skips any slot such a record occupies, linking across it by hash (only
+the contiguous run of occupied slots after the head is passed; a far-away record is never followed;
+the sequence never wraps). Only `{seq:016x}` keys whose record names that seq are read as records;
+anything else under the stream is counted (`audit_malformed_keys`) and ignored. A stream reads
+**segment by segment** (`GossipAgent::audit_segments`, `GET /gateway/audit` `segments`): the verified
+prefix and the tail linked to it verify; the planted records do not. `audit_prune_to_checkpoint`
+prunes only records that verify. Without persistence there
+is nothing to recover from and the stream restarts at seq 0 (peers' copies are not consulted). A
+stream whose first present record has no anchor — seq 0 deleted by hand with no checkpoint at the
+first record — is reported the same way (`audit_verify` names the `SequenceGap`). **A node upgraded
+after a rotation on a version before row Q** reports its pre-upgrade records as unverified until its
+history is re-anchored; nothing is destroyed. **Rotate-and-revoke before a restart**
+([cert-rotation.md](cert-rotation.md) § Compromise remediation): a revoked key verifies nowhere, so
+every record it signed reads as unverified after the restart (kept, reported) — seal a checkpoint with
+the **new** key and `audit_prune_to_checkpoint()` **before** restarting, so the head anchors at that
+checkpoint and the stream verifies.
 
 ---
 
@@ -303,3 +312,32 @@ Three things an operator has to get right:
 
 Coverage travels with the evidence as a field. `coverage.complete: false` names the routes the
 enforcement point does not see. **Never read silence as an all-clear.**
+
+### Gaps, skipped slots and kept records (post-360 plan row Q)
+
+- **Seqs may jump.** A seal skips a slot that a record the node cannot verify occupies (kept, never sealed over) and
+  links across it by hash. The contiguous verifiers — `verify_chain`, `verify_chain_keys`,
+  `verify_stream_from_genesis` — require `seq = previous + 1` and report such a jump as `SequenceGap`. **An external
+  verifier of an `AuditSink` export should use `verify_linked(records, node, keys, anchor_seq, anchor_prev)`**, which
+  follows the hash links (the rule the node verifies itself by) and returns which records verify and which do not.
+- **A planted run never stops sealing.** When records of the node it cannot verify occupy the slots after the chain
+  head, the seal finds the first free slot outside the audit lock — one ordered pass over the stream; the lock is held
+  only for an O(1) check of the head's slot per attempt — seals there, links by hash, and reports the run with the
+  other unverified records. Garbage at a key is not a record and occupies nothing. (That rule could overwrite a
+  genuine record only on a node downgraded across a change of the audit record's format, which would read its own
+  newer records as garbage — an unsupported downgrade.) The look-ahead costs one O(1) lookup per occupied slot, not a
+  read of the stream, and scan-then-recheck is retried at most 8 times before the free slot is found under the lock
+  (the race reported); a seal never refuses and never loops unbounded.
+- **Kept, unverified records stay until an operator removes them.** Neither recovery, sealing nor
+  `audit_prune_to_checkpoint` deletes them. To remove them: read the seqs from `GossipAgent::audit_segments(node)`
+  (`unverified`), or `GET /gateway/audit` (`segments.unverified_seqs`); keep a copy as evidence; then delete each with
+  the embedded API, `agent.kv().delete(mycelium::audit_key(&node, seq))` (the gateway's KV routes refuse the owned
+  `sys/` namespaces). Removing them clears the report at the next restart, and frees the slots the next seals skip.
+- **A pruned stream whose boundary record was removed** anchors at the newest checkpoint below its first record, so
+  numbering resumes at that boundary — not at genesis, among exported and pruned slots.
+- **The anchor.** `verify_linked` takes the anchor `(seq, prev_hash)` from the caller: take it from a checkpoint whose
+  signature you verified (`SignedAuditCheckpoint`), or `(0, [0; 32])` for genesis.
+- **Residual, with `require_identity_proofs` off (the default):** a key poisoned into a node's identity set can sign an
+  audit checkpoint for that node that replaces the genuine one by LWW and so steers where its stream is anchored. This
+  is pre-existing in kind (the identity-poisoning residual); a peer's write into `sys/audit-checkpoint/{node}/` now
+  trips the `sys/` tripwire, so it is counted.

@@ -126,7 +126,9 @@ mod mcp_handle;
 mod rbac;
 #[cfg(feature = "compliance")]
 pub(crate) mod audit;
-#[cfg(feature = "compliance")]
+/// Key revocation: validated under `tls` (every verifier of a node's key consults it — post-360 plan
+/// row Q); issued under `compliance`.
+#[cfg(feature = "tls")]
 pub(crate) mod revocation;
 #[cfg(feature = "compliance")]
 mod knowledge_keys;
@@ -231,8 +233,8 @@ pub use capability_handle::CapabilitiesHandle;
 pub use rbac::{role_key, RoleClaim, SignedRoleClaim, ROLE_PREFIX};
 #[cfg(feature = "compliance")]
 pub use audit::{
-    audit_key, audit_stream_prefix, verify_chain, verify_chain_keys, verify_stream_from_genesis,
-    AuditAction, AuditOutcome, AuditRecord, AuditSink, AuditVerifyError, SignedAuditRecord,
+    audit_key, audit_stream_prefix, verify_chain, verify_chain_keys, verify_linked, verify_stream_from_genesis,
+    AuditAction, AuditOutcome, AuditRecord, AuditSegments, AuditSink, AuditVerifyError, SignedAuditRecord,
     AUDIT_PREFIX,
 };
 #[cfg(feature = "compliance")]
@@ -783,6 +785,11 @@ pub(crate) struct TaskCtx {
     /// Closure plan C5: the membership authorities this node takes removals from.
     #[cfg(feature = "tls")]
     pub(crate) membership: std::sync::OnceLock<Arc<crate::membership::MembershipAuthorities>>,
+    /// Post-360 plan row Q: what the key-standing fold keeps between runs — anchored keys judged,
+    /// the journal of counted revocations, this node's own records to republish
+    /// (`revocation::IdentityLedger`, lock-free).
+    #[cfg(feature = "tls")]
+    pub(crate) identity_ledger: Arc<revocation::IdentityLedger>,
     /// Whether `/a2a` is mounted (`with_a2a`), so `start()` can say what that exposes.
     #[cfg(feature = "a2a")]
     pub(crate) a2a_mounted: AtomicBool,
@@ -1181,6 +1188,7 @@ impl GossipAgent {
             peer_keys: Arc::new(papaya::HashMap::new()),
             peer_anchor_keys: Arc::new(papaya::HashMap::new()),
             removed: Arc::new(mycelium_core::removal::RemovedSet::default()),
+            key_standing: Arc::new(mycelium_core::removal::KeyStanding::default()),
             identity_anchor_conflicts: Arc::new(AtomicU64::new(0)),
             peers: Arc::clone(&peers_arc),
             rate_throttle: Arc::new(papaya::HashMap::new()),
@@ -1325,6 +1333,8 @@ impl GossipAgent {
             provider_enforcement: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "tls")]
             membership: std::sync::OnceLock::new(),
+            #[cfg(feature = "tls")]
+            identity_ledger: Arc::new(revocation::IdentityLedger::default()),
             #[cfg(feature = "a2a")]
             a2a_mounted: AtomicBool::new(false),
             guarantees: parking_lot::Mutex::new(guarantee::core_guarantees()),
@@ -1860,6 +1870,26 @@ impl GossipAgent {
         Some(tls.signing_key().verifying_key().to_bytes())
     }
 
+    /// The verifying keys this node **trusts for `node` now** (post-360 plan row Q,
+    /// `docs/design/revocation-authority.md`): for a node with a certificate record, exactly its
+    /// anchored keys it has not revoked; for a legacy node, its retained identity keys minus any
+    /// revocation; plus this node's own current key when `node` is self. What a companion verifying a
+    /// member's signature should read — never the raw `sys/identity/{node}` value, which any member can
+    /// write.
+    #[cfg(feature = "tls")]
+    pub fn trusted_identity_keys(&self, node: &NodeId) -> Vec<[u8; 32]> {
+        let mut keys = self.task_ctx.trusted_keys(node);
+        if node == &self.node_id
+            && let Some(t) = self.task_ctx.tls.get()
+        {
+            let cur = t.verifying_key_bytes();
+            if !keys.contains(&cur) {
+                keys.push(cur);
+            }
+        }
+        keys
+    }
+
     /// Rotate this node's TLS / identity key **without cluster disruption**.
     ///
     /// 1. Generate a new key + CA-signed cert (reusing the cluster CA), persisted
@@ -1897,8 +1927,19 @@ impl GossipAgent {
         })?;
 
         // 1. Generate the new material (persisted, not yet active).
-        let material = crate::tls::generate_rotation(tls_cfg, &self.node_id, Arc::clone(&self.task_ctx.removed))?;
+        // Post-360 plan row Q: the new certificate is issued strictly after every one of this node's
+        // own, so a clock stepped back cannot mint a successor that ranks below its predecessor.
+        let floor = revocation::own_newest_issuance(&self.task_ctx);
+        let material = crate::tls::generate_rotation_after(tls_cfg, &self.node_id, Arc::clone(&self.task_ctx.removed), floor)?;
         let new_vk = material.verifying_key;
+
+        // Post-360 plan row Q: the new key's certificate record, before anything else — the new key's
+        // standing, issued after every earlier key's, so it may revoke them.
+        {
+            let path = revocation::cert_record_key(&self.node_id, &new_vk);
+            let _ = self.kv().set(path.clone(), Bytes::from(material.node_cert_der.clone()));
+            self.task_ctx.identity_ledger.own(path, material.node_cert_der.clone());
+        }
 
         // 2. Publish new ‖ (every previously-published key) — the full rotation
         //    history, so historical signatures stay verifiable across any number
@@ -1986,9 +2027,14 @@ impl GossipAgent {
     /// **Revoke** one of this node's own verifying keys cluster-wide (WS-D / D1) — for a key known
     /// to be *compromised*, where WS5 rotation alone is insufficient (a rotated-away key stays
     /// trusted for verification). Writes a signed revocation to `sys/revocation/{self}/{key}`,
-    /// signed by the **current** identity key; once it gossips, every node's retained-key verify
-    /// paths (role claims, audit chain) **exclude** `revoked_key`, so anything it signed fails
-    /// verification — "sub-second revocation", bounded by gossip latency.
+    /// signed by the **current** identity key; once it gossips, **every verifier of this node's key**
+    /// at each peer that validates it excludes `revoked_key` — KV writes, identity records, consensus,
+    /// role claims, the audit chain, caller envelopes, knowledge records (post-360 plan row Q) — so
+    /// anything it signed fails verification — "sub-second revocation", bounded by gossip latency.
+    /// Refuses the key this node signs with (rotate first) and a key that is not this node's. The
+    /// revocation counts at a peer only if this node's current key has a certificate record there
+    /// issued after the revoked key's (post-360 plan row Q): a node whose certificate predates row Q
+    /// has no standing until it is re-issued.
     ///
     /// Typical flow: detect compromise → [`rotate_identity`](Self::rotate_identity) to a fresh key
     /// → `revoke_identity_key(old_key)` (signed by the new current key). Requires the `tls` identity.
@@ -2000,7 +2046,18 @@ impl GossipAgent {
     /// WS-B). [`rotate_identity`](Self::rotate_identity) alone is *hygiene*: the retired key stays
     /// accepted (WS5 retained-set), so it does **not** contain a compromise. This rotates to a
     /// fresh key, then revokes the old one *with the new key*, so the old key stops verifying
-    /// cluster-wide (roles, audit, **and consensus**). Use when the current key may be compromised.
+    /// cluster-wide (KV writes, identity records, roles, audit, **and consensus** — row Q). Use
+    /// when the current key may be compromised.
+    ///
+    /// **What it relies on** (post-360 plan row Q, `docs/design/revocation-authority.md`): the new
+    /// key's certificate (minted by the rotation, naming this node by URI) is issued after the old
+    /// key's, so the revocation counts and nothing the old key signs can revoke the new one. It does
+    /// **not** protect against a holder of the fleet CA key — in the development posture every node has
+    /// it, and a host-level thief can issue a key that outranks this node's. In the secure posture the
+    /// CA key is off the node and this call cannot run: recovery is an operator re-issue
+    /// (`mycelium tls issue`), then [`revoke_identity_key`](Self::revoke_identity_key). Unsigned `Data`
+    /// frames and anti-entropy entries are not covered, and a node whose certificate predates row Q has
+    /// no standing until it is re-issued (`docs/operations/cert-rotation.md`).
     /// Returns the new verifying key.
     #[cfg(feature = "compliance")]
     pub async fn rotate_identity_on_compromise(
@@ -2129,6 +2186,15 @@ impl GossipAgent {
     /// stream resumes from the signed checkpoint boundary instead of genesis.
     pub fn audit_verify(&self, node: &NodeId) -> Result<(), audit::AuditVerifyError> {
         audit::verify_stream(&self.task_ctx, node)
+    }
+
+    /// `node`'s audit stream **segment by segment** (post-360 plan row Q): the records that verify as
+    /// one hash-linked chain from its anchor — the verified prefix, and the tail sealed after records
+    /// that do not verify, linked to the prefix by hash — and the records that do not (kept, never
+    /// sealed over). Where [`audit_verify`](Self::audit_verify) says only *whether* every record
+    /// verifies, this says which do, so one planted record does not leave the rest unverifiable.
+    pub fn audit_segments(&self, node: &NodeId) -> audit::AuditSegments {
+        audit::segments(&self.task_ctx, node)
     }
 
     /// Seal a signed **audit checkpoint** at the current chain boundary (SOC 2 WS-D): a trusted

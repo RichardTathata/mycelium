@@ -44,7 +44,27 @@
 #[cfg(not(feature = "sim"))]
 #[inline]
 pub fn wall_now_ms() -> u64 {
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        let off = WALL_STEP_MS.with(|c| c.get());
+        if off != 0 {
+            return real_wall_now_ms().saturating_add_signed(off);
+        }
+    }
     real_wall_now_ms()
+}
+
+#[cfg(all(not(feature = "sim"), any(test, feature = "test-support")))]
+thread_local! {
+    static WALL_STEP_MS: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+}
+
+/// **Test only:** step this thread's wall clock by `ms` (negative is backwards) — what an NTP step
+/// does to a node — until set back to 0. A `#[tokio::test]` runs its agents on the test thread, so
+/// the step reaches them and no other test.
+#[cfg(all(not(feature = "sim"), any(test, feature = "test-support")))]
+pub fn step_wall_clock_for_test(ms: i64) {
+    WALL_STEP_MS.with(|c| c.set(ms));
 }
 
 #[inline]

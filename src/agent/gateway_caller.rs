@@ -773,8 +773,8 @@ fn signed_message(principal: &str, via: &str, scopes: &[String], issued_at_ms: u
 }
 
 /// Keys this node trusts to have signed for `node`: the retained identity set (`sys/identity`
-/// and CA anchors) minus revocations under `compliance`, plus this node's own current key when
-/// `node` is self.
+/// and CA anchors) plus this node's own current key when `node` is self, minus the keys `node` has
+/// revoked (in every `tls` build since post-360 plan row Q).
 #[cfg(feature = "tls")]
 fn verifying_keys_for(ctx: &TaskCtx, node: &NodeId) -> Vec<[u8; 32]> {
     #[cfg(feature = "compliance")]
@@ -783,7 +783,7 @@ fn verifying_keys_for(ctx: &TaskCtx, node: &NodeId) -> Vec<[u8; 32]> {
     }
     #[cfg(not(feature = "compliance"))]
     {
-        let mut keys: Vec<[u8; 32]> = ctx.peer_keys.pin().get(node).cloned().unwrap_or_default();
+        let mut keys: Vec<[u8; 32]> = ctx.trusted_keys(node);
         if node == &ctx.node_id
             && let Some(t) = ctx.tls.get()
         {
@@ -792,6 +792,8 @@ fn verifying_keys_for(ctx: &TaskCtx, node: &NodeId) -> Vec<[u8; 32]> {
                 keys.push(cur);
             }
         }
+        // Post-360 plan row Q: revocations reach this build too.
+        ctx.retain_trusted(node, &mut keys);
         keys
     }
 }

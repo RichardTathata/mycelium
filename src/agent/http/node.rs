@@ -215,6 +215,25 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
         body["kv_signer_mismatch"] = json!(load(&b.kv_signer_mismatch));
         body["kv_identity_exempt_frames"] = json!(load(&b.kv_identity_exempt));
         body["kv_identity_stale_refused"] = json!(load(&b.kv_identity_stale_refused));
+        body["kv_revoked_key_refused"] = json!(load(&b.kv_revoked_key_refused));
+        // Post-360 plan row Q: certificate records issued past the skew bound (ignored), records past a
+        // cap (skipped), and counted revocations the journal could not take (the node saturated).
+        let l = &ctx.agent_ctx.identity_ledger;
+        body["identity_cert_future"] = json!(load(&l.cert_future));
+        body["identity_records_over_cap"] = json!(load(&l.over_cap));
+        body["revocation_journal_refused"] = json!(load(&l.journal_refused));
+        // Row Q: this node's own persisted audit records that did not verify at start (kept, never
+        // sealed over).
+        #[cfg(feature = "compliance")]
+        {
+            let (unverified, count, malformed) = {
+                let g = ctx.agent_ctx.audit_chain.lock().unwrap_or_else(|e| e.into_inner());
+                (g.unverified, g.unverified_count, g.malformed)
+            };
+            body["audit_unverified_records"] = json!(count);
+            body["audit_unverified_from_seq"] = json!(unverified.map(|(a, _)| a));
+            body["audit_malformed_keys"] = json!(malformed);
+        }
     }
     Json(body)
 }

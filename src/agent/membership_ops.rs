@@ -43,6 +43,10 @@ fn apply(ctx: &TaskCtx, auth: &MembershipAuthorities, writers: &Writers, signed:
     if let Some(anchored) = ctx.peer_anchor_keys.pin().get(node) {
         keys.extend(anchored.iter().copied());
     }
+    // Post-360 plan row Q: and every key a certificate record anchors for it.
+    if let Some(standing) = ctx.key_standing.get(node) {
+        keys.extend(standing.anchored.iter().flatten().copied());
+    }
     ctx.removed.remove(node, keys);
     ctx.peers.pin().remove(node);
     writers.pin().remove(node);

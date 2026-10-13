@@ -516,11 +516,33 @@ pub(crate) fn resolve_identity_record<'a>(
 /// the pre-2.32.0 form, accepted for one release while `require_proofs` was off — is refused since
 /// the release after 2.32.0 (post-360 plan row F; `docs/guide/deprecations.md` §23/§35): a bare
 /// signature over 32-aligned bytes is exactly what any other signing path could have produced.
-#[cfg(feature = "tls")]
+#[cfg(all(test, feature = "tls"))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_and_merge_identity(
     peer_keys: &papaya::HashMap<crate::node_id::NodeId, Vec<[u8; 32]>>,
     anchor_keys: &papaya::HashMap<crate::node_id::NodeId, std::collections::HashSet<[u8; 32]>>,
+    conflict_counter: &std::sync::atomic::AtomicU64,
+    node: &crate::node_id::NodeId,
+    history_bytes: &[u8],
+    kv_keys: &[[u8; 32]],
+    proof: Option<&[u8]>,
+    require_proofs: bool,
+) {
+    validate_and_merge_identity_with_revocations(peer_keys, anchor_keys, &mycelium_core::removal::KeyStanding::default(),
+        conflict_counter, node, history_bytes, kv_keys, proof, require_proofs);
+}
+
+/// [`validate_and_merge_identity`]'s rule, with the node's **revocations** (post-360 plan row Q): a
+/// proof signed by a key `node` has revoked here chains to nothing — not to an established set, and
+/// not as a first sighting. A record whose keys are all held already adds nothing, so one signed by
+/// a since-revoked key (a node's own rotation record, signed by the key it then revoked) is a quiet
+/// no-op rather than a conflict counted on every resync.
+#[cfg(feature = "tls")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_and_merge_identity_with_revocations(
+    peer_keys: &papaya::HashMap<crate::node_id::NodeId, Vec<[u8; 32]>>,
+    anchor_keys: &papaya::HashMap<crate::node_id::NodeId, std::collections::HashSet<[u8; 32]>>,
+    revoked: &mycelium_core::removal::KeyStanding,
     conflict_counter: &std::sync::atomic::AtomicU64,
     node: &crate::node_id::NodeId,
     history_bytes: &[u8],
@@ -553,9 +575,17 @@ pub(crate) fn validate_and_merge_identity(
     let anchor = anchor_keys.pin().get(node).cloned().unwrap_or_default();
     let current = peer_keys.pin().get(node).cloned().unwrap_or_default();
     let established = !anchor.is_empty() || !current.is_empty();
-    let signer_trusted = anchor.contains(&signer) || current.contains(&signer);
+    let signer_revoked = revoked.is_revoked(node, &signer);
+    if signer_revoked && kv_keys.iter().all(|k| anchor.contains(k) || current.contains(k)) {
+        // Nothing to merge, and nothing to flag: a record signed before its signer was revoked.
+        return;
+    }
+    let signer_trusted = !signer_revoked && (anchor.contains(&signer) || current.contains(&signer));
 
-    let accept = if established {
+    let accept = if signer_revoked {
+        // Row Q: a key the node has revoked proves nothing for it.
+        false
+    } else if established {
         // A key may enter an established/anchored set only via a proof signed by a key already
         // trusted for V — a legitimate rotation chains through the prior key. An overwrite signed
         // by any other key (the poisoning case) fails here.
@@ -584,7 +614,8 @@ pub(crate) fn validate_and_merge_identity(
 /// the `compliance` verify paths (role claims, audit chain).
 #[cfg(feature = "compliance")]
 pub(crate) fn known_verifying_keys(ctx: &TaskCtx, node: &crate::node_id::NodeId) -> Vec<[u8; 32]> {
-    let mut keys: Vec<[u8; 32]> = ctx.peer_keys.pin().get(node).cloned().unwrap_or_default();
+    // Post-360 plan row Q: an anchored node's anchored keys, a legacy node's retained set.
+    let mut keys: Vec<[u8; 32]> = ctx.trusted_keys(node);
     if node == &ctx.node_id
         && let Some(t) = ctx.tls.get()
     {
@@ -593,13 +624,27 @@ pub(crate) fn known_verifying_keys(ctx: &TaskCtx, node: &crate::node_id::NodeId)
             keys.push(cur);
         }
     }
-    // WS-D / D1: exclude validly-revoked keys. A key the node has explicitly revoked (signed by its
-    // current identity) is no longer trusted for *any* signature — closing the WS5 compromise
-    // caveat. Retained-key verification (role claims, audit chain) consults this set here, so a
-    // revoked key fails verification everywhere it is read.
-    let revoked = super::revocation::revoked_key_set(ctx);
-    if !revoked.is_empty() {
-        keys.retain(|k| !revoked.contains(k));
+    // WS-D / D1, post-360 plan row Q: exclude the keys `node` has validly revoked (and removed
+    // members' keys) — the same answer every other verifier of a node's key reads.
+    ctx.retain_trusted(node, &mut keys);
+    keys
+}
+
+/// The keys that verify **history** signed for `node` (post-360 plan row Q, the final review's finding
+/// 1): every key held for it minus the keys it revoked (`CoreCtx::history_keys`), plus this node's own
+/// current key when `node` is self. Verify-only — audit-chain recovery, verification and pruning read
+/// it, so a chain sealed under a key retired before re-anchoring still verifies; live writes and
+/// present authority are judged by [`known_verifying_keys`].
+#[cfg(feature = "compliance")]
+pub(crate) fn history_verifying_keys(ctx: &TaskCtx, node: &crate::node_id::NodeId) -> Vec<[u8; 32]> {
+    let mut keys = ctx.history_keys(node);
+    if node == &ctx.node_id
+        && let Some(t) = ctx.tls.get()
+    {
+        let cur = t.verifying_key_bytes();
+        if !keys.contains(&cur) {
+            keys.push(cur);
+        }
     }
     keys
 }

@@ -1744,29 +1744,11 @@ impl ConsensusEngine {
             // in-memory cache first, else parse the `sys/identity/` KV entry
             // (32 = one key, 64 = current‖previous). Verify against any so a
             // rotated key still validates in-flight/historical consensus msgs.
-            let mut key_set: Vec<[u8; 32]> =
-                self.task_ctx.peer_keys.pin().get(&signed.signer).cloned().unwrap_or_default();
-            if key_set.is_empty() {
-                let kv_key = format!("{}{}", crate::signal::kv_ns::IDENTITY, signed.signer);
-                if let Some(b) = self.task_ctx.kv_state.store.pin()
-                    .get(kv_key.as_str()).and_then(|e| e.data.clone())
-                {
-                    key_set = crate::agent::helpers::parse_identity_keys(&b);
-                }
-            }
-            // WS-D: exclude validly-revoked keys on the consensus verify path too. The revocation
-            // module's guarantee — "a key signed by a revoked key fails verification cluster-wide" —
-            // was applied only by `helpers::known_verifying_keys` (role-claim / audit paths); consensus
-            // built its own `key_set` and skipped it, so a key an operator rotated away from AND revoked
-            // still validated `Vote`/`Propose` messages, defeating the operator's remediation (audit
-            // 2026-07-15 pass 3). Mirror `known_verifying_keys` here.
-            #[cfg(feature = "compliance")]
-            {
-                let revoked = crate::agent::revocation::revoked_key_set(&self.task_ctx);
-                if !revoked.is_empty() {
-                    key_set.retain(|k| !revoked.contains(k));
-                }
-            }
+            // The keys this node trusts for the signer (post-360 plan row Q): an anchored node's
+            // anchored, unrevoked keys, or a legacy node's retained set minus its revocations — the one
+            // answer every verifier reads. An unknown signer has none and is refused: the fallback to
+            // the raw `sys/identity/{signer}` value (any member can write it) is gone.
+            let key_set: Vec<[u8; 32]> = self.task_ctx.trusted_keys(&signed.signer);
             if !verify_consensus_signature(&key_set, &signed.msg_bytes, &signed.signature) {
                 tracing::warn!("dropping consensus msg: bad/unknown signature from {}", signed.signer);
                 return None;

@@ -218,6 +218,10 @@ pub struct GuaranteeReport {
     pub started: bool,
     /// Attachments made after the boundary — a non-zero count means the logged report is stale.
     pub late_attachments: u32,
+    /// This node's own persisted audit records that did not verify at start, `[first seq, last seq]`
+    /// — kept untouched and never sealed over (post-360 plan row Q). Absent when there are none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit_unverified: Option<[u64; 2]>,
     /// The profile this node runs under (`dev` by default, said so), its revision and required set.
     pub profile: Option<ProfileRef>,
     pub entries: Vec<GuaranteeEntry>,
@@ -484,6 +488,12 @@ pub(crate) fn report(ctx: &TaskCtx) -> GuaranteeReport {
         config_digest: config_digest(&ctx.config),
         started: ctx.started.load(Ordering::Acquire),
         late_attachments: ctx.late_attachments.load(Ordering::Relaxed),
+        audit_unverified: {
+            #[cfg(feature = "compliance")]
+            { ctx.audit_chain.lock().unwrap_or_else(|e| e.into_inner()).unverified.map(|(a, b)| [a, b]) }
+            #[cfg(not(feature = "compliance"))]
+            { None }
+        },
         profile: {
             let (p, selected) = selected_profile(&ctx.config);
             Some(ProfileRef { name: p.name, revision: p.revision, selected, required: p.required.to_vec() })
@@ -797,6 +807,31 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
                       // report is computed before that, so say what is about to be true.
                       Some(t) if !t.auto_cert_dir.join("ca-cert.pem").exists() && t.ca_cert_pem.is_none() => Resolution::NotConfigured { missing: "no CA in `auto_cert_dir` yet: start() generates one here, private key included; provision the CA cert and keep its key off the node" },
                       Some(_) => Resolution::Enforced,
+                  }
+              }
+              #[cfg(not(feature = "tls"))]
+              { let _ = c; Resolution::NotInBuild { feature: "tls" } }
+          }),
+        g("id.revocation_authority", 1, "identity", Node,
+          "a revocation of this node's keys counts only when a newer certificate the fleet CA issued for it signs it, and no one without the CA key can issue one",
+          "`tls`; `[tls] cert_pem` + `key_pem` with a certificate naming the node by URI (`mycelium://<node>`, issued by `mycelium tls issue` since post-360 row Q); no `ca-key.pem` in this node's certificate directory",
+          &["revocation (post-360 plan row Q)"], "docs/design/revocation-authority.md",
+          always,
+          |c| {
+              #[cfg(feature = "tls")]
+              {
+                  match &c.config.tls {
+                      None => Resolution::NotConfigured { missing: "[tls]" },
+                      Some(t) if t.cert_pem.is_none() || t.auto_cert_dir.join("ca-key.pem").exists() => Resolution::NotConfigured {
+                          missing: "the CA private key is on this node (the development posture): anyone holding it can issue a certificate that outranks every node's key, so revocation authority is only as strong as the CA key's custody",
+                      },
+                      Some(_) => match c.tls.get().map(|tls| tls.node_cert_der()) {
+                          None => Resolution::NotConfigured { missing: "the node's certificate is judged once its identity loads (start())" },
+                          Some(der) if mycelium_core::tls::cert_identity(&der).is_some_and(|id| id.node_uris.contains(&mycelium_core::tls::node_uri(&c.node_id))) => Resolution::Enforced,
+                          Some(_) => Resolution::NotConfigured {
+                              missing: "this node's certificate does not name it by URI (mycelium://<node>): re-issue it with `mycelium tls issue` — until then no revocation of its keys counts at upgraded peers, and keys it revoked before the upgrade verify again there",
+                          },
+                      },
                   }
               }
               #[cfg(not(feature = "tls"))]
