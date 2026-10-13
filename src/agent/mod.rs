@@ -234,7 +234,7 @@ pub use rbac::{role_key, RoleClaim, SignedRoleClaim, ROLE_PREFIX};
 #[cfg(feature = "compliance")]
 pub use audit::{
     audit_key, audit_stream_prefix, verify_chain, verify_chain_keys, verify_stream_from_genesis,
-    AuditAction, AuditOutcome, AuditRecord, AuditSink, AuditVerifyError, SignedAuditRecord,
+    AuditAction, AuditOutcome, AuditRecord, AuditSegments, AuditSink, AuditVerifyError, SignedAuditRecord,
     AUDIT_PREFIX,
 };
 #[cfg(feature = "compliance")]
@@ -2186,6 +2186,15 @@ impl GossipAgent {
     /// stream resumes from the signed checkpoint boundary instead of genesis.
     pub fn audit_verify(&self, node: &NodeId) -> Result<(), audit::AuditVerifyError> {
         audit::verify_stream(&self.task_ctx, node)
+    }
+
+    /// `node`'s audit stream **segment by segment** (post-360 plan row Q): the records that verify as
+    /// one hash-linked chain from its anchor — the verified prefix, and the tail sealed after records
+    /// that do not verify, linked to the prefix by hash — and the records that do not (kept, never
+    /// sealed over). Where [`audit_verify`](Self::audit_verify) says only *whether* every record
+    /// verifies, this says which do, so one planted record does not leave the rest unverifiable.
+    pub fn audit_segments(&self, node: &NodeId) -> audit::AuditSegments {
+        audit::segments(&self.task_ctx, node)
     }
 
     /// Seal a signed **audit checkpoint** at the current chain boundary (SOC 2 WS-D): a trusted

@@ -310,7 +310,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   so a node upgraded after an old-version rotation keeps its genesis and reports its pre-upgrade prefix unverified
   (`an_audit_genesis_survives_an_upgrade_after_an_old_version_rotation`); the revoked-signer rule is dropped, so two
   compromise rotations learned out of order leave the oldest key revoked
-  (`two_compromise_rotations_learned_out_of_order_leave_the_oldest_key_revoked`). Upgrade notes in `deprecations.md` §39.
+  (`two_compromise_rotations_learned_out_of_order_leave_the_oldest_key_revoked`). **The safety net's review** (each seen
+  failing on 81b70a2e): only `{seq:016x}` keys whose record names that seq are read into a stream
+  (`an_audit_record_whose_key_and_body_disagree_is_ignored`); a far-away unverified record is reported, not followed,
+  and a seal skips an occupied slot and never wraps (`a_forged_high_seq_record_neither_pushes_nor_wraps_the_numbering`,
+  `a_far_away_unverified_record_is_reported_not_followed`); `sys/audit/` and `sys/audit-checkpoint/` trip the `sys/`
+  tripwire (`a_peers_write_into_a_nodes_audit_stream_trips_the_tripwire`); a stream reads segment by segment
+  (`audit_segments`, `GET /gateway/audit` `segments`) and `/stats` counts unverified records
+  (`one_planted_record_does_not_leave_the_rest_of_the_stream_unverifiable`); pruning keeps unverified records. Upgrade
+  notes in `deprecations.md` §39.
   Wire **v12** unchanged.
 - **Wire and crypto, one MINOR with a window (post-360 plan row F).** Wire **v12** unchanged — no frame changes
   shape; what changes is what a node accepts and what a signature is over. Three changes and one closure:

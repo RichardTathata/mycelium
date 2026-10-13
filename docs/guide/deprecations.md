@@ -1169,6 +1169,12 @@ entry the connection had accepted when it dropped — the gateway has no resume 
 - **Revocations are written at `sys/revocation/{node}/{P-hex}/{S-hex}`** as the v1 bytes followed by a trailer (the
   revoker, the certificates, a second signature). A 2.32 node reads the v1 prefix and applies its old rule. Records at
   the old path are still read, under the new rule.
+- **Only `{seq:016x}` keys whose record names that seq are read as audit records** (anything else under
+  `sys/audit/{node}/` is counted, `audit_malformed_keys`, and ignored); **a seal skips a slot an unverified record
+  occupies** and never wraps (an exhausted sequence refuses the seal); a peer's write into `sys/audit/{node}/` or
+  `sys/audit-checkpoint/{node}/` trips the `sys/` tripwire; **`audit_segments`** (and `segments` on
+  `GET /gateway/audit`) reads a stream segment by segment; `audit_unverified_records` counts records;
+  `audit_prune_to_checkpoint` prunes only records that verify.
 - **An audit stream is never sealed over.** A node whose own persisted audit records do not verify at start (a planted
   record, or — after upgrading a node that rotated on a version before row Q, whose rotation record is signed by the
   prior key — its pre-upgrade records) keeps them untouched, resumes numbering after the last of them, and reports

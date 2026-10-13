@@ -729,6 +729,11 @@ unproduced), the row closes as follows. The verifiers were enumerated with
   **The N1/N2 check's NEW-1 and NEW-2** (seen failing on 4908ecd3): audit recovery never seals over an existing record,
   reporting the unverified prefix (`an_audit_genesis_survives_an_upgrade_after_an_old_version_rotation`); the
   revoked-signer rule dropped (`two_compromise_rotations_learned_out_of_order_leave_the_oldest_key_revoked`).
+  **The safety net's review, H1/M1/L1/L2** (seen failing on 81b70a2e): strict key/body reading, skip-occupied sealing
+  with `checked_add`, the audit prefixes self-owned, segment-by-segment verification, a real unverified count, pruning
+  that keeps unverified records (`a_forged_high_seq_record_neither_pushes_nor_wraps_the_numbering`,
+  `a_far_away_unverified_record_is_reported_not_followed`, `an_audit_record_whose_key_and_body_disagree_is_ignored`,
+  `a_peers_write_into_a_nodes_audit_stream_trips_the_tripwire`, `one_planted_record_does_not_leave_the_rest_of_the_stream_unverifiable`).
 - **Not built, stated:** no protection against a holder of the fleet CA key (every node in the development posture);
   the secure posture cannot rotate (recovery is re-issue only); a node with a pre-row-Q certificate has no standing
   until re-issued, and keys it revoked before the upgrade verify again at upgraded nodes until then; a retired key that

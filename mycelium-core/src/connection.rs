@@ -38,10 +38,13 @@ use tracing::{error, warn};
 /// revocation log (`sys/revocation/{node}/…`): only the node writes either, and a peer overwriting or
 /// tombstoning one is hiding the node's standing or its revocations (`docs/design/revocation-authority.md`
 /// §4; the owner republishes).
-const SELF_OWNED_SYS_PREFIXES: [&str; 10] = [
+/// And the node's audit stream and its checkpoints (`sys/audit/{node}/…`, `sys/audit-checkpoint/{node}/…`):
+/// only the node seals into its own stream, so a peer writing there is planting a record — kept and
+/// reported as unverified, never sealed over, and now counted here too.
+const SELF_OWNED_SYS_PREFIXES: [&str; 12] = [
     "sys/identity/", "sys/load/", "sys/role/", "sys/tuple/", "sys/caller-context/",
     "sys/consensus-accepted/", "sys/identity-signed/", "sys/identity-proof/",
-    "sys/identity-cert/", "sys/revocation/",
+    "sys/identity-cert/", "sys/revocation/", "sys/audit/", "sys/audit-checkpoint/",
 ];
 
 /// Whether `key` lies in a `sys/` namespace this node owns — a self-owned prefix whose node-id

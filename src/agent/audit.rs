@@ -49,15 +49,20 @@ pub(crate) struct AuditChainState {
     pub(crate) next_seq: u64,
     /// Content hash of the most recently sealed record (zero before genesis).
     pub(crate) last_hash: [u8; 32],
-    /// The persisted records that did not verify at start, `(first seq, last seq)` — kept untouched,
-    /// never sealed over, and reported (post-360 plan row Q: `GET /stats` `audit_unverified_records`,
-    /// the guarantee report's `audit_unverified`).
+    /// The persisted records that did not verify at start, `(lowest seq, highest seq)` — kept
+    /// untouched, never sealed over, and reported (post-360 plan row Q: the guarantee report's
+    /// `audit_unverified`).
     pub(crate) unverified: Option<(u64, u64)>,
+    /// How many persisted records did not verify at start (`GET /stats` `audit_unverified_records`).
+    pub(crate) unverified_count: u64,
+    /// Keys under this node's stream that are not `{seq:016x}` or whose record names another seq or
+    /// node: never read into the stream, counted (`GET /stats` `audit_malformed_keys`).
+    pub(crate) malformed: u64,
 }
 
 impl AuditChainState {
     pub(crate) fn new() -> Self {
-        Self { next_seq: 0, last_hash: [0u8; 32], unverified: None }
+        Self { next_seq: 0, last_hash: [0u8; 32], unverified: None, unverified_count: 0, malformed: 0 }
     }
 }
 
@@ -295,7 +300,30 @@ pub(crate) fn seal_and_write(
     // content hash). Signing and the KV write happen *outside* the lock.
     let (record, key, content) = {
         let mut guard = ctx.audit_chain.lock().unwrap_or_else(|e| e.into_inner());
-        let seq = guard.next_seq;
+        // Post-360 plan row Q: never seal over an existing record. A slot something already occupies
+        // (a record recovery could not verify, kept and reported) is skipped — only the contiguous run
+        // of occupied slots from here, never a jump to a far-away record — and the chain links across
+        // it by hash. The sequence never wraps: exhaustion refuses, loudly.
+        let mut seq = guard.next_seq;
+        let mut skipped = 0u64;
+        let occupied = |seq: u64| ctx.kv_state.store.pin().get(audit_key(&ctx.node_id, seq).as_str()).is_some_and(|e| e.data.is_some());
+        while occupied(seq) {
+            skipped += 1;
+            seq = match seq.checked_add(1) {
+                Some(n) => n,
+                None => {
+                    tracing::error!(node = %ctx.node_id, "audit: the sequence is exhausted; refusing to seal (a record would wrap onto genesis)");
+                    return Err(crate::error::GossipError::InvalidField { field: "audit", reason: "the audit sequence is exhausted".into() });
+                }
+            };
+        }
+        let Some(after) = seq.checked_add(1) else {
+            tracing::error!(node = %ctx.node_id, "audit: the sequence is exhausted; refusing to seal (a record would wrap onto genesis)");
+            return Err(crate::error::GossipError::InvalidField { field: "audit", reason: "the audit sequence is exhausted".into() });
+        };
+        if skipped > 0 {
+            tracing::warn!(node = %ctx.node_id, skipped, seq, "audit: sealing past slots already occupied by records that did not verify (kept, reported)");
+        }
         let record = AuditRecord {
             node_id:   ctx.node_id.clone(),
             seq,
@@ -308,7 +336,7 @@ pub(crate) fn seal_and_write(
             prev_hash: guard.last_hash,
         };
         let content = record.content_hash();
-        guard.next_seq  = seq + 1;
+        guard.next_seq  = after;
         guard.last_hash = content;
         (record, audit_key(&ctx.node_id, seq), content)
     };
@@ -428,6 +456,9 @@ fn read_checkpoints(ctx: &TaskCtx, node: &NodeId, keys: &[[u8; 32]]) -> Vec<Audi
 fn parse_audit_seq(key: &str, node: &NodeId) -> Option<u64> {
     let stream = audit_stream_prefix(node);
     let hex = key.strip_prefix(&stream)?;
+    if hex.len() != 16 || !hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return None;
+    }
     u64::from_str_radix(hex, 16).ok()
 }
 
@@ -439,11 +470,15 @@ pub(crate) fn prune_to_checkpoint(ctx: &TaskCtx, node: &NodeId) -> usize {
     let keys = super::helpers::history_verifying_keys(ctx, node);
     let cps = read_checkpoints(ctx, node, &keys);
     let Some(boundary) = cps.iter().map(|c| c.checkpoint_seq).max() else { return 0 };
+    // Post-360 plan row Q: prune only records that verify in the chain; a record recovery could not
+    // verify is kept (and stays reported) — retention never discards what the safety net kept.
+    let linked: std::collections::HashSet<u64> = segments(ctx, node).linked.into_iter().collect();
     let kv = mycelium_core::kv_handle::KvHandle::from_core(std::sync::Arc::clone(&ctx.core));
     let mut pruned = 0;
     for (key, _) in crate::store::scan_kv_prefix(&ctx.kv_state, &audit_stream_prefix(node)) {
         if let Some(seq) = parse_audit_seq(&key, node)
             && seq < boundary
+            && linked.contains(&seq)
             && kv.delete(key)
         {
             pruned += 1;
@@ -452,37 +487,119 @@ pub(crate) fn prune_to_checkpoint(ctx: &TaskCtx, node: &NodeId) -> usize {
     pruned
 }
 
-/// Read `node`'s audit stream from the local KV view, decoded and ordered by seq.
+/// Read `node`'s audit stream from the local KV view, decoded and ordered by seq. Only keys that are
+/// `{seq:016x}` and whose record names that seq and `node` are read (post-360 plan row Q): anything
+/// else under the prefix is not part of the stream — see [`read_stream_checked`].
 pub(crate) fn read_stream(ctx: &TaskCtx, node: &NodeId) -> Vec<SignedAuditRecord> {
-    let mut entries = crate::store::scan_kv_prefix(&ctx.kv_state, &audit_stream_prefix(node));
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    entries.iter().filter_map(|(_, v)| SignedAuditRecord::decode(v)).collect()
+    read_stream_checked(ctx, node).0
+}
+
+/// [`read_stream`], with the number of keys under the stream's prefix that were not read: not
+/// `{seq:016x}`, not a record, or a record naming another seq or node.
+pub(crate) fn read_stream_checked(ctx: &TaskCtx, node: &NodeId) -> (Vec<SignedAuditRecord>, u64) {
+    let mut malformed = 0u64;
+    let mut out: Vec<SignedAuditRecord> = Vec::new();
+    for (key, value) in crate::store::scan_kv_prefix(&ctx.kv_state, &audit_stream_prefix(node)) {
+        match (parse_audit_seq(&key, node), SignedAuditRecord::decode(&value)) {
+            (Some(seq), Some(sr)) if sr.record.seq == seq && &sr.record.node_id == node => out.push(sr),
+            _ => malformed += 1,
+        }
+    }
+    out.sort_by_key(|sr| sr.record.seq);
+    (out, malformed)
+}
+
+/// How a node's stream reads, segment by segment (post-360 plan row Q): the records that verify as
+/// one hash-linked chain from its anchor (genesis, or the checkpoint at its first record) — a
+/// verified prefix and, after records that do not verify, the tail sealed after recovery, which
+/// links to the prefix by hash — and the records that do not.
+#[non_exhaustive]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AuditSegments {
+    /// Seqs of the records that verify, in order.
+    pub linked: Vec<u64>,
+    /// Seqs of the records that do not verify — kept, never sealed over.
+    pub unverified: Vec<u64>,
+    /// Keys under the stream that are not records of it (see `read_stream_checked`).
+    pub malformed: u64,
+    /// The first reason a record did not verify.
+    pub first_error: Option<AuditVerifyError>,
+    /// The last verified record, `(seq, content hash)` — where the chain's head is.
+    pub head: Option<(u64, [u8; 32])>,
+}
+
+/// Walk `records` (ordered by seq) from `(anchor_seq, anchor_prev)`: a record verifies when it is
+/// this node's, signed under one of `keys`, at a seq past the head and linked to it by hash. Seqs may
+/// jump (a seal skips slots occupied by records that did not verify); hashes may not.
+fn walk(records: &[SignedAuditRecord], node: &NodeId, keys: &[[u8; 32]], anchor_seq: u64, anchor_prev: [u8; 32]) -> AuditSegments {
+    let mut seg = AuditSegments::default();
+    let mut head_hash = anchor_prev;
+    let mut min_seq = anchor_seq;
+    for sr in records {
+        let seq = sr.record.seq;
+        let res = if seq < min_seq {
+            Err(AuditVerifyError::SequenceGap { expected: min_seq, found: seq })
+        } else {
+            verify_chain_keys(std::slice::from_ref(sr), node, keys, seq, head_hash)
+        };
+        match res {
+            Ok(()) => {
+                head_hash = sr.record.content_hash();
+                seg.head = Some((seq, head_hash));
+                seg.linked.push(seq);
+                min_seq = seq.saturating_add(1);
+            }
+            Err(e) => {
+                if seg.first_error.is_none() {
+                    seg.first_error = Some(if seq != min_seq && seg.unverified.is_empty() {
+                        AuditVerifyError::SequenceGap { expected: min_seq, found: seq }
+                    } else {
+                        e
+                    });
+                }
+                seg.unverified.push(seq);
+            }
+        }
+    }
+    seg
+}
+
+/// The anchor a node's stream verifies from: genesis, or the checkpoint at its first record.
+fn anchor(ctx: &TaskCtx, node: &NodeId, keys: &[[u8; 32]], records: &[SignedAuditRecord]) -> Option<(u64, [u8; 32])> {
+    match records.first() {
+        None => read_checkpoints(ctx, node, keys).last().map(|cp| (cp.checkpoint_seq, cp.prev_hash)),
+        Some(first) if first.record.seq == 0 => Some((0, [0u8; 32])),
+        Some(first) => Some(read_checkpoints(ctx, node, keys).iter()
+            .find(|c| c.checkpoint_seq == first.record.seq)
+            .map_or((0, [0u8; 32]), |cp| (cp.checkpoint_seq, cp.prev_hash))),
+    }
+}
+
+/// `node`'s stream, segment by segment: what verifies, what does not (see [`AuditSegments`]).
+pub(crate) fn segments(ctx: &TaskCtx, node: &NodeId) -> AuditSegments {
+    let keys = super::helpers::history_verifying_keys(ctx, node);
+    let (records, malformed) = read_stream_checked(ctx, node);
+    let Some((seq, prev)) = anchor(ctx, node, &keys, &records) else {
+        return AuditSegments { malformed, ..Default::default() };
+    };
+    let mut seg = walk(&records, node, &keys, seq, prev);
+    seg.malformed = malformed;
+    seg
 }
 
 /// Verify `node`'s full stream against the **retained set** of verifying keys
 /// known for it (WS5) — so a stream that spans a key rotation still verifies.
-/// `UnknownSigner` if no key is known for `node`.
+/// `UnknownSigner` if no key is known for `node`. `Ok` only when every record verifies; the first
+/// reason one does not otherwise. [`segments`] says which records verify and which do not.
 pub(crate) fn verify_stream(ctx: &TaskCtx, node: &NodeId) -> Result<(), AuditVerifyError> {
     let keys = super::helpers::history_verifying_keys(ctx, node);
     if keys.is_empty() {
         return Err(AuditVerifyError::UnknownSigner);
     }
-    let records = read_stream(ctx, node);
-    // WS-D: if the stream has been pruned (first present record isn't seq 0), resume from a
-    // signed checkpoint at that exact boundary; otherwise verify from genesis. A first record
-    // > 0 with no matching checkpoint is a genuine gap (unchanged behaviour).
-    let (start_seq, start_prev) = match records.first() {
-        None => return Ok(()),
-        Some(first) if first.record.seq == 0 => (0u64, [0u8; 32]),
-        Some(first) => {
-            let cps = read_checkpoints(ctx, node, &keys);
-            match cps.iter().find(|c| c.checkpoint_seq == first.record.seq) {
-                Some(cp) => (cp.checkpoint_seq, cp.prev_hash),
-                None => return Err(AuditVerifyError::SequenceGap { expected: 0, found: first.record.seq }),
-            }
-        }
-    };
-    verify_chain_keys(&records, node, &keys, start_seq, start_prev)
+    match segments(ctx, node).first_error {
+        None => Ok(()),
+        Some(e) => Err(e),
+    }
 }
 
 /// What a restart recovered of this node's own chain head (see [`restore_chain_head`]).
@@ -497,9 +614,13 @@ pub(crate) struct RecoveredHead {
     /// Why the fold stopped before the end of the persisted stream, if it did: the first record
     /// that did not verify.
     pub(crate) unverified: Option<AuditVerifyError>,
-    /// The records from the first that did not verify to the stream's last, `(first seq, last seq)`.
-    /// The head resumes **after** the last of them: nothing existing is ever sealed over.
+    /// The lowest and highest seqs of the records that did not verify. None is sealed over: a seal
+    /// skips any slot one occupies.
     pub(crate) unverified_range: Option<(u64, u64)>,
+    /// How many records did not verify.
+    pub(crate) unverified_count: u64,
+    /// Keys under the stream that are not records of it.
+    pub(crate) malformed: u64,
 }
 
 /// Fold this node's **own** persisted stream to the chain head a restart must resume from.
@@ -524,44 +645,26 @@ pub(crate) fn recover_chain_head(ctx: &TaskCtx) -> Option<RecoveredHead> {
     if keys.is_empty() {
         return None;
     }
-    let records = read_stream(ctx, node);
-    let checkpoints = read_checkpoints(ctx, node, &keys);
-    let (anchor_seq, anchor_prev) = match records.first() {
-        None => {
-            let cp = checkpoints.last()?;
-            (cp.checkpoint_seq, cp.prev_hash)
-        }
-        Some(first) if first.record.seq == 0 => (0u64, [0u8; 32]),
-        Some(first) => match checkpoints.iter().find(|c| c.checkpoint_seq == first.record.seq) {
-            Some(cp) => (cp.checkpoint_seq, cp.prev_hash),
-            // No anchor covers the first present record: the fold below reports the gap at it and
-            // the head stays at genesis — nothing at seq 0 is overwritten, because nothing is there.
-            None => (0u64, [0u8; 32]),
-        },
+    let (records, malformed) = read_stream_checked(ctx, node);
+    let (anchor_seq, anchor_prev) = anchor(ctx, node, &keys, &records)?;
+    let seg = walk(&records, node, &keys, anchor_seq, anchor_prev);
+    // The head is the last verified record (or the anchor). The next seal takes the slot after it,
+    // and `seal_and_write` skips past any slot a kept, unverified record occupies — so only a
+    // contiguous run directly after the head is ever passed, never a far-away record.
+    let (next_seq, last_hash) = match seg.head {
+        Some((seq, hash)) => (seq.saturating_add(1), hash),
+        None => (anchor_seq, anchor_prev),
     };
-    let mut head = RecoveredHead { next_seq: anchor_seq, last_hash: anchor_prev, verified: 0, unverified: None, unverified_range: None };
-    for sr in &records {
-        match verify_chain_keys(std::slice::from_ref(sr), node, &keys, head.next_seq, head.last_hash) {
-            Ok(()) => {
-                head.next_seq = sr.record.seq + 1;
-                head.last_hash = sr.record.content_hash();
-                head.verified += 1;
-            }
-            Err(e) => {
-                head.unverified = Some(e);
-                // Post-360 plan row Q (the N2 check's NEW-1): never seal over an existing record. The
-                // records from here to the stream's end stay untouched and are reported; numbering
-                // resumes after the last of them, linked to the last *verified* record (the unverified
-                // ones seed nothing).
-                let first = sr.record.seq;
-                let last = records.last().map_or(first, |r| r.record.seq);
-                head.unverified_range = Some((first, last));
-                head.next_seq = head.next_seq.max(last.saturating_add(1));
-                break;
-            }
-        }
-    }
-    Some(head)
+    let unverified_range = seg.unverified.first().zip(seg.unverified.last()).map(|(a, b)| (*a, *b));
+    Some(RecoveredHead {
+        next_seq,
+        last_hash,
+        verified: seg.linked.len(),
+        unverified: seg.first_error,
+        unverified_range,
+        unverified_count: seg.unverified.len() as u64,
+        malformed,
+    })
 }
 
 /// Install the recovered head as the chain's in-memory state (lock #8, a leaf, held alone) and say
@@ -574,14 +677,20 @@ pub(crate) fn restore_chain_head(ctx: &TaskCtx) {
         guard.next_seq = head.next_seq;
         guard.last_hash = head.last_hash;
         guard.unverified = head.unverified_range;
+        guard.unverified_count = head.unverified_count;
+        guard.malformed = head.malformed;
+    }
+    if head.malformed > 0 {
+        tracing::error!(node = %ctx.node_id, keys = head.malformed,
+            "audit: keys under this node's audit stream are not records of it (not `{{seq:016x}}`, or naming another seq or node); ignored, never read into the chain");
     }
     match (&head.unverified, head.unverified_range) {
         (Some(e), Some((first, last))) => tracing::error!(
-            node = %ctx.node_id, next_seq = head.next_seq, verified = head.verified, error = ?e,
-            "audit: this node's persisted records seq {first}..={last} do not verify under its keys ({e:?}); they are kept \
-             untouched and reported unverified, and sealing resumes at seq {} — nothing is sealed over. A node upgraded \
-             after a rotation on a version before row Q reads its pre-upgrade records this way until its history is \
-             re-anchored; otherwise treat as an incident (docs/operations/audit.md §6)", head.next_seq
+            node = %ctx.node_id, next_seq = head.next_seq, verified = head.verified, unverified = head.unverified_count, error = ?e,
+            "audit: {} of this node's persisted records (seqs {first}..={last}) do not verify under its keys ({e:?}); they are kept \
+             untouched and reported unverified, and sealing resumes at seq {}, skipping any slot they occupy — nothing is \
+             sealed over. A node upgraded after a rotation on a version before row Q reads its pre-upgrade records this way \
+             until its history is re-anchored; otherwise treat as an incident (docs/operations/audit.md §6)", head.unverified_count, head.next_seq
         ),
         _ => tracing::info!(
             next_seq = head.next_seq, verified = head.verified,

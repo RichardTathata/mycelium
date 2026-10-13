@@ -285,3 +285,23 @@ on `38da0472`):
   compromise rotations learned out of order leave the oldest key trusted; a revocation's authority flows only to the
   past, so what a since-revoked signer revoked earlier stands. N1 stays closed by the provisional rule and
   first-issuance ranking.
+
+## 12. The safety net's review (2026-10-13)
+
+- **H1 (fixed): no record a member writes can move the numbering.** Only keys that are `{seq:016x}` and whose record
+  names that seq and node are read into a stream; anything else under the prefix is counted (`audit_malformed_keys`)
+  and ignored. Recovery resumes after the last record that verifies; a seal skips a slot a kept, unverified record
+  occupies — only the contiguous run of occupied slots directly after the head is ever passed, never a far-away
+  record — and links across it by hash. The sequence never wraps: `checked_add`, and exhaustion refuses the seal,
+  loudly. `sys/audit/` and `sys/audit-checkpoint/` are self-owned prefixes, so a peer's write into a node's stream
+  trips the `sys/` tripwire.
+- **M1 (fixed): a stream reads segment by segment.** Verification walks the records that form one hash-linked chain
+  from the anchor (genesis, or the checkpoint at the first record) — the verified prefix and the tail sealed after
+  records that do not verify, which links to the prefix by hash; seqs may jump over occupied slots, hashes may not.
+  `audit_verify` stays `Ok` only when every record verifies; `GossipAgent::audit_segments` and `GET /gateway/audit`
+  (`segments`) say which records verify and which do not, so one planted record no longer leaves the rest
+  unverifiable.
+- **L1 (fixed):** `audit_unverified_records` counts the records, not the span between the lowest and highest.
+- **L2 (fixed by keeping, stated):** `audit_prune_to_checkpoint` prunes only records that verify; a kept, unverified
+  record is never pruned, so retention cannot discard what the net kept. The `AuditSink` exporter mirrors records as
+  they are sealed and does not export unverified ones; they stay in the node's stream, reported.

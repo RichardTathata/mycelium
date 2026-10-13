@@ -47,6 +47,7 @@ pub(super) async fn gw_audit(
     for node in nodes {
         let records = super::audit::read_stream(tc, &node);
         let verify  = super::audit::verify_stream(tc, &node);
+        let seg     = super::audit::segments(tc, &node);
         let head_hash = records.last().map(|sr| hex32(&sr.record.content_hash()));
         let shown: Vec<_> = records
             .iter()
@@ -72,6 +73,15 @@ pub(super) async fn gw_audit(
             "count":        records.len(),
             "verified":     verify.is_ok(),
             "verify_error": verify.err().map(|e| format!("{e:?}")),
+            // Post-360 plan row Q: which records verify (the prefix and the tail linked to it) and
+            // which do not — kept, never sealed over.
+            "segments": {
+                "verified": seg.linked.len(),
+                "unverified": seg.unverified.len(),
+                "unverified_seqs": seg.unverified.iter().take(64).collect::<Vec<_>>(),
+                "malformed_keys": seg.malformed,
+                "head_seq": seg.head.map(|(s, _)| s),
+            },
             "head_hash":    head_hash,
             "records":      shown,
         }));

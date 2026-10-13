@@ -2488,6 +2488,176 @@ async fn two_compromise_rotations_learned_out_of_order_leave_the_oldest_key_revo
     assert!(!k0_trusted, "ORDER: k0 is trusted after both revocations");
 }
 
+// ── Row Q, the audit safety net's review: H1, M1, L1 ───────────────────────────────────────────
+
+/// A persisted, gateway-fronted single node for the audit tests: `(id, cfg, base, http_port)`.
+#[cfg(all(feature = "compliance", unix))]
+fn audit_test_node(tag: &str) -> (NodeId, GossipConfig, std::path::PathBuf, u16) {
+    use crate::config::{OnUnreadable, PersistenceConfig, SyncMode, TlsConfig};
+    let port = alloc_port();
+    let http_port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let base = std::env::temp_dir().join(format!("myc-{tag}-{port}"));
+    let _ = std::fs::remove_dir_all(&base);
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    cfg.http_port = Some(http_port);
+    cfg.gateway_scoped_tokens = vec![crate::GatewayToken { token: "auditor".into(), scopes: vec!["audit:read".into()] }];
+    cfg.tls = Some(TlsConfig { auto_cert_dir: base.join("certs"), ..TlsConfig::default() });
+    cfg.persistence = Some(PersistenceConfig { base_path: base.join("data"), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 1_000, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse });
+    (id, cfg, base, http_port)
+}
+
+/// A record in `node`'s stream signed by a key that is not the node's, at `key`.
+#[cfg(all(feature = "compliance", unix))]
+fn plant_audit_record(a: &GossipAgent, key: String, node: &NodeId, seq: u64, prev: [u8; 32]) {
+    use crate::{AuditAction, AuditOutcome, AuditRecord, SignedAuditRecord};
+    let forged = AuditRecord { node_id: node.clone(), seq, hlc: 1, principal: "x".into(), action: AuditAction::Admin, target: "x".into(), outcome: AuditOutcome::Success, detail: None, prev_hash: prev };
+    let _ = a.kv().set(key, SignedAuditRecord::sign(forged, &ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])).encode());
+}
+
+/// **A forged high-seq record neither pushes nor wraps the numbering** (the safety net's review, H1,
+/// its probe). A member writes `sys/audit/{N}/zzzz` — a key that is not a seq — holding a record whose
+/// body names `u64::MAX - 1`. 81b70a2e read it into the stream by its body, resumed numbering at
+/// `u64::MAX`, and the first seal overflowed (a panic here; a wrap onto genesis in release). Only
+/// `{seq:016x}` keys whose record names that seq are read; anything else is counted
+/// (`audit_malformed_keys`) and ignored. Seen failing first on 81b70a2e: "attempt to add with overflow".
+#[cfg(all(feature = "compliance", unix))]
+#[tokio::test]
+async fn a_forged_high_seq_record_neither_pushes_nor_wraps_the_numbering() {
+    use crate::{AuditAction, AuditOutcome};
+    let (id, cfg, base, _http) = audit_test_node("q7-push");
+    let a = GossipAgent::new(id.clone(), cfg.clone());
+    a.start().await.unwrap();
+    let h0 = a.audit(AuditAction::Invoke, "p", "t0", AuditOutcome::Success, None).unwrap();
+    let _ = a.audit(AuditAction::Invoke, "p", "t1", AuditOutcome::Success, None).unwrap();
+    plant_audit_record(&a, format!("sys/audit/{id}/zzzz"), &id, u64::MAX - 1, [9u8; 32]);
+    a.shutdown().await;
+    drop(a);
+    let b = GossipAgent::new(id.clone(), cfg);
+    b.start().await.unwrap();
+    let next = b.task_ctx.audit_chain.lock().unwrap().next_seq;
+    let s1 = b.audit(AuditAction::Admin, "p", "seal-1", AuditOutcome::Success, None);
+    let s2 = b.audit(AuditAction::Admin, "p", "seal-2", AuditOutcome::Success, None);
+    let stream = b.audit_stream(&id);
+    let verified = b.audit_verify(&id);
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
+    assert_eq!(next, 2, "the numbering resumed after the node's own records, not pushed");
+    assert!(s1.is_ok() && s2.is_ok(), "both seals succeed");
+    assert_eq!(stream.first().map(|r| r.record.content_hash()), Some(h0), "genesis is kept");
+    assert_eq!(stream.iter().map(|r| r.record.seq).collect::<Vec<_>>(), vec![0, 1, 2, 3], "the planted key is not part of the stream");
+    assert_eq!(verified, Ok(()), "and the stream verifies");
+}
+
+/// **A far-away record is reported, not followed** (H1). A record at a valid key, seq 1 000 000, that
+/// does not verify: 81b70a2e resumed numbering after it. The next seal now takes the slot after the
+/// verified head; the record is kept and reported. Seen failing first on 81b70a2e: "the numbering
+/// followed a far-away record".
+#[cfg(all(feature = "compliance", unix))]
+#[tokio::test]
+async fn a_far_away_unverified_record_is_reported_not_followed() {
+    use crate::{audit_key, AuditAction, AuditOutcome};
+    let (id, cfg, base, _http) = audit_test_node("q7-far");
+    let a = GossipAgent::new(id.clone(), cfg.clone());
+    a.start().await.unwrap();
+    let _ = a.audit(AuditAction::Invoke, "p", "t0", AuditOutcome::Success, None).unwrap();
+    let _ = a.audit(AuditAction::Invoke, "p", "t1", AuditOutcome::Success, None).unwrap();
+    plant_audit_record(&a, audit_key(&id, 1_000_000), &id, 1_000_000, [9u8; 32]);
+    a.shutdown().await;
+    drop(a);
+    let b = GossipAgent::new(id.clone(), cfg);
+    b.start().await.unwrap();
+    let next = b.task_ctx.audit_chain.lock().unwrap().next_seq;
+    let _ = b.audit(AuditAction::Admin, "p", "after", AuditOutcome::Success, None).unwrap();
+    let kept = b.kv().get(&audit_key(&id, 1_000_000)).is_some();
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
+    assert_eq!(next, 2, "the numbering followed a far-away record");
+    assert!(kept, "and the record is kept");
+}
+
+/// **A record whose key and body disagree is ignored** (H1). `sys/audit/{N}/{5:016x}` holding a record
+/// that names seq 9: 81b70a2e sorted it into the stream by key and judged it by its body (a gap, an
+/// unverified record, numbering pushed to 10). It is not part of the stream now, and is counted. Seen
+/// failing first on 81b70a2e: "a key/body mismatch was read into the stream".
+#[cfg(all(feature = "compliance", unix))]
+#[tokio::test]
+async fn an_audit_record_whose_key_and_body_disagree_is_ignored() {
+    use crate::{audit_key, AuditAction, AuditOutcome};
+    let (id, cfg, base, http_port) = audit_test_node("q7-mismatch");
+    let a = GossipAgent::new(id.clone(), cfg.clone());
+    a.start().await.unwrap();
+    let h0 = a.audit(AuditAction::Invoke, "p", "t0", AuditOutcome::Success, None).unwrap();
+    plant_audit_record(&a, audit_key(&id, 5), &id, 9, h0);
+    a.shutdown().await;
+    drop(a);
+    let b = GossipAgent::new(id.clone(), cfg);
+    b.start().await.unwrap();
+    let stream: Vec<u64> = b.audit_stream(&id).iter().map(|r| r.record.seq).collect();
+    let verified = b.audit_verify(&id);
+    let stats: serde_json::Value = reqwest::get(format!("http://127.0.0.1:{http_port}/stats")).await.unwrap().json().await.unwrap();
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
+    assert_eq!(stream, vec![0], "a key/body mismatch was read into the stream");
+    assert_eq!(verified, Ok(()), "and the stream verifies");
+    assert_eq!(stats["audit_malformed_keys"], 1, "the mismatched key is counted");
+}
+
+/// **A peer's write into a node's audit stream trips the `sys/` tripwire** (H1). `sys/audit/` and
+/// `sys/audit-checkpoint/` were not self-owned prefixes, so a member planting a record in another's
+/// stream went uncounted. Seen failing first on 81b70a2e: "a foreign audit write was not counted".
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn a_peers_write_into_a_nodes_audit_stream_trips_the_tripwire() {
+    let (a, b, c, _nb, nc, dir) = three_signed_nodes("q7-trip", false).await;
+    let before = c.task_ctx.sys_namespace_violations.load(Ordering::Relaxed);
+    let key = format!("sys/audit/{nc}/{:016x}", 7u64);
+    let _ = a.kv().set(key.clone(), b"planted".to_vec());
+    let arrived = within_3s(|| c.kv().get(&key).is_some()).await;
+    let counted = within_3s(|| c.task_ctx.sys_namespace_violations.load(Ordering::Relaxed) > before).await;
+    a.shutdown().await; b.shutdown().await; c.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(arrived, "the write reached C");
+    assert!(counted, "a foreign audit write was not counted");
+}
+
+/// **One planted record does not leave the rest of the stream unverifiable** (the safety net's review,
+/// M1 and L1). A record at seq 2 that does not verify, then a restart and two seals: the seals skip
+/// the occupied slot and link to the verified prefix by hash, and the stream reads as segments — four
+/// records verify (the prefix 0, 1 and the tail 3, 4), one does not. `/stats` counts unverified
+/// *records*: two planted far apart count two, not the span between them. Seen failing first on
+/// 81b70a2e: "the tail sealed after the planted record is not reported as verified".
+#[cfg(all(feature = "compliance", unix))]
+#[tokio::test]
+async fn one_planted_record_does_not_leave_the_rest_of_the_stream_unverifiable() {
+    use crate::{audit_key, AuditAction, AuditOutcome};
+    use axum::http::header::AUTHORIZATION;
+    let (id, cfg, base, http_port) = audit_test_node("q7-segments");
+    let a = GossipAgent::new(id.clone(), cfg.clone());
+    a.start().await.unwrap();
+    let _ = a.audit(AuditAction::Invoke, "p", "t0", AuditOutcome::Success, None).unwrap();
+    let h1 = a.audit(AuditAction::Invoke, "p", "t1", AuditOutcome::Success, None).unwrap();
+    plant_audit_record(&a, audit_key(&id, 2), &id, 2, h1);
+    plant_audit_record(&a, audit_key(&id, 1_000_000_000), &id, 1_000_000_000, [9u8; 32]);
+    a.shutdown().await;
+    drop(a);
+    let b = GossipAgent::new(id.clone(), cfg);
+    b.start().await.unwrap();
+    let _ = b.audit(AuditAction::Admin, "p", "tail-1", AuditOutcome::Success, None).unwrap();
+    let _ = b.audit(AuditAction::Admin, "p", "tail-2", AuditOutcome::Success, None).unwrap();
+    let client = reqwest::Client::new();
+    let audit: serde_json::Value = client.get(format!("http://127.0.0.1:{http_port}/gateway/audit?node={id}"))
+        .header(AUTHORIZATION, "Bearer auditor").send().await.unwrap().json().await.unwrap();
+    let stats: serde_json::Value = client.get(format!("http://127.0.0.1:{http_port}/stats")).send().await.unwrap().json().await.unwrap();
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
+    let seg = &audit["streams"][0]["segments"];
+    assert_eq!(seg["verified"], 4, "the tail sealed after the planted record is not reported as verified: {seg}");
+    assert_eq!(seg["unverified"], 2, "and the two planted records are reported: {seg}");
+    assert_eq!(stats["audit_unverified_records"], 2, "L1: /stats counts the unverified records, not the span");
+}
+
 /// **A capability retracted as its node shuts down reaches the peers** (#611, found by CI's co-op
 /// demo 04). A capability's soft-state task tombstones its key when the handle drops; a node that
 /// drops the handle and shuts down at once (a provider killed mid-run) raced the shutdown signal, and
@@ -6811,16 +6981,23 @@ async fn recover_chain_head_anchors_at_a_checkpoint_or_reports_the_gap() {
     assert_eq!(a.audit_verify(&id), Ok(()), "verification resumes from the checkpoint over the new seal");
 
     // (c) delete the first present record (seq 4) by hand: no checkpoint at 5 → nothing verifies, the gap
-    // is named, and (post-360 plan row Q) the head resumes after the stream's last record — never at a
-    // seq a record holds — linked to nothing it could not verify.
+    // is named, and the head stays at genesis (seq 5 is not directly after a verified prefix, so it is
+    // not followed — post-360 plan row Q). Sealing from genesis **never overwrites** seq 5: a seal skips
+    // a slot a record occupies. (Before row Q's safety net, the sixth seal here overwrote seq 5.)
     assert!(a.kv().delete(audit_key(&id, 4)));
     let _h5 = seal(5);
+    let held5 = a.kv().get(&audit_key(&id, 5));
     let head = recover_chain_head(&a.task_ctx).expect("records to fold");
-    assert_eq!(head.next_seq, 6, "(c) no anchor covers seq 5: the head resumes after it");
+    assert_eq!(head.next_seq, 0, "(c) no anchor covers seq 5: the head stays at genesis");
     assert_eq!(head.last_hash, [0u8; 32]);
     assert_eq!(head.verified, 0);
     assert_eq!(head.unverified, Some(AuditVerifyError::SequenceGap { expected: 0, found: 5 }), "the gap is reported, not guessed over");
-    assert_eq!(head.unverified_range, Some((5, 5)), "and the unverified records are named");
+    assert_eq!(head.unverified_range, Some((5, 5)), "and the unverified record is named");
+    crate::agent::audit::restore_chain_head(&a.task_ctx);
+    for n in 0..6u64 { let _ = seal(100 + n); }
+    assert_eq!(a.kv().get(&audit_key(&id, 5)), held5, "sealing from genesis never overwrote the record at seq 5");
+    let seqs: Vec<u64> = a.audit_stream(&id).iter().map(|r| r.record.seq).collect();
+    assert_eq!(seqs, vec![0, 1, 2, 3, 4, 5, 6], "the six seals took 0..=4 and 6, skipping the occupied 5");
     let _ = h4;
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&cert_dir);

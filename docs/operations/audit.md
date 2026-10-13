@@ -35,12 +35,17 @@ union of those streams.
 **The head survives a restart with `[persistence]`.** At `start()` — after the identity is
 loaded and persisted state replayed, before anything can seal — the node folds its own
 persisted stream, verified from genesis (or the newest signed checkpoint, §5) under its
-retained keys, and resumes sealing at the next `seq` (`audit::restore_chain_head`). **Nothing
-existing is ever sealed over** (post-360 plan row Q): records from the first that does not verify to
-the stream's last are kept untouched, numbering resumes after the last of them, the next seal links
-to the last *verified* record (an unverified one is never used as the link), and the records are
-reported — an `error` log naming the node and the seq range, `GET /stats` `audit_unverified_records`
-and `audit_unverified_from_seq`, the guarantee report's `audit_unverified`. Without persistence there
+retained keys, and resumes sealing after the last record that verifies (`audit::restore_chain_head`).
+**Nothing existing is ever sealed over** (post-360 plan row Q): a record that does not verify is kept
+untouched and reported — an `error` log naming the node and the seq range, `GET /stats`
+`audit_unverified_records` (a count) and `audit_unverified_from_seq`, the guarantee report's
+`audit_unverified` — and a seal skips any slot such a record occupies, linking across it by hash (only
+the contiguous run of occupied slots after the head is passed; a far-away record is never followed;
+the sequence never wraps). Only `{seq:016x}` keys whose record names that seq are read as records;
+anything else under the stream is counted (`audit_malformed_keys`) and ignored. A stream reads
+**segment by segment** (`GossipAgent::audit_segments`, `GET /gateway/audit` `segments`): the verified
+prefix and the tail linked to it verify; the planted records do not. `audit_prune_to_checkpoint`
+prunes only records that verify. Without persistence there
 is nothing to recover from and the stream restarts at seq 0 (peers' copies are not consulted). A
 stream whose first present record has no anchor — seq 0 deleted by hand with no checkpoint at the
 first record — is reported the same way (`audit_verify` names the `SequenceGap`). **A node upgraded

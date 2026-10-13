@@ -226,9 +226,13 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
         // sealed over).
         #[cfg(feature = "compliance")]
         {
-            let unverified = ctx.agent_ctx.audit_chain.lock().unwrap_or_else(|e| e.into_inner()).unverified;
-            body["audit_unverified_records"] = json!(unverified.map_or(0, |(a, b)| b.saturating_sub(a) + 1));
+            let (unverified, count, malformed) = {
+                let g = ctx.agent_ctx.audit_chain.lock().unwrap_or_else(|e| e.into_inner());
+                (g.unverified, g.unverified_count, g.malformed)
+            };
+            body["audit_unverified_records"] = json!(count);
             body["audit_unverified_from_seq"] = json!(unverified.map(|(a, _)| a));
+            body["audit_malformed_keys"] = json!(malformed);
         }
     }
     Json(body)
