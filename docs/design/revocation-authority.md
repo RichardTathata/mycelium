@@ -305,3 +305,13 @@ on `38da0472`):
 - **L2 (fixed by keeping, stated):** `audit_prune_to_checkpoint` prunes only records that verify; a kept, unverified
   record is never pruned, so retention cannot discard what the net kept. The `AuditSink` exporter mirrors records as
   they are sealed and does not export unverified ones; they stay in the node's stream, reported.
+
+## 13. The H1/M1 review (2026-10-13)
+
+- **N-A:** the hash-walk rule is public, `verify_linked`, one implementation with the node's own; the contiguous
+  verifiers are unchanged and their docs point at it (`deprecations.md` §39, `docs/operations/audit.md`).
+- **N-B:** the tripwire test holds the counter quiet first and asserts a delta of exactly one per write.
+- **N-C:** a seal steps over at most 4 096 occupied slots and refuses past that.
+- **N-D:** kept, unverified records stay until an operator removes them; `docs/operations/audit.md` says how.
+- **The pre-existing checkpoint-boundary residual is fixed:** a pruned stream whose boundary record was removed anchors
+  at the newest checkpoint below its first record, so numbering resumes at the boundary, not at genesis.

@@ -1174,7 +1174,12 @@ entry the connection had accepted when it dropped — the gateway has no resume 
   occupies** and never wraps (an exhausted sequence refuses the seal); a peer's write into `sys/audit/{node}/` or
   `sys/audit-checkpoint/{node}/` trips the `sys/` tripwire; **`audit_segments`** (and `segments` on
   `GET /gateway/audit`) reads a stream segment by segment; `audit_unverified_records` counts records;
-  `audit_prune_to_checkpoint` prunes only records that verify.
+  `audit_prune_to_checkpoint` prunes only records that verify. **Seqs may now jump** over a skipped slot: the public
+  contiguous verifiers (`verify_chain`, `verify_chain_keys`, `verify_stream_from_genesis`) report that as
+  `SequenceGap` — they are unchanged, nothing is removed on 2.x — and an external verifier of an `AuditSink` export
+  should use the new `verify_linked`, which follows the hash links. A seal steps over at most 4 096 occupied slots and
+  refuses past that. Kept, unverified records stay until an operator removes them (`docs/operations/audit.md`). A
+  pruned stream whose boundary record was removed anchors at the newest checkpoint below its first record.
 - **An audit stream is never sealed over.** A node whose own persisted audit records do not verify at start (a planted
   record, or — after upgrading a node that rotated on a version before row Q, whose rotation record is signed by the
   prior key — its pre-upgrade records) keeps them untouched, resumes numbering after the last of them, and reports

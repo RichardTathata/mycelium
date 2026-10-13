@@ -312,3 +312,20 @@ Three things an operator has to get right:
 
 Coverage travels with the evidence as a field. `coverage.complete: false` names the routes the
 enforcement point does not see. **Never read silence as an all-clear.**
+
+### Gaps, skipped slots and kept records (post-360 plan row Q)
+
+- **Seqs may jump.** A seal skips a slot that a record the node cannot verify occupies (kept, never sealed over) and
+  links across it by hash. The contiguous verifiers — `verify_chain`, `verify_chain_keys`,
+  `verify_stream_from_genesis` — require `seq = previous + 1` and report such a jump as `SequenceGap`. **An external
+  verifier of an `AuditSink` export should use `verify_linked(records, node, keys, anchor_seq, anchor_prev)`**, which
+  follows the hash links (the rule the node verifies itself by) and returns which records verify and which do not.
+- **A seal steps over at most 4 096 occupied slots.** A longer planted run directly after the head makes the seal
+  refuse, with an error naming the node, until the run is removed.
+- **Kept, unverified records stay until an operator removes them.** Neither recovery, sealing nor
+  `audit_prune_to_checkpoint` deletes them. To remove them: read the seqs from `GossipAgent::audit_segments(node)`
+  (`unverified`), or `GET /gateway/audit` (`segments.unverified_seqs`); keep a copy as evidence; then delete each with
+  the embedded API, `agent.kv().delete(mycelium::audit_key(&node, seq))` (the gateway's KV routes refuse the owned
+  `sys/` namespaces). Removing them clears the report at the next restart, and frees the slots the next seals skip.
+- **A pruned stream whose boundary record was removed** anchors at the newest checkpoint below its first record, so
+  numbering resumes at that boundary — not at genesis, among exported and pruned slots.

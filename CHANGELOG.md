@@ -317,8 +317,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `a_far_away_unverified_record_is_reported_not_followed`); `sys/audit/` and `sys/audit-checkpoint/` trip the `sys/`
   tripwire (`a_peers_write_into_a_nodes_audit_stream_trips_the_tripwire`); a stream reads segment by segment
   (`audit_segments`, `GET /gateway/audit` `segments`) and `/stats` counts unverified records
-  (`one_planted_record_does_not_leave_the_rest_of_the_stream_unverifiable`); pruning keeps unverified records. Upgrade
-  notes in `deprecations.md` §39.
+  (`one_planted_record_does_not_leave_the_rest_of_the_stream_unverifiable`); pruning keeps unverified records. **The
+  H1/M1 review:** a public `verify_linked` follows the hash links, the contiguous verifiers unchanged and pointing at it
+  (`a_stream_with_a_skipped_slot_verifies_under_verify_linked`); a seal steps over at most 4 096 occupied slots
+  (`a_seal_refuses_to_walk_a_run_longer_than_the_cap`); a pruned stream whose boundary record was removed anchors at the
+  newest checkpoint below it. Upgrade notes in `deprecations.md` §39.
   Wire **v12** unchanged.
 - **Wire and crypto, one MINOR with a window (post-360 plan row F).** Wire **v12** unchanged — no frame changes
   shape; what changes is what a node accepts and what a signature is over. Three changes and one closure:

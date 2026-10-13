@@ -233,7 +233,7 @@ pub use capability_handle::CapabilitiesHandle;
 pub use rbac::{role_key, RoleClaim, SignedRoleClaim, ROLE_PREFIX};
 #[cfg(feature = "compliance")]
 pub use audit::{
-    audit_key, audit_stream_prefix, verify_chain, verify_chain_keys, verify_stream_from_genesis,
+    audit_key, audit_stream_prefix, verify_chain, verify_chain_keys, verify_linked, verify_stream_from_genesis,
     AuditAction, AuditOutcome, AuditRecord, AuditSegments, AuditSink, AuditVerifyError, SignedAuditRecord,
     AUDIT_PREFIX,
 };

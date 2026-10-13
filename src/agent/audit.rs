@@ -27,6 +27,10 @@ use sha2::{Digest, Sha256};
 /// KV prefix for the cluster-wide audit trail. One sub-stream per node.
 pub const AUDIT_PREFIX: &str = "sys/audit/";
 
+/// The longest run of occupied slots a seal steps over (post-360 plan row Q). Past it the seal is
+/// refused, loudly, rather than walk an attacker-sized run under the chain lock.
+pub(crate) const MAX_SEAL_SKIP: u64 = 4_096;
+
 /// KV key for a single record: `sys/audit/{node}/{seq:016x}`. Zero-padded hex
 /// seq gives lexicographic = chronological order within a node's stream.
 pub fn audit_key(node: &NodeId, seq: u64) -> String {
@@ -201,6 +205,11 @@ pub enum AuditVerifyError {
 /// `(expected_first_seq = 0, expected_first_prev = [0; 32])` — or use
 /// [`verify_stream_from_genesis`]; to verify a mid-stream range pass the known
 /// boundary `(seq, prev_hash)` of the first returned record.
+///
+/// **Since post-360 plan row Q a node's seqs may jump**: a seal skips a slot a record it could not
+/// verify occupies (kept, never sealed over), and the chain links across the skip by hash. This
+/// verifier requires `seq = previous + 1` and reports such a jump as `SequenceGap`; verify an export
+/// with [`verify_linked`], which follows the hash links and reports each record.
 pub fn verify_chain(
     records: &[SignedAuditRecord],
     owner: &NodeId,
@@ -215,6 +224,11 @@ pub fn verify_chain(
 /// record passes if its signature matches *any* of them. This is the WS5
 /// retained-key path: a node's audit stream may span a key rotation, so records
 /// before and after the rotation are signed by different keys, all still valid.
+///
+/// **Since post-360 plan row Q a node's seqs may jump**: a seal skips a slot a record it could not
+/// verify occupies (kept, never sealed over), and the chain links across the skip by hash. This
+/// verifier requires `seq = previous + 1` and reports such a jump as `SequenceGap`; verify an export
+/// with [`verify_linked`], which follows the hash links and reports each record.
 pub fn verify_chain_keys(
     records: &[SignedAuditRecord],
     owner: &NodeId,
@@ -244,6 +258,11 @@ pub fn verify_chain_keys(
 }
 
 /// Verify a full stream starting at the genesis record (seq 0, zero prev_hash).
+///
+/// **Since post-360 plan row Q a node's seqs may jump**: a seal skips a slot a record it could not
+/// verify occupies (kept, never sealed over), and the chain links across the skip by hash. This
+/// verifier requires `seq = previous + 1` and reports such a jump as `SequenceGap`; verify an export
+/// with [`verify_linked`], which follows the hash links and reports each record.
 pub fn verify_stream_from_genesis(
     records: &[SignedAuditRecord],
     owner: &NodeId,
@@ -309,6 +328,11 @@ pub(crate) fn seal_and_write(
         let occupied = |seq: u64| ctx.kv_state.store.pin().get(audit_key(&ctx.node_id, seq).as_str()).is_some_and(|e| e.data.is_some());
         while occupied(seq) {
             skipped += 1;
+            if skipped > MAX_SEAL_SKIP {
+                tracing::error!(node = %ctx.node_id, from = guard.next_seq, skipped,
+                    "audit: more than {MAX_SEAL_SKIP} consecutive slots after the chain head hold records that do not verify; refusing to seal — remove them (docs/operations/audit.md)");
+                return Err(crate::error::GossipError::InvalidField { field: "audit", reason: format!("more than {MAX_SEAL_SKIP} consecutive audit slots are occupied by records that do not verify") });
+            }
             seq = match seq.checked_add(1) {
                 Some(n) => n,
                 None => {
@@ -528,9 +552,18 @@ pub struct AuditSegments {
     pub head: Option<(u64, [u8; 32])>,
 }
 
-/// Walk `records` (ordered by seq) from `(anchor_seq, anchor_prev)`: a record verifies when it is
-/// this node's, signed under one of `keys`, at a seq past the head and linked to it by hash. Seqs may
-/// jump (a seal skips slots occupied by records that did not verify); hashes may not.
+/// **Verify a stream by its hash links** (post-360 plan row Q) — the rule a node itself verifies its
+/// stream by, public so an [`AuditSink`] consumer verifies an export the same way. Walk `records`
+/// (ordered by seq) from the anchor `(anchor_seq, anchor_prev)` — `(0, [0; 32])` for genesis, or a
+/// checkpoint's `(checkpoint_seq, prev_hash)`: a record verifies when it is `owner`'s, signed under one
+/// of `keys`, at a seq past the head and linked to it by hash. Seqs may jump (a seal skips a slot
+/// occupied by a record that did not verify); hashes may not. Returns which records verify — the
+/// prefix and the tail linked to it — and which do not; every record verified ⇔ `unverified` empty.
+pub fn verify_linked(records: &[SignedAuditRecord], owner: &NodeId, keys: &[[u8; 32]], anchor_seq: u64, anchor_prev: [u8; 32]) -> AuditSegments {
+    walk(records, owner, keys, anchor_seq, anchor_prev)
+}
+
+/// [`verify_linked`]'s implementation, shared with the node's own recovery and verification.
 fn walk(records: &[SignedAuditRecord], node: &NodeId, keys: &[[u8; 32]], anchor_seq: u64, anchor_prev: [u8; 32]) -> AuditSegments {
     let mut seg = AuditSegments::default();
     let mut head_hash = anchor_prev;
@@ -569,9 +602,15 @@ fn anchor(ctx: &TaskCtx, node: &NodeId, keys: &[[u8; 32]], records: &[SignedAudi
     match records.first() {
         None => read_checkpoints(ctx, node, keys).last().map(|cp| (cp.checkpoint_seq, cp.prev_hash)),
         Some(first) if first.record.seq == 0 => Some((0, [0u8; 32])),
-        Some(first) => Some(read_checkpoints(ctx, node, keys).iter()
-            .find(|c| c.checkpoint_seq == first.record.seq)
-            .map_or((0, [0u8; 32]), |cp| (cp.checkpoint_seq, cp.prev_hash))),
+        // The checkpoint at the first record; else the newest checkpoint below it (the boundary record
+        // was removed after pruning — numbering resumes at the boundary, not at genesis among exported,
+        // pruned slots); else genesis.
+        Some(first) => {
+            let cps = read_checkpoints(ctx, node, keys);
+            let at = cps.iter().find(|c| c.checkpoint_seq == first.record.seq)
+                .or_else(|| cps.iter().filter(|c| c.checkpoint_seq <= first.record.seq).max_by_key(|c| c.checkpoint_seq));
+            Some(at.map_or((0, [0u8; 32]), |cp| (cp.checkpoint_seq, cp.prev_hash)))
+        }
     }
 }
 

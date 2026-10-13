@@ -2604,22 +2604,40 @@ async fn an_audit_record_whose_key_and_body_disagree_is_ignored() {
     assert_eq!(stats["audit_malformed_keys"], 1, "the mismatched key is counted");
 }
 
-/// **A peer's write into a node's audit stream trips the `sys/` tripwire** (H1). `sys/audit/` and
-/// `sys/audit-checkpoint/` were not self-owned prefixes, so a member planting a record in another's
-/// stream went uncounted. Seen failing first on 81b70a2e: "a foreign audit write was not counted".
+/// **A peer's write into a node's audit stream trips the `sys/` tripwire** (the safety net's review, H1;
+/// N-B for the control). `sys/audit/` and `sys/audit-checkpoint/` were not self-owned prefixes, so a
+/// member planting a record in another's stream went uncounted. The control: the counter is first held
+/// quiet for a window, then one write into C's stream, then one into C's checkpoint prefix — each must
+/// raise it by exactly one, so the delta is the write's. Seen failing first on 81b70a2e: "the audit
+/// write raised the counter by 0".
 #[cfg(feature = "tls")]
 #[tokio::test]
 async fn a_peers_write_into_a_nodes_audit_stream_trips_the_tripwire() {
     let (a, b, c, _nb, nc, dir) = three_signed_nodes("q7-trip", false).await;
-    let before = c.task_ctx.sys_namespace_violations.load(Ordering::Relaxed);
+    let count = || c.task_ctx.sys_namespace_violations.load(Ordering::Relaxed);
+    // A quiet window: the counter holds still for a second before anything is written.
+    let mut quiet = false;
+    for _ in 0..20 {
+        let before = count();
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+        if count() == before { quiet = true; break; }
+    }
+    let base = count();
     let key = format!("sys/audit/{nc}/{:016x}", 7u64);
     let _ = a.kv().set(key.clone(), b"planted".to_vec());
     let arrived = within_3s(|| c.kv().get(&key).is_some()).await;
-    let counted = within_3s(|| c.task_ctx.sys_namespace_violations.load(Ordering::Relaxed) > before).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let after_audit = count();
+    let cp_key = format!("sys/audit-checkpoint/{nc}/{:016x}", 7u64);
+    let _ = a.kv().set(cp_key.clone(), b"planted".to_vec());
+    let _ = within_3s(|| c.kv().get(&cp_key).is_some()).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let after_cp = count();
     a.shutdown().await; b.shutdown().await; c.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(arrived, "the write reached C");
-    assert!(counted, "a foreign audit write was not counted");
+    assert!(quiet && arrived, "the counter was quiet ({quiet}) and the write reached C ({arrived})");
+    assert_eq!(after_audit - base, 1, "the audit write raised the counter by {}", after_audit - base);
+    assert_eq!(after_cp - after_audit, 1, "the checkpoint write raised the counter by {}", after_cp - after_audit);
 }
 
 /// **One planted record does not leave the rest of the stream unverifiable** (the safety net's review,
@@ -2656,6 +2674,68 @@ async fn one_planted_record_does_not_leave_the_rest_of_the_stream_unverifiable()
     assert_eq!(seg["verified"], 4, "the tail sealed after the planted record is not reported as verified: {seg}");
     assert_eq!(seg["unverified"], 2, "and the two planted records are reported: {seg}");
     assert_eq!(stats["audit_unverified_records"], 2, "L1: /stats counts the unverified records, not the span");
+}
+
+/// **A stream with a skipped slot verifies under `verify_linked`, and is a gap under the contiguous
+/// verifiers** (the H1/M1 review's N-A). Once a seal skips a planted slot, an `AuditSink` consumer
+/// verifying an export with `verify_chain_keys` gets `SequenceGap`; `verify_linked` — the rule the node
+/// itself verifies by — follows the hash links and reports the planted record. A new public API: on
+/// 3898c77c it does not exist.
+#[cfg(feature = "compliance")]
+#[test]
+fn a_stream_with_a_skipped_slot_verifies_under_verify_linked() {
+    use crate::{verify_chain_keys, verify_linked, AuditAction, AuditOutcome, AuditRecord, AuditVerifyError, SignedAuditRecord};
+    let node = NodeId::new("127.0.0.1", 7901).unwrap();
+    let sk = ed25519_dalek::SigningKey::from_bytes(&[0x21; 32]);
+    let vk = sk.verifying_key().to_bytes();
+    let rec = |seq: u64, prev: [u8; 32]| AuditRecord { node_id: node.clone(), seq, hlc: seq + 1, principal: "p".into(), action: AuditAction::Invoke, target: format!("t{seq}"), outcome: AuditOutcome::Success, detail: None, prev_hash: prev };
+    let r0 = rec(0, [0u8; 32]);
+    let r1 = rec(1, r0.content_hash());
+    let planted = rec(2, r1.content_hash());
+    let r3 = rec(3, r1.content_hash());
+    let stream = vec![
+        SignedAuditRecord::sign(r0, &sk),
+        SignedAuditRecord::sign(r1, &sk),
+        SignedAuditRecord::sign(planted, &ed25519_dalek::SigningKey::from_bytes(&[0x22; 32])),
+        SignedAuditRecord::sign(r3, &sk),
+    ];
+    let seg = verify_linked(&stream, &node, &[vk], 0, [0u8; 32]);
+    assert_eq!(seg.linked, vec![0, 1, 3], "the prefix and the tail linked to it verify");
+    assert_eq!(seg.unverified, vec![2], "the planted record does not");
+    let honest = [stream[0].clone(), stream[1].clone(), stream[3].clone()];
+    assert_eq!(verify_chain_keys(&honest, &node, &[vk], 0, [0u8; 32]), Err(AuditVerifyError::SequenceGap { expected: 2, found: 3 }),
+        "the contiguous verifier reports the skip as a gap");
+}
+
+/// **A seal refuses to step over more than `MAX_SEAL_SKIP` occupied slots** (the review's N-C). A planted
+/// contiguous run directly after the head made one seal walk all of it under the chain lock. Past 4 096
+/// slots the seal is refused, loudly; a short run is still stepped over. Seen failing first on 3898c77c:
+/// "a seal walked a run longer than the cap".
+#[cfg(feature = "compliance")]
+#[tokio::test]
+async fn a_seal_refuses_to_walk_a_run_longer_than_the_cap() {
+    use crate::{audit_key, AuditAction, AuditOutcome};
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let dir = std::env::temp_dir().join(format!("myc-q8-cap-{port}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    cfg.tls = Some(crate::config::TlsConfig { auto_cert_dir: dir.clone(), ..Default::default() });
+    let a = GossipAgent::new(id.clone(), cfg);
+    a.start().await.unwrap();
+    let _ = a.audit(AuditAction::Invoke, "p", "t0", AuditOutcome::Success, None).unwrap();
+    // A short run (3 slots) is stepped over.
+    for seq in 1..=3u64 { let _ = a.kv().set(audit_key(&id, seq), b"planted".to_vec()); }
+    let short = a.audit(AuditAction::Invoke, "p", "after-short", AuditOutcome::Success, None);
+    let landed_at_4 = a.audit_stream(&id).iter().any(|r| r.record.seq == 4);
+    // A run one longer than the cap directly after the head (5 ..= 5 + 4096) is refused.
+    for seq in 5..=(5 + 4_096u64) { let _ = a.kv().set(audit_key(&id, seq), b"planted".to_vec()); }
+    let long = a.audit(AuditAction::Invoke, "p", "after-long", AuditOutcome::Success, None);
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(short.is_ok() && landed_at_4, "a short run is stepped over");
+    assert!(long.is_err(), "a seal walked a run longer than the cap");
 }
 
 /// **A capability retracted as its node shuts down reaches the peers** (#611, found by CI's co-op
@@ -6980,24 +7060,26 @@ async fn recover_chain_head_anchors_at_a_checkpoint_or_reports_the_gap() {
     assert_eq!(a.audit_stream(&id).last().map(|r| (r.record.seq, r.record.prev_hash)), Some((4, h3)));
     assert_eq!(a.audit_verify(&id), Ok(()), "verification resumes from the checkpoint over the new seal");
 
-    // (c) delete the first present record (seq 4) by hand: no checkpoint at 5 → nothing verifies, the gap
-    // is named, and the head stays at genesis (seq 5 is not directly after a verified prefix, so it is
-    // not followed — post-360 plan row Q). Sealing from genesis **never overwrites** seq 5: a seal skips
-    // a slot a record occupies. (Before row Q's safety net, the sixth seal here overwrote seq 5.)
+    // (c) delete the first present record (seq 4, the record at the pruned checkpoint boundary) by hand:
+    // no checkpoint at 5. Since post-360 plan row Q the stream anchors at the newest checkpoint below its
+    // first record (4, h3) — not at genesis, among exported and pruned slots — the gap is named, and
+    // seq 5 is not directly after the head, so it is not followed. Sealing **never overwrites** seq 5:
+    // a seal skips a slot a record occupies. (Before the safety net the head went back to genesis and,
+    // sealing on, overwrote seq 5.)
     assert!(a.kv().delete(audit_key(&id, 4)));
     let _h5 = seal(5);
     let held5 = a.kv().get(&audit_key(&id, 5));
     let head = recover_chain_head(&a.task_ctx).expect("records to fold");
-    assert_eq!(head.next_seq, 0, "(c) no anchor covers seq 5: the head stays at genesis");
-    assert_eq!(head.last_hash, [0u8; 32]);
+    assert_eq!(head.next_seq, 4, "(c) anchored at the newest checkpoint below seq 5, not at genesis");
+    assert_eq!(head.last_hash, h3);
     assert_eq!(head.verified, 0);
-    assert_eq!(head.unverified, Some(AuditVerifyError::SequenceGap { expected: 0, found: 5 }), "the gap is reported, not guessed over");
+    assert_eq!(head.unverified, Some(AuditVerifyError::SequenceGap { expected: 4, found: 5 }), "the gap is reported, not guessed over");
     assert_eq!(head.unverified_range, Some((5, 5)), "and the unverified record is named");
     crate::agent::audit::restore_chain_head(&a.task_ctx);
-    for n in 0..6u64 { let _ = seal(100 + n); }
-    assert_eq!(a.kv().get(&audit_key(&id, 5)), held5, "sealing from genesis never overwrote the record at seq 5");
+    for n in 0..3u64 { let _ = seal(100 + n); }
+    assert_eq!(a.kv().get(&audit_key(&id, 5)), held5, "sealing on never overwrote the record at seq 5");
     let seqs: Vec<u64> = a.audit_stream(&id).iter().map(|r| r.record.seq).collect();
-    assert_eq!(seqs, vec![0, 1, 2, 3, 4, 5, 6], "the six seals took 0..=4 and 6, skipping the occupied 5");
+    assert_eq!(seqs, vec![4, 5, 6, 7], "the seals took 4 and 6..=7, skipping the occupied 5 (0..=3 stay pruned)");
     let _ = h4;
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&cert_dir);
