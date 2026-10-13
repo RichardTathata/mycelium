@@ -74,10 +74,15 @@ An attacker who controls one node process (RCE, stolen host) gains:
   record (row Q), both counted (`kv_identity_exempt_frames`). Row F (2.33.0) made the refusal opt-in
   for one release (`kv_require_signed_frames`); row F2 retired the setting to a no-op (`deprecations.md`
   §40). An identity tombstone removes no keys (it used to: one tombstone, unsigned or
-  signed by any member as itself, silenced a member at every receiver). **What remains with
-  `require_identity_proofs` off:** a member can write another member's legacy identity under its *own*
-  signature — a valid frame, signer = sender — and an unproven history merges on first use; the anchor
-  tripwire counts it (`identity_anchor_conflicts`) and does not stop it. The flag closes it. **The refusal is bypassable through anti-entropy:** a `StateResponse` entry
+  signed by any member as itself, silenced a member at every receiver). **A member writing its own key
+  into another's identity** — garbling the victim's sealed record and proof and writing a bare
+  `sys/identity/{V}` key list under its *own* signature, a valid frame — **is refused by default** since
+  post-360 plan row S (`require_identity_proofs` defaults to `true`): only a sealed record whose proof
+  chains to the keys held for `V` is merged, so the key reaches neither `V`'s verify-only history set nor,
+  for a node on a legacy certificate, its trusted set (`by_default_a_poisoned_identity_key_does_not_reach_the_history_set`,
+  `…_does_not_sign_for_a_legacy_certificate_node`). With the flag explicitly `false` (the opt-out) the
+  pre-row-S rule applies: the history merges, and the anchor tripwire counts it
+  (`identity_anchor_conflicts`) without stopping it. First sighting stays trust on first use. **The refusal is bypassable through anti-entropy:** a `StateResponse` entry
   carries no author and no signature and is applied by LWW, unsolicited, so a compromised member can
   introduce a value for any key — another member's included — through a state reply, refusal or no.
   Closing it needs state entries that carry their originator's signature — a wire change, not built
@@ -377,7 +382,7 @@ embedding process it also holds the member's key (Boundary A, once per agent).
   - **P1, issuer binding** (#384; ADR `design/knowledge-issuer-binding.md`). A record is attributed only through
     two paths, member (`node:{id}`, the reader's retained keys) or configured external (never inside `node:`), and
     the reader reports `Current`, `Revoked` or `Unverifiable`. *Limit:* member-path strength rests on
-    `require_identity_proofs`, which is default-off. *Gate:* `issuer::tests` and the two-node
+    `require_identity_proofs` (default-on since post-360 row S; first sighting stays TOFU). *Gate:* `issuer::tests` and the two-node
     `test_boundary_h_p1_issuer_binding_on_live_nodes`.
   - **K1, verify on storage** (#387; ADR `design/knowledge-validity.md` §1). `put_signed` checks integrity (the id
     is the content digest; a deserialised record is re-checked) and attribution, and refusals are counted. *Limit:*

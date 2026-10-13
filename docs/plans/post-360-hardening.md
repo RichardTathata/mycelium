@@ -90,7 +90,7 @@ Four places strain that line today, and the rows in §3 address each:
 | **O** | A Strands session store on Mycelium | a companion package (Python, beside `langgraph-checkpoint-mycelium`) implementing Strands Agents' `SessionManager` over the Mycelium Python SDK, so an agent's conversation and state, and a swarm's shared memory, live in the fleet's KV rather than a file or a bucket; a save returns the SDK's receipt and its docs say which rung it names (a local application, not replication — the checkpointer's wording); an incomplete or unreadable session is an error, never an empty one; concurrent agents in one session do not lose each other's writes, or the limit is stated; its live suite runs in CI against a real node; pinned to a Strands release and re-checked when Strands changes the interface | — (N for the cross-host demo) |
 | **P** | A Strands fleet, demonstrated | a runnable example, in CI like the co-op demos, in which Strands agents on three Mycelium nodes plan one shared task (a constructive domain — food redistribution or a microgrid), keep their session and swarm memory in the fleet through O, and call fleet skills through `/a2a` (N): a call outside an agent's mandate is refused and the refusal is in the evidence journal; one node is stopped and the work resumes on another from the stored session; the README states what Strands provides and what Mycelium adds, and which properties the run shows versus which it does not | N, O |
 | **Q** — *delivered 2.33.0 (#616), §3.5* | Revocation reaches every verifier | a key a node has revoked (`rotate_identity_on_compromise`, `sys/revocation/`) is filtered from the `peer_keys`-based KV `SignedData` verifier, from identity-proof chaining (`validate_and_merge_identity`'s trusted signer) and from the unsigned identity exemption (`connection::self_authenticating_identity`), not only from consensus and `known_verifying_keys`; a test that a `SignedData` signed by a revoked key is refused at a peer that has seen the revocation; `src/agent/revocation.rs`'s `revoke_key` doc made true (corrected in #611 to say what holds today) | — (independent of F2) |
-| **S** | Identity proofs on by default | `require_identity_proofs` defaults to `true` (today `false`, `mycelium-core/src/config.rs`; the `secure-single-domain` profile already requires it as `id.proofs_required`): a bare `sys/identity/{N}` key list without a proof is refused everywhere a node's keys are learned, closing the identity-poisoning residual rows F and Q state — a member writing its own key into another's identity, which still reaches the verify-only history set (forged audit history, a steered checkpoint anchor) and fully impersonates a node on a legacy certificate; a mixed-fleet window in the 2.30.0 shape (the MINOR that flips it says so; a node from before 2.3.0, which cannot prove, is cut off until upgraded, and `false` stays available as an explicit opt-out for that window and for TLS-less development fleets, where the setting is inert); an upgrade note in `deprecations.md`; the guarantee `id.proofs_required` resolves `enforced` by default; the 2.14.0 attempt that was reverted is re-examined first (the failure it was blamed on was not its doing) | — (best in the MINOR with F2) |
+| **S** — *delivered (#PRNUM), unreleased; §3.5* | Identity proofs on by default | `require_identity_proofs` defaults to `true` (today `false`, `mycelium-core/src/config.rs`; the `secure-single-domain` profile already requires it as `id.proofs_required`): a bare `sys/identity/{N}` key list without a proof is refused everywhere a node's keys are learned, closing the identity-poisoning residual rows F and Q state — a member writing its own key into another's identity, which still reaches the verify-only history set (forged audit history, a steered checkpoint anchor) and fully impersonates a node on a legacy certificate; a mixed-fleet window in the 2.30.0 shape (the MINOR that flips it says so; a node from before 2.3.0, which cannot prove, is cut off until upgraded, and `false` stays available as an explicit opt-out for that window and for TLS-less development fleets, where the setting is inert); an upgrade note in `deprecations.md`; the guarantee `id.proofs_required` resolves `enforced` by default; the 2.14.0 attempt that was reverted is re-examined first (the failure it was blamed on was not its doing) | — (best in the MINOR with F2) |
 | **T** — *delivered (#622), unreleased* | Say loudly when the CA key is on the node | the dev posture keeps the fleet CA's private key on every node (`auto_cert_dir`'s `ca-key.pem`, `mycelium-core/src/tls.rs`), so one compromised host yields every node's identity and revocation (row Q) cannot recover it; today this is only the guarantee `id.ca_key_off_node` resolving unmet, one line among the start-time report, worded for member removal alone. Promises: at `start()` a node that holds the CA key and runs no profile, or a profile other than `dev`, logs one prominent warning naming the consequence (a single host compromise compromises every identity in the fleet; key revocation does not recover it) and the remedy (`mycelium tls issue` on a separate CA host, then `[tls] cert_pem` + `key_pem` on the node — `docs/operations/cert-rotation.md`); the `id.ca_key_off_node` guarantee text names identity compromise and revocation, not only removal (catalogue regenerated); `dev` states the trade-off rather than warning; the quick-start and production-readiness pages say which posture they set up; a test pins the warning on and off | — |
 
 ### 3.4 · Documentation follow-through
@@ -794,6 +794,49 @@ unproduced), the row closes as follows. The verifiers were enumerated with
   node without persistence forgets a revocation hidden while it was down until the owner republishes; the fold walks
   every node with records on each change (bounded per node, not per-node incremental).
 
+**S — Identity proofs on by default (#PRNUM, unreleased).** Read against the branch's code. The doors were
+enumerated with `git grep -n "require_identity_proofs\|resolve_identity_record\|validate_and_merge_identity\|merge_peer_keys\|kv_ns::IDENTITY"`
+over `src mycelium-core/src mycelium-*/src`: a node's keys are learned from gossip at two sites, `prewarm_peer_keys`
+and `start_identity_watcher`, both through `identity_resync` → `resolve_identity_record` →
+`validate_and_merge_identity_with_revocations`, each reading the one config value; besides them a key enters
+`peer_keys` only at the handshake anchor (`record_peer_anchor`, CA-validated); `self_authenticating_identity` (the
+unsigned exemption) and the own-history build read no flag; `mycelium-agentfacts` reads the raw value for order only,
+filtered by trusted keys. The config value has three sources — `Default`, serde, the environment — each tested.
+- *The 2.14.0 attempt re-examined first* — `8b588c68` (#368) flipped it; `7cb3b872` (#372) reverted it for the
+  Docker suite's `S12 leader election … Nodes disagree on leader`; `12a69598` (#373) corrected the diagnosis (the flag
+  is inert without TLS and that suite runs none) and shipped the sealed record, the precondition the revert named; the
+  S12 log resolved the failure the same day as an election with a quorum of one (S12 joined no group), closed by
+  #377. Flipping the default and running every lib suite, the core suite, the co-op demos and `make check` found no
+  failure the flag caused (the PR body lists each run).
+- *Defaults to `true`* — `GossipConfig::default()`; `the_default_requires_identity_proofs` (seen failing on 4251d50a).
+  **Two defects the flip exposed:** the field's field-level `#[serde(default)]` resolved a TOML file that never named
+  it to `bool`'s `false` — `a_config_file_that_never_names_identity_proofs_requires_them`, seen failing on 4251d50a
+  and again with only `Default` flipped; and `GOSSIP_REQUIRE_IDENTITY_PROOFS` read any value but four as `false`, so a
+  typo disabled it — strict now, `the_identity_proofs_setting_parses_strictly_from_the_environment` (seen failing).
+- *A bare key list without a proof is refused everywhere a node's keys are learned* — the two gossip sites share one
+  function; `a_default_configuration_rejects_an_unsigned_identity_entry` (seen failing on 4251d50a).
+- *Closing the residual rows F and Q state* — `by_default_a_poisoned_identity_key_does_not_reach_the_history_set`
+  (seen failing on 4251d50a: "HISTORY: … is in C's history set at B" in a `tls` build, "FORGED: A's audit record signed
+  by its poisoned key verifies as C's history at B" under `compliance`) and
+  `by_default_a_poisoned_identity_key_does_not_sign_for_a_legacy_certificate_node` (C on an IP-only certificate; seen
+  failing: "IMPERSONATION: by default, a key A wrote into C's identity signs as C at B").
+- *A mixed-fleet window in the 2.30.0 shape, `false` an explicit opt-out* — `deprecations.md` §41.
+  **Corrected against the code:** the cell says a node from before **2.3.0** is cut off; under the flag only the
+  sealed record is accepted, so it is a node from before **2.14.0** (2.3.0–2.13.x write the legacy pair only), and
+  only for keys learned from gossip — a direct connection still anchors its certificate key.
+  `an_explicit_false_still_opts_out_of_identity_proofs` (a guard; passes on 4251d50a too). A TLS-less node: inert,
+  no warning, no refusal; the report names `[tls]` as missing.
+- *`id.proofs_required` resolves `enforced` by default* — `id_proofs_required_resolves_enforced_by_default` (seen
+  failing on 4251d50a); its `needs` text changed, catalogue regenerated.
+- *Documentation* — CHANGELOG; `deprecations.md` §41 and its table row; `configuration.md`; guide 09, 23, 24;
+  `cert-rotation.md`, `production-readiness.md`, `shared-responsibility-matrix.md`, `companions.md`, `audit.md`,
+  `observability.md`; `docs/threat-model.md` Boundary A; `what-is-proven.md` (the residual moved from the third table
+  to the CI table); the design records that cited the default; wiki `dev/security.md`, `dev/operations.md`,
+  `dev/companions/commitment.md`; `docs/wiki/dev/.log/2026-10-13-s-proofs-default.md`.
+- **Not built, stated:** first sighting of a node never seen stays trust on first use (anchors close it); a pre-2.14.0
+  peer is not learned from gossip; an un-upgraded 2.33 peer keeps proofs off until it is upgraded or configured, so
+  the residual stays open *at it*; anti-entropy entries carry no author.
+
 ### 3.6 · State of play and the next iteration (2026-10-12)
 
 Where the work stands at the end of 2026-10-12, so the next session starts here rather than from a conversation.
@@ -803,11 +846,11 @@ CI on F also caught a co-op demo regression its own changes caused, fixed in the
 queues before the shutdown signal), and N, O, P recorded by #614 with the `a2a-sdk` probe's evidence
 (`docs/plans/external/2026-10-12-a2a-sdk-probe/`).
 
-**Delivered since (unreleased):** F2 (#624 — the unsigned-frame and bare-signature refusal unconditional, `kv_require_signed_frames` retired, `secure-single-domain` rev 5; §3.5), T (#622).
+**Delivered since (unreleased):** F2 (#624 — the unsigned-frame and bare-signature refusal unconditional, `kv_require_signed_frames` retired, `secure-single-domain` rev 5; §3.5), T (#622), S (identity proofs required by default; §3.5).
 
-**Not started:** S (identity proofs on by default — the remaining identity-poisoning residual; best shipped with F2), K (policy over history — decide §5's fleet question first), L (credentials attached at egress), M
+**Not started:** K (policy over history — decide §5's fleet question first), L (credentials attached at egress), M
 (activation commands confined), N (A2A at the current specification — independent of E and F, and it carries a defect
-worth fixing on its own: the agent card names the gossip port), O and P (after N), and §5's inference-routing question. (Q, revocation at every verifier, is delivered — #616, §3.5.)
+worth fixing on its own: the agent card names the gossip port), O and P (after N), and §5's inference-routing question. (Q, revocation at every verifier, is delivered — #616, §3.5; S, identity proofs on by default, is delivered unreleased — #PRNUM, §3.5.)
 
 **Follow-ups recorded as not built in delivered rows (each in its §3.5 block):**
 - **H:** carry each named offer's signed bytes inside the close and award from that copy (today a member who deletes a

@@ -806,7 +806,7 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
           }),
         g("id.proofs_required", 1, "identity", Node,
           "an identity entry this node cannot authenticate is rejected (issuer binding rests on it)",
-          "`tls`; `[tls]`; `require_identity_proofs = true` (default off)",
+          "`tls`; `[tls]`; `require_identity_proofs` (default `true` since post-360 row S; `false` opts out)",
           &["lifecycle (identity-proof check)"], "docs/design/identity-authentication.md",
           always,
           |c| {
@@ -1127,6 +1127,30 @@ mod tests {
         let mut cfg = GossipConfig::default();
         cfg.tls = Some(TlsConfig::default());
         assert_eq!(state(&agent(cfg).guarantee_report(), "mesh.signed_writes"), "enforced", "[tls] alone");
+    }
+
+    /// **Post-360 plan row S:** a TLS node that says nothing about identity proofs enforces them —
+    /// `id.proofs_required` resolves `enforced` from the default; an explicit `false` is
+    /// `not_configured`; without `[tls]` the setting is inert and the report says `[tls]` is what is
+    /// missing, not the flag. Seen failing first on 4251d50a.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn id_proofs_required_resolves_enforced_by_default() {
+        use crate::config::TlsConfig;
+        let dir = std::env::temp_dir().join(format!("myc-row-s-{}", crate::test_util::alloc_port()));
+        let tls = |proofs: Option<bool>| {
+            let mut cfg = GossipConfig::default();
+            cfg.tls = Some(TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() });
+            if let Some(p) = proofs { cfg.require_identity_proofs = p; }
+            agent(cfg).guarantee_report()
+        };
+        assert_eq!(state(&tls(None), "id.proofs_required"), "enforced", "the default enforces");
+        assert_eq!(state(&tls(Some(false)), "id.proofs_required"), "not_configured", "an explicit false opts out");
+        let bare = agent(GossipConfig::default()).guarantee_report();
+        assert_eq!(state(&bare, "id.proofs_required"), "not_configured");
+        let missing = format!("{:?}", bare.entry("id.proofs_required").unwrap().resolution);
+        assert!(missing.contains("[tls]"), "without TLS the missing piece is [tls], not the flag: {missing}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Every core id is unique, and the registry starts with exactly the core set.

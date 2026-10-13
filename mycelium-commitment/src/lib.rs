@@ -41,10 +41,11 @@
 //!   **What a verifying signature does and does not establish** — the same care item 1 takes with a
 //!   receipt. It proves the holder of that key made the record. Whether the key belongs to the
 //!   participant the record names is `sys/identity/{node}`'s question, and that is only as strong as
-//!   `require_identity_proofs`, which is **default-off**: without proofs an admitted node can append
-//!   its own key to another node's identity entry (`src/consensus.rs`, and why identity-auth Phase 2
-//!   exists). So this is `SelfImposedPrevention` in the guardrails tier vocabulary under the default
-//!   configuration, and it rises no higher on its own. Where the participant is not a node at all —
+//!   `require_identity_proofs`, which is **on by default** since the substrate's post-360 plan row S:
+//!   with proofs explicitly off an admitted node can append its own key to another node's identity
+//!   entry (`src/consensus.rs`, and why identity-auth Phase 2 exists), and first sighting of a node is
+//!   trust on first use either way. So this is `SelfImposedPrevention` in the guardrails tier
+//!   vocabulary, and it rises no higher on its own. Where the participant is not a node at all —
 //!   a principal, a driver, a service — the key directory is the caller's, which is why
 //!   `offers_verified` takes a resolver rather than reaching into the mesh.
 //! - **One award per requirement.** A second award is **refused** ([`CommitmentRefusal::AlreadyAwarded`]),
@@ -637,9 +638,9 @@ impl ContractNet {
     /// **What this does and does not establish.** A verifying signature proves the holder of that
     /// key made the offer. Whether the key belongs to the participant it names is
     /// `sys/identity/{node}`'s question, and *that* is only as strong as
-    /// `require_identity_proofs` — **default-off** — because without proofs an admitted node can
-    /// append its own key to another's identity entry. In the guardrails tier vocabulary this is
-    /// `SelfImposedPrevention` under the default configuration and rises no higher on its own.
+    /// `require_identity_proofs` — **on by default** since post-360 row S; with proofs explicitly off
+    /// an admitted node can append its own key to another's identity entry. In the guardrails tier
+    /// vocabulary this is `SelfImposedPrevention` and rises no higher on its own.
     pub fn offer_signed(
         &self,
         requirement: &str,

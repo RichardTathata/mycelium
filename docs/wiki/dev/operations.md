@@ -69,12 +69,11 @@ are never cleartext — reuse the node cert or supply a hostname cert.
 
 **Authenticated identity (WS-E):** every TLS node publishes a signed `sys/identity-proof/{self}`;
 peers reject an identity overwrite whose proof doesn't chain to a trusted key (`identity_anchor_conflicts`
-counts rejections, on `/stats`). `require_identity_proofs` (`GOSSIP_REQUIRE_IDENTITY_PROOFS`, default
-**off**) also rejects *unsigned* entries. The rollout precondition is long met, but the default
-stayed off: identity and proof are two gossip writes, so enabling it opens a transient window in
-which a peer holds no key — harmless for the key (a late proof re-validates) and not harmless for a
-leader election decided inside it ([security](security.md) §identity-proof default,
-[cert-rotation](../../operations/cert-rotation.md)).
+counts rejections, on `/stats`). `require_identity_proofs` (`GOSSIP_REQUIRE_IDENTITY_PROOFS`, a strict boolean, default **on** since
+post-360 row S) also rejects entries it cannot authenticate: only the sealed record (one entry since
+2.14.0) is merged, so the two-write window that kept it off is closed by construction. A pre-2.14.0
+node is not learned from gossip; `false` is the explicit opt-out ([security](security.md)
+§identity-proof default, [cert-rotation](../../operations/cert-rotation.md), `deprecations.md` §41).
 
 **Bridged capability adverts need a lease.** `POST /gateway/capability/advertise` spawns the
 refresh loop *in the node*, so a bridge client's advert survives the client's crash and never

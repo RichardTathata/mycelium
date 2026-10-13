@@ -243,7 +243,7 @@ happen.* So the tab shows the **preconditions**, before a refusal surprises some
 | Panel | The question | Composed from |
 |---|---|---|
 | Electorates | would an election here work, or be refused? | `/gateway/kv/keys?prefix=grp/` |
-| Sealed identity coverage | is it safe to set `require_identity_proofs` yet? | `/gateway/kv/keys?prefix=sys/identity` |
+| Sealed identity coverage | does every node publish the sealed record `require_identity_proofs` (on by default) accepts? | `/gateway/kv/keys?prefix=sys/identity` |
 | Role concentration (P10) | is one node quietly holding everything? | `/stats` |
 | Tripwires | what has been refused or flagged? | `/stats` |
 

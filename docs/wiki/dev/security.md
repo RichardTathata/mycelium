@@ -136,10 +136,11 @@ say *by whom*, and whether the validator is the adversary.
 
 ## The identity-proof window, and a diagnosis that was wrong (2026-09-24)
 
-`require_identity_proofs` defaults to **`false`**. Set it and an identity entry this node cannot
-authenticate is rejected rather than accepted-and-flagged. It was flipped to `true` on 2026-09-23
-and reverted the next day. **Read the correction first, because the original write-up of this
-section asserted a cause it had not checked.**
+`require_identity_proofs` defaults to **`true`** since post-360 plan row S (unreleased, after 2.33.0;
+`docs/guide/deprecations.md` §41). An identity entry this node cannot authenticate is rejected rather
+than accepted-and-flagged. It was first flipped to `true` on 2026-09-23 and reverted the next day.
+**Read the correction first, because the original write-up of this section asserted a cause it had
+not checked.**
 
 ### The correction
 
@@ -151,8 +152,10 @@ cannot have been caused by it.** Every identity writer and both readers (`prewar
 and the compose file sets no TLS env. With no TLS there are no `sys/identity/` entries, the
 validator never runs, and **the flag is inert**.
 
-So: S12's intermittency is **unexplained and still open**. It is not the flip, and it is not #369's
-election-rule change either — that landed after the failing commit.
+So S12 was not the flip, and not #369's election-rule change either — that landed after the failing
+commit. It was explained later the same day ([the S12 log](.log/2026-09-24-s12-leader-election-open.md)):
+S12 joined no group, so each node's election had a quorum of one and committed its own candidate
+before exchanging a vote; closed by the electorate refusal (#377).
 
 The mistake is worth naming because it is the same one the [testing
 page](testing/testing.md) warns about, run backwards: a red run was taken as evidence about a
@@ -185,6 +188,25 @@ only the pair would leave every proof-requiring peer reading the pre-rotation hi
 learning the new key. Any time a reader gains a preference, every writer of the old thing is a bug
 until it writes the new one.
 
+### Row S: the default, flipped again (2026-10-13)
+
+Re-examined before flipping: the revert's cause was S12's quorum of one, not this flag, and the window
+it named is closed by the sealed record (2.14.0). What the default closes is the residual rows F and Q
+left: a member garbling another node's sealed record and proof and writing a bare key list naming its
+own key — a valid frame under its own signature — was merged at every receiver, reaching the
+verify-only history set (`CoreCtx::history_keys`: forged audit history) and, for a node on a legacy
+certificate, its live trusted set (full impersonation). Pinned by
+`by_default_a_poisoned_identity_key_does_not_reach_the_history_set` and
+`by_default_a_poisoned_identity_key_does_not_sign_for_a_legacy_certificate_node` (seen failing on
+4251d50a). Two things the flip exposed beyond the value: the field's **field-level `#[serde(default)]`**
+resolved a TOML file that never named it to `bool`'s `false`, not the struct's default — flipping
+`Default` alone would have left every file-configured node off
+(`a_config_file_that_never_names_identity_proofs_requires_them`); and the environment override read any
+value but `1`/`true`/`TRUE`/`yes` as `false`, so a typo silently disabled a security default — now strict.
+**The general lesson:** a field-level `#[serde(default)]` on a `bool` is `false`, whatever the struct's
+`Default` says; a default flip touches both. Mixed fleet: a pre-2.14.0 node (no sealed record) is cut
+off from gossip-learned keys; `false` stays as the explicit opt-out.
+
 ### What is pinned
 
 The default, with its reason, in `config::tests::the_default_requires_identity_proofs`. That a
@@ -208,8 +230,8 @@ closed**, so the claim cannot rot.
 
 **Who this matters to beyond the mesh:** `mycelium-commitment`'s offer/award signatures verify
 against keys a caller resolves, and `sys/identity/{node}` is the obvious source for a node
-participant. That chain is as strong as the caller's key resolution, which on the default
-configuration is TOFU.
+participant. That chain is as strong as the caller's key resolution, which for a node never seen
+is TOFU on any configuration.
 
 ### What remains
 
@@ -377,7 +399,8 @@ holder, the secure posture's re-issue-only recovery, legacy certificates — are
 >   for an unknown V, TOFU-accepts a self-signed first entry. A proof signed by an **untrusted** key
 >   is **rejected** — the poisoning vector is closed for any connected/established peer. No proof ⇒
 >   rollout tolerance (Phase 3 tightens).
-> - **Phase 3 (shipped 2026-07-22):** config flag `require_identity_proofs` (default off) — when set,
+> - **Phase 3 (shipped 2026-07-22):** config flag `require_identity_proofs` (default off then; **on**
+>   since post-360 row S) — when set,
 >   an identity entry *without* a valid proof is rejected outright, closing the "mimic a pre-upgrade
 >   node" residual. Gated by a **config flag, not a wire bump** — Phase 3 changes no frame format
 >   (proofs gossip as ordinary Data frames), so a `WIRE_VERSION` bump would gate nothing; the

@@ -67,7 +67,7 @@ operator needs instead is the **preconditions**, before a refusal surprises them
 | Panel | The question it answers | Composed from |
 |---|---|---|
 | **Electorates** | *Would an election here work, or be refused?* | `/gateway/kv/keys?prefix=grp/` |
-| **Sealed identity coverage** | *Is it safe to set `require_identity_proofs` yet?* | `/gateway/kv/keys?prefix=sys/identity` |
+| **Sealed identity coverage** | *Does every node publish the record `require_identity_proofs` (on by default) accepts?* | `/gateway/kv/keys?prefix=sys/identity` |
 | **Role concentration (P10)** | *Is one node quietly holding everything?* | `/stats` |
 | **Tripwires** | *What has been refused or flagged?* | `/stats` |
 

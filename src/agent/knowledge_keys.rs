@@ -6,9 +6,9 @@
 //!
 //! Gated on `compliance` because the member path's two inputs live there: the retained identity-key
 //! set (`peer_keys`, learned from `sys/identity/`) and the validated revocations (`sys/revocation/`).
-//! Its strength rests on `require_identity_proofs`, which is **off by default**: without it, the
-//! retained set can include a key injected into `sys/identity/` by another admitted member (the
-//! identity-poisoning residual). The confined-fleet profile turns proofs on.
+//! Its strength rests on `require_identity_proofs`, which is **on by default** since post-360 plan
+//! row S: with it explicitly off, the retained set can include a key injected into `sys/identity/` by
+//! another admitted member (the identity-poisoning residual).
 
 use std::collections::HashMap;
 

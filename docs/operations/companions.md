@@ -415,6 +415,7 @@ operator's, not the integrator's:
   ([deployment.md § Backup & restore](deployment.md#backup--restore)).
 
 **What it rests on:** the member signing path's strength is `require_identity_proofs`
-([cert-rotation.md § Authenticated identity](cert-rotation.md)), **default off**; with it off a
-member's key is trust-on-first-use. Dev chapter: [guide 23](../guide/23-knowledge.md).
+([cert-rotation.md § Authenticated identity](cert-rotation.md)), **default on** since post-360 row S;
+with it explicitly off another member can inject a key into a node's set, and first sighting is
+trust-on-first-use either way. Dev chapter: [guide 23](../guide/23-knowledge.md).
 

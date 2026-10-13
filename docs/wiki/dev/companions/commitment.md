@@ -56,7 +56,7 @@ Design: `docs/plans/v3-contracts-axis.md` §6.9 (CN1–CN3, D39). Key facts:
   **Three things it does not establish**, and they are the reason this is `SelfImposedPrevention`
   and not more. A signature proves the holder of a key made the record. Whether that key *belongs*
   to the named participant is `sys/identity/{node}`'s question, and only as strong as
-  `require_identity_proofs` — **default-off**, without which an admitted node can append its own key
+  `require_identity_proofs` — **default-on** since post-360 row S; with it explicitly off an admitted node can append its own key
   to another's identity entry ([security](../security.md)). Where a participant is a person or a
   vehicle rather than a node, the directory is the operator's and the mesh knows nothing about it.
   And nothing here stops a member *writing* the forged offer: it stops it being awarded, which is

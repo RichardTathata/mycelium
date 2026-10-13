@@ -214,45 +214,38 @@ peers **reject** an identity overwrite whose proof doesn't chain to a key they a
 the key-poisoning vector (a forged verifying key injected via `sys/identity`) is closed for any
 connected/established peer. Rejections increment `identity_anchor_conflicts` on `/stats`.
 
-**`require_identity_proofs` is `false` by default — an operator opt-in.** Set it, and an
-*unsigned* identity entry (one mimicking a pre-Phase-2 node) is rejected outright rather than
-tolerated:
+**`require_identity_proofs` is `true` by default** (post-360 plan row S; `docs/guide/deprecations.md`
+§41). An identity entry this node cannot authenticate is rejected outright rather than tolerated. To
+opt out — for a mixed-fleet window, or on a TLS-less development fleet where it is inert anyway:
 
 ```toml
-require_identity_proofs = true      # or GOSSIP_REQUIRE_IDENTITY_PROOFS=1
+require_identity_proofs = false     # or GOSSIP_REQUIRE_IDENTITY_PROOFS=0 (a strict boolean)
 ```
 
 **What "proof" means here changed in Phase 3b, and it is the difference between safe and not.**
 With the flag set, this node accepts the **sealed** record `sys/identity-signed/{node}` — key
 history and proof in **one** KV entry — and does *not* accept the older
-`sys/identity/` + `sys/identity-proof/` pair.
+`sys/identity/` + `sys/identity-proof/` pair. The pair is two gossip messages with no ordering
+between them, so a peer requiring proofs could learn the identity first, reject it, and hold **no
+key** for that node until the proof arrived. One entry cannot arrive in two parts, so the window is
+closed by construction rather than by timing. (The 2026-09-23 attempt to default the flag on was
+reverted after a test-fleet leader-election failure that was wrongly connected to it: the flag is
+inert without TLS and those nodes configure none; the failure was an election with a quorum of one.)
 
-That is not pedantry. The pair is two gossip messages with no ordering between them, so a peer
-requiring proofs could learn the identity first, reject it, and hold **no key** for that node until
-the proof arrived. The key recovers on its own (the identity watcher subscribes to the broader
-`sys/identity` prefix, so a late proof re-validates its entry) — but a one-shot decision taken
-inside that window, such as a leader election, would not.
+**What the default closes.** With the flag off, an admitted member could garble another node's
+sealed record and proof and write a bare `sys/identity/{node}` key list naming its own key — a valid
+frame under its own signature — and every receiver merged the key: it then verified forged audit
+history for that node and, for a node still on a pre-2.33 certificate, signed live writes as it.
 
-**No deployment has been observed hitting this**, and one claim that it had was wrong: an attempt to
-make the flag default-on (2026-09-23, reverted 2026-09-24) coincided with an intermittent
-`S12 leader election … Nodes disagree on leader` in the test fleet, and the two were connected in
-the write-up. They cannot be: the flag is inert without TLS and those nodes configure none. Treat
-the window as a hazard removed on principle, not a bug you have been living with.
-
-One entry cannot arrive in two parts, so the window is closed by construction rather than by timing.
-
-**The precondition for turning it on** is therefore the ordinary one: **every node in the fleet
-must run a release that writes the sealed record.** A node on an older release publishes only the
-pair, and this node will refuse it — correctly, but you will have removed a healthy peer. Check
-before you set it:
+**Before you upgrade into it.** Every node must run a release that writes the sealed record
+(**2.14.0 or later**). A node on an older release publishes only the pair (before **v2.3.0**, no
+proof at all); upgraded nodes will not learn its keys from gossip and will drop its relayed writes.
+Check:
 
 ```bash
-# One sealed record per node, or you are not ready.
+# One sealed record per node, or set require_identity_proofs = false until you are.
 curl -s localhost:PORT/gateway/kv/keys | grep -c 'sys/identity-signed/'
 ```
-
-**Leave it off** while any node predates the sealed record, and while any node predates **v2.3.0**
-(those write no proof at all).
 
 **What this does *not* give you, and it is worth being exact.** *Proofs required* is **not**
 *identity authenticated*. First sighting of a node you have never seen is still **trust on first

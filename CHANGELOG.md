@@ -49,6 +49,33 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Identity proofs are required by default** (post-360 plan row S; `docs/guide/deprecations.md` §41).
+  `require_identity_proofs` defaults to `true`: a TLS node merges a peer's keys only from its sealed record
+  (`sys/identity-signed/`, written by every TLS node since 2.14.0), so a bare `sys/identity/{n}` key list without a
+  proof is refused and counted (`identity_anchor_conflicts`). This closes the identity-poisoning residual rows F and
+  Q stated: a member garbling another node's sealed record and proof and writing a bare key list naming its own key —
+  a valid frame under its own signature — was merged at every receiver, reaching the verify-only history set (forged
+  audit history) and, for a node on a legacy certificate, its live trusted set (full impersonation). **The 2.14.0
+  attempt, re-examined:** it was reverted after the Docker suite's `S12 leader election … Nodes disagree on leader`,
+  which it could not have caused — the flag is inert without TLS and those nodes run none; S12 was an election with
+  a quorum of one, closed by the electorate refusal (#377). The ordering window the revert named (identity and proof
+  as two gossip writes) was real and is closed by the sealed record. Two defects the flip exposed: the field's
+  field-level `#[serde(default)]` resolved a TOML file that never named it to `bool`'s `false`, whatever
+  `GossipConfig::default()` said (it now has its own serde default), and `GOSSIP_REQUIRE_IDENTITY_PROOFS` read any
+  value but `1`/`true`/`TRUE`/`yes` as `false`, so a typo turned the check off (now a strict boolean that refuses
+  anything else by name). The guarantee `id.proofs_required` resolves `enforced` on a TLS node that says nothing
+  (catalogue regenerated). **Upgrade note:** a peer from before 2.14.0 writes no sealed record and is not learned
+  from gossip until upgraded; `require_identity_proofs = false` (or `GOSSIP_REQUIRE_IDENTITY_PROOFS=0`) is the
+  explicit opt-out for that window and is inert on a TLS-less fleet. **Not closed:** first sighting of a node never
+  seen is trust on first use; anti-entropy entries carry no author. Tests (each seen failing first on 4251d50a):
+  `the_default_requires_identity_proofs`, `a_config_file_that_never_names_identity_proofs_requires_them`,
+  `the_identity_proofs_setting_parses_strictly_from_the_environment`,
+  `a_default_configuration_rejects_an_unsigned_identity_entry`,
+  `by_default_a_poisoned_identity_key_does_not_reach_the_history_set`,
+  `by_default_a_poisoned_identity_key_does_not_sign_for_a_legacy_certificate_node`,
+  `id_proofs_required_resolves_enforced_by_default`; and `an_explicit_false_still_opts_out_of_identity_proofs` (a
+  guard that passes on both).
+
 - **A node holding the fleet CA key says so loudly at start** (post-360 plan row T). In the development posture
   (`TlsConfig::default()`, `ca-key.pem` in `auto_cert_dir`) one compromised host can mint a certificate for every node
   and key revocation cannot recover a stolen identity; until now that was one unmet `id.ca_key_off_node` line in the

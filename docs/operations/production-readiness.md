@@ -26,9 +26,10 @@ this page is the index + the gate.
   in staging. → [cert-rotation.md](cert-rotation.md)
 - ☐ **KV write signing** decided — Ed25519-signed gossip frames (`SignedData`, wire v10+) if writes
   must be attributable/tamper-evident on the wire.
-- ☐ **Sealed-identity coverage checked** *before* considering `require_identity_proofs` — every node
-  must publish `sys/identity-signed/{node}` (key history and proof in **one** entry). The flag
-  accepts only that form, so a node still on the two-entry pair is refused. The Ops Console's
+- ☐ **Sealed-identity coverage checked** — `require_identity_proofs` is on by default (post-360 row S),
+  so every node must publish `sys/identity-signed/{node}` (key history and proof in **one** entry,
+  every release since 2.14.0). The flag accepts only that form, so a node still on the two-entry pair
+  is not learned; `require_identity_proofs = false` is the explicit opt-out for that window. The Ops Console's
   **Integrity** tab answers this, or:
   `curl -s localhost:PORT/gateway/kv/keys | grep -c 'sys/identity-signed/'`
   → [cert-rotation.md](cert-rotation.md), `cargo run --example identity_one_record --features tls,compliance`

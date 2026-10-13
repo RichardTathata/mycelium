@@ -337,7 +337,7 @@ enforcement point does not see. **Never read silence as an all-clear.**
   numbering resumes at that boundary — not at genesis, among exported and pruned slots.
 - **The anchor.** `verify_linked` takes the anchor `(seq, prev_hash)` from the caller: take it from a checkpoint whose
   signature you verified (`SignedAuditCheckpoint`), or `(0, [0; 32])` for genesis.
-- **Residual, with `require_identity_proofs` off (the default):** a key poisoned into a node's identity set can sign an
+- **Residual, with `require_identity_proofs` explicitly off (the default until post-360 row S; `deprecations.md` §41):** a key poisoned into a node's identity set can sign an
   audit checkpoint for that node that replaces the genuine one by LWW and so steers where its stream is anchored. This
   is pre-existing in kind (the identity-poisoning residual); a peer's write into `sys/audit-checkpoint/{node}/` now
   trips the `sys/` tripwire, so it is counted.

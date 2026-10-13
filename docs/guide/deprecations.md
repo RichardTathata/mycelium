@@ -61,6 +61,7 @@ the notice.
 | 38 | a fractional, zero or past-an-hour `interval_secs`/`lease_secs`; a prompt `ns`/`name` that is empty or holds `/`; a caller envelope older than 300 s plus the drift bound; `GatewayPreflight::is_inert` | 2.33.0 (`mycelium-py` 0.2.11, `mycelium-ts` 0.2.5) | whole seconds in `1..=3600`; a one-segment prompt name; a fresh envelope (keep a provider's backlog under 300 s) | Partly — `PromptSkillError` gained `InvalidName`, `CallerError` `Stale`, `is_inert` warns; otherwise HTTP 400 `timer_out_of_range` / `invalid_prompt_name`, `stale` |
 | 39 | a revoked key verifying at a KV, identity, consensus, envelope or knowledge verifier; a revocation signed by any key the node held; a certificate without `mycelium://<node>` | 2.33.0 | re-issue every node's certificate (`mycelium tls issue`, or a development node's next start); rotate before `identity/revoke` | Partly — `CoreCtx` and `RotationMaterial` gained fields; otherwise behaviour (a pre-row-Q certificate has no standing until re-issued; 422 on revoking the current key) |
 | 40 | `kv_require_signed_frames` (an unsigned KV frame or a bare KV signature accepted at a TLS node); the counters `kv_unsigned_frames_accepted` / `kv_untagged_signatures` | 2.34.0 (unreleased) — §35's window closed | nothing: a TLS node refuses both whatever the setting says; read `kv_unsigned_frames_refused` / `kv_untagged_signatures_refused`; upgrade from 2.33.x, not 2.32 | **Yes** for code naming the field — `#[deprecated]`; otherwise no — a no-op, warned at `start()` when set; the two counters stay at zero |
+| 41 | an identity this node cannot authenticate merged by default (a bare `sys/identity/{n}` key list, a legacy pair without a sealed record); `GOSSIP_REQUIRE_IDENTITY_PROOFS` read leniently | the release after 2.33.0 (post-360 row S) | upgrade every node to 2.14.0 or later (they write the sealed record); `require_identity_proofs = false` as an explicit opt-out for a mixed-fleet window | No — behaviour: a pre-2.14.0 peer's key is not learned (counted, `identity_anchor_conflicts`); a malformed `GOSSIP_REQUIRE_IDENTITY_PROOFS` refuses by name |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -1012,7 +1013,7 @@ everywhere, set `kv_require_signed_frames = true`. Alerts on `mycelium_identity_
 **Not covered.** Anti-entropy: a `StateResponse` entry carries no author and no signature and is applied by LWW, so a
 member can still introduce a value for any key through a state reply — the residual the threat model's Boundary A
 states; the `sys/` tripwire does not count an entry for a key the victim holds nothing under. **With
-`require_identity_proofs` off** (the default), the identity of another member is still writable by a member under
+`require_identity_proofs` off** (the default until row S, §41), the identity of another member is still writable by a member under
 its **own** signature: a signed write of `sys/identity/{v}` from M is a valid frame (signer = sender = M), and an
 unproven legacy history is merged on first use — the anchor tripwire counts it (`identity_anchor_conflicts`), it
 does not prevent it. `require_identity_proofs` is what closes that; a replay of a genuine sealed record re-asserts
@@ -1291,7 +1292,7 @@ signature and is applied by LWW, so a member can still introduce a value for any
 through a state reply, and the `sys/` tripwire does not count an entry for a key the victim holds nothing under
 (`docs/threat-model.md` Boundary A). Closing it needs entries that carry their originator's signature, verified on
 receipt as the `SignedData` arm verifies — a wire change with its own window, not built. **With
-`require_identity_proofs` off**, another member's legacy identity is still writable under the writer's own signature
+`require_identity_proofs` off** (an explicit opt-out since row S, §41), another member's legacy identity is still writable under the writer's own signature
 (detected by the anchor tripwire, not prevented). **First sighting of a sealed record stays trust on first use.** **A refused frame still consumes its nonce**
 (pre-existing, unchanged): a receiver records a `Data` frame's nonce in the early-dedup path and a `SignedData` frame's
 before it checks the signature, so a member relaying an unsigned or badly signed copy of another's frame ahead of the
@@ -1299,3 +1300,43 @@ genuine one makes that receiver drop the genuine frame as a duplicate — one ho
 exchange, not a forged write.
 Role claims, audit records and revocation events are still signed over untagged canonical bytes
 (`what-is-proven.md`).
+
+## 41. Identity proofs are required by default (the release after 2.33.0, post-360 plan row S)
+
+**What changes.** `require_identity_proofs` defaults to **`true`**. A TLS node now accepts a peer's identity only
+from its **sealed** record (`sys/identity-signed/{node}`, the history and its proof in one entry), whose proof
+verifies and chains to the keys already held for that node (first sighting stays trust on first use). A bare
+`sys/identity/{node}` key list, or the legacy `sys/identity/` + `sys/identity-proof/` pair without a sealed record,
+is refused and counted (`identity_anchor_conflicts`) rather than merged. A configuration file that does not name
+the field gets `true` (the field now carries its own serde default; it used to resolve to `bool`'s `false`), and
+`GOSSIP_REQUIRE_IDENTITY_PROOFS` is a strict boolean — `true`/`false`/`1`/`0`/`yes`/`no`; anything else refuses
+the configuration by name (`InvalidField { field: "require_identity_proofs" }`), because a typo used to read as
+the opt-out. The guarantee `id.proofs_required` resolves `enforced` on a TLS node that says nothing.
+
+**Why.** It closes the identity-poisoning residual rows F and Q stated: with proofs off, a member could garble
+another node's sealed record and proof and write a bare key list naming its own key — a valid frame under its own
+signature — and every receiver merged that key into the victim's set. The key then reached the verify-only history
+set (forged audit history, a steered checkpoint anchor) and, for a node on a legacy certificate (one with no URI SAN,
+so no standing), verified live writes as that node. The 2.14.0 attempt to make this the default was reverted after a
+Docker leader-election failure that was wrongly blamed on it (the flag is inert without TLS, and that suite runs
+none); the ordering window the revert named is closed by the sealed record, which every TLS node has written since
+2.14.0.
+
+**A mixed fleet.** A node only accepts what its peers publish:
+
+- a peer from **before 2.14.0** writes no sealed record (before 2.3.0, no proof at all), so an upgraded node holds
+  **no key** for it from gossip — only the certificate key a *direct* connection anchors at the handshake — so its
+  writes relayed through other nodes are dropped as from an unknown signer: it is cut off until upgraded;
+- a **2.14.0–2.33.x** peer writes the sealed record, so an upgraded node learns its keys exactly as before; that peer
+  itself still runs with proofs off unless configured, so the residual stays open *at it* until it is upgraded;
+- a node without `[tls]` publishes and reads no identity: the setting is inert there, nothing warns or refuses, and
+  the guarantee report names `[tls]` as what is missing.
+
+**Will the compiler tell me?** No — it is behaviour. `GossipConfig::default()` changed one field's value.
+
+**Migration.** Upgrade every node to 2.14.0 or later before this release reaches a fleet that relies on its older
+nodes (the supported rolling-upgrade window is one release, so a fleet upgrading from 2.33.x is unaffected). To keep
+a pre-2.14.0 node in the fleet for a window, set `require_identity_proofs = false` (or
+`GOSSIP_REQUIRE_IDENTITY_PROOFS=0`) on the upgraded nodes, knowing it reopens the residual above; remove it once the
+fleet is upgraded. A TLS-less development fleet needs nothing. **Not closed:** first sighting of a node never seen
+is trust on first use with or without proofs (anchors close it); anti-entropy entries carry no author.

@@ -489,8 +489,8 @@ pub(crate) fn parse_sealed_identity(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
 /// rejects it — the same answer the flag already gave a node that published no proof at all, for
 /// the same reason: that node predates the mechanism being required.
 ///
-/// With the flag off (the default) nothing changes for an existing deployment: the sealed record is
-/// preferred when present, and the legacy pair still works when it is not.
+/// With the flag explicitly off (the opt-out since post-360 row S made it the default) the sealed
+/// record is preferred when present, and the legacy pair still works when it is not.
 #[cfg(feature = "tls")]
 pub(crate) fn resolve_identity_record<'a>(
     sealed: Option<&'a [u8]>,
@@ -554,10 +554,10 @@ pub(crate) fn validate_and_merge_identity_with_revocations(
     let Some((signer, sig)) = proof.and_then(parse_identity_proof) else {
         // No proof.
         if require_proofs {
-            // Phase 3 (require_identity_proofs): reject an unsigned entry outright — closes the
-            // "mimic a pre-Phase-2 node" residual. Safe only once the whole fleet writes proofs;
-            // a late-arriving proof re-validates via the identity watcher (which also watches the
-            // proof prefix). The key is NOT merged.
+            // Phase 3 (require_identity_proofs, the default since post-360 row S): reject an
+            // unsigned entry outright — closes the identity-poisoning residual (a member's bare key
+            // list for another node). A record arriving later re-validates via the identity watcher
+            // (which watches the whole `sys/identity` prefix). The key is NOT merged.
             conflict_counter.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(
                 node = %node,
@@ -565,7 +565,7 @@ pub(crate) fn validate_and_merge_identity_with_revocations(
             );
             return;
         }
-        // Rollout tolerance (default): keep the Phase-1b detection tripwire, then accept.
+        // The explicit opt-out: keep the Phase-1b detection tripwire, then accept.
         flag_identity_anchor_conflict(anchor_keys, conflict_counter, node, kv_keys);
         merge_peer_keys(peer_keys, node, kv_keys);
         return;

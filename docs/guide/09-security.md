@@ -367,7 +367,7 @@ above, the Dev-facing controls and their Ops runbooks:
 | Audit → SIEM/WORM export | `GossipAgent::with_audit_sink` (`AuditSink`) | [audit](../operations/audit.md) |
 | Audit retention (checkpoint/prune) | `audit_checkpoint` / `audit_prune_to_checkpoint` | [audit](../operations/audit.md) |
 | Compromise remediation | `rotate_identity_on_compromise` · `POST /gateway/identity/revoke` | [cert-rotation](../operations/cert-rotation.md) |
-| Authenticated identity (reject unsigned) | `require_identity_proofs` (`GOSSIP_REQUIRE_IDENTITY_PROOFS`) — **off by default**, see below | [cert-rotation](../operations/cert-rotation.md) |
+| Authenticated identity (reject unsigned) | `require_identity_proofs` (`GOSSIP_REQUIRE_IDENTITY_PROOFS`) — **on by default** since post-360 row S, see below | [cert-rotation](../operations/cert-rotation.md) |
 | Sealed identity record (keys + proof in one entry) | `sys/identity-signed/{node}` — written automatically by every TLS node | [cert-rotation](../operations/cert-rotation.md) |
 | GDPR erasure (crypto-shred) | `SubjectKeyRegistry` (`encrypt_for`/`decrypt_for`/`destroy`) | [data-erasure](../operations/data-erasure.md) |
 
@@ -405,21 +405,35 @@ Three details the example makes checkable rather than asserting:
   the node that was offline when the request came in. That is a stronger property than deletion, and
   it is the only one that is true.
 
-### Identity proofs: what turning them on actually requires
+### Identity proofs: on by default, and what turning them off means
 
-`require_identity_proofs` rejects an identity entry this node cannot authenticate. It is **off by
-default**, and the reason is worth knowing before you turn it on.
+`require_identity_proofs` rejects an identity entry this node cannot authenticate. It is **on by
+default** (post-360 plan row S; [deprecations §41](deprecations.md)), and it is inert without
+`[tls]` — no identity is published or read there, and nothing warns.
 
 Every TLS node publishes a **sealed** record — `sys/identity-signed/{node}` — carrying its key
 history **and** the proof that authenticates them in **one** KV entry. That matters because the
 older form was *two* entries, `sys/identity/` and `sys/identity-proof/`, which are two gossip
 messages with no ordering between them: a peer requiring proofs could learn the identity first,
 reject it, and hold **no key** for that node until the proof arrived. One entry cannot arrive in two
-parts, so the window is closed **by construction rather than by timing**.
+parts, so the window is closed **by construction rather than by timing**. With proofs required,
+**only the sealed record is accepted**.
 
-With the flag set, **only the sealed record is accepted** — the legacy pair is refused, not because
-it is invalid but because it is two messages. So the precondition for turning it on is the ordinary
-one: **every node must run a release that writes the sealed record.** Check before you set it:
+**What the default closes.** With proofs off, an admitted member could garble another node's sealed
+record and write a bare `sys/identity/{node}` key list naming its own key — a valid frame under its
+own signature — and every receiver merged the key into that node's set. It then verified forged
+audit history for the node and, for a node on a pre-2.33 certificate, signed live writes as it.
+
+**A mixed fleet.** A node from **before 2.14.0** writes no sealed record (before 2.3.0, no proof at
+all), so an upgraded node holds no key for it and drops its signed writes until it is upgraded. A
+2.14.0–2.33.x node writes the sealed record and is learned as before. During such a window, or on a
+TLS-less development fleet where it changes nothing anyway, opt out explicitly:
+
+```toml
+require_identity_proofs = false     # or GOSSIP_REQUIRE_IDENTITY_PROOFS=0 (a strict boolean)
+```
+
+Check that every node writes the sealed record:
 
 ```bash
 curl -s localhost:PORT/gateway/kv/keys | grep -c 'sys/identity-signed/'

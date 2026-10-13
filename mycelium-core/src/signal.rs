@@ -1421,8 +1421,8 @@ pub mod kv_ns {
     /// messages with no ordering between them. A peer that requires proofs and learns the identity
     /// first rejects it and holds no key for that node until the proof lands — self-healing for the
     /// key, *not* self-healing for a leader election decided inside the window, which is one-shot.
-    /// That window is why `require_identity_proofs` could not be turned on; one record closes it by
-    /// construction rather than by timing.
+    /// One record closes that window by construction rather than by timing, which is what let
+    /// `require_identity_proofs` become the default (post-360 plan row S).
     ///
     /// Every TLS node writes this **and** the legacy pair, so a node that predates this release
     /// still learns the key. Readers prefer this record; with `require_identity_proofs` set they
