@@ -3,8 +3,9 @@
 # hardening plan row F.
 #
 # WHY IT EXISTS
-#   Under `[tls]` a node signs its KV writes (`WireMessage::SignedData`), and a TLS node can refuse an
-#   unsigned `Data` frame (`kv_require_signed_frames`; unconditional at plan row F2). Row F's
+#   Under `[tls]` a node signs its KV writes (`WireMessage::SignedData`), and a TLS node refuses an
+#   unsigned `Data` frame (opt-in at row F; unconditional since plan row F2), so an unsigned local write
+#   is a write no TLS peer applies. Row F's
 #   enumeration found twenty-three agent write sites that built a bare `Data` frame themselves and never
 #   signed; #611's review found a twenty-fourth — the connection handler's quorum-evidence write — in a
 #   file the first version of this gate exempted whole. Every one goes through

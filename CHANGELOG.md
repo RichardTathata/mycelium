@@ -9,6 +9,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **A TLS node refuses an unsigned KV frame and a bare KV signature unconditionally** (post-360 plan row F2; upgrade
+  note `docs/guide/deprecations.md` §40). Row F (2.33.0) made the refusal opt-in for one release; now, whatever
+  `kv_require_signed_frames` says, a TLS node drops an unsigned `Data` frame (`GET /stats` `kv_unsigned_frames_refused`)
+  and a `SignedData` frame signed in the bare pre-2.33 form (new: `kv_untagged_signatures_refused`,
+  `mycelium_kv_untagged_refused_total`, and a rate-limited warning naming the peer). The two self-authenticating
+  records — a sealed identity record and a CA-verified certificate record — stay exempt. `kv_require_signed_frames` is a
+  **retired no-op** (`#[deprecated(since = "2.34.0")]`, still parsed, warned at `start()` when `true`; an explicit
+  `false` is not an opt-out). Row F's window counters `kv_unsigned_frames_accepted` and `kv_untagged_signatures` stay on
+  `GET /stats` at zero and their metrics are no longer emitted. `mesh.signed_writes` is rev 2 and resolves `enforced`
+  on `[tls]` alone; `secure-single-domain` is **rev 5** and requires it (met wherever `mesh.tls` is, so it admits every
+  node rev 4 admitted). Wire v12 unchanged. **Upgrade note:** upgrade from 2.33.x, not from 2.32 — a 2.32 node's KV
+  writes are refused at gossip by an upgraded node and reach it only by anti-entropy. **Not closed:** an anti-entropy
+  `StateResponse` entry carries no author and no signature and is still applied by LWW (a wire change; restated in the
+  threat model and `what-is-proven.md`). Seen failing first on 4251d50a:
+  `an_unsigned_data_frame_is_refused_whatever_the_setting_says`, `a_bare_2_32_kv_signature_is_refused`,
+  `only_a_self_authenticating_sealed_identity_is_exempt_from_the_refusal` (at the default),
+  `mesh_signed_writes_is_enforced_under_tls_by_default`, `kv_require_signed_frames_is_inert_wherever_it_is_set`.
+
 ### Changed
 
 - **A node holding the fleet CA key says so loudly at start** (post-360 plan row T). In the development posture

@@ -201,9 +201,10 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
     for (name, value) in feature_gated_counters() {
         body[name] = json!(value);
     }
-    // Post-360 plan row F's mixed-fleet window (`deprecations.md` §35), per node: KV signatures accepted
-    // in the bare (pre-2.33) form, unsigned KV `Data` frames a TLS node accepted or refused, and signed
-    // frames refused because their signer was not their sender. Frames, not peers. (2.32.0's
+    // Post-360 plan rows F and F2 (`deprecations.md` §35, §40), per node: unsigned KV `Data` frames and
+    // bare (pre-2.33) KV signatures a TLS node refused, and signed frames refused because their signer
+    // was not their sender. Frames, not peers. `kv_untagged_signatures` and `kv_unsigned_frames_accepted`
+    // counted row F's window and stay at zero since F2 (kept so a 2.x reader does not break). (2.32.0's
     // `identity_untagged_proofs` and `consensus_untagged_signatures` went with the §23 window.)
     #[cfg(feature = "tls")]
     {
@@ -212,6 +213,7 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
         body["kv_untagged_signatures"] = json!(load(&b.kv_untagged_signatures));
         body["kv_unsigned_frames_accepted"] = json!(load(&b.kv_unsigned_accepted));
         body["kv_unsigned_frames_refused"] = json!(load(&b.kv_unsigned_refused));
+        body["kv_untagged_signatures_refused"] = json!(load(&b.kv_untagged_refused));
         body["kv_signer_mismatch"] = json!(load(&b.kv_signer_mismatch));
         body["kv_identity_exempt_frames"] = json!(load(&b.kv_identity_exempt));
         body["kv_identity_stale_refused"] = json!(load(&b.kv_identity_stale_refused));

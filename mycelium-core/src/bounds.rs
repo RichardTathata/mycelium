@@ -46,16 +46,23 @@ pub struct TransportBounds {
     pub per_source_refused: AtomicU64,
     /// Inbound connections per source address — kept only when `max_connections_per_source` is set.
     per_source: Arc<papaya::HashMap<std::net::IpAddr, Arc<AtomicU64>>>,
-    /// KV `SignedData` frames this node accepted in the bare (pre-2.33) signature form — post-360 row
-    /// F's one-release window (`deprecations.md` §35). Frames, not peers. `GET /stats`
-    /// `kv_untagged_signatures`. Only a TLS node raises it.
+    /// **Retired — nothing raises it since post-360 row F2** (`deprecations.md` §40): KV `SignedData`
+    /// frames accepted in the bare (pre-2.33) signature form under row F's one-release window (§35).
+    /// Kept, always zero, so a reader of `GET /stats` `kv_untagged_signatures` does not break on the
+    /// 2.x line; a bare signature is now refused and counted on [`Self::kv_untagged_refused`].
     pub kv_untagged_signatures: AtomicU64,
-    /// Unsigned KV `Data` frames this TLS node applied under the window (`kv_require_signed_frames`
-    /// off). `GET /stats` `kv_unsigned_frames_accepted`.
+    /// **Retired — nothing raises it since post-360 row F2** (`deprecations.md` §40): unsigned KV
+    /// `Data` frames a TLS node applied under row F's window. Kept, always zero, for `GET /stats`
+    /// `kv_unsigned_frames_accepted`; the refusals are [`Self::kv_unsigned_refused`].
     pub kv_unsigned_accepted: AtomicU64,
-    /// Unsigned KV `Data` frames this TLS node dropped because `kv_require_signed_frames` is set.
+    /// Unsigned KV `Data` frames this TLS node refused — every one but a self-authenticating identity
+    /// or certificate record, since row F2 whatever `kv_require_signed_frames` says.
     /// `GET /stats` `kv_unsigned_frames_refused`.
     pub kv_unsigned_refused: AtomicU64,
+    /// KV `SignedData` frames refused because they carry a bare (pre-2.33) signature that verifies only
+    /// without the `mycelium.kv/update/1` tag — a peer still on 2.32 (post-360 row F2). Frames, not
+    /// peers. `GET /stats` `kv_untagged_signatures_refused`.
+    pub kv_untagged_refused: AtomicU64,
     /// `SignedData` frames dropped because their `signer` is not the update's `sender` (#611's review,
     /// finding 1). `GET /stats` `kv_signer_mismatch`.
     pub kv_signer_mismatch: AtomicU64,
@@ -65,7 +72,7 @@ pub struct TransportBounds {
     pub kv_identity_exempt: AtomicU64,
     /// Unsigned sealed identity records refused because their history lacks a key this node already
     /// holds or has stored for that node — a superseded record replayed (#611's third review, N4).
-    /// Refused whatever `kv_require_signed_frames` says. `GET /stats` `kv_identity_stale_refused`.
+    /// `GET /stats` `kv_identity_stale_refused`.
     pub kv_identity_stale_refused: AtomicU64,
     /// `SignedData` frames and unsigned sealed identity records refused because the key that signed
     /// them is one their node has revoked (post-360 plan row Q) — a compromised key still in use, or a

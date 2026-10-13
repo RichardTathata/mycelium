@@ -78,7 +78,7 @@ Four places strain that line today, and the rows in §3 address each:
 | **D** — *delivered 2.32.0 (#599), §3.5* | WASM execution limits | epoch interruption bounds a guest call; guest code runs off the runtime's worker threads; a trap does not recompile the component on every call | R0 |
 | **E** — *delivered 2.33.0 (#613), §3.5* | Gateway remainder | client-supplied timer periods (`interval_secs`, `lease_secs`) bounded; the log-group subscribe keeps the core's `(hlc, key)` tiebreak and saves the group offset only after the entry is sent (today it saves first, so an entry in flight when a stream drops is never re-sent — found by row G); the mailbox deletes an entry only after the client has it (today it tombstones on entering the 256-slot channel, so a dropped stream loses queued events — #595's review); prompt keys cannot alias across `ns`/`name` (`prompts/{ns}/{name}` with a `/` in either); the caller envelope binds freshness (a replay inside the window *not built* — no nonce cache) | P5 |
 | **F** — *delivered 2.33.0 (#611), §3.5 (window; the flip is F2)* | Wire and crypto, one MINOR with a window | a TLS node refuses unsigned `Data` frames; the removal check reads a peer's key structurally, not by byte-scanning the certificate; KV `SignedData` is domain-tagged; each change carries a mixed-fleet window and an upgrade note in the 2.30.0 shape; the #585 and #587 windows close in the same MINOR (#587 opened none — §3.5 F) | R0, ideally its own release |
-| **F2** | The refusal unconditional (the MINOR after F) | a TLS node refuses an unsigned `Data` frame and a bare KV `SignedData` signature whatever `kv_require_signed_frames` says (the setting retired or kept as a no-op, stated); the window counters `kv_unsigned_frames_accepted` and `kv_untagged_signatures` stop rising or are removed, stated in `deprecations.md`; `mesh.signed_writes` resolves `enforced` under `[tls]` and is considered for `secure-single-domain`'s required set; the anti-entropy residual (an unsigned, authorless `StateResponse`) is either closed or restated | F released |
+| **F2** — *delivered (#F2PR), unreleased, §3.5* | The refusal unconditional (the MINOR after F) | a TLS node refuses an unsigned `Data` frame and a bare KV `SignedData` signature whatever `kv_require_signed_frames` says (the setting retired or kept as a no-op, stated); the window counters `kv_unsigned_frames_accepted` and `kv_untagged_signatures` stop rising or are removed, stated in `deprecations.md`; `mesh.signed_writes` resolves `enforced` under `[tls]` and is considered for `secure-single-domain`'s required set; the anti-entropy residual (an unsigned, authorless `StateResponse`) is either closed or restated | F released |
 | **G** — *delivered 2.32.0 (#595), §3.5* | SDKs | Python whole-second timeouts and a non-truncating tuple `take`; path segments escaped; TypeScript `SupersededError`; one `scatterGather` default, documented; SSE reconnect is designed with a gateway resume point or recorded as not built | R0 |
 | **H** — *delivered 2.33.0 (#609), §3.5* | Companions | the commitment deadline judged on the log's clock, not the offerer's — **delivered as the declarer's signed close** (no clock in the log is offerer-proof, §3.5); `award_of` verifies before it reports (the declarer pinned by the caller; the unverified path stated, *not built*); the reason blob store bounded in total (eviction *not built*); caller-chosen `run_id` validated | R0 |
 | **I** — *delivered with 2.33.0 (private #30), §3.5; Cedar narrower* | Private repo P3s | RA5 correction chains and competing corrections; attempt keys carry the operation id; a lock-order table; the outbox directory fsynced at create; Cedar policies schema-validated at load; the CI pin check refuses `[patch]`, `rev =` and multi-line tables | R0's re-pin |
@@ -674,6 +674,48 @@ PR.
   `configuration.md`'s `kv_require_signed_frames` row; the identity-authentication and federated-domains records
   amended; wiki `dev/security.md`; `docs/wiki/dev/.log/2026-10-12-f-wire-crypto.md`.
 
+**F2 — The refusal unconditional (#F2PR, unreleased).** Read against the branch's code; the doors enumerated first
+(`grep -rn 'WireMessage::Data\b\|WireMessage::SignedData\|StateResponse\|apply_inbound('` over `mycelium-core/src`
+and `src` — one `Data` arm, one `SignedData` arm, one `StateResponse` arm in `connection.rs`, the codec, the fuzz
+harness's decode-only `wire_frame_apply`; `grep -rn 'kv_require_signed_frames\|KV_REQUIRE_SIGNED_FRAMES'` — the field,
+`Default`, the env override, `kv_require_signed_frames_is_inert`, the `start()` warning, the guarantee, the
+`Data` arm, the tests, the docs; `grep -rn 'kv_unsigned_accepted\|kv_untagged_signatures\|mycelium_kv_'` — the two
+`TransportBounds` fields, two `metrics::counter!` sites, `GET /stats`, the tests; no SDK, dashboard or alert reads
+either counter).
+- *A TLS node refuses an unsigned `Data` frame whatever `kv_require_signed_frames` says* — `connection.rs`, the
+  `Data` arm: under a TLS identity every unsigned frame but the exempt ones is dropped and counted
+  (`kv_unsigned_refused`), the setting read nowhere; `an_unsigned_data_frame_is_refused_whatever_the_setting_says`
+  (seen applying the forged key on 4251d50a); a node without `[tls]` unchanged
+  (`a_node_without_tls_still_applies_an_unsigned_frame`, passes on both — not a regression test).
+- *… and a bare KV `SignedData` signature* — the `SignedData` arm verifies the tagged form only; a signature that
+  verifies bare is counted (`kv_untagged_refused`, `GET /stats` `kv_untagged_signatures_refused`,
+  `mycelium_kv_untagged_refused_total`) and named in a rate-limited warning; `a_bare_2_32_kv_signature_is_refused`
+  (seen applying the key on 4251d50a).
+- *The setting retired or kept as a no-op, stated* — **retired as a no-op**: `#[deprecated(since = "2.34.0")]`, still
+  parsed from TOML and `GOSSIP_KV_REQUIRE_SIGNED_FRAMES`, `kv_require_signed_frames_is_inert` true wherever it is set
+  and `start()` warns then (`kv_require_signed_frames_is_inert_wherever_it_is_set`, seen failing on 4251d50a: "set with
+  [tls]" read as enforcing; the warning's emission itself is not asserted); a node that still sets it refuses the same
+  (`a_tls_node_that_sets_the_retired_setting_refuses_an_unsigned_data_frame`). An explicit `false` is not an opt-out
+  (stated, `deprecations.md` §40).
+- *The window counters stop rising or are removed, stated in `deprecations.md`* — **stop rising**: both
+  `TransportBounds` fields kept and reported on `GET /stats` at zero (nothing raises them; the API-shape rule), their
+  metrics no longer emitted; asserted at zero in the two refusal tests and on `/stats`
+  (`the_row_f_window_counters_are_on_gateway_stats`); §40 and the §35 closure note.
+- *`mesh.signed_writes` resolves `enforced` under `[tls]`* — rev 2, on `[tls]` alone, names the bare signature;
+  `mesh_signed_writes_is_enforced_under_tls_by_default` (seen `not_configured` on 4251d50a). *Considered for
+  `secure-single-domain`* — **added**, rev 5: it resolves on exactly what `mesh.tls` does, so rev 5 admits every node rev
+  4 admitted (`the_secure_profiles_required_set_is_pinned`, the two refusal tests' revision).
+- *The identity and certificate exemptions keep passing* — `only_a_self_authenticating_sealed_identity_is_exempt_from_the_refusal`
+  now runs at the default (seen failing on 4251d50a: all five refused frames applied); the certificate record's
+  exemption is exercised by row Q's multi-node tests, whose fleets no longer set the flag; the whole `lib_tests`
+  module (263 tests, the multi-node set among them) 12× green.
+- *Every agent write still reaches a peer* — `an_agent_write_reaches_a_peer_that_requires_signed_frames`,
+  `quorum_evidence_reaches_a_peer_that_requires_signed_frames`, `a_gateway_kv_delete_reaches_a_peer_that_requires_signed_frames`,
+  `a_capability_retracted_at_shutdown_reaches_the_peers` at the default; the co-op suite locally.
+- *The anti-entropy residual closed or restated* — **restated, not built**: closing it needs a `SyncEntry` that carries
+  its originator's signature — a wire change (v13) with its own window; restated in §40, the threat model's Boundary A,
+  `what-is-proven.md`'s third table and the config field's doc.
+
 **Q — Revocation reaches every verifier (#616, released in 2.33.0; decision record `docs/design/revocation-authority.md`
 rev 3).** #616's first head (`e5c2c27e`) wired every verifier to one answer and was right about that; its adversarial
 review found the *authority* behind it wrong (any held key revoked any other, for ever — a poisoned key, a first
@@ -755,7 +797,9 @@ CI on F also caught a co-op demo regression its own changes caused, fixed in the
 queues before the shutdown signal), and N, O, P recorded by #614 with the `a2a-sdk` probe's evidence
 (`docs/plans/external/2026-10-12-a2a-sdk-probe/`).
 
-**Not started:** F2 (the unsigned-frame refusal made unconditional, the MINOR after F), S (identity proofs on by default — the remaining identity-poisoning residual; best shipped with F2), K (policy over history — decide §5's fleet question first), L (credentials attached at egress), M
+**Delivered since (unreleased):** F2 (#F2PR — the unsigned-frame and bare-signature refusal unconditional, `kv_require_signed_frames` retired, `secure-single-domain` rev 5; §3.5), T (#622).
+
+**Not started:** S (identity proofs on by default — the remaining identity-poisoning residual; best shipped with F2), K (policy over history — decide §5's fleet question first), L (credentials attached at egress), M
 (activation commands confined), N (A2A at the current specification — independent of E and F, and it carries a defect
 worth fixing on its own: the agent card names the gossip port), O and P (after N), and §5's inference-routing question. (Q, revocation at every verifier, is delivered — #616, §3.5.)
 
@@ -796,7 +840,8 @@ live policy; the privacy router) ·
 
 **Release:** v2.33.0 is cut on 2026-10-13 (branch `release/v2.33.0`; tagged only on the maintainer's word) with the rows merged
 since v2.32.0 — P2's migration #606 (with #604, #605), Φ, P5, J, H, E, F and Q, and the private row I on its pin;
-upgrade notes `deprecations.md` §34–§39. The next MINOR is F2's (best with S).
+upgrade notes `deprecations.md` §34–§39. The next MINOR carries F2 (§40; best with S). Recorded by F2 as not built: an
+authenticated anti-entropy entry (a wire change).
 
 ## 4 · Decisions taken
 

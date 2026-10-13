@@ -1169,37 +1169,34 @@ pub struct GossipConfig {
     #[serde(default)]
     pub require_identity_proofs: bool,
 
-    /// **A TLS node refuses an unsigned KV `Data` frame** (post-360 plan row F).
+    /// **Retired — a no-op since post-360 plan row F2** (`docs/guide/deprecations.md` §40). Accepted
+    /// (TOML and `GOSSIP_KV_REQUIRE_SIGNED_FRAMES`) so a 2.33 configuration still loads; `start()` warns
+    /// once when it is `true`. An explicit `false` is indistinguishable from the default and is **not**
+    /// an opt-out: nothing restores row F's window. Removal is on the 3.0.0 ledger.
     ///
-    /// Under `[tls]` a node signs every KV write it originates (`WireMessage::SignedData`, signature
-    /// over `mycelium.kv/update/1 ‖ len ‖ canonical`, signer bound to the update's sender), and a
-    /// receiver drops a `SignedData` frame whose signature does not verify. An unsigned `Data` frame
-    /// was applied regardless — so a member could write a key under any other member's `sender` hash
-    /// simply by not signing. Before row F the node itself sent twenty-four kinds of write unsigned
-    /// (membership, mailboxes, state machines, opacity, the gateway's routes, the soft-state
-    /// advertiser, the connection handler's quorum evidence), so a refusal would have dropped a
-    /// fleet's own traffic; every one is signed now.
+    /// What it used to choose, and what is now unconditional: under `[tls]` a node signs every KV write
+    /// it originates (`WireMessage::SignedData`, signature over `mycelium.kv/update/1 ‖ len ‖
+    /// canonical`, signer bound to the update's sender), and **a TLS node refuses an unsigned KV `Data`
+    /// frame and a bare (pre-2.33, untagged) KV signature** — counted as `kv_unsigned_frames_refused`
+    /// and `kv_untagged_signatures_refused` on `GET /stats`. Row F (2.33.0) accepted both for one
+    /// release unless this was `true`; row F2 refuses them whatever it says. The guarantee report
+    /// resolves the refusal as `mesh.signed_writes`, `enforced` wherever `[tls]` is. Without `[tls]`
+    /// nothing is signed and nothing is refused — the plaintext posture is unchanged.
     ///
-    /// **The window, one release:** with this `false` (the default) a TLS node applies an unsigned
-    /// `Data` frame and counts it (`GET /stats` `kv_unsigned_frames_accepted`,
-    /// `mycelium_kv_unsigned_frames_total{outcome="accepted"}`); with it `true` the frame is dropped and
-    /// counted as refused (`kv_unsigned_frames_refused`). Set it once every peer is upgraded — an
-    /// upgraded node that requires signed frames drops a 2.32 peer's agent writes until that peer is
-    /// upgraded. Plan row F2 refuses unconditionally (`docs/guide/deprecations.md` §35). Without
-    /// `[tls]` it is inert, and `start()` warns ([`Self::kv_require_signed_frames_is_inert`]). The
-    /// guarantee report resolves it as `mesh.signed_writes`.
-    ///
-    /// **Exempt:** one unsigned frame only — a sealed identity record that authenticates itself (its
-    /// proof verifies under a key in its own history and, when this node holds keys for the node,
-    /// under one of those, and whose history contains every key held or stored for it — a replayed
-    /// superseded record is refused and counted, `kv_identity_stale_refused`;
-    /// `connection::self_authenticating_identity`), counted as
-    /// `kv_identity_exempt_frames`. A bare identity record, a proof alone or any tombstone is refused
-    /// like any unsigned frame. With `require_identity_proofs` off a member can still write another's
-    /// identity under its own signature (detected by the anchor tripwire, not prevented). **Not covered:** anti-entropy. A
-    /// `StateResponse` entry carries no author and no signature, and is applied by LWW whatever this
-    /// says — the refusal is bypassable there (`docs/threat-model.md` Boundary A).
+    /// **Exempt:** two unsigned frames only, each because it authenticates itself — a sealed identity
+    /// record (its proof verifies under a key in its own history and, when this node holds keys for the
+    /// node, under one of those, and its history contains every key held or stored for it; a replayed
+    /// superseded record is refused and counted, `kv_identity_stale_refused`), and a CA-verified
+    /// certificate record (`sys/identity-cert/{n}/{key}`, row Q) — both
+    /// `connection::self_authenticating_identity`, counted as `kv_identity_exempt_frames`. A bare
+    /// identity record, a proof alone or any tombstone is refused like any unsigned frame. With
+    /// `require_identity_proofs` off a member can still write another's identity under its own
+    /// signature (detected by the anchor tripwire, not prevented). **Not covered:** anti-entropy. A
+    /// `StateResponse` entry carries no author and no signature, and is applied by LWW — the refusal is
+    /// bypassable there (`docs/threat-model.md` Boundary A); closing it needs entries that carry their
+    /// origin's signature, a wire change.
     #[serde(default)]
+    #[deprecated(since = "2.34.0", note = "a no-op since post-360 row F2: a TLS node refuses unsigned KV frames unconditionally (docs/guide/deprecations.md §40)")]
     pub kv_require_signed_frames: bool,
 
     /// Gateway caller identity profile (item 7). `Secure` (default): every gateway-originated
@@ -1251,7 +1248,7 @@ pub struct GossipConfig {
     /// `consistent/` slot families — whose scope is not a group with an electorate declaration
     /// (`sys/govern/electorate/{group}`) is refused `ElectorateNotGoverned` before anything is sent.
     /// `false` (default) runs it as before and counts it. Resolves the guarantee `cons.safety_profile`,
-    /// which `secure-single-domain` rev 4 requires. Env `GOSSIP_CONSENSUS_REQUIRE_ELECTORATE`.
+    /// which `secure-single-domain` requires (rev 4 on). Env `GOSSIP_CONSENSUS_REQUIRE_ELECTORATE`.
     #[serde(default)]
     pub consensus_require_electorate: bool,
 
@@ -1410,6 +1407,7 @@ impl Default for GossipConfig {
             gateway_named_tokens:          Vec::new(),
             gateway_identity_issuer:       None,
             require_identity_proofs:       false,
+            #[allow(deprecated)]
             kv_require_signed_frames:      false,
             gateway_caller_profile:        GatewayCallerProfile::Secure,
             protected_rpc_kinds:           Vec::new(),
@@ -1427,11 +1425,13 @@ impl Default for GossipConfig {
 }
 
 impl GossipConfig {
-    /// `kv_require_signed_frames` set where it can refuse nothing: without `[tls]` no frame is signed, so
-    /// an unsigned one cannot be told apart and is applied as before (#611's review, finding 9). `start()`
-    /// warns; it does not refuse, the same as `require_identity_proofs` without `[tls]`.
+    /// `kv_require_signed_frames` set, where it can change nothing. Since post-360 row F2 that is
+    /// everywhere: a TLS node refuses an unsigned frame whatever it says, and without `[tls]` nothing is
+    /// signed, so nothing can be told apart (#611's review, finding 9). `start()` warns; it does not
+    /// refuse — a 2.33 configuration that set it still starts (`docs/guide/deprecations.md` §40).
+    #[allow(deprecated)]
     pub fn kv_require_signed_frames_is_inert(&self) -> bool {
-        self.kv_require_signed_frames && self.tls.is_none()
+        self.kv_require_signed_frames
     }
 
     /// A self-sizing configuration (WS-C M8): [`Default`] with every formula-driven
@@ -2068,8 +2068,10 @@ impl GossipConfig {
         if let Ok(v) = env::var("GOSSIP_REQUIRE_IDENTITY_PROOFS") {
             self.require_identity_proofs = matches!(v.as_str(), "1" | "true" | "TRUE" | "yes");
         }
+        // Retired (row F2, `deprecations.md` §40): still read, so `start()` can say it does nothing.
         if let Ok(v) = env::var("GOSSIP_KV_REQUIRE_SIGNED_FRAMES") {
-            self.kv_require_signed_frames = matches!(v.as_str(), "1" | "true" | "TRUE" | "yes");
+            #[allow(deprecated)]
+            { self.kv_require_signed_frames = matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"); }
         }
         if let Ok(v) = env::var("GOSSIP_MEMBERSHIP_COOLDOWN_SECS") {
             self.membership_cooldown_secs = Some(v.parse().map_err(GossipError::Parse)?);
@@ -2594,22 +2596,26 @@ mod tests {
         assert!(format!("{err}").contains("gateway_named_tokens"), "{err}");
     }
 
+    /// **`kv_require_signed_frames` is retired: inert wherever it is set** (post-360 plan row F2). Row F
+    /// read it as inert only without `[tls]` (#611's review, finding 9); since F2 a TLS node refuses an
+    /// unsigned frame whatever it says, so with `[tls]` too it changes nothing, and `start()` says so.
+    /// Seen failing first on 4251d50a: "on with [tls]" was read as enforcing.
+    #[test]
+    #[allow(deprecated)]
+    fn kv_require_signed_frames_is_inert_wherever_it_is_set() {
+        let mut c = GossipConfig::default();
+        assert!(!c.kv_require_signed_frames_is_inert(), "unset: nothing to warn about");
+        c.kv_require_signed_frames = true;
+        assert!(c.kv_require_signed_frames_is_inert(), "set without [tls]: nothing to refuse");
+        c.tls = Some(TlsConfig::default());
+        assert!(c.kv_require_signed_frames_is_inert(), "set with [tls]: the refusal is unconditional, the setting adds nothing");
+    }
+
     /// **One rule for blank secrets** (#598's adversarial review, finding 1). A blank token — empty or
     /// whitespace-only — in any credential form is refused by name at `validate()`. The env parser
     /// already refused a blank named token; a TOML table did not, so `[[gateway_scoped_tokens]] token
     /// = ""` with `scopes = ["*"]` counted as a credential at start and granted `*` to an empty bearer
     /// wherever the transport delivers one (HTTP/2 does not trim it).
-    /// `kv_require_signed_frames` without `[tls]` is inert and named so (#611's review, finding 9).
-    #[test]
-    fn kv_require_signed_frames_without_tls_is_inert() {
-        let mut c = GossipConfig::default();
-        assert!(!c.kv_require_signed_frames_is_inert(), "off is not inert, it is off");
-        c.kv_require_signed_frames = true;
-        assert!(c.kv_require_signed_frames_is_inert(), "on without [tls]: nothing to refuse");
-        c.tls = Some(TlsConfig::default());
-        assert!(!c.kv_require_signed_frames_is_inert(), "on with [tls]: enforced");
-    }
-
     #[test]
     fn a_blank_gateway_token_is_refused_in_every_form() {
         let cases = [

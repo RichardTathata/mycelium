@@ -113,7 +113,7 @@ hit, re-raised on every `sys/identity*` event, with the peer's handshake key sti
 counters are gone, and an acceptor answers only a tagged request (`an_acceptor_answers_only_a_tagged_request`,
 `a_bare_identity_proof_is_refused_now_the_window_is_closed`). Row F also tags **KV `SignedData`**
 (`mycelium.kv/update/1`, `framing::kv_signing_message`; the bare 2.32 form accepted for one release, counted as
-`kv_untagged_signatures`), so only role claims, audit records and revocation events are still untagged
+`kv_untagged_signatures` — refused since row F2, counted as `kv_untagged_signatures_refused`), so only role claims, audit records and revocation events are still untagged
 (`what-is-proven.md`).
 
 **Row F's other two (2026-10-12).** Under `[tls]` an unsigned `Data` frame was applied — and the node itself sent
@@ -121,11 +121,14 @@ twenty-four kinds of write unsigned (twenty-three in the agent; #611's review fo
 quorum-evidence write in a file the first gate exempted whole) (membership, mailboxes, state machines, opacity, the gateway's routes, the
 soft-state advertiser), so a refusal would have dropped a fleet's own traffic. Every write site now goes through
 `framing::local_kv_wire_msg`, `scripts/check-signed-dispatch.sh` keeps a bare dispatch from returning, and
-`kv_require_signed_frames` refuses the frame (default off for one release: applied and counted as
-`kv_unsigned_frames_accepted`; plan row F2 flips it). The review's first finding was worse than the unsigned
+`kv_require_signed_frames` refused the frame (default off for 2.33.0: applied and counted as
+`kv_unsigned_frames_accepted`). **Row F2 flipped it:** a TLS node refuses an unsigned frame and a bare KV signature
+whatever the setting says, the setting is a retired no-op, and the two window counters stay at zero
+(`deprecations.md` §40); the two self-authenticating records (sealed identity, CA-verified certificate) stay exempt. The review's first finding was worse than the unsigned
 frame: a **signed** frame's `signer` was never bound to its `sender`, so a member's own valid signature carried a
 write attributed to anyone — now refused (`kv_signer_mismatch`). Anti-entropy is the stated residual — a
-`StateResponse` entry carries no author, so the opt-in refusal is bypassable there.
+`StateResponse` entry carries no author, so the refusal is bypassable there — restated by F2, not closed (a
+signed `SyncEntry` is a wire change).
 And the certificate key: `tls::ed25519_key_from_cert_der` now reads the SPKI structurally (rustls-webpki), because
 the byte-scan's premise — "the cert is CA-validated" — covered the issuer, not the bytes; a node holding the CA key
 chooses its certificate's serial. **The lesson:** a safety argument of the form "the input is validated" has to

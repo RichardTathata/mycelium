@@ -92,13 +92,14 @@
     },
     {
       "id": "mesh.signed_writes",
-      "revision": 1,
+      "revision": 2,
       "subsystem": "transport",
       "kind": "node_enforced",
-      "promise": "an unsigned KV write frame is refused (a self-authenticating sealed identity record excepted), so a member cannot write as another by not signing — anti-entropy state replies excepted, and another member's identity stays writable under the writer's own signature unless `require_identity_proofs`",
-      "needs": "`tls`; `[tls]`; `kv_require_signed_frames = true` (default off — post-360 row F's window; unconditional at row F2)",
+      "promise": "an unsigned KV write frame, or one signed in the bare pre-2.33 form, is refused (a self-authenticating sealed identity record or CA-verified certificate record excepted), so a member cannot write as another by not signing — anti-entropy state replies excepted, and another member's identity stays writable under the writer's own signature unless `require_identity_proofs`",
+      "needs": "`tls`; `[tls]` (unconditional since post-360 row F2; `kv_require_signed_frames` is retired)",
       "enforcement_points": [
-        "connection::handle_connection (Data arm)"
+        "connection::handle_connection (Data arm)",
+        "connection::handle_connection (SignedData arm)"
       ],
       "docs": "docs/guide/deprecations.md"
     },

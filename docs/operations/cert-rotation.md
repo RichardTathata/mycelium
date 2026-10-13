@@ -100,8 +100,8 @@ reported as `audit_unverified`, never sealed over). Seal a checkpoint with the *
   **re-issue only**: `mycelium tls issue` a new certificate (it is issued after every earlier one, so the
   new key outranks them), restart the node with it, then `POST /gateway/identity/revoke` the old key.
 - **A retired key still verifies until it is revoked.** `rotate_identity` alone is hygiene.
-- **Unsigned `Data` and anti-entropy** carry no signature to refuse: set `kv_require_signed_frames`
-  (row F2 makes it unconditional); anti-entropy entries carry no author at all.
+- **Anti-entropy** entries carry no author and no signature, so a revocation cannot reach them. (An unsigned
+  `Data` frame is refused at every TLS node since row F2 — `deprecations.md` §40.)
 - **A node with a legacy certificate** (issued before row Q, without the URI) has no standing: no
   revocation of its keys counts at upgraded nodes, and keys it revoked before the upgrade verify again
   there until it is re-issued. **Re-issue every node's certificate as part of the upgrade**

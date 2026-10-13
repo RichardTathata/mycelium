@@ -174,12 +174,15 @@ impl GossipAgent {
             }
             _ => {}
         }
-        // #611's review, finding 9: `kv_require_signed_frames` without `[tls]` refuses nothing — no
-        // frame is signed, so none can be told apart. Inert like `require_identity_proofs`, and said so.
+        // Post-360 plan row F2: `kv_require_signed_frames` is retired. A TLS node refuses unsigned KV
+        // frames whatever it says, and without `[tls]` nothing is signed (#611's review, finding 9).
+        // Accepted, so a 2.33 configuration starts, and said once (`deprecations.md` §40).
         if self.config.kv_require_signed_frames_is_inert() {
             tracing::warn!(
-                "start: kv_require_signed_frames is set without [tls] — it has no effect: nothing is signed \
-                 without a TLS identity, and an unsigned KV write is applied as before"
+                tls = self.config.tls.is_some(),
+                "start: kv_require_signed_frames is retired and has no effect — a TLS node refuses unsigned KV \
+                 frames and bare (pre-2.33) KV signatures unconditionally since 2.34.0, and without [tls] nothing \
+                 is signed; remove it from the configuration (docs/guide/deprecations.md §40)"
             );
         }
         // The lifecycle boundary (plan G13): every attachment is in and the configuration is what it
@@ -394,8 +397,8 @@ impl GossipAgent {
                     let proof = super::helpers::sign_identity_proof(&arc_tls, &history);
                     // Phase 3b: the keys and the proof **sealed into one record**, which cannot arrive
                     // half-way. Published FIRST and UNSIGNED (the TLS identity is not installed yet):
-                    // it is the one unsigned frame a TLS node accepts whatever `kv_require_signed_frames`
-                    // says, because it authenticates itself (#611's second review,
+                    // it is one of the two unsigned frames a TLS node accepts (the other a CA-verified
+                    // certificate record), because it authenticates itself (#611's second review,
                     // `connection::self_authenticating_identity`), and a signed identity frame would be
                     // dropped as from an unknown signer by every peer that does not hold the key yet.
                     // First contact rests on this record.
@@ -885,7 +888,7 @@ impl GossipAgent {
     /// `task_ctx.peer_keys`. Called at startup after TLS is initialised, before listeners are spawned.
     ///
     /// A node is **found** by either record — the legacy `sys/identity/{n}` or the sealed
-    /// `sys/identity-signed/{n}` — since #611's second review: under `kv_require_signed_frames` a node's
+    /// `sys/identity-signed/{n}` — since #611's second review: at a TLS node (since row F2, always) a node's
     /// bare record is refused at gossip (it is not self-authenticating) and arrives by anti-entropy,
     /// while its sealed record is the one unsigned frame a TLS node accepts, so first contact rests on
     /// the sealed record. Tombstones are not read: a tombstone removes nobody's keys

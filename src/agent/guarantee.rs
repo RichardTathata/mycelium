@@ -279,9 +279,14 @@ pub const SECURE_SINGLE_DOMAIN: Profile = Profile {
     //
     // Rev 4 (plan row P2): `cons.safety_profile` — an exclusive outcome is decided only by an electorate
     // group (`consensus_require_electorate`). Met by configuration, so a MINOR may add it (G12).
-    revision: 4,
+    //
+    // Rev 5 (plan row F2): `mesh.signed_writes` — unsigned and bare-signed KV frames refused. It resolves
+    // on exactly what `mesh.tls` does (the `tls` build and `[tls]`), so rev 5 admits every node rev 4
+    // admits; it is required by name so the report says the refusal is part of the profile.
+    revision: 5,
     required: &[
         "mesh.tls",
+        "mesh.signed_writes",
         "id.proofs_required",
         "gw.not_open",
         "gw.exposed_closed",
@@ -783,16 +788,18 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
               #[cfg(not(feature = "tls"))]
               { let _ = c; Resolution::NotInBuild { feature: "tls" } }
           }),
-        g("mesh.signed_writes", 1, "transport", Node,
-          "an unsigned KV write frame is refused (a self-authenticating sealed identity record excepted), so a member cannot write as another by not signing — anti-entropy state replies excepted, and another member's identity stays writable under the writer's own signature unless `require_identity_proofs`",
-          "`tls`; `[tls]`; `kv_require_signed_frames = true` (default off — post-360 row F's window; unconditional at row F2)",
-          &["connection::handle_connection (Data arm)"], "docs/guide/deprecations.md",
+        // Rev 2 (post-360 plan row F2): the refusal is unconditional under `[tls]` — rev 1 resolved on
+        // `kv_require_signed_frames`, row F's one-release opt-in, now a retired no-op — and it covers a
+        // bare (pre-2.33) KV signature as well as an unsigned frame.
+        g("mesh.signed_writes", 2, "transport", Node,
+          "an unsigned KV write frame, or one signed in the bare pre-2.33 form, is refused (a self-authenticating sealed identity record or CA-verified certificate record excepted), so a member cannot write as another by not signing — anti-entropy state replies excepted, and another member's identity stays writable under the writer's own signature unless `require_identity_proofs`",
+          "`tls`; `[tls]` (unconditional since post-360 row F2; `kv_require_signed_frames` is retired)",
+          &["connection::handle_connection (Data arm)", "connection::handle_connection (SignedData arm)"], "docs/guide/deprecations.md",
           always,
           |c| {
               #[cfg(feature = "tls")]
               {
-                  if c.config.tls.is_none() { return Resolution::NotConfigured { missing: "[tls] — nothing is signed without it" }; }
-                  if c.config.kv_require_signed_frames { Resolution::Enforced } else { Resolution::NotConfigured { missing: "kv_require_signed_frames = true" } }
+                  if c.config.tls.is_none() { Resolution::NotConfigured { missing: "[tls] — nothing is signed without it" } } else { Resolution::Enforced }
               }
               #[cfg(not(feature = "tls"))]
               { let _ = c; Resolution::NotInBuild { feature: "tls" } }
@@ -1109,6 +1116,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **`mesh.signed_writes` is enforced wherever `[tls]` is** (post-360 plan row F2): the refusal of an
+    /// unsigned KV frame no longer waits on `kv_require_signed_frames`, so the guarantee resolves on the
+    /// transport alone. Seen failing first on 4251d50a: `not_configured` under `[tls]` with the default.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn mesh_signed_writes_is_enforced_under_tls_by_default() {
+        use crate::config::TlsConfig;
+        assert_eq!(state(&agent(GossipConfig::default()).guarantee_report(), "mesh.signed_writes"), "not_configured", "no [tls]: nothing is signed");
+        let mut cfg = GossipConfig::default();
+        cfg.tls = Some(TlsConfig::default());
+        assert_eq!(state(&agent(cfg).guarantee_report(), "mesh.signed_writes"), "enforced", "[tls] alone");
+    }
+
     /// Every core id is unique, and the registry starts with exactly the core set.
     #[test]
     fn the_core_registry_has_unique_ids() {
@@ -1284,9 +1304,9 @@ mod tests {
     /// bump and a release note), every id is a core guarantee, and none is an external prerequisite.
     #[test]
     fn the_secure_profiles_required_set_is_pinned() {
-        assert_eq!(SECURE_SINGLE_DOMAIN.revision, 4);
+        assert_eq!(SECURE_SINGLE_DOMAIN.revision, 5);
         assert_eq!(SECURE_SINGLE_DOMAIN.required, &[
-            "mesh.tls", "id.proofs_required", "gw.not_open", "gw.exposed_closed", "gw.tls", "gw.caller_profile",
+            "mesh.tls", "mesh.signed_writes", "id.proofs_required", "gw.not_open", "gw.exposed_closed", "gw.tls", "gw.caller_profile",
             "ae.authorised_at_seam", "ae.recorded_before_dispatch", "prov.enforcement", "a2a.admission",
             "authz.execution_authority", "authz.durable_epochs", "audit.chain", "egress.allow_list",
             "persist.configured", "persist.sync_mode", "persist.unreadable_refused", "id.ca_key_off_node",
@@ -1344,10 +1364,10 @@ mod tests {
         cfg.profile = Some("secure-single-domain".into());
         let a = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
         let e = a.start().await.unwrap_err().to_string();
-        assert!(e.contains("profile `secure-single-domain` rev 4"), "{e}");
+        assert!(e.contains("profile `secure-single-domain` rev 5"), "{e}");
         // `cons.safety_profile` is `not_applicable` in a build without `consensus` — nothing proposes there.
         let consensus_id: &[&str] = if cfg!(feature = "consensus") { &["cons.safety_profile"] } else { &[] };
-        for id in ["gw.not_open", "mesh.tls", "egress.allow_list", "persist.configured", "ae.authorised_at_seam"].iter().chain(consensus_id) {
+        for id in ["gw.not_open", "mesh.tls", "mesh.signed_writes", "egress.allow_list", "persist.configured", "ae.authorised_at_seam"].iter().chain(consensus_id) {
             assert!(e.contains(id), "{id} is named: {e}");
         }
         assert!(e.contains("not_configured") && e.contains("docs/operations/rbac.md"), "what is missing and where to read: {e}");
@@ -1376,7 +1396,7 @@ mod tests {
         };
         let os = start_under(SyncMode::Os);
         let e = os.start().await.unwrap_err().to_string();
-        assert!(e.contains("profile `secure-single-domain` rev 4"), "{e}");
+        assert!(e.contains("profile `secure-single-domain` rev 5"), "{e}");
         assert!(e.contains("persist.sync_mode"), "`os` is named as unmet — the writer treats it as `async`: {e}");
         assert!(e.contains("os: the OS buffers"), "what is missing says why: {e}");
         assert_eq!(os.guarantee_report().entry("persist.sync_mode").unwrap().resolution, Resolution::NotConfigured { missing: "sync_mode (os: the OS buffers; an ack is `buffered`)" });
