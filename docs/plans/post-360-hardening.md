@@ -726,6 +726,9 @@ unproduced), the row closes as follows. The verifiers were enumerated with
   first at start (`a_planted_record_does_not_refuse_a_start_whose_own_certificate_record_is_missing`), the start
   history from the node's own records (`a_raw_identity_value_a_member_writes_does_not_enter_the_owners_history`);
   N3 (the certificate cache clears rather than evicting) and N4 (a CA holder can refuse a node's start) stated.
+  **The N1/N2 check's NEW-1 and NEW-2** (seen failing on 4908ecd3): audit recovery never seals over an existing record,
+  reporting the unverified prefix (`an_audit_genesis_survives_an_upgrade_after_an_old_version_rotation`); the
+  revoked-signer rule dropped (`two_compromise_rotations_learned_out_of_order_leave_the_oldest_key_revoked`).
 - **Not built, stated:** no protection against a holder of the fleet CA key (every node in the development posture);
   the secure posture cannot rotate (recovery is re-issue only); a node with a pre-row-Q certificate has no standing
   until re-issued, and keys it revoked before the upgrade verify again at upgraded nodes until then; a retired key that

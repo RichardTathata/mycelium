@@ -35,17 +35,21 @@ union of those streams.
 **The head survives a restart with `[persistence]`.** At `start()` — after the identity is
 loaded and persisted state replayed, before anything can seal — the node folds its own
 persisted stream, verified from genesis (or the newest signed checkpoint, §5) under its
-retained keys, and resumes sealing at the next `seq` (`audit::restore_chain_head`). A record
-that does not verify is logged at `error` and sealed over, never used as the link; without
-persistence there is nothing to recover from and the stream restarts at seq 0 (peers' copies
-are not consulted). A stream whose first present record has no anchor — seq 0 deleted by
-hand with no checkpoint at the first record — folds nothing: the head stays at genesis, the
-log names `SequenceGap`, and nothing is overwritten because nothing is at seq 0 (`audit_verify`
-reports the same gap). **Rotate-and-revoke before a restart** ([cert-rotation.md](cert-rotation.md)
-§ Compromise remediation): a revoked key verifies nowhere, so every record it signed fails
-`BadSignature`, the fold stops at genesis and the next seal overwrites seq 0 — seal a checkpoint
-with the **new** key and `audit_prune_to_checkpoint()` **before** restarting, so the head anchors
-at that checkpoint instead.
+retained keys, and resumes sealing at the next `seq` (`audit::restore_chain_head`). **Nothing
+existing is ever sealed over** (post-360 plan row Q): records from the first that does not verify to
+the stream's last are kept untouched, numbering resumes after the last of them, the next seal links
+to the last *verified* record (an unverified one is never used as the link), and the records are
+reported — an `error` log naming the node and the seq range, `GET /stats` `audit_unverified_records`
+and `audit_unverified_from_seq`, the guarantee report's `audit_unverified`. Without persistence there
+is nothing to recover from and the stream restarts at seq 0 (peers' copies are not consulted). A
+stream whose first present record has no anchor — seq 0 deleted by hand with no checkpoint at the
+first record — is reported the same way (`audit_verify` names the `SequenceGap`). **A node upgraded
+after a rotation on a version before row Q** reports its pre-upgrade records as unverified until its
+history is re-anchored; nothing is destroyed. **Rotate-and-revoke before a restart**
+([cert-rotation.md](cert-rotation.md) § Compromise remediation): a revoked key verifies nowhere, so
+every record it signed reads as unverified after the restart (kept, reported) — seal a checkpoint with
+the **new** key and `audit_prune_to_checkpoint()` **before** restarting, so the head anchors at that
+checkpoint and the stream verifies.
 
 ---
 

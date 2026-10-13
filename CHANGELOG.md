@@ -304,7 +304,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   certificate does not lock in (`a_thiefs_revocation_judged_before_the_successors_certificate_does_not_lock_in`); at
   start the node's own certificate anchors first (`a_planted_record_does_not_refuse_a_start_whose_own_certificate_record_is_missing`);
   the history a node republishes at start comes from its own records, never the raw identity value
-  (`a_raw_identity_value_a_member_writes_does_not_enter_the_owners_history`). Upgrade notes in `deprecations.md` §39.
+  (`a_raw_identity_value_a_member_writes_does_not_enter_the_owners_history`). **The N1/N2 check** (each seen failing on
+  4908ecd3): audit recovery never seals over an existing record — records that do not verify are kept, reported
+  (`audit_unverified_records` on `/stats`, `audit_unverified` in the guarantee report) and numbering resumes after them,
+  so a node upgraded after an old-version rotation keeps its genesis and reports its pre-upgrade prefix unverified
+  (`an_audit_genesis_survives_an_upgrade_after_an_old_version_rotation`); the revoked-signer rule is dropped, so two
+  compromise rotations learned out of order leave the oldest key revoked
+  (`two_compromise_rotations_learned_out_of_order_leave_the_oldest_key_revoked`). Upgrade notes in `deprecations.md` §39.
   Wire **v12** unchanged.
 - **Wire and crypto, one MINOR with a window (post-360 plan row F).** Wire **v12** unchanged — no frame changes
   shape; what changes is what a node accepts and what a signature is over. Three changes and one closure:

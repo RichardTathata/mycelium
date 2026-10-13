@@ -2395,6 +2395,99 @@ async fn a_raw_identity_value_a_member_writes_does_not_enter_the_owners_history(
     assert!(!ka_in_history, "and ka is not in C's history at B");
 }
 
+// ── Row Q, the N1/N2 check's NEW-1 and NEW-2 ───────────────────────────────────────────────────
+
+/// **An audit genesis survives an upgrade after an old-version rotation** (the N1/N2 check's NEW-1).
+/// Before row Q, `rotate_identity` wrote the sealed record `[k0, kL]` signed by the *prior* key kL,
+/// which never had a URI-SAN certificate; after the upgrade the node does not take that record into its
+/// history (N2 stays closed), so records sealed under kL do not verify — and 4908ecd3 then sealed over
+/// seq 0. Recovery never seals over an existing record now: the unverified records are kept, numbering
+/// resumes after them, and they are reported. Seen failing first on 4908ecd3: "UPGRADE: the genesis
+/// sealed under the pre-upgrade key was replaced".
+#[cfg(all(feature = "compliance", unix))]
+#[tokio::test]
+async fn an_audit_genesis_survives_an_upgrade_after_an_old_version_rotation() {
+    use crate::config::{OnUnreadable, PersistenceConfig, SyncMode, TlsConfig};
+    use crate::{audit_key, AuditAction, AuditOutcome, AuditRecord, SignedAuditRecord};
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let base = std::env::temp_dir().join(format!("myc-q6-legacy-{port}"));
+    let _ = std::fs::remove_dir_all(&base);
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    cfg.tls = Some(TlsConfig { auto_cert_dir: base.join("certs"), ..TlsConfig::default() });
+    cfg.persistence = Some(PersistenceConfig { base_path: base.join("data"), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 1_000, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse });
+    let a = GossipAgent::new(id.clone(), cfg.clone());
+    a.start().await.unwrap();
+    let k0 = a.identity_public_key().unwrap();
+    // The pre-upgrade state after a rotation kL -> k0: the rotation record is signed by the prior kL.
+    let kl_sk = ed25519_dalek::SigningKey::from_bytes(&[0x4d; 32]);
+    let kl = kl_sk.verifying_key().to_bytes();
+    let _ = a.kv().set(format!("sys/identity/{id}"), [k0, kl].concat());
+    let _ = a.kv().set(format!("sys/identity-signed/{id}"), sealed_record(&[k0, kl], &kl_sk));
+    let r0 = AuditRecord { node_id: id.clone(), seq: 0, hlc: 1, principal: "p".into(), action: AuditAction::Invoke, target: "t0".into(), outcome: AuditOutcome::Success, detail: None, prev_hash: [0u8; 32] };
+    let h0 = r0.content_hash();
+    let _ = a.kv().set(audit_key(&id, 0), SignedAuditRecord::sign(r0, &kl_sk).encode());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    a.shutdown().await;
+    drop(a);
+    let a = GossipAgent::new(id.clone(), cfg.clone());
+    a.start().await.unwrap();
+    let _ = a.audit(AuditAction::Admin, "p", "after", AuditOutcome::Success, None).unwrap();
+    let s = a.audit_stream(&id);
+    let report = a.guarantee_report();
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&base);
+    assert_eq!(s.first().map(|r| r.record.content_hash()), Some(h0), "UPGRADE: the genesis sealed under the pre-upgrade key was replaced");
+    assert_eq!(s.len(), 2, "the next seal resumed after it");
+    assert_eq!(report.audit_unverified, Some([0, 0]), "and the unverified prefix is reported");
+}
+
+/// **Two compromise rotations learned out of order leave the oldest key revoked** (the N1/N2 check's
+/// NEW-2). C rotates k0 → k1 and revokes k0 under k1, then k1 → k2 and revokes k1 under k2; B learns
+/// k2's revocation of k1 first, then k1's revocation of k0. 4908ecd3 refused a signer it had counted as
+/// revoked, so k1's revocation of k0 never counted and k0 stayed trusted. A revoked signer's earlier
+/// revocations count: authority flows only to the past. (`rotate_identity` and records C writes itself,
+/// so the test needs `tls` and the frame filter, not `compliance`.) Seen failing first on 4908ecd3:
+/// "ORDER: k0 is trusted after both revocations".
+#[cfg(all(feature = "tls", feature = "test-frame-filter"))]
+#[tokio::test]
+async fn two_compromise_rotations_learned_out_of_order_leave_the_oldest_key_revoked() {
+    use crate::store::FrameView;
+    let (a, b, c, _nb, nc, dir) = three_signed_nodes("q6-order", false).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let k0 = c.identity_public_key().unwrap();
+    let prefix = format!("sys/revocation/{nc}/{}/", hex_key(&k0));
+    let p2 = prefix.clone();
+    b.task_ctx.kv_state.frame_filter.pin().insert(55, Arc::new(move |v: &FrameView<'_>| match v {
+        FrameView::Kv { key, .. } => key.starts_with(p2.as_str()),
+        _ => false,
+    }));
+    let revoke = |c: &GossipAgent, revoked: [u8; 32]| {
+        let sk = c.task_ctx.tls.get().unwrap().signing_key();
+        let me = sk.verifying_key().to_bytes();
+        let cert = c.kv().get(&format!("sys/identity-cert/{nc}/{}", hex_key(&me))).map(|v| v.to_vec()).expect("own certificate record");
+        let (path, bytes) = revocation_v2_by(&nc, revoked, &sk, vec![cert]);
+        let _ = c.kv().set(path, bytes);
+    };
+    let k1 = c.rotate_identity(Duration::from_millis(500)).await.unwrap();
+    revoke(&c, k0);
+    let k2 = c.rotate_identity(Duration::from_millis(500)).await.unwrap();
+    revoke(&c, k1);
+    let k1_revoked = within_3s(|| !b.task_ctx.trusted_keys(&nc).contains(&k1) && b.task_ctx.trusted_keys(&nc).contains(&k2)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    b.task_ctx.kv_state.frame_filter.pin().remove(&55);
+    let rec = c.kv().scan_prefix(&prefix);
+    for (k, v) in &rec { let _ = b.kv().set(k.to_string(), v.to_vec()); }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    crate::agent::revocation::refresh(&b.task_ctx);
+    let k0_trusted = b.task_ctx.trusted_keys(&nc).contains(&k0);
+    a.shutdown().await; b.shutdown().await; c.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(k1_revoked && !rec.is_empty(), "B counted k2's revocation of k1 first, and k1's revocation of k0 exists");
+    assert!(!k0_trusted, "ORDER: k0 is trusted after both revocations");
+}
+
 /// **A capability retracted as its node shuts down reaches the peers** (#611, found by CI's co-op
 /// demo 04). A capability's soft-state task tombstones its key when the handle drops; a node that
 /// drops the handle and shuts down at once (a provider killed mid-run) raced the shutdown signal, and
@@ -6623,8 +6716,10 @@ async fn the_audit_chain_head_is_recovered_from_persistence_at_restart() {
 }
 
 /// The recovery is **verified**: a record in this node's own persisted stream that does not verify
-/// under its keys — planted by whoever can write the files — does not seed the chain. The head
-/// resumes after the longest verified prefix, and the restart logs what it could not verify.
+/// under its keys — planted by whoever can write the files — does not seed the chain: the next seal
+/// links to the last verified record. Since post-360 plan row Q it is also **never sealed over**: the
+/// unverified record stays untouched and is reported (`audit_unverified`), and numbering resumes after
+/// it — sealing over it was how a node upgraded after an old-version rotation destroyed its own genesis.
 #[cfg(all(feature = "compliance", unix))]
 #[tokio::test]
 async fn a_forged_record_in_the_persisted_audit_stream_does_not_seed_the_chain_head() {
@@ -6647,7 +6742,7 @@ async fn a_forged_record_in_the_persisted_audit_stream_does_not_seed_the_chain_h
     // the persisted store (the same bytes an attacker with the files could write).
     let forged = AuditRecord { node_id: id.clone(), seq: 1, hlc: 1, principal: "attacker".into(), action: AuditAction::Admin, target: "role/grant".into(), outcome: AuditOutcome::Success, detail: None, prev_hash: h0 };
     let signed = SignedAuditRecord::sign(forged, &ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]));
-    let _ = a.kv().set(audit_key(&id, 1), signed.encode());
+    let _ = a.kv().set(audit_key(&id, 1), signed.clone().encode());
     a.shutdown().await;
 
     let b = GossipAgent::new(id.clone(), cfg);
@@ -6656,11 +6751,14 @@ async fn a_forged_record_in_the_persisted_audit_stream_does_not_seed_the_chain_h
     let mut entries = b.kv().scan_prefix(&audit_stream_prefix(&id));
     entries.sort_by(|x, y| x.0.cmp(&y.0));
     let chain: Vec<SignedAuditRecord> = entries.iter().map(|(_, v)| SignedAuditRecord::decode(v).unwrap()).collect();
-    assert_eq!(chain.len(), 2, "seq 0 and the new seal: {:?}", chain.iter().map(|r| r.record.seq).collect::<Vec<_>>());
+    let reported = b.task_ctx.audit_chain.lock().unwrap().unverified;
+    assert_eq!(chain.len(), 3, "seq 0, the forgery kept, and the new seal: {:?}", chain.iter().map(|r| r.record.seq).collect::<Vec<_>>());
     assert_eq!(chain[0].record.content_hash(), h0, "genesis is untouched");
-    assert_eq!(chain[1].record.seq, 1, "the head resumed after the verified prefix, over the forgery");
-    assert_eq!(chain[1].record.prev_hash, h0, "linked to the last verified record, not to the forgery");
-    assert_eq!(b.audit_verify(&id), Ok(()), "the stream verifies once the forgery is sealed over");
+    assert_eq!(chain[1], signed, "the unverified record is not sealed over");
+    assert_eq!(chain[2].record.seq, 2, "numbering resumed after the stream's last record");
+    assert_eq!(chain[2].record.prev_hash, h0, "linked to the last verified record, not to the forgery");
+    assert_eq!(reported, Some((1, 1)), "and the unverified record is reported");
+    assert!(b.audit_verify(&id).is_err(), "the stream still says it holds a record that does not verify");
     b.shutdown().await;
     let _ = std::fs::remove_dir_all(&base);
 }
@@ -6712,14 +6810,17 @@ async fn recover_chain_head_anchors_at_a_checkpoint_or_reports_the_gap() {
     assert_eq!(a.audit_stream(&id).last().map(|r| (r.record.seq, r.record.prev_hash)), Some((4, h3)));
     assert_eq!(a.audit_verify(&id), Ok(()), "verification resumes from the checkpoint over the new seal");
 
-    // (c) delete the first present record (seq 4) by hand: no checkpoint at 5 → genesis, and the gap named.
+    // (c) delete the first present record (seq 4) by hand: no checkpoint at 5 → nothing verifies, the gap
+    // is named, and (post-360 plan row Q) the head resumes after the stream's last record — never at a
+    // seq a record holds — linked to nothing it could not verify.
     assert!(a.kv().delete(audit_key(&id, 4)));
     let _h5 = seal(5);
     let head = recover_chain_head(&a.task_ctx).expect("records to fold");
-    assert_eq!(head.next_seq, 0, "(c) no anchor covers seq 5: the head stays at genesis");
+    assert_eq!(head.next_seq, 6, "(c) no anchor covers seq 5: the head resumes after it");
     assert_eq!(head.last_hash, [0u8; 32]);
     assert_eq!(head.verified, 0);
     assert_eq!(head.unverified, Some(AuditVerifyError::SequenceGap { expected: 0, found: 5 }), "the gap is reported, not guessed over");
+    assert_eq!(head.unverified_range, Some((5, 5)), "and the unverified records are named");
     let _ = h4;
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&cert_dir);

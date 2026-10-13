@@ -49,11 +49,15 @@ pub(crate) struct AuditChainState {
     pub(crate) next_seq: u64,
     /// Content hash of the most recently sealed record (zero before genesis).
     pub(crate) last_hash: [u8; 32],
+    /// The persisted records that did not verify at start, `(first seq, last seq)` — kept untouched,
+    /// never sealed over, and reported (post-360 plan row Q: `GET /stats` `audit_unverified_records`,
+    /// the guarantee report's `audit_unverified`).
+    pub(crate) unverified: Option<(u64, u64)>,
 }
 
 impl AuditChainState {
     pub(crate) fn new() -> Self {
-        Self { next_seq: 0, last_hash: [0u8; 32] }
+        Self { next_seq: 0, last_hash: [0u8; 32], unverified: None }
     }
 }
 
@@ -491,8 +495,11 @@ pub(crate) struct RecoveredHead {
     /// Records verified from the anchor, in order.
     pub(crate) verified: usize,
     /// Why the fold stopped before the end of the persisted stream, if it did: the first record
-    /// that did not verify, which the head does **not** resume after.
+    /// that did not verify.
     pub(crate) unverified: Option<AuditVerifyError>,
+    /// The records from the first that did not verify to the stream's last, `(first seq, last seq)`.
+    /// The head resumes **after** the last of them: nothing existing is ever sealed over.
+    pub(crate) unverified_range: Option<(u64, u64)>,
 }
 
 /// Fold this node's **own** persisted stream to the chain head a restart must resume from.
@@ -532,7 +539,7 @@ pub(crate) fn recover_chain_head(ctx: &TaskCtx) -> Option<RecoveredHead> {
             None => (0u64, [0u8; 32]),
         },
     };
-    let mut head = RecoveredHead { next_seq: anchor_seq, last_hash: anchor_prev, verified: 0, unverified: None };
+    let mut head = RecoveredHead { next_seq: anchor_seq, last_hash: anchor_prev, verified: 0, unverified: None, unverified_range: None };
     for sr in &records {
         match verify_chain_keys(std::slice::from_ref(sr), node, &keys, head.next_seq, head.last_hash) {
             Ok(()) => {
@@ -542,6 +549,14 @@ pub(crate) fn recover_chain_head(ctx: &TaskCtx) -> Option<RecoveredHead> {
             }
             Err(e) => {
                 head.unverified = Some(e);
+                // Post-360 plan row Q (the N2 check's NEW-1): never seal over an existing record. The
+                // records from here to the stream's end stay untouched and are reported; numbering
+                // resumes after the last of them, linked to the last *verified* record (the unverified
+                // ones seed nothing).
+                let first = sr.record.seq;
+                let last = records.last().map_or(first, |r| r.record.seq);
+                head.unverified_range = Some((first, last));
+                head.next_seq = head.next_seq.max(last.saturating_add(1));
                 break;
             }
         }
@@ -558,16 +573,19 @@ pub(crate) fn restore_chain_head(ctx: &TaskCtx) {
         let mut guard = ctx.audit_chain.lock().unwrap_or_else(|e| e.into_inner());
         guard.next_seq = head.next_seq;
         guard.last_hash = head.last_hash;
+        guard.unverified = head.unverified_range;
     }
-    match &head.unverified {
-        None => tracing::info!(
+    match (&head.unverified, head.unverified_range) {
+        (Some(e), Some((first, last))) => tracing::error!(
+            node = %ctx.node_id, next_seq = head.next_seq, verified = head.verified, error = ?e,
+            "audit: this node's persisted records seq {first}..={last} do not verify under its keys ({e:?}); they are kept \
+             untouched and reported unverified, and sealing resumes at seq {} — nothing is sealed over. A node upgraded \
+             after a rotation on a version before row Q reads its pre-upgrade records this way until its history is \
+             re-anchored; otherwise treat as an incident (docs/operations/audit.md §6)", head.next_seq
+        ),
+        _ => tracing::info!(
             next_seq = head.next_seq, verified = head.verified,
             "audit: chain head recovered from the persisted stream; sealing resumes at seq {}", head.next_seq
-        ),
-        Some(e) => tracing::error!(
-            next_seq = head.next_seq, verified = head.verified, error = ?e,
-            "audit: the persisted stream stops verifying at {e:?}; the chain resumes after its verified prefix, \
-             and the next seal overwrites the record it could not verify — treat as an incident (docs/operations/audit.md §6)"
         ),
     }
 }

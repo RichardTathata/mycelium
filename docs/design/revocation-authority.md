@@ -269,3 +269,19 @@ on `38da0472`):
 - **N4 (stated).** A holder of the fleet CA key can make a node refuse to start (by issuing a certificate that outranks
   the node's key and revoking it). Within the stated CA-holder limit; the refusal is loud and recoverable by an
   operator re-issue.
+
+## 11. The N1/N2 check (2026-10-13)
+
+- **NEW-1 (fixed): audit recovery never seals over an existing record.** When a node's own persisted stream stops
+  verifying under its keys, the records from the first that does not verify to the stream's last are kept untouched,
+  numbering resumes after the last of them (the next seal links to the last *verified* record, so the unverified ones
+  seed nothing), and they are reported loudly: an error naming the node and the seq range, `GET /stats`
+  `audit_unverified_records` / `audit_unverified_from_seq`, and the guarantee report's `audit_unverified`. This is the
+  safety net for the whole class. **Stated:** a node upgrading after a rotation made on a version before row Q — whose
+  rotation record is signed by the prior key, which has no certificate (N2 stays closed: that record shape is not
+  accepted) — reports its pre-upgrade audit records as unverified until its history is re-anchored; nothing is
+  destroyed. A planted record in the stream is likewise kept and reported, no longer sealed over.
+- **NEW-2 (fixed): the revoked-signer rule is dropped.** Refusing a signer this node had counted as revoked made two
+  compromise rotations learned out of order leave the oldest key trusted; a revocation's authority flows only to the
+  past, so what a since-revoked signer revoked earlier stands. N1 stays closed by the provisional rule and
+  first-issuance ranking.

@@ -218,6 +218,10 @@ pub struct GuaranteeReport {
     pub started: bool,
     /// Attachments made after the boundary — a non-zero count means the logged report is stale.
     pub late_attachments: u32,
+    /// This node's own persisted audit records that did not verify at start, `[first seq, last seq]`
+    /// — kept untouched and never sealed over (post-360 plan row Q). Absent when there are none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit_unverified: Option<[u64; 2]>,
     /// The profile this node runs under (`dev` by default, said so), its revision and required set.
     pub profile: Option<ProfileRef>,
     pub entries: Vec<GuaranteeEntry>,
@@ -484,6 +488,12 @@ pub(crate) fn report(ctx: &TaskCtx) -> GuaranteeReport {
         config_digest: config_digest(&ctx.config),
         started: ctx.started.load(Ordering::Acquire),
         late_attachments: ctx.late_attachments.load(Ordering::Relaxed),
+        audit_unverified: {
+            #[cfg(feature = "compliance")]
+            { ctx.audit_chain.lock().unwrap_or_else(|e| e.into_inner()).unverified.map(|(a, b)| [a, b]) }
+            #[cfg(not(feature = "compliance"))]
+            { None }
+        },
         profile: {
             let (p, selected) = selected_profile(&ctx.config);
             Some(ProfileRef { name: p.name, revision: p.revision, selected, required: p.required.to_vec() })

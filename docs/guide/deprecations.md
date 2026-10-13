@@ -1169,6 +1169,13 @@ entry the connection had accepted when it dropped — the gateway has no resume 
 - **Revocations are written at `sys/revocation/{node}/{P-hex}/{S-hex}`** as the v1 bytes followed by a trailer (the
   revoker, the certificates, a second signature). A 2.32 node reads the v1 prefix and applies its old rule. Records at
   the old path are still read, under the new rule.
+- **An audit stream is never sealed over.** A node whose own persisted audit records do not verify at start (a planted
+  record, or — after upgrading a node that rotated on a version before row Q, whose rotation record is signed by the
+  prior key — its pre-upgrade records) keeps them untouched, resumes numbering after the last of them, and reports
+  them: an error log naming the seq range, `GET /stats` `audit_unverified_records` / `audit_unverified_from_seq`, the
+  guarantee report's `audit_unverified`. `audit_verify` keeps saying the stream holds records that do not verify.
+  **Nothing is destroyed;** the pre-upgrade prefix reads as unverified until the node's history is re-anchored.
+  (Before, the next seal overwrote the first record that did not verify.)
 - **A node refuses to start with a key its own records show revoked** — a key file restored from a backup, or
   `key_pem` naming a key a rotation retired: `start()` returns `GossipError::InvalidField { field: "tls", .. }` and
   logs it by name. Start it with its current key, or have the operator issue a new one.

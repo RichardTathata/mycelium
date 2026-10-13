@@ -599,11 +599,12 @@ fn fold_node(ctx: &TaskCtx, tls: &mycelium_core::tls::NodeTls, node: &NodeId) ->
         anchors = v.into_iter().collect();
     }
     // Stratum 2 — revocations, judged against the anchors. A legacy node (none) has none that count.
-    // A signer this node has counted as revoked signs nothing that counts (the confirming review's
-    // N1). A revocation of a key that is not (yet) anchored counts only **provisionally**: it is
-    // re-judged on every fold and never recorded as counted, because the revoked key's certificate may
-    // still arrive and outrank the signer — a thief's revocation that arrived first must not lock in.
-    let revoked_signers: HashSet<[u8; 32]> = ledger.counted_ever.pin().get(node).cloned().unwrap_or_default();
+    // A revocation of a key that is not (yet) anchored counts only **provisionally** (the confirming
+    // review's N1): it is re-judged on every fold and never recorded as counted, because the revoked
+    // key's certificate may still arrive and outrank the signer — a thief's revocation that arrived
+    // first must not lock in. A signer being revoked itself does not void what it revoked earlier:
+    // authority flows only to the past, and refusing it made two compromise rotations learned out of
+    // order leave the oldest key trusted (the N1/N2 check's NEW-2).
     let mut counted = Vec::new();
     let mut provisional = Vec::new();
     if !anchors.is_empty() {
@@ -616,7 +617,6 @@ fn fold_node(ctx: &TaskCtx, tls: &mycelium_core::tls::NodeTls, node: &NodeId) ->
                 None => by_signers.clone(),
             };
             let counts = signers.iter().any(|s| {
-                if revoked_signers.contains(s) { return false; }
                 let Some(&s_at) = anchors.get(s) else { return false };
                 let outranks = anchors.get(&p).is_none_or(|&p_at| s_at > p_at);
                 outranks && c.parsed.signed_by(s)

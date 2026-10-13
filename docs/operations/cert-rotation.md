@@ -83,8 +83,8 @@ curl -X POST https://gateway:9443/gateway/identity/revoke \
 
 **Before restarting a node that revoked its key:** the audit chain's head is recovered at `start()`
 by verifying the persisted stream under the retained keys, and a revoked key is excluded there too —
-every record it signed fails `BadSignature`, the fold stops at genesis and the next seal overwrites
-seq 0. Seal a checkpoint with the **new** key (`agent.audit_checkpoint()`) and prune
+every record it signed fails `BadSignature` and reads as unverified after the restart (kept untouched,
+reported as `audit_unverified`, never sealed over). Seal a checkpoint with the **new** key (`agent.audit_checkpoint()`) and prune
 (`agent.audit_prune_to_checkpoint()`) **before** the restart, so the head anchors at the checkpoint
 ([audit.md §1, §5](audit.md)).
 
