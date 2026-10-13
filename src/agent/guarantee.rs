@@ -524,7 +524,6 @@ pub(crate) fn config_digest(cfg: &crate::config::GossipConfig) -> String {
     s
 }
 
-/// Log the report as one block — one line per entry, then the summary.
 /// The warning a node logs at start when the fleet CA's private key is on it (or `start()` is about to
 /// mint one here) and it was not explicitly started under the `dev` profile (post-360 plan row T).
 pub(crate) const CA_KEY_ON_NODE_WARNING: &str = "the fleet CA's private key is on this node (`ca-key.pem` in \
@@ -542,6 +541,7 @@ pub(crate) fn ca_key_on_node_warning(r: &GuaranteeReport) -> Option<&'static str
     (on_node && !explicit_dev).then_some(CA_KEY_ON_NODE_WARNING)
 }
 
+/// Log the report as one block — one line per entry, then the summary.
 pub(crate) fn log_report(r: &GuaranteeReport) {
     if let Some(w) = ca_key_on_node_warning(r) {
         tracing::warn!(guarantee = "id.ca_key_off_node", "{w}");
