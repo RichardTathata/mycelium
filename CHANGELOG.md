@@ -298,7 +298,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   3.6 s → under 250 ms); a rotation issues strictly after the node's newest issuance
   (`a_rotation_after_the_clock_steps_back_still_outranks_its_predecessor`); a node adopts only revocations its own
   current or anchored keys signed (`an_owner_does_not_adopt_a_revocation_planted_through_its_raw_identity`); revoking
-  one key twice keeps one record (`revoking_one_key_twice_writes_one_record`). Upgrade notes in `deprecations.md` §39.
+  one key twice keeps one record (`revoking_one_key_twice_writes_one_record`). **The confirming review** (each seen
+  failing on 39cfb571): a revocation of a key with no anchor yet is provisional — re-judged every fold, never journaled
+  — and a signer the node counted as revoked signs nothing, so a thief's revocation judged before the successor's
+  certificate does not lock in (`a_thiefs_revocation_judged_before_the_successors_certificate_does_not_lock_in`); at
+  start the node's own certificate anchors first (`a_planted_record_does_not_refuse_a_start_whose_own_certificate_record_is_missing`);
+  the history a node republishes at start comes from its own records, never the raw identity value
+  (`a_raw_identity_value_a_member_writes_does_not_enter_the_owners_history`). Upgrade notes in `deprecations.md` §39.
   Wire **v12** unchanged.
 - **Wire and crypto, one MINOR with a window (post-360 plan row F).** Wire **v12** unchanged — no frame changes
   shape; what changes is what a node accepts and what a signature is over. Three changes and one closure:

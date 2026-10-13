@@ -482,7 +482,10 @@ fn candidate(node: &NodeId, path: &str, bytes: &[u8]) -> Option<Candidate> {
 /// One node's fold: its anchored keys (with first issuance) and the revocations that count.
 struct Folded {
     anchors: HashMap<[u8; 32], u64>,
+    /// Revocations of anchored keys that count: recorded, journaled, never un-counted.
     counted: Vec<Candidate>,
+    /// Revocations of keys not (yet) anchored that count this fold only: re-judged every fold.
+    provisional: Vec<Candidate>,
 }
 
 /// Merge `offered` into `node`'s anchors seen, keeping each key's **first** (lowest) issuance —
@@ -596,7 +599,13 @@ fn fold_node(ctx: &TaskCtx, tls: &mycelium_core::tls::NodeTls, node: &NodeId) ->
         anchors = v.into_iter().collect();
     }
     // Stratum 2 — revocations, judged against the anchors. A legacy node (none) has none that count.
+    // A signer this node has counted as revoked signs nothing that counts (the confirming review's
+    // N1). A revocation of a key that is not (yet) anchored counts only **provisionally**: it is
+    // re-judged on every fold and never recorded as counted, because the revoked key's certificate may
+    // still arrive and outrank the signer — a thief's revocation that arrived first must not lock in.
+    let revoked_signers: HashSet<[u8; 32]> = ledger.counted_ever.pin().get(node).cloned().unwrap_or_default();
     let mut counted = Vec::new();
+    let mut provisional = Vec::new();
     if !anchors.is_empty() {
         let mut by_signers: Vec<[u8; 32]> = anchors.keys().copied().collect();
         by_signers.sort_by(|a, b| anchors[b].cmp(&anchors[a]).then(a.cmp(b)));
@@ -607,16 +616,19 @@ fn fold_node(ctx: &TaskCtx, tls: &mycelium_core::tls::NodeTls, node: &NodeId) ->
                 None => by_signers.clone(),
             };
             let counts = signers.iter().any(|s| {
+                if revoked_signers.contains(s) { return false; }
                 let Some(&s_at) = anchors.get(s) else { return false };
                 let outranks = anchors.get(&p).is_none_or(|&p_at| s_at > p_at);
                 outranks && c.parsed.signed_by(s)
             });
-            if counts {
+            if counts && anchors.contains_key(&p) {
                 counted.push(c);
+            } else if counts {
+                provisional.push(c);
             }
         }
     }
-    Folded { anchors, counted }
+    Folded { anchors, counted, provisional }
 }
 
 /// Every node with a certificate record, a revocation, or a journaled revocation.
@@ -705,7 +717,8 @@ fn refresh_once(ctx: &TaskCtx) {
                 now.insert(c.parsed.signed.event.revoked_key);
             }
         }
-        let revoked = remember_counted(ledger, &node, &now);
+        let mut revoked = remember_counted(ledger, &node, &now);
+        revoked.extend(folded.provisional.iter().map(|c| c.parsed.signed.event.revoked_key));
         let anchored = if folded.anchors.is_empty() {
             None
         } else if ledger.saturated.pin().contains(&node) {
@@ -779,6 +792,35 @@ fn own_history(ctx: &TaskCtx) -> Vec<[u8; 32]> {
     keys
 }
 
+/// The key history this node republishes at start (the confirming review's N2): its current key, the
+/// keys its own certificate records anchor (CA-checked), and the keys of its own sealed record when that
+/// record's proof is signed by one of those — never the raw `sys/identity/{self}` value, which any
+/// member can write. Runs before the identity is installed, so it takes the loaded `tls`.
+pub(crate) fn own_history_at_start(ctx: &TaskCtx, tls: &mycelium_core::tls::NodeTls) -> Vec<[u8; 32]> {
+    let current = tls.verifying_key_bytes();
+    let mut keys = vec![current];
+    for (p, der) in crate::store::scan_kv_prefix(&ctx.kv_state, &format!("{CERT_PREFIX}{}/", ctx.node_id)) {
+        if let Some(k) = p.rsplit('/').next().and_then(parse_hex32)
+            && let Some((key, _)) = judge_cert(ctx, tls, &ctx.identity_ledger, &ctx.node_id, &der, Some(k))
+            && !keys.contains(&key)
+        {
+            keys.push(key);
+        }
+    }
+    let sealed = mycelium_core::ops::kv_get(ctx, &format!("{}{}", mycelium_core::signal::kv_ns::IDENTITY_SIGNED, ctx.node_id));
+    if let Some(bytes) = sealed
+        && let Some((history, proof)) = super::helpers::parse_sealed_identity(&bytes)
+        && let Some((signer, sig)) = super::helpers::parse_identity_proof(proof)
+        && keys.contains(&signer)
+        && crate::tls::verify_bytes(&signer, &super::helpers::identity_proof_message(history), &sig)
+    {
+        for k in super::helpers::parse_identity_keys(history) {
+            if !keys.contains(&k) { keys.push(k); }
+        }
+    }
+    keys
+}
+
 /// The newest issuance among this node's own certificates — its records in the store and the one
 /// it runs with. A rotation issues strictly after it (`generate_rotation_after`).
 pub(crate) fn own_newest_issuance(ctx: &CoreCtx) -> u64 {
@@ -796,6 +838,11 @@ pub(crate) fn own_newest_issuance(ctx: &CoreCtx) -> u64 {
 /// Judged by the same fold as any peer's, over the store and the journal.
 pub(crate) fn own_key_revoked(ctx: &TaskCtx, tls: &mycelium_core::tls::NodeTls) -> bool {
     let current = tls.verifying_key_bytes();
+    // The node's own current certificate is an anchor before anything is judged (the confirming
+    // review's N1), so a missing own-certificate record cannot make a planted record a refusal.
+    if let Some((k, at)) = judge_cert(ctx, tls, &ctx.identity_ledger, &ctx.node_id, &tls.node_cert_der(), Some(current)) {
+        merge_anchors_seen(&ctx.identity_ledger, &ctx.node_id, &[(k, at)].into_iter().collect());
+    }
     let journaled = ctx.identity_ledger.journaled.pin().get(&ctx.node_id).cloned().unwrap_or_default();
     if journaled.iter().filter_map(|(p, b)| candidate(&ctx.node_id, p, b)).any(|c| c.parsed.signed.event.revoked_key == current) {
         return true;

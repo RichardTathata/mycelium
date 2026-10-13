@@ -254,3 +254,18 @@ on `38da0472`):
    records signed by the node's current or anchored keys, reading its history from its own sealed record (never the
    raw `sys/identity/{self}`); repeated `revoke_key` for one `(P, S)` keeps the first record, and the journal takes one
    entry per `(P, S)` path.
+
+## 10. The confirming review (2026-10-13)
+
+- **N1 (fixed).** A revocation of a key that has no anchor yet counts only **provisionally**: it is re-judged on every
+  fold and never recorded as counted or journaled, so a thief's revocation judged before the successor's certificate
+  arrives does not lock in. A signer this node has counted as revoked signs nothing that counts. At start the node's
+  own current certificate is an anchor before its records are judged, so a missing own-certificate record cannot turn
+  a planted record into a start refusal.
+- **N2 (fixed).** The history a node republishes at start is built from its own certificate records and its own
+  verified sealed record (`own_history_at_start`), never the raw `sys/identity/{self}` value.
+- **N3 (stated, not built).** The certificate cache is cleared when full (4 096 entries), not LRU: junk certificates
+  for roughly a hundred nodes can churn it, costing on the order of 1–2 s per fold, linear in the junk.
+- **N4 (stated).** A holder of the fleet CA key can make a node refuse to start (by issuing a certificate that outranks
+  the node's key and revoking it). Within the stated CA-holder limit; the refusal is loud and recoverable by an
+  operator re-issue.

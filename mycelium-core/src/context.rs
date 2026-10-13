@@ -282,8 +282,12 @@ impl CoreCtx {
     /// its anchored keys — minus the keys the node revoked and removed members' keys. **Verify-only**:
     /// audit-chain recovery and verification read it, so a record sealed under a key retired before
     /// the node was re-anchored still verifies; live writes and signatures are admitted only under
-    /// [`Self::trusted_keys`]. It has the pre-row-Q posture for unrevoked keys (a key poisoned into
-    /// `peer_keys` with identity proofs off is in it).
+    /// [`Self::trusted_keys`]. A key reaches `peer_keys` only through an identity record the identity
+    /// watcher validated — and a node's own record is built from its certificate records and its own
+    /// verified sealed record, never the raw `sys/identity/{node}` value (the confirming review's N2) —
+    /// so with `require_identity_proofs` a member cannot add a key to another's history. With proofs off
+    /// (the default) a bare identity record still can, as before row Q: that is the documented
+    /// identity-poisoning residual, and it reaches history verification.
     pub fn history_keys(&self, node: &NodeId) -> Vec<[u8; 32]> {
         let mut keys: Vec<[u8; 32]> = self.peer_keys.pin().get(node).cloned().unwrap_or_default();
         if let Some(s) = self.key_standing.get(node) {

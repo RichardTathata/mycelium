@@ -1190,4 +1190,6 @@ current key gets 422: rotate first. **What is not covered:** a holder of the fle
 development posture) can issue a certificate that outranks any node's key; the secure posture cannot rotate and
 recovers by re-issue only; a retired key verifies until revoked; unsigned `Data` and anti-entropy; the mTLS handshake
 does not refuse a revoked key; a node without persistence forgets, across a restart, a revocation hidden fleet-wide
-while it was down, until the owner republishes it.
+while it was down, until the owner republishes it; a holder of the CA key can make a node refuse to start (loud,
+recovered by a re-issue); junk certificates for many nodes can churn the bounded certificate cache (a fold then costs
+on the order of a second).

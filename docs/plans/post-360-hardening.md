@@ -720,7 +720,12 @@ unproduced), the row closes as follows. The verifiers were enumerated with
   (`junk_revocation_records_keep_a_fold_bounded`); the clock-step floor (`a_rotation_after_the_clock_steps_back_still_outranks_its_predecessor`);
   adoption only under the node's own keys (`an_owner_does_not_adopt_a_revocation_planted_through_its_raw_identity`);
   idempotent revocation (`revoking_one_key_twice_writes_one_record`); `compute` merges (inspection — a race no test
-  reproduces); the three test labels corrected.
+  reproduces); the three test labels corrected. **The confirming review's N1–N2** (seen failing on 39cfb571):
+  provisional revocations of unanchored keys and no signer the node counted as revoked
+  (`a_thiefs_revocation_judged_before_the_successors_certificate_does_not_lock_in`), the own certificate anchoring
+  first at start (`a_planted_record_does_not_refuse_a_start_whose_own_certificate_record_is_missing`), the start
+  history from the node's own records (`a_raw_identity_value_a_member_writes_does_not_enter_the_owners_history`);
+  N3 (the certificate cache clears rather than evicting) and N4 (a CA holder can refuse a node's start) stated.
 - **Not built, stated:** no protection against a holder of the fleet CA key (every node in the development posture);
   the secure posture cannot rotate (recovery is re-issue only); a node with a pre-row-Q certificate has no standing
   until re-issued, and keys it revoked before the upgrade verify again at upgraded nodes until then; a retired key that

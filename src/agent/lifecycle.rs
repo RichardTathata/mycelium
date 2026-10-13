@@ -383,9 +383,11 @@ impl GossipAgent {
                     // still verify after a restart, across any number of rotations.
                     let vk = arc_tls.verifying_key_bytes();
                     let id_key = format!("sys/identity/{}", self.node_id);
-                    let existing = kv_get(&self.task_ctx, &id_key)
-                        .map(|b| super::helpers::parse_identity_keys(&b))
-                        .unwrap_or_default();
+                    // Post-360 plan row Q (the confirming review's N2): the history this node
+                    // republishes comes from what it can show it held — its certificate records and its
+                    // own verified sealed record — never the raw `sys/identity/{self}` value, which any
+                    // member can write.
+                    let existing = super::revocation::own_history_at_start(&self.task_ctx, &arc_tls);
                     let history = super::helpers::encode_identity_history(vk, &existing);
                     // identity-auth Phase 2: a proof signed by the current key, so peers can
                     // authenticate the history against the CA anchor / a trusted key.
