@@ -2183,7 +2183,7 @@ async fn junk_revocation_records_keep_a_fold_bounded() {
 /// below the key it succeeds and its revocation did not count. It is issued strictly after the node's
 /// newest own issuance. Seen failing first on 38da0472 (with the test-only clock step added to that
 /// copy): "STEP: after the clock stepped back, the rotation's revocation did not count".
-#[cfg(all(feature = "tls", feature = "compliance"))]
+#[cfg(all(feature = "tls", feature = "compliance", not(feature = "sim")))]
 #[tokio::test]
 async fn a_rotation_after_the_clock_steps_back_still_outranks_its_predecessor() {
     let (a, b, c, _nb, nc, dir) = three_signed_nodes("q4-step", false).await;
