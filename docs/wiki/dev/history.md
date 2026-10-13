@@ -22,7 +22,25 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
-## Unreleased — 2026-10-11 — P2's migration: close · enumerate · carry · complete
+## v2.33.0 release — 2026-10-13 (tag `v2.33.0`) — post-360 wave 2: revocation at every verifier, wire and crypto with a window
+
+**#604** a lost electorate voter restored with its state or retired, never reissued empty (docs); **#605** an
+electorate member that restarts without its promises detected — persistence required, an empty store warned, a
+forgotten promise withholds the slot (`src/agent/acceptor_guard.rs`); **#606** P2's migration (below); **#607** Φ,
+"a protocol, not a service" in full in the philosophy; **#608** hygiene (J) — the sim-seam skip, every feature and
+bench linted, two CI jobs pinned, nineteen unreferenced items deprecated, `hex_line`/`now_ms` unified; **#609** the
+companions' doors (H) — the commitment award judged on the declarer's signed close, `award_of_verified`, the reason
+blob quota, a one-segment `run_id` (`mycelium-reason` 0.9.0); **#610** `http.rs` split by route family (P5);
+**#613** the gateway remainder (E) — timer periods `1..=3600`, the mailbox and log-group streams record after the
+hand-off, prompt keys cannot alias, a caller envelope fresh for 300 s; **#611** wire and crypto (F) — KV `SignedData`
+domain-tagged, `kv_require_signed_frames` (opt-in, one-release window), the signer bound to its sender, a
+certificate's key read structurally, 2.32.0's §23 window closed; **#616** revocation reaches every verifier and only
+a newer certificate of the node can revoke its keys (Q; `docs/design/revocation-authority.md` rev 3); **#617**
+`quinn-proto` 0.11.18 (RUSTSEC-2026-0338..0342); plan rows K–T and §3.6 (#612, #614, #615, #618); private #30 (row
+I). Companions: `mycelium-reason` 0.9.0, `mycelium-py` 0.2.11, `mycelium-ts` 0.2.5. Wire v12 unchanged. Upgrade notes
+`deprecations.md` §34–§39. Release record: [`.log/2026-10-13-release-v2.33.0.md`](.log/2026-10-13-release-v2.33.0.md).
+
+## P2's migration: close · enumerate · carry · complete — 2026-10-11 (#606, released in v2.33.0)
 
 Changing an electorate's members is a migration that terminates (`docs/design/consensus-electorate.md` §8.3;
 `src/agent/migration.rs`): declare the successor naming its predecessors, retire the group into it (every member

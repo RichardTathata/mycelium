@@ -54,9 +54,12 @@ the notice.
 | 31 | an exclusive outcome (lock, leader, consistent write) on the whole cluster or an undeclared group, under the secure profile | 2.32.0 | declare an electorate group (`declare_electorate`, one `exclusive_default`), sized for its lifetime — its members are fixed at genesis | Partly — new `ConsensusResult`/`CommitError`/`ConsistencyError` variants (a `_` arm must fail closed); otherwise `start()` refuses rev 4 without `consensus_require_electorate`, and proposals are refused by name |
 | 32 | an accept path, a writer and a signal log with no bound | 2.32.0 | `handshake_timeout_ms`, `inbound_idle_timeout_secs`, `peer_read_stall_timeout_ms`, `peer_write_stall_timeout_ms`, `peer_min_rate_bytes_per_sec`, `max_connections_per_source` | Partly — `GossipConfig`, `SystemStats` and `CoreCtx` gain fields; `WriterTiming` replaces a `Duration` in three `writer` functions; `validate()` refuses an idle timeout at or below the writer's |
 | 33 | a permanent `elect_leader`; a lock or leadership read from the three legacy keys | 2.32.0 (legacy keys still written; they stop at a later, governed MINOR) | renew by calling again, or `elect_leader_with(group, LeaderTerm::Permanent)`; `release_leadership`; upgrade every node | No — a leadership lapses after 30 s; an upgraded proposer times out until a quorum is upgraded |
-| 34 | "declare a new group and move the work yourself" as the way to change an electorate's members; a default that cannot move | unreleased (after 2.32.0) | `declare_successor_electorate` → `retire_electorate` → `complete_migration` (`POST /gateway/govern/electorate` with `predecessors` / `retire_to` / `complete`; `drop_predecessor` for one that never retires) | Partly — `ElectorateDecl` and `Retirement` gained fields, `ElectorateError` gained `Retired` (`#[non_exhaustive]`; a `_` arm must fail closed); otherwise refusals by name |
-| 35 | an unsigned KV `Data` frame at a TLS node; a bare KV `SignedData` signature; a signed frame whose signer is not its sender; a certificate whose key was read by a byte-scan, or with no Ed25519 key | unreleased (after 2.32.0): unsigned and bare accepted for one release, counted; the scan removed | `kv_require_signed_frames = true` once every peer is upgraded (unconditional at plan row F2); the tagged form every upgraded node writes | No — counted (`kv_unsigned_frames_accepted`/`_refused`, `kv_untagged_signatures`, `kv_signer_mismatch`); `GossipConfig` gains a field (an exhaustive literal breaks) |
-| 36 | an award without a close; an offer, report or assessment read from another requirement's stream; `award_of_verified` against the writable head; an unbounded blob store; any string as a run id | unreleased (after 2.32.0; `mycelium-reason` 0.9.0) | `close(requirement, key, now_ms)` then award; `award_of_verified(requirement, declarer, resolve)`; `open_with_quota`; one bounded segment per run id | Partly — `TraceRecorder::new` returns `Result`, `award_of_verified` gained a parameter, `CommitmentRefusal` gained variants (`#[non_exhaustive]`); otherwise refusals by name (`NotClosed`, 507, 400) |
+| 34 | "declare a new group and move the work yourself" as the way to change an electorate's members; a default that cannot move | 2.33.0 | `declare_successor_electorate` → `retire_electorate` → `complete_migration` (`POST /gateway/govern/electorate` with `predecessors` / `retire_to` / `complete`; `drop_predecessor` for one that never retires) | Partly — `ElectorateDecl` and `Retirement` gained fields, `ElectorateError` gained `Retired` (`#[non_exhaustive]`; a `_` arm must fail closed); otherwise refusals by name |
+| 35 | an unsigned KV `Data` frame at a TLS node; a bare KV `SignedData` signature; a signed frame whose signer is not its sender; a certificate whose key was read by a byte-scan, or with no Ed25519 key | 2.33.0: unsigned and bare accepted for one release, counted; the scan removed | `kv_require_signed_frames = true` once every peer is upgraded (unconditional at plan row F2); the tagged form every upgraded node writes | No — counted (`kv_unsigned_frames_accepted`/`_refused`, `kv_untagged_signatures`, `kv_signer_mismatch`); `GossipConfig` gains a field (an exhaustive literal breaks) |
+| 36 | an award without a close; an offer, report or assessment read from another requirement's stream; `award_of_verified` against the writable head; an unbounded blob store; any string as a run id | 2.33.0 (`mycelium-reason` 0.9.0) | `close(requirement, key, now_ms)` then award; `award_of_verified(requirement, declarer, resolve)`; `open_with_quota`; one bounded segment per run id | Partly — `TraceRecorder::new` returns `Result`, `award_of_verified` gained a parameter, `CommitmentRefusal` gained variants (`#[non_exhaustive]`); otherwise refusals by name (`NotClosed`, 507, 400) |
+| 37 | nineteen public items (eighteen names) nothing in the repository references | 2.33.0 (deprecated, not removed) | none needed; open an issue to keep one — it is undeprecated in the next MINOR | **Yes** — `#[deprecated(since = "2.33.0")]` |
+| 38 | a fractional, zero or past-an-hour `interval_secs`/`lease_secs`; a prompt `ns`/`name` that is empty or holds `/`; a caller envelope older than 300 s plus the drift bound; `GatewayPreflight::is_inert` | 2.33.0 (`mycelium-py` 0.2.11, `mycelium-ts` 0.2.5) | whole seconds in `1..=3600`; a one-segment prompt name; a fresh envelope (keep a provider's backlog under 300 s) | Partly — `PromptSkillError` gained `InvalidName`, `CallerError` `Stale`, `is_inert` warns; otherwise HTTP 400 `timer_out_of_range` / `invalid_prompt_name`, `stale` |
+| 39 | a revoked key verifying at a KV, identity, consensus, envelope or knowledge verifier; a revocation signed by any key the node held; a certificate without `mycelium://<node>` | 2.33.0 | re-issue every node's certificate (`mycelium tls issue`, or a development node's next start); rotate before `identity/revoke` | Partly — `CoreCtx` and `RotationMaterial` gained fields; otherwise behaviour (a pre-row-Q certificate has no standing until re-issued; 422 on revoking the current key) |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -435,7 +438,7 @@ allow the grace period if the orderly shutdown matters (the stem's trace and its
 persistence). Existing
 `except httpx.HTTPStatusError` handlers keep catching a lost write; catch `SupersededError` to tell it apart.
 
-## 23. Identity proofs and consensus signatures are domain-tagged: the bare form is accepted for one release (2.32.0) — closed after 2.32.0 (§35)
+## 23. Identity proofs and consensus signatures are domain-tagged: the bare form is accepted for one release (2.32.0) — closed in 2.33.0 (§35)
 
 > **Closed.** The allowance below held for 2.32.0 only. From the release after it (§35) a bare identity proof is
 > refused whatever `require_identity_proofs` says, a bare consensus signature does not verify, an acceptor no longer
@@ -846,7 +849,7 @@ leadership after 30 s.
 **Not built:** an SDK `release_leadership` verb; collection on a node that proposes without a listener; releasing
 a permanent decision whose original proposer is gone for good (design §5).
 
-## 34. An electorate's members change by a migration that terminates (unreleased, after 2.32.0)
+## 34. An electorate's members change by a migration that terminates (2.33.0)
 
 **What changes.** Post-360 plan row P2's follow-up (`docs/design/consensus-electorate.md` §8.3). 2.32.0 said *declare a
 new group and move the work yourself — nothing decided in the old group is carried* and *the default cannot move*.
@@ -913,7 +916,7 @@ restore-or-retire rule): the carry set is complete because the group tag is in t
   carry at that slot, named; the claim is for slots decided only in the electorate (an ordinary slot also proposed
   under another scope is not enumerated); two default declarations within gossip lag are escaped by a merge.
 
-## 35. Wire and crypto: a TLS node can refuse unsigned KV frames, KV signatures are domain-tagged, a certificate's key is read structurally, and §23 closes (unreleased, after 2.32.0)
+## 35. Wire and crypto: a TLS node can refuse unsigned KV frames, KV signatures are domain-tagged, a certificate's key is read structurally, and §23 closes (2.33.0)
 
 Post-360 plan row F. Wire **v12** unchanged — no frame gains or loses a byte; what changes is which frames a node
 accepts and what a signature is over.
@@ -1008,7 +1011,7 @@ does not prevent it. `require_identity_proofs` is what closes that; a replay of 
 only keys its node published (keys accumulate). Role claims, audit
 records and revocation events are still signed over untagged canonical bytes (`what-is-proven.md`).
 
-## 36. Companion doors are bounded and checked: a blob quota, a one-segment run id, an award that names its requirement (unreleased, after 2.32.0)
+## 36. Companion doors are bounded and checked: a blob quota, a one-segment run id, an award that names its requirement (2.33.0)
 
 **What changes.** Post-360 plan row H (#609). `mycelium-reason` 0.9.0: `FsBlobStore::open` is **bounded at 1 GiB**
 (`DEFAULT_BLOB_QUOTA_BYTES`; `open_with_quota(dir, bytes)` for another, `u64::MAX` for none, `0` refused) and
@@ -1040,7 +1043,7 @@ restart), which never admits an offer the first close did not.
 The Python SDK and the LangGraph checkpointer are unchanged — a 507 or 400 surfaces as `httpx.HTTPStatusError` with
 the route's body.
 
-## 37. Nineteen public items (eighteen names) nobody references are deprecated, not removed (unreleased, after 2.32.0)
+## 37. Nineteen public items (eighteen names) nobody references are deprecated, not removed (2.33.0)
 
 **What changes** (post-360 plan row J, PR #608). A sweep of every `pub fn` / `const` / `struct` / `enum` / `type`
 / `trait` in the library crates against every file in the repository — `src/`, every `mycelium-*` crate, `tests/`,
@@ -1079,7 +1082,7 @@ the default.
 **Not built:** an automated sweep in CI. The grep above is a one-off (`scripts/` holds no copy); rustc's `dead_code`
 cannot see an exported item, so the next sweep is a session's work, not a gate.
 
-## 38. The gateway remainder: timer periods bounded, a dropped stream loses less, prompt names, a fresh envelope (unreleased, after 2.32.0)
+## 38. The gateway remainder: timer periods bounded, a dropped stream loses less, prompt names, a fresh envelope (2.33.0)
 
 **What changes** (post-360 plan row E). Six things a gateway client or a provider can see:
 
@@ -1143,7 +1146,7 @@ Nothing to do for the log group in a mixed fleet: an older node writes only the 
 the offset whenever it is ahead of the cursor. **What a drop still loses**, stated: a mailbox event or log-group
 entry the connection had accepted when it dropped — the gateway has no resume point (guide 10).
 
-## 39. Revocation reaches every verifier, and only a newer certificate of a node can revoke its keys (unreleased, after 2.32.0)
+## 39. Revocation reaches every verifier, and only a newer certificate of a node can revoke its keys (2.33.0)
 
 **What changes** (post-360 plan row Q; decision record `docs/design/revocation-authority.md` rev 3):
 
