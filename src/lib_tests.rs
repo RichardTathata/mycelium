@@ -2764,6 +2764,43 @@ async fn a_planted_run_of_any_length_leaves_the_node_sealing_and_is_reported() {
     assert!(worst < Duration::from_millis(50), "the lock was held for {worst:?} while the seal stepped over the run");
 }
 
+/// **A seal over one planted record costs the run, not the stream** (the seal fix's check, medium). The
+/// free slot was found by reading and decoding the whole stream; on a long stream one planted record at
+/// the head made a seal cost the stream (20 000 records: 165 ms against 0.29 ms in the review). It is
+/// found slot by slot from the head now, one O(1) lookup per occupied slot. The bound stated: with
+/// 20 000 records elsewhere in the stream and one planted at the head's slot, the seal takes under
+/// 25 ms (debug build). Seen failing first on 5ee431fe: "a seal over one planted record took".
+#[cfg(feature = "compliance")]
+#[tokio::test]
+async fn a_seal_over_one_planted_record_costs_the_run_not_the_stream() {
+    use crate::{audit_key, AuditAction, AuditOutcome, AuditRecord, SignedAuditRecord};
+    let port = alloc_port();
+    let id = NodeId::new("127.0.0.1", port).unwrap();
+    let dir = std::env::temp_dir().join(format!("myc-q10-cost-{port}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    cfg.tls = Some(crate::config::TlsConfig { auto_cert_dir: dir.clone(), ..Default::default() });
+    let a = GossipAgent::new(id.clone(), cfg);
+    a.start().await.unwrap();
+    let h0 = a.audit(AuditAction::Invoke, "p", "t0", AuditOutcome::Success, None).unwrap();
+    let other = ed25519_dalek::SigningKey::from_bytes(&[0x44; 32]);
+    let rec = |seq: u64| SignedAuditRecord::sign(AuditRecord { node_id: id.clone(), seq, hlc: 1, principal: "x".into(), action: AuditAction::Admin, target: "x".into(), outcome: AuditOutcome::Success, detail: None, prev_hash: h0 }, &other).encode();
+    // A long stream: 20 000 records far from the head.
+    for seq in 1_000_000..1_020_000u64 { let _ = a.kv().set(audit_key(&id, seq), rec(seq)); }
+    // One planted record at the head's slot.
+    let _ = a.kv().set(audit_key(&id, 1), rec(1));
+    let t = std::time::Instant::now();
+    let sealed = a.audit(AuditAction::Admin, "p", "after", AuditOutcome::Success, None);
+    let took = t.elapsed();
+    eprintln!("seal over one planted record on a 20 000-record stream: {took:?}");
+    let at = a.audit_stream(&id).iter().any(|r| r.record.prev_hash == h0 && r.record.seq == 2);
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(sealed.is_ok() && at, "the seal stepped over the planted record to seq 2");
+    assert!(took < Duration::from_millis(25), "a seal over one planted record took {took:?}");
+}
+
 /// **A capability retracted as its node shuts down reaches the peers** (#611, found by CI's co-op
 /// demo 04). A capability's soft-state task tombstones its key when the handle drops; a node that
 /// drops the handle and shuts down at once (a provider killed mid-run) raced the shutdown signal, and

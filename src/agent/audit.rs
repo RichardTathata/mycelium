@@ -312,10 +312,14 @@ pub trait AuditSink: Send + Sync + 'static {
     fn export(&self, record: &SignedAuditRecord);
 }
 
+/// How many times a seal looks for a free slot outside the audit lock before it finds one under it.
+const MAX_SEAL_ATTEMPTS: u32 = 8;
+
 /// Whether `seq`'s slot in this node's stream holds a record of this node at that seq — what a seal
 /// must not overwrite. Garbage at the key, or a record naming another seq or node, is not a record of
 /// the stream (`read_stream_checked`) and occupies nothing.
 fn slot_holds_record(ctx: &TaskCtx, seq: u64) -> bool {
+    // (The same rule `read_stream_checked` reads a stream by.)
     let key = audit_key(&ctx.node_id, seq);
     ctx.kv_state.store.pin().get(key.as_str())
         .and_then(|e| e.data.clone())
@@ -353,14 +357,34 @@ pub(crate) fn seal_and_write(
     // Post-360 plan row Q: never seal over an existing record, and never refuse because of planted
     // ones. The lock is held only for an O(1) check of the head's slot. If a record of this node
     // already occupies it (one recovery could not verify — kept, reported), the first free slot after
-    // it is found **outside the lock**, in one ordered pass over the strict-read stream; the head moves
-    // there, the skipped run is reported with the other unverified records, and the chain links across
-    // it by hash. Garbage at a key is not a record and occupies nothing. The sequence never wraps.
+    // it is found **outside the lock**, slot by slot from the head (one O(1) lookup per occupied
+    // slot — O(run), not O(stream)); the head moves there, the skipped run is reported with the other
+    // unverified records, and the chain links across it by hash. Garbage at a key is not a record and
+    // occupies nothing. The sequence never wraps. Scan-then-recheck is retried at most
+    // `MAX_SEAL_ATTEMPTS` times; past that (seals racing to move the head), the race is reported and
+    // the free slot is found under the lock — never a refusal, never an unbounded loop.
     let mut fields = Some((principal.into(), target.into(), detail));
+    let mut attempts = 0u32;
     let (record, key, content) = loop {
         let start = {
             let mut guard = ctx.audit_chain.lock().unwrap_or_else(|e| e.into_inner());
-            let seq = guard.next_seq;
+            let mut seq = guard.next_seq;
+            if attempts >= MAX_SEAL_ATTEMPTS && slot_holds_record(ctx, seq) {
+                let from = seq;
+                while slot_holds_record(ctx, seq) {
+                    seq = match seq.checked_add(1) {
+                        Some(n) => n,
+                        None => {
+                            tracing::error!(node = %ctx.node_id, "audit: the sequence is exhausted; refusing to seal (a record would wrap onto genesis)");
+                            return Err(crate::error::GossipError::InvalidField { field: "audit", reason: "the audit sequence is exhausted".into() });
+                        }
+                    };
+                }
+                guard.next_seq = seq;
+                guard.add_unverified(from, seq - 1);
+                tracing::warn!(node = %ctx.node_id, attempts, from, to = seq - 1,
+                    "audit: the head kept moving while this seal looked for a free slot; found it under the lock, past {} slots held by records that do not verify", seq - from);
+            }
             if !slot_holds_record(ctx, seq) {
                 let Some(after) = seq.checked_add(1) else {
                     tracing::error!(node = %ctx.node_id, "audit: the sequence is exhausted; refusing to seal (a record would wrap onto genesis)");
@@ -385,13 +409,10 @@ pub(crate) fn seal_and_write(
             }
             seq
         };
-        // Outside the lock: the first free slot at or after `start`.
-        let (records, _) = read_stream_checked(ctx, &ctx.node_id);
+        attempts += 1;
+        // Outside the lock: the first free slot at or after `start`, slot by slot.
         let mut free = start;
-        for r in records.iter().map(|r| r.record.seq).filter(|s| *s >= start) {
-            if r != free {
-                break;
-            }
+        while slot_holds_record(ctx, free) {
             free = match free.checked_add(1) {
                 Some(n) => n,
                 None => {

@@ -319,7 +319,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`audit_segments`, `GET /gateway/audit` `segments`) and `/stats` counts unverified records
   (`one_planted_record_does_not_leave_the_rest_of_the_stream_unverifiable`); pruning keeps unverified records. **The
   H1/M1 review:** a public `verify_linked` follows the hash links, the contiguous verifiers unchanged and pointing at it
-  (`a_stream_with_a_skipped_slot_verifies_under_verify_linked`); a planted run of any length leaves the node sealing — the free slot found outside the audit lock, the run reported (`a_planted_run_of_any_length_leaves_the_node_sealing_and_is_reported`); a pruned stream whose boundary record was removed anchors at the
+  (`a_stream_with_a_skipped_slot_verifies_under_verify_linked`); a planted run of any length leaves the node sealing — the free slot found outside the audit lock, slot by slot, the run reported (`a_planted_run_of_any_length_leaves_the_node_sealing_and_is_reported`, `a_seal_over_one_planted_record_costs_the_run_not_the_stream`); a pruned stream whose boundary record was removed anchors at the
   newest checkpoint below it. Upgrade notes in `deprecations.md` §39.
   Wire **v12** unchanged.
 - **Wire and crypto, one MINOR with a window (post-360 plan row F).** Wire **v12** unchanged — no frame changes

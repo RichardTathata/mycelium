@@ -315,6 +315,8 @@ on `38da0472`):
   trail. A seal never refuses because of planted records: it finds the first free slot outside the audit lock in one
   ordered pass (the lock held only for an O(1) check of the head's slot per attempt — measured: under 50 ms of lock
   wait while one seal steps over a 50 000-record run), seals there, and reports the run; garbage occupies nothing.
+  The look-ahead is slot by slot from the head (O(run), not O(stream): one planted record on a 20 000-record stream,
+  0.7 ms against 170 ms), and scan-then-recheck retries are capped at 8 before the slot is found under the lock.
 - **N-D:** kept, unverified records stay until an operator removes them; `docs/operations/audit.md` says how.
 - **The pre-existing checkpoint-boundary residual is fixed:** a pruned stream whose boundary record was removed anchors
   at the newest checkpoint below its first record, so numbering resumes at the boundary, not at genesis.

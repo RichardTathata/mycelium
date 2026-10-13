@@ -323,7 +323,11 @@ enforcement point does not see. **Never read silence as an all-clear.**
 - **A planted run never stops sealing.** When records of the node it cannot verify occupy the slots after the chain
   head, the seal finds the first free slot outside the audit lock — one ordered pass over the stream; the lock is held
   only for an O(1) check of the head's slot per attempt — seals there, links by hash, and reports the run with the
-  other unverified records. Garbage at a key is not a record and occupies nothing.
+  other unverified records. Garbage at a key is not a record and occupies nothing. (That rule could overwrite a
+  genuine record only on a node downgraded across a change of the audit record's format, which would read its own
+  newer records as garbage — an unsupported downgrade.) The look-ahead costs one O(1) lookup per occupied slot, not a
+  read of the stream, and scan-then-recheck is retried at most 8 times before the free slot is found under the lock
+  (the race reported); a seal never refuses and never loops unbounded.
 - **Kept, unverified records stay until an operator removes them.** Neither recovery, sealing nor
   `audit_prune_to_checkpoint` deletes them. To remove them: read the seqs from `GossipAgent::audit_segments(node)`
   (`unverified`), or `GET /gateway/audit` (`segments.unverified_seqs`); keep a copy as evidence; then delete each with
