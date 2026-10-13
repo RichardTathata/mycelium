@@ -9,6 +9,46 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.33.0] — 2026-10-13
+
+**The post-360 hardening plan's second wave: revocation at every verifier, wire and crypto with a window, and an
+electorate that can change.** **A revoked key stops verifying at every verifier** — the KV `SignedData` arm, identity
+chaining, the unsigned identity exemption, consensus (its raw-`sys/identity/` fallback gone), caller envelopes,
+knowledge keys and `mycelium-agentfacts` — and **only a newer certificate of the node can revoke its keys**:
+certificates name their node (`mycelium://<node>`) and their issuance, are published at `sys/identity-cert/`, and a
+revocation counts only when signed by an anchored key issued after the one it revokes; counted revocations are
+journaled, so one hidden while a node was down still counts (row Q, `docs/design/revocation-authority.md` rev 3).
+**Wire and crypto, one MINOR with a window** (row F): KV `SignedData` is signed under its own domain
+(`mycelium.kv/update/1`), the bare 2.32 form accepted and counted for one release; under `[tls]` every local KV write
+is signed and `kv_require_signed_frames` lets a node refuse an unsigned `Data` frame (off by default this release —
+the unconditional refusal is row F2); a signed frame's signer is bound to its sender; a peer certificate's key is read
+from its `SubjectPublicKeyInfo`, not by scanning the DER; and 2.32.0's §23 window closes — a bare identity proof or
+consensus signature is refused. **An electorate's members change by a migration that terminates** — declare the
+successor, retire the group into it, complete the carry — so a retired group can be decommissioned (P2's follow-up),
+and an electorate member that restarts without its promises is detected: `[persistence]` is required, an empty store
+is warned, a forgotten promise withholds its slot. The gateway remainder (row E): timer periods bounded to
+`1..=3600` s, the mailbox and log-group streams record their position only after handing an entry on, prompt keys
+cannot alias, a caller envelope is fresh for 300 s plus the drift bound. The companions' doors (row H): a commitment
+award is decided on the declarer's signed close, `award_of_verified` checks the declarer the caller pins, and
+`mycelium-reason` **0.9.0** bounds its blob store and validates a run id. `src/agent/http.rs` is split by route family
+with behaviour unchanged (P5); hygiene (J) fixes the sim-seam gate's test skip, lints every feature and bench, and
+deprecates nineteen unreferenced items without removing them; the philosophy states "a protocol, not a service" in
+full (Φ). `quinn-proto` 0.11.18 (RUSTSEC-2026-0338..0342). Companions on their own lines: `mycelium-reason` **0.9.0**,
+`mycelium-py` **0.2.11**, `mycelium-ts` **0.2.5**; `langgraph-checkpoint-mycelium` and `mycelium-guardrails`
+unchanged. Wire **v12** unchanged (`WIRE_VERSION` 12, `PREV` 11): no frame changes shape; what a node accepts and
+what a KV signature is over do, and four consensus variants are appended for the migration. **Check before
+upgrading:** upgrade from 2.32, not 2.31 — a 2.31 node and an upgraded one verify neither each other's identity
+proofs nor their consensus messages; an upgraded node's KV writes reach a 2.32 peer only by anti-entropy until that
+peer is upgraded, so upgrade promptly; set `kv_require_signed_frames` only once `kv_unsigned_frames_accepted` and
+`kv_untagged_signatures` (`GET /stats`) stop rising fleet-wide; **re-issue every node's certificate** so it carries
+`URI:mycelium://<node>` (`openssl x509 -noout -ext subjectAltName -in <cert>`) — until then revocations of its keys
+do not count at upgraded nodes; an electorate member without `[persistence]` is refused; a timer period outside
+`1..=3600` answers 400 `timer_out_of_range`; remove alerts on `identity_untagged_proofs` and
+`consensus_untagged_signatures`, which are gone. **Not claimed:** protection against a holder of the fleet CA key
+(every node in the development posture holds it); identity proofs on by default (plan row S); the unconditional
+unsigned-frame refusal (F2); authored anti-entropy entries; the mTLS handshake refusing a revoked key. Upgrade notes
+in `docs/guide/deprecations.md` §34–§39.
+
 ### Added
 
 - **Companions: the commitment deadline decided by the declarer's close, an award checked before it is reported,
@@ -187,7 +227,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `0.5` or `"30"` silently became 30 s; a unit file's `ttl_secs` is held to the same range by `validate()` (`0` was a
   1 ms re-assert loop); a gateway advert gossips a `CapEntry` with its own `refresh_interval_ms` instead of a bare
   `Capability` every reader timed at the legacy 60 s; both SDKs send `interval_secs` in whole seconds, rounded up
-  (unreleased `mycelium-py` / `mycelium-ts`). **The mailbox stream deletes an event as it hands it to the HTTP
+  (`mycelium-py` 0.2.11, `mycelium-ts` 0.2.5). **The mailbox stream deletes an event as it hands it to the HTTP
   connection** (`mailbox::open_mailbox_acked`, an in-flight set so nothing is queued twice), not as it enters the
   256-slot channel — a dropped stream had already deleted every queued event (#595's review); the in-process
   `open_mailbox` is unchanged. **The log-group subscribe keeps the core's `(hlc, key)` order** — of two same-HLC entries
@@ -234,6 +274,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `{persistence.base_path}/{node_id}/kv/` at its latest state; or **retire** — onto the removal ledger, which
   forecloses the restore. A lost majority's repair (an operator-forced genesis from survivors' durable state)
   is named as not built in `what-is-proven.md`'s third table. No code change.
+
+- **`mycelium-py` 0.2.11** (its own tag `mycelium-py-v0.2.11`; post-360 row E, #613): `advertise_capability`
+  and `declare_units` send `interval_secs` in whole seconds, a fraction rounded up, as `lease_secs` already was,
+  and refuse an `interval_secs` or `lease_secs` of 0 or past 3600 (`MAX_TIMER_PERIOD_SECS`) with `ValueError`
+  before any request — the node's new bound. README § *Timer periods (0.2.11)*.
+
+- **`mycelium-ts` 0.2.5** (its own tag `mycelium-ts-v0.2.5`; post-360 row E, #613): `advertiseCapability` and
+  `declareUnits` send `intervalSecs` in whole seconds, a fraction rounded up, as `leaseSecs` already was, and throw
+  on an `intervalSecs` or `leaseSecs` of 0 or past 3600 (`MAX_TIMER_PERIOD_SECS`, exported) before any request.
+  README § *Timer periods (0.2.5)*.
+
+- **Documentation: the post-360 plan's later rows and state of play** (#612, #614, #615, #618; no code change). Rows
+  K, L, M from the Strands Box and NVIDIA OpenShell comparison (policy over history, credentials at egress, confined
+  activations), N, O, P (Strands agents on Mycelium, with the `a2a-sdk` probe's evidence under
+  `docs/plans/external/2026-10-12-a2a-sdk-probe/`), S (identity proofs on by default) and T (a loud warning when the
+  CA key is on the node); §3.6, the state of play, with the shutdown drain's limit stated.
 
 ### Deprecated
 

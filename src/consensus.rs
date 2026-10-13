@@ -1740,10 +1740,8 @@ impl ConsensusEngine {
         if self.task_ctx.tls.get().is_some() {
             let signed: SignedConsensusMsg =
                 mycelium_core::serde_fixint::from_slice(payload).ok()?;
-            // Look up the sender's verifying key SET (WS5 retained keys): the
-            // in-memory cache first, else parse the `sys/identity/` KV entry
-            // (32 = one key, 64 = current‖previous). Verify against any so a
-            // rotated key still validates in-flight/historical consensus msgs.
+            // Verify against the signer's key SET (WS5 retained keys), so a rotated key still
+            // validates in-flight/historical consensus msgs.
             // The keys this node trusts for the signer (post-360 plan row Q): an anchored node's
             // anchored, unrevoked keys, or a legacy node's retained set minus its revocations — the one
             // answer every verifier reads. An unknown signer has none and is refused: the fallback to

@@ -373,7 +373,7 @@ row G and decision D4).
 **Timeouts and path segments.** The routes that read `timeout_secs`, `lease_secs`, `interval_secs` or `ttl_secs` as an integer
 (`rpc/call`, `scatter`, `overlay/emit_reliable`, `wiki/ingest`, the tuple `take`s, `capability/advertise`,
 `units/declare`, `overlay/lock/acquire`) get whole seconds from both SDKs, a fraction rounded up (`mycelium-py`
-0.2.10, `mycelium-ts` 0.2.0/0.2.4; `interval_secs` since post-360 row E, unreleased; the tuple `take` keeps `0`, its poll); a negative, non-finite or past-`u64`
+0.2.10, `mycelium-ts` 0.2.0/0.2.4; `interval_secs` since post-360 row E, `mycelium-py` 0.2.11 / `mycelium-ts` 0.2.5; the tuple `take` keeps `0`, its poll); a negative, non-finite or past-`u64`
 value is refused by name before any request. `capability/advertise` and `units/declare` hold `interval_secs` and
 `lease_secs` to `1..=3600` (both SDKs refuse `0` and a larger value locally) and answer **400 `timer_out_of_range`** naming the field otherwise — a value that is
 not a whole number included, which they used to replace with 30 s ([deprecations.md §38](deprecations.md)). `/gateway/kv/quorum` reads `timeout_secs` as a float and is sent as

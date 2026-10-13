@@ -109,7 +109,7 @@ un-upgraded acceptors, and a 2.31 verifier counts every 2.32 peer's proof as an 
 hit, re-raised on every `sys/identity*` event, with the peer's handshake key still anchored
 (`docs/guide/deprecations.md` §23 has every direction). The counters count validations, not peers. Tests:
 `a_signed_consensus_answer_is_not_an_identity_proof`, seen failing first. **Closed by post-360 row F
-(unreleased after 2.32.0, §35):** the bare forms are refused, `SignatureForm`/`sign_payload_as` and both
+(2.33.0, §35):** the bare forms are refused, `SignatureForm`/`sign_payload_as` and both
 counters are gone, and an acceptor answers only a tagged request (`an_acceptor_answers_only_a_tagged_request`,
 `a_bare_identity_proof_is_refused_now_the_window_is_closed`). Row F also tags **KV `SignedData`**
 (`mycelium.kv/update/1`, `framing::kv_signing_message`; the bare 2.32 form accepted for one release, counted as

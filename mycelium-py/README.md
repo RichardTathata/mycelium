@@ -555,6 +555,14 @@ twice — it is the only thing that lets a silent gateway be retried elsewhere, 
 
 ---
 
+### Timer periods (0.2.11)
+
+- **`interval_secs` and `lease_secs` are whole seconds in `1..=3600`** (`advertise_capability`, `declare_units`),
+  as the node now requires (post-360 row E, 2.33.0 — `MAX_TIMER_PERIOD_SECS`; the gateway answers 400
+  `timer_out_of_range` naming the field otherwise). A fraction rounds **up**; `0` or a value past 3600 raises
+  `ValueError` naming the parameter, before any request. Before 0.2.11 `interval_secs` was sent as given, and the
+  gateway read `0.5` or `"30"` as its 30 s default and any `u64` as a period.
+
 ### Timeouts, path segments and streams (0.2.10)
 
 - **Timeouts are whole seconds.** The routes below read `timeout_secs` as an integer (`set_with_min_acks`'s

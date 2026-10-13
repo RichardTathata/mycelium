@@ -461,6 +461,14 @@ protected kind — is thrown, never reported as `"timeout"`.
   `sseStream`) bounds only the events parsed from a single network read (`maxPending`, default 1024,
   when you call `sseStream` yourself).
 
+### Timer periods (0.2.5)
+
+- **`intervalSecs` and `leaseSecs` are whole seconds in `1..=3600`** (`advertiseCapability`, `declareUnits`),
+  as the node now requires (post-360 row E, 2.33.0 — `MAX_TIMER_PERIOD_SECS`, exported; the gateway answers 400
+  `timer_out_of_range` naming the field otherwise). A fraction rounds **up**; `0` or a value past 3600 throws,
+  naming the option, before any request. Before 0.2.5 `intervalSecs` was sent as given, and the gateway read a
+  fraction as its 30 s default and any `u64` as a period.
+
 ### Timeouts, path segments and streams (0.2.4)
 
 - **Every timeout is whole seconds now**, as `rpcCall`, `scatterGather` and `emitReliable` have been since

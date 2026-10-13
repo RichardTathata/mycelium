@@ -2026,8 +2026,9 @@ impl GossipAgent {
 
     /// **Revoke** one of this node's own verifying keys cluster-wide (WS-D / D1) — for a key known
     /// to be *compromised*, where WS5 rotation alone is insufficient (a rotated-away key stays
-    /// trusted for verification). Writes a signed revocation to `sys/revocation/{self}/{key}`,
-    /// signed by the **current** identity key; once it gossips, **every verifier of this node's key**
+    /// trusted for verification). Writes a signed v2 revocation to
+    /// `sys/revocation/{self}/{revoked-hex}/{current-hex}` (keyed `(P, S)`), signed by the **current**
+    /// identity key; once it gossips, **every verifier of this node's key**
     /// at each peer that validates it excludes `revoked_key` — KV writes, identity records, consensus,
     /// role claims, the audit chain, caller envelopes, knowledge records (post-360 plan row Q) — so
     /// anything it signed fails verification — "sub-second revocation", bounded by gossip latency.

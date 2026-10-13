@@ -2,7 +2,7 @@
 
 **Status:** **adopted** 2026-10-10. Records a decision; changes no code. Plan of record:
 `docs/plans/post-360-hardening.md` (PR #593) §2 and decision D1, rows **P2**, **C1**, **C2** and **Φ**
-(**P2 built** 2026-10-10, §8; **C1, C2 delivered** in PR #600; Φ not built). It builds on the threat model's supported profile
+(**P2 built** 2026-10-10, §8, its migration in 2.33.0 (#606); **C1, C2 delivered** in PR #600; **Φ delivered** in #607). It builds on the threat model's supported profile
 ([`threat-model.md` §7](../threat-model.md#7-safety-sensitive-agreement-the-supported-profile)), guide 04's
 *Changing an electorate* ([`guide/04-consensus.md`](../guide/04-consensus.md#what-a-successful-election-means)) and the
 philosophy's corrected litmus ([`philosophy.md`](../philosophy.md#the-corrected-litmus)).
@@ -144,7 +144,7 @@ Since P2 (2026-10-10, §8):
 
 | Row | Promise (quoted from the plan) | State |
 |---|---|---|
-| **P2** | "safety-sensitive consensus (the threat model §7 supported profile) requires a governed group, whose membership moves only through a governance route; the secure profile checks it; the electorate is named as a group, never as node identities" | delivered in 2.32.0 (#601), **without migration**: an electorate group's members are fixed at genesis; the migration — close, enumerate, carry, complete — delivered after it (§8.3) |
+| **P2** | "safety-sensitive consensus (the threat model §7 supported profile) requires a governed group, whose membership moves only through a governance route; the secure profile checks it; the electorate is named as a group, never as node identities" | delivered in 2.32.0 (#601), **without migration**: an electorate group's members are fixed at genesis; the migration — close, enumerate, carry, complete — delivered in 2.33.0 (#606, §8.3) |
 | **C1** | "`elect_leader` is lease-based by default with a release path (permanence stays available, opt-in)" | delivered (#600): `DEFAULT_LEADER_LEASE`, `release_leadership`, `LeaderTerm::Permanent`; gateway `ttl_secs` / `permanent` and `DELETE /gateway/overlay/elect/{group}` |
 | **C2** | "acceptor state is collected once its decision or lease is over, without weakening the promise a live slot depends on" | delivered (#600): `ConsensusEngine::collect_finished`, bounded per tick, on its own task |
 
@@ -209,7 +209,7 @@ and 3, which built **live one-member steps with a drain before each step**. Roun
 race between taking the drain report and raising the fence) and unable to move a fleet electorate that had decided more
 than its bound. **The maintainer's decisions (2026-10-11): freeze membership, and ship P2 in 2.32.0 without
 migration.** An electorate's members are fixed at genesis; changing them is a **migration** to a successor group, built
-after 2.32.0 — the parked lazy carry of rounds 4–5 replaced by one that **terminates**: close, enumerate, carry,
+in 2.33.0 — the parked lazy carry of rounds 4–5 replaced by one that **terminates**: close, enumerate, carry,
 complete (§8.3). Live reconfiguration is a later plan (§4.2). Wire v12, new message variants appended (§8.6).*
 
 ### 8.1 What an electorate group is
