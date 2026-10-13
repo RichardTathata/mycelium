@@ -1,7 +1,7 @@
 # Post-360 hardening — the next batch, and consensus as a protocol, not a service
 
 **Status:** adopted 2026-10-10, rev 1.9 (2026-10-13: the v2.33.0 cut — every row since 2.32.0 closed on evidence in §3.5, and the table's state markers moved; rev 1.8, 2026-10-12: Φ closed; P5, J, I, H, E and F delivered; rows K, L, M added from the Strands Box comparison; rows N, O, P added — Strands agents on Mycelium, after an `a2a-sdk` probe; Q delivered; rows S and T added). **R0 was released as v2.32.0 (2026-10-11)**, delivering rows **G, P3, C, D,
-P1, A (with C1, C2), B (as narrowed 2026-10-11) and P2 (without migration, as decided 2026-10-11)**; R0's private re-pin landed as private #29. **v2.33.0 (cut 2026-10-13) delivers rows Φ (#607), P2's migration (#606, with #604 and #605), J (#608), P5 (#610), H (#609), E (#613), F (#611, with its window — the flip is F2), Q (#616) and, in the private repository on that pin, I (private #30)** — each closed on evidence in §3.5. Open:
+P1, A (with C1, C2), B (as narrowed 2026-10-11) and P2 (without migration, as decided 2026-10-11)**; R0's private re-pin landed as private #29. **v2.33.0 (cut 2026-10-13) delivers rows Φ (#607), P2's migration (#606, with #604 and #605), J (#608), P5 (#610), H (#609), E (#613), F (#611, with its window — the flip is F2), Q (#616) and, in the private repository on that pin, I (private #30)**; its private re-pin landed as private #31 — each closed on evidence in §3.5. Open:
 F2, K, L, M, N, O, P, S, T. It follows the 2026-10-09 360 review and the eleven
 PRs that addressed its must-do list (#582–#592, private #28); those are recorded in the CHANGELOG and are not
 repeated here. Rows close on evidence (verification policy rule 2): a row is closed by quoting each promise next to
