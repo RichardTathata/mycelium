@@ -30,3 +30,11 @@
   agentfacts on `trusted_identity_keys`, guarantee `id.revocation_authority`.
 - Pages touched: `dev/security.md` § WS5. Outside the wiki: the design record, threat model, runbook
   (`docs/operations/cert-rotation.md`), `what-is-proven.md`, `deprecations.md` §39, CHANGELOG, the plan.
+
+## [2026-10-13] ingest | row Q: the final review's round (named fixes only)
+
+- The final review of 38da0472 found the node's own audit genesis re-sealed after re-anchoring (live trust used for
+  history) and a re-issue un-revoking a key (max issuance, re-judged from scratch). Fixed with a verify-only history set
+  (`CoreCtx::history_keys`), first-issuance ranking, counted-stays-counted, a start refusal for a self-revoked key, the
+  fold's caps before any check (≤ 2 certificates per record, a hashed CA-check cache), a rotation issuance floor, and
+  three low items; each test seen failing on 38da0472. Pages: the design record §9, §39, CHANGELOG, the plan.

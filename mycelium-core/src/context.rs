@@ -277,6 +277,29 @@ impl CoreCtx {
         keys
     }
 
+    /// The keys this node accepts as **having signed history** for `node` (post-360 plan row Q, the
+    /// final review's finding 1): every key it holds for the node — its retained set in `peer_keys` and
+    /// its anchored keys — minus the keys the node revoked and removed members' keys. **Verify-only**:
+    /// audit-chain recovery and verification read it, so a record sealed under a key retired before
+    /// the node was re-anchored still verifies; live writes and signatures are admitted only under
+    /// [`Self::trusted_keys`]. It has the pre-row-Q posture for unrevoked keys (a key poisoned into
+    /// `peer_keys` with identity proofs off is in it).
+    pub fn history_keys(&self, node: &NodeId) -> Vec<[u8; 32]> {
+        let mut keys: Vec<[u8; 32]> = self.peer_keys.pin().get(node).cloned().unwrap_or_default();
+        if let Some(s) = self.key_standing.get(node) {
+            for k in s.anchored.iter().flatten() {
+                if !keys.contains(k) {
+                    keys.push(*k);
+                }
+            }
+            keys.retain(|k| !s.revoked.contains(k));
+        }
+        if !self.removed.is_empty() {
+            keys.retain(|k| !self.removed.is_key_removed(k));
+        }
+        keys
+    }
+
     /// Drop from `keys` (offered for `node`) every key this node does not trust for it: revoked by
     /// `node`, not among an anchored node's anchored keys, or a removed member's. This node's own
     /// current key is always kept for itself (its certificate record may not have been judged yet).

@@ -713,10 +713,19 @@ unproduced), the row closes as follows. The verifiers were enumerated with
   (guards on the new path). Revocations keyed `(P, S)`, self-contained, the v1 bytes first (`a_v2_record_is_a_v1_record_followed_by_a_trailer_both_readers_decode`);
   owner republish and the tripwire (`an_owner_republishes_its_overwritten_certificate_record`, seen failing on e5c2c27e).
   `deprecations.md` §39; guarantee `id.revocation_authority`.
+- **The final review's round** (`38da0472`; named fixes only, each seen failing there): history verifies under a
+  verify-only held-minus-revoked set (`an_audit_chain_sealed_under_a_key_without_a_certificate_record_survives_restarts`);
+  first-issuance ranking, counted-stays-counted and the start refusal (`a_revoked_key_restored_at_its_node_does_not_regain_trust_at_a_peer`,
+  `a_node_whose_key_pem_names_a_retired_key_refuses_to_start`); the fold's cost bounded before checks
+  (`junk_revocation_records_keep_a_fold_bounded`); the clock-step floor (`a_rotation_after_the_clock_steps_back_still_outranks_its_predecessor`);
+  adoption only under the node's own keys (`an_owner_does_not_adopt_a_revocation_planted_through_its_raw_identity`);
+  idempotent revocation (`revoking_one_key_twice_writes_one_record`); `compute` merges (inspection — a race no test
+  reproduces); the three test labels corrected.
 - **Not built, stated:** no protection against a holder of the fleet CA key (every node in the development posture);
   the secure posture cannot rotate (recovery is re-issue only); a node with a pre-row-Q certificate has no standing
   until re-issued, and keys it revoked before the upgrade verify again at upgraded nodes until then; a retired key that
-  never had a URI-SAN certificate stops verifying for a re-anchored node (its history reads as unverified); unsigned
+  never had a URI-SAN certificate stops verifying *live* signatures for a re-anchored node (history — the audit chain —
+  verifies under the held-minus-revoked set, the final review's round); unsigned
   `Data` and anti-entropy; the mTLS handshake does not refuse a revoked key (follow-up, now that the URI SAN exists); a
   node without persistence forgets a revocation hidden while it was down until the owner republishes; the fold walks
   every node with records on each change (bounded per node, not per-node incremental).

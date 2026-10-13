@@ -1157,15 +1157,21 @@ entry the connection had accepted when it dropped — the gateway has no resume 
   `sys/identity-cert/{node}/{key-hex}`.
 - **A node with a certificate record trusts exactly its anchored keys it has not revoked.** No other key verifies as
   it — not a key from a bare or poisoned `sys/identity/`, a first-sighted record, a legacy handshake anchor, or a
-  retired key that never had a URI-SAN certificate. **Historical records** (audit, role claims, knowledge records)
-  signed by a key of the node that never had such a certificate — a key retired before the upgrade — read as
-  unverified once the node is re-anchored.
+  retired key that never had a URI-SAN certificate. **What still reads as unverified** once the node is re-anchored:
+  anything *live* signed by such a key — a KV write, a role claim (`roles_of`), a caller envelope, a consensus
+  message, and a knowledge record's present standing (it stays attributable). **History still verifies**: the audit
+  chain is recovered and verified under every key the node held minus the keys it revoked, so a chain sealed under a
+  pre-upgrade key keeps verifying and its genesis is never re-sealed. Anything signed by a **revoked** key reads as
+  unverified everywhere, history included.
 - **Who may revoke:** a revocation of key P counts only when signed by an anchored key of the node issued after P's
   certificate (or P has no standing). A thief holding an old key cannot revoke a newer one; a CA re-issue outranks
   every older key.
 - **Revocations are written at `sys/revocation/{node}/{P-hex}/{S-hex}`** as the v1 bytes followed by a trailer (the
   revoker, the certificates, a second signature). A 2.32 node reads the v1 prefix and applies its old rule. Records at
   the old path are still read, under the new rule.
+- **A node refuses to start with a key its own records show revoked** — a key file restored from a backup, or
+  `key_pem` naming a key a rotation retired: `start()` returns `GossipError::InvalidField { field: "tls", .. }` and
+  logs it by name. Start it with its current key, or have the operator issue a new one.
 - **A node cannot revoke the key it signs with**, nor a key that is not its own: `revoke_identity_key` returns
   `GossipError::InvalidField { field: "revoked_key", .. }`, and `POST /gateway/identity/revoke` answers **422**.
 - **New on `GET /stats`:** `identity_cert_future`, `identity_records_over_cap`, `revocation_journal_refused`. **New

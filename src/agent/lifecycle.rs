@@ -405,7 +405,31 @@ impl GossipAgent {
                     // itself (the CA signed it), so it is exempt like the sealed record. In the
                     // development posture `load_or_generate` re-issued the certificate for the current key
                     // just now, with the URI SAN — the node re-anchors itself at every start.
-                    super::revocation::publish_own_certificate(&self.task_ctx, &self.task_ctx.identity_ledger, &arc_tls);
+                    // Post-360 plan row Q: the journal of counted revocations, read before anything is
+                    // judged, so a revocation hidden while this node was down still counts.
+                    if let Some(p) = &self.config.persistence {
+                        let path = p.base_path.join("identity").join("revocations.journal");
+                        if let Err(e) = self.task_ctx.identity_ledger.open_journal(&path) {
+                            return Err(crate::error::GossipError::InvalidField {
+                                field: "persistence",
+                                reason: format!("the revocation journal {} cannot be opened: {e}", path.display()),
+                            });
+                        }
+                    }
+                    // A node starting with a key its own records show revoked — a key file restored
+                    // from a backup, or `key_pem` reloading a key a rotation retired — would re-issue a
+                    // certificate for it. Refuse, loudly: the node has restored a revoked key.
+                    if super::revocation::own_key_revoked(&self.task_ctx, &arc_tls) {
+                        tracing::error!(
+                            node = %self.node_id,
+                            "refusing to start: this node's identity key is one its own records show revoked (restored from a backup, or `key_pem` names a key a rotation retired) — start it with its current key, or have the operator issue a new one"
+                        );
+                        return Err(crate::error::GossipError::InvalidField {
+                            field: "tls",
+                            reason: "this node's identity key was revoked by its own records (a key restored from a backup, or `key_pem` naming a key a rotation retired); start with the current key or issue a new one".into(),
+                        });
+                    }
+                    super::revocation::publish_own_certificate(&self.task_ctx, &arc_tls);
                     let _ = self.task_ctx.tls.set(Arc::clone(&arc_tls));
                     // The legacy pair (what a node older than Phase 3b reads), published SIGNED now that
                     // the identity is installed: a bare `sys/identity/` or proof is not
@@ -429,17 +453,6 @@ impl GossipAgent {
                             });
                         if let Some(t) = self.task_ctx.tls.get() {
                             t.set_anchor_sink(sink);
-                        }
-                    }
-                    // Post-360 plan row Q: the journal of counted revocations, read before the first
-                    // fold so a revocation hidden while this node was down still counts.
-                    if let Some(p) = &self.config.persistence {
-                        let path = p.base_path.join("identity").join("revocations.journal");
-                        if let Err(e) = self.task_ctx.identity_ledger.open_journal(&path) {
-                            return Err(crate::error::GossipError::InvalidField {
-                                field: "persistence",
-                                reason: format!("the revocation journal {} cannot be opened: {e}", path.display()),
-                            });
                         }
                     }
                     // Seed peer_keys from any sys/identity/ entries already in the local store.

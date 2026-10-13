@@ -432,7 +432,7 @@ fn parse_audit_seq(key: &str, node: &NodeId) -> Option<u64> {
 /// first; verification then resumes from the checkpoint. No-op (returns 0) if no checkpoint
 /// exists. Returns the number of records pruned. Only prunes **this node's own** stream.
 pub(crate) fn prune_to_checkpoint(ctx: &TaskCtx, node: &NodeId) -> usize {
-    let keys = super::helpers::known_verifying_keys(ctx, node);
+    let keys = super::helpers::history_verifying_keys(ctx, node);
     let cps = read_checkpoints(ctx, node, &keys);
     let Some(boundary) = cps.iter().map(|c| c.checkpoint_seq).max() else { return 0 };
     let kv = mycelium_core::kv_handle::KvHandle::from_core(std::sync::Arc::clone(&ctx.core));
@@ -459,7 +459,7 @@ pub(crate) fn read_stream(ctx: &TaskCtx, node: &NodeId) -> Vec<SignedAuditRecord
 /// known for it (WS5) — so a stream that spans a key rotation still verifies.
 /// `UnknownSigner` if no key is known for `node`.
 pub(crate) fn verify_stream(ctx: &TaskCtx, node: &NodeId) -> Result<(), AuditVerifyError> {
-    let keys = super::helpers::known_verifying_keys(ctx, node);
+    let keys = super::helpers::history_verifying_keys(ctx, node);
     if keys.is_empty() {
         return Err(AuditVerifyError::UnknownSigner);
     }
@@ -513,7 +513,7 @@ pub(crate) struct RecoveredHead {
 /// (no `tls` — nothing could have been sealed), or no record and no checkpoint.
 pub(crate) fn recover_chain_head(ctx: &TaskCtx) -> Option<RecoveredHead> {
     let node = &ctx.node_id;
-    let keys = super::helpers::known_verifying_keys(ctx, node);
+    let keys = super::helpers::history_verifying_keys(ctx, node);
     if keys.is_empty() {
         return None;
     }

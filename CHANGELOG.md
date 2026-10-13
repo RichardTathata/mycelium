@@ -287,8 +287,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   not built:** no protection against a holder of the fleet CA key (every node in the development posture); in the secure
   posture rotation cannot run and recovery is re-issue only; a retired key verifies until revoked; unsigned `Data` and
   anti-entropy are not covered; a node with a pre-row-Q certificate has no standing until re-issued, and keys it revoked
-  before the upgrade verify again at upgraded nodes until then; the mTLS handshake does not refuse a revoked key. Upgrade
-  notes in `deprecations.md` §39. Wire **v12** unchanged.
+  before the upgrade verify again at upgraded nodes until then; the mTLS handshake does not refuse a revoked key. **The
+  final review's round** (each seen failing first on 38da0472): history verifies under a separate verify-only set —
+  every key held minus revoked ones — so a node's audit chain sealed under a key without a certificate record keeps
+  verifying and its genesis is never re-sealed (`an_audit_chain_sealed_under_a_key_without_a_certificate_record_survives_restarts`);
+  a key ranks by its first issuance and a counted revocation stays counted, and a node starting with a key its own
+  records show revoked refuses to start (`a_revoked_key_restored_at_its_node_does_not_regain_trust_at_a_peer`,
+  `a_node_whose_key_pem_names_a_retired_key_refuses_to_start`); a revocation record carries at most two certificates,
+  judged certificates are cached, and the caps apply before any check (`junk_revocation_records_keep_a_fold_bounded`,
+  3.6 s → under 250 ms); a rotation issues strictly after the node's newest issuance
+  (`a_rotation_after_the_clock_steps_back_still_outranks_its_predecessor`); a node adopts only revocations its own
+  current or anchored keys signed (`an_owner_does_not_adopt_a_revocation_planted_through_its_raw_identity`); revoking
+  one key twice keeps one record (`revoking_one_key_twice_writes_one_record`). Upgrade notes in `deprecations.md` §39.
+  Wire **v12** unchanged.
 - **Wire and crypto, one MINOR with a window (post-360 plan row F).** Wire **v12** unchanged — no frame changes
   shape; what changes is what a node accepts and what a signature is over. Three changes and one closure:
   - **KV `SignedData` is domain-tagged.** A KV write is signed over `mycelium.kv/update/1 ‖ u32 len ‖ canonical`

@@ -155,10 +155,13 @@ A revocation record:
 - **The window, stated.** Until N is re-anchored, no revocation of N's keys counts at an upgraded node, so **keys N
   revoked before the upgrade verify again there**. A 2.32 node still applies its old rule. The guarantee
   `id.revocation_authority` reports `not_configured` until the node runs a URI-SAN certificate issued off-node.
-- **Historical records.** After N is re-anchored, a key of N that never had a URI-SAN certificate, such as a key
-  retired before the upgrade, no longer verifies for N. History it signed (audit records, role claims, knowledge
-  records) reads as unverified. This is the price of "trusted = anchored, exactly", and it is stated in
-  `deprecations.md` §39.
+- **Two key sets: live and history** (the final review's finding 1). After N is re-anchored, a key of N that
+  never had a URI-SAN certificate (one retired before the upgrade) no longer verifies anything **live** for N: a
+  write, a role claim, a caller envelope, a consensus message. **History** verifies under a separate, verify-only
+  set — every key held for N minus the keys N revoked (`CoreCtx::history_keys`) — read by audit-chain recovery,
+  verification and pruning; knowledge records keep attribution under it, though not present standing. So a
+  chain sealed under a pre-upgrade key still verifies and its genesis is never re-sealed. The owner republishes the
+  certificate record of every key it holds, not only its current one.
 
 ## 5. Scope
 
@@ -226,3 +229,28 @@ The failing-first runs were on a `git archive` of `e5c2c27e`, with its own targe
 - the v2 layout read by a v1 reader;
 - the path-versus-body check;
 - `KeyStanding`'s per-node standing.
+
+## 9. The final review's round (named fixes, 2026-10-13)
+
+The final review of `38da0472` found two high defects and four smaller ones; each is fixed and tested (seen failing
+on `38da0472`):
+
+1. **History needs its own key set** — §4's "Two key sets" above; `history_keys` for audit recovery, verification
+   and pruning; the owner republishes the certificate record of every key it holds.
+2. **A re-issue must never un-revoke.** A key ranks by its **first** (lowest) issuance seen, never a later
+   re-issue's; a counted (and journaled) revocation stays counted — no later fold un-counts it; and a node starting
+   with a key its own records show revoked (a key file restored from a backup, `key_pem` reloading a retired key)
+   **refuses to start**, by name. A node keeps the certificate record already stored for its current key rather than
+   overwriting it with a re-issue.
+3. **The fold's cost is bounded before any check:** a revocation record carrying more than two certificates is
+   refused at parse; judged certificates are cached by SHA-256 (at most 4 096, cleared when full); a revoked key must
+   be one held for the node, at most 32 revoked keys per node (anchored first) and 8 records per key (those naming an
+   already-anchored revoker first, then by the issuance their carried certificate claims) are considered before any
+   CA or signature check. Stated bound, tested: a fold over five records carrying 2 000 certificates each takes under
+   250 ms (3.6 s before).
+4. **A clock stepped back** cannot mint a successor that ranks below its predecessor: a rotation issues at
+   `max(wall_now_ms, newest own issuance + 1)` (`generate_rotation_after`).
+5. `anchors_seen` and the never-uncounted set merge through papaya `compute`; `adopt_own_revocations` adopts only
+   records signed by the node's current or anchored keys, reading its history from its own sealed record (never the
+   raw `sys/identity/{self}`); repeated `revoke_key` for one `(P, S)` keeps the first record, and the journal takes one
+   entry per `(P, S)` path.

@@ -18,7 +18,10 @@
 //! ## Who may revoke whom
 //!
 //! A revocation of key P for node N, signed by S, counts iff S is an anchored key of N and either P
-//! is not anchored, or S's certificate was issued strictly after P's. Authority flows only to the
+//! is not anchored, or S was **first** issued strictly after P was first issued (a later re-issue of a
+//! key never raises its rank). A revocation this node has counted stays counted; a node whose own
+//! records show its key revoked refuses to start. History (the audit chain) verifies under a separate,
+//! verify-only set: every key held for a node minus the keys it revoked (`CoreCtx::history_keys`). Authority flows only to the
 //! past: a thief holding an old key cannot revoke a newer one, whatever else it holds, and a node that
 //! rotates (`rotate_identity_on_compromise` mints the new key's certificate) or is re-issued a
 //! certificate by the operator outranks every older key. Two keys issued in the same millisecond are
@@ -74,6 +77,13 @@ pub(crate) const MAX_REVOCATIONS_PER_KEY: usize = 8;
 pub(crate) const JOURNAL_PER_NODE: usize = 64;
 /// Counted revocations journaled in all before every further node is saturated.
 pub(crate) const JOURNAL_TOTAL: usize = 65_536;
+/// Certificates a revocation record may carry (the revoker's and the revoked key's); a record with
+/// more is refused before any check.
+pub(crate) const MAX_CERTS_PER_RECORD: usize = 2;
+/// Distinct revoked keys considered per node, anchored ones first.
+pub(crate) const MAX_REVOKED_KEYS_PER_NODE: usize = 32;
+/// Distinct certificates whose CA check is cached before the cache is cleared.
+const CERT_CACHE_MAX: usize = 4_096;
 /// The skew a certificate's issuance may run ahead of this node's wall clock when
 /// `max_clock_drift_ms` is 0 (no drift bound).
 const DEFAULT_SKEW_MS: u64 = 300_000;
@@ -264,6 +274,10 @@ pub(crate) struct IdentityLedger {
     saturated: papaya::HashSet<NodeId>,
     /// This node's own records, which it republishes when they are missing or overwritten.
     own_records: papaya::HashMap<String, Vec<u8>>,
+    /// Every key each node has revoked that this node ever counted: never un-counted.
+    counted_ever: papaya::HashMap<NodeId, HashSet<[u8; 32]>>,
+    /// The CA check and parse per distinct certificate (by SHA-256), bounded by [`CERT_CACHE_MAX`].
+    cert_cache: papaya::HashMap<[u8; 32], Option<CertFacts>>,
     running: AtomicBool,
     again: AtomicBool,
     /// Certificate records whose issuance was past `wall_now_ms` plus the skew bound when judged.
@@ -343,7 +357,9 @@ impl IdentityLedger {
     /// otherwise saturates `node`. Returns whether it was new.
     fn record_counted(&self, node: &NodeId, path: &str, bytes: &[u8]) -> bool {
         let per_node = self.journaled.pin().get(node).map_or(0, |v| v.len());
-        let already = self.journaled.pin().get(node).is_some_and(|v| v.iter().any(|(p, b)| p == path && b == bytes));
+        // One `(P, S)` is one fact: a record at a path already journaled is not journaled again, whatever
+        // its bytes (a re-signed or republished copy) — so repeated revocations cannot fill the budget.
+        let already = self.journaled.pin().get(node).is_some_and(|v| v.iter().any(|(p, _)| p == path));
         if already {
             return false;
         }
@@ -377,11 +393,39 @@ fn skew_ms(ctx: &CoreCtx) -> u64 {
     }
 }
 
+/// What the CA check and the parse say about one certificate, cached by the DER's hash: `None` when
+/// the CA did not issue it, it is not valid now, or it carries no Ed25519 key.
+#[derive(Clone)]
+struct CertFacts {
+    key: [u8; 32],
+    issued: u64,
+}
+
+/// The CA check and the parse of `der`, once per distinct certificate (the final review's finding
+/// 3: a record can carry the same certificate thousands of times). The cache is bounded: past
+/// [`CERT_CACHE_MAX`] entries it is cleared, never grown.
+fn cert_facts(ledger: &IdentityLedger, tls: &mycelium_core::tls::NodeTls, der: &[u8]) -> Option<CertFacts> {
+    let digest: [u8; 32] = Sha256::digest(der).into();
+    if let Some(hit) = ledger.cert_cache.pin().get(&digest) {
+        return hit.clone();
+    }
+    let facts = mycelium_core::tls::cert_identity(der).filter(|_| tls.verify_member_cert(der)).map(|id| CertFacts {
+        key: id.key,
+        issued: id.issued_ms.unwrap_or(0),
+    });
+    let cache = ledger.cert_cache.pin();
+    if cache.len() >= CERT_CACHE_MAX {
+        cache.clear();
+    }
+    cache.insert(digest, facts.clone());
+    facts
+}
+
 /// Judge one certificate for `node`: issued by the fleet CA and valid now, naming `node` by URI,
 /// for `expect` when a path names the key, issued no later than the wall clock plus the skew bound.
 /// `Some((key, issued_ms))` for a certificate that anchors.
-fn judge_cert(ctx: &CoreCtx, ledger: &IdentityLedger, node: &NodeId, der: &[u8], expect: Option<[u8; 32]>) -> Option<([u8; 32], u64)> {
-    let tls = ctx.tls.get()?;
+fn judge_cert(ctx: &CoreCtx, tls: &mycelium_core::tls::NodeTls, ledger: &IdentityLedger, node: &NodeId, der: &[u8], expect: Option<[u8; 32]>) -> Option<([u8; 32], u64)> {
+    // The parse is free; refuse on it before the CA check.
     let id = mycelium_core::tls::cert_identity(der)?;
     if expect.is_some_and(|k| k != id.key) || !id.node_uris.contains(&mycelium_core::tls::node_uri(node)) {
         return None;
@@ -392,10 +436,8 @@ fn judge_cert(ctx: &CoreCtx, ledger: &IdentityLedger, node: &NodeId, der: &[u8],
         tracing::warn!(%node, issued_ms = issued, "certificate record issued in the future beyond the skew bound: ignored (identity_cert_future)");
         return None;
     }
-    if !tls.verify_member_cert(der) {
-        return None;
-    }
-    Some((id.key, issued))
+    let facts = cert_facts(ledger, tls, der)?;
+    Some((facts.key, facts.issued))
 }
 
 /// A revocation record found for a node: where, its bytes, and what it says.
@@ -407,8 +449,9 @@ struct Candidate {
     named: Option<[u8; 32]>,
 }
 
-/// Parse a revocation record found at `path` for `node`, refusing it — before any signature check —
-/// unless its path agrees with its body.
+/// Parse a revocation record found at `path` for `node`, refusing it — before any signature or CA
+/// check — unless its path agrees with its body and it carries at most
+/// [`MAX_CERTS_PER_RECORD`] certificates.
 fn candidate(node: &NodeId, path: &str, bytes: &[u8]) -> Option<Candidate> {
     let rest = path.strip_prefix(REVOCATION_PREFIX)?.strip_prefix(&format!("{node}/"))?;
     let (p_hex, s_hex) = match rest.split_once('/') {
@@ -418,6 +461,9 @@ fn candidate(node: &NodeId, path: &str, bytes: &[u8]) -> Option<Candidate> {
     let p = parse_hex32(p_hex)?;
     let parsed = parse_revocation(bytes)?;
     if &parsed.signed.event.node_id != node || parsed.signed.event.revoked_key != p {
+        return None;
+    }
+    if parsed.trailer.as_ref().is_some_and(|t| t.certs.len() > MAX_CERTS_PER_RECORD) {
         return None;
     }
     let named = match s_hex {
@@ -433,51 +479,115 @@ fn candidate(node: &NodeId, path: &str, bytes: &[u8]) -> Option<Candidate> {
     Some(Candidate { path: path.to_string(), bytes: bytes.to_vec(), parsed, named })
 }
 
-/// One node's fold: its anchored keys (with issuance) and the revocations that count.
+/// One node's fold: its anchored keys (with first issuance) and the revocations that count.
 struct Folded {
     anchors: HashMap<[u8; 32], u64>,
     counted: Vec<Candidate>,
 }
 
-fn fold_node(ctx: &TaskCtx, node: &NodeId) -> Folded {
+/// Merge `offered` into `node`'s anchors seen, keeping each key's **first** (lowest) issuance —
+/// a later re-issue of a key never raises its rank (the final review's finding 2). Retry-safe
+/// `compute`, so two folds never drop each other's anchors (finding 5).
+fn merge_anchors_seen(ledger: &IdentityLedger, node: &NodeId, offered: &HashMap<[u8; 32], u64>) -> HashMap<[u8; 32], u64> {
+    let mut merged_out = HashMap::new();
+    ledger.anchors_seen.pin().compute(node.clone(), |existing| {
+        let mut m = existing.map(|(_, m)| m.clone()).unwrap_or_default();
+        for (k, at) in offered {
+            let e = m.entry(*k).or_insert(*at);
+            *e = (*e).min(*at);
+        }
+        merged_out = m.clone();
+        if existing.is_some_and(|(_, old)| *old == m) {
+            papaya::Operation::Abort(())
+        } else {
+            papaya::Operation::Insert(m)
+        }
+    });
+    merged_out
+}
+
+fn fold_node(ctx: &TaskCtx, tls: &mycelium_core::tls::NodeTls, node: &NodeId) -> Folded {
     let ledger = &ctx.identity_ledger;
-    // Revocation records: the store, then the journal.
+    // Stratum 1a — the store's certificate records: parse first, CA-check what survives.
+    let mut offered: HashMap<[u8; 32], u64> = HashMap::new();
+    let offer = |offered: &mut HashMap<[u8; 32], u64>, key: [u8; 32], issued: u64| {
+        let e = offered.entry(key).or_insert(issued);
+        *e = (*e).min(issued);
+    };
+    for (path, der) in crate::store::scan_kv_prefix(&ctx.kv_state, &format!("{CERT_PREFIX}{node}/")) {
+        let Some(expect) = path.rsplit('/').next().and_then(parse_hex32) else { continue };
+        if let Some((k, at)) = judge_cert(ctx, tls, ledger, node, &der, Some(expect)) {
+            offer(&mut offered, k, at);
+        }
+    }
+    let known_anchors = merge_anchors_seen(ledger, node, &offered);
+    // Revocation records: the store, then the journal — parsed (path against body, at most two
+    // certificates) before any check.
     let mut found: Vec<Candidate> = Vec::new();
     for (key, bytes) in crate::store::scan_kv_prefix(&ctx.kv_state, &format!("{REVOCATION_PREFIX}{node}/")) {
         if let Some(c) = candidate(node, &key, &bytes) {
             found.push(c);
         }
     }
-    if let Some(j) = ledger.journaled.pin().get(node) {
-        for (path, bytes) in j {
-            if !found.iter().any(|c| &c.path == path && &c.bytes == bytes)
-                && let Some(c) = candidate(node, path, bytes)
-            {
-                found.push(c);
-            }
+    let journaled: Vec<(String, Vec<u8>)> = ledger.journaled.pin().get(node).cloned().unwrap_or_default();
+    for (path, bytes) in &journaled {
+        if !found.iter().any(|c| &c.path == path && &c.bytes == bytes)
+            && let Some(c) = candidate(node, path, bytes)
+        {
+            found.push(c);
         }
     }
-    // Stratum 1 — anchored keys: certificate records, and the certificates revocations carry.
-    let mut anchors: HashMap<[u8; 32], u64> = ledger.anchors_seen.pin().get(node).cloned().unwrap_or_default();
-    let mut offer = |key: [u8; 32], issued: u64| {
-        let e = anchors.entry(key).or_insert(issued);
-        *e = (*e).max(issued);
+    // The caps, before any CA or signature check (finding 3). A revoked key must be one held for the
+    // node; per revoked key, records naming an already-anchored revoker come first, then by the
+    // issuance their carried certificate *claims* (parsed, unchecked) — never by key bytes.
+    let held: HashSet<[u8; 32]> = ctx.peer_keys.pin().get(node).cloned().unwrap_or_default().into_iter()
+        .chain(known_anchors.keys().copied()).collect();
+    let claimed = |c: &Candidate| -> u64 {
+        let s = c.named;
+        c.parsed.trailer.iter().flat_map(|t| t.certs.iter())
+            .filter_map(|d| mycelium_core::tls::cert_identity(d))
+            .filter(|id| Some(id.key) == s)
+            .filter_map(|id| id.issued_ms)
+            .min()
+            .unwrap_or(0)
     };
-    for (path, der) in crate::store::scan_kv_prefix(&ctx.kv_state, &format!("{CERT_PREFIX}{node}/")) {
-        let expect = path.rsplit('/').next().and_then(parse_hex32);
-        if expect.is_none() { continue; }
-        if let Some((k, at)) = judge_cert(ctx, ledger, node, &der, expect) {
-            offer(k, at);
+    let mut per_key: HashMap<[u8; 32], Vec<Candidate>> = HashMap::new();
+    for c in found {
+        let p = c.parsed.signed.event.revoked_key;
+        if held.contains(&p) {
+            per_key.entry(p).or_default().push(c);
         }
     }
-    for c in &found {
-        for der in c.parsed.trailer.iter().flat_map(|t| t.certs.iter()) {
-            if let Some((k, at)) = judge_cert(ctx, ledger, node, der, None) {
-                offer(k, at);
+    if per_key.len() > MAX_REVOKED_KEYS_PER_NODE {
+        let mut ps: Vec<[u8; 32]> = per_key.keys().copied().collect();
+        ps.sort_by_key(|p| (std::cmp::Reverse(known_anchors.contains_key(p)), *p));
+        for p in ps.into_iter().skip(MAX_REVOKED_KEYS_PER_NODE) {
+            if let Some(v) = per_key.remove(&p) {
+                ledger.over_cap.fetch_add(v.len() as u64, Ordering::Relaxed);
             }
         }
     }
-    // The cap, by issuance (newest first) — never by key bytes an attacker chooses.
+    let mut selected: Vec<Candidate> = Vec::new();
+    for (_, mut cs) in per_key {
+        cs.sort_by_key(|c| {
+            let anchored_at = c.named.and_then(|s| known_anchors.get(&s).copied());
+            (std::cmp::Reverse(anchored_at.is_some()), std::cmp::Reverse(anchored_at.unwrap_or_else(|| claimed(c))))
+        });
+        if cs.len() > MAX_REVOCATIONS_PER_KEY {
+            ledger.over_cap.fetch_add((cs.len() - MAX_REVOCATIONS_PER_KEY) as u64, Ordering::Relaxed);
+            cs.truncate(MAX_REVOCATIONS_PER_KEY);
+        }
+        selected.extend(cs);
+    }
+    // Stratum 1b — the certificates the selected records carry.
+    for c in &selected {
+        for der in c.parsed.trailer.iter().flat_map(|t| t.certs.iter()) {
+            if let Some((k, at)) = judge_cert(ctx, tls, ledger, node, der, None) {
+                offer(&mut offered, k, at);
+            }
+        }
+    }
+    let mut anchors = merge_anchors_seen(ledger, node, &offered);
     if anchors.len() > MAX_CERTS_PER_NODE {
         let mut v: Vec<([u8; 32], u64)> = anchors.into_iter().collect();
         v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
@@ -485,39 +595,24 @@ fn fold_node(ctx: &TaskCtx, node: &NodeId) -> Folded {
         v.truncate(MAX_CERTS_PER_NODE);
         anchors = v.into_iter().collect();
     }
-    if !anchors.is_empty() {
-        ledger.anchors_seen.pin().insert(node.clone(), anchors.clone());
-    }
     // Stratum 2 — revocations, judged against the anchors. A legacy node (none) has none that count.
     let mut counted = Vec::new();
     if !anchors.is_empty() {
         let mut by_signers: Vec<[u8; 32]> = anchors.keys().copied().collect();
         by_signers.sort_by(|a, b| anchors[b].cmp(&anchors[a]).then(a.cmp(b)));
-        // Per revoked key, at most MAX_REVOCATIONS_PER_KEY records, those naming the newest-issued
-        // anchored revoker first; v1 records (no named revoker) after them.
-        let mut per_key: HashMap<[u8; 32], Vec<Candidate>> = HashMap::new();
-        for c in found {
-            per_key.entry(c.parsed.signed.event.revoked_key).or_default().push(c);
-        }
-        for (p, mut cs) in per_key {
-            cs.sort_by_key(|c| std::cmp::Reverse(c.named.and_then(|s| anchors.get(&s).copied()).unwrap_or(0)));
-            if cs.len() > MAX_REVOCATIONS_PER_KEY {
-                ledger.over_cap.fetch_add((cs.len() - MAX_REVOCATIONS_PER_KEY) as u64, Ordering::Relaxed);
-                cs.truncate(MAX_REVOCATIONS_PER_KEY);
-            }
-            for c in cs {
-                let signers: Vec<[u8; 32]> = match c.named {
-                    Some(s) => vec![s],
-                    None => by_signers.clone(),
-                };
-                let counts = signers.iter().any(|s| {
-                    let Some(&s_at) = anchors.get(s) else { return false };
-                    let outranks = anchors.get(&p).is_none_or(|&p_at| s_at > p_at);
-                    outranks && c.parsed.signed_by(s)
-                });
-                if counts {
-                    counted.push(c);
-                }
+        for c in selected {
+            let p = c.parsed.signed.event.revoked_key;
+            let signers: Vec<[u8; 32]> = match c.named {
+                Some(s) => vec![s],
+                None => by_signers.clone(),
+            };
+            let counts = signers.iter().any(|s| {
+                let Some(&s_at) = anchors.get(s) else { return false };
+                let outranks = anchors.get(&p).is_none_or(|&p_at| s_at > p_at);
+                outranks && c.parsed.signed_by(s)
+            });
+            if counts {
+                counted.push(c);
             }
         }
     }
@@ -549,7 +644,7 @@ fn nodes_with_records(ctx: &TaskCtx) -> Vec<NodeId> {
 
 /// Recompute every node's standing from the store, the carried certificates and the journal, and
 /// publish it to `CoreCtx::key_standing`; journal newly counted revocations. Single-flight: a call
-/// while one runs makes that one run again. Run by the identity watcher on any `sys/identity-cert/`
+/// while one runs makes that one run again. Run by the identity watcher on any `sys/identity*`
 /// or `sys/revocation/` change, after the startup identity prewarm, periodically (to re-judge a
 /// certificate issued in the future), and by [`revoke_key`].
 pub(crate) fn refresh(ctx: &TaskCtx) {
@@ -573,17 +668,44 @@ pub(crate) fn refresh(ctx: &TaskCtx) {
     }
 }
 
+/// The keys a node has revoked that this node has ever counted — in this process, or journaled
+/// before a restart. A counted revocation stays counted: no later fold un-counts it (the final
+/// review's finding 2).
+fn remember_counted(ledger: &IdentityLedger, node: &NodeId, now: &HashSet<[u8; 32]>) -> HashSet<[u8; 32]> {
+    let mut out = HashSet::new();
+    ledger.counted_ever.pin().compute(node.clone(), |existing| {
+        let mut set = existing.map(|(_, s)| s.clone()).unwrap_or_default();
+        let before = set.len();
+        set.extend(now.iter().copied());
+        out = set.clone();
+        if existing.is_some() && set.len() == before {
+            papaya::Operation::Abort(())
+        } else {
+            papaya::Operation::Insert(set)
+        }
+    });
+    out
+}
+
 fn refresh_once(ctx: &TaskCtx) {
+    let Some(tls) = ctx.tls.get() else { return };
     let ledger = &ctx.identity_ledger;
     for node in nodes_with_records(ctx) {
-        let folded = fold_node(ctx, &node);
-        let mut revoked = HashSet::new();
+        let folded = fold_node(ctx, tls, &node);
+        let mut now = HashSet::new();
         for c in &folded.counted {
-            revoked.insert(c.parsed.signed.event.revoked_key);
+            now.insert(c.parsed.signed.event.revoked_key);
             if ledger.record_counted(&node, &c.path, &c.bytes) {
                 tracing::warn!(%node, key = %hex32(&c.parsed.signed.event.revoked_key), "identity key revoked: it no longer verifies for this node");
             }
         }
+        // Journaled revocations were counted by this node before: they stay counted.
+        for (path, bytes) in ledger.journaled.pin().get(&node).cloned().unwrap_or_default() {
+            if let Some(c) = candidate(&node, &path, &bytes) {
+                now.insert(c.parsed.signed.event.revoked_key);
+            }
+        }
+        let revoked = remember_counted(ledger, &node, &now);
         let anchored = if folded.anchors.is_empty() {
             None
         } else if ledger.saturated.pin().contains(&node) {
@@ -602,8 +724,9 @@ fn refresh_once(ctx: &TaskCtx) {
 /// The revocations of `node`'s keys that count at this node (the transparency log's leaves).
 #[cfg(feature = "compliance")]
 pub(crate) fn validated_signed_revocations(ctx: &TaskCtx, node: &NodeId) -> Vec<SignedRevocation> {
+    let Some(tls) = ctx.tls.get() else { return Vec::new() };
     let mut out: Vec<SignedRevocation> = Vec::new();
-    for c in fold_node(ctx, node).counted {
+    for c in fold_node(ctx, tls, node).counted {
         if !out.contains(&c.parsed.signed) {
             out.push(c.parsed.signed);
         }
@@ -630,33 +753,89 @@ pub(crate) fn revocation_nodes(ctx: &CoreCtx) -> Vec<NodeId> {
 
 // ── The owner's side ───────────────────────────────────────────────────────────────────────────
 
-/// The keys this node knows it has held: its identity history in the local store, its retained set,
-/// and its anchored keys. Used only to decide which of its own records it may republish or write.
+/// The keys this node can show it has held, without trusting a value any member can write: its
+/// current key, its anchored keys (each a CA-issued certificate naming it), and the keys in its own
+/// sealed identity record when that record's proof is signed by one of those (the final review's
+/// finding 6 — never the raw `sys/identity/{self}`).
 fn own_history(ctx: &TaskCtx) -> Vec<[u8; 32]> {
-    let mut keys: Vec<[u8; 32]> = mycelium_core::ops::kv_get(ctx, &format!("sys/identity/{}", ctx.node_id))
-        .map(|b| super::helpers::parse_identity_keys(&b))
-        .unwrap_or_default();
-    for k in ctx.peer_keys.pin().get(&ctx.node_id).cloned().unwrap_or_default() {
-        if !keys.contains(&k) { keys.push(k); }
+    let mut keys: Vec<[u8; 32]> = Vec::new();
+    if let Some(t) = ctx.tls.get() {
+        keys.push(t.verifying_key_bytes());
     }
     for k in ctx.identity_ledger.anchors_seen.pin().get(&ctx.node_id).map(|m| m.keys().copied().collect::<Vec<_>>()).unwrap_or_default() {
         if !keys.contains(&k) { keys.push(k); }
     }
+    let sealed = mycelium_core::ops::kv_get(ctx, &format!("{}{}", mycelium_core::signal::kv_ns::IDENTITY_SIGNED, ctx.node_id));
+    if let Some(bytes) = sealed
+        && let Some((history, proof)) = super::helpers::parse_sealed_identity(&bytes)
+        && let Some((signer, sig)) = super::helpers::parse_identity_proof(proof)
+        && keys.contains(&signer)
+        && crate::tls::verify_bytes(&signer, &super::helpers::identity_proof_message(history), &sig)
+    {
+        for k in super::helpers::parse_identity_keys(history) {
+            if !keys.contains(&k) { keys.push(k); }
+        }
+    }
     keys
 }
 
-/// Publish this node's certificate record for its current key, and keep it for republishing.
-pub(crate) fn publish_own_certificate(ctx: &CoreCtx, ledger: &IdentityLedger, tls: &mycelium_core::tls::NodeTls) {
-    let der = tls.node_cert_der();
-    let path = cert_record_key(&ctx.node_id, &tls.verifying_key_bytes());
-    if mycelium_core::tls::cert_identity(&der).is_none_or(|id| !id.node_uris.contains(&mycelium_core::tls::node_uri(&ctx.node_id))) {
-        tracing::warn!(
-            node = %ctx.node_id,
-            "this node's certificate does not name it by URI (mycelium://<node>): it has no standing, so no revocation of its keys counts at upgraded peers — re-issue it (docs/guide/deprecations.md §39)"
-        );
+/// The newest issuance among this node's own certificates — its records in the store and the one
+/// it runs with. A rotation issues strictly after it (`generate_rotation_after`).
+pub(crate) fn own_newest_issuance(ctx: &CoreCtx) -> u64 {
+    let mut newest = ctx.tls.get().and_then(|t| mycelium_core::tls::cert_identity(&t.node_cert_der())).and_then(|id| id.issued_ms).unwrap_or(0);
+    for (_, der) in crate::store::scan_kv_prefix(&ctx.kv_state, &format!("{CERT_PREFIX}{}/", ctx.node_id)) {
+        if let Some(at) = mycelium_core::tls::cert_identity(&der).and_then(|id| id.issued_ms) {
+            newest = newest.max(at);
+        }
     }
-    let _ = mycelium_core::ops::kv_set(ctx, Arc::from(path.as_str()), bytes::Bytes::from(der.clone()));
+    newest
+}
+
+/// Whether this node's own records show the key it is starting with revoked (the final review's
+/// finding 2): a key file restored from a backup, or `key_pem` reloading a key a rotation retired.
+/// Judged by the same fold as any peer's, over the store and the journal.
+pub(crate) fn own_key_revoked(ctx: &TaskCtx, tls: &mycelium_core::tls::NodeTls) -> bool {
+    let current = tls.verifying_key_bytes();
+    let journaled = ctx.identity_ledger.journaled.pin().get(&ctx.node_id).cloned().unwrap_or_default();
+    if journaled.iter().filter_map(|(p, b)| candidate(&ctx.node_id, p, b)).any(|c| c.parsed.signed.event.revoked_key == current) {
+        return true;
+    }
+    fold_node(ctx, tls, &ctx.node_id).counted.iter().any(|c| c.parsed.signed.event.revoked_key == current)
+}
+
+/// Publish this node's certificate record for its current key — keeping a record already in the
+/// store for that key, so the key's first issuance stands — and take up for republishing every
+/// certificate record of a key it has held (the final review's finding 1).
+pub(crate) fn publish_own_certificate(ctx: &TaskCtx, tls: &mycelium_core::tls::NodeTls) {
+    let ledger = &ctx.identity_ledger;
+    let current = tls.verifying_key_bytes();
+    let path = cert_record_key(&ctx.node_id, &current);
+    let uri = mycelium_core::tls::node_uri(&ctx.node_id);
+    let valid = |der: &[u8], key: [u8; 32]| {
+        mycelium_core::tls::cert_identity(der).is_some_and(|id| id.key == key && id.node_uris.contains(&uri)) && tls.verify_member_cert(der)
+    };
+    let der = match mycelium_core::ops::kv_get(ctx, &path) {
+        Some(stored) if valid(&stored, current) => stored.to_vec(),
+        _ => {
+            let der = tls.node_cert_der();
+            if !valid(&der, current) {
+                tracing::warn!(
+                    node = %ctx.node_id,
+                    "this node's certificate does not name it by URI (mycelium://<node>): it has no standing, so no revocation of its keys counts at upgraded peers — re-issue it (docs/guide/deprecations.md §39)"
+                );
+            }
+            let _ = mycelium_core::ops::kv_set(ctx, Arc::from(path.as_str()), bytes::Bytes::from(der.clone()));
+            der
+        }
+    };
     ledger.own(path, der);
+    for (p, stored) in crate::store::scan_kv_prefix(&ctx.kv_state, &format!("{CERT_PREFIX}{}/", ctx.node_id)) {
+        if let Some(k) = p.rsplit('/').next().and_then(parse_hex32)
+            && valid(&stored, k)
+        {
+            ledger.own(p.to_string(), stored.to_vec());
+        }
+    }
 }
 
 /// At start: take up this node's own revocations — its v2 records, and each v1 record (at the old
@@ -666,6 +845,11 @@ pub(crate) fn adopt_own_revocations(ctx: &TaskCtx) {
     let Some(tls) = ctx.tls.get() else { return };
     let current = tls.verifying_key_bytes();
     let history = own_history(ctx);
+    // Who may have written a record this node adopts: its current key or one a certificate anchors
+    // for it — never a key that reached its identity history some other way.
+    let signers: Vec<[u8; 32]> = std::iter::once(current)
+        .chain(ctx.identity_ledger.anchors_seen.pin().get(&ctx.node_id).map(|m| m.keys().copied().collect::<Vec<_>>()).unwrap_or_default())
+        .collect();
     let own_cert = tls.node_cert_der();
     for (path, bytes) in crate::store::scan_kv_prefix(&ctx.kv_state, &format!("{REVOCATION_PREFIX}{}/", ctx.node_id)) {
         let Some(c) = candidate(&ctx.node_id, &path, &bytes) else { continue };
@@ -674,10 +858,10 @@ pub(crate) fn adopt_own_revocations(ctx: &TaskCtx) {
             continue;
         }
         match c.named {
-            Some(s) if history.contains(&s) && c.parsed.signed_by(&s) => ctx.identity_ledger.own(path.to_string(), bytes.to_vec()),
+            Some(s) if signers.contains(&s) && c.parsed.signed_by(&s) => ctx.identity_ledger.own(path.to_string(), bytes.to_vec()),
             Some(_) => {}
             None => {
-                if !history.iter().any(|k| c.parsed.signed.verify(k)) {
+                if !signers.iter().any(|k| c.parsed.signed.verify(k)) {
                     continue;
                 }
                 let new_path = revocation_key_v2(&ctx.node_id, &p, &current);
@@ -710,9 +894,10 @@ pub(crate) fn republish_own(ctx: &CoreCtx, ledger: &IdentityLedger) -> usize {
 
 /// Revoke one of this node's own keys: a v2 record at `sys/revocation/{self}/{P}/{S}`, signed by the
 /// current key S and carrying its certificate (and P's, when this node holds one). Refuses the key
-/// this node signs with (rotate first) and a key that is not this node's. It counts at a peer only
-/// if S is anchored there and was issued after P (or P has no standing) — `rotate_identity` mints the
-/// new key's certificate, so `rotate_identity_on_compromise` satisfies it.
+/// this node signs with (rotate first) and a key that is not this node's. Idempotent per `(P, S)`: a
+/// record this node already wrote for the pair is kept, not re-signed. It counts at a peer only if
+/// S is anchored there and was first issued after P (or P has no standing) — `rotate_identity`
+/// mints the new key's certificate, so `rotate_identity_on_compromise` satisfies it.
 #[cfg(feature = "compliance")]
 pub(crate) fn revoke_key(
     ctx: &TaskCtx,
@@ -737,13 +922,25 @@ pub(crate) fn revoke_key(
             reason: "not one of this node's keys; a node revokes only its own".into(),
         });
     }
-    let mut certs = vec![tls.node_cert_der()];
+    let path = revocation_key_v2(&ctx.node_id, &revoked_key, &current);
+    let existing = ctx.identity_ledger.own_records.pin().get(&path).cloned()
+        .or_else(|| mycelium_core::ops::kv_get(ctx, &path).map(|b| b.to_vec()));
+    if let Some(bytes) = existing
+        && candidate(&ctx.node_id, &path, &bytes).is_some_and(|c| c.parsed.signed_by(&current))
+    {
+        ctx.identity_ledger.own(path.clone(), bytes.clone());
+        if mycelium_core::ops::kv_get(ctx, &path).as_deref() != Some(bytes.as_slice()) {
+            let _ = mycelium_core::ops::kv_set(ctx, Arc::from(path.as_str()), bytes::Bytes::from(bytes));
+        }
+        refresh(ctx);
+        return Ok(());
+    }
+    let mut certs = vec![mycelium_core::ops::kv_get(ctx, &cert_record_key(&ctx.node_id, &current)).map(|b| b.to_vec()).unwrap_or_else(|| tls.node_cert_der())];
     if let Some(p_cert) = mycelium_core::ops::kv_get(ctx, &cert_record_key(&ctx.node_id, &revoked_key)) {
         certs.push(p_cert.to_vec());
     }
     let event = RevocationEvent { node_id: ctx.node_id.clone(), hlc: ctx.hlc.tick(), revoked_key, reason };
     let bytes = encode_v2(event, &tls.signing_key(), certs);
-    let path = revocation_key_v2(&ctx.node_id, &revoked_key, &current);
     let _ = mycelium_core::ops::kv_set(ctx, Arc::from(path.as_str()), bytes::Bytes::from(bytes.clone()));
     ctx.identity_ledger.own(path, bytes);
     // Our own verifiers stop at once, not when the watcher next runs.

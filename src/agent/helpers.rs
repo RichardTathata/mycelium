@@ -630,6 +630,25 @@ pub(crate) fn known_verifying_keys(ctx: &TaskCtx, node: &crate::node_id::NodeId)
     keys
 }
 
+/// The keys that verify **history** signed for `node` (post-360 plan row Q, the final review's finding
+/// 1): every key held for it minus the keys it revoked (`CoreCtx::history_keys`), plus this node's own
+/// current key when `node` is self. Verify-only — audit-chain recovery, verification and pruning read
+/// it, so a chain sealed under a key retired before re-anchoring still verifies; live writes and
+/// present authority are judged by [`known_verifying_keys`].
+#[cfg(feature = "compliance")]
+pub(crate) fn history_verifying_keys(ctx: &TaskCtx, node: &crate::node_id::NodeId) -> Vec<[u8; 32]> {
+    let mut keys = ctx.history_keys(node);
+    if node == &ctx.node_id
+        && let Some(t) = ctx.tls.get()
+    {
+        let cur = t.verifying_key_bytes();
+        if !keys.contains(&cur) {
+            keys.push(cur);
+        }
+    }
+    keys
+}
+
 #[cfg(all(test, feature = "tls"))]
 mod ws5_identity_key_tests {
     use super::{encode_identity_history, parse_identity_keys};

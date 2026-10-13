@@ -143,6 +143,13 @@ pub struct CertIdentity {
     pub issued_ms: Option<u64>,
 }
 
+/// The issuance time a new certificate carries: the wall clock, but strictly after `floor_ms` (the
+/// newest issuance among the node's own certificates), so a clock stepped back never mints a key that
+/// ranks below one it succeeds (post-360 plan row Q).
+pub fn issuance_after(floor_ms: u64) -> u64 {
+    crate::sim_seam::wall_now_ms().max(floor_ms.saturating_add(1))
+}
+
 /// The URI a node certificate names its node by: `mycelium://{node}`.
 pub fn node_uri(node: &crate::node_id::NodeId) -> String {
     format!("mycelium://{node}")
@@ -403,7 +410,7 @@ mod imp {
             }
             None => {
                 let (ca_cert_der, ca_key_pair) = load_or_create_ca(cfg)?;
-                let node_cert_der = generate_node_cert(node_id, &signing_key, &ca_key_pair)?;
+                let node_cert_der = generate_node_cert(node_id, &signing_key, &ca_key_pair, super::issuance_after(0))?;
                 (ca_cert_der, node_cert_der)
             }
         };
@@ -435,6 +442,19 @@ mod imp {
         node_id: &NodeId,
         removed: Arc<crate::removal::RemovedSet>,
     ) -> Result<super::RotationMaterial, GossipError> {
+        generate_rotation_after(cfg, node_id, removed, 0)
+    }
+
+    /// [`generate_rotation`], with the new certificate issued strictly after `issued_floor_ms` — the
+    /// newest issuance among this node's own certificates (post-360 plan row Q: a clock stepped back
+    /// must not mint a successor that ranks below its predecessor, or the predecessor's revocation
+    /// would not count).
+    pub fn generate_rotation_after(
+        cfg: &TlsConfig,
+        node_id: &NodeId,
+        removed: Arc<crate::removal::RemovedSet>,
+        issued_floor_ms: u64,
+    ) -> Result<super::RotationMaterial, GossipError> {
         let signing_key = generate_key()?;
         let verifying_key = signing_key.verifying_key().to_bytes();
 
@@ -444,7 +464,7 @@ mod imp {
         save_key_raw(&signing_key, &auto_key_path)?;
 
         let (ca_cert_der, ca_key_pair) = load_existing_ca(cfg)?;
-        let node_cert_der = generate_node_cert(node_id, &signing_key, &ca_key_pair)?;
+        let node_cert_der = generate_node_cert(node_id, &signing_key, &ca_key_pair, super::issuance_after(issued_floor_ms))?;
         let cert_bytes = node_cert_der.as_ref().to_vec();
         let (server_config, client_config, gateway_server_config, _) =
             build_rustls_configs(node_cert_der, &signing_key, ca_cert_der, removed)?;
@@ -473,7 +493,7 @@ mod imp {
         let ca_cfg = TlsConfig { auto_cert_dir: ca_dir.to_path_buf(), ..TlsConfig::default() };
         let (_ca_cert_der, ca_key_pair) = load_existing_ca(&ca_cfg)?;
         let signing_key = generate_key()?;
-        let node_cert_der = generate_node_cert(node_id, &signing_key, &ca_key_pair)?;
+        let node_cert_der = generate_node_cert(node_id, &signing_key, &ca_key_pair, super::issuance_after(0))?;
         fs::create_dir_all(out_dir).map_err(|e| err(format!("TLS: create {out_dir:?}: {e}")))?;
         let sanitized = node_id.as_str().replace([':', '.'], "_");
         let cert_path = out_dir.join(format!("{sanitized}.cert.pem"));
@@ -559,6 +579,7 @@ mod imp {
         node_id: &NodeId,
         signing_key: &SigningKey,
         ca_key_pair: &KeyPair,
+        issued_ms: u64,
     ) -> Result<CertificateDer<'static>, GossipError> {
         use ed25519_dalek::pkcs8::EncodePrivateKey;
 
@@ -580,7 +601,7 @@ mod imp {
         let uri = rcgen::Ia5String::try_from(super::node_uri(node_id))
             .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: node URI: {e}") })?;
         params.subject_alt_names = vec![SanType::IpAddress(ip), SanType::URI(uri)];
-        params.serial_number = Some(rcgen::SerialNumber::from(crate::sim_seam::wall_now_ms()));
+        params.serial_number = Some(rcgen::SerialNumber::from(issued_ms));
         params.not_before = rcgen::date_time_ymd(2024, 1, 1);
         params.not_after  = rcgen::date_time_ymd(2099, 1, 1);
 
@@ -881,7 +902,7 @@ mod imp {
 }
 
 #[cfg(feature = "tls")]
-pub use imp::{ed25519_key_from_cert_der, gateway_server_config_from_pem, generate_rotation, issue_node_cert, load_or_generate, sign_bytes, verify_bytes};
+pub use imp::{ed25519_key_from_cert_der, gateway_server_config_from_pem, generate_rotation, generate_rotation_after, issue_node_cert, load_or_generate, sign_bytes, verify_bytes};
 
 #[cfg(all(test, feature = "tls"))]
 mod key_extract_tests {
@@ -899,7 +920,7 @@ mod key_extract_tests {
         let expected = signing.verifying_key().to_bytes();
         let ca = KeyPair::generate().unwrap();
         let node = NodeId::new("127.0.0.1", 9000).unwrap();
-        let cert = generate_node_cert(&node, &signing, &ca).unwrap();
+        let cert = generate_node_cert(&node, &signing, &ca, 1).unwrap();
         assert_eq!(ed25519_key_from_cert_der(cert.as_ref()), Some(expected),
             "extracted SPKI key must equal the cert's Ed25519 verifying key");
     }
