@@ -849,6 +849,15 @@ read from the code and not reproduced, recorded, not changed here; the rest are 
   to the CI table); the design records that cited the default; wiki `dev/security.md`, `dev/operations.md`,
   `dev/companions/commitment.md`; `docs/wiki/dev/.log/2026-10-13-s-proofs-default.md`.
 - *Finding 4* — `examples/identity_one_record.rs`'s "opt-in under test" comment corrected.
+- *The confirming check's low finding* — rotation signed the sealed record with the prior key and never re-signed it,
+  so on a legacy-certificate node a second rotation's `own_history` ignored that record and dropped the original key.
+  `rotate_identity` (and so `rotate_identity_on_compromise`, which calls it) now re-signs and republishes the record
+  and proof with the new key after the cut-over, keeping the prior-key record first for the chain;
+  `a_double_rotation_keeps_the_original_key_in_the_published_history` (seen failing on 0f9d417b: "k0 dropped: a
+  legacy-certificate node's history lost its original key after two rotations (2 keys)"). The start path's loss
+  after one rotation and a restart has the same cause and the same fix (`own_history_at_start` now finds a record
+  signed by the current key) but no test: restarting a legacy-certificate node after a rotation means reconfiguring
+  its pre-issued certificate, which the test helpers do not do.
 - **Not built, stated:** first sighting of a node never seen stays trust on first use (anchors close it); a pre-2.3.0
   peer is not learned from gossip; a planted bare list can make a genuine unsigned sealed record `Stale` at gossip
   (`connection.rs:307`, anti-entropy still delivers it); an un-upgraded 2.33 peer keeps proofs off until it is upgraded or configured, so

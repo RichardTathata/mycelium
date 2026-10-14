@@ -1977,6 +1977,21 @@ impl GossipAgent {
 
         // 4. Cut over to the new key/cert.
         tls.activate(material);
+
+        // 5. Re-sign the same history with the NEW current key and republish the sealed record and the
+        //    proof (#623's confirming check). Step 2's record, signed by the prior key, must reach peers
+        //    first — it is what chains trust to the new key — but left as the standing record it is one
+        //    this node cannot use itself: `revocation::own_history` (the next rotation) and
+        //    `own_history_at_start` (the next start) accept the sealed record only when its signer is
+        //    a key the node can show it holds, and on a legacy-certificate node the prior key is not
+        //    one, so the original key fell out of the history. Peers that hold the new key (from step
+        //    2's record) accept this one as a chained update of an unchanged history.
+        if let Some(t) = self.task_ctx.tls.get() {
+            let proof = helpers::sign_identity_proof(t, &history);
+            let _ = self.kv().set(format!("sys/identity-proof/{}", self.node_id), Bytes::from(proof.clone()));
+            let sealed = helpers::encode_sealed_identity(&history, &proof);
+            let _ = self.kv().set(format!("sys/identity-signed/{}", self.node_id), Bytes::from(sealed));
+        }
         Ok(new_vk)
     }
 }

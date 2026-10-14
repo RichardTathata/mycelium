@@ -1497,6 +1497,52 @@ async fn rotation_does_not_launder_a_poisoned_key_into_live_trust_on_a_legacy_ce
     assert!(!trusted, "and it is not among C's trusted keys at B");
 }
 
+/// **A node that rotates twice keeps its original key in its published history** (#623's confirming
+/// check, its probe lifted). Rotation signed the sealed record with the *prior* key and never re-signed
+/// it, so on a legacy-certificate node — whose original key no certificate record anchors — the second
+/// rotation's `own_history` ignored that record (its signer is not a key the node can show it holds)
+/// and dropped k0: existing peers kept it, but a peer joining later learned a history without it.
+/// Rotation now re-signs the record with the new key after the cut-over. Seen failing first on
+/// 0f9d417b: "k0 dropped: a legacy-certificate node's history lost its original key after two
+/// rotations".
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn a_double_rotation_keeps_the_original_key_in_the_published_history() {
+    let (a, b, c, _nb, nc, dir) = three_signed_nodes_tweaked("s-dblrot", false, proofs_by_default, |cfg, n| {
+        proofs_by_default(cfg, n);
+        legacy_certificate_for(cfg, n);
+    }).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let k0 = c.identity_public_key().unwrap();
+    let k1 = c.rotate_identity(Duration::from_millis(500)).await.unwrap();
+    let _ = within_3s(|| b.task_ctx.peer_keys.pin().get(&nc).is_some_and(|k| k.contains(&k1))).await;
+    let k2 = c.rotate_identity(Duration::from_millis(500)).await.unwrap();
+    let _ = within_3s(|| b.task_ctx.peer_keys.pin().get(&nc).is_some_and(|k| k.contains(&k2))).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let sealed = c.kv().get(&format!("sys/identity-signed/{nc}")).unwrap();
+    let hist = crate::agent::helpers::parse_sealed_identity(&sealed).map(|(h, _)| crate::agent::helpers::parse_identity_keys(h)).unwrap_or_default();
+    // A peer joining afterwards learns C's history from gossip alone.
+    let pd = alloc_port();
+    let nd = NodeId::new("127.0.0.1", pd).unwrap();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = pd; cfg.bootstrap_peers = vec![a.node_id.clone()]; cfg.reconnect_backoff_secs = 1;
+    // A short health interval so anti-entropy — the only way a joiner gets records gossiped before it
+    // arrived — runs within the test's bound.
+    cfg.health_check_interval_secs = 1; cfg.kv_require_signed_frames = true;
+    cfg.tls = Some(crate::config::TlsConfig { auto_cert_dir: dir.clone(), ..crate::config::TlsConfig::default() });
+    let d = GossipAgent::new(nd, cfg);
+    d.start().await.unwrap();
+    let mut d_k2 = false;
+    for _ in 0..200 { if d.task_ctx.peer_keys.pin().get(&nc).is_some_and(|k| k.contains(&k2)) { d_k2 = true; break; } tokio::time::sleep(Duration::from_millis(25)).await; }
+    let mut d_has_k0 = false;
+    for _ in 0..400 { if d.task_ctx.history_keys(&nc).contains(&k0) { d_has_k0 = true; break; } tokio::time::sleep(Duration::from_millis(25)).await; }
+    a.shutdown().await; b.shutdown().await; c.shutdown().await; d.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(d_k2, "setup: the late joiner learns C's current key");
+    assert!(hist.contains(&k0) && hist.len() == 3, "k0 dropped: a legacy-certificate node's history lost its original key after two rotations ({} keys)", hist.len());
+    assert!(d_has_k0, "and a peer joining afterwards holds k0 in C's history set");
+}
+
 /// **Post-360 plan row S: `false` is still an opt-out.** A verifier configured with an explicit
 /// `require_identity_proofs = false` (the TOML spelling an operator writes) is back on the pre-row-S
 /// rule — the residual the two tests above close by default reproduces, which is what an opt-out
