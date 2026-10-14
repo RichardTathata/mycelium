@@ -16,7 +16,7 @@ one and the old one goes on this page. Read the entry, adopt the replacement, ke
 
 ## Will the compiler tell me?
 
-Honest answer: **usually not**. Only two entries carry `#[deprecated]`, so for the rest this page is
+Honest answer: **usually not**. Only four entries carry `#[deprecated]` (1, 3, 37 and 40), so for the rest this page is
 the notice.
 
 | # | What | Since | Replacement | Compiler warns? |
@@ -55,11 +55,12 @@ the notice.
 | 32 | an accept path, a writer and a signal log with no bound | 2.32.0 | `handshake_timeout_ms`, `inbound_idle_timeout_secs`, `peer_read_stall_timeout_ms`, `peer_write_stall_timeout_ms`, `peer_min_rate_bytes_per_sec`, `max_connections_per_source` | Partly — `GossipConfig`, `SystemStats` and `CoreCtx` gain fields; `WriterTiming` replaces a `Duration` in three `writer` functions; `validate()` refuses an idle timeout at or below the writer's |
 | 33 | a permanent `elect_leader`; a lock or leadership read from the three legacy keys | 2.32.0 (legacy keys still written; they stop at a later, governed MINOR) | renew by calling again, or `elect_leader_with(group, LeaderTerm::Permanent)`; `release_leadership`; upgrade every node | No — a leadership lapses after 30 s; an upgraded proposer times out until a quorum is upgraded |
 | 34 | "declare a new group and move the work yourself" as the way to change an electorate's members; a default that cannot move | 2.33.0 | `declare_successor_electorate` → `retire_electorate` → `complete_migration` (`POST /gateway/govern/electorate` with `predecessors` / `retire_to` / `complete`; `drop_predecessor` for one that never retires) | Partly — `ElectorateDecl` and `Retirement` gained fields, `ElectorateError` gained `Retired` (`#[non_exhaustive]`; a `_` arm must fail closed); otherwise refusals by name |
-| 35 | an unsigned KV `Data` frame at a TLS node; a bare KV `SignedData` signature; a signed frame whose signer is not its sender; a certificate whose key was read by a byte-scan, or with no Ed25519 key | 2.33.0: unsigned and bare accepted for one release, counted; the scan removed | `kv_require_signed_frames = true` once every peer is upgraded (unconditional at plan row F2); the tagged form every upgraded node writes | No — counted (`kv_unsigned_frames_accepted`/`_refused`, `kv_untagged_signatures`, `kv_signer_mismatch`); `GossipConfig` gains a field (an exhaustive literal breaks) |
+| 35 | an unsigned KV `Data` frame at a TLS node; a bare KV `SignedData` signature; a signed frame whose signer is not its sender; a certificate whose key was read by a byte-scan, or with no Ed25519 key | 2.33.0: unsigned and bare accepted for one release, counted; the scan removed — **refused since 2.34.0** (§40) | the tagged form every upgraded node writes — upgrade the fleet to 2.33 before 2.34 | No — counted (`kv_unsigned_frames_refused`, `kv_untagged_signatures_refused`, `kv_signer_mismatch`); `GossipConfig` gains a field (an exhaustive literal breaks) |
 | 36 | an award without a close; an offer, report or assessment read from another requirement's stream; `award_of_verified` against the writable head; an unbounded blob store; any string as a run id | 2.33.0 (`mycelium-reason` 0.9.0) | `close(requirement, key, now_ms)` then award; `award_of_verified(requirement, declarer, resolve)`; `open_with_quota`; one bounded segment per run id | Partly — `TraceRecorder::new` returns `Result`, `award_of_verified` gained a parameter, `CommitmentRefusal` gained variants (`#[non_exhaustive]`); otherwise refusals by name (`NotClosed`, 507, 400) |
 | 37 | nineteen public items (eighteen names) nothing in the repository references | 2.33.0 (deprecated, not removed) | none needed; open an issue to keep one — it is undeprecated in the next MINOR | **Yes** — `#[deprecated(since = "2.33.0")]` |
 | 38 | a fractional, zero or past-an-hour `interval_secs`/`lease_secs`; a prompt `ns`/`name` that is empty or holds `/`; a caller envelope older than 300 s plus the drift bound; `GatewayPreflight::is_inert` | 2.33.0 (`mycelium-py` 0.2.11, `mycelium-ts` 0.2.5) | whole seconds in `1..=3600`; a one-segment prompt name; a fresh envelope (keep a provider's backlog under 300 s) | Partly — `PromptSkillError` gained `InvalidName`, `CallerError` `Stale`, `is_inert` warns; otherwise HTTP 400 `timer_out_of_range` / `invalid_prompt_name`, `stale` |
 | 39 | a revoked key verifying at a KV, identity, consensus, envelope or knowledge verifier; a revocation signed by any key the node held; a certificate without `mycelium://<node>` | 2.33.0 | re-issue every node's certificate (`mycelium tls issue`, or a development node's next start); rotate before `identity/revoke` | Partly — `CoreCtx` and `RotationMaterial` gained fields; otherwise behaviour (a pre-row-Q certificate has no standing until re-issued; 422 on revoking the current key) |
+| 40 | `kv_require_signed_frames` (an unsigned KV frame or a bare KV signature accepted at a TLS node); the counters `kv_unsigned_frames_accepted` / `kv_untagged_signatures` | 2.34.0 (unreleased) — §35's window closed | nothing: a TLS node refuses both whatever the setting says; read `kv_unsigned_frames_refused` / `kv_untagged_signatures_refused`; upgrade from 2.33.x, not 2.32 | **Yes** for code naming the field — `#[deprecated]`; otherwise no — a no-op, warned at `start()` when set; the two counters stay at zero |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -916,7 +917,14 @@ restore-or-retire rule): the carry set is complete because the group tag is in t
   carry at that slot, named; the claim is for slots decided only in the electorate (an ordinary slot also proposed
   under another scope is not enumerated); two default declarations within gossip lag are escaped by a merge.
 
-## 35. Wire and crypto: a TLS node can refuse unsigned KV frames, KV signatures are domain-tagged, a certificate's key is read structurally, and §23 closes (2.33.0)
+## 35. Wire and crypto: a TLS node can refuse unsigned KV frames, KV signatures are domain-tagged, a certificate's key is read structurally, and §23 closes (2.33.0) — window closed in 2.34.0 (§40)
+
+> **Closed.** The two allowances below held for 2.33.0 only. From the release after it (§40) a TLS node refuses an
+> unsigned KV `Data` frame and a bare KV `SignedData` signature whatever `kv_require_signed_frames` says; the setting
+> is a retired no-op (accepted, warned at `start()` when set, `#[deprecated]`); `kv_unsigned_frames_accepted` and
+> `kv_untagged_signatures` stay on `GET /stats` at zero and their metrics are no longer emitted. **Upgrade a 2.32
+> fleet to 2.33 before going further**: a 2.32 node's KV writes reach a node past 2.33 only by anti-entropy. The
+> anti-entropy residual below is restated in §40, not closed.
 
 Post-360 plan row F. Wire **v12** unchanged — no frame gains or loses a byte; what changes is which frames a node
 accepts and what a signature is over.
@@ -1213,3 +1221,81 @@ does not refuse a revoked key; a node without persistence forgets, across a rest
 while it was down, until the owner republishes it; a holder of the CA key can make a node refuse to start (loud,
 recovered by a re-issue); junk certificates for many nodes can churn the bounded certificate cache (a fold then costs
 on the order of a second).
+
+## 40. The refusal is unconditional: a TLS node refuses unsigned KV frames and bare KV signatures, and `kv_require_signed_frames` is retired (2.34.0) — §35's window closes
+
+Post-360 plan row F2, the MINOR after row F. Wire **v12** unchanged — no frame gains or loses a byte; what changes is
+that §35's one-release allowances end.
+
+**What changes.**
+- **A TLS node refuses an unsigned KV `Data` frame, whatever `kv_require_signed_frames` says.** Dropped, not
+  forwarded, counted (`GET /stats` `kv_unsigned_frames_refused`, `mycelium_kv_unsigned_frames_total{outcome="refused"}`).
+  The two records that authenticate themselves are still taken, as in 2.33.0: a sealed identity record
+  (`sys/identity-signed/{n}`) whose proof verifies and chains to what the receiver holds, and a CA-verified
+  certificate record (`sys/identity-cert/{n}/{key}`, row Q) — both `connection::self_authenticating_identity`, counted
+  (`kv_identity_exempt_frames`). A stale or revoked sealed record is refused as before.
+- **A bare (pre-2.33) KV `SignedData` signature is refused.** A receiver verifies the `mycelium.kv/update/1`-tagged
+  form only. A signature that would have verified in the bare form is told apart on the failure path and counted
+  (`GET /stats` `kv_untagged_signatures_refused`, `mycelium_kv_untagged_refused_total`), and named at most once a
+  minute per connection in a warning that says the peer is on 2.32 — so an operator can find it. That warning has its
+  own per-connection gate, so a 2.32 peer's stream of bare signatures does not use up the minute's warning for a
+  signer mismatch or a revoked key on the same connection. **An unsigned refusal is logged at `debug` only**, and
+  counted: every write a 2.32 peer's agent originates is an unsigned `Data` frame, so a warning per refusal (or even
+  per connection-minute, for every such connection) would flood the log for the whole upgrade; the counter is the
+  signal, and a bare signature's warning already names the 2.32 peer.
+- **A node's locality advertisement is signed.** `start()` wrote `cap/{self}/locality/self` before the TLS identity
+  was installed, so the frame left unsigned and every TLS peer would refuse it; it now follows the install, and the
+  only writes before it are the two self-authenticating records (#624's review). In a two-node run the start-time
+  frame reached the peer by gossip neither before nor after the move — it is dispatched before any connection exists
+  — so the entry arrives by anti-entropy either way; no end-to-end test pins the order.
+- **`kv_require_signed_frames` is a no-op** (`GOSSIP_KV_REQUIRE_SIGNED_FRAMES` too). It is still accepted, so a 2.33
+  configuration that set it loads and starts; `start()` warns once when it is `true`. An explicit `false` cannot be
+  told from the default and is **not** an opt-out — nothing restores the window. The field is
+  `#[deprecated(since = "2.34.0")]`; removal is on the 3.0.0 ledger, like everything on this page.
+- **Row F's window counters stop rising.** `GET /stats` `kv_unsigned_frames_accepted` and `kv_untagged_signatures`
+  are kept, at zero, so a 2.x dashboard does not break on a missing key; nothing raises them.
+  `mycelium_kv_unsigned_frames_total{outcome="accepted"}` and `mycelium_kv_untagged_signatures_total` are no longer
+  emitted. Read the refusals instead: `kv_unsigned_frames_refused` and the new `kv_untagged_signatures_refused`.
+- **`mesh.signed_writes` is rev 2** and resolves `enforced` on `[tls]` alone (rev 1 resolved on the setting), and it
+  now names the bare signature too. **`secure-single-domain` is rev 5** and requires it. It resolves on exactly what
+  `mesh.tls` does, so rev 5 admits every node rev 4 admitted; it is required by name so the profile says the refusal is
+  part of it.
+- A node without `[tls]` signs nothing and refuses nothing — the plaintext posture is unchanged.
+
+**Mixed fleet, direction by direction** (the 2.30.0 shape, §21):
+- **2.33.x ↔ 2.34: works.** A 2.33 node signs every write it originates in the tagged form (row F), so nothing it
+  sends is refused here; a 2.34 node sends nothing a 2.33 node would refuse.
+- **A 2.32 node's KV writes at a 2.34 node: refused at gossip.** Its agent's unsigned `Data` frames and its bare
+  `SignedData` frames are both dropped, counted (`kv_unsigned_frames_refused`, `kv_untagged_signatures_refused`) and
+  not forwarded. They still arrive **by anti-entropy** — a `StateResponse` entry is not refused (below) — so the
+  effect is latency, not loss, as §35 described for the opposite direction; but a 2.32 node's legacy identity record
+  is among them, so a 2.34 node that has not dialled it learns its key only by anti-entropy or from its sealed record.
+- **A 2.34 node's KV writes at a 2.32 node: as §35 says for 2.33** — dropped as a bad signature, by anti-entropy only.
+- **So a fleet that mixes 2.32 and 2.34 replicates KV state by anti-entropy alone, in both directions.** That is the
+  flip §35 announced. **Upgrade from 2.33.x, not from 2.32**: take every node to 2.33 first, check that
+  `kv_untagged_signatures` and `kv_unsigned_frames_accepted` have stopped rising on every node, then upgrade.
+
+**Will the compiler tell me?** For code that names `kv_require_signed_frames` — a struct literal or an assignment —
+**yes**: a deprecation warning, an error under `-D warnings`. `TransportBounds` gained a field
+(`kv_untagged_refused`); it derives `Default`, so only an exhaustive literal breaks. The rest is wire behaviour.
+
+**Migration.** Upgrade from 2.33.x. Remove `kv_require_signed_frames` from configuration files and
+`GOSSIP_KV_REQUIRE_SIGNED_FRAMES` from environments (it does nothing, and the start-up warning says so). Move alerts
+from `kv_unsigned_frames_accepted` / `kv_untagged_signatures` (and their metrics) to `kv_unsigned_frames_refused` /
+`kv_untagged_signatures_refused`: after the upgrade a rising refusal count means a peer still on 2.32, or a member
+forging. A deployment under `profile = "secure-single-domain"` needs nothing new — rev 5's addition is met wherever rev
+4's `mesh.tls` was.
+
+**Not covered.** **Anti-entropy, restated rather than closed:** a `StateResponse` entry carries no author and no
+signature and is applied by LWW, so a member can still introduce a value for any key — another member's included —
+through a state reply, and the `sys/` tripwire does not count an entry for a key the victim holds nothing under
+(`docs/threat-model.md` Boundary A). Closing it needs entries that carry their originator's signature, verified on
+receipt as the `SignedData` arm verifies — a wire change with its own window, not built. **With
+`require_identity_proofs` off**, another member's legacy identity is still writable under the writer's own signature
+(detected by the anchor tripwire, not prevented). **First sighting of a sealed record stays trust on first use.** **A refused frame still consumes its nonce**
+(pre-existing, unchanged): a receiver records a `Data` frame's nonce in the early-dedup path and a `SignedData` frame's
+before it checks the signature, so a member relaying an unsigned or badly signed copy of another's frame ahead of the
+genuine one makes that receiver drop the genuine frame as a duplicate — one hop suppressed until the next anti-entropy
+exchange, not a forged write.
+Role claims, audit records and revocation events are still signed over untagged canonical bytes
+(`what-is-proven.md`).

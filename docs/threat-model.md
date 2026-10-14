@@ -54,31 +54,38 @@ An attacker who controls one node process (RCE, stolen host) gains:
   2.32.0 both were bare, and a victim's signed consensus answer, carrying proposer-chosen bytes,
   could be published as the victim's identity proof (CHANGELOG, 2.32.0). Since the release after
   2.32.0 (post-360 plan row F) KV `SignedData` is signed under `mycelium.kv/update/1` too, and the
-  2.32.0 allowance for bare identity proofs and consensus signatures is closed; a bare KV signature is
-  accepted for one release, counted (`deprecations.md` §35). Role claims, audit records and revocation
+  2.32.0 allowance for bare identity proofs and consensus signatures is closed; a bare KV signature was
+  accepted for one release, counted (`deprecations.md` §35), and since row F2 is refused at every
+  verifier, counted (`kv_untagged_signatures_refused`, §40). Role claims, audit records and revocation
   events (`src/agent/revocation.rs`) are still
   signed over untagged canonical bytes — a residual recorded in `docs/operations/what-is-proven.md`;
   none can begin with another domain's tag, so the tagged verifiers stay closed to them.
 - **Cannot gossip a write *as another member*: a signed frame's signer must be its sender** (row F,
   #611's review). A `SignedData` frame is verified against its `signer`'s key and dropped when `signer`
   is not the update's `sender` (`kv_signer_mismatch`), so a member's own valid signature no longer
-  carries a write attributed to someone else. **An unsigned frame is the other half, and it is opt-in
-  this release:** under `[tls]` every KV write a node originates is signed (row F routed the agent's
-  twenty-four unsigned write sites — the quorum-evidence write among them — through the signer), a
-  receiver with `kv_require_signed_frames` drops an unsigned `Data` frame — except a sealed identity
-  record that authenticates itself (its proof verifies under a key it carries and chains to the keys the
-  receiver already holds for that node, and whose history contains every key held or stored for it, so a
-  replayed pre-rotation record is refused, `kv_identity_stale_refused`; counted, `kv_identity_exempt_frames`;
-  first sighting stays trust on first use) — and one without it — the
-  default this release — applies it and counts it (`kv_unsigned_frames_accepted`). Plan row F2 makes the
-  refusal unconditional. An identity tombstone removes no keys (it used to: one tombstone, unsigned or
+  carries a write attributed to someone else. **An unsigned frame is the other half, refused
+  unconditionally since row F2:** under `[tls]` every KV write a node originates is signed (row F routed
+  the agent's twenty-four unsigned write sites — the quorum-evidence write among them — through the
+  signer), and a TLS receiver drops an unsigned `Data` frame, counted (`kv_unsigned_frames_refused`) —
+  except two records that authenticate themselves: a sealed identity record (its proof verifies under a
+  key it carries and chains to the keys the receiver already holds for that node, and whose history
+  contains every key held or stored for it, so a replayed pre-rotation record is refused,
+  `kv_identity_stale_refused`; first sighting stays trust on first use) and a CA-verified certificate
+  record (row Q), both counted (`kv_identity_exempt_frames`). Row F (2.33.0) made the refusal opt-in
+  for one release (`kv_require_signed_frames`); row F2 retired the setting to a no-op (`deprecations.md`
+  §40). An identity tombstone removes no keys (it used to: one tombstone, unsigned or
   signed by any member as itself, silenced a member at every receiver). **What remains with
   `require_identity_proofs` off:** a member can write another member's legacy identity under its *own*
   signature — a valid frame, signer = sender — and an unproven history merges on first use; the anchor
   tripwire counts it (`identity_anchor_conflicts`) and does not stop it. The flag closes it. **The refusal is bypassable through anti-entropy:** a `StateResponse` entry
   carries no author and no signature and is applied by LWW, unsolicited, so a compromised member can
-  introduce a value for any key — another member's included — through a state reply whatever this
-  setting says. Detection covers part of it: signed `sys/` records (identity, roles, audit) fail
+  introduce a value for any key — another member's included — through a state reply, refusal or no.
+  Closing it needs state entries that carry their originator's signature — a wire change, not built
+  (row F2 restated it rather than closed it). **A refused frame still consumes its nonce** (pre-existing,
+  unchanged by F2): a receiver marks a `Data` frame's nonce in the early-dedup path and a `SignedData` frame's
+  before it verifies the signature, so a member that relays a copy of another member's frame unsigned, or
+  under a bad signature, ahead of the genuine one makes that receiver drop the genuine frame as a duplicate —
+  a suppression of one gossip hop, recovered by the next anti-entropy exchange, not a forged write. Detection covers part of it: signed `sys/` records (identity, roles, audit) fail
   verification at read, and the `sys/` tripwire counts a remote write to a key *this* node owns — but it
   does **not** count an entry for a key the victim holds nothing under, so a fresh key planted in another
   member's namespace is not flagged anywhere.

@@ -48,13 +48,13 @@ this page is the index + the gate.
 - ☐ **Start under the `secure-single-domain` profile** (`profile = "secure-single-domain"` or
   `GOSSIP_PROFILE`). The node then **refuses to start** unless each of these resolves `enforced` (or
   `not_applicable` to its role), and names every one that does not, with what is missing and where to
-  read — rev 4 (2.32.0; rev 3 added `gw.exposed_closed`, rev 2 was v2.21.0's seventeen, rev 1 v2.19.0's fifteen): `mesh.tls` · `id.proofs_required` ·
+  read — rev 5 (post-360 row F2; rev 4 2.32.0, rev 3 added `gw.exposed_closed`, rev 2 was v2.21.0's seventeen, rev 1 v2.19.0's fifteen): `mesh.tls` · `mesh.signed_writes` · `id.proofs_required` ·
   `gw.not_open` · `gw.exposed_closed` · `gw.tls` ·
   `gw.caller_profile` · `ae.authorised_at_seam` · `ae.recorded_before_dispatch` · `prov.enforcement` ·
   `a2a.admission` · `authz.execution_authority` · `authz.durable_epochs` · `audit.chain` ·
   `egress.allow_list` · `persist.configured` · `persist.sync_mode` · `persist.unreadable_refused` ·
   `id.ca_key_off_node` · `cons.safety_profile`. It needs a `compliance` + `tls` build (anything less reads `not_in_build` and
-  refuses). **Rev 4's addition** is `cons.safety_profile` (below); **rev 3's** is `gw.exposed_closed` (with `gw.not_open` at rev 2). **Upgrade note:** rev 3
+  refuses). **Rev 5's addition** is `mesh.signed_writes` — unsigned and bare-signed KV frames refused, which resolves on exactly what `mesh.tls` does, so rev 5 admits every node rev 4 admitted (`deprecations.md` §40). **Rev 4's** is `cons.safety_profile` (below); **rev 3's** is `gw.exposed_closed` (with `gw.not_open` at rev 2). **Upgrade note:** rev 3
   refuses one node rev 2 admitted — a gateway whose only credential was a blank `gateway_auth_token`, which
   `gw.not_open` rev 1 read as enforced (`validate()` now refuses a blank token in every profile; set a real
   secret). Otherwise an open gateway already failed `gw.not_open`, and the new id names the waiver when

@@ -22,6 +22,15 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## Post-360 row F2: the refusal unconditional — 2026-10-13 (#624, unreleased)
+
+A TLS node refuses an unsigned KV `Data` frame and a bare (pre-2.33) KV `SignedData` signature whatever
+`kv_require_signed_frames` says; the setting is a retired no-op (`#[deprecated]`, warned at `start()` when set); row F's
+window counters stay at zero; `kv_untagged_signatures_refused` is new; `mesh.signed_writes` rev 2 resolves on `[tls]`;
+`secure-single-domain` rev 5 requires it. The sealed-identity and certificate-record exemptions stay. The anti-entropy
+residual is restated, not closed (a signed `SyncEntry` is a wire change). Upgrade note `deprecations.md` §40: upgrade
+from 2.33.x, not 2.32. Record: [`.log/2026-10-13-f2-refusal-unconditional.md`](.log/2026-10-13-f2-refusal-unconditional.md).
+
 ## v2.33.0 release — 2026-10-13 (tag `v2.33.0`) — post-360 wave 2: revocation at every verifier, wire and crypto with a window
 
 **#604** a lost electorate voter restored with its state or retired, never reissued empty (docs); **#605** an

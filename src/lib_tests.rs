@@ -1110,13 +1110,16 @@ async fn a_signature_under_another_tag_is_not_a_kv_signature() {
     assert!(store.pin().get("other-tag/k").is_none(), "a consensus-tagged signature is not a KV signature");
 }
 
-/// **A TLS node that requires signed frames refuses an unsigned `Data` frame** (post-360 plan row
-/// F). Before 2.33.0 the `Data` arm of the connection handler applied a frame whatever the node's
-/// posture, so under `[tls]` a member could write any key under any other member's `sender` hash by
-/// not signing. Seen failing first: the unsigned key was applied.
+/// **A TLS node that still sets the retired `kv_require_signed_frames` refuses an unsigned `Data` frame
+/// exactly as one that does not** (post-360 plan rows F and F2). Before 2.33.0 the `Data` arm of the
+/// connection handler applied a frame whatever the node's posture, so under `[tls]` a member could write
+/// any key under any other member's `sender` hash by not signing (row F, seen failing first: the unsigned
+/// key was applied). Since row F2 the setting is a no-op: a 2.33 configuration that set it loads and
+/// refuses the same — [`an_unsigned_data_frame_is_refused_whatever_the_setting_says`] is the default.
 #[cfg(feature = "tls")]
 #[tokio::test]
-async fn a_tls_node_requiring_signed_frames_refuses_an_unsigned_data_frame() {
+#[allow(deprecated)]
+async fn a_tls_node_that_sets_the_retired_setting_refuses_an_unsigned_data_frame() {
     use ed25519_dalek::SigningKey;
     let (mut writer, reader) = loopback_pair().await;
     let store: Arc<papaya::HashMap<Arc<str>, StoreEntry>> = Arc::new(papaya::HashMap::new());
@@ -1166,7 +1169,8 @@ fn sealed_record(history_keys: &[[u8; 32]], signer: &ed25519_dalek::SigningKey) 
 /// whose proof verifies under a key in its own history and — when this node already holds keys for
 /// `n` — under one of those. Everything else in the family is refused like any unsigned frame, and
 /// the exempt frames are counted. Seen failing first: garbage in the sealed slot, a bare identity, a
-/// proof alone and a tombstone were all applied.
+/// proof alone and a tombstone were all applied. Since row F2 it runs with `kv_require_signed_frames` at its
+/// default — seen failing first on 4251d50a, where the default applied all five refused frames.
 #[cfg(feature = "tls")]
 #[tokio::test]
 async fn only_a_self_authenticating_sealed_identity_is_exempt_from_the_refusal() {
@@ -1181,9 +1185,7 @@ async fn only_a_self_authenticating_sealed_identity_is_exempt_from_the_refusal()
     let known_sk = SigningKey::from_bytes(&[78u8; 32]);
     let other_sk = SigningKey::from_bytes(&[79u8; 32]);
     let (tls, dir) = test_tls_identity("identity-exempt", &me);
-    let mut config = GossipConfig::default();
-    config.kv_require_signed_frames = true;
-    let opts = HandlerOpts { config, tls: Some(tls), peer_keys: vec![(known.clone(), vec![known_sk.verifying_key().to_bytes()])], ..Default::default() };
+    let opts = HandlerOpts { tls: Some(tls), peer_keys: vec![(known.clone(), vec![known_sk.verifying_key().to_bytes()])], ..Default::default() };
     let bounds = Arc::clone(&opts.bounds);
     let _ = spawn_handler_with(reader, Arc::clone(&store), Arc::new(papaya::HashMap::new()), tx,
                                Arc::new(ShardedSeen::new(N_GOSSIP_SHARDS)), GossipConfig::default().default_ttl, opts);
@@ -1229,7 +1231,7 @@ async fn only_a_self_authenticating_sealed_identity_is_exempt_from_the_refusal()
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Three TLS nodes requiring signed frames, B and C each bootstrapped to A, anti-entropy a minute away.
+/// Three TLS nodes (each refusing unsigned frames — since row F2, every TLS node), B and C each bootstrapped to A, anti-entropy a minute away.
 /// Returns once B holds C's key — **first contact** between B and C rests on what reaches B by gossip.
 #[cfg(feature = "tls")]
 async fn three_signed_nodes(tag: &str, proofs: bool) -> (GossipAgent, GossipAgent, GossipAgent, NodeId, NodeId, std::path::PathBuf) {
@@ -1257,7 +1259,6 @@ async fn three_signed_nodes_tweaked(tag: &str, proofs: bool, tweak_b: impl Fn(&m
         cfg.bootstrap_peers = boots;
         cfg.reconnect_backoff_secs = 1;
         cfg.health_check_interval_secs = 60;
-        cfg.kv_require_signed_frames = true;
         cfg.require_identity_proofs = proofs;
         cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
         GossipAgent::new(node.clone(), cfg)
@@ -2826,26 +2827,60 @@ async fn a_capability_retracted_at_shutdown_reaches_the_peers() {
     assert!(gone, "B still resolves the capability A retracted as it shut down");
 }
 
-/// **The window: by default a TLS node still applies an unsigned frame, and counts it**, so a 2.32
-/// peer's agent writes (which it sends unsigned) keep arriving while the fleet upgrades. A node
-/// with no TLS identity has nothing to count — the plaintext posture is unchanged.
+/// **A TLS node refuses an unsigned `Data` frame whatever `kv_require_signed_frames` says** (post-360
+/// plan row F2). Row F's window applied the frame and counted it unless the node opted in; F2 makes
+/// the refusal the default and the setting a retired no-op (`docs/guide/deprecations.md` §40).
+/// Seen failing first on 4251d50a: with the setting at its default the unsigned key was applied.
 #[cfg(feature = "tls")]
 #[tokio::test]
-async fn an_unsigned_data_frame_is_applied_and_counted_during_the_window() {
+async fn an_unsigned_data_frame_is_refused_whatever_the_setting_says() {
+    use ed25519_dalek::SigningKey;
     let (mut writer, reader) = loopback_pair().await;
     let store: Arc<papaya::HashMap<Arc<str>, StoreEntry>> = Arc::new(papaya::HashMap::new());
     let (tx, _rx) = mpsc::channel(10);
     let me = NodeId::new("127.0.0.1", 7313).unwrap();
-    let (tls, dir) = test_tls_identity("unsigned-window", &me);
-    let opts = HandlerOpts { tls: Some(tls), ..Default::default() };
+    let peer = NodeId::new("127.0.0.1", 7314).unwrap();
+    let (tls, dir) = test_tls_identity("unsigned-unconditional", &me);
+    let sk = SigningKey::from_bytes(&[80u8; 32]);
+    // The default configuration — the setting untouched.
+    let opts = HandlerOpts { tls: Some(tls), peer_keys: vec![(peer.clone(), vec![sk.verifying_key().to_bytes()])], ..Default::default() };
     let bounds = Arc::clone(&opts.bounds);
     let _ = spawn_handler_with(reader, Arc::clone(&store), Arc::new(papaya::HashMap::new()), tx,
                                Arc::new(ShardedSeen::new(N_GOSSIP_SHARDS)), GossipConfig::default().default_ttl, opts);
-    send_wire(&mut writer, &WireMessage::Data(data_update("window/k", b"v", 7313, false))).await;
+    let mut forged = data_update("unconditional/k", b"forged", 7313, false);
+    forged.sender = peer.id_hash();
+    send_wire(&mut writer, &WireMessage::Data(forged)).await;
+    // A signed control frame behind it, so "absent" means refused rather than not yet read.
+    let mut probe = data_update("unconditional/probe", b"p", 7314, false);
+    probe.sender = peer.id_hash();
+    let canonical = crate::framing::canonical_sign_bytes(&probe);
+    send_wire(&mut writer, &signed_data_over(probe, peer.id_hash(), &sk, &crate::framing::kv_signing_message(&canonical))).await;
     let s = Arc::clone(&store);
-    poll_until(|| s.pin().get("window/k").is_some(), 500).await;
-    assert_eq!(bounds.kv_unsigned_accepted.load(Ordering::Relaxed), 1, "accepted, and counted");
+    poll_until(|| s.pin().get("unconditional/probe").is_some(), 500).await;
+    assert!(store.pin().get("unconditional/k").is_none(), "an unsigned write is refused by a TLS node with the setting at its default");
+    assert_eq!(bounds.kv_unsigned_refused.load(Ordering::Relaxed), 1, "and the refusal is counted");
+    assert_eq!(bounds.kv_unsigned_accepted.load(Ordering::Relaxed), 0, "the window's counter no longer rises");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A node with no TLS identity signs nothing and refuses nothing: the plaintext posture is unchanged by
+/// row F2 — an unsigned frame is applied, and neither window counter moves.
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn a_node_without_tls_still_applies_an_unsigned_frame() {
+    let (mut writer, reader) = loopback_pair().await;
+    let store: Arc<papaya::HashMap<Arc<str>, StoreEntry>> = Arc::new(papaya::HashMap::new());
+    let (tx, _rx) = mpsc::channel(10);
+    let opts = HandlerOpts::default();
+    let bounds = Arc::clone(&opts.bounds);
+    let _ = spawn_handler_with(reader, Arc::clone(&store), Arc::new(papaya::HashMap::new()), tx,
+                               Arc::new(ShardedSeen::new(N_GOSSIP_SHARDS)), GossipConfig::default().default_ttl, opts);
+    send_wire(&mut writer, &WireMessage::Data(data_update("plaintext/k", b"v", 7315, false))).await;
+    let s = Arc::clone(&store);
+    poll_until(|| s.pin().get("plaintext/k").is_some(), 500).await;
+    assert!(store.pin().get("plaintext/k").is_some(), "a plaintext node applies an unsigned frame");
+    assert_eq!(bounds.kv_unsigned_refused.load(Ordering::Relaxed), 0);
+    assert_eq!(bounds.kv_unsigned_accepted.load(Ordering::Relaxed), 0);
 }
 
 /// **A `SignedData` frame's signer must be its sender** (#611's review, finding 1). The arm verified
@@ -2893,10 +2928,12 @@ async fn a_signed_frame_whose_signer_is_not_its_sender_is_refused() {
     assert_eq!(bounds.kv_signer_mismatch.load(Ordering::Relaxed), 2, "each refusal is counted");
 }
 
-/// **The window, pinned: a bare 2.32 KV signature is accepted and counted** (#611's review, finding 8).
+/// **A bare (pre-2.33) KV signature is refused** (post-360 plan row F2). Row F accepted the bare 2.32
+/// form for one release and counted it (`kv_untagged_signatures`); that counter no longer rises.
+/// Seen failing first on 4251d50a: the barely signed key was applied and counted as accepted.
 #[cfg(feature = "tls")]
 #[tokio::test]
-async fn a_bare_2_32_kv_signature_is_accepted_and_counted_during_the_window() {
+async fn a_bare_2_32_kv_signature_is_refused() {
     use ed25519_dalek::SigningKey;
     let (mut writer, reader) = loopback_pair().await;
     let store: Arc<papaya::HashMap<Arc<str>, StoreEntry>> = Arc::new(papaya::HashMap::new());
@@ -2911,12 +2948,19 @@ async fn a_bare_2_32_kv_signature_is_accepted_and_counted_during_the_window() {
     u.sender = peer.id_hash();
     let canonical = crate::framing::canonical_sign_bytes(&u);
     send_wire(&mut writer, &signed_data_over(u, peer.id_hash(), &sk, &canonical)).await;
+    // The same peer's tagged write behind it, so "absent" means refused rather than not yet read.
+    let mut probe = data_update("bare/probe", b"p", 7332, false);
+    probe.sender = peer.id_hash();
+    let probe_canonical = crate::framing::canonical_sign_bytes(&probe);
+    send_wire(&mut writer, &signed_data_over(probe, peer.id_hash(), &sk, &crate::framing::kv_signing_message(&probe_canonical))).await;
     let s = Arc::clone(&store);
-    poll_until(|| s.pin().get("bare/k").is_some(), 500).await;
-    assert_eq!(bounds.kv_untagged_signatures.load(Ordering::Relaxed), 1, "accepted, and counted on this node");
+    poll_until(|| s.pin().get("bare/probe").is_some(), 500).await;
+    assert!(store.pin().get("bare/k").is_none(), "a bare 2.32 signature is refused");
+    assert_eq!(bounds.kv_untagged_signatures.load(Ordering::Relaxed), 0, "the window's counter no longer rises");
+    assert_eq!(bounds.kv_untagged_refused.load(Ordering::Relaxed), 1, "the refusal is counted, so an operator can find the 2.32 peer");
 }
 
-/// Two TLS nodes that both require signed frames, with anti-entropy a minute away, peered and holding
+/// Two TLS nodes (both refusing unsigned frames — since row F2, every TLS node), with anti-entropy a minute away, peered and holding
 /// each other's identity keys — so a write reaches the other only by gossip, and only if it is signed.
 #[cfg(feature = "tls")]
 async fn signed_fleet_pair(tag: &str, http_a: Option<u16>) -> (GossipAgent, GossipAgent, NodeId, NodeId, std::path::PathBuf) {
@@ -2931,7 +2975,6 @@ async fn signed_fleet_pair(tag: &str, http_a: Option<u16>) -> (GossipAgent, Goss
         cfg.bootstrap_peers = boots;
         cfg.reconnect_backoff_secs = 1;
         cfg.health_check_interval_secs = 60;
-        cfg.kv_require_signed_frames = true;
         cfg.http_port = http;
         cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
         GossipAgent::new(node.clone(), cfg)
@@ -3007,7 +3050,8 @@ async fn a_gateway_kv_delete_reaches_a_peer_that_requires_signed_frames() {
     let _ = std::fs::remove_dir_all(&cert_dir);
 }
 
-/// **The window's counters are on `GET /stats`, per node** (#611's review, finding 8). The counters
+/// **The row F and F2 counters are on `GET /stats`, per node** (#611's review, finding 8; row F2 adds
+/// `kv_untagged_signatures_refused`, and the two window counters stay, at zero). The counters
 /// moved from process-global statics to the node's `TransportBounds`, so each node reports its own.
 #[cfg(all(feature = "tls", feature = "gateway"))]
 #[tokio::test]
@@ -3026,6 +3070,7 @@ async fn the_row_f_window_counters_are_on_gateway_stats() {
     b.kv_untagged_signatures.store(3, Ordering::Relaxed);
     b.kv_unsigned_accepted.store(5, Ordering::Relaxed);
     b.kv_unsigned_refused.store(7, Ordering::Relaxed);
+    b.kv_untagged_refused.store(19, Ordering::Relaxed);
     b.kv_signer_mismatch.store(11, Ordering::Relaxed);
     b.kv_identity_exempt.store(13, Ordering::Relaxed);
     b.kv_identity_stale_refused.store(17, Ordering::Relaxed);
@@ -3039,6 +3084,7 @@ async fn the_row_f_window_counters_are_on_gateway_stats() {
     assert_eq!(stats["kv_untagged_signatures"], 3, "{stats}");
     assert_eq!(stats["kv_unsigned_frames_accepted"], 5);
     assert_eq!(stats["kv_unsigned_frames_refused"], 7);
+    assert_eq!(stats["kv_untagged_signatures_refused"], 19, "row F2's refusal of a bare signature, per node");
     assert_eq!(stats["kv_signer_mismatch"], 11);
     assert_eq!(stats["kv_identity_exempt_frames"], 13);
     assert_eq!(stats["kv_identity_stale_refused"], 17);
@@ -3067,7 +3113,6 @@ async fn an_agent_write_reaches_a_peer_that_requires_signed_frames() {
         cfg.bootstrap_peers = boots;
         cfg.reconnect_backoff_secs = 1;
         cfg.health_check_interval_secs = 60; // anti-entropy is not what carries the write
-        cfg.kv_require_signed_frames = true;
         cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
         GossipAgent::new(node.clone(), cfg)
     };
@@ -14149,7 +14194,9 @@ async fn a_node_providing_every_requirement_starts_under_the_secure_profile() {
     a.start().await.expect("and so the profile admits the node");
     let r = a.guarantee_report();
     assert!(r.started && r.node_requirements_satisfied(), "required unmet: {:?}", r.required_unmet());
-    assert_eq!(r.profile.as_ref().map(|p| (p.name, p.revision, p.selected)), Some(("secure-single-domain", 4, true)));
+    assert_eq!(r.profile.as_ref().map(|p| (p.name, p.revision, p.selected)), Some(("secure-single-domain", 5, true)));
+    // Rev 5's requirement (row F2), met by `[tls]` alone: no new setting is needed to start.
+    assert_eq!(r.entry("mesh.signed_writes").unwrap().resolution.state(), "enforced");
     assert!(!cert_dir.join("ca-key.pem").exists(), "start() minted no CA key on the node");
     assert_eq!(r.unresolved(), ["net.confinement", "clock.sync"], "what the node cannot see is still listed");
     // Rev 3's requirement, met: a safety-sensitive proposal outside an electorate group is refused.

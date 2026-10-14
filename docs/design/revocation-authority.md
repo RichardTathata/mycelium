@@ -169,7 +169,7 @@ A revocation record:
 `sys/identity/{signer}` value: a signer with no trusted key is refused.
 
 **Not reached:**
-- unsigned `Data` frames, until `kv_require_signed_frames` or row F2;
+- unsigned `Data` frames, until row F2 (since then refused at every TLS node, `deprecations.md` §40);
 - anti-entropy entries, which carry no author;
 - writes verified before the revocation arrived (detection, not prevention);
 - the mTLS handshake, which refuses removed members only. The per-node check, which needs the URI SAN this row
