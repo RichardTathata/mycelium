@@ -1237,7 +1237,17 @@ that §35's one-release allowances end.
 - **A bare (pre-2.33) KV `SignedData` signature is refused.** A receiver verifies the `mycelium.kv/update/1`-tagged
   form only. A signature that would have verified in the bare form is told apart on the failure path and counted
   (`GET /stats` `kv_untagged_signatures_refused`, `mycelium_kv_untagged_refused_total`), and named at most once a
-  minute per connection in a warning that says the peer is on 2.32 — so an operator can find it.
+  minute per connection in a warning that says the peer is on 2.32 — so an operator can find it. That warning has its
+  own per-connection gate, so a 2.32 peer's stream of bare signatures does not use up the minute's warning for a
+  signer mismatch or a revoked key on the same connection. **An unsigned refusal is logged at `debug` only**, and
+  counted: every write a 2.32 peer's agent originates is an unsigned `Data` frame, so a warning per refusal (or even
+  per connection-minute, for every such connection) would flood the log for the whole upgrade; the counter is the
+  signal, and a bare signature's warning already names the 2.32 peer.
+- **A node's locality advertisement is signed.** `start()` wrote `cap/{self}/locality/self` before the TLS identity
+  was installed, so the frame left unsigned and every TLS peer would refuse it; it now follows the install, and the
+  only writes before it are the two self-authenticating records (#624's review). In a two-node run the start-time
+  frame reached the peer by gossip neither before nor after the move — it is dispatched before any connection exists
+  — so the entry arrives by anti-entropy either way; no end-to-end test pins the order.
 - **`kv_require_signed_frames` is a no-op** (`GOSSIP_KV_REQUIRE_SIGNED_FRAMES` too). It is still accepted, so a 2.33
   configuration that set it loads and starts; `start()` warns once when it is `true`. An explicit `false` cannot be
   told from the default and is **not** an opt-out — nothing restores the window. The field is
@@ -1282,6 +1292,10 @@ through a state reply, and the `sys/` tripwire does not count an entry for a key
 (`docs/threat-model.md` Boundary A). Closing it needs entries that carry their originator's signature, verified on
 receipt as the `SignedData` arm verifies — a wire change with its own window, not built. **With
 `require_identity_proofs` off**, another member's legacy identity is still writable under the writer's own signature
-(detected by the anchor tripwire, not prevented). **First sighting of a sealed record stays trust on first use.**
+(detected by the anchor tripwire, not prevented). **First sighting of a sealed record stays trust on first use.** **A refused frame still consumes its nonce**
+(pre-existing, unchanged): a receiver records a `Data` frame's nonce in the early-dedup path and a `SignedData` frame's
+before it checks the signature, so a member relaying an unsigned or badly signed copy of another's frame ahead of the
+genuine one makes that receiver drop the genuine frame as a duplicate — one hop suppressed until the next anti-entropy
+exchange, not a forged write.
 Role claims, audit records and revocation events are still signed over untagged canonical bytes
 (`what-is-proven.md`).

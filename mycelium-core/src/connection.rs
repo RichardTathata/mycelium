@@ -360,6 +360,10 @@ pub async fn handle_connection(
     #[cfg(feature = "tls")]
     let mut identity_exempt_warn = crate::bounds::WarnGate::default();
     let mut signer_mismatch_warn = crate::bounds::WarnGate::default();
+    // Its own gate (#624's review, finding 4): a 2.32 peer's stream of bare signatures must not use up the
+    // minute's warning a signer mismatch or a revoked key would have had.
+    #[cfg(feature = "tls")]
+    let mut untagged_warn = crate::bounds::WarnGate::default();
     let node_id_str = node_id.to_string();
     let self_hash   = node_id.id_hash();
     // Per-connection anti-entropy rate limit. StateRequest triggers an O(store_size) scan;
@@ -1170,7 +1174,7 @@ pub async fn handle_connection(
                                 task_ctx.transport_bounds.kv_untagged_refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 #[cfg(feature = "metrics")]
                                 metrics::counter!("mycelium_kv_untagged_refused_total").increment(1);
-                                if let Some(suppressed) = signer_mismatch_warn.admit(crate::sim_seam::mono_now_ns(), WARN_EVERY_NS) {
+                                if let Some(suppressed) = untagged_warn.admit(crate::sim_seam::mono_now_ns(), WARN_EVERY_NS) {
                                     warn!(
                                         "SignedData from {} (signer={:#x}, key {}) carries a bare (pre-2.33.0) signature — refused; \
                                          the peer signing it is on 2.32 and must be upgraded (docs/guide/deprecations.md §40; {} more suppressed since the last warning)",

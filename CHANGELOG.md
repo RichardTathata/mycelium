@@ -24,7 +24,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   node rev 4 admitted). Wire v12 unchanged. **Upgrade note:** upgrade from 2.33.x, not from 2.32 — a 2.32 node's KV
   writes are refused at gossip by an upgraded node and reach it only by anti-entropy. **Not closed:** an anti-entropy
   `StateResponse` entry carries no author and no signature and is still applied by LWW (a wire change; restated in the
-  threat model and `what-is-proven.md`). Seen failing first on 4251d50a:
+  threat model and `what-is-proven.md`). The node's locality advertisement now follows the TLS install, so it leaves
+  signed (#624's review; no deterministic test — the start-time frame precedes every connection). Seen failing first
+  on 4251d50a:
   `an_unsigned_data_frame_is_refused_whatever_the_setting_says`, `a_bare_2_32_kv_signature_is_refused`,
   `only_a_self_authenticating_sealed_identity_is_exempt_from_the_refusal` (at the default),
   `mesh_signed_writes_is_enforced_under_tls_by_default`, `kv_require_signed_frames_is_inert_wherever_it_is_set`.

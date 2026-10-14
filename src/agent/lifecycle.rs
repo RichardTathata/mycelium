@@ -371,7 +371,6 @@ impl GossipAgent {
             crate::agent::acceptor_guard::check_at_start(&self.task_ctx);
         }
         self.prewarm_peer_localities();
-        self.advertise_locality();
 
         // Initialise TLS context if configured.
         #[cfg(feature = "tls")]
@@ -473,6 +472,11 @@ impl GossipAgent {
                 Err(e) => return Err(e),
             }
         }
+        // After the TLS identity is installed (#624's review, finding 1): a write before it leaves
+        // unsigned, and every TLS peer refuses an unsigned frame since row F2 — the locality entry then
+        // arrived by anti-entropy only. The only writes above are the two self-authenticating records
+        // (the sealed identity, the certificate record), exempt by construction.
+        self.advertise_locality();
 
         // Recover the audit chain's head from this node's own persisted stream **before** anything
         // can seal — after the identity is loaded (the records are verified under its keys) and the

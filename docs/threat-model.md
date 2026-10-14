@@ -81,7 +81,11 @@ An attacker who controls one node process (RCE, stolen host) gains:
   carries no author and no signature and is applied by LWW, unsolicited, so a compromised member can
   introduce a value for any key — another member's included — through a state reply, refusal or no.
   Closing it needs state entries that carry their originator's signature — a wire change, not built
-  (row F2 restated it rather than closed it). Detection covers part of it: signed `sys/` records (identity, roles, audit) fail
+  (row F2 restated it rather than closed it). **A refused frame still consumes its nonce** (pre-existing,
+  unchanged by F2): a receiver marks a `Data` frame's nonce in the early-dedup path and a `SignedData` frame's
+  before it verifies the signature, so a member that relays a copy of another member's frame unsigned, or
+  under a bad signature, ahead of the genuine one makes that receiver drop the genuine frame as a duplicate —
+  a suppression of one gossip hop, recovered by the next anti-entropy exchange, not a forged write. Detection covers part of it: signed `sys/` records (identity, roles, audit) fail
   verification at read, and the `sys/` tripwire counts a remote write to a key *this* node owns — but it
   does **not** count an entry for a key the victim holds nothing under, so a fresh key planted in another
   member's namespace is not flagged anywhere.

@@ -712,6 +712,12 @@ either counter).
 - *Every agent write still reaches a peer* — `an_agent_write_reaches_a_peer_that_requires_signed_frames`,
   `quorum_evidence_reaches_a_peer_that_requires_signed_frames`, `a_gateway_kv_delete_reaches_a_peer_that_requires_signed_frames`,
   `a_capability_retracted_at_shutdown_reaches_the_peers` at the default; the co-op suite locally.
+- *#624's review, four low findings* — (1) `advertise_locality()` ran before the TLS install, so its frame left
+  unsigned: moved after it (`lifecycle.rs`); the only earlier writes are the two exempt records. A two-node test was
+  written and run on 6d97464b and after the move: the frame reached B by gossip in neither (dispatched before any
+  connection), so it was not kept — **not deterministic, stated**. (2) a refused frame consumes its nonce —
+  pre-existing, stated in §40 and Boundary A, code unchanged. (3) `configuration.md`'s `profile` row says rev 5, 20 ids.
+  (4) the bare-signature warning has its own per-connection gate; unsigned refusals stay at `debug`, reason in §40.
 - *The anti-entropy residual closed or restated* — **restated, not built**: closing it needs a `SyncEntry` that carries
   its originator's signature — a wire change (v13) with its own window; restated in §40, the threat model's Boundary A,
   `what-is-proven.md`'s third table and the config field's doc.
