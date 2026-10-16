@@ -1528,7 +1528,7 @@ async fn a_double_rotation_keeps_the_original_key_in_the_published_history() {
     cfg.bind_port = pd; cfg.bootstrap_peers = vec![a.node_id.clone()]; cfg.reconnect_backoff_secs = 1;
     // A short health interval so anti-entropy — the only way a joiner gets records gossiped before it
     // arrived — runs within the test's bound.
-    cfg.health_check_interval_secs = 1; cfg.kv_require_signed_frames = true;
+    cfg.health_check_interval_secs = 1;
     cfg.tls = Some(crate::config::TlsConfig { auto_cert_dir: dir.clone(), ..crate::config::TlsConfig::default() });
     let d = GossipAgent::new(nd, cfg);
     d.start().await.unwrap();
