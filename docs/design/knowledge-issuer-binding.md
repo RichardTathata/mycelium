@@ -66,7 +66,7 @@ Rotation is not revocation. A signature under a retained, unrevoked older key is
 
 ## 4. What P1 does not claim
 
-- **Its strength rests on `require_identity_proofs`, which is off by default.** Without proofs, `sys/identity/` is
+- **Its strength rests on `require_identity_proofs`, which is on by default since post-360 row S** (off when this was written). Without proofs, `sys/identity/` is
   accepted and flagged, so another admitted member can inject a key into a node's retained set (the documented
   identity-poisoning residual). With proofs required, or the sealed identity record (Phase 3b), a key enters the
   retained set only if authenticated. The confined-fleet profile (plan H7) requires proofs.

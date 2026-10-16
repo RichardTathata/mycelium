@@ -265,8 +265,8 @@ function integrity(stats, grpKeys, idKeys, fleet){
          refused with <code>electorate_unavailable</code>, which is the substrate declining to
          decide alone rather than a fault</td></tr>`;
 
-  // 2 — Sealed identity coverage. This is the readiness check cert-rotation.md prescribes before
-  //     turning `require_identity_proofs` on: every node must publish the one-entry record.
+  // 2 — Sealed identity coverage. `require_identity_proofs` is on by default (post-360 row S), so
+  //     every node must publish the one-entry record or it is not learned from gossip.
   const sealed = (idKeys||[]).filter(k=>k.startsWith("sys/identity-signed/")).length;
   const legacy = (idKeys||[]).filter(k=>k.startsWith("sys/identity/")).length;
   // Three states, not two. A fleet with no identities at all is not "not ready" — it is running
@@ -301,8 +301,8 @@ function integrity(stats, grpKeys, idKeys, fleet){
     <h3>Sealed identity coverage</h3>
     <p class="muted">A node's key history and the proof that authenticates it travel as
       <b>one</b> KV entry (<code>sys/identity-signed/</code>). Two entries would be two gossip
-      messages with no ordering between them. This is the readiness check to run
-      <i>before</i> setting <code>require_identity_proofs</code>.</p>
+      messages with no ordering between them. <code>require_identity_proofs</code> is on by
+      default and accepts only this form: a node missing here is not learned from gossip.</p>
     <div class="trip">
       <div class="row"><span>nodes publishing a sealed record</span><b>${sealed}</b></div>
       <div class="row"><span>legacy identity entries</span><b>${legacy}</b></div>

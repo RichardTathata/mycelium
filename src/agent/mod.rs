@@ -1947,12 +1947,14 @@ impl GossipAgent {
         //    old-key signature over this entry was never implemented; peers accept the
         //    new key purely because the KV entry is unauthenticated and accumulated. See
         //    docs/design/identity-authentication.md (audit 2026-07-15 pass 3).
+        //
+        //    Post-360 plan row S (#623's review, finding 1): the prior keys come from what this node can
+        //    show it held — its current key, its certificate-anchored keys and its own verified sealed
+        //    record (`revocation::own_history`, the source the start path uses) — never the raw
+        //    `sys/identity/{self}` value, which any member can write. Read raw, a key a member planted
+        //    there was re-signed here by the trusted prior key and laundered into the sealed record.
         let id_key = format!("sys/identity/{}", self.node_id);
-        let existing = self
-            .kv()
-            .get(&id_key)
-            .map(|b| helpers::parse_identity_keys(&b))
-            .unwrap_or_default();
+        let existing = revocation::own_history(&self.task_ctx);
         let history = helpers::encode_identity_history(new_vk, &existing);
         let _ = self.kv().set(id_key, Bytes::from(history.clone()));
         // identity-auth Phase 2: sign the new history with the CURRENT (pre-cutover = prior)
@@ -1975,6 +1977,21 @@ impl GossipAgent {
 
         // 4. Cut over to the new key/cert.
         tls.activate(material);
+
+        // 5. Re-sign the same history with the NEW current key and republish the sealed record and the
+        //    proof (#623's confirming check). Step 2's record, signed by the prior key, must reach peers
+        //    first — it is what chains trust to the new key — but left as the standing record it is one
+        //    this node cannot use itself: `revocation::own_history` (the next rotation) and
+        //    `own_history_at_start` (the next start) accept the sealed record only when its signer is
+        //    a key the node can show it holds, and on a legacy-certificate node the prior key is not
+        //    one, so the original key fell out of the history. Peers that hold the new key (from step
+        //    2's record) accept this one as a chained update of an unchanged history.
+        if let Some(t) = self.task_ctx.tls.get() {
+            let proof = helpers::sign_identity_proof(t, &history);
+            let _ = self.kv().set(format!("sys/identity-proof/{}", self.node_id), Bytes::from(proof.clone()));
+            let sealed = helpers::encode_sealed_identity(&history, &proof);
+            let _ = self.kv().set(format!("sys/identity-signed/{}", self.node_id), Bytes::from(sealed));
+        }
         Ok(new_vk)
     }
 }

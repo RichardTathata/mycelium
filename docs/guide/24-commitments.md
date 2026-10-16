@@ -88,9 +88,10 @@ the crate's policy. Awards sign symmetrically (`Award::signed`, `verify_award`),
 names a declarer too.
 
 **What a verifying signature buys, precisely.** It proves the holder of that key made the record.
-Whether the key belongs to the participant it names is the identity layer's question, and under the
-default configuration (`require_identity_proofs` off) that layer is weaker than the signature looks
-— see [09 · Security](09-security.md). And nothing stops the forged offer being *written*; it stops
+Whether the key belongs to the participant it names is the identity layer's question, and that layer
+is weaker than the signature looks — first sighting of a node is trust on first use, and with
+`require_identity_proofs` explicitly off (it is on by default since post-360 row S) a member can
+append its key to another's identity — see [09 · Security](09-security.md). And nothing stops the forged offer being *written*; it stops
 it being *awarded*. That is refusal at the decision point, not prevention at the medium, which is
 the substrate's standing posture.
 

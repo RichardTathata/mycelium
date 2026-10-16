@@ -770,7 +770,7 @@ pub(crate) fn revocation_nodes(ctx: &CoreCtx) -> Vec<NodeId> {
 /// current key, its anchored keys (each a CA-issued certificate naming it), and the keys in its own
 /// sealed identity record when that record's proof is signed by one of those (the final review's
 /// finding 6 — never the raw `sys/identity/{self}`).
-fn own_history(ctx: &TaskCtx) -> Vec<[u8; 32]> {
+pub(crate) fn own_history(ctx: &TaskCtx) -> Vec<[u8; 32]> {
     let mut keys: Vec<[u8; 32]> = Vec::new();
     if let Some(t) = ctx.tls.get() {
         keys.push(t.verifying_key_bytes());

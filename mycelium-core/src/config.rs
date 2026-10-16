@@ -1128,34 +1128,32 @@ pub struct GossipConfig {
     /// it would reopen the window described below. A peer publishing only the pair is a peer that
     /// predates the mechanism, which is what this flag has always refused.
     ///
-    /// **`false` by default — not yet demonstrated safe, which is a weaker and more honest claim
-    /// than the one this comment made for a day.** It was flipped to `true` on 2026-09-23 and
-    /// reverted on 2026-09-24 after an intermittent `S12 leader election … Nodes disagree on
-    /// leader` in the Docker suite. **That failure was then wrongly attributed to this flag.** It
-    /// could not have been: every identity writer and reader lives inside the `config.tls`
-    /// block, and the overlay suite's nodes configure no TLS, so the flag is *inert* there. S12's
-    /// intermittency remains unexplained and is tracked as its own problem.
+    /// **`true` by default since post-360 plan row S** (`docs/guide/deprecations.md` §41). What it
+    /// closes by default is the identity-poisoning residual rows F and Q stated: with it off, a member
+    /// could garble another node's sealed record and proof and write a bare `sys/identity/{V}` key
+    /// list naming its own key — a valid frame under its own signature — and every receiver merged
+    /// that key into `V`'s set. It then reached the verify-only history set (forged audit history, a
+    /// steered checkpoint anchor) and, for a node on a legacy certificate (no certificate record
+    /// naming it, so its trusted keys are its retained set), verified live writes as `V`.
     ///
-    /// **What is real, and is why the default stays off:** identity and proof *were* two separate
-    /// `kv_set` calls — two gossip messages with no ordering between them — so in a **TLS** fleet a
-    /// peer could learn the identity first, reject it for want of a proof, and hold no key for that
-    /// peer until the proof landed. The key recovers on its own (the identity watcher subscribes to
-    /// the broader `sys/identity` prefix, so a late proof re-validates its entry), so the window is
-    /// transient; a one-shot decision taken inside it would not be. That is a **hazard nobody has
-    /// observed firing**, not a diagnosed bug, and the distinction is the point.
+    /// **History.** It was flipped on 2026-09-23 and reverted on 2026-09-24 after an intermittent
+    /// `S12 leader election … Nodes disagree on leader` in the Docker suite, which was **wrongly
+    /// attributed to this flag** — every identity writer and reader lives inside the `config.tls`
+    /// block, and that suite's nodes configure no TLS, so the flag was *inert* there. The hazard the
+    /// revert named was real all the same: identity and proof were two `kv_set` calls, two gossip
+    /// messages with no ordering between them. **Phase 3b removed it by construction** (2.14.0): the
+    /// sealed record above is one KV entry, and one entry cannot arrive in two parts.
     ///
-    /// **Phase 3b removes the hazard by construction** rather than by timing: the sealed record
-    /// above is one KV entry, and one entry cannot arrive in two parts. There is no ordering left
-    /// to lose.
+    /// **A mixed fleet.** Since 2.33.0 a proof is accepted only in its tagged form, in either posture,
+    /// so a 2.3.0–2.31.x peer (untagged proof) is not learned from gossip with or without this flag —
+    /// only what a direct connection anchors at the handshake. A 2.32.0 or later peer proves and is
+    /// learned as before. What this default adds is a peer from **before 2.3.0**, which publishes no
+    /// proof at all: 2.33.0 accepted it on first use, this refuses it. `false` (or
+    /// `GOSSIP_REQUIRE_IDENTITY_PROOFS=0`, a strict boolean — an empty value is refused, as for
+    /// `GOSSIP_GATEWAY_ALLOW_UNAUTHENTICATED`) re-admits only that node.
     ///
-    /// **So why is the default still `false`?** Because a node only accepts what its *peers*
-    /// publish, and a peer running an older release publishes only the pair. Turning this on in a
-    /// half-upgraded fleet refuses the un-upgraded nodes — correctly, but unhelpfully. The
-    /// precondition is now the ordinary one this project applies to any additive change: **every
-    /// node runs a release that writes the sealed record.** After that, set this to `true` (or
-    /// `GOSSIP_REQUIRE_IDENTITY_PROOFS=1`) and the residual is closed with no window. The default
-    /// itself should flip a release later, deliberately, by editing
-    /// `config::tests::the_default_requires_identity_proofs` — which is written to explain itself.
+    /// **Without `[tls]` it is inert** — no identity is published or read — and nothing warns or
+    /// refuses; the guarantee report says `not_configured` with `[tls]` as what is missing.
     ///
     /// **What it does not close, and the distinction matters.** *Proofs required* is not *identity
     /// authenticated*. First sighting of a node this one has never seen is still **trust on first
@@ -1166,7 +1164,7 @@ pub struct GossipConfig {
     /// which is written to fail if that window is ever closed, so the claim here cannot rot.
     ///
     /// See `docs/operations/cert-rotation.md`.
-    #[serde(default)]
+    #[serde(default = "default_require_identity_proofs")]
     pub require_identity_proofs: bool,
 
     /// **Retired — a no-op since post-360 plan row F2** (`docs/guide/deprecations.md` §40). Accepted
@@ -1190,7 +1188,7 @@ pub struct GossipConfig {
     /// certificate record (`sys/identity-cert/{n}/{key}`, row Q) — both
     /// `connection::self_authenticating_identity`, counted as `kv_identity_exempt_frames`. A bare
     /// identity record, a proof alone or any tombstone is refused like any unsigned frame. With
-    /// `require_identity_proofs` off a member can still write another's identity under its own
+    /// `require_identity_proofs` off (an explicit opt-out since row S) a member can still write another's identity under its own
     /// signature (detected by the anchor tripwire, not prevented). **Not covered:** anti-entropy. A
     /// `StateResponse` entry carries no author and no signature, and is applied by LWW — the refusal is
     /// bypassable there (`docs/threat-model.md` Boundary A); closing it needs entries that carry their
@@ -1296,6 +1294,7 @@ pub struct GossipConfig {
 
 fn default_control_max_staleness_ms() -> u64 { 30_000 }
 fn default_control_min_peers_heard() -> usize { 1 }
+fn default_require_identity_proofs() -> bool { true }
 
 /// `GOSSIP_GATEWAY_NAMED_TOKENS` — the named-token table from the environment, so the credential
 /// model the docs say to prefer is settable where `gateway_auth_token` is (env-driven deployments:
@@ -1406,7 +1405,7 @@ impl Default for GossipConfig {
             gateway_scoped_tokens:         Vec::new(),
             gateway_named_tokens:          Vec::new(),
             gateway_identity_issuer:       None,
-            require_identity_proofs:       false,
+            require_identity_proofs:       true,
             #[allow(deprecated)]
             kv_require_signed_frames:      false,
             gateway_caller_profile:        GatewayCallerProfile::Secure,
@@ -1894,7 +1893,8 @@ impl GossipConfig {
     /// `GOSSIP_HEALTH_CHECK_MAX_JITTER_MS`, `GOSSIP_SIGNAL_WINDOW_SECS`,
     /// `GOSSIP_MAX_STORE_ENTRIES`, `GOSSIP_MAX_CLOCK_DRIFT_MS`,
     /// `GOSSIP_EPIDEMIC_EXTRA_PEERS`,
-    /// `GOSSIP_GATEWAY_AUTH_TOKEN`, `GOSSIP_GATEWAY_ALLOW_UNAUTHENTICATED` (strict boolean).
+    /// `GOSSIP_GATEWAY_AUTH_TOKEN`, `GOSSIP_GATEWAY_ALLOW_UNAUTHENTICATED` (strict boolean),
+    /// `GOSSIP_REQUIRE_IDENTITY_PROOFS` (strict boolean — it can only weaken a `true` default).
     pub fn apply_env_overrides(&mut self) -> Result<(), GossipError> {
         if let Ok(v) = env::var("GOSSIP_BIND_ADDRESS") {
             self.bind_address = v;
@@ -2066,7 +2066,16 @@ impl GossipConfig {
             self.emergent_detectors_enabled = matches!(v.as_str(), "1" | "true" | "TRUE" | "yes");
         }
         if let Ok(v) = env::var("GOSSIP_REQUIRE_IDENTITY_PROOFS") {
-            self.require_identity_proofs = matches!(v.as_str(), "1" | "true" | "TRUE" | "yes");
+            // Strict (post-360 plan row S): the default is `true`, so this variable can only weaken it,
+            // and a typo must not be read as the opt-out.
+            self.require_identity_proofs = match v.trim() {
+                "1" | "true" | "TRUE" | "yes" => true,
+                "0" | "false" | "FALSE" | "no" => false,
+                other => return Err(GossipError::InvalidField {
+                    field:  "require_identity_proofs",
+                    reason: format!("GOSSIP_REQUIRE_IDENTITY_PROOFS={other:?} is not one of true/false/1/0/yes/no"),
+                }),
+            };
         }
         // Retired (row F2, `deprecations.md` §40): still read, so `start()` can say it does nothing.
         if let Ok(v) = env::var("GOSSIP_KV_REQUIRE_SIGNED_FRAMES") {
@@ -2168,30 +2177,59 @@ mod tests {
     use super::*;
     use crate::node_id::NodeId;
 
-    /// **The default does not require identity proofs — yet**, and this pins it *with its reason*,
-    /// because the reason is the whole value of the test.
+    /// **The default requires identity proofs** (post-360 plan row S), pinned with its reason.
     ///
-    /// The default was flipped to `true` on 2026-09-23 and reverted on 2026-09-24, after an
-    /// intermittent Docker leader-election failure that was **wrongly blamed on it** — the flag is
-    /// inert without TLS, and those nodes configure none. The revert still stands, for the
-    /// unglamorous reason that the flip was never demonstrated safe and a default is not the place
-    /// to find out. The *hazard* it would have exposed — identity and proof arriving as two
-    /// independent gossip messages — is real and now removed by Phase 3b's sealed record
-    /// (`sys/identity-signed/{node}`); `lib_tests::identity_proof_default` pins that a sealed
-    /// record authenticates on its own while the legacy pair does not.
-    ///
-    /// What remains is not a defect but a rollout: a node only accepts what its peers publish, and
-    /// a peer on an older release publishes only the pair. **Flip this one release after the sealed
-    /// record ships**, when every node writes one — deliberately, by editing this test, in the
-    /// open, which is what a pinned default is for. Do not flip it on the strength of "every node
-    /// writes a proof anyway": that was the 2026-09-23 argument, it was true, and it was not the
-    /// failing condition.
+    /// The default was flipped to `true` on 2026-09-23 and reverted on 2026-09-24 after an
+    /// intermittent Docker leader-election failure (S12) that was **wrongly blamed on it**: the flag is
+    /// inert without TLS, and those nodes configure none. The hazard the revert named — identity and
+    /// proof arriving as two independent gossip messages — was real and is removed by construction by
+    /// Phase 3b's sealed record (`sys/identity-signed/{node}`, every TLS node since 2.14.0), which is
+    /// the one form accepted under the flag. What the default closes is the identity-poisoning
+    /// residual rows F and Q stated: a member writing a bare key list into another node's identity
+    /// reached the verify-only history set and, on a legacy certificate, signed as that node
+    /// (`lib_tests::identity_proof_default`). `false` remains an explicit opt-out
+    /// (`docs/guide/deprecations.md` §41). Seen failing first on 4251d50a.
     #[test]
     fn the_default_requires_identity_proofs() {
         assert!(
-            !GossipConfig::default().require_identity_proofs,
-            "deferred until identity and proof propagate as one record — see this test's doc",
+            GossipConfig::default().require_identity_proofs,
+            "identity proofs are required by default since row S — see this test's doc",
         );
+    }
+
+    /// A configuration file that never names the field gets the default, not `bool::default()`.
+    /// The field carried a field-level `#[serde(default)]`, which serde resolves to `false` for a
+    /// `bool` whatever `GossipConfig::default()` says — so flipping `Default` alone would have left
+    /// every TOML-configured node (the `mycelium` binary, the examples, the Docker suites) on `false`.
+    /// An explicit `false` is still honoured: it is the opt-out. Seen failing first on 4251d50a.
+    #[test]
+    fn a_config_file_that_never_names_identity_proofs_requires_them() {
+        let silent: GossipConfig = toml::from_str("bind_port = 7000\n").expect("parses");
+        assert!(silent.require_identity_proofs, "a file that says nothing gets the default (true)");
+        let opted_out: GossipConfig = toml::from_str("require_identity_proofs = false\n").expect("parses");
+        assert!(!opted_out.require_identity_proofs, "an explicit false opts out");
+    }
+
+    /// The environment override is a strict boolean now that it can only *weaken* the default: a
+    /// typo (`off`, `flase`) used to be read as `false` and silently turn the check off. `0`,
+    /// `false`, `no` opt out; `1`, `true`, `yes` keep it; anything else refuses by name. Seen failing
+    /// first on 4251d50a.
+    #[test]
+    fn the_identity_proofs_setting_parses_strictly_from_the_environment() {
+        let _lock = env_test_lock();
+        let var = "GOSSIP_REQUIRE_IDENTITY_PROOFS";
+        let _guard = EnvGuard(&_lock, var, std::env::var(var).ok());
+        for (v, want) in [("1", true), ("true", true), ("TRUE", true), ("yes", true), ("0", false), ("false", false), ("FALSE", false), ("no", false)] {
+            set_test_env(&_lock, var, Some(v));
+            let mut cfg = GossipConfig::default();
+            cfg.apply_env_overrides().expect("a boolean applies");
+            assert_eq!(cfg.require_identity_proofs, want, "{v}");
+        }
+        for typo in ["off", "flase", ""] {
+            set_test_env(&_lock, var, Some(typo));
+            let err = GossipConfig::default().apply_env_overrides().expect_err("a typo refuses");
+            assert!(matches!(err, GossipError::InvalidField { field: "require_identity_proofs", .. }), "{typo:?}: {err}");
+        }
     }
 
     // ── WS-B M4 fan-out resolution ────────────────────────────────────────

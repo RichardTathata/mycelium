@@ -109,7 +109,7 @@
       "subsystem": "identity",
       "kind": "node_enforced",
       "promise": "an identity entry this node cannot authenticate is rejected (issuer binding rests on it)",
-      "needs": "`tls`; `[tls]`; `require_identity_proofs = true` (default off)",
+      "needs": "`tls`; `[tls]`; `require_identity_proofs` (default `true` since post-360 row S; `false` opts out)",
       "enforcement_points": [
         "lifecycle (identity-proof check)"
       ],

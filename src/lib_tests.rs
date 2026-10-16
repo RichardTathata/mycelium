@@ -1320,6 +1320,249 @@ async fn an_unsigned_identity_forgery_cannot_make_a_member_sign_as_another() {
     assert!(!landed, "IMPERSONATION: A wrote as C at a node requiring signed frames");
 }
 
+/// Row S: put `node` on a **legacy certificate** — CA-issued, naming its IP and not its node (no URI
+/// SAN, what every certificate before row Q was), so no node gives it standing and its trusted keys
+/// are its retained set. Mints the fleet CA into `cfg`'s directory first (the other nodes load it).
+#[cfg(feature = "tls")]
+fn legacy_certificate_for(cfg: &mut GossipConfig, node: &NodeId) {
+    use ed25519_dalek::pkcs8::EncodePrivateKey;
+    let dir = cfg.tls.as_ref().expect("a TLS node").auto_cert_dir.clone();
+    std::fs::create_dir_all(&dir).unwrap();
+    let ca_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    let mut ca_params = rcgen::CertificateParams::new(vec![]).unwrap();
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    ca_params.not_before = rcgen::date_time_ymd(2024, 1, 1);
+    ca_params.not_after = rcgen::date_time_ymd(2099, 1, 1);
+    let ca = ca_params.self_signed(&ca_key).unwrap();
+    std::fs::write(dir.join("ca-key.pem"), ca_key.serialize_pem()).unwrap();
+    std::fs::write(dir.join("ca-cert.pem"), ca.pem()).unwrap();
+    let sk = ed25519_dalek::SigningKey::from_bytes(&[0x5e; 32]);
+    let kp = rcgen::KeyPair::try_from(sk.to_pkcs8_der().unwrap().as_bytes()).unwrap();
+    let mut p = rcgen::CertificateParams::new(vec![]).unwrap();
+    p.subject_alt_names = vec![rcgen::SanType::IpAddress(node.to_socket_addr().ip())];
+    p.not_before = rcgen::date_time_ymd(2024, 1, 1);
+    p.not_after = rcgen::date_time_ymd(2099, 1, 1);
+    let cert = p.signed_by(&kp, &ca, &ca_key).unwrap();
+    let (cert_path, key_path) = (dir.join("legacy-node.crt"), dir.join("legacy-node.key.pem"));
+    std::fs::write(&cert_path, cert.pem()).unwrap();
+    std::fs::write(&key_path, kp.serialize_pem()).unwrap();
+    let t = cfg.tls.as_mut().unwrap();
+    t.cert_pem = Some(cert_path);
+    t.key_pem = Some(key_path);
+}
+
+/// Row S: A garbles C's sealed record and proof and writes C's bare identity as `ka ‖ k0` — each its
+/// own signed write, signer = sender = A, a valid frame. Returns A's signing key and whether B came
+/// to hold `ka` for C within the bound.
+#[cfg(feature = "tls")]
+async fn poison_identity(a: &GossipAgent, b: &GossipAgent, c: &GossipAgent, nc: &NodeId) -> (Arc<ed25519_dalek::SigningKey>, bool) {
+    let a_sk = a.task_ctx.tls.get().unwrap().signing_key();
+    let ka = a_sk.verifying_key().to_bytes();
+    let k0 = c.identity_public_key().unwrap();
+    let _ = a.kv().set(format!("sys/identity-signed/{nc}"), b"x".to_vec());
+    let _ = a.kv().set(format!("sys/identity-proof/{nc}"), b"x".to_vec());
+    let _ = a.kv().set(format!("sys/identity/{nc}"), [ka, k0].concat());
+    let held = within_3s(|| b.task_ctx.peer_keys.pin().get(nc).is_some_and(|k| k.contains(&ka))).await;
+    (a_sk, held)
+}
+
+/// The verifier's identity setting left as the default, whatever the helper's `proofs` argument says.
+#[cfg(feature = "tls")]
+fn proofs_by_default(cfg: &mut GossipConfig, _: &NodeId) {
+    cfg.require_identity_proofs = GossipConfig::default().require_identity_proofs;
+}
+
+/// **Post-360 plan row S: by default, a member's key written into another's identity does not sign as
+/// it on a legacy certificate.** C runs on a pre-row-Q certificate, so B trusts C's retained key set;
+/// A poisons C's identity with its own key ([`poison_identity`]) and writes as C under it. With
+/// `require_identity_proofs` off — the default until row S — B merged `ka` into C's set and the write
+/// landed: full impersonation. B and C run the default configuration here. Seen failing first on
+/// 4251d50a: "IMPERSONATION: by default, a key A wrote into C's identity signs as C at B".
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn by_default_a_poisoned_identity_key_does_not_sign_for_a_legacy_certificate_node() {
+    let (a, b, c, _nb, nc, dir) = three_signed_nodes_tweaked("s-legacy", false, proofs_by_default, |cfg, n| {
+        proofs_by_default(cfg, n);
+        legacy_certificate_for(cfg, n);
+    }).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let anchored = b.task_ctx.key_standing.get(&nc).is_some_and(|s| s.anchored.is_some());
+    let (a_sk, held) = poison_identity(&a, &b, &c, &nc).await;
+    let ka = a_sk.verifying_key().to_bytes();
+    send_signed_as(&a, &nc, &a_sk, "poison/legacy-as-c", b"by-ka");
+    let plant = plant_lands(&c, &b, "poison/legacy-plant").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let landed = b.kv().get("poison/legacy-as-c").is_some();
+    let in_history = b.task_ctx.history_keys(&nc).contains(&ka);
+    a.shutdown().await; b.shutdown().await; c.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!anchored, "the setup: C's legacy certificate gives it no standing at B");
+    assert!(plant, "C's own writes still arrive at B");
+    assert!(!landed, "IMPERSONATION: by default, a key A wrote into C's identity signs as C at B");
+    assert!(!in_history, "nor is it in C's history set");
+    assert!(!held, "by default, A's key does not enter C's set at B");
+}
+
+/// **Post-360 plan row S: by default, a member's key written into another's identity does not reach
+/// its history set.** C is anchored (a current certificate), so its *live* writes verify only under its
+/// anchored keys whatever B holds — but history verification (audit-chain recovery, verification and
+/// pruning, `CoreCtx::history_keys`) reads every key B holds for C. With proofs off a poisoned `ka`
+/// entered it, so a record A sealed under `ka` verified as C's history. Seen failing first on
+/// 4251d50a: "HISTORY: by default, a key A wrote into C's identity is in C's history set at B".
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn by_default_a_poisoned_identity_key_does_not_reach_the_history_set() {
+    let (a, b, c, _nb, nc, dir) = three_signed_nodes_tweaked("s-history", false, proofs_by_default, proofs_by_default).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    #[cfg(feature = "compliance")]
+    let h0 = c.audit(crate::AuditAction::Invoke, "p", "t0", crate::AuditOutcome::Success, None).unwrap();
+    let (a_sk, held) = poison_identity(&a, &b, &c, &nc).await;
+    let ka = a_sk.verifying_key().to_bytes();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let in_history = b.task_ctx.history_keys(&nc).contains(&ka);
+    #[cfg(feature = "compliance")]
+    let forged_verifies = {
+        use crate::{audit_key, AuditAction, AuditOutcome, AuditRecord, SignedAuditRecord};
+        let r1 = AuditRecord { node_id: nc.clone(), seq: 1, hlc: 9, principal: "attacker".into(), action: AuditAction::Admin, target: "role/grant".into(), outcome: AuditOutcome::Success, detail: None, prev_hash: h0 };
+        let _ = a.kv().set(audit_key(&nc, 1), SignedAuditRecord::sign(r1, &a_sk).encode());
+        let _ = within_3s(|| b.kv().get(&audit_key(&nc, 1)).is_some()).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        b.audit_verify(&nc).is_ok()
+    };
+    a.shutdown().await; b.shutdown().await; c.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    #[cfg(feature = "compliance")]
+    assert!(!forged_verifies, "FORGED: by default, A's audit record signed by its poisoned key verifies as C's history at B");
+    assert!(!in_history, "HISTORY: by default, a key A wrote into C's identity is in C's history set at B");
+    assert!(!held, "by default, A's key does not enter C's set at B");
+}
+
+/// **Rotation does not launder a member's key into a node's signed history** (#623's review, finding
+/// 1, its probe lifted). `rotate_identity` built the new history from the raw `sys/identity/{self}`
+/// value — any member can write it — and signed it with the trusted prior key into the sealed record,
+/// so a key A planted there became part of C's authenticated history at every peer, with proofs on.
+/// The history now comes from what C can show it held (`revocation::own_history`), as the start path's
+/// does. Seen failing first on 1e0a648e: "LAUNDERED: after C rotated, A's poisoned key is in C's
+/// history set at B".
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn rotation_does_not_launder_a_poisoned_bare_identity_into_the_history() {
+    let (a, b, c, _nb, nc, dir) = three_signed_nodes_tweaked("s-rotlaunder", false, proofs_by_default, proofs_by_default).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (a_sk, _held) = poison_identity(&a, &b, &c, &nc).await;
+    let ka = a_sk.verifying_key().to_bytes();
+    let c_has = within_3s(|| c.kv().get(&format!("sys/identity/{nc}")).is_some_and(|v| v.len() >= 32 && v[..32] == ka)).await;
+    let before = b.task_ctx.history_keys(&nc).contains(&ka);
+    let k1 = c.rotate_identity(Duration::from_millis(500)).await.unwrap();
+    let learned_k1 = within_3s(|| b.task_ctx.peer_keys.pin().get(&nc).is_some_and(|k| k.contains(&k1))).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let after = b.task_ctx.history_keys(&nc).contains(&ka);
+    let in_peer = b.task_ctx.peer_keys.pin().get(&nc).is_some_and(|k| k.contains(&ka));
+    a.shutdown().await; b.shutdown().await; c.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(c_has && !before && learned_k1, "setup: C holds the poisoned bare list, B does not trust it yet, and B learns C's rotated key");
+    assert!(!after, "LAUNDERED: after C rotated, A's poisoned key is in C's history set at B");
+    assert!(!in_peer, "and not in C's key set at B");
+}
+
+/// [`rotation_does_not_launder_a_poisoned_bare_identity_into_the_history`] on a legacy certificate,
+/// where the laundered key would also be *live* trust: a write A signs as C under it must not land at
+/// B after C rotates (#623's review, its second probe). **A guard, not a regression test:** it passes
+/// on 1e0a648e too, because the rotation itself issues C a certificate naming it (row Q), so after it C
+/// is anchored and its trusted keys are its anchored keys, whatever its history holds. The laundering
+/// reaches the history set, which the test above pins.
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn rotation_does_not_launder_a_poisoned_key_into_live_trust_on_a_legacy_certificate() {
+    let (a, b, c, _nb, nc, dir) = three_signed_nodes_tweaked("s-rotlegacy", false, proofs_by_default, |cfg, n| {
+        proofs_by_default(cfg, n);
+        legacy_certificate_for(cfg, n);
+    }).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (a_sk, _held) = poison_identity(&a, &b, &c, &nc).await;
+    let ka = a_sk.verifying_key().to_bytes();
+    let c_has = within_3s(|| c.kv().get(&format!("sys/identity/{nc}")).is_some_and(|v| v.len() >= 32 && v[..32] == ka)).await;
+    let k1 = c.rotate_identity(Duration::from_millis(500)).await.unwrap();
+    let learned_k1 = within_3s(|| b.task_ctx.peer_keys.pin().get(&nc).is_some_and(|k| k.contains(&k1))).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let trusted = b.task_ctx.trusted_keys(&nc).contains(&ka);
+    send_signed_as(&a, &nc, &a_sk, "poison/rot-legacy-as-c", b"by-ka");
+    let plant = plant_lands(&c, &b, "poison/rot-legacy-plant").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let landed = b.kv().get("poison/rot-legacy-as-c").is_some();
+    a.shutdown().await; b.shutdown().await; c.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(c_has && learned_k1 && plant, "setup: C holds the poisoned list, B learns k1, and C's own writes arrive");
+    assert!(!landed, "IMPERSONATION after rotation: a key A wrote into C's identity signs as C at B");
+    assert!(!trusted, "and it is not among C's trusted keys at B");
+}
+
+/// **A node that rotates twice keeps its original key in its published history** (#623's confirming
+/// check, its probe lifted). Rotation signed the sealed record with the *prior* key and never re-signed
+/// it, so on a legacy-certificate node — whose original key no certificate record anchors — the second
+/// rotation's `own_history` ignored that record (its signer is not a key the node can show it holds)
+/// and dropped k0: existing peers kept it, but a peer joining later learned a history without it.
+/// Rotation now re-signs the record with the new key after the cut-over. Seen failing first on
+/// 0f9d417b: "k0 dropped: a legacy-certificate node's history lost its original key after two
+/// rotations".
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn a_double_rotation_keeps_the_original_key_in_the_published_history() {
+    let (a, b, c, _nb, nc, dir) = three_signed_nodes_tweaked("s-dblrot", false, proofs_by_default, |cfg, n| {
+        proofs_by_default(cfg, n);
+        legacy_certificate_for(cfg, n);
+    }).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let k0 = c.identity_public_key().unwrap();
+    let k1 = c.rotate_identity(Duration::from_millis(500)).await.unwrap();
+    let _ = within_3s(|| b.task_ctx.peer_keys.pin().get(&nc).is_some_and(|k| k.contains(&k1))).await;
+    let k2 = c.rotate_identity(Duration::from_millis(500)).await.unwrap();
+    let _ = within_3s(|| b.task_ctx.peer_keys.pin().get(&nc).is_some_and(|k| k.contains(&k2))).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let sealed = c.kv().get(&format!("sys/identity-signed/{nc}")).unwrap();
+    let hist = crate::agent::helpers::parse_sealed_identity(&sealed).map(|(h, _)| crate::agent::helpers::parse_identity_keys(h)).unwrap_or_default();
+    // A peer joining afterwards learns C's history from gossip alone.
+    let pd = alloc_port();
+    let nd = NodeId::new("127.0.0.1", pd).unwrap();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = pd; cfg.bootstrap_peers = vec![a.node_id.clone()]; cfg.reconnect_backoff_secs = 1;
+    // A short health interval so anti-entropy — the only way a joiner gets records gossiped before it
+    // arrived — runs within the test's bound.
+    cfg.health_check_interval_secs = 1;
+    cfg.tls = Some(crate::config::TlsConfig { auto_cert_dir: dir.clone(), ..crate::config::TlsConfig::default() });
+    let d = GossipAgent::new(nd, cfg);
+    d.start().await.unwrap();
+    let mut d_k2 = false;
+    for _ in 0..200 { if d.task_ctx.peer_keys.pin().get(&nc).is_some_and(|k| k.contains(&k2)) { d_k2 = true; break; } tokio::time::sleep(Duration::from_millis(25)).await; }
+    let mut d_has_k0 = false;
+    for _ in 0..400 { if d.task_ctx.history_keys(&nc).contains(&k0) { d_has_k0 = true; break; } tokio::time::sleep(Duration::from_millis(25)).await; }
+    a.shutdown().await; b.shutdown().await; c.shutdown().await; d.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(d_k2, "setup: the late joiner learns C's current key");
+    assert!(hist.contains(&k0) && hist.len() == 3, "k0 dropped: a legacy-certificate node's history lost its original key after two rotations ({} keys)", hist.len());
+    assert!(d_has_k0, "and a peer joining afterwards holds k0 in C's history set");
+}
+
+/// **Post-360 plan row S: `false` is still an opt-out.** A verifier configured with an explicit
+/// `require_identity_proofs = false` (the TOML spelling an operator writes) is back on the pre-row-S
+/// rule — the residual the two tests above close by default reproduces, which is what an opt-out
+/// means. A guard, not a regression test: it passes on 4251d50a too.
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn an_explicit_false_still_opts_out_of_identity_proofs() {
+    let opt_out = |cfg: &mut GossipConfig, _: &NodeId| {
+        let parsed: GossipConfig = toml::from_str("require_identity_proofs = false\n").unwrap();
+        cfg.require_identity_proofs = parsed.require_identity_proofs;
+    };
+    let (a, b, c, _nb, nc, dir) = three_signed_nodes_tweaked("s-optout", false, opt_out, opt_out).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (a_sk, held) = poison_identity(&a, &b, &c, &nc).await;
+    let in_history = b.task_ctx.history_keys(&nc).contains(&a_sk.verifying_key().to_bytes());
+    a.shutdown().await; b.shutdown().await; c.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(held && in_history, "an explicit false keeps the pre-row-S rule: the bare list merges (detected, not prevented)");
+}
+
 /// **The reviewer's silencing, lifted, in both postures** (#611's second review, and the watcher's
 /// own pre-existing rule): one tombstone of `sys/identity/{C}` — unsigned and exempt under the first
 /// cut, or signed by any member as itself — made B's identity watcher drop C's keys, after which C's
@@ -11140,10 +11383,10 @@ fn a_mandate_identifier_from_the_wire_is_never_empty() {
     assert_eq!(p, back);
 }
 
-// ── The identity-proof opt-in (Phase 3, off by default) ──────────────────────
+// ── The identity-proof default (Phase 3; on by default since post-360 row S) ───
 //
 // `validate_and_merge_identity`'s two arms are unit-tested in `agent::http`, and the default value
-// is pinned — with the reason it is still `false` — in `mycelium-core::config`
+// is pinned — with its reason (`true` since row S) — in `mycelium-core::config`
 // (`the_default_requires_identity_proofs`). What is tested here is the **join**: that the flag an
 // operator sets actually reaches the rejecting arm, because a setting nothing exercises end to end
 // is a setting nobody has checked.
@@ -11165,19 +11408,15 @@ mod identity_proof_default {
         papaya::HashMap::new()
     }
 
-    /// A node that opts in rejects an unsigned identity entry — end to end, from the config field
-    /// an operator sets to the entry that does not enter `peer_keys`.
-    ///
-    /// This test once asserted the *default* did this. The default was flipped on 2026-09-23 and
-    /// reverted on 2026-09-24: requiring proofs opens a startup window, because identity and proof
-    /// are two independent gossip writes and a peer that learns one without the other rejects it
-    /// (`config::tests::the_default_requires_identity_proofs` carries the full account). The
-    /// mechanism being tested here was never what failed, so it is kept — with the flag set
-    /// explicitly, which is now how a deployment reaches this arm.
+    /// **A default configuration rejects an unsigned identity entry** (post-360 plan row S) — end to
+    /// end, from the configuration a deployment gets by saying nothing to the entry that does not
+    /// enter `peer_keys`. This test asserted the default once before (2026-09-23), was renamed
+    /// `an_opted_in_configuration_…` when the flip was reverted, and is the default's again: the
+    /// revert's cause was misattributed (the flag is inert without TLS) and the window it named is
+    /// closed by the sealed record. Seen failing first on 4251d50a.
     #[test]
-    fn an_opted_in_configuration_rejects_an_unsigned_identity_entry() {
-        let mut cfg = GossipConfig::default();
-        cfg.require_identity_proofs = true; // the operator's choice, not the default
+    fn a_default_configuration_rejects_an_unsigned_identity_entry() {
+        let cfg = GossipConfig::default(); // nothing set: the default arm
 
         let victim = NodeId::new("127.0.0.1", 7101).unwrap();
         let attacker_key = SigningKey::from_bytes(&[42u8; 32]).verifying_key().to_bytes();
@@ -11186,8 +11425,8 @@ mod identity_proof_default {
         let (pk, anchor, counter) = (keys(), anchors(), std::sync::atomic::AtomicU64::new(0));
         validate_and_merge_identity(
             &pk, &anchor, &counter, &victim, &history, &[attacker_key],
-            None,                              // no proof — the pre-Phase-2 mimic
-            cfg.require_identity_proofs,       // the opted-in arm
+            None,                              // no proof — a bare key list
+            cfg.require_identity_proofs,       // the default arm
         );
         assert!(pk.pin().get(&victim).is_none(), "an unsigned entry does not enter peer_keys");
         assert_eq!(counter.load(Ordering::SeqCst), 1, "and it is counted, not silently dropped");

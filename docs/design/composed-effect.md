@@ -163,7 +163,7 @@ this repository writes them yet (`docs/operations/what-is-proven.md`). So the se
 supports, once a point writes them, is: *a
 durable effect, **enforced** to be attributed and authorised at the resource, **recorded** as
 cross-domain*. That is stronger than §7 and still not everything: the identity behind *attributed*
-is as strong as item 7's verification (`require_identity_proofs` is default-off), and *authorised*
+is as strong as item 7's verification (`require_identity_proofs` is default-on since post-360 row S; first sighting stays trust on first use), and *authorised*
 is as strong as the epoch the resource has installed.
 
 **The window.** The check and the transaction are two steps. A process that pauses between them

@@ -620,7 +620,7 @@ async fn test_identity_proof_rejects_poisoning_accepts_signed() {
 
 /// Identity-auth Phase 3 (SOC 2 WS-E): with `require_identity_proofs`, an **unsigned**
 /// `sys/identity` entry (mimicking a pre-Phase-2 node) is **rejected** — the last poisoning
-/// residual — whereas the same entry is tolerated when the flag is off (rollout).
+/// residual — whereas the same entry is tolerated when the flag is explicitly off (the opt-out).
 #[cfg(feature = "tls")]
 #[tokio::test]
 async fn test_require_identity_proofs_rejects_unsigned() {
@@ -631,7 +631,7 @@ async fn test_require_identity_proofs_rejects_unsigned() {
     let k = SigningKey::from_bytes(&[9u8; 32]).verifying_key().to_bytes();
     let history = k.to_vec();
 
-    // Flag OFF (**the default** — the 2026-09-23 flip to on was reverted the next day; see
+    // Flag OFF (an explicit opt-out since post-360 row S, which made `true` the default; see
     // `config::tests::the_default_requires_identity_proofs`): unsigned accepted.
     let pk_off: papaya::HashMap<NodeId, Vec<[u8; 32]>> = papaya::HashMap::new();
     let c_off = std::sync::atomic::AtomicU64::new(0);
@@ -640,7 +640,7 @@ async fn test_require_identity_proofs_rejects_unsigned() {
     assert!(pk_off.pin().get(&node).is_some_and(|v| v.contains(&k)),
             "flag off: unsigned entry accepted (rollout tolerance)");
 
-    // Flag ON (Phase 3, the operator opt-in): the same unsigned entry rejected + counted.
+    // Flag ON (Phase 3; the default since row S): the same unsigned entry rejected + counted.
     let pk_on: papaya::HashMap<NodeId, Vec<[u8; 32]>> = papaya::HashMap::new();
     let c_on = std::sync::atomic::AtomicU64::new(0);
     crate::agent::helpers::validate_and_merge_identity(

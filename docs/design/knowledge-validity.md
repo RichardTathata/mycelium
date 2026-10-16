@@ -47,7 +47,7 @@ change. K1 is **additive** instead: `put_signed` is new, and `put` is kept with 
 
 **Not claimed.**
 - `Attribution` is a snapshot. It settles authenticity, which is historical, and does not settle present standing.
-- The member path's strength rests on `require_identity_proofs`, which is default-off (see the P1 ADR).
+- The member path's strength rests on `require_identity_proofs`, which is default-on since post-360 row S (see the P1 ADR).
 - Nothing here yet stops an `Unchecked` record from counting. That is K1b.
 
 ## 2. K1b: present eligibility at resolution (adopted)

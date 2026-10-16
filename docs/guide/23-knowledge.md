@@ -151,7 +151,8 @@ let attribution = store.put_signed(signed, &members, &external)?;  // verified, 
 
 `put_signed` is the verified path; the legacy `put` accepts an unsigned record and `classify_eligible`
 reports which records may be *presented* to a reader under the configured rules. The strength of the
-member path rests on `require_identity_proofs` (default **off**): with proofs off, a member's key is
+member path rests on `require_identity_proofs` (default **on** since post-360 row S): with proofs
+explicitly off, another member can inject a key into a node's set; with them on, only first sighting is
 trust-on-first-use. Design records: [`knowledge-issuer-binding.md`](../design/knowledge-issuer-binding.md),
 [`knowledge-validity.md`](../design/knowledge-validity.md).
 
