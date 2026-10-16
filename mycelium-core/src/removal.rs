@@ -127,6 +127,24 @@ impl KeyStanding {
         self.get(node).is_some_and(|s| s.revoked.contains(key))
     }
 
+    /// Has `node` revoked `key`, a key **anchored** for it — a revocation this node counted against a key
+    /// with standing, never a provisional one against a key whose certificate record has not been
+    /// judged here yet. What the mTLS handshake refuses (post-360 plan row Q's follow-up).
+    pub fn is_anchored_and_revoked(&self, node: &NodeId, key: &[u8; 32]) -> bool {
+        self.get(node).is_some_and(|s| s.revoked.contains(key) && s.anchored.as_ref().is_some_and(|a| a.contains(key)))
+    }
+
+    /// A node for which `key` is anchored and revoked, if any. A key is anchored only for the node its
+    /// CA-issued certificate names, so this finds the key's owner and no other node's revocation.
+    pub fn anchored_revoker_of(&self, key: &[u8; 32]) -> Option<NodeId> {
+        if self.by_node.is_empty() {
+            return None;
+        }
+        self.by_node.pin().iter().find(|(_, s)| {
+            s.revoked.contains(key) && s.anchored.as_ref().is_some_and(|a| a.contains(key))
+        }).map(|(n, _)| n.clone())
+    }
+
     /// Is `key` **not** a key this node trusts for `node`, whatever else holds it — revoked, or, for an
     /// anchored node, not one of its anchored keys?
     pub fn is_distrusted(&self, node: &NodeId, key: &[u8; 32]) -> bool {

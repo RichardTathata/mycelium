@@ -699,7 +699,7 @@ mod imp {
             .map_err(|e| GossipError::InvalidField { field: "gateway_tls", reason: format!("gateway TLS: build server config: {e}") })
     }
 
-    fn build_rustls_configs(
+    pub(super) fn build_rustls_configs(
         node_cert_der: CertificateDer<'static>,
         signing_key: &SigningKey,
         ca_cert_der: CertificateDer<'static>,
@@ -786,14 +786,22 @@ mod imp {
         Ok(())
     }
 
-    /// Refuse a certificate whose key a node it names has revoked (post-360 plan row Q's follow-up,
-    /// `docs/design/revocation-authority.md`). The certificate names its node by a `mycelium://{node}`
-    /// URI, and the key is judged against **that node's** standing only: a revocation counts for N
-    /// when an anchored key of N signed it, and N may revoke a key that is not its own (one without
-    /// standing for N), so judging a key against every node's revocations would let one member refuse
-    /// another's handshakes. A certificate naming no node (issued before row Q) is not judged here —
-    /// no revocation of a legacy node's keys counts until it is re-anchored (`deprecations.md` §39).
-    /// Run after the CA chain check, so the URIs read are ones the fleet CA issued.
+    /// Refuse a certificate whose key has been revoked by its owner (post-360 plan row Q's follow-up,
+    /// `docs/design/revocation-authority.md`): a key **anchored** for a node — a CA-issued certificate
+    /// record naming that node — that the node has revoked, by a revocation this node counted.
+    ///
+    /// - A certificate naming its node (`mycelium://{node}`) is judged against that node's standing.
+    /// - A certificate naming none (issued before row Q) is judged against whichever node holds its key
+    ///   anchored: a key is anchored only for the node its certificate names, so this reaches the key's
+    ///   owner and nobody else.
+    ///
+    /// Only anchored keys: a node may revoke a key without standing for it (its revocations reach any
+    /// key not anchored for it), so reading those would let one member refuse another's handshakes, and
+    /// a provisional revocation — of a key whose certificate record has not reached this node — would
+    /// cut a freshly rotated node off at the transport until the record arrives. The handshake checks
+    /// revocation, not the narrower *distrusted* (`KeyStanding::is_distrusted`): a rotated node
+    /// activates its new key before every peer holds its certificate record, and must still connect.
+    /// Run after the CA chain check, so the names read are ones the fleet CA issued.
     pub(super) fn refuse_if_revoked(
         standing: &crate::removal::KeyStanding,
         end_entity: &CertificateDer<'_>,
@@ -802,13 +810,18 @@ mod imp {
             return Ok(());
         }
         let Some(id) = super::cert_identity(end_entity.as_ref()) else {
-            return Err(rustls::Error::General("mycelium: a mesh certificate must carry an Ed25519 identity key".into()));
+            return Err(rustls::Error::General("mycelium: a mesh certificate whose names this node cannot read".into()));
         };
-        for uri in &id.node_uris {
-            let Some(node) = uri.strip_prefix("mycelium://").and_then(|n| n.parse::<NodeId>().ok()) else { continue };
-            if standing.is_revoked(&node, &id.key) {
-                return Err(rustls::Error::General(format!("mycelium: {node} has revoked this certificate's key")));
-            }
+        let named: Vec<NodeId> = id.node_uris.iter()
+            .filter_map(|uri| uri.strip_prefix("mycelium://").and_then(|n| n.parse::<NodeId>().ok()))
+            .collect();
+        let revoker = if named.is_empty() {
+            standing.anchored_revoker_of(&id.key)
+        } else {
+            named.into_iter().find(|node| standing.is_anchored_and_revoked(node, &id.key))
+        };
+        if let Some(node) = revoker {
+            return Err(rustls::Error::General(format!("mycelium: {node} has revoked this certificate's key")));
         }
         Ok(())
     }
@@ -1176,6 +1189,63 @@ mod ca_race_tests {
         let _ = std::fs::remove_dir_all(&node_dir);
     }
 
+    /// A certificate for `key` the fleet CA in `dir` issued **without** a `mycelium://` URI — what every
+    /// node certificate was before row Q.
+    fn legacy_cert(cfg: &TlsConfig, node: &crate::node_id::NodeId, key: &ed25519_dalek::SigningKey) -> rustls::pki_types::CertificateDer<'static> {
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
+        let (_, ca_key) = load_or_create_ca(cfg).unwrap();
+        let mut ca_params = rcgen::CertificateParams::new(vec![]).unwrap();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca_params.not_before = rcgen::date_time_ymd(2024, 1, 1);
+        ca_params.not_after = rcgen::date_time_ymd(2099, 1, 1);
+        let ca = ca_params.self_signed(&ca_key).unwrap();
+        let kp = rcgen::KeyPair::try_from(key.to_pkcs8_der().unwrap().as_bytes()).unwrap();
+        let mut p = rcgen::CertificateParams::new(vec![]).unwrap();
+        p.subject_alt_names = vec![rcgen::SanType::IpAddress(node.to_socket_addr().ip())];
+        p.not_before = rcgen::date_time_ymd(2024, 1, 1);
+        p.not_after = rcgen::date_time_ymd(2099, 1, 1);
+        rustls::pki_types::CertificateDer::from(p.signed_by(&kp, &ca, &ca_key).unwrap().der().to_vec())
+    }
+
+    /// **A certificate naming no node is refused once its key's owner revoked it** (the review of row Q's
+    /// follow-up, finding 1). A node that ran before row Q on a pre-issued certificate without a URI
+    /// (valid to 2099) is re-issued one with a URI and revokes the old key; whoever stole the old key
+    /// and its certificate presents the URI-less one. The key is anchored for its owner (its certificate
+    /// record) and revoked, so it is refused — judged against the owner, found by the key, never against
+    /// another node's revocation (the plant: the same key revoked under a node it is not anchored for
+    /// refuses nothing). Seen failing first: the URI-less certificate was accepted.
+    #[test]
+    fn a_revoked_key_is_refused_behind_a_certificate_that_names_no_node() {
+        use crate::node_id::NodeId;
+        use crate::removal::{KeyStanding, NodeStanding, RemovedSet};
+        let dir = fresh_dir("revoked-legacy");
+        let cfg = TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() };
+        let (nb, nc, other) = (
+            NodeId::new("127.0.0.1", 9521).unwrap(),
+            NodeId::new("127.0.0.1", 9522).unwrap(),
+            NodeId::new("127.0.0.1", 9523).unwrap(),
+        );
+        let b_standing = Arc::new(KeyStanding::default());
+        let b = super::imp::load_or_generate(&cfg, &nb, Arc::new(RemovedSet::default()), Arc::clone(&b_standing)).unwrap();
+        let k0 = ed25519_dalek::SigningKey::from_bytes(&[21u8; 32]);
+        let k0_pub = k0.verifying_key().to_bytes();
+        let legacy = legacy_cert(&cfg, &nc, &k0);
+        assert!(super::cert_identity(legacy.as_ref()).is_some_and(|id| id.node_uris.is_empty()), "the certificate names no node");
+        let ca_der = load_or_create_ca(&cfg).unwrap().0;
+        let (_, thief, _, _) = super::imp::build_rustls_configs(legacy, &k0, ca_der, Arc::new(RemovedSet::default()), Default::default()).unwrap();
+        let thief = Arc::new(thief);
+
+        b_standing.set(&other, NodeStanding { anchored: Some([[2u8; 32]].into_iter().collect()), revoked: [k0_pub].into_iter().collect() });
+        assert_eq!(handshake(Arc::clone(&thief), b.server_config()), Ok(()),
+            "plant: a revocation by a node the key is not anchored for refuses nothing");
+
+        b_standing.set(&nc, NodeStanding { anchored: Some([k0_pub, [3u8; 32]].into_iter().collect()), revoked: [k0_pub].into_iter().collect() });
+        let after = handshake(thief, b.server_config());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(after.as_ref().is_err_and(|e| e.starts_with("server refused") && e.contains(&nc.to_string())),
+            "REVOKED: a URI-less certificate for a key its owner revoked was accepted: {after:?}");
+    }
+
     /// Drive one handshake between `client` and `server` in memory; `Err` names the side that refused.
     fn handshake(client: Arc<rustls::ClientConfig>, server: Arc<rustls::ServerConfig>) -> Result<(), String> {
         let name = rustls::pki_types::ServerName::try_from("127.0.0.1").unwrap().to_owned();
@@ -1223,7 +1293,7 @@ mod ca_race_tests {
         let b = super::imp::load_or_generate(&cfg, &nb, Arc::new(RemovedSet::default()), Arc::clone(&b_standing)).unwrap();
         let c = super::imp::load_or_generate(&cfg, &nc, Arc::new(RemovedSet::default()), Default::default()).unwrap();
         let c_key = c.verifying_key_bytes();
-        let revoked = |key: [u8; 32]| NodeStanding { anchored: None, revoked: [key].into_iter().collect() };
+        let revoked = |key: [u8; 32]| NodeStanding { anchored: Some([key].into_iter().collect()), revoked: [key].into_iter().collect() };
 
         assert_eq!(handshake(c.client_config(), b.server_config()), Ok(()), "plant: C dials B before any revocation");
         assert_eq!(handshake(b.client_config(), c.server_config()), Ok(()), "plant: B dials C before any revocation");
@@ -1231,6 +1301,12 @@ mod ca_race_tests {
         b_standing.set(&other, revoked(c_key));
         assert_eq!(handshake(c.client_config(), b.server_config()), Ok(()),
             "another node's revocation of C's key does not refuse C's certificate");
+
+        // A provisional revocation — C's key revoked, but not (yet) anchored for C here — cuts nothing:
+        // a node that rotated must still connect while its new certificate record travels.
+        b_standing.set(&nc, NodeStanding { anchored: Some([[1u8; 32]].into_iter().collect()), revoked: [c_key].into_iter().collect() });
+        assert_eq!(handshake(c.client_config(), b.server_config()), Ok(()),
+            "a provisional revocation of a key not anchored for C does not refuse C's certificate");
 
         b_standing.set(&nc, revoked(c_key));
         let accept = handshake(c.client_config(), b.server_config());

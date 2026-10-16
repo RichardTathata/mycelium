@@ -1221,7 +1221,7 @@ revocations under its current key, so they count again. A script calling `POST /
 current key gets 422: rotate first. **What is not covered:** a holder of the fleet CA key (every node in the
 development posture) can issue a certificate that outranks any node's key; the secure posture cannot rotate and
 recovers by re-issue only; a retired key verifies until revoked; unsigned `Data` and anti-entropy; the mTLS handshake
-does not refuse a revoked key; a node without persistence forgets, across a restart, a revocation hidden fleet-wide
+did not refuse a revoked key (it does since §44); a node without persistence forgets, across a restart, a revocation hidden fleet-wide
 while it was down, until the owner republishes it; a holder of the CA key can make a node refuse to start (loud,
 recovered by a re-issue); junk certificates for many nodes can churn the bounded certificate cache (a fold then costs
 on the order of a second).
@@ -1412,8 +1412,10 @@ segment: for a model id such as `org/model`, use a separator other than `/`. Pic
 
 ## 44. A revoked key's certificate is refused at the handshake, and the mesh does not resume TLS sessions (unreleased, post-360 plan row Q's follow-up)
 
-**What changes.** Both sides of a mesh TLS handshake now refuse a certificate whose Ed25519 key the node it names
-(its `mycelium://{node}` URI) has revoked, by the revocations this node has counted (`CoreCtx::key_standing`). Before,
+**What changes.** Both sides of a mesh TLS handshake now refuse a certificate whose Ed25519 key is anchored for its
+owner (a certificate record naming the node) and revoked by it, by the revocations this node has counted
+(`CoreCtx::key_standing`). The owner is the node the certificate's `mycelium://{node}` URI names, or, for a
+certificate issued before row Q with no URI, the node holding the key anchored. Before,
 the handshake judged the fleet CA chain and the removal ledger only, so the holder of a revoked key and its
 certificate stayed a connected peer. And the mesh's rustls configs no longer resume sessions: a resumed TLS 1.3
 session re-runs no certificate verifier, so a removed member (closure plan C5) or a revoked key could reconnect on a
@@ -1428,4 +1430,5 @@ judges no revocation). Every reconnect between mesh nodes is now a full handshak
 verification each way, per connection, not per frame.
 
 **Not changed:** a connection already open when a revocation is counted stays open, and its signed frames are refused
-as before; a certificate issued before row Q names no node and is not judged here.
+as before; a key that never had a certificate record naming its node is not refused at the handshake (its signatures
+are); a provisional revocation (of a key whose certificate record has not reached this node) refuses no handshake.

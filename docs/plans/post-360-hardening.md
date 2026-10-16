@@ -790,7 +790,8 @@ unproduced), the row closes as follows. The verifiers were enumerated with
   until re-issued, and keys it revoked before the upgrade verify again at upgraded nodes until then; a retired key that
   never had a URI-SAN certificate stops verifying *live* signatures for a re-anchored node (history — the audit chain —
   verifies under the held-minus-revoked set, the final review's round); unsigned
-  `Data` and anti-entropy; the mTLS handshake does not refuse a revoked key (follow-up, now that the URI SAN exists); a
+  `Data` and anti-entropy; ~~the mTLS handshake does not refuse a revoked key~~ (delivered by the follow-up, §3.6 under
+  Q); a
   node without persistence forgets a revocation hidden while it was down until the owner republishes; the fold walks
   every node with records on each change (bounded per node, not per-node incremental).
 
@@ -950,12 +951,15 @@ worth fixing on its own: the agent card names the gossip port), O and P (after N
   revocation events are signed untagged.
 - **B:** connection preemption and WAL group commit, removed in review.
 - **Q:** ~~the mTLS handshake does not refuse a revoked key's certificate~~ — *delivered after 2.34.0, unreleased:*
-  both sides of the handshake refuse a certificate whose key the node its URI SAN names has revoked
-  (`refuse_if_revoked`, `mycelium-core/src/tls.rs`; `a_revoked_keys_certificate_is_refused_at_a_peers_handshake`,
-  `a_revoked_keys_certificate_is_refused_at_the_handshake_both_ways`), and the mesh resumes no TLS session — found on
+  both sides of the handshake refuse a certificate whose key is anchored for its owner and revoked by it — the node
+  its URI SAN names, or for a URI-less certificate the node holding the key anchored (`refuse_if_revoked`,
+  `mycelium-core/src/tls.rs`; `a_revoked_keys_certificate_is_refused_at_a_peers_handshake`,
+  `a_revoked_keys_certificate_is_refused_at_the_handshake_both_ways`,
+  `a_revoked_key_is_refused_behind_a_certificate_that_names_no_node`), and the mesh resumes no TLS session — found on
   the way: a resumed session re-ran no verifier, so a removed member could reconnect on one (C5, since 2.15.0;
   `a_removed_member_cannot_reconnect_on_a_resumed_session`). *Not built:* a connection already open when the revocation
-  is counted is not closed; a pre-row-Q certificate is not judged. Still open: revocation authority rests on the CA key's custody (the development posture gives every node the CA key); the fold is
+  is counted is not closed; a key that never had a certificate record naming its node is not refused at the
+  handshake; a provisional revocation refuses no handshake (deliberately: a rotated node must connect). Still open: revocation authority rests on the CA key's custody (the development posture gives every node the CA key); the fold is
   not per-node incremental.
 
 **Sources compared on 2026-10-12** (rows K–P and the open question came from these):

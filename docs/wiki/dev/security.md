@@ -383,9 +383,9 @@ serial): an anchored node trusts exactly its anchored, unrevoked keys; a revocat
 anchored key issued after P's. Records are keyed `(P, S)`, self-contained, journaled when counted, republished by the
 owner. The decision record is `docs/design/revocation-authority.md` (rev 3, three design reviews); its limits — the CA
 holder, the secure posture's re-issue-only recovery, legacy certificates — are stated there and in the runbook.
-**The handshake too** (row Q's follow-up, unreleased): both sides of a mesh handshake refuse a certificate whose key the
-node its URI SAN names has revoked (`refuse_if_revoked`, `mycelium-core/src/tls.rs`), reading that node's standing only
-(a node may revoke a key that is not its own). **The mesh resumes no TLS session**: a resumed TLS 1.3 session re-runs
+**The handshake too** (row Q's follow-up, unreleased): both sides of a mesh handshake refuse a certificate whose key is
+anchored for its owner and revoked by it (`refuse_if_revoked`, `mycelium-core/src/tls.rs`) — never another node's
+revocation (a node may revoke a key that is not its own) and never a provisional one (a rotated node must connect). **The mesh resumes no TLS session**: a resumed TLS 1.3 session re-runs
 no certificate verifier, so any check placed in a verifier — the removal ledger since C5, revocation now — is skipped
 on a reconnect that resumes. Put a new admission check in the verifier *and* keep resumption off.
 

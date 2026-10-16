@@ -174,11 +174,14 @@ A revocation record:
 - writes verified before the revocation arrived (detection, not prevention);
 - a connection already open when the revocation is counted (its signed frames are refused one by one).
 
-**The mTLS handshake** (row Q's follow-up, after 2.34.0): both sides refuse a certificate whose key the node its URI
-SAN names has revoked (`mycelium-core/src/tls.rs`, `refuse_if_revoked`). Only that node's standing is read — a
-node's revocation may name a key that is not its own, so reading every node's would let one member refuse
-another's handshakes — and a certificate naming no node is not judged. The mesh does not resume TLS sessions, since
-a resumed session re-runs no verifier.
+**The mTLS handshake** (row Q's follow-up, after 2.34.0): both sides refuse a certificate whose key is anchored for
+its owner and revoked by it (`mycelium-core/src/tls.rs`, `refuse_if_revoked`; `KeyStanding::is_anchored_and_revoked`).
+The owner is the node the URI SAN names or, for a URI-less certificate, the node holding the key anchored. Anchored
+keys only: a node's revocation may name a key without standing for it, so reading those would let one member refuse
+another's handshakes, and a provisional revocation would cut a freshly rotated node off until its certificate record
+arrives — which is also why the handshake checks *revoked*, not *distrusted*. A key that never had a certificate record
+naming its node is refused at every signature check but not at the handshake. The mesh does not resume TLS sessions,
+since a resumed session re-runs no verifier.
 
 ## 6. Limits, stated where operators read
 
