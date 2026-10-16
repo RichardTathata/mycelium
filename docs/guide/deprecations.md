@@ -1483,4 +1483,6 @@ crate breaks. New: `GossipAgent::receive_gateway_caller`.
 its window on restart; a member that tombstones a gateway's id marker at a provider reopens the id-less path there until
 the gateway's next re-assertion, at most a minute (the `sys/` tripwire counts it); after an eviction floor (past about 109 calls a second, sustained, from one gateway to one
 provider), a gateway whose clock moves back across a restart has its calls dropped until its clock passes the floor; a
-provider whose own clock steps back may serve an envelope it had already pruned, once.
+provider whose own clock steps back may serve an envelope it had already pruned, once; with `max_clock_drift_ms = 0`, a
+gateway 60–300 s ahead of a provider has its marker ignored there, so a stripped envelope is served (fail-open) where
+`verify` still accepts its envelopes.
