@@ -402,6 +402,7 @@ pub use agent::OidcConfig;
 pub use capability::{
     CallerContext, CapConstraint, CapEntry, CapFilter, CapRanking, CapValue, Capability, CapabilityEvent,
     CapabilityGroupDef, CapabilityGroupHandle, CapabilityReg,
+    capability_group_name_problem, capability_name_problem,
     DemandStatus, RankingOrder, RequirementHandle, RequirementStatus,
     WiredEmitOutcome, WiringProvider, WiringStatus,
 };

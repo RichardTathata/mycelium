@@ -376,7 +376,10 @@ row G and decision D4).
 0.2.10, `mycelium-ts` 0.2.0/0.2.4; `interval_secs` since post-360 row E, `mycelium-py` 0.2.11 / `mycelium-ts` 0.2.5; the tuple `take` keeps `0`, its poll); a negative, non-finite or past-`u64`
 value is refused by name before any request. `capability/advertise` and `units/declare` hold `interval_secs` and
 `lease_secs` to `1..=3600` (both SDKs refuse `0` and a larger value locally) and answer **400 `timer_out_of_range`** naming the field otherwise — a value that is
-not a whole number included, which they used to replace with 30 s ([deprecations.md §38](deprecations.md)). `/gateway/kv/quorum` reads `timeout_secs` as a float and is sent as
+not a whole number included, which they used to replace with 30 s ([deprecations.md §38](deprecations.md)). Both answer **400** to a
+capability or requirement whose `ns` or `name` is empty or holds a `/`, or is `locality`/`self` (the node's own
+locality entry); `capability/advertise` names it `invalid_capability_name`, and `units/declare` refuses the file,
+which also refuses a group name holding a `/` ([deprecations.md §43](deprecations.md)). `/gateway/kv/quorum` reads `timeout_secs` as a float and is sent as
 given. A caller-supplied value that becomes one path segment — a kind, a prompt's `ns`/`name`, a run or blob id,
 a domain, a handle or guard id — is percent-encoded, and a value that cannot be one segment (`.`, `..`, empty, a
 lone surrogate) is refused before any request. `scatter_gather` / `scatterGather` wait for **one** reply unless told otherwise

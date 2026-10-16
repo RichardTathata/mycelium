@@ -671,6 +671,20 @@ impl NodeCapabilityConfig {
     /// Every refusal the loader makes, by name. Called by [`load_from_file`](Self::load_from_file)
     /// after parsing; call it yourself on a config built in code.
     pub fn validate(&self) -> Result<(), GossipError> {
+        // Every (ns, name) the file would write as a key, and every group name (#613's review, finding 6).
+        let named = self.capabilities.iter().map(|c| ("capability", c.ns.as_str(), c.name.as_str()))
+            .chain(self.requirements.iter().map(|r| ("requirement", r.ns.as_str(), r.name.as_str())))
+            .chain(self.groups.iter().flat_map(|g| g.provides.iter().map(|p| ("group.provides", p.ns.as_str(), p.name.as_str()))));
+        for (section, ns, name) in named {
+            if let Some(problem) = crate::capability::capability_name_problem(ns, name) {
+                return Err(invalid(section, format!("{ns:?}/{name:?}: {problem}")));
+            }
+        }
+        for g in &self.groups {
+            if let Some(problem) = crate::capability::capability_group_name_problem(&g.name) {
+                return Err(invalid("group", format!("{:?}: {problem}", g.name)));
+            }
+        }
         for c in &self.capabilities {
             if !(1..=MAX_TIMER_PERIOD_SECS).contains(&c.ttl_secs) {
                 return Err(invalid("capability", format!(
@@ -777,8 +791,10 @@ impl NodeCapabilityConfig {
             // A served skill is a prompt skill: its template key is `prompts/{ns}/{name}`, which a `/` (or an
             // empty part) would share with another pair — `register_prompt_skill` refuses it, so refuse it at
             // load rather than on every reconcile tick (#613's review, finding 5).
-            if [&sv.ns, &sv.name].iter().any(|p| p.is_empty() || p.contains('/')) {
-                return Err(invalid("serve", format!("{at}: ns and name must be non-empty and contain no '/' (a served skill is a prompt skill)")));
+            // It also advertises `cap/{node}/{ns}/{name}`, so the reserved locality pair is refused with the rest
+            // (#629's review, finding 2).
+            if let Some(problem) = crate::capability::capability_name_problem(&sv.ns, &sv.name) {
+                return Err(invalid("serve", format!("{at}: {problem} (a served skill is a prompt skill and a capability)")));
             }
             if sv.endpoint.trim().is_empty() || sv.model.trim().is_empty() {
                 return Err(invalid("serve", format!("{at}: an endpoint and a model are both required")));

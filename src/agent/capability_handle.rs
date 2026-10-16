@@ -71,6 +71,12 @@ impl CapabilitiesHandle {
         interval:   Duration,
     ) -> CapabilityReg {
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+        // A name that is not a key segment, or the node's own locality entry, is refused: the handle
+        // returned holds nothing and nothing is written (#613's review, finding 6).
+        if let Some(problem) = crate::capability::capability_name_problem(&capability.namespace, &capability.name) {
+            warn!(ns = %capability.namespace, name = %capability.name, problem, "advertise_capability: refused; nothing is advertised");
+            return CapabilityReg { _retract: cancel_tx };
+        }
         let shutdown_rx            = self.ctx.shutdown_tx.subscribe();
         let ctx: Arc<TaskCtx>      = Arc::clone(&self.ctx);
         let kv_key: Arc<str>       = Arc::from(format!(
@@ -231,6 +237,15 @@ impl CapabilitiesHandle {
     #[must_use]
     pub fn declare_requirement(&self, filter: CapFilter, interval: Duration) -> RequirementHandle {
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+        // Refused as `advertise_capability` refuses: a handle that holds nothing (#613's review, finding 6).
+        if let Some(problem) = crate::capability::capability_name_problem(&filter.namespace, &filter.name) {
+            warn!(ns = %filter.namespace, name = %filter.name, problem, "declare_requirement: refused; nothing is declared");
+            let opacity_drop = crate::capability::OpacityDropGuard {
+                cancelled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                notify:    Arc::clone(&self.ctx.filter_opacity_registry.notify),
+            };
+            return RequirementHandle { _retract: cancel_tx, _opacity_drop: opacity_drop };
+        }
         let shutdown_rx             = self.ctx.shutdown_tx.subscribe();
         let ctx: Arc<TaskCtx>       = Arc::clone(&self.ctx);
 
@@ -364,6 +379,14 @@ impl CapabilitiesHandle {
     ) -> CapabilityGroupHandle {
         let group: Arc<str> = group.into();
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+        // A group name, or a `provides` name, that is not a key segment is refused: the handle holds
+        // nothing and no definition is published (#613's review, finding 6).
+        let problem = crate::capability::capability_group_name_problem(&group)
+            .or_else(|| def.provides.iter().find_map(|c| crate::capability::capability_name_problem(&c.namespace, &c.name)));
+        if let Some(problem) = problem {
+            warn!(group = %group, problem, "define_capability_group: refused; nothing is defined");
+            return CapabilityGroupHandle { _retract: cancel_tx, group };
+        }
         let shutdown_rx            = self.ctx.shutdown_tx.subscribe();
         let ctx: Arc<TaskCtx>      = Arc::clone(&self.ctx);
         let kv_key: Arc<str>       = Arc::from(format!("cap-group/{}", group).as_str());

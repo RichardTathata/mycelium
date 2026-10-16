@@ -37,7 +37,12 @@ impl LlmHandle {
         template: prompt::PromptTemplate,
         backend:  Arc<dyn llm::LlmBackend>,
     ) -> Result<prompt::PromptSkillHandle, prompt::PromptSkillError> {
-        // 1. Write template to KV — configuration, not heartbeat.
+        // 1. Write template to KV — configuration, not heartbeat. A pair that cannot be a capability name
+        // (the reserved locality pair, beyond what `prompt_key` refuses) is refused before anything is
+        // written: its advert would be refused, leaving a skill nobody resolves (#629's review, finding 2).
+        if crate::capability::capability_name_problem(ns, name).is_some() {
+            return Err(prompt::PromptSkillError::InvalidName { ns: ns.to_owned(), name: name.to_owned() });
+        }
         let kv_key = prompt::prompt_key(ns, name)?;
         let bytes  = serde_json::to_vec(&template)
             .map_err(|e| prompt::PromptSkillError::LlmError(e.to_string()))?;

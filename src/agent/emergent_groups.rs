@@ -184,6 +184,15 @@ fn reconcile_emergent_groups(
             warn!(key = %key, "malformed CapabilityGroupDef under cap-group/ — peer sent bytes that did not decode");
             continue;
         };
+        // A definition whose group name or `provides` name is not a key segment would project
+        // `gcap/{group}/{ns}/{name}/{self}` and `grp/{group}/{self}` keys no reader parses. No upgraded door
+        // writes one, but a 2.33 peer or state persisted before the upgrade can (#629's review, finding 1).
+        let problem = crate::capability::capability_group_name_problem(group_name)
+            .or_else(|| def.provides.iter().find_map(|c| crate::capability::capability_name_problem(&c.namespace, &c.name)));
+        if let Some(problem) = problem {
+            warn!(key = %key, problem, "CapabilityGroupDef skipped: a name in it is not a key segment");
+            continue;
+        }
         defs.insert(Arc::from(group_name), def);
     }
 
