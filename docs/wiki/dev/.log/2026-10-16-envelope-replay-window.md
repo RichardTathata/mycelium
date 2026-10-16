@@ -32,13 +32,19 @@ per provider still let a capture be served once at every other provider of the s
 signature. Also from the review: three boundaries untested (now one test each, every one seen failing alone),
 a public raw-signal door (`GossipAgent::receive_gateway_caller`), windows never removed (a sweep, with `admit`
 re-checking its window under the lock), and the cap's arithmetic (600 s at the default drift bound, not 300 s).
+The confirming round found the marker itself abusable: a bare `b"1"` written once could be planted for a 2.34
+gateway, and a rolled-back gateway kept it for good — its calls dropped silently and permanently. It is now the
+gateway's signed, dated statement, re-asserted every minute and honoured only while fresh; never tombstoned, so a
+stopped gateway's stripped envelopes stay refused for exactly as long as they could be replayed. Lesson: a marker
+that *refuses* traffic on its presence needs an author and an expiry; one that merely *enables* it does not.
 
 **Tests:** `a_replayed_envelope_is_refused_at_the_receive_boundary`,
 `an_envelope_id_and_target_are_signed_and_stripping_them_is_refused`, `rpc_rx_drops_a_replay_unanswered`,
 `the_mcp_tool_loop_drops_a_replay_unanswered`, `the_replay_window_is_bounded_and_fails_closed`,
 `an_empty_replay_window_is_swept` (`src/agent/gateway_caller.rs`); `the_mcp_bridge_refuses_a_replayed_or_failed_context`
 (`src/agent/mcp.rs`); `every_receive_boundary_drops_a_replay_unanswered`,
-`a_captured_envelope_is_refused_at_another_provider_and_stripped` (`src/lib_tests.rs`).
+`a_captured_envelope_is_refused_at_another_provider_and_stripped`, `only_a_gateways_own_fresh_id_marker_is_honoured`
+(`src/lib_tests.rs`).
 
 **Pages touched:** [lock-order](../concurrency/lock-order.md) (row 60); `docs/operations/rbac.md`,
 `docs/guide/deprecations.md` §45, the post-360 plan (E's table entry, §3.5 block and §3.6); `src/lib.rs`'s namespace

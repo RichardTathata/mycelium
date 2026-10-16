@@ -612,9 +612,28 @@ impl GossipAgent {
                 let _ = kv_set(&ctx, key,
                                Bytes::from_static(super::gateway_caller::marker_value(&ctx.config)));
                 // Post-360 row E: every envelope this node frames carries an id, so a provider may refuse
-                // an id-less one in this node's name as a replay with the id stripped.
-                let _ = kv_set(&ctx, Arc::from(super::gateway_caller::id_marker_key(&ctx.node_id).as_str()),
-                               Bytes::from_static(b"1"));
+                // an id-less one in this node's name as a replay with the id stripped. The marker is this
+                // node's signed, dated statement, re-asserted so a provider honours it only while it is
+                // fresh; it is never tombstoned — at shutdown it lapses on its own, after this node's last
+                // envelopes can no longer be replayed.
+                #[cfg(feature = "tls")]
+                {
+                    let id_key: Arc<str> = Arc::from(super::gateway_caller::id_marker_key(&ctx.node_id).as_str());
+                    let mut ticker = mycelium_core::sim_seam::interval_ms(
+                        "caller-context-id", super::gateway_caller::ID_MARKER_REFRESH_MS,
+                        tokio::time::MissedTickBehavior::Skip,
+                    );
+                    loop {
+                        tokio::select! { biased;
+                            _ = srx.wait_for(|v| *v) => return,
+                            _ = ticker.tick() => {
+                                if let Some(v) = super::gateway_caller::id_marker_value(&ctx) {
+                                    let _ = kv_set(&ctx, Arc::clone(&id_key), v);
+                                }
+                            }
+                        }
+                    }
+                }
             });
             if self.config.gateway_caller_profile == crate::config::GatewayCallerProfile::Legacy {
                 warn!(

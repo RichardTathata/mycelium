@@ -1472,11 +1472,12 @@ pub mod kv_ns {
     /// refused instead. Self-owned (`sys/` tripwire), never written for another node.
     pub const CALLER_CONTEXT: &str = "sys/caller-context/";
 
-    /// Caller-envelope id marker (post-360 plan row E). Key: `sys/caller-context-id/{node}`, value
-    /// `b"1"`: every caller envelope this node frames carries an id and the signature over it. A
-    /// provider refuses an id-less signed envelope from a node that published it — it can only be one
-    /// of that node's envelopes with the id stripped, i.e. a replay. Written once at start beside
-    /// [`CALLER_CONTEXT`]; self-owned (`sys/` tripwire).
+    /// Caller-envelope id marker (post-360 plan row E). Key: `sys/caller-context-id/{node}`, value: the
+    /// node's signed, dated statement that every caller envelope it frames carries an id
+    /// (`issued_at_ms ‖ signer ‖ signature`). A provider honours it only when signed by a key it trusts for
+    /// the node and fresh, and then refuses an id-less signed envelope in that node's name as a replay
+    /// with the id stripped. Re-asserted every minute under `tls`, never tombstoned (it lapses);
+    /// self-owned (`sys/` tripwire).
     pub const CALLER_CONTEXT_ID: &str = "sys/caller-context-id/";
 
     /// Member removals (closure plan C5). Key: `sys/membership/removed/{node}`, value: the

@@ -3565,6 +3565,50 @@ async fn every_receive_boundary_drops_a_replay_unanswered() {
     assert_eq!(stats["caller_envelopes_without_id"], 0, "{stats}");
 }
 
+/// **Only a gateway's own fresh id marker is honoured** (post-360 row E's re-review). The marker was a bare
+/// `b"1"` written once: any member could plant it for a gateway on an older release, and a gateway rolled back
+/// kept it for good — either way that gateway's id-less envelopes were dropped at every provider, silently and
+/// permanently. It is now the gateway's signed, dated statement, re-asserted every minute, and a provider
+/// honours it only when a key it trusts for that gateway signed it within the freshness window plus two
+/// refresh periods. Here C holds, for A: a marker B signed (planted) — ignored; A's own, dated past the
+/// lifetime (lapsed — a rolled-back A) — ignored; A's own, fresh — honoured. Seen failing first with any marker
+/// honoured: the planted one was.
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn only_a_gateways_own_fresh_id_marker_is_honoured() {
+    let (a, b, c, _nb, nc, dir) = three_signed_nodes("e-marker", false).await;
+    let key = crate::agent::gateway_caller::id_marker_key(a.node_id());
+    let ok = within_3s(|| c.kv().get(&key).is_some()).await;
+    let framed = crate::agent::gateway_caller::frame_with_context(&a.task_ctx, &nc, "oidc:idp/alice", &[], bytes::Bytes::from_static(b"go")).unwrap();
+    let stripped = crate::agent::gateway_caller::strip_envelope_id(&framed);
+    let at_c = || {
+        let mut buf = bytes::BytesMut::new();
+        bytes::BufMut::put_u64_le(&mut buf, 42);
+        bytes::BufMut::put(&mut buf, stripped.clone());
+        let req = crate::RpcRequest::from(crate::signal::Signal {
+            kind: Arc::from("k"), scope: crate::signal::SignalScope::Individual(nc.clone()),
+            payload: buf.freeze(), sender: a.node_id().clone(), nonce: 7,
+        });
+        c.receive_gateway_caller(&req).map(|_| ()).map_err(|e| e.code())
+    };
+    let fresh = at_c();
+    let now = c.task_ctx.hlc.decision_now_ms();
+    let a_sk = a.task_ctx.tls.get().unwrap().signing_key();
+    let b_sk = b.task_ctx.tls.get().unwrap().signing_key();
+    let _ = c.kv().set(key.clone(), crate::agent::gateway_caller::id_marker_bytes(a.node_id(), &b_sk, now).to_vec());
+    let planted = at_c();
+    let lifetime = crate::agent::gateway_caller::CALLER_CONTEXT_MAX_AGE_MS + c.task_ctx.config.max_clock_drift_ms
+        + 2 * crate::agent::gateway_caller::ID_MARKER_REFRESH_MS;
+    let _ = c.kv().set(key.clone(), crate::agent::gateway_caller::id_marker_bytes(a.node_id(), &a_sk, now - lifetime - 1).to_vec());
+    let lapsed = at_c();
+    a.shutdown().await; b.shutdown().await; c.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(ok, "A's marker reached C");
+    assert_eq!(fresh, Err("id_stripped"), "A's own fresh marker is honoured");
+    assert_eq!(planted, Ok(()), "PLANTED: a marker B signed for A was honoured");
+    assert_eq!(lapsed, Ok(()), "LAPSED: A's marker past its lifetime was honoured");
+}
+
 /// **A captured envelope is refused at another provider, and with its id stripped once its gateway
 /// publishes the id marker** (post-360 row E's review, findings 1 and 7). A frames an envelope for
 /// B; C, which serves the same kinds, is handed it: misaddressed, dropped. With the id stripped, C

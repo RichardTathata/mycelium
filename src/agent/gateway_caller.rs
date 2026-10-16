@@ -433,14 +433,70 @@ pub(crate) fn marker_value(config: &crate::config::GossipConfig) -> &'static [u8
     if promises_envelopes(config) { MARKER_PROMISES_ENVELOPES } else { MARKER_VERIFIES }
 }
 
-/// Does `node` put an id on every caller envelope it frames (post-360 row E) — its
-/// `sys/caller-context-id/` marker, or this node itself (it is running this code)?
+/// How often a node re-asserts its caller-envelope id marker (post-360 row E).
+#[cfg(feature = "tls")]
+pub(crate) const ID_MARKER_REFRESH_MS: u64 = 60_000;
+/// Domain separator for the id marker's signature.
+#[cfg(feature = "tls")]
+const ID_MARKER_SEP: &[u8] = b"mycelium:caller-context-id:v1\n";
+
+/// The id marker's value: `issued_at_ms (8, LE) ‖ signer (32) ‖ Ed25519 signature (64)` over
+/// [`ID_MARKER_SEP`] `‖ node ‖ issued_at_ms` — the node's own dated statement that every envelope it
+/// frames carries an id. `None` without a `tls` identity (an unsigned envelope keeps no window anyway).
+#[cfg(feature = "tls")]
+pub(crate) fn id_marker_value(ctx: &TaskCtx) -> Option<Bytes> {
+    let tls = ctx.tls.get()?;
+    Some(id_marker_bytes(&ctx.node_id, &tls.signing_key(), ctx.hlc.decision_now_ms()))
+}
+
+/// An id marker for `node`, issued at `at`, signed by `sk`.
+#[cfg(feature = "tls")]
+pub(crate) fn id_marker_bytes(node: &NodeId, sk: &ed25519_dalek::SigningKey, at: u64) -> Bytes {
+    let sig = crate::tls::sign_bytes(sk, &id_marker_message(node, at));
+    let mut v = BytesMut::with_capacity(104);
+    v.put_u64_le(at);
+    v.put_slice(&sk.verifying_key().to_bytes());
+    v.put_slice(&sig);
+    v.freeze()
+}
+
+#[cfg(feature = "tls")]
+fn id_marker_message(node: &NodeId, at: u64) -> Vec<u8> {
+    let mut m = ID_MARKER_SEP.to_vec();
+    m.extend_from_slice(node.to_string().as_bytes());
+    m.extend_from_slice(&at.to_le_bytes());
+    m
+}
+
+/// Does `node` put an id on every caller envelope it frames (post-360 row E)? This node does (it runs
+/// this code). Another node does if its `sys/caller-context-id/` marker is **its own** — signed by a
+/// key this node trusts for it, so a member cannot plant one for a gateway on an older release — and
+/// **fresh**: issued within the freshness window plus two refresh periods. A node that stops
+/// re-asserting it (rolled back to a release without ids, or stopped) is treated as id-less once its
+/// last envelopes can no longer be fresh, so a rollback is not cut off for good, and a stopped node's
+/// stripped envelopes are refused for as long as they could be replayed.
 #[cfg(feature = "tls")]
 fn issues_envelope_ids(ctx: &TaskCtx, node: &NodeId) -> bool {
-    *node == ctx.node_id || mycelium_core::ops::kv_get(ctx, &id_marker_key(node)).is_some()
+    if *node == ctx.node_id {
+        return true;
+    }
+    let Some(v) = mycelium_core::ops::kv_get(ctx, &id_marker_key(node)) else { return false };
+    if v.len() != 104 {
+        return false;
+    }
+    let at = u64::from_le_bytes(v[..8].try_into().expect("8 bytes"));
+    let signer: [u8; 32] = v[8..40].try_into().expect("32 bytes");
+    let now = ctx.hlc.decision_now_ms();
+    let drift = ctx.config.max_clock_drift_ms;
+    let ttl = CALLER_CONTEXT_MAX_AGE_MS.saturating_add(drift).saturating_add(2 * ID_MARKER_REFRESH_MS);
+    if now.saturating_sub(at) > ttl || at.saturating_sub(now) > drift.max(ID_MARKER_REFRESH_MS) {
+        return false;
+    }
+    verifying_keys_for(ctx, node).contains(&signer) && crate::tls::verify_bytes(&signer, &id_marker_message(node, at), &v[40..])
 }
 
 /// KV key of a node's caller-envelope id marker (post-360 row E).
+#[cfg(feature = "tls")]
 pub(crate) fn id_marker_key(node: &NodeId) -> String {
     format!("{}{}", crate::signal::kv_ns::CALLER_CONTEXT_ID, node)
 }

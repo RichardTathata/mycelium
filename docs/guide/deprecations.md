@@ -1445,17 +1445,23 @@ gateway's envelope as before. A provider on this release:
 - refuses an envelope addressed to another node (`misaddressed`);
 - admits each `(gateway, issue time, id)` once inside the freshness window (300 s plus `max_clock_drift_ms`), refusing a
   second receipt (`replayed`);
-- refuses an id-less signed envelope from a gateway that publishes `sys/caller-context-id/` — every node on this
-  release does — as a replay with the id stripped (`id_stripped`);
+- refuses an id-less signed envelope from a gateway whose `sys/caller-context-id/` marker it holds — signed by a key it
+  trusts for that gateway and issued within the freshness window plus two refresh periods (12 minutes at the default
+  drift bound); every `tls` node on this release re-asserts its own every minute — as a replay with the id stripped
+  (`id_stripped`);
 - refuses an `n` without its `o` or `sn` as `malformed`, and a changed `n` or `o` fails the signature.
 
 The three replay refusals are **dropped without an answer** and counted (`GET /stats` `caller_envelopes_replayed`). The
 MCP bridge now verifies the caller context at its receive boundary and refuses a failed one with `-32022`, as the native
 tool loop does; before, it verified only under provider enforcement.
 
-**The window.** An id-less envelope from a gateway without the marker — 2.34 or earlier — verifies in the v1 form, is
-served and is counted (`caller_envelopes_without_id`). Once every gateway node is upgraded and its marker has gossiped,
-stripping is refused fleet-wide; the next release refuses every envelope without an id.
+**The window.** An id-less envelope from a gateway without a fresh marker — 2.34 or earlier — verifies in the v1 form,
+is served and is counted (`caller_envelopes_without_id`). Once every gateway node is upgraded and its marker has
+gossiped, stripping is refused fleet-wide; the next release refuses every envelope without an id.
+
+**Rolling a gateway back to 2.34** stops its marker being re-asserted; until the last one lapses (up to 12 minutes at
+the default drift bound) upgraded providers drop its id-less envelopes unanswered, so its callers time out for that
+long. Nothing needs deleting: the marker is never tombstoned, it lapses.
 
 **Will the compiler tell me?** No. `GatewayCaller` gained `envelope_id` and `CallerError` gained `Replayed`,
 `Misaddressed` and `IdStripped` (with `CallerError::unanswered`); both are `#[non_exhaustive]`, so nothing outside the
@@ -1474,7 +1480,7 @@ crate breaks. New: `GossipAgent::receive_gateway_caller`.
   `caller_context_too_large`.
 
 **Not changed or not covered:** an unsigned mesh keeps no window (its envelopes can be forged outright); a provider forgets
-its window on restart; a member that tombstones a gateway's id marker at a provider reopens the id-less path there (the
-`sys/` tripwire counts it); after an eviction floor (past about 109 calls a second, sustained, from one gateway to one
+its window on restart; a member that tombstones a gateway's id marker at a provider reopens the id-less path there until
+the gateway's next re-assertion, at most a minute (the `sys/` tripwire counts it); after an eviction floor (past about 109 calls a second, sustained, from one gateway to one
 provider), a gateway whose clock moves back across a restart has its calls dropped until its clock passes the floor; a
 provider whose own clock steps back may serve an envelope it had already pruned, once.

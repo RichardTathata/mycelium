@@ -925,17 +925,20 @@ worth fixing on its own: the agent card names the gossip port), O and P (after N
 - **E:** ~~a nonce cache for the caller envelope~~ — *delivered after 2.34.0, unreleased:* each envelope carries an
   id and its target signed with the rest, and a provider admits each `(gateway, issue time, id)` once at every receive
   boundary (`gateway_caller::verify_received`, `ReplayWindows`; `receive_gateway_caller` for an embedder), refuses one
-  signed for another provider, refuses one with the id stripped from a gateway that publishes `sys/caller-context-id/`,
+  signed for another provider, refuses one with the id stripped from a gateway whose signed, fresh `sys/caller-context-id/`
+  marker it holds,
   and drops each replay unanswered
   (`a_replayed_envelope_is_refused_at_the_receive_boundary`,
   `an_envelope_id_and_target_are_signed_and_stripping_them_is_refused`,
-  `a_captured_envelope_is_refused_at_another_provider_and_stripped`, `rpc_rx_drops_a_replay_unanswered`,
+  `a_captured_envelope_is_refused_at_another_provider_and_stripped`, `only_a_gateways_own_fresh_id_marker_is_honoured`,
+  `rpc_rx_drops_a_replay_unanswered`,
   `the_mcp_tool_loop_drops_a_replay_unanswered`, `the_mcp_bridge_refuses_a_replayed_or_failed_context`,
   `every_receive_boundary_drops_a_replay_unanswered`, `the_replay_window_is_bounded_and_fails_closed`,
   `an_empty_replay_window_is_swept`); the MCP bridge now verifies the caller context. *Not built:* an
   id-less envelope from a gateway without the marker is accepted for one release (counted); an unsigned mesh keeps no
   window; a provider's window does not survive its restart; a tombstoned id marker reopens the id-less path for that
-  gateway (counted by the `sys/` tripwire). Still open: an acknowledged in-process mailbox; and the SSE resume point (recorded since row G). **Fixed (2026-10-16):**
+  gateway until its next re-assertion (counted by the `sys/` tripwire); a gateway rolled back to 2.34 is dropped until
+  its marker lapses (up to 12 minutes). Still open: an acknowledged in-process mailbox; and the SSE resume point (recorded since row G). **Fixed (2026-10-16):**
   the two `cap/` cases outside the row (#613's review, finding 6) — a `/` or an empty `ns`/`name`, which built an advert
   no reader parses, and `locality`/`self`, which overwrote the node's own locality entry — are refused at every door
   that writes a `cap/`, `req/` or `gcap/` key: `capability/advertise` (400 `invalid_capability_name`), the unit-file
