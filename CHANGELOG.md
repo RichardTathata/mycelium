@@ -9,6 +9,38 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.34.0] — 2026-10-16
+
+**Security fixes in the dependencies, and the post-360 plan's last identity rows.** Wasmtime 49.0.3 closes
+thirteen advisories against the WASM host, where third-party components run, and rustls 0.23.46 closes four;
+see the entries under Security. To check a build, run `cargo tree -i wasmtime` and `cargo tree -i rustls`: they
+should show 49.0.3 and 0.23.46.
+
+Two rows complete the identity hardening. **A TLS node now refuses an unsigned KV frame and a bare KV signature
+unconditionally** (row F2): row F's one-release window closes and `kv_require_signed_frames` is retired to a no-op.
+**Identity proofs are required by default** (row S): a peer's keys are merged only from its sealed record, so a
+member can no longer write its own key into another node's identity. A node that holds the fleet CA key says so
+loudly at start (row T).
+
+Shutdown now withdraws a node's soft state at its peers. Persistent service adverts, MCP tools and group
+projections are swept with the rest, and a gate stops any re-assert from overtaking the sweep. A capability name
+that cannot be a key segment is refused at every door. CI audits every tracked lockfile.
+
+Wire **v12** unchanged (`WIRE_VERSION` 12, `PREV` 11). Companions unchanged: `mycelium-reason` 0.9.0,
+`mycelium-py` 0.2.11, `mycelium-ts` 0.2.5, `langgraph-checkpoint-mycelium` and `mycelium-guardrails`.
+
+**Check before upgrading** (`docs/guide/deprecations.md` §40–§43):
+- **Upgrade from 2.33.x, not 2.32.** A 2.32 node's KV writes are refused at a 2.34 node and reach it only by
+  anti-entropy. Before upgrading, confirm `kv_unsigned_frames_accepted` and `kv_untagged_signatures` (`GET /stats`)
+  have stopped rising on every 2.33 node.
+- **Remove `kv_require_signed_frames`.** It does nothing now, and setting it is warned at `start()`.
+- **Identity proofs are on by default.** A 2.3.0–2.31.x peer is already unlearnable from gossip since 2.33.0. Only a
+  node from before 2.3.0 is newly cut off, and `require_identity_proofs = false` re-admits it.
+  `GOSSIP_REQUIRE_IDENTITY_PROOFS` is now a strict boolean, so a typo refuses the configuration.
+- **A capability name is one key segment.** An `ns` or `name` that is empty, holds a `/`, or is `locality`/`self`
+  answers 400 at `capability/advertise` and refuses the unit file.
+- **`CoreCtx` gained `soft_state_gate`.** This breaks only an exhaustive struct literal.
+
 ### Security
 
 - **Dependency: `wasmtime` / `wasmtime-wasi` 49.0.2 → 49.0.3** (RUSTSEC-2026-0352..0364, published 2026-10-14 —
@@ -49,6 +81,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **CI audits every tracked lockfile** (#626). The `Dependency audit (RUSTSEC)` job ran `cargo audit` on the root
+  `Cargo.lock` only, so `examples/conway-gpu/Cargo.lock` held five advisories no job saw (#625's review). It now
+  audits each lockfile `git ls-files` finds, NUL-separated, names the one that failed, and fails closed when the
+  root lockfile is not among them.
 - **Identity proofs are required by default** (post-360 plan row S; `docs/guide/deprecations.md` §41).
   `require_identity_proofs` defaults to `true`: a TLS node merges a peer's keys only from its sealed record
   (`sys/identity-signed/`, written by every TLS node since 2.14.0), so a bare `sys/identity/{n}` key list without a
