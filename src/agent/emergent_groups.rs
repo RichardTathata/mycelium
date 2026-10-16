@@ -316,14 +316,17 @@ async fn run_group_membership_task(
             capability:          cap.clone(),
             refresh_interval_ms: GCAP_REASSERT_INTERVAL.as_millis() as u64,
         }.encode();
-        let upd = make_gossip_update(
-            &ctx.node_id, ctx.default_ttl, Arc::clone(key), payload, false, &ctx.hlc,
-        );
-        apply_and_notify(&ctx.kv_state, &upd);
-        dispatch_gossip_try_send(
-            &ctx.gossip_txs, crate::framing::local_kv_wire_msg(&ctx, upd),
-            ctx.node_id.id_hash(), ForwardHint::All, &ctx.kv_state.dropped_frames,
-        );
+        // Through the soft-state gate: closed by shutdown before its sweep (#627's review).
+        ctx.soft_state_gate.write(|| {
+            let upd = make_gossip_update(
+                &ctx.node_id, ctx.default_ttl, Arc::clone(key), payload, false, &ctx.hlc,
+            );
+            apply_and_notify(&ctx.kv_state, &upd);
+            dispatch_gossip_try_send(
+                &ctx.gossip_txs, crate::framing::local_kv_wire_msg(&ctx, upd),
+                ctx.node_id.id_hash(), ForwardHint::All, &ctx.kv_state.dropped_frames,
+            );
+        });
     };
     let write_opaque = |key: &Arc<str>| {
         let payload = encode_load_state(&LoadState {
@@ -331,14 +334,17 @@ async fn run_group_membership_task(
             is_opaque:     true,
             written_at_ms: now_ms(),
         });
-        let upd = make_gossip_update(
-            &ctx.node_id, ctx.default_ttl, Arc::clone(key), payload, false, &ctx.hlc,
-        );
-        apply_and_notify(&ctx.kv_state, &upd);
-        dispatch_gossip_try_send(
-            &ctx.gossip_txs, crate::framing::local_kv_wire_msg(&ctx, upd),
-            ctx.node_id.id_hash(), ForwardHint::All, &ctx.kv_state.dropped_frames,
-        );
+        // Through the soft-state gate: closed by shutdown before its sweep (#627's review).
+        ctx.soft_state_gate.write(|| {
+            let upd = make_gossip_update(
+                &ctx.node_id, ctx.default_ttl, Arc::clone(key), payload, false, &ctx.hlc,
+            );
+            apply_and_notify(&ctx.kv_state, &upd);
+            dispatch_gossip_try_send(
+                &ctx.gossip_txs, crate::framing::local_kv_wire_msg(&ctx, upd),
+                ctx.node_id.id_hash(), ForwardHint::All, &ctx.kv_state.dropped_frames,
+            );
+        });
     };
     let clear_opaque = |key: &Arc<str>| {
         let upd = make_gossip_update(

@@ -176,6 +176,7 @@ fn spawn_handler_with(
         reorder_buf: None,
         reply_interceptor: None,
         soft_state_advertised: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        soft_state_gate:       Arc::default(),
         shutdown_tx: Arc::new(shutdown_tx_inner),
         task_handles: Arc::new(std::sync::Mutex::new(tokio::task::JoinSet::new())),
         hot: Arc::new(mycelium_core::context::HotConfig::from_config(&opts.config)),
@@ -3109,6 +3110,34 @@ async fn soft_state_with_a_live_handle_at_shutdown_is_retracted_at_the_peers() {
     assert!(kept.is_empty(), "B still holds A's {kept:?} after A shut down");
 }
 
+/// **A soft-state task cannot re-assert a key between the shutdown sweep and the signal** (#627's review,
+/// finding 1). The tasks run until the shutdown signal, which comes after the sweep and the outbound
+/// flush; a re-assert tick in between wrote the key live under a newer HLC and the flush delivered that,
+/// so the peer kept routing to the stopped node — 20/20 shutdowns at a 5 ms interval in the review's
+/// probe. Shutdown now closes the soft-state gate before it sweeps. Five shutdowns at a 5 ms interval,
+/// a persistent service advert and a capability each live across the shutdown.
+#[cfg(feature = "tls")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fast_reassert_does_not_undo_the_shutdown_sweep() {
+    use crate::capability::{Capability, CapFilter};
+    let mut kept_rounds = Vec::new();
+    for round in 0..5 {
+        let (a, b, node_a, _node_b, cert_dir) = signed_fleet_pair(&format!("fast-reassert-{round}"), None).await;
+        let svc_key = format!("svc/fast-svc/{node_a}");
+        let _svc = a.mesh().advertise_persistent("fast-svc", SignalScope::Cluster, Duration::from_millis(5), || Bytes::from_static(b"up"));
+        let _cap = a.capabilities().advertise_capability(Capability::new("route", "fast"), Duration::from_millis(5));
+        let svc_live = || b.kv().get(&svc_key).is_some();
+        let cap_live = || b.capabilities().resolve(&CapFilter::new("route", "fast")).iter().any(|(n, _)| *n == node_a);
+        poll_until(|| svc_live() && cap_live(), 5_000).await;
+        a.shutdown().await;
+        for _ in 0..80 { if !svc_live() && !cap_live() { break; } tokio::time::sleep(Duration::from_millis(25)).await; }
+        if svc_live() || cap_live() { kept_rounds.push((round, svc_live(), cap_live())); }
+        b.shutdown().await;
+        let _ = std::fs::remove_dir_all(&cert_dir);
+    }
+    assert!(kept_rounds.is_empty(), "B kept A's soft state after A shut down in rounds (round, svc, cap): {kept_rounds:?}");
+}
+
 /// **A TLS node refuses an unsigned `Data` frame whatever `kv_require_signed_frames` says** (post-360
 /// plan row F2). Row F's window applied the frame and counted it unless the node opted in; F2 makes
 /// the refusal the default and the setting a retired no-op (`docs/guide/deprecations.md` §40).
@@ -3681,6 +3710,7 @@ async fn test_subscribe_notified_via_gossip() {
             reorder_buf: None,
             reply_interceptor: None,
             soft_state_advertised: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            soft_state_gate:       Arc::default(),
             shutdown_tx: Arc::new(shutdown_tx_inner2),
             task_handles: Arc::new(std::sync::Mutex::new(tokio::task::JoinSet::new())),
             config: Arc::new(crate::config::GossipConfig::default()),

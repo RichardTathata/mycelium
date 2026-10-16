@@ -1247,6 +1247,7 @@ impl GossipAgent {
                 })
             }),
             soft_state_advertised: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            soft_state_gate:       Arc::default(),
             shutdown_tx:         Arc::clone(&shutdown_tx_arc),
             task_handles:        Arc::clone(&task_handles_arc),
         });

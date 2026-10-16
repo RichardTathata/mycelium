@@ -1010,9 +1010,8 @@ impl GossipAgent {
     /// [`Self::shutdown_with_timeout`], before the shutdown signal (#611). Best effort, not a delivery
     /// guarantee: it reads queue emptiness, so a frame between a shard queue and a writer's queue, or one
     /// applied on another thread and not yet enqueued, can be missed. What it delivers is what the
-    /// sweep above queued — a tombstone a task builds after the signal is not covered — and a
-    /// soft-state task still running until the signal can re-assert a swept key inside the window
-    /// (a residual, plan §3.6).
+    /// sweep queued — a tombstone a task builds after the signal is not covered. No task re-asserts a
+    /// swept key in between: the sweep runs after `soft_state_gate.close()`.
     async fn flush_outbound_before_shutdown(&self, bound: Duration) {
         tokio::task::yield_now().await;
         let queued = || {
@@ -1037,6 +1036,11 @@ impl GossipAgent {
     /// Tasks that have not exited within the timeout are logged as warnings and abandoned.
     /// Passing `Duration::MAX` replicates the old unbounded-wait behaviour.
     pub async fn shutdown_with_timeout(&self, timeout: Duration) {
+        // Close the soft-state gate before the sweep: from here no task re-asserts a key, and a
+        // re-assert already under way finishes first — so each tombstone below is the newest write of
+        // its key, and the flush delivers it rather than a re-assert landing in between (#627's
+        // review: 20/20 shutdowns at a 5 ms interval).
+        self.task_ctx.soft_state_gate.close();
         let my_load_prefix = format!("sys/load/{}/", self.node_id);
         let load_keys: Vec<String> = self.kv_state.store.pin()
             .iter()

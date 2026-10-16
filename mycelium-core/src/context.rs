@@ -234,6 +234,9 @@ pub struct CoreCtx {
     /// the persist loop that flips it is pure Layer I. Stored with Release;
     /// loaded with Acquire (see the memory-ordering policy in CLAUDE.md).
     pub soft_state_advertised: Arc<std::sync::atomic::AtomicBool>,
+    /// The gate every soft-state re-assert passes through; shutdown closes it before sweeping the
+    /// node's own soft state, so no tick re-writes a swept key (#627's review).
+    pub soft_state_gate: Arc<crate::kv_persist::SoftStateGate>,
 
     // ── Lifecycle ────────────────────────────────────────────────────────────────
     /// Shutdown broadcast — sending `true` cancels all background tasks.
