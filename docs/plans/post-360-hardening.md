@@ -872,7 +872,7 @@ CI on F also caught a co-op demo regression its own changes caused, fixed in the
 queues before the shutdown signal), and N, O, P recorded by #614 with the `a2a-sdk` probe's evidence
 (`docs/plans/external/2026-10-12-a2a-sdk-probe/`).
 
-**Delivered since (unreleased):** F2 (#624 — the unsigned-frame and bare-signature refusal unconditional, `kv_require_signed_frames` retired, `secure-single-domain` rev 5; §3.5), T (#622), S (identity proofs required by default; §3.5).
+**Delivered since (unreleased):** F2 (#624 — the unsigned-frame and bare-signature refusal unconditional, `kv_require_signed_frames` retired, `secure-single-domain` rev 5; §3.5), T (#622), S (#623 — identity proofs required by default; §3.5); the wasmtime 49.0.3 / rustls 0.23.46 advisories (#625).
 
 **Not started:** K (policy over history — decide §5's fleet question first), L (credentials attached at egress), M
 (activation commands confined), N (A2A at the current specification — independent of E and F, and it carries a defect
@@ -891,12 +891,17 @@ worth fixing on its own: the agent card names the gossip port), O and P (after N
   advert no reader can parse (`parse_cap_key` refuses it as malformed), and `ns = "locality", name = "self"` overwrites
   the node's own locality entry `cap/{node}/locality/self`.
 - **F:** the shutdown drain is best effort (it reads queue emptiness, so a frame between a shard queue and a writer
-  queue can be missed); and, **pre-existing (fails on `main` before F)**, retractions of keys the shutdown sweep does
-  not cover still lose the race to the shutdown signal — `svc/{kind}/{node}` from `mesh().advertise_persistent`
-  (`mycelium-core/src/mesh_handle.rs`) and MCP tool keys `tools/{name}/{node}` (`src/agent/mcp_handle.rs`) are
-  tombstoned only when the signal wakes their tasks, after the drain, so a persistent service advertised with a live
-  handle at shutdown is never retracted at its peers (#611's review, `review_svc_live_handle_at_shutdown_reaches_the_peers`,
-  3/3 on `main`). Fix: add `svc/{kind}/{self}` and `tools/*/{self}` to the shutdown sweep before the drain. Also
+  queue can be missed). **Fixed (2026-10-16):** the pre-existing gap #611's review found — keys the shutdown sweep did
+  not cover were tombstoned only when the signal woke their tasks, after the drain, so a live handle's entry was never
+  retracted at its peers — now covers `svc/{kind}/{self}`, `tools/{name}/{self}` and, found by enumerating every
+  soft-state task, `gcap/{group}/{ns}/{name}/{self}` (`shutdown_with_timeout`;
+  `soft_state_with_a_live_handle_at_shutdown_is_retracted_at_the_peers`, seen failing on all three). Not swept, as
+  before: `cap-group/{name}` (ownership not readable from the key), `grp/` membership entries and `sys/health/{self}`.
+  **Residual, open (#627's review, finding 1):** the soft-state tasks run until the signal, so a re-assert tick
+  between the sweep and the signal writes the key live again and the flush delivers it — 20/20 shutdowns at a 5 ms
+  interval, 10/20 on a current-thread runtime, 0/10 at 50, 200 and 1000 ms (`svc/`, `cap/`, `req/`, `gcap/`; MCP
+  `tools/` keys are written once). Fix: tell the soft-state tasks to stop before the sweep — a stopping flag their
+  ticks read, which is a new `CoreCtx` field (a public struct, so an upgrade note). Also
   stated in F's §3.5 block: first sighting is trust on first use; with identity proofs off another member's identity
   is writable under the writer's own signature; anti-entropy entries carry no author; role claims, audit records and
   revocation events are signed untagged.

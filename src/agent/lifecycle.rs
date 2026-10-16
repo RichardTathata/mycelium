@@ -1009,8 +1009,10 @@ impl GossipAgent {
     /// then give the writers one short beat to put the last frames on the wire. Used once, by
     /// [`Self::shutdown_with_timeout`], before the shutdown signal (#611). Best effort, not a delivery
     /// guarantee: it reads queue emptiness, so a frame between a shard queue and a writer's queue, or one
-    /// applied on another thread and not yet enqueued, can be missed. Keys tombstoned only once the
-    /// shutdown signal wakes their tasks (`svc/` adverts, MCP tool keys) are not covered — plan §3.6.
+    /// applied on another thread and not yet enqueued, can be missed. What it delivers is what the
+    /// sweep above queued — a tombstone a task builds after the signal is not covered — and a
+    /// soft-state task still running until the signal can re-assert a swept key inside the window
+    /// (a residual, plan §3.6).
     async fn flush_outbound_before_shutdown(&self, bound: Duration) {
         tokio::task::yield_now().await;
         let queued = || {
@@ -1059,6 +1061,13 @@ impl GossipAgent {
         let req_prefix            = format!("req/{}/",             self.node_id);
         let req_load_prefix       = format!("sys/load/{}/req/",       self.node_id);
         let group_req_load_prefix = format!("sys/load/{}/group-req/", self.node_id);
+        // The families keyed with this node's id *last* — a persistent service advert
+        // (`svc/{kind}/{self}`), an MCP tool (`tools/{name}/{self}`), an emergent group's projection
+        // (`gcap/{group}/{ns}/{name}/{self}`). Their own tasks tombstone them only when the shutdown
+        // signal wakes them, after the flush below, so with a handle still live the tombstone never
+        // left and peers kept routing to this node until the entry's TTL (#611's review; `gcap/` found
+        // by enumerating every soft-state task). `cap-group/` stays excluded, as said below.
+        let own_suffix = format!("/{}", self.node_id);
         let agent_owned_keys: Vec<String> = self.kv_state.store.pin()
             .iter()
             .filter(|(k, v)| {
@@ -1066,7 +1075,9 @@ impl GossipAgent {
                     k.starts_with(&*cap_prefix) ||
                     k.starts_with(&*req_prefix) ||
                     k.starts_with(&*req_load_prefix) ||
-                    k.starts_with(&*group_req_load_prefix)
+                    k.starts_with(&*group_req_load_prefix) ||
+                    ((k.starts_with("svc/") || k.starts_with("tools/") || k.starts_with("gcap/"))
+                        && k.ends_with(&*own_suffix))
                 )
             })
             .map(|(k, _)| k.to_string())
