@@ -367,6 +367,7 @@ mod imp {
         cfg: &TlsConfig,
         node_id: &NodeId,
         removed: Arc<crate::removal::RemovedSet>,
+        standing: Arc<crate::removal::KeyStanding>,
     ) -> Result<NodeTls, GossipError> {
         fs::create_dir_all(&cfg.auto_cert_dir).map_err(|e| {
             GossipError::InvalidField { field: "tls", reason: format!("TLS: cannot create cert dir {:?}: {e}", cfg.auto_cert_dir) }
@@ -418,7 +419,7 @@ mod imp {
         // ── 4. Build rustls configs ───────────────────────────────────────
         let cert_bytes = node_cert_der.as_ref().to_vec();
         let (server_config, client_config, gateway_server_config, cert_verifier) =
-            build_rustls_configs(node_cert_der, &signing_key, ca_cert_der, removed)?;
+            build_rustls_configs(node_cert_der, &signing_key, ca_cert_der, removed, standing)?;
 
         Ok(NodeTls {
             server_config: arc_swap::ArcSwap::from_pointee(server_config),
@@ -441,8 +442,9 @@ mod imp {
         cfg: &TlsConfig,
         node_id: &NodeId,
         removed: Arc<crate::removal::RemovedSet>,
+        standing: Arc<crate::removal::KeyStanding>,
     ) -> Result<super::RotationMaterial, GossipError> {
-        generate_rotation_after(cfg, node_id, removed, 0)
+        generate_rotation_after(cfg, node_id, removed, standing, 0)
     }
 
     /// [`generate_rotation`], with the new certificate issued strictly after `issued_floor_ms` — the
@@ -453,6 +455,7 @@ mod imp {
         cfg: &TlsConfig,
         node_id: &NodeId,
         removed: Arc<crate::removal::RemovedSet>,
+        standing: Arc<crate::removal::KeyStanding>,
         issued_floor_ms: u64,
     ) -> Result<super::RotationMaterial, GossipError> {
         let signing_key = generate_key()?;
@@ -467,7 +470,7 @@ mod imp {
         let node_cert_der = generate_node_cert(node_id, &signing_key, &ca_key_pair, super::issuance_after(issued_floor_ms))?;
         let cert_bytes = node_cert_der.as_ref().to_vec();
         let (server_config, client_config, gateway_server_config, _) =
-            build_rustls_configs(node_cert_der, &signing_key, ca_cert_der, removed)?;
+            build_rustls_configs(node_cert_der, &signing_key, ca_cert_der, removed, standing)?;
 
         Ok(super::RotationMaterial {
             verifying_key,
@@ -701,6 +704,7 @@ mod imp {
         signing_key: &SigningKey,
         ca_cert_der: CertificateDer<'static>,
         removed: Arc<crate::removal::RemovedSet>,
+        standing: Arc<crate::removal::KeyStanding>,
     ) -> Result<(ServerConfig, ClientConfig, ServerConfig, Arc<dyn rustls::server::danger::ClientCertVerifier>), GossipError> {
         use ed25519_dalek::pkcs8::EncodePrivateKey;
 
@@ -726,13 +730,22 @@ mod imp {
             .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: build client verifier: {e}") })?;
 
         let chain_verifier = Arc::clone(&verifier);
-        // Closure plan C5: a removed member's certificate is refused at the handshake.
-        let verifier: Arc<dyn rustls::server::danger::ClientCertVerifier> =
-            Arc::new(RemovalAwareClientVerifier { inner: verifier, removed: Arc::clone(&removed) });
-        let server_config = ServerConfig::builder()
+        // Closure plan C5: a removed member's certificate is refused at the handshake; post-360 plan
+        // row Q's follow-up: so is a certificate whose key the node it names has revoked.
+        let verifier: Arc<dyn rustls::server::danger::ClientCertVerifier> = Arc::new(RemovalAwareClientVerifier {
+            inner: verifier,
+            removed: Arc::clone(&removed),
+            standing: Arc::clone(&standing),
+        });
+        let mut server_config = ServerConfig::builder()
             .with_client_cert_verifier(verifier)
             .with_single_cert(vec![node_cert_der.clone()], key_der.clone_key())
             .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: build server config: {e}") })?;
+        // No session resumption on the mesh, either side: a resumed TLS 1.3 session re-runs no
+        // certificate verifier, so a peer that completed one handshake could reconnect after its
+        // removal or its key's revocation and be admitted on the cached session.
+        server_config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
+        server_config.send_tls13_tickets = 0;
 
         // Gateway server config: SAME node cert/key, but NO client-cert demand, so
         // ordinary HTTP clients can connect (the node-cert-reuse gateway-TLS path).
@@ -745,11 +758,12 @@ mod imp {
         let server_verifier = rustls::client::WebPkiServerVerifier::builder(Arc::clone(&root_store))
             .build()
             .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: build server verifier: {e}") })?;
-        let client_config = ClientConfig::builder()
+        let mut client_config = ClientConfig::builder()
             .dangerous()
-            .with_custom_certificate_verifier(Arc::new(RemovalAwareServerVerifier { inner: server_verifier, removed }))
+            .with_custom_certificate_verifier(Arc::new(RemovalAwareServerVerifier { inner: server_verifier, removed, standing }))
             .with_client_auth_cert(vec![node_cert_der], key_der)
             .map_err(|e| GossipError::InvalidField { field: "tls", reason: format!("TLS: build client config: {e}") })?;
+        client_config.resumption = rustls::client::Resumption::disabled();
 
         Ok((server_config, client_config, gateway_server_config, chain_verifier))
     }
@@ -772,11 +786,40 @@ mod imp {
         Ok(())
     }
 
-    /// The CA check, then the removal check, for certificates peers present to this node's server.
+    /// Refuse a certificate whose key a node it names has revoked (post-360 plan row Q's follow-up,
+    /// `docs/design/revocation-authority.md`). The certificate names its node by a `mycelium://{node}`
+    /// URI, and the key is judged against **that node's** standing only: a revocation counts for N
+    /// when an anchored key of N signed it, and N may revoke a key that is not its own (one without
+    /// standing for N), so judging a key against every node's revocations would let one member refuse
+    /// another's handshakes. A certificate naming no node (issued before row Q) is not judged here —
+    /// no revocation of a legacy node's keys counts until it is re-anchored (`deprecations.md` §39).
+    /// Run after the CA chain check, so the URIs read are ones the fleet CA issued.
+    pub(super) fn refuse_if_revoked(
+        standing: &crate::removal::KeyStanding,
+        end_entity: &CertificateDer<'_>,
+    ) -> Result<(), rustls::Error> {
+        if standing.is_empty() {
+            return Ok(());
+        }
+        let Some(id) = super::cert_identity(end_entity.as_ref()) else {
+            return Err(rustls::Error::General("mycelium: a mesh certificate must carry an Ed25519 identity key".into()));
+        };
+        for uri in &id.node_uris {
+            let Some(node) = uri.strip_prefix("mycelium://").and_then(|n| n.parse::<NodeId>().ok()) else { continue };
+            if standing.is_revoked(&node, &id.key) {
+                return Err(rustls::Error::General(format!("mycelium: {node} has revoked this certificate's key")));
+            }
+        }
+        Ok(())
+    }
+
+    /// The CA check, then the removal and revocation checks, for certificates peers present to this
+    /// node's server.
     #[derive(Debug)]
     struct RemovalAwareClientVerifier {
         inner: Arc<dyn rustls::server::danger::ClientCertVerifier>,
         removed: Arc<crate::removal::RemovedSet>,
+        standing: Arc<crate::removal::KeyStanding>,
     }
 
     impl rustls::server::danger::ClientCertVerifier for RemovalAwareClientVerifier {
@@ -797,6 +840,7 @@ mod imp {
         ) -> Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
             let verified = self.inner.verify_client_cert(end_entity, intermediates, now)?;
             refuse_if_removed(&self.removed, end_entity)?;
+            refuse_if_revoked(&self.standing, end_entity)?;
             Ok(verified)
         }
         fn verify_tls12_signature(
@@ -820,11 +864,13 @@ mod imp {
         }
     }
 
-    /// The CA check, then the removal check, for certificates the servers this node dials present.
+    /// The CA check, then the removal and revocation checks, for certificates the servers this node
+    /// dials present.
     #[derive(Debug)]
     struct RemovalAwareServerVerifier {
         inner: Arc<rustls::client::WebPkiServerVerifier>,
         removed: Arc<crate::removal::RemovedSet>,
+        standing: Arc<crate::removal::KeyStanding>,
     }
 
     impl rustls::client::danger::ServerCertVerifier for RemovalAwareServerVerifier {
@@ -838,6 +884,7 @@ mod imp {
         ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
             let verified = self.inner.verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)?;
             refuse_if_removed(&self.removed, end_entity)?;
+            refuse_if_revoked(&self.standing, end_entity)?;
             Ok(verified)
         }
         fn verify_tls12_signature(
@@ -1111,7 +1158,7 @@ mod ca_race_tests {
 
         let cfg = TlsConfig { auto_cert_dir: node_dir.clone(), cert_pem: Some(cert_pem.clone()), key_pem: Some(key_pem.clone()), ca_cert_pem: None };
         let removed = Arc::new(crate::removal::RemovedSet::default());
-        super::imp::load_or_generate(&cfg, &node, Arc::clone(&removed)).expect("a pre-issued cert and the CA certificate are enough");
+        super::imp::load_or_generate(&cfg, &node, Arc::clone(&removed), Default::default()).expect("a pre-issued cert and the CA certificate are enough");
         assert!(!node_dir.join("ca-key.pem").exists(), "the node never minted a CA key");
         assert!(!node_dir.join("ca.lock").exists());
         let on_disk = super::imp::pem_cert_to_der(&std::fs::read_to_string(node_dir.join("ca-cert.pem")).unwrap()).unwrap();
@@ -1119,13 +1166,103 @@ mod ca_race_tests {
 
         // A certificate without its key is refused by name; a missing CA certificate is an error, not a mint.
         let half = TlsConfig { key_pem: None, ..cfg.clone() };
-        let Err(e) = super::imp::load_or_generate(&half, &node, Arc::clone(&removed)) else { panic!("a cert without its key must be refused") };
+        let Err(e) = super::imp::load_or_generate(&half, &node, Arc::clone(&removed), Default::default()) else { panic!("a cert without its key must be refused") };
         assert!(e.to_string().contains("key_pem"), "{e}");
         std::fs::remove_file(node_dir.join("ca-cert.pem")).unwrap();
-        let Err(e) = super::imp::load_or_generate(&cfg, &node, removed) else { panic!("a missing CA cert must be an error, not a mint") };
+        let Err(e) = super::imp::load_or_generate(&cfg, &node, removed, Default::default()) else { panic!("a missing CA cert must be an error, not a mint") };
         assert!(e.to_string().contains("CA cert"), "{e}");
         assert!(!node_dir.join("ca-cert.pem").exists() && !node_dir.join("ca-key.pem").exists(), "nothing minted");
         let _ = std::fs::remove_dir_all(&ca_dir);
         let _ = std::fs::remove_dir_all(&node_dir);
+    }
+
+    /// Drive one handshake between `client` and `server` in memory; `Err` names the side that refused.
+    fn handshake(client: Arc<rustls::ClientConfig>, server: Arc<rustls::ServerConfig>) -> Result<(), String> {
+        let name = rustls::pki_types::ServerName::try_from("127.0.0.1").unwrap().to_owned();
+        let mut c = rustls::ClientConnection::new(client, name).unwrap();
+        let mut s = rustls::ServerConnection::new(server).unwrap();
+        for _ in 0..16 {
+            let mut buf = Vec::new();
+            while c.wants_write() { c.write_tls(&mut buf).unwrap(); }
+            if !buf.is_empty() {
+                s.read_tls(&mut buf.as_slice()).unwrap();
+                s.process_new_packets().map_err(|e| format!("server refused: {e}"))?;
+            }
+            let mut buf = Vec::new();
+            while s.wants_write() { s.write_tls(&mut buf).unwrap(); }
+            if !buf.is_empty() {
+                c.read_tls(&mut buf.as_slice()).unwrap();
+                c.process_new_packets().map_err(|e| format!("client refused: {e}"))?;
+            }
+            if !c.is_handshaking() && !s.is_handshaking() { return Ok(()); }
+        }
+        Err("the handshake did not finish".into())
+    }
+
+    /// **A revoked key's certificate is refused at the mTLS handshake, both ways** (post-360 plan row
+    /// Q's follow-up). Row Q made a revoked key stop verifying at every signature check, but the
+    /// handshake judged only the CA chain and the removal ledger, so the holder of a revoked key and
+    /// its certificate — still CA-valid until it expires — was a connected peer. Now a certificate whose
+    /// key the node it names (`mycelium://{node}`) has revoked is refused, by the server and by a
+    /// dialling client. The plants: the same certificate passes before the revocation, and a revocation
+    /// of that key in **another** node's standing refuses nothing (a node's revocations reach only keys
+    /// judged for it, so one member cannot cut another off). Seen failing first: both handshakes
+    /// completed after the revocation.
+    #[test]
+    fn a_revoked_keys_certificate_is_refused_at_the_handshake_both_ways() {
+        use crate::node_id::NodeId;
+        use crate::removal::{KeyStanding, NodeStanding, RemovedSet};
+        let dir = fresh_dir("revoked-handshake");
+        let cfg = TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() };
+        let (nb, nc, other) = (
+            NodeId::new("127.0.0.1", 9501).unwrap(),
+            NodeId::new("127.0.0.1", 9502).unwrap(),
+            NodeId::new("127.0.0.1", 9503).unwrap(),
+        );
+        let b_standing = Arc::new(KeyStanding::default());
+        let b = super::imp::load_or_generate(&cfg, &nb, Arc::new(RemovedSet::default()), Arc::clone(&b_standing)).unwrap();
+        let c = super::imp::load_or_generate(&cfg, &nc, Arc::new(RemovedSet::default()), Default::default()).unwrap();
+        let c_key = c.verifying_key_bytes();
+        let revoked = |key: [u8; 32]| NodeStanding { anchored: None, revoked: [key].into_iter().collect() };
+
+        assert_eq!(handshake(c.client_config(), b.server_config()), Ok(()), "plant: C dials B before any revocation");
+        assert_eq!(handshake(b.client_config(), c.server_config()), Ok(()), "plant: B dials C before any revocation");
+
+        b_standing.set(&other, revoked(c_key));
+        assert_eq!(handshake(c.client_config(), b.server_config()), Ok(()),
+            "another node's revocation of C's key does not refuse C's certificate");
+
+        b_standing.set(&nc, revoked(c_key));
+        let accept = handshake(c.client_config(), b.server_config());
+        let dial = handshake(b.client_config(), c.server_config());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(accept.as_ref().is_err_and(|e| e.starts_with("server refused") && e.contains("revoked")),
+            "REVOKED: B accepted a certificate for a key C revoked: {accept:?}");
+        assert!(dial.as_ref().is_err_and(|e| e.starts_with("client refused") && e.contains("revoked")),
+            "REVOKED: B dialled C and accepted a certificate for a key C revoked: {dial:?}");
+    }
+
+    /// **A removed member cannot reconnect on a resumed session** (found by the test above). The mesh's
+    /// rustls configs kept their defaults: a client cache of sessions and a server that issued TLS 1.3
+    /// tickets. A resumed session re-runs no certificate verifier, so a member that completed one
+    /// handshake before its removal (closure plan C5) — or before its key's revocation — reconnected
+    /// on the cached session and was admitted. Resumption is now off on both sides. Seen failing first
+    /// with resumption on: the handshake after the removal completed.
+    #[test]
+    fn a_removed_member_cannot_reconnect_on_a_resumed_session() {
+        use crate::node_id::NodeId;
+        use crate::removal::{KeyStanding, RemovedSet};
+        let dir = fresh_dir("removed-resume");
+        let cfg = TlsConfig { auto_cert_dir: dir.clone(), ..TlsConfig::default() };
+        let (nb, nc) = (NodeId::new("127.0.0.1", 9511).unwrap(), NodeId::new("127.0.0.1", 9512).unwrap());
+        let b_removed = Arc::new(RemovedSet::default());
+        let b = super::imp::load_or_generate(&cfg, &nb, Arc::clone(&b_removed), Arc::new(KeyStanding::default())).unwrap();
+        let c = super::imp::load_or_generate(&cfg, &nc, Arc::new(RemovedSet::default()), Default::default()).unwrap();
+        assert_eq!(handshake(c.client_config(), b.server_config()), Ok(()), "plant: C connects before its removal");
+        b_removed.remove(&nc, [c.verifying_key_bytes()]);
+        let after = handshake(c.client_config(), b.server_config());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(after.as_ref().is_err_and(|e| e.starts_with("server refused") && e.contains("removed")),
+            "RESUMED: a removed member reconnected on its cached session: {after:?}");
     }
 }

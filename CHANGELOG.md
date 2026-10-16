@@ -9,6 +9,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **A revoked key's certificate is refused at the mTLS handshake, and the mesh no longer resumes TLS sessions**
+  (post-360 plan row Q's follow-up; upgrade note `docs/guide/deprecations.md` §44). Row Q (2.33.0) made a revoked
+  key stop verifying at every signature check, but the handshake judged only the CA chain and the removal ledger,
+  so whoever held a revoked key and its certificate — CA-valid until it expires — stayed a connected peer, its
+  signed frames refused one at a time. Now both sides of a mesh handshake refuse a certificate whose key **the node
+  it names** (`mycelium://{node}`) has revoked, by the revocations this node's fold counted. Only the named node's
+  revocations are read: a node's revocation may name a key that is not its own, so reading every node's would let
+  one member refuse another's handshakes. A certificate naming no node (issued before row Q) is not judged, as no
+  revocation of a legacy node's keys counts. **Found on the way, pre-existing since closure plan C5 (2.15.0):** the
+  mesh's rustls configs kept their defaults, a client session cache and a server issuing TLS 1.3 tickets, and a
+  resumed session re-runs no certificate verifier — so a member that completed one handshake before its **removal**
+  reconnected on the cached session and was admitted at the transport. Resumption is now off on both sides. Tests:
+  `a_revoked_keys_certificate_is_refused_at_the_handshake_both_ways` (seen failing first without the check, and
+  with resumption on), `a_removed_member_cannot_reconnect_on_a_resumed_session` (seen failing first with resumption
+  on), `a_revoked_keys_certificate_is_refused_at_a_peers_handshake` (end to end after
+  `rotate_identity_on_compromise`; seen failing first without the check). **Not closed:** a connection already up
+  when the revocation is counted stays up (its signed frames are refused as before); a pre-row-Q certificate.
+  `mycelium_core::tls::load_or_generate`, `generate_rotation` and `generate_rotation_after` take the key standing
+  (`Arc<KeyStanding>`) after the removed set.
+
 ## [2.34.0] — 2026-10-16
 
 **Security fixes in the dependencies, and the post-360 plan's last identity rows.** Wasmtime 49.0.3 closes

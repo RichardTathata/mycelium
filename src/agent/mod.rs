@@ -1931,7 +1931,7 @@ impl GossipAgent {
         // Post-360 plan row Q: the new certificate is issued strictly after every one of this node's
         // own, so a clock stepped back cannot mint a successor that ranks below its predecessor.
         let floor = revocation::own_newest_issuance(&self.task_ctx);
-        let material = crate::tls::generate_rotation_after(tls_cfg, &self.node_id, Arc::clone(&self.task_ctx.removed), floor)?;
+        let material = crate::tls::generate_rotation_after(tls_cfg, &self.node_id, Arc::clone(&self.task_ctx.removed), Arc::clone(&self.task_ctx.key_standing), floor)?;
         let new_vk = material.verifying_key;
 
         // Post-360 plan row Q: the new key's certificate record, before anything else — the new key's

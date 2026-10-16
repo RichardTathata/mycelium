@@ -172,8 +172,13 @@ A revocation record:
 - unsigned `Data` frames, until row F2 (since then refused at every TLS node, `deprecations.md` §40);
 - anti-entropy entries, which carry no author;
 - writes verified before the revocation arrived (detection, not prevention);
-- the mTLS handshake, which refuses removed members only. The per-node check, which needs the URI SAN this row
-  introduces, is a recorded follow-up.
+- a connection already open when the revocation is counted (its signed frames are refused one by one).
+
+**The mTLS handshake** (row Q's follow-up, after 2.34.0): both sides refuse a certificate whose key the node its URI
+SAN names has revoked (`mycelium-core/src/tls.rs`, `refuse_if_revoked`). Only that node's standing is read — a
+node's revocation may name a key that is not its own, so reading every node's would let one member refuse
+another's handshakes — and a certificate naming no node is not judged. The mesh does not resume TLS sessions, since
+a resumed session re-runs no verifier.
 
 ## 6. Limits, stated where operators read
 
