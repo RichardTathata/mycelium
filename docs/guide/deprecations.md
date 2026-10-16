@@ -1366,6 +1366,8 @@ and one already under way finishes before the sweep.
 `..` or a constructor is unaffected. Code that builds its own `CoreCtx` initialises the field with
 `Arc::default()`.
 
-**Migration.** None for a node. A companion or embedder that writes its own soft state in a periodic loop (one
-re-asserting a key it expects shutdown to retract) should pass the write through `ctx.soft_state_gate.write(|| …)`,
-as `run_kv_persist_task` does.
+**Migration.** None for a node. A companion or embedder that writes its own soft state in a periodic loop, re-asserting a key it
+expects shutdown to retract, should put that write through `ctx.soft_state_gate.write(|| …)`, as
+`run_kv_persist_task` does. Build the payload first and put only the apply and the send inside: `shutdown` waits
+for whatever is inside, so it must not block or await. A panic inside is safe, because the in-flight count is
+restored on unwind.

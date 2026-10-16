@@ -451,6 +451,23 @@ mod tests {
         assert!(a < 1_577_836_800_000 * 1_000, "not Unix milliseconds: {a}");
     }
 
+    /// `write_opacity_key` goes through the soft-state gate: once shutdown has closed it, a requirement
+    /// going unmet writes nothing that could overtake the sweep's tombstone (#628's review, finding 2 —
+    /// the gated sites other than `run_kv_persist_task` had no test).
+    #[test]
+    fn write_opacity_key_writes_nothing_once_the_gate_is_closed() {
+        let port = crate::test_util::alloc_port();
+        let agent = crate::GossipAgent::new(crate::NodeId::new("127.0.0.1", port).unwrap(), crate::GossipConfig::default());
+        let ctx = &agent.task_ctx;
+        let open_key: Arc<str> = Arc::from(format!("sys/load/{}/req/t/open", ctx.node_id).as_str());
+        write_opacity_key(ctx, &open_key);
+        assert!(ctx.kv_state.store.pin().get(&open_key).is_some_and(|e| e.data.is_some()), "an open gate writes");
+        ctx.soft_state_gate.close();
+        let closed_key: Arc<str> = Arc::from(format!("sys/load/{}/req/t/closed", ctx.node_id).as_str());
+        write_opacity_key(ctx, &closed_key);
+        assert!(ctx.kv_state.store.pin().get(&closed_key).is_none(), "a closed gate writes nothing");
+    }
+
     #[test]
     fn parse_cap_key_extracts_components() {
         let key = "cap/127.0.0.1:8080/compute/gpu";

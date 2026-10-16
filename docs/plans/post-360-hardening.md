@@ -899,7 +899,9 @@ worth fixing on its own: the agent card names the gossip port), O and P (after N
   before: `cap-group/{name}` (ownership not readable from the key), `grp/` membership entries and `sys/health/{self}`.
   **The re-assert residual (#627's review, finding 1) is closed (2026-10-16):** shutdown closes
   `CoreCtx::soft_state_gate` before the sweep, so no task re-writes a swept key between the sweep and the signal
-  (`a_fast_reassert_does_not_undo_the_shutdown_sweep`, 10/10 failing before; `deprecations.md` §42). Also
+  (`a_fast_reassert_does_not_undo_the_shutdown_sweep`, every round failing before on `svc/` and `cap/`;
+  `deprecations.md` §42). Only `run_kv_persist_task`'s path and `write_opacity_key` are shown by a test; the
+  emergent-group and load-opacity writes are gated by the same call and not separately tested. Also
   stated in F's §3.5 block: first sighting is trust on first use; with identity proofs off another member's identity
   is writable under the writer's own signature; anti-entropy entries carry no author; role claims, audit records and
   revocation events are signed untagged.

@@ -17,6 +17,13 @@ tasks: `emergent_groups.rs` (two closures), `capability_ops.rs::write_opacity_ke
 `tools/` keys are written once at registration, not re-asserted. Tombstone writes are left ungated (they agree with
 the sweep).
 
-**Tests:** `a_fast_reassert_does_not_undo_the_shutdown_sweep` (`src/lib_tests.rs`, five shutdowns at a 5 ms refresh;
-10/10 shutdowns kept the `svc/` advert at the peer with `close()` toggled off, 15/15 retracted with it — the `cap/`
-half never reproduced at 5 ms), `kv_persist::gate_tests`. Upgrade note `docs/guide/deprecations.md` §42.
+**Tests:** `a_fast_reassert_does_not_undo_the_shutdown_sweep` (`src/lib_tests.rs`, five shutdowns at a 5 ms refresh,
+both keys read raw — `resolve()` drops an advert older than 3 × its interval, which first hid the `cap/` half; with
+`close()` toggled off every round kept both), `a_panicking_soft_state_payload_does_not_wedge_shutdown`,
+`write_opacity_key_writes_nothing_once_the_gate_is_closed`, `kv_persist::gate_tests`. Upgrade note
+`docs/guide/deprecations.md` §42.
+
+**Review (#628), the second transferable part:** a "wait for whoever is inside" gate is only as safe as what runs
+inside it. The first version ran the caller's `payload_fn` inside and restored the count only on a normal return,
+so a panicking payload left `close()` spinning forever, past `shutdown`'s own timeout (reproduced). Now only internal
+apply-and-send runs inside, and an RAII guard restores the count on unwind.

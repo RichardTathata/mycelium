@@ -3119,15 +3119,19 @@ async fn soft_state_with_a_live_handle_at_shutdown_is_retracted_at_the_peers() {
 #[cfg(feature = "tls")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_fast_reassert_does_not_undo_the_shutdown_sweep() {
-    use crate::capability::{Capability, CapFilter};
+    use crate::capability::Capability;
     let mut kept_rounds = Vec::new();
     for round in 0..5 {
         let (a, b, node_a, _node_b, cert_dir) = signed_fleet_pair(&format!("fast-reassert-{round}"), None).await;
         let svc_key = format!("svc/fast-svc/{node_a}");
         let _svc = a.mesh().advertise_persistent("fast-svc", SignalScope::Cluster, Duration::from_millis(5), || Bytes::from_static(b"up"));
         let _cap = a.capabilities().advertise_capability(Capability::new("route", "fast"), Duration::from_millis(5));
+        // Both read as raw keys: `resolve()` drops an advert older than 3 × its refresh interval (15 ms
+        // here), so it would read a re-asserted `cap/` key as gone whether or not the sweep held (#628's
+        // review, finding 2).
+        let cap_key = format!("cap/{node_a}/route/fast");
         let svc_live = || b.kv().get(&svc_key).is_some();
-        let cap_live = || b.capabilities().resolve(&CapFilter::new("route", "fast")).iter().any(|(n, _)| *n == node_a);
+        let cap_live = || b.kv().get(&cap_key).is_some();
         poll_until(|| svc_live() && cap_live(), 5_000).await;
         a.shutdown().await;
         for _ in 0..80 { if !svc_live() && !cap_live() { break; } tokio::time::sleep(Duration::from_millis(25)).await; }
@@ -3136,6 +3140,31 @@ async fn a_fast_reassert_does_not_undo_the_shutdown_sweep() {
         let _ = std::fs::remove_dir_all(&cert_dir);
     }
     assert!(kept_rounds.is_empty(), "B kept A's soft state after A shut down in rounds (round, svc, cap): {kept_rounds:?}");
+}
+
+/// **A soft-state payload that panics does not wedge shutdown** (#628's review, finding 1). The soft-state
+/// gate's in-flight count was restored only on a normal return, and `run_kv_persist_task` ran the
+/// caller's `payload_fn` inside the gate — so a panicking payload left the count raised and the next
+/// `shutdown` spun in `close()` forever, past its own timeout. The caller's closures now run outside the
+/// gate, and the count is restored on unwind. The shutdown runs on a spawned task under a bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_panicking_soft_state_payload_does_not_wedge_shutdown() {
+    let port = alloc_port();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+    a.start().await.unwrap();
+    let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let c = Arc::clone(&calls);
+    let _svc = a.mesh().advertise_persistent("panics", SignalScope::Cluster, Duration::from_millis(5), move || {
+        if c.fetch_add(1, Ordering::SeqCst) == 2 { panic!("the payload panicked on its third call"); }
+        Bytes::from_static(b"up")
+    });
+    poll_until(|| calls.load(Ordering::SeqCst) >= 3, 3_000).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let a2 = Arc::clone(&a);
+    let done = tokio::time::timeout(Duration::from_secs(5), tokio::spawn(async move { a2.shutdown_with_timeout(Duration::from_millis(500)).await })).await;
+    assert!(done.is_ok(), "shutdown did not return after a soft-state payload panicked");
 }
 
 /// **A TLS node refuses an unsigned `Data` frame whatever `kv_require_signed_frames` says** (post-360
