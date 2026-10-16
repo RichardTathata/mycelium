@@ -136,7 +136,7 @@ say *by whom*, and whether the validator is the adversary.
 
 ## The identity-proof window, and a diagnosis that was wrong (2026-09-24)
 
-`require_identity_proofs` defaults to **`true`** since post-360 plan row S (unreleased, after 2.33.0;
+`require_identity_proofs` defaults to **`true`** since post-360 plan row S (2.34.0;
 `docs/guide/deprecations.md` §41). An identity entry this node cannot authenticate is rejected rather
 than accepted-and-flagged. It was first flipped to `true` on 2026-09-23 and reverted the next day.
 **Read the correction first, because the original write-up of this section asserted a cause it had

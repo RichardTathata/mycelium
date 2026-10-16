@@ -53,6 +53,11 @@ recovery: [guide 13 · Cluster topology](../guide/13-cluster-topology.md).
 
 ## TLS / identity (recommended)
 
+This snippet sets up the **development posture**: the fleet CA's private key sits in `auto_cert_dir` on every node,
+so one compromised host can mint a certificate for every node, and the node warns at start unless it runs
+`profile = "dev"`. For production, issue node certificates on a separate CA host (`mycelium tls issue`) and give
+each node `[tls] cert_pem` + `key_pem` ([cert-rotation](cert-rotation.md), [production readiness](production-readiness.md)).
+
 ```rust
 cfg.tls = Some(TlsConfig { auto_cert_dir: "/var/lib/mycelium/tls".into(), ..Default::default() });
 ```

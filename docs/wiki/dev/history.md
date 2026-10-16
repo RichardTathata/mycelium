@@ -22,7 +22,7 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
-## Post-360 row F2: the refusal unconditional — 2026-10-13 (#624, unreleased)
+## Post-360 row F2: the refusal unconditional — 2026-10-13 (#624, released in 2.34.0)
 
 A TLS node refuses an unsigned KV `Data` frame and a bare (pre-2.33) KV `SignedData` signature whatever
 `kv_require_signed_frames` says; the setting is a retired no-op (`#[deprecated]`, warned at `start()` when set); row F's
@@ -30,6 +30,20 @@ window counters stay at zero; `kv_untagged_signatures_refused` is new; `mesh.sig
 `secure-single-domain` rev 5 requires it. The sealed-identity and certificate-record exemptions stay. The anti-entropy
 residual is restated, not closed (a signed `SyncEntry` is a wire change). Upgrade note `deprecations.md` §40: upgrade
 from 2.33.x, not 2.32. Record: [`.log/2026-10-13-f2-refusal-unconditional.md`](.log/2026-10-13-f2-refusal-unconditional.md).
+
+## v2.34.0 release — 2026-10-16 (tag `v2.34.0`) — the identity rows and the dependency advisories
+
+**#621** the A2A agent card names the gateway's `/a2a` endpoint, not the gossip port (row N's standalone defect);
+**#622** a node holding the fleet CA key warns at start (T); **#624** a TLS node refuses an unsigned KV frame and a
+bare KV signature unconditionally, `kv_require_signed_frames` retired (F2); **#623** identity proofs required by
+default — a peer's keys merged only from its sealed record, `GOSSIP_REQUIRE_IDENTITY_PROOFS` strict (S); **#625**
+wasmtime 49.0.3 and rustls 0.23.46 (seventeen advisories published 2026-10-14; the high one, a WASI filesystem
+escape, unreachable through the host, which preopens no directory); **#626** CI audits every tracked lockfile;
+**#627** shutdown sweeps `svc/`, `tools/` and `gcap/` with the rest; **#628** shutdown closes the soft-state gate
+before it sweeps, so no re-assert overtakes it ([runtime-invariants](architecture/runtime-invariants.md)); **#629**
+a capability name is one key segment at every door, the gossip-fed group projector included. Companions unchanged.
+Wire v12 unchanged. Upgrade notes `deprecations.md` §40–§43. Release record:
+[`.log/2026-10-16-release-v2.34.0.md`](.log/2026-10-16-release-v2.34.0.md).
 
 ## v2.33.0 release — 2026-10-13 (tag `v2.33.0`) — post-360 wave 2: revocation at every verifier, wire and crypto with a window
 

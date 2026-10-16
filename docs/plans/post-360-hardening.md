@@ -1,8 +1,8 @@
 # Post-360 hardening — the next batch, and consensus as a protocol, not a service
 
-**Status:** adopted 2026-10-10, rev 1.9 (2026-10-13: the v2.33.0 cut — every row since 2.32.0 closed on evidence in §3.5, and the table's state markers moved; rev 1.8, 2026-10-12: Φ closed; P5, J, I, H, E and F delivered; rows K, L, M added from the Strands Box comparison; rows N, O, P added — Strands agents on Mycelium, after an `a2a-sdk` probe; Q delivered; rows S and T added). **R0 was released as v2.32.0 (2026-10-11)**, delivering rows **G, P3, C, D,
-P1, A (with C1, C2), B (as narrowed 2026-10-11) and P2 (without migration, as decided 2026-10-11)**; R0's private re-pin landed as private #29. **v2.33.0 (cut 2026-10-13) delivers rows Φ (#607), P2's migration (#606, with #604 and #605), J (#608), P5 (#610), H (#609), E (#613), F (#611, with its window — the flip is F2), Q (#616) and, in the private repository on that pin, I (private #30)**; its private re-pin landed as private #31 — each closed on evidence in §3.5. Open:
-F2, K, L, M, N, O, P, S (T delivered after 2.33.0, unreleased). It follows the 2026-10-09 360 review and the eleven
+**Status:** adopted 2026-10-10, rev 1.10 (2026-10-16: the v2.34.0 cut — F2, S and T closed on evidence in §3.5 by an independent reviewer, T's block written then, its `dev` log line *not built*; rev 1.9, 2026-10-13: the v2.33.0 cut — every row since 2.32.0 closed on evidence in §3.5, and the table's state markers moved; rev 1.8, 2026-10-12: Φ closed; P5, J, I, H, E and F delivered; rows K, L, M added from the Strands Box comparison; rows N, O, P added — Strands agents on Mycelium, after an `a2a-sdk` probe; Q delivered; rows S and T added). **R0 was released as v2.32.0 (2026-10-11)**, delivering rows **G, P3, C, D,
+P1, A (with C1, C2), B (as narrowed 2026-10-11) and P2 (without migration, as decided 2026-10-11)**; R0's private re-pin landed as private #29. **v2.33.0 (cut 2026-10-13) delivers rows Φ (#607), P2's migration (#606, with #604 and #605), J (#608), P5 (#610), H (#609), E (#613), F (#611, with its window — the flip is F2), Q (#616) and, in the private repository on that pin, I (private #30)**; its private re-pin landed as private #31 — each closed on evidence in §3.5. **v2.34.0 (cut 2026-10-16) delivers rows F2 (#624), S (#623) and T (#622)**, with three §3.6 follow-ups (#627–#629) and
+the wasmtime/rustls advisories (#625). Open: K, L, M, N, O, P. It follows the 2026-10-09 360 review and the eleven
 PRs that addressed its must-do list (#582–#592, private #28); those are recorded in the CHANGELOG and are not
 repeated here. Rows close on evidence (verification policy rule 2): a row is closed by quoting each promise next to
 the code or test that delivers it, and a promise that is not delivered is written *not built*.
@@ -78,7 +78,7 @@ Four places strain that line today, and the rows in §3 address each:
 | **D** — *delivered 2.32.0 (#599), §3.5* | WASM execution limits | epoch interruption bounds a guest call; guest code runs off the runtime's worker threads; a trap does not recompile the component on every call | R0 |
 | **E** — *delivered 2.33.0 (#613), §3.5* | Gateway remainder | client-supplied timer periods (`interval_secs`, `lease_secs`) bounded; the log-group subscribe keeps the core's `(hlc, key)` tiebreak and saves the group offset only after the entry is sent (today it saves first, so an entry in flight when a stream drops is never re-sent — found by row G); the mailbox deletes an entry only after the client has it (today it tombstones on entering the 256-slot channel, so a dropped stream loses queued events — #595's review); prompt keys cannot alias across `ns`/`name` (`prompts/{ns}/{name}` with a `/` in either); the caller envelope binds freshness (a replay inside the window *not built* — no nonce cache) | P5 |
 | **F** — *delivered 2.33.0 (#611), §3.5 (window; the flip is F2)* | Wire and crypto, one MINOR with a window | a TLS node refuses unsigned `Data` frames; the removal check reads a peer's key structurally, not by byte-scanning the certificate; KV `SignedData` is domain-tagged; each change carries a mixed-fleet window and an upgrade note in the 2.30.0 shape; the #585 and #587 windows close in the same MINOR (#587 opened none — §3.5 F) | R0, ideally its own release |
-| **F2** — *delivered (#624), unreleased, §3.5* | The refusal unconditional (the MINOR after F) | a TLS node refuses an unsigned `Data` frame and a bare KV `SignedData` signature whatever `kv_require_signed_frames` says (the setting retired or kept as a no-op, stated); the window counters `kv_unsigned_frames_accepted` and `kv_untagged_signatures` stop rising or are removed, stated in `deprecations.md`; `mesh.signed_writes` resolves `enforced` under `[tls]` and is considered for `secure-single-domain`'s required set; the anti-entropy residual (an unsigned, authorless `StateResponse`) is either closed or restated | F released |
+| **F2** — *delivered 2.34.0 (#624), §3.5* | The refusal unconditional (the MINOR after F) | a TLS node refuses an unsigned `Data` frame and a bare KV `SignedData` signature whatever `kv_require_signed_frames` says (the setting retired or kept as a no-op, stated); the window counters `kv_unsigned_frames_accepted` and `kv_untagged_signatures` stop rising or are removed, stated in `deprecations.md`; `mesh.signed_writes` resolves `enforced` under `[tls]` and is considered for `secure-single-domain`'s required set; the anti-entropy residual (an unsigned, authorless `StateResponse`) is either closed or restated | F released |
 | **G** — *delivered 2.32.0 (#595), §3.5* | SDKs | Python whole-second timeouts and a non-truncating tuple `take`; path segments escaped; TypeScript `SupersededError`; one `scatterGather` default, documented; SSE reconnect is designed with a gateway resume point or recorded as not built | R0 |
 | **H** — *delivered 2.33.0 (#609), §3.5* | Companions | the commitment deadline judged on the log's clock, not the offerer's — **delivered as the declarer's signed close** (no clock in the log is offerer-proof, §3.5); `award_of` verifies before it reports (the declarer pinned by the caller; the unverified path stated, *not built*); the reason blob store bounded in total (eviction *not built*); caller-chosen `run_id` validated | R0 |
 | **I** — *delivered with 2.33.0 (private #30), §3.5; Cedar narrower* | Private repo P3s | RA5 correction chains and competing corrections; attempt keys carry the operation id; a lock-order table; the outbox directory fsynced at create; Cedar policies schema-validated at load; the CI pin check refuses `[patch]`, `rev =` and multi-line tables | R0's re-pin |
@@ -90,8 +90,8 @@ Four places strain that line today, and the rows in §3 address each:
 | **O** | A Strands session store on Mycelium | a companion package (Python, beside `langgraph-checkpoint-mycelium`) implementing Strands Agents' `SessionManager` over the Mycelium Python SDK, so an agent's conversation and state, and a swarm's shared memory, live in the fleet's KV rather than a file or a bucket; a save returns the SDK's receipt and its docs say which rung it names (a local application, not replication — the checkpointer's wording); an incomplete or unreadable session is an error, never an empty one; concurrent agents in one session do not lose each other's writes, or the limit is stated; its live suite runs in CI against a real node; pinned to a Strands release and re-checked when Strands changes the interface | — (N for the cross-host demo) |
 | **P** | A Strands fleet, demonstrated | a runnable example, in CI like the co-op demos, in which Strands agents on three Mycelium nodes plan one shared task (a constructive domain — food redistribution or a microgrid), keep their session and swarm memory in the fleet through O, and call fleet skills through `/a2a` (N): a call outside an agent's mandate is refused and the refusal is in the evidence journal; one node is stopped and the work resumes on another from the stored session; the README states what Strands provides and what Mycelium adds, and which properties the run shows versus which it does not | N, O |
 | **Q** — *delivered 2.33.0 (#616), §3.5* | Revocation reaches every verifier | a key a node has revoked (`rotate_identity_on_compromise`, `sys/revocation/`) is filtered from the `peer_keys`-based KV `SignedData` verifier, from identity-proof chaining (`validate_and_merge_identity`'s trusted signer) and from the unsigned identity exemption (`connection::self_authenticating_identity`), not only from consensus and `known_verifying_keys`; a test that a `SignedData` signed by a revoked key is refused at a peer that has seen the revocation; `src/agent/revocation.rs`'s `revoke_key` doc made true (corrected in #611 to say what holds today) | — (independent of F2) |
-| **S** — *delivered (#623), unreleased; §3.5* | Identity proofs on by default | `require_identity_proofs` defaults to `true` (today `false`, `mycelium-core/src/config.rs`; the `secure-single-domain` profile already requires it as `id.proofs_required`): a bare `sys/identity/{N}` key list without a proof is refused everywhere a node's keys are learned, closing the identity-poisoning residual rows F and Q state — a member writing its own key into another's identity, which still reaches the verify-only history set (forged audit history, a steered checkpoint anchor) and fully impersonates a node on a legacy certificate; a mixed-fleet window in the 2.30.0 shape (the MINOR that flips it says so; a node from before 2.3.0, which cannot prove, is cut off until upgraded, and `false` stays available as an explicit opt-out for that window and for TLS-less development fleets, where the setting is inert); an upgrade note in `deprecations.md`; the guarantee `id.proofs_required` resolves `enforced` by default; the 2.14.0 attempt that was reverted is re-examined first (the failure it was blamed on was not its doing) | — (best in the MINOR with F2) |
-| **T** — *delivered (#622), unreleased* | Say loudly when the CA key is on the node | the dev posture keeps the fleet CA's private key on every node (`auto_cert_dir`'s `ca-key.pem`, `mycelium-core/src/tls.rs`), so one compromised host yields every node's identity and revocation (row Q) cannot recover it; today this is only the guarantee `id.ca_key_off_node` resolving unmet, one line among the start-time report, worded for member removal alone. Promises: at `start()` a node that holds the CA key and runs no profile, or a profile other than `dev`, logs one prominent warning naming the consequence (a single host compromise compromises every identity in the fleet; key revocation does not recover it) and the remedy (`mycelium tls issue` on a separate CA host, then `[tls] cert_pem` + `key_pem` on the node — `docs/operations/cert-rotation.md`); the `id.ca_key_off_node` guarantee text names identity compromise and revocation, not only removal (catalogue regenerated); `dev` states the trade-off rather than warning; the quick-start and production-readiness pages say which posture they set up; a test pins the warning on and off | — |
+| **S** — *delivered 2.34.0 (#623), §3.5* | Identity proofs on by default | `require_identity_proofs` defaults to `true` (today `false`, `mycelium-core/src/config.rs`; the `secure-single-domain` profile already requires it as `id.proofs_required`): a bare `sys/identity/{N}` key list without a proof is refused everywhere a node's keys are learned, closing the identity-poisoning residual rows F and Q state — a member writing its own key into another's identity, which still reaches the verify-only history set (forged audit history, a steered checkpoint anchor) and fully impersonates a node on a legacy certificate; a mixed-fleet window in the 2.30.0 shape (the MINOR that flips it says so; a node from before 2.3.0, which cannot prove, is cut off until upgraded, and `false` stays available as an explicit opt-out for that window and for TLS-less development fleets, where the setting is inert); an upgrade note in `deprecations.md`; the guarantee `id.proofs_required` resolves `enforced` by default; the 2.14.0 attempt that was reverted is re-examined first (the failure it was blamed on was not its doing) | — (best in the MINOR with F2) |
+| **T** — *delivered 2.34.0 (#622), §3.5* | Say loudly when the CA key is on the node | the dev posture keeps the fleet CA's private key on every node (`auto_cert_dir`'s `ca-key.pem`, `mycelium-core/src/tls.rs`), so one compromised host yields every node's identity and revocation (row Q) cannot recover it; today this is only the guarantee `id.ca_key_off_node` resolving unmet, one line among the start-time report, worded for member removal alone. Promises: at `start()` a node that holds the CA key and runs no profile, or a profile other than `dev`, logs one prominent warning naming the consequence (a single host compromise compromises every identity in the fleet; key revocation does not recover it) and the remedy (`mycelium tls issue` on a separate CA host, then `[tls] cert_pem` + `key_pem` on the node — `docs/operations/cert-rotation.md`); the `id.ca_key_off_node` guarantee text names identity compromise and revocation, not only removal (catalogue regenerated); `dev` states the trade-off rather than warning; the quick-start and production-readiness pages say which posture they set up; a test pins the warning on and off | — |
 
 ### 3.4 · Documentation follow-through
 
@@ -674,7 +674,7 @@ PR.
   `configuration.md`'s `kv_require_signed_frames` row; the identity-authentication and federated-domains records
   amended; wiki `dev/security.md`; `docs/wiki/dev/.log/2026-10-12-f-wire-crypto.md`.
 
-**F2 — The refusal unconditional (#624, unreleased).** Read against the branch's code; the doors enumerated first
+**F2 — The refusal unconditional (#624, released in 2.34.0).** Read against the branch's code; the doors enumerated first
 (`grep -rn 'WireMessage::Data\b\|WireMessage::SignedData\|StateResponse\|apply_inbound('` over `mycelium-core/src`
 and `src` — one `Data` arm, one `SignedData` arm, one `StateResponse` arm in `connection.rs`, the codec, the fuzz
 harness's decode-only `wire_frame_apply`; `grep -rn 'kv_require_signed_frames\|KV_REQUIRE_SIGNED_FRAMES'` — the field,
@@ -699,7 +699,7 @@ either counter).
   (stated, `deprecations.md` §40).
 - *The window counters stop rising or are removed, stated in `deprecations.md`* — **stop rising**: both
   `TransportBounds` fields kept and reported on `GET /stats` at zero (nothing raises them; the API-shape rule), their
-  metrics no longer emitted; asserted at zero in the two refusal tests and on `/stats`
+  metrics no longer emitted; asserted at zero in the two refusal tests, and still reported on `/stats` (`the_row_f_window_counters_are_on_gateway_stats`)
   (`the_row_f_window_counters_are_on_gateway_stats`); §40 and the §35 closure note.
 - *`mesh.signed_writes` resolves `enforced` under `[tls]`* — rev 2, on `[tls]` alone, names the bare signature;
   `mesh_signed_writes_is_enforced_under_tls_by_default` (seen `not_configured` on 4251d50a). *Considered for
@@ -794,7 +794,7 @@ unproduced), the row closes as follows. The verifiers were enumerated with
   node without persistence forgets a revocation hidden while it was down until the owner republishes; the fold walks
   every node with records on each change (bounded per node, not per-node incremental).
 
-**S — Identity proofs on by default (#623, unreleased).** Read against the branch's code. The doors were
+**S — Identity proofs on by default (#623, released in 2.34.0).** Read against the branch's code. The doors were
 enumerated with `git grep -n "require_identity_proofs\|resolve_identity_record\|validate_and_merge_identity\|merge_peer_keys\|kv_ns::IDENTITY"`
 over `src mycelium-core/src mycelium-*/src`: a node's keys are learned from gossip at two sites, `prewarm_peer_keys`
 and `start_identity_watcher`, both through `identity_resync` → `resolve_identity_record` →
@@ -810,7 +810,7 @@ Now built from `revocation::own_history` — `rotation_does_not_launder_a_poison
 certificate twin is a guard, since a rotation re-anchors the node). Re-grep (`"sys/identity/`, `format!("sys/identity/{`,
 `kv_ns::IDENTITY`): `lifecycle.rs` start path — writes only, history from `own_history_at_start`; the identity watcher
 and prewarm — gated by the flag; `mod.rs` rotation — fixed; `mycelium-agentfacts` `crdt.rs:161` — order only, filtered
-by trusted keys; `connection.rs:307` (the unsigned exemption's `Stale` check) — reads the stored bare list only as keys
+by trusted keys; `connection::self_authenticating_identity` (the unsigned exemption's `Stale` check, `connection.rs:308`) — reads the stored bare list only as keys
 a new record must *contain*, so it grants nothing, but a member's planted bare list makes a genuine unsigned sealed
 record count as `Stale` at gossip (refused; it still arrives by anti-entropy) — a liveness residual since 2.33.0,
 read from the code and not reproduced, recorded, not changed here; the rest are tests, examples' wait conditions and the tripwire's prefix list.
@@ -860,8 +860,44 @@ read from the code and not reproduced, recorded, not changed here; the rest are 
   its pre-issued certificate, which the test helpers do not do.
 - **Not built, stated:** first sighting of a node never seen stays trust on first use (anchors close it); a pre-2.3.0
   peer is not learned from gossip; a planted bare list can make a genuine unsigned sealed record `Stale` at gossip
-  (`connection.rs:307`, anti-entropy still delivers it); an un-upgraded 2.33 peer keeps proofs off until it is upgraded or configured, so
+  (`connection::self_authenticating_identity`, anti-entropy still delivers it); an un-upgraded 2.33 peer keeps proofs off until it is upgraded or configured, so
   the residual stays open *at it*; anti-entropy entries carry no author.
+
+**T — Say loudly when the CA key is on the node (#622, released in 2.34.0).** Read against the merged code at the
+2.34.0 cut by an independent reviewer. The doors enumerated first (`git grep -n 'log_report\|ca_key_on_node_warning\|CA_KEY_ON_NODE_WARNING\|id.ca_key_off_node'`):
+one emission site, `guarantee::log_report`, called once from `start()` (`src/agent/lifecycle.rs:192`) after the
+report is resolved and before the profile check (so a `secure-single-domain` node that will refuse still logs it
+first); no other caller.
+- *At `start()` a node that holds the CA key and runs no profile, or a profile other than `dev`, logs one prominent
+  warning* — `guarantee::ca_key_on_node_warning` (`src/agent/guarantee.rs:542`) fires when `id.ca_key_off_node`
+  resolves `not_configured` for a reason other than missing `[tls]`: no `cert_pem` (so `start()` re-signs with the CA
+  key), `ca-key.pem` in `auto_cert_dir`, or no CA yet (`start()` is about to mint one here) (`guarantee.rs:829-835`).
+  Silent only when the profile is explicitly selected as `dev` (an unset profile resolves to `dev` unselected and
+  warns). `log_report` emits it once per `start()` at `WARN`, first in the report block (`guarantee.rs:551-553`).
+- *… naming the consequence and the remedy* — `CA_KEY_ON_NODE_WARNING` (`guarantee.rs:534`): one compromised host
+  can mint a certificate for every node and key revocation cannot recover a stolen identity; issue node certificates
+  on a separate CA host with `mycelium tls issue` and give the node `[tls] cert_pem` + `key_pem`
+  (`docs/operations/cert-rotation.md`).
+- *The `id.ca_key_off_node` guarantee text names identity compromise and revocation, not only removal (catalogue
+  regenerated)* — `guarantee.rs:821-823`; `docs/reference/guarantee-catalogue.md:20`, `.json:119-128`, gated by
+  `the_checked_in_guarantee_catalogue_is_current`.
+- *`dev` states the trade-off rather than warning* — the warning is suppressed under an explicit `dev`; the log then
+  carries only the generic `profile dev — nothing required; this is not a production profile` (`guarantee.rs:562`,
+  which predates T) and `id.ca_key_off_node`'s `not_configured` line. The trade-off is stated in the documentation
+  (`docs/guide/09-security.md:96-100`). *A dev-specific log line stating the trade-off: not built.*
+- *The quick-start and production-readiness pages say which posture they set up* — there is no page named
+  quick-start; the TLS quick-start is guide 09's snippet, which names `TlsConfig::default()` the development posture
+  and the off-node certificate the production one (`docs/guide/09-security.md:96-100`); production-readiness names
+  the warning and when `dev` silences it (`docs/operations/production-readiness.md:68`). The deployment page's
+  "TLS / identity" snippet, which sets up the CA-key-on-node posture, says so since the 2.34.0 cut
+  (`docs/operations/deployment.md`).
+- *A test pins the warning on and off* — `a_node_holding_the_ca_key_is_warned_unless_it_chose_dev`
+  (`guarantee.rs:1100`, seen failing with the check stubbed out): no profile with a CA key → warned, the text naming
+  "every node" and "mycelium tls issue"; `secure-single-domain` → warned; explicit `dev` → none; no `[tls]` → none.
+  It tests the predicate, not the emission: that `log_report` logs at `WARN` is not asserted, and the quiet case of
+  a pre-issued certificate with no CA key on the node is not asserted.
+- **Not built, stated:** the CA key stays on every node in the development posture (the warning says so; it does
+  not move the key); no dev-specific log line for the trade-off; the warning's emission is not asserted by a test.
 
 ### 3.6 · State of play and the next iteration (2026-10-12)
 
@@ -872,11 +908,11 @@ CI on F also caught a co-op demo regression its own changes caused, fixed in the
 queues before the shutdown signal), and N, O, P recorded by #614 with the `a2a-sdk` probe's evidence
 (`docs/plans/external/2026-10-12-a2a-sdk-probe/`).
 
-**Delivered since (unreleased):** F2 (#624 — the unsigned-frame and bare-signature refusal unconditional, `kv_require_signed_frames` retired, `secure-single-domain` rev 5; §3.5), T (#622), S (#623 — identity proofs required by default; §3.5); the wasmtime 49.0.3 / rustls 0.23.46 advisories (#625).
+**Delivered in v2.34.0 (2026-10-16):** F2 (#624 — the unsigned-frame and bare-signature refusal unconditional, `kv_require_signed_frames` retired, `secure-single-domain` rev 5; §3.5), T (#622), S (#623 — identity proofs required by default; §3.5); the wasmtime 49.0.3 / rustls 0.23.46 advisories (#625).
 
 **Not started:** K (policy over history — decide §5's fleet question first), L (credentials attached at egress), M
 (activation commands confined), N (A2A at the current specification — independent of E and F, and it carries a defect
-worth fixing on its own: the agent card names the gossip port), O and P (after N), and §5's inference-routing question. (Q, revocation at every verifier, is delivered — #616, §3.5; S, identity proofs on by default, is delivered unreleased — #623, §3.5.)
+worth fixing on its own: the agent card names the gossip port), O and P (after N), and §5's inference-routing question. (Q, revocation at every verifier, is delivered — #616, §3.5; S, identity proofs on by default, is delivered in 2.34.0 — #623, §3.5.)
 
 **Follow-ups recorded as not built in delivered rows (each in its §3.5 block):**
 - **H:** carry each named offer's signed bytes inside the close and award from that copy (today a member who deletes a
@@ -927,8 +963,9 @@ live policy; the privacy router) ·
 
 **Release:** v2.33.0 is cut on 2026-10-13 (branch `release/v2.33.0`; tagged only on the maintainer's word) with the rows merged
 since v2.32.0 — P2's migration #606 (with #604, #605), Φ, P5, J, H, E, F and Q, and the private row I on its pin;
-upgrade notes `deprecations.md` §34–§39. The next MINOR carries F2 (§40; best with S). Recorded by F2 as not built: an
-authenticated anti-entropy entry (a wire change).
+upgrade notes `deprecations.md` §34–§39. **v2.34.0 is cut on 2026-10-16** (branch `release/v2.34.0`; tagged only on the
+maintainer's word) with F2, S and T, the follow-ups #627–#629 and #625; upgrade notes §40–§43. Recorded by F2 as not
+built: an authenticated anti-entropy entry (a wire change).
 
 ## 4 · Decisions taken
 
