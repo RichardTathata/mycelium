@@ -17,7 +17,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   so whoever held a revoked key and its certificate — CA-valid until it expires — stayed a connected peer, its
   signed frames refused one at a time. Now both sides of a mesh handshake refuse a certificate whose key its owner revoked by a
   revocation this node **counted** — judged while the key was anchored for the owner (a CA-issued certificate record
-  naming the node), and kept for good after, whatever the anchored set's cap or a saturated node later drops
+  naming the node), and kept for good after (across a restart, through the journal under `[persistence]`, 64 per node), whatever the anchored set's cap or a saturated node later drops
   (`NodeStanding::counted`). A certificate naming its node (`mycelium://{node}`) is judged against that node; one naming
   no node (issued before row Q, valid to 2099) against whichever node counted a revocation of its key — a revocation
   counts only against a key anchored for the revoker, and a key is anchored only for the node its certificate names,

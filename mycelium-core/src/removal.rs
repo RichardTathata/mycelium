@@ -85,7 +85,7 @@ pub struct NodeStanding {
     pub revoked: std::collections::HashSet<[u8; 32]>,
     /// The keys of [`revoked`](Self::revoked) whose revocation was **counted against a key with
     /// standing** — never a provisional one (of a key whose certificate record this node has not
-    /// judged). Kept for good, even once the key leaves [`anchored`](Self::anchored) (the newest-16 cap,
+    /// judged). Kept for good (across a restart, through the journal under `[persistence]`), even once the key leaves [`anchored`](Self::anchored) (the newest-16 cap,
     /// a saturated node). What the mTLS handshake refuses (post-360 plan row Q's follow-up).
     pub counted: std::collections::HashSet<[u8; 32]>,
 }

@@ -789,7 +789,8 @@ mod imp {
     /// Refuse a certificate whose key has been revoked by its owner (post-360 plan row Q's follow-up,
     /// `docs/design/revocation-authority.md`): a key its node has revoked by a revocation this node
     /// **counted** — one judged against the key while it was anchored for that node (a CA-issued
-    /// certificate record naming it), kept for good after (`NodeStanding::counted`).
+    /// certificate record naming it), kept for good after (`NodeStanding::counted`; across a restart, through
+    /// the journal under `[persistence]`).
     ///
     /// - A certificate naming its node (`mycelium://{node}`) is judged against that node's standing.
     /// - A certificate naming none (issued before row Q) is judged against whichever node counted a

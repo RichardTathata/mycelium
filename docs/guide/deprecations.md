@@ -1414,7 +1414,7 @@ segment: for a model id such as `org/model`, use a separator other than `/`. Pic
 
 **What changes.** Both sides of a mesh TLS handshake now refuse a certificate whose Ed25519 key its owner revoked by a
 revocation this node counted — judged while the key was anchored for the owner (a certificate record naming the node)
-and kept for good after (`NodeStanding::counted`, in `CoreCtx::key_standing`). The owner is the node the certificate's
+and kept for good after (across a restart, through the journal under `[persistence]`, 64 per node) (`NodeStanding::counted`, in `CoreCtx::key_standing`). The owner is the node the certificate's
 `mycelium://{node}` URI names, or, for a certificate issued before row Q with no URI, the node that counted a
 revocation of its key. Before,
 the handshake judged the fleet CA chain and the removal ledger only, so the holder of a revoked key and its

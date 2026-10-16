@@ -177,7 +177,7 @@ A revocation record:
 **The mTLS handshake** (row Q's follow-up, after 2.34.0): both sides refuse a certificate whose key its owner
 revoked by a revocation this node **counted** (`mycelium-core/src/tls.rs`, `refuse_if_revoked`;
 `NodeStanding::counted`, `KeyStanding::is_counted_revoked`) — judged while the key was anchored for the owner, and kept
-for good after, so neither the newest-16 cap on anchored keys nor saturation lets a long-revoked key back in. The owner
+for good after (across a restart, through the journal under `[persistence]`, 64 per node), so neither the newest-16 cap on anchored keys nor saturation lets a long-revoked key back in. The owner
 is the node the URI SAN names or, for a URI-less certificate, the node that counted a revocation of its key. Counted
 revocations only: a node's revocation may name a key without standing for it, so reading those would let one member refuse
 another's handshakes, and a provisional revocation would cut a freshly rotated node off until its certificate record
