@@ -671,6 +671,20 @@ impl NodeCapabilityConfig {
     /// Every refusal the loader makes, by name. Called by [`load_from_file`](Self::load_from_file)
     /// after parsing; call it yourself on a config built in code.
     pub fn validate(&self) -> Result<(), GossipError> {
+        // Every (ns, name) the file would write as a key, and every group name (#613's review, finding 6).
+        let named = self.capabilities.iter().map(|c| ("capability", c.ns.as_str(), c.name.as_str()))
+            .chain(self.requirements.iter().map(|r| ("requirement", r.ns.as_str(), r.name.as_str())))
+            .chain(self.groups.iter().flat_map(|g| g.provides.iter().map(|p| ("group.provides", p.ns.as_str(), p.name.as_str()))));
+        for (section, ns, name) in named {
+            if let Some(problem) = crate::capability::capability_name_problem(ns, name) {
+                return Err(invalid(section, format!("{ns:?}/{name:?}: {problem}")));
+            }
+        }
+        for g in &self.groups {
+            if let Some(problem) = crate::capability::capability_group_name_problem(&g.name) {
+                return Err(invalid("group", format!("{:?}: {problem}", g.name)));
+            }
+        }
         for c in &self.capabilities {
             if !(1..=MAX_TIMER_PERIOD_SECS).contains(&c.ttl_secs) {
                 return Err(invalid("capability", format!(

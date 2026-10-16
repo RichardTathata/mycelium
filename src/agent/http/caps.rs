@@ -55,6 +55,12 @@ pub(super) async fn gw_cap_advertise(
 
     let ns   = match body["ns"].as_str()   { Some(s) => s.to_string(), None => return (StatusCode::BAD_REQUEST, Json(json!({"error":"missing ns"}))).into_response() };
     let name = match body["name"].as_str() { Some(s) => s.to_string(), None => return (StatusCode::BAD_REQUEST, Json(json!({"error":"missing name"}))).into_response() };
+    if let Some(problem) = crate::capability::capability_name_problem(&ns, &name) {
+        return (StatusCode::BAD_REQUEST, Json(json!({
+            "error": "invalid_capability_name",
+            "message": format!("{ns:?}/{name:?}: {problem}"),
+        }))).into_response();
+    }
     let (interval_secs, lease_secs) = match (timer_secs(&body, "interval_secs"), timer_secs(&body, "lease_secs")) {
         (Ok(i), Ok(l)) => (i.unwrap_or(DEFAULT_INTERVAL_SECS), l),
         (Err(refused), _) | (_, Err(refused)) => return *refused,

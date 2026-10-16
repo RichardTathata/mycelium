@@ -47,8 +47,8 @@ One block per capability the unit advertises.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `ns` | string | required | Capability namespace, e.g. `"llm"`. |
-| `name` | string | required | Capability name, e.g. `"inference"`. |
+| `ns` | string | required | Capability namespace, e.g. `"llm"`. One key segment: refused when empty or holding a `/`. |
+| `name` | string | required | Capability name, e.g. `"inference"`. One key segment, as `ns`; the pair `locality`/`self` is refused (the node's own locality entry). |
 | `probe_url` | string | absent | HTTP GET probed for liveness; a 2xx keeps the capability advertised. Absent means always-alive. Honoured by `run_capability_probes`, not by a stem. |
 | `probe_timeout_secs` | integer | `3` | Probe request timeout, in seconds. |
 | `ttl_secs` | integer | `30` | Re-assertion TTL of the advertisement, in seconds: `1`–`3600` (`MAX_TIMER_PERIOD_SECS`), refused by `validate()` otherwise. |
@@ -72,8 +72,8 @@ What the unit needs: a `CapFilter`, the value `declare_requirement` takes.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `ns` | string | required | Namespace to match. |
-| `name` | string | required | Name to match. |
+| `ns` | string | required | Namespace to match. Refused when empty or holding a `/`. |
+| `name` | string | required | Name to match. Refused when empty or holding a `/`, and the pair `locality`/`self`. |
 | `schema_id` | string | absent | Exact schema id to match. |
 | `attrs` | table of constraints | empty | Per attribute: a bare value means equals; a table names one operator — `eq`, `ne`, `gt`, `gte`, `lt`, `lte`. Two operators in one table are refused. |
 | `ranking` | table | absent | `attribute` (string) and `order` (`"ascending"` or `"descending"`). Any other order is refused. |
@@ -98,10 +98,10 @@ membership intent is **governed**, and `POST /gateway/units/declare` refuses to 
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `name` | string | required | Group name. Refused when empty. |
+| `name` | string | required | Group name. Refused when empty or holding a `/`. |
 | `filter` | table | required | Who may join: the same fields as a `[[requirement]]` (`ns`, `name`, `schema_id`, `attrs`, `ranking`). |
 | `topology_policy` | table | absent | How a group's quorum spreads across locality levels: `prefer_shared_depth` (integer, default `0`), `spread_depth` (integer, absent), `spread_min_distinct` (integer, default `1`), `enforcement` (`"Soft"` or `"Hard"`, default `"Soft"`). |
-| `provides` | array of tables | empty | Capabilities the group asserts once it has members: `ns`, `name`, `schema_id`, `attrs` (values, as in `[[capability]]`). |
+| `provides` | array of tables | empty | Capabilities the group asserts once it has members: `ns`, `name`, `schema_id`, `attrs` (values, as in `[[capability]]`; the same name rules). |
 | `requires` | array of tables | empty | Filters the group needs, each with the `[[requirement]]` fields. |
 
 ```toml

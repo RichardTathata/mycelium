@@ -428,6 +428,37 @@ impl CapFilter {
     }
 }
 
+/// Why `(namespace, name)` cannot name a capability or a requirement, or `None` when it can.
+///
+/// The pair is two segments of `cap/{node}/{ns}/{name}` (and of `req/…` and
+/// `gcap/{group}/{ns}/{name}/{node}`): an empty segment or one holding a `/` builds a key no reader
+/// parses (`parse_cap_key` refuses it), and `("locality", "self")` *is* the node's own locality entry,
+/// `cap/{node}/locality/self`, which holds a `LocalityPath`, not a `Capability` (#613's review,
+/// finding 6). Every door that writes one of these keys refuses a pair this names a problem for.
+pub fn capability_name_problem(namespace: &str, name: &str) -> Option<&'static str> {
+    if namespace.is_empty() || name.is_empty() {
+        Some("ns and name must not be empty")
+    } else if namespace.contains('/') || name.contains('/') {
+        Some("ns and name must contain no '/' (each is one segment of cap/{node}/{ns}/{name})")
+    } else if namespace == "locality" && name == "self" {
+        Some("locality/self is reserved: cap/{node}/locality/self is the node's own locality entry")
+    } else {
+        None
+    }
+}
+
+/// Why `group` cannot name a capability group, or `None` when it can: it is one segment of
+/// `cap-group/{group}` and `gcap/{group}/{ns}/{name}/{node}`, so it must be non-empty and hold no `/`.
+pub fn capability_group_name_problem(group: &str) -> Option<&'static str> {
+    if group.is_empty() {
+        Some("a group name must not be empty")
+    } else if group.contains('/') {
+        Some("a group name must contain no '/' (it is one segment of gcap/{group}/{ns}/{name}/{node})")
+    } else {
+        None
+    }
+}
+
 impl Capability {
     /// Convenience constructor without attributes.
     pub fn new<N: Into<Arc<str>>, S: Into<Arc<str>>>(namespace: N, name: S) -> Self {

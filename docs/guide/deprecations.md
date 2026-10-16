@@ -63,6 +63,7 @@ the notice.
 | 40 | `kv_require_signed_frames` (an unsigned KV frame or a bare KV signature accepted at a TLS node); the counters `kv_unsigned_frames_accepted` / `kv_untagged_signatures` | 2.34.0 (unreleased) — §35's window closed | nothing: a TLS node refuses both whatever the setting says; read `kv_unsigned_frames_refused` / `kv_untagged_signatures_refused`; upgrade from 2.33.x, not 2.32 | **Yes** for code naming the field — `#[deprecated]`; otherwise no — a no-op, warned at `start()` when set; the two counters stay at zero |
 | 41 | an identity this node cannot authenticate merged by default (a bare `sys/identity/{n}` key list, a legacy pair without a sealed record); `GOSSIP_REQUIRE_IDENTITY_PROOFS` read leniently | 2.34.0 (unreleased, post-360 row S) | nothing from 2.33.x (2.3.0–2.31.x peers are unlearnable since 2.33.0 either way); `require_identity_proofs = false` re-admits only a node from before 2.3.0 | No — behaviour: a proofless (pre-2.3.0) peer's key is not learned (counted, `identity_anchor_conflicts`); a `GOSSIP_REQUIRE_IDENTITY_PROOFS` value other than `1`/`true`/`TRUE`/`yes`/`0`/`false`/`FALSE`/`no` (empty included) refuses by name |
 | 42 | a soft-state re-assert written after shutdown began (between the sweep and the signal) | 2.34.0 (unreleased) | nothing — shutdown closes `CoreCtx::soft_state_gate` before its sweep | Only for an exhaustive struct literal of `CoreCtx` (it gained `soft_state_gate`) |
+| 43 | a capability, requirement or group-provides `ns`/`name` that is empty, holds a `/`, or is `locality`/`self`; a group name holding a `/` | 2.34.0 (unreleased) | rename it: one segment each, and not the locality pair | No — behaviour: 400 at `capability/advertise` (`invalid_capability_name`) and `units/declare`; a node config fails to load; in process the handle writes nothing and a warning names it |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -1371,3 +1372,31 @@ expects shutdown to retract, should put that write through `ctx.soft_state_gate.
 `run_kv_persist_task` does. Build the payload first and put only the apply and the send inside: `shutdown` waits
 for whatever is inside, so it must not block or await. A panic inside is safe, because the in-flight count is
 restored on unwind.
+
+## 43. A capability name is one key segment, and `locality`/`self` is reserved (2.34.0)
+
+**What changes** (#613's review, finding 6). A capability's namespace and name are two segments of
+`cap/{node}/{ns}/{name}`, and of `req/{node}/{ns}/{name}` and `gcap/{group}/{ns}/{name}/{node}`. Three kinds of name
+are now refused, where before they were accepted:
+- **An empty `ns` or `name`, or one holding a `/`.** It built a key no reader parses: `parse_cap_key` refuses it, so
+  the advert was invisible to every resolver and logged as malformed on every scan.
+- **`ns = "locality", name = "self"`.** That key is the node's own locality entry, `cap/{node}/locality/self`. An
+  advert overwrote it with a `Capability`.
+- **A group name holding a `/`.** It is one segment of `cap-group/{group}` and of `gcap/…`.
+
+Where each is refused:
+- `POST /gateway/capability/advertise` answers **400 `invalid_capability_name`**.
+- The unit-file loader (`NodeCapabilityConfig::validate`) refuses the file. So `POST /gateway/units/declare` answers
+  400, and a node configuration fails to load. This covers `[[capability]]`, `[[requirement]]`, a group's
+  `[[group.provides]]` and the group's name.
+- In process, `advertise_capability`, `declare_requirement` and `define_capability_group` log a warning and return a
+  handle that writes nothing. Their signatures are unchanged.
+
+The check is `mycelium::capability_name_problem` (and `capability_group_name_problem`), which is public, so a
+caller can ask before it advertises.
+
+**Will the compiler tell me?** No. It is a change in behaviour.
+
+**Migration.** A name holding a `/` never reached a reader, so nothing that worked stops working. Rename it to one
+segment: for a model id such as `org/model`, use a separator other than `/`. Pick another name than
+`locality`/`self` for the capability.

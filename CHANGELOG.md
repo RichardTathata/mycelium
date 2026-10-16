@@ -96,6 +96,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A capability name that cannot be a key segment is refused at every door** (#613's review, finding 6, recorded in
+  post-360 plan §3.6 under E; upgrade note `docs/guide/deprecations.md` §43). A capability's `ns` and `name` are two
+  segments of `cap/{node}/{ns}/{name}` (and of `req/…`, `gcap/{group}/{ns}/{name}/{node}`): an empty one or one holding
+  a `/` built a key no reader parses, and `ns = "locality", name = "self"` overwrote the node's own locality entry with a
+  `Capability`. `POST /gateway/capability/advertise` answered 200 to each. Now `capability::capability_name_problem`
+  (and `capability_group_name_problem`) decide it once, and every door refuses: the route answers 400
+  `invalid_capability_name`; the unit-file loader refuses the file (so `units/declare` answers 400 and a node config
+  fails to load), a group name or a group's `provides` included; and in process `advertise_capability`,
+  `declare_requirement` and `define_capability_group` warn and return a handle that writes nothing. Test:
+  `a_capability_name_that_is_not_a_key_segment_is_refused_at_every_door`, seen failing first at the route (200).
 - **A fast soft-state re-assert no longer undoes the shutdown sweep** (#627's review, finding 1; upgrade note
   `docs/guide/deprecations.md` §42). The soft-state tasks ran until the shutdown signal, which comes after the sweep
   and the outbound flush, so a re-assert tick in between wrote a swept key live again under a newer HLC and the
