@@ -18,5 +18,9 @@ every task that tombstones on exit (`git grep -n "kv_delete(\|, true, &ctx.hlc"`
 `svc/`, `tools/`, `gcap/` — swept now; `cap-group/{name}` — excluded on purpose (ownership is not readable from the
 key; the niche outlives one member); `grp/{group}/{self}` membership — left as it was (a membership, not an advert).
 
+**Residual (#627's review):** the tasks keep running until the signal, so a re-assert between the sweep and the
+signal undoes it — 20/20 at a 5 ms interval, 0/10 at 50 ms and above. Recorded in the plan §3.6; the fix (a stopping
+flag on `CoreCtx`) is an API change and was not taken in this PR.
+
 **Test:** `soft_state_with_a_live_handle_at_shutdown_is_retracted_at_the_peers` (`src/lib_tests.rs`, `tls`; health
 checks every 60 s so anti-entropy cannot mask it), seen failing first on all three families 3/3, passing 5/5 after.
