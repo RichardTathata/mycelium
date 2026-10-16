@@ -674,7 +674,17 @@ jobs:
       # Fails on vulnerabilities; unmaintained/unsound advisories surface as
       # warnings (tracked: bincode RUSTSEC-2025-0141 — wire-codec succession
       # is a ROADMAP v2 item).
-      - run: cargo audit
+      # Every tracked lockfile, by discovery — not the root one only. Until 2026-10-16 this ran
+      # `cargo audit` on `Cargo.lock` alone, and `examples/conway-gpu/Cargo.lock` sat on five
+      # advisories (rustls, h2) that no job could see (#625's review, finding 3).
+      - run: |
+          status=0
+          for lock in $(git ls-files '*Cargo.lock'); do
+            echo "::group::cargo audit -f $lock"
+            cargo audit -f "$lock" || { status=1; echo "::error file=$lock::vulnerable dependency in $lock"; }
+            echo "::endgroup::"
+          done
+          exit $status
 
   afn-smoke:
     name: AFN fluid-pipeline smoke (pull + push)
