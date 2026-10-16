@@ -96,6 +96,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Soft state with a live handle is retracted at the peers when its node shuts down** (post-360 plan §3.6, a follow-up
+  recorded under row F; pre-existing). Graceful shutdown tombstoned the node's own `cap/` and `req/` entries before
+  the outbound flush, but three other families a node keeps alive under its own id were tombstoned only by their own
+  tasks when the shutdown signal woke them — after the flush, with the writers stopping — so the tombstone never
+  left and peers kept routing to the stopped node until the entry's TTL: a persistent service advert
+  (`svc/{kind}/{self}`, `mesh().advertise_persistent`), an MCP tool (`tools/{name}/{self}`, including bridged
+  servers' tools) and an emergent group's projection (`gcap/{group}/{ns}/{name}/{self}` — not in the recorded
+  follow-up; found by enumerating every soft-state task). `shutdown_with_timeout` now sweeps all three. Test:
+  `soft_state_with_a_live_handle_at_shutdown_is_retracted_at_the_peers`, seen failing first on all three families.
+
 - **The A2A agent card names the gateway's `/a2a` endpoint, not the gossip port** (plan row N, its standalone defect). `/.well-known/agent.json`'s `url` was built from the node's gossip address with no path, so an A2A client that follows the card — the current `a2a-sdk`, which Strands Agents uses — posted to the gossip listener and failed with a network error (the 2026-10-12 probe, `docs/plans/external/2026-10-12-a2a-sdk-probe/`). It is now the gateway's scheme (`https` under `gateway_tls`), host (`http_addr`, or the node's own address when the gateway binds every interface), port and `/a2a`. Test: `the_agent_card_names_the_gateways_a2a_endpoint_not_the_gossip_port`. The rest of row N (the current card path and A2A 1.0 methods) is still open.
 
 ## [2.33.0] — 2026-10-13

@@ -1059,6 +1059,13 @@ impl GossipAgent {
         let req_prefix            = format!("req/{}/",             self.node_id);
         let req_load_prefix       = format!("sys/load/{}/req/",       self.node_id);
         let group_req_load_prefix = format!("sys/load/{}/group-req/", self.node_id);
+        // The families keyed with this node's id *last* — a persistent service advert
+        // (`svc/{kind}/{self}`), an MCP tool (`tools/{name}/{self}`), an emergent group's projection
+        // (`gcap/{group}/{ns}/{name}/{self}`). Their own tasks tombstone them only when the shutdown
+        // signal wakes them, after the flush below, so with a handle still live the tombstone never
+        // left and peers kept routing to this node until the entry's TTL (#611's review; `gcap/` found
+        // by enumerating every soft-state task). `cap-group/` stays excluded, as said below.
+        let own_suffix = format!("/{}", self.node_id);
         let agent_owned_keys: Vec<String> = self.kv_state.store.pin()
             .iter()
             .filter(|(k, v)| {
@@ -1066,7 +1073,9 @@ impl GossipAgent {
                     k.starts_with(&*cap_prefix) ||
                     k.starts_with(&*req_prefix) ||
                     k.starts_with(&*req_load_prefix) ||
-                    k.starts_with(&*group_req_load_prefix)
+                    k.starts_with(&*group_req_load_prefix) ||
+                    ((k.starts_with("svc/") || k.starts_with("tools/") || k.starts_with("gcap/"))
+                        && k.ends_with(&*own_suffix))
                 )
             })
             .map(|(k, _)| k.to_string())

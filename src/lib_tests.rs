@@ -3070,6 +3070,45 @@ async fn a_capability_retracted_at_shutdown_reaches_the_peers() {
     assert!(gone, "B still resolves the capability A retracted as it shut down");
 }
 
+/// **Soft state whose handle is still live at shutdown is retracted at the peers** — every family a
+/// node keeps alive under its own id, not only `cap/` and `req/`. A persistent service advert
+/// (`svc/{kind}/{self}`, `mesh().advertise_persistent`), an MCP tool (`tools/{name}/{self}`) and an
+/// emergent group's projection (`gcap/{group}/{ns}/{name}/{self}`) were tombstoned only by their own
+/// tasks when the shutdown signal woke them — after `flush_outbound_before_shutdown`, with the writers
+/// stopping — so the tombstone never left, and a peer kept routing to the dead node until the entry's
+/// TTL (#611's review, recorded in post-360 plan §3.6 under F; `gcap/` found by enumerating every
+/// caller of `run_kv_persist_task` and every task that tombstones on exit). Health checks run every
+/// 60 s here, so anti-entropy cannot deliver the tombstone in the test's bound.
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn soft_state_with_a_live_handle_at_shutdown_is_retracted_at_the_peers() {
+    use crate::capability::{Capability, CapFilter, CapabilityGroupDef};
+    let (a, b, node_a, _node_b, cert_dir) = signed_fleet_pair("live-handle-at-shutdown", None).await;
+    let svc_key  = format!("svc/live-svc/{node_a}");
+    let tool_key = format!("tools/live_tool/{node_a}");
+    let gcap_key = format!("gcap/live-group/route/projected/{node_a}");
+    let _svc = a.mesh().advertise_persistent("live-svc", SignalScope::Cluster, Duration::from_millis(200), || Bytes::from_static(b"up"));
+    let _tool = a.mcp().register_mcp_tool("live_tool", serde_json::json!({}), |_args| async { Ok(serde_json::json!({})) });
+    let _cap = a.capabilities().advertise_capability(Capability::new("route", "member"), Duration::from_secs(30));
+    let _grp = a.capabilities().define_capability_group("live-group", CapabilityGroupDef {
+        filter: CapFilter::new("route", "member"), topology_policy: None,
+        provides: vec![Capability::new("route", "projected")], requires: vec![],
+    }, Duration::from_secs(30));
+    let live = |k: &str| b.kv().get(k).is_some();
+    poll_until(|| live(&svc_key) && live(&tool_key) && live(&gcap_key), 5_000).await;
+    assert!(live(&svc_key) && live(&tool_key) && live(&gcap_key),
+        "B saw all three before the shutdown (svc {}, tools {}, gcap {})", live(&svc_key), live(&tool_key), live(&gcap_key));
+    // Every handle stays alive across the shutdown: the node is stopped, not the work dropped.
+    a.shutdown().await;
+    for _ in 0..80 { if !live(&svc_key) && !live(&tool_key) && !live(&gcap_key) { break; } tokio::time::sleep(Duration::from_millis(25)).await; }
+    let (svc, tool, gcap) = (live(&svc_key), live(&tool_key), live(&gcap_key));
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    let kept: Vec<&str> = [(svc, "the persistent service advert"), (tool, "the MCP tool"), (gcap, "the group projection")]
+        .into_iter().filter(|(still, _)| *still).map(|(_, what)| what).collect();
+    assert!(kept.is_empty(), "B still holds A's {kept:?} after A shut down");
+}
+
 /// **A TLS node refuses an unsigned `Data` frame whatever `kv_require_signed_frames` says** (post-360
 /// plan row F2). Row F's window applied the frame and counted it unless the node opted in; F2 makes
 /// the refusal the default and the setting a retired no-op (`docs/guide/deprecations.md` §40).

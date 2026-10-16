@@ -396,6 +396,18 @@ a peer that keeps talking (above), and `sys/quorum/` keys already written, which
 worse than any KV key a peer may write). Gates: `src/resource_bounds_tests.rs`,
 `mycelium-core/src/signal.rs` `bound_tests`, `writer.rs` `a_peer_that_never_reads_*`.
 
+## Shutdown retracts through the sweep, not through the tasks (2026-10-16)
+
+A soft-state task tombstones its key when it exits, and it exits on the shutdown signal — which
+`shutdown_with_timeout` (`src/agent/lifecycle.rs`) sends *after* `flush_outbound_before_shutdown`, and on which the
+writers also stop. A tombstone built after the signal is not delivered. So **every family a node keeps alive under
+its own id is tombstoned by the sweep, before the flush**: `cap/{self}/`, `req/{self}/`, `sys/load/{self}/…`,
+`cap/{self}/locality/self`, and `svc/`, `tools/`, `gcap/` keys ending `/{self}`. A new soft-state family (a new
+caller of `run_kv_persist_task`, or a task that tombstones on exit) adds itself to the sweep, or a peer keeps routing
+to a stopped node until the entry's TTL. Excluded on purpose: `cap-group/{name}` (ownership is not readable from the
+key) and `grp/` membership. Gate: `soft_state_with_a_live_handle_at_shutdown_is_retracted_at_the_peers`,
+`a_capability_retracted_at_shutdown_reaches_the_peers` ([log](../.log/2026-10-16-shutdown-sweep-live-handles.md)).
+
 ## `subscribe_log_group` is single-active — do NOT turn it into a load-balanced work queue (#149)
 
 Two different patterns keep getting conflated because the word "consumer group" (and the S11
