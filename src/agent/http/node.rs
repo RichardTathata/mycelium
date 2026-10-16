@@ -201,6 +201,13 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
     for (name, value) in feature_gated_counters() {
         body[name] = json!(value);
     }
+    // Post-360 row E: signed caller envelopes accepted without an id (a pre-row-E gateway's — the
+    // one-release window; `deprecations.md` §45), and envelopes dropped as replays.
+    {
+        let r = &ctx.agent_ctx.caller_replay;
+        body["caller_envelopes_without_id"] = json!(r.without_id.load(std::sync::atomic::Ordering::Relaxed));
+        body["caller_envelopes_replayed"] = json!(r.replayed.load(std::sync::atomic::Ordering::Relaxed));
+    }
     // Post-360 plan rows F and F2 (`deprecations.md` §35, §40), per node: unsigned KV `Data` frames and
     // bare (pre-2.33) KV signatures a TLS node refused, and signed frames refused because their signer
     // was not their sender. Frames, not peers. `kv_untagged_signatures` and `kv_unsigned_frames_accepted`

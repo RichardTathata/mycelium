@@ -41,10 +41,13 @@ use tracing::{error, warn};
 /// And the node's audit stream and its checkpoints (`sys/audit/{node}/…`, `sys/audit-checkpoint/{node}/…`):
 /// only the node seals into its own stream, so a peer writing there is planting a record — kept and
 /// reported as unverified, never sealed over, and now counted here too.
-const SELF_OWNED_SYS_PREFIXES: [&str; 12] = [
+/// And the caller-envelope id marker (`sys/caller-context-id/{node}`, post-360 row E): a peer
+/// tombstoning it at a provider reopens the id-less path for this node's envelopes there.
+const SELF_OWNED_SYS_PREFIXES: [&str; 13] = [
     "sys/identity/", "sys/load/", "sys/role/", "sys/tuple/", "sys/caller-context/",
     "sys/consensus-accepted/", "sys/identity-signed/", "sys/identity-proof/",
     "sys/identity-cert/", "sys/revocation/", "sys/audit/", "sys/audit-checkpoint/",
+    "sys/caller-context-id/",
 ];
 
 /// Whether `key` lies in a `sys/` namespace this node owns — a self-owned prefix whose node-id
@@ -1336,6 +1339,10 @@ mod tests {
         assert_eq!(flagged("sys/consensus-accepted/127.0.0.1:8080/leader/g", me), 1); // a slot with a `/`
         assert_eq!(flagged("sys/identity-signed/127.0.0.1:8080", me), 1);
         assert_eq!(flagged("sys/identity-proof/127.0.0.1:8080", me), 1);
+        // Post-360 row E: a peer tombstoning our caller-envelope id marker reopens the id-less path for
+        // our envelopes at a provider; seen failing first (0) before the prefix was listed.
+        assert_eq!(flagged("sys/caller-context-id/127.0.0.1:8080", me), 1);
+        assert_eq!(flagged("sys/caller-context-id/10.0.0.5:9000", me), 0);
     }
 
     #[test]

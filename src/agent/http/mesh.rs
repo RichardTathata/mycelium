@@ -166,7 +166,7 @@ pub(super) async fn gw_rpc_serve(
         // Item 7: a gateway-dispatched request carries a caller context. Verified, it is
         // handed to the served handler as `caller`; refused, the request is dropped here (the
         // served handler never sees a forged principal, and the caller times out).
-        let caller = match gateway_caller::verify(&agent_ctx, &req) {
+        let caller = match gateway_caller::verify_received(&agent_ctx, &req) {
             Ok(Some(c)) => Some(json!({
                 "principal": c.principal,
                 "via":       c.via.to_string(),

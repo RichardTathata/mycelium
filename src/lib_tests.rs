@@ -263,6 +263,7 @@ fn spawn_handler_with(
         membership: std::sync::OnceLock::new(),
         #[cfg(feature = "tls")]
         identity_ledger: Arc::new(crate::agent::revocation::IdentityLedger::default()),
+        caller_replay: Default::default(),
         #[cfg(feature = "a2a")]
         a2a_mounted: std::sync::atomic::AtomicBool::new(false),
         guarantees: parking_lot::Mutex::new(crate::agent::guarantee::core_guarantees()),
@@ -3483,6 +3484,174 @@ async fn a_gateway_kv_delete_reaches_a_peer_that_requires_signed_frames() {
     let _ = std::fs::remove_dir_all(&cert_dir);
 }
 
+/// **Every receive boundary drops a replayed caller envelope unanswered, and `/stats` counts it**
+/// (post-360 row E's review, finding 2). `rpc_rx` and the MCP loops are tested beside the window; these
+/// are the other three places a request is built from a raw signal: the SDK serve stream
+/// (`/gateway/rpc/serve/{kind}`), `llm.invoke` and the explain responder. Each gets the same signed
+/// envelope twice: the first is handed on (streamed, or answered), the second is neither, and
+/// `caller_envelopes_replayed` on `GET /stats` says 3. Seen failing first with each boundary on the
+/// stateless `verify`: the stream carried both and both calls were answered.
+#[cfg(all(feature = "tls", feature = "gateway", feature = "llm"))]
+#[tokio::test]
+async fn every_receive_boundary_drops_a_replay_unanswered() {
+    use crate::config::TlsConfig;
+    use std::sync::atomic::AtomicUsize;
+    let (port, http_port) = (alloc_port(), alloc_port());
+    let cert_dir = std::env::temp_dir().join(format!("myc-e-boundaries-{port}"));
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = port;
+    cfg.http_port = Some(http_port);
+    cfg.emergent_detectors_enabled = true;
+    cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+    let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+    a.start().await.unwrap();
+    let _skill = a.llm().register_prompt_skill("review", "echo", crate::PromptTemplate {
+        system: "".into(), user_template: "{{input}}".into(), max_tokens: 32, temperature: 0.0, metadata: Default::default(),
+    }, Arc::new(crate::EchoBackend)).await.unwrap();
+
+    // The SDK serve stream: count what it hands on.
+    let streamed = Arc::new(AtomicUsize::new(0));
+    {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let resp = loop {
+            match reqwest::Client::new().get(format!("http://127.0.0.1:{http_port}/gateway/rpc/serve/replay.serve")).send().await {
+                Ok(r) => break r,
+                Err(e) => {
+                    assert!(tokio::time::Instant::now() < deadline, "the serve stream never opened: {e}");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        };
+        assert_eq!(resp.status(), 200, "the serve stream is open");
+        let saw = Arc::clone(&streamed);
+        tokio::spawn(async move {
+            use futures_util::StreamExt as _;
+            let mut body = resp.bytes_stream();
+            while let Some(Ok(chunk)) = body.next().await {
+                saw.fetch_add(String::from_utf8_lossy(&chunk).matches("event: replay.serve").count(), Ordering::SeqCst);
+            }
+        });
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let twice = |kind: &'static str, app: &'static [u8]| {
+        let a = Arc::clone(&a);
+        async move {
+            let framed = crate::agent::gateway_caller::frame_with_context(&a.task_ctx, a.node_id(), "oidc:idp/alice", &[], bytes::Bytes::from_static(app)).unwrap();
+            let call = || crate::agent::rpc::rpc_call_framed(&a.task_ctx, a.node_id().clone(), Arc::from(kind), framed.clone(), Duration::from_millis(800));
+            (call().await.is_ok(), call().await.is_ok())
+        }
+    };
+    let llm = twice("llm.invoke", br#"{"prompt":"review/echo","input":"x","context":{}}"#).await;
+    let explain = twice(crate::agent::emergent::EXPLAIN_RPC_KIND, &[0u8; 8]).await;
+    let _ = twice("replay.serve", b"go").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let client = reqwest::Client::new();
+    let mut stats = serde_json::Value::Null;
+    for _ in 0..80 {
+        if let Ok(r) = client.get(format!("http://127.0.0.1:{http_port}/stats")).send().await
+            && r.status().is_success() { stats = r.json().await.unwrap(); break; }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let streamed = streamed.load(Ordering::SeqCst);
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    assert_eq!(llm, (true, false), "REPLAY: llm.invoke answered the replay (first, replay)");
+    assert_eq!(explain, (true, false), "REPLAY: the explain responder answered the replay (first, replay)");
+    assert_eq!(streamed, 1, "REPLAY: the serve stream handed the same envelope on twice");
+    assert_eq!(stats["caller_envelopes_replayed"], 3, "{stats}");
+    assert_eq!(stats["caller_envelopes_without_id"], 0, "{stats}");
+}
+
+/// **Only a gateway's own fresh id marker is honoured** (post-360 row E's re-review). The marker was a bare
+/// `b"1"` written once: any member could plant it for a gateway on an older release, and a gateway rolled back
+/// kept it for good — either way that gateway's id-less envelopes were dropped at every provider, silently and
+/// permanently. It is now the gateway's signed, dated statement, re-asserted every minute, and a provider
+/// honours it only when a key it trusts for that gateway signed it within the freshness window plus two
+/// refresh periods. Here C holds, for A: a marker B signed (planted) — ignored; A's own, dated past the
+/// lifetime (lapsed — a rolled-back A) — ignored; A's own, fresh — honoured. Seen failing first with any marker
+/// honoured: the planted one was.
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn only_a_gateways_own_fresh_id_marker_is_honoured() {
+    let (a, b, c, _nb, nc, dir) = three_signed_nodes("e-marker", false).await;
+    let key = crate::agent::gateway_caller::id_marker_key(a.node_id());
+    let ok = within_3s(|| c.kv().get(&key).is_some()).await;
+    let framed = crate::agent::gateway_caller::frame_with_context(&a.task_ctx, &nc, "oidc:idp/alice", &[], bytes::Bytes::from_static(b"go")).unwrap();
+    let stripped = crate::agent::gateway_caller::strip_envelope_id(&framed);
+    let at_c = || {
+        let mut buf = bytes::BytesMut::new();
+        bytes::BufMut::put_u64_le(&mut buf, 42);
+        bytes::BufMut::put(&mut buf, stripped.clone());
+        let req = crate::RpcRequest::from(crate::signal::Signal {
+            kind: Arc::from("k"), scope: crate::signal::SignalScope::Individual(nc.clone()),
+            payload: buf.freeze(), sender: a.node_id().clone(), nonce: 7,
+        });
+        c.receive_gateway_caller(&req).map(|_| ()).map_err(|e| e.code())
+    };
+    let fresh = at_c();
+    let now = c.task_ctx.hlc.decision_now_ms();
+    let a_sk = a.task_ctx.tls.get().unwrap().signing_key();
+    let b_sk = b.task_ctx.tls.get().unwrap().signing_key();
+    let _ = c.kv().set(key.clone(), crate::agent::gateway_caller::id_marker_bytes(a.node_id(), &b_sk, now).to_vec());
+    let planted = at_c();
+    let lifetime = crate::agent::gateway_caller::CALLER_CONTEXT_MAX_AGE_MS + c.task_ctx.config.max_clock_drift_ms
+        + 2 * crate::agent::gateway_caller::ID_MARKER_REFRESH_MS;
+    let _ = c.kv().set(key.clone(), crate::agent::gateway_caller::id_marker_bytes(a.node_id(), &a_sk, now - lifetime - 1).to_vec());
+    let lapsed = at_c();
+    a.shutdown().await; b.shutdown().await; c.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(ok, "A's marker reached C");
+    assert_eq!(fresh, Err("id_stripped"), "A's own fresh marker is honoured");
+    assert_eq!(planted, Ok(()), "PLANTED: a marker B signed for A was honoured");
+    assert_eq!(lapsed, Ok(()), "LAPSED: A's marker past its lifetime was honoured");
+}
+
+/// **A captured envelope is refused at another provider, and with its id stripped once its gateway
+/// publishes the id marker** (post-360 row E's review, findings 1 and 7). A frames an envelope for
+/// B; C, which serves the same kinds, is handed it: misaddressed, dropped. With the id stripped, C
+/// refuses it as a replay once A's `sys/caller-context-id/` marker has reached it; without the marker
+/// — a gateway on 2.34 or earlier — it verifies in the v1 form, is served, and is counted
+/// (`caller_envelopes_without_id`), which is the one-release window. Seen failing first: C served
+/// both.
+#[cfg(feature = "tls")]
+#[tokio::test]
+async fn a_captured_envelope_is_refused_at_another_provider_and_stripped() {
+    let (a, b, c, nb, nc, dir) = three_signed_nodes("e-captured", false).await;
+    let framed = crate::agent::gateway_caller::frame_with_context(&a.task_ctx, &nb, "oidc:idp/alice", &[], bytes::Bytes::from_static(b"go")).unwrap();
+    let at = |x: &GossipAgent, to: &NodeId, f: bytes::Bytes| {
+        let mut buf = bytes::BytesMut::new();
+        bytes::BufMut::put_u64_le(&mut buf, 42);
+        bytes::BufMut::put(&mut buf, f);
+        let req = crate::RpcRequest::from(crate::signal::Signal {
+            kind: Arc::from("k"), scope: crate::signal::SignalScope::Individual(to.clone()),
+            payload: buf.freeze(), sender: a.node_id().clone(), nonce: 7,
+        });
+        x.receive_gateway_caller(&req).map(|_| ()).map_err(|e| e.code())
+    };
+    let marker = crate::agent::gateway_caller::id_marker_key(a.node_id());
+    let marked = within_3s(|| c.kv().get(&marker).is_some()).await;
+    let elsewhere = at(&c, &nc, framed.clone());
+    let at_b = at(&b, &nb, framed.clone());
+    let stripped = crate::agent::gateway_caller::strip_envelope_id(&framed);
+    let marked_refusal = at(&c, &nc, stripped.clone());
+    // A gateway on 2.34 or earlier publishes no marker: remove A's at C.
+    let removed = c.kv().delete(marker.clone());
+    let unmarked = at(&c, &nc, stripped.clone());
+    let without_id = c.task_ctx.caller_replay.without_id.load(Ordering::Relaxed);
+    a.shutdown().await; b.shutdown().await; c.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(marked, "A's id marker reached C");
+    assert_eq!(at_b, Ok(()), "plant: B, the provider it was signed for, serves it");
+    assert_eq!(elsewhere, Err("misaddressed"), "REPLAY: C served an envelope signed for B");
+    assert_eq!(marked_refusal, Err("id_stripped"), "REPLAY: C served A's envelope with the id stripped");
+    assert!(removed, "the marker was removed at C");
+    assert_eq!(unmarked, Ok(()), "without the marker an id-less envelope is a pre-row-E gateway's");
+    assert_eq!(without_id, 1, "and is counted");
+}
+
 /// **The row F and F2 counters are on `GET /stats`, per node** (#611's review, finding 8; row F2 adds
 /// `kv_untagged_signatures_refused`, and the two window counters stay, at zero). The counters
 /// moved from process-global statics to the node's `TransportBounds`, so each node reports its own.
@@ -3919,6 +4088,7 @@ async fn test_subscribe_notified_via_gossip() {
         membership: std::sync::OnceLock::new(),
         #[cfg(feature = "tls")]
         identity_ledger: Arc::new(crate::agent::revocation::IdentityLedger::default()),
+        caller_replay: Default::default(),
         #[cfg(feature = "a2a")]
         a2a_mounted: std::sync::atomic::AtomicBool::new(false),
         guarantees: parking_lot::Mutex::new(crate::agent::guarantee::core_guarantees()),

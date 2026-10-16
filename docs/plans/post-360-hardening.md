@@ -76,7 +76,7 @@ Four places strain that line today, and the rows in §3 address each:
 | **B** — *delivered 2.32.0 as narrowed (#602), §3.5* | Core resource bounds | a handshake and idle timeout on the gossip accept path, and read-progress bounds with a 1 KiB/s floor — **the accept path is bounded against silent and slow connections; an attacker that keeps talking can hold the connection slots it obtained from free permits**, mitigated by mTLS (a non-member fails the handshake within `handshake_timeout_ms`) and an opt-in per-source cap (narrowed by the maintainer's decision, 2026-10-11, after review rounds 3–5 of #602 found connection preemption could displace honest peers); connect, write and flush timeouts on the outbound writer, and no unbounded pile of anti-entropy replies behind a stalled peer; one stalled SSE or serve subscriber cannot veto admission of its kind node-wide; the signal log is bounded per sender-chosen kind; a stopped agent leaks no task context (`RpcRequestRx` ends at shutdown, as its doc says) | R0 |
 | **C** — *delivered 2.32.0 (#597), §3.5* | Companion WALs (tuple space, blackboard) | compaction is crash-durable (temp file and directory fsynced); a torn or undecodable record poisons the writer and is refused at open rather than silently dropping every later record; one owner per file | R0 |
 | **D** — *delivered 2.32.0 (#599), §3.5* | WASM execution limits | epoch interruption bounds a guest call; guest code runs off the runtime's worker threads; a trap does not recompile the component on every call | R0 |
-| **E** — *delivered 2.33.0 (#613), §3.5* | Gateway remainder | client-supplied timer periods (`interval_secs`, `lease_secs`) bounded; the log-group subscribe keeps the core's `(hlc, key)` tiebreak and saves the group offset only after the entry is sent (today it saves first, so an entry in flight when a stream drops is never re-sent — found by row G); the mailbox deletes an entry only after the client has it (today it tombstones on entering the 256-slot channel, so a dropped stream loses queued events — #595's review); prompt keys cannot alias across `ns`/`name` (`prompts/{ns}/{name}` with a `/` in either); the caller envelope binds freshness (a replay inside the window *not built* — no nonce cache) | P5 |
+| **E** — *delivered 2.33.0 (#613), §3.5* | Gateway remainder | client-supplied timer periods (`interval_secs`, `lease_secs`) bounded; the log-group subscribe keeps the core's `(hlc, key)` tiebreak and saves the group offset only after the entry is sent (today it saves first, so an entry in flight when a stream drops is never re-sent — found by row G); the mailbox deletes an entry only after the client has it (today it tombstones on entering the 256-slot channel, so a dropped stream loses queued events — #595's review); prompt keys cannot alias across `ns`/`name` (`prompts/{ns}/{name}` with a `/` in either); the caller envelope binds freshness (a replay inside the window *not built* in 2.33.0 — no nonce cache; delivered after 2.34.0, §3.6) | P5 |
 | **F** — *delivered 2.33.0 (#611), §3.5 (window; the flip is F2)* | Wire and crypto, one MINOR with a window | a TLS node refuses unsigned `Data` frames; the removal check reads a peer's key structurally, not by byte-scanning the certificate; KV `SignedData` is domain-tagged; each change carries a mixed-fleet window and an upgrade note in the 2.30.0 shape; the #585 and #587 windows close in the same MINOR (#587 opened none — §3.5 F) | R0, ideally its own release |
 | **F2** — *delivered 2.34.0 (#624), §3.5* | The refusal unconditional (the MINOR after F) | a TLS node refuses an unsigned `Data` frame and a bare KV `SignedData` signature whatever `kv_require_signed_frames` says (the setting retired or kept as a no-op, stated); the window counters `kv_unsigned_frames_accepted` and `kv_untagged_signatures` stop rising or are removed, stated in `deprecations.md`; `mesh.signed_writes` resolves `enforced` under `[tls]` and is considered for `secure-single-domain`'s required set; the anti-entropy residual (an unsigned, authorless `StateResponse`) is either closed or restated | F released |
 | **G** — *delivered 2.32.0 (#595), §3.5* | SDKs | Python whole-second timeouts and a non-truncating tuple `take`; path segments escaped; TypeScript `SupersededError`; one `scatterGather` default, documented; SSE reconnect is designed with a gateway resume point or recorded as not built | R0 |
@@ -575,8 +575,8 @@ PR.
 - *The caller envelope binds freshness* — `src/agent/gateway_caller.rs` `verify`: issued more than
   `CALLER_CONTEXT_MAX_AGE_MS` (300 s) plus `max_clock_drift_ms` ago or more than `max_clock_drift_ms` ahead →
   `CallerError::Stale`; one verifier for every receive path. Test: `a_stale_or_future_envelope_is_refused` (*was*
-  `left: Ok(Some(1791791309573)) right: Err("stale") — tls=false: two hours old`). **Not built:** a nonce cache, so a
-  replay inside the window is not refused.
+  `left: Ok(Some(1791791309573)) right: Err("stale") — tls=false: two hours old`). ~~**Not built:** a nonce cache, so a
+  replay inside the window is not refused.~~ Delivered after 2.34.0 (§3.6 under E).
 - *Left for this row by P5* — `mod.rs` cites `every_listed_public_path_is_mounted_and_public_and_gated_paths_are_not`;
   `GatewayPreflight::is_inert` `#[deprecated(since = "2.33.0")]` (no reference in this repository or
   `mycelium-private`, grepped); the SSE resume point stays *not built* — the guide's and READMEs' loss sentences now
@@ -922,8 +922,23 @@ worth fixing on its own: the agent card names the gossip port), O and P (after N
   is partly scanned as production (fails safe) — balance `()`/`[]`/`<>` across the header.
 - **I (private):** a Cedar schema type-check of `context.*` and template `when` literals; behaviour under real power
   loss behind the fsync pins.
-- **E:** a nonce cache for the caller envelope (a replay inside the freshness window is
-  accepted); an acknowledged in-process mailbox; and the SSE resume point (recorded since row G). **Fixed (2026-10-16):**
+- **E:** ~~a nonce cache for the caller envelope~~ — *delivered after 2.34.0, unreleased:* each envelope carries an
+  id and its target signed with the rest, and a provider admits each `(gateway, issue time, id)` once at every receive
+  boundary (`gateway_caller::verify_received`, `ReplayWindows`; `receive_gateway_caller` for an embedder), refuses one
+  signed for another provider, refuses one with the id stripped from a gateway whose signed, fresh `sys/caller-context-id/`
+  marker it holds,
+  and drops each replay unanswered
+  (`a_replayed_envelope_is_refused_at_the_receive_boundary`,
+  `an_envelope_id_and_target_are_signed_and_stripping_them_is_refused`,
+  `a_captured_envelope_is_refused_at_another_provider_and_stripped`, `only_a_gateways_own_fresh_id_marker_is_honoured`,
+  `rpc_rx_drops_a_replay_unanswered`,
+  `the_mcp_tool_loop_drops_a_replay_unanswered`, `the_mcp_bridge_refuses_a_replayed_or_failed_context`,
+  `every_receive_boundary_drops_a_replay_unanswered`, `the_replay_window_is_bounded_and_fails_closed`,
+  `an_empty_replay_window_is_swept`); the MCP bridge now verifies the caller context. *Not built:* an
+  id-less envelope from a gateway without the marker is accepted for one release (counted); an unsigned mesh keeps no
+  window; a provider's window does not survive its restart; a tombstoned id marker reopens the id-less path for that
+  gateway until its next re-assertion (counted by the `sys/` tripwire); a gateway rolled back to 2.34 is dropped until
+  its marker lapses (up to 12 minutes). Still open: an acknowledged in-process mailbox; and the SSE resume point (recorded since row G). **Fixed (2026-10-16):**
   the two `cap/` cases outside the row (#613's review, finding 6) — a `/` or an empty `ns`/`name`, which built an advert
   no reader parses, and `locality`/`self`, which overwrote the node's own locality entry — are refused at every door
   that writes a `cap/`, `req/` or `gcap/` key: `capability/advertise` (400 `invalid_capability_name`), the unit-file

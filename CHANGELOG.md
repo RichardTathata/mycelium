@@ -39,6 +39,44 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `mycelium_core::tls::load_or_generate`, `generate_rotation` and `generate_rotation_after` take the key standing
   (`Arc<KeyStanding>`) after the removed set, and `NodeStanding` gained `counted` (an exhaustive struct literal
   breaks).
+- **A gateway caller envelope is served once, at the provider it was signed for** (post-360 plan row E's nonce cache;
+  upgrade note `docs/guide/deprecations.md` §45). Row E (2.33.0) bounded an envelope's age to 300 s plus the drift
+  bound, but inside that window a captured envelope and its payload — re-emitted under a fresh RPC nonce by a member
+  that relayed it — were served again as the client's call, and at any provider serving the same kind. Each envelope
+  now carries an id (`n`, the gateway's HLC at framing) and its target (`o`), and a second Ed25519 signature covers them
+  with the rest (`mycelium:gateway-caller:v2`); the v1 signature is still produced, so a 2.34 provider verifies a new
+  gateway's envelope. A provider refuses an envelope addressed to another node, and admits each
+  `(gateway, issue time, id)` once at the six places a request is received — `rpc_rx`, the MCP tool loop, the MCP
+  bridge, the SDK serve stream, `llm.invoke` and the explain responder (`gateway_caller::verify_received`; `verify`
+  keeps no state, so a handler re-reading its request is not a replay). An embedder reading raw signals itself calls
+  the new `GossipAgent::receive_gateway_caller`, once per signal. Every `tls` node on this release re-asserts
+  `sys/caller-context-id/{self}` every minute — its signed, dated statement that its envelopes carry ids — and while a
+  provider holds one signed by a key it trusts for that node and issued within the freshness window plus two refresh
+  periods (12 minutes at the default drift bound), an id-less signed envelope in that node's name is a replay with
+  the id stripped. A member cannot plant the marker for another node, and it is never tombstoned: a gateway rolled back
+  to 2.34 stops re-asserting it and its id-less envelopes are served again once it lapses. A replay in any of these shapes is **dropped unanswered** — a refusal sent back under the original's
+  correlation nonce could reach the gateway before the real answer (`CallerError::unanswered`) — and counted
+  (`GET /stats` `caller_envelopes_replayed`). The window is per gateway, signed envelopes only, pruned at the freshness
+  bound (600 s at the default drift bound) and capped at 65 536 ids: past the cap (about 109 calls a second, sustained,
+  from one gateway to one provider) the oldest is evicted and becomes a floor at or below which an envelope is refused,
+  so the bound fails closed; windows left empty are swept. **Also fixed:** the MCP bridge (`connect_mcp_server`)
+  forwarded a call whose caller context failed verification unless provider enforcement was on; it now refuses it
+  (`-32022`) as the native tool loop does. **The window, one release:** an id-less envelope from a gateway without the
+  marker (2.34 or earlier) verifies in the v1 form, is served and is counted (`caller_envelopes_without_id`); once a
+  gateway is upgraded and its marker has reached a provider, stripping is refused there. The next release refuses every
+  envelope without an id. **Not covered:** an unsigned mesh (no `tls` identity) keeps no window; a provider restart
+  forgets its window; a member that tombstones a gateway's id marker at a provider reopens the id-less path for that
+  gateway there until the next re-assertion, at most a minute (the `sys/` tripwire counts the foreign write); a gateway
+  rolled back to 2.34 has its calls dropped unanswered until its marker lapses, up to 12 minutes; after an eviction
+  floor, a gateway whose clock moves back across a restart has its calls dropped until its clock passes the floor; a
+  provider whose own clock steps back may serve an envelope it had already pruned, once. Tests, each seen failing first:
+  `a_replayed_envelope_is_refused_at_the_receive_boundary` (with a plant: two calls identical in content and issue time
+  are both served), `an_envelope_id_and_target_are_signed_and_stripping_them_is_refused`,
+  `a_captured_envelope_is_refused_at_another_provider_and_stripped`, `only_a_gateways_own_fresh_id_marker_is_honoured`,
+  `rpc_rx_drops_a_replay_unanswered`,
+  `the_mcp_tool_loop_drops_a_replay_unanswered`, `the_mcp_bridge_refuses_a_replayed_or_failed_context`,
+  `every_receive_boundary_drops_a_replay_unanswered` (the serve stream, `llm.invoke`, the explain responder, and the two
+  counters on `GET /stats`); and `the_replay_window_is_bounded_and_fails_closed`, `an_empty_replay_window_is_swept`.
 
 ## [2.34.0] — 2026-10-16
 

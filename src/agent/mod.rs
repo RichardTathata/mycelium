@@ -42,7 +42,7 @@ mod lock_service;
 #[cfg(feature = "consensus")]
 mod overlay_consistent;
 mod overlay_reliable;
-mod rpc;
+pub(crate) mod rpc;
 pub(crate) mod gateway_caller;
 pub(crate) mod guarantee;
 /// The AE evaluator seam lives exactly where it is enforced: a gateway that can attest (`tls`
@@ -790,6 +790,9 @@ pub(crate) struct TaskCtx {
     /// (`revocation::IdentityLedger`, lock-free).
     #[cfg(feature = "tls")]
     pub(crate) identity_ledger: Arc<revocation::IdentityLedger>,
+    /// Post-360 row E: each gateway's recent caller-envelope ids, checked once per received request
+    /// (`gateway_caller::verify_received`), so a captured envelope is not served twice.
+    pub(crate) caller_replay: gateway_caller::ReplayWindows,
     /// Whether `/a2a` is mounted (`with_a2a`), so `start()` can say what that exposes.
     #[cfg(feature = "a2a")]
     pub(crate) a2a_mounted: AtomicBool,
@@ -1336,6 +1339,7 @@ impl GossipAgent {
             membership: std::sync::OnceLock::new(),
             #[cfg(feature = "tls")]
             identity_ledger: Arc::new(revocation::IdentityLedger::default()),
+            caller_replay: Default::default(),
             #[cfg(feature = "a2a")]
             a2a_mounted: AtomicBool::new(false),
             guarantees: parking_lot::Mutex::new(guarantee::core_guarantees()),
