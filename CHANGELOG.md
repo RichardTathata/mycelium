@@ -12,7 +12,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Security
 
 - **Dependency: `wasmtime` / `wasmtime-wasi` 49.0.2 → 49.0.3** (RUSTSEC-2026-0352..0364, published 2026-10-14 —
-  thirteen advisories). Eleven are host panics or a host stack overflow a guest component can trigger (a start
+  thirteen advisories). Nine are host panics or a host stack overflow a guest component can trigger (a start
   function that yields, pending calls after a trap, an async-lifted function via `call`, a cancelled `call_async`,
   a stream or future viewed as the wrong type, an erroneous realloc call-to-host, zero-length out-of-bounds stream
   writes, overlapping string transcode, a long chain of recursive types) and one an unenforced async-entrypoint
@@ -25,7 +25,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   impls for client session values exposed TLS secrets; Brotli certificate decompression could allocate up to 1 GiB
   before authentication; an unauthenticated ServerHello could downgrade later connections to classical key
   exchange; buffered application data could reach the outer server after an ECH rejection. Reached through the
-  `tls` transport, the gateway's TLS and every `reqwest` client. A lockfile change only, no API change.
+  `tls` transport, the gateway's TLS, the pinned federation client and the object-store clients (the
+  other `reqwest` clients use the platform's native TLS). A lockfile change only, no API change.
 - **A TLS node refuses an unsigned KV frame and a bare KV signature unconditionally** (post-360 plan row F2; upgrade
   note `docs/guide/deprecations.md` §40). Row F (2.33.0) made the refusal opt-in for one release; now, whatever
   `kv_require_signed_frames` says, a TLS node drops an unsigned `Data` frame (`GET /stats` `kv_unsigned_frames_refused`)
