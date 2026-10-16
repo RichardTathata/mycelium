@@ -14,6 +14,62 @@ use bytes::Bytes;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::watch;
 
+/// The gate every soft-state re-assert passes through, closed by shutdown before its sweep.
+///
+/// Shutdown tombstones the node's own soft state (`cap/`, `req/`, `svc/`, `tools/`, `gcap/`,
+/// `sys/load/{self}/…`) and then flushes the outbound queues before it signals the tasks to stop. A
+/// task still ticking between the sweep and the signal wrote its key live again under a newer HLC, and
+/// the flush delivered that instead (#627's review: 20/20 shutdowns at a 5 ms interval). A writer
+/// passes [`write`](Self::write); shutdown calls [`close`](Self::close) before it sweeps, and from then
+/// on no re-assert is written, while one already inside `write` finishes before `close` returns — so
+/// the sweep's tombstone is the newest write of every key it covers.
+///
+/// Lock-free, so it adds no row to the lock-order table: a flag and an in-flight count, both
+/// `SeqCst`. A writer increments the count and then reads the flag; `close` sets the flag and then
+/// reads the count. In the single total order of `SeqCst` operations one of the two sees the other —
+/// the writer backs out, or `close` waits for it. Weaker orderings do not give that guarantee.
+#[derive(Debug, Default)]
+pub struct SoftStateGate {
+    closed:    std::sync::atomic::AtomicBool,
+    in_flight: std::sync::atomic::AtomicUsize,
+}
+
+impl SoftStateGate {
+    /// Run `f` — one re-assert — unless the gate is closed. Returns whether it ran.
+    ///
+    /// `close` waits for `f`, so `f` must be short and must not block or await: put only the apply and
+    /// the send inside, and compute the payload (caller code, which may be slow) before. A panic in `f`
+    /// is safe — the in-flight count is restored on unwind (#628's review: without that a later
+    /// `close`, and so `shutdown`, spun forever).
+    pub fn write(&self, f: impl FnOnce()) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        struct InFlight<'a>(&'a std::sync::atomic::AtomicUsize);
+        impl Drop for InFlight<'_> {
+            fn drop(&mut self) { self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst); }
+        }
+        self.in_flight.fetch_add(1, SeqCst);
+        let _in_flight = InFlight(&self.in_flight);
+        let open = !self.closed.load(SeqCst);
+        if open { f(); }
+        open
+    }
+
+    /// Close the gate and wait for any write already inside [`write`](Self::write) to finish. Idempotent.
+    /// The wait is for synchronous code on another thread (a `write` holds no await), so it spins.
+    pub fn close(&self) {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.closed.store(true, SeqCst);
+        while self.in_flight.load(SeqCst) != 0 {
+            std::thread::yield_now();
+        }
+    }
+
+    /// Whether [`close`](Self::close) has been called.
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
 /// Closure that produces the payload bytes for one tick of [`run_kv_persist_task`].
 pub type PersistPayloadFn = Arc<dyn Fn() -> Bytes + Send + Sync>;
 /// Optional per-tick side-effect (e.g. a matching signal emission) invoked
@@ -49,22 +105,28 @@ pub async fn run_kv_persist_task(
             _ = &mut cancel_rx               => break,
             _ = shutdown_rx.wait_for(|v| *v) => break,
             _ = ticker.tick() => {
+                // The caller's closures run outside the soft-state gate (they may be slow, or panic);
+                // only the apply and the send go through it. Once shutdown has closed it to sweep, a
+                // tick writes nothing, so the sweep's tombstone stays the newest write (#627's review).
+                if ctx.soft_state_gate.is_closed() { continue; }
                 let payload = payload_fn();
                 if let Some(ref f) = on_tick {
                     f(&ctx, &payload);
                 }
-                let update = crate::framing::make_gossip_update(
-                    &ctx.node_id, ctx.default_ttl, Arc::clone(&kv_key), payload, false, &ctx.hlc,
-                );
-                apply_and_notify(&ctx.kv_state, &update);
-                if first_tick {
-                    ctx.soft_state_advertised.store(true, std::sync::atomic::Ordering::Release);
-                    first_tick = false;
-                }
-                dispatch_gossip_try_send(
-                    &ctx.gossip_txs, crate::framing::local_kv_wire_msg(&ctx, update),
-                    ctx.node_id.id_hash(), ForwardHint::All, &ctx.kv_state.dropped_frames,
-                );
+                ctx.soft_state_gate.write(|| {
+                    let update = crate::framing::make_gossip_update(
+                        &ctx.node_id, ctx.default_ttl, Arc::clone(&kv_key), payload, false, &ctx.hlc,
+                    );
+                    apply_and_notify(&ctx.kv_state, &update);
+                    if first_tick {
+                        ctx.soft_state_advertised.store(true, std::sync::atomic::Ordering::Release);
+                        first_tick = false;
+                    }
+                    dispatch_gossip_try_send(
+                        &ctx.gossip_txs, crate::framing::local_kv_wire_msg(&ctx, update),
+                        ctx.node_id.id_hash(), ForwardHint::All, &ctx.kv_state.dropped_frames,
+                    );
+                });
             }
         }
     }
@@ -80,4 +142,58 @@ pub async fn run_kv_persist_task(
     let msg = crate::framing::local_kv_wire_msg(&ctx, tombstone.clone());
     apply_and_notify(&ctx.kv_state, &tombstone);
     dispatch_gossip_send(&ctx.gossip_txs, msg, ctx.node_id.id_hash(), ForwardHint::All).await;
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::SoftStateGate;
+    use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Barrier};
+
+    /// A closed gate writes nothing, and closing is idempotent.
+    #[test]
+    fn a_closed_gate_runs_nothing() {
+        let gate = SoftStateGate::default();
+        assert!(gate.write(|| {}), "an open gate runs the write");
+        gate.close();
+        gate.close();
+        let ran = AtomicBool::new(false);
+        assert!(!gate.write(|| ran.store(true, Ordering::SeqCst)), "a closed gate reports it did not run");
+        assert!(!ran.load(Ordering::SeqCst) && gate.is_closed());
+    }
+
+    /// `close` returns only after a write already inside the gate has finished — the property the
+    /// shutdown sweep relies on, so the sweep's tombstone is the newest write.
+    #[test]
+    fn close_waits_for_a_write_in_flight() {
+        let gate = Arc::new(SoftStateGate::default());
+        let (entered, finished) = (Arc::new(Barrier::new(2)), Arc::new(AtomicBool::new(false)));
+        let writer = {
+            let (gate, entered, finished) = (Arc::clone(&gate), Arc::clone(&entered), Arc::clone(&finished));
+            std::thread::spawn(move || gate.write(|| {
+                entered.wait();
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                finished.store(true, Ordering::SeqCst);
+            }))
+        };
+        entered.wait();
+        gate.close();
+        assert!(finished.load(Ordering::SeqCst), "close returned while a write was still inside the gate");
+        assert!(writer.join().unwrap(), "the write that was already inside ran");
+    }
+
+    /// A write that panics leaves the gate closable (#628's review, finding 1): the in-flight count is
+    /// restored on unwind, so a later `close` returns instead of spinning forever. `close` runs on its own
+    /// thread with a bound, so the unfixed code fails here rather than hanging the suite.
+    #[test]
+    fn a_write_that_panics_does_not_wedge_close() {
+        let gate = Arc::new(SoftStateGate::default());
+        let g = Arc::clone(&gate);
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { g.write(|| panic!("a write panicked")); }));
+        assert!(unwound.is_err(), "the panic propagated to the writer");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let g = Arc::clone(&gate);
+        std::thread::spawn(move || { g.close(); let _ = tx.send(()); });
+        assert!(rx.recv_timeout(std::time::Duration::from_secs(2)).is_ok(),
+            "close() did not return after a write panicked inside the gate");
+    }
 }

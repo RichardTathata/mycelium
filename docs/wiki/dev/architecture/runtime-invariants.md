@@ -405,11 +405,11 @@ its own id is tombstoned by the sweep, before the flush**: `cap/{self}/`, `req/{
 `cap/{self}/locality/self`, and `svc/`, `tools/`, `gcap/` keys ending `/{self}`. A new soft-state family (a new
 caller of `run_kv_persist_task`, or a task that tombstones on exit) adds itself to the sweep, or a peer keeps routing
 to a stopped node until the entry's TTL. Excluded on purpose: `cap-group/{name}` (ownership is not readable from the
-key), `grp/` membership, and `sys/health/{self}` (a self-report, not routing state). **Residual:** the soft-state tasks
-run until the signal, so a re-assert tick landing between the sweep and the signal writes the key live again and the
-flush delivers *that* — measured by #627's review at 20/20 shutdowns with a 5 ms interval and 0/10 at 50 ms and above
-(the per-shutdown chance is roughly window ÷ interval; adverts refresh every 30–60 s). Closing it needs the tasks
-told to stop before the sweep (plan §3.6). Gate: `soft_state_with_a_live_handle_at_shutdown_is_retracted_at_the_peers`,
+key), `grp/` membership, and `sys/health/{self}` (a self-report, not routing state). **And the tasks are stopped first:**
+shutdown closes `CoreCtx::soft_state_gate` before it sweeps, and every re-assert of a swept family writes through
+`soft_state_gate.write(..)`, so no tick between the sweep and the signal can write a swept key live again. A new
+periodic writer of a swept family goes through the gate too. (Without it, #627's review measured 20/20 shutdowns
+undone at a 5 ms refresh.) Gate: `soft_state_with_a_live_handle_at_shutdown_is_retracted_at_the_peers`, `a_fast_reassert_does_not_undo_the_shutdown_sweep`,
 `a_capability_retracted_at_shutdown_reaches_the_peers` ([log](../.log/2026-10-16-shutdown-sweep-live-handles.md)).
 
 ## `subscribe_log_group` is single-active — do NOT turn it into a load-balanced work queue (#149)

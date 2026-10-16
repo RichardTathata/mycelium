@@ -62,6 +62,7 @@ the notice.
 | 39 | a revoked key verifying at a KV, identity, consensus, envelope or knowledge verifier; a revocation signed by any key the node held; a certificate without `mycelium://<node>` | 2.33.0 | re-issue every node's certificate (`mycelium tls issue`, or a development node's next start); rotate before `identity/revoke` | Partly — `CoreCtx` and `RotationMaterial` gained fields; otherwise behaviour (a pre-row-Q certificate has no standing until re-issued; 422 on revoking the current key) |
 | 40 | `kv_require_signed_frames` (an unsigned KV frame or a bare KV signature accepted at a TLS node); the counters `kv_unsigned_frames_accepted` / `kv_untagged_signatures` | 2.34.0 (unreleased) — §35's window closed | nothing: a TLS node refuses both whatever the setting says; read `kv_unsigned_frames_refused` / `kv_untagged_signatures_refused`; upgrade from 2.33.x, not 2.32 | **Yes** for code naming the field — `#[deprecated]`; otherwise no — a no-op, warned at `start()` when set; the two counters stay at zero |
 | 41 | an identity this node cannot authenticate merged by default (a bare `sys/identity/{n}` key list, a legacy pair without a sealed record); `GOSSIP_REQUIRE_IDENTITY_PROOFS` read leniently | 2.34.0 (unreleased, post-360 row S) | nothing from 2.33.x (2.3.0–2.31.x peers are unlearnable since 2.33.0 either way); `require_identity_proofs = false` re-admits only a node from before 2.3.0 | No — behaviour: a proofless (pre-2.3.0) peer's key is not learned (counted, `identity_anchor_conflicts`); a `GOSSIP_REQUIRE_IDENTITY_PROOFS` value other than `1`/`true`/`TRUE`/`yes`/`0`/`false`/`FALSE`/`no` (empty included) refuses by name |
+| 42 | a soft-state re-assert written after shutdown began (between the sweep and the signal) | 2.34.0 (unreleased) | nothing — shutdown closes `CoreCtx::soft_state_gate` before its sweep | Only for an exhaustive struct literal of `CoreCtx` (it gained `soft_state_gate`) |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -1350,3 +1351,23 @@ before 2.3.0 for a window, set `require_identity_proofs = false` (or `GOSSIP_REQ
 upgraded nodes, knowing it reopens the residual above; remove it once that node is upgraded. A TLS-less development
 fleet needs nothing. **Not closed:** first sighting of a node never seen
 is trust on first use with or without proofs (anchors close it); anti-entropy entries carry no author.
+
+## 42. Shutdown closes the soft-state gate before it sweeps (2.34.0)
+
+**What changes.** `GossipAgent::shutdown` tombstones the node's own soft state (`cap/`, `req/`, `svc/`, `tools/`,
+`gcap/`, `sys/load/{self}/…`) before it flushes and signals its tasks. Those tasks ran until the signal, so a
+re-assert tick between the sweep and the signal wrote a swept key live again under a newer HLC, and the flush
+delivered that instead: a peer kept routing to the stopped node until the entry's TTL. #627's review measured 20/20
+shutdowns at a 5 ms refresh, and 0/10 at 50 ms and above. Shutdown now closes a gate every soft-state re-assert
+passes through (`CoreCtx::soft_state_gate`, a `kv_persist::SoftStateGate`). After that no task writes a re-assert,
+and one already under way finishes before the sweep.
+
+**Will the compiler tell me?** Only for an exhaustive struct literal of `CoreCtx`, which gained `soft_state_gate`.
+`..` or a constructor is unaffected. Code that builds its own `CoreCtx` initialises the field with
+`Arc::default()`.
+
+**Migration.** None for a node. A companion or embedder that writes its own soft state in a periodic loop, re-asserting a key it
+expects shutdown to retract, should put that write through `ctx.soft_state_gate.write(|| …)`, as
+`run_kv_persist_task` does. Build the payload first and put only the apply and the send inside: `shutdown` waits
+for whatever is inside, so it must not block or await. A panic inside is safe, because the in-flight count is
+restored on unwind.

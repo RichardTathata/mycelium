@@ -897,11 +897,11 @@ worth fixing on its own: the agent card names the gossip port), O and P (after N
   soft-state task, `gcap/{group}/{ns}/{name}/{self}` (`shutdown_with_timeout`;
   `soft_state_with_a_live_handle_at_shutdown_is_retracted_at_the_peers`, seen failing on all three). Not swept, as
   before: `cap-group/{name}` (ownership not readable from the key), `grp/` membership entries and `sys/health/{self}`.
-  **Residual, open (#627's review, finding 1):** the soft-state tasks run until the signal, so a re-assert tick
-  between the sweep and the signal writes the key live again and the flush delivers it — 20/20 shutdowns at a 5 ms
-  interval, 10/20 on a current-thread runtime, 0/10 at 50, 200 and 1000 ms (`svc/`, `cap/`, `req/`, `gcap/`; MCP
-  `tools/` keys are written once). Fix: tell the soft-state tasks to stop before the sweep — a stopping flag their
-  ticks read, which is a new `CoreCtx` field (a public struct, so an upgrade note). Also
+  **The re-assert residual (#627's review, finding 1) is closed (2026-10-16):** shutdown closes
+  `CoreCtx::soft_state_gate` before the sweep, so no task re-writes a swept key between the sweep and the signal
+  (`a_fast_reassert_does_not_undo_the_shutdown_sweep`, every round failing before on `svc/` and `cap/`;
+  `deprecations.md` §42). Only `run_kv_persist_task`'s path and `write_opacity_key` are shown by a test; the
+  emergent-group and load-opacity writes are gated by the same call and not separately tested. Also
   stated in F's §3.5 block: first sighting is trust on first use; with identity proofs off another member's identity
   is writable under the writer's own signature; anti-entropy entries carry no author; role claims, audit records and
   revocation events are signed untagged.

@@ -96,6 +96,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A fast soft-state re-assert no longer undoes the shutdown sweep** (#627's review, finding 1; upgrade note
+  `docs/guide/deprecations.md` §42). The soft-state tasks ran until the shutdown signal, which comes after the sweep
+  and the outbound flush, so a re-assert tick in between wrote a swept key live again under a newer HLC and the
+  flush delivered that: the peer kept routing to the stopped node (20/20 shutdowns at a 5 ms refresh in the review's
+  probe; 0/10 at 50 ms and above). Shutdown now closes `CoreCtx::soft_state_gate` before it sweeps: every re-assert
+  of a swept family passes through it (`run_kv_persist_task`, the emergent-group projection and requirement
+  opacity, `declare_requirement`'s opacity, the load-opacity task), and a write already inside finishes first.
+  Lock-free (`SeqCst` flag + in-flight count); only the apply and the send run inside it — a caller's payload closure
+  runs before — and the in-flight count is restored on unwind, so a panicking payload cannot wedge `shutdown`. Tests:
+  `a_fast_reassert_does_not_undo_the_shutdown_sweep` (five shutdowns at a 5 ms refresh; with `close()` toggled off
+  every round kept both the `svc/` and the `cap/` key at the peer), `a_panicking_soft_state_payload_does_not_wedge_shutdown`
+  (hung past 60 s before), `write_opacity_key_writes_nothing_once_the_gate_is_closed`, `kv_persist::gate_tests`.
+  `CoreCtx` gained a field.
 - **Soft state with a live handle is retracted at the peers when its node shuts down** (post-360 plan §3.6, a follow-up
   recorded under row F; pre-existing). Graceful shutdown tombstoned the node's own `cap/` and `req/` entries before
   the outbound flush, but three other families a node keeps alive under its own id were tombstoned only by their own

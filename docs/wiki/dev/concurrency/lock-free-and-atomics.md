@@ -48,6 +48,10 @@ the sweep mechanically clean.
 
 ## Memory-ordering policy for atomics
 
+- **`SeqCst` — only for a two-sided handshake on two variables** (store-then-load on each side, where one side must
+  see the other): `SoftStateGate` (`mycelium-core/src/kv_persist.rs`) — a writer increments `in_flight` then reads
+  `closed`; `close` sets `closed` then reads `in_flight`. Acquire/Release does not order a store before a later load
+  of a *different* variable, so with anything weaker both sides can miss each other. Say why in a comment at the site.
 - **`Relaxed` — purely diagnostic counters** (`dropped_frames`, `hash_acc`,
   `listener_count`, `AliveGuard` flags): read by stats/logging only; no control flow depends
   on precise visibility.
