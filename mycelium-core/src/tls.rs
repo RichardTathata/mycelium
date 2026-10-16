@@ -787,19 +787,21 @@ mod imp {
     }
 
     /// Refuse a certificate whose key has been revoked by its owner (post-360 plan row Q's follow-up,
-    /// `docs/design/revocation-authority.md`): a key **anchored** for a node — a CA-issued certificate
-    /// record naming that node — that the node has revoked, by a revocation this node counted.
+    /// `docs/design/revocation-authority.md`): a key its node has revoked by a revocation this node
+    /// **counted** — one judged against the key while it was anchored for that node (a CA-issued
+    /// certificate record naming it), kept for good after (`NodeStanding::counted`).
     ///
     /// - A certificate naming its node (`mycelium://{node}`) is judged against that node's standing.
-    /// - A certificate naming none (issued before row Q) is judged against whichever node holds its key
-    ///   anchored: a key is anchored only for the node its certificate names, so this reaches the key's
-    ///   owner and nobody else.
+    /// - A certificate naming none (issued before row Q) is judged against whichever node counted a
+    ///   revocation of its key: a revocation counts only against a key anchored for the revoking node,
+    ///   and a key is anchored only for the node its certificate names, so this reaches the key's owner
+    ///   and nobody else.
     ///
-    /// Only anchored keys: a node may revoke a key without standing for it (its revocations reach any
-    /// key not anchored for it), so reading those would let one member refuse another's handshakes, and
-    /// a provisional revocation — of a key whose certificate record has not reached this node — would
-    /// cut a freshly rotated node off at the transport until the record arrives. The handshake checks
-    /// revocation, not the narrower *distrusted* (`KeyStanding::is_distrusted`): a rotated node
+    /// Counted revocations only: a node may revoke a key without standing for it (its revocations reach
+    /// any key not anchored for it), so reading those would let one member refuse another's handshakes,
+    /// and a provisional revocation — of a key whose certificate record has not reached this node —
+    /// would cut a freshly rotated node off at the transport until the record arrives. The handshake
+    /// checks revocation, not the narrower *distrusted* (`KeyStanding::is_distrusted`): a rotated node
     /// activates its new key before every peer holds its certificate record, and must still connect.
     /// Run after the CA chain check, so the names read are ones the fleet CA issued.
     pub(super) fn refuse_if_revoked(
@@ -816,9 +818,9 @@ mod imp {
             .filter_map(|uri| uri.strip_prefix("mycelium://").and_then(|n| n.parse::<NodeId>().ok()))
             .collect();
         let revoker = if named.is_empty() {
-            standing.anchored_revoker_of(&id.key)
+            standing.counted_revoker_of(&id.key)
         } else {
-            named.into_iter().find(|node| standing.is_anchored_and_revoked(node, &id.key))
+            named.into_iter().find(|node| standing.is_counted_revoked(node, &id.key))
         };
         if let Some(node) = revoker {
             return Err(rustls::Error::General(format!("mycelium: {node} has revoked this certificate's key")));
@@ -1210,10 +1212,12 @@ mod ca_race_tests {
     /// **A certificate naming no node is refused once its key's owner revoked it** (the review of row Q's
     /// follow-up, finding 1). A node that ran before row Q on a pre-issued certificate without a URI
     /// (valid to 2099) is re-issued one with a URI and revokes the old key; whoever stole the old key
-    /// and its certificate presents the URI-less one. The key is anchored for its owner (its certificate
-    /// record) and revoked, so it is refused — judged against the owner, found by the key, never against
-    /// another node's revocation (the plant: the same key revoked under a node it is not anchored for
-    /// refuses nothing). Seen failing first: the URI-less certificate was accepted.
+    /// and its certificate presents the URI-less one. The owner counted the revocation, so it is refused —
+    /// judged against the owner, found by the key, never against another node's revocation (the plant:
+    /// the same key revoked, uncounted, under another node refuses nothing). The standing is set
+    /// directly: the fold counts a revocation of K0 only if K0 itself once had a certificate record
+    /// naming its node; a key that never did is not refused at the handshake (stated). Seen failing
+    /// first: the URI-less certificate was accepted.
     #[test]
     fn a_revoked_key_is_refused_behind_a_certificate_that_names_no_node() {
         use crate::node_id::NodeId;
@@ -1235,11 +1239,11 @@ mod ca_race_tests {
         let (_, thief, _, _) = super::imp::build_rustls_configs(legacy, &k0, ca_der, Arc::new(RemovedSet::default()), Default::default()).unwrap();
         let thief = Arc::new(thief);
 
-        b_standing.set(&other, NodeStanding { anchored: Some([[2u8; 32]].into_iter().collect()), revoked: [k0_pub].into_iter().collect() });
+        b_standing.set(&other, NodeStanding { anchored: Some([[2u8; 32]].into_iter().collect()), revoked: [k0_pub].into_iter().collect(), counted: Default::default() });
         assert_eq!(handshake(Arc::clone(&thief), b.server_config()), Ok(()),
             "plant: a revocation by a node the key is not anchored for refuses nothing");
 
-        b_standing.set(&nc, NodeStanding { anchored: Some([k0_pub, [3u8; 32]].into_iter().collect()), revoked: [k0_pub].into_iter().collect() });
+        b_standing.set(&nc, NodeStanding { anchored: Some([k0_pub, [3u8; 32]].into_iter().collect()), revoked: [k0_pub].into_iter().collect(), counted: [k0_pub].into_iter().collect() });
         let after = handshake(thief, b.server_config());
         let _ = std::fs::remove_dir_all(&dir);
         assert!(after.as_ref().is_err_and(|e| e.starts_with("server refused") && e.contains(&nc.to_string())),
@@ -1293,7 +1297,13 @@ mod ca_race_tests {
         let b = super::imp::load_or_generate(&cfg, &nb, Arc::new(RemovedSet::default()), Arc::clone(&b_standing)).unwrap();
         let c = super::imp::load_or_generate(&cfg, &nc, Arc::new(RemovedSet::default()), Default::default()).unwrap();
         let c_key = c.verifying_key_bytes();
-        let revoked = |key: [u8; 32]| NodeStanding { anchored: Some([key].into_iter().collect()), revoked: [key].into_iter().collect() };
+        // Counted, and no longer among the anchored keys — as the fold publishes a key revoked long ago
+        // once it falls outside the newest-16 cap or the node is saturated (the re-review's finding).
+        let revoked = |key: [u8; 32]| NodeStanding {
+            anchored: Some([[4u8; 32]].into_iter().collect()),
+            revoked: [key].into_iter().collect(),
+            counted: [key].into_iter().collect(),
+        };
 
         assert_eq!(handshake(c.client_config(), b.server_config()), Ok(()), "plant: C dials B before any revocation");
         assert_eq!(handshake(b.client_config(), c.server_config()), Ok(()), "plant: B dials C before any revocation");
@@ -1304,7 +1314,7 @@ mod ca_race_tests {
 
         // A provisional revocation — C's key revoked, but not (yet) anchored for C here — cuts nothing:
         // a node that rotated must still connect while its new certificate record travels.
-        b_standing.set(&nc, NodeStanding { anchored: Some([[1u8; 32]].into_iter().collect()), revoked: [c_key].into_iter().collect() });
+        b_standing.set(&nc, NodeStanding { anchored: Some([[1u8; 32]].into_iter().collect()), revoked: [c_key].into_iter().collect(), counted: Default::default() });
         assert_eq!(handshake(c.client_config(), b.server_config()), Ok(()),
             "a provisional revocation of a key not anchored for C does not refuse C's certificate");
 

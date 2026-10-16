@@ -64,7 +64,7 @@ the notice.
 | 41 | an identity this node cannot authenticate merged by default (a bare `sys/identity/{n}` key list, a legacy pair without a sealed record); `GOSSIP_REQUIRE_IDENTITY_PROOFS` read leniently | 2.34.0 (post-360 row S) | nothing from 2.33.x (2.3.0–2.31.x peers are unlearnable since 2.33.0 either way); `require_identity_proofs = false` re-admits only a node from before 2.3.0 | No — behaviour: a proofless (pre-2.3.0) peer's key is not learned (counted, `identity_anchor_conflicts`); a `GOSSIP_REQUIRE_IDENTITY_PROOFS` value other than `1`/`true`/`TRUE`/`yes`/`0`/`false`/`FALSE`/`no` (empty included) refuses by name |
 | 42 | a soft-state re-assert written after shutdown began (between the sweep and the signal) | 2.34.0 | nothing — shutdown closes `CoreCtx::soft_state_gate` before its sweep | Only for an exhaustive struct literal of `CoreCtx` (it gained `soft_state_gate`) |
 | 43 | a capability, requirement or group-provides `ns`/`name` that is empty, holds a `/`, or is `locality`/`self`; a group name holding a `/` | 2.34.0 | rename it: one segment each, and not the locality pair | No — behaviour: 400 at `capability/advertise` (`invalid_capability_name`) and `units/declare`; a node config fails to load; in process the handle writes nothing and a warning names it |
-| 44 | `mycelium_core::tls::load_or_generate` / `generate_rotation` / `generate_rotation_after` without the key standing; TLS session resumption on the mesh | unreleased (post-360 row Q's follow-up) | pass `Arc::clone(&ctx.key_standing)` (or `Default::default()` outside an agent) after the removed set | **Yes** for a direct caller of the three functions — one more argument; otherwise no — a reconnect is a full handshake, and a certificate whose key its node revoked is refused |
+| 44 | `mycelium_core::tls::load_or_generate` / `generate_rotation` / `generate_rotation_after` without the key standing; `NodeStanding` without `counted`; TLS session resumption on the mesh | unreleased (post-360 row Q's follow-up) | pass `Arc::clone(&ctx.key_standing)` (or `Default::default()` outside an agent) after the removed set | **Yes** for a direct caller of the three functions — one more argument — and an exhaustive `NodeStanding` literal; otherwise no — a reconnect is a full handshake, and a certificate whose key its node revoked is refused |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -1412,10 +1412,11 @@ segment: for a model id such as `org/model`, use a separator other than `/`. Pic
 
 ## 44. A revoked key's certificate is refused at the handshake, and the mesh does not resume TLS sessions (unreleased, post-360 plan row Q's follow-up)
 
-**What changes.** Both sides of a mesh TLS handshake now refuse a certificate whose Ed25519 key is anchored for its
-owner (a certificate record naming the node) and revoked by it, by the revocations this node has counted
-(`CoreCtx::key_standing`). The owner is the node the certificate's `mycelium://{node}` URI names, or, for a
-certificate issued before row Q with no URI, the node holding the key anchored. Before,
+**What changes.** Both sides of a mesh TLS handshake now refuse a certificate whose Ed25519 key its owner revoked by a
+revocation this node counted — judged while the key was anchored for the owner (a certificate record naming the node)
+and kept for good after (`NodeStanding::counted`, in `CoreCtx::key_standing`). The owner is the node the certificate's
+`mycelium://{node}` URI names, or, for a certificate issued before row Q with no URI, the node that counted a
+revocation of its key. Before,
 the handshake judged the fleet CA chain and the removal ledger only, so the holder of a revoked key and its
 certificate stayed a connected peer. And the mesh's rustls configs no longer resume sessions: a resumed TLS 1.3
 session re-runs no certificate verifier, so a removed member (closure plan C5) or a revoked key could reconnect on a
@@ -1423,7 +1424,8 @@ session cached before the change.
 
 **Will the compiler tell me?** Only if you call `mycelium_core::tls::load_or_generate`, `generate_rotation` or
 `generate_rotation_after` directly: each takes `standing: Arc<KeyStanding>` after `removed`. A `GossipAgent` passes
-its own; nothing else changes signature.
+its own. `NodeStanding` gained a field, `counted`, so an exhaustive struct literal of it breaks; nothing else changes
+shape.
 
 **Migration.** A direct caller passes the agent's `key_standing` (or `Default::default()` where no fold runs, which
 judges no revocation). Every reconnect between mesh nodes is now a full handshake: one more Ed25519 signature and

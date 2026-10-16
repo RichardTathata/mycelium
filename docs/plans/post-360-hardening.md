@@ -951,11 +951,13 @@ worth fixing on its own: the agent card names the gossip port), O and P (after N
   revocation events are signed untagged.
 - **B:** connection preemption and WAL group commit, removed in review.
 - **Q:** ~~the mTLS handshake does not refuse a revoked key's certificate~~ — *delivered after 2.34.0, unreleased:*
-  both sides of the handshake refuse a certificate whose key is anchored for its owner and revoked by it — the node
-  its URI SAN names, or for a URI-less certificate the node holding the key anchored (`refuse_if_revoked`,
+  both sides of the handshake refuse a certificate whose key its owner revoked by a revocation this node counted (kept
+  past the anchored set's cap and saturation, `NodeStanding::counted`) — the owner being the node its URI SAN names, or
+  for a URI-less certificate the node that counted a revocation of its key (`refuse_if_revoked`,
   `mycelium-core/src/tls.rs`; `a_revoked_keys_certificate_is_refused_at_a_peers_handshake`,
   `a_revoked_keys_certificate_is_refused_at_the_handshake_both_ways`,
-  `a_revoked_key_is_refused_behind_a_certificate_that_names_no_node`), and the mesh resumes no TLS session — found on
+  `a_revoked_key_is_refused_behind_a_certificate_that_names_no_node`,
+  `a_key_revoked_long_ago_stays_refused_at_the_handshake_past_the_anchor_cap`), and the mesh resumes no TLS session — found on
   the way: a resumed session re-ran no verifier, so a removed member could reconnect on one (C5, since 2.15.0;
   `a_removed_member_cannot_reconnect_on_a_resumed_session`). *Not built:* a connection already open when the revocation
   is counted is not closed; a key that never had a certificate record naming its node is not refused at the

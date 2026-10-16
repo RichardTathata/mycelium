@@ -531,8 +531,8 @@ records (`docs/design/revocation-authority.md`): a node with one trusts exactly 
 revocation counts only when signed by an anchored key issued after the revoked key's — so a poisoned or first-sighted
 key revokes nothing and a thief holding a retired key cannot revoke its successor. It does **not** hold against a
 holder of the fleet CA key (every node in the development posture, or a CA compromise), nor for a node whose
-certificate predates row Q. Since row Q's follow-up the mTLS handshake refuses a key anchored for its owner and revoked
-by it, and the mesh resumes no TLS session. Two consequences the rules must state rather than
+certificate predates row Q. Since row Q's follow-up the mTLS handshake refuses a key whose revocation by its owner it
+counted, and the mesh resumes no TLS session. Two consequences the rules must state rather than
 assume: (i) *rotation is not revocation* — requiring the signer's *current* key would reject legitimate history;
 (ii) *revocation reaches a reader only when the revocation does* — a disconnected reader keeps trusting a revoked
 key until it reconnects (Boundary D's residual, in key form), so "excluded everywhere" means everywhere the

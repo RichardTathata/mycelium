@@ -1745,6 +1745,39 @@ async fn a_revoked_keys_certificate_is_refused_at_a_peers_handshake() {
         "REVOKED KEY: B accepted a handshake from C's revoked key and certificate: {stolen:?}");
 }
 
+/// **A key revoked long ago stays refused at the handshake once it falls out of the anchored set**
+/// (the re-review of row Q's follow-up). The fold publishes only a node's sixteen newest anchored keys
+/// (`MAX_CERTS_PER_NODE`), so after C's compromise rotation and sixteen more, C's first key is no
+/// longer anchored at B — and the first cut of the rule (*anchored and revoked*) admitted the thief's
+/// handshake again, while every signature check still refused the key. The handshake now reads the
+/// revocations B **counted** (`NodeStanding::counted`), which no cap or saturation drops. Seen failing
+/// first with the rule reading the anchored set.
+#[cfg(all(feature = "tls", feature = "compliance"))]
+#[tokio::test]
+async fn a_key_revoked_long_ago_stays_refused_at_the_handshake_past_the_anchor_cap() {
+    let (a, b, c, _nb, nc, dir) = three_signed_nodes("rev-handshake-cap", false).await;
+    let thief = c.task_ctx.tls.get().unwrap().client_config();
+    let k0 = c.task_ctx.tls.get().unwrap().verifying_key_bytes();
+    let k1 = c.rotate_identity_on_compromise(Duration::from_millis(300)).await.unwrap();
+    let seen = revocation_seen(&b, &nc, k0, k1).await;
+    let mut newest = k1;
+    for _ in 0..16 {
+        newest = c.rotate_identity(Duration::from_millis(100)).await.unwrap();
+    }
+    let k0_dropped = within_3s(|| b.task_ctx.key_standing.get(&nc).is_some_and(|s| {
+        s.anchored.as_ref().is_some_and(|a| a.contains(&newest) && !a.contains(&k0))
+    })).await;
+    let counted = b.task_ctx.key_standing.get(&nc).is_some_and(|s| s.counted.contains(&k0));
+    let stolen = mesh_handshake(thief, b.task_ctx.tls.get().unwrap().server_config());
+    a.shutdown().await; b.shutdown().await; c.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(seen, "B saw C's first key revoked");
+    assert!(k0_dropped, "plant: past the cap, C's first key is no longer among its anchored keys at B");
+    assert!(counted, "B still holds the revocation as counted");
+    assert!(stolen.as_ref().is_err_and(|e| e.contains("revoked")),
+        "REVOKED KEY: past the anchor cap, B accepted a handshake from C's long-revoked key: {stolen:?}");
+}
+
 /// **An identity record chained through a revoked key adds nothing to the node's key set** (row Q).
 /// `validate_and_merge_identity` accepted a record whose proof was signed by any key held for the
 /// node — revoked or not — so a holder of C's revoked key could publish a sealed record for C carrying

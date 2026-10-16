@@ -6,7 +6,11 @@ owner and revoked by it — post-360 plan row Q's recorded follow-up. The owner 
 (`mycelium://{node}`), or for a URI-less certificate the node holding the key anchored. Anchored only: N may revoke a
 key without standing for N, so reading those would let one member refuse another's handshakes, and a *provisional*
 revocation (the key's certificate record not yet here) would cut a freshly rotated node off — the review's findings
-1 and 3 moved the first cut (named node, any revoked key) to this rule.
+1 and 3 moved the first cut (named node, any revoked key) to *anchored and revoked*, and the re-review found that
+regressed: the fold publishes only a node's sixteen newest anchored keys (and one for a saturated node), so a key
+revoked long ago dropped out and was admitted again. The rule now reads `NodeStanding::counted` — every revocation
+counted against an anchored key, never truncated. Lesson: a rule built from two published sets inherits both sets'
+truncation; read the set whose meaning is the rule.
 
 **The transferable part:** the first test passed its plant handshake and then *also* passed the post-revocation one —
 the second handshake resumed the first's TLS 1.3 session, and a resumed session runs no certificate verifier. The
@@ -24,7 +28,8 @@ fold needs revoked keys' certificates.
 **Tests:** `a_revoked_keys_certificate_is_refused_at_the_handshake_both_ways`,
 `a_removed_member_cannot_reconnect_on_a_resumed_session`, `a_revoked_key_is_refused_behind_a_certificate_that_names_no_node`
 (`mycelium-core/src/tls.rs`),
-`a_revoked_keys_certificate_is_refused_at_a_peers_handshake` (`src/lib_tests.rs`) — each seen failing first.
+`a_revoked_keys_certificate_is_refused_at_a_peers_handshake`,
+`a_key_revoked_long_ago_stays_refused_at_the_handshake_past_the_anchor_cap` (`src/lib_tests.rs`) — each seen failing first.
 
 **Pages touched:** [security](../security.md); `docs/design/revocation-authority.md`, `docs/design/member-removal.md`,
 `docs/operations/what-is-proven.md`, `docs/threat-model.md`, `docs/guide/deprecations.md` §39 and §44, the post-360
