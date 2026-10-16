@@ -65,6 +65,7 @@ the notice.
 | 42 | a soft-state re-assert written after shutdown began (between the sweep and the signal) | 2.34.0 | nothing — shutdown closes `CoreCtx::soft_state_gate` before its sweep | Only for an exhaustive struct literal of `CoreCtx` (it gained `soft_state_gate`) |
 | 43 | a capability, requirement or group-provides `ns`/`name` that is empty, holds a `/`, or is `locality`/`self`; a group name holding a `/` | 2.34.0 | rename it: one segment each, and not the locality pair | No — behaviour: 400 at `capability/advertise` (`invalid_capability_name`) and `units/declare`; a node config fails to load; in process the handle writes nothing and a warning names it |
 | 44 | `mycelium_core::tls::load_or_generate` / `generate_rotation` / `generate_rotation_after` without the key standing; `NodeStanding` without `counted`; TLS session resumption on the mesh | unreleased (post-360 row Q's follow-up) | pass `Arc::clone(&ctx.key_standing)` (or `Default::default()` outside an agent) after the removed set | **Yes** for a direct caller of the three functions — one more argument — and an exhaustive `NodeStanding` literal; otherwise no — a reconnect is a full handshake, and a certificate whose key its node revoked is refused |
+| 45 | a gateway caller envelope without an id (`n`) and its v2 signature (`sn`) — a pre-row-E gateway's | unreleased (post-360 row E) — accepted and counted for one release | upgrade every gateway node; watch `caller_envelopes_without_id` (`GET /stats`) stop rising on every provider | No — behaviour: an envelope is served once per provider; a replay is dropped unanswered and counted (`caller_envelopes_replayed`); a bridged MCP call whose context fails verification is refused `-32022` |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -1434,3 +1435,29 @@ verification each way, per connection, not per frame.
 **Not changed:** a connection already open when a revocation is counted stays open, and its signed frames are refused
 as before; a key that never had a certificate record naming its node is not refused at the handshake (its signatures
 are); a provisional revocation (of a key whose certificate record has not reached this node) refuses no handshake.
+
+## 45. A caller envelope is served once, and carries an id (unreleased, post-360 plan row E)
+
+**What changes.** A gateway's caller envelope gains two fields: `n`, an id unique per gateway (its HLC at framing), and
+`sn`, an Ed25519 signature over the v1 fields and `n` under `mycelium:gateway-caller:v2`. The v1 signature `sig` is
+still produced, so a provider on 2.34 or earlier verifies a new gateway's envelope as before. A provider on this release
+admits each `(gateway, issue time, id)` once: a second receipt inside the freshness window (300 s plus
+`max_clock_drift_ms`) is a replay, **dropped without an answer** and counted (`GET /stats` `caller_envelopes_replayed`).
+An envelope with `n` but not `sn` is refused `malformed`, and a changed `n` fails the signature. The MCP bridge now
+verifies the caller context at its receive boundary and refuses a failed one with `-32022`, as the native tool loop
+does; before, it verified only under provider enforcement.
+
+**The window.** An envelope without `n` — from a gateway on 2.34 or earlier — verifies in the v1 form, is served and is
+counted (`caller_envelopes_without_id`). Because a replayer can strip `n` and `sn` to reach that path, replay
+protection holds only once every gateway node is upgraded. The next release refuses an envelope without an id.
+
+**Will the compiler tell me?** No. `GatewayCaller` gained `envelope_id` and `CallerError` gained `Replayed`; both are
+`#[non_exhaustive]`, so nothing outside the crate breaks.
+
+**Migration.** Upgrade gateway nodes, then confirm `caller_envelopes_without_id` stops rising on every provider. A
+caller that sends one framed envelope twice on purpose — none in this repository does — must frame each call afresh.
+An envelope is about 110 bytes larger, so a mandate within that distance of the 8 KiB bound now answers
+`caller_context_too_large`.
+
+**Not changed:** an unsigned mesh keeps no window (its envelopes can be forged outright); a provider forgets its window
+on restart.

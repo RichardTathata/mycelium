@@ -127,6 +127,16 @@ pub fn federation_principal(origin_domain: &str, principal: &str) -> String {
 /// Domain separator for the signed message.
 #[cfg(feature = "tls")]
 const DOMAIN_SEP: &[u8] = b"mycelium:gateway-caller:v1\n";
+/// Domain separator for the signature that also covers the envelope's id (post-360 row E's
+/// replay window). A gateway signs both: the v1 form for a provider that predates the id, this one
+/// for every provider that keeps a replay window.
+#[cfg(feature = "tls")]
+const DOMAIN_SEP_ID: &[u8] = b"mycelium:gateway-caller:v2\n";
+/// The most envelope ids a provider keeps per gateway inside the freshness window. Past it the
+/// oldest is evicted and becomes the window's floor: an envelope at or below the floor is refused
+/// (it might be a replay of one forgotten), so the bound fails closed. 65 536 in five minutes is
+/// over 200 calls a second from one gateway to one provider.
+pub(crate) const REPLAY_WINDOW_PER_GATEWAY: usize = 65_536;
 /// Upper bound on an envelope: a principal, a node id, a few scopes.
 pub(crate) const MAX_ENVELOPE_BYTES: usize = 8 * 1024;
 /// How old a caller envelope may be when a provider verifies it, before the clock-drift allowance:
@@ -177,6 +187,11 @@ pub struct GatewayCaller {
     /// provider checking mandates uses it only where the payload cannot name the resource itself,
     /// and only after confirming it names this node and something this node serves.
     pub resource: Option<String>,
+    /// The envelope's id, unique per gateway (its HLC at issue), signed with the rest under a `tls`
+    /// identity (post-360 row E). `None` from a gateway that predates it: such an envelope is accepted
+    /// and counted for one release (`GET /stats` `caller_envelopes_without_id`), unprotected against
+    /// replay inside the freshness window.
+    pub envelope_id: Option<u64>,
 }
 
 /// How a [`GatewayCaller`] was attested.
@@ -231,6 +246,16 @@ pub enum CallerError {
         /// This node's decision clock when it verified (`Hlc::decision_now_ms`).
         now_ms: u64,
     },
+    /// This envelope — its gateway, issue time and id — was already received inside the freshness
+    /// window, or falls at or below the window's floor after an eviction (post-360 row E). A replay:
+    /// the receive boundary drops it **without answering**, because a refusal sent back under the
+    /// original's correlation nonce could reach the gateway before the real answer.
+    Replayed {
+        /// The envelope's `issued_at_ms`.
+        issued_at_ms: u64,
+        /// The envelope's id.
+        id: u64,
+    },
 }
 
 impl CallerError {
@@ -246,6 +271,7 @@ impl CallerError {
             CallerError::Missing => "missing",
             CallerError::Removed => "removed",
             CallerError::Stale { .. } => "stale",
+            CallerError::Replayed { .. } => "replayed",
         }
     }
 }
@@ -259,6 +285,10 @@ impl std::fmt::Display for CallerError {
                 "caller context issued at {issued_at_ms} ms is outside the accepted window at {now_ms} ms (at most \
                  {CALLER_CONTEXT_MAX_AGE_MS} ms old plus the clock-drift bound, never beyond that bound ahead; \
                  with a drift bound of 0, at most that age either way)"
+            ),
+            CallerError::Replayed { issued_at_ms, id } => write!(
+                f,
+                "caller context {id} issued at {issued_at_ms} ms was already received (a replay inside the freshness window)"
             ),
             CallerError::Malformed(why) => write!(f, "caller context malformed: {why}"),
             CallerError::ViaMismatch { claimed, sender } => {
@@ -546,6 +576,14 @@ struct Envelope {
     /// The resource the call claims to act on (closure plan C3). Absent when not named.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     r: Option<String>,
+    /// The envelope's id: the issuing gateway's HLC at framing, so unique per gateway (post-360 row
+    /// E). An older provider ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    n: Option<u64>,
+    /// base64 Ed25519 signature over the v2 message — the v1 fields and `n`. An older provider reads
+    /// `sig`; a provider that keeps a replay window requires this one whenever `n` is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sn: Option<String>,
 }
 
 /// Build the framed payload: magic ‖ len ‖ envelope ‖ application payload. Signs under a `tls`
@@ -582,7 +620,8 @@ pub(crate) fn frame_with_context_at(
     issued_at_ms: u64,
 ) -> Option<Bytes> {
     let via = ctx.node_id.to_string();
-    let (k, sig) = attest(ctx, principal, &via, scopes, issued_at_ms, &app);
+    let id = ctx.hlc.tick();
+    let (k, sig, sn) = attest(ctx, principal, &via, scopes, issued_at_ms, id, &app);
     let env = Envelope {
         v: CALLER_CONTEXT_VERSION,
         p: principal.to_string(),
@@ -593,6 +632,8 @@ pub(crate) fn frame_with_context_at(
         sig,
         m: mandate.cloned(),
         r: resource.map(str::to_string),
+        n: Some(id),
+        sn,
     };
     let env_bytes = serde_json::to_vec(&env).ok()?;
     if env_bytes.len() > MAX_ENVELOPE_BYTES {
@@ -616,27 +657,30 @@ pub(crate) fn frame_self(ctx: &TaskCtx, app: Bytes) -> Bytes {
     frame_with_context(ctx, &node_principal(&ctx.node_id), &[], app.clone()).unwrap_or(app)
 }
 
-/// The `(signer, signature)` pair for an envelope: Ed25519 by this node's identity key under a
-/// `tls` identity, `(None, None)` otherwise (an unauthenticated mesh has nothing to sign with).
+/// The `(signer, signature, id signature)` triple for an envelope: Ed25519 by this node's identity
+/// key under a `tls` identity — the v1 signature an older provider verifies, and the v2 one over the
+/// same fields and the envelope's id — `(None, None, None)` otherwise (an unauthenticated mesh has
+/// nothing to sign with).
 #[cfg(feature = "tls")]
+#[allow(clippy::too_many_arguments)] // the signed fields, each one
 fn attest(
     ctx: &TaskCtx,
     principal: &str,
     via: &str,
     scopes: &[String],
     issued_at_ms: u64,
+    id: u64,
     app: &[u8],
-) -> (Option<String>, Option<String>) {
+) -> (Option<String>, Option<String>, Option<String>) {
     use base64::Engine as _;
-    let Some(tls) = ctx.tls.get() else { return (None, None) };
+    let Some(tls) = ctx.tls.get() else { return (None, None, None) };
     let sk = tls.signing_key();
     let signer = sk.verifying_key().to_bytes();
-    let msg = signed_message(principal, via, scopes, issued_at_ms, &digest(app));
-    let sig = crate::tls::sign_bytes(&sk, &msg);
-    (
-        Some(base64::engine::general_purpose::STANDARD.encode(signer)),
-        Some(base64::engine::general_purpose::STANDARD.encode(sig)),
-    )
+    let d = digest(app);
+    let sig = crate::tls::sign_bytes(&sk, &signed_message(principal, via, scopes, issued_at_ms, &d));
+    let sig_id = crate::tls::sign_bytes(&sk, &signed_message_with_id(principal, via, scopes, issued_at_ms, id, &d));
+    let b64 = base64::engine::general_purpose::STANDARD;
+    (Some(b64.encode(signer)), Some(b64.encode(sig)), Some(b64.encode(sig_id)))
 }
 
 #[cfg(not(feature = "tls"))]
@@ -646,9 +690,10 @@ fn attest(
     _via: &str,
     _scopes: &[String],
     _issued_at_ms: u64,
+    _id: u64,
     _app: &[u8],
-) -> (Option<String>, Option<String>) {
-    (None, None)
+) -> (Option<String>, Option<String>, Option<String>) {
+    (None, None, None)
 }
 
 /// A nonce-stripped RPC payload, classified. Three outcomes, never two (review finding 4): a
@@ -743,6 +788,8 @@ pub(crate) fn fuzz_envelope_decode(after_nonce: &Bytes) -> bool {
             env.k.as_deref().and_then(|k| b64.decode(k).ok()).and_then(|v| v.try_into().ok());
         let _: Option<[u8; 64]> =
             env.sig.as_deref().and_then(|s| b64.decode(s).ok()).and_then(|v| v.try_into().ok());
+        let _: Option<[u8; 64]> =
+            env.sn.as_deref().and_then(|s| b64.decode(s).ok()).and_then(|v| v.try_into().ok());
     }
     true
 }
@@ -755,12 +802,25 @@ fn digest(app: &[u8]) -> [u8; 32] {
 
 #[cfg(feature = "tls")]
 fn signed_message(principal: &str, via: &str, scopes: &[String], issued_at_ms: u64, digest: &[u8; 32]) -> Vec<u8> {
+    signed_fields(DOMAIN_SEP, principal, via, scopes, issued_at_ms, digest)
+}
+
+/// The v2 message: the v1 fields under their own domain separator, then the envelope's id.
+#[cfg(feature = "tls")]
+fn signed_message_with_id(principal: &str, via: &str, scopes: &[String], issued_at_ms: u64, id: u64, digest: &[u8; 32]) -> Vec<u8> {
+    let mut buf = signed_fields(DOMAIN_SEP_ID, principal, via, scopes, issued_at_ms, digest);
+    buf.extend_from_slice(&id.to_le_bytes());
+    buf
+}
+
+#[cfg(feature = "tls")]
+fn signed_fields(sep: &[u8], principal: &str, via: &str, scopes: &[String], issued_at_ms: u64, digest: &[u8; 32]) -> Vec<u8> {
     fn put(buf: &mut Vec<u8>, field: &[u8]) {
         buf.extend_from_slice(&(field.len() as u32).to_le_bytes());
         buf.extend_from_slice(field);
     }
-    let mut buf = Vec::with_capacity(96 + principal.len() + via.len());
-    buf.extend_from_slice(DOMAIN_SEP);
+    let mut buf = Vec::with_capacity(104 + principal.len() + via.len());
+    buf.extend_from_slice(sep);
     put(&mut buf, principal.as_bytes());
     put(&mut buf, via.as_bytes());
     buf.extend_from_slice(&(scopes.len() as u32).to_le_bytes());
@@ -841,15 +901,26 @@ pub(crate) fn verify(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<GatewayCa
             .ok()
             .and_then(|v| v.try_into().ok())
             .ok_or_else(|| CallerError::Malformed("signer key is not 32 bytes".into()))?;
-        let sig: [u8; 64] = base64::engine::general_purpose::STANDARD
-            .decode(sig)
-            .ok()
-            .and_then(|v| v.try_into().ok())
-            .ok_or_else(|| CallerError::Malformed("signature is not 64 bytes".into()))?;
+        let decode_sig = |s: &str| -> Result<[u8; 64], CallerError> {
+            base64::engine::general_purpose::STANDARD
+                .decode(s)
+                .ok()
+                .and_then(|v| v.try_into().ok())
+                .ok_or_else(|| CallerError::Malformed("signature is not 64 bytes".into()))
+        };
+        let sig = decode_sig(sig)?;
         if !verifying_keys_for(ctx, &via).contains(&signer) {
             return Err(CallerError::UnknownSigner);
         }
-        let msg = signed_message(&env.p, &env.via, &env.s, env.t, &digest(&req.payload()));
+        let d = digest(&req.payload());
+        // Post-360 row E: an envelope with an id must carry the signature that covers it — the id is
+        // what the replay window keys on, so an unsigned one would let anyone mint fresh ids. One
+        // without an id is a pre-row-E gateway's, verified in the v1 form (counted at the boundary).
+        let (msg, sig) = match (env.n, env.sn.as_deref()) {
+            (Some(id), Some(sn)) => (signed_message_with_id(&env.p, &env.via, &env.s, env.t, id, &d), decode_sig(sn)?),
+            (Some(_), None) => return Err(CallerError::Malformed("envelope id without the signature that covers it".into())),
+            (None, _) => (signed_message(&env.p, &env.via, &env.s, env.t, &d), sig),
+        };
         if !crate::tls::verify_bytes(&signer, &msg, &sig) {
             return Err(CallerError::BadSignature);
         }
@@ -888,7 +959,76 @@ pub(crate) fn verify(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<GatewayCa
         attestation,
         mandate: env.m,
         resource: env.r,
+        envelope_id: env.n,
     }))
+}
+
+/// [`verify`] at a **receive boundary** — the one place a received request is checked against the
+/// replay window (post-360 row E). Call it exactly once per received frame (`rpc_rx`, the SDK serve
+/// stream, `llm.invoke`, the explain responder); everything that re-reads the request later calls
+/// [`verify`], which keeps no state. [`CallerError::Replayed`] must be dropped without an answer.
+pub(crate) fn verify_received(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<GatewayCaller>, CallerError> {
+    let verified = verify(ctx, req)?;
+    if let Some(c) = &verified {
+        ctx.caller_replay.admit(c, ctx.hlc.decision_now_ms(), ctx.config.max_clock_drift_ms)?;
+    }
+    Ok(verified)
+}
+
+/// Every gateway's recent envelope ids, as one provider has received them (post-360 row E). Kept only
+/// for **signed** envelopes: without a `tls` identity an envelope can be forged outright, and a window
+/// keyed on forgeable gateways would be memory anyone could fill. So the number of windows is bounded
+/// by the members whose key signed, and each window by [`REPLAY_WINDOW_PER_GATEWAY`].
+#[derive(Default)]
+pub(crate) struct ReplayWindows {
+    by_gateway: papaya::HashMap<NodeId, std::sync::Arc<parking_lot::Mutex<ReplayWindow>>>,
+    /// Signed envelopes accepted without an id — a pre-row-E gateway's, unprotected inside the window.
+    /// `GET /stats` `caller_envelopes_without_id`.
+    pub(crate) without_id: std::sync::atomic::AtomicU64,
+    /// Envelopes refused as replays. `GET /stats` `caller_envelopes_replayed`.
+    pub(crate) replayed: std::sync::atomic::AtomicU64,
+}
+
+/// One gateway's envelopes inside the freshness window, ordered by `(issued_at_ms, id)`, and the
+/// floor below which an envelope is refused because an eviction forgot what was there.
+#[derive(Default)]
+struct ReplayWindow {
+    seen: std::collections::BTreeSet<(u64, u64)>,
+    floor: Option<(u64, u64)>,
+}
+
+impl ReplayWindows {
+    /// Admit `caller`'s envelope once. Unsigned envelopes pass untouched (see the type's doc); a signed
+    /// one without an id passes and is counted.
+    pub(crate) fn admit(&self, caller: &GatewayCaller, now_ms: u64, drift_ms: u64) -> Result<(), CallerError> {
+        use std::sync::atomic::Ordering;
+        if !matches!(caller.attestation, CallerAttestation::Signed { .. }) {
+            return Ok(());
+        }
+        let Some(id) = caller.envelope_id else {
+            self.without_id.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        };
+        let window = std::sync::Arc::clone(self.by_gateway.pin().get_or_insert_with(caller.via.clone(), Default::default));
+        let key = (caller.issued_at_ms, id);
+        let horizon = now_ms.saturating_sub(CALLER_CONTEXT_MAX_AGE_MS.saturating_add(drift_ms));
+        let mut w = window.lock();
+        // Forget what `verify` would refuse as stale anyway.
+        while w.seen.first().is_some_and(|&(t, _)| t < horizon) {
+            w.seen.pop_first();
+        }
+        if w.floor.is_some_and(|f| key <= f) || !w.seen.insert(key) {
+            drop(w);
+            self.replayed.fetch_add(1, Ordering::Relaxed);
+            return Err(CallerError::Replayed { issued_at_ms: caller.issued_at_ms, id });
+        }
+        if w.seen.len() > REPLAY_WINDOW_PER_GATEWAY
+            && let Some(oldest) = w.seen.pop_first()
+        {
+            w.floor = Some(w.floor.map_or(oldest, |f| f.max(oldest)));
+        }
+        Ok(())
+    }
 }
 
 /// Resolve the principal `req` should be authorised as. `Err` means refuse.
@@ -906,6 +1046,17 @@ pub(crate) fn request_principal_and_mandate(
     req: &RpcRequest,
 ) -> Result<(RequestPrincipal, Option<serde_json::Value>), CallerError> {
     let verified = verify(ctx, req)?;
+    let carried = verified.as_ref().and_then(|c| c.mandate.clone());
+    Ok((principal_of(req, verified), carried))
+}
+
+/// [`request_principal_and_mandate`] at a **receive boundary**: through [`verify_received`], so the
+/// replay window sees the request once. For a loop that reads raw signals itself (the MCP tool loop).
+pub(crate) fn received_principal_and_mandate(
+    ctx: &TaskCtx,
+    req: &RpcRequest,
+) -> Result<(RequestPrincipal, Option<serde_json::Value>), CallerError> {
+    let verified = verify_received(ctx, req)?;
     let carried = verified.as_ref().and_then(|c| c.mandate.clone());
     Ok((principal_of(req, verified), carried))
 }
@@ -1266,7 +1417,7 @@ mod tests {
         let g2 = NodeId::new("127.0.0.1", 9002).unwrap();
         let mk = |via: &NodeId, p: String| GatewayCaller {
             principal: p, via: via.clone(), scopes: vec![], issued_at_ms: 0,
-            attestation: CallerAttestation::UnauthenticatedMesh, mandate: None, resource: None,
+            attestation: CallerAttestation::UnauthenticatedMesh, mandate: None, resource: None, envelope_id: None,
         };
         let a = mk(&g1, positional_token_principal(&g1.to_string(), 0));
         let b = mk(&g2, positional_token_principal(&g2.to_string(), 0));
@@ -1308,7 +1459,7 @@ mod tests {
         let unsigned = serde_json::to_vec(&Envelope {
             v: 1, p: "oidc:idp/mallory".into(), via: a.node_id().to_string(), s: vec![], t: 0, k: None, sig: None,
             m: None,
-            r: None,
+            r: None, n: None, sn: None,
         }).unwrap();
         let req = request_from(a.node_id(), "k", raw_frame(&unsigned, b""));
         assert_eq!(verify(&a.task_ctx, &req), Err(CallerError::Unsigned));
@@ -1324,7 +1475,7 @@ mod tests {
                 k: Some(base64::engine::general_purpose::STANDARD.encode(rogue.verifying_key().to_bytes())),
                 sig: Some(base64::engine::general_purpose::STANDARD.encode(sig)),
                 m: None,
-                r: None,
+                r: None, n: None, sn: None,
             }).unwrap();
             let req = request_from(a.node_id(), "k", raw_frame(&forged, b"payload"));
             assert_eq!(verify(&a.task_ctx, &req), Err(CallerError::UnknownSigner));
@@ -1399,7 +1550,7 @@ mod tests {
         let env = serde_json::to_vec(&Envelope {
             v: 1, p: "oidc:idp/admin".into(), via: a.node_id().to_string(), s: vec![], t: 0, k: None, sig: None,
             m: None,
-            r: None,
+            r: None, n: None, sn: None,
         }).unwrap();
         let bytes = raw_frame(&env, br#"{"prompt":"review/echo","input":"unverified call","context":{}}"#);
         let req = request_from(a.node_id(), "llm.invoke", bytes.clone());
@@ -1412,5 +1563,169 @@ mod tests {
         assert!(v.get("output").is_none(), "the backend must not run");
         drop(handle);
         a.shutdown().await;
+    }
+
+    /// Re-frame `framed`'s envelope with `edit` applied, keeping the application bytes.
+    #[cfg(feature = "tls")]
+    fn reframe(framed: &Bytes, edit: impl FnOnce(&mut serde_json::Value)) -> Bytes {
+        let Frame::Framed { envelope, app } = split_frame(framed) else { panic!("framed") };
+        let mut v: serde_json::Value = serde_json::from_slice(&envelope).unwrap();
+        edit(&mut v);
+        raw_frame(&serde_json::to_vec(&v).unwrap(), &app)
+    }
+
+    /// **A caller envelope is served once** (post-360 row E: the nonce cache). The freshness bound
+    /// alone let a captured envelope and its payload be served again for five minutes — re-emitted under
+    /// a fresh RPC nonce by anyone who saw it. Each envelope now carries an id, signed with the rest,
+    /// and a provider's receive boundary admits each `(gateway, issue time, id)` once. The plant: two
+    /// calls identical in principal, scopes, payload **and issue time** are both admitted — they differ
+    /// in id — so the window keys on the envelope, not on its contents. Seen failing first: the replay
+    /// was admitted.
+    #[cfg(feature = "tls")]
+    #[tokio::test]
+    async fn a_replayed_envelope_is_refused_at_the_receive_boundary() {
+        let a = agent(true);
+        a.start().await.unwrap();
+        let app = Bytes::from_static(b"payload");
+        let t = a.task_ctx.hlc.decision_now_ms();
+        let first = frame_with_context_at(&a.task_ctx, "oidc:idp/alice", &["mesh:write".into()], app.clone(), None, None, t).unwrap();
+        let twin = frame_with_context_at(&a.task_ctx, "oidc:idp/alice", &["mesh:write".into()], app.clone(), None, None, t).unwrap();
+        let receive = |f: &Bytes| verify_received(&a.task_ctx, &request_from(a.node_id(), "k", f.clone())).map(|_| ()).map_err(|e| e.code());
+        assert_eq!(receive(&first), Ok(()), "the first receipt is served");
+        assert_eq!(receive(&twin), Ok(()), "plant: an identical call at the same instant is another envelope");
+        assert_eq!(receive(&first), Err("replayed"), "REPLAY: the same envelope was served twice");
+        // `verify` keeps no state: a handler re-reading the request it was handed is not a replay.
+        assert!(verify(&a.task_ctx, &request_from(a.node_id(), "k", first.clone())).is_ok());
+        assert_eq!(a.task_ctx.caller_replay.replayed.load(std::sync::atomic::Ordering::Relaxed), 1);
+        a.shutdown().await;
+    }
+
+    /// **The id is signed, so a replay cannot be given a fresh one; an envelope without one is a
+    /// pre-row-E gateway's** (post-360 row E). A changed id fails the v2 signature; an id without the
+    /// signature over it is malformed; an envelope with neither verifies in the v1 form, is admitted and
+    /// counted (`caller_envelopes_without_id`, the one-release window) — and its v1 signature is still
+    /// produced, so a provider that predates the id verifies a new gateway's envelope. Seen failing
+    /// first: a re-numbered replay was admitted.
+    #[cfg(feature = "tls")]
+    #[tokio::test]
+    async fn an_envelope_id_is_signed_and_one_without_is_counted() {
+        let a = agent(true);
+        a.start().await.unwrap();
+        let app = Bytes::from_static(b"payload");
+        let framed = frame_with_context(&a.task_ctx, "oidc:idp/alice", &[], app.clone()).unwrap();
+        let receive = |f: Bytes| verify_received(&a.task_ctx, &request_from(a.node_id(), "k", f)).map(|_| ()).map_err(|e| e.code());
+        assert_eq!(receive(framed.clone()), Ok(()));
+        let renumbered = reframe(&framed, |v| { v["n"] = serde_json::json!(v["n"].as_u64().unwrap() + 1); });
+        assert_eq!(receive(renumbered), Err("bad_signature"), "REPLAY: a re-numbered envelope verified");
+        let unsigned_id = reframe(&framed, |v| { v.as_object_mut().unwrap().remove("sn"); });
+        assert_eq!(receive(unsigned_id), Err("malformed"), "an id without its signature");
+
+        // A pre-row-E gateway's envelope: no id, the v1 signature alone.
+        let legacy = reframe(&framed, |v| { let o = v.as_object_mut().unwrap(); o.remove("n"); o.remove("sn"); });
+        assert_eq!(receive(legacy.clone()), Ok(()), "a pre-row-E envelope still verifies");
+        assert_eq!(receive(legacy), Ok(()), "and, without an id, it is not protected (the stated window)");
+        assert_eq!(a.task_ctx.caller_replay.without_id.load(std::sync::atomic::Ordering::Relaxed), 2, "and is counted");
+
+        // What a provider that predates the id checks: the v1 signature over the v1 fields.
+        let Frame::Framed { envelope, .. } = split_frame(&framed) else { panic!() };
+        let env: Envelope = serde_json::from_slice(&envelope).unwrap();
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let k: [u8; 32] = b64.decode(env.k.unwrap()).unwrap().try_into().unwrap();
+        let sig = b64.decode(env.sig.unwrap()).unwrap();
+        assert!(crate::tls::verify_bytes(&k, &signed_message(&env.p, &env.via, &env.s, env.t, &digest(&app)), &sig),
+            "the v1 signature a 2.34 provider verifies is still produced");
+        a.shutdown().await;
+    }
+
+    /// **The window is bounded per gateway and fails closed** (post-360 row E). Past
+    /// [`REPLAY_WINDOW_PER_GATEWAY`] ids the oldest is evicted and becomes the floor: a replay of it, or
+    /// anything older, is refused rather than forgotten; a newer envelope is still served. And ids older
+    /// than the freshness bound are pruned, since `verify` refuses those as stale anyway.
+    #[test]
+    fn the_replay_window_is_bounded_and_fails_closed() {
+        let w = ReplayWindows::default();
+        let via = NodeId::new("127.0.0.1", 9601).unwrap();
+        let caller = |t: u64, id: u64| GatewayCaller {
+            principal: "oidc:idp/alice".into(), via: via.clone(), scopes: vec![], issued_at_ms: t,
+            attestation: CallerAttestation::Signed { signer: [1u8; 32] }, mandate: None, resource: None, envelope_id: Some(id),
+        };
+        let now = 10_000_000;
+        let t = now - 1_000;
+        for id in 0..=REPLAY_WINDOW_PER_GATEWAY as u64 {
+            assert!(w.admit(&caller(t, id), now, 0).is_ok());
+        }
+        assert!(matches!(w.admit(&caller(t, 0), now, 0), Err(CallerError::Replayed { .. })), "the evicted oldest is the floor");
+        assert!(matches!(w.admit(&caller(t - 1, 99_999_999), now, 0), Err(CallerError::Replayed { .. })), "anything below the floor");
+        assert!(w.admit(&caller(t + 1, 0), now, 0).is_ok(), "a newer envelope is served");
+        assert!(matches!(w.admit(&caller(t, 5), now, 0), Err(CallerError::Replayed { .. })), "a kept id is a replay");
+
+        // Pruning: past the freshness bound the window empties, and an unsigned envelope is never kept.
+        let later = t + CALLER_CONTEXT_MAX_AGE_MS + 10;
+        assert!(w.admit(&caller(later, 1), later + 1, 0).is_ok());
+        let kept = w.by_gateway.pin().get(&via).unwrap().lock().seen.len();
+        assert_eq!(kept, 1, "everything older than the freshness bound was pruned");
+        let mut unsigned = caller(later, 1);
+        unsigned.attestation = CallerAttestation::UnauthenticatedMesh;
+        assert!(w.admit(&unsigned, later + 1, 0).is_ok(), "an unsigned envelope has no window to fill");
+    }
+
+    /// **A replay is dropped unanswered at `rpc_rx`** (post-360 row E). The same signed envelope sent
+    /// twice — as an attacker re-emits a captured frame — reaches the serving loop once; the second
+    /// gets no reply (an answer under the original's correlation nonce could reach the gateway first),
+    /// and is counted. Seen failing first: the serving loop ran twice.
+    #[cfg(feature = "tls")]
+    #[tokio::test]
+    async fn rpc_rx_drops_a_replay_unanswered() {
+        let a = agent(true);
+        a.start().await.unwrap();
+        let mut rx = a.service().rpc_rx("echo.replay");
+        let served = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let (ctx, n) = (Arc::clone(&a.task_ctx), Arc::clone(&served));
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                super::super::rpc::rpc_respond_ctx(&ctx, &req, Bytes::from_static(b"ok"));
+            }
+        });
+        let framed = frame_with_context(&a.task_ctx, "oidc:idp/alice", &[], Bytes::from_static(b"go")).unwrap();
+        let call = || super::super::rpc::rpc_call_framed(&a.task_ctx, a.node_id().clone(), Arc::from("echo.replay"), framed.clone(), std::time::Duration::from_millis(800));
+        assert_eq!(call().await.as_deref(), Ok(&b"ok"[..]), "the first is served");
+        let replay = call().await;
+        let replayed = a.task_ctx.caller_replay.replayed.load(std::sync::atomic::Ordering::Relaxed);
+        let count = served.load(std::sync::atomic::Ordering::SeqCst);
+        a.shutdown().await;
+        assert_eq!(count, 1, "REPLAY: the serving loop ran the same envelope twice");
+        assert_eq!(replay, Err(super::super::rpc::RpcError::Timeout), "the replay is not answered");
+        assert_eq!(replayed, 1, "and is counted");
+    }
+
+    /// **The MCP tool loop is a receive boundary too** (post-360 row E): it reads raw `mcp.invoke`
+    /// signals itself, not through `rpc_rx`, so it admits the envelope against the replay window on its
+    /// own. The same signed `tools/call` sent twice runs the tool once and leaves the second unanswered.
+    /// Seen failing first: the tool ran twice.
+    #[cfg(feature = "tls")]
+    #[tokio::test]
+    async fn the_mcp_tool_loop_drops_a_replay_unanswered() {
+        let a = agent(true);
+        a.start().await.unwrap();
+        let ran = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let n = Arc::clone(&ran);
+        let _tool = a.mcp().register_mcp_tool("count", serde_json::json!({"type": "object"}), move |_args| {
+            let n = Arc::clone(&n);
+            async move { n.fetch_add(1, std::sync::atomic::Ordering::SeqCst); Ok(serde_json::json!("ok")) }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let body = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "count", "arguments": {}}});
+        let framed = frame_with_context(&a.task_ctx, "oidc:idp/alice", &["mcp:invoke".into()], Bytes::from(body.to_string())).unwrap();
+        let call = || super::super::rpc::rpc_call_framed(&a.task_ctx, a.node_id().clone(),
+            Arc::from(crate::signal::signal_kind::MCP_INVOKE), framed.clone(), std::time::Duration::from_millis(800));
+        let first = call().await;
+        let replay = call().await;
+        let count = ran.load(std::sync::atomic::Ordering::SeqCst);
+        a.shutdown().await;
+        assert!(first.is_ok(), "the first call is answered: {first:?}");
+        assert_eq!(count, 1, "REPLAY: the MCP tool ran the same envelope twice");
+        assert_eq!(replay, Err(super::super::rpc::RpcError::Timeout), "the replay is not answered");
     }
 }

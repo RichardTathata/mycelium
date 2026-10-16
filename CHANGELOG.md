@@ -39,6 +39,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `mycelium_core::tls::load_or_generate`, `generate_rotation` and `generate_rotation_after` take the key standing
   (`Arc<KeyStanding>`) after the removed set, and `NodeStanding` gained `counted` (an exhaustive struct literal
   breaks).
+- **A gateway caller envelope is served once: a replay inside the freshness window is refused** (post-360 plan row E's
+  nonce cache; upgrade note `docs/guide/deprecations.md` §45). Row E (2.33.0) bounded an envelope's age to 300 s plus
+  the drift bound, but inside that window a captured envelope and its payload — re-emitted under a fresh RPC nonce by a
+  member that relayed it — were served again as the client's call. Each envelope now carries an id (the gateway's HLC
+  at framing, so unique per gateway), and a second Ed25519 signature covers it with the rest
+  (`mycelium:gateway-caller:v2`); the v1 signature is still produced, so a 2.34 provider verifies a new gateway's
+  envelope. A provider admits each `(gateway, issue time, id)` once, at the six places a request is received: `rpc_rx`,
+  the MCP tool loop, the MCP bridge, the SDK serve stream, `llm.invoke` and the explain responder
+  (`gateway_caller::verify_received`; `verify` itself keeps no state, so a handler re-reading its request is not a
+  replay). A replay is **dropped unanswered** — a refusal sent back under the original's correlation nonce could reach
+  the gateway before the real answer — and counted (`GET /stats` `caller_envelopes_replayed`). The window is per
+  gateway, pruned at the freshness bound, and capped at 65 536 ids: past the cap the oldest is evicted and becomes a
+  floor at or below which an envelope is refused, so the bound fails closed. **Also fixed:** the MCP bridge
+  (`connect_mcp_server`) forwarded a call whose caller context failed verification unless provider enforcement was on; it
+  now refuses it (`-32022`) as the native tool loop does. **The window, one release:** an envelope without an id (a
+  pre-row-E gateway's) verifies in the v1 form, is served, and is counted (`caller_envelopes_without_id`) — and a
+  replayer can strip the id to reach that path, so the protection holds once the counter stops rising fleet-wide and
+  the next release refuses an envelope without one. **Not covered:** an unsigned mesh (no `tls` identity), where the
+  envelope can be forged outright and no window is kept; a provider restart forgets its window (a replay of an
+  envelope still inside the freshness bound is served once more). Tests, each seen failing first:
+  `a_replayed_envelope_is_refused_at_the_receive_boundary` (with a plant: two calls identical in content and issue time
+  are both served), `an_envelope_id_is_signed_and_one_without_is_counted` (a re-numbered envelope verified when the id
+  was not signed), `rpc_rx_drops_a_replay_unanswered`, `the_mcp_tool_loop_drops_a_replay_unanswered`,
+  `the_mcp_bridge_refuses_a_replayed_or_failed_context`; and `the_replay_window_is_bounded_and_fails_closed`.
 
 ## [2.34.0] — 2026-10-16
 

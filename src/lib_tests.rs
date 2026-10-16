@@ -263,6 +263,7 @@ fn spawn_handler_with(
         membership: std::sync::OnceLock::new(),
         #[cfg(feature = "tls")]
         identity_ledger: Arc::new(crate::agent::revocation::IdentityLedger::default()),
+        caller_replay: Default::default(),
         #[cfg(feature = "a2a")]
         a2a_mounted: std::sync::atomic::AtomicBool::new(false),
         guarantees: parking_lot::Mutex::new(crate::agent::guarantee::core_guarantees()),
@@ -3919,6 +3920,7 @@ async fn test_subscribe_notified_via_gossip() {
         membership: std::sync::OnceLock::new(),
         #[cfg(feature = "tls")]
         identity_ledger: Arc::new(crate::agent::revocation::IdentityLedger::default()),
+        caller_replay: Default::default(),
         #[cfg(feature = "a2a")]
         a2a_mounted: std::sync::atomic::AtomicBool::new(false),
         guarantees: parking_lot::Mutex::new(crate::agent::guarantee::core_guarantees()),

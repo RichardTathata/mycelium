@@ -254,7 +254,12 @@ async fn handle_llm_invoke(
     // Item 7 (review finding 3): the built-in provider verifies the caller context before it
     // touches a backend; a forged / unsigned / malformed / missing context is refused, never
     // stripped and executed.
-    if let Err(e) = super::gateway_caller::verify(&ctx, &req) {
+    if let Err(e) = super::gateway_caller::verify_received(&ctx, &req) {
+        // Post-360 row E: a replay is dropped unanswered (see `rpc_rx`).
+        if matches!(e, super::gateway_caller::CallerError::Replayed { .. }) {
+            tracing::warn!(sender = %req.sender(), "llm.invoke: dropped unanswered: {e}");
+            return;
+        }
         tracing::warn!(sender = %req.sender(), "llm.invoke: caller context refused: {e}");
         let err = serde_json::to_vec(&LlmInvokeError {
             error: "caller_context_refused".into(), detail: e.to_string(),

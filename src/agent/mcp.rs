@@ -133,8 +133,13 @@ where
         // Item 7: who is calling — the gateway client behind a verified context, or the sending
         // node itself. A context that fails verification is refused with an error reply; the
         // handler never runs as if the node had called.
-        let (principal, carried_mandate) = match gateway_caller::request_principal_and_mandate(&ctx, &req) {
+        let (principal, carried_mandate) = match gateway_caller::received_principal_and_mandate(&ctx, &req) {
             Ok(p) => p,
+            // Post-360 row E: a replay is dropped unanswered (see `rpc_rx`).
+            Err(e @ gateway_caller::CallerError::Replayed { .. }) => {
+                warn!(tool = %tool_name, sender = %req.sender(), "mcp.invoke: dropped unanswered: {e}");
+                continue;
+            }
             Err(e) => {
                 warn!(tool = %tool_name, sender = %req.sender(), "mcp.invoke: caller context refused: {e}");
                 let response = json!({
@@ -255,6 +260,27 @@ pub(super) async fn run_mcp_client_task(
         let req_name = rpc_req["params"]["name"].as_str().unwrap_or("");
         if !tool_names.iter().any(|n| n.as_ref() == req_name) {
             continue;
+        }
+
+        // Post-360 row E: the caller context is checked here as at the native tool loop — once, at
+        // this receive boundary, against the replay window. Before, a bridged call verified it only
+        // inside provider enforcement (off by default), so a forged or replayed context was forwarded.
+        match gateway_caller::verify_received(&ctx, &req) {
+            Ok(_) => {}
+            Err(e @ gateway_caller::CallerError::Replayed { .. }) => {
+                warn!(tool = req_name, sender = %req.sender(), "mcp.invoke (bridged): dropped unanswered: {e}");
+                continue;
+            }
+            Err(e) => {
+                warn!(tool = req_name, sender = %req.sender(), "mcp.invoke (bridged): caller context refused: {e}");
+                let response = json!({
+                    "jsonrpc": "2.0",
+                    "id": rpc_req["id"],
+                    "error": {"code": -32022, "message": format!("caller context refused: {e}")},
+                });
+                rpc_respond_ctx(&ctx, &req, Bytes::from(response.to_string().into_bytes()));
+                continue;
+            }
         }
 
         // Closure plan C3: the bridged external server is protected at this node's boundary.
@@ -741,5 +767,66 @@ mod tests {
         assert!(text.contains("proxy-target"), "expected echo, got '{text}'");
 
         agent.shutdown().await;
+    }
+
+    /// **The MCP bridge checks the caller context at its receive boundary** (post-360 row E). A bridged
+    /// call verified it only inside provider enforcement (off by default), so a context that failed
+    /// verification was forwarded to the external server, and a replay of a good one was forwarded
+    /// again. Now a replay is dropped unanswered and a failed context refused `-32022`; the external
+    /// server sees one call. Seen failing first: the replay was forwarded and answered.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    #[tokio::test]
+    async fn the_mcp_bridge_refuses_a_replayed_or_failed_context() {
+        use axum::{Router, extract::Json as AJson, routing::post};
+        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let seen = Arc::clone(&calls);
+        let app = Router::new().route("/", post(move |AJson(req): AJson<serde_json::Value>| {
+            let seen = Arc::clone(&seen);
+            async move {
+                let id = req["id"].clone();
+                AJson(match req["method"].as_str().unwrap_or("") {
+                    "tools/list" => serde_json::json!({"jsonrpc": "2.0", "id": id,
+                        "result": {"tools": [{"name": "remote", "inputSchema": {"type": "object"}}]}}),
+                    "tools/call" => {
+                        seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {"content": []}})
+                    }
+                    _ => serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {}}),
+                })
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mock_port = listener.local_addr().unwrap().port();
+        let _server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+
+        let port = alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        let dir = std::env::temp_dir().join(format!("mcp-bridge-replay-{port}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        cfg.tls = Some(crate::TlsConfig { auto_cert_dir: dir.clone(), ..Default::default() });
+        let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+        agent.start().await.unwrap();
+        let _bridge = agent.mcp().connect_mcp_server(format!("http://127.0.0.1:{mock_port}/")).await.unwrap();
+
+        let body = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "remote", "arguments": {}}});
+        let framed = super::gateway_caller::frame_with_context(&agent.task_ctx, "oidc:idp/alice", &["mcp:invoke".into()],
+            Bytes::from(body.to_string())).unwrap();
+        let call = |payload: Bytes| super::super::rpc::rpc_call_framed(&agent.task_ctx, agent.node_id().clone(),
+            Arc::from(signal_kind::MCP_INVOKE), payload, Duration::from_millis(800));
+        let first = call(framed.clone()).await;
+        let replay = call(framed.clone()).await;
+        // The same envelope over different bytes: its digest no longer matches (a failed context).
+        let mut tampered = framed.to_vec();
+        tampered.push(b' ');
+        let failed = call(Bytes::from(tampered)).await;
+        let count = calls.load(std::sync::atomic::Ordering::SeqCst);
+        agent.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(first.is_ok(), "the first bridged call is answered: {first:?}");
+        assert_eq!(replay, Err(super::super::rpc::RpcError::Timeout), "the replay is not answered");
+        let failed: serde_json::Value = serde_json::from_slice(&failed.expect("a failed context is answered")).unwrap();
+        assert_eq!(failed["error"]["code"], -32022, "{failed}");
+        assert_eq!(count, 1, "FORWARDED: the external server saw a replayed or unverified call");
     }
 }

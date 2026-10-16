@@ -157,7 +157,7 @@ impl RpcRequestRx {
             };
             #[allow(unused_mut)] // mutated only when the provider check can attach a budget slot
             let mut req = RpcRequest::from(next);
-            match super::gateway_caller::verify(&self.ctx, &req) {
+            match super::gateway_caller::verify_received(&self.ctx, &req) {
                 Ok(_) => {
                     // Closure plan C3: protected work is decided at this boundary, so every serve
                     // loop built on `rpc_rx`, in this crate or a companion, gets it without calling
@@ -176,6 +176,11 @@ impl RpcRequestRx {
                         }
                     }
                     return Some(req);
+                }
+                // Post-360 row E: a replay is dropped unanswered — a refusal under the original's
+                // correlation nonce could reach the gateway before the real answer.
+                Err(e @ super::gateway_caller::CallerError::Replayed { .. }) => {
+                    tracing::warn!(kind = %req.kind(), sender = %req.sender(), "rpc_rx: dropped unanswered: {e}");
                 }
                 Err(e) => {
                     tracing::warn!(kind = %req.kind(), sender = %req.sender(),

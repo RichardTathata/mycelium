@@ -575,8 +575,8 @@ PR.
 - *The caller envelope binds freshness* — `src/agent/gateway_caller.rs` `verify`: issued more than
   `CALLER_CONTEXT_MAX_AGE_MS` (300 s) plus `max_clock_drift_ms` ago or more than `max_clock_drift_ms` ahead →
   `CallerError::Stale`; one verifier for every receive path. Test: `a_stale_or_future_envelope_is_refused` (*was*
-  `left: Ok(Some(1791791309573)) right: Err("stale") — tls=false: two hours old`). **Not built:** a nonce cache, so a
-  replay inside the window is not refused.
+  `left: Ok(Some(1791791309573)) right: Err("stale") — tls=false: two hours old`). ~~**Not built:** a nonce cache, so a
+  replay inside the window is not refused.~~ Delivered after 2.34.0 (§3.6 under E).
 - *Left for this row by P5* — `mod.rs` cites `every_listed_public_path_is_mounted_and_public_and_gated_paths_are_not`;
   `GatewayPreflight::is_inert` `#[deprecated(since = "2.33.0")]` (no reference in this repository or
   `mycelium-private`, grepped); the SSE resume point stays *not built* — the guide's and READMEs' loss sentences now
@@ -922,8 +922,14 @@ worth fixing on its own: the agent card names the gossip port), O and P (after N
   is partly scanned as production (fails safe) — balance `()`/`[]`/`<>` across the header.
 - **I (private):** a Cedar schema type-check of `context.*` and template `when` literals; behaviour under real power
   loss behind the fsync pins.
-- **E:** a nonce cache for the caller envelope (a replay inside the freshness window is
-  accepted); an acknowledged in-process mailbox; and the SSE resume point (recorded since row G). **Fixed (2026-10-16):**
+- **E:** ~~a nonce cache for the caller envelope~~ — *delivered after 2.34.0, unreleased:* each envelope carries an
+  id signed with the rest, and a provider admits each `(gateway, issue time, id)` once at every receive boundary
+  (`gateway_caller::verify_received`, `ReplayWindows`), dropping a replay unanswered
+  (`a_replayed_envelope_is_refused_at_the_receive_boundary`, `an_envelope_id_is_signed_and_one_without_is_counted`,
+  `rpc_rx_drops_a_replay_unanswered`, `the_mcp_tool_loop_drops_a_replay_unanswered`,
+  `the_mcp_bridge_refuses_a_replayed_or_failed_context`, `the_replay_window_is_bounded_and_fails_closed`); the MCP bridge now verifies the caller context. *Not built:* an
+  envelope without an id is accepted for one release (counted); an unsigned mesh keeps no window; a provider's window does
+  not survive its restart. Still open: an acknowledged in-process mailbox; and the SSE resume point (recorded since row G). **Fixed (2026-10-16):**
   the two `cap/` cases outside the row (#613's review, finding 6) — a `/` or an empty `ns`/`name`, which built an advert
   no reader parses, and `locality`/`self`, which overwrote the node's own locality entry — are refused at every door
   that writes a `cap/`, `req/` or `gcap/` key: `capability/advertise` (400 `invalid_capability_name`), the unit-file

@@ -698,7 +698,7 @@ pub async fn run_explain_responder(
             maybe = rx.recv() => {
                 let Some(sig) = maybe else { break };
                 let req = super::rpc::RpcRequest::from(sig);
-                if let Err(e) = super::gateway_caller::verify(&ctx, &req) {
+                if let Err(e) = super::gateway_caller::verify_received(&ctx, &req) {
                     tracing::warn!(sender = %req.sender(), "explain: caller context refused: {e}");
                     continue;
                 }
