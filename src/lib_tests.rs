@@ -1038,7 +1038,7 @@ fn test_tls_identity(tag: &str, node: &NodeId) -> (Arc<crate::tls::NodeTls>, std
     let dir = std::env::temp_dir().join(format!("myc-{tag}-{}-{}", node.to_socket_addr().port(), std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let cfg = crate::config::TlsConfig { auto_cert_dir: dir.clone(), ..Default::default() };
-    let tls = crate::tls::load_or_generate(&cfg, node, Arc::new(mycelium_core::removal::RemovedSet::default())).unwrap();
+    let tls = crate::tls::load_or_generate(&cfg, node, Arc::new(mycelium_core::removal::RemovedSet::default()), Default::default()).unwrap();
     (Arc::new(tls), dir)
 }
 
@@ -1691,6 +1691,91 @@ async fn a_kv_write_signed_by_a_revoked_key_is_refused_once_the_revocation_is_se
     assert!(seen, "B saw C's old key revoked and its new key held");
     assert!(plant, "C's write under its new key reached B");
     assert!(!landed, "REVOKED KEY: C's revoked key still signs C's KV writes at B");
+}
+
+/// Drive one in-memory TLS handshake; `Err` names the side that refused.
+#[cfg(all(feature = "tls", feature = "compliance"))]
+fn mesh_handshake(client: Arc<rustls::ClientConfig>, server: Arc<rustls::ServerConfig>) -> Result<(), String> {
+    let name = rustls::pki_types::ServerName::try_from("127.0.0.1").unwrap().to_owned();
+    let mut c = rustls::ClientConnection::new(client, name).unwrap();
+    let mut s = rustls::ServerConnection::new(server).unwrap();
+    for _ in 0..16 {
+        let mut buf = Vec::new();
+        while c.wants_write() { c.write_tls(&mut buf).unwrap(); }
+        if !buf.is_empty() {
+            s.read_tls(&mut buf.as_slice()).unwrap();
+            s.process_new_packets().map_err(|e| format!("server refused: {e}"))?;
+        }
+        let mut buf = Vec::new();
+        while s.wants_write() { s.write_tls(&mut buf).unwrap(); }
+        if !buf.is_empty() {
+            c.read_tls(&mut buf.as_slice()).unwrap();
+            c.process_new_packets().map_err(|e| format!("client refused: {e}"))?;
+        }
+        if !c.is_handshaking() && !s.is_handshaking() { return Ok(()); }
+    }
+    Err("the handshake did not finish".into())
+}
+
+/// **A thief holding a revoked key and its certificate is refused at the mTLS handshake** (post-360
+/// plan row Q's follow-up, end to end). C's pre-rotation client config — its old key and the
+/// CA-issued certificate naming C — is what a thief who stole them can present. Before, B's handshake
+/// judged the CA chain and the removal ledger only, so after C's `rotate_identity_on_compromise` the
+/// thief was still a connected peer (its signed writes refused one by one). Now the revocation B's
+/// fold counted reaches B's verifier. The plant: C's new certificate is accepted, and the old one was
+/// accepted before the rotation. Seen failing first: the old certificate's handshake completed.
+#[cfg(all(feature = "tls", feature = "compliance"))]
+#[tokio::test]
+async fn a_revoked_keys_certificate_is_refused_at_a_peers_handshake() {
+    let (a, b, c, _nb, nc, dir) = three_signed_nodes("rev-handshake", false).await;
+    let thief = c.task_ctx.tls.get().unwrap().client_config();
+    let k0 = c.task_ctx.tls.get().unwrap().verifying_key_bytes();
+    let b_server = || b.task_ctx.tls.get().unwrap().server_config();
+    let before = mesh_handshake(Arc::clone(&thief), b_server());
+    let k1 = c.rotate_identity_on_compromise(Duration::from_millis(500)).await.unwrap();
+    let seen = revocation_seen(&b, &nc, k0, k1).await;
+    let stolen = mesh_handshake(thief, b_server());
+    let current = mesh_handshake(c.task_ctx.tls.get().unwrap().client_config(), b_server());
+    a.shutdown().await; b.shutdown().await; c.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(before, Ok(()), "plant: C's certificate was accepted before the rotation");
+    assert!(seen, "B saw C's old key revoked and its new key held");
+    assert_eq!(current, Ok(()), "plant: C's new certificate is accepted");
+    assert!(stolen.as_ref().is_err_and(|e| e.contains("revoked")),
+        "REVOKED KEY: B accepted a handshake from C's revoked key and certificate: {stolen:?}");
+}
+
+/// **A key revoked long ago stays refused at the handshake once it falls out of the anchored set**
+/// (the re-review of row Q's follow-up). The fold publishes only a node's sixteen newest anchored keys
+/// (`MAX_CERTS_PER_NODE`), so after C's compromise rotation and sixteen more, C's first key is no
+/// longer anchored at B — and the first cut of the rule (*anchored and revoked*) admitted the thief's
+/// handshake again, while every signature check still refused the key. The handshake now reads the
+/// revocations B **counted** (`NodeStanding::counted`), which no cap or saturation drops. Seen failing
+/// first with the rule reading the anchored set.
+#[cfg(all(feature = "tls", feature = "compliance"))]
+#[tokio::test]
+async fn a_key_revoked_long_ago_stays_refused_at_the_handshake_past_the_anchor_cap() {
+    let (a, b, c, _nb, nc, dir) = three_signed_nodes("rev-handshake-cap", false).await;
+    let thief = c.task_ctx.tls.get().unwrap().client_config();
+    let k0 = c.task_ctx.tls.get().unwrap().verifying_key_bytes();
+    let k1 = c.rotate_identity_on_compromise(Duration::from_millis(300)).await.unwrap();
+    let seen = revocation_seen(&b, &nc, k0, k1).await;
+    let mut newest = k1;
+    for _ in 0..16 {
+        newest = c.rotate_identity(Duration::from_millis(100)).await.unwrap();
+    }
+    let k0_dropped = within_3s(|| b.task_ctx.key_standing.get(&nc).is_some_and(|s| {
+        s.anchored.as_ref().is_some_and(|a| a.contains(&newest) && !a.contains(&k0))
+    })).await;
+    let counted = b.task_ctx.key_standing.get(&nc).is_some_and(|s| s.counted.contains(&k0));
+    let stolen = mesh_handshake(thief, b.task_ctx.tls.get().unwrap().server_config());
+    a.shutdown().await; b.shutdown().await; c.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(seen, "B saw C's first key revoked");
+    assert!(k0_dropped, "plant: past the cap, C's first key is no longer among its anchored keys at B");
+    assert!(counted, "B still holds the revocation as counted");
+    assert!(stolen.as_ref().is_err_and(|e| e.contains("revoked")),
+        "REVOKED KEY: past the anchor cap, B accepted a handshake from C's long-revoked key: {stolen:?}");
 }
 
 /// **An identity record chained through a revoked key adds nothing to the node's key set** (row Q).

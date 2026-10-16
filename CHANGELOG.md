@@ -9,6 +9,37 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **A revoked key's certificate is refused at the mTLS handshake, and the mesh no longer resumes TLS sessions**
+  (post-360 plan row Q's follow-up; upgrade note `docs/guide/deprecations.md` §44). Row Q (2.33.0) made a revoked
+  key stop verifying at every signature check, but the handshake judged only the CA chain and the removal ledger,
+  so whoever held a revoked key and its certificate — CA-valid until it expires — stayed a connected peer, its
+  signed frames refused one at a time. Now both sides of a mesh handshake refuse a certificate whose key its owner revoked by a
+  revocation this node **counted** — judged while the key was anchored for the owner (a CA-issued certificate record
+  naming the node), and kept for good after (across a restart, through the journal under `[persistence]`, 64 per node), whatever the anchored set's cap or a saturated node later drops
+  (`NodeStanding::counted`). A certificate naming its node (`mycelium://{node}`) is judged against that node; one naming
+  no node (issued before row Q, valid to 2099) against whichever node counted a revocation of its key — a revocation
+  counts only against a key anchored for the revoker, and a key is anchored only for the node its certificate names,
+  so one member's revocations can never refuse another's handshakes. A *provisional* revocation (of
+  a key whose certificate record has not reached this node yet) refuses nothing, so a node that has just rotated still
+  connects; and the handshake checks *revoked*, not the wider *distrusted*, for the same reason. **Found on the way, pre-existing since closure plan C5 (2.15.0):** the
+  mesh's rustls configs kept their defaults, a client session cache and a server issuing TLS 1.3 tickets, and a
+  resumed session re-runs no certificate verifier — so a member that completed one handshake before its **removal**
+  reconnected on the cached session and was admitted at the transport. Resumption is now off on both sides. Tests:
+  `a_revoked_keys_certificate_is_refused_at_the_handshake_both_ways` (seen failing first without the check, with
+  resumption on, and — its provisional plant — judging every revocation), `a_revoked_key_is_refused_behind_a_certificate_that_names_no_node`
+  (seen failing first with a URI-less certificate unjudged; the review's finding 1), `a_removed_member_cannot_reconnect_on_a_resumed_session` (seen failing first with resumption
+  on), `a_revoked_keys_certificate_is_refused_at_a_peers_handshake` (end to end after
+  `rotate_identity_on_compromise`; seen failing first without the check),
+  `a_key_revoked_long_ago_stays_refused_at_the_handshake_past_the_anchor_cap` (sixteen rotations later; seen failing
+  first with the rule reading the anchored set — the re-review's finding). **Not closed:** a connection already up
+  when the revocation is counted stays up (its signed frames are refused as before); a key that never had a certificate record naming its node
+  (its signatures are refused, its handshake is not).
+  `mycelium_core::tls::load_or_generate`, `generate_rotation` and `generate_rotation_after` take the key standing
+  (`Arc<KeyStanding>`) after the removed set, and `NodeStanding` gained `counted` (an exhaustive struct literal
+  breaks).
+
 ## [2.34.0] — 2026-10-16
 
 **Security fixes in the dependencies, and the post-360 plan's last identity rows.** Wasmtime 49.0.3 closes

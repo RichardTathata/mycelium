@@ -717,7 +717,8 @@ fn refresh_once(ctx: &TaskCtx) {
                 now.insert(c.parsed.signed.event.revoked_key);
             }
         }
-        let mut revoked = remember_counted(ledger, &node, &now);
+        let counted = remember_counted(ledger, &node, &now);
+        let mut revoked = counted.clone();
         revoked.extend(folded.provisional.iter().map(|c| c.parsed.signed.event.revoked_key));
         let anchored = if folded.anchors.is_empty() {
             None
@@ -727,7 +728,7 @@ fn refresh_once(ctx: &TaskCtx) {
         } else {
             Some(folded.anchors.keys().copied().collect::<HashSet<_>>())
         };
-        let standing = NodeStanding { anchored, revoked };
+        let standing = NodeStanding { anchored, revoked, counted };
         if ctx.key_standing.get(&node).as_deref() != Some(&standing) {
             ctx.key_standing.set(&node, standing);
         }

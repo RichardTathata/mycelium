@@ -83,6 +83,11 @@ pub struct NodeStanding {
     pub anchored: Option<std::collections::HashSet<[u8; 32]>>,
     /// The keys the node has revoked, by a revocation this node counted.
     pub revoked: std::collections::HashSet<[u8; 32]>,
+    /// The keys of [`revoked`](Self::revoked) whose revocation was **counted against a key with
+    /// standing** — never a provisional one (of a key whose certificate record this node has not
+    /// judged). Kept for good (across a restart, through the journal under `[persistence]`), even once the key leaves [`anchored`](Self::anchored) (the newest-16 cap,
+    /// a saturated node). What the mTLS handshake refuses (post-360 plan row Q's follow-up).
+    pub counted: std::collections::HashSet<[u8; 32]>,
 }
 
 /// Every node's [`NodeStanding`], read by every verifier of a node's key through
@@ -125,6 +130,22 @@ impl KeyStanding {
     /// Has `node` revoked `key`?
     pub fn is_revoked(&self, node: &NodeId, key: &[u8; 32]) -> bool {
         self.get(node).is_some_and(|s| s.revoked.contains(key))
+    }
+
+    /// Has `node` revoked `key` by a revocation counted against a key with standing
+    /// ([`NodeStanding::counted`])? What the mTLS handshake refuses (post-360 plan row Q's follow-up).
+    pub fn is_counted_revoked(&self, node: &NodeId, key: &[u8; 32]) -> bool {
+        self.get(node).is_some_and(|s| s.counted.contains(key))
+    }
+
+    /// A node that has revoked `key` by a counted revocation, if any. A revocation counts only against
+    /// a key anchored for the revoking node — a CA-issued certificate naming it — so this finds the
+    /// key's owner and no other node's revocation.
+    pub fn counted_revoker_of(&self, key: &[u8; 32]) -> Option<NodeId> {
+        if self.by_node.is_empty() {
+            return None;
+        }
+        self.by_node.pin().iter().find(|(_, s)| s.counted.contains(key)).map(|(n, _)| n.clone())
     }
 
     /// Is `key` **not** a key this node trusts for `node`, whatever else holds it — revoked, or, for an
@@ -171,6 +192,7 @@ mod tests {
         k.set(&owner, NodeStanding {
             anchored: Some([[2u8; 32], [3u8; 32]].into_iter().collect()),
             revoked: [[3u8; 32]].into_iter().collect(),
+            counted: [[3u8; 32]].into_iter().collect(),
         });
         assert!(k.is_distrusted(&owner, &[1u8; 32]), "not anchored");
         assert!(!k.is_distrusted(&owner, &[2u8; 32]));

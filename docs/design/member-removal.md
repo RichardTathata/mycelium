@@ -44,7 +44,7 @@ fresh admission under a **new identity**.
 | RPC receive (`RpcRequestRx`, the MCP loops, the SDK serve stream) | Refused before any serve path, whether it calls directly or its principal arrives through a gateway envelope |
 | Gossip ingest | Updates originated by a removed node are not applied |
 | Membership / SWIM | Not admitted as a peer; its liveness claims are ignored |
-| TLS handshake | A client/server certificate verifier rejects a removed node's identity key, so it cannot rejoin by reconnecting |
+| TLS handshake | A client/server certificate verifier rejects a removed node's identity key, so it cannot rejoin by reconnecting. The mesh does not resume TLS sessions (since post-360 row Q's follow-up): a resumed session re-runs no verifier, so before then a member that had connected once could reconnect on its cached session |
 | Knowledge (P1) | Its signatures verify as `Removed` (attributable history, never current) |
 | A1 / C3 | Its mandates are refused, since the holder is removed, independent of the authority's checkpoints |
 

@@ -834,7 +834,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let node = crate::node_id::NodeId::new("127.0.0.1", 9301).unwrap();
         let cfg = crate::config::TlsConfig { auto_cert_dir: dir.clone(), ..Default::default() };
-        let tls = crate::tls::load_or_generate(&cfg, &node, Arc::new(crate::removal::RemovedSet::default())).unwrap();
+        let tls = crate::tls::load_or_generate(&cfg, &node, Arc::new(crate::removal::RemovedSet::default()), Default::default()).unwrap();
         let vk = tls.verifying_key_bytes();
         let u = GossipUpdate {
             nonce: 7, sender: node.id_hash(), ttl: 3, is_tombstone: false,
