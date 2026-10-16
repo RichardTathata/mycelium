@@ -42,7 +42,7 @@ mod lock_service;
 #[cfg(feature = "consensus")]
 mod overlay_consistent;
 mod overlay_reliable;
-mod rpc;
+pub(crate) mod rpc;
 pub(crate) mod gateway_caller;
 pub(crate) mod guarantee;
 /// The AE evaluator seam lives exactly where it is enforced: a gateway that can attest (`tls`

@@ -256,7 +256,7 @@ async fn handle_llm_invoke(
     // stripped and executed.
     if let Err(e) = super::gateway_caller::verify_received(&ctx, &req) {
         // Post-360 row E: a replay is dropped unanswered (see `rpc_rx`).
-        if matches!(e, super::gateway_caller::CallerError::Replayed { .. }) {
+        if e.unanswered() {
             tracing::warn!(sender = %req.sender(), "llm.invoke: dropped unanswered: {e}");
             return;
         }

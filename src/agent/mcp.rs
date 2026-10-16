@@ -136,7 +136,7 @@ where
         let (principal, carried_mandate) = match gateway_caller::received_principal_and_mandate(&ctx, &req) {
             Ok(p) => p,
             // Post-360 row E: a replay is dropped unanswered (see `rpc_rx`).
-            Err(e @ gateway_caller::CallerError::Replayed { .. }) => {
+            Err(e) if e.unanswered() => {
                 warn!(tool = %tool_name, sender = %req.sender(), "mcp.invoke: dropped unanswered: {e}");
                 continue;
             }
@@ -267,7 +267,7 @@ pub(super) async fn run_mcp_client_task(
         // inside provider enforcement (off by default), so a forged or replayed context was forwarded.
         match gateway_caller::verify_received(&ctx, &req) {
             Ok(_) => {}
-            Err(e @ gateway_caller::CallerError::Replayed { .. }) => {
+            Err(e) if e.unanswered() => {
                 warn!(tool = req_name, sender = %req.sender(), "mcp.invoke (bridged): dropped unanswered: {e}");
                 continue;
             }
@@ -810,7 +810,7 @@ mod tests {
         let _bridge = agent.mcp().connect_mcp_server(format!("http://127.0.0.1:{mock_port}/")).await.unwrap();
 
         let body = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "remote", "arguments": {}}});
-        let framed = super::gateway_caller::frame_with_context(&agent.task_ctx, "oidc:idp/alice", &["mcp:invoke".into()],
+        let framed = super::gateway_caller::frame_with_context(&agent.task_ctx, agent.node_id(), "oidc:idp/alice", &["mcp:invoke".into()],
             Bytes::from(body.to_string())).unwrap();
         let call = |payload: Bytes| super::super::rpc::rpc_call_framed(&agent.task_ctx, agent.node_id().clone(),
             Arc::from(signal_kind::MCP_INVOKE), payload, Duration::from_millis(800));

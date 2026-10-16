@@ -179,7 +179,7 @@ impl RpcRequestRx {
                 }
                 // Post-360 row E: a replay is dropped unanswered — a refusal under the original's
                 // correlation nonce could reach the gateway before the real answer.
-                Err(e @ super::gateway_caller::CallerError::Replayed { .. }) => {
+                Err(e) if e.unanswered() => {
                     tracing::warn!(kind = %req.kind(), sender = %req.sender(), "rpc_rx: dropped unanswered: {e}");
                 }
                 Err(e) => {
@@ -288,7 +288,7 @@ pub(crate) async fn rpc_call_ctx(
     timeout: Duration,
 ) -> Result<Bytes, RpcError> {
     let payload = if super::gateway_caller::promises_envelopes(&ctx.config) {
-        super::gateway_caller::frame_self(ctx, payload)
+        super::gateway_caller::frame_self(ctx, &target, payload)
     } else {
         payload
     };

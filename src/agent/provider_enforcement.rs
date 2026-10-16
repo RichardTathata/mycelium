@@ -417,7 +417,7 @@ mod tests {
         let call = |principal: String| {
             let (ctx, me) = (Arc::clone(&ctx), me.clone());
             async move {
-                let framed = gateway_caller::frame_with_context(&ctx, &principal, &[], Bytes::from_static(b"go")).unwrap();
+                let framed = gateway_caller::frame_with_context(&ctx, &me, &principal, &[], Bytes::from_static(b"go")).unwrap();
                 match super::super::rpc::rpc_call_framed(&ctx, me, Arc::from("depot.custom"), framed, Duration::from_millis(800)).await {
                     Ok(b) => serde_json::from_slice::<Value>(&b).map(|v| v["reason"].as_str().unwrap_or("").to_string()).unwrap_or_default(),
                     Err(_) => "held".to_string(), // admitted, and never answered

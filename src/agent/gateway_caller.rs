@@ -20,7 +20,12 @@
 //! The context is **constructed only by the auth layer** (`#[non_exhaustive]`, `pub(crate)`
 //! builders) and **attested by the node over the request digest**: under the `tls` identity
 //! the envelope carries an Ed25519 signature by the gateway's identity key over
-//! `principal ‖ via ‖ scopes ‖ issued_at ‖ sha256(payload)`. A struct with a principal name and
+//! `principal ‖ via ‖ scopes ‖ issued_at ‖ sha256(payload)`, and (post-360 row E) a second one over
+//! those fields plus the envelope's **id** (the gateway's HLC at framing) and the node it is addressed
+//! to. A provider admits each `(gateway, issue time, id)` once, at the place it receives the request
+//! ([`verify_received`]: `rpc_rx`, the MCP tool loop and bridge, the SDK serve stream, `llm.invoke`, the
+//! explain responder), and drops a replay — repeated, misaddressed, or with the id stripped from a
+//! gateway that publishes `sys/caller-context-id/` — without answering. A struct with a principal name and
 //! a digest supplied by anyone else is not evidence — the provider verifies the signer against
 //! the keys it knows for `via` (`sys/identity`, anchors, minus revocations) and rejects a
 //! mismatch, an unknown signer, an unsigned envelope on an authenticated mesh, a `via` that is
@@ -134,8 +139,9 @@ const DOMAIN_SEP: &[u8] = b"mycelium:gateway-caller:v1\n";
 const DOMAIN_SEP_ID: &[u8] = b"mycelium:gateway-caller:v2\n";
 /// The most envelope ids a provider keeps per gateway inside the freshness window. Past it the
 /// oldest is evicted and becomes the window's floor: an envelope at or below the floor is refused
-/// (it might be a replay of one forgotten), so the bound fails closed. 65 536 in five minutes is
-/// over 200 calls a second from one gateway to one provider.
+/// (it might be a replay of one forgotten), so the bound fails closed. Ids are kept for the
+/// freshness window — 300 s plus `max_clock_drift_ms`, 600 s at the default drift bound — so the floor
+/// engages past about 109 calls a second, sustained, from one gateway to one provider.
 pub(crate) const REPLAY_WINDOW_PER_GATEWAY: usize = 65_536;
 /// Upper bound on an envelope: a principal, a node id, a few scopes.
 pub(crate) const MAX_ENVELOPE_BYTES: usize = 8 * 1024;
@@ -256,6 +262,16 @@ pub enum CallerError {
         /// The envelope's id.
         id: u64,
     },
+    /// The envelope is addressed (signed) to another node (post-360 row E's review): a capture
+    /// replayed at a provider it was not sent to. Dropped without an answer, as a replay.
+    Misaddressed {
+        /// The node the envelope was signed for.
+        to: String,
+    },
+    /// A signed envelope without an id from a gateway that issues one on every envelope (its
+    /// `sys/caller-context-id/` marker, or this node itself): one of its envelopes with the id
+    /// stripped — a replay reaching for the pre-row-E path. Dropped without an answer.
+    IdStripped,
 }
 
 impl CallerError {
@@ -272,7 +288,16 @@ impl CallerError {
             CallerError::Removed => "removed",
             CallerError::Stale { .. } => "stale",
             CallerError::Replayed { .. } => "replayed",
+            CallerError::Misaddressed { .. } => "misaddressed",
+            CallerError::IdStripped => "id_stripped",
         }
+    }
+
+    /// Whether a receive boundary must drop the request **without answering** (post-360 row E): a
+    /// replay in any of its shapes. A refusal sent back under a captured request's correlation nonce
+    /// could reach its gateway before the real answer.
+    pub fn unanswered(&self) -> bool {
+        matches!(self, CallerError::Replayed { .. } | CallerError::Misaddressed { .. } | CallerError::IdStripped)
     }
 }
 
@@ -289,6 +314,10 @@ impl std::fmt::Display for CallerError {
             CallerError::Replayed { issued_at_ms, id } => write!(
                 f,
                 "caller context {id} issued at {issued_at_ms} ms was already received (a replay inside the freshness window)"
+            ),
+            CallerError::Misaddressed { to } => write!(f, "caller context is addressed to {to}, not this node (a replay)"),
+            CallerError::IdStripped => f.write_str(
+                "caller context has no id, from a gateway that issues one on every envelope (a replay with the id stripped)",
             ),
             CallerError::Malformed(why) => write!(f, "caller context malformed: {why}"),
             CallerError::ViaMismatch { claimed, sender } => {
@@ -402,6 +431,18 @@ pub(crate) fn promises_envelopes(config: &crate::config::GossipConfig) -> bool {
 /// The `sys/caller-context/{self}` value this node publishes.
 pub(crate) fn marker_value(config: &crate::config::GossipConfig) -> &'static [u8] {
     if promises_envelopes(config) { MARKER_PROMISES_ENVELOPES } else { MARKER_VERIFIES }
+}
+
+/// Does `node` put an id on every caller envelope it frames (post-360 row E) — its
+/// `sys/caller-context-id/` marker, or this node itself (it is running this code)?
+#[cfg(feature = "tls")]
+fn issues_envelope_ids(ctx: &TaskCtx, node: &NodeId) -> bool {
+    *node == ctx.node_id || mycelium_core::ops::kv_get(ctx, &id_marker_key(node)).is_some()
+}
+
+/// KV key of a node's caller-envelope id marker (post-360 row E).
+pub(crate) fn id_marker_key(node: &NodeId) -> String {
+    format!("{}{}", crate::signal::kv_ns::CALLER_CONTEXT_ID, node)
 }
 
 /// Did `sender` promise an envelope on every RPC it originates (its marker is
@@ -524,7 +565,7 @@ pub(crate) async fn gateway_rpc_call_with_mandate(
                 refused("provider_without_caller_context");
                 return Err(GatewayDispatchError::ProviderWithoutContext(target));
             }
-            let Some(framed) = frame_with_context_and_mandate(ctx, &caller.principal, &caller.scopes, payload, mandate, resource) else {
+            let Some(framed) = frame_with_context_and_mandate(ctx, &target, &caller.principal, &caller.scopes, payload, mandate, resource) else {
                 refused("caller_context_too_large");
                 return Err(GatewayDispatchError::ContextTooLarge);
             };
@@ -580,7 +621,11 @@ struct Envelope {
     /// E). An older provider ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     n: Option<u64>,
-    /// base64 Ed25519 signature over the v2 message — the v1 fields and `n`. An older provider reads
+    /// The node the envelope is addressed to — inside the v2 signature, so a capture cannot be replayed
+    /// at another provider. Present whenever `n` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    o: Option<String>,
+    /// base64 Ed25519 signature over the v2 message — the v1 fields, `n` and `o`. An older provider reads
     /// `sig`; a provider that keeps a replay window requires this one whenever `n` is present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sn: Option<String>,
@@ -590,14 +635,15 @@ struct Envelope {
 /// identity; otherwise the envelope is unsigned (see [`CallerAttestation::UnauthenticatedMesh`]).
 /// `None` when the envelope would exceed the bound a receiver accepts (`MAX_ENVELOPE_BYTES`) —
 /// the producer never truncates (review finding 4).
-pub(crate) fn frame_with_context(ctx: &TaskCtx, principal: &str, scopes: &[String], app: Bytes) -> Option<Bytes> {
-    frame_with_context_and_mandate(ctx, principal, scopes, app, None, None)
+pub(crate) fn frame_with_context(ctx: &TaskCtx, target: &NodeId, principal: &str, scopes: &[String], app: Bytes) -> Option<Bytes> {
+    frame_with_context_and_mandate(ctx, target, principal, scopes, app, None, None)
 }
 
 /// [`frame_with_context`], carrying a presented mandate for the provider to verify (closure plan C2).
 /// `None` when the envelope, mandate included, would exceed `MAX_ENVELOPE_BYTES`.
 pub(crate) fn frame_with_context_and_mandate(
     ctx: &TaskCtx,
+    target: &NodeId,
     principal: &str,
     scopes: &[String],
     app: Bytes,
@@ -606,12 +652,14 @@ pub(crate) fn frame_with_context_and_mandate(
 ) -> Option<Bytes> {
     // A caller envelope's issue time is checked against a lifetime by whoever receives it, so it
     // must come from a clock that moves. See `Hlc::decision_now_ms`.
-    frame_with_context_at(ctx, principal, scopes, app, mandate, resource, ctx.hlc.decision_now_ms())
+    frame_with_context_at(ctx, target, principal, scopes, app, mandate, resource, ctx.hlc.decision_now_ms())
 }
 
 /// [`frame_with_context_and_mandate`] at a given issue time — the one place an envelope is built.
+#[allow(clippy::too_many_arguments)] // the envelope's fields, each one
 pub(crate) fn frame_with_context_at(
     ctx: &TaskCtx,
+    target: &NodeId,
     principal: &str,
     scopes: &[String],
     app: Bytes,
@@ -621,7 +669,8 @@ pub(crate) fn frame_with_context_at(
 ) -> Option<Bytes> {
     let via = ctx.node_id.to_string();
     let id = ctx.hlc.tick();
-    let (k, sig, sn) = attest(ctx, principal, &via, scopes, issued_at_ms, id, &app);
+    let to = target.to_string();
+    let (k, sig, sn) = attest(ctx, principal, &via, scopes, issued_at_ms, id, &to, &app);
     let env = Envelope {
         v: CALLER_CONTEXT_VERSION,
         p: principal.to_string(),
@@ -633,6 +682,7 @@ pub(crate) fn frame_with_context_at(
         m: mandate.cloned(),
         r: resource.map(str::to_string),
         n: Some(id),
+        o: Some(to),
         sn,
     };
     let env_bytes = serde_json::to_vec(&env).ok()?;
@@ -653,8 +703,8 @@ pub(crate) fn frame_with_context_at(
 /// (`principal = node:{self}`, no scopes): what makes a bare RPC-shaped frame from that node
 /// distinguishable from its own action. Falls back to the bare payload only if the envelope
 /// cannot be built (it cannot exceed the bound: a node id is short).
-pub(crate) fn frame_self(ctx: &TaskCtx, app: Bytes) -> Bytes {
-    frame_with_context(ctx, &node_principal(&ctx.node_id), &[], app.clone()).unwrap_or(app)
+pub(crate) fn frame_self(ctx: &TaskCtx, target: &NodeId, app: Bytes) -> Bytes {
+    frame_with_context(ctx, target, &node_principal(&ctx.node_id), &[], app.clone()).unwrap_or(app)
 }
 
 /// The `(signer, signature, id signature)` triple for an envelope: Ed25519 by this node's identity
@@ -670,6 +720,7 @@ fn attest(
     scopes: &[String],
     issued_at_ms: u64,
     id: u64,
+    to: &str,
     app: &[u8],
 ) -> (Option<String>, Option<String>, Option<String>) {
     use base64::Engine as _;
@@ -678,12 +729,13 @@ fn attest(
     let signer = sk.verifying_key().to_bytes();
     let d = digest(app);
     let sig = crate::tls::sign_bytes(&sk, &signed_message(principal, via, scopes, issued_at_ms, &d));
-    let sig_id = crate::tls::sign_bytes(&sk, &signed_message_with_id(principal, via, scopes, issued_at_ms, id, &d));
+    let sig_id = crate::tls::sign_bytes(&sk, &signed_message_with_id(principal, via, scopes, issued_at_ms, id, to, &d));
     let b64 = base64::engine::general_purpose::STANDARD;
     (Some(b64.encode(signer)), Some(b64.encode(sig)), Some(b64.encode(sig_id)))
 }
 
 #[cfg(not(feature = "tls"))]
+#[allow(clippy::too_many_arguments)] // mirrors the `tls` signature
 fn attest(
     _ctx: &TaskCtx,
     _principal: &str,
@@ -691,6 +743,7 @@ fn attest(
     _scopes: &[String],
     _issued_at_ms: u64,
     _id: u64,
+    _to: &str,
     _app: &[u8],
 ) -> (Option<String>, Option<String>, Option<String>) {
     (None, None, None)
@@ -805,11 +858,15 @@ fn signed_message(principal: &str, via: &str, scopes: &[String], issued_at_ms: u
     signed_fields(DOMAIN_SEP, principal, via, scopes, issued_at_ms, digest)
 }
 
-/// The v2 message: the v1 fields under their own domain separator, then the envelope's id.
+/// The v2 message: the v1 fields under their own domain separator, then the envelope's id and the
+/// node it is addressed to.
 #[cfg(feature = "tls")]
-fn signed_message_with_id(principal: &str, via: &str, scopes: &[String], issued_at_ms: u64, id: u64, digest: &[u8; 32]) -> Vec<u8> {
+#[allow(clippy::too_many_arguments)] // the signed fields, each one
+fn signed_message_with_id(principal: &str, via: &str, scopes: &[String], issued_at_ms: u64, id: u64, to: &str, digest: &[u8; 32]) -> Vec<u8> {
     let mut buf = signed_fields(DOMAIN_SEP_ID, principal, via, scopes, issued_at_ms, digest);
     buf.extend_from_slice(&id.to_le_bytes());
+    buf.extend_from_slice(&(to.len() as u32).to_le_bytes());
+    buf.extend_from_slice(to.as_bytes());
     buf
 }
 
@@ -916,13 +973,23 @@ pub(crate) fn verify(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<GatewayCa
         // Post-360 row E: an envelope with an id must carry the signature that covers it — the id is
         // what the replay window keys on, so an unsigned one would let anyone mint fresh ids. One
         // without an id is a pre-row-E gateway's, verified in the v1 form (counted at the boundary).
-        let (msg, sig) = match (env.n, env.sn.as_deref()) {
-            (Some(id), Some(sn)) => (signed_message_with_id(&env.p, &env.via, &env.s, env.t, id, &d), decode_sig(sn)?),
-            (Some(_), None) => return Err(CallerError::Malformed("envelope id without the signature that covers it".into())),
-            (None, _) => (signed_message(&env.p, &env.via, &env.s, env.t, &d), sig),
+        let (msg, sig) = match (env.n, env.o.as_deref(), env.sn.as_deref()) {
+            (Some(id), Some(to), Some(sn)) => (signed_message_with_id(&env.p, &env.via, &env.s, env.t, id, to, &d), decode_sig(sn)?),
+            (Some(_), _, _) => {
+                return Err(CallerError::Malformed("envelope id without its target and the signature that covers them".into()))
+            }
+            (None, _, _) => (signed_message(&env.p, &env.via, &env.s, env.t, &d), sig),
         };
         if !crate::tls::verify_bytes(&signer, &msg, &sig) {
             return Err(CallerError::BadSignature);
+        }
+        // Checked after the signature, so a forgery answers as one.
+        match env.o.as_deref() {
+            Some(to) if to != ctx.node_id.to_string() => {
+                return Err(CallerError::Misaddressed { to: to.to_string() });
+            }
+            None if issues_envelope_ids(ctx, &via) => return Err(CallerError::IdStripped),
+            _ => {}
         }
         CallerAttestation::Signed { signer }
     } else {
@@ -968,7 +1035,11 @@ pub(crate) fn verify(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<GatewayCa
 /// stream, `llm.invoke`, the explain responder); everything that re-reads the request later calls
 /// [`verify`], which keeps no state. [`CallerError::Replayed`] must be dropped without an answer.
 pub(crate) fn verify_received(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<GatewayCaller>, CallerError> {
-    let verified = verify(ctx, req)?;
+    let verified = verify(ctx, req).inspect_err(|e| {
+        if e.unanswered() {
+            ctx.caller_replay.count_replay();
+        }
+    })?;
     if let Some(c) = &verified {
         ctx.caller_replay.admit(c, ctx.hlc.decision_now_ms(), ctx.config.max_clock_drift_ms)?;
     }
@@ -977,17 +1048,24 @@ pub(crate) fn verify_received(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<
 
 /// Every gateway's recent envelope ids, as one provider has received them (post-360 row E). Kept only
 /// for **signed** envelopes: without a `tls` identity an envelope can be forged outright, and a window
-/// keyed on forgeable gateways would be memory anyone could fill. So the number of windows is bounded
-/// by the members whose key signed, and each window by [`REPLAY_WINDOW_PER_GATEWAY`].
+/// keyed on forgeable gateways would be memory anyone could fill. Each window holds at most
+/// [`REPLAY_WINDOW_PER_GATEWAY`] ids, and a window left empty past the freshness bound — a gateway that
+/// went quiet, left or was removed — is dropped by a sweep every [`REPLAY_SWEEP_EVERY`] admissions.
 #[derive(Default)]
 pub(crate) struct ReplayWindows {
     by_gateway: papaya::HashMap<NodeId, std::sync::Arc<parking_lot::Mutex<ReplayWindow>>>,
-    /// Signed envelopes accepted without an id — a pre-row-E gateway's, unprotected inside the window.
-    /// `GET /stats` `caller_envelopes_without_id`.
+    /// Signed envelopes accepted without an id from a gateway that has not published the id marker —
+    /// a pre-row-E gateway's, unprotected inside the window. `GET /stats` `caller_envelopes_without_id`.
     pub(crate) without_id: std::sync::atomic::AtomicU64,
-    /// Envelopes refused as replays. `GET /stats` `caller_envelopes_replayed`.
+    /// Envelopes dropped as replays — repeated, misaddressed, or with the id stripped.
+    /// `GET /stats` `caller_envelopes_replayed`.
     pub(crate) replayed: std::sync::atomic::AtomicU64,
+    /// Admissions since the last sweep.
+    since_sweep: std::sync::atomic::AtomicU64,
 }
+
+/// How many admissions pass between sweeps of empty windows.
+pub(crate) const REPLAY_SWEEP_EVERY: u64 = 4_096;
 
 /// One gateway's envelopes inside the freshness window, ordered by `(issued_at_ms, id)`, and the
 /// floor below which an envelope is refused because an eviction forgot what was there.
@@ -997,9 +1075,23 @@ struct ReplayWindow {
     floor: Option<(u64, u64)>,
 }
 
+impl ReplayWindow {
+    /// Forget what `verify` would refuse as stale anyway; a floor below the horizon refuses nothing
+    /// `verify` would not, so it goes too.
+    fn prune(&mut self, horizon: u64) {
+        while self.seen.first().is_some_and(|&(t, _)| t < horizon) {
+            self.seen.pop_first();
+        }
+        if self.floor.is_some_and(|(t, _)| t < horizon) {
+            self.floor = None;
+        }
+    }
+}
+
 impl ReplayWindows {
     /// Admit `caller`'s envelope once. Unsigned envelopes pass untouched (see the type's doc); a signed
-    /// one without an id passes and is counted.
+    /// one without an id passes and is counted (`verify` has already refused one from a gateway that
+    /// issues ids).
     pub(crate) fn admit(&self, caller: &GatewayCaller, now_ms: u64, drift_ms: u64) -> Result<(), CallerError> {
         use std::sync::atomic::Ordering;
         if !matches!(caller.attestation, CallerAttestation::Signed { .. }) {
@@ -1009,25 +1101,61 @@ impl ReplayWindows {
             self.without_id.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         };
-        let window = std::sync::Arc::clone(self.by_gateway.pin().get_or_insert_with(caller.via.clone(), Default::default));
         let key = (caller.issued_at_ms, id);
         let horizon = now_ms.saturating_sub(CALLER_CONTEXT_MAX_AGE_MS.saturating_add(drift_ms));
-        let mut w = window.lock();
-        // Forget what `verify` would refuse as stale anyway.
-        while w.seen.first().is_some_and(|&(t, _)| t < horizon) {
-            w.seen.pop_first();
-        }
-        if w.floor.is_some_and(|f| key <= f) || !w.seen.insert(key) {
-            drop(w);
+        let outcome = loop {
+            let window = std::sync::Arc::clone(self.by_gateway.pin().get_or_insert_with(caller.via.clone(), Default::default));
+            let mut w = window.lock();
+            // A sweep may have removed this window between the lookup and the lock; an entry added to
+            // a removed window would be forgotten, so look again.
+            if !self.by_gateway.pin().get(&caller.via).is_some_and(|cur| std::sync::Arc::ptr_eq(cur, &window)) {
+                continue;
+            }
+            w.prune(horizon);
+            if w.floor.is_some_and(|f| key <= f) || !w.seen.insert(key) {
+                break Err(CallerError::Replayed { issued_at_ms: caller.issued_at_ms, id });
+            }
+            if w.seen.len() > REPLAY_WINDOW_PER_GATEWAY
+                && let Some(oldest) = w.seen.pop_first()
+            {
+                w.floor = Some(w.floor.map_or(oldest, |f| f.max(oldest)));
+            }
+            break Ok(());
+        };
+        if outcome.is_err() {
             self.replayed.fetch_add(1, Ordering::Relaxed);
-            return Err(CallerError::Replayed { issued_at_ms: caller.issued_at_ms, id });
         }
-        if w.seen.len() > REPLAY_WINDOW_PER_GATEWAY
-            && let Some(oldest) = w.seen.pop_first()
-        {
-            w.floor = Some(w.floor.map_or(oldest, |f| f.max(oldest)));
+        if self.since_sweep.fetch_add(1, Ordering::Relaxed) + 1 >= REPLAY_SWEEP_EVERY {
+            self.since_sweep.store(0, Ordering::Relaxed);
+            self.sweep(horizon);
         }
-        Ok(())
+        outcome
+    }
+
+    /// Count a replay refused before the window (misaddressed, or with the id stripped).
+    pub(crate) fn count_replay(&self) {
+        self.replayed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Drop every window left empty at `horizon`, one window lock at a time.
+    fn sweep(&self, horizon: u64) {
+        let windows: Vec<(NodeId, std::sync::Arc<parking_lot::Mutex<ReplayWindow>>)> =
+            self.by_gateway.pin().iter().map(|(k, v)| (k.clone(), std::sync::Arc::clone(v))).collect();
+        for (via, window) in windows {
+            let mut w = window.lock();
+            w.prune(horizon);
+            if w.seen.is_empty() && w.floor.is_none() {
+                // Under the window's lock, and only if the map still holds this window: an admission
+                // that fetched it waits on the lock and then finds it gone, and looks again.
+                self.by_gateway.pin().remove_if(&via, |_, cur| std::sync::Arc::ptr_eq(cur, &window)).ok();
+            }
+        }
+    }
+
+    /// How many gateways have a window (tests).
+    #[cfg(test)]
+    pub(crate) fn gateways(&self) -> usize {
+        self.by_gateway.len()
     }
 }
 
@@ -1092,8 +1220,23 @@ impl crate::GossipAgent {
     ///
     /// `Ok(None)` — no context: the sender node acts for itself. `Err` — a context was present
     /// and failed verification: **refuse the call**; never run it as the node.
+    ///
+    /// Stateless: it can be called any number of times on a request, and it does **not** check the
+    /// replay window. A request from [`rpc_rx`](crate::ServiceHandle::rpc_rx) has already been
+    /// through the window; a loop that builds requests from raw signals itself
+    /// (`mesh().signal_rx(kind)` + [`RpcRequest::from`]) calls [`receive_gateway_caller`](Self::receive_gateway_caller) instead.
     pub fn gateway_caller(&self, req: &RpcRequest) -> Result<Option<GatewayCaller>, CallerError> {
         verify(&self.task_ctx, req)
+    }
+
+    /// [`gateway_caller`](Self::gateway_caller) **at a receive boundary** (post-360 row E): verifies
+    /// `req` and admits its envelope against this node's replay window, so a captured envelope is
+    /// served once. Call it **exactly once per received signal** — a second call on the same request
+    /// is refused as a replay — and drop the request without answering when the error
+    /// [`unanswered`](CallerError::unanswered) says so. [`rpc_rx`](crate::ServiceHandle::rpc_rx) does
+    /// this for you.
+    pub fn receive_gateway_caller(&self, req: &RpcRequest) -> Result<Option<GatewayCaller>, CallerError> {
+        verify_received(&self.task_ctx, req)
     }
 
     /// The principal `req` should be authorised as — the gateway client when a verified
@@ -1128,6 +1271,22 @@ impl crate::GossipAgent {
             RequestPrincipal::Client(c) => client_admitted(allow, &c),
         })
     }
+}
+
+/// `framed` with its envelope's id, target and v2 signature removed — what a replayer reaching for the
+/// pre-row-E path sends (tests).
+#[cfg(test)]
+pub(crate) fn strip_envelope_id(framed: &Bytes) -> Bytes {
+    let Frame::Framed { envelope, app } = split_frame(framed) else { panic!("framed") };
+    let mut env: Envelope = serde_json::from_slice(&envelope).expect("an envelope");
+    (env.n, env.o, env.sn) = (None, None, None);
+    let env = serde_json::to_vec(&env).expect("serialises");
+    let mut buf = BytesMut::new();
+    buf.put_slice(&FRAME_MAGIC);
+    buf.put_u16(env.len() as u16);
+    buf.put_slice(&env);
+    buf.put(app);
+    buf.freeze()
 }
 
 #[cfg(test)]
@@ -1237,14 +1396,14 @@ mod tests {
         let a = agent(false);
         let mandate = serde_json::json!({"grant": {"mandate": {"holder": "token:gw/a"}, "signature": [1, 2, 3]},
                                          "possession": "cHJvb2Y="});
-        let framed = frame_with_context_and_mandate(&a.task_ctx, "token:gw/a", &[], Bytes::from_static(b"app"), Some(&mandate), Some("skill:depot/dispatch@x")).unwrap();
+        let framed = frame_with_context_and_mandate(&a.task_ctx, a.node_id(), "token:gw/a", &[], Bytes::from_static(b"app"), Some(&mandate), Some("skill:depot/dispatch@x")).unwrap();
         let req = request_from(a.node_id(), "skill.invoke", framed);
         let c = verify(&a.task_ctx, &req).unwrap().unwrap();
         assert_eq!(c.mandate, Some(mandate), "carried exactly as presented");
         assert_eq!(c.resource.as_deref(), Some("skill:depot/dispatch@x"), "the named resource travels too (C3)");
         assert_eq!(req.payload(), Bytes::from_static(b"app"), "the application payload is untouched");
 
-        let plain = frame_with_context(&a.task_ctx, "token:gw/a", &[], Bytes::from_static(b"app")).unwrap();
+        let plain = frame_with_context(&a.task_ctx, a.node_id(), "token:gw/a", &[], Bytes::from_static(b"app")).unwrap();
         let Frame::Framed { envelope, .. } = split_frame(&plain) else { panic!("framed") };
         let env: serde_json::Value = serde_json::from_slice(&envelope).unwrap();
         assert!(env.get("m").is_none(), "no mandate, no key: the pre-C2 envelope, unchanged");
@@ -1258,7 +1417,7 @@ mod tests {
     async fn an_oversized_mandate_is_refused_not_truncated() {
         let a = agent(false);
         let huge = serde_json::json!({"grant": "x".repeat(MAX_ENVELOPE_BYTES), "possession": ""});
-        assert!(frame_with_context_and_mandate(&a.task_ctx, "token:gw/a", &[], Bytes::new(), Some(&huge), None).is_none());
+        assert!(frame_with_context_and_mandate(&a.task_ctx, a.node_id(), "token:gw/a", &[], Bytes::new(), Some(&huge), None).is_none());
     }
 
     /// **A member acting under its own mandate** calls a provider directly: the provider sees the
@@ -1339,16 +1498,16 @@ mod tests {
     async fn producer_refuses_an_oversized_envelope() {
         let a = agent(false);
         let long = format!("oidc:{}", "a".repeat(9_000));
-        assert!(frame_with_context(&a.task_ctx, &long, &[], Bytes::from_static(b"x")).is_none(),
+        assert!(frame_with_context(&a.task_ctx, a.node_id(), &long, &[], Bytes::from_static(b"x")).is_none(),
             "a 9 KB principal does not fit the 8 KiB envelope bound");
-        assert!(frame_with_context(&a.task_ctx, "oidc:idp/alice", &["mesh:write".into()], Bytes::from_static(b"x")).is_some());
+        assert!(frame_with_context(&a.task_ctx, a.node_id(), "oidc:idp/alice", &["mesh:write".into()], Bytes::from_static(b"x")).is_some());
     }
 
     #[tokio::test]
     async fn context_round_trips_and_payload_is_stripped() {
         let a = agent(false);
         let app = Bytes::from_static(b"hello");
-        let framed = frame_with_context(&a.task_ctx, "token:gw/#0", &["mcp:invoke".into()], app.clone()).unwrap();
+        let framed = frame_with_context(&a.task_ctx, a.node_id(), "token:gw/#0", &["mcp:invoke".into()], app.clone()).unwrap();
         let req = request_from(a.node_id(), "k", framed);
         assert_eq!(req.payload(), app, "the provider sees exactly the application bytes");
         assert!(req.has_caller_context());
@@ -1382,7 +1541,7 @@ mod tests {
         assert_eq!(marker_value(&g.task_ctx.config), MARKER_PROMISES_ENVELOPES);
 
         // Its own action: the self envelope ⇒ Node.
-        let own = frame_self(&g.task_ctx, Bytes::from_static(b"payload"));
+        let own = frame_self(&g.task_ctx, g.node_id(), Bytes::from_static(b"payload"));
         let req = request_from(g.node_id(), "k", own);
         assert_eq!(req.payload(), Bytes::from_static(b"payload"));
         assert_eq!(request_principal(&g.task_ctx, &req).unwrap(), RequestPrincipal::Node(g.node_id().clone()));
@@ -1402,7 +1561,7 @@ mod tests {
     #[tokio::test]
     async fn via_must_be_the_frame_sender() {
         let a = agent(false);
-        let framed = frame_with_context(&a.task_ctx, PRINCIPAL_ANONYMOUS, &[], Bytes::from_static(b"x")).unwrap();
+        let framed = frame_with_context(&a.task_ctx, a.node_id(), PRINCIPAL_ANONYMOUS, &[], Bytes::from_static(b"x")).unwrap();
         let other = NodeId::new("127.0.0.1", 1).unwrap();
         let req = request_from(&other, "k", framed);
         assert!(matches!(verify(&a.task_ctx, &req), Err(CallerError::ViaMismatch { .. })));
@@ -1444,7 +1603,7 @@ mod tests {
         let a = agent(true);
         a.start().await.unwrap();
         let app = Bytes::from_static(b"payload");
-        let framed = frame_with_context(&a.task_ctx, "oidc:idp/alice", &["mesh:write".into()], app.clone()).unwrap();
+        let framed = frame_with_context(&a.task_ctx, a.node_id(), "oidc:idp/alice", &["mesh:write".into()], app.clone()).unwrap();
         let req = request_from(a.node_id(), "k", framed.clone());
         let c = verify(&a.task_ctx, &req).unwrap().expect("context");
         let own = a.task_ctx.tls.get().unwrap().verifying_key_bytes();
@@ -1459,7 +1618,7 @@ mod tests {
         let unsigned = serde_json::to_vec(&Envelope {
             v: 1, p: "oidc:idp/mallory".into(), via: a.node_id().to_string(), s: vec![], t: 0, k: None, sig: None,
             m: None,
-            r: None, n: None, sn: None,
+            r: None, n: None, o: None, sn: None,
         }).unwrap();
         let req = request_from(a.node_id(), "k", raw_frame(&unsigned, b""));
         assert_eq!(verify(&a.task_ctx, &req), Err(CallerError::Unsigned));
@@ -1475,7 +1634,7 @@ mod tests {
                 k: Some(base64::engine::general_purpose::STANDARD.encode(rogue.verifying_key().to_bytes())),
                 sig: Some(base64::engine::general_purpose::STANDARD.encode(sig)),
                 m: None,
-                r: None, n: None, sn: None,
+                r: None, n: None, o: None, sn: None,
             }).unwrap();
             let req = request_from(a.node_id(), "k", raw_frame(&forged, b"payload"));
             assert_eq!(verify(&a.task_ctx, &req), Err(CallerError::UnknownSigner));
@@ -1498,7 +1657,7 @@ mod tests {
             let drift = a.task_ctx.config.max_clock_drift_ms;
             let app = Bytes::from_static(b"payload");
             let at = |t: u64| {
-                let framed = frame_with_context_at(&a.task_ctx, "oidc:idp/alice", &["mesh:write".into()], app.clone(), None, None, t).unwrap();
+                let framed = frame_with_context_at(&a.task_ctx, a.node_id(), "oidc:idp/alice", &["mesh:write".into()], app.clone(), None, None, t).unwrap();
                 verify(&a.task_ctx, &request_from(a.node_id(), "k", framed)).map(|c| c.map(|c| c.issued_at_ms)).map_err(|e| e.code())
             };
             assert_eq!(at(now), Ok(Some(now)), "tls={tls}: a fresh envelope verifies");
@@ -1525,7 +1684,7 @@ mod tests {
         let now = a.task_ctx.hlc.decision_now_ms();
         let app = Bytes::from_static(b"payload");
         let at = |t: u64| {
-            let framed = frame_with_context_at(&a.task_ctx, "oidc:idp/alice", &[], app.clone(), None, None, t).unwrap();
+            let framed = frame_with_context_at(&a.task_ctx, a.node_id(), "oidc:idp/alice", &[], app.clone(), None, None, t).unwrap();
             verify(&a.task_ctx, &request_from(a.node_id(), "k", framed)).map(|c| c.is_some()).map_err(|e| e.code())
         };
         assert_eq!(at(now + 50), Ok(true), "a gateway 50 ms ahead of this provider");
@@ -1550,7 +1709,7 @@ mod tests {
         let env = serde_json::to_vec(&Envelope {
             v: 1, p: "oidc:idp/admin".into(), via: a.node_id().to_string(), s: vec![], t: 0, k: None, sig: None,
             m: None,
-            r: None, n: None, sn: None,
+            r: None, n: None, o: None, sn: None,
         }).unwrap();
         let bytes = raw_frame(&env, br#"{"prompt":"review/echo","input":"unverified call","context":{}}"#);
         let req = request_from(a.node_id(), "llm.invoke", bytes.clone());
@@ -1588,8 +1747,8 @@ mod tests {
         a.start().await.unwrap();
         let app = Bytes::from_static(b"payload");
         let t = a.task_ctx.hlc.decision_now_ms();
-        let first = frame_with_context_at(&a.task_ctx, "oidc:idp/alice", &["mesh:write".into()], app.clone(), None, None, t).unwrap();
-        let twin = frame_with_context_at(&a.task_ctx, "oidc:idp/alice", &["mesh:write".into()], app.clone(), None, None, t).unwrap();
+        let first = frame_with_context_at(&a.task_ctx, a.node_id(), "oidc:idp/alice", &["mesh:write".into()], app.clone(), None, None, t).unwrap();
+        let twin = frame_with_context_at(&a.task_ctx, a.node_id(), "oidc:idp/alice", &["mesh:write".into()], app.clone(), None, None, t).unwrap();
         let receive = |f: &Bytes| verify_received(&a.task_ctx, &request_from(a.node_id(), "k", f.clone())).map(|_| ()).map_err(|e| e.code());
         assert_eq!(receive(&first), Ok(()), "the first receipt is served");
         assert_eq!(receive(&twin), Ok(()), "plant: an identical call at the same instant is another envelope");
@@ -1600,31 +1759,37 @@ mod tests {
         a.shutdown().await;
     }
 
-    /// **The id is signed, so a replay cannot be given a fresh one; an envelope without one is a
-    /// pre-row-E gateway's** (post-360 row E). A changed id fails the v2 signature; an id without the
-    /// signature over it is malformed; an envelope with neither verifies in the v1 form, is admitted and
-    /// counted (`caller_envelopes_without_id`, the one-release window) — and its v1 signature is still
-    /// produced, so a provider that predates the id verifies a new gateway's envelope. Seen failing
-    /// first: a re-numbered replay was admitted.
+    /// **The id and the target are signed, so a replay can be neither re-numbered nor re-addressed;
+    /// stripping them is refused from a gateway that issues ids** (post-360 row E and its review). A
+    /// changed id fails the v2 signature; an id without its target or signature is malformed; an
+    /// envelope addressed to another node is misaddressed; and an envelope with the id stripped, in the
+    /// name of a gateway that issues ids (here this node itself), is a replay — each dropped unanswered.
+    /// The v1 signature is still produced, so a provider that predates the id verifies a new gateway's
+    /// envelope. Seen failing first: a re-numbered replay was admitted (id unsigned), and a stripped one
+    /// was served twice (before the id marker).
     #[cfg(feature = "tls")]
     #[tokio::test]
-    async fn an_envelope_id_is_signed_and_one_without_is_counted() {
+    async fn an_envelope_id_and_target_are_signed_and_stripping_them_is_refused() {
         let a = agent(true);
         a.start().await.unwrap();
         let app = Bytes::from_static(b"payload");
-        let framed = frame_with_context(&a.task_ctx, "oidc:idp/alice", &[], app.clone()).unwrap();
+        let framed = frame_with_context(&a.task_ctx, a.node_id(), "oidc:idp/alice", &[], app.clone()).unwrap();
         let receive = |f: Bytes| verify_received(&a.task_ctx, &request_from(a.node_id(), "k", f)).map(|_| ()).map_err(|e| e.code());
         assert_eq!(receive(framed.clone()), Ok(()));
         let renumbered = reframe(&framed, |v| { v["n"] = serde_json::json!(v["n"].as_u64().unwrap() + 1); });
         assert_eq!(receive(renumbered), Err("bad_signature"), "REPLAY: a re-numbered envelope verified");
-        let unsigned_id = reframe(&framed, |v| { v.as_object_mut().unwrap().remove("sn"); });
-        assert_eq!(receive(unsigned_id), Err("malformed"), "an id without its signature");
-
-        // A pre-row-E gateway's envelope: no id, the v1 signature alone.
-        let legacy = reframe(&framed, |v| { let o = v.as_object_mut().unwrap(); o.remove("n"); o.remove("sn"); });
-        assert_eq!(receive(legacy.clone()), Ok(()), "a pre-row-E envelope still verifies");
-        assert_eq!(receive(legacy), Ok(()), "and, without an id, it is not protected (the stated window)");
-        assert_eq!(a.task_ctx.caller_replay.without_id.load(std::sync::atomic::Ordering::Relaxed), 2, "and is counted");
+        let readdressed = reframe(&framed, |v| { v["o"] = serde_json::json!("127.0.0.1:1"); });
+        assert_eq!(receive(readdressed), Err("bad_signature"), "REPLAY: a re-addressed envelope verified");
+        for field in ["sn", "o"] {
+            let partial = reframe(&framed, |v| { v.as_object_mut().unwrap().remove(field); });
+            assert_eq!(receive(partial), Err("malformed"), "an id without `{field}`");
+        }
+        let elsewhere = frame_with_context(&a.task_ctx, &NodeId::new("127.0.0.1", 1).unwrap(), "oidc:idp/alice", &[], app.clone()).unwrap();
+        assert_eq!(receive(elsewhere), Err("misaddressed"), "REPLAY: an envelope signed for another provider was served here");
+        let stripped = reframe(&framed, |v| { let o = v.as_object_mut().unwrap(); o.remove("n"); o.remove("o"); o.remove("sn"); });
+        assert_eq!(receive(stripped), Err("id_stripped"), "REPLAY: an id-less envelope from a gateway that issues ids was served");
+        assert!(CallerError::IdStripped.unanswered() && CallerError::Misaddressed { to: String::new() }.unanswered());
+        assert_eq!(a.task_ctx.caller_replay.replayed.load(std::sync::atomic::Ordering::Relaxed), 2, "both counted as replays");
 
         // What a provider that predates the id checks: the v1 signature over the v1 fields.
         let Frame::Framed { envelope, .. } = split_frame(&framed) else { panic!() };
@@ -1636,6 +1801,27 @@ mod tests {
         assert!(crate::tls::verify_bytes(&k, &signed_message(&env.p, &env.via, &env.s, env.t, &digest(&app)), &sig),
             "the v1 signature a 2.34 provider verifies is still produced");
         a.shutdown().await;
+    }
+
+    /// **A window left empty is swept** (post-360 row E's review, finding 4): a gateway that sent a
+    /// burst and left kept its window at every provider for good. Every [`REPLAY_SWEEP_EVERY`]
+    /// admissions the windows empty at the freshness bound are dropped; a live gateway's is kept.
+    #[test]
+    fn an_empty_replay_window_is_swept() {
+        let w = ReplayWindows::default();
+        let (gone, live) = (NodeId::new("127.0.0.1", 9611).unwrap(), NodeId::new("127.0.0.1", 9612).unwrap());
+        let caller = |via: &NodeId, t: u64, id: u64| GatewayCaller {
+            principal: "p".into(), via: via.clone(), scopes: vec![], issued_at_ms: t,
+            attestation: CallerAttestation::Signed { signer: [1u8; 32] }, mandate: None, resource: None, envelope_id: Some(id),
+        };
+        let t0 = 10_000_000;
+        assert!(w.admit(&caller(&gone, t0, 1), t0, 0).is_ok());
+        let later = t0 + CALLER_CONTEXT_MAX_AGE_MS + 1;
+        for id in 0..REPLAY_SWEEP_EVERY {
+            assert!(w.admit(&caller(&live, later, id), later, 0).is_ok());
+        }
+        assert_eq!(w.gateways(), 1, "the departed gateway's window was swept; the live one kept");
+        assert!(matches!(w.admit(&caller(&live, later, 7), later, 0), Err(CallerError::Replayed { .. })), "and still remembers");
     }
 
     /// **The window is bounded per gateway and fails closed** (post-360 row E). Past
@@ -1688,7 +1874,7 @@ mod tests {
                 super::super::rpc::rpc_respond_ctx(&ctx, &req, Bytes::from_static(b"ok"));
             }
         });
-        let framed = frame_with_context(&a.task_ctx, "oidc:idp/alice", &[], Bytes::from_static(b"go")).unwrap();
+        let framed = frame_with_context(&a.task_ctx, a.node_id(), "oidc:idp/alice", &[], Bytes::from_static(b"go")).unwrap();
         let call = || super::super::rpc::rpc_call_framed(&a.task_ctx, a.node_id().clone(), Arc::from("echo.replay"), framed.clone(), std::time::Duration::from_millis(800));
         assert_eq!(call().await.as_deref(), Ok(&b"ok"[..]), "the first is served");
         let replay = call().await;
@@ -1717,7 +1903,7 @@ mod tests {
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let body = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "count", "arguments": {}}});
-        let framed = frame_with_context(&a.task_ctx, "oidc:idp/alice", &["mcp:invoke".into()], Bytes::from(body.to_string())).unwrap();
+        let framed = frame_with_context(&a.task_ctx, a.node_id(), "oidc:idp/alice", &["mcp:invoke".into()], Bytes::from(body.to_string())).unwrap();
         let call = || super::super::rpc::rpc_call_framed(&a.task_ctx, a.node_id().clone(),
             Arc::from(crate::signal::signal_kind::MCP_INVOKE), framed.clone(), std::time::Duration::from_millis(800));
         let first = call().await;

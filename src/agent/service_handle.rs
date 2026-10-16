@@ -85,6 +85,7 @@ impl ServiceHandle {
         use super::gateway_caller::{frame_with_context_and_mandate, node_principal};
         let framed = frame_with_context_and_mandate(
             &self.ctx,
+            &target,
             &node_principal(&self.ctx.node_id),
             &[],
             payload.into(),
