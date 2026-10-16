@@ -791,8 +791,10 @@ impl NodeCapabilityConfig {
             // A served skill is a prompt skill: its template key is `prompts/{ns}/{name}`, which a `/` (or an
             // empty part) would share with another pair — `register_prompt_skill` refuses it, so refuse it at
             // load rather than on every reconcile tick (#613's review, finding 5).
-            if [&sv.ns, &sv.name].iter().any(|p| p.is_empty() || p.contains('/')) {
-                return Err(invalid("serve", format!("{at}: ns and name must be non-empty and contain no '/' (a served skill is a prompt skill)")));
+            // It also advertises `cap/{node}/{ns}/{name}`, so the reserved locality pair is refused with the rest
+            // (#629's review, finding 2).
+            if let Some(problem) = crate::capability::capability_name_problem(&sv.ns, &sv.name) {
+                return Err(invalid("serve", format!("{at}: {problem} (a served skill is a prompt skill and a capability)")));
             }
             if sv.endpoint.trim().is_empty() || sv.model.trim().is_empty() {
                 return Err(invalid("serve", format!("{at}: an endpoint and a model are both required")));

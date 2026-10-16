@@ -103,9 +103,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Capability`. `POST /gateway/capability/advertise` answered 200 to each. Now `capability::capability_name_problem`
   (and `capability_group_name_problem`) decide it once, and every door refuses: the route answers 400
   `invalid_capability_name`; the unit-file loader refuses the file (so `units/declare` answers 400 and a node config
-  fails to load), a group name or a group's `provides` included; and in process `advertise_capability`,
-  `declare_requirement` and `define_capability_group` warn and return a handle that writes nothing. Test:
-  `a_capability_name_that_is_not_a_key_segment_is_refused_at_every_door`, seen failing first at the route (200).
+  fails to load), a group name or a group's `provides` included, and a `[[serve]]` named `locality`/`self`; in process
+  `advertise_capability`, `declare_requirement` and `define_capability_group` warn and return a handle that writes
+  nothing, and `register_prompt_skill` returns `InvalidName` for the locality pair; and the emergent-group projector
+  skips a `cap-group/` definition (a 2.33 peer's, or one persisted before the upgrade) whose names fail the check,
+  rather than projecting `gcap/`/`grp/` keys no reader parses. Tests:
+  `a_capability_name_that_is_not_a_key_segment_is_refused_at_every_door` (failing first at the route: 200),
+  `the_group_projector_skips_a_definition_whose_names_are_not_key_segments`, `a_prompt_skill_named_like_the_locality_entry_is_refused`,
+  and the `[[serve]]` load test — each seen failing first.
 - **A fast soft-state re-assert no longer undoes the shutdown sweep** (#627's review, finding 1; upgrade note
   `docs/guide/deprecations.md` §42). The soft-state tasks ran until the shutdown signal, which comes after the sweep
   and the outbound flush, so a re-assert tick in between wrote a swept key live again under a newer HLC and the

@@ -440,7 +440,7 @@ async fn gw_openai_chat(
 /// Mycelium extension. This node's view: eventually consistent by construction.
 async fn gw_openai_models(State(s): State<ReasonState>) -> Response {
     let caps = s.agent.capabilities();
-    // Cap keys are `cap/{node}/{ns}/{name}` (the name may itself contain `/`).
+    // Cap keys are `cap/{node}/{ns}/{name}`; neither segment holds a `/` (`capability_name_problem`).
     let mut names: Vec<String> = s
         .agent
         .kv()

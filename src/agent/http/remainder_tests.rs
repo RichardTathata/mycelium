@@ -370,7 +370,27 @@ fn a_serve_name_that_cannot_be_a_prompt_skill_is_refused_at_load() {
     assert!(crate::NodeCapabilityConfig::from_toml_str(&file("llm", "qwen/3")).is_err(), "a / in name");
     assert!(crate::NodeCapabilityConfig::from_toml_str(&file("ll/m", "qwen3")).is_err(), "a / in ns");
     assert!(crate::NodeCapabilityConfig::from_toml_str(&file("llm", "")).is_err(), "an empty name");
+    // A served skill advertises `cap/{node}/{ns}/{name}`, so the reserved locality pair is refused too
+    // (#629's review, finding 2: it loaded, then served a skill whose advert was refused).
+    assert!(crate::NodeCapabilityConfig::from_toml_str(&file("locality", "self")).is_err(), "the locality pair");
     assert!(crate::NodeCapabilityConfig::from_toml_str(&file("llm", "qwen3")).is_ok());
+}
+
+/// `register_prompt_skill("locality", "self")` wrote the template and returned `Ok` while its advert was
+/// refused — a skill nobody can resolve (#629's review, finding 2). It refuses the pair as `InvalidName`
+/// before writing anything, as it refuses a `/`.
+#[cfg(feature = "llm")]
+#[tokio::test]
+async fn a_prompt_skill_named_like_the_locality_entry_is_refused() {
+    let (agent, _base, _client) = gateway_agent().await;
+    let template = crate::PromptTemplate {
+        system: "s".into(), user_template: "{{input}}".into(), max_tokens: 16, temperature: 0.0,
+        metadata: std::collections::HashMap::new(),
+    };
+    let r = agent.llm().register_prompt_skill("locality", "self", template, Arc::new(crate::agent::llm::EchoBackend)).await;
+    assert!(matches!(r, Err(crate::PromptSkillError::InvalidName { .. })), "the locality pair is refused by name");
+    assert!(agent.kv().get("prompts/locality/self").is_none(), "and no template is written");
+    agent.shutdown().await;
 }
 
 // ── #613's review, finding 6: a capability name that cannot be a key segment ─────
@@ -431,5 +451,35 @@ async fn a_capability_name_that_is_not_a_key_segment_is_refused_at_every_door() 
 
     // A well-formed name still advertises.
     assert_eq!(post_status(&client, &adv, serde_json::json!({"ns": "plan", "name": "fine"})).await, 200);
+    agent.shutdown().await;
+}
+
+/// The emergent-group projector writes `gcap/{group}/{ns}/{name}/{self}` and `grp/{group}/{self}` from
+/// every `cap-group/` definition in its view — a peer's included — so a definition no upgraded door would
+/// accept (a group name holding a `/`, or a `provides` name that is not a key segment), gossiped from a
+/// 2.33 peer or replayed from state persisted before the upgrade, still produced keys no reader parses
+/// (#629's review, finding 1). The projector now skips such a definition. A well-named group beside them is
+/// the control: it is joined and projected.
+#[tokio::test]
+async fn the_group_projector_skips_a_definition_whose_names_are_not_key_segments() {
+    use crate::capability::{CapFilter, Capability, CapabilityGroupDef};
+    let (agent, _base, _client) = gateway_agent().await;
+    let node = agent.node_id().to_string();
+    let _cap = agent.capabilities().advertise_capability(Capability::new("plan", "route"), Duration::from_secs(30));
+    let def = |provides: Capability| CapabilityGroupDef {
+        filter: CapFilter::new("plan", "route"), topology_policy: None, provides: vec![provides], requires: vec![],
+    }.encode();
+    // Written raw, as a 2.33 peer's definitions would arrive: no in-process door would write them now.
+    let _ = agent.kv().set("cap-group/g/h", def(Capability::new("plan", "fine")));
+    let _ = agent.kv().set("cap-group/bad-provides", def(Capability::new("plan", "x/y")));
+    let _ = agent.kv().set("cap-group/good", def(Capability::new("plan", "fine")));
+    let good = format!("gcap/good/plan/fine/{node}");
+    for _ in 0..200 { if agent.kv().get(&good).is_some() { break; } tokio::time::sleep(Duration::from_millis(25)).await; }
+    assert!(agent.kv().get(&good).is_some(), "the well-named group is projected (the projector ran)");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let bad: Vec<String> = ["gcap/g/h/", "gcap/bad-provides/", "grp/g/h/", "grp/bad-provides/"].iter()
+        .flat_map(|p| agent.kv().scan_prefix(p).into_iter().map(|(k, _)| k.to_string()))
+        .collect();
+    assert!(bad.is_empty(), "the projector wrote keys for a definition whose names are not key segments: {bad:?}");
     agent.shutdown().await;
 }

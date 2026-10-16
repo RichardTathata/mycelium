@@ -41,7 +41,7 @@ pub enum PromptSkillError {
     /// `ns` or `name` is empty or contains a `/`: the template key `prompts/{ns}/{name}` would be
     /// shared with another pair (`(a/b, c)` and `(a, b/c)` are one key), so it is refused (post-360
     /// hardening row E).
-    #[error("invalid prompt skill name {ns:?}/{name:?}: neither part may be empty or contain '/'")]
+    #[error("invalid prompt skill name {ns:?}/{name:?}: neither part may be empty or contain '/', and locality/self is reserved")]
     InvalidName { ns: String, name: String },
 }
 

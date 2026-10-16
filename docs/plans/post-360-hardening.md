@@ -891,9 +891,12 @@ worth fixing on its own: the agent card names the gossip port), O and P (after N
   no reader parses, and `locality`/`self`, which overwrote the node's own locality entry — are refused at every door
   that writes a `cap/`, `req/` or `gcap/` key: `capability/advertise` (400 `invalid_capability_name`), the unit-file
   loader (`units/declare` and node config; a group name holding a `/` too), and in process `advertise_capability`,
-  `declare_requirement` and `define_capability_group`, which write nothing and warn
-  (`capability::capability_name_problem`; `a_capability_name_that_is_not_a_key_segment_is_refused_at_every_door`;
-  `deprecations.md` §43).
+  `declare_requirement` and `define_capability_group`, which write nothing and warn; `[[serve]]` and
+  `register_prompt_skill` refuse the locality pair; and the emergent-group projector skips a gossiped `cap-group/`
+  definition whose names fail the check (`capability::capability_name_problem`;
+  `a_capability_name_that_is_not_a_key_segment_is_refused_at_every_door`,
+  `the_group_projector_skips_a_definition_whose_names_are_not_key_segments`; `deprecations.md` §43). Not checked at
+  load: a catalogue manifest's `provides` (it installs; its advert is refused in process).
 - **F:** the shutdown drain is best effort (it reads queue emptiness, so a frame between a shard queue and a writer
   queue can be missed). **Fixed (2026-10-16):** the pre-existing gap #611's review found — keys the shutdown sweep did
   not cover were tombstoned only when the signal woke their tasks, after the drain, so a live handle's entry was never

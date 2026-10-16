@@ -1391,6 +1391,14 @@ Where each is refused:
   `[[group.provides]]` and the group's name.
 - In process, `advertise_capability`, `declare_requirement` and `define_capability_group` log a warning and return a
   handle that writes nothing. Their signatures are unchanged.
+- A `[[serve]]` named `locality`/`self` fails to load. `register_prompt_skill` returns `PromptSkillError::InvalidName`
+  for that pair, as it already did for a `/`.
+- The emergent-group projector skips, with a warning, any `cap-group/` definition whose group name or `provides`
+  name fails the check. Such a definition can still come from a 2.33 peer, or from state persisted before the
+  upgrade, until the fleet is upgraded.
+
+**Not checked at load:** a catalogue manifest's `provides`. One holding a `/` still installs, and its advert is
+refused in process with a warning.
 
 The check is `mycelium::capability_name_problem` (and `capability_group_name_problem`), which is public, so a
 caller can ask before it advertises.
