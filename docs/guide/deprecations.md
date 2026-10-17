@@ -1573,5 +1573,5 @@ No for the two outputs.
   `credential: None`, `port: None`); `OpenAiBackend::new` is unaffected.
 - A test or a log parser matching a `ServeDecl`'s `Debug` or the `api_key_env` refusal's text: match the section name
   (`[[serve]] llm/<name>`) and `api_key_env`; the variable is whatever the unit file says.
-- A loopback binding (`localhost`, `127.0.0.0/8`, `::1`) must set `port` — new, so nothing written before it breaks.
+- A binding to `localhost` (any spelling, a trailing dot included) or to any IP literal must set `port` — new, so nothing written before it breaks.
 

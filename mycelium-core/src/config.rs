@@ -419,7 +419,7 @@ pub enum CredentialForm {
 /// ```
 ///
 /// Env `GOSSIP_EGRESS_CREDENTIALS` ([`parse_egress_credentials_env`]).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialBinding {
     /// The binding's name — what a placeholder names. `[A-Za-z0-9._-]+`, unique on the node. Not a secret.
     pub name: String,
@@ -452,10 +452,30 @@ pub struct CredentialBinding {
     #[serde(default)]
     pub allow_plaintext: bool,
     /// The one port the value is attached on (the URL's port, or its scheme's default). Absent: any
-    /// port on the host — **refused for a loopback host** (`localhost`, `127.0.0.0/8`, `::1`), where
-    /// every port is a different local process and the host name says nothing about the recipient.
+    /// port on the host — **refused for `localhost` in any spelling and for any IP literal** (loopback,
+    /// IPv4-mapped, unspecified or not), where every port is a different process and the host alone says
+    /// nothing about the recipient.
     #[serde(default)]
     pub port: Option<u16>,
+}
+
+/// `Debug` says whether a source is set, never which variable or file — a value pasted into
+/// `value_env` or `value_file` would otherwise be printed wherever a config is (row L's re-review).
+impl std::fmt::Debug for CredentialBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CredentialBinding")
+            .field("name", &self.name)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("path_prefix", &self.path_prefix)
+            .field("form", &self.form)
+            .field("header", &self.header)
+            .field("username", &self.username)
+            .field("value_env", &self.value_env.as_ref().map(|_| "<redacted>"))
+            .field("value_file", &self.value_file.as_ref().map(|_| "<redacted>"))
+            .field("allow_plaintext", &self.allow_plaintext)
+            .finish()
+    }
 }
 
 impl CredentialBinding {
@@ -525,8 +545,12 @@ impl CredentialBinding {
         // another user's — so the host name alone names no recipient. A loopback binding names its port.
         // (Pinning to the port of the first use was the alternative; it makes what a binding authorises
         // depend on which request came first, which no operator wrote and no replay can see.)
-        if self.port.is_none() && url::Url::parse(&format!("http://{h}/")).is_ok_and(|u| is_loopback_host(&u)) {
-            return Err(format!("`{n}`: a loopback host needs `port` — each port on loopback is a different process"));
+        // The rule is on what the host *is*, not how it is spelled (the re-review: `localhost.`, an
+        // IPv4-mapped loopback and the unspecified addresses all reach this host): any `localhost` name,
+        // trailing dot or not, and **any IP literal** — an address names a machine, not a service, and
+        // enumerating which addresses are this machine is the spelling game this rule must not play.
+        if self.port.is_none() && host_needs_port(h) {
+            return Err(format!("`{n}`: a loopback host or an IP address needs `port` — each port is a different process"));
         }
         if self.port == Some(0) {
             return Err(format!("`{n}`: port 0 names no endpoint"));
@@ -569,6 +593,13 @@ impl CredentialBinding {
     }
 }
 
+/// `localhost` in any spelling (case, a trailing dot, a `*.localhost` name — RFC 6761 reserves them all
+/// for this host) or any IP literal: hosts a credential binding must pin to a port.
+fn host_needs_port(h: &str) -> bool {
+    let t = h.trim_end_matches('.').to_ascii_lowercase();
+    t == "localhost" || t.ends_with(".localhost") || t.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>().is_ok()
+}
+
 fn is_loopback_host(u: &url::Url) -> bool {
     match u.host() {
         Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
@@ -588,12 +619,10 @@ fn is_loopback_host(u: &url::Url) -> bool {
 pub fn parse_egress_credentials_env(v: &str) -> Result<Vec<CredentialBinding>, GossipError> {
     // Row L's review, finding 2: an entry is named by its index (and its name, once that is a valid
     // binding name), never echoed — a value pasted into the wrong field would reach a start-time log.
-    let bad = |i: usize, name: &str, why: &str| {
-        let named = if !name.is_empty() && name.chars().all(is_binding_name_char) { format!(" (`{name}`)") } else { String::new() };
-        GossipError::InvalidField {
-            field:  "egress_credentials",
-            reason: format!("GOSSIP_EGRESS_CREDENTIALS entry {i}{named}: {why} (`name|host[:port][/prefix]|form|env:VAR or file:/path[|plaintext]`)"),
-        }
+    // By index alone (the re-review): a secret pasted into the name field is a valid-looking name.
+    let bad = |i: usize, _name: &str, why: &str| GossipError::InvalidField {
+        field:  "egress_credentials",
+        reason: format!("GOSSIP_EGRESS_CREDENTIALS entry {i}: {why} (`name|host[:port][/prefix]|form|env:VAR or file:/path[|plaintext]`)"),
     };
     let mut out = Vec::new();
     for (i, entry) in v.split(';').map(str::trim).filter(|e| !e.is_empty()).enumerate() {
@@ -2740,6 +2769,40 @@ mod tests {
         assert_eq!((env[0].host.as_str(), env[0].port, env[0].path_prefix.as_deref()), ("localhost", Some(11434), Some("/v1")));
         assert_eq!((env[1].host.as_str(), env[1].port), ("[::1]", Some(8080)));
         assert_eq!(env[2].port, None);
+    }
+
+    /// Row L's re-review: the loopback-port rule is not defeated by the host's spelling — a trailing dot,
+    /// an IPv4-mapped loopback, the unspecified addresses (which reach this host) all need `port`. Seen
+    /// failing first: each validated without one.
+    #[test]
+    fn every_spelling_of_this_host_needs_a_port() {
+        for host in ["localhost.", "LOCALHOST", "[::ffff:127.0.0.1]", "0.0.0.0", "[::]", "api.localhost"] {
+            let mut c = GossipConfig::default();
+            c.egress_credentials = vec![bearer_binding("l", host)];
+            let e = c.validate().map(|_| "validated".to_string()).unwrap_or_else(|e| e.to_string());
+            assert!(e.contains("port"), "{host}: {e}");
+            c.egress_credentials[0].port = Some(8080);
+            c.validate().unwrap_or_else(|e| panic!("{host} with a port: {e}"));
+        }
+    }
+
+    /// Row L's re-review: a secret pasted into `name` is not echoed by an env refusal (the entry is
+    /// named by index alone), and a binding's `Debug` hides where its value comes from. Seen failing
+    /// first: the env refusal printed the name, the `Debug` the variable and the path.
+    #[test]
+    fn neither_an_env_refusal_nor_a_bindings_debug_prints_a_pasted_secret() {
+        const S: &str = "sk-live-pasted-into-name-9f";
+        let e = parse_egress_credentials_env(&format!("{S}|api.example.com|bearer")).unwrap_err();
+        assert!(!e.to_string().contains(S) && e.to_string().contains("entry 0"), "{e}");
+        let mut b = bearer_binding("m", "api.example.com");
+        b.value_env = Some(S.into());
+        assert!(!format!("{b:?}").contains(S), "{b:?}");
+        b.value_env = None;
+        b.value_file = Some(S.into());
+        assert!(!format!("{b:?}").contains(S), "{b:?}");
+        let mut c = GossipConfig::default();
+        c.egress_credentials = vec![b];
+        assert!(!format!("{c:?}").contains(S));
     }
 
     /// Row L's review, finding 2: a refusal never echoes a raw field that could hold a value — a secret

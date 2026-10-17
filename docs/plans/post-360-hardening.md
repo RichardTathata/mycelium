@@ -1326,7 +1326,14 @@ tokens, and an `[[activation]]` command's inherited environment.
   changed: a placeholder request goes out under the node's egress policy as the gate captured it at `start()`, not
   the backend's own `with_egress` policy (`OpenAiBackend::with_credentials`' doc, crown-jewel). (11) The proxy, stated
   below.
-- **Not built, stated:** the activation-command half (above); a placeholder in a query string or a request body is not
+- *The review's confirmation* — findings 1–11 confirmed; two follow-ups, fixed with tests seen failing first: the
+  loopback-port rule read the host's spelling, so `localhost.`, `[::ffff:127.0.0.1]`, `0.0.0.0` and `[::]` validated
+  without a port — now any `localhost` spelling and **any IP literal** needs one (`every_spelling_of_this_host_needs_a_port`);
+  and a secret pasted into `name` was echoed by an env refusal, and `value_env` / `value_file` by a binding's `Debug` —
+  an env refusal names its entry by index alone, and the `Debug` redacts both sources
+  (`neither_an_env_refusal_nor_a_bindings_debug_prints_a_pasted_secret`). The residual is stated in crown-jewel.
+- **Not built, stated:** the activation-command half (above); a binding whose `name` or `header` is itself a secret is
+  printed and used as a metric label or a header name; a placeholder in a query string or a request body is not
   resolved (sent as written); the value is not zeroised when the gate is dropped; a `value_env` variable stays in the
   process environment, which a child process inherits (`value_file` avoids it); no SkillRunner, `HttpLibrarySource` or
   MCP-bridge binding; the gate compares names, not resolved addresses (the allow-list's limit); the gate sends on its

@@ -126,7 +126,7 @@ on a request to the host the binding names:
 [[egress_credentials]]
 name        = "openai"
 host        = "api.openai.com"        # exact host — never a suffix
-# port      = 443                     # optional: the one port (the scheme's default counts); REQUIRED for localhost / 127.x / ::1
+# port      = 443                     # optional: the one port (the scheme's default counts); REQUIRED for localhost (any spelling) and any IP literal
 path_prefix = "/v1"                   # optional; /v10 and /v1/../admin are outside it
 form        = "bearer"                # or "header" + header = "x-api-key", or "basic" + username = "svc"
 value_file  = "/run/secrets/openai"   # or value_env = "OPENAI_API_KEY"; read once, at start()
@@ -142,8 +142,10 @@ What the gate does, per request:
 
 - **attaches** the value in its form, replacing the header that carried the placeholder, when the URL's host
   is the bound host (case-insensitive), its port is `port` (when set), its normalised path is under `path_prefix`,
-  and the scheme is https (or http to `localhost` / a loopback address, or `allow_plaintext`). A loopback binding
-  must name its port: each port on loopback is a different local process;
+  and the scheme is https (or http to `localhost` / a loopback address, or `allow_plaintext`). A binding to
+  `localhost` in any spelling (`localhost.`, `*.localhost`) or to any IP literal (loopback, IPv4-mapped, `0.0.0.0`,
+  `[::]` included) must name its port: each port is a different process, and the rule is on what the host is, not
+  how it is spelled;
 - **refuses** the request — before a byte is sent — anywhere else, when a placeholder names no binding, and when two
   bindings would set the same header;
 - follows redirects itself — 301, 302, 303, 307 and 308 only; any other 3xx is handed back as it arrived — through the
@@ -178,7 +180,10 @@ out under the egress policy the gate captured at `start()` — the node's — no
 | Gateway tokens, mTLS keys | inbound credentials, not egress | n/a |
 
 **Not covered:** a placeholder in a query string or a request body (sent as written — an opaque name); zeroising the
-value when the gate is dropped; the gate's client honours `HTTP_PROXY` / `HTTPS_PROXY`, so a configured proxy sees a
+value when the gate is dropped; a binding whose `name` or `header` is itself a secret (pasted into the wrong field)
+is printed — its `Debug`, a refusal naming the binding, the drop log line — and used as the metric label or as the
+header name sent (`value_env` and `value_file` are redacted in `Debug`, and an env refusal names its entry by index
+alone); the gate's client honours `HTTP_PROXY` / `HTTPS_PROXY`, so a configured proxy sees a
 plaintext or loopback request's header (an https request's is inside the tunnel).
 
 ---

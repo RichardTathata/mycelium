@@ -90,7 +90,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   attachments, refusals and drops (`uses()`; `mycelium_egress_credential_total{binding, event}` under `metrics`). The
   value is held as a sensitive header value inside the gate: no `Debug`, `Display`, error, log line or trace field
   carries it, and a refusal names a binding by index and name, never a field's contents (so a value pasted into the
-  wrong field is not logged). A binding may name a `port`, and a loopback binding must; only 301, 302, 303, 307 and 308
+  wrong field is not logged). A binding may name a `port`, and one to `localhost` (any spelling) or an IP literal must; only 301, 302, 303, 307 and 308
   are followed; two bindings that would set one header are refused. Moved behind a binding: `[[serve]]`'s new `credential = "<binding>"` (a stem refuses to start if the node
   lacks it) and `OpenAiBackend::with_credentials` (a placeholder `api_key` without a gate is refused, never sent).
   A `[[serve]]` whose endpoint its binding does not authorise refuses the stem's start. A placeholder request goes out
