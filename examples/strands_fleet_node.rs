@@ -27,7 +27,7 @@
 //! evidence journal of the gateway that decided it.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -40,7 +40,7 @@ use mycelium::config::{GatewayNamedToken, PersistenceConfig, TlsConfig};
 use mycelium::knowledge::issuer::TrustedExternalIssuers;
 use mycelium::knowledge::IssuerId;
 use mycelium::mandate::authority::{
-    ClockModel, ExecutionGate, FreshnessPolicy, ResourceTier, RevocationCheckpoint, SignedRevocationCheckpoint,
+    CheckpointOffer, ClockModel, ExecutionGate, FreshnessPolicy, ResourceTier, RevocationCheckpoint, SignedRevocationCheckpoint,
 };
 use mycelium::mandate::grant::{EntitlementTable, GrantVerifier, SignedMandateGrant};
 use mycelium::mandate::{Mandate, PrincipalId, ResourceAuthority, TermId};
@@ -296,16 +296,20 @@ async fn node() {
     // The node votes: the session store claims every message and record version by consensus.
     let _voter = agent.consensus().start_consensus_listener(Default::default());
 
-    // The operator's checkpoints keep each grant's revocation standing fresh.
+    // The operator's checkpoints keep each grant's revocation standing fresh. Only one issued after this node
+    // started counts (closure plan C8), so the first accepted one is part of being ready: before it, a mandated call
+    // is refused with "revocation standing unknown".
+    let standing = Arc::new(AtomicBool::new(false));
     {
-        let (agent, url) = (Arc::clone(&agent), format!("{}/checkpoint", env("OPERATOR_URL")));
+        let (agent, url, standing) = (Arc::clone(&agent), format!("{}/checkpoint", env("OPERATOR_URL")), Arc::clone(&standing));
         tokio::spawn(async move {
             let http = reqwest::Client::new();
             loop {
                 if let Ok(r) = http.get(&url).timeout(Duration::from_secs(2)).send().await
                     && let Ok(Some(c)) = r.json::<Option<SignedRevocationCheckpoint>>().await
+                    && matches!(agent.offer_revocation_checkpoint(&c), Some(CheckpointOffer::Accepted))
                 {
-                    let _ = agent.offer_revocation_checkpoint(&c);
+                    standing.store(true, Ordering::SeqCst);
                 }
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
@@ -341,6 +345,11 @@ async fn node() {
             assert!(tokio::time::Instant::now() < deadline, "{key} never reached {name}");
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while !standing.load(Ordering::SeqCst) {
+        assert!(tokio::time::Instant::now() < deadline, "{name} never accepted a revocation checkpoint");
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
     println!("ready {name} gossip={port} http={} skill={skill}", env("HTTP_PORT"));
     std::future::pending::<()>().await;

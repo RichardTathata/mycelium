@@ -1142,7 +1142,10 @@ courier); asking the bakery and the kitchen is allowed by policy to the fleet's 
   kitchen, planner → hub, courier → hub, then depot); (L4, L5, L6) the docstring, the depot check's filter, closed
   managers, a removed work directory, a CI timeout. Stated: (M2) one holder per scope and epoch is checked per gateway
   verifier, not by the fleet — the wiki, plan and example doc now say so; and the run never shows an agent holding a
-  mandate and calling outside it.
+  mandate and calling outside it. The confirmation found everything fixed or stated, and one low race of the original's:
+  a node printed `ready` before it held a revocation checkpoint issued since its start (closure plan C8), so a
+  mandated call sent at once was refused "revocation standing unknown"; readiness now includes the first accepted
+  checkpoint (the reviewer's no-delay variant, seen refused, now permitted at the hub and the depot, 3 of 3).
 - **Not built, stated:** a model's judgement (scripted); a node failing mid-call (stopped between turns); revocation
   (shown by `authority_drain` and the confined-fleet suite); Strands' own A2A classes; scale; fleet-wide enforcement of
   one holder per scope.
