@@ -166,24 +166,31 @@ let agent = GossipAgent::new(node_id, cfg)
 ```
 
 A message can still name a skill, in `metadata.skillId` (the message's or the request's); without a default,
-one that names none is refused `-32602`. The first part is the skill's input — its text, or its `data` as
-JSON. A mandate and an operation id go in the request's `metadata._meta`. Each message is its own task, complete
+one that names none is refused `-32602`. The first part is the skill's input — its text, or its `data`
+re-serialised as compact JSON (keys in sorted order; a number beyond an `f64`'s precision is rounded — send exact
+values as text). A mandate's possession proof digests `{"text": <that input>}`, so a holder sending a `data` part
+signs over the re-serialised form. A mandate and an operation id go in the request's `metadata._meta`. Each message is its own task, complete
 when the send returns: a message naming a `taskId` is refused `-32004`. With the SDK:
 
 ```python
+import asyncio
+
 import httpx
 from a2a.client.card_resolver import A2ACardResolver
 from a2a.client.client_factory import ClientConfig, ClientFactory
 from a2a.helpers.proto_helpers import new_text_message
 from a2a.types import Role, SendMessageRequest
 
-async with httpx.AsyncClient(timeout=120) as http:
-    card = await A2ACardResolver(http, "http://localhost:9050").get_agent_card()
-    client = ClientFactory(ClientConfig(httpx_client=http)).create(card)
-    msg = new_text_message('{"topic": "gossip protocols"}', role=Role.ROLE_USER)
-    msg.metadata.update({"skillId": "llm/orchestrator"})   # omit to reach the default skill
-    async for event in client.send_message(SendMessageRequest(message=msg)):
-        print(event)
+async def main():
+    async with httpx.AsyncClient(timeout=120) as http:
+        card = await A2ACardResolver(http, "http://localhost:9050").get_agent_card()
+        client = ClientFactory(ClientConfig(httpx_client=http)).create(card)
+        msg = new_text_message('{"topic": "gossip protocols"}', role=Role.ROLE_USER)
+        msg.metadata.update({"skillId": "llm/orchestrator"})   # omit to reach the default skill
+        async for event in client.send_message(SendMessageRequest(message=msg)):
+            print(event)
+
+asyncio.run(main())
 ```
 
 That path runs in CI against a node (`tests/a2a-sdk/`, the `a2a-sdk` job, `a2a-sdk` 1.2.2).

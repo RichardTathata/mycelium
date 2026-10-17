@@ -949,6 +949,15 @@ window).
   `ClientFactory`, `send_message` unary and streamed, `get_task`, and the 0.3 compatibility transport; collected by
   the test universe, `MYCELIUM_A2A_LIVE_REQUIRED` in the step that starts the node. Its failing-first is the probe's
   own output (`docs/plans/external/2026-10-12-a2a-sdk-probe/probe-output.txt`).
+- *The independent review (#633)* — five findings, no blocker. Fixed: a card skill lacked `tags`, which 0.3's card
+  schema requires, so a 0.3 client refused the card (`tags` = the namespace;
+  `test_the_card_validates_as_an_a2a_0_3_card`, seen failing with the field omitted); a `tasks/send` naming a task a
+  0.3/1.0 method created re-ran the skill and replaced the task (refused `-32004`, `Unclaimable::NotResendable`;
+  seen failing in the end-to-end test); the confined-fleet suite's doors (`examples/confined_fleet_node.rs`, C7's
+  real-process sibling) try all six send names, its plant floor six. Documented: a `data` part is re-serialised
+  (keys sorted, numbers as `f64` past 64-bit integers) and the mandate digest is over that form; the guide's SDK
+  snippet runs as a script. Answered, kept: federation refusals stay `-32003`/`-32004` on every generation (the
+  federation client and partners match those codes; the message names the reason).
 - **Not built, stated:** `mycelium-py`'s and `mycelium-ts`' `A2aClient` still use `/.well-known/agent.json` and
   `tasks/send` (they move before the old names are removed); a message naming a `taskId` is refused rather than
   continuing a task (a task here is complete when its send returns); push notifications, `ListTasks`,

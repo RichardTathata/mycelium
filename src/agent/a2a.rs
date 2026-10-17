@@ -103,6 +103,9 @@ pub(crate) struct AgentSkill {
     /// build properly-typed tools instead of guessing field names from prose.
     #[serde(rename = "inputSchema", skip_serializing_if = "Option::is_none", default)]
     pub input_schema: Option<Value>,
+    /// Required by A2A 0.3's card schema (a 0.3 client refused the card without it — #633 review):
+    /// the skill's namespace.
+    pub tags: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -222,7 +225,10 @@ pub(crate) struct SendRequest {
     pub task_id:    String,
     pub context_id: String,
     pub skill_id:   String,
-    /// What the skill receives: the first part's text, or its `data` serialised as JSON.
+    /// What the skill receives: the first part's text, or its `data` re-serialised as compact JSON —
+    /// keys sorted and numbers as `serde_json` holds them (an integer past `u64`/`i64` becomes an `f64`), so
+    /// a `data` part does not reach the skill byte for byte, and a mandate's possession proof digests
+    /// this form (guide 08, `deprecations.md` §46; #633 review, finding 3).
     pub text:       String,
     /// What the AE preflight and the mandate reader read: `{ "_meta": … }`, from `params._meta`
     /// before 0.3 and from the request's `metadata._meta` after.
@@ -400,12 +406,17 @@ fn reserve_task(
     context_id: &str,
     generation: Generation,
     owner:      &Option<String>,
-) -> Result<TaskReservation, ()> {
+) -> Result<TaskReservation, Unclaimable> {
     let token = RESERVATION_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let guard = state.tasks.pin();
     let claimed = guard.compute(task_id.to_string(), |existing| match existing {
-        Some((_, t)) if t.owner != *owner => papaya::Operation::Abort(false),
-        Some(_) => papaya::Operation::Abort(true),
+        Some((_, t)) if t.owner != *owner => papaya::Operation::Abort(Err(Unclaimable::Foreign)),
+        // A re-send is a pre-0.2 notion: a task a 0.3 or 1.0 method created is its own message's,
+        // and a `tasks/send` naming its id must not run the skill again and replace it (#633 review).
+        Some((_, t)) if t.generation != Generation::Legacy || generation != Generation::Legacy => {
+            papaya::Operation::Abort(Err(Unclaimable::NotResendable))
+        }
+        Some(_) => papaya::Operation::Abort(Ok(())),
         None => papaya::Operation::Insert(A2aTask {
             task: Task { id: task_id.to_string(), status: TaskStatus { state: "submitted".into() }, artifacts: vec![] },
             context_id: context_id.to_string(),
@@ -417,8 +428,9 @@ fn reserve_task(
     });
     let token = match claimed {
         papaya::Compute::Inserted(..) => Some(token),
-        papaya::Compute::Aborted(true) => None,
-        _ => return Err(()),
+        papaya::Compute::Aborted(Ok(())) => None,
+        papaya::Compute::Aborted(Err(why)) => return Err(why),
+        _ => return Err(Unclaimable::Foreign),
     };
     Ok(TaskReservation {
         tasks: Arc::clone(&state.tasks),
@@ -428,6 +440,28 @@ fn reserve_task(
         owner: owner.clone(),
         token,
     })
+}
+
+/// Why a send could not claim its task id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Unclaimable {
+    /// Another identity owns it (or an anonymous caller's, which no one can name).
+    Foreign,
+    /// It is a task a 0.3 or 1.0 method created, which is never re-sent.
+    NotResendable,
+}
+
+impl Unclaimable {
+    fn refusal(self, id: Option<Value>) -> Value {
+        match self {
+            Unclaimable::Foreign => not_the_creator(id),
+            Unclaimable::NotResendable => jsonrpc_error(
+                id,
+                -32004,
+                "this task was created by message/send or SendMessage and is its own message's: send a new message instead",
+            ),
+        }
+    }
 }
 
 /// The identity a task is owned by: the resolved principal, or `None` for an anonymous caller (and
@@ -710,7 +744,8 @@ async fn agent_card_handler(State(state): State<A2aState>) -> impl IntoResponse 
     let skill_ids = card_skill_ids(kv);
     let skills: Vec<AgentSkill> = skill_ids.into_iter().map(|id| {
         let (description, input_schema) = skill_input_description(kv, &id);
-        AgentSkill { name: id.clone(), id, description, input_schema }
+        let tags = id.split_once('/').map(|(ns, _)| vec![ns.to_string()]).unwrap_or_default();
+        AgentSkill { name: id.clone(), id, description, input_schema, tags }
     }).collect();
 
     let node_addr = state.task_ctx.node_id.to_string();
@@ -794,8 +829,9 @@ async fn dispatch_send(
     // The id is claimed **after** the federation authorisation (#587 F6: an unauthorised partner
     // learns nothing about which ids exist) and **before** the dispatch (F5: two senders racing one
     // new id cannot both run). An id another identity owns is refused here, before anything is sent.
-    let Ok(reservation) = reserve_task(state, &req.task_id, &req.context_id, req.generation, &task_owner(caller)) else {
-        return Err(not_the_creator(id));
+    let reservation = match reserve_task(state, &req.task_id, &req.context_id, req.generation, &task_owner(caller)) {
+        Ok(reservation) => reservation,
+        Err(why) => return Err(why.refusal(id)),
     };
     let text = req.text.clone();
 
@@ -1250,11 +1286,11 @@ pub(crate) async fn a2a_jsonrpc_full(
             };
             // Claimed before the stream's task is spawned (#587 F5), and moved into it: a failed or
             // refused stream drops it, removing the pending entry.
-            let Ok(reservation) =
-                reserve_task(&state, &req.task_id, &req.context_id, req.generation, &task_owner(caller.as_ref()))
-            else {
-                return Json(not_the_creator(id)).into_response();
-            };
+            let reservation =
+                match reserve_task(&state, &req.task_id, &req.context_id, req.generation, &task_owner(caller.as_ref())) {
+                    Ok(reservation) => reservation,
+                    Err(why) => return Json(why.refusal(id)).into_response(),
+                };
             return tasks_send_subscribe(state, caller, id, req, reservation).await.into_response();
         }
         Verb::Send => match send_request(generation.unwrap_or(Generation::Legacy)) {
@@ -1545,6 +1581,15 @@ mod tests {
         let v = call(Some("alice-tok"), "tasks/get", json!({ "id": "t-legacy" })).await;
         assert!(v["result"].get("kind").is_none() && v["result"]["status"]["state"] == "completed", "{v}");
         assert_eq!(ran.load(Ordering::SeqCst), 3);
+
+        // A pre-0.2 re-send naming a task `SendMessage` created is refused, not run again over it
+        // (#633 review, finding 2; seen failing first: the skill ran and the task was replaced).
+        let v = call(Some("alice-tok"), "tasks/send", json!({ "id": t10, "skillId": "depot/dispatch",
+            "message": { "role": "user", "parts": [{ "type": "text", "text": "over" }] } })).await;
+        assert_eq!(v["error"]["code"], -32004, "{v}");
+        assert_eq!(ran.load(Ordering::SeqCst), 3, "nothing dispatched for the refused re-send");
+        let v = call(Some("alice-tok"), "GetTask", json!({ "id": t10 })).await;
+        assert_eq!(v["result"]["artifacts"][0]["parts"][0]["text"], "dispatched", "the task is unchanged: {v}");
 
         // A `taskId` is refused before anything is dispatched.
         let mut cont = v10.clone();

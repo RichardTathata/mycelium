@@ -107,6 +107,21 @@ def test_the_card_resolves_at_the_sdks_default_path_and_offers_jsonrpc_1_0():
     assert "depot/dispatch" in [s.id for s in card.skills]
 
 
+def test_the_card_validates_as_an_a2a_0_3_card():
+    """A 0.3 client validates the card with 0.3's own model, which requires each skill's `tags`; the 1.0
+    resolver above ignores unknown and missing fields, so it cannot see this (#633 review, finding 1)."""
+    from a2a.compat.v0_3 import types as v03
+
+    async def go():
+        async with _http(10) as http:
+            r = await http.get(f"{URL}/.well-known/agent-card.json")
+            r.raise_for_status()
+            return r.json()
+
+    card = v03.AgentCard.model_validate(run(go()))
+    assert card.url == f"{URL}/a2a"
+
+
 def test_send_message_reaches_the_default_skill():
     _, state, texts = _final_task(run(_send("one crate", streaming=False)))
     assert state == "TASK_STATE_COMPLETED"

@@ -417,11 +417,21 @@ async fn agent_doors(phase: &str, provider: &str) {
     let skill_args = serde_json::json!({ "text": text });
 
     println!("/mcp tools/call: {}", mcp_call(&http, "work", presented(&grant, &holder, "tools/call", &tool, &empty)).await);
-    for method in ["tasks/send", "tasks/sendSubscribe"] {
-        let body = serde_json::json!({"jsonrpc":"2.0","id":1,"method":method,"params":{
-            "id": format!("task-{method}-{}", wall_ms()), "skillId": "depot/dispatch",
-            "message": {"role": "user", "parts": [{"type": "text", "text": text}]},
-            "_meta": {"mandate": presented(&grant, &holder, "skill.invoke", &skill, &skill_args)}}});
+    // Every name `/a2a` takes a send by — pre-0.2, 0.3 and 1.0, unary and streamed (post-360 row N). The
+    // pre-0.2 methods take `skillId` and `_meta` in params; the others in the request's `metadata`.
+    for method in ["tasks/send", "tasks/sendSubscribe", "message/send", "message/stream", "SendMessage", "SendStreamingMessage"] {
+        let mandate = presented(&grant, &holder, "skill.invoke", &skill, &skill_args);
+        let params = if method.starts_with("tasks/") {
+            serde_json::json!({
+                "id": format!("task-{method}-{}", wall_ms()), "skillId": "depot/dispatch",
+                "message": {"role": "user", "parts": [{"type": "text", "text": text}]},
+                "_meta": {"mandate": mandate}})
+        } else {
+            serde_json::json!({
+                "message": {"messageId": format!("m-{method}-{}", wall_ms()), "role": "ROLE_USER", "parts": [{"text": text}]},
+                "metadata": {"skillId": "depot/dispatch", "_meta": {"mandate": mandate}}})
+        };
+        let body = serde_json::json!({"jsonrpc":"2.0","id":1,"method":method,"params":params});
         let out = match http.post(format!("{}/a2a", gateway())).bearer_auth(TOKEN).json(&body).send().await {
             Ok(r) => r.text().await.unwrap_or_default(),
             Err(e) => format!("transport error: {e}"),
