@@ -955,7 +955,7 @@ window).
   0.3/1.0 method created re-ran the skill and replaced the task (refused `-32004`, `Unclaimable::NotResendable`;
   seen failing in the end-to-end test); the confined-fleet suite's doors (`examples/confined_fleet_node.rs`, C7's
   real-process sibling) try all six send names, its plant floor six. Documented: a `data` part is re-serialised
-  (keys sorted, numbers as `f64` past 64-bit integers) and the mandate digest is over that form; the guide's SDK
+  (keys sorted; an integer beyond 64 bits, or a decimal, through an `f64`) and the mandate digest is over that form; the guide's SDK
   snippet runs as a script. Answered, kept: federation refusals stay `-32003`/`-32004` on every generation (the
   federation client and partners match those codes; the message names the reason).
 - **Not built, stated:** `mycelium-py`'s and `mycelium-ts`' `A2aClient` still use `/.well-known/agent.json` and
@@ -1030,6 +1030,9 @@ queues before the shutdown signal), and N, O, P recorded by #614 with the `a2a-s
 - **N:** `mycelium-py`'s and `mycelium-ts`' `A2aClient` move to `/.well-known/agent-card.json` and `SendMessage`
   (with a fallback for a node before this release) before the pre-0.2 `tasks/send` / `tasks/sendSubscribe` and the
   old card path are removed — as do `examples/a2a_langchain` and `examples/community`'s smoke.
+  Also found by #633's confirming review, pre-existing (2.32.0's owner rule): two **anonymous** callers share the
+  owner `None`, so one's `tasks/send` under the other's caller-chosen id re-sends over it — decide whether an
+  anonymous pre-0.2 task is ever re-sendable.
 - **B:** connection preemption and WAL group commit, removed in review.
 - **Q:** ~~the mTLS handshake does not refuse a revoked key's certificate~~ — *delivered after 2.34.0, unreleased:*
   both sides of the handshake refuse a certificate whose key its owner revoked by a revocation this node counted (kept

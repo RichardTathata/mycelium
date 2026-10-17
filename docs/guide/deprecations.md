@@ -1495,8 +1495,8 @@ lists `/a2a` once per protocol version (`supportedInterfaces`: JSON-RPC `1.0`, t
 `SendMessage`, `SendStreamingMessage`, `GetTask` and `CancelTask` and 0.3's `message/send` and `message/stream` in each
 generation's shapes. A 0.3 / 1.0 send names its skill in `metadata.skillId` (the message's or the request's; the two
 must agree), or reaches the skill the embedder declared with `GossipAgent::with_a2a_default_skill`, or is refused
-`-32602`; its first part is read as text, or its `data` re-serialised as compact JSON — keys sorted, a number past an
-`f64`'s precision rounded, and a mandate's possession proof digests that form (anything else is `-32005`); a mandate and an operation
+`-32602`; its first part is read as text, or its `data` re-serialised as compact JSON — keys sorted, an integer beyond 64
+bits or a decimal passed through an `f64`, and a mandate's possession proof digests that form (anything else is `-32005`); a mandate and an operation
 id go in the request's `metadata._meta`, where `tasks/send` takes them in `params._meta`. The task id is minted by the
 node, and a message naming a `taskId` is refused `-32004`: a task here is complete when its send returns. An unknown
 skill is `-32602` on the new methods (0.3 and 1.0 give `-32001` to *task* not found) and stays `-32001` on `tasks/send`.

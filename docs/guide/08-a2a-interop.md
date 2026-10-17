@@ -167,8 +167,8 @@ let agent = GossipAgent::new(node_id, cfg)
 
 A message can still name a skill, in `metadata.skillId` (the message's or the request's); without a default,
 one that names none is refused `-32602`. The first part is the skill's input — its text, or its `data`
-re-serialised as compact JSON (keys in sorted order; a number beyond an `f64`'s precision is rounded — send exact
-values as text). A mandate's possession proof digests `{"text": <that input>}`, so a holder sending a `data` part
+re-serialised as compact JSON (keys in sorted order; an integer beyond 64 bits, or a decimal, goes through an `f64`
+and may be rounded — send exact values as text). A mandate's possession proof digests `{"text": <that input>}`, so a holder sending a `data` part
 signs over the re-serialised form. A mandate and an operation id go in the request's `metadata._meta`. Each message is its own task, complete
 when the send returns: a message naming a `taskId` is refused `-32004`. With the SDK:
 
