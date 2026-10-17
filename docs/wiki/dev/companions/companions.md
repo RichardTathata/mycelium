@@ -57,8 +57,8 @@ via wasm-host).
   quorum per write; `claims=False` restores last-writer-wins. A row is at most about 1.5 MiB — the gateway's 2 MiB
   request body, base64 — not `MAX_KV_WRITE_BYTES`. Building it found that the `mycelium` binary never voted, so a
   fleet of binaries timed out on every consensus write; it starts a listener now. Pinned to
-  `strands-agents` 1.61.1, the interface recorded in `tests/test_interface.py`; live suite in CI on the reason-node
-  pair (`strands-session-mycelium/README.md`).
+  `strands-agents` 1.61.1, the interface recorded in `tests/test_interface.py`; live suite in CI on three voting `mycelium`
+  nodes (`strands-session-mycelium/README.md`).
 - **`mycelium-wasm-host/`** — WS-E code mobility: the coordinator-free
   requirement→resolve→pull→advertise→serve→self-heal loop, Ed25519 provenance, mesh artifact
   pull, gossiped catalog, fuel limits (restart ≡ provisioning). PRs #32–#42; runbook

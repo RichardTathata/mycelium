@@ -18,3 +18,7 @@ now). Lesson for the family: a view cannot vouch for what it has not seen, so th
 
 Pages: `dev/companions/companions.md`. Repo: `strands-session-mycelium/README.md`, `operations/companions.md`, the
 plan's row O block (§3.5) and §3.6, CI's `python-sdk` job and test universe.
+The claims round's own review then found the same mistake one level up: a "restarted writer takes back its
+unwritten claim" rule judged *unwritten* by the local view again. The fix is that a claim names its write: the row
+goes under `pending/{token}` before the claim, so any reader can finish a claimed write, and no writer id licenses
+a rewrite. Updates to agent and swarm records are claimed by version.

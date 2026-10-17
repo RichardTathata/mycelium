@@ -396,7 +396,8 @@ an absent section.
   node that is behind raises `IncompleteSession` or `StaleWriter` instead. That needs `consensus:read`/`consensus:write`
   and **a quorum for every write** — while a majority is unreachable, writes fail and are held. The fleet's nodes
   must vote: embedders start `start_consensus_listener`; the `mycelium` binary does after 2.34.0 (before it, a
-  fleet of binaries timed out on every consensus write).
+  fleet of binaries timed out on every consensus write). Give the voters `[persistence]`: one without it forgets
+  its promises on restart, and a quorum counting it can decide a claim twice.
 - **Moving a session between nodes.** Resume where its rows have arrived: before then the new node raises (it does
   not start the agent afresh). With `claims=False` there is no such guard — wait for the agent's count row on the new
   node to reach the old node's count, and keep one writer per agent id.

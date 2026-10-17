@@ -92,42 +92,54 @@ from before it.
 
 What a node reads is its own view, and a view can be behind: none of a record may have arrived, or
 an older version of it. No read can tell either from the real thing. So the store does not trust its
-view for writes. It **claims** each record and each message index once, fleet-wide, before writing
-it: a consensus write (`consistent_set`) that a quorum decides, so no two writers ever hold one claim
+view for writes. Before each write it **claims** what it is about to write, once, fleet-wide: a
+consensus write (`consistent_set`) that a quorum decides, so no two writers ever hold one claim
 however far behind either node is.
 
-- **A session** has a generation, the decided value of its claim; every other claim is scoped by it.
-  Two nodes creating one session agree on it. A deleted session's claim stays, so its id is refused
-  by name rather than reused.
-- **An agent, a swarm's or graph's state**: created only by the writer that claims it. A node that has
-  not seen one another writer created raises `IncompleteSession` instead of creating it afresh.
-- **A message index**: written only by its claimant, the writer and a digest of the message. A
-  writer refused an index — its view is behind the conversation, or another writer is writing the
-  same agent — raises `StaleWriter` and is fenced for that agent: it writes nothing more for it, its
-  agent state included. Re-create the agent where the session has arrived to carry on.
+- **A message index** is claimed before its message is written. A writer refused an index (its view
+  is behind the conversation, or another writer is writing the same agent) raises `StaleWriter` and is
+  fenced for that agent: it writes nothing more for it, its agent state included. Re-create the agent
+  where the session has arrived to carry on.
+- **An agent's record, and a swarm's or graph's state**, are versioned. Creating one claims version 0;
+  each update claims the version after the one the writer's object was read at. A node that has not
+  seen a record another writer created raises `IncompleteSession` instead of creating it afresh, and a
+  writer resumed from an older version is refused (`StaleWriter`) at its first update instead of
+  writing over the newer state.
+- **A session** has a generation, the decided value of its own claim; every other claim is scoped by
+  it. Two nodes creating one session agree on it. A deleted session's claim stays, so its id is
+  refused by name rather than reused.
 
-`writer` is the claimant's id: the host's name by default, so a process that retries or restarts on
-the same host keeps what it claimed, including an index it claimed and died before writing. Two
-processes that could write the same agent from one host need distinct `writer`s.
+**A claim names its write.** Before claiming, the writer puts the row under `pending/{token}`, and
+the claim's value is the writer's id and that token; the row follows the claim and the pending copy
+is removed. A reader that finds a claimed index or version whose row has not arrived reads it from the
+pending copy, and writes the row. So a writer that claims and then dies before writing leaves no hole
+and blocks no one: whoever resumes the agent next reads that message. A retry reuses its token and is
+recognised as the same write; any other write to a claimed index or version is refused, whoever
+makes it. `writer` (the host's name by default; no newline) says who claimed what.
 
-**What claims cost.** One consensus round per message, agent and swarm creation (tens of
-milliseconds on a local mesh), and **a quorum of the fleet for every write**: while a majority is
-unreachable, writes raise and are held, as any failed write is. A node that is behind still *reads*
-an older conversation without error; what it can no longer do is write over the newer one. The fleet
-must vote: an embedder starts `start_consensus_listener` on its nodes; the `mycelium` binary does
-in the release after 2.34.0.
+**What claims cost.** One consensus round, and one more row, per message and per agent or swarm
+update (tens of milliseconds on a local mesh), and **a quorum of the fleet for every write**: while a
+majority is unreachable, writes raise and are held, as any failed write is. A node that is behind
+still *reads* an older conversation without error; what it can no longer do is write over the newer
+one. The fleet must vote: an embedder starts `start_consensus_listener` on its nodes; the `mycelium`
+binary does in the release after 2.34.0. **Voters should persist** (`[persistence]`): an acceptor
+without it forgets its promises when it restarts, and a quorum counting it can then decide a second
+value for a claim (`src/agent/acceptor_guard.rs`; guide 04 requires it of an electorate member). A fleet that requires a declared
+electorate needs an `exclusive_default` group, or every claim is refused, which the store reports as a
+configuration error rather than something to retry.
 
 `claims=False` writes by last-writer-wins with no consensus, as a single-node or availability-first
 deployment may prefer. Then the limits claims close are back: resume an agent only where its rows
-have arrived in full (its `…/count` row on the new node at the count the old one wrote), and one agent
-id is one writer.
+have arrived in full (its `…/count` row on the new node at the count the old one wrote), one writer per
+agent id, and one orchestrator per swarm or graph. The window-0 renumbering does not depend on claims.
 
 ## Concurrent agents
 
 - Two agents with different ids in one session write disjoint rows and claims. Neither loses the
   other's writes, on one node or on several (the live suite runs it across two nodes).
-- Two writers of **one** agent: the first to claim each index writes it; the other gets
-  `StaleWriter`. Nothing is written over (the live suite runs it across two nodes at once).
+- Two writers of **one** agent, or of one swarm: the first to claim each index or version writes it;
+  the other gets `StaleWriter`. Nothing is written over (the live suite runs it across two nodes at
+  once).
 - `delete_session` while another manager is still writing the session is not supported: the writer's
   later rows outlive the session record.
 
@@ -142,7 +154,8 @@ strands/{session}/agent/{agent}/count         {"count": n}
 strands/{session}/agent/{agent}/msg/{index}   one SessionMessage (index zero-padded)
 strands/{session}/multi/{id}                  a Swarm's or Graph's serialized state
 strands/{session}/claim/session               the session's claim: its generation
-strands/{session}/claim/{generation}/…        a record's or a message index's claim
+strands/{session}/claim/{generation}/…        a message index's or a record version's claim
+strands/{session}/pending/{token}             a claimed write's row, until the row itself is written
 ```
 
 A row is at most about **1.5 MiB**. The limit is the gateway's request body (axum's default 2 MiB),

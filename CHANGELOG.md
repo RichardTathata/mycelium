@@ -90,13 +90,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the rows that are there (a per-agent count row covers the tail); an undecodable or malformed row or a gateway error
   raises `SessionException`. A failed message write is held and written, in order, before any later one, so it leaves
   no hole. A row is at most about 1.5 MiB (the gateway's request limit), checked before sending. **Nothing is written
-  over what a node has not seen:** every agent, swarm or graph record and every message index is claimed once,
-  fleet-wide, by a consensus write before it is written (`claims=True`, the default), so a node that is behind, or a
-  second writer of one agent, is refused (`IncompleteSession`, or `StaleWriter`, which fences that writer for the
-  agent) rather than overwriting. A session's claim fixes its generation; a deleted session's id is refused, not
-  reused; a sliding window of 0 resumes without writing over its history. Claims cost a consensus round per message
-  and a quorum for every write; `claims=False` is last-writer-wins, with its limits stated. Pinned to `strands-agents` 1.61.1 with
-  the interface recorded in a test. Its live suite runs in CI against the two meshed reason nodes
+  over what a node has not seen:** every message index, and every version of an agent's, swarm's or graph's record,
+  is claimed once, fleet-wide, by a consensus write before it is written (`claims=True`, the default), so a node that
+  is behind, or a second writer of one agent or swarm, is refused (`IncompleteSession`, or `StaleWriter`, which
+  fences that writer) rather than overwriting. A claim names its write (the row goes under `pending/` first), so a
+  writer that claims and dies blocks no one: the next reader takes the row from it. A session's claim fixes its
+  generation; a deleted session's id is refused, not reused; a sliding window of 0 resumes without writing over its
+  history. Claims cost a consensus round per message and per update, and a quorum for every write; voters should
+  persist; `claims=False` is last-writer-wins, with its limits stated. Pinned to `strands-agents` 1.61.1 with the
+  interface recorded in a test. Its live suite runs in CI on three voting `mycelium` nodes
   (`MYCELIUM_STRANDS_LIVE_REQUIRED`).
 - **An unmodified A2A client reaches a node's skills through `/a2a`** (post-360 plan row N; upgrade note
   `docs/guide/deprecations.md` §46). The 2026-10-12 probe found the current `a2a-sdk` (1.2.2, the library Strands

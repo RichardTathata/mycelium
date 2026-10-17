@@ -54,6 +54,9 @@ class FakeGateway:
     def consistent_set(self, key: str, value: bytes) -> None:
         self._maybe_fail()
         if key in self.decided:
+            # A proposer that loses learns the decision in losing (its prepare is answered with it), so
+            # the losing node reads it at once — checked against the real gateway on 2026-10-17.
+            self.seen.add(key)
             req = httpx.Request("POST", "http://gw/gateway/overlay/consistent/set")
             raise SupersededError(httpx.Response(409, request=req, json={"error": "superseded", "ok": False}))
         self.decided[key] = value

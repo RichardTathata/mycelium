@@ -280,7 +280,7 @@ def test_a_request_past_the_gateways_body_limit_is_refused_before_it_is_sent():
 def test_a_row_missing_its_fields_is_unreadable(key):
     gw = FakeGateway()
     run_agent(gw, ["one"])
-    gw.rows[key] = b'{"foo":1}'
+    gw.rows[key] = b'{"foo":1,"mycelium_version":99}'  # a version no later claim follows
     with pytest.raises(SessionException, match="unreadable"):
         Agent(agent_id="planner", model=ScriptedModel([]), session_manager=manager(gw), callback_handler=None)
 
@@ -360,8 +360,8 @@ def test_a_window_of_zero_resumes_where_it_was_written():
     assert again.messages == []
     again("three")
     # Strands numbers the next message 0 again (its own FileSessionManager then writes over "one", checked
-    # 2026-10-17 against 1.61.1). Index 0 is claimed, and this node holds messages past it, so the store
-    # moves the message to the next free index instead, and Strands carries on from there.
+    # 2026-10-17 against 1.61.1). The store answered it an empty tail at offset 4, so it moves that message
+    # to index 4 instead, and Strands carries on from there — with or without claims.
     def text(i):
         return json.loads(gw.rows[f"strands/s1/agent/planner/msg/{i:010d}"])["message"]["content"][0]["text"]
     assert text(0) == "one" and text(4) == "three" and text(5) == "r3"

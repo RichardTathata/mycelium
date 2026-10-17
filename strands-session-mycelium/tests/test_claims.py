@@ -44,9 +44,10 @@ def test_a_node_behind_as_a_whole_cannot_write_over_what_it_has_not_seen():
     a, b = fleet()
     agent(a, ["r1", "r2"], writer="node-a")("one")
     agent(a, ["r2"], writer="node-a")("two")  # messages 0..3 on A
-    # B holds everything but A's second turn — including an older count: it reads a shorter
-    # conversation without error, which no view of its own can tell from the whole one.
-    arrive(a, b, keep=lambda k: k not in (MSG.format(2), MSG.format(3)))
+    # B holds nothing of A's second turn — not its rows, not its claims — and an older count: it reads a
+    # shorter conversation without error, which no view of its own can tell from the whole one.
+    late = ("/msg/0000000002", "/msg/0000000003")
+    arrive(a, b, keep=lambda k: not k.endswith(late) and "/v/" not in k.rsplit("/agent/", 1)[-1][len("planner"):] or k.endswith("/v/0"))
     b.rows["strands/s1/agent/planner/count"] = b'{"count":2}'
     m = MyceliumSessionManager("s1", agent=b, writer="node-b")
     stale = Agent(agent_id="planner", model=ScriptedModel(["late reply"]), callback_handler=None, session_manager=m)
@@ -61,6 +62,30 @@ def test_a_node_behind_as_a_whole_cannot_write_over_what_it_has_not_seen():
     # Re-created where the session has arrived, B carries on after A's messages.
     agent(b, ["r3"], writer="node-b")("three")
     assert text(b, 4) == "three"
+
+
+def test_a_node_that_holds_a_later_claim_but_not_its_row_waits():
+    a, b = fleet()
+    agent(a, ["r1", "r2"], writer="node-a")("one")
+    agent(a, ["r2"], writer="node-a")("two")
+    arrive(a, b, keep=lambda k: not k.endswith(("/msg/0000000002", "/msg/0000000003")) or "/claim/" in k)
+    with pytest.raises(IncompleteSession) as e:
+        agent(b, [], writer="node-b")
+    assert e.value.missing == [MSG.format(2)]
+
+
+def test_the_same_writer_restarted_behind_its_own_writes_cannot_write_over_them():
+    """Review finding 1 of 57e405d5: a writer id is not a licence — only the write a claim names is."""
+    a, b = fleet()
+    agent(a, ["r1"], writer="host-h")("one")
+    agent(a, ["r2"], writer="host-h")("two")
+    arrive(a, b, keep=lambda k: not k.endswith(("/msg/0000000002", "/msg/0000000003"))
+           and not ("/claim/" in k and "/msg/" in k and k.endswith(("2", "3"))) and "/v/" not in k or k.endswith("/v/0"))
+    b.rows["strands/s1/agent/planner/count"] = b'{"count":2}'
+    with pytest.raises(StaleWriter):
+        agent(b, ["late"], writer="host-h")("three")
+    arrive(b, a)
+    assert text(a, 2) == "two"
 
 
 def test_an_agent_created_elsewhere_and_not_arrived_is_incomplete_not_new():
@@ -87,13 +112,11 @@ def test_two_writers_of_one_agent_cannot_both_write_one_index():
 
 def test_two_nodes_creating_one_session_agree_on_its_generation():
     a, b = fleet()
-    MyceliumSessionManager("s1", agent=a, writer="node-a")
-    with pytest.raises(IncompleteSession):  # B's view has none of it: its claim is decided, not arrived
-        MyceliumSessionManager("s1", agent=b, writer="node-b")
-    arrive(a, b)
     m_a = MyceliumSessionManager("s1", agent=a, writer="node-a")
+    # B's view has none of it, so B creates the session too — and, losing the claim, learns its decision.
     m_b = MyceliumSessionManager("s1", agent=b, writer="node-b")
-    assert m_a.repository._generation("s1") == m_b.repository._generation("s1")
+    generation = m_a.repository._generation("s1")
+    assert generation is not None and generation == m_b.repository._generation("s1")
 
 
 def test_a_deleted_sessions_id_is_refused_by_name_not_reused():
@@ -104,28 +127,51 @@ def test_a_deleted_sessions_id_is_refused_by_name_not_reused():
         MyceliumSessionManager("s1", agent=gw, writer="node-a")
 
 
-def test_a_claim_whose_row_was_never_written_is_taken_back_by_its_writer():
+@pytest.mark.parametrize("writer", ["node-a", "node-b"])
+def test_a_message_claimed_and_never_written_is_read_from_its_claim(writer):
+    """Review finding 3 of 57e405d5: a writer that claimed and died blocks no one — the claim names its write."""
     gw = FakeGateway()
     first = agent(gw, ["r1", "r2"], writer="node-a")
     first("one")
     gw.fail_once.add(MSG.format(2))
     with pytest.raises(SessionException):
-        first("two")  # message 2 claimed, its row not written — and then this process is gone
-    again = agent(gw, ["r3"], writer="node-a")  # restarted on the same host: the same writer
-    assert len(again.messages) == 2
+        first("two")  # message 2 claimed, its row not written — and then this writer is gone
+    again = agent(gw, ["r3"], writer=writer)  # its restart, or a replacement on another host
+    assert [b["text"] for m in again.messages for b in m["content"]] == ["one", "r1", "two"]
     again("three")
-    assert text(gw, 2) == "three"
+    assert text(gw, 2) == "two" and text(gw, 3) == "three"
 
 
-def test_a_claim_whose_row_was_never_written_is_not_taken_by_another_writer():
+def test_an_agent_claimed_and_never_written_is_read_from_its_claim():
     gw = FakeGateway()
-    first = agent(gw, ["r1", "r2"], writer="node-a")
-    first("one")
-    gw.fail_once.add(MSG.format(2))
+    MyceliumSessionManager("s1", agent=gw, writer="pod-1")
+    gw.fail_once.add("strands/s1/agent/planner/count")
     with pytest.raises(SessionException):
-        first("two")
+        agent(gw, [], writer="pod-1")  # its version 0 claimed; neither count nor row written
+    again = agent(gw, ["r1"], writer="pod-2")
+    again("one")
+    assert text(gw, 0) == "one"
+
+
+def test_a_swarm_resumed_behind_its_newer_state_cannot_write_over_it():
+    """Review finding 2 of 57e405d5: a multi-agent state's updates are claimed by version."""
+    from strands.multiagent import Swarm
+
+    a, b = fleet()
+
+    def swarm(gw, w, reply):
+        c = Agent(name="collector", model=ScriptedModel([reply]), callback_handler=None)
+        return Swarm([c], id="redistribution", session_manager=MyceliumSessionManager("s1", agent=gw, writer=w))
+
+    swarm(a, "node-a", "first")("plan 1")
+    arrive(a, b)
+    swarm(a, "node-a", "second")("plan 2")
+    key = "strands/s1/multi/redistribution"
+    older = b.rows[key]
     with pytest.raises(StaleWriter):
-        agent(gw, ["r3"], writer="node-b")("three")
+        swarm(b, "node-b", "stale")("plan 3 from behind")  # B holds the older state, not its later claims
+    assert b.rows[key] == older  # B wrote no state of its own over the swarm's
+    assert json.loads(a.rows[key])["mycelium_version"] > json.loads(older)["mycelium_version"]
 
 
 def test_a_swarm_created_elsewhere_and_not_arrived_is_incomplete_not_new():

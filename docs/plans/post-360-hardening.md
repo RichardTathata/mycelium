@@ -997,12 +997,12 @@ window).
   messages) reads an older, complete conversation; claims (below) stop it writing over the newer one.
 - *concurrent agents in one session do not lose each other's writes, or the limit is stated* — both: different agent
   ids write disjoint rows (`test_two_agents_in_one_session_keep_each_others_writes`; across two nodes at once,
-  `test_two_agents_on_two_nodes_in_one_session_keep_both_conversations`), and the limit is stated in the README: one
-  agent id is one writer, a swarm's state is its orchestrator's, and a node that has none of an agent's rows yet starts
-  that agent afresh (absent and not-yet-arrived are indistinguishable there). A count row that lags its messages
-  reads them rather than overwriting them (`test_messages_ahead_of_a_lagging_count_are_read_and_not_overwritten`).
-- *its live suite runs in CI against a real node* — `tests/test_live.py` in the `python-sdk` job's pytest step,
-  against the two meshed reason nodes it already starts, with `MYCELIUM_STRANDS_LIVE_REQUIRED`; collected by the test
+  `test_two_agents_on_two_nodes_in_one_session_keep_both_conversations`), and, since the claims below, two writers of
+  *one* agent or swarm cannot write over each other either (refused, `StaleWriter`). A count row that lags its
+  messages reads them rather than overwriting them (`test_messages_ahead_of_a_lagging_count_are_read_and_not_overwritten`).
+- *its live suite runs in CI against a real node* — `tests/test_live.py` in the `python-sdk` job's own step against
+  three meshed `mycelium` nodes, which vote (the store's claims are consensus writes), with
+  `MYCELIUM_STRANDS_LIVE_REQUIRED`; collected by the test
   universe (its skip is a `skipif` mark, so `--collect-only` lists it — it was a module-level skip, which listed
   nothing, until review finding 4); the inventory check and its mutation suite pass with the new directory.
 - *pinned to a Strands release and re-checked when Strands changes the interface* — `strands-agents==1.61.1` in the
@@ -1045,20 +1045,38 @@ window).
 - *The stated limits, closed for writes (on the user's direction, 2026-10-17)* — the review rounds left three edges
   stated: a node behind as a whole, a record none of which has arrived, and one agent id on two writers. Each ends in
   a write over something the writing node has not seen, which no read on that node can detect. **Claims**: every
-  agent, swarm or graph record and every message index is claimed once, fleet-wide, by `consistent_set` before it is
-  written; a claim another writer holds is refused — `IncompleteSession` for a record, `StaleWriter` for an index,
-  which fences the writer for that agent — never overwritten. A session's claim fixes its generation, which scopes
-  the rest; a deleted session's id is refused by name. The message claim is the writer and a digest of the message,
-  so a retry is recognised and a restarted writer (same `writer`, the host name by default) takes back an index it
-  claimed and died before writing. A sliding window of 0, which makes Strands number from 0 again after the store
-  answers an empty tail, moves to the next free index instead of writing over message 0 (Strands' own
-  `FileSessionManager` writes over it). Tests: `tests/test_claims.py` (two fakes sharing one set of decisions, each
-  with its own view): behind as a whole, an agent and a swarm not arrived, two writers of one agent, two creators of
-  one session, a deleted id, an orphaned claim taken back by its writer and not by another; with claims forced off,
-  eight tests fail (seven there and the window-0 one). Live, on three voting nodes: two writers of one agent on two
-  nodes at once never write over each other (15 of 15 runs), and a window of 0 resumes on another node without
-  writing over its history. Cost, stated: a consensus round per message and a quorum for every write; `claims=False`
-  is last-writer-wins with the old limits.
+  message index, and every version of an agent's or a swarm's or graph's record, is claimed once, fleet-wide, by
+  `consistent_set` before it is written; a claim another writer holds is refused (`StaleWriter`, which fences the
+  writer; `IncompleteSession` when a record was created elsewhere), never overwritten. A record's update claims the
+  version after the one the writer's object was read at, so a writer resumed from an older version is refused at its
+  first write. A claim names its write: the row goes under `pending/{token}` first and the claim's value is the
+  writer and the token, so a reader that finds a claimed write whose row has not arrived takes it from the pending
+  copy and writes it — a writer that claims and dies blocks no one, and no writer id is a licence to rewrite (the
+  first claims round let a restarted writer "take back" an index judged unwritten by its own node's view: review
+  finding 1). A session's claim fixes its generation, which scopes the rest; a deleted session's id is refused by
+  name. A sliding window of 0, which makes Strands number from 0 again after the store answers an empty tail, moves to
+  the next free index instead of writing over message 0 (independent of claims; Strands' own `FileSessionManager`
+  writes over it). Tests: `tests/test_claims.py` — two fakes sharing one set of decisions, each with its own view,
+  the losing node learning the decision as the real gateway's does — a node behind as a whole, one holding a later
+  claim but not its row, the same writer restarted behind its own writes, an agent and a swarm not arrived, two
+  writers of one agent, two creators of one session, a deleted id, a message and an agent claimed and never written
+  (read from the claim by the same writer and by another), a swarm resumed behind its newer state. With claims forced
+  off, ten tests fail; against the first claims round (57e405d5), seven fail. Live, on three voting nodes: two writers
+  of one agent on two nodes at once never write over each other, and a window of 0 resumes on another node without
+  writing over its history (20 of 20 runs of the live file). Cost, stated: a consensus round and a pending row per
+  message and per update, a quorum for every write, voters that persist; `claims=False` is last-writer-wins with the
+  old limits.
+- *The claims round's review (57e405d5)* — a fresh reviewer: (1, high) the orphan-reclaim rule trusted the writing
+  node's view, so a writer restarted behind its own writes wrote over them — removed, replaced by claims that name
+  their write; (2, high) a swarm's or graph's updates were neither claimed nor fenced — versioned; (3, medium) a
+  claimed-and-never-written message index or agent blocked every other writer for good, and host names change on a
+  container restart — read from the claim's pending copy now; (4) voters without `[persistence]` can decide a claim
+  twice across a restart — stated, and a consensus refusal that is configuration (an electorate without an
+  `exclusive_default`, a missing scope) is reported as such, not as "retry"; (5) the two-writer live test could fail
+  on a claim that timed out under contention — it now counts that as the writer stopping; (6) the count of tests
+  failing with claims off was wrong (it said eight; it was seven) and stale text named the reason-node pair; (7) the
+  fake now teaches a losing node the decision, as the gateway does, and a `writer` with a newline is refused. Each
+  defect's test was seen failing first.
 - *Found on the way — a substrate defect* — the `mycelium` binary never started a consensus listener, so on a mesh of
   two or more binaries every `/gateway/overlay/{consistent/set,lock/acquire,elect}` timed out (`consensus timed out
   after 3 ballot(s)`, measured on three local binaries; milliseconds with the listener). `src/main.rs` now starts one
