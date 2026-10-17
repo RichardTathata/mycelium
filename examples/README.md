@@ -148,6 +148,7 @@ not to raw source. The suite READMEs carry the per-example walkthrough + the exa
 | [`authority_drain`](../docs/design/authority-at-execution.md#4-what-this-does-not-claim) · [src](authority_drain.rs) | · | · | · | ● | Adv | CLI | · | ✓ | · | ✓ | · |
 | [`composed_commit`](../docs/design/composed-effect.md#9-enforced-at-the-destination-2026-09-29) · [src](composed_commit.rs) | · | · | · | ● | Adv | CLI | · | ✓ | · | ✓ | · |
 | [`confined_fleet_node`](../docs/operations/confined-fleet.md#1-before-you-start-does-your-cni-enforce-networkpolicy) · [src](confined_fleet_node.rs) | ○ | · | · | ● | Adv | CLI | · | ✓ | · | ✓ᵖ | [✓](units/confined_fleet_node/) |
+| [`strands_fleet_node`](strands_fleet/README.md) · [src](strands_fleet_node.rs) | ● | · | ○ | ● | Adv | CLI | · | ✓ | · | ✓ | · |
 | **Coordination & identity integrity** | | | | | | | | | | | |
 | [`coordination_integrity`](../docs/guide/04-consensus.md#what-a-successful-election-means) · [src](coordination_integrity.rs) | · | · | ● | ○ | Adv | CLI | · | · | · | ✓ | · |
 | [`coordinator_by_accretion`](../docs/guide/14-patterns-and-pitfalls.md#12--expect-one-node-to-end-up-holding-every-single-writer-role) · [src](coordinator_by_accretion.rs) | · | · | ○ | ● | Adv | CLI | · | · | · | ✓ | · |
