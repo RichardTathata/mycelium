@@ -573,10 +573,11 @@ jobs:
         env:
           MYCELIUM_TEST_PORT: 8101
           MYCELIUM_TEST_PORT_B: 8102
-          # The reason-node suites (test_reason, test_typed, the checkpointer's) and the Strands session
-          # store's (post-360 row O) fail rather than skip if the ports above go missing.
+          # The reason-node suites (test_reason, test_typed, the checkpointer's) fail rather than skip if
+          # the ports above go missing. The Strands session store's live suite needs a fleet that votes
+          # (its claims are consensus writes; the reason nodes are built without `consensus`) and runs in
+          # its own step below.
           MYCELIUM_REASON_LIVE_REQUIRED: "1"
-          MYCELIUM_STRANDS_LIVE_REQUIRED: "1"
       # The LangGraph example ladder, rungs 0–5 (echo variant): each runs against the
       # shared A/B mesh above and prints `RUNG N OK`. Rung 03 needs the second node
       # (MYCELIUM_TEST_PORT_B); the rest ignore it. Rung 06 has its own step below.
@@ -618,6 +619,25 @@ jobs:
           # The live directory, not a file: a new live suite runs the day it lands. MYCELIUM_LIVE_REQUIRED
           # makes a missing node a failure rather than an all-skipped green run.
           MYCELIUM_LIVE_REQUIRED=1 MYCELIUM_TEST_HOST=127.0.0.1 MYCELIUM_TEST_PORT=9312 pytest mycelium-py/tests/live -v
+      # The Strands session store (post-360 row O) against three meshed `mycelium` nodes, which vote: the
+      # store claims each record and message index by a consensus write, so its live suite needs a quorum.
+      # Its directory, with MYCELIUM_STRANDS_LIVE_REQUIRED, so a step that lost its fleet fails, not skips.
+      - name: Strands session store against a voting fleet
+        run: |
+          for n in 1 2 3; do
+            peers=""; [ "$n" -gt 1 ] && peers="--peers 127.0.0.1:9331"
+            GOSSIP_HTTP_PORT=934$n ./target/debug/mycelium --port 933$n $peers > "$RUNNER_TEMP/strands-node-$n.log" 2>&1 &
+            echo $! > "$RUNNER_TEMP/strands-node-$n.pid"
+          done
+          # Every node's caller-context marker, seen from the first: the mesh is formed and dispatch will not 412.
+          for i in $(seq 1 60); do
+            seen=$(curl -sf "http://127.0.0.1:9341/gateway/kv/keys?prefix=sys/caller-context/" \
+                   | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["keys"]))' 2>/dev/null || echo 0)
+            [ "$seen" -ge 3 ] && break
+            if [ "$i" -eq 60 ]; then echo "the strands fleet never formed (saw $seen)"; cat "$RUNNER_TEMP"/strands-node-*.log; exit 1; fi
+            sleep 1
+          done
+          MYCELIUM_STRANDS_LIVE_REQUIRED=1 MYCELIUM_STRANDS_PORTS=9341,9342,9343 pytest strands-session-mycelium/tests -v
       - name: Stop reason nodes
         if: always()
         run: |
@@ -625,6 +645,9 @@ jobs:
             [ -f "$RUNNER_TEMP/node-$n.pid" ] && kill "$(cat "$RUNNER_TEMP/node-$n.pid")" 2>/dev/null || true
           done
           [ -f "$RUNNER_TEMP/py-node.pid" ] && kill "$(cat "$RUNNER_TEMP/py-node.pid")" 2>/dev/null || true
+          for n in 1 2 3; do
+            [ -f "$RUNNER_TEMP/strands-node-$n.pid" ] && kill "$(cat "$RUNNER_TEMP/strands-node-$n.pid")" 2>/dev/null || true
+          done
       # The nodes' own logs, kept when the job fails: #561/#563 could not be diagnosed without them (a blob fetch
       # miss now logs which providers it asked and what each answered).
       - name: Keep the nodes' logs
@@ -635,6 +658,7 @@ jobs:
           path: |
             ${{ runner.temp }}/node-*.log
             ${{ runner.temp }}/py-node.log
+            ${{ runner.temp }}/strands-node-*.log
           if-no-files-found: ignore
 
   conway-gpu:

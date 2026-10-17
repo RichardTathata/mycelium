@@ -391,10 +391,15 @@ an absent section.
 - **What a save promises.** Local application on the gateway node and that node's disk state, not replication. A
   session is readable on another node once it has gossiped there; a read that sees part of it raises
   `IncompleteSession` (retry) rather than the rows that are there; a node behind as a whole is the next point.
-- **Moving a session between nodes.** Resume where its rows have arrived in full. On a node that has none of an
-  agent's (or a swarm's) rows yet, Strands starts it afresh; on a node holding only an older count and none of the
-  later messages, it reads an older conversation without error. Either way the copies compete (last writer wins).
-  Wait for the agent's count row on the new node to reach the old node's count. One agent id is one writer.
+- **Claims need a voting fleet.** By default the store claims every agent, swarm or graph record and every message
+  index by a consensus write before writing it, so nothing is written over what the writing node has not seen: a
+  node that is behind raises `IncompleteSession` or `StaleWriter` instead. That needs `consensus:read`/`consensus:write`
+  and **a quorum for every write** — while a majority is unreachable, writes fail and are held. The fleet's nodes
+  must vote: embedders start `start_consensus_listener`; the `mycelium` binary does after 2.34.0 (before it, a
+  fleet of binaries timed out on every consensus write).
+- **Moving a session between nodes.** Resume where its rows have arrived: before then the new node raises (it does
+  not start the agent afresh). With `claims=False` there is no such guard — wait for the agent's count row on the new
+  node to reach the old node's count, and keep one writer per agent id.
 - **Observe.** The gateway's KV routes and the receipts the package hands back. No metrics of its own.
 - **The reference** is [its README](../../strands-session-mycelium/README.md).
 

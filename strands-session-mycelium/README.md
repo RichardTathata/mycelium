@@ -33,12 +33,14 @@ when the pin moves.
 ## Reaching the gateway
 
 `MyceliumSessionManager(session_id, *, agent=None, host="127.0.0.1", port=7946, token=None,
-scheme="http", ca_file=None, prefix="strands", require_on_disk=False, on_receipt=None)`.
+scheme="http", ca_file=None, prefix="strands", require_on_disk=False, on_receipt=None,
+claims=True, writer=None)`.
 
 Pass an SDK client you already hold as `agent=` (a `mycelium.MyceliumAgent`), or the gateway's
 address. `token`, `scheme` and `ca_file` are the SDK's: the bearer defaults to
 `MYCELIUM_GATEWAY_TOKEN`, `scheme="https"` reaches a gateway serving TLS with verification on, and
-`ca_file` trusts a private fleet CA. Under scoped tokens the store needs `kv:read` and `kv:write`.
+`ca_file` trusts a private fleet CA. Under scoped tokens the store needs `kv:read` and `kv:write`,
+and for its claims (below) `consensus:read` and `consensus:write`.
 `prefix` is the first segment of every key: an application namespace (the gateway's KV routes
 refuse the namespaces the substrate owns).
 
@@ -74,16 +76,9 @@ rather than reading as an empty conversation that Strands would restart at messa
 with no count yet raises too; `create_agent` writes the count first, so that row is still arriving.
 
 A removed count *equal* to the messages here is read as an empty tail, because it is legitimate: a
-sliding window of 0 removes every message each turn. Two things follow:
-
-- **Strands' own behaviour:** an agent resumed with such a window restarts its message indices at 0
-  and writes over the first message. Strands' `FileSessionManager` does the same.
-- **A narrow cross-node case:** an agent row exactly level with an older count looks the same.
-
-What it cannot see is a node that is **behind as a whole**: one holding an older count and none of
-the messages after it reads a complete, older conversation without error, and an agent resumed there
-writes its next message over the first one it did not see (last writer wins). That is the
-"Resuming on another node" rule below; nothing on the reading node can tell it apart.
+sliding window of 0 removes every message each turn. Strands then numbers the next message 0 again
+(its `FileSessionManager` writes it over the first message); this store moves it to the next free
+index instead, and Strands carries on from there.
 
 A write that fails is held, not skipped. Strands moves to the next message index before the store
 writes the current one, so a failed write (a 503, a dropped connection, a row past the size limit)
@@ -93,30 +88,48 @@ first message it could not write. A message that can never be written (one past 
 holds every later message back and says so in each error; the session as stored is still resumable
 from before it.
 
-## Resuming on another node
+## Claims: nothing is written over what this node has not seen
 
-Resume where the session's rows have arrived, in full. Two cases look fine to the reading node and
-are not:
+What a node reads is its own view, and a view can be behind: none of a record may have arrived, or
+an older version of it. No read can tell either from the real thing. So the store does not trust its
+view for writes. It **claims** each record and each message index once, fleet-wide, before writing
+it: a consensus write (`consistent_set`) that a quorum decides, so no two writers ever hold one claim
+however far behind either node is.
 
-- **Nothing of a record has arrived** (for an agent, nothing but its `count` of 0, which
-  `create_agent` writes before the agent row). "Absent" and "not here yet" are the same to a node. A session,
-  an agent or a swarm's or graph's state read there before any of its rows is new as far as Strands
-  is concerned. Strands creates it, and the two copies compete, last writer wins.
-- **An older version has arrived.** An older count with none of the later messages reads as a
-  complete, shorter conversation (above).
+- **A session** has a generation, the decided value of its claim; every other claim is scoped by it.
+  Two nodes creating one session agree on it. A deleted session's claim stays, so its id is refused
+  by name rather than reused.
+- **An agent, a swarm's or graph's state**: created only by the writer that claims it. A node that has
+  not seen one another writer created raises `IncompleteSession` instead of creating it afresh.
+- **A message index**: written only by its claimant, the writer and a digest of the message. A
+  writer refused an index — its view is behind the conversation, or another writer is writing the
+  same agent — raises `StaleWriter` and is fenced for that agent: it writes nothing more for it, its
+  agent state included. Re-create the agent where the session has arrived to carry on.
 
-A deployment that moves a session between nodes waits until the agent's `…/count` row on the new
-node reaches the count the old one wrote (as `tests/test_live.py` does), or keeps a session on one
-node at a time. `delete_session` while another manager is still writing the session is not
-supported: the writer's later rows outlive the session record.
+`writer` is the claimant's id: the host's name by default, so a process that retries or restarts on
+the same host keeps what it claimed, including an index it claimed and died before writing. Two
+processes that could write the same agent from one host need distinct `writer`s.
+
+**What claims cost.** One consensus round per message, agent and swarm creation (tens of
+milliseconds on a local mesh), and **a quorum of the fleet for every write**: while a majority is
+unreachable, writes raise and are held, as any failed write is. A node that is behind still *reads*
+an older conversation without error; what it can no longer do is write over the newer one. The fleet
+must vote: an embedder starts `start_consensus_listener` on its nodes; the `mycelium` binary does
+in the release after 2.34.0.
+
+`claims=False` writes by last-writer-wins with no consensus, as a single-node or availability-first
+deployment may prefer. Then the limits claims close are back: resume an agent only where its rows
+have arrived in full (its `…/count` row on the new node at the count the old one wrote), and one agent
+id is one writer.
 
 ## Concurrent agents
 
-- Two agents with different ids in one session write disjoint rows. Neither loses the other's
-  writes, on one node or on several, and the live suite runs exactly that across two nodes.
-- **One agent id is one writer.** Two processes running the same agent id in one session overwrite
-  each other's rows (last writer wins), as Strands' own managers would.
-- A swarm's or graph's state is its orchestrator's alone, by the same rule.
+- Two agents with different ids in one session write disjoint rows and claims. Neither loses the
+  other's writes, on one node or on several (the live suite runs it across two nodes).
+- Two writers of **one** agent: the first to claim each index writes it; the other gets
+  `StaleWriter`. Nothing is written over (the live suite runs it across two nodes at once).
+- `delete_session` while another manager is still writing the session is not supported: the writer's
+  later rows outlive the session record.
 
 ## Layout
 
@@ -128,6 +141,8 @@ strands/{session}/agent/{agent}               the SessionAgent (state, conversat
 strands/{session}/agent/{agent}/count         {"count": n}
 strands/{session}/agent/{agent}/msg/{index}   one SessionMessage (index zero-padded)
 strands/{session}/multi/{id}                  a Swarm's or Graph's serialized state
+strands/{session}/claim/session               the session's claim: its generation
+strands/{session}/claim/{generation}/…        a record's or a message index's claim
 ```
 
 A row is at most about **1.5 MiB**. The limit is the gateway's request body (axum's default 2 MiB),
@@ -142,8 +157,8 @@ later messages back, as above. Listing an agent's messages reads one row per mes
 
 ```sh
 pytest strands-session-mycelium/tests        # the store against an in-memory gateway; the live suite skips
-MYCELIUM_TEST_PORT=8101 MYCELIUM_TEST_PORT_B=8102 pytest strands-session-mycelium/tests   # + two meshed nodes
+MYCELIUM_STRANDS_PORTS=9341,9342,9343 pytest strands-session-mycelium/tests   # + a meshed fleet that votes
 ```
 
-CI runs both against two meshed nodes. With `MYCELIUM_STRANDS_LIVE_REQUIRED` set, the live suite
+CI runs the directory in its Python job, then again against three meshed `mycelium` nodes. With `MYCELIUM_STRANDS_LIVE_REQUIRED` set, the live suite
 fails rather than skips if the ports are missing.

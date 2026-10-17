@@ -13,6 +13,8 @@ Rows, one per record (every segment percent-encoded, so an id cannot forge a ``/
     {prefix}/{session}/agent/{agent}/count          {"count": n} — messages 0..n-1 were written
     {prefix}/{session}/agent/{agent}/msg/{index}    one SessionMessage, the index zero-padded
     {prefix}/{session}/multi/{id}                   a MultiAgentBase's serialized state
+    {prefix}/{session}/claim/session                the session's claim: its generation
+    {prefix}/{session}/claim/{generation}/…         a record's or a message index's claim
 
 What a write's receipt names. Every write returns the SDK's :class:`mycelium.KvReceipt`, kept on
 :attr:`MyceliumSessionRepository.last_receipt`. It names **local application on the gateway node**
@@ -29,27 +31,37 @@ would append at the wrong index and overwrite a message it never read. A row tha
 or is not the record its key names, raises ``SessionException``; so does a gateway error (401, 403,
 5xx). ``None`` means only that no row of that record exists anywhere under the session. A node that
 is behind as a whole — an older count and none of the later messages — reads an older conversation
-without error; the README's "Resuming on another node" is the rule for that.
+without error, and its claims (below) are what stop it writing over the newer one.
 
 A failed write leaves no hole: Strands has already moved to the next index when a message write
 fails, so the message is held and written, in order, before any later one (``_write_held``).
 
-Concurrent agents. Two agents with different ids in one session write disjoint rows and never lose
-each other's writes, on one node or several. **One agent id is one writer**: two processes running
-the same agent id in the same session overwrite each other's rows (last writer wins), as the same
-agent id in two Strands managers would. A multi-agent record is likewise its orchestrator's alone.
+Claims. A node's view can be behind — none of a record arrived, or an older version — and no read can
+tell. So nothing is written on the view's word: each record (an agent, a multi-agent state) and each
+message index is claimed once, fleet-wide, by a consensus write before it is written, and a claim
+another writer holds is refused (`IncompleteSession` for a record, `StaleWriter` for an index, which
+fences the writer for that agent), never overwritten. A session's claim fixes its generation, which
+scopes the rest. ``claims=False`` writes by last-writer-wins instead (README, "Claims").
+
+Concurrent agents. Two agents with different ids in one session write disjoint rows and claims and
+never lose each other's writes, on one node or several; two writers of one agent cannot both write an
+index.
 """
 
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
-from typing import TYPE_CHECKING, Any, Callable, Optional
+import socket
+import uuid
+from typing import TYPE_CHECKING, Any, Callable, NoReturn, Optional
 from urllib.parse import quote, unquote
 
 import httpx
 from mycelium import KvReceipt, MyceliumAgent
+from mycelium.agent import SupersededError
 from strands.session.repository_session_manager import RepositorySessionManager
 from strands.session.session_repository import SessionRepository
 from strands.types.exceptions import SessionException
@@ -95,6 +107,15 @@ class IncompleteSession(SessionException):
         super().__init__(f"{what} is incomplete on this node; missing {missing} (retry once they arrive)")
 
 
+class StaleWriter(SessionException):
+    """Another writer holds what this writer was about to write: its view of the agent is behind.
+
+    Raised instead of overwriting a message another writer claimed. The writer is fenced for that
+    agent — every later write for it raises this too — and is replaced by re-creating the agent where
+    the session has arrived. Not retriable in place.
+    """
+
+
 def _seg(value: str, what: str) -> str:
     if not isinstance(value, str) or value == "":
         raise SessionException(f"{what} must be a non-empty string, got {value!r}")
@@ -110,6 +131,15 @@ class MyceliumSessionRepository(SessionRepository):
             routes refuse the namespaces the substrate owns).
         require_on_disk: raise when a write's receipt is not ``"on_disk"`` on the gateway node.
         on_receipt: called with every write's key and receipt.
+        claims: claim every agent, swarm or graph record and every message index once, through the
+            fleet's consensus, before writing it (the default). A record or index another writer
+            claimed is refused, never overwritten — whatever this node has or has not seen yet. Needs
+            a quorum of the fleet for each write and ``consensus:write``/``consensus:read``; with
+            ``False`` the store writes by last-writer-wins and the README's limits apply.
+        writer: this writer's id, the value of every claim it makes; the host's name by default, so a
+            process that retries or restarts on the same host keeps what it claimed (a crash between a
+            claim and its row would otherwise leave that record claimed by no one alive). Two processes
+            that could write the same agent from one host need distinct ids.
     """
 
     def __init__(
@@ -119,8 +149,24 @@ class MyceliumSessionRepository(SessionRepository):
         prefix: str = "strands",
         require_on_disk: bool = False,
         on_receipt: Optional[Callable[[str, KvReceipt], None]] = None,
+        claims: bool = True,
+        writer: Optional[str] = None,
     ) -> None:
         self._agent = agent
+        self._claims = claims
+        self.writer = writer if writer else socket.gethostname()
+        if not isinstance(self.writer, str):
+            raise SessionException(f"writer must be a string, got {writer!r}")
+        # session -> its generation, the decided value of its session claim (claims scope by it, so a
+        # session's claims never meet another incarnation's).
+        self._generations: dict[str, str] = {}
+        # (session, agent) pairs this writer has been refused a message index for: its view of that
+        # agent is out of date, and every later write for it is refused too.
+        self._fenced: set[tuple[str, str]] = set()
+        # (session, agent) -> where its messages continue after this store answered Strands an empty
+        # tail (a removed count equal to the messages stored, as a sliding window of 0 leaves): Strands
+        # then numbers the next message 0, and the store moves it here instead.
+        self._continue_at: dict[tuple[str, str], int] = {}
         self._prefix = _seg(prefix, "prefix")
         self._require_on_disk = require_on_disk
         self._on_receipt = on_receipt
@@ -158,6 +204,14 @@ class MyceliumSessionRepository(SessionRepository):
 
     def _multi_key(self, session_id: str, multi_agent_id: str) -> str:
         return self._session_root(session_id) + "multi/" + _seg(multi_agent_id, "multi_agent_id")
+
+    def _session_claim_key(self, session_id: str) -> str:
+        return self._session_root(session_id) + "claim/session"
+
+    def _claim_key(self, session_id: str, generation: str, record_key: str) -> str:
+        """The claim of a record (an agent, a message index, a multi-agent state), by generation."""
+        root = self._session_root(session_id)
+        return f"{root}claim/{generation}/{record_key[len(root):]}"
 
     # ── the gateway ─────────────────────────────────────────────────────────
 
@@ -225,6 +279,84 @@ class MyceliumSessionRepository(SessionRepository):
             )
         return receipt
 
+    # ── claims ──────────────────────────────────────────────────────────────
+
+    def _decided(self, key: str) -> Optional[bytes]:
+        try:
+            return self._agent.consistent_get(key)
+        except httpx.HTTPError as e:
+            raise SessionException(f"reading the claim {key!r} through the gateway failed: {e}") from e
+
+    def _claim(self, key: str, value: str) -> bool:
+        """Claim ``key`` for ``value`` once, fleet-wide: ``True`` when it is ``value``'s, ``False`` when
+        another value holds it. A claim is decided by a quorum, so two writers never both hold one,
+        however far behind either node's view is."""
+        try:
+            self._agent.consistent_set(key, value.encode())
+            return True
+        except SupersededError:
+            # Decided already: ours (a retry, or a commit whose answer was lost — read on the node
+            # that committed it), or another writer's.
+            return self._decided(key) == value.encode()
+        except httpx.HTTPError as e:
+            raise SessionException(
+                f"claiming {key!r} needs a quorum of the fleet and did not reach one ({e}); retry"
+            ) from e
+
+    def _generation(self, session_id: str) -> Optional[str]:
+        """The session's generation: its claim's decided value, established by whoever needs it first."""
+        if not self._claims:
+            return None
+        known = self._generations.get(session_id)
+        if known is not None:
+            return known
+        key = self._session_claim_key(session_id)
+        decided = self._decided(key)
+        if decided is None:
+            fresh = uuid.uuid4().hex
+            decided = fresh.encode() if self._claim(key, fresh) else self._decided(key)
+            if decided is None:
+                raise IncompleteSession(f"session {session_id!r}'s generation", [key])
+        self._generations[session_id] = decided.decode()
+        return self._generations[session_id]
+
+    def _claim_record(self, session_id: str, record_key: str) -> bool:
+        generation = self._generation(session_id)
+        if generation is None:
+            return True
+        return self._claim(self._claim_key(session_id, generation, record_key), self.writer)
+
+    def _claim_message(self, session_id: str, agent_id: str, index: int, message: SessionMessage) -> bool:
+        """Claim message ``index`` for this message: the writer and a digest of what it says.
+
+        It is this message's when the decision is this value — a retry, or a commit whose answer was
+        lost. It is also this writer's when the decision is an earlier claim of this writer's whose row
+        was never written (no row here and nothing stored past it: a process that claimed and died before
+        writing), which is how a restarted writer takes back what it held. Anything else holds the index.
+        """
+        generation = self._generation(session_id)
+        if generation is None:
+            return True
+        record = self._message_key(session_id, agent_id, index)
+        digest = hashlib.sha256(
+            json.dumps([message.message, message.created_at], sort_keys=True, default=str).encode()
+        ).hexdigest()
+        value = f"{self.writer}\n{digest}"
+        key = self._claim_key(session_id, generation, record)
+        if self._claim(key, value):
+            return True
+        decided = self._decided(key)
+        if decided is None or not decided.decode(errors="replace").startswith(f"{self.writer}\n"):
+            return False
+        return self._read(record) is None and (self._stored_count(session_id, agent_id) or 0) <= index
+
+    def _check_not_fenced(self, session_id: str, agent_id: str) -> None:
+        if (session_id, agent_id) in self._fenced:
+            raise StaleWriter(
+                f"agent {agent_id!r} of session {session_id!r} was written by another writer past what this "
+                f"one has read; it writes nothing more. Re-create the agent where the session has arrived."
+            )
+
     def _absent_or_incomplete(self, what: str, key: str, under: str) -> None:
         """A record's row is absent: ``None`` if nothing of it exists, incomplete otherwise."""
         if self._keys(under):
@@ -236,7 +368,15 @@ class MyceliumSessionRepository(SessionRepository):
         key = self._session_key(session.session_id)
         if self._read(key) is not None:
             raise SessionException(f"Session {session.session_id} already exists")
+        if self._claims and self._decided(self._session_claim_key(session.session_id)) is not None:
+            # Its claim is here and its row is not: created elsewhere and still arriving, or deleted —
+            # a session's claim is permanent, so a deleted session's id is not reused.
+            raise SessionException(
+                f"session {session.session_id!r} was created before: elsewhere and not arrived here yet "
+                f"(retry), or deleted (a deleted session's id is not reused while claims are on)"
+            )
         self._write(key, session.to_dict())
+        self._generation(session.session_id)
         return session
 
     def read_session(self, session_id: str, **kwargs: Any) -> Optional[Session]:
@@ -269,14 +409,22 @@ class MyceliumSessionRepository(SessionRepository):
             del self._counts[k]
         for k in [k for k in self._held if k[0] == session_id]:
             del self._held[k]
+        self._fenced = {k for k in self._fenced if k[0] != session_id}
 
     # ── agents ──────────────────────────────────────────────────────────────
 
     def create_agent(self, session_id: str, session_agent: SessionAgent, **kwargs: Any) -> None:
-        # The count first, then the agent row. A failure between them leaves only `count == 0`,
+        # The claim first: a node that has not seen an agent another writer created cannot tell it
+        # from a new one, and creating it here would overwrite that agent's state.
+        agent_id = session_agent.agent_id
+        if not self._claim_record(session_id, self._agent_key(session_id, agent_id)):
+            raise IncompleteSession(
+                f"agent {agent_id!r} of session {session_id!r} (created by another writer)",
+                [self._agent_key(session_id, agent_id)],
+            )
+        # The count, then the agent row. A failure between them leaves only `count == 0`,
         # which `read_agent` reads as no agent, so the next `create_agent` writes it again — and an
         # agent row is never left without the count that `list_messages` needs.
-        agent_id = session_agent.agent_id
         self._write(self._count_key(session_id, agent_id), {"count": 0})
         self._counts[(session_id, agent_id)] = 0
         self._write(self._agent_key(session_id, agent_id), session_agent.to_dict())
@@ -296,6 +444,7 @@ class MyceliumSessionRepository(SessionRepository):
 
     def update_agent(self, session_id: str, session_agent: SessionAgent, **kwargs: Any) -> None:
         agent_id = session_agent.agent_id
+        self._check_not_fenced(session_id, agent_id)
         previous = self.read_agent(session_id, agent_id)
         if previous is None:
             raise SessionException(f"Agent {agent_id} in session {session_id} does not exist")
@@ -318,6 +467,12 @@ class MyceliumSessionRepository(SessionRepository):
         self, session_id: str, agent_id: str, session_message: SessionMessage, **kwargs: Any
     ) -> None:
         self._message_key(session_id, agent_id, session_message.message_id)  # validates the index
+        self._check_not_fenced(session_id, agent_id)
+        base = self._continue_at.pop((session_id, agent_id), None)
+        if base is not None and session_message.message_id < base:
+            # Strands' numbering restarted after an empty tail. The object is the one Strands numbers
+            # its next message from, so moving it here moves the rest of the conversation with it.
+            session_message.message_id += base
         held = self._held.setdefault((session_id, agent_id), {})
         held[session_message.message_id] = session_message
         self._write_held(session_id, agent_id)
@@ -325,11 +480,16 @@ class MyceliumSessionRepository(SessionRepository):
     def _write_held(self, session_id: str, agent_id: str) -> None:
         """Write the held messages in index order, each followed by the count; stop at a failure."""
         held = self._held.get((session_id, agent_id), {})
-        for index in sorted(held):
-            # The message first, then the count: on the gateway node the count never names a message
-            # that is not there. Across nodes the two gossip independently — `list_messages` says so.
+        while held:
+            index = min(held)
             try:
+                if not self._claim_message(session_id, agent_id, index, held[index]):
+                    self._index_claimed_elsewhere(session_id, agent_id, index)
+                # The message, then the count: on the gateway node the count never names a message that is
+                # not there. Across nodes the two gossip independently — `list_messages` says so.
                 self._write(self._message_key(session_id, agent_id, index), held[index].to_dict())
+            except StaleWriter:
+                raise
             except SessionException as e:
                 later = sorted(i for i in held if i > index)
                 held_back = f"; messages {later} are held back until it is" if later else ""
@@ -347,6 +507,17 @@ class MyceliumSessionRepository(SessionRepository):
                 known = index + 1
             self._counts[(session_id, agent_id)] = known
 
+    def _index_claimed_elsewhere(self, session_id: str, agent_id: str, index: int) -> NoReturn:
+        """Another writer holds message ``index``: this writer's view of the conversation is behind it, or
+        another writer is writing the same agent. It is fenced and the message refused, not written."""
+        self._fenced.add((session_id, agent_id))
+        self._held.pop((session_id, agent_id), None)
+        raise StaleWriter(
+            f"message {index} of agent {agent_id!r} in session {session_id!r} was claimed by another writer: "
+            f"this writer's view of the conversation is behind it, so the message is refused rather than "
+            f"written over the other. Re-create the agent where the session has arrived."
+        )
+
     def read_message(
         self, session_id: str, agent_id: str, message_id: int, **kwargs: Any
     ) -> Optional[SessionMessage]:
@@ -361,6 +532,7 @@ class MyceliumSessionRepository(SessionRepository):
         self, session_id: str, agent_id: str, session_message: SessionMessage, **kwargs: Any
     ) -> None:
         index = session_message.message_id
+        self._check_not_fenced(session_id, agent_id)
         previous = self.read_message(session_id, agent_id, index)
         if previous is None:
             raise SessionException(f"Message {index} does not exist")
@@ -406,6 +578,8 @@ class MyceliumSessionRepository(SessionRepository):
             # of 0 removes every message each turn — so that case cannot be told from an agent row
             # level with an older count, and reads as the empty tail it usually is.
             raise IncompleteSession(what, [self._message_key(session_id, agent_id, i) for i in range(end, start)])
+        if start == end and start > 0:
+            self._continue_at[(session_id, agent_id)] = end
         wanted = list(range(start, end))
         if limit is not None:
             wanted = wanted[: max(limit, 0)]
@@ -424,6 +598,9 @@ class MyceliumSessionRepository(SessionRepository):
     # ── multi-agent state (a swarm's or a graph's) ──────────────────────────
 
     def create_multi_agent(self, session_id: str, multi_agent: "MultiAgentBase", **kwargs: Any) -> None:
+        key = self._multi_key(session_id, multi_agent.id)
+        if not self._claim_record(session_id, key):
+            raise IncompleteSession(f"multi-agent state {multi_agent.id!r} of session {session_id!r} (created by another writer)", [key])
         self._write(self._multi_key(session_id, multi_agent.id), multi_agent.serialize_state())
 
     def read_multi_agent(self, session_id: str, multi_agent_id: str, **kwargs: Any) -> Optional[dict[str, Any]]:
@@ -459,6 +636,8 @@ class MyceliumSessionManager(RepositorySessionManager):
         prefix: str = "strands",
         require_on_disk: bool = False,
         on_receipt: Optional[Callable[[str, KvReceipt], None]] = None,
+        claims: bool = True,
+        writer: Optional[str] = None,
         **kwargs: Any,
     ) -> None:
         self._owns_client = agent is None
@@ -466,7 +645,8 @@ class MyceliumSessionManager(RepositorySessionManager):
             host, port, token=token, scheme=scheme, ca_file=ca_file
         )
         self.repository = MyceliumSessionRepository(
-            client, prefix=prefix, require_on_disk=require_on_disk, on_receipt=on_receipt
+            client, prefix=prefix, require_on_disk=require_on_disk, on_receipt=on_receipt,
+            claims=claims, writer=writer,
         )
         super().__init__(session_id=session_id, session_repository=self.repository, **kwargs)
 

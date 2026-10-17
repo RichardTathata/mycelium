@@ -1,3 +1,3 @@
-from .store import IncompleteSession, MyceliumSessionManager, MyceliumSessionRepository
+from .store import IncompleteSession, MyceliumSessionManager, MyceliumSessionRepository, StaleWriter
 
-__all__ = ["IncompleteSession", "MyceliumSessionManager", "MyceliumSessionRepository"]
+__all__ = ["IncompleteSession", "MyceliumSessionManager", "MyceliumSessionRepository", "StaleWriter"]

@@ -994,7 +994,7 @@ window).
   so does a row that is JSON but not its record, a `message_id` that disagrees with its key included (review finding
   6). A failed message write leaves no hole: the store holds it and writes it, in order, before any later message
   (review finding 1). **Not detectable, stated:** a node behind as a whole (an older count, none of the later
-  messages) reads an older, complete conversation; the README's "Resuming on another node" is the rule.
+  messages) reads an older, complete conversation; claims (below) stop it writing over the newer one.
 - *concurrent agents in one session do not lose each other's writes, or the limit is stated* — both: different agent
   ids write disjoint rows (`test_two_agents_in_one_session_keep_each_others_writes`; across two nodes at once,
   `test_two_agents_on_two_nodes_in_one_session_keep_both_conversations`), and the limit is stated in the README: one
@@ -1042,9 +1042,32 @@ window).
   agent; `test_an_agent_row_that_arrived_alone_is_incomplete_not_empty`,
   `test_a_failed_agent_row_write_at_creation_leaves_the_agent_creatable`). Stated: an agent row exactly level with
   an older count reads as an empty tail.
+- *The stated limits, closed for writes (on the user's direction, 2026-10-17)* — the review rounds left three edges
+  stated: a node behind as a whole, a record none of which has arrived, and one agent id on two writers. Each ends in
+  a write over something the writing node has not seen, which no read on that node can detect. **Claims**: every
+  agent, swarm or graph record and every message index is claimed once, fleet-wide, by `consistent_set` before it is
+  written; a claim another writer holds is refused — `IncompleteSession` for a record, `StaleWriter` for an index,
+  which fences the writer for that agent — never overwritten. A session's claim fixes its generation, which scopes
+  the rest; a deleted session's id is refused by name. The message claim is the writer and a digest of the message,
+  so a retry is recognised and a restarted writer (same `writer`, the host name by default) takes back an index it
+  claimed and died before writing. A sliding window of 0, which makes Strands number from 0 again after the store
+  answers an empty tail, moves to the next free index instead of writing over message 0 (Strands' own
+  `FileSessionManager` writes over it). Tests: `tests/test_claims.py` (two fakes sharing one set of decisions, each
+  with its own view): behind as a whole, an agent and a swarm not arrived, two writers of one agent, two creators of
+  one session, a deleted id, an orphaned claim taken back by its writer and not by another; with claims forced off,
+  eight tests fail (seven there and the window-0 one). Live, on three voting nodes: two writers of one agent on two
+  nodes at once never write over each other (15 of 15 runs), and a window of 0 resumes on another node without
+  writing over its history. Cost, stated: a consensus round per message and a quorum for every write; `claims=False`
+  is last-writer-wins with the old limits.
+- *Found on the way — a substrate defect* — the `mycelium` binary never started a consensus listener, so on a mesh of
+  two or more binaries every `/gateway/overlay/{consistent/set,lock/acquire,elect}` timed out (`consensus timed out
+  after 3 ballot(s)`, measured on three local binaries; milliseconds with the listener). `src/main.rs` now starts one
+  after `start()` under `consensus`. The store's live suite runs in its own CI step on three such binaries.
 - **Not built, stated:** a session's rows are replicated by gossip only (no `set_with_min_acks` option); a message
   listing reads one row per message; a row over about 1.5 MiB is refused rather than moved to the blob tier; no async
-  variant (Strands' repository interface is synchronous); not published to PyPI.
+  variant (Strands' repository interface is synchronous); not published to PyPI; claims are permanent (a consensus
+  decision is not released through the gateway), so a deleted session's id is not reused; a node behind still
+  *reads* an older conversation without error — claims stop it writing, not reading.
 
 ### 3.6 · State of play and the next iteration (2026-10-12)
 

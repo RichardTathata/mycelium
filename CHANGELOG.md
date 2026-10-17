@@ -89,9 +89,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   while some of its rows are still gossiping raises `IncompleteSession` naming the missing keys rather than returning
   the rows that are there (a per-agent count row covers the tail); an undecodable or malformed row or a gateway error
   raises `SessionException`. A failed message write is held and written, in order, before any later one, so it leaves
-  no hole. A row is at most about 1.5 MiB (the gateway's request limit), checked before sending. Two agents in one
-  session never lose each other's writes; one agent id is one writer. Stated, not prevented: a node behind as a whole
-  reads an older conversation, so resume where the session has arrived in full. Pinned to `strands-agents` 1.61.1 with
+  no hole. A row is at most about 1.5 MiB (the gateway's request limit), checked before sending. **Nothing is written
+  over what a node has not seen:** every agent, swarm or graph record and every message index is claimed once,
+  fleet-wide, by a consensus write before it is written (`claims=True`, the default), so a node that is behind, or a
+  second writer of one agent, is refused (`IncompleteSession`, or `StaleWriter`, which fences that writer for the
+  agent) rather than overwriting. A session's claim fixes its generation; a deleted session's id is refused, not
+  reused; a sliding window of 0 resumes without writing over its history. Claims cost a consensus round per message
+  and a quorum for every write; `claims=False` is last-writer-wins, with its limits stated. Pinned to `strands-agents` 1.61.1 with
   the interface recorded in a test. Its live suite runs in CI against the two meshed reason nodes
   (`MYCELIUM_STRANDS_LIVE_REQUIRED`).
 - **An unmodified A2A client reaches a node's skills through `/a2a`** (post-360 plan row N; upgrade note
@@ -118,6 +122,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `examples/a2a_sdk_node.rs` (`tests/a2a-sdk/`). **Not built:** the SDKs' own `A2aClient`s (`mycelium-py`,
   `mycelium-ts`) still send `tasks/send` and read `/.well-known/agent.json`, and move before those are removed; push
   notifications, `ListTasks`, `SubscribeToTask` and the HTTP+JSON and gRPC bindings are not served.
+
+### Fixed
+
+- **A fleet of `mycelium` binaries could not decide anything by consensus.** The binary never started a consensus
+  listener, so its nodes never voted: every consistent write, lock and election its own gateway serves
+  (`/gateway/overlay/{consistent/set,lock/acquire,elect}`) timed out on a mesh of two or more — only an embedder that
+  called `start_consensus_listener` itself had a quorum. The binary now starts one after `start()` (built with
+  `consensus`, a default feature). Found while building row O's claims: a probe on three binaries answered
+  `consensus timed out after 3 ballot(s)` for every write, and commits in milliseconds with the listener; the Strands
+  session store's live suite runs on such a fleet in CI.
 
 ## [2.34.0] — 2026-10-16
 

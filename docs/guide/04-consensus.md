@@ -635,7 +635,7 @@ late joiners automatically via the existing KV mechanism.
 use mycelium::{ConsensusConfig, ConsensusResult};
 use bytes::Bytes;
 
-// Every node that should vote calls this once.
+// Every node that should vote calls this once (the `mycelium` binary does, after `start()`).
 let _listener = agent.consensus().start_consensus_listener(ConsensusConfig::default());
 
 // Propose within a group — blocks until quorum or timeout.

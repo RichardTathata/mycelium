@@ -56,7 +56,7 @@ def test_a_conversation_and_its_state_resume_in_another_manager():
     again("and the community kitchen")
     count = json.loads(gw.rows["strands/s1/agent/planner/count"])["count"]
     assert count == 6
-    assert len([k for k in gw.rows if "/msg/" in k]) == 6
+    assert len([k for k in gw.rows if "/msg/" in k and "/claim/" not in k]) == 6
 
 
 def test_two_agents_in_one_session_keep_each_others_writes():
@@ -152,7 +152,7 @@ def test_a_gateway_refusal_is_an_error_and_creates_nothing():
 def test_a_brand_new_session_is_created_once():
     gw = FakeGateway()
     manager(gw)
-    assert list(gw.rows) == ["strands/s1/session"]
+    assert [k for k in gw.rows if "/claim/" not in k] == ["strands/s1/session"]
     manager(gw)  # read back, not recreated
     assert gw.writes == ["strands/s1/session"]
 
@@ -359,9 +359,12 @@ def test_a_window_of_zero_resumes_where_it_was_written():
                   conversation_manager=SlidingWindowConversationManager(window_size=0))
     assert again.messages == []
     again("three")
-    # Strands then appends at index 0, over "one" — its own FileSessionManager does the same with a window of
-    # 0 (checked 2026-10-17 against 1.61.1); the store's part is not to refuse the resume.
-    assert json.loads(gw.rows["strands/s1/agent/planner/msg/0000000000"])["message"]["content"][0]["text"] == "three"
+    # Strands numbers the next message 0 again (its own FileSessionManager then writes over "one", checked
+    # 2026-10-17 against 1.61.1). Index 0 is claimed, and this node holds messages past it, so the store
+    # moves the message to the next free index instead, and Strands carries on from there.
+    def text(i):
+        return json.loads(gw.rows[f"strands/s1/agent/planner/msg/{i:010d}"])["message"]["content"][0]["text"]
+    assert text(0) == "one" and text(4) == "three" and text(5) == "r3"
 
 
 def test_an_agent_row_that_arrived_alone_is_incomplete_not_empty():

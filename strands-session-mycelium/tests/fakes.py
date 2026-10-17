@@ -7,14 +7,24 @@ from typing import Any, AsyncIterator
 
 import httpx
 from mycelium import KvReceipt
+from mycelium.agent import SupersededError
 from strands.models.model import Model
 
 
 class FakeGateway:
-    """The four KV verbs the store uses, over a dict — ``MyceliumAgent``'s shapes, no node."""
+    """The KV and consensus verbs the store uses, over dicts — ``MyceliumAgent``'s shapes, no node.
 
-    def __init__(self, durability: str = "on_disk") -> None:
+    ``decided`` is the fleet's consensus decisions: pass one dict to several fakes and they are nodes of
+    one fleet, each with its own ``rows`` (its own view, which a test can hold back) and one set of claims
+    that no node can decide twice — what a quorum gives the real store.
+    """
+
+    def __init__(self, durability: str = "on_disk", decided: dict[str, bytes] | None = None) -> None:
         self.rows: dict[str, bytes] = {}
+        self.decided: dict[str, bytes] = {} if decided is None else decided
+        # Decisions this node's view holds. Like the real committed record (`consensus/life/…`), a
+        # decision stays visible when its raw copy under the key is deleted.
+        self.seen: set[str] = set()
         self.durability = durability
         self.fail_with: int | None = None
         self.writes: list[str] = []
@@ -40,6 +50,20 @@ class FakeGateway:
         self.rows[key] = value
         self.writes.append(key)
         return KvReceipt(operation_id=f"op-{len(self.writes)}", local_durability=self.durability)
+
+    def consistent_set(self, key: str, value: bytes) -> None:
+        self._maybe_fail()
+        if key in self.decided:
+            req = httpx.Request("POST", "http://gw/gateway/overlay/consistent/set")
+            raise SupersededError(httpx.Response(409, request=req, json={"error": "superseded", "ok": False}))
+        self.decided[key] = value
+        self.seen.add(key)
+        self.rows[key] = value  # the raw copy the gateway writes beside the decision
+
+    def consistent_get(self, key: str) -> bytes | None:
+        """Local, as the real read is: a decision this node's view does not hold yet reads as none."""
+        self._maybe_fail()
+        return self.decided.get(key) if key in self.rows or key in self.seen else None
 
     def delete(self, key: str) -> None:
         self._maybe_fail()
