@@ -180,7 +180,7 @@ out under the egress policy the gate captured at `start()` — the node's — no
 | Gateway tokens, mTLS keys | inbound credentials, not egress | n/a |
 
 **Not covered:** a placeholder in a query string or a request body (sent as written — an opaque name); zeroising the
-value when the gate is dropped; a binding whose `name` or `header` is itself a secret (pasted into the wrong field)
+value when the gate is dropped; a binding whose `name`, `header` or `username` is itself a secret (pasted into the wrong field)
 is printed — its `Debug`, a refusal naming the binding, the drop log line — and used as the metric label or as the
 header name sent (`value_env` and `value_file` are redacted in `Debug`, and an env refusal names its entry by index
 alone); the gate's client honours `HTTP_PROXY` / `HTTPS_PROXY`, so a configured proxy sees a
