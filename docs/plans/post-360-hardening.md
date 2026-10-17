@@ -1256,12 +1256,27 @@ CC8, `docs/capabilities.md`, the crate README). The example units with `[[activa
   against `write = ["{dir}"]`. (7) This block and the row say *partly delivered*. (8) A macOS CI job,
   `wasm-host-macos`, runs the confinement tests on Seatbelt with the guard. (9) The stem test's foreign-backend half
   now waits for the `confinement_unavailable` record in the trace. (10) Admitted in the sim-seam baseline and the inventory, the `Path` methods the gate cannot see stated below.
+- *The review's confirmation (#636)* — findings 1–5 and 8–10 confirmed fixed, 6 and 7 accepted; three follow-ups,
+  each with a test seen failing first. (1) A pinned descriptor outlived its path: a declared directory removed and
+  recreated (a cleaned scratch directory, a re-heal's new inode) left every later run denied until a restart,
+  recorded as `command_failed`. Each kept profile now records its paths' device and inode and is re-resolved —
+  every check repeated — when one differs (`Profile::is_current`, `ResolvedProfiles::get_or_resolve`); a re-probe
+  that finds one fails, so the install is withdrawn and re-resolved; profiles of placed files that are gone are
+  forgotten, and at most 1024 are kept. `a_declared_path_removed_and_recreated_between_runs_is_the_new_one` (seen
+  failing first on Linux; Seatbelt matched by name and passed) and
+  `resolved_profiles_forget_a_removed_placement_and_are_bounded` (seen failing first: 3 kept, none forgotten). (2) The
+  symlink check compared spellings: roots and prefixes are compared canonically now —
+  `a_symlink_behind_another_spelling_of_a_write_root_is_refused` (seen failing first on both platforms). (3) macOS
+  `/private/etc/ssl` narrowed to `cert.pem`, `certs` and `openssl.cnf`; and a misspelt top-level section is refused —
+  `NodeCapabilityConfig` is `deny_unknown_fields` (`a_misspelt_top_level_section_is_refused_not_dropped`, seen failing
+  first; every unit file in the repository loads — the mesh presets and artifact descriptions beside them are other
+  formats, never loaded as units; `deprecations.md` §47).
 - **Not built, stated:** limits by hostname or address; a live network allow-list; an OpenShell backend; resource
   limits (CPU, memory); on Linux below Landlock ABI 6, a limit on signals to the stem user's processes; device
   `ioctl`s (Landlock ABI 5); metadata (`stat`) of any path stays readable on both backends; a socket inherited across
   `exec` is not looked at; the command inherits the stem's environment (row L's concern). Confinement narrows what an operator's command can reach; it does not make an untrusted
   command safe to run. Activation, like any spawned process, is outside the replay seams: `activation_sandbox.rs`'s
-  three `std::fs` sites are admitted in the baseline and the nondeterminism inventory (review finding 10); its
+  five `std::fs` sites are admitted in the baseline and the nondeterminism inventory (review finding 10); its
   `Path::canonicalize`/`exists`/`is_dir` calls are ones `scripts/check-sim-seams.sh` does not see.
 
 ### 3.6 · State of play and the next iteration (2026-10-12)

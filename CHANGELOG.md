@@ -162,11 +162,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Open (`MSG_FASTOPEN` sends, the `TCP_FASTOPEN*` options), no `listen`, and on x86_64 no x32 syscall; the
   always-readable set is exactly the executables, libraries and the few `/etc` files a loader, resolver and TLS read
   (not `/etc`, `/private/etc` or `/usr/local` whole, so not the node's key); an `[[activation]]` refuses unknown keys,
-  so a misspelt `[activation.confined]` cannot load as no profile; a profile is resolved once and kept (on Linux held
-  open), and a declared path through a symlink below the placement root or a write path is refused; a macOS CI job
+  and so does the unit file's top level, so neither `[activation.confined]` nor `[activations.confine]` can load as no
+  profile; a profile is resolved once and kept (on Linux held open), re-resolved when a kept path no longer names
+  the same file, and a declared path through a symlink below the placement root or a write path — compared
+  canonically — is refused; a macOS CI job
   runs the Seatbelt tests. `landlock` 0.4.7 and `seccompiler` 0.5 are new, Linux-only
   dependencies of `mycelium-wasm-host`. **Upgrade notes:** `ActivationDecl` gained `confine` (an exhaustive struct
-  literal breaks); an `[[activation]]` with an unknown key is now refused at load (every unit in the repository
+  literal breaks); a unit file with an unknown key — at the top level, in an `[[activation]]` or in its
+  `[activation.confine]` — is now refused at load (`docs/guide/deprecations.md` §47; every unit in the repository
   loads unchanged).
 
 ### Fixed

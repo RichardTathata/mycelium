@@ -294,15 +294,16 @@ An empty table is the strictest profile: the placement directory read-only, no n
 A path is absolute, or starts with `{dir}` (the placement root — see below) or `{path}` (the placed file); no
 other placeholder, and no `..` segment. Each must exist when the activation runs, or the activation is
 refused naming it. A `connect` entry naming a hostname or an address is refused at load: neither backend
-can limit a connection to one. An unknown key in the table — or in the `[[activation]]` itself, so a
-misspelt `[activation.confined]` cannot load as *no profile* — is refused at load.
+can limit a connection to one. An unknown key in the table, in the `[[activation]]` itself, or at the top
+level of the file is refused at load — so neither `[activation.confined]` nor `[activations.confine]` can
+load as *no profile* (`deprecations.md` §47).
 
 What each backend allows, besides the profile's own paths and ports:
 
 | | Seatbelt (macOS) | Landlock + seccomp (Linux) |
 |---|---|---|
 | How | `/usr/bin/sandbox-exec` with a generated profile (`deny default`); paths passed as `-D` parameters | a Landlock ruleset and a seccomp filter on a dedicated thread, inherited by the command |
-| Always readable — exactly these | `/usr/bin`, `/usr/sbin`, `/usr/lib`, `/usr/libexec`, `/usr/share`, `/bin`, `/sbin`, `/System`, `/private/var/select`, `/private/var/db/timezone`, `/private/etc/hosts`, `/private/etc/resolv.conf`, `/private/var/run/resolv.conf`, `/private/etc/passwd`, `/private/etc/group`, `/private/etc/localtime`, `/private/etc/ssl`, `/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom` | `/usr/bin`, `/usr/sbin`, `/usr/lib`, `/usr/lib32`, `/usr/lib64`, `/usr/libx32`, `/usr/libexec`, `/usr/share`, `/bin`, `/sbin`, `/lib`, `/lib32`, `/lib64`, `/libx32`, `/etc/ld.so.cache`, `/etc/ld.so.conf`, `/etc/ld.so.conf.d`, `/etc/hosts`, `/etc/resolv.conf`, `/etc/host.conf`, `/etc/gai.conf`, `/etc/nsswitch.conf`, `/etc/passwd`, `/etc/group`, `/etc/localtime`, `/etc/alternatives`, `/etc/ssl/certs`, `/etc/ssl/openssl.cnf`, `/etc/ca-certificates`, and the same devices (each skipped where absent) |
+| Always readable — exactly these | `/usr/bin`, `/usr/sbin`, `/usr/lib`, `/usr/libexec`, `/usr/share`, `/bin`, `/sbin`, `/System`, `/private/var/select`, `/private/var/db/timezone`, `/private/etc/hosts`, `/private/etc/resolv.conf`, `/private/var/run/resolv.conf`, `/private/etc/passwd`, `/private/etc/group`, `/private/etc/localtime`, `/private/etc/ssl/cert.pem`, `/private/etc/ssl/certs`, `/private/etc/ssl/openssl.cnf`, `/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom` | `/usr/bin`, `/usr/sbin`, `/usr/lib`, `/usr/lib32`, `/usr/lib64`, `/usr/libx32`, `/usr/libexec`, `/usr/share`, `/bin`, `/sbin`, `/lib`, `/lib32`, `/lib64`, `/libx32`, `/etc/ld.so.cache`, `/etc/ld.so.conf`, `/etc/ld.so.conf.d`, `/etc/hosts`, `/etc/resolv.conf`, `/etc/host.conf`, `/etc/gai.conf`, `/etc/nsswitch.conf`, `/etc/passwd`, `/etc/group`, `/etc/localtime`, `/etc/alternatives`, `/etc/ssl/certs`, `/etc/ssl/openssl.cnf`, `/etc/ca-certificates`, and the same devices (each skipped where absent) |
 | Always writable | `/dev/null` | `/dev/null` |
 | `localhost:<port>` | held | **refused** — Landlock limits a port, not an address; write `*:<port>` |
 | `*:<port>` | that port at any address, and the resolver's socket, so a name resolves | that port at any address; no DNS (UDP is refused), so a name resolves only through `/etc/hosts` |
@@ -317,8 +318,12 @@ address — not a directory of the artifact's own. `write = ["{dir}"]` therefore
 every other placed artifact; write to a subdirectory you create for it (`{dir}/<name>`) or to a path
 outside. A declared path that is a symlink, or reaches its target through a symlink below the placement
 root or below a write path (which a confined command could have planted), is refused. Each path is
-resolved once, the first time the activation runs, and kept for the stem's life — on Linux held open, so
-the rules are made from those descriptors and never re-resolved by name.
+resolved the first time the activation runs and kept — on Linux held open, so the rules are made from those
+descriptors, not re-resolved by name. Before each run, and each re-probe, the stem checks that every kept
+path still names the same file (device and inode, not a symlink). A path removed and recreated — a cleaned
+scratch directory, a re-placed blob — is resolved again, with every check above; a re-probe that finds one
+fails, so the install is withdrawn and its reinstall resolves afresh. Profiles of placed files that are
+gone are forgotten at the next resolution, and a stem keeps at most 1024.
 
 Neither limits reading a path's metadata (`stat`), CPU or memory, and the command inherits the stem's
 environment (row L's credential bindings are the way to keep a secret out of it). On Linux below Landlock ABI 6, signals to

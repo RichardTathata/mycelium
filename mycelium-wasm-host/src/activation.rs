@@ -43,6 +43,9 @@ pub struct Watched {
 /// The re-probe list, shared by the activation hook and the re-probe task.
 pub type WatchList = Arc<Mutex<Vec<Watched>>>;
 
+/// The most resolved confinement profiles one stem keeps (review follow-up 1, #636).
+const RESOLVED_PROFILES_CAP: usize = 1024;
+
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -173,7 +176,7 @@ pub fn hook(
     // Review finding 5 (#636): each activation's profile is resolved once — per declaration and placed
     // file — and kept for the stem's life, its paths held open, re-probes included. Lock-order table row
     // 61: a leaf, held for a lookup or an insert, never while a command runs.
-    let resolved: Arc<Mutex<std::collections::HashMap<(usize, PathBuf), Profile>>> = Default::default();
+    let resolved = ResolvedProfiles::with_capacity(RESOLVED_PROFILES_CAP);
     move |entry, path, actx| {
         let target = format!("{}/{}", entry.provides.namespace, entry.provides.name);
         let trigger = format!("install token {}", actx.install_token);
@@ -196,7 +199,7 @@ pub fn hook(
         // nothing runs, not even the render. Resolved once, here; the re-probes reuse it.
         let profile = match &decl.confine {
             None => None,
-            Some(c) => match resolved_profile(&resolved, index, c, path) {
+            Some(c) => match resolved.get_or_resolve(index, c, path) {
                 Ok(p) => Some(p),
                 Err(refusal) => {
                     rec("prov.activation", OutcomeKind::Refusal, refusal.reason(), None);
@@ -245,20 +248,56 @@ pub fn hook(
     }
 }
 
-/// The profile resolved for `(index, placed)` the first time, or resolve and keep it now.
-fn resolved_profile(
-    resolved: &Mutex<std::collections::HashMap<(usize, PathBuf), Profile>>,
-    index: usize,
-    c: &mycelium::ConfineDecl,
-    placed: &Path,
-) -> Result<Profile, crate::activation_sandbox::Refusal> {
-    let key = (index, placed.to_path_buf());
-    if let Some(p) = resolved.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
-        return Ok(p.clone());
+/// Each activation's resolved confinement profile, per declaration and placed file (review finding 5,
+/// #636). Lock-order table row 61: a leaf, held for a lookup or an insert, never while a command runs.
+pub(crate) struct ResolvedProfiles {
+    map: Mutex<std::collections::HashMap<(usize, PathBuf), Profile>>,
+    cap: usize,
+}
+
+impl ResolvedProfiles {
+    pub(crate) fn with_capacity(cap: usize) -> Self {
+        ResolvedProfiles { map: Mutex::default(), cap }
     }
-    // Resolved outside the lock (it reads the filesystem); a racing first resolution keeps the earlier.
-    let fresh = crate::activation_sandbox::prepare(c, placed)?;
-    Ok(resolved.lock().unwrap_or_else(|e| e.into_inner()).entry(key).or_insert(fresh).clone())
+
+    #[cfg(test)]
+    pub(crate) fn contains(&self, index: usize, placed: &Path) -> bool {
+        self.map.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&(index, placed.to_path_buf()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.map.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// The profile resolved for `(index, placed)`, kept while every path it pinned still names what it
+    /// pinned; re-resolved — with every check `prepare` makes, symlinks included — when one was removed,
+    /// recreated or replaced (review follow-up 1, #636), never used stale. A placed file that is gone
+    /// (`BlobRuntime::uninstall` removed it) is forgotten, and at most `cap` profiles are kept.
+    pub(crate) fn get_or_resolve(&self, index: usize, c: &mycelium::ConfineDecl, placed: &Path) -> Result<Profile, crate::activation_sandbox::Refusal> {
+        let key = (index, placed.to_path_buf());
+        let cached = self.map.lock().unwrap_or_else(|e| e.into_inner()).get(&key).cloned();
+        // Checked outside the lock (it reads the filesystem).
+        if let Some(p) = cached.filter(|p| p.is_current()) {
+            return Ok(p);
+        }
+        let fresh = crate::activation_sandbox::prepare(c, placed)?;
+        let gone: Vec<(usize, PathBuf)> = {
+            let g = self.map.lock().unwrap_or_else(|e| e.into_inner());
+            g.keys().filter(|(_, p)| p != placed).cloned().collect()
+        };
+        let gone: Vec<(usize, PathBuf)> = gone.into_iter().filter(|(_, p)| !p.exists()).collect();
+        let mut g = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        for k in &gone {
+            g.remove(k);
+        }
+        while g.len() >= self.cap && !g.contains_key(&key) {
+            let Some(victim) = g.keys().next().cloned() else { break };
+            g.remove(&victim);
+        }
+        g.insert(key, fresh.clone());
+        Ok(fresh)
+    }
 }
 
 /// Re-run every live activation's probe each `every`, flipping its flag; drop the ones whose
@@ -276,7 +315,15 @@ pub fn spawn_reprobe(watch: WatchList, every: Duration) -> tokio::task::JoinHand
                 let ok = tokio::task::spawn_blocking(move || {
                     let rendered = w.decl.resolve_artifact_refs.then(|| PathBuf::from(format!("{}.rendered", w.path.display())));
                     let was = w.health.load(Ordering::Relaxed);
-                    let ok = run_under(&expand(&w.decl.probe, &w.entry, &w.path, rendered.as_deref()), PROBE_TIMEOUT, w.profile.as_ref()).is_ok();
+                    // A profile whose pinned paths no longer name what they pinned is not run stale (review
+                    // follow-up 1, #636): the probe fails, the install is withdrawn, and the reinstall's
+                    // activation re-resolves the profile.
+                    let stale = w.profile.as_ref().is_some_and(|p| !p.is_current());
+                    if stale {
+                        tracing::warn!(activation = %format!("{}/{}", w.entry.provides.namespace, w.entry.provides.name),
+                            "a confinement profile's declared path was removed, recreated or replaced: probe failed, the install will be withdrawn and re-resolved");
+                    }
+                    let ok = !stale && run_under(&expand(&w.decl.probe, &w.entry, &w.path, rendered.as_deref()), PROBE_TIMEOUT, w.profile.as_ref()).is_ok();
                     w.health.store(ok, Ordering::Relaxed);
                     // A re-probe records only a **change** of verdict (the steady state is the
                     // install's record), under the install's token.
@@ -672,6 +719,56 @@ except OSError as e:
         let fresh = hook(vec![confined(sh(&cmd), Vec::new(), profile)], Default::default());
         let e = fresh(&pack_entry(), &s.placed, &actx).expect_err("a fresh resolution through the symlink is refused");
         assert!(e.contains("symlink") && e.contains("not run unconfined"), "{e}");
+    }
+
+    /// Review follow-up 1 (#636): a declared path removed and recreated between two runs — a scratch
+    /// directory cleaned, a re-heal's new inode at the same path — must be the recreated one at the next
+    /// run, never a stale pin that refuses everything until the stem restarts. Seen failing first on
+    /// Linux: the second run's write was denied (the rules came from the first directory's descriptor).
+    #[test]
+    fn a_declared_path_removed_and_recreated_between_runs_is_the_new_one() {
+        const T: &str = "a_declared_path_removed_and_recreated_between_runs_is_the_new_one";
+        if !crate::activation_sandbox::native_backend_or_skip(T) {
+            return;
+        }
+        let s = Scene::new("recreate");
+        let out = s.p("out");
+        let profile = mycelium::ConfineDecl { write: vec![out.clone()], ..Default::default() };
+        let h = hook(vec![confined(sh(&format!("echo run > {out}/f")), Vec::new(), profile)], Default::default());
+        let actx = ActivationCtx { install_token: 1, trace: None };
+        assert!(h(&pack_entry(), &s.placed, &actx).is_ok(), "the first run writes");
+        std::fs::remove_dir_all(&out).unwrap();
+        std::fs::create_dir(&out).unwrap();
+        let got = h(&pack_entry(), &s.placed, &actx);
+        assert!(got.is_ok(), "the recreated directory is the declared one: {got:?}");
+        assert_eq!(std::fs::read(s.root.join("out/f")).unwrap(), b"run\n");
+    }
+
+    /// Review follow-up 1 (#636): the resolved profiles are bounded and forget a placed file that is gone
+    /// (`BlobRuntime::uninstall` removes it), so the cache does not grow with every artifact ever placed.
+    #[test]
+    fn resolved_profiles_forget_a_removed_placement_and_are_bounded() {
+        if !crate::activation_sandbox::native_backend_or_skip("resolved_profiles_forget_a_removed_placement_and_are_bounded") {
+            return;
+        }
+        let s = Scene::new("cache");
+        let cache = ResolvedProfiles::with_capacity(2);
+        let c = mycelium::ConfineDecl::default();
+        let mut placed = Vec::new();
+        for i in 0..3 {
+            let p = s.root.join(format!("placed/blob{i}"));
+            std::fs::write(&p, b"x").unwrap();
+            cache.get_or_resolve(0, &c, &p).unwrap();
+            placed.push(p);
+        }
+        assert!(cache.len() <= 2, "bounded: {}", cache.len());
+        assert!(cache.contains(0, &placed[2]), "the newest is kept");
+        std::fs::remove_file(&placed[2]).unwrap();
+        let next = s.root.join("placed/blob3");
+        std::fs::write(&next, b"x").unwrap();
+        cache.get_or_resolve(0, &c, &next).unwrap();
+        assert!(!cache.contains(0, &placed[2]), "a removed placement is forgotten at the next resolution");
+        assert!(cache.len() <= 2, "still bounded: {}", cache.len());
     }
 
     /// A command that genuinely hangs still times out, and is killed and reaped.

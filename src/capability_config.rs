@@ -172,6 +172,10 @@ use std::{
 /// Load with [`NodeCapabilityConfig::load_from_file`], then drive the probe
 /// loop with [`run_capability_probes`].
 #[derive(Debug, Default, Clone, Deserialize)]
+// Review follow-up 3 (#636): an unknown top-level key or section is refused by name — a misspelt
+// `[activations.confine]` after an `[[activation]]` would otherwise be dropped and the activation run
+// unconfined; a misspelt `[[capabilty]]` would declare nothing.
+#[serde(deny_unknown_fields)]
 pub struct NodeCapabilityConfig {
     /// The issuer-qualified principal this unit presents at a gateway — the one key a runtime
     /// observation also carries, and so the join between a declaration and what the fleet later
@@ -1465,6 +1469,18 @@ max_providers = 4
         assert!(e.contains("activation.confine") && e.contains("port"), "{e}");
         let e = bad("connect = [\"*:70000\"]\n");
         assert!(e.contains("activation.confine") && e.contains("port"), "{e}");
+    }
+
+    #[test]
+    fn a_misspelt_top_level_section_is_refused_not_dropped() {
+        // Review follow-up 3 (#636): `[activations.confine]` after an `[[activation]]` is a new top-level
+        // table, `activations`, which the unit file dropped — the activation then ran unconfined. Seen
+        // failing first: it loaded.
+        let head = "[hosts]\nkinds = [\"blob\"]\naccept_unsigned = true\n[[activation]]\nns = \"a\"\nname = \"b\"\ncommand = [\"run\"]\n";
+        let e = refused(&format!("{head}[activations.confine]\n"));
+        assert!(e.contains("activations"), "{e}");
+        let e = refused("[[capabilty]]\nns = \"a\"\nname = \"b\"\n");
+        assert!(e.contains("capabilty"), "{e}");
     }
 
     /// Review finding 3 (#636): a misspelt table — `[activation.confined]`, `[activation.sandbox]` — was an

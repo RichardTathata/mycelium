@@ -86,7 +86,8 @@ pub const SEATBELT_SYSTEM_READ: &[&str] = &[
     "/usr/bin", "/usr/sbin", "/usr/lib", "/usr/libexec", "/usr/share", "/bin", "/sbin", "/System",
     "/private/var/select", "/private/var/db/timezone",
     "/private/etc/hosts", "/private/etc/resolv.conf", "/private/var/run/resolv.conf", "/private/etc/passwd",
-    "/private/etc/group", "/private/etc/localtime", "/private/etc/ssl",
+    "/private/etc/group", "/private/etc/localtime", "/private/etc/ssl/cert.pem", "/private/etc/ssl/certs",
+    "/private/etc/ssl/openssl.cnf",
 ];
 
 /// The paths a Landlock profile always lets a command read and execute — **exactly these**: the system's
@@ -178,6 +179,20 @@ pub struct Profile {
     /// `read` then `write`, held open from the first resolution (Linux; empty elsewhere).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) pinned: Pinned,
+    /// `read` then `write`: each path's (device, inode) at the resolution — what a pin refers to.
+    pub(crate) ids: Vec<(u64, u64)>,
+}
+
+impl Profile {
+    /// Whether every path still names what was resolved (review follow-up 1, #636): not a symlink now,
+    /// and the same device and inode. A path removed and recreated, or replaced, is not — the caller
+    /// re-resolves it rather than run with a stale pin.
+    pub fn is_current(&self) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        self.read.iter().chain(&self.write).zip(&self.ids).all(|(p, id)| {
+            std::fs::symlink_metadata(p).is_ok_and(|m| !m.file_type().is_symlink() && (m.dev(), m.ino()) == *id)
+        })
+    }
 }
 
 /// Descriptors of a profile's paths, opened at its resolution.
@@ -203,13 +218,25 @@ pub fn prepare(c: &ConfineDecl, placed: &Path) -> Result<Profile, Refusal> {
     // `write = ["{dir}"]`) and under its write paths, so a symlink there could be its own plant. A declared
     // path that is itself a symlink, or passes through one below the placement directory or a write path,
     // is refused — name its target instead.
-    let roots: Vec<PathBuf> = std::iter::once(dir.to_path_buf()).chain(c.write.iter().map(|w| expand(w))).collect();
+    // Compared canonically (review follow-up 2, #636): a root and a prefix spelt differently — an alias
+    // directory, `/tmp` against `/private/tmp`, a relative placement root — are compared as the kernel sees
+    // them, each prefix by its canonical parent and its own last component (the component itself may be the
+    // symlink being looked for).
+    let canon_or = |p: &Path| canonical(p).unwrap_or_else(|_| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()));
+    let roots: Vec<PathBuf> = std::iter::once(dir.to_path_buf()).chain(c.write.iter().map(|w| expand(w))).map(|r| canon_or(&r)).collect();
+    let norm = |q: &Path| -> PathBuf {
+        match (q.parent(), q.file_name()) {
+            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => canon_or(parent).join(name),
+            _ => canon_or(q),
+        }
+    };
     for raw in c.read.iter().chain(&c.write) {
         let p = expand(raw);
         let mut q = PathBuf::new();
         for part in p.components() {
             q.push(part);
-            let in_root = roots.iter().any(|r| q != *r && q.starts_with(r));
+            let nq = norm(&q);
+            let in_root = roots.iter().any(|r| nq != *r && nq.starts_with(r));
             if (q == p || in_root) && std::fs::symlink_metadata(&q).is_ok_and(|m| m.file_type().is_symlink()) {
                 return Err(Refusal::Failed(format!(
                     "confine path {raw:?} ({}) passes through a symlink at {} — a declared path is never a symlink, \
@@ -237,7 +264,17 @@ pub fn prepare(c: &ConfineDecl, placed: &Path) -> Result<Profile, Refusal> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(Refusal::Failed)?;
     let pinned = linux::pin(read.iter().chain(&write)).map_err(Refusal::Failed)?;
-    Ok(Profile { backend, read, write, connect, pinned })
+    let ids = read
+        .iter()
+        .chain(&write)
+        .map(|p| {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::symlink_metadata(p)
+                .map(|m| (m.dev(), m.ino()))
+                .map_err(|e| Refusal::Failed(format!("confine path {}: {e}", p.display())))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Profile { backend, read, write, connect, pinned, ids })
 }
 
 /// The kernel matches resolved paths (`/tmp` is `/private/tmp` on macOS), so a profile names those.
@@ -539,7 +576,7 @@ pub fn confinement_guarantee(units: &mycelium::NodeCapabilityConfig) -> mycelium
         1,
         "stem",
         GuaranteeKind::NodeEnforced,
-        "every `[[activation]]` command and probe runs under its OS confinement profile — reading only the placement directory, its declared paths and the system set (Linux: /usr/{bin,sbin,lib,lib32,lib64,libx32,libexec,share}, /bin, /sbin, /lib, /lib32, /lib64, /libx32, /etc/{ld.so.cache,ld.so.conf,ld.so.conf.d,hosts,resolv.conf,host.conf,gai.conf,nsswitch.conf,passwd,group,localtime,alternatives,ssl/certs,ssl/openssl.cnf,ca-certificates}; macOS: /usr/{bin,sbin,lib,libexec,share}, /bin, /sbin, /System, /private/var/select, /private/var/db/timezone, /private/etc/{hosts,resolv.conf,passwd,group,localtime,ssl}, /private/var/run/resolv.conf; both: /dev/{null,zero,random,urandom}), writing only its declared write paths and /dev/null, connecting only to declared TCP ports (no Fast Open, no listen) or nowhere — never by hostname",
+        "every `[[activation]]` command and probe runs under its OS confinement profile — reading only the placement directory, its declared paths and the system set (Linux: /usr/{bin,sbin,lib,lib32,lib64,libx32,libexec,share}, /bin, /sbin, /lib, /lib32, /lib64, /libx32, /etc/{ld.so.cache,ld.so.conf,ld.so.conf.d,hosts,resolv.conf,host.conf,gai.conf,nsswitch.conf,passwd,group,localtime,alternatives,ssl/certs,ssl/openssl.cnf,ca-certificates}; macOS: /usr/{bin,sbin,lib,libexec,share}, /bin, /sbin, /System, /private/var/select, /private/var/db/timezone, /private/etc/{hosts,resolv.conf,passwd,group,localtime,ssl/cert.pem,ssl/certs,ssl/openssl.cnf}, /private/var/run/resolv.conf; both: /dev/{null,zero,random,urandom}), writing only its declared write paths and /dev/null, connecting only to declared TCP ports (no Fast Open, no listen) or nowhere — never by hostname",
         "`[activation.confine]` on every `[[activation]]`; Seatbelt (`sandbox-exec`, macOS) or Landlock ABI 3 (ABI 4 with `connect`) and seccomp (Linux)",
         &["activation::hook", "activation::spawn_reprobe", "activation_sandbox::run_confined"],
         "docs/reference/unit-file.md",
@@ -587,6 +624,7 @@ mod tests {
             write: vec![PathBuf::from("/w")],
             connect: vec![(true, 11434), (false, 443)],
             pinned: Pinned::default(),
+            ids: Vec::new(),
         };
         let text = seatbelt_profile(&p);
         assert!(!text.contains("allow default"), "no path is spliced into the profile: {text}");
@@ -679,6 +717,36 @@ mod tests {
         for p in SEATBELT_SYSTEM_READ.iter().chain(LANDLOCK_SYSTEM_READ) {
             let leaf = p.rsplit('/').next().unwrap();
             assert!(promise.contains(leaf), "the promise names {p}");
+        }
+    }
+
+    /// Review follow-up 2 (#636): the symlink check compared spellings, so a declared path written through
+    /// another spelling of a write root (here an alias directory) skipped its intermediate components and a
+    /// symlink among them passed. Prefixes and roots are compared canonically now. Seen failing first: the
+    /// profile resolved.
+    #[test]
+    fn a_symlink_behind_another_spelling_of_a_write_root_is_refused() {
+        if !native_backend_or_skip("a_symlink_behind_another_spelling_of_a_write_root_is_refused") {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("confine-spell-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("real/out")).unwrap();
+        std::fs::create_dir_all(root.join("elsewhere/models")).unwrap();
+        std::fs::create_dir_all(root.join("placed")).unwrap();
+        let root = root.canonicalize().unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("alias")).unwrap();
+        std::os::unix::fs::symlink(root.join("elsewhere"), root.join("real/out/link")).unwrap();
+        let c = ConfineDecl {
+            write: vec![root.join("real/out").display().to_string()],
+            read: vec![root.join("alias/out/link/models").display().to_string()],
+            ..Default::default()
+        };
+        let got = prepare(&c, &root.join("placed/blob"));
+        let _ = std::fs::remove_dir_all(&root);
+        match got {
+            Err(Refusal::Failed(m)) => assert!(m.contains("symlink"), "{m}"),
+            other => panic!("a symlink inside a write root, spelt another way, must be refused: {:?}", other.map(|p| p.read)),
         }
     }
 }

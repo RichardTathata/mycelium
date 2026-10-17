@@ -67,6 +67,7 @@ the notice.
 | 44 | `mycelium_core::tls::load_or_generate` / `generate_rotation` / `generate_rotation_after` without the key standing; `NodeStanding` without `counted`; TLS session resumption on the mesh | unreleased (post-360 row Q's follow-up) | pass `Arc::clone(&ctx.key_standing)` (or `Default::default()` outside an agent) after the removed set | **Yes** for a direct caller of the three functions — one more argument — and an exhaustive `NodeStanding` literal; otherwise no — a reconnect is a full handshake, and a certificate whose key its node revoked is refused |
 | 45 | a gateway caller envelope without an id (`n`), target (`o`) and v2 signature (`sn`) — a pre-row-E gateway's | unreleased (post-360 row E) — accepted and counted for one release from a gateway without `sys/caller-context-id/` | upgrade every gateway node; watch `caller_envelopes_without_id` (`GET /stats`) stop rising on every provider; a raw-signal loop calls `receive_gateway_caller` once per signal | No — behaviour: an envelope is served once, at its target; a replay (repeated, misaddressed, id stripped) is dropped unanswered and counted (`caller_envelopes_replayed`); two subscribers verifying one kind on one node no longer both serve; a bridged MCP call whose context fails verification is refused `-32022` |
 | 46 | the A2A card at `/.well-known/agent.json`; the pre-0.2 `/a2a` methods `tasks/send` and `tasks/sendSubscribe`, and `skillId` as a send's parameter | unreleased (post-360 row N) — served beside the replacements for one release | read the card at `/.well-known/agent-card.json`; send with `SendMessage` / `SendStreamingMessage` (or 0.3's `message/send` / `message/stream`), the skill in `metadata.skillId` and a mandate in `metadata._meta` | No — behaviour: the old path and methods answer as before; a task created by `message/send` answers `tasks/get` in 0.3's shapes; the refusal for another identity's task names `GetTask`/`CancelTask` too |
+| 47 | a unit file with a key or section the loader does not know — at the top level or in an `[[activation]]` | unreleased (post-360 row M) | correct the spelling, or remove the key | No — behaviour: the file is refused at load, naming the key (`units/declare` answers 400, `wire-check` and a stem refuse it); it was silently dropped |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -1521,3 +1522,20 @@ needs the new wording.
 **Not changed or not covered:** push notifications, `ListTasks`, `SubscribeToTask`, the extended card, and the HTTP+JSON
 and gRPC bindings are not served; a task's `history` is not kept; `A2A-Version` is not checked (the card says which
 versions `/a2a` speaks).
+
+## 47. A unit file with an unknown key is refused, not read without it (unreleased, post-360 plan row M)
+
+**What changes** (#636's review, finding 3 and its follow-up). The unit-file loader dropped any key it did not know.
+A misspelt confinement table — `[activation.confined]` inside an `[[activation]]`, or `[activations.confine]` at the
+top level — therefore loaded as **no profile**, and the activation ran unconfined without a word; a misspelt
+`[[capabilty]]` declared nothing. `NodeCapabilityConfig` (the top level), `[[activation]]` and `[activation.confine]`
+now refuse an unknown key by name. The other sections keep their tolerance.
+
+Where it is refused: `NodeCapabilityConfig::from_toml_str` / `load_from_file`, so `POST /gateway/units/declare`
+(400), `mycelium wire-check` and `mycelium-stem --units`.
+
+**Will the compiler tell me?** No. It is a change in behaviour.
+
+**Migration.** Every unit file in this repository loads unchanged. A file of yours that the loader now refuses held a
+key that was never read: correct its spelling or remove it.
+
