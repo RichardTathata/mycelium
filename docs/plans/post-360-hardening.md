@@ -88,7 +88,7 @@ Four places strain that line today, and the rows in §3 address each:
 | **M** | Activation commands confined | an `[[activation]]` command — today "not a sandbox: there is no allowlist and no confinement" (`docs/reference/unit-file.md:276`) and run with the stem's privileges — can be run under an OS confinement profile the unit file names (macOS Seatbelt first, Linux namespaces/Landlock or seccomp where available): filesystem access limited to the placed artifact's directory and declared paths, network limited to declared hosts or none; a profile the platform cannot apply refuses the activation by name, never runs it unconfined; the unconfined default stays, stated, and the guarantee report says which applies *From NVIDIA OpenShell (2026-10-12):* a profile's filesystem and syscall limits are fixed for the activation's life and its network allow-list may change live (OpenShell's split: filesystem and process locked at creation, network hot-reloadable); OpenShell itself (containers, seccomp, an unprivileged identity; needs Docker) is a candidate backend for a stem, beside a native Seatbelt/Landlock profile, rather than something to rebuild. | — |
 | **N** — *delivered after 2.34.0, unreleased (#633), §3.5* | A2A at the current specification | an A2A client built on the current `a2a-sdk` (1.2.2, the library Strands Agents uses) reaches Mycelium's skills through `/a2a`, with the same authority as today — **the 2026-10-12 probe found it cannot**: the card is served only at `/.well-known/agent.json` (the SDK reads `/.well-known/agent-card.json`, 404); the card's `url` is the node's **gossip** address, not its gateway, and omits `/a2a` (`src/agent/a2a.rs:445`, so the SDK's `send_message` failed with a network error); the methods are the pre-0.2 `tasks/send` / `tasks/sendSubscribe` / `tasks/get` / `tasks/cancel` (`SendMessage` and `message/send` both answer `-32601`); and the skill is chosen by a Mycelium-only `skillId` parameter that a standard client never sends. Promises: the card at `/.well-known/agent-card.json` (the old path kept for one release), naming the gateway's own URL and scheme (https under `gateway_tls`) with `/a2a` and its supported interfaces and protocol versions; the A2A 1.0 methods (`SendMessage`, `SendStreamingMessage`, `GetTask`, `CancelTask`) and the 0.3 names (`message/send`, `message/stream`) served beside the old ones, which stay for one release with a deprecation entry; a message reaches a skill without `skillId` (a declared default skill, or the skill named in the message's metadata — decided in the PR, stated on the card); every new method runs the same doors as `tasks/send` — the action evaluator, mandates, evidence, task ownership — and the C7 bypass matrix gains each new method; the probe becomes a CI test driving the real `a2a-sdk` client against a node | — |
 | **O** — *delivered after 2.34.0, unreleased (#634), §3.5* | A Strands session store on Mycelium | a companion package (Python, beside `langgraph-checkpoint-mycelium`) implementing Strands Agents' `SessionManager` over the Mycelium Python SDK, so an agent's conversation and state, and a swarm's shared memory, live in the fleet's KV rather than a file or a bucket; a save returns the SDK's receipt and its docs say which rung it names (a local application, not replication — the checkpointer's wording); an incomplete or unreadable session is an error, never an empty one; concurrent agents in one session do not lose each other's writes, or the limit is stated; its live suite runs in CI against a real node; pinned to a Strands release and re-checked when Strands changes the interface | — (N for the cross-host demo) |
-| **P** | A Strands fleet, demonstrated | a runnable example, in CI like the co-op demos, in which Strands agents on three Mycelium nodes plan one shared task (a constructive domain — food redistribution or a microgrid), keep their session and swarm memory in the fleet through O, and call fleet skills through `/a2a` (N): a call outside an agent's mandate is refused and the refusal is in the evidence journal; one node is stopped and the work resumes on another from the stored session; the README states what Strands provides and what Mycelium adds, and which properties the run shows versus which it does not | N, O |
+| **P** — *delivered after 2.34.0, unreleased (#635), §3.5* | A Strands fleet, demonstrated | a runnable example, in CI like the co-op demos, in which Strands agents on three Mycelium nodes plan one shared task (a constructive domain — food redistribution or a microgrid), keep their session and swarm memory in the fleet through O, and call fleet skills through `/a2a` (N): a call outside an agent's mandate is refused and the refusal is in the evidence journal; one node is stopped and the work resumes on another from the stored session; the README states what Strands provides and what Mycelium adds, and which properties the run shows versus which it does not | N, O |
 | **Q** — *delivered 2.33.0 (#616), §3.5* | Revocation reaches every verifier | a key a node has revoked (`rotate_identity_on_compromise`, `sys/revocation/`) is filtered from the `peer_keys`-based KV `SignedData` verifier, from identity-proof chaining (`validate_and_merge_identity`'s trusted signer) and from the unsigned identity exemption (`connection::self_authenticating_identity`), not only from consensus and `known_verifying_keys`; a test that a `SignedData` signed by a revoked key is refused at a peer that has seen the revocation; `src/agent/revocation.rs`'s `revoke_key` doc made true (corrected in #611 to say what holds today) | — (independent of F2) |
 | **S** — *delivered 2.34.0 (#623), §3.5* | Identity proofs on by default | `require_identity_proofs` defaults to `true` (today `false`, `mycelium-core/src/config.rs`; the `secure-single-domain` profile already requires it as `id.proofs_required`): a bare `sys/identity/{N}` key list without a proof is refused everywhere a node's keys are learned, closing the identity-poisoning residual rows F and Q state — a member writing its own key into another's identity, which still reaches the verify-only history set (forged audit history, a steered checkpoint anchor) and fully impersonates a node on a legacy certificate; a mixed-fleet window in the 2.30.0 shape (the MINOR that flips it says so; a node from before 2.3.0, which cannot prove, is cut off until upgraded, and `false` stays available as an explicit opt-out for that window and for TLS-less development fleets, where the setting is inert); an upgrade note in `deprecations.md`; the guarantee `id.proofs_required` resolves `enforced` by default; the 2.14.0 attempt that was reverted is re-examined first (the failure it was blamed on was not its doing) | — (best in the MINOR with F2) |
 | **T** — *delivered 2.34.0 (#622), §3.5* | Say loudly when the CA key is on the node | the dev posture keeps the fleet CA's private key on every node (`auto_cert_dir`'s `ca-key.pem`, `mycelium-core/src/tls.rs`), so one compromised host yields every node's identity and revocation (row Q) cannot recover it; today this is only the guarantee `id.ca_key_off_node` resolving unmet, one line among the start-time report, worded for member removal alone. Promises: at `start()` a node that holds the CA key and runs no profile, or a profile other than `dev`, logs one prominent warning naming the consequence (a single host compromise compromises every identity in the fleet; key revocation does not recover it) and the remedy (`mycelium tls issue` on a separate CA host, then `[tls] cert_pem` + `key_pem` on the node — `docs/operations/cert-rotation.md`); the `id.ca_key_off_node` guarantee text names identity compromise and revocation, not only removal (catalogue regenerated); `dev` states the trade-off rather than warning; the quick-start and production-readiness pages say which posture they set up; a test pins the warning on and off | — |
@@ -1098,6 +1098,58 @@ window).
   decision is not released through the gateway), so a deleted session's id is not reused; a node behind still
   *reads* an older conversation without error — claims stop it writing, not reading.
 
+**P — A Strands fleet, demonstrated (#635, unreleased).** The surfaces it stands on, enumerated: `/a2a` and its card
+(row N, `src/agent/a2a.rs`), the action evaluator and the gateway's mandate establishment
+(`src/agent/gateway_authority.rs`: a `PresentedMandate` in `metadata._meta.mandate`, the grant's holder = the caller's
+principal, possession bound to the call), the evidence journal (`src/agent/evidence_journal.rs`, node-local, read by
+`read_evidence_journal`), the session store (row O) and its claims, and the voter (`start_consensus_listener`). Found
+on the way, and the shape of the demonstration follows from it: **a mandate is an appointment** — at each gateway's
+verifier a scope has one holder at an epoch (`GrantVerifier`: two grants at one scope and epoch are
+`ConflictingAppointments`; its memory is per node, so one holder fleet-wide is the authority's to keep by issuing one
+grant), and a node's execution authority guards one scope. So dispatching is the mandated role (scope `dispatch`, appointed to the
+courier); asking the bakery and the kitchen is allowed by policy to the fleet's three principals.
+- *a runnable example, in CI like the co-op demos* — `examples/strands_fleet/run_demo.py` over
+  `examples/strands_fleet_node.rs` (an operator and three nodes), CI job `strands-fleet`, ending `STRANDS FLEET OK`;
+  the examples matrix row is checked (`check-example-matrix.py`: the driver starts the built example as a process).
+- *in which Strands agents on three Mycelium nodes plan one shared task (a constructive domain — food redistribution
+  or a microgrid)* — food redistribution: each agent attached to a node of its own (collector → kitchen, planner → hub,
+  courier → hub then depot); a Strands `Swarm` (collector → planner, a scripted model's handoff) asks the bakery's
+  skill on the hub and the kitchen's on the kitchen node, and plans two runs; the courier dispatches them on the
+  depot's skill. The models are scripted, stated in the README.
+- *keep their session and swarm memory in the fleet through O* — the swarm's session and the courier's, through
+  `MyceliumSessionManager` with claims; act 4 reads the swarm's state (completed, collector then planner) on the depot
+  after the hub is gone.
+- *and call fleet skills through `/a2a` (N)* — every call is A2A 1.0 `SendMessage` with `metadata.skillId`
+  (`fleet.FleetCaller`); the `a2a-sdk` job drives the SDK itself.
+- *a call outside an agent's mandate is refused and the refusal is in the evidence journal* — the planner's
+  `depot/dispatch`: `-32031 authority not established`, and the hub's journal holds one record for it, `indeterminate`,
+  `execution: none`; the planner presenting the courier's grant with its own key is refused too; the courier's
+  permitted call's record names `mandate scope=dispatch holder=token:fleet/courier term=t1 epoch=1`.
+- *one node is stopped and the work resumes on another from the stored session* — the hub is terminated; the courier is
+  re-created through the depot from its session, with its four messages (van 1 in them), and dispatches van 2; the
+  depot's journal holds its own decision. The claims keep a quorum on two of three voters.
+- *the README states what Strands provides and what Mycelium adds, and which properties the run shows versus which it
+  does not* — `examples/strands_fleet/README.md`, both tables.
+- *Seen failing:* two broken variants of the driver — the planner appointed to dispatch (act 2's refusal check fails:
+  nothing refused) and the courier resumed into a fresh session (act 4 fails: 0 messages).
+- *The independent review (#635)* — no blocker; the Python grant digest and possession proof match `grant.rs` and
+  `gateway_authority.rs` byte for byte, and the demo passes with the hub killed by SIGKILL. Fixed: (M1) the operator
+  signed a grant for any holder on request, so the appointment was the driver's choice and each re-fetch made a
+  conflicting appointment — it now appoints from configuration (`APPOINT`), signs one grant at start and answers
+  anyone else 403 (checked in the run); (L1) the cross-node check now asserts the kitchen's own answer and the
+  kitchen node's journal resolving the bakery's skill to the hub; (L2) the borrowed-grant refusal is asserted on its
+  cause, the holder binding, and the README says so; (L3) each agent attaches to a node of its own (collector →
+  kitchen, planner → hub, courier → hub, then depot); (L4, L5, L6) the docstring, the depot check's filter, closed
+  managers, a removed work directory, a CI timeout. Stated: (M2) one holder per scope and epoch is checked per gateway
+  verifier, not by the fleet — the wiki, plan and example doc now say so; and the run never shows an agent holding a
+  mandate and calling outside it. The confirmation found everything fixed or stated, and one low race of the original's:
+  a node printed `ready` before it held a revocation checkpoint issued since its start (closure plan C8), so a
+  mandated call sent at once was refused "revocation standing unknown"; readiness now includes the first accepted
+  checkpoint (the reviewer's no-delay variant, seen refused, now permitted at the hub and the depot, 3 of 3).
+- **Not built, stated:** a model's judgement (scripted); a node failing mid-call (stopped between turns); revocation
+  (shown by `authority_drain` and the confined-fleet suite); Strands' own A2A classes; scale; fleet-wide enforcement of
+  one holder per scope.
+
 ### 3.6 · State of play and the next iteration (2026-10-12)
 
 Where the work stands at the end of 2026-10-12, so the next session starts here rather than from a conversation.
@@ -1110,7 +1162,7 @@ queues before the shutdown signal), and N, O, P recorded by #614 with the `a2a-s
 **Delivered in v2.34.0 (2026-10-16):** F2 (#624 — the unsigned-frame and bare-signature refusal unconditional, `kv_require_signed_frames` retired, `secure-single-domain` rev 5; §3.5), T (#622), S (#623 — identity proofs required by default; §3.5); the wasmtime 49.0.3 / rustls 0.23.46 advisories (#625).
 
 **Not started:** K (policy over history — decide §5's fleet question first), L (credentials attached at egress), M
-(activation commands confined), P (N and O are delivered, #633 and #634, §3.5), and §5's inference-routing question; O is delivered (#634, §3.5), so P waits on nothing. (Q, revocation at every verifier, is delivered — #616, §3.5; S, identity proofs on by default, is delivered in 2.34.0 — #623, §3.5.)
+(activation commands confined), and §5's inference-routing question. N, O and P are delivered (#633, #634, #635; §3.5). (Q, revocation at every verifier, is delivered — #616, §3.5; S, identity proofs on by default, is delivered in 2.34.0 — #623, §3.5.)
 
 **Follow-ups recorded as not built in delivered rows (each in its §3.5 block):**
 - **H:** carry each named offer's signed bytes inside the close and award from that copy (today a member who deletes a

@@ -152,6 +152,13 @@ Layer explainers: gossip-KV [ch01](../../guide/01-gossip-kv.md) · signal-mesh
 - **A2A LangChain/AutoGen** (`examples/a2a_langchain/`): external agents auto-discover
   Mycelium skills via the agent card (`/.well-known/agent-card.json`; the examples' clients still read the
   pre-0.3 path, kept for one release). An unmodified `a2a-sdk` client drives `a2a_sdk_node` in CI (`tests/a2a-sdk/`).
+- **Strands fleet** (`examples/strands_fleet/`, post-360 row P): Strands agents on three nodes — a `Swarm` planning
+  over `/a2a`, a courier holding the one `dispatch` mandate, sessions in the fleet through `strands-session-mycelium`,
+  the hub stopped and the courier resumed on the depot. CI `strands-fleet`. The lesson it carries: a mandate is an
+  **appointment** (one holder per scope and epoch *at each gateway's verifier* — each node's `GrantVerifier` keeps
+  its own memory, so one holder fleet-wide is the authority's to keep by issuing one grant; a node's execution
+  authority guards one scope), so "outside its mandate" is a role one agent was appointed to and another was not,
+  not a per-agent permission list.
 - **Skills / community cluster** (`examples/community/`, the `skillrunner` bin at `:9050`): LLM agents
   as first-class mesh citizens (skills = capabilities, live load-balancing). The de-facto **audit**
   demo — every invocation writes a signed audit record; the mgmt UI (`:9050/mgmt`) shows the trail

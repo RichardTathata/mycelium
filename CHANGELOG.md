@@ -80,6 +80,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A Strands fleet, demonstrated** (post-360 plan row P; `examples/strands_fleet/`, CI job `strands-fleet`). Strands
+  agents on three nodes plan tonight's food redistribution: a `Swarm` (collector → planner) asks the bakery's and the
+  kitchen's skills through one gateway's `/a2a`; the planner's attempt to dispatch a van, a mandated role it was not
+  appointed to, is refused (`-32031`) and read back from the hub's evidence journal, as is the planner presenting the
+  courier's grant; the courier dispatches with its own grant and possession proof; the hub is stopped and the courier
+  resumes on the depot from its stored session and dispatches the second van. The node binary is
+  `examples/strands_fleet_node.rs` (an operator and three nodes, `--features tls,a2a,compliance`). The README says
+  what Strands provides, what Mycelium adds, and what the run does not show (the models are scripted).
 - **A Strands Agents session store on the fleet: `strands-session-mycelium` 0.1.0** (post-360 plan row O). A new Python
   companion beside `langgraph-checkpoint-mycelium`. `MyceliumSessionManager` is a Strands `SessionManager` over the
   Python SDK's KV verbs, so an agent's conversation and state, and a `Swarm`'s or `Graph`'s shared state, are rows in
