@@ -718,17 +718,24 @@ pub(crate) async fn ae_preflight(
     // one it was decided on, so concurrent calls by one actor cannot both slip under a limit; otherwise decide
     // again on a fresh view (twice), then refuse as not established.
     let history_index = ctx.history_index.get();
+    let point = super::evidence_journal::point_of(enforcement_point);
+    if let (Some(_), Some(index)) = (history_request, history_index) {
+        index.start_loading(now_ms); // a no-op once started; normally started when the evaluator was attached
+    }
     // One actor's decisions on its history, one after another: the view, the evaluator and the count are one step.
     let _gate = match (history_request, history_index) {
         (Some(_), Some(index)) => Some(index.gate(&envelope.actor).lock().await),
         _ => None,
     };
+    // The clock the history is read at is read *under* the gate: a call that read its clock before another
+    // decided would otherwise count from an earlier instant than the permits admitted meanwhile.
+    let history_now = ctx.hlc.decision_now_ms().max(now_ms);
     let mut tries = 0;
     let (outcome, history, admitted) = loop {
         let (history, version) = match (history_request, history_index) {
             (None, _) => (None, None),
             (Some(request), Some(index)) => {
-                let (h, v) = index.view(&envelope.actor, request, now_ms);
+                let (h, v) = index.view(&point, &envelope.actor, request, history_now);
                 (Some(h), Some(v))
             }
             (Some(_), None) => (
@@ -738,19 +745,19 @@ pub(crate) async fn ae_preflight(
                 None,
             ),
         };
-        let outcome = ae::preflight_with_history(Some(evaluator), &envelope, history.as_ref(), now_ms);
+        let outcome = ae::preflight_with_history(Some(evaluator), &envelope, history.as_ref(), history_now);
         let (Ok(Some(_)), Some(index), Some(version)) = (&outcome, history_index, version) else {
             break (outcome, history, false);
         };
         let entry = ae::HistoryEntry {
-            at_ms: envelope.issued_at_ms,
+            at_ms: history_now,
             attempt_id: envelope.attempt_id.clone(),
             operation: envelope.operation.clone(),
             resource: envelope.resource.clone(),
             decision: ae::DecisionKind::Permit,
             execution: ae::Execution::Attempted,
         };
-        if index.admit(&envelope.actor, version, entry) {
+        if index.admit(&point, &envelope.actor, version, entry) {
             break (outcome, history, true);
         }
         tries += 1;
@@ -794,7 +801,7 @@ pub(crate) async fn ae_preflight(
     if let Err(e) = ae_record(ctx, &evidence).await {
         // Not recorded, so not done: a permit counted into the history is taken back.
         if admitted && let Some(index) = history_index {
-            index.retract(&envelope.actor, &envelope.attempt_id);
+            index.retract(&point, &envelope.actor, &envelope.attempt_id);
         }
         warn!(actor = %envelope.actor, %operation, %resource,
               "AE preflight: the decision could not be recorded, so the action is refused: {e}");
@@ -922,6 +929,13 @@ pub(super) async fn ae_record(
                 };
                 let refuse =
                     matches!(journal.profile(), EvidenceProfile::Strict).then(|| e.to_string());
+                // Lenient proceeds without the record, so after a restart the journal will not hold this
+                // decision: no history reaching back past it can be complete (post-360 row K).
+                if refuse.is_none()
+                    && let Some(index) = ctx.history_index.get()
+                {
+                    index.note_lost(evidence.at_ms);
+                }
                 (None, state, refuse)
             }
         },

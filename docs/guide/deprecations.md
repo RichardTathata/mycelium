@@ -1549,3 +1549,8 @@ closed, but not what was meant. Forward `history_request` and `evaluate_with_his
 (see `ReferenceEvaluator` and the contract suite's `TableEvaluator`), and the gateway needs an evidence journal
 (`with_evidence_journal`) — without one, every history it is asked for is unavailable.
 
+**An adapter held to the contract suite** (`ae_contract::run`) meets five new cases (`history_*`). One that cannot
+express `PolicyClause::AllowAtMost` must decline them and list them in `declared_limits`, or `Report::conformant` fails
+— the private companion's Cedar adapter, on its next re-pin. `AeEvidence`'s schema stays `mycelium.ae/evidence/1`: the
+new `history` field is additive and absent when no history was read.
+

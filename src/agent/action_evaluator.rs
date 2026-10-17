@@ -468,10 +468,12 @@ pub trait ActionEvaluator: Send + Sync + 'static {
 /// **Whose** history a count covers. Every history decision names it, because a limit means nothing until
 /// it is said what was counted.
 ///
-/// Decided for row K (plan §5): a count is what **this enforcement point** saw — its own evidence journal,
-/// node-local and never gossiped. Exact there and needing no quorum; an actor that spreads its calls over N
-/// gateways can be admitted up to N times a per-gateway limit. A fleet scope would be a new variant, and a
-/// rule naming it would not be satisfied by this one.
+/// Decided for row K (plan §5): a count is what **this enforcement point** at this node saw — its own evidence
+/// journal, node-local and never gossiped. The point is the gateway (all its doors, `/mcp`, `/a2a`, the LLM and
+/// federation routes, count together) or the provider check, each counted apart, so a call the gateway decided
+/// and the provider re-checks on one node is counted once at each, never twice at one. Exact there and needing no
+/// quorum; an actor that spreads its calls over N gateways can be admitted up to N times a per-gateway limit. A
+/// fleet scope would be a new variant, and a rule naming it would not be satisfied by this one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -523,7 +525,9 @@ pub struct HistoryView {
     pub scope: HistoryScope,
     /// The actor it is about — the envelope's.
     pub actor: String,
-    /// The enforcement point's clock when it was read. The evaluator holds no clock; windows end here.
+    /// Which enforcement point at this node counted it: `gateway`, or the provider check (`provider`).
+    pub point: String,
+    /// The enforcement point's clock when it was read. The evaluator holds no clock; windows start here.
     pub as_of_ms: u64,
     /// How far back it reaches.
     pub window_ms: u64,
@@ -532,6 +536,19 @@ pub struct HistoryView {
     /// Whether these are **all** of the actor's records in the window. `false` when the view was capped or
     /// the point no longer holds some of them: a count below a limit is then not established.
     pub complete: bool,
+    /// The newest event time of a record this view does not hold — dropped by the point's bounds, lost to a
+    /// journal repair or a lenient append, or cut by the request's cap. A rule over a window that starts at or
+    /// after it sees all of its records whatever `complete` says of the widest window; one reaching back past
+    /// it does not. `None`: nothing is missing.
+    pub omitted_through_ms: Option<u64>,
+}
+
+impl HistoryView {
+    /// Whether this view holds every record in the `window_ms` ending at `as_of_ms` — for a rule whose window
+    /// is not the view's.
+    pub fn complete_for(&self, window_ms: u64) -> bool {
+        window_ms <= self.window_ms && self.omitted_through_ms.is_none_or(|t| t <= self.as_of_ms.saturating_sub(window_ms))
+    }
 }
 
 /// The history an enforcement point gives an evaluator: a view, or why none could be established —
@@ -1694,20 +1711,34 @@ impl ActionEvaluator for ReferenceEvaluator {
                         };
                     }
                 };
+                if limit.window_ms == 0 {
+                    return Decision {
+                        verdict: Verdict::Indeterminate,
+                        checked: vec![limited],
+                        reason: "the allowance is limited over an empty window, which counts nothing".into(),
+                        policy_revision: rev,
+                        errors: vec!["history limit with a window of 0 ms".into()],
+                    };
+                }
                 let any = |pat: &str, v: &str| pat == "*" || pat == v;
+                // Everything in the window *and after its start* counts — a record stamped later than this
+                // view's clock (a call that read its clock after this one, decided first) is one more, not none.
+                let from = view.as_of_ms.saturating_sub(limit.window_ms);
                 let n = view
                     .entries
                     .iter()
                     .filter(|e| {
                         e.decision == DecisionKind::Permit
-                            && e.at_ms <= view.as_of_ms
-                            && view.as_of_ms - e.at_ms < limit.window_ms
+                            && e.at_ms > from
                             && any(&a.operation, &e.operation)
                             && any(&a.resource, &e.resource)
                     })
                     .count();
                 let scope = view.scope.label();
-                let tally = format!("history scope={scope} window_ms={} counted={n} limit={}", limit.window_ms, limit.count);
+                let tally = format!(
+                    "history scope={scope} point={} window_ms={} counted={n} limit={}",
+                    view.point, limit.window_ms, limit.count
+                );
                 if n >= limit.count as usize {
                     return Decision {
                         verdict: Verdict::Deny,
@@ -1720,7 +1751,7 @@ impl ActionEvaluator for ReferenceEvaluator {
                         errors: Vec::new(),
                     };
                 }
-                if !view.complete {
+                if !view.complete_for(limit.window_ms) {
                     return Decision {
                         verdict: Verdict::Indeterminate,
                         checked: vec![limited, tally],
@@ -2031,10 +2062,12 @@ mod tests {
         History::View(HistoryView {
             scope: HistoryScope::EnforcementPoint,
             actor: "oidc:idp/alice".into(),
+            point: "gateway".into(),
             as_of_ms,
             window_ms: TEN_MIN,
             entries,
             complete,
+            omitted_through_ms: (!complete).then_some(as_of_ms),
         })
     }
 

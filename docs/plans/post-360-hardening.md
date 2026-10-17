@@ -1164,7 +1164,7 @@ directly. The evidence journal is written only by `ae_record`.
   journal at `with_evidence_journal`, fed by `ae_record` after each append (an execution record updates its attempt),
   bounded at 24 hours and 1 024 records per actor, a view past a dropped record `complete: false`. Tests
   `a_history_is_loaded_from_the_journal`, `a_journal_not_yet_written_is_an_empty_history`,
-  `the_journal_record_of_an_admitted_permit_is_not_counted_twice`, `a_view_reaching_past_a_dropped_record_is_incomplete`,
+  `the_journal_record_of_an_admitted_permit_is_not_counted_twice`, `completeness_is_judged_per_window`,
   `a_window_longer_than_the_horizon_is_never_complete`.
 - *a rule such as at most three posts in ten minutes is expressible and tested in the reference evaluator and the AE
   contract suite (`mycelium::ae_contract`)* — `Rule::at_most(3, 600_000)`
@@ -1195,8 +1195,24 @@ directly. The evidence journal is written only by `ae_record`.
   reference evaluator asks for the whole window.
 - *Seen failing:* with the gate and the admit removed, the burst admitted more than three; with an unreadable journal
   read as empty, and with the journal not loaded at attach, the unreadable and reload tests failed.
+- *The independent review (#638)* — fixed, each with a test seen failing first where it is a defect: (1) the index was
+  per node across every enforcement point, so provider enforcement on the gateway's node counted each call twice and
+  `at_most(3)` ran one — now keyed by point (`gateway`, `provider`), the label true, and the end-to-end test runs four
+  posts with provider enforcement on, three admitted; (2) the clock was read before the per-actor gate and views dropped
+  records stamped after it, so a call that waited could count from before permits admitted meanwhile — the clock is read
+  under the gate and later-stamped records count; (3) completeness was judged for the widest window, so a week-long
+  rule left a ten-minute one never established — a view now says the newest record it omits and each rule judges its own
+  window; (4) attaching a journal read all of it synchronously, and actors were unbounded — the history is read in the
+  background, page by page, only once an evaluator asks for history (until then not established), and capped at 65 536
+  actors per point with evictions tracked; (5) a journal repaired at open, or a lenient append that failed, loaded as a
+  complete shorter history — the journal reports a truncation (`truncated_at_open`) and both mark older history as not
+  held; (7) `at_most(n, 0)` permitted without limit — not established now, and `at_most(0, w)` documented as never.
+  Stated: (6) a permit whose client went away, or that a downstream check refused, stays counted; (8) the private Cedar
+  adapter must decline the five new cases on its re-pin (§47), and the evidence schema is unchanged; (9) the history input
+  is recorded, and no replay consumes it yet.
 - **Not built, stated:** a fleet-wide count (§5); the decision trace does not carry `ae.preflight`, so the history input
-  lives on the evidence record; a per-actor history across more than 24 hours or 1 024 records reads as incomplete.
+  lives on the evidence record and nothing replays it yet; a history across more than 24 hours, 1 024 records per actor or
+  65 536 actors per point reads as incomplete.
 
 ### 3.6 · State of play and the next iteration (2026-10-12)
 

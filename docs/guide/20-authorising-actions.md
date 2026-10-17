@@ -353,23 +353,33 @@ let policy = ReferenceEvaluator::new("rev-posts")
     .allow(Rule::new("oidc:idp/alice", "tools/call", "tool:post@10.0.0.5:7946").at_most(3, 600_000));
 ```
 
-**Whose history.** The gateway's own: the decisions its evidence journal recorded about this actor
-(`HistoryScope::EnforcementPoint`). The journal is node-local and never gossiped, so the count is exact *here* and needs
-no quorum — and an actor that spreads its calls over three gateways can be admitted up to three times the limit. Every
-history decision names the scope (`history scope=enforcement_point … counted=2 limit=3`), and so does the evidence.
+**Whose history.** The enforcement point's, at this node: the decisions its evidence journal recorded about this actor
+(`HistoryScope::EnforcementPoint`). The gateway's doors — `/mcp`, `/a2a`, the LLM and federation routes — count
+together (`point=gateway`); the provider check counts apart (`point=provider`), so a call the gateway decided and the
+provider re-checks on one node is counted once at each. The journal is node-local and never gossiped, so the count is
+exact *here* and needs no quorum — and an actor that spreads its calls over three gateways can be admitted up to three
+times the limit. Every history decision names the scope and the point (`history scope=enforcement_point point=gateway
+… counted=2 limit=3`), and so does the evidence.
 
-**What the history is.** Loaded from the journal when it is attached, so a restart keeps it, and kept current by every
-decision recorded after. Bounded: each actor's records within 24 hours, at most 1 024 of them; a view that reaches past
-what was dropped says it is incomplete, and a count *below* the limit on an incomplete view is not established. A
-journal that cannot be read, or none at all, gives `History::Unavailable` — and a limited rule decides
-`Indeterminate` on it, never as though the actor had done nothing.
+**What the history is.** Read from the journal in the background, once an evaluator that asks for history is attached
+(a node whose evaluator never asks never reads it), so a restart keeps it; until the read completes a limited call is
+not established. Kept current by every decision recorded after. Bounded: each actor's records within 24 hours, at most
+1 024 of them, at most 65 536 actors per point — so a limit above 1 024 a day is not expressible. A rule is judged on its
+own window: a view says the newest record it does not hold (`omitted_through_ms`), and a count *below* the limit over a
+window reaching back past it is not established. Records lost to a journal repair at open, or to an append a lenient
+journal failed to make, count as not held. A journal that cannot be read, or none at all, gives `History::Unavailable` —
+and a limited rule decides `Indeterminate` on it, never as though the actor had done nothing. `at_most(n, 0)` counts
+nothing and is not established; `at_most(0, w)` is an explicit never.
 
-**Check, then count.** The gateway decides one actor's history-limited calls one after another, and counts a permit
-into the history as it is decided, so ten concurrent calls under *at most three* admit three. A permit whose evidence is
-then not recorded is taken back out.
+**Check, then count.** The gateway decides one actor's history-limited calls one after another, reading the clock once
+it is that call's turn, and counts a permit into the history as it is decided, so ten concurrent calls under *at most
+three* admit three. A permit whose evidence is then not recorded is taken back out. It errs towards counting: a permit
+whose client went away before its evidence was written, or that a later check downstream refused, stays counted.
 
 **On the record.** The decision's evidence carries the history it read — the scope, the window, the attempts it was
-given, and whether that was all of them — so a replay finds those attempts in the journal and decides again.
+given by id, and whether that was all of them. That is what a replay would decide again from; no replay of gateway
+decisions consumes it yet (`ae.preflight` is not in the decision trace), and an attempt it names may be one whose own
+evidence was then not written.
 
 **An evaluator that wraps another** forwards `history_request` and `evaluate_with_history` as well as `evaluate`; one
 that does not hides the inner request, and its limited rules decide `Indeterminate`.

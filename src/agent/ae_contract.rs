@@ -741,6 +741,7 @@ fn history_of(as_of_ms: u64, at: &[u64], complete: bool) -> History {
     History::View(HistoryView {
         scope: HistoryScope::EnforcementPoint,
         actor: "oidc:idp/alice".into(),
+        point: "gateway".into(),
         as_of_ms,
         window_ms: 500,
         entries: at
@@ -756,6 +757,8 @@ fn history_of(as_of_ms: u64, at: &[u64], complete: bool) -> History {
             })
             .collect(),
         complete,
+        // An incomplete view here is missing something as recent as its clock: no window over it is complete.
+        omitted_through_ms: (!complete).then_some(as_of_ms),
     })
 }
 
@@ -948,7 +951,7 @@ mod tests {
                         return Decision::deny(format!("ration of {room} exhausted ({used} used, counted at {label})"), &self.revision)
                             .checking(["entry.rationed", label]);
                     }
-                    if !seen.complete {
+                    if !seen.complete_for(*span) {
                         return Decision::indeterminate(format!("ration not settled: the {label} history is partial"), &self.revision)
                             .checking(["entry.rationed"])
                             .with_errors(["history: partial"]);
