@@ -69,8 +69,16 @@ names (a message whose `message_id` disagrees with its key included), and a gate
 The tail is covered once the count arrives. Each agent has a count row written after each message,
 so a node that holds the count but not the last message raises. Messages that arrive ahead of their
 count are read, not dropped. So is the other direction: an agent row whose conversation manager has
-moved past the messages this node holds (a sliding window's removed count at or beyond them) raises,
-rather than reading as an empty conversation that Strands would restart at message 0.
+moved past the messages this node holds (a sliding window's removed count beyond them) raises,
+rather than reading as an empty conversation that Strands would restart at message 0. An agent row
+with no count yet raises too; `create_agent` writes the count first, so that row is still arriving.
+
+A removed count *equal* to the messages here is read as an empty tail, because it is legitimate: a
+sliding window of 0 removes every message each turn. Two things follow:
+
+- **Strands' own behaviour:** an agent resumed with such a window restarts its message indices at 0
+  and writes over the first message. Strands' `FileSessionManager` does the same.
+- **A narrow cross-node case:** an agent row exactly level with an older count looks the same.
 
 What it cannot see is a node that is **behind as a whole**: one holding an older count and none of
 the messages after it reads a complete, older conversation without error, and an agent resumed there

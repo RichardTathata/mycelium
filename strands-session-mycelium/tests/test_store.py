@@ -312,7 +312,7 @@ def test_a_failed_count_write_at_creation_leaves_the_agent_resumable():
     assert texts(back) == ["one", "r1"]
 
 
-@pytest.mark.parametrize("offset", [2, 4])
+@pytest.mark.parametrize("offset", [3, 4])
 def test_an_offset_past_the_messages_here_is_incomplete_not_empty(offset):
     """The agent row (its conversation manager's removed count) arrived ahead of the messages it counts."""
     gw = FakeGateway()
@@ -320,7 +320,7 @@ def test_an_offset_past_the_messages_here_is_incomplete_not_empty(offset):
     repo = MyceliumSessionRepository(gw)
     with pytest.raises(IncompleteSession) as e:
         repo.list_messages("s1", "planner", offset=offset)
-    assert e.value.missing[-1] == f"strands/s1/agent/planner/msg/{offset:010d}"
+    assert e.value.missing[-1] == f"strands/s1/agent/planner/msg/{offset - 1:010d}"
     assert repo.list_messages("s1", "planner", offset=1)[0].message_id == 1
 
 
@@ -341,3 +341,45 @@ def test_an_agent_whose_window_moved_on_resumes_only_once_its_messages_have():
         Agent(agent_id="planner", model=ScriptedModel(["r"]), session_manager=manager(gw), callback_handler=None,
               conversation_manager=SlidingWindowConversationManager(window_size=2))
     assert json.loads(gw.rows["strands/s1/agent/planner/msg/0000000000"])["message"]["content"][0]["text"] == "one"
+
+
+# ── second confirmation round (R1, R2) ──────────────────────────────────────
+
+
+def test_a_window_of_zero_resumes_where_it_was_written():
+    """``window_size=0`` removes every message each turn: a removed count equal to the messages written is legitimate."""
+    from strands.agent.conversation_manager import SlidingWindowConversationManager
+
+    gw = FakeGateway()
+    a = Agent(agent_id="planner", model=ScriptedModel(["r1", "r2"]), session_manager=manager(gw), callback_handler=None,
+              conversation_manager=SlidingWindowConversationManager(window_size=0))
+    a("one")
+    a("two")
+    again = Agent(agent_id="planner", model=ScriptedModel(["r3"]), session_manager=manager(gw), callback_handler=None,
+                  conversation_manager=SlidingWindowConversationManager(window_size=0))
+    assert again.messages == []
+    again("three")
+    # Strands then appends at index 0, over "one" — its own FileSessionManager does the same with a window of
+    # 0 (checked 2026-10-17 against 1.61.1); the store's part is not to refuse the resume.
+    assert json.loads(gw.rows["strands/s1/agent/planner/msg/0000000000"])["message"]["content"][0]["text"] == "three"
+
+
+def test_an_agent_row_that_arrived_alone_is_incomplete_not_empty():
+    gw = FakeGateway()
+    run_agent(gw, ["one"])
+    for key in [k for k in gw.rows if "/msg/" in k or k.endswith("/count")]:
+        del gw.rows[key]
+    with pytest.raises(IncompleteSession):
+        Agent(agent_id="planner", model=ScriptedModel(["r"]), session_manager=manager(gw), callback_handler=None)
+
+
+def test_a_failed_agent_row_write_at_creation_leaves_the_agent_creatable():
+    gw = FakeGateway()
+    manager(gw)
+    gw.fail_once.add("strands/s1/agent/planner")
+    with pytest.raises(SessionException):
+        Agent(agent_id="planner", model=ScriptedModel([]), session_manager=manager(gw), callback_handler=None)
+    again = Agent(agent_id="planner", model=ScriptedModel(["r1"]), session_manager=manager(gw), callback_handler=None)
+    again("one")
+    back = Agent(agent_id="planner", model=ScriptedModel([]), session_manager=manager(gw), callback_handler=None)
+    assert texts(back) == ["one", "r1"]

@@ -273,16 +273,24 @@ class MyceliumSessionRepository(SessionRepository):
     # ── agents ──────────────────────────────────────────────────────────────
 
     def create_agent(self, session_id: str, session_agent: SessionAgent, **kwargs: Any) -> None:
+        # The count first, then the agent row. A failure between them leaves only `count == 0`,
+        # which `read_agent` reads as no agent, so the next `create_agent` writes it again — and an
+        # agent row is never left without the count that `list_messages` needs.
         agent_id = session_agent.agent_id
-        self._write(self._agent_key(session_id, agent_id), session_agent.to_dict())
         self._write(self._count_key(session_id, agent_id), {"count": 0})
         self._counts[(session_id, agent_id)] = 0
+        self._write(self._agent_key(session_id, agent_id), session_agent.to_dict())
 
     def read_agent(self, session_id: str, agent_id: str, **kwargs: Any) -> Optional[SessionAgent]:
         key = self._agent_key(session_id, agent_id)
         row = self._read(key)
         if row is None:
-            self._absent_or_incomplete(f"agent {agent_id!r} of session {session_id!r}", key, key + "/")
+            under = self._keys(key + "/")
+            count_key = self._count_key(session_id, agent_id)
+            if under == [count_key] and self._stored_count(session_id, agent_id) == 0:
+                return None  # a creation that stopped after its count: not an agent yet
+            if under:
+                raise IncompleteSession(f"agent {agent_id!r} of session {session_id!r}", [key])
             return None
         return self._decode(SessionAgent, row, key)
 
@@ -385,20 +393,19 @@ class MyceliumSessionRepository(SessionRepository):
         what = f"the messages of agent {agent_id!r} in session {session_id!r}"
         count = self._stored_count(session_id, agent_id)
         if count is None:
-            if present:  # messages here and the count written after the first of them is not
-                raise IncompleteSession(what, [count_key])
-            # No messages and no count: an agent with no messages yet. `create_agent` writes the
-            # count after the agent row, and if that write failed nothing would ever write it, so
-            # its absence here cannot be a row in flight that this read must wait for.
-            count = 0
+            # `create_agent` writes the count before the agent row, so an agent row without its
+            # count is a row in flight — or no such agent, which Strands never asks to list.
+            raise IncompleteSession(what, [count_key])
         end = max(count, max(present) + 1 if present else 0)
         start = max(offset, 0)
-        if start > 0 and start >= end:
+        if start > end:
             # Strands' offset is the conversation manager's removed-message count, from the agent
-            # row. Messages up to it were written, and the window kept at least the one at it — so
-            # an offset at or past what is here is an agent row ahead of its messages. Answering
-            # empty would make Strands append at index 0, over the conversation's first message.
-            raise IncompleteSession(what, [self._message_key(session_id, agent_id, i) for i in range(end, start + 1)])
+            # row: that many messages were written. An offset past what is here is an agent row
+            # ahead of its messages; answering empty would make Strands append at index 0, over the
+            # conversation's first message. An offset *equal* to it is legitimate — a sliding window
+            # of 0 removes every message each turn — so that case cannot be told from an agent row
+            # level with an older count, and reads as the empty tail it usually is.
+            raise IncompleteSession(what, [self._message_key(session_id, agent_id, i) for i in range(end, start)])
         wanted = list(range(start, end))
         if limit is not None:
             wanted = wanted[: max(limit, 0)]

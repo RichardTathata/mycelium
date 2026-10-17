@@ -1034,7 +1034,14 @@ window).
   overwriting it — now `IncompleteSession` (`test_an_offset_past_the_messages_here_is_incomplete_not_empty`,
   `test_an_agent_whose_window_moved_on_resumes_only_once_its_messages_have`). (C) The held-message error no longer
   says an applied write is unstored, and the README says `require_on_disk` fails every turn on a node without
-  `[persistence]`.
+  `[persistence]`. The second confirmation found both new rules too broad, fixed with tests seen failing first: the
+  offset rule refused a sliding window of 0, which legitimately removes every message (now strictly *past* the
+  messages here; `test_a_window_of_zero_resumes_where_it_was_written`, which also records that Strands then restarts
+  at index 0, as its `FileSessionManager` does); and reading a missing count as zero let an agent row that arrived
+  alone read as empty (now `create_agent` writes the count first, and `read_agent` reads a lone `count == 0` as no
+  agent; `test_an_agent_row_that_arrived_alone_is_incomplete_not_empty`,
+  `test_a_failed_agent_row_write_at_creation_leaves_the_agent_creatable`). Stated: an agent row exactly level with
+  an older count reads as an empty tail.
 - **Not built, stated:** a session's rows are replicated by gossip only (no `set_with_min_acks` option); a message
   listing reads one row per message; a row over about 1.5 MiB is refused rather than moved to the blob tier; no async
   variant (Strands' repository interface is synchronous); not published to PyPI.
