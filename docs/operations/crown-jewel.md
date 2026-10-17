@@ -114,6 +114,65 @@ resolve names: an allowed name that resolves to an address you meant to deny is 
 For the non-gated rows, enforce egress at the **network layer** (firewall rules,
 security groups, an egress proxy with its own allowlist).
 
+### Credentials attached at egress (post-360 plan row L, unreleased)
+
+A secret need not sit in a unit file, a component's environment or a backend's fields. Declare a
+**credential binding** on the node; a caller holds only its **placeholder**
+(`mycelium-credential:<name>`, `mycelium::credential_placeholder`) and puts it where the secret would
+go. The node's egress gate (`mycelium::EgressCredentials`) swaps the placeholder for the value **only**
+on a request to the host the binding names:
+
+```toml
+[[egress_credentials]]
+name        = "openai"
+host        = "api.openai.com"        # exact host — never a suffix
+path_prefix = "/v1"                   # optional; /v10 and /v1/../admin are outside it
+form        = "bearer"                # or "header" + header = "x-api-key", or "basic" + username = "svc"
+value_file  = "/run/secrets/openai"   # or value_env = "OPENAI_API_KEY"; read once, at start()
+# allow_plaintext = true              # attach over http to a non-loopback host (default: refused)
+```
+
+Env form, which replaces the TOML's bindings: `GOSSIP_EGRESS_CREDENTIALS="openai|api.openai.com/v1|bearer|file:/run/secrets/openai"`
+(`name|host[/prefix]|bearer, header:<name> or basic:<user>|env:<VAR> or file:<path>[|plaintext]`, entries split by `;`).
+
+What the gate does, per request:
+
+- **attaches** the value in its form, replacing the header that carried the placeholder, when the URL's host
+  is the bound host (case-insensitive), its normalised path is under `path_prefix`, and the scheme is https
+  (or http to `localhost` / a loopback address, or `allow_plaintext`);
+- **refuses** the request — before a byte is sent — anywhere else, and when a placeholder names no binding;
+- follows redirects itself, through the allow-list's per-hop verdict (≤ 5, never https → http), and **drops**
+  the credential on a hop the binding does not authorise (no value, no placeholder);
+- **counts** each binding's attachments, refusals and redirect drops (`EgressCredentials::uses()`; under
+  `metrics`, `mycelium_egress_credential_total{binding, event}`) — the label is the binding's name.
+
+The value is held only in the gate, as a sensitive header value: no `Debug`, `Display`, error message, log
+line or trace field carries it, and nothing writes it to the evidence journal. Guarantee
+`egress.credentials` reports `enforced` when a binding is configured.
+
+Who sends through the gate: `[[serve]]`'s `credential = "<binding>"` (a stem refuses to start if the node has
+no such binding), `OpenAiBackend::new(url, credential_placeholder("openai"), model).with_credentials(gate)`,
+and your own code via `agent.egress_credentials()` → `EgressCredentials::send(request)`.
+
+**The places a secret is read into a node, and which use a binding:**
+
+| Secret | Path today | Behind a binding? |
+|---|---|---|
+| `[[serve]]` bearer | `api_key` (literal), `api_key_env` (read at stem start) | **yes**, with `credential = "<binding>"`; the two old forms are kept unchanged |
+| `OpenAiBackend` key (prompt skills you register) | the `api_key` field | **yes**, with a placeholder and `.with_credentials(gate)`; a literal still works |
+| SkillRunner's LLM key | its own config's `api_key` | unchanged — a separate binary with its own config |
+| `HttpLibrarySource` static headers | `.with_header(…)` by the embedding code | unchanged — a companion without the gateway's client; it follows no redirect while it holds a header |
+| Federation credential | a per-call header signed with the node's key | unchanged — a signature over the call, not a static secret; its client follows no redirect |
+| Object-store credentials (S3/GCS) | the environment, read by `object_store` | unchanged — request signing inside `object_store`'s client, not a header the gate can attach |
+| Wiki git mirror push | git's own credential helpers | unchanged — git's process, not an HTTP client of the node's |
+| OIDC | none sent (JWKS and discovery are public) | n/a |
+| Artifact signing keys (`mycelium-artifact`) | `--key` (a file) or `--key-env` (a variable) | unchanged — used to sign locally, never sent |
+| An `[[activation]]` command | inherits the stem's whole environment | unchanged here — a `value_env` variable stays in that environment, so prefer `value_file`; confining the command is row M |
+| Gateway tokens, mTLS keys | inbound credentials, not egress | n/a |
+
+**Not covered:** a placeholder in a query string or a request body (sent as written — an opaque name); a
+binding pinned to a port (the host is compared, not the port); zeroising the value when the gate is dropped.
+
 ---
 
 ## 3. Failure modes

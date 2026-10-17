@@ -148,7 +148,14 @@ fn parse_publisher(field: &str, s: &str) -> Result<[u8; 32], StemError> {
 
 /// Zero-gaps Z2 (D2): the bearer a `[[serve]]` sends — `api_key` as written, or the value of the
 /// variable `api_key_env` names, read once here. An unset variable is a refusal that names it.
+///
+/// Post-360 plan row L: a `credential` resolves to the binding's **placeholder**, never its value — the
+/// node's egress gate attaches the value at the binding's host (`serve::spawn` hands the backend the
+/// gate). Whether the node holds that binding is checked by `Stem::start`, which has the agent.
 pub fn resolve_serve_key(d: &mycelium::ServeDecl) -> Result<Option<String>, StemError> {
+    if let Some(binding) = &d.credential {
+        return Ok(Some(mycelium::credential_placeholder(binding)));
+    }
     if let Some(lit) = &d.api_key {
         return Ok(Some(lit.clone()));
     }
@@ -379,6 +386,18 @@ impl Stem {
             let resolved = units.serves.iter()
                 .map(|d| resolve_serve_key(d).map(|k| (d.clone(), k)))
                 .collect::<Result<Vec<_>, _>>()?;
+            // Row L: a `credential` must name a binding this node's gate holds — refused by name here,
+            // not discovered as an endpoint's 401 (or a skill that never answers) later.
+            for d in &units.serves {
+                if let Some(binding) = &d.credential
+                    && !agent.egress_credentials().is_some_and(|g| g.has(binding))
+                {
+                    return Err(StemError(format!(
+                        "[[serve]] {}/{}: credential `{binding}` is not a binding on this node — add [[egress_credentials]] name = \"{binding}\" to the node's config (it is read at the agent's start)",
+                        d.ns, d.name
+                    )));
+                }
+            }
             Some(crate::serve::spawn(Arc::clone(&agent), resolved, opts.tick))
         };
         #[cfg(not(feature = "llm"))]
@@ -735,7 +754,7 @@ mod tests {
         let decl = |literal: Option<&str>, env: Option<&str>| mycelium::ServeDecl {
             ns: "llm".into(), name: "m".into(), endpoint: "http://127.0.0.1:9/v1".into(), model: "x".into(),
             while_live: None, api_key: literal.map(str::to_string), api_key_env: env.map(str::to_string),
-            max_tokens: None, temperature: None,
+            credential: None, max_tokens: None, temperature: None,
         };
         // The crate is `#![deny(unsafe_code)]` (post-360 P3); this env write is its only `unsafe`.
         // SAFETY — the hazard, stated honestly: edition 2024 marks `set_var` unsafe because a
@@ -751,6 +770,96 @@ mod tests {
         assert_eq!(resolve_serve_key(&decl(None, Some("MYCELIUM_TEST_SERVE_KEY_SET_7F"))).unwrap().as_deref(), Some("sk-test-7f"));
         let e = resolve_serve_key(&decl(None, Some("MYCELIUM_TEST_SERVE_KEY_UNSET_7F"))).unwrap_err();
         assert!(e.to_string().contains("MYCELIUM_TEST_SERVE_KEY_UNSET_7F") && e.to_string().contains("api_key_env"), "{e}");
+    }
+
+    /// Post-360 plan row L, end to end: a stem whose `[[serve]]` names a credential binding serves a
+    /// skill whose calls reach the endpoint carrying the binding's value — which the unit file, the
+    /// stem and the backend never held (the stem holds the placeholder; the node's gate attaches it).
+    #[cfg(feature = "llm")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_served_skill_sends_its_binding_value_which_the_stem_never_held() {
+        const SECRET: &str = "sk-row-L-serve-e2e-91c";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint_port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let log = Arc::clone(&seen);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { return };
+                let log = Arc::clone(&log);
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+                    let mut buf = vec![0u8; 16384];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    log.lock().unwrap().push(String::from_utf8_lossy(&buf[..n]).to_string());
+                    let body = r#"{"choices":[{"message":{"content":"served"}}],"usage":{"total_tokens":1},"model":"pack"}"#;
+                    let reply = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    let _ = sock.write_all(reply.as_bytes()).await;
+                });
+            }
+        });
+        let secret_file = std::env::temp_dir().join(format!("mycelium-row-l-serve-{}", std::process::id()));
+        std::fs::write(&secret_file, SECRET).unwrap();
+
+        let (seed, lib_dir, head, _ids) = blob_library("credential-e2e", &[("pack", b"weights standing in")]).await;
+        let units = NodeCapabilityConfig::from_toml_str(&format!(
+            "{head}[[serve]]\nname=\"keyed\"\nendpoint=\"http://localhost:{endpoint_port}/v1\"\nmodel=\"pack\"\ncredential=\"model\"\n"
+        )).unwrap();
+        assert!(!format!("{units:?}").contains(SECRET));
+        let port = alloc_port();
+        let cfg = mycelium::GossipConfig {
+            bind_port: port,
+            bootstrap_peers: vec![NodeId::new("127.0.0.1", seed.node_id().to_socket_addr().port()).unwrap()],
+            health_check_interval_secs: 2,
+            egress_credentials: vec![mycelium::CredentialBinding {
+                name: "model".into(), host: "localhost".into(), path_prefix: Some("/v1".into()),
+                form: mycelium::CredentialForm::Bearer, header: None, username: None,
+                value_env: None, value_file: Some(secret_file.clone()), allow_plaintext: false,
+            }],
+            ..Default::default()
+        };
+        let node = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+        node.start().await.expect("agent start");
+        let stem = Stem::start(Arc::clone(&node), &units, stem_opts(&lib_dir)).unwrap();
+        let skill = CapFilter::new("llm", "keyed");
+        assert!(wait_until(30, || node.capabilities().resolve(&skill).iter().any(|(n, _)| n == node.node_id())).await, "the skill is served");
+        let out = node.llm().call_prompt_skill("llm", "keyed", "hello", Default::default(), Duration::from_secs(10)).await.expect("the call answers");
+        assert_eq!(out, "served");
+        let seen = seen.lock().unwrap().clone();
+        assert!(seen.iter().any(|r| r.contains(&format!("Bearer {SECRET}"))), "the endpoint received the binding's value: {seen:?}");
+        assert!(seen.iter().all(|r| !r.contains("mycelium-credential:")), "and never the placeholder");
+        assert_eq!(node.egress_credentials().unwrap().uses()[0].attached as usize, seen.len());
+
+        stem.stop().await;
+        node.shutdown().await;
+        seed.shutdown().await;
+        let _ = std::fs::remove_file(&secret_file);
+    }
+
+    /// Post-360 plan row L: a `[[serve]]`'s `credential` resolves to the binding's placeholder (the
+    /// stem never holds the value), and a binding the node does not have **refuses the start**, naming
+    /// it. Seen failing first: the stem started and served with the placeholder as its bearer.
+    #[cfg(feature = "llm")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_serve_naming_a_binding_the_node_lacks_refuses_the_start() {
+        let d = mycelium::ServeDecl {
+            ns: "llm".into(), name: "m".into(), endpoint: "https://api.example/v1".into(), model: "x".into(),
+            while_live: None, api_key: None, api_key_env: None, credential: Some("openai".into()),
+            max_tokens: None, temperature: None,
+        };
+        assert_eq!(resolve_serve_key(&d).unwrap(), Some(mycelium::credential_placeholder("openai")));
+        let (seed, lib_dir, head, _ids) = blob_library("credential", &[("pack", b"weights standing in")]).await;
+        let units = NodeCapabilityConfig::from_toml_str(&format!(
+            "{head}[[serve]]\nname=\"keyed\"\nendpoint=\"http://127.0.0.1:9/v1\"\nmodel=\"pack\"\ncredential=\"openai\"\n"
+        )).unwrap();
+        let node = agent(alloc_port(), Some(seed.node_id().to_socket_addr().port())).await;
+        let err = match Stem::start(Arc::clone(&node), &units, stem_opts(&lib_dir)) {
+            Ok(stem) => { stem.stop().await; panic!("a serve naming a binding the node lacks must refuse the start") }
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("credential `openai`") && err.contains("egress_credentials"), "{err}");
+        node.shutdown().await;
+        seed.shutdown().await;
     }
 
     /// Zero-gaps Z2 (D2): a stem whose `[[serve]]` names an unset variable **refuses to start**,

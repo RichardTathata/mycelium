@@ -76,6 +76,23 @@ pub struct OpenAiBackend {
     pub api_key:  String,
     pub model:    String,
     pub client:   reqwest::Client,
+    /// The egress gate's credential bindings (post-360 plan row L). When set and `api_key` is a
+    /// placeholder ([`credential_placeholder`](crate::config::credential_placeholder)), the request is
+    /// sent through the gate, which attaches the binding's value only at the host it names; the
+    /// backend never holds the secret. `None` = `api_key` is sent as written.
+    pub credentials: Option<std::sync::Arc<crate::agent::egress_credentials::EgressCredentials>>,
+}
+
+impl std::fmt::Debug for OpenAiBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let key = if crate::config::credential_placeholders_in(&self.api_key).is_empty() { "<redacted>" } else { self.api_key.as_str() };
+        f.debug_struct("OpenAiBackend")
+            .field("base_url", &self.base_url)
+            .field("api_key", &key)
+            .field("model", &self.model)
+            .field("credentials", &self.credentials.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl OpenAiBackend {
@@ -88,7 +105,17 @@ impl OpenAiBackend {
             // gate checks `base_url`, and a 307 would re-send the prompt wherever it pointed.
             // `with_egress` re-checks each hop against the node's policy instead.
             client:   crate::agent::egress_client::build_or_none(crate::agent::egress_client::without_redirects()),
+            credentials: None,
         }
+    }
+
+    /// Send through the egress gate's credential bindings (post-360 plan row L): build the backend
+    /// with a placeholder for `api_key` — `credential_placeholder("openai")` — and the gate attaches
+    /// the binding's value, at its host only. The gate follows redirects under its own (the node's)
+    /// egress policy. What `[[serve]]`'s `credential` does.
+    pub fn with_credentials(mut self, gate: std::sync::Arc<crate::agent::egress_credentials::EgressCredentials>) -> Self {
+        self.credentials = Some(gate);
+        self
     }
 
     /// Follow redirects, re-checking every hop against `egress` (realignment repairs R3). What a
@@ -122,13 +149,25 @@ impl LlmBackend for OpenAiBackend {
                 {"role": "user",    "content": user},
             ]
         });
-        let resp = self.client
+        let request = self.client
             .post(format!("{}/chat/completions", self.base_url.trim_end_matches('/')))
             .bearer_auth(&self.api_key)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| LlmError::Http(e.to_string()))?;
+            .json(&body);
+        let names_binding = !crate::config::credential_placeholders_in(&self.api_key).is_empty();
+        let resp = match (&self.credentials, names_binding) {
+            (Some(gate), true) => {
+                let request = request.build().map_err(|e| LlmError::Http(e.to_string()))?;
+                gate.send(request).await.map_err(|e| LlmError::Http(e.to_string()))?
+            }
+            // A placeholder with no gate would send the binding's name as the bearer: refused, so a
+            // missing attachment is a named error rather than an endpoint's 401.
+            (None, true) => {
+                return Err(LlmError::Http(
+                    "api_key is a credential placeholder but no egress gate is attached (OpenAiBackend::with_credentials)".into(),
+                ))
+            }
+            (_, false) => request.send().await.map_err(|e| LlmError::Http(e.to_string()))?,
+        };
 
         if !resp.status().is_success() {
             let status = resp.status();

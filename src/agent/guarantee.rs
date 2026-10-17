@@ -974,6 +974,18 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
           &["config::EgressPolicy::permits_url"], "docs/operations/crown-jewel.md",
           always,
           |c| if c.config.egress.allow_hosts.is_empty() { Resolution::NotConfigured { missing: "egress.allow_hosts (empty allows all)" } } else { Resolution::Enforced }),
+        g("egress.credentials", 1, "egress", Node,
+          "a credential binding's value is attached at the egress gate only to a request for the host it names (under its path prefix, over https or to loopback) — refused anywhere else, dropped on a redirect that leaves it, counted per binding, and never in a log, a `Debug`, an error or the evidence journal; a caller holds only its placeholder",
+          "`[[egress_credentials]]` (or `GOSSIP_EGRESS_CREDENTIALS`), values read once at `start()`; a caller that sends through the gate — `OpenAiBackend::with_credentials`, `[[serve]]`'s `credential`, `EgressCredentials::send`. **Not covered:** a secret a component or command reads from its own environment or files; a placeholder in a query string or body (not resolved); `api_key` / `api_key_env`, federation, object-store and git credentials, which keep their own paths",
+          &["agent::egress_credentials::EgressCredentials::send", "config::CredentialBinding::authorises_url"], "docs/operations/crown-jewel.md",
+          always,
+          |c| {
+              if c.config.egress_credentials.is_empty() { return Resolution::NotConfigured { missing: "egress_credentials (no binding configured)" }; }
+              #[cfg(feature = "gateway")]
+              { Resolution::Enforced }
+              #[cfg(not(feature = "gateway"))]
+              { Resolution::NotInBuild { feature: "gateway" } }
+          }),
         g("persist.configured", 1, "persistence", Node,
           "a restart recovers the KV and acceptor memory from disk",
           "`[persistence]`",

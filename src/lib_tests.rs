@@ -280,6 +280,8 @@ fn spawn_handler_with(
         federation_edge: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         federation_clients: std::sync::OnceLock::new(),
+        #[cfg(feature = "gateway")]
+        egress_credentials: std::sync::OnceLock::new(),
         #[cfg(feature = "compliance")]
         audit_sink: std::sync::OnceLock::new(),
         #[cfg(feature = "compliance")]
@@ -4109,6 +4111,8 @@ async fn test_subscribe_notified_via_gossip() {
         federation_edge: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         federation_clients: std::sync::OnceLock::new(),
+        #[cfg(feature = "gateway")]
+        egress_credentials: std::sync::OnceLock::new(),
             #[cfg(feature = "compliance")]
             audit_sink: std::sync::OnceLock::new(),
             #[cfg(feature = "compliance")]

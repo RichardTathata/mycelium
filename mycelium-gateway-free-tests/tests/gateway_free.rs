@@ -58,3 +58,29 @@ fn the_gateway_guarantees_read_not_in_build() {
         assert_eq!(e.resolution.state(), "not_in_build", "{id}");
     }
 }
+
+/// Post-360 plan row L: a credential binding is attached by the egress gate, which a gateway-free
+/// build does not have — refused at start by name rather than accepted and attached to nothing, and
+/// its guarantee reads `not_in_build`.
+#[tokio::test]
+async fn a_credential_binding_refuses_the_start_and_reads_not_in_build() {
+    let mut cfg = GossipConfig::default();
+    cfg.egress_credentials = vec![mycelium::CredentialBinding {
+        name: "model".into(),
+        host: "api.example.com".into(),
+        path_prefix: None,
+        form: mycelium::CredentialForm::Bearer,
+        header: None,
+        username: None,
+        value_env: Some("MYCELIUM_ROW_L_GATEWAY_FREE".into()),
+        value_file: None,
+        allow_plaintext: false,
+    }];
+    let e = node(cfg.clone()).guarantee_report();
+    let entry = e.entries.iter().find(|e| e.id == "egress.credentials").expect("registered");
+    assert_eq!(entry.resolution.state(), "not_in_build");
+    match node(cfg).start().await {
+        Err(GossipError::InvalidField { field, .. }) => assert_eq!(field, "egress_credentials"),
+        other => panic!("a build without the gateway must not start with a credential binding: {other:?}"),
+    }
+}

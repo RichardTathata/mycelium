@@ -371,6 +371,17 @@ their broker IS the crown jewel). Two opt-in controls:
   let `http://evil\@allowed/` through as `allowed`); and an object store is gated on the **endpoint it
   dials**, not the bucket name (`dial_hosts`). Not covered: name resolution (an allowed name resolving to a
   denied address), a cloud identity's credential traffic, redirects inside `object_store`'s own client.
+- **Credential bindings at the egress gate** (post-360 row L, unreleased) — `[[egress_credentials]]` /
+  `GOSSIP_EGRESS_CREDENTIALS` name a host (exact, never a suffix), an optional path prefix, a form (bearer, header,
+  basic) and a value source; the value is read once at `start()` into `EgressCredentials`
+  (`src/agent/egress_credentials.rs`), held as a sensitive `HeaderValue`, and attached only where
+  `CredentialBinding::authorises_url` (`mycelium-core/src/config.rs`) says — a caller holds the placeholder
+  `mycelium-credential:<name>`. The gate **follows redirects itself** (a reqwest redirect policy cannot change
+  headers, and reqwest strips only `Authorization`/`Cookie` cross-origin, never a custom `x-api-key`), resolving each
+  hop afresh: off the binding, no value and no placeholder. Elsewhere a placeholder request is refused before it is
+  sent. Users: `[[serve]].credential`, `OpenAiBackend::with_credentials`. Guarantee `egress.credentials`. The places a
+  secret enters a node, and which use a binding, are tabled in `operations/crown-jewel.md`. Not covered: placeholders
+  in a query or body, ports, zeroisation, a `value_env` variable's presence in the process environment.
 - **Crypto-shred erasure (WS-F, `tls`)** — `SubjectKeyRegistry` (`mycelium-core/src/erasure.rs`):
   per-subject DEK envelope encryption; GDPR erase = destroy the DEK → all ciphertext dead. The
   per-subject layer *above* the KV value, composing with `DataAtRestCipher`. Physical deletion isn't
