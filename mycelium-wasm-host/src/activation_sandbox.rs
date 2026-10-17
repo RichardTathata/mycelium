@@ -438,7 +438,7 @@ mod linux {
             return Err(format!("landlock enforced the profile only partly ({:?}) — refused", status.ruleset));
         }
         seccompiler::apply_filter(&filter(net)?).map_err(|e| format!("seccomp: {e}"))?;
-        if let Some(x32) = x32_filter().filter(|_| false) { // PLANTED OFF for one CI run: x32 fail-first (#636 finding 4)
+        if let Some(x32) = x32_filter() {
             seccompiler::apply_filter(&x32).map_err(|e| format!("seccomp (x32): {e}"))?;
         }
         Ok(())

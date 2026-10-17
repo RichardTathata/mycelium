@@ -1245,7 +1245,8 @@ CC8, `docs/capabilities.md`, the crate README). The example units with `[[activa
   itself is left tolerant: a misspelt top-level section runs nothing rather than something unconfined, and the
   SDK's declare route reads the same files. (4) x32: on x86_64 a second, raw cBPF filter refuses every syscall
   with the x32 bit (`EACCES`); `an_x32_syscall_is_refused_by_the_filter` (x86_64 only — not applicable on aarch64,
-  where the container ran; its failing-first is CI's first run on x86_64). (5) A symlink planted by one confined run
+  where the container ran; seen failing first in CI on x86_64 with the filter planted off, commit 36a24eae: errno 38,
+  `ENOSYS` — that runner's kernel has x32 disabled, so the bypass was not open there, and the filter now answers first). (5) A symlink planted by one confined run
   widened the next: each profile is now resolved once per declaration and placed file and kept for the stem's life
   (`resolved_profile`, lock-order row 61), its Linux paths held open `O_PATH` and the Landlock rules made from those
   descriptors; and a declared path that is a symlink, or passes through one below the placement root or a write
