@@ -45,6 +45,20 @@ via wasm-host).
 - **[wiki.md](wiki.md)** — `mycelium-wiki/`: group-scoped, LLM-curated wiki — the durable, curated
   third primitive (a **store, not a service**: node-independent store + a recallable curator). Build
   phases 1–5 shipped 2026-07-03.
+- **`strands-session-mycelium/`** (Python, post-360 row O, 2026-10-17) — a Strands Agents `SessionManager` over the
+  Python SDK's KV verbs: one row per session, agent, message and swarm/graph under `strands/`, plus a per-agent count
+  row so a reader can tell a missing tail from a short conversation. The design rule it shares with the checkpointer:
+  **incomplete is never empty** (`IncompleteSession`, retriable), because Strands resumes by appending after the last
+  message it read and would overwrite what it did not see. A failed message write is held and written in order, never
+  skipped (Strands advances its index first, so a skip is a hole no retry fills). The edge that reads cannot close — a node
+  holding none of a record, or an older version, cannot tell either from the real thing — is closed for **writes** by
+  **claims**: each record and message index is decided once by a consensus write before it is written, so a stale
+  node or a second writer is refused (`IncompleteSession`, `StaleWriter` + a fence), never overwrites. The cost is a
+  quorum per write; `claims=False` restores last-writer-wins. A row is at most about 1.5 MiB — the gateway's 2 MiB
+  request body, base64 — not `MAX_KV_WRITE_BYTES`. Building it found that the `mycelium` binary never voted, so a
+  fleet of binaries timed out on every consensus write; it starts a listener now. Pinned to
+  `strands-agents` 1.61.1, the interface recorded in `tests/test_interface.py`; live suite in CI on three voting `mycelium`
+  nodes (`strands-session-mycelium/README.md`).
 - **`mycelium-wasm-host/`** — WS-E code mobility: the coordinator-free
   requirement→resolve→pull→advertise→serve→self-heal loop, Ed25519 provenance, mesh artifact
   pull, gossiped catalog, fuel limits (restart ≡ provisioning). PRs #32–#42; runbook

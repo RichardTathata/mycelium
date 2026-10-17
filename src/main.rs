@@ -56,6 +56,13 @@ async fn run(config: GossipConfig, trace: Option<Arc<mycelium::decision::Decisio
     let shutdown = if interactive { None } else { Some(mycelium::shutdown::ShutdownSignal::install()?) };
 
     agent.start().await?;
+    // The node votes. A node that never started a listener answered every quorum it was asked to join
+    // with silence, so a fleet of `mycelium` binaries timed out on each consistent write, lock and
+    // election its own gateway serves (`/gateway/overlay/{consistent/set,lock/acquire,elect}`) — only
+    // an embedder that called `start_consensus_listener` itself had a working quorum (found 2026-10-17,
+    // post-360 row O). Held until shutdown; dropping the handle stops the voter.
+    #[cfg(feature = "consensus")]
+    let _voter = agent.consensus().start_consensus_listener(mycelium::ConsensusConfig::default());
 
     match shutdown {
         None => run_interactive(Arc::clone(&agent)).await?,

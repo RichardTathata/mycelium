@@ -87,7 +87,7 @@ Four places strain that line today, and the rows in §3 address each:
 | **L** | Credentials attached at egress | a secret need not enter a component's or an activation command's environment: an outbound request names a credential binding, and the egress gate (`EgressPolicy`, `mycelium-core/src/config.rs:280`, which today checks the host and every redirect hop) attaches it on the way out — bearer, header and basic forms at least — only to the host the binding names; a redirect off that host drops it; the binding's use is counted and its value never logged, traced or written to the evidence journal; the places a secret is read into the node today (`[[serve]].api_key_env`, federation credentials, an activation command's environment) are listed and each either moved behind a binding or stated as unchanged *From NVIDIA OpenShell (2026-10-12):* the component holds an opaque placeholder and never the value — the gate resolves the placeholder only at an endpoint the binding authorises — so a leaked environment or log carries nothing usable. | — |
 | **M** | Activation commands confined | an `[[activation]]` command — today "not a sandbox: there is no allowlist and no confinement" (`docs/reference/unit-file.md:276`) and run with the stem's privileges — can be run under an OS confinement profile the unit file names (macOS Seatbelt first, Linux namespaces/Landlock or seccomp where available): filesystem access limited to the placed artifact's directory and declared paths, network limited to declared hosts or none; a profile the platform cannot apply refuses the activation by name, never runs it unconfined; the unconfined default stays, stated, and the guarantee report says which applies *From NVIDIA OpenShell (2026-10-12):* a profile's filesystem and syscall limits are fixed for the activation's life and its network allow-list may change live (OpenShell's split: filesystem and process locked at creation, network hot-reloadable); OpenShell itself (containers, seccomp, an unprivileged identity; needs Docker) is a candidate backend for a stem, beside a native Seatbelt/Landlock profile, rather than something to rebuild. | — |
 | **N** — *delivered after 2.34.0, unreleased (#633), §3.5* | A2A at the current specification | an A2A client built on the current `a2a-sdk` (1.2.2, the library Strands Agents uses) reaches Mycelium's skills through `/a2a`, with the same authority as today — **the 2026-10-12 probe found it cannot**: the card is served only at `/.well-known/agent.json` (the SDK reads `/.well-known/agent-card.json`, 404); the card's `url` is the node's **gossip** address, not its gateway, and omits `/a2a` (`src/agent/a2a.rs:445`, so the SDK's `send_message` failed with a network error); the methods are the pre-0.2 `tasks/send` / `tasks/sendSubscribe` / `tasks/get` / `tasks/cancel` (`SendMessage` and `message/send` both answer `-32601`); and the skill is chosen by a Mycelium-only `skillId` parameter that a standard client never sends. Promises: the card at `/.well-known/agent-card.json` (the old path kept for one release), naming the gateway's own URL and scheme (https under `gateway_tls`) with `/a2a` and its supported interfaces and protocol versions; the A2A 1.0 methods (`SendMessage`, `SendStreamingMessage`, `GetTask`, `CancelTask`) and the 0.3 names (`message/send`, `message/stream`) served beside the old ones, which stay for one release with a deprecation entry; a message reaches a skill without `skillId` (a declared default skill, or the skill named in the message's metadata — decided in the PR, stated on the card); every new method runs the same doors as `tasks/send` — the action evaluator, mandates, evidence, task ownership — and the C7 bypass matrix gains each new method; the probe becomes a CI test driving the real `a2a-sdk` client against a node | — |
-| **O** | A Strands session store on Mycelium | a companion package (Python, beside `langgraph-checkpoint-mycelium`) implementing Strands Agents' `SessionManager` over the Mycelium Python SDK, so an agent's conversation and state, and a swarm's shared memory, live in the fleet's KV rather than a file or a bucket; a save returns the SDK's receipt and its docs say which rung it names (a local application, not replication — the checkpointer's wording); an incomplete or unreadable session is an error, never an empty one; concurrent agents in one session do not lose each other's writes, or the limit is stated; its live suite runs in CI against a real node; pinned to a Strands release and re-checked when Strands changes the interface | — (N for the cross-host demo) |
+| **O** — *delivered after 2.34.0, unreleased (#634), §3.5* | A Strands session store on Mycelium | a companion package (Python, beside `langgraph-checkpoint-mycelium`) implementing Strands Agents' `SessionManager` over the Mycelium Python SDK, so an agent's conversation and state, and a swarm's shared memory, live in the fleet's KV rather than a file or a bucket; a save returns the SDK's receipt and its docs say which rung it names (a local application, not replication — the checkpointer's wording); an incomplete or unreadable session is an error, never an empty one; concurrent agents in one session do not lose each other's writes, or the limit is stated; its live suite runs in CI against a real node; pinned to a Strands release and re-checked when Strands changes the interface | — (N for the cross-host demo) |
 | **P** | A Strands fleet, demonstrated | a runnable example, in CI like the co-op demos, in which Strands agents on three Mycelium nodes plan one shared task (a constructive domain — food redistribution or a microgrid), keep their session and swarm memory in the fleet through O, and call fleet skills through `/a2a` (N): a call outside an agent's mandate is refused and the refusal is in the evidence journal; one node is stopped and the work resumes on another from the stored session; the README states what Strands provides and what Mycelium adds, and which properties the run shows versus which it does not | N, O |
 | **Q** — *delivered 2.33.0 (#616), §3.5* | Revocation reaches every verifier | a key a node has revoked (`rotate_identity_on_compromise`, `sys/revocation/`) is filtered from the `peer_keys`-based KV `SignedData` verifier, from identity-proof chaining (`validate_and_merge_identity`'s trusted signer) and from the unsigned identity exemption (`connection::self_authenticating_identity`), not only from consensus and `known_verifying_keys`; a test that a `SignedData` signed by a revoked key is refused at a peer that has seen the revocation; `src/agent/revocation.rs`'s `revoke_key` doc made true (corrected in #611 to say what holds today) | — (independent of F2) |
 | **S** — *delivered 2.34.0 (#623), §3.5* | Identity proofs on by default | `require_identity_proofs` defaults to `true` (today `false`, `mycelium-core/src/config.rs`; the `secure-single-domain` profile already requires it as `id.proofs_required`): a bare `sys/identity/{N}` key list without a proof is refused everywhere a node's keys are learned, closing the identity-poisoning residual rows F and Q state — a member writing its own key into another's identity, which still reaches the verify-only history set (forged audit history, a steered checkpoint anchor) and fully impersonates a node on a legacy certificate; a mixed-fleet window in the 2.30.0 shape (the MINOR that flips it says so; a node from before 2.3.0, which cannot prove, is cut off until upgraded, and `false` stays available as an explicit opt-out for that window and for TLS-less development fleets, where the setting is inert); an upgrade note in `deprecations.md`; the guarantee `id.proofs_required` resolves `enforced` by default; the 2.14.0 attempt that was reverted is re-examined first (the failure it was blamed on was not its doing) | — (best in the MINOR with F2) |
@@ -964,6 +964,140 @@ window).
   `SubscribeToTask`, the extended card, a task's `history`, and the HTTP+JSON and gRPC bindings are not served;
   `A2A-Version` is not checked.
 
+**O — A Strands session store on Mycelium (#634, unreleased).** The doors enumerated first: Strands'
+`SessionRepository` (`strands/session/session_repository.py` in `strands-agents` 1.61.1, twelve methods, and the
+`delete_session` its own file and S3 managers add) and the SDK verbs the store reaches the node with
+(`MyceliumAgent.get`/`set`/`delete`/`keys`, `mycelium-py/src/mycelium/agent.py`, behind `kv:read`/`kv:write`,
+`authz.rs`). The KV routes refuse owned namespaces (`refuse_protected_key`); `strands/` is an application namespace.
+- *a companion package (Python, beside `langgraph-checkpoint-mycelium`) implementing Strands Agents' `SessionManager`
+  over the Mycelium Python SDK* — `strands-session-mycelium/`, `MyceliumSessionManager` (a
+  `RepositorySessionManager`) over `MyceliumSessionRepository`, every method of the interface implemented
+  (`test_every_method_is_implemented_here`).
+- *so an agent's conversation and state, and a swarm's shared memory, live in the fleet's KV rather than a file or a
+  bucket* — `test_a_conversation_and_its_state_resume_in_another_manager` (a real `Agent`, a scripted model; the
+  messages and `agent.state` back in a new manager) and `test_a_swarms_shared_state_lives_in_the_session` (a real
+  `Swarm`; its serialized state is the session's `multi/` row). Across two nodes:
+  `test_a_session_written_on_one_node_resumes_on_another`.
+- *a save returns the SDK's receipt and its docs say which rung it names (a local application, not replication — the
+  checkpointer's wording)* — every write returns the SDK's `KvReceipt` (`_write`), kept on `last_receipt` and passed
+  to `on_receipt` (`test_every_write_hands_back_the_sdks_receipt`; against a node, the live test asserts an
+  `operation_id` and a `local_durability`); the README's "What a save's receipt names" and the module doc say rung 1 and
+  the gateway node's disk, not replication. `require_on_disk` added (`test_require_on_disk_refuses_a_write_that_is_not`).
+  Strands' interface returns `None` from its writes, so the receipt is on the manager, not the return value.
+- *an incomplete or unreadable session is an error, never an empty one* — `IncompleteSession` (a `SessionException`,
+  with `missing`): a session row absent while its agents are present, an agent row absent while its messages are, a
+  message missing below the larger of the stored count and the highest index present, a missing count. Five tests,
+  seen failing first with the checks removed (the store then returned the rows it had, as Strands' own managers do):
+  the middle message, the last message, the agent row, the session row, the count. Unreadable: a row that is not a
+  JSON object, and a gateway error, raise `SessionException` (`test_an_unreadable_row_is_an_error_not_an_absent_one`,
+  `test_a_gateway_refusal_is_an_error_and_creates_nothing`, the latter also showing nothing is created over a 401), and
+  so does a row that is JSON but not its record, a `message_id` that disagrees with its key included (review finding
+  6). A failed message write leaves no hole: the store holds it and writes it, in order, before any later message
+  (review finding 1). **Not detectable, stated:** a node behind as a whole (an older count, none of the later
+  messages) reads an older, complete conversation; claims (below) stop it writing over the newer one.
+- *concurrent agents in one session do not lose each other's writes, or the limit is stated* — both: different agent
+  ids write disjoint rows (`test_two_agents_in_one_session_keep_each_others_writes`; across two nodes at once,
+  `test_two_agents_on_two_nodes_in_one_session_keep_both_conversations`), and, since the claims below, two writers of
+  *one* agent or swarm cannot write over each other either (refused, `StaleWriter`). A count row that lags its
+  messages reads them rather than overwriting them (`test_messages_ahead_of_a_lagging_count_are_read_and_not_overwritten`).
+- *its live suite runs in CI against a real node* — `tests/test_live.py` in the `python-sdk` job's own step against
+  three meshed `mycelium` nodes, which vote (the store's claims are consensus writes), with
+  `MYCELIUM_STRANDS_LIVE_REQUIRED`; collected by the test
+  universe (its skip is a `skipif` mark, so `--collect-only` lists it — it was a module-level skip, which listed
+  nothing, until review finding 4); the inventory check and its mutation suite pass with the new directory.
+- *pinned to a Strands release and re-checked when Strands changes the interface* — `strands-agents==1.61.1` in the
+  package's dependencies (so CI installs exactly it); `tests/test_interface.py` asserts the installed version and
+  records each `SessionRepository` method's parameters, so a release that changes the interface fails before the pin
+  moves.
+- *The independent review (#634)* — nine findings. Fixed, each with a test seen failing first: (1) a failed message
+  write left a hole no retry filled, because Strands has moved to the next index by then — every later resume raised
+  `IncompleteSession` for a row that would never arrive (now held and written in order;
+  `test_a_failed_message_write_is_held_and_written_before_the_next`,
+  `test_a_message_that_cannot_be_stored_holds_every_later_one_back`); (2) the row limit was stated as
+  `MAX_KV_WRITE_BYTES` (about 9.94 MiB) while the gateway's 2 MiB request body, carrying the row base64-encoded,
+  refused anything over about 1.5 MiB with a 413 — the store now computes the request's size (`request_bytes`), and
+  the live suite writes the largest row it allows through a real gateway
+  (`test_the_largest_row_the_store_sends_is_one_the_gateway_takes`; a probe found the gateway's limit within a few
+  bytes of it); (4) the live suite's module-level skip hid it from the test universe; (6) a JSON row missing its
+  fields raised `TypeError`, and a `message_id` was not checked against its key. Documented: (3) "never a shorter
+  conversation" overclaimed — a node behind as a whole reads an older one; (8) a swarm's or graph's state that has not
+  arrived is recreated, named beside sessions and agents; `delete_session` racing a writer is unsupported. (5) The
+  README's install line installs `./mycelium-py` too; (7) `make check-full` runs the directory and `src/lib.rs`'s KV
+  table names `strands/`. Answered: (9) the interface record covers `SessionRepository`'s signatures; the
+  `RepositorySessionManager` behaviour the store relies on (the index advanced before `create_message`, the offset
+  from `removed_message_count`) is exercised by the behaviour tests under the exact pin, and a resumed swarm is
+  Strands' (it resets a completed swarm) — the store's half, its row, is tested. The reviewer confirmed 1, 2, 4–7 and
+  accepted 3, 8, 9, and found two more of finding 1's family, fixed with tests seen failing first: (A) a failed
+  count write at `create_agent` left the agent unresumable — a missing count with no messages now reads as zero
+  (`test_a_failed_count_write_at_creation_leaves_the_agent_resumable`); (B) an agent row ahead of its messages (a
+  sliding window's removed count at or past the messages here) read as empty, and Strands restarted at message 0,
+  overwriting it — now `IncompleteSession` (`test_an_offset_past_the_messages_here_is_incomplete_not_empty`,
+  `test_an_agent_whose_window_moved_on_resumes_only_once_its_messages_have`). (C) The held-message error no longer
+  says an applied write is unstored, and the README says `require_on_disk` fails every turn on a node without
+  `[persistence]`. The second confirmation found both new rules too broad, fixed with tests seen failing first: the
+  offset rule refused a sliding window of 0, which legitimately removes every message (now strictly *past* the
+  messages here; `test_a_window_of_zero_resumes_where_it_was_written`, which also records that Strands then restarts
+  at index 0, as its `FileSessionManager` does); and reading a missing count as zero let an agent row that arrived
+  alone read as empty (now `create_agent` writes the count first, and `read_agent` reads a lone `count == 0` as no
+  agent; `test_an_agent_row_that_arrived_alone_is_incomplete_not_empty`,
+  `test_a_failed_agent_row_write_at_creation_leaves_the_agent_creatable`). Stated: an agent row exactly level with
+  an older count reads as an empty tail.
+- *The stated limits, closed for writes (on the user's direction, 2026-10-17)* — the review rounds left three edges
+  stated: a node behind as a whole, a record none of which has arrived, and one agent id on two writers. Each ends in
+  a write over something the writing node has not seen, which no read on that node can detect. **Claims**: every
+  message index, and every version of an agent's or a swarm's or graph's record, is claimed once, fleet-wide, by
+  `consistent_set` before it is written; a claim another writer holds is refused (`StaleWriter`, which fences the
+  writer; `IncompleteSession` when a record was created elsewhere), never overwritten. A record's update claims the
+  version after the one the writer's object was read at, so a writer resumed from an older version is refused at its
+  first write. A claim names its write: the row goes under `pending/{token}` first and the claim's value is the
+  writer and the token, so a reader that finds a claimed write whose row has not arrived serves it from the pending
+  copy and writes nothing — a writer that claims and dies blocks no one, and no writer id is a licence to rewrite (the
+  first claims round let a restarted writer "take back" an index judged unwritten by its own node's view: review
+  finding 1). A session's claim fixes its generation, which scopes the rest; a deleted session's id is refused by
+  name. A sliding window of 0, which makes Strands number from 0 again after the store answers an empty tail, moves to
+  the next free index instead of writing over message 0 (independent of claims; Strands' own `FileSessionManager`
+  writes over it). Tests: `tests/test_claims.py` — two fakes sharing one set of decisions, each with its own view,
+  the losing node learning the decision as the real gateway's does — a node behind as a whole, one holding a later
+  claim but not its row, the same writer restarted behind its own writes, an agent and a swarm not arrived, two
+  writers of one agent, two creators of one session, a deleted id, a message and an agent claimed and never written
+  (read from the claim by the same writer and by another), a swarm resumed behind its newer state. With claims forced
+  off, ten tests fail; against the first claims round (57e405d5), seven fail. Live, on three voting nodes: two writers
+  of one agent on two nodes at once never write over each other, and a window of 0 resumes on another node without
+  writing over its history (20 of 20 runs of the live file). Cost, stated: a consensus round and a pending row per
+  message and per update, a quorum for every write, voters that persist; `claims=False` is last-writer-wins with the
+  old limits.
+- *The claims round's review (57e405d5)* — a fresh reviewer: (1, high) the orphan-reclaim rule trusted the writing
+  node's view, so a writer restarted behind its own writes wrote over them — removed, replaced by claims that name
+  their write; (2, high) a swarm's or graph's updates were neither claimed nor fenced — versioned; (3, medium) a
+  claimed-and-never-written message index or agent blocked every other writer for good, and host names change on a
+  container restart — read from the claim's pending copy now; (4) voters without `[persistence]` can decide a claim
+  twice across a restart — stated, and a consensus refusal that is configuration (an electorate without an
+  `exclusive_default`, a missing scope) is reported as such, not as "retry"; (5) the two-writer live test could fail
+  on a claim that timed out under contention — it now counts that as the writer stopping; (6) the count of tests
+  failing with claims off was wrong (it said eight; it was seven) and stale text named the reason-node pair; (7) the
+  fake now teaches a losing node the decision, as the gateway does, and a `writer` with a newline is refused. Each
+  defect's test was seen failing first.
+- *Its confirmation (0887326f)* — the reviewer confirmed findings 1–3 fixed (its reproductions now wait, resume or
+  refuse) and found one more (N1, high): a reader that took a claimed write from its pending copy also wrote it as
+  the row, a last-writer-wins write with a newer clock from a lagging view, which could bury a newer version (the
+  record then read incomplete for good) or write an unredacted message back over its redaction. A reader now serves a
+  claimed write from its pending copy and writes nothing (`test_a_reader_serving_a_claimed_version_writes_nothing_over_a_newer_one`,
+  `test_a_reader_serving_a_claimed_message_writes_nothing_over_its_redaction`, both seen failing first). Stated: a
+  node that holds a message's pending copy and neither its row nor the copy's tombstone serves the message as it was
+  first written, without a later redaction, until the row arrives — a read, nothing written. The reviewer confirmed
+  N1 fixed, no reader path writing (only `_generation`'s first claim), and nothing regressed; its note, recorded at
+  `_pending_key`: an orphaned write lives only in its pending copy, so a future cleanup of `pending/` must keep a copy
+  whose claim has no row.
+- *Found on the way — a substrate defect* — the `mycelium` binary never started a consensus listener, so on a mesh of
+  two or more binaries every `/gateway/overlay/{consistent/set,lock/acquire,elect}` timed out (`consensus timed out
+  after 3 ballot(s)`, measured on three local binaries; milliseconds with the listener). `src/main.rs` now starts one
+  after `start()` under `consensus`. The store's live suite runs in its own CI step on three such binaries.
+- **Not built, stated:** a session's rows are replicated by gossip only (no `set_with_min_acks` option); a message
+  listing reads one row per message; a row over about 1.5 MiB is refused rather than moved to the blob tier; no async
+  variant (Strands' repository interface is synchronous); not published to PyPI; claims are permanent (a consensus
+  decision is not released through the gateway), so a deleted session's id is not reused; a node behind still
+  *reads* an older conversation without error — claims stop it writing, not reading.
+
 ### 3.6 · State of play and the next iteration (2026-10-12)
 
 Where the work stands at the end of 2026-10-12, so the next session starts here rather than from a conversation.
@@ -976,7 +1110,7 @@ queues before the shutdown signal), and N, O, P recorded by #614 with the `a2a-s
 **Delivered in v2.34.0 (2026-10-16):** F2 (#624 — the unsigned-frame and bare-signature refusal unconditional, `kv_require_signed_frames` retired, `secure-single-domain` rev 5; §3.5), T (#622), S (#623 — identity proofs required by default; §3.5); the wasmtime 49.0.3 / rustls 0.23.46 advisories (#625).
 
 **Not started:** K (policy over history — decide §5's fleet question first), L (credentials attached at egress), M
-(activation commands confined), O and P (N is delivered, #633, §3.5), and §5's inference-routing question. (Q, revocation at every verifier, is delivered — #616, §3.5; S, identity proofs on by default, is delivered in 2.34.0 — #623, §3.5.)
+(activation commands confined), P (N and O are delivered, #633 and #634, §3.5), and §5's inference-routing question; O is delivered (#634, §3.5), so P waits on nothing. (Q, revocation at every verifier, is delivered — #616, §3.5; S, identity proofs on by default, is delivered in 2.34.0 — #623, §3.5.)
 
 **Follow-ups recorded as not built in delivered rows (each in its §3.5 block):**
 - **H:** carry each named offer's signed bytes inside the close and award from that copy (today a member who deletes a

@@ -1,0 +1,21 @@
+[build-system]
+requires      = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name        = "strands-session-mycelium"
+version     = "0.1.0"
+description = "A Strands Agents session store on the Mycelium mesh — an agent's conversation, state and a swarm's shared state in the fleet's KV"
+requires-python = ">=3.10"
+# Pinned to the Strands release whose SessionRepository this implements; `tests/test_interface.py`
+# fails when a release changes the interface, and CI installs exactly this version.
+dependencies = [
+    "strands-agents==1.61.1",
+    "mycelium-py>=0.2.11",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/strands_session_mycelium"]

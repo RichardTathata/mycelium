@@ -80,6 +80,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A Strands Agents session store on the fleet: `strands-session-mycelium` 0.1.0** (post-360 plan row O). A new Python
+  companion beside `langgraph-checkpoint-mycelium`. `MyceliumSessionManager` is a Strands `SessionManager` over the
+  Python SDK's KV verbs, so an agent's conversation and state, and a `Swarm`'s or `Graph`'s shared state, are rows in
+  the fleet's gossiped KV, and another node resumes a session once its rows have arrived. Every write returns the
+  SDK's `KvReceipt` (`last_receipt`, `on_receipt`): local application on the gateway node and that node's disk state,
+  **not replication**; `require_on_disk=True` raises on any write the node did not report `on_disk`. A session read
+  while some of its rows are still gossiping raises `IncompleteSession` naming the missing keys rather than returning
+  the rows that are there (a per-agent count row covers the tail); an undecodable or malformed row or a gateway error
+  raises `SessionException`. A failed message write is held and written, in order, before any later one, so it leaves
+  no hole. A row is at most about 1.5 MiB (the gateway's request limit), checked before sending. **Nothing is written
+  over what a node has not seen:** every message index, and every version of an agent's, swarm's or graph's record,
+  is claimed once, fleet-wide, by a consensus write before it is written (`claims=True`, the default), so a node that
+  is behind, or a second writer of one agent or swarm, is refused (`IncompleteSession`, or `StaleWriter`, which
+  fences that writer) rather than overwriting. A claim names its write (the row goes under `pending/` first), so a
+  writer that claims and dies blocks no one: the next reader takes the row from it. A session's claim fixes its
+  generation; a deleted session's id is refused, not reused; a sliding window of 0 resumes without writing over its
+  history. Claims cost a consensus round per message and per update, and a quorum for every write; voters should
+  persist; `claims=False` is last-writer-wins, with its limits stated. Pinned to `strands-agents` 1.61.1 with the
+  interface recorded in a test. Its live suite runs in CI on three voting `mycelium` nodes
+  (`MYCELIUM_STRANDS_LIVE_REQUIRED`).
 - **An unmodified A2A client reaches a node's skills through `/a2a`** (post-360 plan row N; upgrade note
   `docs/guide/deprecations.md` §46). The 2026-10-12 probe found the current `a2a-sdk` (1.2.2, the library Strands
   Agents uses) could not: the card was served only at `/.well-known/agent.json`, the methods were the pre-0.2
@@ -104,6 +124,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `examples/a2a_sdk_node.rs` (`tests/a2a-sdk/`). **Not built:** the SDKs' own `A2aClient`s (`mycelium-py`,
   `mycelium-ts`) still send `tasks/send` and read `/.well-known/agent.json`, and move before those are removed; push
   notifications, `ListTasks`, `SubscribeToTask` and the HTTP+JSON and gRPC bindings are not served.
+
+### Fixed
+
+- **A fleet of `mycelium` binaries could not decide anything by consensus.** The binary never started a consensus
+  listener, so its nodes never voted: every consistent write, lock and election its own gateway serves
+  (`/gateway/overlay/{consistent/set,lock/acquire,elect}`) timed out on a mesh of two or more — only an embedder that
+  called `start_consensus_listener` itself had a quorum. The binary now starts one after `start()` (built with
+  `consensus`, a default feature). Found while building row O's claims: a probe on three binaries answered
+  `consensus timed out after 3 ballot(s)` for every write, and commits in milliseconds with the listener; the Strands
+  session store's live suite runs on such a fleet in CI.
 
 ## [2.34.0] — 2026-10-16
 
