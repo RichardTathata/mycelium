@@ -12,7 +12,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - **A confined activation's re-probe no longer withdraws an install whose declared path was replaced legitimately**
-  (post-360 row M's follow-up, #PRNUM). A write directory rotated or a read file replaced by an atomic rename failed
+  (post-360 row M's follow-up, #641). A write directory rotated or a read file replaced by an atomic rename failed
   the next re-probe, so the install was withdrawn and reinstalled, a flap if the path churned. The re-probe now
   re-resolves the profile, repeating every check (symlinks, the canonical comparison, existence), and runs the probe
   under the fresh profile. The install is withdrawn only when re-resolution refuses, and the trace names the refusal

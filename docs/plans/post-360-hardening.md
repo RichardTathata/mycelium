@@ -1468,7 +1468,7 @@ CC8, `docs/capabilities.md`, the crate README). The example units with `[[activa
   first; every unit file in the repository loads — the mesh presets and artifact descriptions beside them are other
   formats, never loaded as units; `deprecations.md` §49). Confirmed by the reviewer at `a1161463` (macOS and Linux 6.8;
   every door that parses a unit file refuses an unknown key; 91 unit-bearing TOML files load). **Follow-up, delivered
-  (#PRNUM):** a declared path replaced legitimately (a model file by atomic rename, a rotated directory) failed the next
+  (#641):** a declared path replaced legitimately (a model file by atomic rename, a rotated directory) failed the next
   re-probe, so the install was withdrawn and reinstalled — a flap if the path churned. The re-probe now takes its profile
   from the hook's resolved profiles, re-resolved inside the re-probe with every check repeated, and runs under the fresh
   one; only a refused re-resolution withdraws, named in the trace (§3.6).
@@ -1500,7 +1500,7 @@ envelope's nonce cache) and Q (the handshake refuses a revoked key's certificate
 
 **Follow-ups recorded as not built in delivered rows (each in its §3.5 block):**
 - **M:** ~~a declared path replaced legitimately (atomic rename, rotated directory) fails the next re-probe, so the
-  install is withdrawn and reinstalled — a flap if the path churns~~ — *delivered (#PRNUM):* the re-probe re-resolves a
+  install is withdrawn and reinstalled — a flap if the path churns~~ — *delivered (#641):* the re-probe re-resolves a
   profile whose declared path was replaced, every check repeated (symlinks, the canonical comparison, existence), and
   runs the probe under the fresh profile (`reprobe_one`, the hook's `ResolvedProfiles` shared through each `Watched`);
   only a refused re-resolution withdraws the install, named as `prov.probe`'s `confinement_failed` /
