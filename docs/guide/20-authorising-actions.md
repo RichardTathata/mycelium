@@ -365,7 +365,8 @@ times the limit. Every history decision names the scope and the point (`history 
 (a node whose evaluator never asks never reads it), so a restart keeps it; until the read completes a limited call is
 not established. Kept current by every decision recorded after. Bounded: each actor's records within 24 hours, at most
 1 024 of them, at most 65 536 actors per point (past it the oldest sixteenth are evicted, and an actor that then
-appears at that point is not established over windows reaching back past what was evicted) — so a limit above 1 024 a
+appears at that point is not established over windows reaching back past what was evicted — so under a sustained churn
+of new principals at one point, its quiet and new actors are refused, closed, until the churn stops) — so a limit above 1 024 a
 day is not expressible, and **a rule whose window is longer than 24 hours never permits**. After a crash, the
 journal's torn tail is repaired at open, and every limited rule is not established for one window, since what was lost
 is not known. A rule is judged on its

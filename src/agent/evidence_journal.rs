@@ -333,7 +333,7 @@ impl HistoryState {
         let key = (point_of(&record.enforcement_point), record.subject.clone());
         match record.kind {
             RecordKind::Execution => {
-                let loading = matches!(self.load, Load::Loading | Load::NotStarted);
+                let loading = matches!(self.load, Load::Loading);
                 let found = self.actors.get_mut(&key).and_then(|h| h.entries.iter_mut().find(|e| e.attempt_id == record.attempt_id));
                 match found {
                     Some(e) => e.execution = record.execution,
