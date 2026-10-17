@@ -21,7 +21,8 @@ fn is_live_here(agent: &GossipAgent, decl: &ServeDecl) -> bool {
 /// retract what is not. Abort the task to retract everything.
 ///
 /// `decls` carries each section with its bearer already resolved (`stem::resolve_serve_key`, at
-/// start): a literal, a variable's value, or none. The key is never logged.
+/// start): a literal, a variable's value, a credential binding's placeholder (row L), or none. The key
+/// is never logged.
 pub fn spawn(agent: Arc<GossipAgent>, decls: Vec<(ServeDecl, Option<String>)>, tick: Duration) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut held: HashMap<usize, PromptSkillHandle> = HashMap::new();
@@ -31,11 +32,17 @@ pub fn spawn(agent: Arc<GossipAgent>, decls: Vec<(ServeDecl, Option<String>)>, t
                 if live && !held.contains_key(&i) {
                     // The node's own egress policy, so a redirect from the endpoint is re-checked
                     // on every hop (realignment repairs R3).
-                    let backend: Arc<dyn LlmBackend> = Arc::new(OpenAiBackend::new(
+                    let mut backend = OpenAiBackend::new(
                         d.endpoint.clone(),
                         key.clone().unwrap_or_else(|| "none".into()),
                         d.model.clone(),
-                    ).with_egress(agent.egress_policy()));
+                    ).with_egress(agent.egress_policy());
+                    // Post-360 plan row L: a `credential` arrives here as its placeholder; the node's
+                    // gate attaches the value at the binding's host only.
+                    if let Some(gate) = agent.egress_credentials() {
+                        backend = backend.with_credentials(gate);
+                    }
+                    let backend: Arc<dyn LlmBackend> = Arc::new(backend);
                     let template = PromptTemplate {
                         system: String::new(),
                         user_template: "{{input}}".into(),

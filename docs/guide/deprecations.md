@@ -67,7 +67,9 @@ the notice.
 | 44 | `mycelium_core::tls::load_or_generate` / `generate_rotation` / `generate_rotation_after` without the key standing; `NodeStanding` without `counted`; TLS session resumption on the mesh | unreleased (post-360 row Q's follow-up) | pass `Arc::clone(&ctx.key_standing)` (or `Default::default()` outside an agent) after the removed set | **Yes** for a direct caller of the three functions — one more argument — and an exhaustive `NodeStanding` literal; otherwise no — a reconnect is a full handshake, and a certificate whose key its node revoked is refused |
 | 45 | a gateway caller envelope without an id (`n`), target (`o`) and v2 signature (`sn`) — a pre-row-E gateway's | unreleased (post-360 row E) — accepted and counted for one release from a gateway without `sys/caller-context-id/` | upgrade every gateway node; watch `caller_envelopes_without_id` (`GET /stats`) stop rising on every provider; a raw-signal loop calls `receive_gateway_caller` once per signal | No — behaviour: an envelope is served once, at its target; a replay (repeated, misaddressed, id stripped) is dropped unanswered and counted (`caller_envelopes_replayed`); two subscribers verifying one kind on one node no longer both serve; a bridged MCP call whose context fails verification is refused `-32022` |
 | 46 | the A2A card at `/.well-known/agent.json`; the pre-0.2 `/a2a` methods `tasks/send` and `tasks/sendSubscribe`, and `skillId` as a send's parameter | unreleased (post-360 row N) — served beside the replacements for one release | read the card at `/.well-known/agent-card.json`; send with `SendMessage` / `SendStreamingMessage` (or 0.3's `message/send` / `message/stream`), the skill in `metadata.skillId` and a mandate in `metadata._meta` | No — behaviour: the old path and methods answer as before; a task created by `message/send` answers `tasks/get` in 0.3's shapes; the refusal for another identity's task names `GetTask`/`CancelTask` too |
-| 47 | a unit file with a key or section the loader does not know — at the top level or in an `[[activation]]` | unreleased (post-360 row M) | correct the spelling, or remove the key | No — behaviour: the file is refused at load, naming the key (`units/declare` answers 400, `wire-check` and a stem refuse it); it was silently dropped |
+| 47 | an exhaustive `Rule { .. }` or `ContractCase { .. }` literal; an evaluator that wraps another and forwards only `evaluate` | unreleased (post-360 row K) | build a `Rule` with `Rule::new` and its builders, and give a `ContractCase` `history: None` (or a history); a wrapping evaluator forwards `history_request` and `evaluate_with_history` | Yes for the literals (a new field); no for a wrapper — it compiles, and its limited rules decide `Indeterminate` |
+| 48 | an exhaustive struct literal of `GossipConfig`, `OpenAiBackend`, `ServeDecl` or `CredentialBinding`; a `{:?}` of a `ServeDecl` showing its `api_key`; Z2's `api_key_env` refusal naming the variable | unreleased (post-360 row L) | `..Default::default()` (or the new fields: `egress_credentials`, `credentials`, `credential`, `port`); read the section name in the refusal | **Yes** for an exhaustive literal — it will not compile; otherwise no — `Debug` prints `api_key: Some("<redacted>")`, and the refusal names the `[[serve]]` section and the field, not the variable |
+| 49 | a unit file with a key or section the loader does not know — at the top level or in an `[[activation]]` | unreleased (post-360 row M) | correct the spelling, or remove the key | No — behaviour: the file is refused at load, naming the key (`units/declare` answers 400, `wire-check` and a stem refuse it); it was silently dropped |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -1523,7 +1525,58 @@ needs the new wording.
 and gRPC bindings are not served; a task's `history` is not kept; `A2A-Version` is not checked (the card says which
 versions `/a2a` speaks).
 
-## 47. A unit file with an unknown key is refused, not read without it (unreleased, post-360 plan row M)
+## 47. An evaluator can decide on what an actor has already done (unreleased, post-360 plan row K)
+
+**What changes.** `ActionEvaluator` gains two methods with defaults: `history_request` (the window of the actor's history
+the evaluator needs; `None` by default) and `evaluate_with_history` (what the seam now calls; by default it calls
+`evaluate`), so an evaluator that decides on the request alone is unchanged. A gateway with an evidence journal keeps
+each actor's recent decisions from it — its own, node-local (`HistoryScope::EnforcementPoint`) — and gives them to an
+evaluator that asks; a decision on them carries the history it read on its evidence record (`history`). The reference
+evaluator's `Rule::at_most(count, window_ms)` expresses *at most three posts in ten minutes*; the fourth is a `Deny`. A
+history that cannot be read — no journal, an unreadable one — is `History::Unavailable`, and a limited rule decides
+`Indeterminate` on it, never as though the actor had done nothing. `preflight` is unchanged; `preflight_with_history`
+is new.
+
+**Whose history.** This enforcement point's, by decision (plan §5): an actor that spreads its calls over N gateways can
+be admitted up to N times a per-gateway limit. The scope is named on every history decision and evidence record.
+
+**Will the compiler tell me?** For two struct literals: `Rule` and `ContractCase` each gained a field (`limit`,
+`history`) — build a `Rule` with `Rule::new` and its builders, and give a `ContractCase` `history: None`.
+`AeEvidence` is `#[non_exhaustive]` and gained `history`, absent when no history was read, so a record without one
+serialises exactly as before. **Not for a wrapper**: an evaluator that wraps another and forwards only `evaluate`
+compiles, and hides the inner evaluator's history request, so every limited rule behind it decides `Indeterminate` —
+closed, but not what was meant. Forward `history_request` and `evaluate_with_history`.
+
+**Migration.** None for an evaluator without history rules. To limit by history: an evaluator implements both methods
+(see `ReferenceEvaluator` and the contract suite's `TableEvaluator`), and the gateway needs an evidence journal
+(`with_evidence_journal`) — without one, every history it is asked for is unavailable.
+
+**An adapter held to the contract suite** (`ae_contract::run`) meets five new cases (`history_*`). One that cannot
+express `PolicyClause::AllowAtMost` must decline them and list them in `declared_limits`, or `Report::conformant` fails
+— the private companion's Cedar adapter, on its next re-pin. `AeEvidence`'s schema stays `mycelium.ae/evidence/1`: the
+new `history` field is additive and absent when no history was read.
+
+## 48. Credentials attached at egress: four structs gained fields, a `ServeDecl`'s `Debug` hides its key, Z2's refusal names the section (unreleased, post-360 plan row L)
+
+**What changes.** Row L adds credential bindings (`docs/operations/crown-jewel.md` § Credentials attached at egress).
+Additive for a running node — no binding configured, nothing changes — but four public structs gained fields:
+`GossipConfig.egress_credentials`, `OpenAiBackend.credentials`, `ServeDecl.credential`, and the new
+`CredentialBinding`'s `port` (added by the PR's review). Two outputs change: `ServeDecl`'s `Debug` (hand-written now)
+prints `api_key: Some("<redacted>")` and the new `credential` field, where the derived one printed the literal key; and
+the stem's refusal for an unset `api_key_env` variable (zero-gaps Z2) names the `[[serve]]` section and the field, no
+longer the variable — a value pasted into `api_key_env` would have been echoed into a start-time log line.
+
+**Will the compiler tell me?** **Yes** for an exhaustive struct literal of any of the four — it will not compile.
+No for the two outputs.
+
+**Migration.**
+- A struct literal: add `..Default::default()` (`GossipConfig`), or the new field (`credentials: None`,
+  `credential: None`, `port: None`); `OpenAiBackend::new` is unaffected.
+- A test or a log parser matching a `ServeDecl`'s `Debug` or the `api_key_env` refusal's text: match the section name
+  (`[[serve]] llm/<name>`) and `api_key_env`; the variable is whatever the unit file says.
+- A binding to `localhost` (any spelling, a trailing dot included) or to any IP literal must set `port` — new, so nothing written before it breaks.
+
+## 49. A unit file with an unknown key is refused, not read without it (unreleased, post-360 plan row M)
 
 **What changes** (#636's review, finding 3 and its follow-up). The unit-file loader dropped any key it did not know.
 A misspelt confinement table — `[activation.confined]` inside an `[[activation]]`, or `[activations.confine]` at the

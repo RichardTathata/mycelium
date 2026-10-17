@@ -256,6 +256,8 @@ fn spawn_handler_with(
         #[cfg(all(feature = "gateway", feature = "tls"))]
         evidence_journal: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
+        history_index: std::sync::OnceLock::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
         execution_authority: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         provider_enforcement: std::sync::atomic::AtomicBool::new(false),
@@ -278,6 +280,8 @@ fn spawn_handler_with(
         federation_edge: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         federation_clients: std::sync::OnceLock::new(),
+        #[cfg(feature = "gateway")]
+        egress_credentials: std::sync::OnceLock::new(),
         #[cfg(feature = "compliance")]
         audit_sink: std::sync::OnceLock::new(),
         #[cfg(feature = "compliance")]
@@ -4083,6 +4087,8 @@ async fn test_subscribe_notified_via_gossip() {
         #[cfg(all(feature = "gateway", feature = "tls"))]
         evidence_journal: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
+        history_index: std::sync::OnceLock::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
         execution_authority: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         provider_enforcement: std::sync::atomic::AtomicBool::new(false),
@@ -4105,6 +4111,8 @@ async fn test_subscribe_notified_via_gossip() {
         federation_edge: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         federation_clients: std::sync::OnceLock::new(),
+        #[cfg(feature = "gateway")]
+        egress_credentials: std::sync::OnceLock::new(),
             #[cfg(feature = "compliance")]
             audit_sink: std::sync::OnceLock::new(),
             #[cfg(feature = "compliance")]

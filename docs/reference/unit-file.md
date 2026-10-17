@@ -296,7 +296,7 @@ other placeholder, and no `..` segment. Each must exist when the activation runs
 refused naming it. A `connect` entry naming a hostname or an address is refused at load: neither backend
 can limit a connection to one. An unknown key in the table, in the `[[activation]]` itself, or at the top
 level of the file is refused at load — so neither `[activation.confined]` nor `[activations.confine]` can
-load as *no profile* (`deprecations.md` §47).
+load as *no profile* (`deprecations.md` §49).
 
 What each backend allows, besides the profile's own paths and ports:
 
@@ -373,8 +373,9 @@ A2A agent card, and `/a2a` `tasks/send` refuses it, naming that route.
 | `endpoint` | string | required | The OpenAI-compatible base URL, e.g. `http://localhost:11434/v1`. Refused when empty. |
 | `model` | string | required | The model name at that endpoint. Refused when empty. |
 | `while_live` | table | absent (always) | `ns` and `name` of the install this skill waits for; the skill is served while this node provides that capability. Refused when it names the skill itself: the two share a capability key. Name the install differently, e.g. `storyteller-deploy`. |
-| `api_key` | string | `"none"` | The bearer sent to the endpoint, as a literal. One of `api_key` / `api_key_env`, never both. |
-| `api_key_env` | string | absent | The **name** of an environment variable holding the bearer, read once at stem start. An unset variable refuses the start, naming it; an empty name is refused by the loader. |
+| `api_key` | string | `"none"` | The bearer sent to the endpoint, as a literal. One of `api_key` / `api_key_env` / `credential`. |
+| `api_key_env` | string | absent | The **name** of an environment variable holding the bearer, read once at stem start. An unset variable refuses the start, naming the section and the field (not the variable — a key pasted there would be logged; since row L); an empty name is refused by the loader. |
+| `credential` | string | absent | The **name of a credential binding** on the node (`[[egress_credentials]]` in its config — [crown-jewel.md § Credentials attached at egress](../operations/crown-jewel.md)). The stem holds only the binding's placeholder; the node's egress gate attaches the value on a request to the binding's host and nowhere else. A binding the node does not have, or one that does not authorise `endpoint`, refuses the start, naming it; a name outside `[A-Za-z0-9._-]` is refused by the loader. Post-360 plan row L, unreleased. |
 | `max_tokens` | integer | `256` | The template's token limit. |
 | `temperature` | float | `0.7` | The template's temperature. |
 
@@ -394,8 +395,11 @@ name = "storyteller-deploy"
 **Keys.** A keyed endpoint names its variable — `api_key_env = "OPENAI_API_KEY"` — and the stem reads it
 once at start, so the unit file carries no secret and stays safe to commit
 ([capability-lifecycle.md](../operations/capability-lifecycle.md) §1). A host where the variable is unset
-refuses to start naming it, rather than serving a skill with no key. `api_key` remains the literal form
+refuses to start naming the section, rather than serving a skill with no key. `api_key` remains the literal form
 for a file that is not committed (a local Ollama needs neither). The key is never logged, traced or reported.
+With `credential = "openai"` the value never reaches the stem's side at all: the node reads it once, from a
+variable or a file its `[[egress_credentials]]` binding names, and attaches it only to a request for the
+bound host — a redirect off that host carries nothing.
 
 ## Checking a file
 

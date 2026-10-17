@@ -175,7 +175,7 @@ pub fn hook(
 ) -> impl Fn(&InstallableEntry, &Path, &ActivationCtx) -> Result<Option<Arc<AtomicBool>>, String> + Send + Sync + 'static {
     // Review finding 5 (#636): each activation's profile is resolved once — per declaration and placed
     // file — and kept for the stem's life, its paths held open, re-probes included. Lock-order table row
-    // 61: a leaf, held for a lookup or an insert, never while a command runs.
+    // 63: a leaf, held for a lookup or an insert, never while a command runs.
     let resolved = ResolvedProfiles::with_capacity(RESOLVED_PROFILES_CAP);
     move |entry, path, actx| {
         let target = format!("{}/{}", entry.provides.namespace, entry.provides.name);
@@ -249,7 +249,7 @@ pub fn hook(
 }
 
 /// Each activation's resolved confinement profile, per declaration and placed file (review finding 5,
-/// #636). Lock-order table row 61: a leaf, held for a lookup or an insert, never while a command runs.
+/// #636). Lock-order table row 63: a leaf, held for a lookup or an insert, never while a command runs.
 pub(crate) struct ResolvedProfiles {
     map: Mutex<std::collections::HashMap<(usize, PathBuf), Profile>>,
     cap: usize,

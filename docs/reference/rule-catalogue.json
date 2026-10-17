@@ -51,7 +51,7 @@
     },
     {
       "id": "ae.preflight",
-      "revision": 1,
+      "revision": 2,
       "subsystem": "mycelium::agent::http",
       "responsibilities": [
         "authority"
@@ -62,6 +62,11 @@
           "source": "the action envelope, the presented mandate, the deployed policy revision",
           "scope": "this request",
           "freshness": "the decision clock"
+        },
+        {
+          "source": "the actor's recent decisions, when the evaluator asks for them (post-360 row K); carried on the evidence record",
+          "scope": "this enforcement point (its evidence journal)",
+          "freshness": "the journal, loaded at attach and kept current by every record appended"
         }
       ],
       "outcomes": [
@@ -103,7 +108,8 @@
       "docs": "docs/guide/20-authorising-actions.md",
       "tests": [
         "an_expired_envelope_is_denied_before_the_evaluator_runs",
-        "test_c7_the_bypass_matrix_no_door_runs_revoked_work"
+        "test_c7_the_bypass_matrix_no_door_runs_revoked_work",
+        "at_most_three_posts_in_ten_minutes_counted_at_this_gateway"
       ],
       "trace": "catalogue_only",
       "summary": "Permit, deny or indeterminate, recorded before the work runs; a refused mandate denies before policy runs, so a policy engine cannot launder a revocation."

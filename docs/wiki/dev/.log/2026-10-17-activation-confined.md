@@ -22,4 +22,4 @@ Seccomp's number match misses x32 on x86_64, so a raw filter refuses the x32 bit
 `/etc` whole, so it now names files. A profile resolved per run could be widened by a symlink the previous run
 planted, so it is resolved once and held open. Lesson: a sandbox's allow-list is only as narrow as its widest entry
 and its oldest resolution — test with the syscalls themselves, not the shell's convenience path.
-Pages also touched: `dev/concurrency/lock-order.md` (row 61).
+Pages also touched: `dev/concurrency/lock-order.md` (row 63).

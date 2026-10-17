@@ -316,9 +316,10 @@ pub use agent::{
 // The AE evaluator seam (runtime authorisation at the gateway) — present where it is enforced.
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use agent::{
-    preflight,
+    preflight, preflight_with_history,
     ActionEnvelope, ActionEvaluator, ActionMapping, AeEvidence, AeReference, Decision, DecisionKind,
-    EvidenceState, Execution, MandateBinding, MandateState, MappingKind, MappingStatus,
+    EvidenceState, Execution, History, HistoryEntry, HistoryInput, HistoryLimit, HistoryRequest,
+    HistoryScope, HistoryView, MandateBinding, MandateState, MappingKind, MappingStatus,
     PreflightRefusal, RecordKind, ReferenceEvaluator, Rule, Verdict, AE_EVIDENCE_SCHEMA,
     AE_REFERENCE_SCHEMA,
 };
@@ -337,6 +338,9 @@ pub use agent::ae_contract;
 /// Outbound HTTP clients that re-check every redirect against the egress policy (realignment repairs R3).
 #[cfg(feature = "gateway")]
 pub use agent::egress_client;
+/// Credentials attached at egress (post-360 plan row L).
+#[cfg(feature = "gateway")]
+pub use agent::egress_credentials::{CredentialError, CredentialUse, EgressCredentials};
 pub use agent::confinement::{ClockSync, ConfinementReport, NetworkConfinement, Setting as ConfinementSetting};
 pub use agent::guarantee::{
     GuaranteeDescriptor, GuaranteeEntry, GuaranteeId, GuaranteeKind, GuaranteeReport, ProfileRef,
@@ -419,7 +423,7 @@ pub use mesh_manifest::{
     GroupManifest, GroupStatus, MeshManifest, MeshMeta, MeshStatus,
     manifest_keys, semver_gt,
 };
-pub use config::{DomainProfile, EgressPolicy, PROFILE_NAMES, GatewayCallerProfile, GatewayNamedToken, GatewayToken, GatewayTlsConfig, GossipConfig, GroupTopologyPolicy, PersistenceConfig, SyncMode, TlsConfig, TopologyEnforcement};
+pub use config::{CredentialBinding, CredentialForm, credential_placeholder, DomainProfile, EgressPolicy, PROFILE_NAMES, GatewayCallerProfile, GatewayNamedToken, GatewayToken, GatewayTlsConfig, GossipConfig, GroupTopologyPolicy, PersistenceConfig, SyncMode, TlsConfig, TopologyEnforcement};
 pub use persistence::DataAtRestCipher;
 /// Exclusive ownership of a persistence file (`<file>.lock`), the lock the KV WAL and the node-local
 /// journal hold — re-exported so a companion's own log is refused to a second owner the same way.

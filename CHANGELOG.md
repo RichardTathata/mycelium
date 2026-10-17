@@ -78,6 +78,46 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `every_receive_boundary_drops_a_replay_unanswered` (the serve stream, `llm.invoke`, the explain responder, and the two
   counters on `GET /stats`); and `the_replay_window_is_bounded_and_fails_closed`, `an_empty_replay_window_is_swept`.
 
+- **Credentials attached at egress: a secret need not enter a component's environment** (post-360 plan row L). A
+  node declares **credential bindings** — `[[egress_credentials]]` (or `GOSSIP_EGRESS_CREDENTIALS`), each a host, an
+  optional path prefix, a form (`bearer`, `header` with its name, `basic` with a username) and where the value comes from
+  (`value_env` or `value_file`, read once at `start()`) — and a caller holds only an opaque placeholder,
+  `mycelium-credential:<name>` (`mycelium::credential_placeholder`), where the secret would go. The egress gate
+  (`mycelium::EgressCredentials`, `GossipAgent::egress_credentials()`) replaces the header that carries it with the
+  value **only** on a request to the bound host (exactly, under the prefix, over https or to loopback unless
+  `allow_plaintext`), refuses the request before a byte is sent anywhere else, follows redirects itself through the
+  allow-list's per-hop verdict and **drops** the credential on a hop that leaves the binding, and counts each binding's
+  attachments, refusals and drops (`uses()`; `mycelium_egress_credential_total{binding, event}` under `metrics`). The
+  value is held as a sensitive header value inside the gate: no `Debug`, `Display`, error, log line or trace field
+  carries it, and a refusal names a binding by index and name, never a field's contents (so a value pasted into the
+  wrong field is not logged). A binding may name a `port`, and one to `localhost` (any spelling) or an IP literal must; only 301, 302, 303, 307 and 308
+  are followed; two bindings that would set one header are refused. Moved behind a binding: `[[serve]]`'s new `credential = "<binding>"` (a stem refuses to start if the node
+  lacks it) and `OpenAiBackend::with_credentials` (a placeholder `api_key` without a gate is refused, never sent).
+  A `[[serve]]` whose endpoint its binding does not authorise refuses the stem's start. A placeholder request goes out
+  under the node's egress policy as the gate captured it at `start()`, not a backend's own `with_egress`. Guarantee
+  `egress.credentials`. **Not built:** the row's activation-command half — an `[[activation]]` command is a separate
+  process with no path to the gate and inherits the stem's environment. Every other place a secret enters a node is listed in
+  `docs/operations/crown-jewel.md` § Credentials attached at egress and stated unchanged, with the reason. Found on the
+  way: a `{:?}` of a unit file printed a `[[serve]]`'s literal `api_key` (the derived `Debug`) — now redacted;
+  `OpenAiBackend` gained a `Debug` that redacts a literal key. Tests: `egress_credentials_tests.rs` (seven seen failing
+  first with the gate's attachment stubbed out — the placeholder went out as written, to every host, through every
+  redirect), `a_serve_names_one_key_form_and_its_debug_prints_no_literal_key` (seen failing first with the derived
+  `Debug`), `egress_credentials_come_from_the_environment` (seen failing first without the override),
+  `a_serve_naming_a_binding_the_node_lacks_refuses_the_start` (seen failing first without the check),
+  `a_served_skill_sends_its_binding_value_which_the_stem_never_held` (seen failing first without the gate handed to the
+  backend), `a_credential_binding_refuses_the_start_and_reads_not_in_build` (a gateway-free build; seen failing first
+  without the refusal), and the core binding tests; the review's findings each with a test seen failing first
+  (`a_300_is_not_followed`, `two_bindings_that_would_set_one_header_are_refused`,
+  `a_redirect_to_another_port_on_the_bound_host_drops_the_credential`, `a_secret_in_a_source_field_is_not_echoed_by_a_refusal`,
+  `a_refusal_never_echoes_a_field_that_could_hold_the_value`, `a_serve_whose_endpoint_its_binding_does_not_authorise_refuses_the_start`).
+  Additive: no binding configured, nothing changes. **Upgrade notes** (`docs/guide/deprecations.md` §48): `GossipConfig`
+  gained `egress_credentials`, `OpenAiBackend` gained `credentials` and `ServeDecl` gained `credential` (an exhaustive
+  struct literal breaks; `..Default::default()` is unaffected); a `ServeDecl`'s `Debug` redacts `api_key`; zero-gaps
+  Z2's refusal for an unset `api_key_env` variable names the `[[serve]]` section and the field, no longer the variable.
+  **Not covered:** a placeholder in a query string or a body; a proxy the gate's client honours (`HTTP(S)_PROXY`) sees
+  a plaintext or loopback request's header; zeroising the value; a `value_env` variable stays in the process environment, which an
+  `[[activation]]` command inherits (`value_file` keeps it out of every environment; confining the command is row M).
+
 ### Added
 
 - **A Strands fleet, demonstrated** (post-360 plan row P; `examples/strands_fleet/`, CI job `strands-fleet`). Strands
@@ -88,6 +128,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   resumes on the depot from its stored session and dispatches the second van. The node binary is
   `examples/strands_fleet_node.rs` (an operator and three nodes, `--features tls,a2a,compliance`). The README says
   what Strands provides, what Mycelium adds, and what the run does not show (the models are scripted).
+- **An evaluator can decide on what an actor has already done** (post-360 plan row K; upgrade note
+  `docs/guide/deprecations.md` §47). `ActionEvaluator` gains `history_request` and `evaluate_with_history` (defaults keep
+  every evaluator as it was), and a gateway with an evidence journal gives an evaluator that asks the actor's recent
+  decisions from that journal — **counted at this enforcement point** (`HistoryScope::EnforcementPoint`, decided in the
+  plan's §5: node-local, exact here, no quorum; an actor spreading calls over N gateways can be admitted up to N times a
+  limit, and the scope is named on every history decision). The reference evaluator's `Rule::at_most(3, 600_000)` is
+  *at most three posts in ten minutes*: the fourth is denied. A history that cannot be read is `Unavailable`, and a
+  limited rule decides `Indeterminate` on it, never as an empty history; a count below the limit on an incomplete view
+  is not established. One actor's history-limited decisions are made one after another and a permit is counted as it
+  is decided, so ten concurrent calls under a limit of three admit three. The history is loaded from the journal at
+  attach (a restart keeps it), bounded (24 hours, 1 024 records per actor), and each decision's evidence carries the
+  history it read, by attempt id. The AE contract suite gains the clause `AllowAtMost` and five cases, passed by the
+  reference evaluator and by the suite's independent replacement.
 - **A Strands Agents session store on the fleet: `strands-session-mycelium` 0.1.0** (post-360 plan row O). A new Python
   companion beside `langgraph-checkpoint-mycelium`. `MyceliumSessionManager` is a Strands `SessionManager` over the
   Python SDK's KV verbs, so an agent's conversation and state, and a `Swarm`'s or `Graph`'s shared state, are rows in
@@ -169,7 +222,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   runs the Seatbelt tests. `landlock` 0.4.7 and `seccompiler` 0.5 are new, Linux-only
   dependencies of `mycelium-wasm-host`. **Upgrade notes:** `ActivationDecl` gained `confine` (an exhaustive struct
   literal breaks); a unit file with an unknown key — at the top level, in an `[[activation]]` or in its
-  `[activation.confine]` — is now refused at load (`docs/guide/deprecations.md` §47; every unit in the repository
+  `[activation.confine]` — is now refused at load (`docs/guide/deprecations.md` §49; every unit in the repository
   loads unchanged).
 
 ### Fixed

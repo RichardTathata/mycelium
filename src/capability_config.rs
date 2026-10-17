@@ -222,7 +222,7 @@ pub struct NodeCapabilityConfig {
 /// this node hosts the install named by `while_live` (absent = always). When that install is
 /// withdrawn — its probe failed, the floor moved — the skill is retracted with it, so a router
 /// fails over to a node that still has the model. `max_tokens` / `temperature` are the template's.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct ServeDecl {
     #[serde(default = "default_serve_ns")]
     pub ns:   String,
@@ -237,10 +237,35 @@ pub struct ServeDecl {
     /// variable refuses the start by name. One of `api_key` / `api_key_env`, never both (zero-gaps Z2).
     #[serde(default)]
     pub api_key_env: Option<String>,
+    /// The **name of a credential binding** (`[[egress_credentials]]` in the node's config, post-360
+    /// plan row L): the stem holds only its placeholder, and the node's egress gate attaches the value
+    /// on a request to the binding's host and nowhere else. The binding must exist on the node, or the
+    /// stem refuses to start, naming it. One of `api_key` / `api_key_env` / `credential`.
+    #[serde(default)]
+    pub credential: Option<String>,
     #[serde(default)]
     pub max_tokens: Option<u32>,
     #[serde(default)]
     pub temperature: Option<f32>,
+}
+
+/// `Debug` names where a key comes from, never a literal `api_key` (post-360 plan row L: a
+/// `{:?}` of a unit — a log line, a panic — printed it).
+impl std::fmt::Debug for ServeDecl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServeDecl")
+            .field("ns", &self.ns)
+            .field("name", &self.name)
+            .field("endpoint", &self.endpoint)
+            .field("model", &self.model)
+            .field("while_live", &self.while_live)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("api_key_env", &self.api_key_env)
+            .field("credential", &self.credential)
+            .field("max_tokens", &self.max_tokens)
+            .field("temperature", &self.temperature)
+            .finish()
+    }
 }
 
 fn default_serve_ns() -> String {
@@ -919,8 +944,13 @@ impl NodeCapabilityConfig {
             if sv.endpoint.trim().is_empty() || sv.model.trim().is_empty() {
                 return Err(invalid("serve", format!("{at}: an endpoint and a model are both required")));
             }
-            if sv.api_key.is_some() && sv.api_key_env.is_some() {
-                return Err(invalid("serve.api_key", format!("{at}: set one of api_key (a literal) or api_key_env (a variable name), not both")));
+            if [sv.api_key.is_some(), sv.api_key_env.is_some(), sv.credential.is_some()].into_iter().filter(|s| *s).count() > 1 {
+                return Err(invalid("serve.api_key", format!("{at}: set one of api_key (a literal), api_key_env (a variable name) or credential (a binding name), not more")));
+            }
+            if let Some(c) = &sv.credential
+                && (c.is_empty() || !c.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-')))
+            {
+                return Err(invalid("serve.credential", format!("{at}: credential {c:?} is not a binding name ([A-Za-z0-9._-]+)")));
             }
             if sv.api_key_env.as_deref().is_some_and(|v| v.trim().is_empty()) {
                 return Err(invalid("serve.api_key_env", format!("{at}: api_key_env is empty — name the variable that holds the key")));
@@ -1343,6 +1373,28 @@ max_providers = 4
             Err(e) => e.to_string(),
             Ok(_) => panic!("must be refused:\n{toml}"),
         }
+    }
+
+    /// Post-360 plan row L: a `[[serve]]` names a credential binding — one key form at a time — and a
+    /// `{:?}` of a unit never prints a literal `api_key` (it did, through the derived `Debug`; seen
+    /// failing first with the derive restored).
+    #[test]
+    fn a_serve_names_one_key_form_and_its_debug_prints_no_literal_key() {
+        let units = NodeCapabilityConfig::from_toml_str(
+            "[[serve]]\nname = \"m\"\nendpoint = \"https://api.example/v1\"\nmodel = \"x\"\napi_key = \"sk-row-L-literal-7f\"\n",
+        )
+        .unwrap();
+        let shown = format!("{units:?}");
+        assert!(!shown.contains("sk-row-L-literal-7f") && shown.contains("<redacted>"), "{shown}");
+        let units = NodeCapabilityConfig::from_toml_str(
+            "[[serve]]\nname = \"m\"\nendpoint = \"https://api.example/v1\"\nmodel = \"x\"\ncredential = \"openai\"\n",
+        )
+        .unwrap();
+        assert_eq!(units.serves[0].credential.as_deref(), Some("openai"));
+        let e = refused("[[serve]]\nname = \"m\"\nendpoint = \"http://o/v1\"\nmodel = \"x\"\napi_key_env = \"K\"\ncredential = \"openai\"\n");
+        assert!(e.contains("credential") && e.contains("not more"), "{e}");
+        let e = refused("[[serve]]\nname = \"m\"\nendpoint = \"http://o/v1\"\nmodel = \"x\"\ncredential = \"a b\"\n");
+        assert!(e.contains("binding name"), "{e}");
     }
 
     #[test]

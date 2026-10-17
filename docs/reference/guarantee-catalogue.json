@@ -250,6 +250,19 @@
       "docs": "docs/operations/crown-jewel.md"
     },
     {
+      "id": "egress.credentials",
+      "revision": 1,
+      "subsystem": "egress",
+      "kind": "node_enforced",
+      "promise": "a credential binding's value is attached at the egress gate only to a request for the host it names (on its port when it names one — a binding to `localhost` or an IP literal must; under its path prefix; over https or to loopback) — refused anywhere else, dropped on a redirect that leaves it, counted per binding, and never in a log, a `Debug`, an error or the evidence journal; a caller holds only its placeholder",
+      "needs": "`[[egress_credentials]]` (or `GOSSIP_EGRESS_CREDENTIALS`), values read once at `start()`; a caller that sends through the gate — `OpenAiBackend::with_credentials`, `[[serve]]`'s `credential`, `EgressCredentials::send`. **Not covered:** a secret a component or command reads from its own environment or files (an `[[activation]]` command has no path to the gate); a proxy the gate's client is configured with (`HTTP(S)_PROXY`) sees a plaintext or loopback request's header; a placeholder in a query string or body (not resolved); `api_key` / `api_key_env`, federation, object-store and git credentials, which keep their own paths",
+      "enforcement_points": [
+        "agent::egress_credentials::EgressCredentials::send",
+        "config::CredentialBinding::authorises_url"
+      ],
+      "docs": "docs/operations/crown-jewel.md"
+    },
+    {
       "id": "persist.configured",
       "revision": 1,
       "subsystem": "persistence",
