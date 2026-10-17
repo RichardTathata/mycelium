@@ -1084,7 +1084,10 @@ window).
   claimed write from its pending copy and writes nothing (`test_a_reader_serving_a_claimed_version_writes_nothing_over_a_newer_one`,
   `test_a_reader_serving_a_claimed_message_writes_nothing_over_its_redaction`, both seen failing first). Stated: a
   node that holds a message's pending copy and neither its row nor the copy's tombstone serves the message as it was
-  first written, without a later redaction, until the row arrives — a read, nothing written.
+  first written, without a later redaction, until the row arrives — a read, nothing written. The reviewer confirmed
+  N1 fixed, no reader path writing (only `_generation`'s first claim), and nothing regressed; its note, recorded at
+  `_pending_key`: an orphaned write lives only in its pending copy, so a future cleanup of `pending/` must keep a copy
+  whose claim has no row.
 - *Found on the way — a substrate defect* — the `mycelium` binary never started a consensus listener, so on a mesh of
   two or more binaries every `/gateway/overlay/{consistent/set,lock/acquire,elect}` timed out (`consensus timed out
   after 3 ballot(s)`, measured on three local binaries; milliseconds with the listener). `src/main.rs` now starts one

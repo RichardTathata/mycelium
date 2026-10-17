@@ -235,6 +235,9 @@ class MyceliumSessionRepository(SessionRepository):
         return f"{root}claim/{generation}/{record_key[len(root):]}{suffix}"
 
     def _pending_key(self, session_id: str, token: str) -> str:
+        # Removed only by its claimant once the row is written, and by `delete_session`. A write whose
+        # claimant died before writing its row lives here alone, served to every reader: a cleanup of
+        # `pending/` must keep a copy whose claim has no row, or it loses that write.
         return self._session_root(session_id) + "pending/" + token
 
     # ── the gateway ─────────────────────────────────────────────────────────
