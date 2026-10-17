@@ -1461,7 +1461,11 @@ CC8, `docs/capabilities.md`, the crate README). The example units with `[[activa
   `/private/etc/ssl` narrowed to `cert.pem`, `certs` and `openssl.cnf`; and a misspelt top-level section is refused —
   `NodeCapabilityConfig` is `deny_unknown_fields` (`a_misspelt_top_level_section_is_refused_not_dropped`, seen failing
   first; every unit file in the repository loads — the mesh presets and artifact descriptions beside them are other
-  formats, never loaded as units; `deprecations.md` §49).
+  formats, never loaded as units; `deprecations.md` §49). Confirmed by the reviewer at `a1161463` (macOS and Linux 6.8;
+  every door that parses a unit file refuses an unknown key; 91 unit-bearing TOML files load). **Follow-up, open:** a
+  declared path replaced legitimately (a model file by atomic rename, a rotated directory) fails the next re-probe, so the
+  install is withdrawn and reinstalled — a blip, and a flap if the path churns; re-resolving inside the re-probe would
+  avoid it.
 - **Not built, stated:** limits by hostname or address; a live network allow-list; an OpenShell backend; resource
   limits (CPU, memory); on Linux below Landlock ABI 6, a limit on signals to the stem user's processes; device
   `ioctl`s (Landlock ABI 5); metadata (`stat`) of any path stays readable on both backends; a socket inherited across
