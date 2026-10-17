@@ -1,6 +1,6 @@
 # mycelium-wasm-host
 
-New developers: start with [Your first stem fleet](../docs/guide/tutorials/01-first-stem-fleet.md), then the [tutorial sequence](../docs/guide/tutorials/README.md).
+New developers: start with [Your first stem fleet](../docs/guide/tutorials/01-first-stem-fleet.md), then the [tutorial sequence](../docs/guide/tutorials/README.md). What a stem is, and where the stem-cell analogy stops: [concepts § Fleet growth](../docs/guide/00-concepts.md#fleet-growth).
 
 Use the [capability map](../docs/capabilities.md) to connect this material to other mechanisms, operating guidance and evidence.
 

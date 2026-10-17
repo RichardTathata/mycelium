@@ -432,7 +432,19 @@ node's WASM sandbox) or `blob` (bytes placed on disk for a native runtime alread
 an Ollama process). An **activation** (`[[activation]]`) is how a placed blob reaches that runtime: after
 the blob is placed and verified, the stem runs the operator's `command` (an argv), then gates the
 capability on `probe`, which it re-runs in the background; when the probe fails the install is
-withdrawn and a later round reinstalls. <!-- row M: confinement --> **`[[serve]]`** turns a live install into a routable prompt
+withdrawn and a later round reinstalls. Without an `[activation.confine]` table the command and its
+probe run with the stem's own privileges: this is **not a sandbox**, since the WASM sandbox covers
+components, not these commands. With the table, both run under an OS confinement profile (post-360 row
+M, unreleased): they may read the placement directory, a fixed system set and the declared `read`
+paths, write only the declared `write` paths, and open TCP connections only to the declared ports
+(`localhost:<port>` or `*:<port>`; none when `connect` is empty). Seatbelt enforces it on macOS, and
+Landlock with seccomp on Linux. A profile the platform cannot apply, or a declared path that is
+missing, refuses the activation by name and runs nothing, never unconfined. Confinement narrows what
+the command can reach; it does not make an untrusted command safe. It does not limit `stat`, CPU or
+memory; the command inherits the stem's environment; the network is limited by port, not by host; and
+the profile holds until the stem restarts, with no live-changing allow-list
+([unit-file § `[activation.confine]`](../reference/unit-file.md#activationconfine)).
+**`[[serve]]`** turns a live install into a routable prompt
 skill: it registers `{ns}/{name}` over an OpenAI-compatible endpoint while the install named by
 `while_live` is live, and retracts it when the install goes.
 
@@ -520,7 +532,7 @@ runtime facts it does not read ([`wire_check.rs`](../../src/wire_check.rs)).
 | <a id="governor"></a>Governor | native | a node-local loop that holds something to a published intent, with no coordinator: membership (by self-election), tuning (a fleet intent wherever a parameter is not pinned locally), timing (a whole set in one pass); the membership and tuning governors act under the node's control profile | `elastic_intent` |
 | <a id="self-election"></a>Self-election | native | how the provisioner and the membership governor decide: each eligible node rolls a damped probability every round and acts only on its own roll; nobody assigns the work, and an overshoot is corrected in a later round | `provisioning` |
 | <a id="runtime-kind"></a>Runtime kind | native | how an artifact becomes live: `wasm-component` (the node's WASM sandbox) or `blob` (bytes placed for a native runtime already on the node); `[hosts].kinds` lists the kinds a host can run | `reference/unit-file.md` |
-| <a id="activation"></a>Activation (`[[activation]]`) | native | how a placed blob reaches its runtime: the stem runs the operator's command, then gates the capability on a probe it keeps re-running; a failed probe withdraws the install <!-- row M: confinement --> | `reference/unit-file.md` |
+| <a id="activation"></a>Activation (`[[activation]]`) | native | how a placed blob reaches its runtime: the stem runs the operator's command, then gates the capability on a probe it keeps re-running; a failed probe withdraws the install. Without `[activation.confine]` it runs with the stem's privileges and is not a sandbox; with it, a declared filesystem and TCP-port allowance enforced by Seatbelt (macOS) or Landlock + seccomp (Linux), and refused by name where it cannot be applied. Confinement narrows what the command can reach; it does not make it safe (post-360 row M, unreleased) | `reference/unit-file.md` |
 | <a id="serve"></a>`[[serve]]` | native | a prompt skill over an OpenAI-compatible endpoint, registered while a named install is live and retracted when the install goes | `reference/unit-file.md` |
 | <a id="shadow"></a>Proposed · shadow lane · reviewer | native | a `proposed = true` entry loads only as `{ns}/{name}.shadow` (callable by name, takes no demand) until a **reviewer** — a key in that host's `[hosts].trusted_reviewers` — co-signs it with `mycelium-artifact accept`. Reviewers are a separate list from publishers (nothing refuses one key in both) | `provisioning`, guide 16 |
 | <a id="wire-check"></a>`wire-check` | native | `mycelium wire-check`: a pure function over unit files that names what could not bind. Its answer is *would bind*, never *is bound* | `reference/unit-file.md` |

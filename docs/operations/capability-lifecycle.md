@@ -8,8 +8,8 @@ workflow, in the order an operator lives it, for both.
 
 | | **Directly deployed** | **Dynamically installed** |
 |---|---|---|
-| What is deployed | a unit whose capabilities are in its binary or its `[[capability]]` file, started by your platform | a **host** unit that runs a provisioner (`mycelium-wasm-host`), with runtimes for some kinds and a budget |
-| Who decides it exists | you, at deploy time | the host node, at runtime, when it sees unmet demand (a `req/` entry with no provider) or a presence floor below its count, self-elects, and the signed footprint fits its headroom |
+| What is deployed | a unit whose capabilities are in its binary or its `[[capability]]` file, started by your platform | a **host** unit — a [stem](../guide/00-concepts.md#stem) with `[hosts]` — that runs a provisioner (`mycelium-wasm-host`), with runtimes for some kinds and a budget |
+| Who decides it exists | you, at deploy time | the host node, at runtime, when it sees unmet demand (a `req/` entry with no provider) or a presence floor below its count, [self-elects](../guide/00-concepts.md#self-election), and the signed footprint fits its headroom |
 | Where the code comes from | the unit's image | the catalogue entry's content address, pulled from the library and verified on arrival |
 | When it goes away | when the unit stops | when demand lapses or a governor sheds it: a tombstone, and the placed bytes at the host's placement root |
 | Its page | [deployment.md](deployment.md), guide 13 | [artifacts.md](artifacts.md) §3, [dynamic-scaling.md](dynamic-scaling.md) § Elastic capacity, the `provisioning` and `catalog` demos |

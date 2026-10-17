@@ -238,6 +238,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   error, which says `did not finish within`, so the rule catalogue's `command_timed_out` was never recorded. Found
   while enumerating row M's doors; `a_hung_activation_is_recorded_as_a_timeout`, seen failing first.
 
+### Documentation
+- **Every concept on the newcomer path is defined where it is met.** `docs/guide/00-concepts.md` gains § Fleet growth
+  (stem, catalogue · library · librarian, unit file, presence band, provisioner vs governor, self-election, runtime
+  kind, activation and its confinement, `[[serve]]`, shadow → accept, `wire-check`), the enforcement point and
+  evidence journal, history scope, credential binding, and disambiguation rows for *claim*, *scope*, *journal*,
+  *catalogue* and *admission*; tutorials 1–5 link the terms they use. `docs/positioning.md`'s stem definition is
+  taken from `stem.rs` (a node that declares from its unit file; only one with `[hosts]` installs), and an evaluator
+  without a journal is stated to still enforce.
+
 ## [2.34.0] — 2026-10-16
 
 **Security fixes in the dependencies, and the post-360 plan's last identity rows.** Wasmtime 49.0.3 closes
