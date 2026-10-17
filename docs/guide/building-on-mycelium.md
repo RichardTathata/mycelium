@@ -86,7 +86,7 @@ prefixes; **do not write under them:**
 > `grp/` · `sys/` · `consensus/` · `cap/` · `req/` · `cap-group/` · `gcap/` · `mailbox/` ·
 > `schemas/` · `tools/` · `agent/` · `svc/` · `log/` · `clog/` · `lock/` · `prompts/` ·
 > `skills/` · `manifest/` · `audit/` · `installable/` · `comp/` · `tuple/` · `wiki/` · `ckpt/` ·
-> `ckptw/` · `facts/` · `knowledge/` · `mandate/` · `rights/` · `cn/` (the full authoritative table
+> `ckptw/` · `strands/` · `facts/` · `knowledge/` · `mandate/` · `rights/` · `cn/` (the full authoritative table
 > with per-key semantics is in
 > [`src/lib.rs`](../../src/lib.rs) → *KV namespace ownership*). Note `log/` in particular:
 > `KvHandle::append` writes `log/{stream}/…`, so give your streams an app-scoped name —
@@ -95,7 +95,8 @@ prefixes; **do not write under them:**
 > Companion claims: `tuple/` (`mycelium-tuple-space`) · `wiki/` (`mycelium-wiki`) ·
 > `installable/` + `comp/` (`mycelium-wasm-host`) · `facts/` (per-field AgentFacts CRDT,
 > `mycelium-agentfacts`) · `ckpt/` + `ckptw/` (checkpoint index rows,
-> `langgraph-checkpoint-mycelium`) · `log/reason/` (trace substreams, `mycelium-reason`). The
+> `langgraph-checkpoint-mycelium`) · `strands/` (Strands session rows, `strands-session-mycelium`) ·
+> `log/reason/` (trace substreams, `mycelium-reason`). The
 > `reason/blob-cache` **capability** marks blob-tier providers (`mycelium-reason`).
 
 Pick a distinct top-level prefix for your app's state (e.g. `myapp/…`) and keep all your
@@ -169,7 +170,7 @@ inherits the contract without reading everything:
 - **Our KV keys live under `myapp/…`.** Never write under the substrate's reserved
   prefixes: grp/ sys/ consensus/ cap/ req/ cap-group/ gcap/ mailbox/ schemas/ tools/
   agent/ svc/ log/ clog/ lock/ prompts/ skills/ installable/ comp/ tuple/ wiki/ ckpt/ ckptw/
-  facts/ manifest/ audit/ knowledge/ mandate/ rights/ cn/ (authoritative table: mycelium
+  strands/ facts/ manifest/ audit/ knowledge/ mandate/ rights/ cn/ (authoritative table: mycelium
   `src/lib.rs` → KV namespace ownership).
 - **One compatibility rule, Rust's definition.** The substrate ships compatible additions on the
   2.x line: a public field or type never changes shape. When a verb's answer gains meaning (the
