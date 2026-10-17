@@ -67,7 +67,7 @@
 //! cases — the wrapper pin below, and the no-gossip pin in `action_evaluator`. *Strength:*
 //! `SelfImposedPrevention` — it governs this node's own dispatch; it prevents nothing at a resource.
 
-use super::action_evaluator::{AeEvidence, History, HistoryEntry, HistoryRequest, HistoryScope, HistoryView, RecordKind};
+use super::action_evaluator::{AeEvidence, Execution, History, HistoryEntry, HistoryRequest, HistoryScope, HistoryView, RecordKind};
 use super::journal::{Journal, JournalCursor};
 use std::path::Path;
 use std::sync::Arc;
@@ -174,9 +174,11 @@ pub fn read_evidence_journal_from(
 /// under them (by attempt id). A node whose evaluator never asks for history never reads its journal for this.
 ///
 /// **Bounded:** each actor's records within [`HORIZON_MS`] of its newest, at most [`PER_ACTOR`] of them, and at most
-/// [`MAX_ACTORS`] actors per point; an actor evicted for room takes its records with it, and every view reaching
-/// back past the newest record so lost says so ([`HistoryView::omitted_through_ms`]). So do records lost to a journal
-/// repair at open and appends a lenient journal failed to make.
+/// [`MAX_ACTORS`] actors per point; past it the oldest sixteenth are evicted in one pass, and an actor that appears
+/// at the point afterwards — which may have been one of them — has views reaching no further back than what was
+/// taken ([`HistoryView::omitted_through_ms`]). Actors that stay are unaffected. Records the journal itself lost — to a
+/// repair at open, which a crash's torn tail also triggers, or an append a lenient journal failed to make — make
+/// every view reaching back past them incomplete, at every point, for one window.
 ///
 /// **Check, then count, as one step:** an enforcement point holds the actor's [`gate`](Self::gate) from reading the
 /// view — with the clock read under it — to counting the permit. A view carries its actor's version too, and a
@@ -219,10 +221,17 @@ enum Load {
 struct HistoryState {
     /// (enforcement point, actor) → its history.
     actors: std::collections::HashMap<(String, String), ActorHistory>,
+    /// Point → how many actors it holds, against [`MAX_ACTORS`].
+    per_point: std::collections::HashMap<String, usize>,
+    /// Point → the newest event time of a record an eviction there took. An actor that (re)appears at the point
+    /// afterwards may have been among them, so its views reach no further back than this.
+    evicted_through_ms: std::collections::HashMap<String, u64>,
     load: Load,
-    /// The newest event time of a record no longer held for some actor at all — evicted for room, lost to a
-    /// journal repair, or a lenient append that failed: a view reaching back past it is incomplete.
+    /// The newest event time of a record the journal itself no longer holds — lost to a repair at open, or an
+    /// append a lenient journal failed to make: no view at any point reaching back past it is complete.
     lost_through_ms: Option<u64>,
+    /// Executions observed while the journal was still being read, whose decisions the read has not merged yet.
+    pending_executions: std::collections::HashMap<String, Execution>,
     /// Records observed, so idle actors are swept every so often rather than on every append.
     observed: u64,
 }
@@ -231,7 +240,8 @@ struct HistoryState {
 struct ActorHistory {
     /// Oldest first.
     entries: std::collections::VecDeque<HistoryEntry>,
-    /// The newest `at_ms` of a record dropped for capacity or age.
+    /// The newest `at_ms` of a record dropped for capacity or age — or, for an actor created after an eviction at
+    /// its point, the newest that eviction took, since it may have been this actor's.
     forgotten_through_ms: Option<u64>,
     /// Bumped by every change to what is counted, so a permit is admitted only into the history it was decided on.
     version: u64,
@@ -248,9 +258,11 @@ fn later(a: Option<u64>, b: Option<u64>) -> Option<u64> {
 impl ActorHistory {
     fn upsert(&mut self, entry: HistoryEntry) {
         if let Some(e) = self.entries.iter_mut().find(|e| e.attempt_id == entry.attempt_id) {
-            // The record of an attempt already here (an admitted permit's journal record): the same attempt,
-            // so nothing a view counted changes and the version stays.
-            *e = entry;
+            // The record of an attempt already here (an admitted permit's journal record): the same attempt, so
+            // nothing a view counted changes and the version stays — nor its time, which is when it was counted
+            // (the record carries the envelope's earlier one; moving it back would let it leave a window early).
+            e.decision = entry.decision;
+            e.execution = entry.execution;
             return;
         }
         let at = self.entries.iter().rposition(|e| e.at_ms <= entry.at_ms).map_or(0, |i| i + 1);
@@ -285,29 +297,54 @@ fn entry_of(record: &AeEvidence) -> HistoryEntry {
 }
 
 impl HistoryState {
+    /// The actor's history at its point, made room for if it is new: past [`MAX_ACTORS`] at that point, the
+    /// sixteenth whose newest records are oldest are evicted in one pass (amortised, never a scan per new actor),
+    /// and an actor created after an eviction is marked as reaching no further back than what it took.
+    fn actor_mut(&mut self, key: (String, String)) -> &mut ActorHistory {
+        if !self.actors.contains_key(&key) {
+            let point = key.0.clone();
+            let count = self.per_point.entry(point.clone()).or_default();
+            if *count >= MAX_ACTORS {
+                let mut at_point: Vec<((String, String), u64)> = self
+                    .actors
+                    .iter()
+                    .filter(|(k, _)| k.0 == point)
+                    .map(|(k, a)| (k.clone(), a.entries.back().map_or(0, |e| e.at_ms)))
+                    .collect();
+                at_point.sort_by_key(|(_, t)| *t);
+                let mut removed = 0;
+                for (victim, newest) in at_point.into_iter().take((MAX_ACTORS / 16).max(1)) {
+                    self.actors.remove(&victim);
+                    let through = self.evicted_through_ms.entry(point.clone()).or_default();
+                    *through = (*through).max(newest);
+                    removed += 1;
+                }
+                let count = self.per_point.entry(point.clone()).or_default();
+                *count = count.saturating_sub(removed);
+            }
+            *self.per_point.entry(point.clone()).or_default() += 1;
+            let born = ActorHistory { forgotten_through_ms: self.evicted_through_ms.get(&point).copied(), ..Default::default() };
+            self.actors.insert(key.clone(), born);
+        }
+        self.actors.get_mut(&key).expect("present")
+    }
+
     fn apply(&mut self, record: &AeEvidence) {
         let key = (point_of(&record.enforcement_point), record.subject.clone());
-        if !self.actors.contains_key(&key) && self.actors.len() >= MAX_ACTORS {
-            // Room for a new actor: the one whose newest record is oldest goes, and views reaching back past
-            // its newest record can no longer be complete.
-            if let Some((victim, newest)) = self
-                .actors
-                .iter()
-                .map(|(k, a)| (k.clone(), a.entries.back().map_or(0, |e| e.at_ms)))
-                .min_by_key(|(_, t)| *t)
-            {
-                self.actors.remove(&victim);
-                self.lost_through_ms = later(self.lost_through_ms, Some(newest));
-            }
-        }
-        let h = self.actors.entry(key).or_default();
         match record.kind {
             RecordKind::Execution => {
-                if let Some(e) = h.entries.iter_mut().find(|e| e.attempt_id == record.attempt_id) {
-                    e.execution = record.execution;
+                let loading = matches!(self.load, Load::Loading | Load::NotStarted);
+                let found = self.actors.get_mut(&key).and_then(|h| h.entries.iter_mut().find(|e| e.attempt_id == record.attempt_id));
+                match found {
+                    Some(e) => e.execution = record.execution,
+                    // Its decision is still in the journal being read: apply this when the read merges it.
+                    None if loading && self.pending_executions.len() < 4_096 => {
+                        self.pending_executions.insert(record.attempt_id.clone(), record.execution);
+                    }
+                    None => {}
                 }
             }
-            _ => h.upsert(entry_of(record)),
+            _ => self.actor_mut(key).upsert(entry_of(record)),
         }
         self.observed += 1;
         if self.observed.is_multiple_of(PER_ACTOR as u64) {
@@ -315,6 +352,11 @@ impl HistoryState {
             // can be complete over (a window longer than the horizon never is).
             let newest = self.actors.values().filter_map(|a| a.entries.back().map(|e| e.at_ms)).max().unwrap_or(0);
             self.actors.retain(|_, a| a.entries.back().is_some_and(|e| newest.saturating_sub(e.at_ms) <= HORIZON_MS));
+            let mut per_point: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            for (point, _) in self.actors.keys() {
+                *per_point.entry(point.clone()).or_default() += 1;
+            }
+            self.per_point = per_point;
         }
     }
 }
@@ -382,12 +424,24 @@ impl HistoryIndex {
         match outcome {
             Err(why) => state.load = Load::Unreadable(why),
             Ok(()) => {
+                let pending = std::mem::take(&mut state.pending_executions);
                 for (key, history) in loaded.actors {
-                    let live = state.actors.entry(key).or_default();
-                    for e in history.entries {
-                        live.upsert(e);
+                    let forgotten = history.forgotten_through_ms;
+                    let live = state.actor_mut(key);
+                    for mut e in history.entries {
+                        if let Some(x) = pending.get(&e.attempt_id) {
+                            e.execution = *x;
+                        }
+                        // What was observed live is the newer word on an attempt: a loaded copy fills gaps only.
+                        if !live.entries.iter().any(|l| l.attempt_id == e.attempt_id) {
+                            live.upsert(e);
+                        }
                     }
-                    live.forgotten_through_ms = later(live.forgotten_through_ms, history.forgotten_through_ms);
+                    live.forgotten_through_ms = later(live.forgotten_through_ms, forgotten);
+                }
+                for (point, t) in loaded.evicted_through_ms {
+                    let through = state.evicted_through_ms.entry(point).or_default();
+                    *through = (*through).max(t);
                 }
                 state.lost_through_ms = later(state.lost_through_ms, loaded.lost_through_ms);
                 if self.truncated_at_open {
@@ -424,7 +478,8 @@ impl HistoryIndex {
         let (in_window, forgotten, version): (Vec<&HistoryEntry>, Option<u64>, u64) = match state.actors.get(&key) {
             // Everything after the window's start — a record stamped after `now_ms` is one more, not none.
             Some(h) => (h.entries.iter().filter(|e| e.at_ms > from).collect(), h.forgotten_through_ms, h.version),
-            None => (Vec::new(), None, 0),
+            // Not held: it may have been evicted from this point, so what was evicted bounds its view too.
+            None => (Vec::new(), state.evicted_through_ms.get(point).copied(), 0),
         };
         let take = in_window.len().min(request.max_entries);
         let cut = in_window.len() - take;
@@ -455,7 +510,7 @@ impl HistoryIndex {
     /// and the permit is now in it; `false` if it changed meanwhile — decide again on a fresh view.
     pub(crate) fn admit(&self, point: &str, actor: &str, version: u64, entry: HistoryEntry) -> bool {
         let mut state = self.lock();
-        let h = state.actors.entry((point.to_string(), actor.to_string())).or_default();
+        let h = state.actor_mut((point.to_string(), actor.to_string()));
         if h.version != version {
             return false;
         }
@@ -741,6 +796,43 @@ mod history_tests {
         index.observe(&record("newcomer", "n", 900_000, Verdict::Permit));
         assert!(!view(index.view(GW, "newcomer", HistoryRequest { window_ms: 900_000, max_entries: 10 }, 900_001).0).complete);
         assert!(view(index.view(GW, "newcomer", HistoryRequest { window_ms: 1_000, max_entries: 10 }, 900_001).0).complete);
+        // An actor never seen here may have been evicted too.
+        assert!(!view(index.view(GW, "stranger", HistoryRequest { window_ms: 900_000, max_entries: 10 }, 900_001).0).complete);
+        // One that stayed is untouched by the others' eviction, and another point not at all (review N1).
+        let stayed = format!("actor-{}", MAX_ACTORS - 1);
+        assert!(view(index.view(GW, &stayed, HistoryRequest { window_ms: 900_000, max_entries: 10 }, 900_001).0).complete);
+        assert!(view(index.view("provider", "alice", HistoryRequest { window_ms: 900_000, max_entries: 10 }, 900_001).0).complete);
+        // Bounded per point: the eviction made room in one pass.
+        assert!(index.lock().per_point[GW] <= MAX_ACTORS);
+    }
+
+    /// The journal record of an admitted permit keeps the time it was counted at (review N2).
+    #[tokio::test]
+    async fn an_admitted_permit_keeps_the_time_it_was_counted_at() {
+        let (_j, index) = loaded("time");
+        let (_, v) = index.view(GW, "alice", request(), 10_000);
+        let r = record("alice", "p1", 1_000, Verdict::Permit); // its envelope was assembled at 1 000
+        assert!(index.admit(GW, "alice", v, HistoryEntry {
+            at_ms: 5_000, attempt_id: r.attempt_id.clone(), operation: r.operation.clone(), resource: r.resource.clone(),
+            decision: DecisionKind::Permit, execution: Execution::Attempted,
+        }));
+        index.observe(&r);
+        assert_eq!(view(index.view(GW, "alice", request(), 10_000).0).entries[0].at_ms, 5_000);
+    }
+
+    /// An execution observed while the journal is still being read is not lost when the read merges (review N4).
+    #[tokio::test]
+    async fn an_execution_seen_during_the_read_survives_the_merge() {
+        let path = temp_journal("pending");
+        let j = EvidenceJournal::open(&path, EvidenceProfile::Strict).unwrap();
+        let r = record("alice", "p1", 9_000, Verdict::Permit);
+        j.append(serde_json::to_vec(&r).unwrap()).await.unwrap();
+        let index = HistoryIndex::new(&j);
+        index.lock().load = Load::Loading;
+        index.observe(&r.as_execution(Execution::Completed));
+        index.load(10_000);
+        assert_eq!(view(index.view(GW, "alice", request(), 10_000).0).entries[0].execution, Execution::Completed);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }
 

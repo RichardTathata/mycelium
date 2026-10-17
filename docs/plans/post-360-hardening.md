@@ -1210,6 +1210,15 @@ directly. The evidence journal is written only by `ae_record`.
   Stated: (6) a permit whose client went away, or that a downstream check refused, stays counted; (8) the private Cedar
   adapter must decline the five new cases on its re-pin (§47), and the evidence schema is unchanged; (9) the history input
   is recorded, and no replay consumes it yet.
+- *Its confirmation* — F1 and F2 confirmed fixed, F3–F7 fixed or stated; four more, fixed: (N1) the actor cap counted the
+  whole map and an eviction marked every actor's views incomplete at every point, after an O(actors) scan under the
+  lock per new actor — now per point, evicted a sixteenth at a time, and only an actor appearing after an eviction is
+  bounded by it (`an_actor_evicted_for_room_leaves_older_views_incomplete` now also asserts one that stayed and another
+  point are untouched); (N2) an admitted permit's journal record moved its time back to the envelope's — it keeps the time
+  it was counted at (`an_admitted_permit_keeps_the_time_it_was_counted_at`); (N3) `admit` skipped the cap — it goes
+  through the same path; (N4) an execution observed during the read was lost at the merge
+  (`an_execution_seen_during_the_read_survives_the_merge`). Stated: a window longer than 24 hours never permits; a
+  crash's torn tail makes limited rules not established for one window.
 - **Not built, stated:** a fleet-wide count (§5); the decision trace does not carry `ae.preflight`, so the history input
   lives on the evidence record and nothing replays it yet; a history across more than 24 hours, 1 024 records per actor or
   65 536 actors per point reads as incomplete.
