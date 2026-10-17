@@ -323,7 +323,7 @@ renders each stream's verified badge, chain-tip hash, and records over `GET /gat
 
 ## Credentials attached at egress
 
-*Post-360 plan row L, unreleased.* A secret an outbound call needs (an LLM endpoint's API key, say)
+*Post-360 plan row L, 2.35.0.* A secret an outbound call needs (an LLM endpoint's API key, say)
 need not sit in a unit file, a component's environment or a backend's fields. The node holds a
 **credential binding** (`[[egress_credentials]]` in its config, or `GOSSIP_EGRESS_CREDENTIALS`): a
 name, the one host it is for (optionally a port and a path prefix), the header form, and where to read

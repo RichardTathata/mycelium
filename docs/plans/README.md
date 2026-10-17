@@ -62,7 +62,7 @@ record, not duplicates of those.
 > *would bind*, never *is bound*. **The design-time half of the composition theme** — §13 of the axis plan is the
 > runtime half (the records); this is the vocabulary they are written in.
 >
-> **Post-360 hardening (adopted 2026-10-10; R0 and wave 1 — G, P3, C, D, P1, A with C1/C2, B, P2 without migration — in v2.32.0, #595–#602; wave 2 — Φ, P2's migration, P5, J, H, E, F, Q, I — in v2.33.0, #604–#616; F2, S, T in v2.34.0, #622–#624):** [`post-360-hardening.md`](post-360-hardening.md) —
+> **Post-360 hardening (adopted 2026-10-10; R0 and wave 1 — G, P3, C, D, P1, A with C1/C2, B, P2 without migration — in v2.32.0, #595–#602; wave 2 — Φ, P2's migration, P5, J, H, E, F, Q, I — in v2.33.0, #604–#616; F2, S, T in v2.34.0, #622–#624; K–P with E's and Q's follow-ups in v2.35.0, #631–#638):** [`post-360-hardening.md`](post-360-hardening.md) —
 > the batch after the 2026-10-09 360 review's must-do fixes (#582–#592): release 2.32.0, the external review's items
 > (refuse an exposed unauthenticated gateway, a consensus electorate as a governed group, `deny(unsafe_code)` in core,
 > the `http.rs` split), and rows A–J (locks and leases, resource bounds, companion WALs, WASM limits, the gateway
@@ -72,8 +72,10 @@ record, not duplicates of those.
 > **Delivered in v2.33.0 (2026-10-13):** Φ, P2's migration, P5, J, H, E, F (with its one-release window; #587 opened
 > none to close), Q, and the private row I. **Delivered in v2.34.0 (2026-10-16):** F2 (the unsigned-frame refusal
 > unconditional, #624), S (identity proofs on by default, #623), T (the CA-key warning, #622), and three §3.6
-> follow-ups (#627–#629). **Next:** K–P, the §3.6 follow-ups still open (Q's handshake refusal, E's envelope nonce
-> cache), and v2.34.0's private re-pin with `COMPATIBILITY.md`.
+> follow-ups (#627–#629). **Delivered in v2.35.0 (2026-10-17):** K (policy over history, #638), L (credentials at
+> egress, #637), M (activation commands confined, partly, #636), N (#633), O (`strands-session-mycelium` 0.1.0, #634),
+> P (#635), E's envelope nonce cache and Q's handshake refusal. **Next:** the rows' *not built* lists (§3.6), §5's
+> inference-routing question, and the private re-pin with `COMPATIBILITY.md`.
 >
 > **Realignment repairs (adopted 2026-10-04; delivered — piece 1 in v2.23.0, #518–#524; pieces 2 and 4 with R7 in v2.24.0, #526–#532; the private exporter, piece 3, on the same pin; R8 and R9 in v2.25.0, #534–#535 — every row closed; S5's and A3's unbuilt halves found by doc-coverage run 20 and delivered in v2.26.0, #542–#543):** [`realignment-repairs.md`](realignment-repairs.md) —
 > an external review's twelve findings, each verified by `file:line` and six re-run as probes (eleven hold; F01 is

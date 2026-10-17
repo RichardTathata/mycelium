@@ -395,7 +395,7 @@ an absent section.
   index by a consensus write before writing it, so nothing is written over what the writing node has not seen: a
   node that is behind raises `IncompleteSession` or `StaleWriter` instead. That needs `consensus:read`/`consensus:write`
   and **a quorum for every write** — while a majority is unreachable, writes fail and are held. The fleet's nodes
-  must vote: embedders start `start_consensus_listener`; the `mycelium` binary does after 2.34.0 (before it, a
+  must vote: embedders start `start_consensus_listener`; the `mycelium` binary does since 2.35.0 (before it, a
   fleet of binaries timed out on every consensus write). Give the voters `[persistence]`: one without it forgets
   its promises on restart, and a quorum counting it can decide a claim twice.
 - **Moving a session between nodes.** Resume where its rows have arrived: before then the new node raises (it does

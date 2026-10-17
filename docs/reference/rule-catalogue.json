@@ -66,7 +66,7 @@
         {
           "source": "the actor's recent decisions, when the evaluator asks for them (post-360 row K); carried on the evidence record",
           "scope": "this enforcement point (its evidence journal)",
-          "freshness": "the journal, loaded at attach and kept current by every record appended"
+          "freshness": "the journal, read in the background once an evaluator that asks for history is attached (unavailable until then), and kept current by every record appended"
         }
       ],
       "outcomes": [

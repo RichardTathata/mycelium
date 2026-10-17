@@ -31,6 +31,21 @@ window counters stay at zero; `kv_untagged_signatures_refused` is new; `mesh.sig
 residual is restated, not closed (a signed `SyncEntry` is a wire change). Upgrade note `deprecations.md` §40: upgrade
 from 2.33.x, not 2.32. Record: [`.log/2026-10-13-f2-refusal-unconditional.md`](.log/2026-10-13-f2-refusal-unconditional.md).
 
+## v2.35.0 release — 2026-10-17 (tag `v2.35.0`) — the post-360 comparison rows, and two security fixes
+
+**#631/#632** the follow-ups to E and Q: a gateway caller envelope is served once, at the provider it was signed for
+(an id and target signed with the rest, a per-gateway replay window; id-less envelopes from a pre-2.35 gateway
+accepted and counted for one release), and a revoked key's certificate is refused at the mTLS handshake, with TLS
+session resumption off — a member removed after one handshake could reconnect on its cached session since 2.15.0;
+**#633** an unmodified `a2a-sdk` 1.2.2 client reaches `/a2a` (N); **#634** `strands-session-mycelium` 0.1.0, claims
+fleet-wide by consensus write, and the `mycelium` binary starts a consensus listener (O); **#635** the Strands fleet
+demo (P); **#638** policy over history, counted per enforcement point (K); **#637** credentials attached at egress
+(L; the activation-command half not built); **#636** activation commands confined by Seatbelt or Landlock + seccomp
+(M; hosts, a live allow-list and OpenShell not built); **#639** the concepts pass — § Fleet growth, the stem, one
+name per concept. Each row had an independent adversarial review, its findings fixed with tests seen failing first
+and confirmed by the reviewer who found them. Wire v12 unchanged. Upgrade notes `deprecations.md` §44–§49. Release
+record: [`.log/2026-10-17-release-v2.35.0.md`](.log/2026-10-17-release-v2.35.0.md).
+
 ## v2.34.0 release — 2026-10-16 (tag `v2.34.0`) — the identity rows and the dependency advisories
 
 **#621** the A2A agent card names the gateway's `/a2a` endpoint, not the gossip port (row N's standalone defect);

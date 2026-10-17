@@ -99,7 +99,7 @@ pub static RULES: &[RuleDescriptor] = &[
         trigger: "a gateway dispatch that an evaluator covers",
         inputs: &[
             Input { source: "the action envelope, the presented mandate, the deployed policy revision", scope: "this request", freshness: "the decision clock" },
-            Input { source: "the actor's recent decisions, when the evaluator asks for them (post-360 row K); carried on the evidence record", scope: "this enforcement point (its evidence journal)", freshness: "the journal, loaded at attach and kept current by every record appended" },
+            Input { source: "the actor's recent decisions, when the evaluator asks for them (post-360 row K); carried on the evidence record", scope: "this enforcement point (its evidence journal)", freshness: "the journal, read in the background once an evaluator that asks for history is attached (unavailable until then), and kept current by every record appended" },
         ],
         outcomes: &[Outcome { kind: Action, reasons: &["permit"] }, Outcome { kind: Refusal, reasons: &["deny", "indeterminate", "mandate_revoked", "mandate_expired", "stale_policy"] }, Outcome { kind: NoAction, reasons: &["inert_no_evaluator"] }],
         effects: &["the evidence journal record before dispatch; the audit chain reference under `compliance`"],

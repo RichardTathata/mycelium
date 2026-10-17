@@ -60,7 +60,7 @@ Permit, deny or indeterminate, recorded before the work runs; a refused mandate 
 - **Trigger:** a gateway dispatch that an evaluator covers
 - **Reads:**
   - `the action envelope, the presented mandate, the deployed policy revision` — scope: this request; freshness: the decision clock
-  - `the actor's recent decisions, when the evaluator asks for them (post-360 row K); carried on the evidence record` — scope: this enforcement point (its evidence journal); freshness: the journal, loaded at attach and kept current by every record appended
+  - `the actor's recent decisions, when the evaluator asks for them (post-360 row K); carried on the evidence record` — scope: this enforcement point (its evidence journal); freshness: the journal, read in the background once an evaluator that asks for history is attached (unavailable until then), and kept current by every record appended
 - **Outcomes:**
   - Action: `permit`
   - Refusal: `deny`, `indeterminate`, `mandate_revoked`, `mandate_expired`, `stale_policy`

@@ -9,6 +9,55 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.35.0] — 2026-10-17
+
+**Two security fixes, and the post-360 plan's comparison rows.** A revoked key's certificate is now refused at the mTLS
+handshake, and the mesh no longer resumes TLS sessions: since closure plan C5 (2.15.0) a member removed after one
+handshake could reconnect on its cached session, past the removal check (row Q's follow-up). A gateway caller envelope
+is now served once, at the provider it was signed for: inside its freshness window a captured envelope could be
+re-emitted and served again as the client's call (row E's nonce cache). See the entries under Security.
+
+Six rows from comparing Strands Box, NVIDIA OpenShell and Strands Agents (rows K–P):
+- **Policy over history (K):** an action evaluator can decide on what an actor has already done, counted at the
+  enforcement point; "at most three posts in ten minutes" denies the fourth.
+- **Credentials attached at egress (L):** a component or a served skill holds a placeholder, and the egress gate
+  attaches the secret only on a request to the bound host and port.
+- **Activation commands confined (M):** an `[[activation]]` can name a filesystem and TCP-port allowance, enforced
+  by Seatbelt on macOS and Landlock with seccomp on Linux, and refused by name where it cannot be applied.
+- **A2A at the current specification (N):** an unmodified `a2a-sdk` 1.2.2 client reaches a node's skills through
+  `/a2a`, checked in CI.
+- **A Strands session store (O):** `strands-session-mycelium` 0.1.0, a new Python companion; every write is claimed
+  fleet-wide by a consensus write first, so nothing is written over what a node has not seen.
+- **A Strands fleet, demonstrated (P):** three nodes, one plan, a mandated dispatch, and a resume after a node stops.
+
+Found on the way: the `mycelium` binary never started a consensus listener, so a fleet of binaries could decide
+nothing by consensus. And the concepts chapter now defines every term the README and tutorials use, starting with
+the stem.
+
+Wire **v12** unchanged (`WIRE_VERSION` 12, `PREV` 11). Companions: `strands-session-mycelium` 0.1.0 is new; unchanged
+are `mycelium-reason` 0.9.0, `mycelium-py` 0.2.11, `mycelium-ts` 0.2.5, `langgraph-checkpoint-mycelium` and
+`mycelium-guardrails`.
+
+**Check before upgrading** (`docs/guide/deprecations.md` §44–§49):
+- **Upgrade every gateway node, then watch the providers.** A 2.34 gateway's caller envelopes carry no id; they are
+  accepted for this release and counted. Watch `caller_envelopes_without_id` (`GET /stats`) stop rising on every
+  provider: the next release refuses an envelope without an id. An embedder reading raw signals calls
+  `receive_gateway_caller` once per signal. A replayed or misaddressed envelope is dropped unanswered and counted
+  (`caller_envelopes_replayed`).
+- **A reconnect is a full TLS handshake,** and a certificate whose key its node revoked is refused. A direct caller of
+  `mycelium_core::tls::load_or_generate`, `generate_rotation` or `generate_rotation_after` passes the key standing.
+- **A unit file with an unknown key is refused,** at the top level or in an `[[activation]]`, where it used to be
+  dropped silently: `units/declare` answers 400, and `wire-check` and a stem refuse it.
+- **The old A2A paths are served for one more release:** move clients to `/.well-known/agent-card.json` and
+  `SendMessage` / `message/send`, the skill in `metadata.skillId`.
+- **The `mycelium` binary votes:** built with `consensus` (the default), it starts a consensus listener after `start()`;
+  build without `consensus` to keep a binary out of quorums.
+- **An evaluator that wraps another** forwards `history_request` and `evaluate_with_history`, or its history-limited
+  rules decide `Indeterminate`.
+- **Struct literals:** `Rule`, `ContractCase`, `NodeStanding`, `GossipConfig`, `OpenAiBackend`, `ServeDecl` and
+  `ActivationDecl` gained fields; an exhaustive literal breaks, `..Default::default()` does
+  not. A `ServeDecl`'s `Debug` redacts `api_key`.
+
 ### Security
 
 - **A revoked key's certificate is refused at the mTLS handshake, and the mesh no longer resumes TLS sessions**
@@ -62,7 +111,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   so the bound fails closed; windows left empty are swept. **Also fixed:** the MCP bridge (`connect_mcp_server`)
   forwarded a call whose caller context failed verification unless provider enforcement was on; it now refuses it
   (`-32022`) as the native tool loop does. **The window, one release:** an id-less envelope from a gateway without the
-  marker (2.34 or earlier) verifies in the v1 form, is served and is counted (`caller_envelopes_without_id`); once a
+  marker (2.34 or earlier) verifies in the v1 form, is served and, if signed, counted (`caller_envelopes_without_id`); once a
   gateway is upgraded and its marker has reached a provider, stripping is refused there. The next release refuses every
   envelope without an id. **Not covered:** an unsigned mesh (no `tls` identity) keeps no window; a provider restart
   forgets its window; a member that tombstones a gateway's id marker at a provider reopens the id-less path for that
@@ -137,8 +186,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   *at most three posts in ten minutes*: the fourth is denied. A history that cannot be read is `Unavailable`, and a
   limited rule decides `Indeterminate` on it, never as an empty history; a count below the limit on an incomplete view
   is not established. One actor's history-limited decisions are made one after another and a permit is counted as it
-  is decided, so ten concurrent calls under a limit of three admit three. The history is loaded from the journal at
-  attach (a restart keeps it), bounded (24 hours, 1 024 records per actor), and each decision's evidence carries the
+  is decided, so ten concurrent calls under a limit of three admit three. The history is read from the journal once an
+  evaluator that asks for it is attached (a restart keeps it), bounded (24 hours, 1 024 records per actor), and each decision's evidence carries the
   history it read, by attempt id. The AE contract suite gains the clause `AllowAtMost` and five cases, passed by the
   reference evaluator and by the suite's independent replacement.
 - **A Strands Agents session store on the fleet: `strands-session-mycelium` 0.1.0** (post-360 plan row O). A new Python
