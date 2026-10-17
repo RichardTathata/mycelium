@@ -170,6 +170,10 @@ pub fn hook(
     decls: Vec<ActivationDecl>,
     watch: WatchList,
 ) -> impl Fn(&InstallableEntry, &Path, &ActivationCtx) -> Result<Option<Arc<AtomicBool>>, String> + Send + Sync + 'static {
+    // Review finding 5 (#636): each activation's profile is resolved once — per declaration and placed
+    // file — and kept for the stem's life, its paths held open, re-probes included. Lock-order table row
+    // 61: a leaf, held for a lookup or an insert, never while a command runs.
+    let resolved: Arc<Mutex<std::collections::HashMap<(usize, PathBuf), Profile>>> = Default::default();
     move |entry, path, actx| {
         let target = format!("{}/{}", entry.provides.namespace, entry.provides.name);
         let trigger = format!("install token {}", actx.install_token);
@@ -180,9 +184,10 @@ pub fn hook(
                 t.record(rule, trigger.clone(), outcome, reason, target.clone(), Vec::new(), effect);
             }
         };
-        let Some(decl) = decls
+        let Some((index, decl)) = decls
             .iter()
-            .find(|d| d.ns == entry.provides.namespace.as_ref() && d.name == entry.provides.name.as_ref())
+            .enumerate()
+            .find(|(_, d)| d.ns == entry.provides.namespace.as_ref() && d.name == entry.provides.name.as_ref())
         else {
             rec("prov.activation", OutcomeKind::NoAction, "no_declaration", None);
             return Ok(None);
@@ -191,7 +196,7 @@ pub fn hook(
         // nothing runs, not even the render. Resolved once, here; the re-probes reuse it.
         let profile = match &decl.confine {
             None => None,
-            Some(c) => match crate::activation_sandbox::prepare(c, path) {
+            Some(c) => match resolved_profile(&resolved, index, c, path) {
                 Ok(p) => Some(p),
                 Err(refusal) => {
                     rec("prov.activation", OutcomeKind::Refusal, refusal.reason(), None);
@@ -238,6 +243,22 @@ pub fn hook(
         });
         Ok(Some(health))
     }
+}
+
+/// The profile resolved for `(index, placed)` the first time, or resolve and keep it now.
+fn resolved_profile(
+    resolved: &Mutex<std::collections::HashMap<(usize, PathBuf), Profile>>,
+    index: usize,
+    c: &mycelium::ConfineDecl,
+    placed: &Path,
+) -> Result<Profile, crate::activation_sandbox::Refusal> {
+    let key = (index, placed.to_path_buf());
+    if let Some(p) = resolved.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        return Ok(p.clone());
+    }
+    // Resolved outside the lock (it reads the filesystem); a racing first resolution keeps the earlier.
+    let fresh = crate::activation_sandbox::prepare(c, placed)?;
+    Ok(resolved.lock().unwrap_or_else(|e| e.into_inner()).entry(key).or_insert(fresh).clone())
 }
 
 /// Re-run every live activation's probe each `every`, flipping its flag; drop the ones whose
@@ -497,6 +518,160 @@ mod tests {
             assert!(e.contains("landlock") && e.contains("localhost") && e.contains("not run unconfined"), "{e}");
         }
         drop((open, other));
+    }
+
+    /// `python3` for the probes bash cannot make; under `MYCELIUM_CONFINE_LIVE_REQUIRED` its absence fails.
+    fn python3_or_skip(test: &str) -> bool {
+        if run(&["python3".to_string(), "-c".into(), "pass".into()], Duration::from_secs(10)).is_ok() {
+            return true;
+        }
+        if std::env::var_os("MYCELIUM_CONFINE_LIVE_REQUIRED").is_some() {
+            panic!("{test}: MYCELIUM_CONFINE_LIVE_REQUIRED is set and python3 is not on this host");
+        }
+        eprintln!("{test}: SKIPPED — no python3");
+        false
+    }
+
+    /// A probe written in Python: `mode` against 127.0.0.1:`port`, exit 0 if the call succeeded.
+    const NET_PROBE: &str = r#"import socket,sys
+mode,port=sys.argv[1],int(sys.argv[2])
+s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+try:
+    if mode=='fastopen': s.sendto(b'x',socket.MSG_FASTOPEN,('127.0.0.1',port))
+    elif mode=='fastopen_msg': s.sendmsg([b'x'],[],socket.MSG_FASTOPEN,('127.0.0.1',port))
+    elif mode=='listen': s.listen(1)
+    elif mode=='connect': s.connect(('127.0.0.1',port))
+except OSError as e:
+    print(e,file=sys.stderr); sys.exit(3)
+"#;
+
+    /// Where this host's `python3` lives (`sys.base_prefix`, canonical), for a profile's `read`: on macOS
+    /// it is under `/opt/homebrew` or `/Library`, outside the always-readable set.
+    fn python_prefix() -> String {
+        let out = std::process::Command::new("python3").args(["-c", "import sys,os;print(os.path.realpath(sys.base_prefix))"]).output().unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    fn net_probe(mode: &str, port: u16) -> Vec<String> {
+        vec!["python3".into(), "-I".into(), "-S".into(), "-c".into(), NET_PROBE.into(), mode.into(), port.to_string()]
+    }
+
+    /// Review finding 1 (#636): a confined command with one declared port reached any other by TCP Fast
+    /// Open (`sendto`/`sendmsg` with `MSG_FASTOPEN` connects without `connect(2)`, past Landlock's hook),
+    /// and could `listen()` on an auto-bound port. Both refused now, by the syscalls themselves — not
+    /// bash's `/dev/tcp`, which only ever calls `connect`. Seen failing first on Linux (both succeeded).
+    #[test]
+    fn a_confined_activation_cannot_reach_an_undeclared_port_by_fast_open_or_listen() {
+        const T: &str = "a_confined_activation_cannot_reach_an_undeclared_port_by_fast_open_or_listen";
+        if !crate::activation_sandbox::native_backend_or_skip(T) || !python3_or_skip(T) {
+            return;
+        }
+        let s = Scene::new("tfo");
+        let open = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let other = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let (a, b) = (open.local_addr().unwrap().port(), other.local_addr().unwrap().port());
+        let profile = mycelium::ConfineDecl { read: vec![python_prefix()], connect: vec![format!("*:{a}")], ..Default::default() };
+        let run_c = |argv: Vec<String>| activate(confined(argv, Vec::new(), profile.clone()), &s.placed).0;
+        // The plants: unconfined, each call succeeds; confined, the declared port is still reachable.
+        assert_eq!(super::run(&net_probe("listen", 0), Duration::from_secs(10)), Ok(()));
+        assert_eq!(run_c(net_probe("connect", a)), Ok(()), "the declared port");
+        let modes: &[&str] = if cfg!(target_os = "linux") {
+            assert_eq!(super::run(&net_probe("fastopen", b), Duration::from_secs(10)), Ok(()));
+            assert_eq!(super::run(&net_probe("fastopen_msg", b), Duration::from_secs(10)), Ok(()));
+            &["fastopen", "fastopen_msg"]
+        } else {
+            &[] // macOS's Python has no MSG_FASTOPEN; Seatbelt checks the connection, not the call
+        };
+        for mode in modes {
+            assert!(run_c(net_probe(mode, b)).is_err(), "{mode} to an undeclared port must be refused");
+        }
+        assert!(run_c(net_probe("listen", 0)).is_err(), "listen() must be refused");
+        drop((open, other));
+    }
+
+    /// Review finding 4 (#636): on x86_64 an x32 syscall number (`nr | 0x40000000`) matched no rule of
+    /// the seccomp filter, whose default is allow, so `socket(2)` through the x32 table passed it. Now
+    /// refused with the filter's own `EACCES`. Not applicable off x86_64 (aarch64 has no x32 table).
+    /// Seen failing first in CI (x86_64): the errno was not the filter's.
+    #[test]
+    fn an_x32_syscall_is_refused_by_the_filter() {
+        const T: &str = "an_x32_syscall_is_refused_by_the_filter";
+        if !(cfg!(target_os = "linux") && cfg!(target_arch = "x86_64")) {
+            eprintln!("{T}: not applicable — x32 is an x86_64 Linux table");
+            return;
+        }
+        if !crate::activation_sandbox::native_backend_or_skip(T) || !python3_or_skip(T) {
+            return;
+        }
+        let s = Scene::new("x32");
+        let script = "import ctypes,sys\nlibc=ctypes.CDLL(None,use_errno=True)\nr=libc.syscall(41|0x40000000,1,1,0)\ne=ctypes.get_errno()\nprint(r,e,file=sys.stderr)\nsys.exit(0 if r==-1 and e==13 else 3)\n";
+        let profile = mycelium::ConfineDecl { read: vec![python_prefix()], ..Default::default() };
+        let got = activate(confined(vec!["python3".into(), "-I".into(), "-S".into(), "-c".into(), script.into()], Vec::new(), profile), &s.placed).0;
+        assert_eq!(got, Ok(()), "an x32 socket(2) is refused with the filter's EACCES");
+    }
+
+    /// Review finding 2 (#636): the always-readable set held `/etc` (Linux) and `/private/etc` and all of
+    /// `/usr` (macOS) — the node key's documented home is `/etc/mycelium/node.key`. Now only what loading,
+    /// resolving and TLS need. A world-readable `/etc` file outside that list stands in for the key. Seen
+    /// failing first: it was read.
+    #[test]
+    fn a_confined_activation_cannot_read_the_hosts_unlisted_configuration() {
+        const T: &str = "a_confined_activation_cannot_read_the_hosts_unlisted_configuration";
+        if !crate::activation_sandbox::native_backend_or_skip(T) {
+            return;
+        }
+        let candidates: &[&str] = if cfg!(target_os = "macos") {
+            &["/private/etc/shells", "/private/etc/profile", "/private/etc/bashrc"]
+        } else {
+            &["/etc/hostname", "/etc/debian_version", "/etc/issue", "/etc/environment", "/etc/shells"]
+        };
+        let readable = candidates.iter().find(|p| run(&sh(&format!("cat {p} >/dev/null")), Duration::from_secs(5)).is_ok());
+        let Some(file) = readable else {
+            if std::env::var_os("MYCELIUM_CONFINE_LIVE_REQUIRED").is_some() {
+                panic!("{T}: no readable stand-in among {candidates:?}");
+            }
+            eprintln!("{T}: SKIPPED — no readable stand-in");
+            return;
+        };
+        let s = Scene::new("etc");
+        let got = activate(confined(sh(&format!("cat {file}")), Vec::new(), mycelium::ConfineDecl::default()), &s.placed).0;
+        assert!(got.is_err(), "{file} is outside the always-readable set and must not be readable");
+        // What a loader, a resolver and TLS need still is.
+        let ok = activate(confined(sh("cat /etc/hosts >/dev/null"), Vec::new(), mycelium::ConfineDecl::default()), &s.placed).0;
+        assert_eq!(ok, Ok(()), "/etc/hosts stays readable");
+    }
+
+    /// Review finding 5 (#636): a confined run with `write = ["{dir}"]` replaced a declared read path
+    /// under it with a symlink to a directory the profile never named, and the next run — which resolved
+    /// the profile afresh — was granted it. Now the first resolution is kept for the activation's life,
+    /// and a declared path that passes through a symlink inside a writable root is refused. Seen failing
+    /// first: the second run read the secret.
+    #[test]
+    fn a_symlink_planted_by_one_run_does_not_widen_the_next() {
+        const T: &str = "a_symlink_planted_by_one_run_does_not_widen_the_next";
+        if !crate::activation_sandbox::native_backend_or_skip(T) {
+            return;
+        }
+        let s = Scene::new("symlink");
+        std::fs::create_dir_all(s.root.join("placed/models")).unwrap();
+        std::fs::write(s.root.join("placed/models/m"), b"declared").unwrap();
+        let outside = s.p("outside");
+        let profile = mycelium::ConfineDecl { read: vec!["{dir}/models".into()], write: vec!["{dir}".into()], ..Default::default() };
+        // One command: the first run plants the symlink, every later run reads through it.
+        let cmd = format!(
+            "if [ -e {{dir}}/planted ]; then cat {{dir}}/models/secret; else rm -rf {{dir}}/models && ln -s {outside} {{dir}}/models && touch {{dir}}/planted; fi"
+        );
+        let actx = ActivationCtx { install_token: 1, trace: None };
+        // One hook for every run, as one stem's provisioner holds it.
+        let h = hook(vec![confined(sh(&cmd), Vec::new(), profile.clone())], Default::default());
+        assert!(h(&pack_entry(), &s.placed, &actx).is_ok(), "the first run may rewrite its writable {{dir}}");
+        assert!(std::fs::symlink_metadata(s.root.join("placed/models")).unwrap().file_type().is_symlink(), "the plant");
+        let got = h(&pack_entry(), &s.placed, &actx);
+        assert!(got.is_err(), "the same stem's next run must not read through the planted symlink: {got:?}");
+        // A stem started afresh resolves anew — and refuses a declared path through a symlink in a writable root.
+        let fresh = hook(vec![confined(sh(&cmd), Vec::new(), profile)], Default::default());
+        let e = fresh(&pack_entry(), &s.placed, &actx).expect_err("a fresh resolution through the symlink is refused");
+        assert!(e.contains("symlink") && e.contains("not run unconfined"), "{e}");
     }
 
     /// A command that genuinely hangs still times out, and is killed and reaped.

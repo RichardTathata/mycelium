@@ -744,9 +744,13 @@ mod tests {
         std::fs::remove_dir_all(lib_dir.join("placed")).unwrap();
         let foreign = if cfg!(target_os = "macos") { "landlock" } else { "seatbelt" };
         let node = agent(alloc_port(), Some(seed.node_id().to_socket_addr().port())).await;
-        let stem = Stem::start(Arc::clone(&node), &unit(foreign), stem_opts(&lib_dir)).unwrap();
+        let sink = Arc::new(mycelium::decision::DecisionSink::default());
+        let opts = StemOptions { trace: Some(Arc::clone(&sink)), ..stem_opts(&lib_dir) };
+        let stem = Stem::start(Arc::clone(&node), &unit(foreign), opts).unwrap();
         assert!(matches!(stem.activation_confinement(), [(_, Confinement::Refused { reason })] if reason.contains(foreign)), "{:?}", stem.activation_confinement());
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        // Review finding 9 (#636): observe the refusal itself, not a quiet interval.
+        let refused = || sink.snapshot().iter().any(|r| r.rule == "prov.activation" && r.reason == "confinement_unavailable");
+        assert!(wait_until(60, refused).await, "the provisioner tried, and the refusal is recorded by name");
         assert_eq!(stem.hosted_count(), 0, "a refused activation hosts nothing");
         assert!(!active.exists(), "and its command never ran");
         stem.stop().await;

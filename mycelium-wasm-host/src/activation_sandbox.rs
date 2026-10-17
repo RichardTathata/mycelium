@@ -78,14 +78,28 @@ impl std::fmt::Display for Refusal {
     }
 }
 
-/// The paths a Seatbelt profile always lets a command read: enough for the system's shells, tools and
-/// dynamic loader. `/usr` includes `/usr/local` (Homebrew on Intel); `/opt/homebrew` and `/Applications`
-/// are not here — name them in `read`.
-pub const SEATBELT_SYSTEM_READ: &[&str] =
-    &["/usr", "/bin", "/sbin", "/System", "/private/etc", "/private/var/select"];
+/// The paths a Seatbelt profile always lets a command read — **exactly these**: the system's executables
+/// and libraries (not `/usr/local`, not `/opt/homebrew`, not `/Applications` — name those in `read`), the
+/// `sh` shim's selection, and from `/private/etc` only what a resolver, a user lookup, the time zone and
+/// TLS read (review finding 2, #636: `/private/etc` whole and `/usr/local` were readable).
+pub const SEATBELT_SYSTEM_READ: &[&str] = &[
+    "/usr/bin", "/usr/sbin", "/usr/lib", "/usr/libexec", "/usr/share", "/bin", "/sbin", "/System",
+    "/private/var/select", "/private/var/db/timezone",
+    "/private/etc/hosts", "/private/etc/resolv.conf", "/private/var/run/resolv.conf", "/private/etc/passwd",
+    "/private/etc/group", "/private/etc/localtime", "/private/etc/ssl",
+];
 
-/// The paths a Landlock profile always lets a command read and execute.
-pub const LANDLOCK_SYSTEM_READ: &[&str] = &["/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/etc"];
+/// The paths a Landlock profile always lets a command read and execute — **exactly these**: the system's
+/// executables and libraries (not `/usr/local`), and from `/etc` only what the dynamic loader, a resolver,
+/// a user lookup, the time zone, `alternatives` and TLS read — not `/etc` whole, where the node key's
+/// documented home is (review finding 2, #636). Absent ones are skipped.
+pub const LANDLOCK_SYSTEM_READ: &[&str] = &[
+    "/usr/bin", "/usr/sbin", "/usr/lib", "/usr/lib32", "/usr/lib64", "/usr/libx32", "/usr/libexec", "/usr/share",
+    "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32",
+    "/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d", "/etc/hosts", "/etc/resolv.conf", "/etc/host.conf",
+    "/etc/gai.conf", "/etc/nsswitch.conf", "/etc/passwd", "/etc/group", "/etc/localtime", "/etc/alternatives",
+    "/etc/ssl/certs", "/etc/ssl/openssl.cnf", "/etc/ca-certificates",
+];
 
 /// The device files both backends let a command read, and `/dev/null`, which it may also write.
 pub const SYSTEM_DEVICES: &[&str] = &["/dev/null", "/dev/zero", "/dev/random", "/dev/urandom"];
@@ -147,8 +161,12 @@ fn backend_for(c: &ConfineDecl) -> Result<ConfineBackend, String> {
     Ok(backend)
 }
 
-/// A profile resolved against one placed file: every path expanded, canonical and present.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A profile resolved against one placed file: every path expanded, canonical and present — resolved
+/// **once**, when the activation is first prepared, and kept (review finding 5, #636): on Linux the paths
+/// are held open (`O_PATH`) from that resolution and Landlock's rules are made from those descriptors, so
+/// a path a confined run later replaces with a symlink grants nothing new; Seatbelt matches the resolved
+/// path strings, so a symlink planted under one resolves to its target, which the profile does not name.
+#[derive(Debug, Clone)]
 pub struct Profile {
     pub backend: ConfineBackend,
     /// Readable: the placement directory, then `read`.
@@ -157,7 +175,14 @@ pub struct Profile {
     pub write:   Vec<PathBuf>,
     /// TCP destinations: `(localhost only, port)`.
     pub connect: Vec<(bool, u16)>,
+    /// `read` then `write`, held open from the first resolution (Linux; empty elsewhere).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) pinned: Pinned,
 }
+
+/// Descriptors of a profile's paths, opened at its resolution.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Pinned(#[cfg_attr(not(target_os = "linux"), allow(dead_code))] pub(crate) Vec<std::sync::Arc<std::os::fd::OwnedFd>>);
 
 /// Resolve `c` against the placed file `placed`: the backend (or [`Refusal::Unavailable`]), then each
 /// path with `{dir}`/`{path}` expanded and canonicalised — one that does not exist is
@@ -165,16 +190,40 @@ pub struct Profile {
 pub fn prepare(c: &ConfineDecl, placed: &Path) -> Result<Profile, Refusal> {
     let backend = backend_for(c).map_err(Refusal::Unavailable)?;
     let dir = placed.parent().unwrap_or_else(|| Path::new("/"));
-    let resolve = |raw: &str| -> Result<PathBuf, Refusal> {
-        let expanded = if let Some(rest) = raw.strip_prefix("{dir}") {
+    let expand = |raw: &str| -> PathBuf {
+        PathBuf::from(if let Some(rest) = raw.strip_prefix("{dir}") {
             format!("{}{rest}", dir.display())
         } else if let Some(rest) = raw.strip_prefix("{path}") {
             format!("{}{rest}", placed.display())
         } else {
             raw.to_string()
-        };
-        canonical(Path::new(&expanded))
-            .map_err(|e| Refusal::Failed(format!("confine path {raw:?} ({expanded}): {e} — a declared path must exist when the activation runs")))
+        })
+    };
+    // Review finding 5 (#636): a confined run may write under the placement directory (with
+    // `write = ["{dir}"]`) and under its write paths, so a symlink there could be its own plant. A declared
+    // path that is itself a symlink, or passes through one below the placement directory or a write path,
+    // is refused — name its target instead.
+    let roots: Vec<PathBuf> = std::iter::once(dir.to_path_buf()).chain(c.write.iter().map(|w| expand(w))).collect();
+    for raw in c.read.iter().chain(&c.write) {
+        let p = expand(raw);
+        let mut q = PathBuf::new();
+        for part in p.components() {
+            q.push(part);
+            let in_root = roots.iter().any(|r| q != *r && q.starts_with(r));
+            if (q == p || in_root) && std::fs::symlink_metadata(&q).is_ok_and(|m| m.file_type().is_symlink()) {
+                return Err(Refusal::Failed(format!(
+                    "confine path {raw:?} ({}) passes through a symlink at {} — a declared path is never a symlink, \
+                     nor reached through one a confined command could have planted; name its target",
+                    p.display(), q.display()
+                )));
+            }
+        }
+    }
+    let resolve = |raw: &str| -> Result<PathBuf, Refusal> {
+        let expanded = expand(raw);
+        canonical(&expanded).map_err(|e| {
+            Refusal::Failed(format!("confine path {raw:?} ({}): {e} — a declared path must exist when the activation runs", expanded.display()))
+        })
     };
     let mut read = vec![canonical(dir).map_err(|e| Refusal::Failed(format!("the placement directory {}: {e}", dir.display())))?];
     for r in &c.read {
@@ -187,7 +236,8 @@ pub fn prepare(c: &ConfineDecl, placed: &Path) -> Result<Profile, Refusal> {
         .map(|e| mycelium::parse_confine_connect(e).map(|(host, port)| (host == "localhost", port)))
         .collect::<Result<Vec<_>, _>>()
         .map_err(Refusal::Failed)?;
-    Ok(Profile { backend, read, write, connect })
+    let pinned = linux::pin(read.iter().chain(&write)).map_err(Refusal::Failed)?;
+    Ok(Profile { backend, read, write, connect, pinned })
 }
 
 /// The kernel matches resolved paths (`/tmp` is `/private/tmp` on macOS), so a profile names those.
@@ -324,6 +374,22 @@ mod linux {
         rules.insert(libc::SYS_socket, socket_rules);
         // io_uring opens and connects sockets without socket(2)/connect(2).
         rules.insert(libc::SYS_io_uring_setup, Vec::new());
+        // Review finding 1 (#636): TCP Fast Open connects inside sendto/sendmsg/sendmmsg — Landlock's
+        // connect hook never sees it — so a send carrying MSG_FASTOPEN is refused, and so are the socket
+        // options that turn connect(2) or a listener into Fast Open. listen(2) auto-binds an unbound socket
+        // past Landlock's bind hook: refused outright (a confined command serves nothing).
+        let fastopen = libc::MSG_FASTOPEN as u64;
+        let flagged = |arg: u8| -> Result<Vec<SeccompRule>, String> {
+            Ok(vec![SeccompRule::new(vec![cond(arg, SeccompCmpOp::MaskedEq(fastopen), fastopen)?]).map_err(e)?])
+        };
+        rules.insert(libc::SYS_sendto, flagged(3)?);
+        rules.insert(libc::SYS_sendmsg, flagged(2)?);
+        rules.insert(libc::SYS_sendmmsg, flagged(3)?);
+        rules.insert(libc::SYS_listen, Vec::new());
+        rules.insert(libc::SYS_setsockopt, vec![
+            SeccompRule::new(vec![cond(1, SeccompCmpOp::Eq, libc::IPPROTO_TCP as u64)?, cond(2, SeccompCmpOp::Eq, libc::TCP_FASTOPEN as u64)?]).map_err(e)?,
+            SeccompRule::new(vec![cond(1, SeccompCmpOp::Eq, libc::IPPROTO_TCP as u64)?, cond(2, SeccompCmpOp::Eq, libc::TCP_FASTOPEN_CONNECT as u64)?]).map_err(e)?,
+        ]);
         let f = SeccompFilter::new(rules, SeccompAction::Allow, SeccompAction::Errno(libc::EACCES as u32), arch()?).map_err(e)?;
         f.try_into().map_err(e)
     }
@@ -349,13 +415,20 @@ mod linux {
         if let Some(r) = rule(std::path::Path::new("/dev/null"), all)? {
             created = created.add_rule(r).map_err(|e| format!("landlock rule /dev/null: {e}"))?;
         }
-        for p in &profile.read {
-            let r = rule(p, read)?.ok_or_else(|| format!("confine path {} cannot be opened", p.display()))?;
-            created = created.add_rule(r).map_err(|e| format!("landlock rule {}: {e}", p.display()))?;
+        // The profile's own paths by the descriptors opened when it was resolved (review finding 5, #636):
+        // never re-opened by name, so a path replaced since by a symlink grants nothing new.
+        let n_read = profile.read.len();
+        if profile.pinned.0.len() != n_read + profile.write.len() {
+            return Err("the profile's paths were not pinned at its resolution".into());
         }
-        for p in &profile.write {
-            let r = rule(p, all)?.ok_or_else(|| format!("confine path {} cannot be opened", p.display()))?;
-            created = created.add_rule(r).map_err(|e| format!("landlock rule {}: {e}", p.display()))?;
+        for (i, (p, fd)) in profile.read.iter().chain(&profile.write).zip(&profile.pinned.0).enumerate() {
+            let access = if i < n_read { read } else { all };
+            let file = std::fs::File::from(fd.try_clone().map_err(|e| format!("confine path {}: {e}", p.display()))?);
+            let is_dir = file.metadata().map(|m| m.is_dir()).unwrap_or(false);
+            let access = if is_dir { access } else { access & AccessFs::from_file(FS_ABI) };
+            created = created
+                .add_rule(PathBeneath::new(std::os::fd::OwnedFd::from(file), access))
+                .map_err(|e| format!("landlock rule {}: {e}", p.display()))?;
         }
         for (_, port) in &profile.connect {
             created = created.add_rule(NetPort::new(*port, AccessNet::ConnectTcp)).map_err(|e| format!("landlock port {port}: {e}"))?;
@@ -364,7 +437,55 @@ mod linux {
         if status.ruleset != RulesetStatus::FullyEnforced || !status.no_new_privs {
             return Err(format!("landlock enforced the profile only partly ({:?}) — refused", status.ruleset));
         }
-        seccompiler::apply_filter(&filter(net)?).map_err(|e| format!("seccomp: {e}"))
+        seccompiler::apply_filter(&filter(net)?).map_err(|e| format!("seccomp: {e}"))?;
+        if let Some(x32) = x32_filter().filter(|_| false) { // PLANTED OFF for one CI run: x32 fail-first (#636 finding 4)
+            seccompiler::apply_filter(&x32).map_err(|e| format!("seccomp (x32): {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// Open each path `O_PATH`, once, at the profile's resolution (review finding 5, #636).
+    pub(super) fn pin<'a>(paths: impl Iterator<Item = &'a std::path::PathBuf>) -> Result<super::Pinned, String> {
+        use std::os::unix::fs::OpenOptionsExt;
+        paths
+            .map(|p| {
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_PATH | libc::O_CLOEXEC)
+                    .open(p)
+                    .map(|f| std::sync::Arc::new(std::os::fd::OwnedFd::from(f)))
+                    .map_err(|e| format!("confine path {}: {e}", p.display()))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(super::Pinned)
+    }
+
+    /// On x86_64, refuse every syscall with the x32 bit (`nr & 0x40000000`) — review finding 4 (#636). The
+    /// main filter matches syscall numbers exactly and allows the rest, so `socket(2)` through the x32
+    /// table (41 | 0x40000000) matched no rule. A raw cBPF program: check the architecture, load the
+    /// number, refuse anything at or above the x32 bit with `EACCES`, allow the rest. `None` off x86_64.
+    fn x32_filter() -> Option<BpfProgram> {
+        if std::env::consts::ARCH != "x86_64" {
+            return None;
+        }
+        use seccompiler::sock_filter;
+        const LD_W_ABS: u16 = 0x20; // BPF_LD (0) | BPF_W (0) | BPF_ABS
+        const JEQ_K: u16 = 0x05 | 0x10; // BPF_JMP | BPF_JEQ | BPF_K
+        const JGE_K: u16 = 0x05 | 0x30; // BPF_JMP | BPF_JGE | BPF_K
+        const RET_K: u16 = 0x06; // BPF_RET | BPF_K
+        const AUDIT_ARCH_X86_64: u32 = 0xC000_003E;
+        const RET_ALLOW: u32 = 0x7fff_0000;
+        let ret_eacces: u32 = 0x0005_0000 | libc::EACCES as u32;
+        let f = |code, jt, jf, k| sock_filter { code, jt, jf, k };
+        Some(vec![
+            f(LD_W_ABS, 0, 0, 4),                   // seccomp_data.arch
+            f(JEQ_K, 1, 0, AUDIT_ARCH_X86_64),      // x86_64: go on; else allow (the main filter judges it)
+            f(RET_K, 0, 0, RET_ALLOW),
+            f(LD_W_ABS, 0, 0, 0),                   // seccomp_data.nr
+            f(JGE_K, 0, 1, 0x4000_0000),            // the x32 bit
+            f(RET_K, 0, 0, ret_eacces),
+            f(RET_K, 0, 0, RET_ALLOW),
+        ])
     }
 
     /// Restrict a fresh thread, then run the command from it: the child inherits the thread's Landlock
@@ -393,6 +514,11 @@ mod linux {
         Err(format!("backend landlock is Linux's, and this is {}", std::env::consts::OS))
     }
 
+    /// Seatbelt matches the resolved path strings; nothing to hold open.
+    pub(super) fn pin<'a>(_paths: impl Iterator<Item = &'a std::path::PathBuf>) -> Result<super::Pinned, String> {
+        Ok(super::Pinned::default())
+    }
+
     pub(super) fn run(_argv: &[String], _timeout: Duration, _profile: &Profile) -> Result<(), String> {
         Err(format!("backend landlock is Linux's, and this is {} — refused, not run unconfined", std::env::consts::OS))
     }
@@ -413,7 +539,7 @@ pub fn confinement_guarantee(units: &mycelium::NodeCapabilityConfig) -> mycelium
         1,
         "stem",
         GuaranteeKind::NodeEnforced,
-        "every `[[activation]]` command and probe runs under its OS confinement profile — filesystem limited to the placement directory and declared paths, network to declared TCP ports or none",
+        "every `[[activation]]` command and probe runs under its OS confinement profile — reading only the placement directory, its declared paths and the system set (Linux: /usr/{bin,sbin,lib,lib32,lib64,libx32,libexec,share}, /bin, /sbin, /lib, /lib32, /lib64, /libx32, /etc/{ld.so.cache,ld.so.conf,ld.so.conf.d,hosts,resolv.conf,host.conf,gai.conf,nsswitch.conf,passwd,group,localtime,alternatives,ssl/certs,ssl/openssl.cnf,ca-certificates}; macOS: /usr/{bin,sbin,lib,libexec,share}, /bin, /sbin, /System, /private/var/select, /private/var/db/timezone, /private/etc/{hosts,resolv.conf,passwd,group,localtime,ssl}, /private/var/run/resolv.conf; both: /dev/{null,zero,random,urandom}), writing only its declared write paths and /dev/null, connecting only to declared TCP ports (no Fast Open, no listen) or nowhere — never by hostname",
         "`[activation.confine]` on every `[[activation]]`; Seatbelt (`sandbox-exec`, macOS) or Landlock ABI 3 (ABI 4 with `connect`) and seccomp (Linux)",
         &["activation::hook", "activation::spawn_reprobe", "activation_sandbox::run_confined"],
         "docs/reference/unit-file.md",
@@ -460,6 +586,7 @@ mod tests {
             read: vec![PathBuf::from("/a\")(allow default)")],
             write: vec![PathBuf::from("/w")],
             connect: vec![(true, 11434), (false, 443)],
+            pinned: Pinned::default(),
         };
         let text = seatbelt_profile(&p);
         assert!(!text.contains("allow default"), "no path is spliced into the profile: {text}");
@@ -534,6 +661,24 @@ mod tests {
         assert!(why.contains("refused") && why.contains("never run unconfined"), "{why}");
         if native_backend_or_skip("the_guarantee_report_says_confined_unconfined_or_refused") {
             assert_eq!(state(&act("b", "[activation.confine]\n")).0, "enforced");
+        }
+    }
+
+    /// Review finding 2 (#636): the always-readable sets name no directory that holds a node's own
+    /// secrets — not `/etc` or `/private/etc` whole, not `/usr` whole (so not `/usr/local`) — and the
+    /// guarantee's promise lists every entry.
+    #[test]
+    fn the_always_readable_sets_hold_no_whole_configuration_tree() {
+        for set in [SEATBELT_SYSTEM_READ, LANDLOCK_SYSTEM_READ] {
+            for whole in ["/", "/etc", "/private/etc", "/usr", "/usr/local", "/opt", "/home", "/Users", "/var", "/private/var"] {
+                assert!(!set.contains(&whole), "{whole} is readable whole");
+            }
+        }
+        let units = mycelium::NodeCapabilityConfig::default();
+        let promise = confinement_guarantee(&units).promise;
+        for p in SEATBELT_SYSTEM_READ.iter().chain(LANDLOCK_SYSTEM_READ) {
+            let leaf = p.rsplit('/').next().unwrap();
+            assert!(promise.contains(leaf), "the promise names {p}");
         }
     }
 }

@@ -713,7 +713,7 @@ named one), and `io_uring` (which opens sockets past `socket(2)`). Landlock's ri
 requirement**: an older kernel is a refusal, never a quieter sandbox. The rule is 2.18.1's: **a profile the node
 cannot apply refuses the activation by name, never runs it unconfined** — and a profile no backend can hold (a
 hostname, an address) is refused at load. The guarantee report says which applies (`stem.activation_confined`,
-registered by `mycelium-stem` before `start()`); the per-activation answer is `Stem::activation_confinement`. Not
+registered by `mycelium-stem` before `start()`); the per-activation answer is `Stem::activation_confinement`. Its review (#636) found what each hook does not see: Landlock's TCP rules miss TCP Fast Open (`MSG_FASTOPEN` sends) and `listen`'s auto-bind, and seccomp's syscall-number match misses x32 — all three refused by the filter now; the always-readable set names files, not `/etc` whole (the node key's home); a profile is resolved once and held open, so a symlink a confined run plants cannot widen the next. Not
 built: a live-reloaded network allow-list, limits by host, an OpenShell (container) backend, resource limits, and on
 Linux below Landlock ABI 6 a limit on signals. [`.log/2026-10-17-activation-confined.md`](.log/2026-10-17-activation-confined.md).
 

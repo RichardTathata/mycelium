@@ -291,27 +291,41 @@ An empty table is the strictest profile: the placement directory read-only, no n
 | `write` | array of strings | empty | Paths the command may read and write. |
 | `connect` | array of strings | empty | TCP destinations, `localhost:<port>` or `*:<port>`. Empty: no network at all. |
 
-A path is absolute, or starts with `{dir}` (the placement directory) or `{path}` (the placed file); no
+A path is absolute, or starts with `{dir}` (the placement root — see below) or `{path}` (the placed file); no
 other placeholder, and no `..` segment. Each must exist when the activation runs, or the activation is
 refused naming it. A `connect` entry naming a hostname or an address is refused at load: neither backend
-can limit a connection to one. An unknown key in the table is refused at load.
+can limit a connection to one. An unknown key in the table — or in the `[[activation]]` itself, so a
+misspelt `[activation.confined]` cannot load as *no profile* — is refused at load.
 
 What each backend allows, besides the profile's own paths and ports:
 
 | | Seatbelt (macOS) | Landlock + seccomp (Linux) |
 |---|---|---|
 | How | `/usr/bin/sandbox-exec` with a generated profile (`deny default`); paths passed as `-D` parameters | a Landlock ruleset and a seccomp filter on a dedicated thread, inherited by the command |
-| Always readable | `/usr`, `/bin`, `/sbin`, `/System`, `/private/etc`, `/private/var/select`, `/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom` | `/usr`, `/bin`, `/sbin`, `/lib`, `/lib32`, `/lib64`, `/libx32`, `/etc`, and the same devices |
+| Always readable — exactly these | `/usr/bin`, `/usr/sbin`, `/usr/lib`, `/usr/libexec`, `/usr/share`, `/bin`, `/sbin`, `/System`, `/private/var/select`, `/private/var/db/timezone`, `/private/etc/hosts`, `/private/etc/resolv.conf`, `/private/var/run/resolv.conf`, `/private/etc/passwd`, `/private/etc/group`, `/private/etc/localtime`, `/private/etc/ssl`, `/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom` | `/usr/bin`, `/usr/sbin`, `/usr/lib`, `/usr/lib32`, `/usr/lib64`, `/usr/libx32`, `/usr/libexec`, `/usr/share`, `/bin`, `/sbin`, `/lib`, `/lib32`, `/lib64`, `/libx32`, `/etc/ld.so.cache`, `/etc/ld.so.conf`, `/etc/ld.so.conf.d`, `/etc/hosts`, `/etc/resolv.conf`, `/etc/host.conf`, `/etc/gai.conf`, `/etc/nsswitch.conf`, `/etc/passwd`, `/etc/group`, `/etc/localtime`, `/etc/alternatives`, `/etc/ssl/certs`, `/etc/ssl/openssl.cnf`, `/etc/ca-certificates`, and the same devices (each skipped where absent) |
 | Always writable | `/dev/null` | `/dev/null` |
 | `localhost:<port>` | held | **refused** — Landlock limits a port, not an address; write `*:<port>` |
 | `*:<port>` | that port at any address, and the resolver's socket, so a name resolves | that port at any address; no DNS (UDP is refused), so a name resolves only through `/etc/hosts` |
-| Other sockets | denied (`deny default`) | every socket but an IP stream over TCP refused, and every socket without `connect`; no `io_uring` |
+| Other sockets | denied (`deny default`), listening included | every socket but an IP stream over TCP refused, and every socket without `connect`; no `listen`, no TCP Fast Open (`MSG_FASTOPEN` on `sendto`/`sendmsg`/`sendmmsg`, the `TCP_FASTOPEN*` options), no `io_uring`; on x86_64 no x32 syscall |
 | Needs | `sandbox-exec` | Landlock ABI 3 (Linux 6.2); ABI 4 (Linux 6.7) with `connect`; x86_64 or aarch64 |
+
+Nothing else in `/etc` (or `/private/etc`), and nothing under `/usr/local`, is readable: the node's own
+key, certificates and configuration stay out of reach unless a path names them.
+
+`{dir}` is the **placement root** — the one directory every blob this stem places lands in, by content
+address — not a directory of the artifact's own. `write = ["{dir}"]` therefore lets the command rewrite
+every other placed artifact; write to a subdirectory you create for it (`{dir}/<name>`) or to a path
+outside. A declared path that is a symlink, or reaches its target through a symlink below the placement
+root or below a write path (which a confined command could have planted), is refused. Each path is
+resolved once, the first time the activation runs, and kept for the stem's life — on Linux held open, so
+the rules are made from those descriptors and never re-resolved by name.
 
 Neither limits reading a path's metadata (`stat`), CPU or memory, and the command inherits the stem's
 environment (row L's credential bindings are the way to keep a secret out of it). On Linux below Landlock ABI 6, signals to
 the stem user's other processes are not limited either. `/opt/homebrew` and `/Applications` are not in the
-macOS set: an Ollama installed as an app needs `read = ["/Applications/Ollama.app"]`.
+macOS set: an Ollama installed as an app needs `read = ["/Applications/Ollama.app"]` and its
+`command` naming `/Applications/Ollama.app/Contents/Resources/ollama` (the `/usr/local/bin` link is not
+readable).
 
 The profile is resolved once, when the activation runs, and its re-probes reuse it; the unit file is read
 at start, so every limit holds until the stem restarts. A network allow-list that changes live is **not
@@ -330,8 +344,8 @@ otherwise, and `not_applicable` with no `[[activation]]`.
 ns   = "llm"
 name = "storyteller"
 resolve_artifact_refs = true
-command = ["ollama", "create", "coop-storyteller", "-f", "{rendered}"]
-probe   = ["ollama", "show", "coop-storyteller"]
+command = ["/Applications/Ollama.app/Contents/Resources/ollama", "create", "coop-storyteller", "-f", "{rendered}"]
+probe   = ["/Applications/Ollama.app/Contents/Resources/ollama", "show", "coop-storyteller"]
   [activation.confine]
   read    = ["/Applications/Ollama.app"]
   connect = ["localhost:11434"]

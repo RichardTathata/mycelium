@@ -251,7 +251,11 @@ fn default_serve_ns() -> String {
 /// `artifact:<64 hex>` reference is replaced by that artifact's placed path (a Modelfile's
 /// `FROM artifact:…`). A reference not yet placed fails the activation, and the next round
 /// retries: ordering without a dependency resolver, as the model demo does in code.
+///
+/// Unknown keys are refused (review finding 3, #636): a misspelt `[activation.confined]` would otherwise
+/// load as no profile at all, and the activation run unconfined without a word.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActivationDecl {
     pub ns:   String,
     pub name: String,
@@ -1461,5 +1465,18 @@ max_providers = 4
         assert!(e.contains("activation.confine") && e.contains("port"), "{e}");
         let e = bad("connect = [\"*:70000\"]\n");
         assert!(e.contains("activation.confine") && e.contains("port"), "{e}");
+    }
+
+    /// Review finding 3 (#636): a misspelt table — `[activation.confined]`, `[activation.sandbox]` — was an
+    /// unknown key the loader dropped, so the activation ran **unconfined** with no word said. An
+    /// `[[activation]]` now refuses an unknown key by name. Seen failing first: both loaded, `confine` None.
+    #[test]
+    fn a_misspelt_confinement_table_is_refused_not_dropped() {
+        let head = "[hosts]\nkinds = [\"blob\"]\naccept_unsigned = true\n[[activation]]\nns = \"a\"\nname = \"b\"\ncommand = [\"run\"]\n";
+        for table in ["[activation.confined]\n", "[activation.sandbox]\nread = [\"/x\"]\n", "confnie = 1\n"] {
+            let e = refused(&format!("{head}{table}"));
+            let key = table.trim_start_matches("[activation.").split([']', ' ', '\n']).next().unwrap();
+            assert!(e.contains(key), "names {key:?}: {e}");
+        }
     }
 }
