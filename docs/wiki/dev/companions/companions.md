@@ -45,6 +45,14 @@ via wasm-host).
 - **[wiki.md](wiki.md)** — `mycelium-wiki/`: group-scoped, LLM-curated wiki — the durable, curated
   third primitive (a **store, not a service**: node-independent store + a recallable curator). Build
   phases 1–5 shipped 2026-07-03.
+- **`strands-session-mycelium/`** (Python, post-360 row O, 2026-10-17) — a Strands Agents `SessionManager` over the
+  Python SDK's KV verbs: one row per session, agent, message and swarm/graph under `strands/`, plus a per-agent count
+  row so a reader can tell a missing tail from a short conversation. The design rule it shares with the checkpointer:
+  **incomplete is never empty** (`IncompleteSession`, retriable), because Strands resumes by appending after the last
+  message it read and would overwrite what it did not see. Its limit: a node holding none of an agent's rows cannot
+  tell *not arrived* from *new*, so resume where the rows have arrived; one agent id is one writer. Pinned to
+  `strands-agents` 1.61.1, the interface recorded in `tests/test_interface.py`; live suite in CI on the reason-node
+  pair (`strands-session-mycelium/README.md`).
 - **`mycelium-wasm-host/`** — WS-E code mobility: the coordinator-free
   requirement→resolve→pull→advertise→serve→self-heal loop, Ed25519 provenance, mesh artifact
   pull, gossiped catalog, fuel limits (restart ≡ provisioning). PRs #32–#42; runbook

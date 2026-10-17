@@ -99,10 +99,10 @@ MUTATIONS = {
         "def test_x():\n    pass\n"),
     # python and typescript collection
     "a *_test.py outside every collected dir": write("tools/thing_test.py", "def test_x():\n    pass\n"),
-    "pytest --ignore drops a dir": edit(CI, "pytest langgraph-checkpoint-mycelium/tests mycelium-py/tests -v",
-                                       "pytest langgraph-checkpoint-mycelium/tests mycelium-py/tests -v --ignore mycelium-py/tests"),
-    "pytest -k filter": edit(CI, "pytest langgraph-checkpoint-mycelium/tests mycelium-py/tests -v",
-                             "pytest langgraph-checkpoint-mycelium/tests mycelium-py/tests -v -k crud"),
+    "pytest --ignore drops a dir": edit(CI, "pytest langgraph-checkpoint-mycelium/tests mycelium-py/tests strands-session-mycelium/tests -v",
+                                       "pytest langgraph-checkpoint-mycelium/tests mycelium-py/tests strands-session-mycelium/tests -v --ignore mycelium-py/tests"),
+    "pytest -k filter": edit(CI, "pytest langgraph-checkpoint-mycelium/tests mycelium-py/tests strands-session-mycelium/tests -v",
+                             "pytest langgraph-checkpoint-mycelium/tests mycelium-py/tests strands-session-mycelium/tests -v -k crud"),
     "jest with a path filter": regex(CI, r"npx jest --verbose\s", "npx jest --verbose agent "),
     # fuzz
     "a fuzz target not run": regex(CI, r"^.*fuzz run .* fixint_decode .*\n", ""),
@@ -162,8 +162,8 @@ EXPECT = {
     "[lib] test = false": (append("mycelium-commitment/Cargo.toml", "\n[lib]\ntest = false\n"), "lib mycelium-commitment"),
     "a bin filter that matches no test path": (edit(CI, "cargo test --features tls,a2a --bins", "cargo test --features tls,a2a --bins skillrunner"),
                                                "bin mycelium::src/bin/skillrunner"),
-    "pytest --collect-only": (edit(CI, "pytest langgraph-checkpoint-mycelium/tests mycelium-py/tests -v",
-                                   "pytest langgraph-checkpoint-mycelium/tests mycelium-py/tests -v --co"),
+    "pytest --collect-only": (edit(CI, "pytest langgraph-checkpoint-mycelium/tests mycelium-py/tests strands-session-mycelium/tests -v",
+                                   "pytest langgraph-checkpoint-mycelium/tests mycelium-py/tests strands-session-mycelium/tests -v --co"),
                               "python langgraph-checkpoint-mycelium/tests/"),
     "jest --listTests": (regex(CI, r"npx jest --verbose\s", "npx jest --verbose --listTests "), "typescript mycelium-ts/tests/"),
     "two crates' same-named integration tests": (

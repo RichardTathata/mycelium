@@ -80,6 +80,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A Strands Agents session store on the fleet: `strands-session-mycelium` 0.1.0** (post-360 plan row O). A new Python
+  companion beside `langgraph-checkpoint-mycelium`. `MyceliumSessionManager` is a Strands `SessionManager` over the
+  Python SDK's KV verbs, so an agent's conversation and state, and a `Swarm`'s or `Graph`'s shared state, are rows in
+  the fleet's gossiped KV, and another node resumes a session once its rows have arrived. Every write returns the
+  SDK's `KvReceipt` (`last_receipt`, `on_receipt`): local application on the gateway node and that node's disk state,
+  **not replication**; `require_on_disk=True` raises on any write the node did not report `on_disk`. A session read
+  before all of it has gossiped raises `IncompleteSession` naming the missing keys, never a shorter conversation (a
+  per-agent count row covers the tail); an undecodable row or a gateway error raises `SessionException`. Two agents
+  in one session never lose each other's writes; one agent id is one writer. Pinned to `strands-agents` 1.61.1 with
+  the interface recorded in a test. Its live suite runs in CI against the two meshed reason nodes
+  (`MYCELIUM_STRANDS_LIVE_REQUIRED`).
 - **An unmodified A2A client reaches a node's skills through `/a2a`** (post-360 plan row N; upgrade note
   `docs/guide/deprecations.md` §46). The 2026-10-12 probe found the current `a2a-sdk` (1.2.2, the library Strands
   Agents uses) could not: the card was served only at `/.well-known/agent.json`, the methods were the pre-0.2

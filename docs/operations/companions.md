@@ -280,7 +280,7 @@ Nothing to persist: routing state is capability pheromone + **node-local** in-fl
 
 ## Companions with a thinner surface
 
-Six more companions ship. None has a stateful serving role, so none needs the failover and WAL
+Seven more companions ship. None has a stateful serving role, so none needs the failover and WAL
 material above — but *"no failover story"* is a fact an operator should read rather than infer from
 an absent section.
 
@@ -378,6 +378,22 @@ an absent section.
   `installs_started` ≫ `completed + failed` for installs wedged mid-flight, and
   `ineligible_skips_total{reason}` for a fleet asking a node to host what it cannot.
 - **The runbook** is [artifacts.md](artifacts.md).
+
+### strands-session-mycelium — a Strands session in the fleet's KV
+
+- **What it is.** A Python package, not a node component. Strands agents use it as their `session_manager`, and it
+  writes through a node's gateway with the Python SDK (`kv:read` and `kv:write` under scoped tokens). There is no
+  route to mount and nothing to start.
+- **What it stores.** One row per session, agent, message and swarm or graph, under `strands/` (the prefix is
+  settable). KV rows reach every node, so it is sized for conversations, not bulk payloads: one row is at most
+  `MAX_KV_WRITE_BYTES`, and a larger message is refused by name.
+- **What a save promises.** Local application on the gateway node and that node's disk state, not replication. A
+  session is readable on another node once it has gossiped there; a read that sees part of it raises
+  `IncompleteSession` (retry), never a shorter conversation.
+- **Moving a session between nodes.** Resume where its rows have arrived. On a node that has none of an agent's rows
+  yet, Strands starts that agent afresh, and the two copies compete (last writer wins). One agent id is one writer.
+- **Observe.** The gateway's KV routes and the receipts the package hands back. No metrics of its own.
+- **The reference** is [its README](../../strands-session-mycelium/README.md).
 
 ### mycelium-sim — no production surface, deliberately
 

@@ -565,17 +565,18 @@ jobs:
             fi
             sleep 1
           done
-      - run: pip install './mycelium-py[typed]' ./langgraph-checkpoint-mycelium pytest pytest-asyncio langgraph httpx-sse
+      - run: pip install './mycelium-py[typed]' ./langgraph-checkpoint-mycelium ./strands-session-mycelium pytest pytest-asyncio langgraph httpx-sse
       # By directory, never by file (verification policy rule 3): a named list left five node-free test files
       # out of CI until 2026-10-06. The live gateway suite skips itself here (no MYCELIUM_TEST_HOST) and runs in
       # its own step below against a plain node.
-      - run: pytest langgraph-checkpoint-mycelium/tests mycelium-py/tests -v
+      - run: pytest langgraph-checkpoint-mycelium/tests mycelium-py/tests strands-session-mycelium/tests -v
         env:
           MYCELIUM_TEST_PORT: 8101
           MYCELIUM_TEST_PORT_B: 8102
-          # The reason-node suites (test_reason, test_typed, the checkpointer's) fail rather than skip if
-          # the ports above go missing.
+          # The reason-node suites (test_reason, test_typed, the checkpointer's) and the Strands session
+          # store's (post-360 row O) fail rather than skip if the ports above go missing.
           MYCELIUM_REASON_LIVE_REQUIRED: "1"
+          MYCELIUM_STRANDS_LIVE_REQUIRED: "1"
       # The LangGraph example ladder, rungs 0–5 (echo variant): each runs against the
       # shared A/B mesh above and prints `RUNG N OK`. Rung 03 needs the second node
       # (MYCELIUM_TEST_PORT_B); the rest ignore it. Rung 06 has its own step below.
@@ -875,7 +876,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install './mycelium-py[typed]' ./langgraph-checkpoint-mycelium pytest pytest-asyncio langgraph httpx-sse
+      - run: pip install './mycelium-py[typed]' ./langgraph-checkpoint-mycelium ./strands-session-mycelium pytest pytest-asyncio langgraph httpx-sse
       - name: List every test
         run: |
           echo "@@test-universe@@ begin rust-python"
@@ -886,7 +887,7 @@ jobs:
           for p in $(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; [print(p["name"]) for p in json.load(sys.stdin)["packages"]]'); do
             cargo test -p "$p" --no-default-features --no-fail-fast -- --list || exit 1
           done
-          pytest --collect-only -q langgraph-checkpoint-mycelium/tests mycelium-py/tests tests/a2a-sdk
+          pytest --collect-only -q langgraph-checkpoint-mycelium/tests mycelium-py/tests strands-session-mycelium/tests tests/a2a-sdk
           echo "@@test-universe@@ end"
       # The script-style suites this workflow runs, case by case: each suite's --list prints one
       # `@@case-list@@ <suite>::<case>` line per case without running anything, and each case prints
