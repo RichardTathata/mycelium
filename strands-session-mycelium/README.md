@@ -112,10 +112,13 @@ however far behind either node is.
 **A claim names its write.** Before claiming, the writer puts the row under `pending/{token}`, and
 the claim's value is the writer's id and that token; the row follows the claim and the pending copy
 is removed. A reader that finds a claimed index or version whose row has not arrived reads it from the
-pending copy, and writes the row. So a writer that claims and then dies before writing leaves no hole
+pending copy, and writes nothing: a write from its view would carry a newer clock than whatever the
+claimant wrote since (a newer version, a redaction) and bury it. So a writer that claims and then dies before writing leaves no hole
 and blocks no one: whoever resumes the agent next reads that message. A retry reuses its token and is
 recognised as the same write; any other write to a claimed index or version is refused, whoever
-makes it. `writer` (the host's name by default; no newline) says who claimed what.
+makes it. One read-side window follows from writing nothing: a node that holds a message's pending copy
+but neither its row nor the copy's removal serves the message as first written, without a redaction
+made since, until the row arrives. `writer` (the host's name by default; no newline) says who claimed what.
 
 **What claims cost.** One consensus round, and one more row, per message and per agent or swarm
 update (tens of milliseconds on a local mesh), and **a quorum of the fleet for every write**: while a

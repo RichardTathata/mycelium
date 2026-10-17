@@ -1050,8 +1050,8 @@ window).
   writer; `IncompleteSession` when a record was created elsewhere), never overwritten. A record's update claims the
   version after the one the writer's object was read at, so a writer resumed from an older version is refused at its
   first write. A claim names its write: the row goes under `pending/{token}` first and the claim's value is the
-  writer and the token, so a reader that finds a claimed write whose row has not arrived takes it from the pending
-  copy and writes it — a writer that claims and dies blocks no one, and no writer id is a licence to rewrite (the
+  writer and the token, so a reader that finds a claimed write whose row has not arrived serves it from the pending
+  copy and writes nothing — a writer that claims and dies blocks no one, and no writer id is a licence to rewrite (the
   first claims round let a restarted writer "take back" an index judged unwritten by its own node's view: review
   finding 1). A session's claim fixes its generation, which scopes the rest; a deleted session's id is refused by
   name. A sliding window of 0, which makes Strands number from 0 again after the store answers an empty tail, moves to
@@ -1077,6 +1077,14 @@ window).
   failing with claims off was wrong (it said eight; it was seven) and stale text named the reason-node pair; (7) the
   fake now teaches a losing node the decision, as the gateway does, and a `writer` with a newline is refused. Each
   defect's test was seen failing first.
+- *Its confirmation (0887326f)* — the reviewer confirmed findings 1–3 fixed (its reproductions now wait, resume or
+  refuse) and found one more (N1, high): a reader that took a claimed write from its pending copy also wrote it as
+  the row, a last-writer-wins write with a newer clock from a lagging view, which could bury a newer version (the
+  record then read incomplete for good) or write an unredacted message back over its redaction. A reader now serves a
+  claimed write from its pending copy and writes nothing (`test_a_reader_serving_a_claimed_version_writes_nothing_over_a_newer_one`,
+  `test_a_reader_serving_a_claimed_message_writes_nothing_over_its_redaction`, both seen failing first). Stated: a
+  node that holds a message's pending copy and neither its row nor the copy's tombstone serves the message as it was
+  first written, without a later redaction, until the row arrives — a read, nothing written.
 - *Found on the way — a substrate defect* — the `mycelium` binary never started a consensus listener, so on a mesh of
   two or more binaries every `/gateway/overlay/{consistent/set,lock/acquire,elect}` timed out (`consensus timed out
   after 3 ballot(s)`, measured on three local binaries; milliseconds with the listener). `src/main.rs` now starts one

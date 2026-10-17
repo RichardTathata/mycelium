@@ -15,9 +15,10 @@ from strands.types.exceptions import SessionException
 from strands.types.session import SessionAgent
 
 from fakes import FakeGateway, ScriptedModel
-from strands_session_mycelium import IncompleteSession, MyceliumSessionManager, StaleWriter
+from strands_session_mycelium import IncompleteSession, MyceliumSessionManager, MyceliumSessionRepository, StaleWriter
 
 MSG = "strands/s1/agent/planner/msg/{:010d}"
+AGENT = "strands/s1/agent/planner"
 
 
 def fleet() -> tuple[FakeGateway, FakeGateway]:
@@ -139,7 +140,10 @@ def test_a_message_claimed_and_never_written_is_read_from_its_claim(writer):
     again = agent(gw, ["r3"], writer=writer)  # its restart, or a replacement on another host
     assert [b["text"] for m in again.messages for b in m["content"]] == ["one", "r1", "two"]
     again("three")
-    assert text(gw, 2) == "two" and text(gw, 3) == "three"
+    # Message 2 is served from its claim's pending copy, never rewritten by a reader; 3 follows it.
+    assert MSG.format(2) not in gw.rows and text(gw, 3) == "three"
+    after = agent(gw, [], writer="node-c")
+    assert [b["text"] for m in after.messages for b in m["content"]][:4] == ["one", "r1", "two", "three"]
 
 
 def test_an_agent_claimed_and_never_written_is_read_from_its_claim():
@@ -200,3 +204,53 @@ def test_without_claims_the_store_needs_no_consensus():
     m = MyceliumSessionManager("s1", agent=gw, claims=False)
     Agent(agent_id="planner", model=ScriptedModel(["r1"]), callback_handler=None, session_manager=m)("one")
     assert text(gw, 1) == "r1"
+
+
+# ── a reader never writes (the claims round's confirmation, N1) ─────────────
+
+
+def test_a_reader_serving_a_claimed_version_writes_nothing_over_a_newer_one():
+    """A write a reader makes from its own lagging view is a last-writer-wins write with a newer clock: it
+    would bury whatever the claimant wrote since. A reader takes a claimed write from its pending copy and
+    writes nothing."""
+    from strands.types.session import Session, SessionType
+
+    a, b = fleet()
+    ra = MyceliumSessionRepository(a, writer="node-a")
+    ra.create_session(Session(session_id="s1", session_type=SessionType.AGENT))
+    record = SessionAgent(agent_id="planner", state={"v": 0}, conversation_manager_state={})
+    ra.create_agent("s1", record)
+    ra.read_agent("s1", "planner")
+    arrive(a, b)
+    record.state = {"v": 1}
+    ra.update_agent("s1", record)
+    # B holds version 1's claim and its pending copy (the tombstone after the row has not reached it), not
+    # its row; version 2 is then written on A.
+    claim = next(k for k in a.decided if k.endswith("/agent/planner/v/1"))
+    token = a.decided[claim].decode().split("\n")[1]
+    arrive(a, b, keep=lambda k: "/claim/" in k)
+    b.rows[f"strands/s1/pending/{token}"] = a.rows[AGENT]
+    record.state = {"v": 2}
+    ra.update_agent("s1", record)
+    before = list(b.writes)
+    seen_on_b = MyceliumSessionRepository(b, writer="node-b").read_agent("s1", "planner")
+    assert seen_on_b.state == {"v": 1}  # the newest version B can establish
+    assert b.writes == before  # and nothing written for it
+    assert json.loads(a.rows[AGENT])["state"] == {"v": 2}
+
+
+def test_a_reader_serving_a_claimed_message_writes_nothing_over_its_redaction():
+    a, b = fleet()
+    m = MyceliumSessionManager("s1", agent=a, writer="node-a")
+    talker = Agent(agent_id="planner", model=ScriptedModel(["your card is 4111"]), callback_handler=None,
+                   session_manager=m)
+    talker("what card is on file?")
+    original = a.rows[MSG.format(1)]
+    token = a.decided[next(k for k in a.decided if k.endswith("/msg/0000000001"))].decode().split("\n")[1]
+    m.redact_latest_message({"role": "assistant", "content": [{"text": "[redacted]"}]}, talker)
+    assert "redact_message" in a.rows[MSG.format(1)].decode() and '"[redacted]"' in a.rows[MSG.format(1)].decode()
+    arrive(a, b, keep=lambda k: k != MSG.format(1))
+    b.rows[f"strands/s1/pending/{token}"] = original  # the pending copy's tombstone not yet arrived
+    before = list(b.writes)
+    MyceliumSessionRepository(b, writer="node-b").list_messages("s1", "planner")
+    assert b.writes == before  # no unredacted copy written back over the fleet's rows

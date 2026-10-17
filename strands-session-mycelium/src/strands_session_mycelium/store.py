@@ -44,9 +44,10 @@ so a writer resumed from an older version is refused at its first write.
 
 A claim names what it writes. Before claiming, the writer puts the row under ``pending/{token}`` and
 the claim's value is ``{writer}\\n{token}``; the row is written after the claim and the pending copy
-removed. A reader that finds a claimed index or version whose row is not here takes it from the pending
-copy (and writes the row), so a writer that claimed and died before writing leaves no hole and blocks
-no one; with neither here, the read is incomplete. A retry reuses its token and is recognised as the
+removed. A reader that finds a claimed index or version whose row is not here serves it from the pending
+copy, so a writer that claimed and died before writing leaves no hole and blocks no one; with neither
+here, the read is incomplete. A reader writes nothing: a write from its view would carry a newer clock
+than whatever the claimant wrote since (a newer version, a redaction) and bury it. A retry reuses its token and is recognised as the
 same write. A session's own claim fixes its generation, which scopes the rest, so a deleted session's
 id is refused rather than reused. ``claims=False`` writes by last-writer-wins (README, "Claims").
 
@@ -415,7 +416,7 @@ class MyceliumSessionRepository(SessionRepository):
         self, session_id: str, key: str, record: tuple[str, ...], *, track: bool
     ) -> Optional[dict[str, Any]]:
         """The newest version of a record this node can establish: its row, then every later version
-        claimed here taken from its pending copy (and written). ``track`` records it as the version this
+        claimed here served from its pending copy (never written). ``track`` records it as the version this
         writer's object stands on."""
         row = self._read(key)
         generation = self._generation(session_id) if self._claims else None
@@ -428,8 +429,9 @@ class MyceliumSessionRepository(SessionRepository):
             later = self._from_claim(session_id, self._claim_key(session_id, generation, key, f"/v/{version + 1}"), key)
             if later is None:
                 break
+            # Served, not written: a write from this view would carry a newer clock than whatever the
+            # claimant wrote since, and bury it (the claims round's confirmation, N1).
             row, version = later, version + 1
-            self._write(key, row)  # the claimed write's own row, written where it had not arrived
         if row is not None and track and record not in self._versions:
             self._versions[record] = version
         return row
@@ -645,8 +647,7 @@ class MyceliumSessionRepository(SessionRepository):
             claimed = self._from_claim(session_id, self._claim_key(session_id, generation, key), key) if generation else None
             if claimed is None:
                 return None
-            self._write(key, claimed)
-            row = claimed
+            row = claimed  # served from the claim, not written (see `_read_versioned`)
         return self._decode_message(row, key, message_id)
 
     def update_message(
@@ -727,9 +728,8 @@ class MyceliumSessionRepository(SessionRepository):
             key = self._message_key(session_id, agent_id, i)
             row = self._read(key)
             if row is None and generation is not None:
+                # Served from the claim, not written: a redaction the claimant wrote since would be buried.
                 row = self._from_claim(session_id, self._claim_key(session_id, generation, key), key)
-                if row is not None:
-                    self._write(key, row)  # the claimed message's own row, where it had not arrived
             if row is None:  # listed a moment ago, tombstoned since; or neither row nor claim here
                 raise IncompleteSession(what, [key])
             messages.append(self._decode_message(row, key, i))
