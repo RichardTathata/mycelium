@@ -1211,7 +1211,7 @@ directly. The evidence journal is written only by `ae_record`.
   complete shorter history — the journal reports a truncation (`truncated_at_open`) and both mark older history as not
   held; (7) `at_most(n, 0)` permitted without limit — not established now, and `at_most(0, w)` documented as never.
   Stated: (6) a permit whose client went away, or that a downstream check refused, stays counted; (8) the private Cedar
-  adapter must decline the five new cases on its re-pin (§47), and the evidence schema is unchanged; (9) the history input
+  adapter passes the five new cases on its v2.35.0 re-pin (private #32, `5e807a2`; all sixteen, none declined — §47), and the evidence schema is unchanged; (9) the history input
   is recorded, and no replay consumes it yet.
 - *Its confirmation* — F1 and F2 confirmed fixed, F3–F7 fixed or stated; four more, fixed: (N1) the actor cap counted the
   whole map and an eviction marked every actor's views incomplete at every point, after an O(actors) scan under the
@@ -1510,8 +1510,31 @@ envelope's nonce cache) and Q (the handshake refuses a revoked key's certificate
   `a_declared_path_replaced_by_a_symlink_is_refused_at_the_reprobe_by_name`,
   `a_declared_path_swapped_during_the_probe_fails_closed`, each seen failing first on macOS under
   `MYCELIUM_CONFINE_LIVE_REQUIRED=1`). A probe that itself replaces one of its declared paths on every run now fails
-  as `confinement_changed`. Not built: limits by hostname or address, a live
-  network allow-list, an OpenShell backend, resource limits.
+  as `confinement_changed`. *Its review (round 1):*
+  - **(1, high) Fixed.** A symlink planted while a profile resolves was followed. The race window lay between the
+    symlink check and `canonicalize`, and between that and the pin. The bug predates #641, which made it reachable on
+    every re-probe. Now each declared path's resolution must agree with what the check saw (its canonical parent and
+    its own name). Each path is opened without following a symlink: `O_PATH | O_NOFOLLOW` on Linux, `O_NOFOLLOW` on
+    macOS. Its identity comes from `fstat` on that descriptor. The check and the resolution are then repeated against
+    what was opened. A probe also runs only under a profile that is current before it.
+    Test: `a_symlink_planted_while_prepare_resolves_is_refused`, which plants the swap through a test-only stage hook.
+    It was seen failing first at both stages: the profile named the link's target, then pinned the link.
+  - **(2, medium) Fixed.** A rotation by flipping an ancestor symlink (`current` → `v2`) left the v1 profile
+    "current", which wedged the install. Currency now also re-canonicalises the declared path and compares it with
+    what the profile names. The flip is seen and re-resolved, with every check. Ancestor symlinks outside every root
+    stay allowed (`/tmp` is one on macOS). This keeps the sandbox closed because the profile only ever names the
+    re-resolved target. Test: `a_flipped_ancestor_symlink_makes_the_profile_not_current`, seen failing first.
+  - **(3, low) Stated.** A rotation that is not atomic (`mv out out.old && mkdir out`), caught between its two steps,
+    finds the path missing. It refuses as `confinement_failed`, and the install is withdrawn and reinstalled. Rotate
+    by `rename(2)` over the old path, or by flipping a symlink above it.
+  - **(4, low) Fixed.** The activation's initial probe takes the same check on both sides of the run. The `command`
+    before it may replace its own declared paths, and the probe re-resolves them. Test:
+    `a_declared_path_swapped_during_the_initial_probe_fails_the_activation`, seen failing first.
+  - **(7, low) Fixed.** A round runs every entry's probe concurrently, so one churning entry delays only the next
+    round. Test: `one_slow_reprobe_does_not_delay_the_others`, seen failing first. Findings 5 and 6, the documents,
+    were fixed in place (`deprecations.md` §47, §50).
+
+  Not built: limits by hostname or address, a live network allow-list, an OpenShell backend, resource limits.
 - **H:** carry each named offer's signed bytes inside the close and award from that copy (today a member who deletes a
   named offer steers the checked path); a declarer that restarts without keeping its close can re-decide.
 - **J:** the seam and KV gates end an unstarted skip at the first trailing `,`, so a test item with a multi-line header

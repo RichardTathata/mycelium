@@ -180,19 +180,39 @@ pub struct Profile {
     /// `read` then `write`, held open from the first resolution (Linux; empty elsewhere).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) pinned: Pinned,
-    /// `read` then `write`: each path's (device, inode) at the resolution — what a pin refers to.
+    /// `read` then `write`: each path's (device, inode) at the resolution, read from the descriptor opened
+    /// without following a symlink — what a pin refers to.
     pub(crate) ids: Vec<(u64, u64)>,
+    /// `read` then `write`: each path as declared, expanded but not resolved — what the currency check
+    /// re-resolves, so a flipped ancestor symlink is seen (review of #641, finding 2).
+    pub(crate) sources: Vec<PathBuf>,
 }
 
 impl Profile {
     /// Whether every path still names what was resolved (review follow-up 1, #636): not a symlink now,
-    /// and the same device and inode. A path removed and recreated, or replaced, is not — the caller
-    /// re-resolves it rather than run with a stale pin.
+    /// the same device and inode, and the declared path still resolving to it — so an ancestor symlink
+    /// flipped to another target (`current` → `v2`) is not current either (review of #641, finding 2). A
+    /// path removed and recreated, or replaced, is not current — the caller re-resolves it rather than run
+    /// with a stale pin.
     pub fn is_current(&self) -> bool {
+        self.stale_path().is_none()
+    }
+
+    /// The first path that no longer names what was resolved, if any.
+    fn stale_path(&self) -> Option<&Path> {
         use std::os::unix::fs::MetadataExt;
-        self.read.iter().chain(&self.write).zip(&self.ids).all(|(p, id)| {
-            std::fs::symlink_metadata(p).is_ok_and(|m| !m.file_type().is_symlink() && (m.dev(), m.ino()) == *id)
-        })
+        let paths = self.read.iter().chain(&self.write);
+        if self.ids.len() != self.read.len() + self.write.len() || self.sources.len() != self.ids.len() {
+            return Some(Path::new("(an incomplete profile)"));
+        }
+        for ((p, id), src) in paths.zip(&self.ids).zip(&self.sources) {
+            let same = std::fs::symlink_metadata(p).is_ok_and(|m| !m.file_type().is_symlink() && (m.dev(), m.ino()) == *id)
+                && canonical(src).is_ok_and(|c| c == *p);
+            if !same {
+                return Some(p);
+            }
+        }
+        None
     }
 }
 
@@ -231,6 +251,7 @@ pub fn prepare(c: &ConfineDecl, placed: &Path) -> Result<Profile, Refusal> {
             _ => canon_or(q),
         }
     };
+    let symlink_check = || -> Result<(), Refusal> {
     for raw in c.read.iter().chain(&c.write) {
         let p = expand(raw);
         let mut q = PathBuf::new();
@@ -247,6 +268,10 @@ pub fn prepare(c: &ConfineDecl, placed: &Path) -> Result<Profile, Refusal> {
             }
         }
     }
+    Ok(())
+    };
+    symlink_check()?;
+    at_stage("checked");
     let resolve = |raw: &str| -> Result<PathBuf, Refusal> {
         let expanded = expand(raw);
         canonical(&expanded).map_err(|e| {
@@ -264,19 +289,58 @@ pub fn prepare(c: &ConfineDecl, placed: &Path) -> Result<Profile, Refusal> {
         .map(|e| mycelium::parse_confine_connect(e).map(|(host, port)| (host == "localhost", port)))
         .collect::<Result<Vec<_>, _>>()
         .map_err(Refusal::Failed)?;
+    at_stage("resolved");
+    let sources: Vec<PathBuf> = std::iter::once(dir.to_path_buf()).chain(c.read.iter().chain(&c.write).map(|r| expand(r))).collect();
+    // Review of #641, finding 1: between the symlink check and the canonicalisation a racing confined
+    // command could swap a declared path for a symlink, and `canonicalize` would follow it. Each declared
+    // path's resolution must agree with what the check saw — its canonical parent and its own name, the last
+    // component not a link — and each is opened **without following a symlink**, its identity read from
+    // that descriptor; then the check and the resolution are repeated against what was opened.
+    for (src, p) in sources.iter().zip(read.iter().chain(&write)).skip(1) {
+        if norm(src) != *p {
+            return Err(Refusal::Failed(format!(
+                "confine path {} resolved to {}, which is not where the symlink check found it — a declared path changed \
+                 while it was resolved; refused",
+                src.display(), p.display()
+            )));
+        }
+    }
     let pinned = linux::pin(read.iter().chain(&write)).map_err(Refusal::Failed)?;
-    let ids = read
-        .iter()
-        .chain(&write)
-        .map(|p| {
-            use std::os::unix::fs::MetadataExt;
-            std::fs::symlink_metadata(p)
-                .map(|m| (m.dev(), m.ino()))
-                .map_err(|e| Refusal::Failed(format!("confine path {}: {e}", p.display())))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(Profile { backend, read, write, connect, pinned, ids })
+    let ids = linux::ids_nofollow(read.iter().chain(&write), &pinned).map_err(Refusal::Failed)?;
+    let profile = Profile { backend, read, write, connect, pinned, ids, sources };
+    symlink_check()?;
+    if let Some(p) = profile.stale_path() {
+        return Err(Refusal::Failed(format!(
+            "confine path {} changed while it was resolved (a symlink, another file, or another target now) — refused",
+            p.display()
+        )));
+    }
+    Ok(profile)
 }
+
+// A test-only hook `prepare` calls between its stages (`"checked"`: after the symlink check, before the
+// canonicalisation; `"resolved"`: after it, before the pinning), so a test can plant the swap a confined
+// command racing the resolution would (review of #641, finding 1). Nothing outside the tests sets it.
+#[cfg(test)]
+pub(crate) type StageHook = Option<Box<dyn FnMut(&str)>>;
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static PREPARE_STAGE_HOOK: std::cell::RefCell<StageHook> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn at_stage(stage: &str) {
+    PREPARE_STAGE_HOOK.with(|h| {
+        if let Some(f) = h.borrow_mut().as_mut() {
+            f(stage);
+        }
+    });
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn at_stage(_stage: &str) {}
 
 /// The kernel matches resolved paths (`/tmp` is `/private/tmp` on macOS), so a profile names those.
 fn canonical(p: &Path) -> std::io::Result<PathBuf> {
@@ -489,13 +553,31 @@ mod linux {
             .map(|p| {
                 std::fs::OpenOptions::new()
                     .read(true)
-                    .custom_flags(libc::O_PATH | libc::O_CLOEXEC)
+                    .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC)
                     .open(p)
                     .map(|f| std::sync::Arc::new(std::os::fd::OwnedFd::from(f)))
                     .map_err(|e| format!("confine path {}: {e}", p.display()))
             })
             .collect::<Result<Vec<_>, _>>()
             .map(super::Pinned)
+    }
+
+    /// Each pinned descriptor's (device, inode), from `fstat` on the descriptor itself (review of #641,
+    /// finding 1): `O_PATH | O_NOFOLLOW` opens a symlink as itself, so a link planted at the path is seen
+    /// here and refused, never pinned at its target.
+    pub(super) fn ids_nofollow<'a>(paths: impl Iterator<Item = &'a std::path::PathBuf>, pinned: &super::Pinned) -> Result<Vec<(u64, u64)>, String> {
+        use std::os::unix::fs::MetadataExt;
+        paths
+            .zip(&pinned.0)
+            .map(|(p, fd)| {
+                let f = std::fs::File::from(fd.try_clone().map_err(|e| format!("confine path {}: {e}", p.display()))?);
+                let m = f.metadata().map_err(|e| format!("confine path {}: {e}", p.display()))?;
+                if m.file_type().is_symlink() {
+                    return Err(format!("confine path {} is a symlink now — refused, not followed", p.display()));
+                }
+                Ok((m.dev(), m.ino()))
+            })
+            .collect()
     }
 
     /// On x86_64, refuse every syscall with the x32 bit (`nr & 0x40000000`) — review finding 4 (#636). The
@@ -555,6 +637,25 @@ mod linux {
     /// Seatbelt matches the resolved path strings; nothing to hold open.
     pub(super) fn pin<'a>(_paths: impl Iterator<Item = &'a std::path::PathBuf>) -> Result<super::Pinned, String> {
         Ok(super::Pinned::default())
+    }
+
+    /// Each path's (device, inode), from `fstat` on a descriptor opened with `O_NOFOLLOW` (review of #641,
+    /// finding 1): a symlink planted at the path fails the open (`ELOOP`) and is refused, never followed.
+    pub(super) fn ids_nofollow<'a>(paths: impl Iterator<Item = &'a std::path::PathBuf>, _pinned: &super::Pinned) -> Result<Vec<(u64, u64)>, String> {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        // `O_NOFOLLOW` on macOS and the BSDs (`<sys/fcntl.h>`); this crate takes `libc` on Linux only.
+        const O_NOFOLLOW: i32 = 0x0100;
+        paths
+            .map(|p| {
+                let f = std::fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(O_NOFOLLOW)
+                    .open(p)
+                    .map_err(|e| format!("confine path {}: {e} — opened without following a symlink; refused", p.display()))?;
+                let m = f.metadata().map_err(|e| format!("confine path {}: {e}", p.display()))?;
+                Ok((m.dev(), m.ino()))
+            })
+            .collect()
     }
 
     pub(super) fn run(_argv: &[String], _timeout: Duration, _profile: &Profile) -> Result<(), String> {
@@ -626,6 +727,7 @@ mod tests {
             connect: vec![(true, 11434), (false, 443)],
             pinned: Pinned::default(),
             ids: Vec::new(),
+            sources: Vec::new(),
         };
         let text = seatbelt_profile(&p);
         assert!(!text.contains("allow default"), "no path is spliced into the profile: {text}");
@@ -719,6 +821,73 @@ mod tests {
             let leaf = p.rsplit('/').next().unwrap();
             assert!(promise.contains(leaf), "the promise names {p}");
         }
+    }
+
+    /// Review of #641, finding 1: a declared path swapped for a symlink **while `prepare` resolves it** —
+    /// after the symlink check and before the canonicalisation, or after it and before the pinning — must
+    /// be refused, never resolved to (or pinned at) the symlink's target. Planted deterministically through
+    /// the test-only stage hook. Seen failing first: at both stages `prepare` returned a profile.
+    #[test]
+    fn a_symlink_planted_while_prepare_resolves_is_refused() {
+        if !native_backend_or_skip("a_symlink_planted_while_prepare_resolves_is_refused") {
+            return;
+        }
+        for stage in ["checked", "resolved"] {
+            let root = std::env::temp_dir().join(format!("confine-race-{stage}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            for d in ["placed", "out", "outside"] {
+                std::fs::create_dir_all(root.join(d)).unwrap();
+            }
+            let root = root.canonicalize().unwrap();
+            let (out, outside) = (root.join("out"), root.join("outside"));
+            let c = ConfineDecl { write: vec![out.display().to_string()], ..Default::default() };
+            let (o, x, aside) = (out.clone(), outside.clone(), root.join("out.real"));
+            PREPARE_STAGE_HOOK.with(|h| {
+                *h.borrow_mut() = Some(Box::new(move |at: &str| {
+                    if at == stage {
+                        std::fs::rename(&o, &aside).unwrap();
+                        std::os::unix::fs::symlink(&x, &o).unwrap();
+                    }
+                }))
+            });
+            let got = prepare(&c, &root.join("placed/blob"));
+            PREPARE_STAGE_HOOK.with(|h| *h.borrow_mut() = None);
+            let _ = std::fs::remove_dir_all(&root);
+            match got {
+                Err(Refusal::Failed(m)) => assert!(m.contains("symlink") || m.contains("changed"), "{stage}: {m}"),
+                other => panic!("{stage}: a symlink planted during the resolution must be refused, got {:?}", other.map(|p| p.write)),
+            }
+        }
+    }
+
+    /// Review of #641, finding 2: a declared path reached through an ancestor symlink that is flipped (a
+    /// `current` link rotated from `v1` to `v2`) no longer resolves to what the profile named, so the
+    /// profile is not current and is re-resolved. Seen failing first: `is_current` held after the flip.
+    #[test]
+    fn a_flipped_ancestor_symlink_makes_the_profile_not_current() {
+        if !native_backend_or_skip("a_flipped_ancestor_symlink_makes_the_profile_not_current") {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("confine-flip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for d in ["placed", "models/v1", "models/v2"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let root = root.canonicalize().unwrap();
+        std::fs::write(root.join("models/v1/m"), b"1").unwrap();
+        std::fs::write(root.join("models/v2/m"), b"2").unwrap();
+        std::os::unix::fs::symlink(root.join("models/v1"), root.join("models/current")).unwrap();
+        let c = ConfineDecl { read: vec![root.join("models/current/m").display().to_string()], ..Default::default() };
+        let p = prepare(&c, &root.join("placed/blob")).expect("an operator's ancestor symlink outside every root is allowed");
+        assert!(p.read.contains(&root.join("models/v1/m")));
+        assert!(p.is_current());
+        std::os::unix::fs::symlink(root.join("models/v2"), root.join("models/next")).unwrap();
+        std::fs::rename(root.join("models/next"), root.join("models/current")).unwrap();
+        let current = p.is_current();
+        let again = prepare(&c, &root.join("placed/blob")).map(|p| p.read);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!current, "the declared path now resolves elsewhere: the profile is not current");
+        assert!(again.unwrap().contains(&root.join("models/v2/m")), "and a re-resolution names the new target");
     }
 
     /// Review follow-up 2 (#636): the symlink check compared spellings, so a declared path written through

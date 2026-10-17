@@ -329,8 +329,22 @@ path still names the same file (device and inode, not a symlink). A path removed
 scratch directory, a re-placed blob, a directory rotated or a file replaced by an atomic rename — is resolved
 again, with every check above, and the run or re-probe goes ahead under the fresh profile; only a resolution
 that refuses (the path now a symlink, or gone) fails the re-probe, so the install is withdrawn, the refusal
-recorded by name (`prov.probe`'s `confinement_failed`). A re-probe whose path changes while the probe runs does
-not trust its verdict: it resolves and runs once more, and a change under both is `confinement_changed`. Profiles of placed files that are
+recorded by name (`prov.probe`'s `confinement_failed`).
+
+A path reached through an ancestor symlink that is flipped (`/models/current` → `v2`) resolves to the new target.
+The profile re-resolves to name that target and no longer names the old one. Every path is resolved and pinned
+without following a symlink at its last component, so a symlink planted while a profile resolves is refused, not
+followed.
+
+A probe whose path changes while it runs, the activation's initial probe included, does not trust its verdict. It
+resolves and runs once more, and a change under both runs is `confinement_changed`. The activation `command` may
+replace its own declared paths; the probe after it re-resolves them.
+
+A rotation that is not atomic (`mv out out.old && mkdir out`), caught between its two steps, finds the path missing.
+It is refused, so the install is withdrawn and reinstalled. Rotate with `rename(2)` over the old path, or flip a
+symlink above it.
+
+Profiles of placed files that are
 gone are forgotten at the next resolution, and a stem keeps at most 1024.
 
 Neither limits reading a path's metadata (`stat`), CPU or memory, and the command inherits the stem's

@@ -17,5 +17,13 @@ window open. On Linux the run already fails closed, because the rules come from 
 On macOS a same-path real directory matches the Seatbelt profile by name, and a planted symlink resolves to a target
 the profile does not name. The post-run check makes the verdict honest on both platforms.
 
+The PR's review (round 1) found the older hole underneath: `prepare` checked for symlinks and then resolved with
+`canonicalize`, which follows them. A swap planted between the two, or before the Linux pin (no `O_NOFOLLOW`), widened
+the profile, and the currency check then kept the widened profile. Now each path is opened without following a
+symlink, its identity comes from `fstat` on that descriptor, and the check and the resolution are repeated. Currency
+also re-canonicalises the declared path, so a flipped ancestor link is seen. Lesson: **a resolution is a read like any
+other, and a check-then-use on the filesystem is a race unless the use is pinned without following and the check is
+re-run against what was pinned.**
+
 Pages: `dev/concurrency/lock-order.md` (row 63: the re-probe task now takes it). Repo: `docs/reference/unit-file.md`
 §`[activation.confine]`, the rule catalogue, and the plan's row M block and §3.6.

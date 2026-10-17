@@ -9,6 +9,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **A symlink planted while a confinement profile resolved could widen it for good** (post-360 row M; #641's review,
+  finding 1, present since 2.35.0). There was a window between `prepare`'s symlink check and its `canonicalize`, and
+  another before the Linux pin, which opened without `O_NOFOLLOW`. A confined command still running in that window
+  could swap a declared path for a link to a directory the profile never named. The profile would then name and pin
+  the link's target, and every later run would reuse it. Now each resolution must agree with what the check saw. Each
+  path is opened without following a symlink and identified by `fstat` on that descriptor. The check and the
+  resolution are then repeated, and a profile runs only while it is current.
+
 ### Fixed
 
 - **A confined activation's re-probe no longer withdraws an install whose declared path was replaced legitimately**
@@ -18,8 +28,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   under the fresh profile. The install is withdrawn only when re-resolution refuses, and the trace names the refusal
   (`prov.probe`'s `confinement_failed` / `confinement_unavailable`, rule revision 3). A path that changes while the
   probe runs makes the verdict untrusted: the probe is re-resolved and run once more, and a change under both runs is
-  `confinement_changed`. A path replaced by a symlink is refused, never followed. **Upgrade note:** a probe that
-  replaces one of its own declared paths on every run now fails as `confinement_changed`.
+  `confinement_changed`. A path replaced by a symlink is refused, never followed.
+  - A rotation by flipping an ancestor symlink (`current` → `v2`) is now seen and re-resolved. Before, the old profile
+    stayed current and wedged the install.
+  - The activation's initial probe takes the same check.
+  - A re-probe round runs its entries concurrently, so one churning entry delays no other.
+
+  **Upgrade note:** a probe that replaces one of its own declared paths on every run now fails as
+  `confinement_changed` (`deprecations.md` §50).
 
 ## [2.35.0] — 2026-10-17
 

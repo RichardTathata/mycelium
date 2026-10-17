@@ -1552,8 +1552,9 @@ closed, but not what was meant. Forward `history_request` and `evaluate_with_his
 (`with_evidence_journal`) — without one, every history it is asked for is unavailable.
 
 **An adapter held to the contract suite** (`ae_contract::run`) meets five new cases (`history_*`). One that cannot
-express `PolicyClause::AllowAtMost` must decline them and list them in `declared_limits`, or `Report::conformant` fails
-— the private companion's Cedar adapter, on its next re-pin. `AeEvidence`'s schema stays `mycelium.ae/evidence/1`: the
+express `PolicyClause::AllowAtMost` must decline them and list them in `declared_limits`, or `Report::conformant` fails.
+The private companion's Cedar adapter passes all sixteen cases on its v2.35.0 re-pin (private #32, `5e807a2`), none
+declined. `AeEvidence`'s schema stays `mycelium.ae/evidence/1`: the
 new `history` field is additive and absent when no history was read.
 
 ## 48. Credentials attached at egress: three structs gained fields and `CredentialBinding` is new, a `ServeDecl`'s `Debug` hides its key, Z2's refusal names the section (2.35.0, post-360 plan row L)
@@ -1592,3 +1593,22 @@ Where it is refused: `NodeCapabilityConfig::from_toml_str` / `load_from_file`, s
 **Migration.** Every unit file in this repository loads unchanged. A file of yours that the loader now refuses held a
 key that was never read: correct its spelling or remove it.
 
+## 50. `prov.probe` is rule revision 3: a confined re-probe re-resolves, and three new refusal reasons (unreleased, post-360 plan row M's follow-up, #641)
+
+**What changes.** A confined `[[activation]]`'s re-probe used to fail when a declared path was replaced, so the
+install was withdrawn and reinstalled. It now re-resolves the profile, repeating every check, and runs the probe under
+the fresh one. The activation's initial probe follows the same rule. `prov.probe` in the rule catalogue goes from
+revision 2 to 3 and gains three refusal reasons:
+- `confinement_failed`: re-resolution refused, for example because the declared path is now a symlink or is missing;
+- `confinement_unavailable`: the platform can no longer apply the profile;
+- `confinement_changed`: a declared path changed around each of two probe runs, so the verdict is not trusted.
+
+Before this change, every re-probe refusal was recorded as `probe_failed`.
+
+**Will the compiler tell me?** No. It is a change in recorded reasons and in behaviour.
+
+**Migration.**
+- A trace consumer or alert keyed on `prov.probe`'s reasons should add the three new ones.
+- `probe_failed` now means the probe itself failed, not its confinement.
+- A probe that replaces one of its own declared paths on every run now fails as `confinement_changed`. Move that step
+  into the activation `command`, which may replace them.
