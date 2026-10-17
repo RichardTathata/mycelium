@@ -40,7 +40,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::{Extension, Json};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use serde::Deserialize;
@@ -48,6 +48,7 @@ use serde_json::json;
 
 use mycelium::{CapFilter, GossipAgent, ResolvedPrincipal};
 
+use crate::classify::{DATA_CLASS_HEADER, DataClassPolicy};
 use crate::blob::{BlobId, BlobMiss, FsBlobStore, MAX_BLOB_BYTES, MeshBlobStore};
 use crate::route::{InferenceRouter, ModelQuery, RouteError, Routed, RouterConfig};
 use crate::trace::{TraceRecorder, narrate, replay, validate_run_id};
@@ -76,9 +77,29 @@ pub fn reason_router_with(
     store: Arc<FsBlobStore>,
     router_cfg: RouterConfig,
 ) -> axum::Router {
+    let router = InferenceRouter::new(Arc::clone(&agent), router_cfg);
+    routes(agent, store, router)
+}
+
+/// [`reason_router_with`] whose two routing doors **classify** each request by `classes`
+/// (post-360 row R): the caller's principal floor, a declared [`DATA_CLASS_HEADER`] that may raise
+/// it, or the policy's default for an unclassified request. The class travels to the gateway's
+/// preflight beside each candidate's declared locality, so an attached evaluator can say where each
+/// class may go — and the router dispatches to the first candidate it permits.
+pub fn reason_router_classified(
+    agent: Arc<GossipAgent>,
+    store: Arc<FsBlobStore>,
+    router_cfg: RouterConfig,
+    classes: DataClassPolicy,
+) -> axum::Router {
+    let router = InferenceRouter::new(Arc::clone(&agent), router_cfg).with_data_classes(classes);
+    routes(agent, store, router)
+}
+
+fn routes(agent: Arc<GossipAgent>, store: Arc<FsBlobStore>, router: InferenceRouter) -> axum::Router {
     let state = ReasonState {
         blobs: MeshBlobStore::new(Arc::clone(&agent), store, Duration::from_secs(10)),
-        router: Arc::new(InferenceRouter::new(Arc::clone(&agent), router_cfg)),
+        router: Arc::new(router),
         agent,
     };
     axum::Router::new()
@@ -112,6 +133,26 @@ struct RouteBody {
     /// causal trace of routed inference (rung 5). Omitted → no trace (back-compat).
     #[serde(default)]
     run_id: Option<String>,
+}
+
+/// The class a request declared in [`DATA_CLASS_HEADER`], or the header's own problem (row R).
+fn declared_class(headers: &HeaderMap) -> Result<Option<&str>, String> {
+    match headers.get(DATA_CLASS_HEADER) {
+        None => Ok(None),
+        Some(v) => v
+            .to_str()
+            .map(|s| Some(s.trim()))
+            .map_err(|_| format!("{DATA_CLASS_HEADER} is not a visible ASCII string")),
+    }
+}
+
+/// The refused-before destinations of a routed call, as the façade reports them.
+fn refused_json(routed: &Routed) -> serde_json::Value {
+    routed
+        .refused
+        .iter()
+        .map(|(n, reason)| json!({ "provider": n.to_string(), "reason": reason }))
+        .collect()
 }
 
 fn error_json(status: StatusCode, error: &str) -> Response {
@@ -194,9 +235,14 @@ async fn gw_trace_get(State(s): State<ReasonState>, Path(run_id): Path<String>) 
 async fn gw_route(
     State(s): State<ReasonState>,
     caller: Option<Extension<ResolvedPrincipal>>,
+    headers: HeaderMap,
     Json(body): Json<RouteBody>,
 ) -> Response {
     let caller = caller.map(|Extension(c)| c);
+    let declared = match declared_class(&headers) {
+        Ok(d) => d,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "unclassifiable", "detail": e }))).into_response(),
+    };
     let query = ModelQuery::new(body.model);
     // Record a trace only when the caller supplied a run_id (rung 5); otherwise the
     // route is untraced, exactly as before. The id is one bounded segment, or 400 by name before
@@ -207,16 +253,32 @@ async fn gw_route(
             return (StatusCode::BAD_REQUEST, Json(json!({ "error": "bad_run_id", "detail": e.to_string() }))).into_response();
         }
     };
-    match s.router.call_as(caller.as_ref(), ENFORCEMENT_POINT_ROUTE, &query, &body.input, &body.context, recorder.as_ref()).await {
-        Ok(routed) => Json(json!({
-            "output": routed.output,
-            "model_used": routed.model_used,
-            "tokens_used": routed.tokens_used,
-            "provider": routed.provider.to_string(),
-            "attempt": routed.attempt,
-        }))
-        .into_response(),
+    match s
+        .router
+        .call_as_classified(caller.as_ref(), ENFORCEMENT_POINT_ROUTE, &query, &body.input, &body.context, declared, recorder.as_ref())
+        .await
+    {
+        Ok(routed) => {
+            let mut out = json!({
+                "output": routed.output,
+                "model_used": routed.model_used,
+                "tokens_used": routed.tokens_used,
+                "provider": routed.provider.to_string(),
+                "attempt": routed.attempt,
+            });
+            // Row R: present only when the route classified or passed a destination over.
+            if let Some(c) = &routed.data_class {
+                out["data_class"] = json!(c);
+            }
+            if !routed.refused.is_empty() {
+                out["refused"] = refused_json(&routed);
+            }
+            Json(out).into_response()
+        }
         Err(RouteError::NoProvider) => error_json(StatusCode::NOT_FOUND, "no_provider"),
+        Err(RouteError::Unclassifiable(why)) => {
+            (StatusCode::BAD_REQUEST, Json(json!({ "error": "unclassifiable", "detail": why }))).into_response()
+        }
         Err(RouteError::Refused { code, reason, message, data }) => (
             StatusCode::FORBIDDEN,
             Json(json!({ "error": "policy", "reason": reason, "code": code, "detail": message, "data": data })),
@@ -339,11 +401,19 @@ fn usage_json(routed: &Routed) -> serde_json::Value {
 /// The `mycelium` extension block: which provider answered, on which attempt, and what
 /// the usage figures do and do not claim.
 fn mycelium_ext(routed: &Routed) -> serde_json::Value {
-    json!({
+    let mut ext = json!({
         "provider": routed.provider.to_string(),
         "attempt": routed.attempt,
         "usage": { "split_known": false },
-    })
+    });
+    // Row R: present only when the route classified or passed a destination over.
+    if let Some(c) = &routed.data_class {
+        ext["data_class"] = json!(c);
+    }
+    if !routed.refused.is_empty() {
+        ext["refused"] = refused_json(routed);
+    }
+    ext
 }
 
 /// The one-chunk SSE rendering of the same completion: a content delta, a stop chunk
@@ -374,9 +444,14 @@ fn chat_completion_sse(id: &str, created: u64, routed: &Routed) -> String {
 async fn gw_openai_chat(
     State(s): State<ReasonState>,
     caller: Option<Extension<ResolvedPrincipal>>,
+    headers: HeaderMap,
     Json(body): Json<ChatRequest>,
 ) -> Response {
     let caller = caller.map(|Extension(c)| c);
+    let declared = match declared_class(&headers) {
+        Ok(d) => d,
+        Err(e) => return openai_error(StatusCode::BAD_REQUEST, e, "invalid_request_error", "data_class", None),
+    };
     let Some((input, context)) = messages_to_skill_call(&body.messages) else {
         return openai_error(
             StatusCode::BAD_REQUEST,
@@ -399,7 +474,11 @@ async fn gw_openai_chat(
             );
         }
     };
-    match s.router.call_as(caller.as_ref(), ENFORCEMENT_POINT_CHAT, &query, &input, &context, recorder.as_ref()).await {
+    match s
+        .router
+        .call_as_classified(caller.as_ref(), ENFORCEMENT_POINT_CHAT, &query, &input, &context, declared, recorder.as_ref())
+        .await
+    {
         Ok(routed) => {
             let id = completion_id();
             let created = unix_now();
@@ -429,6 +508,9 @@ async fn gw_openai_chat(
             })),
         )
             .into_response(),
+        Err(RouteError::Unclassifiable(why)) => {
+            openai_error(StatusCode::BAD_REQUEST, why, "invalid_request_error", "data_class", None)
+        }
         Err(e @ RouteError::Exhausted(_)) => {
             openai_error(StatusCode::BAD_GATEWAY, e.to_string(), "server_error", "exhausted", None)
         }
@@ -504,6 +586,8 @@ mod tests {
             tokens_used: 3,
             provider: mycelium::NodeId::new("127.0.0.1", 1).unwrap(),
             attempt: 1,
+            data_class: None,
+            refused: Vec::new(),
         };
         let sse = chat_completion_sse("chatcmpl-x", 1, &routed);
         assert!(sse.starts_with("data: {"));
@@ -522,6 +606,8 @@ mod tests {
             tokens_used: 3,
             provider: mycelium::NodeId::new("127.0.0.1", 1).unwrap(),
             attempt: 2,
+            data_class: None,
+            refused: Vec::new(),
         };
         let body = chat_completion_json("chatcmpl-x", 1, &routed);
         assert_eq!(body["usage"]["total_tokens"], 3);

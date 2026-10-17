@@ -90,6 +90,7 @@ Four places strain that line today, and the rows in §3 address each:
 | **O** — *delivered 2.35.0 (#634), §3.5* | A Strands session store on Mycelium | a companion package (Python, beside `langgraph-checkpoint-mycelium`) implementing Strands Agents' `SessionManager` over the Mycelium Python SDK, so an agent's conversation and state, and a swarm's shared memory, live in the fleet's KV rather than a file or a bucket; a save returns the SDK's receipt and its docs say which rung it names (a local application, not replication — the checkpointer's wording); an incomplete or unreadable session is an error, never an empty one; concurrent agents in one session do not lose each other's writes, or the limit is stated; its live suite runs in CI against a real node; pinned to a Strands release and re-checked when Strands changes the interface | — (N for the cross-host demo) |
 | **P** — *delivered 2.35.0 (#635), §3.5* | A Strands fleet, demonstrated | a runnable example, in CI like the co-op demos, in which Strands agents on three Mycelium nodes plan one shared task (a constructive domain — food redistribution or a microgrid), keep their session and swarm memory in the fleet through O, and call fleet skills through `/a2a` (N): a call outside an agent's mandate is refused and the refusal is in the evidence journal; one node is stopped and the work resumes on another from the stored session; the README states what Strands provides and what Mycelium adds, and which properties the run shows versus which it does not | N, O |
 | **Q** — *delivered 2.33.0 (#616), §3.5* | Revocation reaches every verifier | a key a node has revoked (`rotate_identity_on_compromise`, `sys/revocation/`) is filtered from the `peer_keys`-based KV `SignedData` verifier, from identity-proof chaining (`validate_and_merge_identity`'s trusted signer) and from the unsigned identity exemption (`connection::self_authenticating_identity`), not only from consensus and `known_verifying_keys`; a test that a `SignedData` signed by a revoked key is refused at a peer that has seen the revocation; `src/agent/revocation.rs`'s `revoke_key` doc made true (corrected in #611 to say what holds today) | — (independent of F2) |
+| **R** — *built, in review (this PR), §3.5* | Inference routing as policy (decided a row, §5, 2026-10-17) | the action evaluator sees **where a routed call would go**: for each candidate the router considers, the destination (`llm/{model}@{provider}`) and its **locality** — in-domain (an engine on a fleet node) or external (an endpoint off the mesh), the provider's own declaration in its `llm-meta` ad, and *unknown* when it declares none, which a rule reads as not established, never as in-domain; the request's **data class** reaches the envelope with who declared it — a floor bound to the caller's verified principal, a client declaration that may raise it and never lower it, otherwise the most restrictive configured class; a policy can say *confidential may only reach in-domain models, public may go anywhere* in the reference evaluator's rule types, extended additively, and the AE contract suite states it (the private Cedar adapter handles the new clause on its next re-pin, or declines it by name); the preflight runs **per candidate, before the router commits**, so a classified request is routed to a permitted model when one exists and refused, naming every candidate and why, when none does; the evidence record names the class, the destination chosen and the candidates refused; every door by which a model call leaves a node is enumerated and each is covered or stated as not; a door that does not classify cannot pass a class rule; **not built, stated:** content inspection (the class is declared, never detected), observing a provider's backend, exfiltration through a permitted model | — |
 | **S** — *delivered 2.34.0 (#623), §3.5* | Identity proofs on by default | `require_identity_proofs` defaults to `true` (today `false`, `mycelium-core/src/config.rs`; the `secure-single-domain` profile already requires it as `id.proofs_required`): a bare `sys/identity/{N}` key list without a proof is refused everywhere a node's keys are learned, closing the identity-poisoning residual rows F and Q state — a member writing its own key into another's identity, which still reaches the verify-only history set (forged audit history, a steered checkpoint anchor) and fully impersonates a node on a legacy certificate; a mixed-fleet window in the 2.30.0 shape (the MINOR that flips it says so; a node from before 2.3.0, which cannot prove, is cut off until upgraded, and `false` stays available as an explicit opt-out for that window and for TLS-less development fleets, where the setting is inert); an upgrade note in `deprecations.md`; the guarantee `id.proofs_required` resolves `enforced` by default; the 2.14.0 attempt that was reverted is re-examined first (the failure it was blamed on was not its doing) | — (best in the MINOR with F2) |
 | **T** — *delivered 2.34.0 (#622), §3.5* | Say loudly when the CA key is on the node | the dev posture keeps the fleet CA's private key on every node (`auto_cert_dir`'s `ca-key.pem`, `mycelium-core/src/tls.rs`), so one compromised host yields every node's identity and revocation (row Q) cannot recover it; today this is only the guarantee `id.ca_key_off_node` resolving unmet, one line among the start-time report, worded for member removal alone. Promises: at `start()` a node that holds the CA key and runs no profile, or a profile other than `dev`, logs one prominent warning naming the consequence (a single host compromise compromises every identity in the fleet; key revocation does not recover it) and the remedy (`mycelium tls issue` on a separate CA host, then `[tls] cert_pem` + `key_pem` on the node — `docs/operations/cert-rotation.md`); the `id.ca_key_off_node` guarantee text names identity compromise and revocation, not only removal (catalogue regenerated); `dev` states the trade-off rather than warning; the quick-start and production-readiness pages say which posture they set up; a test pins the warning on and off | — |
 
@@ -1480,6 +1481,84 @@ CC8, `docs/capabilities.md`, the crate README). The example units with `[[activa
   five `std::fs` sites are admitted in the baseline and the nondeterminism inventory (review finding 10); its
   `Path::canonicalize`/`exists`/`is_dir` calls are ones `scripts/check-sim-seams.sh` does not see.
 
+**R — Inference routing as policy (this PR; in review).** The doors enumerated first — every path by which a model call
+leaves a node: `git grep -ln 'LLM_INVOKE\|"llm.invoke"' -- src mycelium-*/src` (who sends or names `llm.invoke`),
+`git grep -n 'LlmBackend for' -- src mycelium-*/src` (`OpenAiBackend`, `EchoBackend`),
+`git grep -ln 'register_prompt_skill' -- src mycelium-*/src` (who serves one), `git grep -ln 'chat/completions' -- src
+mycelium-*/src` (who calls an OpenAI-compatible endpoint), and `ae_preflight(`'s callers. Each, and whether R covers it:
+
+| Door | Covered? |
+|---|---|
+| `/gateway/reason/route`, `/gateway/reason/v1/chat/completions` (`InferenceRouter::call_as`) | **yes** — the destination's locality and the request's class reach the preflight per candidate |
+| `/gateway/llm/call`, `/gateway/llm/stream` (`llm_bridge.rs`) | **fails closed** — they establish no class and no destination, so any rule about class or locality decides not established (`a_door_that_does_not_classify_cannot_pass_a_class_rule`); no routing there |
+| raw RPC routes (`/gateway/rpc/call`, `scatter`, …) | **refused already** — `llm.invoke` is a protected kind (`403 protected_kind`, C1) |
+| `/a2a`, `/mcp` | **not a model door** — `/a2a` does not send `llm.invoke` (a prompt skill is pointed at `/gateway/llm/call`), `/mcp` sends `mcp.invoke` |
+| `InferenceRouter::call`, `LlmHandle::call_prompt_skill` (the node's own action, in process) | **not covered** — no preflight runs on a node's own call, so neither class nor locality is consulted |
+| a provider's backend — `OpenAiBackend` behind `serve_model` or a `[[serve]]` skill (`mycelium-wasm-host/src/serve.rs`) | **not covered as a decision** — it is the egress itself; what it may reach is the provider's `[egress]` allow-list; its locality is what the provider declares (`[[serve]]` advertises no `llm-meta` ad, so *unknown*) |
+| `SkillRunner` (`src/bin/skillrunner/llm.rs`, its own OpenAI-compatible client) | **not covered** — a separate binary calling its configured endpoint |
+| the doors that **establish the facts** — `capability/advertise` and `units/declare`, which write ads under the gateway's key for a client (found by the review) | **refused** — an `llm-meta` ad carrying `locality` from a client is `403 reserved_attribute` (`a_gateway_client_cannot_declare_a_models_locality`); a fleet member writing another node's ad is **not covered** (an ad's key is not bound to its writer) |
+| provider enforcement (`with_provider_enforcement`) | **fails closed** — the re-check sees no class or destination (neither travels), so a class rule there decides not established |
+
+- *the action evaluator sees where a routed call would go: the destination and its locality … unknown when it declares
+  none, read as not established, never as in-domain* — `RouteFacts` / `Destination` / `Locality`
+  (`src/agent/route_facts.rs`), handed in by `GossipAgent::gateway_preflight_routed` (`authz.rs`) and carried on
+  `ActionEnvelope::destination`; the locality is `llm_meta::LOCALITY` on the provider's `llm-meta/{model}` ad
+  (`ModelProfile::in_domain` / `external`, read by `InferenceRouter::localities`). Tests
+  `an_unknown_locality_is_not_established_never_in_domain`, `a_declared_locality_is_read_strictly`, and end to end
+  `with_no_permitted_destination_a_classified_request_is_refused_naming_every_candidate` (the undeclared provider
+  `unknown`, `authority_not_established`).
+- *the request's data class reaches the envelope with who declared it — a floor bound to the caller's verified
+  principal, a client declaration that may raise it and never lower it, otherwise the most restrictive configured
+  class* — `DataClassPolicy::classify` (`mycelium-reason/src/classify.rs`; `ClassSource::{Principal, Declared,
+  Default}`), the header `x-mycelium-data-class`, on `ActionEnvelope::data_class`. Tests
+  `an_unclassified_request_is_the_most_restrictive_class`, `a_declaration_raises_a_credential_floor_and_never_lowers_it`,
+  `a_floor_for_every_caller_holds_for_anonymous_too`, `an_unknown_class_is_refused_never_guessed`,
+  `a_declared_class_on_a_node_that_classifies_nothing_is_refused`. *What is verified:* the principal (the gateway's
+  auth layer); the declared class is the client's assertion, used only to raise.
+- *a policy can say confidential may only reach in-domain models, public anywhere, in the reference evaluator's rule
+  types, extended additively, and the AE contract suite states it* — `Rule::for_class`, `Rule::at_locality`
+  (`route_policy_tests`, eight tests); the suite's `PolicyClause::ForbidClassAt` and cases
+  `route_class_forbidden_at_locality`, `route_class_permitted_elsewhere`, `route_other_class_unaffected`,
+  `route_locality_unknown`, `route_class_absent`, passed by the reference evaluator, the derived-revision wrapper and
+  the independent `TableEvaluator`. **The private companion's Cedar adapter** must express the clause or decline the
+  five cases in `declared_limits` on its next re-pin (`deprecations.md` §50); the private repository is not touched here.
+- *per candidate, before the router commits: routed to a permitted model when one exists, refused naming every
+  candidate and why when none does* — `call_inner` (`mycelium-reason/src/route.rs`): a refused candidate is passed over
+  without counting as an attempt; all refused → `RouteError::Refused` with `data.refused_destinations` and
+  `data.data_class` (`refusal_of`); an unrecorded decision stops the route. Tests
+  `a_confidential_request_is_routed_to_an_in_domain_model_and_the_external_one_is_passed_over` (confidential and
+  unclassified to the in-domain model with the external one named as refused; public to the external one; both doors)
+  and `with_no_permitted_destination_a_classified_request_is_refused_naming_every_candidate`.
+- *the evidence record names the class, the destination chosen and the candidates refused* — `AeEvidence::route`
+  (`with_route`, also filling `destination`); each refused candidate its own `Decided` record with `execution: none`.
+  Tests `the_route_is_on_the_evidence_record` and the end-to-end test's journal assertions.
+- *a door that does not classify cannot pass a class rule* — a class or locality not established matches the rule and
+  is reported not established (`a_request_with_no_class_cannot_pass_a_class_rule`,
+  `a_door_that_does_not_classify_cannot_pass_a_class_rule` through `/gateway/llm/call`). `ae.preflight` is catalogue
+  revision 3, listing the route as an input.
+- *Seen failing:* with the router telling the preflight a destination and class other than the ones it established, the
+  confidential request answered `200` from the external provider, and the no-permitted-destination request `200`; with
+  the router stopping at the first refused candidate, `403` although an in-domain model existed; with the reference
+  evaluator's class and locality match removed, eight `route_*`/`ae_contract` tests failed.
+- **Not built, stated:** content inspection — the class is declared, never detected; observing where a provider's
+  backend sends a prompt — the locality is its declaration; exfiltration through a permitted model or its output; the
+  node's own in-process calls; a class or destination at the provider's re-check (neither travels); a `[[serve]]`
+  skill's locality; a bound on how many candidates are evaluated (one denied record per candidate tried). Two
+  routing residuals: an attempt gets the short `failover_timeout` while untried candidates remain, even when the
+  policy then refuses all of them (the policy is asked lazily, so the router cannot know in advance); and a route
+  where some candidates failed and the rest were refused answers `Exhausted` with the failures, the refusals only in
+  the evidence. Binding an ad's key to its writer (a member can write another node's `llm-meta` ad); a class rule
+  covering "this class or stricter" (a rule names one class, so the guide writes policies as allow-lists); a provider
+  refreshing its ad reads as unknown meanwhile (closed).
+- *The independent review (rule 4)* — fixed: (1, high) a `cap:write` client could declare any model in-domain, or
+  overwrite the gateway node's own ad, through `capability/advertise` or `units/declare` — refused at both, test seen
+  failing first; the authenticity wording ("signed", "authenticated as that member's ad") corrected; (6) the candidates'
+  records shared no `operation_id` — one per call now, asserted end to end; (5) a refused candidate traced as a failed
+  call — now traced *refused by policy, not dispatched*. Answered in the docs: (2) a class rule names one class — the
+  guide's policy is an allow-list, so an unlisted or stricter class is refused; (3) the refresh gap; (4) the timeout and
+  mixed-outcome residuals; (7) the header's new `400` in `deprecations.md` §50; (8) floor keys exact, the topology a
+  refusal discloses, `at_locality(Unknown)` never deciding.
+
 ### 3.6 · State of play and the next iteration (2026-10-12; updated at the 2.35.0 cut, 2026-10-17)
 
 Where the work stands at the end of 2026-10-12, so the next session starts here rather than from a conversation.
@@ -1496,7 +1575,7 @@ at egress; its activation-command half *not built*), M (#636 — activation comm
 OpenShell *not built*), N (#633), O (#634 — `strands-session-mycelium` 0.1.0), P (#635), and the follow-ups to E (the caller
 envelope's nonce cache) and Q (the handshake refuses a revoked key's certificate; no TLS resumption); §3.5 and below.
 
-**Not started:** §5's inference-routing question. Every row K–P is released in 2.35.0; the rows' own *not built* lists stand. (Q, revocation at every verifier, is delivered — #616, §3.5; S, identity proofs on by default, is delivered in 2.34.0 — #623, §3.5.)
+**In review:** row R (inference routing as policy — §5's question, decided a row on 2026-10-17; §3.5). Every row K–P is released in 2.35.0; the rows' own *not built* lists stand. (Q, revocation at every verifier, is delivered — #616, §3.5; S, identity proofs on by default, is delivered in 2.34.0 — #623, §3.5.)
 
 **Follow-ups recorded as not built in delivered rows (each in its §3.5 block):**
 - **M:** ~~a declared path replaced legitimately (atomic rename, rotated directory) fails the next re-probe, so the
@@ -1727,6 +1806,10 @@ built: an authenticated anti-entropy entry (a wire change).
   call by capacity and reservation; nothing decides whether a request *may* leave the domain, or to which model, by the
   data it carries. The façade already runs the action preflight, so it is the natural enforcement point. Decide whether
   this becomes a row (the evaluator sees the route's destination and a data classification) or stays out of scope.
+  *Decided 2026-10-17 (the user): a row* — row **R** (§3.3). Built so that the router only dispatches to candidates
+  the policy permits (the preflight per candidate, in the router's order, before it commits), the class declared and
+  never detected (a principal floor a client cannot lower; the most restrictive class by default), the locality the
+  provider's declaration. The evidence and the not-built list are R's §3.5 block.
 - **Row K: what does "history" mean in a fleet?** *Decided 2026-10-17 (the user): per enforcement point, the scope
   named.* A history-conditioned rule counts what *this* enforcement point's evidence journal recorded
   (`HistoryScope::EnforcementPoint`): exact there, no quorum; an actor spreading calls over N gateways can be admitted up

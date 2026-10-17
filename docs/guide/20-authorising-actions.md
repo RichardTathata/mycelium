@@ -389,6 +389,107 @@ evidence was then not written.
 **An evaluator that wraps another** forwards `history_request` and `evaluate_with_history` as well as `evaluate`; one
 that does not hides the inner request, and its limited rules decide `Indeterminate`.
 
+## Deciding where data may go: inference routing as policy
+
+`mycelium-reason`'s router picks one provider of `llm/{model}` among several, by load and reservation. Before
+post-360 row R nothing could say *this prompt may not leave the domain*: the evaluator saw the chosen resource and
+nothing about where its inference runs or what the request carries. Now a routing door tells the preflight both, per
+candidate, and the router dispatches to the first candidate the policy permits:
+
+```rust
+use mycelium::{Locality, ReferenceEvaluator, Rule};
+use mycelium_reason::{DataClassPolicy, ModelProfile, RouterConfig, reason_router_classified};
+
+// Serve side: each provider declares where its inference runs (the `locality` attribute of its llm-meta ad).
+let _reg = serve_model(&agent, ModelProfile::new("qwen3").in_domain(), template, ollama).await?;
+
+// Policy, as an allow-list: public and internal data may go anywhere; confidential only in-domain.
+// A class not listed here (a typo, a class added later, `restricted`) matches no allowance: refused.
+agent.with_action_evaluator(Arc::new(
+    ReferenceEvaluator::new("rev-route")
+        .with_catalogue("cat-route", "1")
+        .map_action("llm.invoke", "*")
+        .allow(Rule::new("*", "llm.invoke", "*").for_class("public"))
+        .allow(Rule::new("*", "llm.invoke", "*").for_class("internal"))
+        .allow(Rule::new("*", "llm.invoke", "*").for_class("confidential").at_locality(Locality::InDomain)),
+));
+
+// Gateway door: classes least to most restrictive; an unclassified request is the most restrictive.
+let classes = DataClassPolicy::new(["public", "internal", "confidential"])?
+    .floor_for("token:gw/hr-agent", "confidential")?;
+agent.with_http_routes(reason_router_classified(agent.clone(), store, RouterConfig::default(), classes));
+```
+
+**Where the class comes from.** In order: a **floor** the operator binds to the caller's verified principal
+(`floor_for`, or `floor_for_all` for everyone); a class the client **declares** in the `x-mycelium-data-class` header,
+which may raise the floor and never lower it; otherwise the policy's **default for an unclassified request**, the most
+restrictive class unless `unclassified_as` says otherwise. A class the policy does not have is `400`; so is any
+declaration to a node whose router classifies nothing (`reason_router` without classes) — a declaration that cannot be
+honoured is not silently dropped. The envelope carries the class and who declared it (`DataClass { class, source }`,
+`ClassSource::{Principal, Declared, Default}`).
+
+**Where the destination is.** The candidate's `llm/{model}@{provider}` and the provider's own declaration of where its
+inference runs — `ModelProfile::in_domain()` (an engine on a fleet node) or `external()` (the backend sends the prompt
+off the mesh), the `locality` attribute of its `llm-meta/{model}` ad. A gateway client cannot set that attribute:
+`capability/advertise` and `units/declare` refuse it `403 reserved_attribute`. A provider that declares nothing is
+`Locality::Unknown`, and a rule about locality reads it as **not established** — never as in-domain.
+
+**Per candidate, in the router's order.** The preflight runs for each candidate before the router commits to it. A
+refusal (`action_denied`, `authority_not_established`) passes that candidate over without counting as an attempt; the
+first permitted one is dispatched. So a confidential request reaches an in-domain model when one exists — the response
+names the destinations passed over (`refused`) and the class (`data_class`) — and when none does it is `403`, with
+`data.refused_destinations` listing each candidate's destination, locality and reason, and `data.data_class`. A
+decision that could not be recorded (`evidence_not_recorded`) stops the route at once.
+
+**On the record.** Each candidate's decision is its own evidence record: a refused one is `Decided` with `execution:
+none`; the permitted one carries `route` — the class and its source, the destination with its locality, and the
+destinations refused before it — and `destination` names where it went.
+
+**The rule types** (reference evaluator; additive): `Rule::for_class(c)` applies a rule only to a request of class `c`,
+`Rule::at_locality(l)` only to a destination at `l`. **A class rule names exactly one class** — the evaluator knows
+nothing of the classifier's order — so a *prohibition* on `confidential` does not cover a stricter `restricted`, and a
+misspelt class makes it inert. Write the policy as an **allow-list**, as above: a class it does not list matches no
+allowance and is refused. (`at_locality(Locality::Unknown)` can never decide: an unknown locality is not established.) A class or locality the enforcement point **did not establish**
+matches, so the rule reports it as not established instead of silently not applying. That is what keeps the policy
+from being walked around: the substrate's own `llm.invoke` doors, `/gateway/llm/call` and `/gateway/llm/stream`, establish
+no class and no destination, so under any rule about class or locality a call through them is not established —
+refused, even for data that would have been public (the raw RPC routes refuse `llm.invoke` as a protected kind, and
+`/a2a` does not send it). Route classified calls through the façade. The contract suite states the same (`PolicyClause::ForbidClassAt`,
+the `route_*` cases).
+
+**What this does not establish.**
+- **No content inspection.** The class is declared, never detected. A client that sends confidential text marked
+  `public`, with no floor above `public`, routes it as public. A floor bound to the credential is the control.
+- **No observation of the backend, and no binding to the writer.** The locality is a declaration in a capability ad,
+  not an observation: a member that declares `in_domain` and forwards prompts off the mesh is outside the guarantee.
+  And an ad's key names its node without anything binding the key to the member that wrote it, so a fleet **member**
+  can write another node's `llm-meta` ad (a gateway client cannot — the attribute is refused at its doors). The
+  provider's own egress allow-list (`[egress]`) is the complementary control on what its backend can reach.
+- **A provider refreshing its ad reads as unknown meanwhile.** `ModelReg::refresh_meta` (the Ollama collector drives it
+  as `warm` and the VRAM figures change) retracts the old ad before writing the new one; between the two the provider's
+  locality is unknown, and a class rule about locality refuses it — closed, but a sole in-domain provider can answer
+  `403` for that moment.
+- **Timeouts and mixed outcomes.** The router asks the policy lazily, so an attempt gets the short `failover_timeout`
+  while untried candidates remain even if the policy then refuses all of them — a slow sole permitted model ranked
+  first can time out early. A route where some candidates failed and the rest were refused answers `502 exhausted`,
+  the refusals only in the evidence.
+- **Floors are exact principals.** `floor_for` keys are the gateway's principal strings (`token:{issuer}/{name}`,
+  `oidc:{issuer}/{subject}`); a key that matches no principal binds nothing, silently. `ClassSource` is on the record,
+  but the reference rules do not distinguish a declared class from a principal-bound one.
+- **The refusal names the candidates.** `refused_destinations` and `refused` give the client each candidate's provider
+  address and declared locality.
+- **No control of what a permitted model does with the data** — exfiltration through a permitted model, or through
+  its output, is out of scope.
+- **Not the node's own calls.** `InferenceRouter::call` (the node acting in-process) runs no preflight, so neither class
+  nor locality is consulted; nor do `SkillRunner`'s own OpenAI-compatible client, a `[[serve]]` backend or any other
+  in-process `LlmBackend`. A `[[serve]]` skill advertises no `llm-meta` ad, so its locality is unknown and a class rule
+  never permits it through the façade.
+- **Not at the provider.** With `with_provider_enforcement`, the provider's own evaluator re-checks `llm.invoke` without a
+  class or destination (neither travels), so a class rule placed there decides not established — closed. Put class rules
+  at the gateway.
+- **One evidence record per refused candidate.** A route over many providers that the policy refuses writes one denied
+  decision per candidate tried.
+
 ---
 
 ## Replacing the evaluator

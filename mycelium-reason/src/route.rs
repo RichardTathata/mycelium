@@ -64,6 +64,7 @@ use crate::trace::TraceRecorder;
 /// | [`TOKENS_PER_SEC`] | `Float` | embedder-measured | recent decode throughput on this device |
 /// | [`PARAM_SIZE`] | `Text` | engine (`/api/show`) | parameter count as the engine prints it (`8B`) |
 /// | [`QUANT`] | `Text` | engine (`/api/show`) | quantization level (`Q4_K_M`) |
+/// | [`LOCALITY`] | `Text` | serve side (the operator) | where inference runs: [`LOCALITY_IN_DOMAIN`] (an engine on this fleet) or [`LOCALITY_EXTERNAL`] (an endpoint off the mesh) — what an inference-routing policy decides on (post-360 row R) |
 ///
 /// Static attributes ride the profile once; dynamic ones (`warm`, `vram_used_mb`,
 /// `tokens_per_sec`) are refreshed via [`ModelReg::refresh_meta`] — the Ollama collector
@@ -89,6 +90,15 @@ pub mod llm_meta {
     pub const PARAM_SIZE: &str = "param_size";
     /// Quantization level (`Text`).
     pub const QUANT: &str = "quant";
+    /// Where this model's inference runs (`Text`): [`LOCALITY_IN_DOMAIN`] or [`LOCALITY_EXTERNAL`]
+    /// (post-360 row R). **The serving node's declaration** — it knows its backend; nothing observes
+    /// where the backend sends a prompt. Undeclared, or any other value, reads as *unknown*, which a
+    /// policy about locality treats as not established, never as in-domain.
+    pub const LOCALITY: &str = "locality";
+    /// [`LOCALITY`]: an engine on a node of this fleet (Ollama, a local vLLM, …).
+    pub const LOCALITY_IN_DOMAIN: &str = "in_domain";
+    /// [`LOCALITY`]: an endpoint off the mesh (a hosted OpenAI-compatible API, …).
+    pub const LOCALITY_EXTERNAL: &str = "external";
 }
 
 // ── Serve side (feature `llm`) ────────────────────────────────────────────────
@@ -104,7 +114,8 @@ pub struct ModelProfile {
     pub ctx_window: Option<i64>,
     /// Model family (advertised as a `Text` attribute `family`).
     pub family: Option<String>,
-    /// Additional typed attributes, advertised as-is.
+    /// Additional typed attributes, advertised as-is — including [`llm_meta::LOCALITY`]
+    /// (see [`in_domain`](Self::in_domain) / [`external`](Self::external)).
     pub extra: Vec<(String, mycelium::CapValue)>,
 }
 
@@ -121,6 +132,18 @@ impl ModelProfile {
     pub fn with(mut self, attr: &str, value: mycelium::CapValue) -> Self {
         self.set(attr, value);
         self
+    }
+
+    /// Declare that this model's inference runs **inside the domain** — an engine on this node
+    /// ([`llm_meta::LOCALITY`] = `in_domain`; post-360 row R).
+    pub fn in_domain(self) -> Self {
+        self.with(llm_meta::LOCALITY, mycelium::CapValue::Text(Arc::from(llm_meta::LOCALITY_IN_DOMAIN)))
+    }
+
+    /// Declare that this model's inference runs **outside the domain** — the backend sends the prompt
+    /// to an endpoint off the mesh ([`llm_meta::LOCALITY`] = `external`; post-360 row R).
+    pub fn external(self) -> Self {
+        self.with(llm_meta::LOCALITY, mycelium::CapValue::Text(Arc::from(llm_meta::LOCALITY_EXTERNAL)))
     }
 
     /// In-place form of [`with`](Self::with).
@@ -288,8 +311,14 @@ pub struct Routed {
     pub tokens_used: u32,
     /// The provider that answered.
     pub provider: NodeId,
-    /// 1-based attempt index (1 = first candidate answered).
+    /// 1-based attempt index (1 = first candidate answered). Destinations the policy refused are
+    /// not attempts: they are in [`refused`](Self::refused).
     pub attempt: usize,
+    /// The request's data class, when the route classified it (post-360 row R).
+    pub data_class: Option<String>,
+    /// The destinations the policy refused for this call before the one that answered, with the
+    /// refusal's reason (post-360 row R) — passed over, never dispatched to.
+    pub refused: Vec<(NodeId, String)>,
 }
 
 /// Why routing failed.
@@ -303,7 +332,17 @@ pub enum RouteError {
     /// ([`InferenceRouter::call_as`]): nothing was dispatched. The fields are what every gateway
     /// door answers with — the JSON-RPC `code`, the machine-readable `reason` (`action_denied`,
     /// `not_established`, …), the sentence, and the `data` object (`policy_revision`, `checked`, …).
+    ///
+    /// **Per destination (post-360 row R).** The preflight runs for each candidate in the router's
+    /// order, and a refused candidate is passed over for the next; this is returned only when every
+    /// candidate was refused (or the decision could not be recorded, which stops at once). With more
+    /// than one candidate refused, `message` names each and `data.refused_destinations` lists them,
+    /// with their locality and reason; `data.data_class` is the request's class when it was classified.
     Refused { code: i32, reason: String, message: String, data: serde_json::Value },
+    /// The request could not be classified (post-360 row R): a declared class the node's
+    /// [`DataClassPolicy`](crate::DataClassPolicy) does not have, or a class declared to a node that
+    /// classifies nothing. Nothing was routed.
+    Unclassifiable(String),
 }
 
 impl fmt::Display for RouteError {
@@ -311,6 +350,7 @@ impl fmt::Display for RouteError {
         match self {
             RouteError::NoProvider => write!(f, "no provider for the requested model"),
             RouteError::Refused { reason, message, .. } => write!(f, "refused by policy ({reason}): {message}"),
+            RouteError::Unclassifiable(why) => write!(f, "the request could not be classified: {why}"),
             RouteError::Exhausted(fails) => {
                 write!(f, "all {} attempted provider(s) failed: ", fails.len())?;
                 let mut first = true;
@@ -338,6 +378,9 @@ pub struct InferenceRouter {
     /// string). Leaf lock — taken for a map read/write only, never across an await
     /// (lock-order row 36). Node-local by design: see the module doc.
     inflight: Mutex<HashMap<String, u32>>,
+    /// How a client's request is classified (post-360 row R); `None` classifies nothing.
+    #[cfg(feature = "gateway")]
+    classes: Option<crate::classify::DataClassPolicy>,
 }
 
 /// One atomic pick: the chosen provider, the ranking it was chosen from, its reservation.
@@ -368,12 +411,53 @@ impl Drop for Reservation<'_> {
 enum Dispatch<'a> {
     AsNode(std::marker::PhantomData<&'a ()>),
     #[cfg(feature = "gateway")]
-    ForClient { caller: Option<&'a mycelium::ResolvedPrincipal>, enforcement_point: &'a str },
+    ForClient {
+        caller: Option<&'a mycelium::ResolvedPrincipal>,
+        enforcement_point: &'a str,
+        /// The request's class (row R), when this router classifies.
+        class: Option<&'a mycelium::DataClass>,
+    },
 }
 
 impl InferenceRouter {
     pub fn new(agent: Arc<GossipAgent>, cfg: RouterConfig) -> Self {
-        Self { agent, cfg, inflight: Mutex::new(HashMap::new()) }
+        Self {
+            agent,
+            cfg,
+            inflight: Mutex::new(HashMap::new()),
+            #[cfg(feature = "gateway")]
+            classes: None,
+        }
+    }
+
+    /// Classify every request routed for a gateway client by `policy` (post-360 row R): each
+    /// [`call_as`](Self::call_as) carries a [`DataClass`](mycelium::DataClass) into the gateway's
+    /// preflight beside the destination's locality, so a policy can say where each class may go.
+    /// Without this, a routed request carries no class, and a policy rule about class decides
+    /// *not established* for it.
+    #[cfg(feature = "gateway")]
+    pub fn with_data_classes(mut self, policy: crate::classify::DataClassPolicy) -> Self {
+        self.classes = Some(policy);
+        self
+    }
+
+    /// Where each provider of `model` declared its inference runs — the [`llm_meta::LOCALITY`]
+    /// attribute of its `llm-meta/{model}` ad (post-360 row R). A provider absent from the map
+    /// declared nothing, which is [`Locality::Unknown`](mycelium::Locality::Unknown).
+    #[cfg(feature = "gateway")]
+    pub fn localities(&self, model: &str) -> HashMap<NodeId, mycelium::Locality> {
+        self.agent
+            .capabilities()
+            .resolve(&CapFilter::new("llm-meta", model))
+            .into_iter()
+            .map(|(n, cap)| {
+                let locality = match cap.attributes.get(llm_meta::LOCALITY) {
+                    Some(mycelium::CapValue::Text(t)) => mycelium::Locality::parse(t),
+                    _ => mycelium::Locality::Unknown,
+                };
+                (n, locality)
+            })
+            .collect()
     }
 
     /// Calls this router currently has open against `node` (the local reservation count).
@@ -515,6 +599,14 @@ impl InferenceRouter {
     /// provider's `request_principal` is `Client(<the bearer's principal>)`, never this node) and
     /// its outcome recorded. Before this the façade called `rpc_call`, so the provider saw the
     /// gateway node as the caller and no evaluator was consulted.
+    ///
+    /// **Per destination (post-360 row R).** The preflight sees the destination it decides on —
+    /// `llm/{model}@{provider}` and the provider's declared [`llm_meta::LOCALITY`] — and, when this
+    /// router classifies ([`with_data_classes`](Self::with_data_classes)), the request's class (an
+    /// unclassified request is the policy's default class). A candidate the policy refuses is passed
+    /// over for the next in the router's order, without counting as an attempt; so a classified
+    /// request reaches a permitted model when one exists, and is refused — every candidate named —
+    /// when none does. See [`call_as_classified`](Self::call_as_classified) for a declared class.
     #[cfg(feature = "gateway")]
     pub async fn call_as(
         &self,
@@ -525,7 +617,46 @@ impl InferenceRouter {
         context: &HashMap<String, String>,
         trace: Option<&TraceRecorder>,
     ) -> Result<Routed, RouteError> {
-        self.call_inner(Dispatch::ForClient { caller, enforcement_point }, q, input, context, trace).await
+        self.call_as_classified(caller, enforcement_point, q, input, context, None, trace).await
+    }
+
+    /// [`call_as`](Self::call_as) with the class the client **declared** (the façade reads it from
+    /// [`DATA_CLASS_HEADER`](crate::DATA_CLASS_HEADER); post-360 row R). The declaration may raise the
+    /// class the caller's principal carries and never lower it ([`DataClassPolicy`](crate::DataClassPolicy)).
+    /// A class the policy does not have, or any declaration to a router that classifies nothing, is
+    /// [`RouteError::Unclassifiable`] and nothing is routed — a declaration this node cannot honour is
+    /// not silently dropped.
+    #[cfg(feature = "gateway")]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn call_as_classified(
+        &self,
+        caller: Option<&mycelium::ResolvedPrincipal>,
+        enforcement_point: &str,
+        q: &ModelQuery,
+        input: &str,
+        context: &HashMap<String, String>,
+        declared: Option<&str>,
+        trace: Option<&TraceRecorder>,
+    ) -> Result<Routed, RouteError> {
+        let class = match (&self.classes, declared) {
+            (Some(policy), _) => Some(
+                policy
+                    .classify(caller.map(|c| c.principal()), declared)
+                    .map_err(|e| RouteError::Unclassifiable(e.to_string()))?,
+            ),
+            (None, Some(d)) => {
+                return Err(RouteError::Unclassifiable(crate::classify::ClassError::NotConfigured(d.into()).to_string()));
+            }
+            (None, None) => None,
+        };
+        self.call_inner(
+            Dispatch::ForClient { caller, enforcement_point, class: class.as_ref() },
+            q,
+            input,
+            context,
+            trace,
+        )
+        .await
     }
 
     async fn call_inner(
@@ -545,34 +676,48 @@ impl InferenceRouter {
         });
         let payload = Bytes::from(request.to_string().into_bytes());
 
-        // Each attempt picks-and-reserves atomically against the providers not yet tried.
-        // `to_try` (fixed from the first ranking) decides which attempt gets the full
-        // `call_timeout` — the last one — and which the shorter `failover_timeout` (fail
-        // over fast, don't burn the inference budget on a candidate that may have just died).
+        // Row R: where each provider declared its inference runs, read once per call.
+        #[cfg(feature = "gateway")]
+        let localities = match dispatch {
+            Dispatch::ForClient { .. } => self.localities(&q.model),
+            Dispatch::AsNode(_) => HashMap::new(),
+        };
+        // Row R: one operation id for the whole call, so every candidate's evidence record — the refused ones and
+        // the one dispatched — joins on it (each attempt still gets its own attempt id).
+        #[cfg(feature = "gateway")]
+        let call_params = serde_json::json!({ "_meta": { "operation_id": call_operation_id(self.agent.node_id()) } });
+        // Row R: the destinations the policy refused for this call, in the order they were tried.
+        #[cfg(feature = "gateway")]
+        let mut refused: Vec<(NodeId, mycelium::RefusedDestination, mycelium::GatewayRefusal)> = Vec::new();
+
+        // Each attempt picks-and-reserves atomically against the providers not yet tried. An
+        // attempt gets the full `call_timeout` when it is the last — no untried provider remains in
+        // its ranking, or the failover depth is reached — and the shorter `failover_timeout`
+        // otherwise (fail over fast, don't burn the inference budget on a candidate that may have
+        // just died). A destination the policy refuses is passed over without counting as an
+        // attempt (row R).
         let mut tried: Vec<NodeId> = Vec::new();
         let mut failures: Vec<(NodeId, String)> = Vec::new();
-        let mut to_try = 0usize;
-        for attempt in 0..self.cfg.max_attempts {
+        let mut attempt = 0usize;
+        let mut first_pick = true;
+        while attempt < self.cfg.max_attempts {
             let Some((node, ranked, reservation)) = self.pick_and_reserve(q, &tried) else {
-                if attempt == 0 {
+                if first_pick {
                     metrics::counter!("mycelium_reason_route_no_provider_total").increment(1);
                     return Err(RouteError::NoProvider);
                 }
                 break; // every eligible provider has been tried
             };
             let node = &node;
-            if attempt == 0 {
-                to_try = ranked.len().min(self.cfg.max_attempts);
+            if first_pick {
                 if let Some(t) = trace {
                     t.route(&q.model, &ranked, node);
                 }
+                first_pick = false;
             }
-            metrics::counter!("mycelium_reason_route_attempts_total").increment(1);
-            let per_attempt_timeout = if attempt + 1 >= to_try {
-                self.cfg.call_timeout
-            } else {
-                self.cfg.failover_timeout
-            };
+            let untried_after = ranked.iter().filter(|(n, _)| n != node && !tried.contains(n)).count();
+            let last = untried_after == 0 || attempt + 1 >= self.cfg.max_attempts;
+            let per_attempt_timeout = if last { self.cfg.call_timeout } else { self.cfg.failover_timeout };
             let started = std::time::Instant::now();
             let reply: Result<Bytes, String> = {
                 // Reserved for exactly the attempt: the guard drops when the reply (or the
@@ -586,30 +731,46 @@ impl InferenceRouter {
                         .await
                         .map_err(|e| e.to_string()),
                     #[cfg(feature = "gateway")]
-                    Dispatch::ForClient { caller, enforcement_point } => {
+                    Dispatch::ForClient { caller, enforcement_point, class } => {
                         // The same preflight `/mcp`, `/a2a` and `/gateway/llm/call` run, between the
-                        // auth layer and the dispatch; a refusal is answered and nothing is sent.
+                        // auth layer and the dispatch — told, since row R, which destination it is
+                        // deciding on and what the request carries.
+                        let destination = mycelium::Destination::new(
+                            format!("llm/{}@{node}", q.model),
+                            localities.get(node).copied().unwrap_or(mycelium::Locality::Unknown),
+                        );
+                        let mut facts = mycelium::RouteFacts::new(destination.clone())
+                            .with_refused(refused.iter().map(|(_, d, _)| d.clone()).collect());
+                        if let Some(c) = class {
+                            facts = facts.with_data_class(c.clone());
+                        }
                         let preflight = self
                             .agent
-                            .gateway_preflight(
+                            .gateway_preflight_routed(
                                 caller,
                                 signal_kind::LLM_INVOKE,
                                 &format!("prompt:llm/{}@{node}", q.model),
                                 &serde_json::json!({ "input": input, "context": context }),
-                                &serde_json::Value::Null,
+                                &call_params,
                                 enforcement_point,
+                                &facts,
                             )
                             .await;
                         if let Some(r) = preflight.refusal() {
                             if let Some(t) = trace {
-                                t.llm_call(node, false, 0, 0, Some(&r.message));
+                                // Nothing was sent to this destination: the trace says it was refused, not that a call failed.
+                                t.llm_call(node, false, 0, 0, Some(&format!("refused by policy, not dispatched: {}", r.message)));
                             }
-                            return Err(RouteError::Refused {
-                                code: r.code,
-                                reason: r.reason,
-                                message: r.message,
-                                data: r.data,
-                            });
+                            metrics::counter!("mycelium_reason_route_policy_refusals_total").increment(1);
+                            // A decision that could not be recorded stops the route: trying the
+                            // next destination would only multiply unrecorded decisions.
+                            let unrecorded = r.reason == "evidence_not_recorded";
+                            refused.push((node.clone(), mycelium::RefusedDestination::new(destination, r.reason.clone()), r));
+                            if unrecorded {
+                                return Err(refusal_of(&q.model, class, refused));
+                            }
+                            tried.push(node.clone());
+                            continue; // passed over: not an attempt
                         }
                         let dispatched = self
                             .agent
@@ -622,6 +783,7 @@ impl InferenceRouter {
                 }
             };
             let duration_ms = started.elapsed().as_millis() as u64;
+            metrics::counter!("mycelium_reason_route_attempts_total").increment(1);
 
             let err = match reply {
                 Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
@@ -636,12 +798,24 @@ impl InferenceRouter {
                             if let Some(t) = trace {
                                 t.llm_call(node, true, tokens_used, duration_ms, None);
                             }
+                            #[cfg(feature = "gateway")]
+                            let (data_class, refused) = match dispatch {
+                                Dispatch::ForClient { class, .. } => (
+                                    class.map(|c| c.class.clone()),
+                                    refused.iter().map(|(n, d, _)| (n.clone(), d.reason.clone())).collect(),
+                                ),
+                                Dispatch::AsNode(_) => (None, Vec::new()),
+                            };
+                            #[cfg(not(feature = "gateway"))]
+                            let (data_class, refused) = (None, Vec::new());
                             return Ok(Routed {
                                 output,
                                 model_used,
                                 tokens_used,
                                 provider: node.clone(),
                                 attempt: attempt + 1,
+                                data_class,
+                                refused,
                             });
                         }
                     }
@@ -654,14 +828,82 @@ impl InferenceRouter {
             }
             failures.push((node.clone(), err));
             tried.push(node.clone());
-            // Failover: this attempt failed and at least one candidate remains to try.
-            if attempt + 1 < to_try {
+            attempt += 1;
+            // Failover: this attempt failed and it was not the last.
+            if !last {
                 metrics::counter!("mycelium_reason_route_failovers_total").increment(1);
             }
+        }
+        // Row R: nothing dispatched and every candidate refused — the refusal, every one named.
+        #[cfg(feature = "gateway")]
+        if failures.is_empty() && !refused.is_empty() {
+            let class = match dispatch {
+                Dispatch::ForClient { class, .. } => class,
+                Dispatch::AsNode(_) => None,
+            };
+            return Err(refusal_of(&q.model, class, refused));
         }
         metrics::counter!("mycelium_reason_route_exhausted_total").increment(1);
         Err(RouteError::Exhausted(failures))
     }
+}
+
+/// A correlation id for one routed call (row R): this node, the wall clock and a process-local sequence. Not
+/// authority — the gateway's own rule for `_meta.operation_id`.
+#[cfg(feature = "gateway")]
+fn call_operation_id(node: &NodeId) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    format!("reason:{node}/{ms:x}/{:x}", SEQ.fetch_add(1, Ordering::Relaxed))
+}
+
+/// The refusal a route answers when the policy refused every candidate (row R). One refused
+/// candidate answers exactly as the gateway's preflight did, plus `refused_destinations` and
+/// `data_class` in `data`; several answer with the first's code and reason (the most preferred
+/// destination's), and a message naming each.
+#[cfg(feature = "gateway")]
+fn refusal_of(
+    model: &str,
+    class: Option<&mycelium::DataClass>,
+    refused: Vec<(NodeId, mycelium::RefusedDestination, mycelium::GatewayRefusal)>,
+) -> RouteError {
+    let listed: Vec<serde_json::Value> = refused
+        .iter()
+        .map(|(_, d, r)| {
+            serde_json::json!({
+                "destination": d.destination.name,
+                "locality": d.destination.locality.label(),
+                "reason": d.reason,
+                "message": r.message,
+            })
+        })
+        .collect();
+    let names: Vec<String> = refused
+        .iter()
+        .map(|(_, d, _)| format!("{} ({}, {})", d.destination.name, d.destination.locality, d.reason))
+        .collect();
+    let several = refused.len() > 1;
+    let Some((_, _, first)) = refused.into_iter().next() else {
+        return RouteError::NoProvider;
+    };
+    let message = if several {
+        let of_class = class.map(|c| format!(" for {} data", c.class)).unwrap_or_default();
+        format!("no destination for model {model}{of_class} is permitted: {}", names.join("; "))
+    } else {
+        first.message.clone()
+    };
+    let mut data = first.data.clone();
+    if let Some(obj) = data.as_object_mut() {
+        obj.insert("refused_destinations".into(), serde_json::Value::Array(listed));
+        if let Some(c) = class {
+            obj.insert(
+                "data_class".into(),
+                serde_json::json!({ "class": c.class, "source": c.source.label() }),
+            );
+        }
+    }
+    RouteError::Refused { code: first.code, reason: first.reason, message, data }
 }
 
 /// Score `eligible` (pheromone fill) against the given in-flight map, rank, and choose the

@@ -560,6 +560,52 @@ impl crate::GossipAgent {
         }
     }
 
+    /// [`gateway_preflight`](Self::gateway_preflight) for a door that **routes** (post-360 row R):
+    /// `route` names the destination this decision is about — its name and [`Locality`](crate::Locality)
+    /// — the request's [`DataClass`](crate::DataClass) when the door classifies, and the destinations
+    /// already refused for this call. The evaluator sees the destination and the class in the
+    /// envelope; the evidence record carries all of it. A router calls this once per candidate, in its
+    /// own order, and dispatches to the first the policy permits — so a classified request reaches a
+    /// permitted model when one exists and is refused, naming why, when none does.
+    ///
+    /// What the door puts here is what it **established**, never what the request body says: the
+    /// locality from the provider's own declaration, the class from the door's classification (a
+    /// client may raise a class its credential carries, never lower it). Inert, like
+    /// `gateway_preflight`, unless an evaluator is attached.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn gateway_preflight_routed(
+        &self,
+        caller: Option<&ResolvedPrincipal>,
+        operation: &str,
+        resource: &str,
+        arguments: &serde_json::Value,
+        params: &serde_json::Value,
+        enforcement_point: &str,
+        route: &crate::agent::route_facts::RouteFacts,
+    ) -> GatewayPreflight {
+        #[cfg(feature = "tls")]
+        {
+            GatewayPreflight {
+                inner: ae_preflight_routed(
+                    &self.task_ctx,
+                    caller,
+                    operation,
+                    resource,
+                    arguments,
+                    params,
+                    enforcement_point,
+                    Some(route),
+                )
+                .await,
+            }
+        }
+        #[cfg(not(feature = "tls"))]
+        {
+            let _ = (caller, operation, resource, arguments, params, enforcement_point, route);
+            GatewayPreflight {}
+        }
+    }
+
     /// Record what became of a dispatch [`gateway_preflight`](Self::gateway_preflight) permitted:
     /// a reply is `completed` (or `failed`, when it is a JSON object with an `error`), a refusal
     /// before sending is `none`, a timeout or transport error is `unknown` — never a negative.
@@ -618,6 +664,25 @@ pub(crate) async fn ae_preflight(
     arguments: &serde_json::Value,
     params: &serde_json::Value,
     enforcement_point: &str,
+) -> Preflight {
+    ae_preflight_routed(ctx, caller, operation, resource, arguments, params, enforcement_point, None).await
+}
+
+/// [`ae_preflight`] for a **routing** door (post-360 row R): `route` is what the door established
+/// about the destination it is deciding on and the request's data class. Both enter the envelope, so
+/// the evaluator decides on them; all of it, the destinations already refused for this call
+/// included, enters the evidence record. `None` is [`ae_preflight`] exactly.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn ae_preflight_routed(
+    ctx: &Arc<TaskCtx>,
+    caller: Option<&ResolvedPrincipal>,
+    operation: &str,
+    resource: &str,
+    arguments: &serde_json::Value,
+    params: &serde_json::Value,
+    enforcement_point: &str,
+    route: Option<&crate::agent::route_facts::RouteFacts>,
 ) -> Preflight {
     use super::action_evaluator as ae;
     let Some(evaluator) = ctx.action_evaluator.get() else { return Preflight::Inert };
@@ -707,6 +772,9 @@ pub(crate) async fn ae_preflight(
         // presented — *claims none*, which a rule requiring a mandate reads as **authority not
         // established** (`Indeterminate`), never a denial. With an authority, the finding above.
         mandate: assessment.binding,
+        // Row R: established by the routing door, never read from the request body.
+        destination: route.map(|r| r.destination.clone()),
+        data_class: route.and_then(|r| r.data_class.clone()),
     };
 
     // Decide, then record, *then* dispatch. Both outcomes are sealed: a permit with no record of
@@ -797,6 +865,10 @@ pub(crate) async fn ae_preflight(
     if let Some(h) = &history {
         // The history this decision read, as a decision input: a replay finds the attempts in the journal.
         evidence = evidence.with_history(ae::HistoryInput::of(h));
+    }
+    if let Some(r) = route {
+        // Row R: the class, the destination decided on and the destinations already refused.
+        evidence = evidence.with_route(r.clone());
     }
     if let Err(e) = ae_record(ctx, &evidence).await {
         // Not recorded, so not done: a permit counted into the history is taken back.

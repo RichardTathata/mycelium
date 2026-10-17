@@ -12,7 +12,12 @@
 //!   and the **OpenAI-compatible façade** `POST /gateway/reason/v1/chat/completions`
 //!   (feature `gateway`) — point any OpenAI-speaking client at
 //!   `http://node:port/gateway/reason/v1` and its `model` field becomes an `llm/{model}`
-//!   route across the fleet.
+//!   route across the fleet. **Routing as policy** (post-360 row R): with an action evaluator
+//!   attached, each candidate's preflight sees the destination's declared locality
+//!   ([`llm_meta::LOCALITY`]) and — with a [`DataClassPolicy`] — the request's data class, and the
+//!   router dispatches to the first candidate the policy permits (*confidential stays in the
+//!   domain*), refusing with every candidate named when none is. The class is declared, never
+//!   detected; the locality is the provider's declaration, never observed.
 //! - **② Fleet-reasoning traces** ([`TraceRecorder`], [`replay`], [`narrate`]) — causal,
 //!   HLC-ordered, gossip-replicated records of why the whole fleet reasoned as it did,
 //!   replayable from any node; optionally anchored into the WS2 audit chain
@@ -60,6 +65,8 @@
 
 mod blob;
 #[cfg(feature = "gateway")]
+mod classify;
+#[cfg(feature = "gateway")]
 mod http;
 #[cfg(feature = "ollama")]
 mod ollama;
@@ -74,7 +81,9 @@ pub use blob::{
     MAX_BLOB_BYTES, MeshBlobStore, spawn_blob_server,
 };
 #[cfg(feature = "gateway")]
-pub use http::{reason_router, reason_router_with};
+pub use classify::{ClassError, DATA_CLASS_HEADER, DataClassPolicy};
+#[cfg(feature = "gateway")]
+pub use http::{reason_router, reason_router_classified, reason_router_with};
 #[cfg(feature = "ollama")]
 pub use ollama::{MetaRefresher, OllamaError, OllamaModelState, OllamaProbe, spawn_meta_refresher};
 pub use resume::{ModelDependency, ResumeError, require_model};

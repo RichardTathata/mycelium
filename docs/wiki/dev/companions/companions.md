@@ -111,7 +111,11 @@ via wasm-host).
   install half is wasm-host's `model_deploy`). Plus a content-addressed **blob tier**
   (`FsBlobStore`/`MeshBlobStore`/`spawn_blob_server`, ≤ 8 MiB per blob; the store bounded at 1 GiB by default since 0.9.0, post-360 row H — `open_with_quota`, 507 `quota_exceeded`; a `run_id` one bounded segment at every door, 400 `bad_run_id`) + `/gateway/reason/{blob,trace,route}`
   routes (`route` is the load-aware routing surface, #132; the OpenAI-compatible façade `/gateway/reason/v1/{chat/completions,models}`
-  joined in 0.6.0, below — `mycelium-reason/src/http.rs` holds the whole set). Zero core changes, zero new locks. **Python tier** (separate packages): the
+  joined in 0.6.0, below — `mycelium-reason/src/http.rs` holds the whole set). Zero core changes, zero new locks.
+  **0.10.0 (post-360 row R):** routing as policy — each candidate's preflight sees its declared `llm_meta::LOCALITY` and,
+  with a `DataClassPolicy` (`reason_router_classified`), the request's class (`x-mycelium-data-class`, a principal floor
+  a client cannot lower, the most restrictive by default); a refused candidate is passed over, `403` only when all are
+  (`classify.rs`, `route.rs::call_inner`). **Python tier** (separate packages): the
   **`langgraph-checkpoint-mycelium`** `BaseCheckpointSaver` (index rows in KV `ckpt/`/`ckptw/`,
   payloads in the blob tier, cross-node `StateGraph` resume proven in CI; **0.1.1, 2026-09-05:**
   `alist` selects rows on the async client — a pure window/filter core with sync + async drivers,

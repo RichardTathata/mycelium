@@ -50,6 +50,7 @@ use super::action_evaluator::{
     ActionEnvelope, ActionEvaluator, ActionMapping, Decision, DecisionKind, Execution, History, HistoryEntry,
     HistoryScope, HistoryView, PreflightRefusal, ReferenceEvaluator, Rule, Verdict, preflight, preflight_with_history,
 };
+use super::route_facts::{ClassSource, DataClass, Destination, Locality};
 use mycelium_core::NodeId;
 use std::sync::Arc;
 
@@ -106,6 +107,23 @@ pub enum PolicyClause {
         /// How far back, in milliseconds.
         window_ms: u64,
     },
+    /// A prohibition about **where data may go** (post-360 row R): this actor may not send a request
+    /// whose data is of `class` to a destination at `locality`. The class and the locality are facts
+    /// the enforcement point establishes ([`ActionEnvelope::data_class`],
+    /// [`ActionEnvelope::destination`]); a class or locality it did not establish decides nothing —
+    /// *not established*, never *permitted* and never *in-domain*.
+    ForbidClassAt {
+        /// Actor principal, or `*`.
+        actor: String,
+        /// Operation, or `*`.
+        operation: String,
+        /// Resource, or `*`.
+        resource: String,
+        /// The data class the prohibition is about.
+        class: String,
+        /// The destination locality it forbids that class to reach.
+        locality: Locality,
+    },
     /// A clause name this policy uses that the evaluator has declared it does not support.
     ///
     /// The case that matters: an adapter must not silently ignore a clause it cannot evaluate,
@@ -135,6 +153,17 @@ impl PolicyClause {
     /// `AllowAtMost`, with `&str` arguments.
     pub fn allow_at_most(actor: &str, operation: &str, resource: &str, count: u32, window_ms: u64) -> Self {
         Self::AllowAtMost { actor: actor.into(), operation: operation.into(), resource: resource.into(), count, window_ms }
+    }
+
+    /// `ForbidClassAt`, with `&str` arguments.
+    pub fn forbid_class_at(actor: &str, operation: &str, resource: &str, class: &str, locality: Locality) -> Self {
+        Self::ForbidClassAt {
+            actor: actor.into(),
+            operation: operation.into(),
+            resource: resource.into(),
+            class: class.into(),
+            locality,
+        }
     }
 
     /// `AllowRequiringFacts`, with `&str` arguments.
@@ -733,7 +762,86 @@ pub fn cases() -> Vec<ContractCase> {
             must_mention: vec!["history".into()],
             revision: RevisionBinding::Matching,
         },
+        // ── Row R: where data may go ──────────────────────────────────────────────────────────
+        ContractCase {
+            id: "route_class_forbidden_at_locality",
+            requirement: "a request of a class forbidden to reach a locality is denied there — an authority decided \
+                          no — and the decision names the class and the locality",
+            policy: route_policy(),
+            envelope: routed(Some("confidential"), Some(Locality::External)),
+            history: None,
+            now_ms: now,
+            expect: Expected::Denied,
+            must_mention: vec!["confidential".into(), "external".into()],
+            revision: RevisionBinding::Matching,
+        },
+        ContractCase {
+            id: "route_class_permitted_elsewhere",
+            requirement: "the same class to a destination the prohibition does not name is admitted",
+            policy: route_policy(),
+            envelope: routed(Some("confidential"), Some(Locality::InDomain)),
+            history: None,
+            now_ms: now,
+            expect: Expected::Admitted,
+            must_mention: vec![],
+            revision: RevisionBinding::Matching,
+        },
+        ContractCase {
+            id: "route_other_class_unaffected",
+            requirement: "another class to the forbidden locality is admitted: the prohibition is about one class",
+            policy: route_policy(),
+            envelope: routed(Some("public"), Some(Locality::External)),
+            history: None,
+            now_ms: now,
+            expect: Expected::Admitted,
+            must_mention: vec![],
+            revision: RevisionBinding::Matching,
+        },
+        ContractCase {
+            id: "route_locality_unknown",
+            requirement: "a destination whose locality was not established is not in-domain by default: the \
+                          prohibition cannot be decided, so the action is not established, and the decision says locality",
+            policy: route_policy(),
+            envelope: routed(Some("confidential"), Some(Locality::Unknown)),
+            history: None,
+            now_ms: now,
+            expect: Expected::NotEstablished,
+            must_mention: vec!["locality".into()],
+            revision: RevisionBinding::Matching,
+        },
+        ContractCase {
+            id: "route_class_absent",
+            requirement: "a request whose class was not established — a door that does not classify — cannot pass a \
+                          rule about class: not established, and the decision says class",
+            policy: route_policy(),
+            envelope: routed(None, Some(Locality::External)),
+            history: None,
+            now_ms: now,
+            expect: Expected::NotEstablished,
+            must_mention: vec!["class".into()],
+            revision: RevisionBinding::Matching,
+        },
     ]
+}
+
+/// Row R's policy: anyone may invoke the model, but `confidential` data may not reach an external one.
+fn route_policy() -> PolicyIntent {
+    PolicyIntent::new(
+        "rev-1",
+        vec![
+            PolicyClause::allow("*", "llm.invoke", "*"),
+            PolicyClause::forbid_class_at("*", "llm.invoke", "*", "confidential", Locality::External),
+        ],
+    )
+}
+
+/// A routed `llm.invoke`, with the class and the destination's locality the enforcement point
+/// established — `None` for a fact it did not.
+fn routed(class: Option<&str>, locality: Option<Locality>) -> ActionEnvelope {
+    let mut env = base("oidc:idp/alice", "llm.invoke", "prompt:llm/m@n1");
+    env.data_class = class.map(|c| DataClass::new(c, ClassSource::Declared));
+    env.destination = locality.map(|l| Destination::new("llm/m@n1", l));
+    env
 }
 
 /// A history at `as_of_ms` holding a permitted `tools/call` on `tool:post@n1` at each time in `at`.
@@ -795,6 +903,9 @@ impl EvaluatorUnderTest for ReferenceUnderTest {
                 PolicyClause::AllowAtMost { actor, operation, resource, count, window_ms } => ev.allow(
                     Rule::new(actor, operation, resource).requiring_scopes(["mcp:invoke"]).at_most(*count, *window_ms),
                 ),
+                PolicyClause::ForbidClassAt { actor, operation, resource, class, locality } => {
+                    ev.prohibit(Rule::new(actor, operation, resource).for_class(class).at_locality(*locality))
+                }
                 PolicyClause::UnsupportedClause(name) => ev.unsupported_clause(name),
                 // No wildcard arm, deliberately. `PolicyClause` is `#[non_exhaustive]` for
                 // downstream adapters, but in this crate the match is exhaustive — so adding a
@@ -849,6 +960,8 @@ mod tests {
         Conditional { who: String, what: String, on: String, upon: Vec<String> },
         /// A permit that holds while the actor's history shows fewer than `room` matching permits in `span` ms.
         Rationed { who: String, what: String, on: String, room: u32, span: u64 },
+        /// A refusal of one data class reaching one destination locality (row R).
+        RefuseFlow { who: String, what: String, on: String, data: String, to: Locality },
     }
 
     /// A table-driven evaluator. Prohibitions are scanned **last** here and still win, which is a
@@ -906,6 +1019,33 @@ mod tests {
                         )
                         .checking(["entry.conditional"])
                         .with_errors(unmet);
+                    }
+                }
+            }
+
+            // Flow refusals: a refusal about a class reaching a locality, settled only on facts the
+            // request established.
+            for entry in &self.entries {
+                if let Entry::RefuseFlow { who, what, on, data, to } = entry
+                    && hits(who, what, on)
+                {
+                    let Some(have) = &env.data_class else {
+                        return Decision::indeterminate("the flow refusal cannot be settled", &self.revision)
+                            .checking(["entry.refuse_flow"])
+                            .with_errors([format!("data class: none on the request (entry is about {data})")]);
+                    };
+                    if have.class != *data {
+                        continue;
+                    }
+                    let at = env.destination.as_ref().map(|d| d.locality).unwrap_or(Locality::Unknown);
+                    if at == Locality::Unknown {
+                        return Decision::indeterminate("the flow refusal cannot be settled", &self.revision)
+                            .checking(["entry.refuse_flow"])
+                            .with_errors([format!("destination locality: unknown (entry is about {to})")]);
+                    }
+                    if at == *to {
+                        return Decision::deny(format!("{data} data may not flow to a {to} destination"), &self.revision)
+                            .checking(["entry.refuse_flow"]);
                     }
                 }
             }
@@ -1010,6 +1150,15 @@ mod tests {
                             on: resource.clone(),
                             room: *count,
                             span: *window_ms,
+                        })
+                    }
+                    PolicyClause::ForbidClassAt { actor, operation, resource, class, locality } => {
+                        entries.push(Entry::RefuseFlow {
+                            who: actor.clone(),
+                            what: operation.clone(),
+                            on: resource.clone(),
+                            data: class.clone(),
+                            to: *locality,
                         })
                     }
                     PolicyClause::UnsupportedClause(name) => cannot_evaluate.push(name.clone()),
@@ -1142,6 +1291,9 @@ mod tests {
                                 .requiring_scopes(["mcp:invoke"])
                                 .at_most(*count, *window_ms),
                         ),
+                        PolicyClause::ForbidClassAt { actor, operation, resource, class, locality } => {
+                            inner.prohibit(Rule::new(actor, operation, resource).for_class(class).at_locality(*locality))
+                        }
                         PolicyClause::UnsupportedClause(name) => inner.unsupported_clause(name),
                     };
                 }

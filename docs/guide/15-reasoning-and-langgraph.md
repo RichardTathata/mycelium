@@ -217,6 +217,7 @@ same thing fleet-wide, so a constraint written on one node matches an ad written
 | `vram_free_mb` | Integer | embedder-measured (`nvidia-smi`, Metal) — engines do not report it |
 | `tokens_per_sec` | Float | embedder-measured decode throughput |
 | `param_size` · `quant` | Text | engine (`/api/show`) |
+| `locality` | Text | serve side: `in_domain` (an engine on this fleet) · `external` (the backend calls off the mesh) — `ModelProfile::in_domain()` / `external()`; what an inference-routing policy decides on ([guide 20](20-authorising-actions.md#deciding-where-data-may-go-inference-routing-as-policy), post-360 row R) |
 
 Static attributes ride the profile (`ModelProfile::new(m).with(llm_meta::CTX_WINDOW, …)`);
 dynamic ones are re-advertised by `ModelReg::refresh_meta`, which retracts the old ad and

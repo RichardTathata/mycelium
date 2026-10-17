@@ -50,6 +50,10 @@ pub(crate) mod guarantee;
 /// would be dead code — the feature-gated dead-code trap (CLAUDE.md).
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(crate) mod action_evaluator;
+/// Post-360 row R: what a routing enforcement point establishes about a destination and a request's
+/// data class. Every gateway build — a companion's door names them without `tls`, where the preflight is inert.
+#[cfg(feature = "gateway")]
+pub mod route_facts;
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(crate) mod gateway_authority;
 /// Closure plan C3: the action preflight, mandates included, at the provider's receive boundary.
@@ -193,6 +197,8 @@ pub use action_evaluator::{
 pub use gateway_caller::{GatewayDispatchError, ResolvedPrincipal};
 #[cfg(feature = "gateway")]
 pub use http::{GatewayPreflight, GatewayRefusal};
+#[cfg(feature = "gateway")]
+pub use route_facts::{ClassSource, DataClass, Destination, Locality, RefusedDestination, RouteFacts};
 pub use gateway_caller::{
     CallerAttestation, CallerError, GatewayCaller, RequestPrincipal,
     CALLER_CONTEXT_VERSION, PRINCIPAL_ANONYMOUS,

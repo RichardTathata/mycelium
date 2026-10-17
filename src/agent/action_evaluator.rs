@@ -34,6 +34,7 @@
 //! this gateway fronts — never `HardPrevention`, which only a resource fence earns.
 
 use crate::mandate::{MandateRefusal, PrincipalId, TermId};
+use super::route_facts::{DataClass, Destination, Locality, RouteFacts};
 use mycelium_core::receipt::LocalDurability;
 use crate::node_id::NodeId;
 use serde::{Deserialize, Serialize};
@@ -144,6 +145,14 @@ pub struct ActionEnvelope {
     /// failed: see [`MandateState`]. Assembled by the enforcement point from a mandate it read and
     /// checked itself — a caller-supplied epoch is a claim, never authority.
     pub mandate: Option<MandateBinding>,
+    /// Where the action would go, when a routing enforcement point established it (post-360 row R):
+    /// the destination's name and [`Locality`]. `None` from a door that does not route — which a rule
+    /// about locality reads as *not established*, never as in-domain.
+    pub destination: Option<Destination>,
+    /// The class of the data the request carries — declared, never detected — and who declared it
+    /// (post-360 row R). `None` from a door that does not classify, which a rule about class reads
+    /// as *not established*.
+    pub data_class: Option<DataClass>,
 }
 
 /// The mandate an action claims, and the enforcement point's finding about it (AE1).
@@ -250,6 +259,8 @@ impl ActionEnvelope {
                 issued_at_ms: 0,
                 not_after_ms: 60_000,
                 mandate: None,
+                destination: None,
+                data_class: None,
             },
         }
     }
@@ -303,6 +314,19 @@ impl ActionEnvelopeBuilder {
     /// binding is that the enforcement point read the mandate and checked it.
     pub fn mandate(mut self, binding: MandateBinding) -> Self {
         self.inner.mandate = Some(binding);
+        self
+    }
+
+    /// Where the action would go (post-360 row R) — set by a routing enforcement point from the
+    /// destination it established, never from the request.
+    pub fn destination(mut self, destination: Destination) -> Self {
+        self.inner.destination = Some(destination);
+        self
+    }
+
+    /// The class of the request's data and who declared it (post-360 row R).
+    pub fn data_class(mut self, class: DataClass) -> Self {
+        self.inner.data_class = Some(class);
         self
     }
 
@@ -868,9 +892,24 @@ pub struct AeEvidence {
     /// alone, so a record without history serialises exactly as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history: Option<HistoryInput>,
+    /// What a routing enforcement point established for this decision (post-360 row R): the request's
+    /// data class and who declared it, the destination decided on with its locality, and the
+    /// destinations this call had already been refused for. Absent from a door that does not route,
+    /// so a record without it serialises exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<RouteFacts>,
 }
 
 impl AeEvidence {
+    /// This record, carrying what a routing enforcement point established (post-360 row R). The
+    /// destination's name also fills [`destination`](Self::destination), which until now no door
+    /// could state.
+    pub fn with_route(mut self, route: RouteFacts) -> Self {
+        self.destination = Some(route.destination.name.clone());
+        self.route = Some(route);
+        self
+    }
+
     /// This record, carrying the history its decision read.
     pub fn with_history(mut self, history: HistoryInput) -> Self {
         self.history = Some(history);
@@ -936,6 +975,8 @@ impl AeEvidence {
             reason: decision.reason.clone(),
             // Set by the enforcement point when the decision read a history (`with_history`).
             history: None,
+            // Set by a routing enforcement point (`with_route`).
+            route: None,
         }
     }
 
@@ -1425,6 +1466,14 @@ pub struct Rule {
     /// At most this many permitted actions matching the rule in a window, counted in the actor's history at
     /// this enforcement point (post-360 row K). `None`: no limit.
     pub limit: Option<HistoryLimit>,
+    /// The request's data class this rule is about (post-360 row R): the rule applies only to a request
+    /// of this class. A request whose class was not established matches, so the rule reports the class
+    /// as *not established* rather than silently not applying. `None`: any class, or none.
+    pub data_class: Option<String>,
+    /// The destination locality this rule is about (post-360 row R): the rule applies only to a
+    /// destination at this locality. A destination that was not established, or is
+    /// [`Locality::Unknown`], matches, so the rule reports the locality as *not established*. `None`: anywhere.
+    pub locality: Option<Locality>,
 }
 
 /// *At most `count` in `window_ms`* — a limit over the actor's history, counted at the enforcement point
@@ -1449,7 +1498,23 @@ impl Rule {
             requires_mandate: None,
             requires_values: Vec::new(),
             limit: None,
+            data_class: None,
+            locality: None,
         }
+    }
+
+    /// Apply this rule only to requests whose data is of `class` (post-360 row R) — e.g. with
+    /// [`at_locality`](Self::at_locality), *confidential may not go to an external model*.
+    pub fn for_class(mut self, class: impl Into<String>) -> Self {
+        self.data_class = Some(class.into());
+        self
+    }
+
+    /// Apply this rule only to a destination at `locality` (post-360 row R). A destination whose
+    /// locality is not established is *not established* under this rule — never assumed in-domain.
+    pub fn at_locality(mut self, locality: Locality) -> Self {
+        self.locality = Some(locality);
+        self
     }
 
     /// Permit at most `count` actions matching this rule in `window_ms`, counted in the actor's history at
@@ -1485,6 +1550,24 @@ impl Rule {
         self
     }
 
+    /// What this rule said about class and locality, for `checked` (row R) — `None` when nothing.
+    fn route_clause(&self, env: &ActionEnvelope) -> Option<String> {
+        if self.data_class.is_none() && self.locality.is_none() {
+            return None;
+        }
+        let mut c = String::from("route");
+        if let Some(class) = &self.data_class {
+            c.push_str(&format!(" class={class}"));
+        }
+        if let Some(l) = self.locality {
+            c.push_str(&format!(" locality={l}"));
+        }
+        if let Some(d) = &env.destination {
+            c.push_str(&format!(" destination={} at {}", d.name, d.locality));
+        }
+        Some(c)
+    }
+
     fn matches(&self, env: &ActionEnvelope) -> bool {
         let any = |pat: &str, v: &str| pat == "*" || pat == v;
         // A rule scoped to a mandate is about *that* scope: a binding for another scope is a
@@ -1506,6 +1589,17 @@ impl Rule {
             && self.requires_values.iter().all(|(n, v)| {
                 env.selected_arguments.get(n).map(|have| have == v).unwrap_or(true)
             })
+            // Row R: a class or locality that is established and different means this rule is not
+            // the one; one that is *not established* still matches, so `unestablished` reports it —
+            // the same reading as an absent argument value above.
+            && match (&self.data_class, &env.data_class) {
+                (Some(want), Some(have)) => *want == have.class,
+                _ => true,
+            }
+            && match (self.locality, &env.destination) {
+                (Some(want), Some(d)) if d.locality != Locality::Unknown => want == d.locality,
+                _ => true,
+            }
     }
 }
 
@@ -1633,6 +1727,21 @@ impl ActionEvaluator for ReferenceEvaluator {
                     missing.push(format!("argument value not available: {name}"));
                 }
             }
+            // Row R: a rule about the request's class, or the destination's locality, on a request
+            // whose class or destination this enforcement point did not establish.
+            if let (Some(class), None) = (&r.data_class, &env.data_class) {
+                missing.push(format!("data class not established: the rule is about class {class}"));
+            }
+            if let Some(want) = r.locality {
+                match &env.destination {
+                    None => missing.push(format!("destination locality not established: the rule is about {want}")),
+                    Some(d) if d.locality == Locality::Unknown => missing.push(format!(
+                        "destination locality not established for {}: the rule is about {want}",
+                        d.name
+                    )),
+                    Some(_) => {}
+                }
+            }
             missing
         };
 
@@ -1665,7 +1774,9 @@ impl ActionEvaluator for ReferenceEvaluator {
             if !missing.is_empty() {
                 return Decision {
                     verdict: Verdict::Indeterminate,
-                    checked: vec![format!("prohibition actor={} operation={}", p.actor, p.operation)],
+                    checked: std::iter::once(format!("prohibition actor={} operation={}", p.actor, p.operation))
+                        .chain(p.route_clause(env))
+                        .collect(),
                     reason: "a prohibition matches but needs facts this evaluator cannot establish".into(),
                     policy_revision: rev,
                     errors: missing,
@@ -1673,7 +1784,12 @@ impl ActionEvaluator for ReferenceEvaluator {
             }
             return Decision {
                 verdict: Verdict::Deny,
-                checked: vec![format!("prohibition actor={} operation={} resource={}", p.actor, p.operation, p.resource)],
+                checked: std::iter::once(format!(
+                    "prohibition actor={} operation={} resource={}",
+                    p.actor, p.operation, p.resource
+                ))
+                .chain(p.route_clause(env))
+                .collect(),
                 reason: "an explicit prohibition matches this action".into(),
                 policy_revision: rev,
                 errors: Vec::new(),
@@ -1685,7 +1801,9 @@ impl ActionEvaluator for ReferenceEvaluator {
             if !missing.is_empty() {
                 return Decision {
                     verdict: Verdict::Indeterminate,
-                    checked: vec![format!("allowance actor={} operation={}", a.actor, a.operation)],
+                    checked: std::iter::once(format!("allowance actor={} operation={}", a.actor, a.operation))
+                        .chain(a.route_clause(env))
+                        .collect(),
                     reason: "the matching allowance needs facts this evaluator cannot establish".into(),
                     policy_revision: rev,
                     errors: missing,
@@ -1778,6 +1896,7 @@ impl ActionEvaluator for ReferenceEvaluator {
                             b.holder, b.term, b.epoch
                         ));
                     }
+                    c.extend(a.route_clause(env));
                     c.extend(counted);
                     c
                 },
@@ -2893,5 +3012,146 @@ mod destination_refusal_tests {
         assert_eq!(e.subject, "worker-a");
         assert_eq!(e.policy_revision, "rev-9");
         assert_eq!(e.at_ms, 1_000, "the envelope's own time, carried");
+    }
+}
+
+/// Post-360 row R — inference routing as policy: the evaluator decides on the destination's locality
+/// and the request's data class.
+#[cfg(test)]
+mod route_policy_tests {
+    use super::*;
+    use crate::agent::route_facts::{ClassSource, RefusedDestination};
+
+    fn routed(class: Option<&str>, locality: Option<Locality>) -> ActionEnvelope {
+        let via = NodeId::new("127.0.0.1", 9000).unwrap();
+        let mut b = ActionEnvelope::builder("token:gw/alice", via, "llm.invoke", "prompt:llm/m@127.0.0.1:9001")
+            .identities("op-r", "op-r/1")
+            .scopes(["mesh:write"])
+            .mapping(ActionMapping::mapped("cat", "1"))
+            .expected_policy_revision("rev-r")
+            .validity(1_000, 61_000);
+        if let Some(c) = class {
+            b = b.data_class(DataClass::new(c, ClassSource::Declared));
+        }
+        if let Some(l) = locality {
+            b = b.destination(Destination::new("llm/m@127.0.0.1:9001", l));
+        }
+        b.build()
+    }
+
+    /// *Confidential may only go to in-domain models; public may go anywhere* — the prohibition form.
+    fn confidential_stays_home() -> Arc<dyn ActionEvaluator> {
+        Arc::new(
+            ReferenceEvaluator::new("rev-r")
+                .allow(Rule::new("*", "llm.invoke", "*"))
+                .prohibit(Rule::new("*", "llm.invoke", "*").for_class("confidential").at_locality(Locality::External)),
+        )
+    }
+
+    #[test]
+    fn a_confidential_request_to_an_external_destination_is_denied_naming_class_and_locality() {
+        let r = preflight(Some(&confidential_stays_home()), &routed(Some("confidential"), Some(Locality::External)), 2_000);
+        let Err(PreflightRefusal::Denied(d)) = r else { panic!("an authority decided no: {r:?}") };
+        let said = format!("{} {}", d.reason, d.checked.join(" "));
+        assert!(said.contains("confidential") && said.contains("external"), "{said}");
+    }
+
+    #[test]
+    fn a_confidential_request_to_an_in_domain_destination_is_permitted() {
+        let r = preflight(Some(&confidential_stays_home()), &routed(Some("confidential"), Some(Locality::InDomain)), 2_000);
+        assert!(matches!(r, Ok(Some(ref d)) if d.verdict == Verdict::Permit), "{r:?}");
+    }
+
+    #[test]
+    fn a_public_request_may_go_to_an_external_destination() {
+        let r = preflight(Some(&confidential_stays_home()), &routed(Some("public"), Some(Locality::External)), 2_000);
+        assert!(matches!(r, Ok(Some(ref d)) if d.verdict == Verdict::Permit), "{r:?}");
+    }
+
+    /// A provider that declared no locality is not in-domain by default: a rule about locality cannot
+    /// be decided on it, so the call is not established — refused, and the reason names locality.
+    #[test]
+    fn an_unknown_locality_is_not_established_never_in_domain() {
+        for env in [routed(Some("confidential"), Some(Locality::Unknown)), routed(Some("confidential"), None)] {
+            let r = preflight(Some(&confidential_stays_home()), &env, 2_000);
+            let Err(PreflightRefusal::NotEstablished(d)) = r else { panic!("not established: {r:?}") };
+            assert!(d.errors.join(" ").contains("locality not established"), "{d:?}");
+        }
+    }
+
+    /// A door that does not classify — `/gateway/llm/call`, `/mcp` — cannot pass a class rule: the
+    /// class is not established, so the rule decides nothing and the seam refuses. That is what keeps
+    /// a policy written for the routing door from being walked around through another.
+    #[test]
+    fn a_request_with_no_class_cannot_pass_a_class_rule() {
+        let r = preflight(Some(&confidential_stays_home()), &routed(None, Some(Locality::External)), 2_000);
+        let Err(PreflightRefusal::NotEstablished(d)) = r else { panic!("not established: {r:?}") };
+        assert!(d.errors.join(" ").contains("data class not established"), "{d:?}");
+        // The allow-list form refuses an unclassified request too: no allowance matches.
+        let allow_list: Arc<dyn ActionEvaluator> = Arc::new(
+            ReferenceEvaluator::new("rev-r")
+                .allow(Rule::new("*", "llm.invoke", "*").for_class("confidential").at_locality(Locality::InDomain))
+                .allow(Rule::new("*", "llm.invoke", "*").for_class("public")),
+        );
+        let r = preflight(Some(&allow_list), &routed(None, Some(Locality::InDomain)), 2_000);
+        assert!(matches!(r, Err(PreflightRefusal::NotEstablished(_))), "{r:?}");
+        let r = preflight(Some(&allow_list), &routed(Some("confidential"), Some(Locality::External)), 2_000);
+        assert!(matches!(r, Err(PreflightRefusal::NotEstablished(_))), "no allowance covers it: {r:?}");
+        let r = preflight(Some(&allow_list), &routed(Some("confidential"), Some(Locality::InDomain)), 2_000);
+        assert!(matches!(r, Ok(Some(_))), "{r:?}");
+    }
+
+    /// A policy with no class or locality clause decides exactly as before on a routed envelope.
+    #[test]
+    fn a_rule_without_class_or_locality_ignores_both() {
+        let ev: Arc<dyn ActionEvaluator> =
+            Arc::new(ReferenceEvaluator::new("rev-r").allow(Rule::new("*", "llm.invoke", "*")));
+        for env in [routed(None, None), routed(Some("confidential"), Some(Locality::External))] {
+            assert!(matches!(preflight(Some(&ev), &env, 2_000), Ok(Some(_))));
+        }
+    }
+
+    /// The evidence names the class and who declared it, the destination decided on with its
+    /// locality, and the destinations refused before it; a record without a route serialises as before.
+    #[test]
+    fn the_route_is_on_the_evidence_record() {
+        let env = routed(Some("confidential"), Some(Locality::InDomain));
+        let d = Decision::permit("ok", "rev-r");
+        let plain = AeEvidence::for_decision(&env, &d, Execution::Attempted, "gateway:reason/route");
+        let wire = serde_json::to_value(&plain).unwrap();
+        assert!(wire.get("route").is_none(), "absent, not null: {wire}");
+
+        let refused = RefusedDestination::new(
+            Destination::new("llm/m@127.0.0.1:9002", Locality::External),
+            "action_denied",
+        );
+        let route = RouteFacts::new(Destination::new("llm/m@127.0.0.1:9001", Locality::InDomain))
+            .with_data_class(DataClass::new("confidential", ClassSource::Principal))
+            .with_refused(vec![refused]);
+        let rec = plain.with_route(route);
+        assert_eq!(rec.destination.as_deref(), Some("llm/m@127.0.0.1:9001"));
+        let wire = serde_json::to_value(&rec).unwrap();
+        assert_eq!(wire["route"]["data_class"]["class"], "confidential");
+        assert_eq!(wire["route"]["data_class"]["source"], "principal");
+        assert_eq!(wire["route"]["destination"]["locality"], "in_domain");
+        assert_eq!(wire["route"]["refused"][0]["destination"]["name"], "llm/m@127.0.0.1:9002");
+        assert_eq!(wire["route"]["refused"][0]["destination"]["locality"], "external");
+        assert_eq!(wire["route"]["refused"][0]["reason"], "action_denied");
+        let back: AeEvidence = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, rec, "round-trips");
+        // The execution record for the same attempt names where it went.
+        assert_eq!(rec.as_execution(Execution::Completed).route, rec.route);
+    }
+
+    #[test]
+    fn a_declared_locality_is_read_strictly() {
+        assert_eq!(Locality::parse("in_domain"), Locality::InDomain);
+        assert_eq!(Locality::parse("external"), Locality::External);
+        for s in ["", "In_Domain", "internal", "local"] {
+            assert_eq!(Locality::parse(s), Locality::Unknown, "{s:?}");
+        }
+        for l in [Locality::InDomain, Locality::External, Locality::Unknown] {
+            assert_eq!(serde_json::to_value(l).unwrap(), l.label());
+        }
     }
 }

@@ -53,7 +53,7 @@ An absent credential is anonymous and a present bearer's scopes are dropped: a b
 
 ## `ae.preflight`
 
-rev 2 · `mycelium::agent::http` · Authority · trace: catalogue only
+rev 3 · `mycelium::agent::http` · Authority · trace: catalogue only
 
 Permit, deny or indeterminate, recorded before the work runs; a refused mandate denies before policy runs, so a policy engine cannot launder a revocation.
 
@@ -61,6 +61,7 @@ Permit, deny or indeterminate, recorded before the work runs; a refused mandate 
 - **Reads:**
   - `the action envelope, the presented mandate, the deployed policy revision` — scope: this request; freshness: the decision clock
   - `the actor's recent decisions, when the evaluator asks for them (post-360 row K); carried on the evidence record` — scope: this enforcement point (its evidence journal); freshness: the journal, read in the background once an evaluator that asks for history is attached (unavailable until then), and kept current by every record appended
+  - `from a routing door (post-360 row R), the destination decided on with its declared locality and the request's data class; carried on the evidence record with the destinations already refused` — scope: this request; the locality is the provider's own `llm-meta` declaration; freshness: the provider's ad as gossiped; the class as classified at the door
 - **Outcomes:**
   - Action: `permit`
   - Refusal: `deny`, `indeterminate`, `mandate_revoked`, `mandate_expired`, `stale_policy`
@@ -68,7 +69,7 @@ Permit, deny or indeterminate, recorded before the work runs; a refused mandate 
 - **Effects:** the evidence journal record before dispatch; the audit chain reference under `compliance`
 - **Guards:** Authority
 - **Depends on:** [`gateway.auth`](#gatewayauth)
-- **Code:** `http::ae_preflight / ae_record` · **Docs:** docs/guide/20-authorising-actions.md · **Tests:** `an_expired_envelope_is_denied_before_the_evaluator_runs`, `test_c7_the_bypass_matrix_no_door_runs_revoked_work`, `at_most_three_posts_in_ten_minutes_counted_at_this_gateway`
+- **Code:** `http::ae_preflight / ae_record` · **Docs:** docs/guide/20-authorising-actions.md · **Tests:** `an_expired_envelope_is_denied_before_the_evaluator_runs`, `test_c7_the_bypass_matrix_no_door_runs_revoked_work`, `at_most_three_posts_in_ten_minutes_counted_at_this_gateway`, `a_confidential_request_to_an_external_destination_is_denied_naming_class_and_locality`
 
 ## `cap.match`
 

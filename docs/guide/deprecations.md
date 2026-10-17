@@ -70,6 +70,7 @@ the notice.
 | 47 | an exhaustive `Rule { .. }` or `ContractCase { .. }` literal; an evaluator that wraps another and forwards only `evaluate` | 2.35.0 (post-360 row K) | build a `Rule` with `Rule::new` and its builders, and give a `ContractCase` `history: None` (or a history); a wrapping evaluator forwards `history_request` and `evaluate_with_history` | Yes for the literals (a new field); no for a wrapper — it compiles, and its limited rules decide `Indeterminate` |
 | 48 | an exhaustive struct literal of `GossipConfig`, `OpenAiBackend` or `ServeDecl`; a `{:?}` of a `ServeDecl` showing its `api_key`; Z2's `api_key_env` refusal naming the variable | 2.35.0 (post-360 row L) | `..Default::default()` (or the new fields: `egress_credentials`, `credentials`, `credential`); read the section name in the refusal | **Yes** for an exhaustive literal — it will not compile; otherwise no — `Debug` prints `api_key: Some("<redacted>")`, and the refusal names the `[[serve]]` section and the field, not the variable |
 | 49 | a unit file with a key or section the loader does not know — at the top level or in an `[[activation]]` | 2.35.0 (post-360 row M) | correct the spelling, or remove the key | No — behaviour: the file is refused at load, naming the key (`units/declare` answers 400, `wire-check` and a stem refuse it); it was silently dropped |
+| 50 | an exhaustive `Rule { .. }` literal; an evaluator adapter held to the contract suite that cannot express `PolicyClause::ForbidClassAt`; a `mycelium-reason` caller matching `RouteError` exhaustively or building `Routed`; a client relying on the façade answering `403` at the first refused provider | Unreleased (post-360 row R) — also: a `locality` attribute on an `llm-meta` ad from a gateway client is `403 reserved_attribute`, and `x-mycelium-data-class` to a router that classifies nothing is `400` | `Rule::new` and its builders; decline the five `route_*` cases in `declared_limits` or express them; a `RouteError::Unclassifiable` arm; read `refused` / `data.refused_destinations` | Yes for the literals and the `match`; no for the façade — a refused provider is now passed over for the next, and `403` comes only when every candidate is refused |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -1612,3 +1613,35 @@ Before this change, every re-probe refusal was recorded as `probe_failed`.
 - `probe_failed` now means the probe itself failed, not its confinement.
 - A probe that replaces one of its own declared paths on every run now fails as `confinement_changed`. Move that step
   into the activation `command`, which may replace them.
+
+## 50. The evaluator sees where a routed call would go and what it carries (unreleased, post-360 plan row R)
+
+**What changes.** A routing door can tell the gateway's preflight the destination it is deciding on and the request's
+data class (`GossipAgent::gateway_preflight_routed`, `RouteFacts`). `ActionEnvelope` gained `destination` and
+`data_class` and `AeEvidence` gained `route` — both `#[non_exhaustive]`, both `None` from every existing door, so a
+record without a route serialises exactly as before and every existing policy decides as it did. The reference
+evaluator's `Rule` gained `data_class` and `locality` (builders `for_class`, `at_locality`). `mycelium-reason` 0.10.0
+uses all of it: each candidate's preflight sees its declared locality and the request's class, and **a refused candidate
+is passed over for the next** — before, the façade answered `403` at the first refused provider.
+
+**Will the compiler tell me?** **Yes** for an exhaustive `Rule { .. }` literal (two new fields) and, in
+`mycelium-reason`, for an exhaustive `match` on `RouteError` (`Unclassifiable`) or a `Routed { .. }` literal (`data_class`,
+`refused`). No for the façade's behaviour.
+
+**Migration.**
+- `Rule`: build it with `Rule::new` and its builders.
+- An evaluator adapter run against `ae_contract::run` meets five new cases (`route_*`) and a new clause,
+  `PolicyClause::ForbidClassAt`. One that cannot express it must decline the five and list them in `declared_limits`,
+  or `Report::conformant` fails — **the private companion's Cedar adapter, on its next re-pin**.
+- A client of the façade: a `403` now means every candidate was refused; `data.refused_destinations` names each with
+  its locality and reason. A `200` may name providers passed over (`refused`). A request carrying
+  `x-mycelium-data-class` to a node whose router classifies nothing is now `400` (it was ignored), with or without an
+  evaluator.
+- A gateway client advertising an `llm-meta` ad with a `locality` attribute (`capability/advertise`,
+  `units/declare`) is refused `403 reserved_attribute`; other `llm-meta` attributes are unaffected.
+- A policy written with `for_class` or `at_locality` refuses `llm.invoke` through `/gateway/llm/call` and
+  `/gateway/llm/stream` (they establish neither) — by design; route classified calls through the façade.
+
+**Not claimed.** The class is declared, never detected; the locality is the provider's declaration, never observed; a
+provider re-checking with its own evaluator sees neither (a class rule there decides not established).
+

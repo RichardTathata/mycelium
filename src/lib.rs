@@ -330,6 +330,10 @@ pub use agent::{
 /// dispatched protected `llm.invoke` as the node.
 #[cfg(feature = "gateway")]
 pub use agent::{GatewayDispatchError, GatewayPreflight, GatewayRefusal, ResolvedPrincipal};
+/// Post-360 row R — what a routing door establishes about where a call would go and what it carries,
+/// handed to `GossipAgent::gateway_preflight_routed` so the evaluator decides on them.
+#[cfg(feature = "gateway")]
+pub use agent::{ClassSource, DataClass, Destination, Locality, RefusedDestination, RouteFacts};
 /// AE4's contract fixtures — what the seam requires of *any* evaluator behind it. Public because
 /// its whole purpose is to be run against an evaluator this repository did not write: fixtures an
 /// adopter cannot see cannot hold their replacement evaluator to anything.
