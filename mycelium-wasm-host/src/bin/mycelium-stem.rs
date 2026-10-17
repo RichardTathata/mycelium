@@ -156,6 +156,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 agent.with_http_routes(mycelium_wasm_host::artifact_router(Arc::clone(&agent), trusted, librarian_publisher));
             }
         }
+        // Post-360 row M: the guarantee report (`GET /gateway/guarantees`, the start-time log block) says
+        // whether this stem's activations run confined, unconfined, or are refused — registered before
+        // start(), the lifecycle boundary after which a registration is refused.
+        agent.register_guarantee(mycelium_wasm_host::confinement_guarantee(&units))?;
         agent.start().await?;
 
         let _librarian = match (&librarian, &library) {

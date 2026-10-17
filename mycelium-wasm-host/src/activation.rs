@@ -6,8 +6,11 @@
 //! lock. A failed re-probe withdraws the install and the next round reinstalls — restart ≡
 //! provisioning, exactly as for a wasm component whose serve task died.
 //!
-//! What this is not: a sandbox. The commands are the operator's, written in a reviewed unit file
-//! and run with the stem's own privileges — the same trust as the stem's command line.
+//! Unconfined by default: the commands are the operator's, written in a reviewed unit file and run
+//! with the stem's own privileges — the same trust as the stem's command line. An activation whose
+//! unit names an `[activation.confine]` profile runs its command **and** its probe under that profile,
+//! or is refused by name and runs nothing (post-360 row M, [`crate::activation_sandbox`]). The profile
+//! is resolved once, when the activation runs, and its re-probes reuse it.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use mycelium::ActivationDecl;
 
+use crate::activation_sandbox::{run_confined, Profile};
 use crate::catalog::InstallableEntry;
 use crate::runtime::{ActivationCtx, TraceCtx};
 use mycelium::decision::OutcomeKind;
@@ -29,6 +33,8 @@ pub struct Watched {
     entry:  InstallableEntry,
     path:   PathBuf,
     health: Arc<AtomicBool>,
+    /// The confinement the activation ran under, reused by every re-probe (row M: fixed for its life).
+    profile: Option<Profile>,
     /// The install's token and trace, so a re-probe's verdict records under the same token.
     token:  u64,
     trace:  Option<Arc<TraceCtx>>,
@@ -61,6 +67,18 @@ fn expand(argv: &[String], entry: &InstallableEntry, path: &Path, rendered: Opti
         })
         .collect()
 }
+
+/// Run `argv` unconfined, or under `profile` (row M).
+fn run_under(argv: &[String], timeout: Duration, profile: Option<&Profile>) -> Result<(), String> {
+    match profile {
+        None => run(argv, timeout),
+        Some(p) => run_confined(argv, timeout, p),
+    }
+}
+
+/// The runner's message for a command killed at its deadline — matched by the hook to record
+/// `command_timed_out`, so the two cannot drift apart again.
+const DID_NOT_FINISH: &str = "did not finish within";
 
 /// How much of a failing command's stderr its error keeps — the tail, where the reason usually is.
 const STDERR_TAIL_BYTES: usize = 4096;
@@ -110,7 +128,7 @@ pub fn run(argv: &[String], timeout: Duration) -> Result<(), String> {
             None if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("{cmd} did not finish within {}s", timeout.as_secs()));
+                return Err(format!("{cmd} {DID_NOT_FINISH} {}s", timeout.as_secs()));
             }
             None => std::thread::sleep(Duration::from_millis(50)),
         }
@@ -169,6 +187,18 @@ pub fn hook(
             rec("prov.activation", OutcomeKind::NoAction, "no_declaration", None);
             return Ok(None);
         };
+        // Row M: the profile first — a profile this node cannot apply refuses the activation by name and
+        // nothing runs, not even the render. Resolved once, here; the re-probes reuse it.
+        let profile = match &decl.confine {
+            None => None,
+            Some(c) => match crate::activation_sandbox::prepare(c, path) {
+                Ok(p) => Some(p),
+                Err(refusal) => {
+                    rec("prov.activation", OutcomeKind::Refusal, refusal.reason(), None);
+                    return Err(format!("activation {target}: its [activation.confine] profile cannot be applied — {refusal}; refused, not run unconfined"));
+                }
+            },
+        };
         let rendered = if decl.resolve_artifact_refs {
             match render(path) {
                 Ok(r) => Some(r),
@@ -179,8 +209,8 @@ pub fn hook(
             }
         } else { None };
         let timeout = decl.timeout_secs.map(Duration::from_secs).unwrap_or(DEFAULT_TIMEOUT);
-        if let Err(e) = run(&expand(&decl.command, entry, path, rendered.as_deref()), timeout) {
-            rec("prov.activation", OutcomeKind::Refusal, if e.contains("timed out") { "command_timed_out" } else { "command_failed" }, None);
+        if let Err(e) = run_under(&expand(&decl.command, entry, path, rendered.as_deref()), timeout, profile.as_ref()) {
+            rec("prov.activation", OutcomeKind::Refusal, if e.contains(DID_NOT_FINISH) { "command_timed_out" } else { "command_failed" }, None);
             return Err(e);
         }
         rec("prov.activation", OutcomeKind::Action, "activated", Some(decl.command.join(" ")));
@@ -191,7 +221,7 @@ pub fn hook(
         // The probe gates the capability (D21): a failing initial probe is an activation error, so the
         // install fails at stage `activation`, nothing is advertised, and the next round retries —
         // never a live install that the health pass withdraws a round later.
-        if let Err(e) = run(&expand(&decl.probe, entry, path, rendered.as_deref()), PROBE_TIMEOUT) {
+        if let Err(e) = run_under(&expand(&decl.probe, entry, path, rendered.as_deref()), PROBE_TIMEOUT, profile.as_ref()) {
             rec("prov.probe", OutcomeKind::Refusal, "initial_probe_failed", None);
             return Err(format!("initial probe failed after activation: {e}"));
         }
@@ -202,6 +232,7 @@ pub fn hook(
             entry: entry.clone(),
             path: path.to_path_buf(),
             health: Arc::clone(&health),
+            profile,
             token: actx.install_token,
             trace: actx.trace.clone(),
         });
@@ -224,7 +255,7 @@ pub fn spawn_reprobe(watch: WatchList, every: Duration) -> tokio::task::JoinHand
                 let ok = tokio::task::spawn_blocking(move || {
                     let rendered = w.decl.resolve_artifact_refs.then(|| PathBuf::from(format!("{}.rendered", w.path.display())));
                     let was = w.health.load(Ordering::Relaxed);
-                    let ok = run(&expand(&w.decl.probe, &w.entry, &w.path, rendered.as_deref()), PROBE_TIMEOUT).is_ok();
+                    let ok = run_under(&expand(&w.decl.probe, &w.entry, &w.path, rendered.as_deref()), PROBE_TIMEOUT, w.profile.as_ref()).is_ok();
                     w.health.store(ok, Ordering::Relaxed);
                     // A re-probe records only a **change** of verdict (the steady state is the
                     // install's record), under the install's token.
@@ -295,6 +326,7 @@ mod tests {
             probe: vec!["false".into()],
             timeout_secs: Some(5),
             resolve_artifact_refs: false,
+            confine: None,
         };
         let entry = crate::InstallableEntry::new(mycelium::Capability::new("data", "pack"), crate::ArtifactId::from_bytes([7u8; 32]));
         let watch: WatchList = Default::default();
@@ -313,6 +345,160 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // ── Post-360 row M: confined activations ────────────────────────────────────────────────────
+
+    struct Scene {
+        root:   std::path::PathBuf,
+        placed: std::path::PathBuf,
+    }
+
+    impl Scene {
+        /// `root/placed/pack` (the placed blob), `root/outside/secret`, `root/models/m`, `root/out/`. Every
+        /// path canonical, so a profile names what the kernel sees (`/tmp` is `/private/tmp` on macOS).
+        fn new(tag: &str) -> Self {
+            static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let root = std::env::temp_dir().join(format!("act-confine-{tag}-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
+            let _ = std::fs::remove_dir_all(&root);
+            for d in ["placed", "outside", "models", "out"] {
+                std::fs::create_dir_all(root.join(d)).unwrap();
+            }
+            let root = root.canonicalize().unwrap();
+            std::fs::write(root.join("placed/pack"), b"the placed bytes").unwrap();
+            std::fs::write(root.join("outside/secret"), b"not yours").unwrap();
+            std::fs::write(root.join("models/m"), b"a declared model").unwrap();
+            Scene { placed: root.join("placed/pack"), root }
+        }
+        fn p(&self, rel: &str) -> String {
+            self.root.join(rel).display().to_string()
+        }
+    }
+
+    impl Drop for Scene {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn confined(command: Vec<String>, probe: Vec<String>, confine: mycelium::ConfineDecl) -> ActivationDecl {
+        ActivationDecl {
+            ns: "data".into(),
+            name: "pack".into(),
+            command,
+            probe,
+            timeout_secs: Some(10),
+            resolve_artifact_refs: false,
+            confine: Some(confine),
+        }
+    }
+
+    fn pack_entry() -> InstallableEntry {
+        crate::InstallableEntry::new(mycelium::Capability::new("data", "pack"), crate::ArtifactId::from_bytes([7u8; 32]))
+    }
+
+    /// Run one activation through the stem's hook; the result and what the trace recorded.
+    fn activate(decl: ActivationDecl, path: &Path) -> (Result<(), String>, Vec<(String, String)>) {
+        let sink = Arc::new(mycelium::decision::DecisionSink::default());
+        let actx = ActivationCtx { install_token: 11, trace: Some(Arc::new(TraceCtx { sink: Arc::clone(&sink), node: "n".into(), build: "t".into(), config_digest: "d".into(), profile: None })) };
+        let got = hook(vec![decl], Default::default())(&pack_entry(), path, &actx).map(|_| ());
+        (got, sink.snapshot().into_iter().map(|r| (r.rule, r.reason)).collect())
+    }
+
+    /// The backend this platform cannot apply: Landlock on macOS, Seatbelt everywhere else.
+    fn foreign_backend() -> mycelium::ConfineBackend {
+        if cfg!(target_os = "macos") { mycelium::ConfineBackend::Landlock } else { mycelium::ConfineBackend::Seatbelt }
+    }
+
+    /// A profile the platform cannot apply refuses the activation **by name** and never runs it
+    /// unconfined (row M). Runs on every platform: it forces the backend this one does not have. Seen
+    /// failing first: the profile was ignored, the command ran unconfined and the activation succeeded.
+    #[test]
+    fn a_profile_the_platform_cannot_apply_refuses_the_activation_by_name() {
+        let s = Scene::new("foreign");
+        let ran = s.p("placed/ran");
+        let foreign = foreign_backend();
+        let decl = confined(sh(&format!("touch {ran}")), Vec::new(), mycelium::ConfineDecl { backend: foreign, ..Default::default() });
+        let (got, recs) = activate(decl, &s.placed);
+        let e = got.expect_err("a profile this platform cannot apply must refuse the activation");
+        assert!(e.contains(foreign.as_str()) && e.contains("not run unconfined") && e.contains("data/pack"), "names the backend, the activation and the refusal: {e}");
+        assert!(!Path::new(&ran).exists(), "the command never ran");
+        assert_eq!(recs, [("prov.activation".to_string(), "confinement_unavailable".to_string())]);
+    }
+
+    /// Filesystem confinement, shown on this platform's own backend: a confined command reads the placed
+    /// blob and its declared paths, writes only its declared write paths, and reads nothing else — and
+    /// the probe runs under the same profile. On Linux without Landlock the test cannot show anything and
+    /// says so — unless `MYCELIUM_CONFINE_LIVE_REQUIRED` is set (CI sets it), when it fails. Seen failing
+    /// first: unconfined, the secret was read and every write landed.
+    #[test]
+    fn a_confined_activation_reads_and_writes_only_what_its_profile_names() {
+        if !crate::activation_sandbox::native_backend_or_skip("a_confined_activation_reads_and_writes_only_what_its_profile_names") {
+            return;
+        }
+        let s = Scene::new("fs");
+        let profile = mycelium::ConfineDecl { read: vec![s.p("models")], write: vec![s.p("out")], ..Default::default() };
+        let run = |cmd: String, probe: Vec<String>| activate(confined(sh(&cmd), probe, profile.clone()), &s.placed).0;
+
+        // What the profile names: the placed blob ({path}, in the readable placement directory), a declared
+        // read path, a declared write path.
+        let ok = run(format!("cat {{path}} > {out}/blob && cat {m} > {out}/model", out = s.p("out"), m = s.p("models/m")), Vec::new());
+        assert_eq!(ok, Ok(()), "the declared paths are usable");
+        assert_eq!(std::fs::read(s.root.join("out/blob")).unwrap(), b"the placed bytes");
+        assert_eq!(std::fs::read(s.root.join("out/model")).unwrap(), b"a declared model");
+
+        // What it does not.
+        let e = run(format!("cat {}", s.p("outside/secret")), Vec::new()).expect_err("a path outside the profile is not readable");
+        assert!(e.contains("exited"), "{e}");
+        assert!(run(format!("echo x > {}", s.p("placed/new")), Vec::new()).is_err(), "the placement directory is read-only");
+        assert!(!s.root.join("placed/new").exists());
+        assert!(run(format!("echo x > {}", s.p("models/new")), Vec::new()).is_err(), "a read path is read-only");
+        assert!(!s.root.join("models/new").exists());
+        assert!(run(format!("echo x > {}", s.p("outside/new")), Vec::new()).is_err(), "an undeclared path is not writable");
+        assert!(!s.root.join("outside/new").exists());
+
+        // The probe runs under the same profile: a probe reading outside it fails the activation.
+        let e = run("true".into(), vec!["cat".into(), s.p("outside/secret")]).expect_err("the probe is confined too");
+        assert!(e.contains("probe"), "{e}");
+    }
+
+    /// Network confinement, shown on this platform's own backend: with `connect` empty a confined command
+    /// reaches nothing; with `*:<port>` it reaches that TCP port and no other, and no UDP at all. Seen
+    /// failing first: unconfined, every connection opened.
+    #[test]
+    fn a_confined_activation_reaches_only_its_declared_tcp_ports() {
+        if !crate::activation_sandbox::native_backend_or_skip("a_confined_activation_reaches_only_its_declared_tcp_ports") {
+            return;
+        }
+        let s = Scene::new("net");
+        // Two listening ports, so a refused connection is the profile's doing, not an absent listener.
+        let open = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let other = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let (a, b) = (open.local_addr().unwrap().port(), other.local_addr().unwrap().port());
+        let tcp = |port: u16| vec!["bash".to_string(), "-c".into(), format!("exec 3<>/dev/tcp/127.0.0.1/{port}")];
+        let udp = |port: u16| vec!["bash".to_string(), "-c".into(), format!("exec 3<>/dev/udp/127.0.0.1/{port} && echo x >&3")];
+        let run = |argv: Vec<String>, connect: Vec<String>| {
+            activate(confined(argv, Vec::new(), mycelium::ConfineDecl { connect, ..Default::default() }), &s.placed).0
+        };
+        // Unconfined, both ports open: the plant that shows the listeners answer.
+        assert_eq!(super::run(&tcp(a), Duration::from_secs(5)), Ok(()));
+        assert_eq!(super::run(&tcp(b), Duration::from_secs(5)), Ok(()));
+
+        assert!(run(tcp(a), Vec::new()).is_err(), "no `connect`: no network");
+        let declared = vec![format!("*:{a}")];
+        assert_eq!(run(tcp(a), declared.clone()), Ok(()), "the declared port is reachable");
+        assert!(run(tcp(b), declared.clone()).is_err(), "an undeclared port is not");
+        assert!(run(udp(a), declared.clone()).is_err(), "UDP is not, whatever the port");
+
+        // `localhost:<port>`: Seatbelt holds it; Landlock limits ports, not addresses, so it refuses by name.
+        let local = run(tcp(a), vec![format!("localhost:{a}")]);
+        if cfg!(target_os = "macos") {
+            assert_eq!(local, Ok(()), "Seatbelt limits to localhost");
+        } else {
+            let e = local.expect_err("Landlock cannot hold `localhost:<port>`");
+            assert!(e.contains("landlock") && e.contains("localhost") && e.contains("not run unconfined"), "{e}");
+        }
+        drop((open, other));
+    }
+
     /// A command that genuinely hangs still times out, and is killed and reaped.
     #[test]
     fn a_hung_command_times_out() {
@@ -320,5 +506,24 @@ mod tests {
         let err = run(&sh("sleep 30"), Duration::from_secs(1)).unwrap_err();
         assert!(err.contains("did not finish"), "{err}");
         assert!(started.elapsed() < Duration::from_secs(5), "killed at the deadline: {:?}", started.elapsed());
+    }
+
+    /// A hung activation is recorded as `command_timed_out`, the reason the rule catalogue lists. Found
+    /// while enumerating row M's doors: the hook matched `"timed out"` against the runner's error, which
+    /// says `did not finish`, so every timeout was recorded as `command_failed`. Seen failing first.
+    #[test]
+    fn a_hung_activation_is_recorded_as_a_timeout() {
+        let decl = ActivationDecl {
+            ns: "data".into(),
+            name: "pack".into(),
+            command: sh("sleep 30"),
+            probe: Vec::new(),
+            timeout_secs: Some(1),
+            resolve_artifact_refs: false,
+            confine: None,
+        };
+        let (got, recs) = activate(decl, Path::new("/nonexistent/pack"));
+        assert!(got.is_err());
+        assert_eq!(recs, [("prov.activation".to_string(), "command_timed_out".to_string())]);
     }
 }

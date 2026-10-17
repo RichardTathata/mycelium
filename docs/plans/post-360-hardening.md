@@ -85,7 +85,7 @@ Four places strain that line today, and the rows in §3 address each:
 | **J** — *delivered 2.33.0 (#608), §3.5* | Hygiene | the sim-seam gate's test-skip bug (the one the KV gate fixed in #591); every feature and bench linted or built by some CI step; the two CI jobs on `stable` pinned; unreferenced public items deprecated, not removed (nothing is removed on the 2.x line); only the duplicates that disagree are unified (`hex_line`'s whitespace, `now_ms` copies outside the seam) | — |
 | **K** | Policy over history | the action evaluator can decide on what an actor has already done, not only on the request: a bounded, read-only history view (the actor's recent decisions and executions from the evidence journal — `src/agent/evidence_journal.rs`) reaches `ActionEvaluator::evaluate` beside the envelope (`ActionEnvelope`, `src/agent/action_evaluator.rs:101`, which today carries no history); a rule such as *at most three posts in ten minutes* is expressible and tested in the reference evaluator and the AE contract suite (`mycelium::ae_contract`); the scope of a count is stated by name — **per node** (the journal is node-local and never gossiped) unless the design question in §5 is decided otherwise; a history that cannot be read is `Indeterminate`, never an empty history; replay records the history view as a decision input | design question §5 |
 | **L** | Credentials attached at egress | a secret need not enter a component's or an activation command's environment: an outbound request names a credential binding, and the egress gate (`EgressPolicy`, `mycelium-core/src/config.rs:280`, which today checks the host and every redirect hop) attaches it on the way out — bearer, header and basic forms at least — only to the host the binding names; a redirect off that host drops it; the binding's use is counted and its value never logged, traced or written to the evidence journal; the places a secret is read into the node today (`[[serve]].api_key_env`, federation credentials, an activation command's environment) are listed and each either moved behind a binding or stated as unchanged *From NVIDIA OpenShell (2026-10-12):* the component holds an opaque placeholder and never the value — the gate resolves the placeholder only at an endpoint the binding authorises — so a leaked environment or log carries nothing usable. | — |
-| **M** | Activation commands confined | an `[[activation]]` command — today "not a sandbox: there is no allowlist and no confinement" (`docs/reference/unit-file.md:276`) and run with the stem's privileges — can be run under an OS confinement profile the unit file names (macOS Seatbelt first, Linux namespaces/Landlock or seccomp where available): filesystem access limited to the placed artifact's directory and declared paths, network limited to declared hosts or none; a profile the platform cannot apply refuses the activation by name, never runs it unconfined; the unconfined default stays, stated, and the guarantee report says which applies *From NVIDIA OpenShell (2026-10-12):* a profile's filesystem and syscall limits are fixed for the activation's life and its network allow-list may change live (OpenShell's split: filesystem and process locked at creation, network hot-reloadable); OpenShell itself (containers, seccomp, an unprivileged identity; needs Docker) is a candidate backend for a stem, beside a native Seatbelt/Landlock profile, rather than something to rebuild. | — |
+| **M** — *delivered after 2.34.0, unreleased (#NNN), §3.5* | Activation commands confined | an `[[activation]]` command — today "not a sandbox: there is no allowlist and no confinement" (`docs/reference/unit-file.md:276`) and run with the stem's privileges — can be run under an OS confinement profile the unit file names (macOS Seatbelt first, Linux namespaces/Landlock or seccomp where available): filesystem access limited to the placed artifact's directory and declared paths, network limited to declared hosts or none; a profile the platform cannot apply refuses the activation by name, never runs it unconfined; the unconfined default stays, stated, and the guarantee report says which applies *From NVIDIA OpenShell (2026-10-12):* a profile's filesystem and syscall limits are fixed for the activation's life and its network allow-list may change live (OpenShell's split: filesystem and process locked at creation, network hot-reloadable); OpenShell itself (containers, seccomp, an unprivileged identity; needs Docker) is a candidate backend for a stem, beside a native Seatbelt/Landlock profile, rather than something to rebuild. | — |
 | **N** — *delivered after 2.34.0, unreleased (#633), §3.5* | A2A at the current specification | an A2A client built on the current `a2a-sdk` (1.2.2, the library Strands Agents uses) reaches Mycelium's skills through `/a2a`, with the same authority as today — **the 2026-10-12 probe found it cannot**: the card is served only at `/.well-known/agent.json` (the SDK reads `/.well-known/agent-card.json`, 404); the card's `url` is the node's **gossip** address, not its gateway, and omits `/a2a` (`src/agent/a2a.rs:445`, so the SDK's `send_message` failed with a network error); the methods are the pre-0.2 `tasks/send` / `tasks/sendSubscribe` / `tasks/get` / `tasks/cancel` (`SendMessage` and `message/send` both answer `-32601`); and the skill is chosen by a Mycelium-only `skillId` parameter that a standard client never sends. Promises: the card at `/.well-known/agent-card.json` (the old path kept for one release), naming the gateway's own URL and scheme (https under `gateway_tls`) with `/a2a` and its supported interfaces and protocol versions; the A2A 1.0 methods (`SendMessage`, `SendStreamingMessage`, `GetTask`, `CancelTask`) and the 0.3 names (`message/send`, `message/stream`) served beside the old ones, which stay for one release with a deprecation entry; a message reaches a skill without `skillId` (a declared default skill, or the skill named in the message's metadata — decided in the PR, stated on the card); every new method runs the same doors as `tasks/send` — the action evaluator, mandates, evidence, task ownership — and the C7 bypass matrix gains each new method; the probe becomes a CI test driving the real `a2a-sdk` client against a node | — |
 | **O** — *delivered after 2.34.0, unreleased (#634), §3.5* | A Strands session store on Mycelium | a companion package (Python, beside `langgraph-checkpoint-mycelium`) implementing Strands Agents' `SessionManager` over the Mycelium Python SDK, so an agent's conversation and state, and a swarm's shared memory, live in the fleet's KV rather than a file or a bucket; a save returns the SDK's receipt and its docs say which rung it names (a local application, not replication — the checkpointer's wording); an incomplete or unreadable session is an error, never an empty one; concurrent agents in one session do not lose each other's writes, or the limit is stated; its live suite runs in CI against a real node; pinned to a Strands release and re-checked when Strands changes the interface | — (N for the cross-host demo) |
 | **P** — *delivered after 2.34.0, unreleased (#635), §3.5* | A Strands fleet, demonstrated | a runnable example, in CI like the co-op demos, in which Strands agents on three Mycelium nodes plan one shared task (a constructive domain — food redistribution or a microgrid), keep their session and swarm memory in the fleet through O, and call fleet skills through `/a2a` (N): a call outside an agent's mandate is refused and the refusal is in the evidence journal; one node is stopped and the work resumes on another from the stored session; the README states what Strands provides and what Mycelium adds, and which properties the run shows versus which it does not | N, O |
@@ -1150,6 +1150,90 @@ courier); asking the bakery and the kitchen is allowed by policy to the fleet's 
   (shown by `authority_drain` and the confined-fleet suite); Strands' own A2A classes; scale; fleet-wide enforcement of
   one holder per scope.
 
+**M — Activation commands confined (#NNN, unreleased).** The doors enumerated first
+(`git grep -n -i 'activation' -- src mycelium-wasm-host/src mycelium-core/src docs/reference scripts .github`, the
+core hits in `connection.rs`/`swim.rs` being SWIM's fan-out "activation", unrelated): the unit-file parse and
+`validate()` (`src/capability_config.rs`, `ActivationDecl`); the stem's activation runner, `activation::hook` (command,
+render, initial probe) and `activation::spawn_reprobe` (every re-probe) — the only two places an activation's argv is
+run (`git grep -n 'run(&expand' mycelium-wasm-host/src`); the hook's registration in `Stem::start` and
+`BlobRuntime::with_entry_activation` (`runtime.rs`, which calls the hook on `spawn_blocking`); `mycelium wire-check`,
+which does not read `[[activation]]` (`src/wire_check.rs` — unchanged, the unit-file table says so);
+`POST /gateway/units/declare`, which refuses the section 422 (`src/agent/http/caps.rs:208` — unchanged, so a profile
+cannot arrive there); the guarantee report (`src/agent/guarantee.rs`; a companion registers through
+`GossipAgent::register_guarantee` before `start()` — `mycelium-stem` is the one place a stem's agent is built before
+start); the rule catalogue's `prov.activation` and `prov.probe` (`mycelium-wasm-host/src/rules.rs`); and the docs
+(`docs/reference/unit-file.md`, `operations/capability-lifecycle.md`, `operations/shared-responsibility-matrix.md`
+CC8, `docs/capabilities.md`, the crate README). The example units with `[[activation]]` (`examples/units/model_deploy`,
+`reheal_deploy`, `llm_agent`) name no profile and run as before.
+- *an `[[activation]]` command … can be run under an OS confinement profile the unit file names* —
+  `[activation.confine]` (`ConfineDecl`: `backend`, `read`, `write`, `connect`; `deny_unknown_fields`), parsed and
+  checked at load (`ConfineDecl::check` in `validate()`): `an_activation_confinement_profile_parses_and_a_bad_one_is_refused_by_name`
+  (seen failing to compile — the table was an unknown key the loader dropped). The stem resolves it per activation
+  (`activation_sandbox::prepare`) and runs the command **and the probe** under it (`run_confined`), the re-probe
+  reusing the resolved profile (`Watched::profile`).
+- *(macOS Seatbelt first, Linux namespaces/Landlock or seccomp where available)* — Seatbelt: `/usr/bin/sandbox-exec`
+  with a generated `deny default` profile, every path a `-D` parameter, never profile text
+  (`seatbelt_profile`, `seatbelt_argv`; `a_seatbelt_profile_names_paths_by_parameter_and_ports_by_number`). Linux:
+  Landlock (filesystem rights at ABI 3, TCP connect/bind at ABI 4, a **hard requirement** — an older kernel refuses
+  rather than sandboxes less) and a seccomp filter (no socket without `connect`; with it none but an `AF_INET`/`AF_INET6`
+  stream over TCP; no `io_uring_setup`), applied to a dedicated thread that spawns the command, so the stem's other
+  threads stay unrestricted and nothing runs between `fork` and `exec`. **Namespaces: not used** — `unshare` with
+  `CLONE_NEWUSER` is refused in a multi-threaded process and Ubuntu 24.04 restricts unprivileged user namespaces;
+  seccomp covers the network instead. New dependencies, Linux-only: `landlock` 0.4.7 (the Landlock maintainers' crate)
+  and `seccompiler` 0.5 (rust-vmm); `cargo audit` clean (below).
+- *filesystem access limited to the placed artifact's directory and declared paths* — the placement directory
+  readable, `read` readable, `write` readable and writable, beyond a fixed system set
+  (`SEATBELT_SYSTEM_READ`, `LANDLOCK_SYSTEM_READ`, `SYSTEM_DEVICES`, all in `unit-file.md`);
+  `a_confined_activation_reads_and_writes_only_what_its_profile_names` — the placed blob and the declared paths
+  usable; a secret outside unreadable; the placement directory, a read path and an undeclared path unwritable; a
+  probe reading outside fails the activation. Seen failing first (unconfined, the secret was read and every write
+  landed); run on macOS (Seatbelt) and in a Linux 6.8 container (Landlock ABI 4) with `MYCELIUM_CONFINE_LIVE_REQUIRED=1`.
+- *network limited to declared hosts or none* — **declared TCP ports, or none; hosts not built.** `connect` takes
+  `localhost:<port>` or `*:<port>`; empty is no network. A hostname or an address is refused at load
+  (`parse_confine_connect`): Seatbelt limits to `localhost` or any address, Landlock to a port only, and neither by
+  name — an egress proxy would, and none is built. `a_confined_activation_reaches_only_its_declared_tcp_ports` — two
+  listening ports (a plant shows both answer unconfined): no `connect` reaches neither, `*:<a>` reaches `a` and not
+  `b`, UDP is refused; `localhost:<a>` holds under Seatbelt and is refused by name under Landlock. Seen failing first
+  (unconfined, every connection opened). On Linux a `*:<port>` profile resolves names only through `/etc/hosts` (DNS
+  is UDP); on macOS the resolver's socket is allowed with a `*` entry.
+- *a profile the platform cannot apply refuses the activation by name, never runs it unconfined* — `backend_for`
+  (backend absent, the wrong OS, a kernel below the ABI, an unsupported architecture, `localhost:` under Landlock) and
+  `prepare` (a declared path missing) return a `Refusal`; the hook records `confinement_unavailable` or
+  `confinement_failed` (`prov.activation` revision 2) and returns an error naming the activation, the backend and
+  "refused, not run unconfined", before the render or the command. `a_profile_the_platform_cannot_apply_refuses_the_activation_by_name`
+  forces the backend this platform lacks, so it runs on macOS and Linux alike (seen failing first: the command ran);
+  `a_missing_declared_path_refuses_by_name`; in a stem, `a_confined_activation_runs_in_a_stem_and_the_stem_says_which_applies`
+  — confined under `auto` (`{dir}` expanding to the real placement root), and under the foreign backend nothing
+  hosted and the command never run (planted: with the hook ignoring the profile, it hosts).
+- *the unconfined default stays, stated* — `confine` absent is `Confinement::Unconfined` (`assess`), the existing
+  activation tests unchanged; `unit-file.md`'s **Security** paragraph now says *by default it is unconfined*, beside
+  the `[activation.confine]` section; the stem logs each activation's answer at start.
+- *and the guarantee report says which applies* — `confinement_guarantee(&units)` → `stem.activation_confined`,
+  registered by `mycelium-stem` before `start()`: `enforced` when every activation is confined here, `not_configured`
+  naming *unconfined* or *refused* otherwise, `not_applicable` with none;
+  `the_guarantee_report_says_confined_unconfined_or_refused` (planted: with the check answering `enforced`, it fails).
+  Per activation: `Stem::activation_confinement`. An embedder that builds its own agent and calls `Stem::start` after
+  `start()` cannot register it then (the lifecycle boundary refuses) — it registers `confinement_guarantee` before
+  its own `start()`, as the binary does.
+- *a profile's filesystem and syscall limits are fixed for the activation's life and its network allow-list may
+  change live* — the first half delivered: the profile is resolved once when the activation runs and every re-probe
+  reuses it, and the unit file is read at start. **A network allow-list that changes live is not built**: every limit
+  holds until the stem restarts.
+- *OpenShell … is a candidate backend for a stem … rather than something to rebuild* — **not built**; `backend`
+  is an enum with room for it.
+- *Found on the way* — the hook recorded every timeout as `command_failed`: it matched `"timed out"`, and the runner
+  says `did not finish within` (now one constant both read; `a_hung_activation_is_recorded_as_a_timeout`, seen
+  failing first).
+- *CI* — the `wasm-host` job sets `MYCELIUM_CONFINE_LIVE_REQUIRED`, so the confinement tests fail rather than skip on
+  a runner that cannot confine (`native_backend_or_skip`); they are not feature- or `cfg`-gated, so the default-feature
+  and `stem,gateway,llm` steps both run them. No CI job runs macOS: the Seatbelt path is shown locally only.
+- **Not built, stated:** limits by hostname or address; a live network allow-list; an OpenShell backend; resource
+  limits (CPU, memory); on Linux below Landlock ABI 6, a limit on signals to the stem user's processes; device
+  `ioctl`s (Landlock ABI 5); metadata (`stat`) of any path stays readable on both backends; a socket inherited across
+  `exec` is not looked at; the command inherits the stem's environment (row L's concern). Confinement narrows what an operator's command can reach; it does not make an untrusted
+  command safe to run. The filesystem checks in `activation_sandbox.rs` go through `Path` methods, which
+  `scripts/check-sim-seams.sh` does not see; activation, like any spawned process, is outside the replay seams.
+
 ### 3.6 · State of play and the next iteration (2026-10-12)
 
 Where the work stands at the end of 2026-10-12, so the next session starts here rather than from a conversation.
@@ -1161,8 +1245,7 @@ queues before the shutdown signal), and N, O, P recorded by #614 with the `a2a-s
 
 **Delivered in v2.34.0 (2026-10-16):** F2 (#624 — the unsigned-frame and bare-signature refusal unconditional, `kv_require_signed_frames` retired, `secure-single-domain` rev 5; §3.5), T (#622), S (#623 — identity proofs required by default; §3.5); the wasmtime 49.0.3 / rustls 0.23.46 advisories (#625).
 
-**Not started:** K (policy over history — decide §5's fleet question first), L (credentials attached at egress), M
-(activation commands confined), and §5's inference-routing question. N, O and P are delivered (#633, #634, #635; §3.5). (Q, revocation at every verifier, is delivered — #616, §3.5; S, identity proofs on by default, is delivered in 2.34.0 — #623, §3.5.)
+**Not started:** K (policy over history — decide §5's fleet question first), L (credentials attached at egress), and §5's inference-routing question. M, N, O and P are delivered (#NNN, #633, #634, #635; §3.5). (Q, revocation at every verifier, is delivered — #616, §3.5; S, identity proofs on by default, is delivered in 2.34.0 — #623, §3.5.)
 
 **Follow-ups recorded as not built in delivered rows (each in its §3.5 block):**
 - **H:** carry each named offer's signed bytes inside the close and award from that copy (today a member who deletes a

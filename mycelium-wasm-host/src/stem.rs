@@ -128,6 +128,8 @@ pub struct Stem {
     reprobe: Option<tokio::task::JoinHandle<()>>,
     /// X2: the `[[serve]]` task, when the unit declares any (feature `llm`).
     serve: Option<tokio::task::JoinHandle<()>>,
+    /// Row M: what applies to each `[[activation]]` on this node, as assessed at start.
+    confinement: Vec<(String, crate::activation_sandbox::Confinement)>,
 }
 
 /// `"ed25519:<64 hex>"` → the verifying key bytes; `field` names the table entry in the refusal.
@@ -369,6 +371,21 @@ impl Stem {
             }
         };
 
+        // Row M: say once, at start, what applies to each activation — confined (and how), unconfined
+        // (the default, with the stem's privileges), or refused (a profile this node cannot apply).
+        let confinement: Vec<(String, crate::activation_sandbox::Confinement)> = units
+            .activations
+            .iter()
+            .map(|a| (format!("{}/{}", a.ns, a.name), crate::activation_sandbox::assess(a.confine.as_ref())))
+            .collect();
+        for (at, c) in &confinement {
+            use crate::activation_sandbox::Confinement::*;
+            match c {
+                Unconfined => tracing::info!(activation = %at, "activation unconfined: its commands run with this stem's privileges (no [activation.confine])"),
+                Confined { backend } => tracing::info!(activation = %at, backend = backend.as_str(), "activation confined"),
+                Refused { reason } => tracing::warn!(activation = %at, %reason, "activation refused: its [activation.confine] profile cannot be applied on this node, and it will not run unconfined"),
+            }
+        }
         let reprobe = (!units.activations.is_empty()).then(|| crate::activation::spawn_reprobe(watch, opts.reprobe_every));
         #[cfg(feature = "llm")]
         let serve = if units.serves.is_empty() {
@@ -383,7 +400,14 @@ impl Stem {
         };
         #[cfg(not(feature = "llm"))]
         let serve: Option<tokio::task::JoinHandle<()>> = None;
-        Ok(Self { _caps: caps, _reqs: reqs, _groups: groups, stop, ticker, hosted, _peer_serve: peer_serve, reprobe, serve })
+        Ok(Self { _caps: caps, _reqs: reqs, _groups: groups, stop, ticker, hosted, _peer_serve: peer_serve, reprobe, serve, confinement })
+    }
+
+    /// What applies to each `[[activation]]` (`ns/name`) on this node, as assessed at start (row M):
+    /// confined and by which backend, unconfined, or refused. The node-wide summary is the
+    /// `stem.activation_confined` guarantee ([`crate::activation_sandbox::confinement_guarantee`]).
+    pub fn activation_confinement(&self) -> &[(String, crate::activation_sandbox::Confinement)] {
+        &self.confinement
     }
 
     /// How many artifacts this stem currently hosts (as of its last tick).
@@ -685,6 +709,46 @@ mod tests {
         assert!(wait_until(30, || stem.hosted_count() == 0).await, "a failing probe withdraws the install");
         assert!(wait_until(60, || stem.hosted_count() == 1 && active.exists()).await, "restart ≡ provisioning: re-activated");
 
+        stem.stop().await;
+        node.shutdown().await;
+        seed.shutdown().await;
+    }
+
+    /// Row M, end to end: a stem whose `[[activation]]` names a profile runs it confined — `{dir}`
+    /// expands to the real placement root, so the command writes its marker there — and says so; the
+    /// same activation under a backend this platform lacks is refused at every attempt, nothing is
+    /// hosted, and the stem says that too. Written after the hook; planted — with the hook ignoring the
+    /// profile, the foreign-backend half hosts the blob and fails.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_confined_activation_runs_in_a_stem_and_the_stem_says_which_applies() {
+        use crate::activation_sandbox::Confinement;
+        if !crate::activation_sandbox::native_backend_or_skip("a_confined_activation_runs_in_a_stem_and_the_stem_says_which_applies") {
+            return;
+        }
+        let (seed, lib_dir, head, ids) = blob_library("confined", &[("pack", b"bytes for a confined runtime")]).await;
+        std::fs::create_dir_all(lib_dir.join("placed")).unwrap();
+        let unit = |backend: &str| NodeCapabilityConfig::from_toml_str(&format!(
+            "{head}[[presence]]\nns=\"data\"\nname=\"pack\"\nmin_providers=1\n\
+             [[activation]]\nns=\"data\"\nname=\"pack\"\ncommand=[\"sh\",\"-c\",\"cp {{path}} {{path}}.active\"]\nprobe=[\"test\",\"-f\",\"{{path}}.active\"]\n\
+             [activation.confine]\nbackend=\"{backend}\"\nwrite=[\"{{dir}}\"]\n"
+        )).unwrap();
+        let node = agent(alloc_port(), Some(seed.node_id().to_socket_addr().port())).await;
+        let stem = Stem::start(Arc::clone(&node), &unit("auto"), stem_opts(&lib_dir)).unwrap();
+        assert!(matches!(stem.activation_confinement(), [(at, Confinement::Confined { .. })] if at == "data/pack"), "{:?}", stem.activation_confinement());
+        let active = lib_dir.join("placed").join(format!("{}.active", ids[0].to_hex()));
+        assert!(wait_until(60, || stem.hosted_count() == 1 && active.exists()).await, "placed, activated under the profile, live");
+        stem.stop().await;
+        node.shutdown().await;
+
+        // The same unit forced onto the backend this platform lacks: refused, never run, never hosted.
+        std::fs::remove_dir_all(lib_dir.join("placed")).unwrap();
+        let foreign = if cfg!(target_os = "macos") { "landlock" } else { "seatbelt" };
+        let node = agent(alloc_port(), Some(seed.node_id().to_socket_addr().port())).await;
+        let stem = Stem::start(Arc::clone(&node), &unit(foreign), stem_opts(&lib_dir)).unwrap();
+        assert!(matches!(stem.activation_confinement(), [(_, Confinement::Refused { reason })] if reason.contains(foreign)), "{:?}", stem.activation_confinement());
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert_eq!(stem.hosted_count(), 0, "a refused activation hosts nothing");
+        assert!(!active.exists(), "and its command never ran");
         stem.stop().await;
         node.shutdown().await;
         seed.shutdown().await;

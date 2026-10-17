@@ -699,6 +699,24 @@ records it). `Instance::invoke` stays synchronous: an embedder calling it from a
 `spawn_blocking` as the serve loop does — the co-op `catalog`, `catalog_viz` and `mcp_toolgrowth` demos,
 which call it directly, do (instantiation included).
 
+**Activation commands confined (unreleased — post-360 row M).** An `[[activation]]` is a host process, not a
+guest, so the wasm sandbox never covered it: by default its `command` and `probe` still run with the stem's
+privileges. A unit may now name `[activation.confine]` (`ConfineDecl`, `src/capability_config.rs`) and the stem runs
+both under it (`mycelium-wasm-host/src/activation_sandbox.rs`): **Seatbelt** on macOS (`sandbox-exec`, a generated
+`deny default` profile, paths passed as `-D` parameters so a path is never profile text), **Landlock + seccomp** on
+Linux. The Linux shape is the one to keep: both are applied to a **dedicated thread** that then spawns the command —
+Landlock domains and seccomp filters are per-thread and inherited by children — so the stem's other threads stay
+unrestricted, nothing runs between `fork` and `exec` (no `pre_exec`, no `unsafe`), and multi-threaded `unshare` (which
+`CLONE_NEWUSER` refuses, and Ubuntu's AppArmor restricts) is not needed. Seccomp covers what Landlock cannot: UDP and
+every non-TCP socket, non-TCP stream protocols (SCTP, MPTCP), Unix sockets (Landlock does not limit `connect` to a
+named one), and `io_uring` (which opens sockets past `socket(2)`). Landlock's rights are taken at a **hard
+requirement**: an older kernel is a refusal, never a quieter sandbox. The rule is 2.18.1's: **a profile the node
+cannot apply refuses the activation by name, never runs it unconfined** — and a profile no backend can hold (a
+hostname, an address) is refused at load. The guarantee report says which applies (`stem.activation_confined`,
+registered by `mycelium-stem` before `start()`); the per-activation answer is `Stem::activation_confinement`. Not
+built: a live-reloaded network allow-list, limits by host, an OpenShell (container) backend, resource limits, and on
+Linux below Landlock ABI 6 a limit on signals. [`.log/2026-10-17-activation-confined.md`](.log/2026-10-17-activation-confined.md).
+
 ## `unsafe` — denied in every library crate (2026-10-10, post-360 P3)
 
 Every workspace library with code carries `#![deny(unsafe_code)]`: the root crate (`src/lib.rs`),

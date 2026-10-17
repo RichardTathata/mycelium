@@ -62,6 +62,16 @@ axum       = { version = "0.8", optional = true }
 serde      = { version = "1.0", features = ["derive"], optional = true }
 serde_json = { version = "1.0", optional = true }
 
+# Post-360 row M: confined activations on Linux. Landlock limits the filesystem and TCP ports
+# (landlock-lsm/rust-landlock, the Landlock maintainers' own crate; safe API, deps libc + enumflags2 +
+# thiserror); seccompiler (rust-vmm, Firecracker's filter compiler; dep libc) refuses every socket but
+# TCP, which Landlock cannot. Both apply to one thread, so the stem's other threads stay unrestricted.
+# macOS needs no crate: Seatbelt is `/usr/bin/sandbox-exec`.
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock    = "0.4.7"
+seccompiler = "0.5"
+libc        = "0.2"
+
 [features]
 stem = ["dep:tracing-subscriber"]
 # Deterministic-replay seams in this crate's tests: the pilot's draw-count equivalence (plan I5).

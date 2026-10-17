@@ -518,7 +518,7 @@
     },
     {
       "id": "prov.activation",
-      "revision": 1,
+      "revision": 2,
       "subsystem": "mycelium-wasm-host::activation",
       "responsibilities": [
         "response"
@@ -549,7 +549,9 @@
             "command_failed",
             "command_timed_out",
             "reference_not_placed_yet",
-            "render_failed"
+            "render_failed",
+            "confinement_unavailable",
+            "confinement_failed"
           ]
         },
         {
@@ -560,7 +562,7 @@
         }
       ],
       "effects": [
-        "the operator's command, run with the stem's privileges — not a sandbox"
+        "the operator's command — under its `[activation.confine]` profile (Seatbelt, or Landlock with seccomp) when the unit names one, else with the stem's privileges"
       ],
       "guards": [
         "other"
@@ -577,10 +579,15 @@
       "tests": [
         "a_declared_activation_runs_after_placement_and_its_probe_gates_the_capability",
         "an_activation_resolves_artifact_references_to_placed_paths",
-        "a_verbose_command_that_succeeds_is_not_reported_as_a_timeout"
+        "a_verbose_command_that_succeeds_is_not_reported_as_a_timeout",
+        "a_hung_activation_is_recorded_as_a_timeout",
+        "a_profile_the_platform_cannot_apply_refuses_the_activation_by_name",
+        "a_confined_activation_reads_and_writes_only_what_its_profile_names",
+        "a_confined_activation_reaches_only_its_declared_tcp_ports",
+        "a_confined_activation_runs_in_a_stem_and_the_stem_says_which_applies"
       ],
       "trace": "instrumented",
-      "summary": "After placement the declared command hands the blob to its local runtime; a failure is an install failure at stage `activation`, retried next round."
+      "summary": "After placement the declared command hands the blob to its local runtime — confined when the unit names a profile, which a node that cannot apply it refuses by name rather than run unconfined; a failure is an install failure at stage `activation`, retried next round."
     },
     {
       "id": "prov.advertise",
