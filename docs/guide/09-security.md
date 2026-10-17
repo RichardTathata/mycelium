@@ -334,9 +334,13 @@ request to the bound host. It refuses the request before a byte is sent anywhere
 the credential on a redirect the binding does not authorise. `[[serve]]`'s `credential = "<binding>"`
 and `OpenAiBackend` with `.with_credentials(gate)` send through it.
 
-What it does not cover: a placeholder in a query string or a request body (sent as written),
-SkillRunner's own key, object-store and git credentials, and an `[[activation]]` command, which is a
-separate process with no path to the gate. The configuration, the per-request rules and the full table
+What it does not cover (guarantee `egress.credentials`, `src/agent/guarantee.rs`): a secret a component
+or command reads from its own environment or files — an `[[activation]]` command is a separate process
+with no path to the gate; a proxy the gate's client is configured with (`HTTP_PROXY` / `HTTPS_PROXY`),
+which sees a plaintext or loopback request's header; a placeholder in a query string or a request body
+(sent as written, not resolved); and `[[serve]]`'s `api_key` / `api_key_env`, federation, object-store
+and git credentials, which keep their own paths. SkillRunner's own key is outside it too
+(crown-jewel's table). The configuration, the per-request rules and the full table
 of where a node reads secrets are in
 [crown-jewel.md § Credentials attached at egress](../operations/crown-jewel.md).
 

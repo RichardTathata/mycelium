@@ -38,7 +38,8 @@ then the [artifact lifecycle](../../operations/artifacts.md):
 ## Try a change, then a refusal
 
 The unmodified run already publishes an acceptance signed by a stranger and
-asserts that the incumbent remains the only live provider. This is the first
+asserts that the [incumbent](../00-concepts.md#incumbent) — the provider already live under
+`route/optimize` before the proposal — remains the only live provider. This is the first
 negative case to inspect; a signature alone does not establish reviewer authority.
 
 Locate the proposed artifact and acceptance in the final wave. Before the acceptance

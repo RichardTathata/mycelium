@@ -330,10 +330,12 @@ provider is handed a **`GatewayCaller`** — the verified *client* principal, is
 the credential itself. Authorisation judges that client: **listing the gateway node does not admit
 its clients**. A context that fails verification is a denial, never a fall-back to running the call
 as the node. One thing, three names: this guide says **gateway caller**; the code also says **caller
-context** for the same value, and **caller envelope** for its signed form on the wire — the
-`GatewayCaller` framed into the RPC payload, signed by the gateway's identity key, and admitted once
-per gateway, issue time and id at the provider, inside a 300 s freshness window
-(`src/agent/gateway_caller.rs`). The caller envelope is not the **action envelope** below: the caller
+context** for the same value, and **caller envelope** for its form on the wire — the
+`GatewayCaller` framed into the RPC payload. Under `tls` the envelope is signed by the gateway's
+identity key and a provider refuses one issued more than 300 s plus the node's clock-drift bound ago;
+without `tls` it is unsigned, and carried exactly as strong as the frame's sender. That a provider
+admits each signed envelope only once (per gateway, issue time and id) is post-360 row E's nonce
+cache, unreleased (`src/agent/gateway_caller.rs`). The caller envelope is not the **action envelope** below: the caller
 envelope tells a provider who called; the action envelope is what an enforcement point hands its
 evaluator. → [09 · Security](09-security.md), [`operations/rbac.md`](../operations/rbac.md).
 
@@ -365,14 +367,16 @@ from biology: like a stem cell, a stem starts generic and undifferentiated, and 
 fleet needs a capability. The analogy stops early. Only two kinds of thing load dynamically: WASM
 components, and blobs for a runtime already on the node. New native code, a companion crate, a gateway
 route or a TLS change needs a new image, and the stem image is itself deployed directly. And the
-catalogue is the supply chain: a stem installs what the keys in `[hosts].trusted_publishers` signed, so
-those keys are the posture to review. Two other kinds of node install nothing: an **SDK agent** (Python
+catalogue is the supply chain: a stem installs what the keys in `[hosts].trusted_publishers` signed,
+unless its unit file sets `[hosts].accept_unsigned = true`, which installs entries with no provenance;
+those keys, and that setting, are the posture to review. Two other kinds of node install nothing: an **SDK agent** (Python
 or TypeScript, through the gateway) can declare a unit file with `POST /gateway/units/declare` but is
 refused the hosting sections, and a plain **`mycelium` node** does not read a unit file at all.
 
 **Catalogue · library · librarian.** The **catalogue** is the set of installable entries in gossiped
 KV: one `installable/{ns}/{name}/{hex}` entry per artifact, naming the capability it provides, its
-kind, its content address, its footprint and its publisher's signature. Every node holds the whole
+kind, its content address, its footprint and, when it has one, its publisher's signature (an entry
+can be unsigned; a host refuses it unless it accepts unsigned entries). Every node holds the whole
 catalogue, and there is no registry server. An entry is only the announcement. The bytes travel
 separately, pulled from a holder on demand and verified against the content address. The **library**
 is the durable source behind the catalogue: a directory, HTTP blob store or object store holding the
@@ -391,12 +395,16 @@ presence it wants, and how a hosted blob reaches its runtime. Every section is o
 is not execution: `[[lane]]` (a tuple-space stage, by name and side), `[[mandate]]` and `[[rule]]` are
 vocabulary for the offline check and the evaluator, and nothing enforces them at runtime.
 
-**Presence band: floor and ceiling.** A `[[presence]]` section asks the fleet to keep between
-`min_providers` (the **presence floor**) and `max_providers` (the **ceiling**) live providers of a
-capability, independent of demand. The two together are the **presence band**. Every stem whose
-`[hosts]` can take the entry reconciles toward it locally. Below the floor, eligible hosts self-elect
-and install. Above the ceiling, the hosts ranked beyond `max` by the band's rendezvous order withdraw
-(rule `prov.shed`), and every host with the same view agrees which. A band is a **convergence target,
+**Presence band: floor and ceiling.** A `[[presence]]` section asks for between `min_providers` (the
+**presence floor**) and `max_providers` (the **ceiling**) live providers of a capability across the
+fleet, independent of demand. The two together are the **presence band**. A band is supervised per
+stem, not published to the fleet: every stem that declares this `[[presence]]` in its own unit file,
+and whose `[hosts]` can take the entry, reconciles toward it locally; a host that does not declare it
+does not fill the band. Below the floor, eligible declaring hosts self-elect and install. Above the
+ceiling, the hosts ranked beyond `max` by the band's rendezvous order withdraw (rule `prov.shed`), and
+every host with the same view agrees which. Only providers that advertise the band's `prov-shed` mark
+are ranked; one that does not (registered in code, or a stem without this band) keeps its place
+([unit-file § `[[presence]]`](../reference/unit-file.md#presence)). A band is a **convergence target,
 not a cardinality guarantee**: the count can overshoot or dip for a round, and a gap is filled only after
 a host sees it. "Provider floor" and "desired floor" mean the presence floor. A stem refuses
 `[[presence]]` without `[hosts]`.
@@ -406,13 +414,15 @@ a gap: it watches demand (a `req/` entry with no live provider) and presence flo
 against the catalogue, pulls, verifies and installs through the runtime for the entry's kind, and
 advertises the capability ([`provisioner.rs`](../../mycelium-wasm-host/src/provisioner.rs)). It is an
 ordinary agent on the public API: the library never provisions on its own. A **governor** is a
-node-local loop that holds something to a published intent. The `MembershipGovernor` sizes a group
-toward a `MembershipIntent`'s `[min, max]`; the tuning and timing governors constrain the auto-tuner
-and the timing parameters. Governors act under the node's [control
-profile](../operations/control-profiles.md). Both decide by **self-election**: each eligible node rolls
-a probability every round and acts only if the roll says so. Nobody assigns the work. The provisioner's
-probability is fixed (`mycelium-stem --self-elect`, default `0.5`); the membership governor's grows with
-the gap. The probability damps the herd, so two nodes acting at once is expected and corrected in a
+node-local loop that holds something to a published intent, with no coordinator. They differ in how
+they act. The `MembershipGovernor` sizes a group toward a `MembershipIntent`'s `[min, max]` by
+self-election. The tuning governor applies a fleet intent to the auto-tuner wherever a parameter is not
+pinned locally, and the timing governor applies a whole timing set in one reconcile pass; neither draws.
+The membership and tuning governors act under the node's [control
+profile](../operations/control-profiles.md); the timing governor does not read it. **Self-election** is
+how the provisioner and the membership governor decide: each eligible node rolls a probability every
+round and acts only if the roll says so. Nobody assigns the work. The provisioner's probability is
+fixed (`mycelium-stem --self-elect`, default `0.5`); the membership governor's grows with the gap. The probability damps the herd, so two nodes acting at once is expected and corrected in a
 later round. A node with no runtime for an entry's kind, or no budget for it, never self-elects for it:
 eligibility is node-local truth.
 
@@ -430,8 +440,8 @@ skill: it registers `{ns}/{name}` over an OpenAI-compatible endpoint while the i
 host loads it only into the **shadow lane**: advertised as `{ns}/{name}.shadow`, callable by that name
 for comparison, and never resolved by a requirer's filter, so it takes no demand. It loads for real only
 after a **reviewer** co-signs it with `mycelium-artifact accept`. A reviewer is a key listed in that
-host's `[hosts].trusted_reviewers`. That key is separate from the publisher keys, and an empty list
-means a proposed entry never loads for real on that host. A reviewer's signature says someone accepted
+host's `[hosts].trusted_reviewers`, a separate list from `[hosts].trusted_publishers` (nothing refuses
+one key in both), and an empty list means a proposed entry never loads for real on that host. A reviewer's signature says someone accepted
 the entry, not that the function is correct. → [16 · Guardrails](16-guardrails.md).
 
 **wire-check.** `mycelium wire-check` is a pure function over unit files and, optionally, artifact
@@ -493,7 +503,7 @@ runtime facts it does not read ([`wire_check.rs`](../../src/wire_check.rs)).
 | Rule catalogue | native | every decision point the substrate has, described by stable id — trigger, inputs, typed outcomes and reasons, guards, relations as hypotheses, code and tests, trace policy; generated and gated, `mycelium rules` | `reference/rule-catalogue.md`, guide 19 |
 | Decision trace | native | a bounded record of what each instrumented decision point read, how it ended and why — off unless attached, changes no decision, never waits; `decisions.jsonl` + `coverage.json` in a bundle, read with `mycelium explain` | guide 19 § reading what a node decided |
 | Claim / observation / assessment | native | an assertion · a report · a *judgement with an author*. Only assessments count as evidence, and not one's own | `design/knowledge-layer.md` |
-| <a id="gateway-caller"></a>Gateway caller (caller context, caller envelope) | native | the verified client principal a provider sees behind a gateway call (`GatewayCaller`, item 7); *caller context* is the same value, *caller envelope* its signed wire form, admitted once and only while fresh. Not the action envelope | `docs/operations/rbac.md` §7 |
+| <a id="gateway-caller"></a>Gateway caller (caller context, caller envelope) | native | the verified client principal a provider sees behind a gateway call (`GatewayCaller`, item 7); *caller context* is the same value, *caller envelope* its wire form — signed under `tls` (unsigned without it) and refused past 300 s plus the drift bound; a signed envelope admitted once only (post-360 row E's nonce cache, unreleased). Not the action envelope | `docs/operations/rbac.md` §7 |
 | Action envelope | native | who is asking to do what, to which resource, with which arguments — assembled only by the enforcement point from verified facts (AE0) | `design/action-envelope-ae0.md` |
 | Evaluator · permit / deny / indeterminate | native | a replaceable, deterministic decision over an envelope + authority facts; indeterminate is never permit; the secure profile refuses on it | `design/action-envelope-ae0.md` |
 | Policy revision · coverage · deployment report | native | the digest of the policy actually evaluated; the routes an enforcement point does not see (`coverage.complete: false`); attributable testimony about activation, never proof of coverage | `design/action-envelope-ae0.md` |
@@ -501,23 +511,26 @@ runtime facts it does not read ([`wire_check.rs`](../../src/wire_check.rs)).
 | <a id="bundle"></a>Bundle | native | a recorded run that a reviewer replays exactly: what production asked for and received (build identity, config, initial disk state, redacted inputs, the ordered choices trace), plus the witness that failed; exact replay detects divergence, never merely re-seeds | `replay_a_bundle`, `design/replay-nondeterminism-inventory.md` |
 | **Fleet growth** | | *§ [Fleet growth](#fleet-growth) has the longer form of each row below* | |
 | <a id="stem"></a>Stem · stem node · stem fleet | native | a node that declares from its unit file (`mycelium-stem`, `Stem::start`); with a `[hosts]` table it runs a provisioner and installs signed artifacts, and only then. A stem fleet is many stems from one image. Named after a stem cell: generic until the fleet needs something. An SDK agent or a plain `mycelium` node installs nothing | `first_stem_fleet` |
-| <a id="catalogue"></a>Catalogue · catalogue entry | native | the gossiped `installable/{ns}/{name}/{hex}` entries every node holds: capability, kind, content address, footprint, publisher signature. The announcement only: the bytes are pulled and verified separately | `catalog` |
+| <a id="catalogue"></a>Catalogue · catalogue entry | native | the gossiped `installable/{ns}/{name}/{hex}` entries every node holds: capability, kind, content address, footprint, and a publisher signature unless the entry is unsigned (installed only where `accept_unsigned = true`). The announcement only: the bytes are pulled and verified separately | `catalog` |
 | <a id="library"></a>Library · librarian | native | the durable store of blobs and a signed manifest (directory, HTTP or object store) · the node role that serves it and keeps the catalogue reconciled to the manifest | `catalog`, `operations/artifacts.md` |
 | <a id="unit-file"></a>Unit file (unit declaration, declaration) | native | one TOML file per deployable unit: offers, needs, groups, lanes, authority, hosting, presence, activation, serving; one loader for `wire-check`, the stem and `POST /gateway/units/declare`. Declaring is not executing | `reference/unit-file.md` |
 | <a id="lane"></a>Lane (`[[lane]]`) | native | a tuple-space stage a unit names, with its side (`produces` / `consumes`); the checker joins lanes by name, and nothing runs them at runtime | `reference/unit-file.md` |
-| <a id="presence"></a>Presence band · floor · ceiling | native | `[[presence]]`: keep from `min_providers` (the floor) to `max_providers` (the ceiling) live providers, independent of demand; above the ceiling the hosts ranked beyond `max` withdraw (rule `prov.shed`). A convergence target, not a cardinality guarantee. "Provider floor" and "desired floor" mean the presence floor | `first_stem_fleet` |
+| <a id="presence"></a>Presence band · floor · ceiling | native | `[[presence]]`: keep from `min_providers` (the floor) to `max_providers` (the ceiling) live providers, independent of demand, supervised by each stem that declares it (a host that does not declare it does not fill it); above the ceiling the hosts ranked beyond `max` among those advertising the band's `prov-shed` mark withdraw (rule `prov.shed`). A convergence target, not a cardinality guarantee. "Provider floor" and "desired floor" mean the presence floor | `first_stem_fleet` |
 | <a id="provisioner"></a>Provisioner | native | a host's loop: demand or a presence gap → the catalogue → pull, verify, install → advertise. An ordinary agent on the public API; the library never provisions on its own | `provisioning` |
-| <a id="governor"></a>Governor | native | a node-local loop that holds something to a published intent (group membership, tuning, timing), acting under the node's control profile, with no coordinator | `elastic_intent` |
-| <a id="self-election"></a>Self-election | native | each eligible node rolls a damped probability every round and acts only on its own roll; nobody assigns the work, and an overshoot is corrected in a later round | `provisioning` |
+| <a id="governor"></a>Governor | native | a node-local loop that holds something to a published intent, with no coordinator: membership (by self-election), tuning (a fleet intent wherever a parameter is not pinned locally), timing (a whole set in one pass); the membership and tuning governors act under the node's control profile | `elastic_intent` |
+| <a id="self-election"></a>Self-election | native | how the provisioner and the membership governor decide: each eligible node rolls a damped probability every round and acts only on its own roll; nobody assigns the work, and an overshoot is corrected in a later round | `provisioning` |
 | <a id="runtime-kind"></a>Runtime kind | native | how an artifact becomes live: `wasm-component` (the node's WASM sandbox) or `blob` (bytes placed for a native runtime already on the node); `[hosts].kinds` lists the kinds a host can run | `reference/unit-file.md` |
 | <a id="activation"></a>Activation (`[[activation]]`) | native | how a placed blob reaches its runtime: the stem runs the operator's command, then gates the capability on a probe it keeps re-running; a failed probe withdraws the install <!-- row M: confinement --> | `reference/unit-file.md` |
 | <a id="serve"></a>`[[serve]]` | native | a prompt skill over an OpenAI-compatible endpoint, registered while a named install is live and retracted when the install goes | `reference/unit-file.md` |
-| <a id="shadow"></a>Proposed · shadow lane · reviewer | native | a `proposed = true` entry loads only as `{ns}/{name}.shadow` (callable by name, takes no demand) until a **reviewer** — a key in that host's `[hosts].trusted_reviewers` — co-signs it with `mycelium-artifact accept`. Publisher and reviewer keys are separate | `provisioning`, guide 16 |
+| <a id="shadow"></a>Proposed · shadow lane · reviewer | native | a `proposed = true` entry loads only as `{ns}/{name}.shadow` (callable by name, takes no demand) until a **reviewer** — a key in that host's `[hosts].trusted_reviewers` — co-signs it with `mycelium-artifact accept`. Reviewers are a separate list from publishers (nothing refuses one key in both) | `provisioning`, guide 16 |
 | <a id="wire-check"></a>`wire-check` | native | `mycelium wire-check`: a pure function over unit files that names what could not bind. Its answer is *would bind*, never *is bound* | `reference/unit-file.md` |
+| <a id="wiring-report"></a>Static wiring report · observation consumer | native | in `first_stem_fleet`: the `wire-check` report over the three hosts' declarations (what *would* bind), exported beside one observer's snapshot of who provides `demo/echo` · the example `compare_stem_observations`, which validates that export against `declaration.schema.json` and checks the observed providers against what was declared | `first_stem_fleet`, `examples/compare_stem_observations.rs` |
+| <a id="incumbent"></a>Incumbent | native | in `provisioning`'s final wave: the v1 provider already live under `route/optimize` before a proposed v2 is published; it keeps serving the live name while the proposal runs only in the shadow lane | `provisioning` |
 | **Authority** | | | |
 | <a id="enforcement-point"></a>Enforcement point | native | where authority is checked before work runs — the gateway (`point=gateway`) or the provider check (`point=provider`) — by assembling the action envelope and asking the evaluator. It covers only the routes it fronts | guide 20 |
 | <a id="evidence-journal"></a>Evidence journal | native | the node-local, append-only, fsynced, never-gossiped record of what an enforcement point decided and what became of the action; only a hash-bearing reference enters the audit chain. Not a replay bundle | guide 20 |
-| <a id="history-scope"></a>History scope | native | whose history a count covers: `HistoryScope::EnforcementPoint`, the decisions this enforcement point's journal recorded at this node (gateway and provider counted apart). Exact here, with no quorum; an actor spread over N gateways can be admitted up to N times a per-gateway limit | guide 20 § Deciding on what an actor has already done |
+| <a id="continuation"></a>Continuation · confirmed drain | native | how admitted long-running work continues once its authority may lapse (`mandate::Continuation`: re-check every interval and cancel on failure, or run to completion within a limit the resource enforces) · in `authority_drain`, the time from a revocation to the last stop the authority **confirmed**; a stop requested but never confirmed is reported, never counted as stopped | `authority_drain` |
+| <a id="history-scope"></a>History scope | native | whose history a count covers: `HistoryScope::EnforcementPoint`, the decisions this enforcement point's journal recorded at this node (gateway and provider counted apart). Exact here, with no quorum; an actor spread over N gateways can be admitted up to N times a per-gateway limit (post-360 row K, unreleased) | guide 20 § Deciding on what an actor has already done |
 | <a id="credential-binding"></a>Credential binding · placeholder | native | `[[egress_credentials]]`: a secret the node's egress gate attaches only on a request to the bound host (and port and path prefix, when set); a caller holds only the placeholder `mycelium-credential:<name>`. A request anywhere else is refused, and a redirect off the host carries nothing (post-360 row L, unreleased) | `operations/crown-jewel.md` § Credentials attached at egress |
 | **Words with several meanings** | | | |
 | <a id="claim"></a>Things called "claim" | disambiguation | a **knowledge claim** (`RecordKind::Claim`: an issuer asserting something; not evidence) · a **work claim**: a tuple-space worker taking an item from a stage, or the blackboard's competitive claim-by-predicate (one consumer; *work is claimed, not dispatched* means these) · the **log claim** (`clog/{stream}/{group}/claim`: a leased consensus commitment naming a log group's one active consumer) · a **Strands session claim** (`strands-session-mycelium`: a consensus write fixing who writes a message index or record version, made before the write) · a **role claim** (`SignedRoleClaim` at `sys/role/{node}`, RBAC) · a **namespace claim** (a companion owning a KV prefix, such as `tuple/`). None implies another | `design/knowledge-layer.md`, `strands-session-mycelium/README.md` § Claims |

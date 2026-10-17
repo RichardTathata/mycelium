@@ -5,11 +5,14 @@
 ## Objective
 
 Trace where authority is checked: gateway dispatch, provider admission and
-continuation, and the destination that commits an effect.
+[continuation](../00-concepts.md#continuation) (whether admitted work keeps running once its authority
+lapses), and the destination that commits an effect.
 
-**Terms.** The gateway and the provider are [enforcement points](../00-concepts.md#enforcement-point):
-each checks the *caller context* (the verified [gateway caller](../00-concepts.md#gateway-caller)) and the
-[mandate](../00-concepts.md#mandate) a call presents, whose *scope* names what it covers. The destination
+**Terms.** The gateway and the provider are [enforcement points](../00-concepts.md#enforcement-point).
+The gateway builds the *caller context* (the [gateway caller](../00-concepts.md#gateway-caller)) from the
+credential it verified, and signs it under `tls`; the provider verifies it where it receives the
+request. Each checks the [mandate](../00-concepts.md#mandate) a call presents, whose *scope* names what
+it covers. The destination
 keeps its own *resource epoch* and refuses work authorised only under an older one, and its
 [commit](../00-concepts.md#destination-commit) answers `Fresh` (applied now) or `Replayed` (that
 operation was already applied).
@@ -25,7 +28,8 @@ cargo run --example authority_drain --features compliance
 
 The first shows a `Fresh` commit, `Replayed` duplicate, then a destination refusal
 while the gateway still permits. Read back the journal to see both decisions.
-The second measures admission and confirmed drain after revocation, and checks
+The second measures admission and [confirmed drain](../00-concepts.md#continuation) (the time to the
+last stop the authority confirmed) after revocation, and checks
 the declared bound. An unconfirmed stop is never counted as stopped.
 
 ## What it demonstrates
