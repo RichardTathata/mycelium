@@ -180,10 +180,10 @@ pub fn is_protected_kind(cfg: &GossipConfig, kind: &str) -> bool {
 }
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use action_evaluator::{
-    preflight, ActionEnvelope, ActionEvaluator, ActionMapping, AeEvidence, AeReference, Decision,
-    DecisionKind, EvidenceState, Execution, MandateBinding, MandateState, MappingKind,
-    MappingStatus, PreflightRefusal, RecordKind, ReferenceEvaluator, Rule, Verdict,
-    AE_EVIDENCE_SCHEMA, AE_REFERENCE_SCHEMA,
+    preflight, preflight_with_history, ActionEnvelope, ActionEvaluator, ActionMapping, AeEvidence, AeReference,
+    Decision, DecisionKind, EvidenceState, Execution, History, HistoryEntry, HistoryInput, HistoryLimit,
+    HistoryRequest, HistoryScope, HistoryView, MandateBinding, MandateState, MappingKind, MappingStatus,
+    PreflightRefusal, RecordKind, ReferenceEvaluator, Rule, Verdict, AE_EVIDENCE_SCHEMA, AE_REFERENCE_SCHEMA,
 };
 #[cfg(feature = "gateway")]
 pub use gateway_caller::{GatewayDispatchError, ResolvedPrincipal};
@@ -774,6 +774,11 @@ pub(crate) struct TaskCtx {
     /// which `with_action_evaluator` warns about.
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) evidence_journal: std::sync::OnceLock<Arc<evidence_journal::EvidenceJournal>>,
+    /// The actor histories this point keeps from that journal (post-360 row K) — what an evaluator that
+    /// asks for history decides on. Set with the journal; absent without one, and a history an evaluator
+    /// asks for is then `Unavailable`.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(crate) history_index: std::sync::OnceLock<Arc<evidence_journal::HistoryIndex>>,
     /// The gateway's execution authority (Boundary H A1), set via `with_execution_authority`.
     /// Absent = the gateway binds no mandate, exactly as before.
     #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -1336,6 +1341,8 @@ impl GossipAgent {
             #[cfg(all(feature = "gateway", feature = "tls"))]
             evidence_journal: std::sync::OnceLock::new(),
             #[cfg(all(feature = "gateway", feature = "tls"))]
+            history_index: std::sync::OnceLock::new(),
+            #[cfg(all(feature = "gateway", feature = "tls"))]
             execution_authority: std::sync::OnceLock::new(),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             provider_enforcement: std::sync::atomic::AtomicBool::new(false),
@@ -1459,6 +1466,26 @@ impl GossipAgent {
         }
         if self.task_ctx.action_evaluator.set(evaluator).is_err() {
             tracing::warn!("with_action_evaluator: an evaluator is already attached; ignoring");
+            return;
+        }
+        self.load_history_if_wanted();
+    }
+
+    /// Read the actor histories from the evidence journal — in the background — once both a journal and an
+    /// evaluator that asks for history are attached (post-360 row K). A node whose evaluator never asks never
+    /// reads its journal for this.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    fn load_history_if_wanted(&self) {
+        let (Some(evaluator), Some(index)) = (self.task_ctx.action_evaluator.get(), self.task_ctx.history_index.get())
+        else {
+            return;
+        };
+        let wants = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| evaluator.history_request()))
+            .ok()
+            .flatten()
+            .is_some();
+        if wants {
+            index.start_loading(self.task_ctx.hlc.decision_now_ms());
         }
     }
 
@@ -1486,9 +1513,19 @@ impl GossipAgent {
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub fn with_evidence_journal(&self, journal: Arc<evidence_journal::EvidenceJournal>) {
         self.note_attachment("with_evidence_journal");
+        if self.task_ctx.evidence_journal.get().is_some() {
+            tracing::warn!("with_evidence_journal: a journal is already attached; ignoring");
+            return;
+        }
+        // The actor histories an evaluator may decide on (post-360 row K): read from what the journal already
+        // holds — so a restart keeps them — in the background, and only once an evaluator asks for history.
+        let index = Arc::new(evidence_journal::HistoryIndex::new(&journal));
         if self.task_ctx.evidence_journal.set(journal).is_err() {
             tracing::warn!("with_evidence_journal: a journal is already attached; ignoring");
+            return;
         }
+        let _ = self.task_ctx.history_index.set(index);
+        self.load_history_if_wanted();
     }
 
     /// **Enforce authority where the work happens** (Boundary H closure plan C3).

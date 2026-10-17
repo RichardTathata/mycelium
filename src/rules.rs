@@ -95,14 +95,17 @@ pub static RULES: &[RuleDescriptor] = &[
         summary: "Deny by default under `compliance`: a route needs its scope; with no credential model the gateway is open — on loopback only, since a non-loopback one refuses to start unless `gateway_allow_unauthenticated` waives it — and a table the build cannot enforce refuses to start.",
     },
     RuleDescriptor {
-        id: "ae.preflight", revision: 1, subsystem: "mycelium::agent::http", responsibilities: &[Authority],
+        id: "ae.preflight", revision: 2, subsystem: "mycelium::agent::http", responsibilities: &[Authority],
         trigger: "a gateway dispatch that an evaluator covers",
-        inputs: &[Input { source: "the action envelope, the presented mandate, the deployed policy revision", scope: "this request", freshness: "the decision clock" }],
+        inputs: &[
+            Input { source: "the action envelope, the presented mandate, the deployed policy revision", scope: "this request", freshness: "the decision clock" },
+            Input { source: "the actor's recent decisions, when the evaluator asks for them (post-360 row K); carried on the evidence record", scope: "this enforcement point (its evidence journal)", freshness: "the journal, loaded at attach and kept current by every record appended" },
+        ],
         outcomes: &[Outcome { kind: Action, reasons: &["permit"] }, Outcome { kind: Refusal, reasons: &["deny", "indeterminate", "mandate_revoked", "mandate_expired", "stale_policy"] }, Outcome { kind: NoAction, reasons: &["inert_no_evaluator"] }],
         effects: &["the evidence journal record before dispatch; the audit chain reference under `compliance`"],
         guards: &[Guard::Authority], may_trigger: &[], may_inhibit: &[], depends_on: &["gateway.auth"],
         symbol: "http::ae_preflight / ae_record", docs: "docs/guide/20-authorising-actions.md",
-        tests: &["an_expired_envelope_is_denied_before_the_evaluator_runs", "test_c7_the_bypass_matrix_no_door_runs_revoked_work"], trace: CatalogueOnly,
+        tests: &["an_expired_envelope_is_denied_before_the_evaluator_runs", "test_c7_the_bypass_matrix_no_door_runs_revoked_work", "at_most_three_posts_in_ten_minutes_counted_at_this_gateway"], trace: CatalogueOnly,
         summary: "Permit, deny or indeterminate, recorded before the work runs; a refused mandate denies before policy runs, so a policy engine cannot launder a revocation.",
     },
     RuleDescriptor {

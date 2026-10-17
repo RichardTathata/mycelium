@@ -47,8 +47,8 @@
 //! adopter reading that sentence should be able to find out exactly what passing it buys them.
 
 use super::action_evaluator::{
-    ActionEnvelope, ActionEvaluator, ActionMapping, Decision, PreflightRefusal, ReferenceEvaluator,
-    Rule, Verdict, preflight,
+    ActionEnvelope, ActionEvaluator, ActionMapping, Decision, DecisionKind, Execution, History, HistoryEntry,
+    HistoryScope, HistoryView, PreflightRefusal, ReferenceEvaluator, Rule, Verdict, preflight, preflight_with_history,
 };
 use mycelium_core::NodeId;
 use std::sync::Arc;
@@ -91,6 +91,21 @@ pub enum PolicyClause {
         /// The facts the clause depends on.
         facts: Vec<String>,
     },
+    /// An allowance limited over the actor's history (post-360 row K): at most `count` permitted actions
+    /// matching it in `window_ms`, counted in the history the enforcement point gives — its own. The fourth
+    /// of three is an authority deciding no; a history that cannot be read decides nothing.
+    AllowAtMost {
+        /// Actor principal, or `*`.
+        actor: String,
+        /// Operation, or `*`.
+        operation: String,
+        /// Resource, or `*`.
+        resource: String,
+        /// How many the window may hold, the one being decided included.
+        count: u32,
+        /// How far back, in milliseconds.
+        window_ms: u64,
+    },
     /// A clause name this policy uses that the evaluator has declared it does not support.
     ///
     /// The case that matters: an adapter must not silently ignore a clause it cannot evaluate,
@@ -115,6 +130,11 @@ impl PolicyClause {
             operation: operation.into(),
             resource: resource.into(),
         }
+    }
+
+    /// `AllowAtMost`, with `&str` arguments.
+    pub fn allow_at_most(actor: &str, operation: &str, resource: &str, count: u32, window_ms: u64) -> Self {
+        Self::AllowAtMost { actor: actor.into(), operation: operation.into(), resource: resource.into(), count, window_ms }
     }
 
     /// `AllowRequiringFacts`, with `&str` arguments.
@@ -202,6 +222,8 @@ pub struct ContractCase {
     pub policy: PolicyIntent,
     /// What arrives at the enforcement point.
     pub envelope: ActionEnvelope,
+    /// The actor's history the enforcement point gives the evaluator (post-360 row K); `None`, none.
+    pub history: Option<History>,
     /// The enforcement point's clock for this case. The evaluator holds no clock; the seam does.
     pub now_ms: u64,
     /// What the contract requires.
@@ -376,7 +398,7 @@ pub fn run_cases(subject: &dyn EvaluatorUnderTest, cases: &[ContractCase]) -> Re
             }
         }
 
-        let outcome = preflight(Some(&evaluator), &envelope, case.now_ms);
+        let outcome = preflight_with_history(Some(&evaluator), &envelope, case.history.as_ref(), case.now_ms);
         let (actual, decision) = match &outcome {
             Ok(Some(d)) => (Expected::Admitted, Some(d.clone())),
             // No evaluator attached is impossible here: one was just built.
@@ -480,6 +502,7 @@ pub fn cases() -> Vec<ContractCase> {
                 vec![PolicyClause::allow("oidc:idp/alice", "tools/call", "tool:square@n1")],
             ),
             envelope: base("oidc:idp/alice", "tools/call", "tool:square@n1"),
+            history: None,
             now_ms: now,
             expect: Expected::Admitted,
             must_mention: vec![],
@@ -496,6 +519,7 @@ pub fn cases() -> Vec<ContractCase> {
                 ],
             ),
             envelope: base("oidc:idp/mallory", "tools/call", "tool:square@n1"),
+            history: None,
             now_ms: now,
             expect: Expected::Denied,
             must_mention: vec![],
@@ -511,6 +535,7 @@ pub fn cases() -> Vec<ContractCase> {
                 vec![PolicyClause::allow("oidc:idp/alice", "tools/call", "tool:square@n1")],
             ),
             envelope: base("oidc:idp/alice", "tools/call", "tool:cube@n1"),
+            history: None,
             now_ms: now,
             expect: Expected::NotEstablished,
             must_mention: vec![],
@@ -526,6 +551,7 @@ pub fn cases() -> Vec<ContractCase> {
                 vec![PolicyClause::allow("oidc:idp/alice", "tools/call", "tool:square@n1")],
             ),
             envelope: base("oidc:idp/mallory", "tools/call", "tool:square@n1"),
+            history: None,
             now_ms: now,
             expect: Expected::NotEstablished,
             must_mention: vec![],
@@ -541,6 +567,7 @@ pub fn cases() -> Vec<ContractCase> {
                 vec![PolicyClause::allow_requiring("*", "tools/call", "*", &["mandate"])],
             ),
             envelope: base("oidc:idp/alice", "tools/call", "tool:square@n1"),
+            history: None,
             now_ms: now,
             expect: Expected::NotEstablished,
             must_mention: vec!["mandate".into()],
@@ -559,6 +586,7 @@ pub fn cases() -> Vec<ContractCase> {
                 ],
             ),
             envelope: base("oidc:idp/alice", "tools/call", "tool:square@n1"),
+            history: None,
             now_ms: now,
             expect: Expected::NotEstablished,
             must_mention: vec!["odrl:duty".into()],
@@ -575,6 +603,7 @@ pub fn cases() -> Vec<ContractCase> {
                 e.mapping = ActionMapping::unmapped("cat-procurement", "7");
                 e
             },
+            history: None,
             now_ms: now,
             expect: Expected::NotEstablished,
             must_mention: vec![],
@@ -590,6 +619,7 @@ pub fn cases() -> Vec<ContractCase> {
                 e.mapping = ActionMapping::ambiguous("cat-procurement", "7");
                 e
             },
+            history: None,
             now_ms: now,
             expect: Expected::NotEstablished,
             must_mention: vec![],
@@ -606,6 +636,7 @@ pub fn cases() -> Vec<ContractCase> {
             // it. The suite supplies both strings to `must_mention`.
             policy: PolicyIntent::new("rev-1", vec![PolicyClause::allow("*", "*", "*")]),
             envelope: base("oidc:idp/alice", "tools/call", "tool:square@n1"),
+            history: None,
             now_ms: now,
             expect: Expected::NotEstablished,
             must_mention: vec![],
@@ -618,6 +649,7 @@ pub fn cases() -> Vec<ContractCase> {
                  is DENIED before any evaluator runs",
             policy: PolicyIntent::new("rev-1", vec![PolicyClause::allow("*", "*", "*")]),
             envelope: base("oidc:idp/alice", "tools/call", "tool:square@n1"),
+            history: None,
             now_ms: 61_001,
             expect: Expected::Denied,
             must_mention: vec!["validity".into()],
@@ -637,12 +669,97 @@ pub fn cases() -> Vec<ContractCase> {
                 e.arguments_digest = [9u8; 32];
                 e
             },
+            history: None,
             now_ms: now,
             expect: Expected::Admitted,
             must_mention: vec![],
             revision: RevisionBinding::Matching,
         },
+        // ── Post-360 row K: policy over history ─────────────────────────────────────────────────
+        ContractCase {
+            id: "history_below_limit",
+            requirement: "an allowance limited over the actor's history admits an action the history leaves room for",
+            policy: PolicyIntent::new("rev-1", vec![PolicyClause::allow_at_most("oidc:idp/alice", "tools/call", "tool:post@n1", 3, 500)]),
+            envelope: base("oidc:idp/alice", "tools/call", "tool:post@n1"),
+            history: Some(history_of(now, &[1_700, 1_800], true)),
+            now_ms: now,
+            expect: Expected::Admitted,
+            must_mention: vec![],
+            revision: RevisionBinding::Matching,
+        },
+        ContractCase {
+            id: "history_at_limit",
+            requirement: "at the limit the next action is denied — an authority decided no — and the decision names \
+                          the history's scope, since a count means nothing until it is said what was counted",
+            policy: PolicyIntent::new("rev-1", vec![PolicyClause::allow_at_most("oidc:idp/alice", "tools/call", "tool:post@n1", 3, 500)]),
+            envelope: base("oidc:idp/alice", "tools/call", "tool:post@n1"),
+            history: Some(history_of(now, &[1_600, 1_700, 1_800], true)),
+            now_ms: now,
+            expect: Expected::Denied,
+            must_mention: vec![HistoryScope::EnforcementPoint.label().to_string()],
+            revision: RevisionBinding::Matching,
+        },
+        ContractCase {
+            id: "history_outside_window",
+            requirement: "actions older than the window are not counted against it",
+            policy: PolicyIntent::new("rev-1", vec![PolicyClause::allow_at_most("oidc:idp/alice", "tools/call", "tool:post@n1", 3, 500)]),
+            envelope: base("oidc:idp/alice", "tools/call", "tool:post@n1"),
+            history: Some(history_of(now, &[1_100, 1_200, 1_300, 1_400, 1_500], true)),
+            now_ms: now,
+            expect: Expected::Admitted,
+            must_mention: vec![],
+            revision: RevisionBinding::Matching,
+        },
+        ContractCase {
+            id: "history_unavailable",
+            requirement: "a history that cannot be read is not an empty one: the limited allowance is not established",
+            policy: PolicyIntent::new("rev-1", vec![PolicyClause::allow_at_most("oidc:idp/alice", "tools/call", "tool:post@n1", 3, 500)]),
+            envelope: base("oidc:idp/alice", "tools/call", "tool:post@n1"),
+            history: Some(History::Unavailable("the journal could not be read".into())),
+            now_ms: now,
+            expect: Expected::NotEstablished,
+            must_mention: vec!["history".into()],
+            revision: RevisionBinding::Matching,
+        },
+        ContractCase {
+            id: "history_incomplete_below_limit",
+            requirement: "below the limit on a history the enforcement point says is incomplete, the count is not \
+                          established — a missing record could be the one that reaches it",
+            policy: PolicyIntent::new("rev-1", vec![PolicyClause::allow_at_most("oidc:idp/alice", "tools/call", "tool:post@n1", 3, 500)]),
+            envelope: base("oidc:idp/alice", "tools/call", "tool:post@n1"),
+            history: Some(history_of(now, &[1_800], false)),
+            now_ms: now,
+            expect: Expected::NotEstablished,
+            must_mention: vec!["history".into()],
+            revision: RevisionBinding::Matching,
+        },
     ]
+}
+
+/// A history at `as_of_ms` holding a permitted `tools/call` on `tool:post@n1` at each time in `at`.
+fn history_of(as_of_ms: u64, at: &[u64], complete: bool) -> History {
+    History::View(HistoryView {
+        scope: HistoryScope::EnforcementPoint,
+        actor: "oidc:idp/alice".into(),
+        point: "gateway".into(),
+        as_of_ms,
+        window_ms: 500,
+        entries: at
+            .iter()
+            .enumerate()
+            .map(|(i, t)| HistoryEntry {
+                at_ms: *t,
+                attempt_id: format!("earlier-{i}"),
+                operation: "tools/call".into(),
+                resource: "tool:post@n1".into(),
+                decision: DecisionKind::Permit,
+                execution: Execution::Completed,
+            })
+            .collect(),
+        complete,
+        // An incomplete view here is missing something as recent as its clock: no window over it is complete.
+        omitted_through_ms: (!complete).then_some(as_of_ms),
+    })
 }
 
 // ── the reference evaluator's adapter, shipped as the worked example ──────────────────────────
@@ -675,6 +792,9 @@ impl EvaluatorUnderTest for ReferenceUnderTest {
                             .requiring_scopes(["mcp:invoke"])
                             .requiring_facts(facts.clone()),
                     ),
+                PolicyClause::AllowAtMost { actor, operation, resource, count, window_ms } => ev.allow(
+                    Rule::new(actor, operation, resource).requiring_scopes(["mcp:invoke"]).at_most(*count, *window_ms),
+                ),
                 PolicyClause::UnsupportedClause(name) => ev.unsupported_clause(name),
                 // No wildcard arm, deliberately. `PolicyClause` is `#[non_exhaustive]` for
                 // downstream adapters, but in this crate the match is exhaustive — so adding a
@@ -727,6 +847,8 @@ mod tests {
         Permit { who: String, what: String, on: String },
         Refuse { who: String, what: String, on: String },
         Conditional { who: String, what: String, on: String, upon: Vec<String> },
+        /// A permit that holds while the actor's history shows fewer than `room` matching permits in `span` ms.
+        Rationed { who: String, what: String, on: String, room: u32, span: u64 },
     }
 
     /// A table-driven evaluator. Prohibitions are scanned **last** here and still win, which is a
@@ -743,7 +865,19 @@ mod tests {
     }
 
     impl ActionEvaluator for TableEvaluator {
+        fn history_request(&self) -> Option<crate::agent::action_evaluator::HistoryRequest> {
+            let span = self.entries.iter().filter_map(|e| match e {
+                Entry::Rationed { span, .. } => Some(*span),
+                _ => None,
+            }).max()?;
+            Some(crate::agent::action_evaluator::HistoryRequest { window_ms: span, max_entries: usize::MAX })
+        }
+
         fn evaluate(&self, env: &ActionEnvelope) -> Decision {
+            self.evaluate_with_history(env, &History::Unavailable("this table was consulted without a history".into()))
+        }
+
+        fn evaluate_with_history(&self, env: &ActionEnvelope, history: &History) -> Decision {
             let hits = |who: &str, what: &str, on: &str| {
                 glob(who, &env.actor) && glob(what, &env.operation) && glob(on, &env.resource)
             };
@@ -795,6 +929,38 @@ mod tests {
                 }
             }
 
+            // Rationed entries: count from the newest record back, stopping at the window's edge.
+            for entry in &self.entries {
+                if let Entry::Rationed { who, what, on, room, span } = entry
+                    && hits(who, what, on)
+                {
+                    let History::View(seen) = history else {
+                        return Decision::indeterminate("the ration cannot be checked: no history came with the request", &self.revision)
+                            .checking(["entry.rationed"])
+                            .with_errors(["history: none available"]);
+                    };
+                    let used = seen
+                        .entries
+                        .iter()
+                        .rev()
+                        .take_while(|r| seen.as_of_ms.saturating_sub(r.at_ms) < *span)
+                        .filter(|r| r.decision == DecisionKind::Permit && glob(what, &r.operation) && glob(on, &r.resource))
+                        .count() as u32;
+                    let label = seen.scope.label();
+                    if used >= *room {
+                        return Decision::deny(format!("ration of {room} exhausted ({used} used, counted at {label})"), &self.revision)
+                            .checking(["entry.rationed", label]);
+                    }
+                    if !seen.complete_for(*span) {
+                        return Decision::indeterminate(format!("ration not settled: the {label} history is partial"), &self.revision)
+                            .checking(["entry.rationed"])
+                            .with_errors(["history: partial"]);
+                    }
+                    return Decision::permit(format!("{used} of {room} used, counted at {label}"), &self.revision)
+                        .checking(["entry.rationed", label]);
+                }
+            }
+
             Decision::indeterminate(
                 "no entry in this table covers the request",
                 &self.revision,
@@ -835,6 +1001,15 @@ mod tests {
                             what: operation.clone(),
                             on: resource.clone(),
                             upon: facts.clone(),
+                        })
+                    }
+                    PolicyClause::AllowAtMost { actor, operation, resource, count, window_ms } => {
+                        entries.push(Entry::Rationed {
+                            who: actor.clone(),
+                            what: operation.clone(),
+                            on: resource.clone(),
+                            room: *count,
+                            span: *window_ms,
                         })
                     }
                     PolicyClause::UnsupportedClause(name) => cannot_evaluate.push(name.clone()),
@@ -917,6 +1092,14 @@ mod tests {
                     ..inner
                 }
             }
+            // A wrapper forwards the history methods too (row K): one that did not would hide the inner
+            // evaluator's history request, and every limited rule behind it would be not established.
+            fn history_request(&self) -> Option<crate::agent::action_evaluator::HistoryRequest> {
+                self.1.history_request()
+            }
+            fn evaluate_with_history(&self, env: &ActionEnvelope, history: &History) -> Decision {
+                Decision { policy_revision: self.0.clone(), ..self.1.evaluate_with_history(env, history) }
+            }
         }
 
         struct Subject;
@@ -953,6 +1136,11 @@ mod tests {
                             Rule::new(actor, operation, resource)
                                 .requiring_scopes(["mcp:invoke"])
                                 .requiring_facts(facts.clone()),
+                        ),
+                        PolicyClause::AllowAtMost { actor, operation, resource, count, window_ms } => inner.allow(
+                            Rule::new(actor, operation, resource)
+                                .requiring_scopes(["mcp:invoke"])
+                                .at_most(*count, *window_ms),
                         ),
                         PolicyClause::UnsupportedClause(name) => inner.unsupported_clause(name),
                     };

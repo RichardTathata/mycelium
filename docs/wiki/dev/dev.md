@@ -71,6 +71,14 @@ journal record's **content hash**, so tamper-evidence survives without dissemina
 behaviours are tested: saturation and persistence failure refuse; a lost acknowledgement is
 `DeliveryUnknown`, never `Failed`. `EvidenceProfile` decides whether they gate the effect or are
 merely declared.
+**Policy over history (post-360 row K, 2026-10-17):** an evaluator can decide on what an actor has already done —
+`history_request` / `evaluate_with_history` (defaults keep every evaluator as it was), the history built from this
+node's own evidence journal by `HistoryIndex` (`evidence_journal.rs`; loaded at attach, fed by `ae_record`, bounded),
+**counted at this enforcement point** by decision (the scope named on every history decision, `HistoryScope`), an
+unreadable history `Unavailable` and so `Indeterminate`, never empty. Two lessons: a history-limited decision is a
+check-then-count, so one actor's are serialised (lock-order row 61) and a permit counted as it is decided; and a view
+capped near the limit is filled by the actor's *other* records, so a counting evaluator asks for the whole window. The
+decision trace does not carry `ae.preflight`, so the history input is recorded on the evidence record.
 **The reader seam shipped the same day** (PR #226): `read_evidence_journal_from(path, cursor, …)`,
 §6.7's outbox shape — batch, ship, advance, with a byte-offset cursor so resuming stays cheap, and
 each entry carrying the same content hash the chain's `AeReference` cites. Needed because moving

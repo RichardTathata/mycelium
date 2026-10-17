@@ -139,6 +139,11 @@ pub struct Journal {
     /// The exclusive OS lock on `<path>.lock`, held for this handle's lifetime and released when
     /// the last `Arc` drops. `None` only for the test-only handles that own no file.
     _lock:  Option<OwnershipLock>,
+    /// Whether `open` truncated the file: records past the cut — a torn tail, or a frame damaged mid-file
+    /// that the scan stopped at — are gone, and a reader that folds the journal cannot see which. Read by the
+    /// evidence profile's history (gateway + tls), so unread in a build without it.
+    #[cfg_attr(not(all(feature = "gateway", feature = "tls")), allow(dead_code))]
+    truncated_at_open: bool,
 }
 
 /// What `recover` found: how many complete frames the file holds, where the last one ends, and
@@ -241,12 +246,19 @@ impl Journal {
             }
         });
 
-        Ok(Arc::new(Self { tx, stream, path, _lock: Some(lock) }))
+        let truncated_at_open = recovered.valid_end < recovered.file_len;
+        Ok(Arc::new(Self { tx, stream, path, _lock: Some(lock), truncated_at_open }))
     }
 
     /// Where the journal lives.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Whether `open` truncated the file, dropping whatever lay past the last complete frame.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(crate) fn truncated_at_open(&self) -> bool {
+        self.truncated_at_open
     }
 
     /// Append one record, returning only once it is fsynced.
@@ -300,7 +312,7 @@ impl Journal {
                 drop(ack);
             }
         });
-        Arc::new(Self { tx, stream, path: PathBuf::from("<stalled>"), _lock: None })
+        Arc::new(Self { tx, stream, path: PathBuf::from("<stalled>"), _lock: None, truncated_at_open: false })
     }
 
     /// A real journal whose writer fails the next append **after writing part of its frame**
@@ -591,7 +603,7 @@ mod tests {
         let path = temp("saturation");
         // A writer that never drains, so the queue fills and stays full.
         let (tx, _held) = mpsc::channel::<Msg>(1);
-        let j = Journal { tx, stream: "test/journal", path: path.clone(), _lock: None };
+        let j = Journal { tx, stream: "test/journal", path: path.clone(), _lock: None, truncated_at_open: false };
 
         // Fill the one slot, then the next append has nowhere to go.
         let first = j.append(b"a".to_vec());

@@ -83,7 +83,7 @@ Four places strain that line today, and the rows in §3 address each:
 | **H** — *delivered 2.33.0 (#609), §3.5* | Companions | the commitment deadline judged on the log's clock, not the offerer's — **delivered as the declarer's signed close** (no clock in the log is offerer-proof, §3.5); `award_of` verifies before it reports (the declarer pinned by the caller; the unverified path stated, *not built*); the reason blob store bounded in total (eviction *not built*); caller-chosen `run_id` validated | R0 |
 | **I** — *delivered with 2.33.0 (private #30), §3.5; Cedar narrower* | Private repo P3s | RA5 correction chains and competing corrections; attempt keys carry the operation id; a lock-order table; the outbox directory fsynced at create; Cedar policies schema-validated at load; the CI pin check refuses `[patch]`, `rev =` and multi-line tables | R0's re-pin |
 | **J** — *delivered 2.33.0 (#608), §3.5* | Hygiene | the sim-seam gate's test-skip bug (the one the KV gate fixed in #591); every feature and bench linted or built by some CI step; the two CI jobs on `stable` pinned; unreferenced public items deprecated, not removed (nothing is removed on the 2.x line); only the duplicates that disagree are unified (`hex_line`'s whitespace, `now_ms` copies outside the seam) | — |
-| **K** | Policy over history | the action evaluator can decide on what an actor has already done, not only on the request: a bounded, read-only history view (the actor's recent decisions and executions from the evidence journal — `src/agent/evidence_journal.rs`) reaches `ActionEvaluator::evaluate` beside the envelope (`ActionEnvelope`, `src/agent/action_evaluator.rs:101`, which today carries no history); a rule such as *at most three posts in ten minutes* is expressible and tested in the reference evaluator and the AE contract suite (`mycelium::ae_contract`); the scope of a count is stated by name — **per node** (the journal is node-local and never gossiped) unless the design question in §5 is decided otherwise; a history that cannot be read is `Indeterminate`, never an empty history; replay records the history view as a decision input | design question §5 |
+| **K** — *delivered after 2.34.0, unreleased (#638), §3.5* | Policy over history | the action evaluator can decide on what an actor has already done, not only on the request: a bounded, read-only history view (the actor's recent decisions and executions from the evidence journal — `src/agent/evidence_journal.rs`) reaches `ActionEvaluator::evaluate` beside the envelope (`ActionEnvelope`, `src/agent/action_evaluator.rs:101`, which today carries no history); a rule such as *at most three posts in ten minutes* is expressible and tested in the reference evaluator and the AE contract suite (`mycelium::ae_contract`); the scope of a count is stated by name — **per node** (the journal is node-local and never gossiped) unless the design question in §5 is decided otherwise; a history that cannot be read is `Indeterminate`, never an empty history; replay records the history view as a decision input | design question §5 |
 | **L** | Credentials attached at egress | a secret need not enter a component's or an activation command's environment: an outbound request names a credential binding, and the egress gate (`EgressPolicy`, `mycelium-core/src/config.rs:280`, which today checks the host and every redirect hop) attaches it on the way out — bearer, header and basic forms at least — only to the host the binding names; a redirect off that host drops it; the binding's use is counted and its value never logged, traced or written to the evidence journal; the places a secret is read into the node today (`[[serve]].api_key_env`, federation credentials, an activation command's environment) are listed and each either moved behind a binding or stated as unchanged *From NVIDIA OpenShell (2026-10-12):* the component holds an opaque placeholder and never the value — the gate resolves the placeholder only at an endpoint the binding authorises — so a leaked environment or log carries nothing usable. | — |
 | **M** | Activation commands confined | an `[[activation]]` command — today "not a sandbox: there is no allowlist and no confinement" (`docs/reference/unit-file.md:276`) and run with the stem's privileges — can be run under an OS confinement profile the unit file names (macOS Seatbelt first, Linux namespaces/Landlock or seccomp where available): filesystem access limited to the placed artifact's directory and declared paths, network limited to declared hosts or none; a profile the platform cannot apply refuses the activation by name, never runs it unconfined; the unconfined default stays, stated, and the guarantee report says which applies *From NVIDIA OpenShell (2026-10-12):* a profile's filesystem and syscall limits are fixed for the activation's life and its network allow-list may change live (OpenShell's split: filesystem and process locked at creation, network hot-reloadable); OpenShell itself (containers, seccomp, an unprivileged identity; needs Docker) is a candidate backend for a stem, beside a native Seatbelt/Landlock profile, rather than something to rebuild. | — |
 | **N** — *delivered after 2.34.0, unreleased (#633), §3.5* | A2A at the current specification | an A2A client built on the current `a2a-sdk` (1.2.2, the library Strands Agents uses) reaches Mycelium's skills through `/a2a`, with the same authority as today — **the 2026-10-12 probe found it cannot**: the card is served only at `/.well-known/agent.json` (the SDK reads `/.well-known/agent-card.json`, 404); the card's `url` is the node's **gossip** address, not its gateway, and omits `/a2a` (`src/agent/a2a.rs:445`, so the SDK's `send_message` failed with a network error); the methods are the pre-0.2 `tasks/send` / `tasks/sendSubscribe` / `tasks/get` / `tasks/cancel` (`SendMessage` and `message/send` both answer `-32601`); and the skill is chosen by a Mycelium-only `skillId` parameter that a standard client never sends. Promises: the card at `/.well-known/agent-card.json` (the old path kept for one release), naming the gateway's own URL and scheme (https under `gateway_tls`) with `/a2a` and its supported interfaces and protocol versions; the A2A 1.0 methods (`SendMessage`, `SendStreamingMessage`, `GetTask`, `CancelTask`) and the 0.3 names (`message/send`, `message/stream`) served beside the old ones, which stay for one release with a deprecation entry; a message reaches a skill without `skillId` (a declared default skill, or the skill named in the message's metadata — decided in the PR, stated on the card); every new method runs the same doors as `tasks/send` — the action evaluator, mandates, evidence, task ownership — and the C7 bypass matrix gains each new method; the probe becomes a CI test driving the real `a2a-sdk` client against a node | — |
@@ -1149,6 +1149,79 @@ courier); asking the bakery and the kitchen is allowed by policy to the fleet's 
 - **Not built, stated:** a model's judgement (scripted); a node failing mid-call (stopped between turns); revocation
   (shown by `authority_drain` and the confined-fleet suite); Strands' own A2A classes; scale; fleet-wide enforcement of
   one holder per scope.
+**K — Policy over history (#638, unreleased).** The doors enumerated first
+(`git grep -n "ae_preflight\|preflight(\|evaluator_facts\|\.evaluate(" -- src`): every gateway decision goes through
+`http::ae_preflight` (`src/agent/http/authz.rs`) — `/mcp` (through `gateway_preflight`), `/a2a`'s unary and streamed
+sends (`a2a.rs`), and provider enforcement (`provider_enforcement.rs`) — so one change reaches all of them; the public
+`preflight` (for an adopter's own enforcement point) and the contract suite's `run_cases`/`outcome_of` call the seam
+directly. The evidence journal is written only by `ae_record`.
+- *the action evaluator can decide on what an actor has already done, not only on the request: a bounded, read-only
+  history view (the actor's recent decisions and executions from the evidence journal) reaches
+  `ActionEvaluator::evaluate` beside the envelope* — `ActionEvaluator::history_request` (what it needs) and
+  `evaluate_with_history(envelope, &History)` (what the seam calls; the default calls `evaluate`, so no evaluator
+  changes); `History::View(HistoryView)` — the actor's records in the window, oldest first, each with its decision and
+  last-recorded execution — or `History::Unavailable`. Built by `HistoryIndex` (`evidence_journal.rs`): loaded from the
+  journal at `with_evidence_journal`, fed by `ae_record` after each append (an execution record updates its attempt),
+  bounded at 24 hours and 1 024 records per actor, a view past a dropped record `complete: false`. Tests
+  `a_history_is_loaded_from_the_journal`, `a_journal_not_yet_written_is_an_empty_history`,
+  `the_journal_record_of_an_admitted_permit_is_not_counted_twice`, `completeness_is_judged_per_window`,
+  `a_window_longer_than_the_horizon_is_never_complete`.
+- *a rule such as at most three posts in ten minutes is expressible and tested in the reference evaluator and the AE
+  contract suite (`mycelium::ae_contract`)* — `Rule::at_most(3, 600_000)`
+  (`at_most_three_in_ten_minutes_denies_the_fourth_naming_the_scope`, `only_permits_inside_the_window_and_matching_the_rule_count`);
+  the contract suite's clause `PolicyClause::AllowAtMost` and cases `history_below_limit`, `history_at_limit`,
+  `history_outside_window`, `history_unavailable`, `history_incomplete_below_limit`, passed by the reference evaluator,
+  the derived-revision wrapper (which had to forward the new methods — the upgrade note says so) and the suite's
+  independent `TableEvaluator`, which implements the limit its own way. End to end through `/mcp`:
+  `at_most_three_posts_in_ten_minutes_counted_at_this_gateway` — the fourth post denied (`-32030`) and never run.
+- *the scope of a count is stated by name — per node … unless the design question in §5 is decided otherwise* —
+  decided per node, scope named (§5): `HistoryScope::EnforcementPoint`, named in every history decision's `checked`
+  (`history scope=enforcement_point … counted=n limit=m`), its denial's reason, and the evidence record's `history.scope`.
+- *a history that cannot be read is `Indeterminate`, never an empty history* — an unreadable journal makes every view
+  `Unavailable` (`an_unreadable_journal_makes_every_history_unavailable`), no journal makes it `Unavailable` at the gateway,
+  a decision through plain `preflight` gets `Unavailable`; a limited rule decides `Indeterminate` on each
+  (`an_unavailable_history_is_not_established_never_empty`), and below the limit on an incomplete view too
+  (`an_incomplete_history_establishes_a_denial_but_not_a_permit`).
+- *replay records the history view as a decision input* — the gateway's decisions are not in the decision trace
+  (`ae.preflight` is *catalogue only*), so the input is recorded where the decision is: the evidence record's `history`
+  (`HistoryInput`: scope, window, the attempts the view held by attempt id, completeness, or why none was available),
+  from which a replay finds the attempts in the journal and decides again
+  (`the_history_a_decision_read_is_on_its_evidence_record`, and the end-to-end test asserting the refusal's three
+  attempts). The rule catalogue's `ae.preflight` (revision 2) lists the history as an input with its scope.
+- *Found on the way* — a check-then-count race: two concurrent calls by one actor could each read *two posts so far*
+  and both be permitted. One actor's history-limited decisions are made one after another (a striped async lock, row 61),
+  a permit is counted as it is decided and taken back if its evidence is not recorded; ten concurrent calls under a
+  limit of three admit three. And a view capped near the limit was filled by the actor's other records, so the
+  reference evaluator asks for the whole window.
+- *Seen failing:* with the gate and the admit removed, the burst admitted more than three; with an unreadable journal
+  read as empty, and with the journal not loaded at attach, the unreadable and reload tests failed.
+- *The independent review (#638)* — fixed, each with a test seen failing first where it is a defect: (1) the index was
+  per node across every enforcement point, so provider enforcement on the gateway's node counted each call twice and
+  `at_most(3)` ran one — now keyed by point (`gateway`, `provider`), the label true, and the end-to-end test runs four
+  posts with provider enforcement on, three admitted; (2) the clock was read before the per-actor gate and views dropped
+  records stamped after it, so a call that waited could count from before permits admitted meanwhile — the clock is read
+  under the gate and later-stamped records count; (3) completeness was judged for the widest window, so a week-long
+  rule left a ten-minute one never established — a view now says the newest record it omits and each rule judges its own
+  window; (4) attaching a journal read all of it synchronously, and actors were unbounded — the history is read in the
+  background, page by page, only once an evaluator asks for history (until then not established), and capped at 65 536
+  actors per point with evictions tracked; (5) a journal repaired at open, or a lenient append that failed, loaded as a
+  complete shorter history — the journal reports a truncation (`truncated_at_open`) and both mark older history as not
+  held; (7) `at_most(n, 0)` permitted without limit — not established now, and `at_most(0, w)` documented as never.
+  Stated: (6) a permit whose client went away, or that a downstream check refused, stays counted; (8) the private Cedar
+  adapter must decline the five new cases on its re-pin (§47), and the evidence schema is unchanged; (9) the history input
+  is recorded, and no replay consumes it yet.
+- *Its confirmation* — F1 and F2 confirmed fixed, F3–F7 fixed or stated; four more, fixed: (N1) the actor cap counted the
+  whole map and an eviction marked every actor's views incomplete at every point, after an O(actors) scan under the
+  lock per new actor — now per point, evicted a sixteenth at a time, and only an actor appearing after an eviction is
+  bounded by it (`an_actor_evicted_for_room_leaves_older_views_incomplete` now also asserts one that stayed and another
+  point are untouched); (N2) an admitted permit's journal record moved its time back to the envelope's — it keeps the time
+  it was counted at (`an_admitted_permit_keeps_the_time_it_was_counted_at`); (N3) `admit` skipped the cap — it goes
+  through the same path; (N4) an execution observed during the read was lost at the merge
+  (`an_execution_seen_during_the_read_survives_the_merge`). Stated: a window longer than 24 hours never permits; a
+  crash's torn tail makes limited rules not established for one window.
+- **Not built, stated:** a fleet-wide count (§5); the decision trace does not carry `ae.preflight`, so the history input
+  lives on the evidence record and nothing replays it yet; a history across more than 24 hours, 1 024 records per actor or
+  65 536 actors per point reads as incomplete.
 
 ### 3.6 · State of play and the next iteration (2026-10-12)
 
@@ -1161,8 +1234,8 @@ queues before the shutdown signal), and N, O, P recorded by #614 with the `a2a-s
 
 **Delivered in v2.34.0 (2026-10-16):** F2 (#624 — the unsigned-frame and bare-signature refusal unconditional, `kv_require_signed_frames` retired, `secure-single-domain` rev 5; §3.5), T (#622), S (#623 — identity proofs required by default; §3.5); the wasmtime 49.0.3 / rustls 0.23.46 advisories (#625).
 
-**Not started:** K (policy over history — decide §5's fleet question first), L (credentials attached at egress), M
-(activation commands confined), and §5's inference-routing question. N, O and P are delivered (#633, #634, #635; §3.5). (Q, revocation at every verifier, is delivered — #616, §3.5; S, identity proofs on by default, is delivered in 2.34.0 — #623, §3.5.)
+**Not started:** L (credentials attached at egress), M
+(activation commands confined), and §5's inference-routing question. N, O, P and K are delivered (#633, #634, #635, #638; §3.5). (Q, revocation at every verifier, is delivered — #616, §3.5; S, identity proofs on by default, is delivered in 2.34.0 — #623, §3.5.)
 
 **Follow-ups recorded as not built in delivered rows (each in its §3.5 block):**
 - **H:** carry each named offer's signed bytes inside the close and award from that copy (today a member who deletes a
@@ -1268,10 +1341,12 @@ built: an authenticated anti-entropy entry (a wire change).
   call by capacity and reservation; nothing decides whether a request *may* leave the domain, or to which model, by the
   data it carries. The façade already runs the action preflight, so it is the natural enforcement point. Decide whether
   this becomes a row (the evaluator sees the route's destination and a data classification) or stays out of scope.
-- **Row K: what does "history" mean in a fleet?** The evidence journal is node-local, so a history-conditioned rule
-  counts what *this* enforcement point saw. A fleet-wide count needs either the consensus path (an agreed counter —
-  exact, slower, unavailable without a quorum) or a gossiped tally that detects an overrun after the fact (detection,
-  not prevention, the Layer I law). Decide before K is built, and say which on the rule.
+- **Row K: what does "history" mean in a fleet?** *Decided 2026-10-17 (the user): per enforcement point, the scope
+  named.* A history-conditioned rule counts what *this* enforcement point's evidence journal recorded
+  (`HistoryScope::EnforcementPoint`): exact there, no quorum; an actor spreading calls over N gateways can be admitted up
+  to N times a limit, and every history decision names the scope. A fleet scope — the consensus path (an agreed
+  counter, exact, unavailable without a quorum) or a gossiped tally (detection after the fact) — would be a new variant,
+  not built.
 
 ## 6 · Recorded limits that stay limits
 

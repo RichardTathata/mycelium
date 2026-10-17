@@ -439,6 +439,173 @@ pub trait ActionEvaluator: Send + Sync + 'static {
             status: MappingStatus::Unmapped,
         }
     }
+
+    /// The history this evaluator needs to decide (post-360 row K), or `None` — the default — for a policy
+    /// that decides on the request alone. Asked before the envelope is built, behind the same unwind
+    /// boundary as the other facts; the enforcement point then reads the actor's records for the window.
+    ///
+    /// **An evaluator that wraps another forwards this and [`evaluate_with_history`](Self::evaluate_with_history).**
+    /// A wrapper written before them hides the inner evaluator's request, so every limited rule behind it
+    /// decides `Indeterminate` — closed, but not what was meant.
+    fn history_request(&self) -> Option<HistoryRequest> {
+        None
+    }
+
+    /// Decide with the actor's history beside the envelope. **What the seam calls.**
+    ///
+    /// The default ignores it and calls [`evaluate`](Self::evaluate), so an evaluator that decides on the
+    /// request alone is unchanged. One that needs history overrides this and decides
+    /// [`Verdict::Indeterminate`] on [`History::Unavailable`] — a history that cannot be read is not an
+    /// empty one — and names the [`HistoryScope`] in what it reports.
+    fn evaluate_with_history(&self, envelope: &ActionEnvelope, history: &History) -> Decision {
+        let _ = history;
+        self.evaluate(envelope)
+    }
+}
+
+// ── History (post-360 row K) ─────────────────────────────────────────────────
+
+/// **Whose** history a count covers. Every history decision names it, because a limit means nothing until
+/// it is said what was counted.
+///
+/// Decided for row K (plan §5): a count is what **this enforcement point** at this node saw — its own evidence
+/// journal, node-local and never gossiped. The point is the gateway (all its doors, `/mcp`, `/a2a`, the LLM and
+/// federation routes, count together) or the provider check, each counted apart, so a call the gateway decided
+/// and the provider re-checks on one node is counted once at each, never twice at one. Exact there and needing no
+/// quorum; an actor that spreads its calls over N gateways can be admitted up to N times a per-gateway limit. A
+/// fleet scope would be a new variant, and a rule naming it would not be satisfied by this one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum HistoryScope {
+    /// The decisions this enforcement point recorded in its own evidence journal.
+    EnforcementPoint,
+}
+
+impl HistoryScope {
+    /// The scope's name, as decisions and evidence state it.
+    pub fn label(&self) -> &'static str {
+        match self {
+            HistoryScope::EnforcementPoint => "enforcement_point",
+        }
+    }
+}
+
+/// What history an evaluator needs to decide: how far back, and at most how many of the actor's records.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HistoryRequest {
+    /// How far back from the decision, in milliseconds.
+    pub window_ms: u64,
+    /// The most recent records it needs at most. A view holding fewer than the window had says so
+    /// ([`HistoryView::complete`]).
+    pub max_entries: usize,
+}
+
+/// One earlier decision about the same actor, as the evidence journal recorded it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryEntry {
+    /// Its event time, epoch milliseconds (the record's `at_ms`).
+    pub at_ms: u64,
+    /// The attempt it decided — the key a replay finds it by in the journal.
+    pub attempt_id: String,
+    /// The operation.
+    pub operation: String,
+    /// The resource, as the enforcement point resolved it.
+    pub resource: String,
+    /// What was decided.
+    pub decision: DecisionKind,
+    /// What this point last recorded about its execution.
+    pub execution: Execution,
+}
+
+/// An actor's recent history, bounded and read-only — what [`ActionEvaluator::evaluate_with_history`] decides on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryView {
+    /// Whose history this is.
+    pub scope: HistoryScope,
+    /// The actor it is about — the envelope's.
+    pub actor: String,
+    /// Which enforcement point at this node counted it: `gateway`, or the provider check (`provider`).
+    pub point: String,
+    /// The enforcement point's clock when it was read. The evaluator holds no clock; windows start here.
+    pub as_of_ms: u64,
+    /// How far back it reaches.
+    pub window_ms: u64,
+    /// The actor's records in the window, oldest first.
+    pub entries: Vec<HistoryEntry>,
+    /// Whether these are **all** of the actor's records in the window. `false` when the view was capped or
+    /// the point no longer holds some of them: a count below a limit is then not established.
+    pub complete: bool,
+    /// The newest event time of a record this view does not hold — dropped by the point's bounds, lost to a
+    /// journal repair or a lenient append, or cut by the request's cap. A rule over a window that starts at or
+    /// after it sees all of its records whatever `complete` says of the widest window; one reaching back past
+    /// it does not. `None`: nothing is missing.
+    pub omitted_through_ms: Option<u64>,
+}
+
+impl HistoryView {
+    /// Whether this view holds every record in the `window_ms` ending at `as_of_ms` — for a rule whose window
+    /// is not the view's.
+    pub fn complete_for(&self, window_ms: u64) -> bool {
+        window_ms <= self.window_ms && self.omitted_through_ms.is_none_or(|t| t <= self.as_of_ms.saturating_sub(window_ms))
+    }
+}
+
+/// The history an enforcement point gives an evaluator: a view, or why none could be established —
+/// **never** an empty view standing in for one it could not read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum History {
+    /// What was read.
+    View(HistoryView),
+    /// No history could be established, and why: no evidence journal, a journal that could not be read,
+    /// or a decision made without one.
+    Unavailable(String),
+}
+
+/// What a decision read of its actor's history, carried on the evidence record — the history view as a
+/// **decision input**: the scope, the window, and the attempts it was given, by which a replay finds them in
+/// the journal and decides again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryInput {
+    /// Whose history; absent when none could be established.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<HistoryScope>,
+    /// How far back it reached.
+    pub window_ms: u64,
+    /// The clock it was read at.
+    pub as_of_ms: u64,
+    /// The attempts it held, oldest first.
+    pub attempts: Vec<String>,
+    /// Whether that was all of them in the window.
+    pub complete: bool,
+    /// Why no history could be established, when none could.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<String>,
+}
+
+impl HistoryInput {
+    /// The input `history` makes to a decision.
+    pub fn of(history: &History) -> Self {
+        match history {
+            History::View(v) => HistoryInput {
+                scope: Some(v.scope),
+                window_ms: v.window_ms,
+                as_of_ms: v.as_of_ms,
+                attempts: v.entries.iter().map(|e| e.attempt_id.clone()).collect(),
+                complete: v.complete,
+                unavailable: None,
+            },
+            History::Unavailable(why) => HistoryInput {
+                scope: None,
+                window_ms: 0,
+                as_of_ms: 0,
+                attempts: Vec::new(),
+                complete: false,
+                unavailable: Some(why.clone()),
+            },
+        }
+    }
 }
 
 // ── The evidence record ──────────────────────────────────────────────────────
@@ -696,9 +863,20 @@ pub struct AeEvidence {
     pub checked: Vec<String>,
     /// The evaluator's human-legible reason. Never policy text.
     pub reason: String,
+    /// The actor's history this decision read, when it read one (post-360 row K) — scope, window and the
+    /// attempts it was given, or why none could be established. Absent for a decision made on the request
+    /// alone, so a record without history serialises exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<HistoryInput>,
 }
 
 impl AeEvidence {
+    /// This record, carrying the history its decision read.
+    pub fn with_history(mut self, history: HistoryInput) -> Self {
+        self.history = Some(history);
+        self
+    }
+
     /// The evidence for a **destination's** refusal of a composed effect
     /// (`docs/design/composed-effect.md` §9): a `Decided` record at enforcement point
     /// `destination`, verdict `Deny`, execution `None` — nothing ran there, and the resource can
@@ -756,6 +934,8 @@ impl AeEvidence {
             arguments_digest: hex32(&envelope.arguments_digest),
             checked: decision.checked.clone(),
             reason: decision.reason.clone(),
+            // Set by the enforcement point when the decision read a history (`with_history`).
+            history: None,
         }
     }
 
@@ -769,7 +949,8 @@ impl AeEvidence {
     /// `at_ms` is carried too: both records are about **one attempt**, and an exporter that merges
     /// them into a single observation needs one event time for it — the attempt's.
     pub fn as_execution(&self, execution: Execution) -> Self {
-        Self { kind: RecordKind::Execution, execution, ..self.clone() }
+        // The history was an input to the decision, which stands on its own record; it is not repeated here.
+        Self { kind: RecordKind::Execution, execution, history: None, ..self.clone() }
     }
 
     /// The coarse audit outcome this decision summarises to.
@@ -1064,14 +1245,14 @@ impl std::fmt::Display for PreflightRefusal {
 /// [`preflight`], so an adapter that panics here is contained wherever containment is possible.
 /// `None` means the adapter panicked and nothing it said can be used.
 ///
-/// Returns `(security_relevant_argument_names, mapping)`.
+/// Returns `(security_relevant_argument_names, mapping, history_request)`.
 pub fn evaluator_facts(
     evaluator: &Arc<dyn ActionEvaluator>,
     operation: &str,
     resource: &str,
-) -> Option<(Vec<String>, ActionMapping)> {
+) -> Option<(Vec<String>, ActionMapping, Option<HistoryRequest>)> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        (evaluator.security_relevant_arguments(), evaluator.mapping(operation, resource))
+        (evaluator.security_relevant_arguments(), evaluator.mapping(operation, resource), evaluator.history_request())
     }))
     .ok()
 }
@@ -1107,7 +1288,22 @@ pub fn preflight(
     envelope: &ActionEnvelope,
     now_ms: u64,
 ) -> Result<Option<Decision>, PreflightRefusal> {
+    preflight_with_history(evaluator, envelope, None, now_ms)
+}
+
+/// [`preflight`], with the actor's history beside the envelope (post-360 row K) — what an enforcement point
+/// that keeps one calls. `None` gives an evaluator that asked for history
+/// [`History::Unavailable`]: a decision made without the history it needs is not established, never made
+/// as though the actor had done nothing.
+pub fn preflight_with_history(
+    evaluator: Option<&Arc<dyn ActionEvaluator>>,
+    envelope: &ActionEnvelope,
+    history: Option<&History>,
+    now_ms: u64,
+) -> Result<Option<Decision>, PreflightRefusal> {
     let Some(evaluator) = evaluator else { return Ok(None) };
+    let unavailable = History::Unavailable("no history was given to this decision".into());
+    let history = history.unwrap_or(&unavailable);
 
     // Expiry is the seam's own check: an evaluator is deterministic and holds no clock.
     if envelope.is_expired(now_ms) {
@@ -1126,7 +1322,9 @@ pub fn preflight(
     // builds where it works (review, 2026-09-15). `AssertUnwindSafe` is sound here: the evaluator
     // is `&dyn` behind an `Arc` and the envelope is borrowed immutably, so no observable state can
     // be left inconsistent by an unwind.
-    let decision = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| evaluator.evaluate(envelope))) {
+    let decision = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        evaluator.evaluate_with_history(envelope, history)
+    })) {
         Ok(d) => d,
         Err(_) => {
             return Err(PreflightRefusal::NotEstablished(Decision::indeterminate(
@@ -1224,6 +1422,19 @@ pub struct Rule {
     /// [`ActionEnvelope::selected_arguments`]. A named value the request did not carry is *not
     /// established*, never a silent mismatch.
     pub requires_values: Vec<(String, serde_json::Value)>,
+    /// At most this many permitted actions matching the rule in a window, counted in the actor's history at
+    /// this enforcement point (post-360 row K). `None`: no limit.
+    pub limit: Option<HistoryLimit>,
+}
+
+/// *At most `count` in `window_ms`* — a limit over the actor's history, counted at the enforcement point
+/// ([`HistoryScope::EnforcementPoint`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HistoryLimit {
+    /// How many permitted actions matching the rule the window may hold, this one included.
+    pub count: u32,
+    /// How far back, in milliseconds.
+    pub window_ms: u64,
 }
 
 impl Rule {
@@ -1237,7 +1448,16 @@ impl Rule {
             requires_facts: Vec::new(),
             requires_mandate: None,
             requires_values: Vec::new(),
+            limit: None,
         }
+    }
+
+    /// Permit at most `count` actions matching this rule in `window_ms`, counted in the actor's history at
+    /// this enforcement point — e.g. *at most three posts in ten minutes*. An evaluator holding such a rule
+    /// asks for history; without it the rule decides `Indeterminate`.
+    pub fn at_most(mut self, count: u32, window_ms: u64) -> Self {
+        self.limit = Some(HistoryLimit { count, window_ms });
+        self
     }
 
     /// Require these scopes for the rule to apply.
@@ -1345,6 +1565,21 @@ impl ReferenceEvaluator {
 }
 
 impl ActionEvaluator for ReferenceEvaluator {
+    fn history_request(&self) -> Option<HistoryRequest> {
+        let limits: Vec<HistoryLimit> = self.allowances.iter().filter_map(|r| r.limit).collect();
+        (!limits.is_empty()).then(|| HistoryRequest {
+            window_ms: limits.iter().map(|l| l.window_ms).max().unwrap_or(0),
+            // Every record in the window: the view is the actor's, across operations and resources, so a cap
+            // near the limit would be filled by records no rule here counts. The enforcement point's own bound
+            // still applies, and a view it had to cut says it is incomplete.
+            max_entries: usize::MAX,
+        })
+    }
+
+    fn evaluate(&self, env: &ActionEnvelope) -> Decision {
+        self.evaluate_with_history(env, &History::Unavailable("evaluated without a history".into()))
+    }
+
     fn mapping(&self, operation: &str, resource: &str) -> ActionMapping {
         let (catalogue, revision) = self
             .catalogue
@@ -1358,7 +1593,7 @@ impl ActionEvaluator for ReferenceEvaluator {
         ActionMapping { catalogue, revision, status }
     }
 
-    fn evaluate(&self, env: &ActionEnvelope) -> Decision {
+    fn evaluate_with_history(&self, env: &ActionEnvelope, history: &History) -> Decision {
         let rev = self.revision.clone();
 
         // A rule whose own preconditions cannot be established decides nothing — **including a
@@ -1456,6 +1691,77 @@ impl ActionEvaluator for ReferenceEvaluator {
                     errors: missing,
                 };
             }
+            // A limit over the actor's history (row K): counted at this enforcement point, and only on a
+            // history it could read — an unreadable one is not an empty one.
+            let mut counted: Option<String> = None;
+            if let Some(limit) = a.limit {
+                let limited = format!(
+                    "allowance actor={} operation={} resource={} at most {} per {} ms",
+                    a.actor, a.operation, a.resource, limit.count, limit.window_ms
+                );
+                let view = match history {
+                    History::View(v) => v,
+                    History::Unavailable(why) => {
+                        return Decision {
+                            verdict: Verdict::Indeterminate,
+                            checked: vec![limited],
+                            reason: "the matching allowance is limited over the actor's history, which was not established".into(),
+                            policy_revision: rev,
+                            errors: vec![format!("history not established: {why}")],
+                        };
+                    }
+                };
+                if limit.window_ms == 0 {
+                    return Decision {
+                        verdict: Verdict::Indeterminate,
+                        checked: vec![limited],
+                        reason: "the allowance is limited over an empty window, which counts nothing".into(),
+                        policy_revision: rev,
+                        errors: vec!["history limit with a window of 0 ms".into()],
+                    };
+                }
+                let any = |pat: &str, v: &str| pat == "*" || pat == v;
+                // Everything in the window *and after its start* counts — a record stamped later than this
+                // view's clock (a call that read its clock after this one, decided first) is one more, not none.
+                let from = view.as_of_ms.saturating_sub(limit.window_ms);
+                let n = view
+                    .entries
+                    .iter()
+                    .filter(|e| {
+                        e.decision == DecisionKind::Permit
+                            && e.at_ms > from
+                            && any(&a.operation, &e.operation)
+                            && any(&a.resource, &e.resource)
+                    })
+                    .count();
+                let scope = view.scope.label();
+                let tally = format!(
+                    "history scope={scope} point={} window_ms={} counted={n} limit={}",
+                    view.point, limit.window_ms, limit.count
+                );
+                if n >= limit.count as usize {
+                    return Decision {
+                        verdict: Verdict::Deny,
+                        checked: vec![limited, tally],
+                        reason: format!(
+                            "the allowance permits at most {} in {} ms and the actor's history at scope {scope} already holds {n}",
+                            limit.count, limit.window_ms
+                        ),
+                        policy_revision: rev,
+                        errors: Vec::new(),
+                    };
+                }
+                if !view.complete_for(limit.window_ms) {
+                    return Decision {
+                        verdict: Verdict::Indeterminate,
+                        checked: vec![limited, tally],
+                        reason: "the actor's history is incomplete, so a count below the limit is not established".into(),
+                        policy_revision: rev,
+                        errors: vec![format!("history incomplete at scope {scope}")],
+                    };
+                }
+                counted = Some(tally);
+            }
             return Decision {
                 verdict: Verdict::Permit,
                 checked: {
@@ -1472,6 +1778,7 @@ impl ActionEvaluator for ReferenceEvaluator {
                             b.holder, b.term, b.epoch
                         ));
                     }
+                    c.extend(counted);
                     c
                 },
                 reason: "an allowance matches this action".into(),
@@ -1729,6 +2036,137 @@ mod tests {
             .build()
     }
 
+
+    // ── Row K: policy over history ──────────────────────────────────────────────────────────────
+
+    const TEN_MIN: u64 = 600_000;
+
+    fn posts(limit: u32) -> ReferenceEvaluator {
+        ReferenceEvaluator::new("rev-1").allow(
+            Rule::new("oidc:idp/alice", "tools/call", "tool:post@n1").requiring_scopes(["mcp:invoke"]).at_most(limit, TEN_MIN),
+        )
+    }
+
+    fn entry(at_ms: u64, attempt: &str, decision: DecisionKind) -> HistoryEntry {
+        HistoryEntry {
+            at_ms,
+            attempt_id: attempt.into(),
+            operation: "tools/call".into(),
+            resource: "tool:post@n1".into(),
+            decision,
+            execution: Execution::Completed,
+        }
+    }
+
+    fn history(as_of_ms: u64, entries: Vec<HistoryEntry>, complete: bool) -> History {
+        History::View(HistoryView {
+            scope: HistoryScope::EnforcementPoint,
+            actor: "oidc:idp/alice".into(),
+            point: "gateway".into(),
+            as_of_ms,
+            window_ms: TEN_MIN,
+            entries,
+            complete,
+            omitted_through_ms: (!complete).then_some(as_of_ms),
+        })
+    }
+
+    #[test]
+    fn a_limited_allowance_asks_for_the_history_it_counts() {
+        assert_eq!(posts(3).history_request(), Some(HistoryRequest { window_ms: TEN_MIN, max_entries: usize::MAX }));
+        assert_eq!(ReferenceEvaluator::new("rev-1").allow(Rule::new("*", "*", "*")).history_request(), None);
+    }
+
+    /// *At most three posts in ten minutes*: the fourth is denied, and the decision names whose history it counted.
+    #[test]
+    fn at_most_three_in_ten_minutes_denies_the_fourth_naming_the_scope() {
+        let env = envelope("oidc:idp/alice", "tools/call", "tool:post@n1");
+        let now = 2_000_000;
+        let two = history(now, vec![entry(now - 1_000, "a", DecisionKind::Permit), entry(now - 2_000, "b", DecisionKind::Permit)], true);
+        let d = posts(3).evaluate_with_history(&env, &two);
+        assert_eq!(d.verdict, Verdict::Permit, "{d:?}");
+        assert!(d.checked.iter().any(|c| c.contains("history scope=enforcement_point") && c.contains("counted=2")), "{d:?}");
+
+        let three = history(now, vec![entry(now - 3_000, "a", DecisionKind::Permit), entry(now - 2_000, "b", DecisionKind::Permit),
+                                      entry(now - 1_000, "c", DecisionKind::Permit)], true);
+        let d = posts(3).evaluate_with_history(&env, &three);
+        assert_eq!(d.verdict, Verdict::Deny, "{d:?}");
+        assert!(d.reason.contains("enforcement_point") && d.reason.contains("at most 3"), "{d:?}");
+    }
+
+    #[test]
+    fn only_permits_inside_the_window_and_matching_the_rule_count() {
+        let env = envelope("oidc:idp/alice", "tools/call", "tool:post@n1");
+        let now = 2_000_000;
+        let mut other = entry(now - 500, "x", DecisionKind::Permit);
+        other.resource = "tool:read@n1".into();
+        let h = history(now, vec![
+            entry(now - TEN_MIN, "old", DecisionKind::Permit), // exactly a window ago: outside it
+            entry(now - 2_000, "d1", DecisionKind::Deny),
+            entry(now - 1_500, "d2", DecisionKind::Indeterminate),
+            other,
+            entry(now - 1_000, "p1", DecisionKind::Permit),
+            entry(now - 900, "p2", DecisionKind::Permit),
+        ], true);
+        assert_eq!(posts(3).evaluate_with_history(&env, &h).verdict, Verdict::Permit);
+    }
+
+    /// A history that cannot be read is not an empty one.
+    #[test]
+    fn an_unavailable_history_is_not_established_never_empty() {
+        let env = envelope("oidc:idp/alice", "tools/call", "tool:post@n1");
+        let d = posts(3).evaluate_with_history(&env, &History::Unavailable("the journal could not be read".into()));
+        assert_eq!(d.verdict, Verdict::Indeterminate);
+        assert!(d.errors.iter().any(|e| e.contains("history not established") && e.contains("could not be read")), "{d:?}");
+        // Decided on the request alone — `evaluate`, the pre-row-K entry — a limited rule is not established either.
+        assert_eq!(posts(3).evaluate(&env).verdict, Verdict::Indeterminate);
+        // And through the seam with no history given.
+        let ev: Arc<dyn ActionEvaluator> = Arc::new(posts(3));
+        assert!(matches!(preflight(Some(&ev), &env, 2_000), Err(PreflightRefusal::NotEstablished(_))));
+    }
+
+    /// Below the limit on an incomplete view is not established; at the limit it is a denial whatever is missing.
+    #[test]
+    fn an_incomplete_history_establishes_a_denial_but_not_a_permit() {
+        let env = envelope("oidc:idp/alice", "tools/call", "tool:post@n1");
+        let now = 2_000_000;
+        let one = history(now, vec![entry(now - 1_000, "a", DecisionKind::Permit)], false);
+        let d = posts(3).evaluate_with_history(&env, &one);
+        assert_eq!(d.verdict, Verdict::Indeterminate, "{d:?}");
+        assert!(d.errors.iter().any(|e| e.contains("incomplete")), "{d:?}");
+        let three = history(now, (0..3).map(|i| entry(now - 1_000 - i, &format!("p{i}"), DecisionKind::Permit)).collect(), false);
+        assert_eq!(posts(3).evaluate_with_history(&env, &three).verdict, Verdict::Deny);
+    }
+
+    /// An evaluator that asks for no history is unchanged: the seam's history path calls its `evaluate`.
+    #[test]
+    fn an_evaluator_without_a_limit_ignores_history() {
+        let env = envelope("oidc:idp/alice", "tools/call", "tool:post@n1");
+        let plain = ReferenceEvaluator::new("rev-1").allow(Rule::new("oidc:idp/alice", "tools/call", "tool:post@n1").requiring_scopes(["mcp:invoke"]));
+        let full = history(2_000_000, (0..10).map(|i| entry(1_999_000 + i, &format!("p{i}"), DecisionKind::Permit)).collect(), true);
+        assert_eq!(plain.evaluate_with_history(&env, &full), plain.evaluate(&env));
+        assert_eq!(plain.evaluate_with_history(&env, &History::Unavailable("x".into())).verdict, Verdict::Permit);
+    }
+
+    /// The evidence record carries what the decision read — absent when it read none, so older records are unchanged.
+    #[test]
+    fn the_history_a_decision_read_is_on_its_evidence_record() {
+        let env = envelope("oidc:idp/alice", "tools/call", "tool:post@n1");
+        let d = Decision::indeterminate("x", "rev-1");
+        let plain = AeEvidence::for_decision(&env, &d, Execution::None, "gateway");
+        assert!(!serde_json::to_string(&plain).unwrap().contains("history"), "a record without history serialises as before");
+        let now = 2_000_000;
+        let h = history(now, vec![entry(now - 1_000, "a", DecisionKind::Permit)], true);
+        let with = plain.with_history(HistoryInput::of(&h));
+        let back: AeEvidence = serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
+        let input = back.history.expect("carried");
+        assert_eq!(input.scope, Some(HistoryScope::EnforcementPoint));
+        assert_eq!(input.attempts, vec!["a".to_string()]);
+        assert!(input.complete && input.unavailable.is_none());
+        let none = HistoryInput::of(&History::Unavailable("no journal".into()));
+        assert_eq!(none.scope, None);
+        assert_eq!(none.unavailable.as_deref(), Some("no journal"));
+    }
 
     // ── AE1: the authenticated action envelope binds a scoped mandate ───────────────────────────
     //
