@@ -83,12 +83,12 @@ Four places strain that line today, and the rows in §3 address each:
 | **H** — *delivered 2.33.0 (#609), §3.5* | Companions | the commitment deadline judged on the log's clock, not the offerer's — **delivered as the declarer's signed close** (no clock in the log is offerer-proof, §3.5); `award_of` verifies before it reports (the declarer pinned by the caller; the unverified path stated, *not built*); the reason blob store bounded in total (eviction *not built*); caller-chosen `run_id` validated | R0 |
 | **I** — *delivered with 2.33.0 (private #30), §3.5; Cedar narrower* | Private repo P3s | RA5 correction chains and competing corrections; attempt keys carry the operation id; a lock-order table; the outbox directory fsynced at create; Cedar policies schema-validated at load; the CI pin check refuses `[patch]`, `rev =` and multi-line tables | R0's re-pin |
 | **J** — *delivered 2.33.0 (#608), §3.5* | Hygiene | the sim-seam gate's test-skip bug (the one the KV gate fixed in #591); every feature and bench linted or built by some CI step; the two CI jobs on `stable` pinned; unreferenced public items deprecated, not removed (nothing is removed on the 2.x line); only the duplicates that disagree are unified (`hex_line`'s whitespace, `now_ms` copies outside the seam) | — |
-| **K** — *delivered after 2.34.0, unreleased (#638), §3.5* | Policy over history | the action evaluator can decide on what an actor has already done, not only on the request: a bounded, read-only history view (the actor's recent decisions and executions from the evidence journal — `src/agent/evidence_journal.rs`) reaches `ActionEvaluator::evaluate` beside the envelope (`ActionEnvelope`, `src/agent/action_evaluator.rs:101`, which today carries no history); a rule such as *at most three posts in ten minutes* is expressible and tested in the reference evaluator and the AE contract suite (`mycelium::ae_contract`); the scope of a count is stated by name — **per node** (the journal is node-local and never gossiped) unless the design question in §5 is decided otherwise; a history that cannot be read is `Indeterminate`, never an empty history; replay records the history view as a decision input | design question §5 |
-| **L** — *delivered after 2.34.0, unreleased (#637), §3.5; the activation-command half not built* | Credentials attached at egress | a secret need not enter a component's or an activation command's environment: an outbound request names a credential binding, and the egress gate (`EgressPolicy`, `mycelium-core/src/config.rs:280`, which today checks the host and every redirect hop) attaches it on the way out — bearer, header and basic forms at least — only to the host the binding names; a redirect off that host drops it; the binding's use is counted and its value never logged, traced or written to the evidence journal; the places a secret is read into the node today (`[[serve]].api_key_env`, federation credentials, an activation command's environment) are listed and each either moved behind a binding or stated as unchanged *From NVIDIA OpenShell (2026-10-12):* the component holds an opaque placeholder and never the value — the gate resolves the placeholder only at an endpoint the binding authorises — so a leaked environment or log carries nothing usable. | — |
-| **M** — *partly delivered after 2.34.0, unreleased (#636), §3.5; not built: network limited to declared hosts (ports only), a live-changing network allow-list, the OpenShell backend* | Activation commands confined | an `[[activation]]` command — today "not a sandbox: there is no allowlist and no confinement" (`docs/reference/unit-file.md:276`) and run with the stem's privileges — can be run under an OS confinement profile the unit file names (macOS Seatbelt first, Linux namespaces/Landlock or seccomp where available): filesystem access limited to the placed artifact's directory and declared paths, network limited to declared hosts or none; a profile the platform cannot apply refuses the activation by name, never runs it unconfined; the unconfined default stays, stated, and the guarantee report says which applies *From NVIDIA OpenShell (2026-10-12):* a profile's filesystem and syscall limits are fixed for the activation's life and its network allow-list may change live (OpenShell's split: filesystem and process locked at creation, network hot-reloadable); OpenShell itself (containers, seccomp, an unprivileged identity; needs Docker) is a candidate backend for a stem, beside a native Seatbelt/Landlock profile, rather than something to rebuild. | — |
-| **N** — *delivered after 2.34.0, unreleased (#633), §3.5* | A2A at the current specification | an A2A client built on the current `a2a-sdk` (1.2.2, the library Strands Agents uses) reaches Mycelium's skills through `/a2a`, with the same authority as today — **the 2026-10-12 probe found it cannot**: the card is served only at `/.well-known/agent.json` (the SDK reads `/.well-known/agent-card.json`, 404); the card's `url` is the node's **gossip** address, not its gateway, and omits `/a2a` (`src/agent/a2a.rs:445`, so the SDK's `send_message` failed with a network error); the methods are the pre-0.2 `tasks/send` / `tasks/sendSubscribe` / `tasks/get` / `tasks/cancel` (`SendMessage` and `message/send` both answer `-32601`); and the skill is chosen by a Mycelium-only `skillId` parameter that a standard client never sends. Promises: the card at `/.well-known/agent-card.json` (the old path kept for one release), naming the gateway's own URL and scheme (https under `gateway_tls`) with `/a2a` and its supported interfaces and protocol versions; the A2A 1.0 methods (`SendMessage`, `SendStreamingMessage`, `GetTask`, `CancelTask`) and the 0.3 names (`message/send`, `message/stream`) served beside the old ones, which stay for one release with a deprecation entry; a message reaches a skill without `skillId` (a declared default skill, or the skill named in the message's metadata — decided in the PR, stated on the card); every new method runs the same doors as `tasks/send` — the action evaluator, mandates, evidence, task ownership — and the C7 bypass matrix gains each new method; the probe becomes a CI test driving the real `a2a-sdk` client against a node | — |
-| **O** — *delivered after 2.34.0, unreleased (#634), §3.5* | A Strands session store on Mycelium | a companion package (Python, beside `langgraph-checkpoint-mycelium`) implementing Strands Agents' `SessionManager` over the Mycelium Python SDK, so an agent's conversation and state, and a swarm's shared memory, live in the fleet's KV rather than a file or a bucket; a save returns the SDK's receipt and its docs say which rung it names (a local application, not replication — the checkpointer's wording); an incomplete or unreadable session is an error, never an empty one; concurrent agents in one session do not lose each other's writes, or the limit is stated; its live suite runs in CI against a real node; pinned to a Strands release and re-checked when Strands changes the interface | — (N for the cross-host demo) |
-| **P** — *delivered after 2.34.0, unreleased (#635), §3.5* | A Strands fleet, demonstrated | a runnable example, in CI like the co-op demos, in which Strands agents on three Mycelium nodes plan one shared task (a constructive domain — food redistribution or a microgrid), keep their session and swarm memory in the fleet through O, and call fleet skills through `/a2a` (N): a call outside an agent's mandate is refused and the refusal is in the evidence journal; one node is stopped and the work resumes on another from the stored session; the README states what Strands provides and what Mycelium adds, and which properties the run shows versus which it does not | N, O |
+| **K** — *delivered 2.35.0 (#638), §3.5* | Policy over history | the action evaluator can decide on what an actor has already done, not only on the request: a bounded, read-only history view (the actor's recent decisions and executions from the evidence journal — `src/agent/evidence_journal.rs`) reaches `ActionEvaluator::evaluate` beside the envelope (`ActionEnvelope`, `src/agent/action_evaluator.rs:101`, which today carries no history); a rule such as *at most three posts in ten minutes* is expressible and tested in the reference evaluator and the AE contract suite (`mycelium::ae_contract`); the scope of a count is stated by name — **per node** (the journal is node-local and never gossiped) unless the design question in §5 is decided otherwise; a history that cannot be read is `Indeterminate`, never an empty history; replay records the history view as a decision input | design question §5 |
+| **L** — *delivered 2.35.0 (#637), §3.5; the activation-command half not built* | Credentials attached at egress | a secret need not enter a component's or an activation command's environment: an outbound request names a credential binding, and the egress gate (`EgressPolicy`, `mycelium-core/src/config.rs:280`, which today checks the host and every redirect hop) attaches it on the way out — bearer, header and basic forms at least — only to the host the binding names; a redirect off that host drops it; the binding's use is counted and its value never logged, traced or written to the evidence journal; the places a secret is read into the node today (`[[serve]].api_key_env`, federation credentials, an activation command's environment) are listed and each either moved behind a binding or stated as unchanged *From NVIDIA OpenShell (2026-10-12):* the component holds an opaque placeholder and never the value — the gate resolves the placeholder only at an endpoint the binding authorises — so a leaked environment or log carries nothing usable. | — |
+| **M** — *partly delivered 2.35.0 (#636), §3.5; not built: network limited to declared hosts (ports only), a live-changing network allow-list, the OpenShell backend* | Activation commands confined | an `[[activation]]` command — today "not a sandbox: there is no allowlist and no confinement" (`docs/reference/unit-file.md:276`) and run with the stem's privileges — can be run under an OS confinement profile the unit file names (macOS Seatbelt first, Linux namespaces/Landlock or seccomp where available): filesystem access limited to the placed artifact's directory and declared paths, network limited to declared hosts or none; a profile the platform cannot apply refuses the activation by name, never runs it unconfined; the unconfined default stays, stated, and the guarantee report says which applies *From NVIDIA OpenShell (2026-10-12):* a profile's filesystem and syscall limits are fixed for the activation's life and its network allow-list may change live (OpenShell's split: filesystem and process locked at creation, network hot-reloadable); OpenShell itself (containers, seccomp, an unprivileged identity; needs Docker) is a candidate backend for a stem, beside a native Seatbelt/Landlock profile, rather than something to rebuild. | — |
+| **N** — *delivered 2.35.0 (#633), §3.5* | A2A at the current specification | an A2A client built on the current `a2a-sdk` (1.2.2, the library Strands Agents uses) reaches Mycelium's skills through `/a2a`, with the same authority as today — **the 2026-10-12 probe found it cannot**: the card is served only at `/.well-known/agent.json` (the SDK reads `/.well-known/agent-card.json`, 404); the card's `url` is the node's **gossip** address, not its gateway, and omits `/a2a` (`src/agent/a2a.rs:445`, so the SDK's `send_message` failed with a network error); the methods are the pre-0.2 `tasks/send` / `tasks/sendSubscribe` / `tasks/get` / `tasks/cancel` (`SendMessage` and `message/send` both answer `-32601`); and the skill is chosen by a Mycelium-only `skillId` parameter that a standard client never sends. Promises: the card at `/.well-known/agent-card.json` (the old path kept for one release), naming the gateway's own URL and scheme (https under `gateway_tls`) with `/a2a` and its supported interfaces and protocol versions; the A2A 1.0 methods (`SendMessage`, `SendStreamingMessage`, `GetTask`, `CancelTask`) and the 0.3 names (`message/send`, `message/stream`) served beside the old ones, which stay for one release with a deprecation entry; a message reaches a skill without `skillId` (a declared default skill, or the skill named in the message's metadata — decided in the PR, stated on the card); every new method runs the same doors as `tasks/send` — the action evaluator, mandates, evidence, task ownership — and the C7 bypass matrix gains each new method; the probe becomes a CI test driving the real `a2a-sdk` client against a node | — |
+| **O** — *delivered 2.35.0 (#634), §3.5* | A Strands session store on Mycelium | a companion package (Python, beside `langgraph-checkpoint-mycelium`) implementing Strands Agents' `SessionManager` over the Mycelium Python SDK, so an agent's conversation and state, and a swarm's shared memory, live in the fleet's KV rather than a file or a bucket; a save returns the SDK's receipt and its docs say which rung it names (a local application, not replication — the checkpointer's wording); an incomplete or unreadable session is an error, never an empty one; concurrent agents in one session do not lose each other's writes, or the limit is stated; its live suite runs in CI against a real node; pinned to a Strands release and re-checked when Strands changes the interface | — (N for the cross-host demo) |
+| **P** — *delivered 2.35.0 (#635), §3.5* | A Strands fleet, demonstrated | a runnable example, in CI like the co-op demos, in which Strands agents on three Mycelium nodes plan one shared task (a constructive domain — food redistribution or a microgrid), keep their session and swarm memory in the fleet through O, and call fleet skills through `/a2a` (N): a call outside an agent's mandate is refused and the refusal is in the evidence journal; one node is stopped and the work resumes on another from the stored session; the README states what Strands provides and what Mycelium adds, and which properties the run shows versus which it does not | N, O |
 | **Q** — *delivered 2.33.0 (#616), §3.5* | Revocation reaches every verifier | a key a node has revoked (`rotate_identity_on_compromise`, `sys/revocation/`) is filtered from the `peer_keys`-based KV `SignedData` verifier, from identity-proof chaining (`validate_and_merge_identity`'s trusted signer) and from the unsigned identity exemption (`connection::self_authenticating_identity`), not only from consensus and `known_verifying_keys`; a test that a `SignedData` signed by a revoked key is refused at a peer that has seen the revocation; `src/agent/revocation.rs`'s `revoke_key` doc made true (corrected in #611 to say what holds today) | — (independent of F2) |
 | **S** — *delivered 2.34.0 (#623), §3.5* | Identity proofs on by default | `require_identity_proofs` defaults to `true` (today `false`, `mycelium-core/src/config.rs`; the `secure-single-domain` profile already requires it as `id.proofs_required`): a bare `sys/identity/{N}` key list without a proof is refused everywhere a node's keys are learned, closing the identity-poisoning residual rows F and Q state — a member writing its own key into another's identity, which still reaches the verify-only history set (forged audit history, a steered checkpoint anchor) and fully impersonates a node on a legacy certificate; a mixed-fleet window in the 2.30.0 shape (the MINOR that flips it says so; a node from before 2.3.0, which cannot prove, is cut off until upgraded, and `false` stays available as an explicit opt-out for that window and for TLS-less development fleets, where the setting is inert); an upgrade note in `deprecations.md`; the guarantee `id.proofs_required` resolves `enforced` by default; the 2.14.0 attempt that was reverted is re-examined first (the failure it was blamed on was not its doing) | — (best in the MINOR with F2) |
 | **T** — *delivered 2.34.0 (#622), §3.5* | Say loudly when the CA key is on the node | the dev posture keeps the fleet CA's private key on every node (`auto_cert_dir`'s `ca-key.pem`, `mycelium-core/src/tls.rs`), so one compromised host yields every node's identity and revocation (row Q) cannot recover it; today this is only the guarantee `id.ca_key_off_node` resolving unmet, one line among the start-time report, worded for member removal alone. Promises: at `start()` a node that holds the CA key and runs no profile, or a profile other than `dev`, logs one prominent warning naming the consequence (a single host compromise compromises every identity in the fleet; key revocation does not recover it) and the remedy (`mycelium tls issue` on a separate CA host, then `[tls] cert_pem` + `key_pem` on the node — `docs/operations/cert-rotation.md`); the `id.ca_key_off_node` guarantee text names identity compromise and revocation, not only removal (catalogue regenerated); `dev` states the trade-off rather than warning; the quick-start and production-readiness pages say which posture they set up; a test pins the warning on and off | — |
@@ -576,7 +576,7 @@ PR.
   `CALLER_CONTEXT_MAX_AGE_MS` (300 s) plus `max_clock_drift_ms` ago or more than `max_clock_drift_ms` ahead →
   `CallerError::Stale`; one verifier for every receive path. Test: `a_stale_or_future_envelope_is_refused` (*was*
   `left: Ok(Some(1791791309573)) right: Err("stale") — tls=false: two hours old`). ~~**Not built:** a nonce cache, so a
-  replay inside the window is not refused.~~ Delivered after 2.34.0 (§3.6 under E).
+  replay inside the window is not refused.~~ Delivered in 2.35.0 (§3.6 under E).
 - *Left for this row by P5* — `mod.rs` cites `every_listed_public_path_is_mounted_and_public_and_gated_paths_are_not`;
   `GatewayPreflight::is_inert` `#[deprecated(since = "2.33.0")]` (no reference in this repository or
   `mycelium-private`, grepped); the SSE resume point stays *not built* — the guide's and READMEs' loss sentences now
@@ -900,7 +900,7 @@ first); no other caller.
 - **Not built, stated:** the CA key stays on every node in the development posture (the warning says so; it does
   not move the key); no dev-specific log line for the trade-off; the warning's emission is not asserted by a test.
 
-**N — A2A at the current specification (#633, unreleased).** The doors enumerated first
+**N — A2A at the current specification (#633, released in 2.35.0).** The doors enumerated first
 (`git grep -n 'agent.json\|"/a2a"\|tasks/send\|tasks/sendSubscribe\|tasks/get\|tasks/cancel' -- src examples tests mycelium-py/src mycelium-ts/src`):
 the card handler and the one JSON-RPC handler in `src/agent/a2a.rs`; the router's public list
 (`http::PUBLIC_PATHS`) and `/a2a`'s optional auth (`authz::gateway_auth_if_gateway_path`, by path, unchanged); the
@@ -964,7 +964,7 @@ window).
   `SubscribeToTask`, the extended card, a task's `history`, and the HTTP+JSON and gRPC bindings are not served;
   `A2A-Version` is not checked.
 
-**O — A Strands session store on Mycelium (#634, unreleased).** The doors enumerated first: Strands'
+**O — A Strands session store on Mycelium (#634, released in 2.35.0).** The doors enumerated first: Strands'
 `SessionRepository` (`strands/session/session_repository.py` in `strands-agents` 1.61.1, twelve methods, and the
 `delete_session` its own file and S3 managers add) and the SDK verbs the store reaches the node with
 (`MyceliumAgent.get`/`set`/`delete`/`keys`, `mycelium-py/src/mycelium/agent.py`, behind `kv:read`/`kv:write`,
@@ -1098,7 +1098,7 @@ window).
   decision is not released through the gateway), so a deleted session's id is not reused; a node behind still
   *reads* an older conversation without error — claims stop it writing, not reading.
 
-**P — A Strands fleet, demonstrated (#635, unreleased).** The surfaces it stands on, enumerated: `/a2a` and its card
+**P — A Strands fleet, demonstrated (#635, released in 2.35.0).** The surfaces it stands on, enumerated: `/a2a` and its card
 (row N, `src/agent/a2a.rs`), the action evaluator and the gateway's mandate establishment
 (`src/agent/gateway_authority.rs`: a `PresentedMandate` in `metadata._meta.mandate`, the grant's holder = the caller's
 principal, possession bound to the call), the evidence journal (`src/agent/evidence_journal.rs`, node-local, read by
@@ -1149,7 +1149,7 @@ courier); asking the bakery and the kitchen is allowed by policy to the fleet's 
 - **Not built, stated:** a model's judgement (scripted); a node failing mid-call (stopped between turns); revocation
   (shown by `authority_drain` and the confined-fleet suite); Strands' own A2A classes; scale; fleet-wide enforcement of
   one holder per scope.
-**K — Policy over history (#638, unreleased).** The doors enumerated first
+**K — Policy over history (#638, released in 2.35.0).** The doors enumerated first
 (`git grep -n "ae_preflight\|preflight(\|evaluator_facts\|\.evaluate(" -- src`): every gateway decision goes through
 `http::ae_preflight` (`src/agent/http/authz.rs`) — `/mcp` (through `gateway_preflight`), `/a2a`'s unary and streamed
 sends (`a2a.rs`), and provider enforcement (`provider_enforcement.rs`) — so one change reaches all of them; the public
@@ -1160,8 +1160,9 @@ directly. The evidence journal is written only by `ae_record`.
   `ActionEvaluator::evaluate` beside the envelope* — `ActionEvaluator::history_request` (what it needs) and
   `evaluate_with_history(envelope, &History)` (what the seam calls; the default calls `evaluate`, so no evaluator
   changes); `History::View(HistoryView)` — the actor's records in the window, oldest first, each with its decision and
-  last-recorded execution — or `History::Unavailable`. Built by `HistoryIndex` (`evidence_journal.rs`): loaded from the
-  journal at `with_evidence_journal`, fed by `ae_record` after each append (an execution record updates its attempt),
+  last-recorded execution — or `History::Unavailable`. Built by `HistoryIndex` (`evidence_journal.rs`): read from the
+  journal in the background once an evaluator that asks for history is attached (`HistoryIndex::start_loading`;
+  unavailable until then), fed by `ae_record` after each append (an execution record updates its attempt),
   bounded at 24 hours and 1 024 records per actor, a view past a dropped record `complete: false`. Tests
   `a_history_is_loaded_from_the_journal`, `a_journal_not_yet_written_is_an_empty_history`,
   `the_journal_record_of_an_admitted_permit_is_not_counted_twice`, `completeness_is_judged_per_window`,
@@ -1175,7 +1176,8 @@ directly. The evidence journal is written only by `ae_record`.
   independent `TableEvaluator`, which implements the limit its own way. End to end through `/mcp`:
   `at_most_three_posts_in_ten_minutes_counted_at_this_gateway` — the fourth post denied (`-32030`) and never run.
 - *the scope of a count is stated by name — per node … unless the design question in §5 is decided otherwise* —
-  decided per node, scope named (§5): `HistoryScope::EnforcementPoint`, named in every history decision's `checked`
+  decided per enforcement point, scope named (§5): `HistoryScope::EnforcementPoint` — the gateway's doors count together
+  (`gateway`), provider enforcement apart (`provider`) — named in every history decision's `checked`
   (`history scope=enforcement_point … counted=n limit=m`), its denial's reason, and the evidence record's `history.scope`.
 - *a history that cannot be read is `Indeterminate`, never an empty history* — an unreadable journal makes every view
   `Unavailable` (`an_unreadable_journal_makes_every_history_unavailable`), no journal makes it `Unavailable` at the gateway,
@@ -1197,8 +1199,9 @@ directly. The evidence journal is written only by `ae_record`.
   read as empty, and with the journal not loaded at attach, the unreadable and reload tests failed.
 - *The independent review (#638)* — fixed, each with a test seen failing first where it is a defect: (1) the index was
   per node across every enforcement point, so provider enforcement on the gateway's node counted each call twice and
-  `at_most(3)` ran one — now keyed by point (`gateway`, `provider`), the label true, and the end-to-end test runs four
-  posts with provider enforcement on, three admitted; (2) the clock was read before the per-actor gate and views dropped
+  `at_most(3)` ran one — now keyed by point (`gateway`, `provider`), the label true; keying by point is shown by
+  `each_enforcement_point_counts_its_own_decisions`, and the end-to-end test runs without provider enforcement
+  (corrected at the 2.35.0 cut: an earlier line here said it ran with it on); (2) the clock was read before the per-actor gate and views dropped
   records stamped after it, so a call that waited could count from before permits admitted meanwhile — the clock is read
   under the gate and later-stamped records count; (3) completeness was judged for the widest window, so a week-long
   rule left a ten-minute one never established — a view now says the newest record it omits and each rule judges its own
@@ -1223,7 +1226,7 @@ directly. The evidence journal is written only by `ae_record`.
   lives on the evidence record and nothing replays it yet; a history across more than 24 hours, 1 024 records per actor or
   65 536 actors per point reads as incomplete.
 
-**L — Credentials attached at egress (#637, unreleased).** The doors enumerated first. Every outbound HTTP client
+**L — Credentials attached at egress (#637, released in 2.35.0).** The doors enumerated first. Every outbound HTTP client
 (`git grep -n "egress_client::\|reqwest::Client::builder\|reqwest::Client::new\|Client::builder()" -- '*.rs'`, test
 modules and examples set aside): `OpenAiBackend` (`src/agent/llm.rs`), the MCP bridge (`mcp_handle.rs`), capability
 probes (`capability_config.rs`), OIDC (`oidc.rs`), the federation client (`federation/client.rs`), the bulk peer fetch
@@ -1332,7 +1335,9 @@ tokens, and an `[[activation]]` command's inherited environment.
   and a secret pasted into `name` was echoed by an env refusal, and `value_env` / `value_file` by a binding's `Debug` —
   an env refusal names its entry by index alone, and the `Debug` redacts both sources
   (`neither_an_env_refusal_nor_a_bindings_debug_prints_a_pasted_secret`). The residual is stated in crown-jewel.
-- **Not built, stated:** the activation-command half (above); a binding whose `name` or `header` is itself a secret is
+- **Not built, stated:** the activation-command half (above); a `ServeDecl`'s `Debug` prints `api_key_env` as written
+  (`src/capability_config.rs`), so a key pasted into that field is echoed by a `{:?}` of the unit (found at the 2.35.0 cut);
+  with `value_env` the value stays in the node's process environment (`value_file` avoids it); a binding whose `name` or `header` is itself a secret is
   printed and used as a metric label or a header name; a placeholder in a query string or a request body is not
   resolved (sent as written); the value is not zeroised when the gate is dropped; a `value_env` variable stays in the
   process environment, which a child process inherits (`value_file` avoids it); no SkillRunner, `HttpLibrarySource` or
@@ -1341,7 +1346,7 @@ tokens, and an `[[activation]]` command's inherited environment.
   client honours `HTTP_PROXY` / `HTTPS_PROXY`, so a configured proxy sees a plaintext or loopback request's header (an
   https request's header is inside the tunnel).
 
-**M — Activation commands confined (#636, unreleased; partly delivered — three promises not built, below).** The doors enumerated first
+**M — Activation commands confined (#636, released in 2.35.0; partly delivered — three promises not built, below).** The doors enumerated first
 (`git grep -n -i 'activation' -- src mycelium-wasm-host/src mycelium-core/src docs/reference scripts .github`, the
 core hits in `connection.rs`/`swim.rs` being SWIM's fan-out "activation", unrelated): the unit-file parse and
 `validate()` (`src/capability_config.rs`, `ActivationDecl`); the stem's activation runner, `activation::hook` (command,
@@ -1474,7 +1479,7 @@ CC8, `docs/capabilities.md`, the crate README). The example units with `[[activa
   five `std::fs` sites are admitted in the baseline and the nondeterminism inventory (review finding 10); its
   `Path::canonicalize`/`exists`/`is_dir` calls are ones `scripts/check-sim-seams.sh` does not see.
 
-### 3.6 · State of play and the next iteration (2026-10-12)
+### 3.6 · State of play and the next iteration (2026-10-12; updated at the 2.35.0 cut, 2026-10-17)
 
 Where the work stands at the end of 2026-10-12, so the next session starts here rather than from a conversation.
 
@@ -1485,17 +1490,24 @@ queues before the shutdown signal), and N, O, P recorded by #614 with the `a2a-s
 
 **Delivered in v2.34.0 (2026-10-16):** F2 (#624 — the unsigned-frame and bare-signature refusal unconditional, `kv_require_signed_frames` retired, `secure-single-domain` rev 5; §3.5), T (#622), S (#623 — identity proofs required by default; §3.5); the wasmtime 49.0.3 / rustls 0.23.46 advisories (#625).
 
-**Not started:** §5's inference-routing question. N, O, P and K are delivered (#633, #634, #635, #638; §3.5);
-L is delivered (#637, §3.5) except its activation-command half, which is *not built*; M is partly delivered (#636, §3.5 — hosts, a live allow-list and OpenShell not built). (Q, revocation at every verifier, is delivered — #616, §3.5; S, identity proofs on by default, is delivered in 2.34.0 — #623, §3.5.)
+**Delivered in v2.35.0 (2026-10-17):** K (#638 — policy over history, counted per enforcement point), L (#637 — credentials attached
+at egress; its activation-command half *not built*), M (#636 — activation commands confined, partly: hosts, a live allow-list and
+OpenShell *not built*), N (#633), O (#634 — `strands-session-mycelium` 0.1.0), P (#635), and the follow-ups to E (the caller
+envelope's nonce cache) and Q (the handshake refuses a revoked key's certificate; no TLS resumption); §3.5 and below.
+
+**Not started:** §5's inference-routing question. Every row K–P is released in 2.35.0; the rows' own *not built* lists stand. (Q, revocation at every verifier, is delivered — #616, §3.5; S, identity proofs on by default, is delivered in 2.34.0 — #623, §3.5.)
 
 **Follow-ups recorded as not built in delivered rows (each in its §3.5 block):**
+- **M:** a declared path replaced legitimately (atomic rename, rotated directory) fails the next re-probe, so the
+  install is withdrawn and reinstalled — a flap if the path churns. Not built: limits by hostname or address, a live
+  network allow-list, an OpenShell backend, resource limits.
 - **H:** carry each named offer's signed bytes inside the close and award from that copy (today a member who deletes a
   named offer steers the checked path); a declarer that restarts without keeping its close can re-decide.
 - **J:** the seam and KV gates end an unstarted skip at the first trailing `,`, so a test item with a multi-line header
   is partly scanned as production (fails safe) — balance `()`/`[]`/`<>` across the header.
 - **I (private):** a Cedar schema type-check of `context.*` and template `when` literals; behaviour under real power
   loss behind the fsync pins.
-- **E:** ~~a nonce cache for the caller envelope~~ — *delivered after 2.34.0, unreleased:* each envelope carries an
+- **E:** ~~a nonce cache for the caller envelope~~ — *delivered 2.35.0:* each envelope carries an
   id and its target signed with the rest, and a provider admits each `(gateway, issue time, id)` once at every receive
   boundary (`gateway_caller::verify_received`, `ReplayWindows`; `receive_gateway_caller` for an embedder), refuses one
   signed for another provider, refuses one with the id stripped from a gateway whose signed, fresh `sys/caller-context-id/`
@@ -1544,7 +1556,7 @@ L is delivered (#637, §3.5) except its activation-command half, which is *not b
   owner `None`, so one's `tasks/send` under the other's caller-chosen id re-sends over it — decide whether an
   anonymous pre-0.2 task is ever re-sendable.
 - **B:** connection preemption and WAL group commit, removed in review.
-- **Q:** ~~the mTLS handshake does not refuse a revoked key's certificate~~ — *delivered after 2.34.0, unreleased:*
+- **Q:** ~~the mTLS handshake does not refuse a revoked key's certificate~~ — *delivered 2.35.0:*
   both sides of the handshake refuse a certificate whose key its owner revoked by a revocation this node counted (kept
   past the anchored set's cap and saturation, `NodeStanding::counted`) — the owner being the node its URI SAN names, or
   for a URI-less certificate the node that counted a revocation of its key (`refuse_if_revoked`,

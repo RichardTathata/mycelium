@@ -313,7 +313,7 @@ advertising a new kind of plumbing capability adds it to `is_infrastructure_capa
 `agent_card_leaves_out_infrastructure_capabilities`, seen failing first.
 [`.log/2026-10-07-ingest-549-551.md`](.log/2026-10-07-ingest-549-551.md).
 
-**Three generations of A2A, one send path (unreleased — post-360 row N).** `/a2a` serves A2A 1.0's `SendMessage`,
+**Three generations of A2A, one send path (2.35.0 — post-360 row N).** `/a2a` serves A2A 1.0's `SendMessage`,
 `SendStreamingMessage`, `GetTask`, `CancelTask`, 0.3's `message/send`, `message/stream`, and the pre-0.2 `tasks/*`
 methods, and the card is at `/.well-known/agent-card.json` with `supportedInterfaces` (the old path kept for one
 release, `deprecations.md` §46). The security property is that a new protocol name is **not a new door**: every send
@@ -371,7 +371,7 @@ their broker IS the crown jewel). Two opt-in controls:
   let `http://evil\@allowed/` through as `allowed`); and an object store is gated on the **endpoint it
   dials**, not the bucket name (`dial_hosts`). Not covered: name resolution (an allowed name resolving to a
   denied address), a cloud identity's credential traffic, redirects inside `object_store`'s own client.
-- **Credential bindings at the egress gate** (post-360 row L, unreleased) — `[[egress_credentials]]` /
+- **Credential bindings at the egress gate** (post-360 row L, 2.35.0) — `[[egress_credentials]]` /
   `GOSSIP_EGRESS_CREDENTIALS` name a host (exact, never a suffix), an optional path prefix, a form (bearer, header,
   basic) and a value source; the value is read once at `start()` into `EgressCredentials`
   (`src/agent/egress_credentials.rs`), held as a sensitive `HeaderValue`, and attached only where
@@ -411,7 +411,7 @@ serial): an anchored node trusts exactly its anchored, unrevoked keys; a revocat
 anchored key issued after P's. Records are keyed `(P, S)`, self-contained, journaled when counted, republished by the
 owner. The decision record is `docs/design/revocation-authority.md` (rev 3, three design reviews); its limits — the CA
 holder, the secure posture's re-issue-only recovery, legacy certificates — are stated there and in the runbook.
-**The handshake too** (row Q's follow-up, unreleased): both sides of a mesh handshake refuse a certificate whose key is
+**The handshake too** (row Q's follow-up, 2.35.0): both sides of a mesh handshake refuse a certificate whose key is
 revoked by its owner by a revocation this node counted (`refuse_if_revoked`, `mycelium-core/src/tls.rs`;
 `NodeStanding::counted`, kept past the anchored set's cap) — never another node's
 revocation (a node may revoke a key that is not its own) and never a provisional one (a rotated node must connect). **The mesh resumes no TLS session**: a resumed TLS 1.3 session re-runs
@@ -714,7 +714,7 @@ records it). `Instance::invoke` stays synchronous: an embedder calling it from a
 `spawn_blocking` as the serve loop does — the co-op `catalog`, `catalog_viz` and `mcp_toolgrowth` demos,
 which call it directly, do (instantiation included).
 
-**Activation commands confined (unreleased — post-360 row M).** An `[[activation]]` is a host process, not a
+**Activation commands confined (2.35.0 — post-360 row M).** An `[[activation]]` is a host process, not a
 guest, so the wasm sandbox never covered it: by default its `command` and `probe` still run with the stem's
 privileges. A unit may now name `[activation.confine]` (`ConfineDecl`, `src/capability_config.rs`) and the stem runs
 both under it (`mycelium-wasm-host/src/activation_sandbox.rs`): **Seatbelt** on macOS (`sandbox-exec`, a generated

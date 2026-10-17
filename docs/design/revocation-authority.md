@@ -174,7 +174,7 @@ A revocation record:
 - writes verified before the revocation arrived (detection, not prevention);
 - a connection already open when the revocation is counted (its signed frames are refused one by one).
 
-**The mTLS handshake** (row Q's follow-up, after 2.34.0): both sides refuse a certificate whose key its owner
+**The mTLS handshake** (row Q's follow-up, 2.35.0): both sides refuse a certificate whose key its owner
 revoked by a revocation this node **counted** (`mycelium-core/src/tls.rs`, `refuse_if_revoked`;
 `NodeStanding::counted`, `KeyStanding::is_counted_revoked`) — judged while the key was anchored for the owner, and kept
 for good after (across a restart, through the journal under `[persistence]`, 64 per node), so neither the newest-16 cap on anchored keys nor saturation lets a long-revoked key back in. The owner

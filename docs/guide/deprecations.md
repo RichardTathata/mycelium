@@ -64,12 +64,12 @@ the notice.
 | 41 | an identity this node cannot authenticate merged by default (a bare `sys/identity/{n}` key list, a legacy pair without a sealed record); `GOSSIP_REQUIRE_IDENTITY_PROOFS` read leniently | 2.34.0 (post-360 row S) | nothing from 2.33.x (2.3.0–2.31.x peers are unlearnable since 2.33.0 either way); `require_identity_proofs = false` re-admits only a node from before 2.3.0 | No — behaviour: a proofless (pre-2.3.0) peer's key is not learned (counted, `identity_anchor_conflicts`); a `GOSSIP_REQUIRE_IDENTITY_PROOFS` value other than `1`/`true`/`TRUE`/`yes`/`0`/`false`/`FALSE`/`no` (empty included) refuses by name |
 | 42 | a soft-state re-assert written after shutdown began (between the sweep and the signal) | 2.34.0 | nothing — shutdown closes `CoreCtx::soft_state_gate` before its sweep | Only for an exhaustive struct literal of `CoreCtx` (it gained `soft_state_gate`) |
 | 43 | a capability, requirement or group-provides `ns`/`name` that is empty, holds a `/`, or is `locality`/`self`; a group name holding a `/` | 2.34.0 | rename it: one segment each, and not the locality pair | No — behaviour: 400 at `capability/advertise` (`invalid_capability_name`) and `units/declare`; a node config fails to load; in process the handle writes nothing and a warning names it |
-| 44 | `mycelium_core::tls::load_or_generate` / `generate_rotation` / `generate_rotation_after` without the key standing; `NodeStanding` without `counted`; TLS session resumption on the mesh | unreleased (post-360 row Q's follow-up) | pass `Arc::clone(&ctx.key_standing)` (or `Default::default()` outside an agent) after the removed set | **Yes** for a direct caller of the three functions — one more argument — and an exhaustive `NodeStanding` literal; otherwise no — a reconnect is a full handshake, and a certificate whose key its node revoked is refused |
-| 45 | a gateway caller envelope without an id (`n`), target (`o`) and v2 signature (`sn`) — a pre-row-E gateway's | unreleased (post-360 row E) — accepted and counted for one release from a gateway without `sys/caller-context-id/` | upgrade every gateway node; watch `caller_envelopes_without_id` (`GET /stats`) stop rising on every provider; a raw-signal loop calls `receive_gateway_caller` once per signal | No — behaviour: an envelope is served once, at its target; a replay (repeated, misaddressed, id stripped) is dropped unanswered and counted (`caller_envelopes_replayed`); two subscribers verifying one kind on one node no longer both serve; a bridged MCP call whose context fails verification is refused `-32022` |
-| 46 | the A2A card at `/.well-known/agent.json`; the pre-0.2 `/a2a` methods `tasks/send` and `tasks/sendSubscribe`, and `skillId` as a send's parameter | unreleased (post-360 row N) — served beside the replacements for one release | read the card at `/.well-known/agent-card.json`; send with `SendMessage` / `SendStreamingMessage` (or 0.3's `message/send` / `message/stream`), the skill in `metadata.skillId` and a mandate in `metadata._meta` | No — behaviour: the old path and methods answer as before; a task created by `message/send` answers `tasks/get` in 0.3's shapes; the refusal for another identity's task names `GetTask`/`CancelTask` too |
-| 47 | an exhaustive `Rule { .. }` or `ContractCase { .. }` literal; an evaluator that wraps another and forwards only `evaluate` | unreleased (post-360 row K) | build a `Rule` with `Rule::new` and its builders, and give a `ContractCase` `history: None` (or a history); a wrapping evaluator forwards `history_request` and `evaluate_with_history` | Yes for the literals (a new field); no for a wrapper — it compiles, and its limited rules decide `Indeterminate` |
-| 48 | an exhaustive struct literal of `GossipConfig`, `OpenAiBackend`, `ServeDecl` or `CredentialBinding`; a `{:?}` of a `ServeDecl` showing its `api_key`; Z2's `api_key_env` refusal naming the variable | unreleased (post-360 row L) | `..Default::default()` (or the new fields: `egress_credentials`, `credentials`, `credential`, `port`); read the section name in the refusal | **Yes** for an exhaustive literal — it will not compile; otherwise no — `Debug` prints `api_key: Some("<redacted>")`, and the refusal names the `[[serve]]` section and the field, not the variable |
-| 49 | a unit file with a key or section the loader does not know — at the top level or in an `[[activation]]` | unreleased (post-360 row M) | correct the spelling, or remove the key | No — behaviour: the file is refused at load, naming the key (`units/declare` answers 400, `wire-check` and a stem refuse it); it was silently dropped |
+| 44 | `mycelium_core::tls::load_or_generate` / `generate_rotation` / `generate_rotation_after` without the key standing; `NodeStanding` without `counted`; TLS session resumption on the mesh | 2.35.0 (post-360 row Q's follow-up) | pass `Arc::clone(&ctx.key_standing)` (or `Default::default()` outside an agent) after the removed set | **Yes** for a direct caller of the three functions — one more argument — and an exhaustive `NodeStanding` literal; otherwise no — a reconnect is a full handshake, and a certificate whose key its node revoked is refused |
+| 45 | a gateway caller envelope without an id (`n`), target (`o`) and v2 signature (`sn`) — a pre-row-E gateway's | 2.35.0 (post-360 row E) — accepted and counted for one release from a gateway without a fresh, signed `sys/caller-context-id/` marker | upgrade every gateway node; watch `caller_envelopes_without_id` (`GET /stats`) stop rising on every provider; a raw-signal loop calls `receive_gateway_caller` once per signal | No — behaviour: an envelope is served once, at its target; a replay (repeated, misaddressed, id stripped) is dropped unanswered and counted (`caller_envelopes_replayed`); two subscribers verifying one kind on one node no longer both serve; a bridged MCP call whose context fails verification is refused `-32022` |
+| 46 | the A2A card at `/.well-known/agent.json`; the pre-0.2 `/a2a` methods `tasks/send` and `tasks/sendSubscribe`, and `skillId` as a send's parameter | 2.35.0 (post-360 row N) — served beside the replacements for one release | read the card at `/.well-known/agent-card.json`; send with `SendMessage` / `SendStreamingMessage` (or 0.3's `message/send` / `message/stream`), the skill in `metadata.skillId` and a mandate in `metadata._meta` | No — behaviour: the old path and methods answer as before; a task created by `message/send` answers `tasks/get` in 0.3's shapes; the refusal for another identity's task names `GetTask`/`CancelTask` too |
+| 47 | an exhaustive `Rule { .. }` or `ContractCase { .. }` literal; an evaluator that wraps another and forwards only `evaluate` | 2.35.0 (post-360 row K) | build a `Rule` with `Rule::new` and its builders, and give a `ContractCase` `history: None` (or a history); a wrapping evaluator forwards `history_request` and `evaluate_with_history` | Yes for the literals (a new field); no for a wrapper — it compiles, and its limited rules decide `Indeterminate` |
+| 48 | an exhaustive struct literal of `GossipConfig`, `OpenAiBackend` or `ServeDecl`; a `{:?}` of a `ServeDecl` showing its `api_key`; Z2's `api_key_env` refusal naming the variable | 2.35.0 (post-360 row L) | `..Default::default()` (or the new fields: `egress_credentials`, `credentials`, `credential`); read the section name in the refusal | **Yes** for an exhaustive literal — it will not compile; otherwise no — `Debug` prints `api_key: Some("<redacted>")`, and the refusal names the `[[serve]]` section and the field, not the variable |
+| 49 | a unit file with a key or section the loader does not know — at the top level or in an `[[activation]]` | 2.35.0 (post-360 row M) | correct the spelling, or remove the key | No — behaviour: the file is refused at load, naming the key (`units/declare` answers 400, `wire-check` and a stem refuse it); it was silently dropped |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -1415,7 +1415,7 @@ caller can ask before it advertises.
 segment: for a model id such as `org/model`, use a separator other than `/`. Pick another name than
 `locality`/`self` for the capability.
 
-## 44. A revoked key's certificate is refused at the handshake, and the mesh does not resume TLS sessions (unreleased, post-360 plan row Q's follow-up)
+## 44. A revoked key's certificate is refused at the handshake, and the mesh does not resume TLS sessions (2.35.0, post-360 plan row Q's follow-up)
 
 **What changes.** Both sides of a mesh TLS handshake now refuse a certificate whose Ed25519 key its owner revoked by a
 revocation this node counted — judged while the key was anchored for the owner (a certificate record naming the node)
@@ -1440,7 +1440,7 @@ verification each way, per connection, not per frame.
 as before; a key that never had a certificate record naming its node is not refused at the handshake (its signatures
 are); a provisional revocation (of a key whose certificate record has not reached this node) refuses no handshake.
 
-## 45. A caller envelope is served once, at the provider it was signed for (unreleased, post-360 plan row E)
+## 45. A caller envelope is served once, at the provider it was signed for (2.35.0, post-360 plan row E)
 
 **What changes.** A gateway's caller envelope gains three fields: `n`, an id unique per gateway (its HLC at framing);
 `o`, the node it is addressed to; and `sn`, an Ed25519 signature over the v1 fields, `n` and `o` under
@@ -1460,7 +1460,7 @@ MCP bridge now verifies the caller context at its receive boundary and refuses a
 tool loop does; before, it verified only under provider enforcement.
 
 **The window.** An id-less envelope from a gateway without a fresh marker — 2.34 or earlier — verifies in the v1 form,
-is served and is counted (`caller_envelopes_without_id`). Once every gateway node is upgraded and its marker has
+is served and, if signed, is counted (`caller_envelopes_without_id`; an unsigned mesh counts nothing). Once every gateway node is upgraded and its marker has
 gossiped, stripping is refused fleet-wide; the next release refuses every envelope without an id.
 
 **Rolling a gateway back to 2.34** stops its marker being re-asserted; until the last one lapses (up to 12 minutes at
@@ -1491,7 +1491,7 @@ provider whose own clock steps back may serve an envelope it had already pruned,
 gateway 60–300 s ahead of a provider has its marker ignored there, so a stripped envelope is served (fail-open) where
 `verify` still accepts its envelopes.
 
-## 46. A current A2A client reaches `/a2a`: the card at `agent-card.json`, the 1.0 and 0.3 methods, a skill in `metadata.skillId` (unreleased, post-360 plan row N)
+## 46. A current A2A client reaches `/a2a`: the card at `agent-card.json`, the 1.0 and 0.3 methods, a skill in `metadata.skillId` (2.35.0, post-360 plan row N)
 
 **What changes.** The agent card is served at `/.well-known/agent-card.json`, where A2A 0.3 and 1.0 clients read it, and
 lists `/a2a` once per protocol version (`supportedInterfaces`: JSON-RPC `1.0`, then `0.3`). `/a2a` answers A2A 1.0's
@@ -1525,7 +1525,7 @@ needs the new wording.
 and gRPC bindings are not served; a task's `history` is not kept; `A2A-Version` is not checked (the card says which
 versions `/a2a` speaks).
 
-## 47. An evaluator can decide on what an actor has already done (unreleased, post-360 plan row K)
+## 47. An evaluator can decide on what an actor has already done (2.35.0, post-360 plan row K)
 
 **What changes.** `ActionEvaluator` gains two methods with defaults: `history_request` (the window of the actor's history
 the evaluator needs; `None` by default) and `evaluate_with_history` (what the seam now calls; by default it calls
@@ -1556,27 +1556,27 @@ express `PolicyClause::AllowAtMost` must decline them and list them in `declared
 — the private companion's Cedar adapter, on its next re-pin. `AeEvidence`'s schema stays `mycelium.ae/evidence/1`: the
 new `history` field is additive and absent when no history was read.
 
-## 48. Credentials attached at egress: four structs gained fields, a `ServeDecl`'s `Debug` hides its key, Z2's refusal names the section (unreleased, post-360 plan row L)
+## 48. Credentials attached at egress: three structs gained fields and `CredentialBinding` is new, a `ServeDecl`'s `Debug` hides its key, Z2's refusal names the section (2.35.0, post-360 plan row L)
 
 **What changes.** Row L adds credential bindings (`docs/operations/crown-jewel.md` § Credentials attached at egress).
-Additive for a running node — no binding configured, nothing changes — but four public structs gained fields:
-`GossipConfig.egress_credentials`, `OpenAiBackend.credentials`, `ServeDecl.credential`, and the new
-`CredentialBinding`'s `port` (added by the PR's review). Two outputs change: `ServeDecl`'s `Debug` (hand-written now)
+Additive for a running node — no binding configured, nothing changes — but three public structs gained fields:
+`GossipConfig.egress_credentials`, `OpenAiBackend.credentials` and `ServeDecl.credential`; `CredentialBinding` is new
+in this release, so no existing literal of it can break. Two outputs change: `ServeDecl`'s `Debug` (hand-written now)
 prints `api_key: Some("<redacted>")` and the new `credential` field, where the derived one printed the literal key; and
 the stem's refusal for an unset `api_key_env` variable (zero-gaps Z2) names the `[[serve]]` section and the field, no
 longer the variable — a value pasted into `api_key_env` would have been echoed into a start-time log line.
 
-**Will the compiler tell me?** **Yes** for an exhaustive struct literal of any of the four — it will not compile.
+**Will the compiler tell me?** **Yes** for an exhaustive struct literal of any of the three — it will not compile.
 No for the two outputs.
 
 **Migration.**
 - A struct literal: add `..Default::default()` (`GossipConfig`), or the new field (`credentials: None`,
-  `credential: None`, `port: None`); `OpenAiBackend::new` is unaffected.
+  `credential: None`); `OpenAiBackend::new` is unaffected.
 - A test or a log parser matching a `ServeDecl`'s `Debug` or the `api_key_env` refusal's text: match the section name
   (`[[serve]] llm/<name>`) and `api_key_env`; the variable is whatever the unit file says.
 - A binding to `localhost` (any spelling, a trailing dot included) or to any IP literal must set `port` — new, so nothing written before it breaks.
 
-## 49. A unit file with an unknown key is refused, not read without it (unreleased, post-360 plan row M)
+## 49. A unit file with an unknown key is refused, not read without it (2.35.0, post-360 plan row M)
 
 **What changes** (#636's review, finding 3 and its follow-up). The unit-file loader dropped any key it did not know.
 A misspelt confinement table — `[activation.confined]` inside an `[[activation]]`, or `[activations.confine]` at the

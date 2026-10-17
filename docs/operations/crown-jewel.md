@@ -114,7 +114,7 @@ resolve names: an allowed name that resolves to an address you meant to deny is 
 For the non-gated rows, enforce egress at the **network layer** (firewall rules,
 security groups, an egress proxy with its own allowlist).
 
-### Credentials attached at egress (post-360 plan row L, unreleased)
+### Credentials attached at egress (post-360 plan row L, 2.35.0)
 
 A secret need not sit in a unit file, a component's environment or a backend's fields. Declare a
 **credential binding** on the node; a caller holds only its **placeholder**
