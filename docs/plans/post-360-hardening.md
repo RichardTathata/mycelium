@@ -1103,17 +1103,19 @@ window).
 (`src/agent/gateway_authority.rs`: a `PresentedMandate` in `metadata._meta.mandate`, the grant's holder = the caller's
 principal, possession bound to the call), the evidence journal (`src/agent/evidence_journal.rs`, node-local, read by
 `read_evidence_journal`), the session store (row O) and its claims, and the voter (`start_consensus_listener`). Found
-on the way, and the shape of the demonstration follows from it: **a mandate is an appointment** — a scope has one
-holder at an epoch (`GrantVerifier`: two grants at one scope and epoch are `ConflictingAppointments`), and a node's
-execution authority guards one scope. So dispatching is the mandated role (scope `dispatch`, appointed to the
+on the way, and the shape of the demonstration follows from it: **a mandate is an appointment** — at each gateway's
+verifier a scope has one holder at an epoch (`GrantVerifier`: two grants at one scope and epoch are
+`ConflictingAppointments`; its memory is per node, so one holder fleet-wide is the authority's to keep by issuing one
+grant), and a node's execution authority guards one scope. So dispatching is the mandated role (scope `dispatch`, appointed to the
 courier); asking the bakery and the kitchen is allowed by policy to the fleet's three principals.
 - *a runnable example, in CI like the co-op demos* — `examples/strands_fleet/run_demo.py` over
   `examples/strands_fleet_node.rs` (an operator and three nodes), CI job `strands-fleet`, ending `STRANDS FLEET OK`;
   the examples matrix row is checked (`check-example-matrix.py`: the driver starts the built example as a process).
 - *in which Strands agents on three Mycelium nodes plan one shared task (a constructive domain — food redistribution
-  or a microgrid)* — food redistribution: a Strands `Swarm` (collector → planner, a scripted model's handoff) asks the
-  bakery's skill on the hub and the kitchen's on the kitchen node through the hub's `/a2a`, and plans two runs; the
-  courier dispatches them on the depot's skill. The models are scripted, stated in the README.
+  or a microgrid)* — food redistribution: each agent attached to a node of its own (collector → kitchen, planner → hub,
+  courier → hub then depot); a Strands `Swarm` (collector → planner, a scripted model's handoff) asks the bakery's
+  skill on the hub and the kitchen's on the kitchen node, and plans two runs; the courier dispatches them on the
+  depot's skill. The models are scripted, stated in the README.
 - *keep their session and swarm memory in the fleet through O* — the swarm's session and the courier's, through
   `MyceliumSessionManager` with claims; act 4 reads the swarm's state (completed, collector then planner) on the depot
   after the hub is gone.
@@ -1130,8 +1132,20 @@ courier); asking the bakery and the kitchen is allowed by policy to the fleet's 
   does not* — `examples/strands_fleet/README.md`, both tables.
 - *Seen failing:* two broken variants of the driver — the planner appointed to dispatch (act 2's refusal check fails:
   nothing refused) and the courier resumed into a fresh session (act 4 fails: 0 messages).
+- *The independent review (#635)* — no blocker; the Python grant digest and possession proof match `grant.rs` and
+  `gateway_authority.rs` byte for byte, and the demo passes with the hub killed by SIGKILL. Fixed: (M1) the operator
+  signed a grant for any holder on request, so the appointment was the driver's choice and each re-fetch made a
+  conflicting appointment — it now appoints from configuration (`APPOINT`), signs one grant at start and answers
+  anyone else 403 (checked in the run); (L1) the cross-node check now asserts the kitchen's own answer and the
+  kitchen node's journal resolving the bakery's skill to the hub; (L2) the borrowed-grant refusal is asserted on its
+  cause, the holder binding, and the README says so; (L3) each agent attaches to a node of its own (collector →
+  kitchen, planner → hub, courier → hub, then depot); (L4, L5, L6) the docstring, the depot check's filter, closed
+  managers, a removed work directory, a CI timeout. Stated: (M2) one holder per scope and epoch is checked per gateway
+  verifier, not by the fleet — the wiki, plan and example doc now say so; and the run never shows an agent holding a
+  mandate and calling outside it.
 - **Not built, stated:** a model's judgement (scripted); a node failing mid-call (stopped between turns); revocation
-  (shown by `authority_drain` and the confined-fleet suite); Strands' own A2A classes; scale.
+  (shown by `authority_drain` and the confined-fleet suite); Strands' own A2A classes; scale; fleet-wide enforcement of
+  one holder per scope.
 
 ### 3.6 · State of play and the next iteration (2026-10-12)
 

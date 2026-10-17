@@ -4,7 +4,7 @@
 //!
 //! | `ROLE` | What runs |
 //! |---|---|
-//! | `operator` | The mandate authority of the food co-op: signs each agent's grant (`GET /grant`) and issues a revocation checkpoint every second (`GET /checkpoint`) |
+//! | `operator` | The mandate authority of the food co-op: appoints one courier to dispatch — one grant, signed at start for the holder its configuration names (`APPOINT`), served to that holder only (`GET /grant`) — and issues a revocation checkpoint every second (`GET /checkpoint`) |
 //! | `node` | A fleet member: a gateway with `/a2a`, the action evaluator, the mandate authority's verifier, an evidence journal and a consensus voter, serving one skill |
 //!
 //! and three helpers the driver runs: `ca-init <dir>` (the fleet CA), `pubkey <seed-hex>` (the authority's public
@@ -20,9 +20,11 @@
 //! allowed to the fleet's own agents (each a principal named by its bearer); **dispatching a van is a mandated
 //! role** — `depot/dispatch` is allowed to anyone only with an established mandate in scope `dispatch`, and the
 //! gateway establishes one only from a grant the operator signed for the calling principal, presented with the
-//! holder's proof for this very call. A mandate is an appointment: a scope has one holder at an epoch (two grants
-//! at one scope and epoch are `ConflictingAppointments`), so the operator appoints one courier. A call without
-//! one is refused, and the refusal is in the evidence journal of the gateway that decided it.
+//! holder's proof for this very call. A mandate is an appointment: at each gateway's verifier, a scope has one holder
+//! at an epoch (two grants at one scope and epoch are `ConflictingAppointments` there — each node's verifier keeps its
+//! own memory, so one holder across the fleet is the authority's to keep, by issuing one grant). So the operator
+//! appoints one courier and signs nothing else. A call without the grant is refused, and the refusal is in the
+//! evidence journal of the gateway that decided it.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -127,6 +129,9 @@ struct Operator {
     key: SigningKey,
     seq: AtomicU64,
     latest: Mutex<Option<SignedRevocationCheckpoint>>,
+    /// The one appointment: signed once, at start. Re-signing on request would make each fetch a second grant at
+    /// the same scope and epoch, which a verifier refuses as a conflicting appointment — the holder's own included.
+    appointment: SignedMandateGrant,
 }
 
 impl Operator {
@@ -145,11 +150,21 @@ impl Operator {
 }
 
 async fn operator() {
-    let op = Arc::new(Operator {
-        key: SigningKey::from_bytes(&key_from_hex(&env("AUTHORITY_SEED"))),
-        seq: AtomicU64::new(0),
-        latest: Mutex::new(None),
-    });
+    let key = SigningKey::from_bytes(&key_from_hex(&env("AUTHORITY_SEED")));
+    // Whom the co-op appoints, and to what: configuration, not whoever asks.
+    let mandate = Mandate {
+        holder: PrincipalId::new(format!("token:{ISSUER}/{}", env("APPOINT"))).unwrap(),
+        established_by: PrincipalId::new(AUTHORITY).unwrap(),
+        purpose: "dispatch tonight's redistribution runs".into(),
+        scope: SCOPE.into(),
+        operations: vec![format!("skill.invoke:skill:{MANDATED_SKILL}")],
+        epoch: 1,
+        term: TermId::new("t1").unwrap(),
+        valid_from_ms: 0,
+        valid_until_ms: wall_ms() + 12 * 3_600_000,
+    };
+    let appointment = SignedMandateGrant { signature: key.sign(&mandate.canonical_bytes()).to_bytes().to_vec(), mandate };
+    let op = Arc::new(Operator { key, seq: AtomicU64::new(0), latest: Mutex::new(None), appointment });
     op.issue();
     {
         let op = Arc::clone(&op);
@@ -164,20 +179,13 @@ async fn operator() {
         .route("/checkpoint", get(|State(op): State<Arc<Operator>>| async move { Json(op.latest.lock().unwrap().clone()) }))
         .route(
             "/grant",
-            // `holder` is a principal; `ops` the comma-separated operations the grant enumerates — absence is denial.
+            // The appointment, to its holder: anyone else is told no — the authority signs nothing on request.
             get(|State(op): State<Arc<Operator>>, Query(q): Query<HashMap<String, String>>| async move {
-                let mandate = Mandate {
-                    holder: PrincipalId::new(q.get("holder").expect("holder").as_str()).unwrap(),
-                    established_by: PrincipalId::new(AUTHORITY).unwrap(),
-                    purpose: "dispatch tonight's redistribution runs".into(),
-                    scope: SCOPE.into(),
-                    operations: q.get("ops").map(|o| o.split(',').map(str::to_string).collect()).unwrap_or_default(),
-                    epoch: 1,
-                    term: TermId::new("t1").unwrap(),
-                    valid_from_ms: 0,
-                    valid_until_ms: wall_ms() + 3_600_000,
-                };
-                Json(SignedMandateGrant { signature: op.key.sign(&mandate.canonical_bytes()).to_bytes().to_vec(), mandate })
+                if q.get("holder").map(String::as_str) == Some(op.appointment.mandate.holder.as_str()) {
+                    Ok(Json(op.appointment.clone()))
+                } else {
+                    Err((axum::http::StatusCode::FORBIDDEN, Json(serde_json::json!({ "error": "not_appointed" }))))
+                }
             }),
         )
         .with_state(op);

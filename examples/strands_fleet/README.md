@@ -26,19 +26,26 @@ evaluator, the mandate verifier, an evidence journal and a consensus voter, and 
 | kitchen | `kitchen/needs` | who needs meals tonight |
 | depot | `depot/dispatch` | dispatches a van |
 
-There are three agents, each a principal its bearer names (`token:fleet/collector`, and so on):
+There are three agents, each a principal its bearer names (`token:fleet/collector`, and so on), each
+attached to a node of its own: the collector to the kitchen node, the planner to the hub, the courier
+to the hub and, after act 4, the depot. The authority **appoints** from its own configuration
+(`APPOINT=courier`): it signs one grant at start, for the courier, and answers anyone else `403
+not_appointed`.
 
-1. **A Strands `Swarm` plans.** The collector asks the bakery and the kitchen through the hub's
-   `/a2a`, then hands off to the planner. One call reaches a skill on the hub itself and one on the
-   kitchen node, through the same gateway. The swarm's state goes to the fleet's KV through
+1. **A Strands `Swarm` plans.** The collector asks the bakery and the kitchen through the kitchen
+   node's `/a2a`, then hands off to the planner. The bakery's skill is served on the hub and the
+   kitchen's on the kitchen node, and the kitchen node's journal records both resolved there. The
+   swarm's state goes to the fleet's KV through
    [`strands-session-mycelium`](../../strands-session-mycelium/README.md).
 2. **The planner tries to dispatch a van, and is refused.** Dispatching is a mandated role: the
    co-op's policy allows `depot/dispatch` only with an established mandate in scope `dispatch`, and
    the authority appointed the courier, not the planner. The gateway answers `-32031 authority not
    established`. The driver then reads the hub's **evidence journal**, which is node-local and never
    gossiped, and finds the refusal: `indeterminate`, with nothing executed. The planner then
-   presents the courier's own grant, signed with its own key, and is refused again. A grant is an
-   appointment, not a bearer token: it counts only with the holder's proof for that very call.
+   presents the courier's own grant, and is refused again: a grant names its holder, and the gateway
+   establishes it only for that principal, the caller its bearer names ("the grant's holder
+   token:fleet/courier is not the caller token:fleet/planner"). A grant is an appointment, not a
+   bearer token.
 3. **The courier dispatches van 1 through the hub.** It presents its grant with a possession proof
    bound to this call, signed with a key only the courier holds. The evidence record names the
    appointment it relied on: `mandate scope=dispatch holder=token:fleet/courier term=t1 epoch=1`.
@@ -63,7 +70,7 @@ There are three agents, each a principal its bearer names (`token:fleet/collecto
   the first one is stopped.
 - A call outside the caller's mandate refused, and that refusal read back from the deciding node's
   own evidence journal.
-- A borrowed grant refused.
+- A borrowed grant refused on its holder, and the authority refusing to sign a grant on request.
 - A permitted call's record naming its appointment.
 - The session store's claims keeping a quorum with one of three voters gone.
 
@@ -80,3 +87,11 @@ There are three agents, each a principal its bearer names (`token:fleet/collecto
   request a standard client sends (`fleet.FleetCaller`). The `a2a-sdk` CI job drives the SDK itself
   against a node.
 - **A real deployment's scale or timing.** Three local processes, one machine.
+- **One holder across the fleet, enforced by the fleet.** A scope's one holder at an epoch is checked
+  by each gateway's own verifier (`GrantVerifier`, per node): two different grants at one scope and
+  epoch are refused as `ConflictingAppointments` at a gateway that has seen both, and a gateway that
+  has seen only one would admit it. One holder fleet-wide is the authority's to keep, by issuing one
+  grant, as this one does.
+- **An agent holding a mandate and calling outside it.** The courier's grant names only dispatch, and
+  nothing else it calls needs a mandate, so the run's refusals are the no-mandate and the
+  someone-else's-mandate cases.
