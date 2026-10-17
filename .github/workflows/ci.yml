@@ -886,7 +886,7 @@ jobs:
           for p in $(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; [print(p["name"]) for p in json.load(sys.stdin)["packages"]]'); do
             cargo test -p "$p" --no-default-features --no-fail-fast -- --list || exit 1
           done
-          pytest --collect-only -q langgraph-checkpoint-mycelium/tests mycelium-py/tests
+          pytest --collect-only -q langgraph-checkpoint-mycelium/tests mycelium-py/tests tests/a2a-sdk
           echo "@@test-universe@@ end"
       # The script-style suites this workflow runs, case by case: each suite's --list prints one
       # `@@case-list@@ <suite>::<case>` line per case without running anything, and each case prints
@@ -916,6 +916,36 @@ jobs:
           for f in examples/langgraph/[0-9][0-9]_*.py; do echo "@@case-list@@ examples/langgraph::$(basename "$f" .py)"; done
           echo "@@test-universe@@ end"
 
+  a2a-sdk:
+    # Post-360 plan row N: an unmodified A2A client — `a2a-sdk` 1.2.2, the library Strands Agents uses — reaches a
+    # node's skills through `/a2a`. The 2026-10-12 probe (docs/plans/external/2026-10-12-a2a-sdk-probe/) found it
+    # could not; this is that probe as a test. The SDK's card resolver, client factory and both its JSON-RPC
+    # transports (1.0, and 0.3's compatibility one) against `examples/a2a_sdk_node.rs`. The version is pinned so a
+    # new SDK is a deliberate change here, not a red run.
+    name: A2A SDK (a2a-sdk against a node)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --example a2a_sdk_node --features a2a,compliance
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install 'a2a-sdk[http-server]==1.2.2' httpx pytest
+      - name: a2a-sdk against a node
+        run: |
+          PORT=7311 A2A_TOKEN=a2a-sdk-test ./target/debug/examples/a2a_sdk_node > "$RUNNER_TEMP/a2a-node.log" 2>&1 &
+          # `ready` is printed once a send dispatches: the skill advertised and the caller-context marker written.
+          for i in $(seq 1 90); do
+            grep -q '^ready' "$RUNNER_TEMP/a2a-node.log" && break
+            if [ "$i" -eq 90 ]; then echo "the node never became ready"; cat "$RUNNER_TEMP/a2a-node.log"; exit 1; fi
+            sleep 1
+          done
+          # The directory, not a file. MYCELIUM_A2A_LIVE_REQUIRED makes a missing node a failure, not a skipped run.
+          MYCELIUM_A2A_LIVE_REQUIRED=1 MYCELIUM_A2A_URL=http://127.0.0.1:7312 MYCELIUM_A2A_TOKEN=a2a-sdk-test \
+            pytest tests/a2a-sdk -v
+
   test-coverage:
     # Verification policy rule 3, observed: fails unless every test in the universe EXECUTED (passed or
     # failed — not skipped, ignored, filtered out, or in a step that did not run) in some job of this run.
@@ -928,7 +958,7 @@ jobs:
     if: always()
     needs: [test, embedded, wasm-host, agentfacts, blackboard, effects, commitment, wiki, reason, guardrails,
             python-sdk, sdk-ts, loom, demo-smoke, afn-smoke, coop-smoke, conway-gpu, documentation, clippy, audit,
-            test-universe]
+            test-universe, a2a-sdk]
     permissions:
       actions: read
       contents: read

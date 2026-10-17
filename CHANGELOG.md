@@ -78,6 +78,33 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `every_receive_boundary_drops_a_replay_unanswered` (the serve stream, `llm.invoke`, the explain responder, and the two
   counters on `GET /stats`); and `the_replay_window_is_bounded_and_fails_closed`, `an_empty_replay_window_is_swept`.
 
+### Added
+
+- **An unmodified A2A client reaches a node's skills through `/a2a`** (post-360 plan row N; upgrade note
+  `docs/guide/deprecations.md` §46). The 2026-10-12 probe found the current `a2a-sdk` (1.2.2, the library Strands
+  Agents uses) could not: the card was served only at `/.well-known/agent.json`, the methods were the pre-0.2
+  `tasks/*` set, and the skill was chosen by a Mycelium-only `skillId` that a standard client never sends (the card's
+  gossip-port `url` was fixed in 2.34.0, #621). Now the card is also at `/.well-known/agent-card.json` and names
+  `/a2a` once per protocol version served (`supportedInterfaces`: JSON-RPC 1.0 and 0.3), with how a message reaches a
+  skill in its `description`; `/a2a` serves A2A 1.0's `SendMessage`, `SendStreamingMessage`, `GetTask` and `CancelTask`
+  and 0.3's `message/send` and `message/stream` beside the old methods, each answering in its generation's shapes
+  (`tasks/get` and `tasks/cancel`, which pre-0.2 and 0.3 share by name, answer a task in the generation that created
+  it). A 0.3 / 1.0 message names its skill in `metadata.skillId` — the message's or the request's — or reaches the
+  default skill an embedder declares (`GossipAgent::with_a2a_default_skill`), or is refused `-32602`; a presented
+  mandate and an operation id ride in the request's `metadata._meta`. Every send, whatever its generation, runs the one
+  path `tasks/send` ran — the federation edge (unary sends only; a federated stream, get or cancel is refused as
+  before), the task reservation and its owner rule, the action evaluator, the mandate to the provider, the evidence
+  record — and the C7 bypass matrix now tries all six send methods, plant and revocation. Each message is its own task:
+  one naming a `taskId` is refused `-32004`. Tests: `the_current_a2a_methods_reach_the_skill_and_answer_in_their_generations_shapes`,
+  `a_current_send_names_its_skill_in_metadata_or_reaches_the_default`,
+  `the_card_names_a2a_once_per_protocol_version_and_how_a_message_reaches_a_skill`, the federation and C7 tests
+  extended — the HTTP, federation and C7 ones seen failing first with the new names unrouted (`-32601`) and the card
+  path unmounted; and the probe as a CI job, **`a2a-sdk`**: the real `a2a-sdk` 1.2.2 client — its card resolver, client
+  factory, 1.0 transport unary and streamed, and its 0.3 compatibility transport — against
+  `examples/a2a_sdk_node.rs` (`tests/a2a-sdk/`). **Not built:** the SDKs' own `A2aClient`s (`mycelium-py`,
+  `mycelium-ts`) still send `tasks/send` and read `/.well-known/agent.json`, and move before those are removed; push
+  notifications, `ListTasks`, `SubscribeToTask` and the HTTP+JSON and gRPC bindings are not served.
+
 ## [2.34.0] — 2026-10-16
 
 **Security fixes in the dependencies, and the post-360 plan's last identity rows.** Wasmtime 49.0.3 closes

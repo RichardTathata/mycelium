@@ -796,6 +796,10 @@ pub(crate) struct TaskCtx {
     /// Whether `/a2a` is mounted (`with_a2a`), so `start()` can say what that exposes.
     #[cfg(feature = "a2a")]
     pub(crate) a2a_mounted: AtomicBool,
+    /// The skill (`ns/name`) an A2A message reaches when it names none in `metadata.skillId`
+    /// (`with_a2a_default_skill`, plan row N). Unset, such a message is refused.
+    #[cfg(feature = "a2a")]
+    pub(crate) a2a_default_skill: std::sync::OnceLock<String>,
     /// The guarantee registry (plan I1/I2): the core set at construction, a companion's before `start()`.
     pub(crate) guarantees: parking_lot::Mutex<Vec<guarantee::GuaranteeDescriptor>>,
     /// Past the lifecycle boundary (plan G13): the startup report has been computed and logged.
@@ -1342,6 +1346,8 @@ impl GossipAgent {
             caller_replay: Default::default(),
             #[cfg(feature = "a2a")]
             a2a_mounted: AtomicBool::new(false),
+            #[cfg(feature = "a2a")]
+            a2a_default_skill: std::sync::OnceLock::new(),
             guarantees: parking_lot::Mutex::new(guarantee::core_guarantees()),
             started: AtomicBool::new(false),
             late_attachments: std::sync::atomic::AtomicU32::new(0),
@@ -1670,15 +1676,6 @@ impl GossipAgent {
         });
     }
 
-    /// Registers the A2A (Agent-to-Agent protocol) endpoints on this node's HTTP gateway.
-    ///
-    /// Adds `GET /.well-known/agent.json` (discovery) and `POST /a2a` (JSON-RPC) to the
-    /// embedded HTTP server. The AgentCard is built dynamically from the live `cap/` KV
-    /// prefix so skills become visible as capabilities are advertised.
-    ///
-    /// Must be called before [`start`](Self::start).
-    ///
-    /// Requires the `a2a` cargo feature.
     /// Attach the federation edge (item 2 PR 8): this domain's identity, exports, policy and
     /// trust bundle. Serves the filtered catalogue on `/federation/catalog` and admits federated
     /// credentials on `/a2a`. Call **before** `start()`, like [`with_a2a`](Self::with_a2a): the
@@ -1736,6 +1733,17 @@ impl GossipAgent {
         self
     }
 
+    /// Registers the A2A (Agent-to-Agent protocol) endpoints on this node's HTTP gateway.
+    ///
+    /// Adds the agent card at `GET /.well-known/agent-card.json` (and at the pre-0.3 path
+    /// `/.well-known/agent.json`, kept for one release) and `POST /a2a` (JSON-RPC: the A2A 1.0 methods,
+    /// their 0.3 names, and the pre-0.2 `tasks/*` methods, kept for one release — `a2a` module doc).
+    /// The card is built from the live `cap/` KV prefix, so skills become visible as capabilities are
+    /// advertised. A message names its skill in `metadata.skillId`; one that names none reaches
+    /// [`with_a2a_default_skill`](Self::with_a2a_default_skill)'s skill, or is refused.
+    ///
+    /// Must be called before [`start`](Self::start). Requires the `a2a` cargo feature.
+    ///
     /// Mount the A2A (agent-to-agent) surface at `POST /a2a`.
     ///
     /// **`/a2a` uses *optional* authentication, and that is the thing to understand before calling
@@ -1772,6 +1780,27 @@ impl GossipAgent {
         a2a::spawn_cleanup(Arc::clone(&tasks), self.task_ctx.shutdown_tx.subscribe());
         let router = a2a::a2a_router_full(ctx, tasks);
         self.with_http_routes(router);
+        self
+    }
+
+    /// The skill an A2A message reaches when it names none (plan row N). A standard A2A client — the
+    /// `a2a-sdk`, Strands Agents — sends a message and never a skill; Mycelium's own `skillId` parameter
+    /// is not something it knows to set. A message that names a skill in `metadata.skillId` (the
+    /// message's or the request's) still reaches that skill; one that names none reaches this one, and
+    /// without it is refused `-32602` naming `metadata.skillId`. The card states which.
+    ///
+    /// `namespace`/`name` must each be one key segment (`capability_name_problem`); one that is not,
+    /// or a second call, is ignored with a warning and the first setting kept. The default is a name,
+    /// not a grant: the call runs the same doors as a named skill — the evaluator, mandates, evidence.
+    #[cfg(feature = "a2a")]
+    pub fn with_a2a_default_skill(self, namespace: &str, name: &str) -> Self {
+        if let Some(problem) = crate::capability::capability_name_problem(namespace, name) {
+            tracing::warn!(namespace, name, problem, "with_a2a_default_skill: not a skill name; no default set");
+            return self;
+        }
+        if self.task_ctx.a2a_default_skill.set(format!("{namespace}/{name}")).is_err() {
+            tracing::warn!(namespace, name, "with_a2a_default_skill: a default is already set; keeping the first");
+        }
         self
     }
 }

@@ -11,7 +11,7 @@
 //! carrying `mcp:invoke` before the evaluator is ever consulted.
 //!
 //! `POST /a2a` is the door a **foreign** agent comes through, and it is **public by design** — an
-//! A2A client discovers `/.well-known/agent.json` and calls, with no prior credential. The gateway
+//! A2A client discovers `/.well-known/agent-card.json` and calls, with no prior credential. The gateway
 //! resolves a bearer if one is offered and calls the caller `anonymous` if not, but it does **not
 //! refuse for want of one**. So at this door there is no scope check standing in front of the
 //! evaluator: the per-call decision is the *only* thing between a stranger and a skill.
@@ -201,9 +201,9 @@ async fn main() {
     note(format!("POST /mcp  with no bearer → HTTP {}", mcp.status()));
     assert_eq!(mcp.status(), 401, "/mcp must require a bearer, or act 0 proves nothing");
     let card = client
-        .get(format!("http://127.0.0.1:{http}/.well-known/agent.json"))
+        .get(format!("http://127.0.0.1:{http}/.well-known/agent-card.json"))
         .send().await.expect("agent card");
-    note(format!("GET  /.well-known/agent.json → HTTP {} — discovery is open", card.status()));
+    note(format!("GET  /.well-known/agent-card.json → HTTP {} — discovery is open", card.status()));
     note("POST /a2a  with no bearer → answered (every act below). The caller is `anonymous`.");
     note("✓ so at THIS door no scope check runs first. The evaluator is the whole of the gate,");
     note("  which is why leaving it off `/a2a` would leave the remit enforced at one door only.");

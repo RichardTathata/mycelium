@@ -169,14 +169,16 @@ phase2() {
   else echo "PASS  agent blocked from the member plane (provider :57000); control reaches it"; fi
 
   # C7 plant: the front doors reach the handlers. Retried while the gateway learns the provider's tools and skill.
+  # Six /a2a sends a round (every generation's names, post-360 row N); the counts accumulate across retries, so
+  # this is a floor, and each name reaching the skill once is asserted in process (test_c7_the_bypass_matrix_…).
   local r0 ok=0
   for _ in $(seq 1 20); do
     doors plant >/dev/null 2>&1 || true
     r0="$(report)"
-    if [ "$(field "$r0" work)" -ge 1 ] 2>/dev/null && [ "$(field "$r0" skill)" -ge 2 ] 2>/dev/null; then ok=1; break; fi
+    if [ "$(field "$r0" work)" -ge 1 ] 2>/dev/null && [ "$(field "$r0" skill)" -ge 6 ] 2>/dev/null; then ok=1; break; fi
     sleep 3
   done
-  if [ "$ok" = 1 ]; then echo "PASS  C7 plant: with a valid mandate, /mcp and /a2a (send, stream) reach the provider's handlers"
+  if [ "$ok" = 1 ]; then echo "PASS  C7 plant: with a valid mandate, /mcp and /a2a (every send name) reach the provider's handlers"
   else echo "FAIL  C7 plant: the front doors never reached the handlers ($r0)"; FAIL=1; doors plant || true; return; fi
 
   # C12: load the long-running tool, revoke while it runs, keep loading.

@@ -266,6 +266,8 @@ fn spawn_handler_with(
         caller_replay: Default::default(),
         #[cfg(feature = "a2a")]
         a2a_mounted: std::sync::atomic::AtomicBool::new(false),
+        #[cfg(feature = "a2a")]
+        a2a_default_skill: std::sync::OnceLock::new(),
         guarantees: parking_lot::Mutex::new(crate::agent::guarantee::core_guarantees()),
         started: std::sync::atomic::AtomicBool::new(false),
         late_attachments: std::sync::atomic::AtomicU32::new(0),
@@ -4091,6 +4093,8 @@ async fn test_subscribe_notified_via_gossip() {
         caller_replay: Default::default(),
         #[cfg(feature = "a2a")]
         a2a_mounted: std::sync::atomic::AtomicBool::new(false),
+        #[cfg(feature = "a2a")]
+        a2a_default_skill: std::sync::OnceLock::new(),
         guarantees: parking_lot::Mutex::new(crate::agent::guarantee::core_guarantees()),
         started: std::sync::atomic::AtomicBool::new(false),
         late_attachments: std::sync::atomic::AtomicU32::new(0),
@@ -10546,6 +10550,16 @@ mod federation_transport {
         })
     }
 
+    /// An A2A 0.3 / 1.0 send (`message/send`, `SendMessage`, and their streaming names) naming its
+    /// skill in `metadata.skillId` (plan row N).
+    fn message_body(method: &str, skill: &str) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": method,
+            "params": {"message": {"messageId": "m-1", "role": "ROLE_USER", "parts": [{"text": "?"}],
+                                   "metadata": {"skillId": skill}}},
+        })
+    }
+
     fn cred(beta: &DomainId, export: &str, sk: &ed25519_dalek::SigningKey) -> PresentedCall {
         let now = now_ms();
         PresentedCall::sign(
@@ -10657,8 +10671,8 @@ mod federation_transport {
         // adversarial audit a partner granted one export could read any task's completed artifact —
         // including a *native* caller's — or cancel it, by naming its id. Ids are caller-supplied on
         // `tasks/send`, so they are enumerable. Both are refused for federated callers, as
-        // `tasks/sendSubscribe` already was.
-        for method in ["tasks/get", "tasks/cancel"] {
+        // `tasks/sendSubscribe` already was — and A2A 1.0's names for them (plan row N).
+        for method in ["tasks/get", "tasks/cancel", "GetTask", "CancelTask"] {
             let body = serde_json::json!({
                 "jsonrpc": "2.0", "id": 1, "method": method, "params": {"id": "some-other-callers-task"},
             });
@@ -10700,13 +10714,20 @@ mod federation_transport {
             .header(axum::http::header::AUTHORIZATION, "Bearer anything")
             .json(&task_body("demo/whoami")).send().await.unwrap();
         assert_eq!(r.status(), 400);
-        // 5g. Streaming is not a federated call.
-        let mut subscribe = task_body("demo/whoami");
-        subscribe["method"] = serde_json::Value::String("tasks/sendSubscribe".into());
-        let r = raw.post(&a2a).header(HEADER_FEDERATED_CALL, cred(&beta, "demo/whoami", &beta_sk).to_header_value())
-            .json(&subscribe).send().await.unwrap();
-        let v: serde_json::Value = r.json().await.unwrap();
-        assert_eq!(v["error"]["code"], -32003, "{v}");
+        // 5g. Streaming is not a federated call, in any generation's name for it (plan row N).
+        for method in ["tasks/sendSubscribe", "message/stream", "SendStreamingMessage"] {
+            let subscribe = if method == "tasks/sendSubscribe" {
+                let mut b = task_body("demo/whoami");
+                b["method"] = serde_json::Value::String(method.into());
+                b
+            } else {
+                message_body(method, "demo/whoami")
+            };
+            let r = raw.post(&a2a).header(HEADER_FEDERATED_CALL, cred(&beta, "demo/whoami", &beta_sk).to_header_value())
+                .json(&subscribe).send().await.unwrap();
+            let v: serde_json::Value = r.json().await.unwrap();
+            assert_eq!(v["error"]["code"], -32003, "{method}: {v}");
+        }
         // 5h. The catalogue needs its reserved export: a call credential cannot fetch it.
         let r = raw.get(&catalog).header(HEADER_FEDERATED_CALL, cred(&beta, "demo/whoami", &beta_sk).to_header_value())
             .send().await.unwrap();
@@ -10721,6 +10742,24 @@ mod federation_transport {
         assert_eq!(v["result"]["artifacts"][0]["parts"][0]["text"], crate::PRINCIPAL_ANONYMOUS, "{v}");
         assert_eq!(calls.load(Ordering::SeqCst), 2);
 
+        // 6b. A2A 1.0's `SendMessage` crosses the edge as `tasks/send` does (plan row N): the export
+        //     is authorised against the skill `metadata.skillId` names, and the provider is told the
+        //     partner — and an export the credential does not name is refused with no dispatch.
+        let r = raw.post(&a2a).header(HEADER_FEDERATED_CALL, cred(&beta, "demo/whoami", &beta_sk).to_header_value())
+            .json(&message_body("SendMessage", "demo/whoami")).send().await.unwrap();
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(
+            v["result"]["task"]["artifacts"][0]["parts"][0]["text"],
+            crate::federation_principal("beta.example", "svc/billing"),
+            "{v}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        let r = raw.post(&a2a).header(HEADER_FEDERATED_CALL, cred(&beta, "demo/whoami", &beta_sk).to_header_value())
+            .json(&message_body("SendMessage", "demo/secret")).send().await.unwrap();
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["error"]["code"], -32003, "{v}");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+
         // 7. Revocation at the provider, mid-session: the next call is refused at the auth
         //    layer with no dispatch. The client learns it from the refusal, not from gossip.
         edge.revoke(&beta);
@@ -10730,15 +10769,15 @@ mod federation_transport {
             }
             other => panic!("a revoked partner must be refused at the gateway, got {other:?}"),
         }
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
 
         // 8. The tables, after bytes crossed: two meshes. Non-vacuity of "bytes crossed": the
-        //    provider was reached exactly twice — the federated call and the anonymous one.
+        //    provider was reached exactly three times — two federated calls and the anonymous one.
         let a_nodes: Vec<&GossipAgent> = std::iter::once(a0.as_ref()).chain(a_rest.iter()).collect();
         let b_nodes: Vec<&GossipAgent> = b.iter().collect();
         assert_never_merged(&a_nodes, &b_nodes);
         assert_eq!(a0.peers().len(), 1, "domain A's gateway node peers with its own mesh only");
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
 
         for n in a_nodes.iter().chain(b_nodes.iter()) {
             n.shutdown().await;
@@ -14013,8 +14052,8 @@ async fn test_c11_a_quiet_gateway_still_sees_a_mandate_expire() {
 /// requiring a `depot` mandate, an execution authority, and provider enforcement. Every handler
 /// counts what reaches it.
 ///
-/// **The plant:** with a valid mandate, `/mcp` `tools/call`, `/a2a` `tasks/send` and `/a2a`
-/// `tasks/sendSubscribe` each reach their handler. Without it, the refusals below could come from a
+/// **The plant:** with a valid mandate, `/mcp` `tools/call` and every `/a2a` send — the pre-0.2,
+/// 0.3 and 1.0 names, unary and streamed (plan row N) — each reach their handler. Without it, the refusals below could come from a
 /// node that refused everything.
 ///
 /// Then the authority **revokes** the term, and every door is tried again with the revoked mandate.
@@ -14024,7 +14063,7 @@ async fn test_c11_a_quiet_gateway_still_sees_a_mandate_expire() {
 /// | Door | Refused at |
 /// |---|---|
 /// | `/mcp` `tools/call` | the gateway (#399) and the provider (C3) |
-/// | `/a2a` `tasks/send`, `tasks/sendSubscribe` | the gateway and the provider |
+/// | `/a2a` `tasks/send`, `tasks/sendSubscribe`, `message/send`, `message/stream`, `SendMessage`, `SendStreamingMessage` | the gateway and the provider |
 /// | `/gateway/rpc/call` with a protected kind | the route (C1) |
 /// | `/gateway/signal/emit`, RPC-shaped | the route (C1) |
 /// | a member's direct `rpc_call_with_mandate` | the provider (C3) |
@@ -14207,31 +14246,47 @@ async fn test_c7_the_bypass_matrix_no_door_runs_revoked_work() {
     };
     let a2a = |method: &str, m: serde_json::Value| {
         let (http, base, method) = (http.clone(), base.clone(), method.to_string());
+        // The pre-0.2 methods take `skillId` and `_meta` in params; 0.3 and 1.0 take them in the
+        // request's `metadata` (plan row N).
+        let params = if method.starts_with("tasks/") {
+            serde_json::json!({
+                "id": format!("task-{}", fastrand::u32(..)), "skillId": "depot/dispatch",
+                "message": {"role": "user", "parts": [{"type": "text", "text": text}]},
+                "_meta": {"mandate": m}})
+        } else {
+            serde_json::json!({
+                "message": {"messageId": format!("m-{}", fastrand::u32(..)), "role": "ROLE_USER", "parts": [{"text": text}]},
+                "metadata": {"skillId": "depot/dispatch", "_meta": {"mandate": m}}})
+        };
         async move {
             http.post(format!("{base}/a2a")).bearer_auth("s3cret")
-                .json(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":method,"params":{
-                    "id": format!("task-{}", fastrand::u32(..)), "skillId": "depot/dispatch",
-                    "message": {"role": "user", "parts": [{"type": "text", "text": text}]},
-                    "_meta": {"mandate": m}}}))
+                .json(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}))
                 .send().await.unwrap().text().await.unwrap()
         }
     };
+    // Every name `/a2a` takes a send by, in every generation (plan row N).
+    const A2A_SENDS: [&str; 6] =
+        ["tasks/send", "tasks/sendSubscribe", "message/send", "message/stream", "SendMessage", "SendStreamingMessage"];
     let skill_args = serde_json::json!({ "text": text });
 
     // ── The plant: a valid mandate reaches every handler through the front doors. ──
     mcp_call(client_mandate("tools/call", &tool, &tool_args)).await;
-    a2a("tasks/send", client_mandate("skill.invoke", &skill, &skill_args)).await;
-    a2a("tasks/sendSubscribe", client_mandate("skill.invoke", &skill, &skill_args)).await;
+    for method in A2A_SENDS {
+        let before = skill_ran.load(Ordering::SeqCst);
+        let answer = a2a(method, client_mandate("skill.invoke", &skill, &skill_args)).await;
+        // A stream's body is read to its end above, so its skill call has returned.
+        assert_eq!(skill_ran.load(Ordering::SeqCst), before + 1, "plant: /a2a {method} reaches the skill: {answer}");
+    }
     assert_eq!(tool_ran.load(Ordering::SeqCst), 1, "plant: /mcp reaches the tool");
-    assert_eq!(skill_ran.load(Ordering::SeqCst), 2, "plant: /a2a send and stream reach the skill");
 
     // ── Revoked. ──
     agent.offer_revocation_checkpoint(&checkpoint(2, &["t1"])).unwrap();
     let (tool0, skill0, sdk0) = (tool_ran.load(Ordering::SeqCst), skill_ran.load(Ordering::SeqCst), sdk_saw.load(Ordering::SeqCst));
 
     mcp_call(client_mandate("tools/call", &tool, &tool_args)).await;
-    a2a("tasks/send", client_mandate("skill.invoke", &skill, &skill_args)).await;
-    a2a("tasks/sendSubscribe", client_mandate("skill.invoke", &skill, &skill_args)).await;
+    for method in A2A_SENDS {
+        a2a(method, client_mandate("skill.invoke", &skill, &skill_args)).await;
+    }
     let b64 = base64::engine::general_purpose::STANDARD.encode(
         serde_json::json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"work","arguments":{}}}).to_string(),
     );

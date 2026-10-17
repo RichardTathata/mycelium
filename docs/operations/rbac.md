@@ -138,7 +138,7 @@ included, after the provider check (C3) has admitted it. That is the serving age
 provider is where the mandate is verified. Grant `mesh:serve` only to the agents that serve those kinds.
 
 **Public, never scope-gated** (M16 edge criterion): `/health`, `/ready`, `/stats`, `/metrics`,
-the A2A descriptor (`/.well-known/agent.json`), `POST /a2a` (an A2A peer needs no Mycelium
+the A2A descriptor (`/.well-known/agent-card.json`, and `/.well-known/agent.json` for one release), `POST /a2a` (an A2A peer needs no Mycelium
 credential — but a bearer *presented* on it is resolved, and an unrecognised one is 401; §7), and
 `GET /bulk/{id}` — a **capability URL**: the 64-bit random per-call nonce is the credential, and
 the serving peer fetches it node-to-node with no shared bearer. **That is the whole public
