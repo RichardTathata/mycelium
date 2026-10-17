@@ -7,6 +7,11 @@
 Separate publisher trust from reviewer acceptance. A proposed artifact may be
 available for evaluation without becoming the live provider customers discover.
 
+**Terms.** A *proposed* entry (`proposed = true`) loads only under its
+[shadow name](../00-concepts.md#shadow), `{ns}/{name}.shadow`, which can be called by name but takes no
+demand. A *reviewer* is a key in the host's `[hosts].trusted_reviewers`; its co-signature
+(`mycelium-artifact accept`) is what lets the entry load under the live name.
+
 ## How to run
 
 Prerequisites: Rust and loopback sockets; no Docker or model. From the repository root:

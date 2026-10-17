@@ -22,8 +22,10 @@ runs and a record someone else can read. The sentence makes each claim at the st
 
 - *Embedded library, no coordinator* — the thesis, and the binding wording: a library, not a platform.
 - *Generic nodes install signed capabilities when demand goes unmet* — the stem node and demand-driven
-  provisioning (v2.17.0–v2.18.0). It is true of a **stem** — a node with a `[hosts]` table — not of every
-  node; an SDK agent or a plain `mycelium` node does not install anything.
+  provisioning (v2.17.0–v2.18.0). A **stem** is a node that declares from its unit file
+  (`mycelium-wasm-host/src/stem.rs`); only a stem whose unit file has a `[hosts]` table runs a provisioner
+  and installs anything. It is not true of every node: an SDK agent or a plain `mycelium` node does not
+  install anything ([the stem, defined](guide/00-concepts.md#fleet-growth)).
 - *Re-heal what they declared when a provider dies* — presence floors: **what was declared**, not
   self-repair in general.
 - *Where you configure an enforcement point* — gateway and provider enforcement need their features
@@ -34,9 +36,9 @@ runs and a record someone else can read. The sentence makes each claim at the st
   `gateway_allow_unauthenticated` is set), allow-all egress, no profile — and `profile = "secure-single-domain"` makes `start()`
   refuse unless the enforced posture holds.
 - *It checks authority before work runs and records what it decided* — mandates and the action seam, with
-  the evidence journal attached; an evaluator without a journal enforces and records nothing.
+  the evidence journal attached; an evaluator without a journal still enforces, and records nothing.
 - *A recorded run replays* — replay checks a recording against its captured inputs and choices. It does not
-  reproduce external effects, and a decision journal is not a replay bundle. Deliberately not *proves it by
+  reproduce external effects, and the evidence journal is not a replay bundle. Deliberately not *proves it by
   replay* (the 360 review, 2026-10-02).
 
 It contains no word that [`philosophy.md`](philosophy.md) § *What This Architecture Is Not* forbids.

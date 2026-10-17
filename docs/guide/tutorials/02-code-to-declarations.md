@@ -8,6 +8,11 @@ Compare the same provisioning scenario implemented with Rust orchestration and
 with generic stem processes. This is the larger, existing co-op example: after
 the small echo fleet, follow how its plumbing moves into unit declarations.
 
+**Terms.** A [unit file](../00-concepts.md#unit-file) declares what a unit offers, needs and hosts; a
+[`[[lane]]`](../00-concepts.md#lane) names a tuple-space stage the unit produces into or consumes from,
+which the checker joins by name and nothing runs. [`wire-check`](../00-concepts.md#wire-check) reads
+unit files offline and says what *would* bind, never what *is* bound.
+
 ## How to run
 
 Prerequisites: Rust, Docker and Docker Compose. The first stem image build can take

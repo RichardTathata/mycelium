@@ -153,7 +153,7 @@ not to raw source. The suite READMEs carry the per-example walkthrough + the exa
 | [`coordination_integrity`](../docs/guide/04-consensus.md#what-a-successful-election-means) · [src](coordination_integrity.rs) | · | · | ● | ○ | Adv | CLI | · | · | · | ✓ | · |
 | [`coordinator_by_accretion`](../docs/guide/14-patterns-and-pitfalls.md#12--expect-one-node-to-end-up-holding-every-single-writer-role) · [src](coordinator_by_accretion.rs) | · | · | ○ | ● | Adv | CLI | · | · | · | ✓ | · |
 | [`coordination_viz`](../docs/guide/14-patterns-and-pitfalls.md#12--expect-one-node-to-end-up-holding-every-single-writer-role) · [src](coordination_viz.rs) | · | · | ○ | ● | Adv | Web | · | · | ✓ | · | · |
-| [`identity_one_record`](../docs/guide/09-security.md#identity-proofs-what-turning-them-on-actually-requires) · [src](identity_one_record.rs) | ● | · | · | ○ | Adv | CLI | · | · | · | ✓ | · |
+| [`identity_one_record`](../docs/guide/09-security.md#identity-proofs-on-by-default-and-what-turning-them-off-means) · [src](identity_one_record.rs) | ● | · | · | ○ | Adv | CLI | · | · | · | ✓ | · |
 | [`auditor_questions`](../docs/guide/09-security.md#three-questions-an-auditor-asks) · [src](auditor_questions.rs) | ● | · | · | ○ | Adv | CLI | · | ✓ | · | ✓ | · |
 | [`federation_trust_is_not_transitive`](../docs/guide/17-federation.md#three-domains--the-question-two-cannot-ask) · [src](federation_trust_is_not_transitive.rs) | · | · | · | ● | Adv | CLI | · | · | · | ✓ | · |
 | **Food-Rescue Co-op** — [`coop/README.md`](coop/README.md), one constructive world | | | | | | | | | | | |

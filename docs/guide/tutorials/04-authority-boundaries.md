@@ -7,6 +7,13 @@
 Trace where authority is checked: gateway dispatch, provider admission and
 continuation, and the destination that commits an effect.
 
+**Terms.** The gateway and the provider are [enforcement points](../00-concepts.md#enforcement-point):
+each checks the *caller context* (the verified [gateway caller](../00-concepts.md#gateway-caller)) and the
+[mandate](../00-concepts.md#mandate) a call presents, whose *scope* names what it covers. The destination
+keeps its own *resource epoch* and refuses work authorised only under an older one, and its
+[commit](../00-concepts.md#destination-commit) answers `Fresh` (applied now) or `Replayed` (that
+operation was already applied).
+
 ## How to run
 
 Prerequisites: Rust and loopback sockets. From the repository root:

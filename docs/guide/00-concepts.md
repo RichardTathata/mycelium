@@ -286,6 +286,24 @@ says it is allowed. A declared argument missing from a request must produce `Ind
 guess. Separately, **coverage is a field, not a hope**: the evidence names the routes the enforcement
 point does not see, rather than leaving a reader to infer an all-clear from silence.
 
+**Enforcement point vs. evidence journal.** An **enforcement point** is the place that checks
+authority before work runs: it assembles the action envelope from facts it verified, asks the
+evaluator, and dispatches or refuses. The substrate has two, and each records its decisions under its
+own name: the **gateway** (`point=gateway` — `/mcp`, `/a2a`, the LLM and federation routes count
+together) and the **provider** check that `with_provider_enforcement()` adds before a handler runs
+(`point=provider`). A resource that commits an effect checks its own installed epoch at its commit
+boundary, a separate check with its own refusal (guide 20, tutorial 4). Where it stops: an
+enforcement point covers only the routes it fronts, and a route no enforcement point fronts inherits
+nothing; it needs the `gateway` and `tls` features (`compliance` includes both and adds the audit
+chain), an attached evaluator and configuration; and provider enforcement with no evaluator refuses protected
+work rather than allowing it. The **evidence journal** (`EvidenceJournal`,
+`src/agent/evidence_journal.rs`) is where an enforcement point records what it decided and what
+became of the action: node-local, append-only, fsynced, **never gossiped**. Only a hash-bearing
+reference enters the tamper-evident audit chain. Without a journal an attached evaluator still
+enforces and records nothing, and the node warns at attach time. The journal is evidence of
+decisions, not a replay bundle: it does not let a run be repeated. → [20 · Authorising
+actions](20-authorising-actions.md).
+
 **Exact replay vs. scenario replay (item 6).** A **seed is not a durable reproduction artefact** —
 a run reproduced by re-seeding is reproducible only while the code is unchanged, which is exactly
 when nobody needs it. A **bundle** instead records what the production code *asked for* and what it
@@ -311,7 +329,13 @@ provider is handed a **`GatewayCaller`** — the verified *client* principal, is
 (`oidc:{issuer}/{subject}`, `token:{issuer}/{name}`), not the gateway's own node identity, and never
 the credential itself. Authorisation judges that client: **listing the gateway node does not admit
 its clients**. A context that fails verification is a denial, never a fall-back to running the call
-as the node. → [09 · Security](09-security.md), [`operations/rbac.md`](../operations/rbac.md).
+as the node. One thing, three names: this guide says **gateway caller**; the code also says **caller
+context** for the same value, and **caller envelope** for its signed form on the wire — the
+`GatewayCaller` framed into the RPC payload, signed by the gateway's identity key, and admitted once
+per gateway, issue time and id at the provider, inside a 300 s freshness window
+(`src/agent/gateway_caller.rs`). The caller envelope is not the **action envelope** below: the caller
+envelope tells a provider who called; the action envelope is what an enforcement point hands its
+evaluator. → [09 · Security](09-security.md), [`operations/rbac.md`](../operations/rbac.md).
 
 **Refusals are typed by what you should do next.** This is the axis's actual thesis, and it shows up
 in nearly every error type above. A refusal a retry loop would consume is a *different type* from
@@ -321,6 +345,100 @@ A bad signature is not a policy gap, or the operator edits the wrong file. `Inde
 absent. `DeliveryUnknown` does not mean nothing happened — and there is deliberately **no** variant
 that means that, because no verb on that path can establish it. When you add an error variant here,
 the question to answer is not "what went wrong" but "what should the caller do differently".
+
+---
+
+## Fleet growth
+
+How a fleet acquires a capability it lacks, in the words [tutorial 1](tutorials/01-first-stem-fleet.md)
+uses. The workflow is [capability-lifecycle.md](../operations/capability-lifecycle.md); every field is in
+the [unit-file reference](../reference/unit-file.md). Each term has a one-line row in the
+[glossary](#glossary-quick-reference).
+
+**Stem node.** A **stem node** (*stem* for short) is a node that declares from its unit file and loads
+what the declarations call for ([`stem.rs`](../../mycelium-wasm-host/src/stem.rs); the `mycelium-stem`
+binary, or `Stem::start` embedded). At start it advertises every `[[capability]]`, declares every
+`[[requirement]]` and defines every `[[group]]`. When the file has a `[hosts]` table it also runs a
+**provisioner** configured from it, with every `[[presence]]` as a standing want. **Only a stem with
+`[hosts]` installs anything.** A **stem fleet** is a fleet of stems started from one image. The name is
+from biology: like a stem cell, a stem starts generic and undifferentiated, and specialises when the
+fleet needs a capability. The analogy stops early. Only two kinds of thing load dynamically: WASM
+components, and blobs for a runtime already on the node. New native code, a companion crate, a gateway
+route or a TLS change needs a new image, and the stem image is itself deployed directly. And the
+catalogue is the supply chain: a stem installs what the keys in `[hosts].trusted_publishers` signed, so
+those keys are the posture to review. Two other kinds of node install nothing: an **SDK agent** (Python
+or TypeScript, through the gateway) can declare a unit file with `POST /gateway/units/declare` but is
+refused the hosting sections, and a plain **`mycelium` node** does not read a unit file at all.
+
+**Catalogue · library · librarian.** The **catalogue** is the set of installable entries in gossiped
+KV: one `installable/{ns}/{name}/{hex}` entry per artifact, naming the capability it provides, its
+kind, its content address, its footprint and its publisher's signature. Every node holds the whole
+catalogue, and there is no registry server. An entry is only the announcement. The bytes travel
+separately, pulled from a holder on demand and verified against the content address. The **library**
+is the durable source behind the catalogue: a directory, HTTP blob store or object store holding the
+blobs and a signed manifest that CI publishes into. The **librarian** is a role a node takes over a
+library (`spawn_librarian`, or `mycelium-stem --librarian`): it serves the bytes, advertises
+`artifact/librarian`, and keeps the catalogue reconciled to the manifest, publishing additions and
+tombstoning removals. So the library is where artifacts are kept, the librarian serves it, and the
+catalogue is what every node sees of it. A **catalogue entry** is one of those announcements. →
+[artifacts.md](../operations/artifacts.md).
+
+**Unit file.** One TOML file per deployable unit. It says what the unit offers, what it needs, the
+groups it defines, the lanes it touches, the authority it expects, what it can host (`[hosts]`), the
+presence it wants, and how a hosted blob reaches its runtime. Every section is optional. One loader
+(`NodeCapabilityConfig::from_toml_str`) serves `mycelium wire-check`, the stem and
+`POST /gateway/units/declare`. "Unit declaration" and "declaration" mean the same file. A declaration
+is not execution: `[[lane]]` (a tuple-space stage, by name and side), `[[mandate]]` and `[[rule]]` are
+vocabulary for the offline check and the evaluator, and nothing enforces them at runtime.
+
+**Presence band: floor and ceiling.** A `[[presence]]` section asks the fleet to keep between
+`min_providers` (the **presence floor**) and `max_providers` (the **ceiling**) live providers of a
+capability, independent of demand. The two together are the **presence band**. Every stem whose
+`[hosts]` can take the entry reconciles toward it locally. Below the floor, eligible hosts self-elect
+and install. Above the ceiling, the hosts ranked beyond `max` by the band's rendezvous order withdraw
+(rule `prov.shed`), and every host with the same view agrees which. A band is a **convergence target,
+not a cardinality guarantee**: the count can overshoot or dip for a round, and a gap is filled only after
+a host sees it. "Provider floor" and "desired floor" mean the presence floor. A stem refuses
+`[[presence]]` without `[hosts]`.
+
+**Provisioner vs. governor, and self-election.** The **provisioner** is the loop on a host that closes
+a gap: it watches demand (a `req/` entry with no live provider) and presence floors, resolves them
+against the catalogue, pulls, verifies and installs through the runtime for the entry's kind, and
+advertises the capability ([`provisioner.rs`](../../mycelium-wasm-host/src/provisioner.rs)). It is an
+ordinary agent on the public API: the library never provisions on its own. A **governor** is a
+node-local loop that holds something to a published intent. The `MembershipGovernor` sizes a group
+toward a `MembershipIntent`'s `[min, max]`; the tuning and timing governors constrain the auto-tuner
+and the timing parameters. Governors act under the node's [control
+profile](../operations/control-profiles.md). Both decide by **self-election**: each eligible node rolls
+a probability every round and acts only if the roll says so. Nobody assigns the work. The provisioner's
+probability is fixed (`mycelium-stem --self-elect`, default `0.5`); the membership governor's grows with
+the gap. The probability damps the herd, so two nodes acting at once is expected and corrected in a
+later round. A node with no runtime for an entry's kind, or no budget for it, never self-elects for it:
+eligibility is node-local truth.
+
+**Runtime kind, activation and `[[serve]]`.** An artifact's **kind** says how it becomes live, and a
+host's `[hosts].kinds` lists the kinds it has a runtime for: `wasm-component` (instantiated in the
+node's WASM sandbox) or `blob` (bytes placed on disk for a native runtime already on the node, such as
+an Ollama process). An **activation** (`[[activation]]`) is how a placed blob reaches that runtime: after
+the blob is placed and verified, the stem runs the operator's `command` (an argv), then gates the
+capability on `probe`, which it re-runs in the background; when the probe fails the install is
+withdrawn and a later round reinstalls. <!-- row M: confinement --> **`[[serve]]`** turns a live install into a routable prompt
+skill: it registers `{ns}/{name}` over an OpenAI-compatible endpoint while the install named by
+`while_live` is live, and retracts it when the install goes.
+
+**Shadow → accept.** An artifact description with `proposed = true` publishes a **proposed** entry. A
+host loads it only into the **shadow lane**: advertised as `{ns}/{name}.shadow`, callable by that name
+for comparison, and never resolved by a requirer's filter, so it takes no demand. It loads for real only
+after a **reviewer** co-signs it with `mycelium-artifact accept`. A reviewer is a key listed in that
+host's `[hosts].trusted_reviewers`. That key is separate from the publisher keys, and an empty list
+means a proposed entry never loads for real on that host. A reviewer's signature says someone accepted
+the entry, not that the function is correct. → [16 · Guardrails](16-guardrails.md).
+
+**wire-check.** `mycelium wire-check` is a pure function over unit files and, optionally, artifact
+descriptions. It applies the mesh's own match rule and reports by name what could not bind
+(`unwired requirement`, `presence unhostable`, …). Its answer is **would bind under these
+declarations**, never *is bound*: liveness, load, membership now and whether a mandate is current are
+runtime facts it does not read ([`wire_check.rs`](../../src/wire_check.rs)).
 
 ## Layers at a glance
 
@@ -361,27 +479,52 @@ the question to answer is not "what went wrong" but "what should the caller do d
 | `operation_id` / `attempt_id` | native | caller-minted identity of an operation (stable across retries) and of each attempt; the key of every receipt | `design/contracts-receipts.md` |
 | `DeliveryUnknown` | native | a timeout's honest answer: the rungs established so far, then *unknown* — never a negative | `design/contracts-receipts.md` |
 | `Buffered` | native | a durability rung: survives a process crash, lost to a power failure. A *different* claim from `OnDisk`, not a weaker one | `receipt_ladder` |
-| Destination commit / `mycelium-effects` | native | rung 4 — one effect, once, at a destination you own; a SQLite dedup table keyed by `operation_id`, `DeliveryUnknown` on a passed deadline | guide [18](18-contracts-and-receipts.md) § Rung 4 |
-| Mandate / term / epoch | native | one appointment (enumerated operations, no wildcard) · which appointment this is · what orders authority; an installed epoch never goes backwards | `curator_handover` |
+| <a id="destination-commit"></a>Destination commit / `mycelium-effects` | native | rung 4 — one effect, once, at a destination you own; a SQLite dedup table keyed by `operation_id`, `DeliveryUnknown` on a passed deadline. `Fresh`: the effect was applied now. `Replayed`: this `operation_id` was already applied with the same content, so nothing is applied twice | guide [18](18-contracts-and-receipts.md) § Rung 4 |
+| <a id="mandate"></a>Mandate / term / epoch | native | one appointment (enumerated operations, no wildcard) · which appointment this is · what orders authority; an installed epoch never goes backwards. A mandate's **scope** names what it covers (a group, a scope name), and epochs are ordered per scope. The **resource epoch** is the one a resource has installed: it refuses anything authorised only under an older epoch, whatever an earlier check permitted | `curator_handover`, `composed_commit` |
 | Strict eligibility · coverage · `Unknown` | native | a verdict per configured incumbency rule (consecutive terms · cumulative tenure · cooling-off) from a `TermHistory` whose coverage was verified from chained terms; `Unknown` is never eligible; `ready` = the handover journal read **and** every rule decided in favour | guide [21](21-mandates.md) § Eligibility · `strict_eligibility` |
 | Egress allow-list | native | a **hostname** list each node enforces on the substrate's own outbound calls — the first URL and every redirect hop (≤ 5, never https → http); an object store on the endpoint it dials; names, not addresses | `operations/crown-jewel.md` § 2 |
 | Allocated right | native | exclusive units in a node-local fsynced journal, never gossiped and never reclaimed because a holder went quiet (contracts axis item 4) | `design/adaptive-stability.md` |
 | Domain | native | one independently admitted mesh; federation exports *services* between domains and never joins the transports | `federated_domains` |
 | Award | native | the contract net's accepted offer — a receipt-bearing operation, one per requirement, a second is refused | `redistribution_cn` |
 | `Indeterminate` | native | authority could not be **established** — never a permit, and never the same as a deny | `design/action-envelope-ae0.md` |
-| Bundle | native | a recorded run: what production asked for and received, plus the build and the witness that failed | `replay_a_bundle` |
 | "No control plane" | definition | *Control decisions live in participating nodes: enabled governors and provisioners act locally, subject to configured consensus and resource-side authority checks. No separate Mycelium control-plane service is required.* — no *separate* service to run, not the absence of control | `positioning.md` |
 | Things called "profile" | disambiguation | a **domain profile** (`domain_profile = Enforced`: this mesh is a federated domain — TLS required, SWIM refused) · a **guarantee (startup) profile** (`profile = "secure-single-domain"`: the guarantees a node refuses to start without) · a **control profile** (`Legacy` → `Observe` → `EnforceLocal` → `EnforceAllocated`: how the node's governors act, set at runtime) · a **consensus policy** (per operation: quorum, lease, ballot). None implies another | `operations/control-profiles.md` |
 | Guarantee report · profile | native | what this node enforces and why not the rest — every core guarantee resolved at `start()` to `enforced` · `not_configured` · `not_in_build` · `not_applicable` · `not_verifiable_here` (`guarantee_report()`, `GET /gateway/guarantees`); a **profile** (`dev`, `secure-single-domain`) names the set a node refuses to start without | `reference/guarantee-catalogue.md`, guide 20 |
 | Rule catalogue | native | every decision point the substrate has, described by stable id — trigger, inputs, typed outcomes and reasons, guards, relations as hypotheses, code and tests, trace policy; generated and gated, `mycelium rules` | `reference/rule-catalogue.md`, guide 19 |
 | Decision trace | native | a bounded record of what each instrumented decision point read, how it ended and why — off unless attached, changes no decision, never waits; `decisions.jsonl` + `coverage.json` in a bundle, read with `mycelium explain` | guide 19 § reading what a node decided |
 | Claim / observation / assessment | native | an assertion · a report · a *judgement with an author*. Only assessments count as evidence, and not one's own | `design/knowledge-layer.md` |
-| Gateway caller | native | the client principal a provider sees behind a gateway call (`GatewayCaller`, item 7) | `docs/operations/rbac.md` §7 |
+| <a id="gateway-caller"></a>Gateway caller (caller context, caller envelope) | native | the verified client principal a provider sees behind a gateway call (`GatewayCaller`, item 7); *caller context* is the same value, *caller envelope* its signed wire form, admitted once and only while fresh. Not the action envelope | `docs/operations/rbac.md` §7 |
 | Action envelope | native | who is asking to do what, to which resource, with which arguments — assembled only by the enforcement point from verified facts (AE0) | `design/action-envelope-ae0.md` |
 | Evaluator · permit / deny / indeterminate | native | a replaceable, deterministic decision over an envelope + authority facts; indeterminate is never permit; the secure profile refuses on it | `design/action-envelope-ae0.md` |
 | Policy revision · coverage · deployment report | native | the digest of the policy actually evaluated; the routes an enforcement point does not see (`coverage.complete: false`); attributable testimony about activation, never proof of coverage | `design/action-envelope-ae0.md` |
 | Seam | native | a replaceable adapter behind which production decision logic runs unchanged — wall clock, monotonic clock, named RNG streams, timers, scheduling, channels, storage, external inputs (replay, item 6) | `design/replay-nondeterminism-inventory.md` |
-| Bundle | native | what a failing run leaves behind and a reviewer replays exactly: build identity, config, initial disk state, redacted inputs, the ordered choices trace, the witness; exact replay detects divergence, never merely re-seeds | `design/replay-nondeterminism-inventory.md` |
+| <a id="bundle"></a>Bundle | native | a recorded run that a reviewer replays exactly: what production asked for and received (build identity, config, initial disk state, redacted inputs, the ordered choices trace), plus the witness that failed; exact replay detects divergence, never merely re-seeds | `replay_a_bundle`, `design/replay-nondeterminism-inventory.md` |
+| **Fleet growth** | | *§ [Fleet growth](#fleet-growth) has the longer form of each row below* | |
+| <a id="stem"></a>Stem · stem node · stem fleet | native | a node that declares from its unit file (`mycelium-stem`, `Stem::start`); with a `[hosts]` table it runs a provisioner and installs signed artifacts, and only then. A stem fleet is many stems from one image. Named after a stem cell: generic until the fleet needs something. An SDK agent or a plain `mycelium` node installs nothing | `first_stem_fleet` |
+| <a id="catalogue"></a>Catalogue · catalogue entry | native | the gossiped `installable/{ns}/{name}/{hex}` entries every node holds: capability, kind, content address, footprint, publisher signature. The announcement only: the bytes are pulled and verified separately | `catalog` |
+| <a id="library"></a>Library · librarian | native | the durable store of blobs and a signed manifest (directory, HTTP or object store) · the node role that serves it and keeps the catalogue reconciled to the manifest | `catalog`, `operations/artifacts.md` |
+| <a id="unit-file"></a>Unit file (unit declaration, declaration) | native | one TOML file per deployable unit: offers, needs, groups, lanes, authority, hosting, presence, activation, serving; one loader for `wire-check`, the stem and `POST /gateway/units/declare`. Declaring is not executing | `reference/unit-file.md` |
+| <a id="lane"></a>Lane (`[[lane]]`) | native | a tuple-space stage a unit names, with its side (`produces` / `consumes`); the checker joins lanes by name, and nothing runs them at runtime | `reference/unit-file.md` |
+| <a id="presence"></a>Presence band · floor · ceiling | native | `[[presence]]`: keep from `min_providers` (the floor) to `max_providers` (the ceiling) live providers, independent of demand; above the ceiling the hosts ranked beyond `max` withdraw (rule `prov.shed`). A convergence target, not a cardinality guarantee. "Provider floor" and "desired floor" mean the presence floor | `first_stem_fleet` |
+| <a id="provisioner"></a>Provisioner | native | a host's loop: demand or a presence gap → the catalogue → pull, verify, install → advertise. An ordinary agent on the public API; the library never provisions on its own | `provisioning` |
+| <a id="governor"></a>Governor | native | a node-local loop that holds something to a published intent (group membership, tuning, timing), acting under the node's control profile, with no coordinator | `elastic_intent` |
+| <a id="self-election"></a>Self-election | native | each eligible node rolls a damped probability every round and acts only on its own roll; nobody assigns the work, and an overshoot is corrected in a later round | `provisioning` |
+| <a id="runtime-kind"></a>Runtime kind | native | how an artifact becomes live: `wasm-component` (the node's WASM sandbox) or `blob` (bytes placed for a native runtime already on the node); `[hosts].kinds` lists the kinds a host can run | `reference/unit-file.md` |
+| <a id="activation"></a>Activation (`[[activation]]`) | native | how a placed blob reaches its runtime: the stem runs the operator's command, then gates the capability on a probe it keeps re-running; a failed probe withdraws the install <!-- row M: confinement --> | `reference/unit-file.md` |
+| <a id="serve"></a>`[[serve]]` | native | a prompt skill over an OpenAI-compatible endpoint, registered while a named install is live and retracted when the install goes | `reference/unit-file.md` |
+| <a id="shadow"></a>Proposed · shadow lane · reviewer | native | a `proposed = true` entry loads only as `{ns}/{name}.shadow` (callable by name, takes no demand) until a **reviewer** — a key in that host's `[hosts].trusted_reviewers` — co-signs it with `mycelium-artifact accept`. Publisher and reviewer keys are separate | `provisioning`, guide 16 |
+| <a id="wire-check"></a>`wire-check` | native | `mycelium wire-check`: a pure function over unit files that names what could not bind. Its answer is *would bind*, never *is bound* | `reference/unit-file.md` |
+| **Authority** | | | |
+| <a id="enforcement-point"></a>Enforcement point | native | where authority is checked before work runs — the gateway (`point=gateway`) or the provider check (`point=provider`) — by assembling the action envelope and asking the evaluator. It covers only the routes it fronts | guide 20 |
+| <a id="evidence-journal"></a>Evidence journal | native | the node-local, append-only, fsynced, never-gossiped record of what an enforcement point decided and what became of the action; only a hash-bearing reference enters the audit chain. Not a replay bundle | guide 20 |
+| <a id="history-scope"></a>History scope | native | whose history a count covers: `HistoryScope::EnforcementPoint`, the decisions this enforcement point's journal recorded at this node (gateway and provider counted apart). Exact here, with no quorum; an actor spread over N gateways can be admitted up to N times a per-gateway limit | guide 20 § Deciding on what an actor has already done |
+| <a id="credential-binding"></a>Credential binding · placeholder | native | `[[egress_credentials]]`: a secret the node's egress gate attaches only on a request to the bound host (and port and path prefix, when set); a caller holds only the placeholder `mycelium-credential:<name>`. A request anywhere else is refused, and a redirect off the host carries nothing (post-360 row L, unreleased) | `operations/crown-jewel.md` § Credentials attached at egress |
+| **Words with several meanings** | | | |
+| <a id="claim"></a>Things called "claim" | disambiguation | a **knowledge claim** (`RecordKind::Claim`: an issuer asserting something; not evidence) · a **work claim**: a tuple-space worker taking an item from a stage, or the blackboard's competitive claim-by-predicate (one consumer; *work is claimed, not dispatched* means these) · the **log claim** (`clog/{stream}/{group}/claim`: a leased consensus commitment naming a log group's one active consumer) · a **Strands session claim** (`strands-session-mycelium`: a consensus write fixing who writes a message index or record version, made before the write) · a **role claim** (`SignedRoleClaim` at `sys/role/{node}`, RBAC) · a **namespace claim** (a companion owning a KV prefix, such as `tuple/`). None implies another | `design/knowledge-layer.md`, `strands-session-mycelium/README.md` § Claims |
+| <a id="scope"></a>Things called "scope" | disambiguation | a **signal scope** (`SignalScope`: `Cluster` · `Group` · `Individual`, who a signal or a consensus proposal addresses) · a **token scope** (`kv:write`, `mesh:serve`, …: what a gateway credential may do) · a **history scope** (`HistoryScope`: whose decisions a history count covers) · a **mandate scope** (`Mandate::scope`: what a mandate covers; epochs are ordered per scope). None implies another | `03-signals.md`, `operations/rbac.md`, guide 20, guide 21 |
+| <a id="journal"></a>Things called "journal" | disambiguation | the **node-local journal** (`src/agent/journal.rs`: the mechanism — append-only, fsynced, never gossiped; a full queue is refused, never silently dropped) · the **evidence journal** (its profile for enforcement points; "decision journal" and "authority journal" mean this) · the **rights journal** (the rights ledger's records, on the same mechanism) · the **handover journal** (`HandoverJournal`: what a mandate's successor inherits as history, not conclusions). The **decision trace** is not a journal: it is bounded, drops its newest records when full, and changes no decision | guide 20, guide 21, guide 19 |
+| <a id="catalogue-meanings"></a>Things called "catalogue" | disambiguation | the **installable catalogue** (`installable/`: what a stem can install) · the **reviewed catalogue** (the business-activity catalogue an action envelope's `mapping` names, owned by the evidence consumer) · the **federation catalog** (a domain's filtered, signed list of the exports a partner may see) · the **rule catalogue** (every decision point, `reference/rule-catalogue.md`) · the **guarantee catalogue** (every core guarantee, `reference/guarantee-catalogue.md`). Code identifiers spell it `catalog` (`InstallableCatalog`, `CatalogObservation`); prose spells it `catalogue` | `operations/artifacts.md`, `design/action-envelope-ae0.md` §6, guide 17 |
+| <a id="admission"></a>Things called "admission" | disambiguation | **peer admission** (mTLS: a node joins a mesh by a certificate from its CA, never by `cluster_name`; a removed member is refused at the handshake) · **signal admission** (a node's `Boundary`: whether it acts on a signal; forwarding is not scoped) · **provider admission** (the provider enforcement point: whether a protected call reaches its handler) · **admission control** (a companion's queue bound: work past the watermark is refused and counted). None implies another | guide 09, `03-signals.md`, guide 20, `operations/admission-control.md` |
 
 **Next:** [01 · Gossip KV](01-gossip-kv.md). For the full design argument behind
 this vocabulary, see [philosophy.md](../philosophy.md).

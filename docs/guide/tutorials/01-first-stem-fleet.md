@@ -8,6 +8,14 @@ Give three generic hosts one capability to maintain: `demo/echo`, with two live
 providers and a third host available to replace one. The component is checked in;
 there is no model, remote download or domain application to understand first.
 
+**Terms.** A [stem](../00-concepts.md#stem) is a generic host that declares from its
+[unit file](../00-concepts.md#unit-file) (the *unit declaration* below) and, with a `[hosts]` table,
+installs signed [catalogue entries](../00-concepts.md#catalogue) that a [librarian](../00-concepts.md#library)
+serves, for a [runtime kind](../00-concepts.md#runtime-kind) it can run. Hosts
+[self-elect](../00-concepts.md#self-election) to fill a [presence band](../00-concepts.md#presence), and
+the hosts ranked above its ceiling withdraw (rule `prov.shed`); the band is a target the fleet converges
+to, not a count it guarantees.
+
 ## How to run
 
 Prerequisites: the repository's Rust toolchain and permission to bind loopback
@@ -40,7 +48,7 @@ from top to bottom:
 5. One hosting stem stops gracefully. The available host installs the component
    and the observer again sees two providers.
 
-The seed address, runtime kind, trust key and desired floor are configured.
+The seed address, runtime kind, trust key and presence floor are configured.
 The example driver starts the processes; it does not assign providers.
 Which eligible hosts serve the capability is decided at runtime. The floor is an
 intent under eventual convergence, not an instantaneous global cardinality guarantee.

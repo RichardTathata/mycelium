@@ -321,6 +321,27 @@ renders each stream's verified badge, chain-tip hash, and records over `GET /gat
 
 ---
 
+## Credentials attached at egress
+
+*Post-360 plan row L, unreleased.* A secret an outbound call needs (an LLM endpoint's API key, say)
+need not sit in a unit file, a component's environment or a backend's fields. The node holds a
+**credential binding** (`[[egress_credentials]]` in its config, or `GOSSIP_EGRESS_CREDENTIALS`): a
+name, the one host it is for (optionally a port and a path prefix), the header form, and where to read
+the value once at `start()`. A caller holds only the binding's **placeholder**,
+`mycelium-credential:<name>` (`mycelium::credential_placeholder`), and puts it where the secret would
+go. The node's egress gate (`EgressCredentials`, feature `gateway`) swaps in the value only on a
+request to the bound host. It refuses the request before a byte is sent anywhere else, and it drops
+the credential on a redirect the binding does not authorise. `[[serve]]`'s `credential = "<binding>"`
+and `OpenAiBackend` with `.with_credentials(gate)` send through it.
+
+What it does not cover: a placeholder in a query string or a request body (sent as written),
+SkillRunner's own key, object-store and git credentials, and an `[[activation]]` command, which is a
+separate process with no path to the gate. The configuration, the per-request rules and the full table
+of where a node reads secrets are in
+[crown-jewel.md § Credentials attached at egress](../operations/crown-jewel.md).
+
+---
+
 ## Compliance positioning
 
 | Control | Framework | Mycelium mechanism |
