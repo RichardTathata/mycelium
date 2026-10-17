@@ -145,6 +145,10 @@ pub(crate) mod oidc;
 /// policy on every hop, or not followed at all (realignment repairs R3).
 #[cfg(feature = "gateway")]
 pub mod egress_client;
+/// Credentials attached at egress (post-360 plan row L): bindings resolved from opaque placeholders,
+/// only at the host each binding names.
+#[cfg(feature = "gateway")]
+pub mod egress_credentials;
 
 #[allow(unused_imports)]
 pub(crate) use bulk::BulkTransport;
@@ -831,6 +835,10 @@ pub(crate) struct TaskCtx {
     /// by `partner()` costs nothing and the lock-order table gains no row.
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) federation_clients: std::sync::OnceLock<Vec<Arc<crate::federation::client::FederationClient>>>,
+    /// The egress gate's credential bindings (post-360 plan row L), read once at `start()` from
+    /// `GossipConfig::egress_credentials`. Unset before `start()`, and when no binding is configured.
+    #[cfg(feature = "gateway")]
+    pub(crate) egress_credentials: std::sync::OnceLock<Arc<egress_credentials::EgressCredentials>>,
     /// Optional external audit sink (SOC 2 WS-C), set via `with_audit_sink`.
     #[cfg(feature = "compliance")]
     pub(crate) audit_sink: std::sync::OnceLock<Arc<dyn audit::AuditSink>>,
@@ -1365,6 +1373,8 @@ impl GossipAgent {
             federation_edge: std::sync::OnceLock::new(),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             federation_clients: std::sync::OnceLock::new(),
+            #[cfg(feature = "gateway")]
+            egress_credentials: std::sync::OnceLock::new(),
             #[cfg(feature = "compliance")]
             audit_sink: std::sync::OnceLock::new(),
             #[cfg(feature = "compliance")]
@@ -1906,6 +1916,16 @@ impl GossipAgent {
     /// `allow_hosts` (default) permits all.
     pub fn egress_policy(&self) -> &crate::config::EgressPolicy {
         &self.config.egress
+    }
+
+    /// The egress gate's credential bindings (post-360 plan row L): what resolves a
+    /// [`credential_placeholder`](crate::config::credential_placeholder) into a secret, only on a
+    /// request to the host its binding names. `None` before `start()` (the values are read there,
+    /// once) and when `GossipConfig::egress_credentials` is empty. Hand it to a client that sends
+    /// placeholders — `OpenAiBackend::with_credentials`, or [`EgressCredentials::send`](crate::EgressCredentials::send).
+    #[cfg(feature = "gateway")]
+    pub fn egress_credentials(&self) -> Option<Arc<egress_credentials::EgressCredentials>> {
+        self.task_ctx.egress_credentials.get().cloned()
     }
 }
 

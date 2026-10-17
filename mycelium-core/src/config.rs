@@ -355,6 +355,351 @@ impl EgressPolicy {
     }
 }
 
+/// The marker every credential placeholder starts with ([`credential_placeholder`]).
+pub const CREDENTIAL_PLACEHOLDER_MARKER: &str = "mycelium-credential:";
+
+/// The **opaque placeholder** a caller holds in place of a secret (post-360 plan row L): put it where
+/// the secret would go — an `Authorization: Bearer …` value, an `x-api-key` header, an
+/// `OpenAiBackend`'s `api_key`, a `[[serve]]`'s `credential` — and the egress gate
+/// (`mycelium::EgressCredentials`) replaces the header that carries it with the binding's value, on a
+/// request to the host the binding names and nowhere else. The placeholder itself carries nothing: a
+/// leaked environment, log or unit file holding it holds the binding's *name*.
+pub fn credential_placeholder(binding: &str) -> String {
+    format!("{CREDENTIAL_PLACEHOLDER_MARKER}{binding}")
+}
+
+/// The binding names a header value's placeholders name, in order — every `mycelium-credential:NAME`
+/// it holds, `NAME` running to the first character outside `[A-Za-z0-9._-]`. Empty when it holds
+/// none. A marker with no name after it yields `""`, which no binding is called (so it is refused).
+pub fn credential_placeholders_in(value: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut rest = value;
+    while let Some(i) = rest.find(CREDENTIAL_PLACEHOLDER_MARKER) {
+        let after = &rest[i + CREDENTIAL_PLACEHOLDER_MARKER.len()..];
+        let end = after.find(|c: char| !is_binding_name_char(c)).unwrap_or(after.len());
+        out.push(&after[..end]);
+        rest = &after[end..];
+    }
+    out
+}
+
+fn is_binding_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')
+}
+
+/// How a credential binding's value is attached to a request ([`CredentialBinding::form`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CredentialForm {
+    /// `Authorization: Bearer <value>`.
+    Bearer,
+    /// `<header>: <value>` — the header named by [`CredentialBinding::header`] (`x-api-key`, …).
+    Header,
+    /// `Authorization: Basic base64(<username>:<value>)` — the username is
+    /// [`CredentialBinding::username`] (not a secret); the value is the password.
+    Basic,
+}
+
+/// A **credential binding** (post-360 plan row L): a secret the node attaches to an outbound
+/// request **at the egress gate**, so the secret need not enter a component's or an activation
+/// command's environment. A caller names the binding with its opaque placeholder
+/// ([`credential_placeholder`]); the gate resolves it only on a request to [`host`](Self::host)
+/// (under [`path_prefix`](Self::path_prefix), over https unless [`allow_plaintext`](Self::allow_plaintext)),
+/// refuses the request anywhere else, and drops it on a redirect that leaves the binding.
+///
+/// This struct holds **where the value comes from, never the value**: it is read once, at
+/// `GossipAgent::start()`, into the gate, and nothing here prints it. In TOML:
+///
+/// ```toml
+/// [[egress_credentials]]
+/// name      = "openai"
+/// host      = "api.openai.com"
+/// form      = "bearer"            # or "header" (with header = "x-api-key") or "basic" (with username)
+/// value_file = "/run/secrets/openai"   # or value_env = "OPENAI_API_KEY"
+/// ```
+///
+/// Env `GOSSIP_EGRESS_CREDENTIALS` ([`parse_egress_credentials_env`]).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialBinding {
+    /// The binding's name — what a placeholder names. `[A-Za-z0-9._-]+`, unique on the node. Not a secret.
+    pub name: String,
+    /// The one host the value is attached to — compared exactly (case-insensitive), never as a
+    /// suffix: a binding names an endpoint, not a domain.
+    pub host: String,
+    /// Optionally, a path prefix the request's (normalised) path must be under — `/v1` admits `/v1`
+    /// and `/v1/chat/completions`, not `/v10` or `/admin`.
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+    /// How the value is attached.
+    pub form: CredentialForm,
+    /// The header name, for `form = "header"` (required there, refused elsewhere).
+    #[serde(default)]
+    pub header: Option<String>,
+    /// The username, for `form = "basic"` (required there, refused elsewhere).
+    #[serde(default)]
+    pub username: Option<String>,
+    /// The **name** of an environment variable holding the value, read once at start. One of
+    /// `value_env` / `value_file`. The variable stays in the process environment, so a child the
+    /// node starts inherits it — `value_file` is the form that keeps the value out of every environment.
+    #[serde(default)]
+    pub value_env: Option<String>,
+    /// A file holding the value (trailing newline trimmed), read once at start. One of `value_env` /
+    /// `value_file`.
+    #[serde(default)]
+    pub value_file: Option<PathBuf>,
+    /// Attach over plain `http` to a host that is not loopback. Default `false`: a credential goes
+    /// out over `https`, or over `http` only to `localhost` / a loopback address.
+    #[serde(default)]
+    pub allow_plaintext: bool,
+    /// The one port the value is attached on (the URL's port, or its scheme's default). Absent: any
+    /// port on the host — **refused for `localhost` in any spelling and for any IP literal** (loopback,
+    /// IPv4-mapped, unspecified or not), where every port is a different process and the host alone says
+    /// nothing about the recipient.
+    #[serde(default)]
+    pub port: Option<u16>,
+}
+
+/// `Debug` says whether a source is set, never which variable or file — a value pasted into
+/// `value_env` or `value_file` would otherwise be printed wherever a config is (row L's re-review).
+impl std::fmt::Debug for CredentialBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CredentialBinding")
+            .field("name", &self.name)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("path_prefix", &self.path_prefix)
+            .field("form", &self.form)
+            .field("header", &self.header)
+            .field("username", &self.username)
+            .field("value_env", &self.value_env.as_ref().map(|_| "<redacted>"))
+            .field("value_file", &self.value_file.as_ref().map(|_| "<redacted>"))
+            .field("allow_plaintext", &self.allow_plaintext)
+            .finish()
+    }
+}
+
+impl CredentialBinding {
+    /// The placeholder that names this binding ([`credential_placeholder`]).
+    pub fn placeholder(&self) -> String {
+        credential_placeholder(&self.name)
+    }
+
+    /// Does this binding authorise attaching its value to a request for `url`? `Err` names why not
+    /// (never the value). Pure; the URL is read with the client's own (WHATWG) parser, so the path
+    /// compared is the normalised one (`/v1/../admin` is `/admin`).
+    pub fn authorises_url(&self, url: &str) -> Result<(), String> {
+        let parsed = url::Url::parse(url).map_err(|_| format!("credential `{}`: the URL does not parse", self.name))?;
+        let host = match parsed.host() {
+            Some(url::Host::Domain(d)) => d.to_string(),
+            Some(url::Host::Ipv4(a)) => a.to_string(),
+            Some(url::Host::Ipv6(a)) => a.to_string(),
+            None => return Err(format!("credential `{}`: the URL names no host", self.name)),
+        };
+        if !host.eq_ignore_ascii_case(self.host.trim_start_matches('[').trim_end_matches(']')) {
+            return Err(format!("credential `{}` is not bound to {host}", self.name));
+        }
+        if let Some(port) = self.port
+            && parsed.port_or_known_default() != Some(port)
+        {
+            return Err(format!("credential `{}` is not bound to {host} on that port", self.name));
+        }
+        match parsed.scheme() {
+            "https" => {}
+            "http" if self.allow_plaintext || is_loopback_host(&parsed) => {}
+            other => {
+                return Err(format!(
+                    "credential `{}`: refused over {other} to a non-loopback host (set allow_plaintext to permit it)",
+                    self.name
+                ))
+            }
+        }
+        if let Some(prefix) = &self.path_prefix {
+            let p = prefix.trim_end_matches('/');
+            let path = parsed.path();
+            let under = p.is_empty() || path == p || path.strip_prefix(p).is_some_and(|r| r.starts_with('/'));
+            if !under {
+                return Err(format!("credential `{}`: the path {path} is not under {prefix}", self.name));
+            }
+        }
+        Ok(())
+    }
+
+    /// This binding's own rules (`GossipConfig::validate` runs them with the index and uniqueness). The
+    /// message names fields and the binding, never a field's contents other than a valid name.
+    pub fn validate(&self, egress: &EgressPolicy) -> Result<(), String> {
+        let n = &self.name;
+        // Row L's review, finding 2: no message echoes a field's contents (a value pasted into the wrong
+        // field would reach a start-time log line); the name is shown only once it is a valid name.
+        if n.is_empty() || !n.chars().all(is_binding_name_char) {
+            return Err("its name is not a binding name (non-empty, only [A-Za-z0-9._-])".into());
+        }
+        let h = self.host.trim();
+        let bad_host = || format!("`{n}`: host must be one host name or address as the HTTP client dials it — no scheme, path, port (set `port`) or leading '.'");
+        if h.is_empty() || h != self.host || h.contains(['/', '@', '?', '#', ' ', '\\']) || h.starts_with('.') {
+            return Err(bad_host());
+        }
+        if host_of_url(&format!("http://{h}/")).is_none_or(|parsed| !parsed.eq_ignore_ascii_case(h.trim_start_matches('[').trim_end_matches(']'))) {
+            return Err(bad_host());
+        }
+        // Row L's review, finding 3: on loopback every port is a different local process — possibly
+        // another user's — so the host name alone names no recipient. A loopback binding names its port.
+        // (Pinning to the port of the first use was the alternative; it makes what a binding authorises
+        // depend on which request came first, which no operator wrote and no replay can see.)
+        // The rule is on what the host *is*, not how it is spelled (the re-review: `localhost.`, an
+        // IPv4-mapped loopback and the unspecified addresses all reach this host): any `localhost` name,
+        // trailing dot or not, and **any IP literal** — an address names a machine, not a service, and
+        // enumerating which addresses are this machine is the spelling game this rule must not play.
+        if self.port.is_none() && host_needs_port(h) {
+            return Err(format!("`{n}`: a loopback host or an IP address needs `port` — each port is a different process"));
+        }
+        if self.port == Some(0) {
+            return Err(format!("`{n}`: port 0 names no endpoint"));
+        }
+        if let Some(p) = &self.path_prefix
+            && !p.starts_with('/')
+        {
+            return Err(format!("`{n}`: path_prefix must start with '/'"));
+        }
+        match (self.form, &self.header, &self.username) {
+            (CredentialForm::Header, Some(hd), None) => {
+                if hd.is_empty() || !hd.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)) {
+                    return Err(format!("`{n}`: header is not a header name"));
+                }
+            }
+            (CredentialForm::Header, None, _) => return Err(format!("`{n}`: form = \"header\" needs header = \"<name>\"")),
+            (CredentialForm::Basic, None, Some(u)) => {
+                if u.contains(':') || u.chars().any(char::is_control) {
+                    return Err(format!("`{n}`: a basic username holds no ':' and no control character"));
+                }
+            }
+            (CredentialForm::Basic, _, None) => return Err(format!("`{n}`: form = \"basic\" needs username = \"<user>\"")),
+            (CredentialForm::Bearer, None, None) => {}
+            (form, _, _) => {
+                return Err(format!("`{n}`: header is for form = \"header\" and username for form = \"basic\", not {form:?}"))
+            }
+        }
+        match (&self.value_env, &self.value_file) {
+            (Some(v), None) if !v.trim().is_empty() => {}
+            (None, Some(f)) if !f.as_os_str().is_empty() => {}
+            (Some(_), Some(_)) => return Err(format!("`{n}`: set one of value_env or value_file, not both")),
+            _ => return Err(format!("`{n}`: name where the value comes from — value_env = \"VAR\" or value_file = \"/path\"")),
+        }
+        // A binding to a host the allow-list denies could never be used: a contradiction, refused here
+        // rather than discovered as a refused request (the OIDC rule's shape, `lifecycle.rs`).
+        if !egress.permits_host(h) {
+            return Err(format!("`{n}`: egress.allow_hosts does not permit the bound host"));
+        }
+        Ok(())
+    }
+}
+
+/// `localhost` in any spelling (case, a trailing dot, a `*.localhost` name — RFC 6761 reserves them all
+/// for this host) or any IP literal: hosts a credential binding must pin to a port.
+fn host_needs_port(h: &str) -> bool {
+    let t = h.trim_end_matches('.').to_ascii_lowercase();
+    t == "localhost" || t.ends_with(".localhost") || t.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>().is_ok()
+}
+
+fn is_loopback_host(u: &url::Url) -> bool {
+    match u.host() {
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(a)) => a.is_loopback(),
+        Some(url::Host::Ipv6(a)) => a.is_loopback(),
+        None => false,
+    }
+}
+
+/// `GOSSIP_EGRESS_CREDENTIALS` — credential bindings from the environment ([`CredentialBinding`]).
+/// Entries separated by `;`, fields by `|`:
+/// `name|host[/path-prefix]|form|source[|plaintext]` — `form` is `bearer`, `header:<name>` or
+/// `basic:<username>`; `source` is `env:<VAR>` or `file:<path>`; a fifth field `plaintext` sets
+/// `allow_plaintext`. Example: `openai|api.openai.com/v1|bearer|file:/run/secrets/openai`.
+/// The variable names **where** each value is, never a value. A malformed entry refuses the whole
+/// variable, and the variable replaces the TOML's bindings.
+pub fn parse_egress_credentials_env(v: &str) -> Result<Vec<CredentialBinding>, GossipError> {
+    // Row L's review, finding 2: an entry is named by its index (and its name, once that is a valid
+    // binding name), never echoed — a value pasted into the wrong field would reach a start-time log.
+    // By index alone (the re-review): a secret pasted into the name field is a valid-looking name.
+    let bad = |i: usize, _name: &str, why: &str| GossipError::InvalidField {
+        field:  "egress_credentials",
+        reason: format!("GOSSIP_EGRESS_CREDENTIALS entry {i}: {why} (`name|host[:port][/prefix]|form|env:VAR or file:/path[|plaintext]`)"),
+    };
+    let mut out = Vec::new();
+    for (i, entry) in v.split(';').map(str::trim).filter(|e| !e.is_empty()).enumerate() {
+        let parts: Vec<&str> = entry.split('|').map(str::trim).collect();
+        let name = parts[0];
+        if !(4..=5).contains(&parts.len()) {
+            return Err(bad(i, name, "needs four or five fields"));
+        }
+        let (authority, path_prefix) = match parts[1].find('/') {
+            Some(at) => (&parts[1][..at], Some(parts[1][at..].to_string())),
+            None => (parts[1], None),
+        };
+        let (host, port) = if authority.starts_with('[') {
+            match authority.find(']') {
+                Some(end) => (&authority[..=end], &authority[end + 1..]),
+                None => return Err(bad(i, name, "an IPv6 host is written [addr]")),
+            }
+        } else {
+            match authority.rsplit_once(':') {
+                Some((h, _)) => (h, &authority[h.len()..]),
+                None => (authority, ""),
+            }
+        };
+        let port = match port.strip_prefix(':') {
+            None if port.is_empty() => None,
+            Some(p) => Some(p.parse::<u16>().map_err(|_| bad(i, name, "the port is not a number"))?),
+            None => return Err(bad(i, name, "the host is followed by something other than :port")),
+        };
+        let (form, header, username) = match parts[2].split_once(':') {
+            None if parts[2] == "bearer" => (CredentialForm::Bearer, None, None),
+            Some(("header", h)) => (CredentialForm::Header, Some(h.to_string()), None),
+            Some(("basic", u)) => (CredentialForm::Basic, None, Some(u.to_string())),
+            _ => return Err(bad(i, name, "form is bearer, header:<name> or basic:<username>")),
+        };
+        let (value_env, value_file) = match parts[3].split_once(':') {
+            Some(("env", var)) => (Some(var.to_string()), None),
+            Some(("file", path)) => (None, Some(PathBuf::from(path))),
+            _ => return Err(bad(i, name, "source is env:<VAR> or file:<path>")),
+        };
+        let allow_plaintext = match parts.get(4) {
+            None => false,
+            Some(&"plaintext") => true,
+            Some(_) => return Err(bad(i, name, "the fifth field, if present, is `plaintext`")),
+        };
+        out.push(CredentialBinding {
+            name: name.to_string(),
+            host: host.to_string(),
+            path_prefix,
+            form,
+            header,
+            username,
+            value_env,
+            value_file,
+            allow_plaintext,
+            port,
+        });
+    }
+    Ok(out)
+}
+
+/// Every binding's own rules ([`CredentialBinding::validate`]) and their names unique — what
+/// `GossipConfig::validate` and `EgressCredentials::load` both run. A refusal names the binding by
+/// index (`egress_credentials[i]`) and by name once that is valid, never a field's contents.
+pub fn validate_credential_bindings(bindings: &[CredentialBinding], egress: &EgressPolicy) -> Result<(), GossipError> {
+    let mut seen = std::collections::HashSet::new();
+    for (i, b) in bindings.iter().enumerate() {
+        b.validate(egress).map_err(|why| GossipError::InvalidField { field: "egress_credentials", reason: format!("[{i}] {why}") })?;
+        if !seen.insert(b.name.as_str()) {
+            return Err(GossipError::InvalidField {
+                field:  "egress_credentials",
+                reason: format!("[{i}] `{}`: two bindings share the name — a placeholder must name one", b.name),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// The host a URL names, read **the way the HTTP client reads it** — the WHATWG parser (`url`) that
 /// reqwest uses — so the host the egress gate allows is the host the client dials.
 ///
@@ -1267,6 +1612,16 @@ pub struct GossipConfig {
     #[serde(default)]
     pub egress: EgressPolicy,
 
+    /// **Credential bindings** the egress gate attaches on the way out (post-360 plan row L). Empty
+    /// (default) = none. Each names a host, a form and where its value comes from — never the value,
+    /// which is read once at `start()` into the gate (`mycelium::EgressCredentials`) and held only
+    /// there. A caller names a binding by its placeholder ([`credential_placeholder`]). In TOML:
+    /// `[[egress_credentials]]`; env `GOSSIP_EGRESS_CREDENTIALS` ([`parse_egress_credentials_env`]).
+    /// `validate()` refuses a malformed binding by name; `start()` refuses one whose value cannot be
+    /// read, and every binding in a build without `gateway` (the gate's HTTP client).
+    #[serde(default)]
+    pub egress_credentials: Vec<CredentialBinding>,
+
     /// Generic-OIDC SSO config for the gateway (WS4, `compliance` feature).
     /// `None` (default) = no OIDC; gateway auth uses bearer tokens / scoped
     /// tokens only. When set, a presented JWT is validated against the IdP's
@@ -1417,6 +1772,7 @@ impl Default for GossipConfig {
             consensus_require_electorate:  false,
             consensus_electorate:          None,
             egress:                        EgressPolicy::default(),
+            egress_credentials:            Vec::new(),
             oidc:                          None,
             tls:                           None,
         }
@@ -1592,6 +1948,9 @@ impl GossipConfig {
             Ok(())
         };
         if let Some(t) = &self.gateway_auth_token { blank("gateway_auth_token", t)?; }
+        // Credential bindings (post-360 plan row L): each well-formed, names unique, every bound host
+        // permitted by the allow-list. The values are not read here — `start()` reads them.
+        validate_credential_bindings(&self.egress_credentials, &self.egress)?;
         for t in &self.gateway_scoped_tokens { blank("gateway_scoped_tokens", &t.token)?; }
         for t in &self.gateway_named_tokens  { blank("gateway_named_tokens",  &t.token)?; }
         #[cfg(feature = "compliance")]
@@ -2111,6 +2470,9 @@ impl GossipConfig {
                 .map(str::to_string)
                 .collect();
         }
+        if let Ok(v) = env::var("GOSSIP_EGRESS_CREDENTIALS") {
+            self.egress_credentials = parse_egress_credentials_env(&v)?;
+        }
         if let Ok(v) = env::var("GOSSIP_PROFILE") {
             self.profile = Some(v);
         }
@@ -2366,6 +2728,187 @@ mod tests {
         assert!(!p.permits_url("http://evil.example\\@allowed.example/mcp"), "the userinfo trick is refused");
         assert!(!p.permits_url("http://evil.example\\.allowed.example/"), "the suffix trick is refused");
         assert!(p.permits_url("http://allowed.example/"));
+    }
+
+    // ── Post-360 plan row L: credential bindings ──────────────────────────────
+
+    fn bearer_binding(name: &str, host: &str) -> CredentialBinding {
+        CredentialBinding {
+            name: name.into(),
+            host: host.into(),
+            path_prefix: None,
+            form: CredentialForm::Bearer,
+            header: None,
+            username: None,
+            value_env: Some("MYCELIUM_ROW_L_VAR".into()),
+            value_file: None,
+            allow_plaintext: false,
+            port: None,
+        }
+    }
+
+    /// Row L's review, finding 3: a binding names a port when it sets one, and a loopback binding must
+    /// set one — on loopback every port is a different local process.
+    #[test]
+    fn a_binding_matches_its_port_and_a_loopback_binding_must_name_one() {
+        let mut b = bearer_binding("m", "api.example.com");
+        b.port = Some(8443);
+        assert!(b.authorises_url("https://api.example.com:8443/").is_ok());
+        assert!(b.authorises_url("https://api.example.com/").is_err(), "443 is not 8443");
+        b.port = Some(443);
+        assert!(b.authorises_url("https://api.example.com/").is_ok(), "the scheme's default port");
+        for host in ["localhost", "127.0.0.1", "127.9.9.9", "[::1]"] {
+            let mut c = GossipConfig::default();
+            c.egress_credentials = vec![bearer_binding("l", host)];
+            let e = c.validate().unwrap_err().to_string();
+            assert!(e.contains("port"), "{host}: {e}");
+            c.egress_credentials[0].port = Some(11434);
+            c.validate().unwrap_or_else(|e| panic!("{host} with a port: {e}"));
+        }
+        let env = parse_egress_credentials_env("o|localhost:11434/v1|bearer|env:K;s|[::1]:8080|bearer|env:K;r|api.example.com|bearer|env:K").unwrap();
+        assert_eq!((env[0].host.as_str(), env[0].port, env[0].path_prefix.as_deref()), ("localhost", Some(11434), Some("/v1")));
+        assert_eq!((env[1].host.as_str(), env[1].port), ("[::1]", Some(8080)));
+        assert_eq!(env[2].port, None);
+    }
+
+    /// Row L's re-review: the loopback-port rule is not defeated by the host's spelling — a trailing dot,
+    /// an IPv4-mapped loopback, the unspecified addresses (which reach this host) all need `port`. Seen
+    /// failing first: each validated without one.
+    #[test]
+    fn every_spelling_of_this_host_needs_a_port() {
+        for host in ["localhost.", "LOCALHOST", "[::ffff:127.0.0.1]", "0.0.0.0", "[::]", "api.localhost"] {
+            let mut c = GossipConfig::default();
+            c.egress_credentials = vec![bearer_binding("l", host)];
+            let e = c.validate().map(|_| "validated".to_string()).unwrap_or_else(|e| e.to_string());
+            assert!(e.contains("port"), "{host}: {e}");
+            c.egress_credentials[0].port = Some(8080);
+            c.validate().unwrap_or_else(|e| panic!("{host} with a port: {e}"));
+        }
+    }
+
+    /// Row L's re-review: a secret pasted into `name` is not echoed by an env refusal (the entry is
+    /// named by index alone), and a binding's `Debug` hides where its value comes from. Seen failing
+    /// first: the env refusal printed the name, the `Debug` the variable and the path.
+    #[test]
+    fn neither_an_env_refusal_nor_a_bindings_debug_prints_a_pasted_secret() {
+        const S: &str = "sk-live-pasted-into-name-9f";
+        let e = parse_egress_credentials_env(&format!("{S}|api.example.com|bearer")).unwrap_err();
+        assert!(!e.to_string().contains(S) && e.to_string().contains("entry 0"), "{e}");
+        let mut b = bearer_binding("m", "api.example.com");
+        b.value_env = Some(S.into());
+        assert!(!format!("{b:?}").contains(S), "{b:?}");
+        b.value_env = None;
+        b.value_file = Some(S.into());
+        assert!(!format!("{b:?}").contains(S), "{b:?}");
+        let mut c = GossipConfig::default();
+        c.egress_credentials = vec![b];
+        assert!(!format!("{c:?}").contains(S));
+    }
+
+    /// Row L's review, finding 2: a refusal never echoes a raw field that could hold a value — a secret
+    /// pasted into the env variable's source or form field, or into `host`, is named by entry, not shown.
+    #[test]
+    fn a_refusal_never_echoes_a_field_that_could_hold_the_value() {
+        const S: &str = "sk-live-0a1b2c3d4e5f-row-L";
+        for entry in [format!("m|api.example.com|bearer|{S}"), format!("m|api.example.com|{S}|env:K"), format!("m|api.example.com|bearer|env:K|{S}"), format!("m|{S}")] {
+            let e = parse_egress_credentials_env(&entry).unwrap_err();
+            for shown in [e.to_string(), format!("{e:?}")] {
+                assert!(!shown.contains(S), "{entry}: {shown}");
+                assert!(shown.contains("entry 0"), "{entry}: names the entry: {shown}");
+            }
+        }
+        let mut c = GossipConfig::default();
+        c.egress_credentials = vec![bearer_binding("m", &format!("https://{S}"))];
+        let e = c.validate().unwrap_err();
+        for shown in [e.to_string(), format!("{e:?}")] {
+            assert!(!shown.contains(S) && shown.contains("[0]") && shown.contains("`m`"), "{shown}");
+        }
+        let mut b = bearer_binding("m", "api.example.com");
+        b.header = Some(format!("Bearer {S}"));
+        b.form = CredentialForm::Header;
+        let e = b.validate(&EgressPolicy::default()).unwrap_err();
+        assert!(!e.contains(S), "{e}");
+    }
+
+    /// A binding authorises its host exactly — never a suffix or a look-alike — under its prefix, over
+    /// https (or to loopback, or with `allow_plaintext`).
+    #[test]
+    fn a_binding_authorises_its_host_exactly_under_its_prefix_over_https() {
+        let mut b = bearer_binding("m", "api.example.com");
+        assert!(b.authorises_url("https://api.example.com/v1/chat").is_ok());
+        assert!(b.authorises_url("https://API.Example.com/").is_ok(), "case-insensitive");
+        for denied in [
+            "https://evil.example.com/",
+            "https://api.example.com.evil.net/",
+            "https://x.api.example.com/",
+            "https://evil.example\\@api.example.com/",
+            "http://api.example.com/",
+        ] {
+            assert!(b.authorises_url(denied).is_err(), "{denied}");
+        }
+        assert!(bearer_binding("l", "localhost").authorises_url("http://localhost:9/").is_ok(), "loopback over http");
+        assert!(bearer_binding("l", "127.0.0.1").authorises_url("http://127.0.0.1:9/").is_ok());
+        b.allow_plaintext = true;
+        assert!(b.authorises_url("http://api.example.com/").is_ok());
+        b.path_prefix = Some("/v1".into());
+        assert!(b.authorises_url("https://api.example.com/v1").is_ok());
+        assert!(b.authorises_url("https://api.example.com/v1/x").is_ok());
+        assert!(b.authorises_url("https://api.example.com/v10").is_err());
+        assert!(b.authorises_url("https://api.example.com/v1/../admin").is_err(), "the normalised path");
+        // An error names the binding and the host, never a value (there is none here to name).
+        let e = bearer_binding("m", "api.example.com").authorises_url("https://other.example/").unwrap_err();
+        assert!(e.contains("`m`") && e.contains("other.example"), "{e}");
+    }
+
+    /// Placeholders are found wherever a header value holds them.
+    #[test]
+    fn placeholders_are_found_in_a_header_value() {
+        assert_eq!(credential_placeholders_in("Bearer mycelium-credential:openai"), vec!["openai"]);
+        assert_eq!(credential_placeholders_in("a mycelium-credential:x.y_z-1 b mycelium-credential:q,"), vec!["x.y_z-1", "q"]);
+        assert_eq!(credential_placeholders_in("mycelium-credential:"), vec![""]);
+        assert!(credential_placeholders_in("Bearer sk-123").is_empty());
+        assert_eq!(credential_placeholder("n"), "mycelium-credential:n");
+    }
+
+    /// TOML and env load the same bindings; `validate()` refuses each malformed shape by name.
+    #[test]
+    fn credential_bindings_load_from_toml_and_env_and_are_validated() {
+        let cfg: GossipConfig = toml::from_str(
+            "[[egress_credentials]]\nname = \"openai\"\nhost = \"api.openai.com\"\npath_prefix = \"/v1\"\nform = \"bearer\"\nvalue_file = \"/run/secrets/openai\"\n\n\
+             [[egress_credentials]]\nname = \"anthropic\"\nhost = \"api.anthropic.com\"\nform = \"header\"\nheader = \"x-api-key\"\nvalue_env = \"ANTHROPIC_KEY\"\n",
+        )
+        .unwrap();
+        cfg.validate().expect("valid");
+        let from_env = parse_egress_credentials_env(
+            "openai|api.openai.com/v1|bearer|file:/run/secrets/openai; anthropic|api.anthropic.com|header:x-api-key|env:ANTHROPIC_KEY",
+        )
+        .unwrap();
+        assert_eq!(from_env, cfg.egress_credentials, "the two doors load the same bindings");
+        let basic = parse_egress_credentials_env("reg|registry.local|basic:svc|env:REG_PW|plaintext").unwrap();
+        assert_eq!((basic[0].form, basic[0].username.as_deref(), basic[0].allow_plaintext), (CredentialForm::Basic, Some("svc"), true));
+        for bad in ["x|h|bearer", "x|h|token|env:V", "x|h|bearer|V", "x|h|bearer|env:V|yes"] {
+            assert!(parse_egress_credentials_env(bad).is_err(), "{bad}");
+        }
+
+        let refused = |mutate: &dyn Fn(&mut GossipConfig), needle: &str| {
+            let mut c = GossipConfig::default();
+            c.egress_credentials = vec![bearer_binding("m", "api.example.com")];
+            mutate(&mut c);
+            let e = c.validate().unwrap_err().to_string();
+            assert!(e.contains("egress_credentials") && e.contains(needle), "{needle}: {e}");
+        };
+        refused(&|c| c.egress_credentials.push(bearer_binding("m", "b.example")), "share the name");
+        refused(&|c| c.egress_credentials[0].name = "a/b".into(), "binding name");
+        refused(&|c| c.egress_credentials[0].host = "api.example.com:443".into(), "host");
+        refused(&|c| c.egress_credentials[0].host = "https://api.example.com".into(), "host");
+        refused(&|c| c.egress_credentials[0].host = ".example.com".into(), "host");
+        refused(&|c| c.egress_credentials[0].path_prefix = Some("v1".into()), "path_prefix");
+        refused(&|c| c.egress_credentials[0].value_file = Some("/f".into()), "not both");
+        refused(&|c| c.egress_credentials[0].value_env = None, "value_env");
+        refused(&|c| c.egress_credentials[0].form = CredentialForm::Header, "header");
+        refused(&|c| c.egress_credentials[0].form = CredentialForm::Basic, "username");
+        refused(&|c| c.egress_credentials[0].header = Some("x-k".into()), "not Bearer");
+        refused(&|c| c.egress.allow_hosts = vec!["other.example".into()], "allow_hosts");
     }
 
     #[test]
@@ -2632,6 +3175,24 @@ mod tests {
         set_test_env(&_lock, vars[2], Some("ci-bot|s3cr3t"));
         let err = GossipConfig::default().apply_env_overrides().expect_err("a malformed entry refuses");
         assert!(format!("{err}").contains("gateway_named_tokens"), "{err}");
+    }
+
+    /// Post-360 plan row L: `GOSSIP_EGRESS_CREDENTIALS` replaces the TOML's bindings, and a malformed
+    /// entry refuses the override by name.
+    #[test]
+    fn egress_credentials_come_from_the_environment() {
+        let _lock = env_test_lock();
+        let var = "GOSSIP_EGRESS_CREDENTIALS";
+        let _guard = EnvGuard(&_lock, var, std::env::var(var).ok());
+        set_test_env(&_lock, var, Some("openai|api.openai.com/v1|bearer|file:/run/secrets/openai"));
+        let mut cfg = GossipConfig::default();
+        cfg.egress_credentials = vec![bearer_binding("from-toml", "toml.example")];
+        cfg.apply_env_overrides().expect("a well-formed binding applies");
+        assert_eq!(cfg.egress_credentials.len(), 1);
+        assert_eq!((cfg.egress_credentials[0].name.as_str(), cfg.egress_credentials[0].path_prefix.as_deref()), ("openai", Some("/v1")));
+        set_test_env(&_lock, var, Some("openai|api.openai.com|bearer"));
+        let err = GossipConfig::default().apply_env_overrides().expect_err("a malformed entry refuses");
+        assert!(format!("{err}").contains("egress_credentials"), "{err}");
     }
 
     /// **`kv_require_signed_frames` is retired: inert wherever it is set** (post-360 plan row F2). Row F

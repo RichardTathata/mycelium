@@ -88,6 +88,24 @@ impl GossipAgent {
                 }
             }
         }
+        // Credential bindings (post-360 plan row L): each value read once, here, into the gate. A value
+        // that cannot be read refuses the start by name (never by value); a build without the gate's
+        // HTTP client refuses every binding, rather than accept it and attach nothing.
+        #[cfg(feature = "gateway")]
+        if !self.config.egress_credentials.is_empty() && self.task_ctx.egress_credentials.get().is_none() {
+            let gate = super::egress_credentials::EgressCredentials::load(&self.config.egress_credentials, &self.config.egress)?;
+            let _ = self.task_ctx.egress_credentials.set(Arc::new(gate));
+        }
+        #[cfg(not(feature = "gateway"))]
+        if !self.config.egress_credentials.is_empty() {
+            return Err(GossipError::InvalidField {
+                field: "egress_credentials",
+                reason: "credential bindings are attached by the egress gate, which only a build with the \
+                         `gateway` feature has; this build would attach nothing. Build with \
+                         `--features gateway`, or remove the bindings"
+                    .into(),
+            });
+        }
         // An audit sink on a node with no `[tls]` would receive nothing — records are sealed with
         // the node identity (`audit.chain`), and without it nothing is sealed — a setting accepted
         // and ignored, the class v2.18.1 closed for the token tables (`audit.sink`, plan §8).
