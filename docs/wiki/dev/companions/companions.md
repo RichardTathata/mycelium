@@ -49,8 +49,11 @@ via wasm-host).
   Python SDK's KV verbs: one row per session, agent, message and swarm/graph under `strands/`, plus a per-agent count
   row so a reader can tell a missing tail from a short conversation. The design rule it shares with the checkpointer:
   **incomplete is never empty** (`IncompleteSession`, retriable), because Strands resumes by appending after the last
-  message it read and would overwrite what it did not see. Its limit: a node holding none of an agent's rows cannot
-  tell *not arrived* from *new*, so resume where the rows have arrived; one agent id is one writer. Pinned to
+  message it read and would overwrite what it did not see. A failed message write is held and written in order, never
+  skipped (Strands advances its index first, so a skip is a hole no retry fills). Its limit: a node holding none of a
+  record's rows cannot tell *not arrived* from *new*, and one holding an older count reads an older conversation, so
+  resume where the session has arrived in full; one agent id is one writer. A row is at most about 1.5 MiB — the
+  gateway's 2 MiB request body, base64 — not `MAX_KV_WRITE_BYTES`. Pinned to
   `strands-agents` 1.61.1, the interface recorded in `tests/test_interface.py`; live suite in CI on the reason-node
   pair (`strands-session-mycelium/README.md`).
 - **`mycelium-wasm-host/`** — WS-E code mobility: the coordinator-free

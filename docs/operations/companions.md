@@ -386,12 +386,15 @@ an absent section.
   route to mount and nothing to start.
 - **What it stores.** One row per session, agent, message and swarm or graph, under `strands/` (the prefix is
   settable). KV rows reach every node, so it is sized for conversations, not bulk payloads: one row is at most
-  `MAX_KV_WRITE_BYTES`, and a larger message is refused by name.
+  about 1.5 MiB (the gateway's 2 MiB request limit, the row base64-encoded), and a larger message is refused by
+  name before it is sent, holding later messages back until it is dealt with.
 - **What a save promises.** Local application on the gateway node and that node's disk state, not replication. A
   session is readable on another node once it has gossiped there; a read that sees part of it raises
-  `IncompleteSession` (retry), never a shorter conversation.
-- **Moving a session between nodes.** Resume where its rows have arrived. On a node that has none of an agent's rows
-  yet, Strands starts that agent afresh, and the two copies compete (last writer wins). One agent id is one writer.
+  `IncompleteSession` (retry) rather than the rows that are there; a node behind as a whole is the next point.
+- **Moving a session between nodes.** Resume where its rows have arrived in full. On a node that has none of an
+  agent's (or a swarm's) rows yet, Strands starts it afresh; on a node holding only an older count and none of the
+  later messages, it reads an older conversation without error. Either way the copies compete (last writer wins).
+  Wait for the agent's count row on the new node to reach the old node's count. One agent id is one writer.
 - **Observe.** The gateway's KV routes and the receipts the package hands back. No metrics of its own.
 - **The reference** is [its README](../../strands-session-mycelium/README.md).
 

@@ -22,7 +22,7 @@ A `Swarm` or `Graph` takes the same `session_manager=`; its state is one row und
 ## Installation
 
 ```sh
-pip install ./strands-session-mycelium     # from source; it brings mycelium-py and strands-agents
+pip install ./mycelium-py ./strands-session-mycelium     # from source, both: mycelium-py is not on PyPI
 ```
 
 Requires Python ≥ 3.10 and a Mycelium node with an HTTP gateway (`http_port`). The package is
@@ -57,23 +57,44 @@ any write the gateway node did not report `"on_disk"`; a `"failed"` one is logge
 
 Rows gossip independently, so a node can hold message 7 before message 6, or an agent's messages
 before the agent. Each such read raises `IncompleteSession` (a Strands `SessionException`) with
-`missing`, the keys it needs: retry once they arrive. It never returns a shorter conversation,
-because Strands resumes by appending after the last message it was given, and would overwrite the
-messages it did not see. A row that cannot be decoded, or a gateway error (401, 403, 5xx), raises
-`SessionException` too. Only a session or agent with no row at all reads as absent.
+`missing`, the keys it needs: retry once they arrive. Returning the rows that are there would be
+worse, because Strands resumes by appending after the last message it was given and would overwrite
+the ones it did not see. A row that cannot be decoded, a row that is JSON but not the record its key
+names (a message whose `message_id` disagrees with its key included), and a gateway error (401, 403,
+5xx) each raise `SessionException`. Only a record with no row at all reads as absent.
 
-The tail is covered as well. Each agent has a count row written after each message, so a missing
-last message is detected once the count has arrived. Messages that arrive ahead of their count are
-read, not dropped.
+The tail is covered once the count arrives. Each agent has a count row written after each message,
+so a node that holds the count but not the last message raises. Messages that arrive ahead of their
+count are read, not dropped.
+
+What it cannot see is a node that is **behind as a whole**: one holding an older count and none of
+the messages after it reads a complete, older conversation without error, and an agent resumed there
+writes its next message over the first one it did not see (last writer wins). That is the
+"Resuming on another node" rule below; nothing on the reading node can tell it apart.
+
+A write that fails is held, not skipped. Strands moves to the next message index before the store
+writes the current one, so a failed write (a 503, a dropped connection, a row past the size limit)
+would leave a hole that no retry fills. Instead the store keeps the message and writes it, in order,
+before any later one, raising until it can. The stored session stays the conversation up to the
+first message it could not write. A message that can never be written (one past the size limit)
+holds every later message back and says so in each error; the session as stored is still resumable
+from before it.
 
 ## Resuming on another node
 
-Resume where the session's rows have arrived. "Absent" and "not here yet" look the same to a node
-when **nothing** of a record has reached it. A session or agent id read there before any of its
-rows arrive is new as far as Strands is concerned. Strands then creates it, and the two copies
-compete, last writer wins. A deployment that moves a session between nodes waits for it (for
-example, for the agent's `…/count` row to reach the expected count, as `tests/test_live.py` does), or
-keeps a session on one node at a time.
+Resume where the session's rows have arrived, in full. Two cases look fine to the reading node and
+are not:
+
+- **Nothing of a record has arrived.** "Absent" and "not here yet" are the same to a node. A session,
+  an agent or a swarm's or graph's state read there before any of its rows is new as far as Strands
+  is concerned. Strands creates it, and the two copies compete, last writer wins.
+- **An older version has arrived.** An older count with none of the later messages reads as a
+  complete, shorter conversation (above).
+
+A deployment that moves a session between nodes waits until the agent's `…/count` row on the new
+node reaches the count the old one wrote (as `tests/test_live.py` does), or keeps a session on one
+node at a time. `delete_session` while another manager is still writing the session is not
+supported: the writer's later rows outlive the session record.
 
 ## Concurrent agents
 
@@ -95,9 +116,13 @@ strands/{session}/agent/{agent}/msg/{index}   one SessionMessage (index zero-pad
 strands/{session}/multi/{id}                  a Swarm's or Graph's serialized state
 ```
 
-A row is at most the KV write cap, `MAX_KV_WRITE_BYTES` (10 MiB less 64 KiB). A larger message is
-refused by name before it is sent. KV rows reach every node, so this store suits conversations, not
-bulk payloads. Listing an agent's messages reads one row per message.
+A row is at most about **1.5 MiB**. The limit is the gateway's request body (axum's default 2 MiB),
+which carries the row base64-encoded; the store computes the request's size and refuses a larger row
+by name before sending it (`GATEWAY_BODY_LIMIT`, `request_bytes`; the live suite writes the largest
+row it allows through a real gateway). That is below the substrate's KV write cap,
+`MAX_KV_WRITE_BYTES` (10 MiB less 64 KiB). KV rows reach every node, so this store suits
+conversations, not bulk payloads: a message carrying a large image or document is refused, and holds
+later messages back, as above. Listing an agent's messages reads one row per message.
 
 ## Tests
 

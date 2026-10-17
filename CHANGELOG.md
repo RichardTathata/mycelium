@@ -86,9 +86,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the fleet's gossiped KV, and another node resumes a session once its rows have arrived. Every write returns the
   SDK's `KvReceipt` (`last_receipt`, `on_receipt`): local application on the gateway node and that node's disk state,
   **not replication**; `require_on_disk=True` raises on any write the node did not report `on_disk`. A session read
-  before all of it has gossiped raises `IncompleteSession` naming the missing keys, never a shorter conversation (a
-  per-agent count row covers the tail); an undecodable row or a gateway error raises `SessionException`. Two agents
-  in one session never lose each other's writes; one agent id is one writer. Pinned to `strands-agents` 1.61.1 with
+  while some of its rows are still gossiping raises `IncompleteSession` naming the missing keys rather than returning
+  the rows that are there (a per-agent count row covers the tail); an undecodable or malformed row or a gateway error
+  raises `SessionException`. A failed message write is held and written, in order, before any later one, so it leaves
+  no hole. A row is at most about 1.5 MiB (the gateway's request limit), checked before sending. Two agents in one
+  session never lose each other's writes; one agent id is one writer. Stated, not prevented: a node behind as a whole
+  reads an older conversation, so resume where the session has arrived in full. Pinned to `strands-agents` 1.61.1 with
   the interface recorded in a test. Its live suite runs in CI against the two meshed reason nodes
   (`MYCELIUM_STRANDS_LIVE_REQUIRED`).
 - **An unmodified A2A client reaches a node's skills through `/a2a`** (post-360 plan row N; upgrade note

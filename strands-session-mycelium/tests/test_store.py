@@ -12,7 +12,7 @@ import pytest
 from strands import Agent
 from strands.types.exceptions import SessionException
 
-from fakes import FakeGateway, ScriptedModel
+from fakes import FakeGateway, ScriptedModel, largest_value
 from strands_session_mycelium import IncompleteSession, MyceliumSessionManager, MyceliumSessionRepository
 from strands_session_mycelium.store import MAX_ROW_BYTES
 
@@ -226,3 +226,71 @@ def test_a_swarms_shared_state_lives_in_the_session():
     assert swarm("plan the pickups").status.value == "completed"
     row = json.loads(gw.rows["strands/s9/multi/redistribution"])
     assert row["type"] == "swarm" and row["node_history"] == ["collector"]
+
+
+# ── a write that fails leaves no hole (review finding 1) ────────────────────
+
+
+def test_a_failed_message_write_is_held_and_written_before_the_next():
+    gw = FakeGateway()
+    agent = Agent(agent_id="planner", model=ScriptedModel(["r1", "r2", "r3"]), session_manager=manager(gw),
+                  callback_handler=None)
+    agent("one")
+    gw.fail_once.add("strands/s1/agent/planner/msg/0000000002")
+    with pytest.raises(Exception):
+        agent("two")  # its message is in the agent, not yet in the store
+    assert json.loads(gw.rows["strands/s1/agent/planner/count"])["count"] == 2
+    agent("three")  # the held message is written first, then this turn's
+    back = Agent(agent_id="planner", model=ScriptedModel([]), session_manager=manager(gw), callback_handler=None)
+    assert texts(back) == texts(agent)
+
+
+def test_a_message_that_cannot_be_stored_holds_every_later_one_back():
+    gw = FakeGateway()
+    agent = Agent(agent_id="planner", model=ScriptedModel(["r1", "r2"]), session_manager=manager(gw),
+                  callback_handler=None)
+    agent("one")
+    with pytest.raises(SessionException, match="at most"):
+        agent("x" * MAX_ROW_BYTES)
+    with pytest.raises(SessionException, match="message 2"):
+        agent("after")
+    # The stored session is the prefix before the message it could not hold — resumable, not a hole.
+    back = Agent(agent_id="planner", model=ScriptedModel([]), session_manager=manager(gw), callback_handler=None)
+    assert texts(back) == ["one", "r1"]
+
+
+def test_a_request_past_the_gateways_body_limit_is_refused_before_it_is_sent():
+    from strands_session_mycelium.store import GATEWAY_BODY_LIMIT, request_bytes
+
+    gw = FakeGateway()
+    repo = MyceliumSessionRepository(gw)
+    key = "strands/s1/big"
+    n = largest_value(key)
+    assert request_bytes(key, json.dumps({"x": "y" * n}, separators=(",", ":")).encode()) <= GATEWAY_BODY_LIMIT
+    repo._write(key, {"x": "y" * n})
+    with pytest.raises(SessionException, match="at most"):
+        repo._write(key, {"x": "y" * (n + 3)})
+
+
+# ── a row that is JSON but not a record (review finding 6) ──────────────────
+
+
+@pytest.mark.parametrize("key", ["strands/s1/session", "strands/s1/agent/planner",
+                                 "strands/s1/agent/planner/msg/0000000001"])
+def test_a_row_missing_its_fields_is_unreadable(key):
+    gw = FakeGateway()
+    run_agent(gw, ["one"])
+    gw.rows[key] = b'{"foo":1}'
+    with pytest.raises(SessionException, match="unreadable"):
+        Agent(agent_id="planner", model=ScriptedModel([]), session_manager=manager(gw), callback_handler=None)
+
+
+def test_a_message_whose_index_disagrees_with_its_key_is_unreadable():
+    gw = FakeGateway()
+    run_agent(gw, ["one"])
+    key = "strands/s1/agent/planner/msg/0000000001"
+    row = json.loads(gw.rows[key])
+    row["message_id"] = 7
+    gw.rows[key] = json.dumps(row).encode()
+    with pytest.raises(SessionException, match="unreadable"):
+        Agent(agent_id="planner", model=ScriptedModel([]), session_manager=manager(gw), callback_handler=None)

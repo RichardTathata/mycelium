@@ -19,17 +19,25 @@ import pytest
 from mycelium import MyceliumAgent
 from strands import Agent
 
-from fakes import ScriptedModel
-from strands_session_mycelium import IncompleteSession, MyceliumSessionManager
+from fakes import ScriptedModel, largest_value
+from strands.types.exceptions import SessionException
+
+from strands_session_mycelium import IncompleteSession, MyceliumSessionManager, MyceliumSessionRepository
 
 HOST = os.environ.get("MYCELIUM_TEST_HOST", "127.0.0.1")
 PORT_A = os.environ.get("MYCELIUM_TEST_PORT")
 PORT_B = os.environ.get("MYCELIUM_TEST_PORT_B")
 
-if not (PORT_A and PORT_B):
-    if os.environ.get("MYCELIUM_STRANDS_LIVE_REQUIRED"):
-        raise RuntimeError("MYCELIUM_STRANDS_LIVE_REQUIRED is set but MYCELIUM_TEST_PORT/_B are not")
-    pytest.skip("no Mycelium nodes configured (MYCELIUM_TEST_PORT, MYCELIUM_TEST_PORT_B)", allow_module_level=True)
+# A live CI step sets MYCELIUM_STRANDS_LIVE_REQUIRED, so a step that lost its nodes fails here instead of
+# skipping green (verification policy rule 3). The skip is a mark, not a module-level skip, so the tests
+# stay collected — the test universe lists them and the coverage job sees whether they ran.
+if os.environ.get("MYCELIUM_STRANDS_LIVE_REQUIRED") and not (PORT_A and PORT_B):
+    raise RuntimeError("MYCELIUM_STRANDS_LIVE_REQUIRED is set but MYCELIUM_TEST_PORT/_B are not: this live suite would skip")
+
+pytestmark = pytest.mark.skipif(
+    not (PORT_A and PORT_B),
+    reason="no Mycelium nodes configured (MYCELIUM_TEST_PORT, MYCELIUM_TEST_PORT_B)",
+)
 
 
 def node(port: str) -> MyceliumAgent:
@@ -81,7 +89,9 @@ def test_a_session_written_on_one_node_resumes_on_another():
     a("where do we start?")
     a("and after?")
     receipt = m.last_receipt
-    assert receipt is not None and receipt.operation_id and receipt.local_durability is not None
+    # The reason nodes run without [persistence]: the gateway says it promised nothing on disk.
+    assert receipt is not None and receipt.operation_id
+    assert receipt.local_durability == "not_configured"
 
     written = texts(a)
     # Resume where the agent's rows have arrived. Before then node B cannot tell this agent from a new
@@ -119,3 +129,15 @@ def test_two_agents_on_two_nodes_in_one_session_keep_both_conversations():
             until(lambda: arrived(port, session, agent_id, 6))
             got = resume(port, session, agent_id, [])
             assert texts(got) == [x for i in range(3) for x in (f"{agent_id} turn {i}", f"{agent_id}-{i}")]
+
+
+def test_the_largest_row_the_store_sends_is_one_the_gateway_takes():
+    """The size check matches the gateway's real request limit: the largest row passes, one more is refused."""
+    repo = MyceliumSessionRepository(node(PORT_A))
+    key = f"strands/live-{uuid.uuid4().hex}/big"
+    n = largest_value(key)
+    repo._write(key, {"x": "y" * n})  # a 413 here would mean the store's limit is above the gateway's
+    assert len(node(PORT_A).get(key)) > n
+    with pytest.raises(SessionException, match="at most"):
+        repo._write(key, {"x": "y" * (n + 3)})
+    node(PORT_A).delete(key)

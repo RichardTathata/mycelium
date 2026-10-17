@@ -990,7 +990,11 @@ window).
   seen failing first with the checks removed (the store then returned the rows it had, as Strands' own managers do):
   the middle message, the last message, the agent row, the session row, the count. Unreadable: a row that is not a
   JSON object, and a gateway error, raise `SessionException` (`test_an_unreadable_row_is_an_error_not_an_absent_one`,
-  `test_a_gateway_refusal_is_an_error_and_creates_nothing`, the latter also showing nothing is created over a 401).
+  `test_a_gateway_refusal_is_an_error_and_creates_nothing`, the latter also showing nothing is created over a 401), and
+  so does a row that is JSON but not its record, a `message_id` that disagrees with its key included (review finding
+  6). A failed message write leaves no hole: the store holds it and writes it, in order, before any later message
+  (review finding 1). **Not detectable, stated:** a node behind as a whole (an older count, none of the later
+  messages) reads an older, complete conversation; the README's "Resuming on another node" is the rule.
 - *concurrent agents in one session do not lose each other's writes, or the limit is stated* — both: different agent
   ids write disjoint rows (`test_two_agents_in_one_session_keep_each_others_writes`; across two nodes at once,
   `test_two_agents_on_two_nodes_in_one_session_keep_both_conversations`), and the limit is stated in the README: one
@@ -999,14 +1003,33 @@ window).
   reads them rather than overwriting them (`test_messages_ahead_of_a_lagging_count_are_read_and_not_overwritten`).
 - *its live suite runs in CI against a real node* — `tests/test_live.py` in the `python-sdk` job's pytest step,
   against the two meshed reason nodes it already starts, with `MYCELIUM_STRANDS_LIVE_REQUIRED`; collected by the test
-  universe; the inventory check and its mutation suite pass with the new directory.
+  universe (its skip is a `skipif` mark, so `--collect-only` lists it — it was a module-level skip, which listed
+  nothing, until review finding 4); the inventory check and its mutation suite pass with the new directory.
 - *pinned to a Strands release and re-checked when Strands changes the interface* — `strands-agents==1.61.1` in the
   package's dependencies (so CI installs exactly it); `tests/test_interface.py` asserts the installed version and
   records each `SessionRepository` method's parameters, so a release that changes the interface fails before the pin
   moves.
+- *The independent review (#634)* — nine findings. Fixed, each with a test seen failing first: (1) a failed message
+  write left a hole no retry filled, because Strands has moved to the next index by then — every later resume raised
+  `IncompleteSession` for a row that would never arrive (now held and written in order;
+  `test_a_failed_message_write_is_held_and_written_before_the_next`,
+  `test_a_message_that_cannot_be_stored_holds_every_later_one_back`); (2) the row limit was stated as
+  `MAX_KV_WRITE_BYTES` (about 9.94 MiB) while the gateway's 2 MiB request body, carrying the row base64-encoded,
+  refused anything over about 1.5 MiB with a 413 — the store now computes the request's size (`request_bytes`), and
+  the live suite writes the largest row it allows through a real gateway
+  (`test_the_largest_row_the_store_sends_is_one_the_gateway_takes`; a probe found the gateway's limit within a few
+  bytes of it); (4) the live suite's module-level skip hid it from the test universe; (6) a JSON row missing its
+  fields raised `TypeError`, and a `message_id` was not checked against its key. Documented: (3) "never a shorter
+  conversation" overclaimed — a node behind as a whole reads an older one; (8) a swarm's or graph's state that has not
+  arrived is recreated, named beside sessions and agents; `delete_session` racing a writer is unsupported. (5) The
+  README's install line installs `./mycelium-py` too; (7) `make check-full` runs the directory and `src/lib.rs`'s KV
+  table names `strands/`. Answered: (9) the interface record covers `SessionRepository`'s signatures; the
+  `RepositorySessionManager` behaviour the store relies on (the index advanced before `create_message`, the offset
+  from `removed_message_count`) is exercised by the behaviour tests under the exact pin, and a resumed swarm is
+  Strands' (it resets a completed swarm) — the store's half, its row, is tested.
 - **Not built, stated:** a session's rows are replicated by gossip only (no `set_with_min_acks` option); a message
-  listing reads one row per message; a message larger than the KV write cap is refused rather than moved to the blob
-  tier; no async variant (Strands' repository interface is synchronous); not published to PyPI.
+  listing reads one row per message; a row over about 1.5 MiB is refused rather than moved to the blob tier; no async
+  variant (Strands' repository interface is synchronous); not published to PyPI.
 
 ### 3.6 · State of play and the next iteration (2026-10-12)
 

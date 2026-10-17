@@ -207,7 +207,7 @@ gate-knowledge:
 ## release or when you have touched wasm-host / a feature-conditional path. A local subset of CI, not a
 ## mirror: the companions' suites, loom, the fuzz job and the TypeScript SDK run in CI only, and CI's
 ## coverage is what scripts/check-test-inventory.py proves. The Python line needs pytest and the two
-## Python packages installed (pip install -e mycelium-py -e langgraph-checkpoint-mycelium pytest pytest-asyncio).
+## Python packages installed (pip install -e mycelium-py -e langgraph-checkpoint-mycelium -e strands-session-mycelium pytest pytest-asyncio).
 check-full: check
 	cargo clippy --lib --features otel -- -D warnings                  # the one root feature no other line builds (row J)
 	cargo clippy --benches --features gateway,test-util -- -D warnings  # both bench targets (gateway_overhead needs these features)
@@ -218,7 +218,7 @@ check-full: check
 	cargo test  --features tls,a2a --doc                 # the crate's doctests (cargo will not mix --doc with other targets)
 	cargo test  -p mycelium-wasm-host --features stem,gateway,llm   # rule_catalogue, signed-entry gateway, provisioner gateway, [[serve]]
 	cargo test  -p mycelium-effects --features tuple-space,envelope --test '*'
-	python3 -m pytest -q langgraph-checkpoint-mycelium/tests mycelium-py/tests   # the live suites skip without a node
+	python3 -m pytest -q langgraph-checkpoint-mycelium/tests mycelium-py/tests strands-session-mycelium/tests   # the live suites skip without a node
 
 	cargo test  --lib --no-default-features --features gateway
 	cargo test  -p mycelium-gateway-free-tests   # the one test build of `mycelium` without `gateway` (R8)

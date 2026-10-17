@@ -24,10 +24,15 @@ receipt is not ``"on_disk"`` raise.
 Incomplete is never empty. Rows gossip independently, so a reader on another node can see a
 message before the agent that owns it, or message 7 before message 6. Each such case raises
 :class:`IncompleteSession` (a ``SessionException``) naming the keys that are missing — retriable once
-they arrive — rather than returning ``None`` or a shorter conversation: a resumed agent that saw a
-shorter conversation would append at the wrong index and overwrite a message it never read. A row
-that cannot be decoded raises ``SessionException``; so does a gateway error (401, 403, 5xx).
-``None`` means only that no row of that record exists anywhere under the session.
+they arrive — rather than returning ``None`` or the rows that are there: a resumed agent given those
+would append at the wrong index and overwrite a message it never read. A row that cannot be decoded,
+or is not the record its key names, raises ``SessionException``; so does a gateway error (401, 403,
+5xx). ``None`` means only that no row of that record exists anywhere under the session. A node that
+is behind as a whole — an older count and none of the later messages — reads an older conversation
+without error; the README's "Resuming on another node" is the rule for that.
+
+A failed write leaves no hole: Strands has already moved to the next index when a message write
+fails, so the message is held and written, in order, before any later one (``_write_held``).
 
 Concurrent agents. Two agents with different ids in one session write disjoint rows and never lose
 each other's writes, on one node or several. **One agent id is one writer**: two processes running
@@ -37,6 +42,7 @@ agent id in two Strands managers would. A multi-agent record is likewise its orc
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 from typing import TYPE_CHECKING, Any, Callable, Optional
@@ -54,9 +60,21 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# `mycelium_core::framing::MAX_KV_WRITE_BYTES` — the gateway refuses a larger value. Checked here
-# so the error names the record rather than arriving as a 500.
-MAX_ROW_BYTES = 10 * 1024 * 1024 - 64 * 1024
+# What one row can hold. The binding limit is the gateway's request body: axum's default 2 MiB on
+# `POST /gateway/kv`, whose JSON carries the value base64-encoded — so a row is at most about 1.5 MiB,
+# well under `mycelium_core::framing::MAX_KV_WRITE_BYTES` (10 MiB less 64 KiB, key and value). Checked
+# here, before sending, so the error names the record rather than arriving as a 413.
+GATEWAY_BODY_LIMIT = 2 * 1024 * 1024
+MAX_KV_WRITE_BYTES = 10 * 1024 * 1024 - 64 * 1024
+# A row this size encodes to the whole body limit before its key, so every row this size or larger is
+# refused; the exact check is `request_bytes`, slightly below it.
+MAX_ROW_BYTES = GATEWAY_BODY_LIMIT // 4 * 3
+
+
+def request_bytes(key: str, value: bytes) -> int:
+    """The size of the ``POST /gateway/kv`` body the SDK sends for this write."""
+    body = {"key": key, "value_b64": base64.b64encode(value).decode()}
+    return len(json.dumps(body).encode("utf-8"))
 
 # Wide enough for any message index Strands produces; fixed width keeps the keys in index order.
 _INDEX_WIDTH = 10
@@ -66,7 +84,10 @@ class IncompleteSession(SessionException):
     """Part of a session is visible and part of it is not yet.
 
     ``missing`` lists the KV keys that a complete read needs and could not find. Retry once they
-    have gossiped to this node; this is neither an absent session nor a shorter one.
+    have gossiped to this node; this is neither an absent session nor a shorter one. This package
+    never writes past a row it failed to write (a failed message is held, below), so a hole that
+    persists on the node that wrote the session means a row was removed there — a ``delete_session``
+    racing a writer, or a write to these keys from outside this package.
     """
 
     def __init__(self, what: str, missing: list[str]) -> None:
@@ -107,6 +128,11 @@ class MyceliumSessionRepository(SessionRepository):
         # (session, agent) -> the count this process last wrote, so a message write rewrites the
         # count row only when it grows.
         self._counts: dict[tuple[str, str], int] = {}
+        # (session, agent) -> messages Strands has appended that are not yet written, by index. A
+        # write that fails stays here and is retried, in order, before any later message — so the
+        # store never holds message i+1 without message i (Strands has already moved on to i+1 when
+        # `create_message(i)` fails, and a hole there would make every later resume incomplete).
+        self._held: dict[tuple[str, str], dict[int, SessionMessage]] = {}
 
     # ── keys ────────────────────────────────────────────────────────────────
 
@@ -156,11 +182,29 @@ class MyceliumSessionRepository(SessionRepository):
             raise SessionException(f"the row at {key!r} is unreadable: not a JSON object")
         return value
 
+    @staticmethod
+    def _decode(cls: Any, row: dict[str, Any], key: str) -> Any:
+        """A record from its row — or ``SessionException``, never a ``TypeError`` from Strands."""
+        try:
+            return cls.from_dict(row)
+        except (TypeError, ValueError, KeyError) as e:
+            raise SessionException(f"the row at {key!r} is unreadable: {e}") from e
+
+    def _decode_message(self, row: dict[str, Any], key: str, index: int) -> SessionMessage:
+        message = self._decode(SessionMessage, row, key)
+        if message.message_id != index:
+            raise SessionException(
+                f"the row at {key!r} is unreadable: it holds message_id {message.message_id!r}, not {index}"
+            )
+        return message
+
     def _write(self, key: str, value: dict[str, Any]) -> KvReceipt:
         data = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        if len(data) > MAX_ROW_BYTES:
+        size = request_bytes(key, data)
+        if size > GATEWAY_BODY_LIMIT or len(key) + len(data) > MAX_KV_WRITE_BYTES:
             raise SessionException(
-                f"the row at {key!r} is {len(data)} bytes; a KV write is at most {MAX_ROW_BYTES}"
+                f"the row at {key!r} is {len(data)} bytes, a {size}-byte request; the gateway takes "
+                f"at most {GATEWAY_BODY_LIMIT} bytes per request (about {MAX_ROW_BYTES} bytes of row)"
             )
         try:
             receipt = self._agent.set(key, data)
@@ -201,13 +245,21 @@ class MyceliumSessionRepository(SessionRepository):
         if row is None:
             self._absent_or_incomplete(f"session {session_id!r}", key, self._session_root(session_id))
             return None
-        return Session.from_dict(row)
+        return self._decode(Session, row, key)
 
     def delete_session(self, session_id: str, **kwargs: Any) -> None:
-        """Tombstone every row of the session (each tombstone gossips like a write)."""
-        keys = self._keys(self._session_root(session_id))
+        """Tombstone every row of the session (each tombstone gossips like a write).
+
+        Messages and counts go first and the session row last, so a reader sees the session until
+        its rows are gone. Deleting a session another manager is still writing is not supported: its
+        later writes recreate rows under a session that no longer has its record.
+        """
+        root = self._session_root(session_id)
+        keys = self._keys(root)
         if not keys:
             raise SessionException(f"Session {session_id} does not exist")
+        session_key = self._session_key(session_id)
+        keys = sorted(keys, key=lambda k: (k == session_key, "/msg/" not in k and not k.endswith("/count"), k))
         for key in keys:
             try:
                 self._agent.delete(key)
@@ -215,6 +267,8 @@ class MyceliumSessionRepository(SessionRepository):
                 raise SessionException(f"deleting {key!r} through the gateway failed: {e}") from e
         for k in [k for k in self._counts if k[0] == session_id]:
             del self._counts[k]
+        for k in [k for k in self._held if k[0] == session_id]:
+            del self._held[k]
 
     # ── agents ──────────────────────────────────────────────────────────────
 
@@ -230,7 +284,7 @@ class MyceliumSessionRepository(SessionRepository):
         if row is None:
             self._absent_or_incomplete(f"agent {agent_id!r} of session {session_id!r}", key, key + "/")
             return None
-        return SessionAgent.from_dict(row)
+        return self._decode(SessionAgent, row, key)
 
     def update_agent(self, session_id: str, session_agent: SessionAgent, **kwargs: Any) -> None:
         agent_id = session_agent.agent_id
@@ -255,23 +309,44 @@ class MyceliumSessionRepository(SessionRepository):
     def create_message(
         self, session_id: str, agent_id: str, session_message: SessionMessage, **kwargs: Any
     ) -> None:
-        index = session_message.message_id
-        # The message first, then the count: on the gateway node the count never names a message
-        # that is not there. Across nodes the two gossip independently — `list_messages` says so.
-        self._write(self._message_key(session_id, agent_id, index), session_message.to_dict())
-        known = self._counts.get((session_id, agent_id))
-        if known is None:
-            known = self._stored_count(session_id, agent_id) or 0
-        if index + 1 > known:
-            self._write(self._count_key(session_id, agent_id), {"count": index + 1})
-            known = index + 1
-        self._counts[(session_id, agent_id)] = known
+        self._message_key(session_id, agent_id, session_message.message_id)  # validates the index
+        held = self._held.setdefault((session_id, agent_id), {})
+        held[session_message.message_id] = session_message
+        self._write_held(session_id, agent_id)
+
+    def _write_held(self, session_id: str, agent_id: str) -> None:
+        """Write the held messages in index order, each followed by the count; stop at a failure."""
+        held = self._held.get((session_id, agent_id), {})
+        for index in sorted(held):
+            # The message first, then the count: on the gateway node the count never names a message
+            # that is not there. Across nodes the two gossip independently — `list_messages` says so.
+            try:
+                self._write(self._message_key(session_id, agent_id, index), held[index].to_dict())
+            except SessionException as e:
+                later = sorted(i for i in held if i > index)
+                held_back = f"; messages {later} are held back until it is" if later else ""
+                raise SessionException(
+                    f"message {index} of agent {agent_id!r} in session {session_id!r} is not stored "
+                    f"({e}){held_back}. The stored session ends before it."
+                ) from e
+            del held[index]
+            known = self._counts.get((session_id, agent_id))
+            if known is None:
+                known = self._stored_count(session_id, agent_id) or 0
+            if index + 1 > known:
+                self._write(self._count_key(session_id, agent_id), {"count": index + 1})
+                known = index + 1
+            self._counts[(session_id, agent_id)] = known
 
     def read_message(
         self, session_id: str, agent_id: str, message_id: int, **kwargs: Any
     ) -> Optional[SessionMessage]:
-        row = self._read(self._message_key(session_id, agent_id, message_id))
-        return None if row is None else SessionMessage.from_dict(row)
+        held = self._held.get((session_id, agent_id), {})
+        if message_id in held:
+            return held[message_id]
+        key = self._message_key(session_id, agent_id, message_id)
+        row = self._read(key)
+        return None if row is None else self._decode_message(row, key, message_id)
 
     def update_message(
         self, session_id: str, agent_id: str, session_message: SessionMessage, **kwargs: Any
@@ -281,6 +356,11 @@ class MyceliumSessionRepository(SessionRepository):
         if previous is None:
             raise SessionException(f"Message {index} does not exist")
         session_message.created_at = previous.created_at
+        held = self._held.get((session_id, agent_id), {})
+        if index in held:  # not written yet: the redaction is what will be written
+            held[index] = session_message
+            self._write_held(session_id, agent_id)
+            return
         self._write(self._message_key(session_id, agent_id, index), session_message.to_dict())
 
     def list_messages(
@@ -320,7 +400,7 @@ class MyceliumSessionRepository(SessionRepository):
             row = self._read(key)
             if row is None:  # listed a moment ago, tombstoned since
                 raise IncompleteSession(f"the messages of agent {agent_id!r} in session {session_id!r}", [key])
-            messages.append(SessionMessage.from_dict(row))
+            messages.append(self._decode_message(row, key, i))
         return messages
 
     # ── multi-agent state (a swarm's or a graph's) ──────────────────────────

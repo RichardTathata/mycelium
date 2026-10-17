@@ -160,6 +160,7 @@
 //! | `log/reason/{run_id}/{node}/{hlc}` | `mycelium-reason` companion — fleet-reasoning trace substreams (one per writer; a shared stream would collide same-ms HLC keys — `TraceRecorder`/`replay`) |
 //! | `ckpt/{thread}/{ns}/{id}`          | `langgraph-checkpoint-mycelium` — LangGraph checkpoint **index** rows (metadata inline; payloads in the blob tier). Written by the Python saver via the gateway KV endpoint |
 //! | `ckptw/{thread}/{ns}/{id}/{task}/{idx}` | `langgraph-checkpoint-mycelium` — LangGraph pending-write index rows (one blob per write) |
+//! | `strands/{session}/…`              | `strands-session-mycelium` — a Strands Agents session: `session`, `agent/{id}`, `agent/{id}/count`, `agent/{id}/msg/{index}`, `multi/{id}` (the prefix is the package's default and settable). Written by the Python package via the gateway KV endpoint |
 //! | `facts/{node}/{field}`             | `mycelium-agentfacts` companion — node-signed per-field AgentFacts CRDT publication (`publish_field`; LWW-assembled by readers) |
 //! | `mandate/{scope}`                   | **Reserved** (v3 item 5, `docs/design/scoped-mandates.md`) — `(holder, authority epoch)`. An *announcement*; the enforcing check lives inside the protected resource's own atomic boundary |
 //! | `log/wiki/{group}/proposals`        | **Reserved** (v3 item 5) — durable wiki proposals via the existing `append` verb; the evaporating KV queue stays a delivery hint |

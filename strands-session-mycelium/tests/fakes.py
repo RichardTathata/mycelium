@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, AsyncIterator
 
 import httpx
@@ -17,6 +18,8 @@ class FakeGateway:
         self.durability = durability
         self.fail_with: int | None = None
         self.writes: list[str] = []
+        # Keys whose next write fails once with a 503 — a transient gateway error.
+        self.fail_once: set[str] = set()
 
     def _maybe_fail(self) -> None:
         if self.fail_with is not None:
@@ -30,6 +33,10 @@ class FakeGateway:
 
     def set(self, key: str, value: bytes) -> KvReceipt:
         self._maybe_fail()
+        if key in self.fail_once:
+            self.fail_once.discard(key)
+            req = httpx.Request("POST", "http://gw/gateway/kv")
+            raise httpx.HTTPStatusError("503", request=req, response=httpx.Response(503, request=req))
         self.rows[key] = value
         self.writes.append(key)
         return KvReceipt(operation_id=f"op-{len(self.writes)}", local_durability=self.durability)
@@ -70,3 +77,15 @@ class ScriptedModel(Model):
         yield {"contentBlockDelta": {"delta": {"text": text}}}
         yield {"contentBlockStop": {}}
         yield {"messageStop": {"stopReason": "end_turn"}}
+
+
+def largest_value(key: str) -> int:
+    """The longest ``"y" * n`` a ``{"x": …}`` row at ``key`` can hold under the gateway's body limit."""
+    from strands_session_mycelium.store import GATEWAY_BODY_LIMIT, request_bytes
+
+    lo, hi = 0, GATEWAY_BODY_LIMIT
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        body = json.dumps({"x": "y" * mid}, separators=(",", ":")).encode()
+        lo, hi = (mid, hi) if request_bytes(key, body) <= GATEWAY_BODY_LIMIT else (lo, mid - 1)
+    return lo
