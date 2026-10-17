@@ -22,7 +22,7 @@ For teams running fleets of AI agents: generic nodes find and install the capabi
 |---|---|---|
 | [Coordination](docs/capabilities.md) | Nodes share state by gossip, find each other by capability, signal, and agree by consensus where you ask for it. | [guide 01](docs/guide/01-gossip-kv.md) · [02](docs/guide/02-capabilities.md) · [04](docs/guide/04-consensus.md) |
 | [Tools and reasoning](docs/capabilities.md) | LLM skills and MCP tools are found and called by name across the mesh, outside agents reach them over A2A, and a companion routes inference across the fleet. | [guide 05](docs/guide/05-skills.md) · [06](docs/guide/06-tool-discovery.md) · [15](docs/guide/15-reasoning-and-langgraph.md) |
-| [Adaptive capabilities](docs/capabilities.md) | Stem hosts install signed components from a catalogue when demand goes unmet and restore the provider floors they declared. | [first stem fleet](docs/guide/tutorials/01-first-stem-fleet.md) |
+| [Adaptive capabilities](docs/capabilities.md) | [Stem hosts](docs/guide/00-concepts.md#fleet-growth) install signed components from a catalogue when demand goes unmet and restore the presence floors they declared. | [first stem fleet](docs/guide/tutorials/01-first-stem-fleet.md) |
 | [Authority](docs/capabilities.md) | Where an enforcement point is configured, mandates and an evaluator decide before work runs; with an evidence journal attached, the decision is recorded. | [guide 20](docs/guide/20-authorising-actions.md) · [21](docs/guide/21-mandates.md) |
 | [Federation](docs/capabilities.md) | Separately admitted meshes exchange explicitly exported services without merging, and trust does not pass through a partner. | [guide 17](docs/guide/17-federation.md) |
 | [Replay and knowledge](docs/capabilities.md) | Receipts name how far a write got, a recorded run replays against its captured inputs, and knowledge keeps its provenance and disagreements. | [guide 18](docs/guide/18-contracts-and-receipts.md) · [19](docs/guide/19-replay-and-simulation.md) · [23](docs/guide/23-knowledge.md) |
@@ -35,7 +35,7 @@ Every row has a runnable starting point and its limits in the [capability map](d
 <!-- path:start -->
 1. **[`hello_mesh`](examples/hello_mesh.rs)** — two embedded agents share state by gossip: 30 seconds, no setup.
 2. **[`hello_capability`](examples/hello_capability.rs)** — one node says what it does, another finds it by name and calls it: no registry, no addresses.
-3. **[Your first stem fleet](docs/guide/tutorials/01-first-stem-fleet.md)** — generic hosts discover and install a signed echo component, answer a call, and restore a declared provider floor after graceful removal.
+3. **[Your first stem fleet](docs/guide/tutorials/01-first-stem-fleet.md)** — [generic hosts](docs/guide/00-concepts.md#fleet-growth) discover and install a signed echo component, answer a call, and restore a declared provider floor after graceful removal.
 4. **[guide 20](docs/guide/20-authorising-actions.md) with [`authority_drain`](examples/authority_drain.rs)** — what an agent may do, checked where the work happens, and stopped when its authority lapses.
 5. **[`what-is-proven.md`](docs/operations/what-is-proven.md)** — what CI proves on every merge, what is demonstrated with its bound stated, and what is not yet shown.
 <!-- path:end -->

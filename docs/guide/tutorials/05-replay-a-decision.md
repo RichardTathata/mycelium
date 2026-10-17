@@ -8,7 +8,7 @@
 ## Objective
 
 Turn a timing-dependent result into a recording that detects a changed decision.
-Distinguish an authority journal (what a boundary recorded) from a replay bundle
+Distinguish an [evidence journal](../00-concepts.md#evidence-journal) (what a boundary recorded) from a [replay bundle](../00-concepts.md#bundle)
 (the choices needed to repeat a particular scenario).
 
 ## How to run

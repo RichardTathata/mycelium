@@ -6,7 +6,8 @@ summary: [guide 02](../guide/02-capabilities.md) · code: `src/capability_config
 A **unit file** is one TOML file per deployable unit. It says what the unit offers, what it needs,
 the groups it defines, the lanes it touches, the authority it expects, what it can host, and how a
 hosted blob reaches its local runtime. Every section is optional. A file with only `[[capability]]`
-blocks is a valid unit file.
+blocks is a valid unit file. "Unit declaration" and "declaration" name the same file
+([glossary](../guide/00-concepts.md#unit-file)).
 
 The loader is `NodeCapabilityConfig::from_toml_str` (or `load_from_file`): it parses the file and
 then runs `NodeCapabilityConfig::validate`, which refuses a bad value **by name**. The same loader
@@ -190,7 +191,7 @@ Present only for a unit that runs a provisioner. These are the provisioner's own
 | `operator_publishers` | array of strings | empty | The operator's own keys. Each must also be in `trusted_publishers`; refused otherwise, and refused when `trusted_publishers` is empty. |
 | `operator_fuel_per_call` | integer | absent (unbounded) | Fuel budget for entries signed by an operator key. `0` is refused. |
 | `call_deadline_ms` | integer | absent (the host's `5000`) | Wall-clock bound, in milliseconds, on each call into a hosted component (and on its instantiation), whoever signed it: a call past it is interrupted and recorded as *deadline exceeded*. Unlike fuel it needs no metering and applies to the operator's entries too. `0` is refused. |
-| `trusted_reviewers` | array of strings | empty | Reviewer keys whose acceptance promotes a proposed entry from the shadow lane to a real load. Empty means a proposed entry never loads for real here. |
+| `trusted_reviewers` | array of strings | empty | Reviewer keys whose acceptance promotes a proposed entry from the shadow lane to a real load. Empty means a proposed entry never loads for real here. See [shadow → accept](../guide/00-concepts.md#shadow). |
 
 ```toml
 # examples/units/model_deploy/model-host.toml
@@ -217,7 +218,11 @@ no unit-file field to grant a component further kinds; that is `HostState::with_
 ## `[[presence]]`
 
 Keep between `min_providers` and `max_providers` live providers of a filter across the fleet,
-independent of demand. A stem refuses `[[presence]]` without `[hosts]`.
+independent of demand. A stem refuses `[[presence]]` without `[hosts]`. A band is supervised by each stem
+that declares it in its own unit file, not published to the fleet: a host that does not declare it does
+not fill it. The band is a convergence target, not a cardinality guarantee; "provider floor" and
+"desired floor" elsewhere mean `min_providers`, the presence floor
+([glossary](../guide/00-concepts.md#presence)).
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|

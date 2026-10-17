@@ -8,6 +8,15 @@ Give three generic hosts one capability to maintain: `demo/echo`, with two live
 providers and a third host available to replace one. The component is checked in;
 there is no model, remote download or domain application to understand first.
 
+**Terms.** A [stem](../00-concepts.md#stem) is a generic host that declares from its
+[unit file](../00-concepts.md#unit-file) (the *unit declaration* below) and, with a `[hosts]` table,
+installs signed [catalogue entries](../00-concepts.md#catalogue) that a [librarian](../00-concepts.md#library)
+serves, for a [runtime kind](../00-concepts.md#runtime-kind) it can run. Hosts
+[self-elect](../00-concepts.md#self-election) to fill the [presence band](../00-concepts.md#presence)
+their own unit file declares, and of the providers that advertise the band's `prov-shed` mark, those
+ranked above its ceiling withdraw (rule `prov.shed`); the band is a target the fleet converges to, not a
+count it guarantees.
+
 ## How to run
 
 Prerequisites: the repository's Rust toolchain and permission to bind loopback
@@ -35,12 +44,14 @@ from top to bottom:
    [capability-lifecycle.md § Presence ceilings](../../operations/capability-lifecycle.md).
 3. Hosts discover the entry and pull, verify and install it. The observer resolves
    `demo/echo`; it does not choose a preconfigured service address.
-4. An RPC checks the actual component result. A static wiring report is joined to
-   observed providers using the example's explicit node-to-unit mapping.
+4. An RPC checks the actual component result. A
+   [static wiring report](../00-concepts.md#wiring-report) — the `wire-check` result over the three
+   declarations, which says what *would* bind — is joined to observed providers using the example's
+   explicit node-to-unit mapping.
 5. One hosting stem stops gracefully. The available host installs the component
    and the observer again sees two providers.
 
-The seed address, runtime kind, trust key and desired floor are configured.
+The seed address, runtime kind, trust key and presence floor are configured.
 The example driver starts the processes; it does not assign providers.
 Which eligible hosts serve the capability is decided at runtime. The floor is an
 intent under eventual convergence, not an instantaneous global cardinality guarantee.
@@ -71,7 +82,9 @@ is not evidence that arbitrary code is safe or semantically correct.
 Normal completion stops agents and removes its own temporary artifact library.
 After an assertion failure, process exit stops the tasks; a temporary directory
 named `mycelium-first-fleet-<pid>-<port>` may remain. Remove only that run's directory.
-CI runs the example and the observation consumer in the WASM-host job.
+CI runs the example and the [observation consumer](../00-concepts.md#wiring-report)
+(`examples/compare_stem_observations.rs`, which checks the exported declarations and snapshot) in the
+WASM-host job.
 
 For your application, replace the echo component and artifact description together,
 set your publisher trust and budgets, and retain assertions on useful output.

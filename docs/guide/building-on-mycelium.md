@@ -95,7 +95,10 @@ prefixes; **do not write under them:**
 > Companion claims: `tuple/` (`mycelium-tuple-space`) · `wiki/` (`mycelium-wiki`) ·
 > `installable/` + `comp/` (`mycelium-wasm-host`) · `facts/` (per-field AgentFacts CRDT,
 > `mycelium-agentfacts`) · `ckpt/` + `ckptw/` (checkpoint index rows,
-> `langgraph-checkpoint-mycelium`) · `strands/` (Strands session rows, `strands-session-mycelium`) ·
+> `langgraph-checkpoint-mycelium`) · `strands/` (Strands session rows, `strands-session-mycelium`; before it writes a message index or a
+> record version it takes a **session claim** on it, a consensus write (`consistent_set`) a quorum decides, so
+> no node writes over what it has not seen — [its README § Claims](../../strands-session-mycelium/README.md#claims-nothing-is-written-over-what-this-node-has-not-seen);
+> a different thing from the namespace claims this list names, [glossary](00-concepts.md#claim)) ·
 > `log/reason/` (trace substreams, `mycelium-reason`). The
 > `reason/blob-cache` **capability** marks blob-tier providers (`mycelium-reason`).
 

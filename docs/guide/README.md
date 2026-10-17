@@ -14,7 +14,7 @@ Use the [capability map](../capabilities.md) to connect this material to other m
 
 Mycelium is an embedded library for agent fleets with no coordinator. Generic nodes install signed capabilities when demand goes unmet and re-heal what they declared when a provider dies. Where you configure an enforcement point, it checks authority before work runs and records what it decided; a recorded run replays.
 It is a broker-less embedded Rust library: you embed it directly in your process — there is no
-mandatory central daemon or coordinator. Rust embeds directly; Python/TypeScript use a gateway process, and generic hosts use the stem executable. Each node is simultaneously a participant in the mesh
+mandatory central daemon or coordinator. Rust embeds directly; Python/TypeScript drive a Rust node through the HTTP gateway embedded in it, and generic hosts use the stem executable ([stem nodes](00-concepts.md#fleet-growth)). Each node is simultaneously a participant in the mesh
 and a full peer; the mesh is the registry, the bus, and the scheduler all at once. The map of the
 contracts axis behind *authorise*, *account* and *replay*: local decision-making · evidence-aware
 capability selection · scoped authority · bounded federation · coordination contracts tested through
