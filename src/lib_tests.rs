@@ -256,6 +256,8 @@ fn spawn_handler_with(
         #[cfg(all(feature = "gateway", feature = "tls"))]
         evidence_journal: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
+        history_index: std::sync::OnceLock::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
         execution_authority: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         provider_enforcement: std::sync::atomic::AtomicBool::new(false),
@@ -4082,6 +4084,8 @@ async fn test_subscribe_notified_via_gossip() {
         deployed_policy_revision: arc_swap::ArcSwapOption::from(None),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         evidence_journal: std::sync::OnceLock::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        history_index: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         execution_authority: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]

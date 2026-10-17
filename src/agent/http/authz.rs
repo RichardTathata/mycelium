@@ -624,7 +624,7 @@ pub(crate) async fn ae_preflight(
 
     // Both evaluator questions asked behind the unwind boundary (AE0 §3): a panicking adapter
     // cannot be used to build the envelope either.
-    let Some((wanted, mapping)) = ae::evaluator_facts(evaluator, operation, resource) else {
+    let Some((wanted, mapping, history_request)) = ae::evaluator_facts(evaluator, operation, resource) else {
         warn!(%operation, %resource, "AE preflight: evaluator panicked while reporting its facts");
         return Preflight::Refuse(ae::PreflightRefusal::NotEstablished(
             ae::Decision::indeterminate("evaluator panicked while reporting its facts", ""),
@@ -713,7 +713,57 @@ pub(crate) async fn ae_preflight(
     // why is precisely the gap this slice exists to close, so recording only refusals would leave
     // the interesting half invisible — and an evidence stream that omits its permits cannot support
     // any statement about what an agent was allowed to do.
-    let outcome = ae::preflight(Some(evaluator), &envelope, now_ms);
+    // Post-360 row K: an evaluator that asks for the actor's history gets this point's — or is told none could
+    // be established. A permit decided on a view is counted into the history only if the history is still the
+    // one it was decided on, so concurrent calls by one actor cannot both slip under a limit; otherwise decide
+    // again on a fresh view (twice), then refuse as not established.
+    let history_index = ctx.history_index.get();
+    // One actor's decisions on its history, one after another: the view, the evaluator and the count are one step.
+    let _gate = match (history_request, history_index) {
+        (Some(_), Some(index)) => Some(index.gate(&envelope.actor).lock().await),
+        _ => None,
+    };
+    let mut tries = 0;
+    let (outcome, history, admitted) = loop {
+        let (history, version) = match (history_request, history_index) {
+            (None, _) => (None, None),
+            (Some(request), Some(index)) => {
+                let (h, v) = index.view(&envelope.actor, request, now_ms);
+                (Some(h), Some(v))
+            }
+            (Some(_), None) => (
+                Some(ae::History::Unavailable(
+                    "no evidence journal is attached, so this enforcement point keeps no history".into(),
+                )),
+                None,
+            ),
+        };
+        let outcome = ae::preflight_with_history(Some(evaluator), &envelope, history.as_ref(), now_ms);
+        let (Ok(Some(_)), Some(index), Some(version)) = (&outcome, history_index, version) else {
+            break (outcome, history, false);
+        };
+        let entry = ae::HistoryEntry {
+            at_ms: envelope.issued_at_ms,
+            attempt_id: envelope.attempt_id.clone(),
+            operation: envelope.operation.clone(),
+            resource: envelope.resource.clone(),
+            decision: ae::DecisionKind::Permit,
+            execution: ae::Execution::Attempted,
+        };
+        if index.admit(&envelope.actor, version, entry) {
+            break (outcome, history, true);
+        }
+        tries += 1;
+        if tries >= 3 {
+            let refused = ae::Decision::indeterminate(
+                "the actor's history kept changing while this decision was made on it",
+                envelope.expected_policy_revision.clone().unwrap_or_default(),
+            );
+            break (Err(ae::PreflightRefusal::NotEstablished(refused)), history, false);
+        }
+    };
+    // Counted: the next decision on this actor's history may proceed while this one is recorded.
+    drop(_gate);
     let (decision, execution) = match &outcome {
         Ok(Some(d)) => (d.clone(), ae::Execution::Attempted),
         // No evaluator — unreachable here, one was fetched above. Nothing decided, nothing to
@@ -736,8 +786,16 @@ pub(crate) async fn ae_preflight(
             .increment(1);
     }
 
-    let evidence = ae::AeEvidence::for_decision(&envelope, &decision, execution, enforcement_point);
+    let mut evidence = ae::AeEvidence::for_decision(&envelope, &decision, execution, enforcement_point);
+    if let Some(h) = &history {
+        // The history this decision read, as a decision input: a replay finds the attempts in the journal.
+        evidence = evidence.with_history(ae::HistoryInput::of(h));
+    }
     if let Err(e) = ae_record(ctx, &evidence).await {
+        // Not recorded, so not done: a permit counted into the history is taken back.
+        if admitted && let Some(index) = history_index {
+            index.retract(&envelope.actor, &envelope.attempt_id);
+        }
         warn!(actor = %envelope.actor, %operation, %resource,
               "AE preflight: the decision could not be recorded, so the action is refused: {e}");
         #[cfg(feature = "metrics")]
@@ -848,11 +906,13 @@ pub(super) async fn ae_record(
         // absent. `with_action_evaluator` warns at attach time so this is never a surprise.
         None => (None, EvidenceState::NotConfigured, None),
         Some(journal) => match journal.append(bytes).await {
-            Ok(appended) => (
-                Some(super::action_evaluator::hex32(&appended.content_hash)),
-                EvidenceState::OnDisk,
-                None,
-            ),
+            Ok(appended) => {
+                // On the record, so in the actor's history this point keeps (post-360 row K).
+                if let Some(index) = ctx.history_index.get() {
+                    index.observe(evidence);
+                }
+                (Some(super::action_evaluator::hex32(&appended.content_hash)), EvidenceState::OnDisk, None)
+            }
             Err(e) => {
                 // A lost acknowledgement is *unknown*, not failed: the record may be on disk, and
                 // claiming failure would assert knowledge nobody has.

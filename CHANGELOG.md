@@ -88,6 +88,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   resumes on the depot from its stored session and dispatches the second van. The node binary is
   `examples/strands_fleet_node.rs` (an operator and three nodes, `--features tls,a2a,compliance`). The README says
   what Strands provides, what Mycelium adds, and what the run does not show (the models are scripted).
+- **An evaluator can decide on what an actor has already done** (post-360 plan row K; upgrade note
+  `docs/guide/deprecations.md` §47). `ActionEvaluator` gains `history_request` and `evaluate_with_history` (defaults keep
+  every evaluator as it was), and a gateway with an evidence journal gives an evaluator that asks the actor's recent
+  decisions from that journal — **counted at this enforcement point** (`HistoryScope::EnforcementPoint`, decided in the
+  plan's §5: node-local, exact here, no quorum; an actor spreading calls over N gateways can be admitted up to N times a
+  limit, and the scope is named on every history decision). The reference evaluator's `Rule::at_most(3, 600_000)` is
+  *at most three posts in ten minutes*: the fourth is denied. A history that cannot be read is `Unavailable`, and a
+  limited rule decides `Indeterminate` on it, never as an empty history; a count below the limit on an incomplete view
+  is not established. One actor's history-limited decisions are made one after another and a permit is counted as it
+  is decided, so ten concurrent calls under a limit of three admit three. The history is loaded from the journal at
+  attach (a restart keeps it), bounded (24 hours, 1 024 records per actor), and each decision's evidence carries the
+  history it read, by attempt id. The AE contract suite gains the clause `AllowAtMost` and five cases, passed by the
+  reference evaluator and by the suite's independent replacement.
 - **A Strands Agents session store on the fleet: `strands-session-mycelium` 0.1.0** (post-360 plan row O). A new Python
   companion beside `langgraph-checkpoint-mycelium`. `MyceliumSessionManager` is a Strands `SessionManager` over the
   Python SDK's KV verbs, so an agent's conversation and state, and a `Swarm`'s or `Graph`'s shared state, are rows in

@@ -595,3 +595,111 @@ async fn without_an_evaluator_the_gateway_is_unchanged() {
     assert!(body["result"]["content"][0]["text"].as_str().unwrap().contains("42"));
     agent.shutdown().await;
 }
+
+/// **Policy over history, end to end** (post-360 row K): *at most three posts in ten minutes*, counted in the
+/// actor's history at this enforcement point.
+///
+/// The fourth post is refused, and its evidence record carries the history it was decided on — the three
+/// attempts, the scope, the window. Ten concurrent calls under the same limit admit exactly three: the check and
+/// the count are one step, so concurrent calls cannot all slip under it. And the history is the journal's, so a
+/// restarted node still refuses.
+#[tokio::test]
+async fn at_most_three_posts_in_ten_minutes_counted_at_this_gateway() {
+    use super::super::evidence_journal::{EvidenceJournal, EvidenceProfile};
+    use crate::{AeEvidence, DecisionKind, HistoryScope, RecordKind};
+
+    let gossip_port = alloc_port();
+    let http_port = alloc_port();
+    let cert_dir = std::env::temp_dir().join(format!("ae-history-{http_port}"));
+    let journal_path = std::env::temp_dir().join(format!("ae-history-journal-{http_port}")).join("evidence.log");
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    let _ = std::fs::remove_dir_all(journal_path.parent().unwrap());
+
+    let start = || async {
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.tls = Some(crate::TlsConfig { auto_cert_dir: cert_dir.clone(), ..Default::default() });
+        let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
+        let me = agent.node_id().clone();
+        agent.with_evidence_journal(EvidenceJournal::open(&journal_path, EvidenceProfile::Strict).unwrap());
+        let mut policy = ReferenceEvaluator::new("rev-k").with_catalogue("cat-k", "1");
+        for tool in ["post", "burst"] {
+            policy = policy
+                .map_action("tools/call", format!("tool:{tool}@{me}"))
+                .allow(Rule::new(crate::PRINCIPAL_ANONYMOUS, "tools/call", format!("tool:{tool}@{me}")).at_most(3, 600_000));
+        }
+        agent.with_action_evaluator(Arc::new(policy));
+        agent.start().await.unwrap();
+        let runs = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for tool in ["post", "burst"] {
+            let runs = Arc::clone(&runs);
+            handles.push(agent.mcp().register_mcp_tool(tool, serde_json::json!({"type": "object", "properties": {}}), move |_args| {
+                let runs = Arc::clone(&runs);
+                async move {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    Ok(serde_json::json!("ran"))
+                }
+            }));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        (agent, runs, handles)
+    };
+
+    let (agent, runs, handles) = start().await;
+    for i in 0..3 {
+        let r = tools_call(http_port, "post", serde_json::json!({})).await;
+        assert!(r.get("error").is_none(), "post {i} is within the limit: {r}");
+    }
+    let fourth = tools_call(http_port, "post", serde_json::json!({})).await;
+    assert_eq!(fourth["error"]["code"], -32030, "the fourth post in ten minutes is denied: {fourth}");
+    assert_eq!(runs.load(Ordering::SeqCst), 3, "the denied post never ran");
+
+    let journalled: Vec<AeEvidence> = super::super::evidence_journal::read_evidence_journal(&journal_path)
+        .unwrap()
+        .iter()
+        .map(|b| serde_json::from_slice(b).unwrap())
+        .collect();
+    let decided: Vec<&AeEvidence> = journalled.iter().filter(|e| e.kind == RecordKind::Decided).collect();
+    assert_eq!(decided.len(), 4);
+    let refused = decided[3];
+    assert_eq!(refused.decision, DecisionKind::Deny);
+    let read = refused.history.as_ref().expect("the refusal carries the history it was decided on");
+    assert_eq!(read.scope, Some(HistoryScope::EnforcementPoint));
+    assert_eq!(read.window_ms, 600_000);
+    assert_eq!(read.attempts, decided[..3].iter().map(|e| e.attempt_id.clone()).collect::<Vec<_>>(),
+               "the three earlier attempts, by the ids a replay finds them under");
+    assert!(read.complete);
+    assert!(refused.checked.iter().any(|c| c.contains("history scope=enforcement_point") && c.contains("counted=3")));
+    assert!(journalled.iter().filter(|e| e.kind == RecordKind::Execution).all(|e| e.history.is_none()));
+
+    // Concurrent: ten calls under a limit of three admit three.
+    let before = runs.load(Ordering::SeqCst);
+    let burst: Vec<_> = (0..10).map(|_| tokio::spawn(tools_call(http_port, "burst", serde_json::json!({})))).collect();
+    let mut admitted = 0;
+    for call in burst {
+        let r = call.await.unwrap();
+        if r.get("error").is_none() {
+            admitted += 1;
+        }
+    }
+    assert_eq!(admitted, 3, "the check and the count are one step");
+    assert_eq!(runs.load(Ordering::SeqCst) - before, 3);
+
+    drop(handles);
+    agent.shutdown().await;
+    drop(agent);
+
+    // Restarted on the same journal: the history is still there.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (agent, runs, handles) = start().await;
+    let after_restart = tools_call(http_port, "post", serde_json::json!({})).await;
+    assert_eq!(after_restart["error"]["code"], -32030, "the journal's history survives a restart: {after_restart}");
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
+
+    drop(handles);
+    agent.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    let _ = std::fs::remove_dir_all(journal_path.parent().unwrap());
+}

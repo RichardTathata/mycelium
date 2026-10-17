@@ -338,6 +338,44 @@ happened — and the operator who trusts it will go looking for an attacker who 
 
 ---
 
+## Deciding on what an actor has already done
+
+A rule such as *at most three posts in ten minutes* needs more than the request: it needs the actor's history. An
+evaluator that asks for it (`history_request`: how far back) is given it beside the envelope
+(`evaluate_with_history`), and the reference evaluator expresses the limit on a rule:
+
+```rust
+use mycelium::{ReferenceEvaluator, Rule};
+
+let policy = ReferenceEvaluator::new("rev-posts")
+    .with_catalogue("cat-posts", "1")
+    .map_action("tools/call", "tool:post@10.0.0.5:7946")
+    .allow(Rule::new("oidc:idp/alice", "tools/call", "tool:post@10.0.0.5:7946").at_most(3, 600_000));
+```
+
+**Whose history.** The gateway's own: the decisions its evidence journal recorded about this actor
+(`HistoryScope::EnforcementPoint`). The journal is node-local and never gossiped, so the count is exact *here* and needs
+no quorum — and an actor that spreads its calls over three gateways can be admitted up to three times the limit. Every
+history decision names the scope (`history scope=enforcement_point … counted=2 limit=3`), and so does the evidence.
+
+**What the history is.** Loaded from the journal when it is attached, so a restart keeps it, and kept current by every
+decision recorded after. Bounded: each actor's records within 24 hours, at most 1 024 of them; a view that reaches past
+what was dropped says it is incomplete, and a count *below* the limit on an incomplete view is not established. A
+journal that cannot be read, or none at all, gives `History::Unavailable` — and a limited rule decides
+`Indeterminate` on it, never as though the actor had done nothing.
+
+**Check, then count.** The gateway decides one actor's history-limited calls one after another, and counts a permit
+into the history as it is decided, so ten concurrent calls under *at most three* admit three. A permit whose evidence is
+then not recorded is taken back out.
+
+**On the record.** The decision's evidence carries the history it read — the scope, the window, the attempts it was
+given, and whether that was all of them — so a replay finds those attempts in the journal and decides again.
+
+**An evaluator that wraps another** forwards `history_request` and `evaluate_with_history` as well as `evaluate`; one
+that does not hides the inner request, and its limited rules decide `Indeterminate`.
+
+---
+
 ## Replacing the evaluator
 
 The trait is small on purpose:
