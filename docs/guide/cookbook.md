@@ -201,7 +201,7 @@ pipeline-scale writes (stage a batch, submit only its reference via `Wiki::submi
 
 ### How do I make my agents reachable from LangChain / AutoGen (A2A)?
 
-Serve the A2A AgentCard — built automatically at `/.well-known/agent.json` from the
+Serve the A2A AgentCard — built automatically at `/.well-known/agent-card.json` from the
 capabilities `/a2a` can call (prompt skills and the fleet's plumbing are left out; call a prompt
 skill through `POST /gateway/llm/call`). An external ReAct agent discovers and calls your
 skills as tools. Demo: [`examples/a2a_langchain`](../../examples/a2a_langchain/).

@@ -200,7 +200,8 @@ not to raw source. The suite READMEs carry the per-example walkthrough + the exa
 
 **Harness binaries — deliberately not rows above.** `federation_node` (the one binary of the
 two-mesh Docker suite), `scrape_fleet_node` and `scrape_worker_node` (launcher + sidecar for the
-analytics-scraper fleet) are *fixtures a suite starts*, not demonstrations you read. They are named
+analytics-scraper fleet) and `a2a_sdk_node` (the node an unmodified `a2a-sdk` client drives in the `a2a-sdk` CI
+job, `tests/a2a-sdk/`) are *fixtures a suite starts*, not demonstrations you read. They are named
 here so this page is a complete enumeration: a list that is silently short is indistinguishable from
 one that is out of date, and this index has drifted that way before.
 

@@ -1,19 +1,36 @@
 //! A2A (Agent-to-Agent) protocol adapter — `a2a` feature.
 //!
-//! Exposes two HTTP endpoints:
-//! - `GET  /.well-known/agent.json` — A2A discovery (AgentCard)
-//! - `POST /a2a`                    — JSON-RPC 2.0 task dispatch
+//! Exposes these HTTP endpoints:
+//! - `GET  /.well-known/agent-card.json` — A2A discovery (the AgentCard), where A2A 0.3 and 1.0 clients
+//!   read it
+//! - `GET  /.well-known/agent.json`      — the same card at the pre-0.3 path, **kept for one release**
+//!   (`deprecations.md` §46)
+//! - `POST /a2a`                         — JSON-RPC 2.0 task dispatch
 //!
 //! The card is built dynamically from the live `cap/` KV prefix so late-joining
-//! nodes are immediately discoverable without re-configuration.
+//! nodes are immediately discoverable without re-configuration. It names `/a2a` once per protocol
+//! version it serves (`supportedInterfaces`), so a current client picks the 1.0 methods.
 //!
 //! ## JSON-RPC methods
-//! | Method               | Behaviour                                                  |
-//! |----------------------|------------------------------------------------------------|
-//! | `tasks/send`         | Synchronous: resolve skill, RPC call, return completed task|
-//! | `tasks/sendSubscribe`| SSE stream: submitted → working → completed/failed         |
-//! | `tasks/get`          | Retrieve a previously-created task by `id`                 |
-//! | `tasks/cancel`       | Cancel a pending task; error if already completed          |
+//!
+//! Three generations of the protocol are served on one endpoint, and every send runs the same doors —
+//! the federation edge, the task reservation, the action evaluator, the presented mandate, the
+//! evidence record — through [`dispatch_send`] (plan row N). A task is answered in the shapes of the
+//! generation that created it: `tasks/get` on a task `message/send` created answers in 0.3's shapes.
+//!
+//! | A2A 1.0                | A2A 0.3        | pre-0.2 (one release)  | Behaviour                                   |
+//! |------------------------|----------------|------------------------|---------------------------------------------|
+//! | `SendMessage`          | `message/send` | `tasks/send`           | resolve the skill, call it, return the task |
+//! | `SendStreamingMessage` | `message/stream` | `tasks/sendSubscribe` | SSE: submitted → working → completed/failed |
+//! | `GetTask`              | `tasks/get`    | `tasks/get`            | the task, to the identity that created it   |
+//! | `CancelTask`           | `tasks/cancel` | `tasks/cancel`         | cancel a pending task; completed is refused |
+//!
+//! **Which skill.** The pre-0.2 methods take Mycelium's own `skillId` parameter. The 0.3 and 1.0 methods
+//! read `metadata.skillId` — the message's, or the request's — and a message that names none reaches the
+//! node's declared default skill (`GossipAgent::with_a2a_default_skill`), or is refused `-32602`. The
+//! card's description says which. A presented mandate and an operation id ride where `tasks/send` takes
+//! them in `params._meta`: in the request's `metadata._meta`. Each message is its own task: a message
+//! naming a `taskId` is refused `-32004`, since every task here is complete when its send returns.
 
 use axum::{
     Router,
@@ -44,10 +61,30 @@ use super::capability_ops::{is_cap_locality_key, parse_cap_key_or_warn};
 #[derive(Serialize)]
 pub(crate) struct AgentCard {
     pub name:         String,
+    /// What the agent is and how a message reaches a skill here (which `metadata.skillId` names, or
+    /// the default skill) — the place A2A gives an agent to say so.
+    pub description:  String,
+    /// `/a2a`, once per protocol version served. A 0.3 or 1.0 client reads this and ignores `url`.
+    #[serde(rename = "supportedInterfaces")]
+    pub supported_interfaces: Vec<AgentInterface>,
+    /// The pre-0.3 field, kept for clients that read only it (it names `/a2a` too).
     pub url:          String,
     pub version:      String,
     pub capabilities: A2aCapabilities,
+    #[serde(rename = "defaultInputModes")]
+    pub default_input_modes: Vec<&'static str>,
+    #[serde(rename = "defaultOutputModes")]
+    pub default_output_modes: Vec<&'static str>,
     pub skills:       Vec<AgentSkill>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct AgentInterface {
+    pub url: String,
+    #[serde(rename = "protocolBinding")]
+    pub protocol_binding: &'static str,
+    #[serde(rename = "protocolVersion")]
+    pub protocol_version: &'static str,
 }
 
 #[derive(Serialize)]
@@ -99,10 +136,205 @@ pub(crate) enum Part {
     Text { text: String },
 }
 
+// ── Protocol generations ──────────────────────────────────────────────────────
+
+/// The generation of the A2A protocol a method belongs to, which fixes the shapes its answers take
+/// (plan row N). The pre-0.2 shapes are the ones `/a2a` has always answered; 0.3 tags each object
+/// with a `kind` and names states in lower case; 1.0 is the protobuf JSON form, with
+/// `TASK_STATE_*` names and a send's task wrapped as `{ "task": … }`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Generation {
+    /// `tasks/send`, `tasks/sendSubscribe` — and `tasks/get`/`tasks/cancel` on a task they created.
+    Legacy,
+    /// `message/send`, `message/stream` — and `tasks/get`/`tasks/cancel` on a task they created.
+    V03,
+    /// `SendMessage`, `SendStreamingMessage`, `GetTask`, `CancelTask`.
+    V10,
+}
+
+/// The protocol versions the card names for `/a2a`, newest first: a client takes the first it speaks.
+const PROTOCOL_VERSIONS: [&str; 2] = ["1.0", "0.3"];
+
+/// A task state as the generation spells it: the stored (pre-0.2) name, the same in 0.3, and
+/// `TASK_STATE_*` in 1.0.
+fn state_name(state: &str, generation: Generation) -> String {
+    match generation {
+        Generation::Legacy | Generation::V03 => state.to_string(),
+        Generation::V10 => format!("TASK_STATE_{}", state.to_ascii_uppercase()),
+    }
+}
+
+/// A text part: `{type: text}` before 0.2, `{kind: text}` in 0.3, the bare `{text}` in 1.0.
+fn text_part(text: &str, generation: Generation) -> Value {
+    match generation {
+        Generation::Legacy => json!({ "type": "text", "text": text }),
+        Generation::V03 => json!({ "kind": "text", "text": text }),
+        Generation::V10 => json!({ "text": text }),
+    }
+}
+
+/// The artifact a completed task carries, in the generation's shape. 0.3 and 1.0 require an
+/// `artifactId`; a task has at most one artifact here, so it is derived from the task id.
+fn render_artifact(task_id: &str, index: usize, artifact: &Artifact, generation: Generation) -> Value {
+    let parts: Vec<Value> = artifact
+        .parts
+        .iter()
+        .map(|Part::Text { text }| text_part(text, generation))
+        .collect();
+    match generation {
+        Generation::Legacy => json!({ "parts": parts }),
+        Generation::V03 | Generation::V10 => json!({ "artifactId": format!("{task_id}-{index}"), "parts": parts }),
+    }
+}
+
+/// A task in the generation's shape. The pre-0.2 shape is the serialised [`Task`], unchanged.
+fn render_task(task: &Task, context_id: &str, generation: Generation) -> Value {
+    if generation == Generation::Legacy {
+        return serde_json::to_value(task).unwrap_or(Value::Null);
+    }
+    let mut v = json!({
+        "id": task.id,
+        "contextId": context_id,
+        "status": { "state": state_name(&task.status.state, generation) },
+    });
+    if generation == Generation::V03 {
+        v["kind"] = json!("task");
+    }
+    if !task.artifacts.is_empty() {
+        v["artifacts"] = Value::Array(
+            task.artifacts.iter().enumerate().map(|(i, a)| render_artifact(&task.id, i, a, generation)).collect(),
+        );
+    }
+    v
+}
+
+/// A send's result: the task itself before 1.0, `{ "task": … }` in 1.0 (`SendMessageResponse`).
+fn render_send_result(task: &Task, context_id: &str, generation: Generation) -> Value {
+    let rendered = render_task(task, context_id, generation);
+    match generation {
+        Generation::V10 => json!({ "task": rendered }),
+        Generation::Legacy | Generation::V03 => rendered,
+    }
+}
+
+/// One send, whatever generation asked for it: the shape [`dispatch_send`] and the stream run on.
+pub(crate) struct SendRequest {
+    pub task_id:    String,
+    pub context_id: String,
+    pub skill_id:   String,
+    /// What the skill receives: the first part's text, or its `data` serialised as JSON.
+    pub text:       String,
+    /// What the AE preflight and the mandate reader read: `{ "_meta": … }`, from `params._meta`
+    /// before 0.3 and from the request's `metadata._meta` after.
+    pub meta:       Value,
+    pub generation: Generation,
+}
+
+impl SendRequest {
+    /// A pre-0.2 `tasks/send` / `tasks/sendSubscribe`: the caller names the task id and the skill.
+    fn legacy(state: &A2aState, params: &Value) -> Self {
+        let task_id = params.get("id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| new_task_id(&state.task_ctx.hlc));
+        let skill_id = params.get("skillId")
+            .or_else(|| params.get("skill_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let text = text_from_message(params.get("message").unwrap_or(&Value::Null));
+        SendRequest {
+            context_id: task_id.clone(),
+            task_id,
+            skill_id,
+            text,
+            meta: params.clone(),
+            generation: Generation::Legacy,
+        }
+    }
+
+    /// A 0.3 `message/send` / `message/stream` or a 1.0 `SendMessage` / `SendStreamingMessage`
+    /// (`params` is `MessageSendParams` / `SendMessageRequest`; the two agree on every field read
+    /// here). `Err` is the JSON-RPC error to answer, before anything is reserved or dispatched.
+    fn current(state: &A2aState, id: &Option<Value>, params: &Value, generation: Generation) -> Result<Self, Value> {
+        let invalid = |why: &str| jsonrpc_error(id.clone(), -32602, why);
+        let Some(message) = params.get("message").filter(|m| m.is_object()) else {
+            return Err(invalid("params.message is required"));
+        };
+        // Every task here is complete when its send returns, so there is no task to continue: a
+        // `taskId` would otherwise have to mean either "replace that completed task" (the pre-0.2
+        // re-send) or nothing at all.
+        if message.get("taskId").and_then(Value::as_str).is_some_and(|t| !t.is_empty()) {
+            return Err(jsonrpc_error(
+                id.clone(),
+                -32004,
+                "each message is its own task at this agent and its task is complete when the send returns: \
+                 send without taskId (name an earlier task in referenceTaskIds)",
+            ));
+        }
+        let named = |holder: Option<&Value>| -> Result<Option<String>, Value> {
+            match holder.and_then(|m| m.get("metadata")).and_then(|m| m.get("skillId")) {
+                None | Some(Value::Null) => Ok(None),
+                Some(Value::String(s)) => Ok(Some(s.clone())),
+                Some(_) => Err(invalid("metadata.skillId must be a string \"ns/name\"")),
+            }
+        };
+        let skill_id = match (named(Some(message))?, named(Some(params))?) {
+            (Some(a), Some(b)) if a != b => {
+                return Err(invalid("the message's and the request's metadata.skillId name different skills"))
+            }
+            (Some(a), _) | (None, Some(a)) => a,
+            (None, None) => match state.task_ctx.a2a_default_skill.get() {
+                Some(default) => default.clone(),
+                None => {
+                    return Err(invalid(
+                        "name the skill in metadata.skillId (\"ns/name\", one the agent card lists): \
+                         this agent declares no default skill",
+                    ))
+                }
+            },
+        };
+        let text = match message.get("parts").and_then(Value::as_array).and_then(|p| p.first()) {
+            None => return Err(invalid("the message has no parts")),
+            Some(part) => match (part.get("text"), part.get("data")) {
+                (Some(Value::String(t)), _) => t.clone(),
+                (_, Some(data)) => data.to_string(),
+                _ => {
+                    return Err(jsonrpc_error(
+                        id.clone(),
+                        -32005,
+                        "a skill here reads a text or a data part; this message's first part is neither",
+                    ))
+                }
+            },
+        };
+        let context_id = message.get("contextId")
+            .and_then(Value::as_str)
+            .filter(|c| !c.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| new_task_id(&state.task_ctx.hlc));
+        let meta = params.get("metadata").and_then(|m| m.get("_meta")).cloned().unwrap_or(Value::Null);
+        Ok(SendRequest {
+            task_id: new_task_id(&state.task_ctx.hlc),
+            context_id,
+            skill_id,
+            text,
+            meta: json!({ "_meta": meta }),
+            generation,
+        })
+    }
+}
+
 // ── In-memory task store ──────────────────────────────────────────────────────
 
 pub(crate) struct A2aTask {
     pub task:       Task,
+    /// The A2A context the task belongs to: the message's `contextId`, or one minted for it. The
+    /// pre-0.2 shapes have no context and do not carry it.
+    pub context_id: String,
+    /// The protocol generation whose method created the task; `tasks/get` and `tasks/cancel`, which
+    /// pre-0.2 and 0.3 share by name, answer in its shapes.
+    pub generation: Generation,
     pub created_at: Instant,
     /// The principal that created the task (`tasks/send` / `tasks/sendSubscribe`), or `None` for an
     /// anonymous caller. `tasks/get` and `tasks/cancel` answer **only this identity**: ids are
@@ -125,6 +357,8 @@ static RESERVATION_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 pub(crate) struct TaskReservation {
     tasks: Arc<papaya::HashMap<String, A2aTask>>,
     id:    String,
+    context_id: String,
+    generation: Generation,
     owner: Option<String>,
     /// `None` when the id already belonged to this caller (a re-send): nothing of ours to remove.
     token: Option<u64>,
@@ -136,6 +370,8 @@ impl TaskReservation {
         self.token = None;
         self.tasks.pin().insert(self.id.clone(), A2aTask {
             task,
+            context_id: self.context_id.clone(),
+            generation: self.generation,
             created_at: mycelium_core::sim_seam::mono_instant(),
             owner: self.owner.clone(),
             pending: None,
@@ -158,7 +394,13 @@ impl Drop for TaskReservation {
 /// caller (atomically — `compute`, so two senders racing one new id cannot both pass); an id this
 /// identity already owns is a re-send; an id another identity owns is `Err`. The check and the
 /// claim are one step, so the dispatch `await` no longer sits between them.
-fn reserve_task(state: &A2aState, task_id: &str, owner: &Option<String>) -> Result<TaskReservation, ()> {
+fn reserve_task(
+    state:      &A2aState,
+    task_id:    &str,
+    context_id: &str,
+    generation: Generation,
+    owner:      &Option<String>,
+) -> Result<TaskReservation, ()> {
     let token = RESERVATION_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let guard = state.tasks.pin();
     let claimed = guard.compute(task_id.to_string(), |existing| match existing {
@@ -166,6 +408,8 @@ fn reserve_task(state: &A2aState, task_id: &str, owner: &Option<String>) -> Resu
         Some(_) => papaya::Operation::Abort(true),
         None => papaya::Operation::Insert(A2aTask {
             task: Task { id: task_id.to_string(), status: TaskStatus { state: "submitted".into() }, artifacts: vec![] },
+            context_id: context_id.to_string(),
+            generation,
             created_at: mycelium_core::sim_seam::mono_instant(),
             owner: owner.clone(),
             pending: Some(token),
@@ -176,7 +420,14 @@ fn reserve_task(state: &A2aState, task_id: &str, owner: &Option<String>) -> Resu
         papaya::Compute::Aborted(true) => None,
         _ => return Err(()),
     };
-    Ok(TaskReservation { tasks: Arc::clone(&state.tasks), id: task_id.to_string(), owner: owner.clone(), token })
+    Ok(TaskReservation {
+        tasks: Arc::clone(&state.tasks),
+        id: task_id.to_string(),
+        context_id: context_id.to_string(),
+        generation,
+        owner: owner.clone(),
+        token,
+    })
 }
 
 /// The identity a task is owned by: the resolved principal, or `None` for an anonymous caller (and
@@ -191,7 +442,7 @@ fn not_the_creator(id: Option<Value>) -> Value {
     jsonrpc_error(
         id,
         -32004,
-        "tasks/get, tasks/cancel and a tasks/send under an existing id are answered only to the identity that created it; an anonymous task is answered only on the response that created it",
+        "a task is read (tasks/get, GetTask), cancelled (tasks/cancel, CancelTask) or re-sent under its id only by the identity that created it; an anonymous task is answered only on the response that created it",
     )
 }
 
@@ -463,37 +714,57 @@ async fn agent_card_handler(State(state): State<A2aState>) -> impl IntoResponse 
     }).collect();
 
     let node_addr = state.task_ctx.node_id.to_string();
+    let endpoint = a2a_endpoint_url(&state.task_ctx);
+    let routing = match state.task_ctx.a2a_default_skill.get() {
+        Some(default) => format!(
+            "A message names its skill (\"ns/name\", one of the skills below) in metadata.skillId, the message's \
+             or the request's; a message that names none goes to {default}."
+        ),
+        None => "A message names its skill (\"ns/name\", one of the skills below) in metadata.skillId, the \
+                 message's or the request's; one that names none is refused."
+            .to_string(),
+    };
     let card = AgentCard {
         name:         format!("Mycelium/{}", node_addr),
-        url:          a2a_endpoint_url(&state.task_ctx),
+        description:  format!(
+            "Mycelium node {node_addr}: the skills its mesh advertises. {routing} A skill reads the first part \
+             of the message, text or data. Each message is its own task."
+        ),
+        supported_interfaces: PROTOCOL_VERSIONS
+            .iter()
+            .map(|v| AgentInterface { url: endpoint.clone(), protocol_binding: "JSONRPC", protocol_version: v })
+            .collect(),
+        url:          endpoint,
         version:      "1.0.0".into(),
         capabilities: A2aCapabilities { streaming: true },
+        default_input_modes: vec!["text/plain", "application/json"],
+        default_output_modes: vec!["text/plain"],
         skills,
     };
     Json(card)
 }
 
+/// **The one send** (plan row N): `tasks/send`, `message/send` and `SendMessage` each parse their
+/// request into a [`SendRequest`] and come here, so every generation runs the same doors in the same
+/// order — the federation edge, the task reservation, skill resolution, the action evaluator, the
+/// presented mandate travelling to the provider, the evidence record. `Ok` is the completed task, its
+/// reservation spent; `Err` is the JSON-RPC error to answer.
+///
 /// `raw` is the request body **exactly as it arrived**, before parsing. A federated credential may
 /// bind it (item 2 row 11), and that binding is worth nothing if it is checked against a
 /// re-serialisation: two encodings of the same JSON are the same request and different bytes.
-async fn handle_tasks_send(
+async fn dispatch_send(
     state:  &A2aState,
     caller: Option<&ResolvedPrincipal>,
     #[cfg(feature = "tls")]
     federated: Option<&super::federation_http::FederatedIdentity>,
     id:     Option<Value>,
-    params: &Value,
+    req:    &SendRequest,
     #[cfg_attr(not(feature = "tls"), allow(unused_variables))]
     raw:    &[u8],
-) -> Value {
-    let task_id  = params.get("id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| new_task_id(&state.task_ctx.hlc));
-    let skill_id = params.get("skillId")
-        .or_else(|| params.get("skill_id"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+) -> Result<Task, Value> {
+    let skill_id = req.skill_id.as_str();
+    let params = &req.meta;
 
     // Item 2 PR 8: a federated caller was authenticated at the auth layer; the export it named is
     // authorised here, now that the body has said which skill it is asking for. The credential
@@ -505,33 +776,32 @@ async fn handle_tasks_send(
     #[cfg(feature = "tls")]
     if let Some(federated) = federated {
         let Some(edge) = state.task_ctx.federation_edge.get() else {
-            return jsonrpc_error(id, -32003, "federation is not enabled at this gateway");
+            return Err(jsonrpc_error(id, -32003, "federation is not enabled at this gateway"));
         };
         let accepted =
             match edge.authorize(&federated.presented, skill_id, raw, crate::federation::edge::now_ms()) {
                 Ok(accepted) => accepted,
-                Err(refusal) => return jsonrpc_error(id, -32003, &format!("federated call refused: {refusal}")),
+                Err(refusal) => return Err(jsonrpc_error(id, -32003, &format!("federated call refused: {refusal}"))),
             };
         // Capacity is asked **after** authority, so a partner we would refuse on authority cannot
         // occupy a slot belonging to one we would admit. Its own code: a capacity refusal is
         // transient and a retry resolves it, while -32003 says go and talk to your operator.
         match edge.admit(&accepted.origin_domain) {
             Ok(slot) => _slot = Some(slot),
-            Err(refusal) => return jsonrpc_error(id, -32004, &format!("federated call refused: {refusal}")),
+            Err(refusal) => return Err(jsonrpc_error(id, -32004, &format!("federated call refused: {refusal}"))),
         }
     }
     // The id is claimed **after** the federation authorisation (#587 F6: an unauthorised partner
     // learns nothing about which ids exist) and **before** the dispatch (F5: two senders racing one
     // new id cannot both run). An id another identity owns is refused here, before anything is sent.
-    let Ok(reservation) = reserve_task(state, &task_id, &task_owner(caller)) else {
-        return not_the_creator(id);
+    let Ok(reservation) = reserve_task(state, &req.task_id, &req.context_id, req.generation, &task_owner(caller)) else {
+        return Err(not_the_creator(id));
     };
-    let message  = params.get("message").cloned().unwrap_or(Value::Null);
-    let text     = text_from_message(&message);
+    let text = req.text.clone();
 
     let target = match resolve_skill(&state.task_ctx, skill_id) {
         Ok(target) => target,
-        Err(why) => return jsonrpc_error(id, -32001, &why),
+        Err(why) => return Err(jsonrpc_error(id, unresolved_skill_code(req.generation), &why)),
     };
 
     // Generous: A2A skills are frequently multi-step LLM pipelines
@@ -558,12 +828,12 @@ async fn handle_tasks_send(
     if let super::http::Preflight::Refuse(refusal) = &preflight {
         // The same body `/mcp` sends. A partner domain calling across the federation edge gets the
         // machine-readable reason and the policy revision, not only a number and a sentence.
-        return jsonrpc_error_with_data(
+        return Err(jsonrpc_error_with_data(
             id,
             refusal.json_rpc_code(),
             &refusal.to_string(),
             refusal.error_data(),
-        );
+        ));
     }
 
     // Item 7: the skill provider is told who called (the resolved bearer principal, or
@@ -588,37 +858,89 @@ async fn handle_tasks_send(
 
     match dispatched {
         Ok(reply) => {
-            let task = completed_task(task_id.clone(), reply);
+            let task = completed_task(req.task_id.clone(), reply);
             reservation.complete(task.clone());
-            jsonrpc_ok(id, serde_json::to_value(&task).unwrap_or(Value::Null))
+            Ok(task)
         }
         Err(GatewayDispatchError::Rpc(e)) => {
-            warn!("A2A tasks/send rpc_call failed for skill {}: {:?}", skill_id, e);
-            jsonrpc_error(id, -32603, "rpc call failed")
+            warn!("A2A send rpc_call failed for skill {}: {:?}", skill_id, e);
+            Err(jsonrpc_error(id, -32603, "rpc call failed"))
         }
         Err(e) => {
-            warn!("A2A tasks/send refused for skill {}: {e}", skill_id);
-            jsonrpc_error(id, e.json_rpc_code(), &e.to_string())
+            warn!("A2A send refused for skill {}: {e}", skill_id);
+            Err(jsonrpc_error(id, e.json_rpc_code(), &e.to_string()))
         }
     }
 }
 
-/// `tasks/get`: the task, **to the identity that created it**. Anyone else — another principal,
-/// or an anonymous caller, who has no identity to match — is refused `-32004` naming the rule.
-fn handle_tasks_get(state: &A2aState, caller: Option<&ResolvedPrincipal>, id: Option<Value>, params: &Value) -> Value {
+/// The code a send answers for a skill it cannot resolve: `-32001` before 0.3, as it always has been;
+/// `-32602` (invalid params) after, because 0.3 and 1.0 give `-32001` to *task* not found and a
+/// client would read it as that.
+fn unresolved_skill_code(generation: Generation) -> i32 {
+    match generation {
+        Generation::Legacy => -32001,
+        Generation::V03 | Generation::V10 => -32602,
+    }
+}
+
+/// A send in any generation, answered in its shapes.
+async fn handle_send(
+    state:  &A2aState,
+    caller: Option<&ResolvedPrincipal>,
+    #[cfg(feature = "tls")]
+    federated: Option<&super::federation_http::FederatedIdentity>,
+    id:     Option<Value>,
+    req:    &SendRequest,
+    raw:    &[u8],
+) -> Value {
+    match dispatch_send(
+        state,
+        caller,
+        #[cfg(feature = "tls")]
+        federated,
+        id.clone(),
+        req,
+        raw,
+    )
+    .await
+    {
+        Ok(task) => jsonrpc_ok(id, render_send_result(&task, &req.context_id, req.generation)),
+        Err(error) => error,
+    }
+}
+
+
+/// `tasks/get` / `GetTask`: the task, **to the identity that created it**. Anyone else — another
+/// principal, or an anonymous caller, who has no identity to match — is refused `-32004` naming the
+/// rule. `asked` is the generation of the method (`GetTask` is 1.0); `None` for `tasks/get`, which
+/// pre-0.2 and 0.3 share, so the task answers in the shapes of the generation that created it.
+fn handle_tasks_get(
+    state:  &A2aState,
+    caller: Option<&ResolvedPrincipal>,
+    id:     Option<Value>,
+    params: &Value,
+    asked:  Option<Generation>,
+) -> Value {
     let task_id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
     let owner = task_owner(caller);
     match state.tasks.pin().get(task_id) {
         Some(entry) if owner.is_some() && entry.owner == owner => {
-            jsonrpc_ok(id, serde_json::to_value(&entry.task).unwrap_or(Value::Null))
+            jsonrpc_ok(id, render_task(&entry.task, &entry.context_id, asked.unwrap_or(entry.generation)))
         }
         Some(_) => not_the_creator(id),
         None    => jsonrpc_error(id, -32001, "task not found"),
     }
 }
 
-/// `tasks/cancel`: the same owner rule as `tasks/get`, checked before the task's state.
-fn handle_tasks_cancel(state: &A2aState, caller: Option<&ResolvedPrincipal>, id: Option<Value>, params: &Value) -> Value {
+/// `tasks/cancel` / `CancelTask`: the same owner rule as `tasks/get`, checked before the task's state,
+/// and the same `asked`.
+fn handle_tasks_cancel(
+    state:  &A2aState,
+    caller: Option<&ResolvedPrincipal>,
+    id:     Option<Value>,
+    params: &Value,
+    asked:  Option<Generation>,
+) -> Value {
     let task_id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
     let owner = task_owner(caller);
     let guard = state.tasks.pin();
@@ -627,9 +949,15 @@ fn handle_tasks_cancel(state: &A2aState, caller: Option<&ResolvedPrincipal>, id:
         Some(entry) if entry.task.status.state == "completed" => {
             jsonrpc_error(id, -32002, "task already completed")
         }
-        Some(_) => {
+        Some(entry) => {
+            let generation = asked.unwrap_or(entry.generation);
+            let canceled = Task { id: task_id.to_string(), status: TaskStatus { state: "canceled".into() }, artifacts: vec![] };
+            let answer = match generation {
+                Generation::Legacy => json!({ "id": task_id, "status": { "state": "canceled" } }),
+                Generation::V03 | Generation::V10 => render_task(&canceled, &entry.context_id, generation),
+            };
             guard.remove(task_id);
-            jsonrpc_ok(id, json!({ "id": task_id, "status": { "state": "canceled" } }))
+            jsonrpc_ok(id, answer)
         }
         None => jsonrpc_error(id, -32001, "task not found"),
     }
@@ -637,38 +965,120 @@ fn handle_tasks_cancel(state: &A2aState, caller: Option<&ResolvedPrincipal>, id:
 
 // ── tasks/sendSubscribe SSE ───────────────────────────────────────────────────
 
-/// A2A SSE handler for `tasks/sendSubscribe`. Unlike the JSON-RPC handler,
-/// this is called via a separate route when the request body specifies
-/// `"method": "tasks/sendSubscribe"`. We expose it as a plain `async fn`
-/// so the router can dispatch to it after the JSON body is parsed.
-#[allow(clippy::too_many_arguments)]
+/// One step of a streamed send, rendered per generation by [`stream_events`].
+enum Step<'a> {
+    Submitted,
+    Working,
+    Completed(&'a Task),
+    /// `error` and `detail` are the pre-0.2 event's fields, each present where it always was; 0.3 and
+    /// 1.0 carry the same text as the failed status's message.
+    Failed { error: Option<String>, detail: Option<String> },
+}
+
+/// The SSE events one step becomes. Before 0.3: one `task_status_update` event, its data the bare
+/// object, exactly as `tasks/sendSubscribe` has always sent. In 0.3 and 1.0: unnamed events whose data
+/// is a JSON-RPC response to the request (`id`) carrying a `Task`, a status update or an artifact
+/// update — a completion is the artifact, then the terminal status.
+fn stream_events(id: &Option<Value>, req: &SendRequest, step: Step<'_>) -> Vec<Event> {
+    let (task_id, context_id, generation) = (req.task_id.as_str(), req.context_id.as_str(), req.generation);
+    if generation == Generation::Legacy {
+        let data = match step {
+            Step::Submitted => json!({ "id": task_id, "status": { "state": "submitted" } }),
+            Step::Working => json!({ "id": task_id, "status": { "state": "working" } }),
+            Step::Completed(task) => serde_json::to_value(task).unwrap_or(Value::Null),
+            Step::Failed { error, detail } => {
+                let mut v = json!({ "id": task_id, "status": { "state": "failed" } });
+                if let Some(error) = error { v["error"] = json!(error); }
+                if let Some(detail) = detail { v["detail"] = json!(detail); }
+                v
+            }
+        };
+        return vec![Event::default().event("task_status_update").data(data.to_string())];
+    }
+    let v03 = generation == Generation::V03;
+    let event = |result: Value| Event::default().data(jsonrpc_ok(id.clone(), result).to_string());
+    let status_update = |state: &str, message: Option<&str>, last: bool| {
+        let mut status = json!({ "state": state_name(state, generation) });
+        if let Some(text) = message {
+            status["message"] = if v03 {
+                json!({ "kind": "message", "messageId": format!("{task_id}-status"), "role": "agent",
+                        "parts": [text_part(text, generation)] })
+            } else {
+                json!({ "messageId": format!("{task_id}-status"), "role": "ROLE_AGENT",
+                        "parts": [text_part(text, generation)] })
+            };
+        }
+        let update = json!({ "taskId": task_id, "contextId": context_id, "status": status });
+        if v03 {
+            let mut update = update;
+            update["kind"] = json!("status-update");
+            update["final"] = json!(last);
+            update
+        } else {
+            json!({ "statusUpdate": update })
+        }
+    };
+    match step {
+        Step::Submitted => {
+            let task = Task { id: task_id.to_string(), status: TaskStatus { state: "submitted".into() }, artifacts: vec![] };
+            vec![event(render_send_result(&task, context_id, generation))]
+        }
+        Step::Working => vec![event(status_update("working", None, false))],
+        Step::Completed(task) => {
+            let mut events: Vec<Event> = task.artifacts.iter().enumerate().map(|(i, a)| {
+                let update = json!({ "taskId": task_id, "contextId": context_id,
+                                     "artifact": render_artifact(task_id, i, a, generation), "lastChunk": true });
+                if v03 {
+                    let mut update = update;
+                    update["kind"] = json!("artifact-update");
+                    event(update)
+                } else {
+                    event(json!({ "artifactUpdate": update }))
+                }
+            }).collect();
+            events.push(event(status_update("completed", None, true)));
+            events
+        }
+        Step::Failed { error, detail } => {
+            let text = detail.or(error).unwrap_or_else(|| "the skill call failed".into());
+            vec![event(status_update("failed", Some(&text), true))]
+        }
+    }
+}
+
+/// A streamed send in any generation — `tasks/sendSubscribe`, `message/stream`, `SendStreamingMessage`
+/// — running the same doors as [`dispatch_send`]: the reservation (taken by the caller, moved in here),
+/// skill resolution, the AE preflight with the request's own `_meta`, the mandate to the provider, the
+/// evidence record. A refusal becomes a failed task rather than a silent drop, so the client learns
+/// the same thing it would on a unary send.
 pub(crate) async fn tasks_send_subscribe(
     state:    A2aState,
     caller:   Option<ResolvedPrincipal>,
     id:       Option<Value>,
-    task_id:  String,
-    skill_id: String,
-    text:     String,
-    params:   Value,
+    req:      SendRequest,
     reservation: TaskReservation,
 ) -> impl IntoResponse {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(8);
 
     // Emit "submitted" immediately.
-    let _ = tx.try_send(Ok(Event::default()
-        .event("task_status_update")
-        .data(json!({ "id": &task_id, "status": { "state": "submitted" } }).to_string())));
+    for e in stream_events(&id, &req, Step::Submitted) {
+        let _ = tx.try_send(Ok(e));
+    }
 
-    let state2   = state.clone();
-    let task_id2 = task_id.clone();
-    let id2      = id.clone();
     tokio::spawn(async move {
-        let target = match resolve_skill(&state2.task_ctx, &skill_id) {
+        let send_all = |events: Vec<Event>| {
+            let tx = tx.clone();
+            async move {
+                for e in events {
+                    let _ = tx.send(Ok(e)).await;
+                }
+            }
+        };
+        let skill_id = req.skill_id.clone();
+        let target = match resolve_skill(&state.task_ctx, &skill_id) {
             Ok(target) => target,
             Err(why) => {
-                let _ = tx.send(Ok(Event::default()
-                    .event("task_status_update")
-                    .data(json!({ "id": &task_id2, "status": { "state": "failed" }, "error": why }).to_string()))).await;
+                send_all(stream_events(&id, &req, Step::Failed { error: Some(why), detail: None })).await;
                 return;
             }
         };
@@ -682,58 +1092,50 @@ pub(crate) async fn tasks_send_subscribe(
         // reads as a task that recovered from failing. The same held for any dispatch that
         // completed inside 100 ms — `completed → working` — so this predates the AE seam and is
         // not confined to refusals. Found by `examples/a2a_skill_authority`'s first CI run.
-        let tx2      = tx.clone();
-        let task_id3 = task_id2.clone();
+        let tx2     = tx.clone();
+        let working_events = stream_events(&id, &req, Step::Working);
         let working = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            let _ = tx2.try_send(Ok(Event::default()
-                .event("task_status_update")
-                .data(json!({ "id": &task_id3, "status": { "state": "working" } }).to_string())));
+            for e in working_events {
+                let _ = tx2.try_send(Ok(e));
+            }
         });
 
-        // The streaming edge is the same enforcement point; a refusal becomes a failed task
-        // rather than a silent drop, so the client learns the same thing it would on `tasks/send`.
         #[cfg(all(feature = "gateway", feature = "tls"))]
         let preflight = super::http::ae_preflight(
-            &state2.task_ctx,
+            &state.task_ctx,
             caller.as_ref(),
             "skill.invoke",
             &format!("skill:{skill_id}@{target}"),
-            &json!({ "text": text }),
-            // The request's own params, so a presented `_meta.mandate` is assessed here exactly as
-            // on `tasks/send`. This passed `Null` until 2026-09-25 (closure plan C2), so a stream
-            // call's mandate was never read and a mandate-requiring rule refused every stream.
-            &params,
+            &json!({ "text": &req.text }),
+            // The request's own `_meta`, so a presented mandate is assessed here exactly as on a
+            // unary send. This passed `Null` until 2026-09-25 (closure plan C2), so a stream call's
+            // mandate was never read and a mandate-requiring rule refused every stream.
+            &req.meta,
             super::http::ENFORCEMENT_POINT_A2A,
         )
         .await;
         #[cfg(all(feature = "gateway", feature = "tls"))]
         if let super::http::Preflight::Refuse(refusal) = &preflight {
             working.abort();
-            let _ = tx
-                .send(Ok(Event::default().event("task_status_update").data(
-                    json!({ "id": &task_id2, "status": { "state": "failed" },
-                            "error": refusal.to_string() })
-                    .to_string(),
-                )))
-                .await;
+            send_all(stream_events(&id, &req, Step::Failed { error: Some(refusal.to_string()), detail: None })).await;
             return;
         }
 
         let timeout = Duration::from_secs(30);
         // Closure plan C2: the presented mandate travels to the provider, which verifies it itself.
-        let mandate = gateway_caller::presented_mandate(&params);
+        let mandate = gateway_caller::presented_mandate(&req.meta);
         let resource_claim = format!("skill:{skill_id}@{target}");
         let dispatched = gateway_caller::gateway_rpc_call_with_mandate(
-            &state2.task_ctx, caller.as_ref(), target,
-            "skill.invoke".into(), Bytes::from(text.into_bytes()), timeout, mandate,
+            &state.task_ctx, caller.as_ref(), target,
+            "skill.invoke".into(), Bytes::from(req.text.clone().into_bytes()), timeout, mandate,
             Some(&resource_claim),
         ).await;
 
         #[cfg(all(feature = "gateway", feature = "tls"))]
         {
             let observed = super::http::observed_execution(&dispatched);
-            super::http::ae_record_execution(&state2.task_ctx, &preflight, observed).await;
+            super::http::ae_record_execution(&state.task_ctx, &preflight, observed).await;
         }
 
         // Whatever the outcome, it is terminal: no "working" may follow it.
@@ -741,27 +1143,22 @@ pub(crate) async fn tasks_send_subscribe(
 
         match dispatched {
             Ok(reply) => {
-                let task = completed_task(task_id2.clone(), reply);
+                let task = completed_task(req.task_id.clone(), reply);
                 reservation.complete(task.clone());
-                let _ = tx.send(Ok(Event::default()
-                    .event("task_status_update")
-                    .data(serde_json::to_string(&task).unwrap_or_default()))).await;
+                send_all(stream_events(&id, &req, Step::Completed(&task))).await;
             }
             Err(GatewayDispatchError::Rpc(e)) => {
-                warn!("A2A sendSubscribe rpc_call failed for skill {}: {:?}", skill_id, e);
-                let _ = tx.send(Ok(Event::default()
-                    .event("task_status_update")
-                    .data(json!({ "id": &task_id2, "status": { "state": "failed" } }).to_string()))).await;
+                warn!("A2A streamed send rpc_call failed for skill {}: {:?}", skill_id, e);
+                send_all(stream_events(&id, &req, Step::Failed { error: None, detail: None })).await;
             }
             Err(e) => {
-                warn!("A2A sendSubscribe refused for skill {}: {e}", skill_id);
-                let _ = tx.send(Ok(Event::default()
-                    .event("task_status_update")
-                    .data(json!({ "id": &task_id2, "status": { "state": "failed" },
-                                  "error": e.reason(), "detail": e.to_string() }).to_string()))).await;
+                warn!("A2A streamed send refused for skill {}: {e}", skill_id);
+                send_all(stream_events(&id, &req, Step::Failed {
+                    error: Some(e.reason().to_string()),
+                    detail: Some(e.to_string()),
+                })).await;
             }
         }
-        drop(id2); // suppress unused warning
     });
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -798,15 +1195,32 @@ pub(crate) async fn a2a_jsonrpc_full(
     let method = body.get("method").and_then(|m| m.as_str()).unwrap_or("").to_string();
     let params = body.get("params").cloned().unwrap_or(Value::Null);
 
+    // The method's generation and verb (plan row N). `tasks/get` and `tasks/cancel` are pre-0.2's and
+    // 0.3's both: the task answers in the generation that created it.
+    let (verb, generation) = match method.as_str() {
+        "tasks/send" => (Verb::Send, Some(Generation::Legacy)),
+        "message/send" => (Verb::Send, Some(Generation::V03)),
+        "SendMessage" => (Verb::Send, Some(Generation::V10)),
+        "tasks/sendSubscribe" => (Verb::Stream, Some(Generation::Legacy)),
+        "message/stream" => (Verb::Stream, Some(Generation::V03)),
+        "SendStreamingMessage" => (Verb::Stream, Some(Generation::V10)),
+        "tasks/get" => (Verb::Get, None),
+        "GetTask" => (Verb::Get, Some(Generation::V10)),
+        "tasks/cancel" => (Verb::Cancel, None),
+        "CancelTask" => (Verb::Cancel, Some(Generation::V10)),
+        _ => return Json(jsonrpc_error(id, -32601, "method not found")).into_response(),
+    };
+
     // Item 2 PR 8: federated calls are unary (§5's "authenticated unary calls"). Streaming would
     // need the credential re-checked per event; that is a revision of D5, not a silent extension.
     #[cfg(feature = "tls")]
-    if federated.is_some() && method == "tasks/sendSubscribe" {
-        return Json(jsonrpc_error(id, -32003, "federated calls are unary: use tasks/send")).into_response();
+    if federated.is_some() && verb == Verb::Stream {
+        return Json(jsonrpc_error(id, -32003, "federated calls are unary: use SendMessage, message/send or tasks/send"))
+            .into_response();
     }
 
-    // A credential binds **one export**, and only `tasks/send` authorises against it
-    // (`FederationEdge::authorize`). `tasks/get` and `tasks/cancel` carry no export and take no
+    // A credential binds **one export**, and only a send authorises against it
+    // (`FederationEdge::authorize`). A get or a cancel carries no export and takes no
     // caller, so a partner granted one export could read any task's completed artifact — including a
     // *native* caller's — or cancel it, by naming its id. Task ids are caller-supplied on
     // `tasks/send`, so they are enumerable. Refused here for the same reason streaming is: binding
@@ -814,50 +1228,56 @@ pub(crate) async fn a2a_jsonrpc_full(
     // Found by the Phase-C adversarial audit (items 1+2+7). That closed the federated half only;
     // the native half — any bearer, or none, reading any task — is closed by `A2aTask::owner`.
     #[cfg(feature = "tls")]
-    if federated.is_some() && (method == "tasks/get" || method == "tasks/cancel") {
+    if federated.is_some() && matches!(verb, Verb::Get | Verb::Cancel) {
         return Json(jsonrpc_error(
             id,
             -32004,
-            "a federated credential binds one export: tasks/get and tasks/cancel are not federated",
+            "a federated credential binds one export: a task is not read or cancelled across the federation edge",
         ))
         .into_response();
     }
 
-    if method == "tasks/sendSubscribe" {
-        let task_id  = params.get("id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| new_task_id(&state.task_ctx.hlc));
-        let skill_id = params.get("skillId")
-            .or_else(|| params.get("skill_id"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let text     = text_from_message(params.get("message").unwrap_or(&Value::Null));
-        // Claimed before the stream's task is spawned (#587 F5), and moved into it: a failed or refused
-        // stream drops it, removing the pending entry.
-        let Ok(reservation) = reserve_task(&state, &task_id, &task_owner(caller.as_ref())) else {
-            return Json(not_the_creator(id)).into_response();
-        };
-        return tasks_send_subscribe(state, caller, id, task_id, skill_id, text, params.clone(), reservation).await.into_response();
-    }
+    let send_request = |generation: Generation| match generation {
+        Generation::Legacy => Ok(SendRequest::legacy(&state, &params)),
+        Generation::V03 | Generation::V10 => SendRequest::current(&state, &id, &params, generation),
+    };
 
-    let result: Value = match method.as_str() {
-        "tasks/send"   => handle_tasks_send(
-            &state,
-            caller.as_ref(),
-            #[cfg(feature = "tls")]
-            federated.as_ref(),
-            id.clone(),
-            &params,
-            &raw,
-        ).await,
-        "tasks/get"    => handle_tasks_get(&state, caller.as_ref(), id.clone(), &params),
-        "tasks/cancel" => handle_tasks_cancel(&state, caller.as_ref(), id.clone(), &params),
-        _              => jsonrpc_error(id, -32601, "method not found"),
+    let result: Value = match verb {
+        Verb::Stream => {
+            let req = match send_request(generation.unwrap_or(Generation::Legacy)) {
+                Ok(req) => req,
+                Err(error) => return Json(error).into_response(),
+            };
+            // Claimed before the stream's task is spawned (#587 F5), and moved into it: a failed or
+            // refused stream drops it, removing the pending entry.
+            let Ok(reservation) =
+                reserve_task(&state, &req.task_id, &req.context_id, req.generation, &task_owner(caller.as_ref()))
+            else {
+                return Json(not_the_creator(id)).into_response();
+            };
+            return tasks_send_subscribe(state, caller, id, req, reservation).await.into_response();
+        }
+        Verb::Send => match send_request(generation.unwrap_or(Generation::Legacy)) {
+            Ok(req) => handle_send(
+                &state,
+                caller.as_ref(),
+                #[cfg(feature = "tls")]
+                federated.as_ref(),
+                id.clone(),
+                &req,
+                &raw,
+            ).await,
+            Err(error) => error,
+        },
+        Verb::Get    => handle_tasks_get(&state, caller.as_ref(), id.clone(), &params, generation),
+        Verb::Cancel => handle_tasks_cancel(&state, caller.as_ref(), id.clone(), &params, generation),
     };
     Json(result).into_response()
 }
+
+/// What a JSON-RPC method does, whichever generation names it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Verb { Send, Stream, Get, Cancel }
 
 // ── Router (updated to use full handler with SSE) ─────────────────────────────
 
@@ -868,8 +1288,10 @@ pub(crate) fn a2a_router_full(
 ) -> Router {
     let state = A2aState { task_ctx, tasks };
     Router::new()
-        .route("/.well-known/agent.json", get(agent_card_handler))
-        .route("/a2a",                    post(a2a_jsonrpc_full))
+        .route("/.well-known/agent-card.json", get(agent_card_handler))
+        // The pre-0.3 path, kept for one release (`deprecations.md` §46).
+        .route("/.well-known/agent.json",      get(agent_card_handler))
+        .route("/a2a",                         post(a2a_jsonrpc_full))
         .with_state(state)
 }
 
@@ -906,6 +1328,265 @@ mod tests {
         cfg.http_port = Some(9092);
         cfg.http_addr = "0.0.0.0".into();
         assert_eq!(card_url(cfg, NodeId::new("10.0.0.7", 8091).unwrap()).await, "http://10.0.0.7:9092/a2a");
+    }
+
+    /// **Plan row N: the card where a current client reads it.** The 2026-10-12 probe found the
+    /// current `a2a-sdk` (1.2.2, the library Strands Agents uses) reading `/.well-known/agent-card.json`
+    /// (404 here) and, given the card, choosing its transport from `supportedInterfaces`, which the card
+    /// did not have. The card now names `/a2a` once per protocol version it serves, 1.0 first, and says
+    /// how a message reaches a skill. (That the path is mounted and public is
+    /// `every_listed_public_path_is_mounted_and_public_and_gated_paths_are_not`'s, from `PUBLIC_PATHS`.)
+    #[tokio::test]
+    async fn the_card_names_a2a_once_per_protocol_version_and_how_a_message_reaches_a_skill() {
+        let card = |agent: GossipAgent| async move {
+            let state = A2aState { task_ctx: Arc::clone(&agent.task_ctx), tasks: Arc::new(papaya::HashMap::new()) };
+            let resp = agent_card_handler(State(state)).await.into_response();
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.expect("body");
+            serde_json::from_slice::<Value>(&body).expect("card json")
+        };
+        let mut cfg = GossipConfig::default();
+        cfg.http_port = Some(9092);
+        cfg.http_addr = "127.0.0.1".into();
+        let v = card(GossipAgent::new(NodeId::new("127.0.0.1", 8091).unwrap(), cfg.clone())).await;
+        let interfaces = v["supportedInterfaces"].as_array().expect("supportedInterfaces");
+        let versions: Vec<&str> = interfaces.iter().map(|i| i["protocolVersion"].as_str().unwrap()).collect();
+        assert_eq!(versions, ["1.0", "0.3"], "{v}");
+        for i in interfaces {
+            assert_eq!(i["url"], "http://127.0.0.1:9092/a2a", "{v}");
+            assert_eq!(i["protocolBinding"], "JSONRPC", "{v}");
+        }
+        assert_eq!(v["url"], "http://127.0.0.1:9092/a2a", "the pre-0.3 field is kept: {v}");
+        assert!(v["description"].as_str().unwrap().contains("is refused"), "no default, and the card says so: {v}");
+
+        let agent = GossipAgent::new(NodeId::new("127.0.0.1", 8091).unwrap(), cfg).with_a2a_default_skill("depot", "dispatch");
+        let v = card(agent).await;
+        assert!(v["description"].as_str().unwrap().contains("goes to depot/dispatch"), "the default is stated: {v}");
+    }
+
+    /// **Plan row N: a standard client never sends `skillId`.** A 0.3 / 1.0 send names its skill in
+    /// `metadata.skillId` — the message's or the request's — or reaches the declared default skill, or
+    /// is refused `-32602` naming `metadata.skillId`; two different names are refused; a `taskId` is
+    /// refused `-32004` (each message is its own task); the first part is read as text, or its `data`
+    /// as JSON, and anything else is `-32005`; the request's `metadata._meta` is what the AE preflight
+    /// and the mandate reader see, as `params._meta` is on `tasks/send`.
+    #[test]
+    fn a_current_send_names_its_skill_in_metadata_or_reaches_the_default() {
+        let state = |default: Option<(&str, &str)>| {
+            let mut agent = GossipAgent::new(NodeId::new("127.0.0.1", 0).unwrap(), GossipConfig::default());
+            if let Some((ns, name)) = default {
+                agent = agent.with_a2a_default_skill(ns, name);
+            }
+            A2aState { task_ctx: Arc::clone(&agent.task_ctx), tasks: Arc::new(papaya::HashMap::new()) }
+        };
+        let id = Some(json!(1));
+        let msg = |extra: Value| {
+            let mut m = json!({ "messageId": "m", "role": "ROLE_USER", "parts": [{ "text": "go" }] });
+            if let (Some(m), Some(e)) = (m.as_object_mut(), extra.as_object()) {
+                m.extend(e.clone());
+            }
+            m
+        };
+        let bare = state(None);
+        let current = |st: &A2aState, params: Value| SendRequest::current(st, &id, &params, Generation::V10);
+
+        // No skill named, no default: refused, and the refusal names where a skill is named.
+        let e = current(&bare, json!({ "message": msg(json!({})) })).err().expect("refused");
+        assert_eq!(e["error"]["code"], -32602, "{e}");
+        assert!(e["error"]["message"].as_str().unwrap().contains("metadata.skillId"), "{e}");
+        // The message's metadata, or the request's.
+        let r = current(&bare, json!({ "message": msg(json!({ "metadata": { "skillId": "a/b" } })) })).unwrap();
+        assert_eq!(r.skill_id, "a/b");
+        let r = current(&bare, json!({ "message": msg(json!({})), "metadata": { "skillId": "c/d" } })).unwrap();
+        assert_eq!(r.skill_id, "c/d");
+        assert_eq!(r.text, "go");
+        // Both, naming different skills: refused rather than one silently preferred.
+        let e = current(&bare, json!({ "message": msg(json!({ "metadata": { "skillId": "a/b" } })),
+                                       "metadata": { "skillId": "c/d" } })).err().expect("refused");
+        assert_eq!(e["error"]["code"], -32602, "{e}");
+        let e = current(&bare, json!({ "message": msg(json!({ "metadata": { "skillId": 7 } })) })).err().expect("refused");
+        assert_eq!(e["error"]["code"], -32602, "{e}");
+
+        // A declared default: reached when nothing is named, overridden when something is.
+        let defaulted = state(Some(("depot", "dispatch")));
+        assert_eq!(current(&defaulted, json!({ "message": msg(json!({})) })).unwrap().skill_id, "depot/dispatch");
+        assert_eq!(
+            current(&defaulted, json!({ "message": msg(json!({ "metadata": { "skillId": "a/b" } })) })).unwrap().skill_id,
+            "a/b"
+        );
+        // A default that is not a skill name is not set.
+        assert!(state(Some(("depot", "a/b"))).task_ctx.a2a_default_skill.get().is_none());
+
+        // Each message is its own task; the task id is never the caller's.
+        let e = current(&defaulted, json!({ "message": msg(json!({ "taskId": "someone-elses" })) })).err().expect("refused");
+        assert_eq!(e["error"]["code"], -32004, "{e}");
+        let r = current(&defaulted, json!({ "message": msg(json!({ "contextId": "ctx-1" })) })).unwrap();
+        assert_eq!(r.context_id, "ctx-1");
+        assert_ne!(r.task_id, "ctx-1");
+
+        // Parts: text, data as JSON, nothing else; at least one.
+        let parts = |p: Value| json!({ "message": { "messageId": "m", "role": "ROLE_USER", "parts": p } });
+        assert_eq!(current(&defaulted, parts(json!([{ "data": { "n": 1 } }]))).unwrap().text, r#"{"n":1}"#);
+        assert_eq!(current(&defaulted, parts(json!([{ "kind": "text", "text": "v03" }]))).unwrap().text, "v03");
+        assert_eq!(current(&defaulted, parts(json!([{ "url": "https://x/y" }]))).err().unwrap()["error"]["code"], -32005);
+        assert_eq!(current(&defaulted, parts(json!([]))).err().unwrap()["error"]["code"], -32602);
+        assert_eq!(current(&defaulted, json!({})).err().unwrap()["error"]["code"], -32602);
+
+        // The mandate and operation id ride in the request's `metadata._meta`.
+        let r = current(&defaulted, json!({ "message": msg(json!({})),
+                                            "metadata": { "_meta": { "mandate": { "m": 1 }, "operation_id": "op" } } })).unwrap();
+        assert_eq!(gateway_caller::presented_mandate(&r.meta), Some(&json!({ "m": 1 })));
+        assert_eq!(r.meta["_meta"]["operation_id"], "op");
+    }
+
+    /// **Plan row N: the current methods, end to end.** `SendMessage` (1.0) and `message/send` (0.3)
+    /// reach the skill and answer in their generation's shapes; `GetTask` and `CancelTask` keep the
+    /// owner rule; `tasks/get` answers a task in the generation that created it, since pre-0.2 and 0.3
+    /// share the name; the streamed sends emit submitted, the artifact and a terminal completed status
+    /// as JSON-RPC responses; a `taskId` is refused before any dispatch. Seen failing first: every new
+    /// method answered `-32601` (method not found).
+    #[cfg(feature = "compliance")]
+    #[tokio::test]
+    async fn the_current_a2a_methods_reach_the_skill_and_answer_in_their_generations_shapes() {
+        use crate::capability::Capability;
+        use crate::test_util::alloc_port;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let gossip_port = alloc_port();
+        let http_port = alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = gossip_port;
+        cfg.http_port = Some(http_port);
+        cfg.gateway_scoped_tokens = vec![
+            crate::GatewayToken { token: "alice-tok".into(), scopes: vec!["kv:read".into()] },
+            crate::GatewayToken { token: "bob-tok".into(), scopes: vec!["kv:read".into()] },
+        ];
+        let agent = Arc::new(
+            GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg)
+                .with_a2a()
+                .with_a2a_default_skill("depot", "dispatch"),
+        );
+        agent.start().await.unwrap();
+        let _reg = agent.capabilities().advertise_capability(Capability::new("depot", "dispatch"), Duration::from_secs(30));
+        let ran = Arc::new(AtomicUsize::new(0));
+        {
+            let (agent, ran) = (Arc::clone(&agent), Arc::clone(&ran));
+            let mut rx = agent.service().rpc_rx("skill.invoke");
+            tokio::spawn(async move {
+                while let Some(req) = rx.recv().await {
+                    ran.fetch_add(1, Ordering::SeqCst);
+                    agent.service().rpc_respond(&req, b"dispatched".to_vec());
+                }
+            });
+        }
+        until_advertised(&agent, "depot", "dispatch").await;
+
+        let http = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{http_port}");
+        let raw = |bearer: Option<&str>, method: &str, params: Value| {
+            let (http, url, method) = (http.clone(), format!("{base}/a2a"), method.to_string());
+            let bearer = bearer.map(str::to_owned);
+            async move {
+                let mut req = http.post(&url).json(&json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}));
+                if let Some(b) = bearer {
+                    req = req.bearer_auth(b);
+                }
+                let r = req.send().await.unwrap();
+                assert_eq!(r.status(), 200, "answered as JSON-RPC");
+                r.text().await.unwrap()
+            }
+        };
+        let call = |bearer: Option<&'static str>, method: &'static str, params: Value| {
+            let fut = raw(bearer, method, params);
+            async move { serde_json::from_str::<Value>(&fut.await).unwrap() }
+        };
+        // A message as a 1.0 client sends it (no skill: the default), and as a 0.3 client does.
+        let v10 = json!({ "message": { "messageId": "m1", "role": "ROLE_USER", "parts": [{ "text": "go" }] } });
+        let v03 = json!({ "message": { "kind": "message", "messageId": "m2", "role": "user",
+                                       "parts": [{ "kind": "text", "text": "go" }] } });
+
+        // The card, at the path the SDK reads.
+        let card: Value = http.get(format!("{base}/.well-known/agent-card.json")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(card["supportedInterfaces"][0]["url"], format!("{base}/a2a"), "{card}");
+
+        // 1.0: `{ task: … }`, `TASK_STATE_*`, bare text parts with an artifact id.
+        let v = call(Some("alice-tok"), "SendMessage", v10.clone()).await;
+        let task = &v["result"]["task"];
+        assert_eq!(task["status"]["state"], "TASK_STATE_COMPLETED", "{v}");
+        assert_eq!(task["artifacts"][0]["parts"][0], json!({ "text": "dispatched" }), "{v}");
+        assert!(task["artifacts"][0]["artifactId"].is_string() && task["contextId"].is_string(), "{v}");
+        let t10 = task["id"].as_str().unwrap().to_string();
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+
+        // 0.3: the task itself, `kind`-tagged, lower-case states.
+        let v = call(Some("alice-tok"), "message/send", v03.clone()).await;
+        assert_eq!(v["result"]["kind"], "task", "{v}");
+        assert_eq!(v["result"]["status"]["state"], "completed", "{v}");
+        assert_eq!(v["result"]["artifacts"][0]["parts"][0], json!({ "kind": "text", "text": "dispatched" }), "{v}");
+        let t03 = v["result"]["id"].as_str().unwrap().to_string();
+        assert_eq!(ran.load(Ordering::SeqCst), 2);
+
+        // `GetTask` and `CancelTask` keep the owner rule; the creator reads its task in 1.0's shape.
+        let v = call(Some("alice-tok"), "GetTask", json!({ "id": t10 })).await;
+        assert_eq!(v["result"]["status"]["state"], "TASK_STATE_COMPLETED", "{v}");
+        for who in [Some("bob-tok"), None] {
+            for method in ["GetTask", "CancelTask"] {
+                let v = call(who, method, json!({ "id": t10 })).await;
+                assert_eq!(v["error"]["code"], -32004, "{who:?} {method}: {v}");
+            }
+        }
+        let v = call(Some("alice-tok"), "CancelTask", json!({ "id": t10 })).await;
+        assert_eq!(v["error"]["code"], -32002, "a completed task is not cancelable: {v}");
+        // `tasks/get` answers in the generation that created the task: 0.3 here, pre-0.2 for `tasks/send`'s.
+        let v = call(Some("alice-tok"), "tasks/get", json!({ "id": t03 })).await;
+        assert_eq!(v["result"]["kind"], "task", "{v}");
+        let v = call(Some("alice-tok"), "tasks/send", json!({ "id": "t-legacy", "skillId": "depot/dispatch",
+            "message": { "role": "user", "parts": [{ "type": "text", "text": "go" }] } })).await;
+        assert_eq!(v["result"]["artifacts"][0]["parts"][0], json!({ "type": "text", "text": "dispatched" }), "{v}");
+        let v = call(Some("alice-tok"), "tasks/get", json!({ "id": "t-legacy" })).await;
+        assert!(v["result"].get("kind").is_none() && v["result"]["status"]["state"] == "completed", "{v}");
+        assert_eq!(ran.load(Ordering::SeqCst), 3);
+
+        // A `taskId` is refused before anything is dispatched.
+        let mut cont = v10.clone();
+        cont["message"]["taskId"] = json!(t10);
+        assert_eq!(call(Some("alice-tok"), "SendMessage", cont).await["error"]["code"], -32004);
+        assert_eq!(ran.load(Ordering::SeqCst), 3, "nothing dispatched for the refused send");
+
+        // The streams: every event a JSON-RPC response to the request; submitted first, the artifact,
+        // and the terminal completed status last.
+        let events = |body: String| -> Vec<Value> {
+            body.lines()
+                .filter_map(|l| l.strip_prefix("data:"))
+                .map(|d| serde_json::from_str::<Value>(d.trim()).expect("event data is JSON"))
+                .collect()
+        };
+        let e = events(raw(Some("alice-tok"), "SendStreamingMessage", v10.clone()).await);
+        assert!(e.iter().all(|e| e["jsonrpc"] == "2.0" && e["id"] == 1), "{e:?}");
+        assert_eq!(e[0]["result"]["task"]["status"]["state"], "TASK_STATE_SUBMITTED", "{e:?}");
+        assert!(e.iter().any(|e| e["result"]["artifactUpdate"]["artifact"]["parts"][0]["text"] == "dispatched"), "{e:?}");
+        assert_eq!(e.last().unwrap()["result"]["statusUpdate"]["status"]["state"], "TASK_STATE_COMPLETED", "{e:?}");
+        let e = events(raw(Some("alice-tok"), "message/stream", v03.clone()).await);
+        assert_eq!(e[0]["result"]["kind"], "task", "{e:?}");
+        assert!(e.iter().any(|e| e["result"]["kind"] == "artifact-update"), "{e:?}");
+        let last = &e.last().unwrap()["result"];
+        assert_eq!((last["kind"].as_str(), last["status"]["state"].as_str(), last["final"].as_bool()),
+                   (Some("status-update"), Some("completed"), Some(true)), "{e:?}");
+        assert_eq!(ran.load(Ordering::SeqCst), 5);
+
+        agent.shutdown().await;
+    }
+
+    /// Waits until the node's own `cap/` entry for `ns/name` is in its store. Advertising is spawned,
+    /// so a fixed sleep before the first send lost the race under a loaded test run (`skill not
+    /// found`, seen on the full suite 2026-10-17).
+    #[cfg(feature = "compliance")]
+    async fn until_advertised(agent: &GossipAgent, ns: &str, name: &str) {
+        let key = format!("cap/{}/{ns}/{name}", agent.node_id());
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while agent.kv().get(&key).is_none() {
+            assert!(std::time::Instant::now() < deadline, "{key} was never written");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     fn make_ctx() -> Arc<TaskCtx> {
@@ -1073,7 +1754,7 @@ mod tests {
     fn tasks_get_unknown_returns_error() {
         let tasks = Arc::new(papaya::HashMap::<String, A2aTask>::new());
         let state = A2aState { task_ctx: make_ctx(), tasks };
-        let result = handle_tasks_get(&state, None, None, &json!({ "id": "no-such-id" }));
+        let result = handle_tasks_get(&state, None, None, &json!({ "id": "no-such-id" }), None);
         assert_eq!(result["error"]["code"], -32001);
     }
 
@@ -1123,8 +1804,8 @@ mod tests {
         let tasks = Arc::new(papaya::HashMap::<String, A2aTask>::new());
         let now = Instant::now();
         let old = now.checked_sub(Duration::from_secs(600)).expect("clock supports -600s");
-        tasks.pin().insert("stale".into(), A2aTask { task: mk("stale"), created_at: old, owner: None, pending: None });
-        tasks.pin().insert("fresh".into(), A2aTask { task: mk("fresh"), created_at: now, owner: None, pending: None });
+        tasks.pin().insert("stale".into(), A2aTask { task: mk("stale"), context_id: String::new(), generation: Generation::Legacy, created_at: old, owner: None, pending: None });
+        tasks.pin().insert("fresh".into(), A2aTask { task: mk("fresh"), context_id: String::new(), generation: Generation::Legacy, created_at: now, owner: None, pending: None });
         evict_stale_tasks(&tasks, now);
         assert!(tasks.pin().get("stale").is_none(), "stale task evicted");
         assert!(tasks.pin().get("fresh").is_some(), "fresh task survives the sweep");
@@ -1138,17 +1819,17 @@ mod tests {
             status:    TaskStatus { state: "completed".into() },
             artifacts: vec![],
         };
-        tasks.pin().insert("t1".into(), A2aTask { task, created_at: Instant::now(), owner: Some("token:gw/a".into()), pending: None });
+        tasks.pin().insert("t1".into(), A2aTask { task, context_id: String::new(), generation: Generation::Legacy, created_at: Instant::now(), owner: Some("token:gw/a".into()), pending: None });
         let state = A2aState { task_ctx: make_ctx(), tasks };
         let creator = ResolvedPrincipal { principal: "token:gw/a".into(), scopes: Vec::new() };
-        let result = handle_tasks_cancel(&state, Some(&creator), None, &json!({ "id": "t1" }));
+        let result = handle_tasks_cancel(&state, Some(&creator), None, &json!({ "id": "t1" }), None);
         assert_eq!(result["error"]["code"], -32002);
         // The owner rule comes before the state rule: another identity, or no identity, is -32004.
         let other = ResolvedPrincipal { principal: "token:gw/b".into(), scopes: Vec::new() };
-        assert_eq!(handle_tasks_cancel(&state, Some(&other), None, &json!({ "id": "t1" }))["error"]["code"], -32004);
-        assert_eq!(handle_tasks_cancel(&state, None, None, &json!({ "id": "t1" }))["error"]["code"], -32004);
-        assert_eq!(handle_tasks_get(&state, None, None, &json!({ "id": "t1" }))["error"]["code"], -32004);
-        assert_eq!(handle_tasks_get(&state, Some(&creator), None, &json!({ "id": "t1" }))["result"]["id"], "t1");
+        assert_eq!(handle_tasks_cancel(&state, Some(&other), None, &json!({ "id": "t1" }), None)["error"]["code"], -32004);
+        assert_eq!(handle_tasks_cancel(&state, None, None, &json!({ "id": "t1" }), None)["error"]["code"], -32004);
+        assert_eq!(handle_tasks_get(&state, None, None, &json!({ "id": "t1" }), None)["error"]["code"], -32004);
+        assert_eq!(handle_tasks_get(&state, Some(&creator), None, &json!({ "id": "t1" }), None)["result"]["id"], "t1");
     }
 
     /// **Public `/a2a` `tasks/get` and `tasks/cancel` had no owner check.** Task ids are caller-chosen
@@ -1189,7 +1870,7 @@ mod tests {
                 }
             });
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        until_advertised(&agent, "depot", "dispatch").await;
 
         let http = reqwest::Client::new();
         let url = format!("http://127.0.0.1:{http_port}/a2a");
@@ -1273,7 +1954,7 @@ mod tests {
                 }
             });
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        until_advertised(&agent, "depot", "dispatch").await;
 
         let url = format!("http://127.0.0.1:{http_port}/a2a");
         let send = |bearer: &'static str| {

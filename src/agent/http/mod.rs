@@ -433,7 +433,7 @@ pub(super) async fn run_http_server(
     // companion's `/gateway/reason/route` or `/gateway/wiki/ingest` answered without a bearer
     // while `/gateway/kv` demanded one (found 2026-09-04 while adding the OpenAI façade; the
     // companion docs had claimed coverage all along). Prefix-guarded: an application's
-    // deliberately public path (`/.well-known/agent.json`, `/a2a`) stays open.
+    // deliberately public path (the agent card, `/a2a`) stays open.
     let app = if let Some(extra) = extra_routes {
         let extra = extra.route_layer(middleware::from_fn_with_state(
             Arc::clone(&state),
@@ -479,6 +479,7 @@ pub(crate) const PUBLIC_PATHS: &[&str] = &[
     "/stats",
     "/metrics",
     "/bulk/{corr_id}",
+    "/.well-known/agent-card.json",
     "/.well-known/agent.json",
     "/a2a",
 ];

@@ -298,7 +298,7 @@ commitment's offers. The topology escape hatch moved to
 [`.log/2026-10-07-code-gaps-doors.md`](.log/2026-10-07-code-gaps-doors.md) ·
 [`.log/2026-10-07-ingest-549-551.md`](.log/2026-10-07-ingest-549-551.md).
 
-**`/a2a` calls only what its agent card lists (2.27.0 — #550).** `/.well-known/agent.json`
+**`/a2a` calls only what its agent card lists (2.27.0 — #550).** The agent card
 listed every advertised capability as a skill, so an external agent was offered the fleet's plumbing — provisioning
 tiers (`{ns}/loading`, `{ns}/installable`), `prov-shed/*` marks, `llm-meta/*`, `artifact/librarian`,
 `reason/blob-cache`, the companions' election and role marks (`.primary`/`.secondary`/`.candidate`/`.curator`) — none
@@ -312,6 +312,19 @@ refused (`-32001` on `tasks/send`, a `failed` status event on the stream), a pro
 advertising a new kind of plumbing capability adds it to `is_infrastructure_capability`. Gate:
 `agent_card_leaves_out_infrastructure_capabilities`, seen failing first.
 [`.log/2026-10-07-ingest-549-551.md`](.log/2026-10-07-ingest-549-551.md).
+
+**Three generations of A2A, one send path (unreleased — post-360 row N).** `/a2a` serves A2A 1.0's `SendMessage`,
+`SendStreamingMessage`, `GetTask`, `CancelTask`, 0.3's `message/send`, `message/stream`, and the pre-0.2 `tasks/*`
+methods, and the card is at `/.well-known/agent-card.json` with `supportedInterfaces` (the old path kept for one
+release, `deprecations.md` §46). The security property is that a new protocol name is **not a new door**: every send
+parses into a `SendRequest` and runs `dispatch_send` (unary) or `tasks_send_subscribe` (streamed) — the federation
+edge, the reservation and owner rule, `ae_preflight`, the mandate to the provider, the evidence record — so the C7
+bypass matrix tries all six send names and the federated refusals (unary only; no get or cancel across the edge) are
+asserted in every generation's name. A standard client sends no skill: `metadata.skillId` names one, else the
+embedder's `with_a2a_default_skill`, else `-32602`. The default is a name, not a grant — it runs the same doors. A
+`taskId` is refused, so a 1.0 client cannot address another identity's task through a send. The real `a2a-sdk` drives
+a node in CI (`a2a-sdk` job, `tests/a2a-sdk/`). Not moved yet: the SDKs' `A2aClient`.
+[`.log/2026-10-17-a2a-current-spec.md`](.log/2026-10-17-a2a-current-spec.md).
 
 ## Threat model revision 3 draft — Boundary H (2026-09-23)
 

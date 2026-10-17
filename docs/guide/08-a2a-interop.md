@@ -3,7 +3,7 @@
 ## Concept
 
 The A2A (Agent-to-Agent) protocol is a simple HTTP standard for agent
-discovery: a well-known endpoint (`/.well-known/agent.json`) describes what
+discovery: a well-known endpoint (`/.well-known/agent-card.json`) describes what
 an agent can do, and a task endpoint (`/a2a`) accepts work. Mycelium
 implements both sides of this protocol via `--features a2a`, which means any
 framework that speaks A2A — LangChain, AutoGen, or a hand-rolled client — can
@@ -17,8 +17,11 @@ capabilities, or the mesh topology.
 > [20](20-authorising-actions.md)) or a federation edge ([17](17-federation.md)); with neither, an
 > anonymous caller reaches skill dispatch and `with_a2a()` warns about exactly that. Building with
 > `--features a2a` alone (no `tls`) has no evaluator by construction. The methods the handler knows
-> are `tasks/send`, `tasks/sendSubscribe`, `tasks/get` and `tasks/cancel`. **A task belongs to the
-> identity that created it** (since 2.32.0): `tasks/get` and `tasks/cancel` answer only the bearer's
+> are A2A 1.0's `SendMessage`, `SendStreamingMessage`, `GetTask` and `CancelTask`, 0.3's `message/send`
+> and `message/stream`, and the pre-0.2 `tasks/send`, `tasks/sendSubscribe`, `tasks/get` and `tasks/cancel`
+> (`tasks/send` and `tasks/sendSubscribe` kept for one release, [`deprecations.md`](deprecations.md) §46) —
+> every send through one path, so each runs the same checks. **A task belongs to the
+> identity that created it** (since 2.32.0): `tasks/get` and `tasks/cancel` (and `GetTask`, `CancelTask`) answer only the bearer's
 > principal that sent it, and a `tasks/send` under an id another identity owns is refused — all
 > `-32004`, naming the rule. Task ids are caller-chosen, so they are enumerable; before this any
 > client could read another caller's completed artifact or cancel its task by naming the id. An
@@ -34,7 +37,7 @@ sequenceDiagram
     participant R as researcher<br/>skill
     participant W as writer<br/>skill
 
-    LC->>GW: GET /.well-known/agent.json
+    LC->>GW: GET /.well-known/agent-card.json
     GW-->>LC: {skills: [llm/orchestrator, llm/researcher, llm/writer]}
     LC->>LC: wrap each skill as a native LangChain tool
     LC->>GW: POST /a2a tasks/send {skill: llm/orchestrator, input: {topic: "..."}}
@@ -125,8 +128,10 @@ python autogen_agent.py
 
 ## How It Works
 
-**`/.well-known/agent.json`** is served by the node's gateway when the node is built with
-`--features a2a` and enables it (`with_a2a()`). It lists the skills `/a2a` can call, scanned from the
+**`/.well-known/agent-card.json`** (and, for one release, `/.well-known/agent.json`) is served by the node's
+gateway when the node is built with `--features a2a` and enables it (`with_a2a()`). It names `/a2a` once per
+protocol version it speaks (`supportedInterfaces`: JSON-RPC `1.0`, then `0.3`), says in its `description` how a
+message reaches a skill, and lists the skills `/a2a` can call, scanned from the
 capability KV entries at request time. Since 2.27.0 it leaves out what `tasks/send` cannot reach, and
 `tasks/send` refuses the same set (`-32001`):
 
@@ -150,8 +155,42 @@ capability KV entries at request time. Since 2.27.0 it leaves out what `tasks/se
 }
 ```
 
-**`/a2a tasks/send`** accepts a task, resolves the target skill from the mesh,
-and dispatches via RPC. The HTTP response waits for the RPC result:
+**A standard A2A client** — `a2a-sdk`, and so Strands Agents — reads the card, picks the 1.0 interface and
+sends `SendMessage` (or `SendStreamingMessage`). It sends no skill, so a node whose callers are such clients
+declares one (since post-360 row N):
+
+```rust
+let agent = GossipAgent::new(node_id, cfg)
+    .with_a2a()
+    .with_a2a_default_skill("depot", "dispatch");   // a message naming no skill goes here
+```
+
+A message can still name a skill, in `metadata.skillId` (the message's or the request's); without a default,
+one that names none is refused `-32602`. The first part is the skill's input — its text, or its `data` as
+JSON. A mandate and an operation id go in the request's `metadata._meta`. Each message is its own task, complete
+when the send returns: a message naming a `taskId` is refused `-32004`. With the SDK:
+
+```python
+import httpx
+from a2a.client.card_resolver import A2ACardResolver
+from a2a.client.client_factory import ClientConfig, ClientFactory
+from a2a.helpers.proto_helpers import new_text_message
+from a2a.types import Role, SendMessageRequest
+
+async with httpx.AsyncClient(timeout=120) as http:
+    card = await A2ACardResolver(http, "http://localhost:9050").get_agent_card()
+    client = ClientFactory(ClientConfig(httpx_client=http)).create(card)
+    msg = new_text_message('{"topic": "gossip protocols"}', role=Role.ROLE_USER)
+    msg.metadata.update({"skillId": "llm/orchestrator"})   # omit to reach the default skill
+    async for event in client.send_message(SendMessageRequest(message=msg)):
+        print(event)
+```
+
+That path runs in CI against a node (`tests/a2a-sdk/`, the `a2a-sdk` job, `a2a-sdk` 1.2.2).
+
+**`/a2a tasks/send`** (pre-0.2, kept for one release) accepts a task, resolves the skill its `skillId` names,
+and dispatches via RPC. The HTTP response waits for the RPC result. `mycelium-py`'s and `mycelium-ts`'
+`A2aClient` still send it:
 
 ```python
 # What A2aClient.send does (mycelium-py) — JSON-RPC 2.0, the input as a text part
@@ -193,7 +232,7 @@ tools = [make_tool(s) for s in client.fetch_card().get("skills", [])]
 cargo build --bin skillrunner --features a2a
 ```
 
-Without the flag the gateway starts but `/a2a` and `/.well-known/agent.json`
+Without the flag the gateway starts but `/a2a` and the agent card
 return 404.
 
 **Gateway port.** The A2A gateway uses the `http_port` in the skill TOML.
@@ -215,7 +254,7 @@ or set `OLLAMA_BASE_URL=http://localhost:11434/v1` and `OLLAMA_MODEL=llama3.2`
 for local inference. The Mycelium skills use their own separate LLM config.
 
 **Extending to custom clients.** Any HTTP client that can `GET
-/.well-known/agent.json` and `POST /a2a tasks/send` can use Mycelium skills.
+/.well-known/agent-card.json` and `POST /a2a` a `SendMessage` can use Mycelium skills.
 The protocol is intentionally minimal — a JSON description and a task endpoint.
 No SDK required.
 

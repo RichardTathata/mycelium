@@ -35,7 +35,7 @@ This is the headline confusion. Here is the whole thing in one table:
 | **Capability** | native | A declarative advertisement: "this node provides `ns/name`." The discovery *atom*. It does nothing by itself — it is found, not called. | Advertise what a node can do; discover providers at call time | [`provisioning`](../../examples/coop/src/bin/provisioning.rs) |
 | **Skill** | native | A **Capability + an executable handler**. A *Prompt Skill* is LLM-backed (template in `prompts/`, an `LlmBackend` runs the inference); a *SkillRunner skill* is a hosted process. | Make a capability *invokable* — the unit you actually call | [`mailbox_llm`](../../examples/coop/src/bin/mailbox_llm.rs), [`llm_council`](../../examples/coop/src/bin/llm_council.rs) |
 | **MCP tool** | **standard** (Model Context Protocol) | A JSON-schema'd tool registered at `tools/{name}/{node}`, invoked over `mcp.invoke`. Bridges LLM tool-use ↔ the mesh, both directions. | Expose tools to an LLM, or bridge an external MCP server's tools in | [`mcp_toolgrowth`](../../examples/coop/src/bin/mcp_toolgrowth.rs) |
-| **A2A AgentCard** | **standard** (Google A2A) | An agent-discovery document served at `/.well-known/agent.json`, **built dynamically from `cap/`** — the skills `/a2a` can call (not the fleet's plumbing, not prompt skills). | Let an *external agent framework* (LangChain, AutoGen) discover & call your agents | [`a2a_langchain`](../../examples/a2a_langchain/) |
+| **A2A AgentCard** | **standard** (Google A2A) | An agent-discovery document served at `/.well-known/agent-card.json`, **built dynamically from `cap/`** — the skills `/a2a` can call (not the fleet's plumbing, not prompt skills). | Let an *external agent framework* (LangChain, AutoGen) discover & call your agents | [`a2a_langchain`](../../examples/a2a_langchain/) |
 | **AgentFacts** | **standard** (NANDA) | A self-certified metadata document at `/.well-known/agent-facts.json` for cross-domain discovery. | Federate discovery across *domains* with no shared trust authority | [`federation_facts`](../../examples/coop/src/bin/federation_facts.rs) |
 
 ### Why "Skill" had to exist (it's not just a renamed Capability)
@@ -355,7 +355,7 @@ the question to answer is not "what went wrong" but "what should the caller do d
 | Intent | native | evaporating soft-state desired-state; nodes reconcile locally | `elastic_intent` |
 | Artifact | native | deployable bytes in the `installable/` catalogue → becomes a Capability | `provisioning` |
 | MCP tool | standard | LLM-tool bridge at `tools/{name}/{node}` | `mcp_toolgrowth` |
-| A2A AgentCard | standard | agent discovery for external frameworks (`/.well-known/agent.json`) | `a2a_langchain` |
+| A2A AgentCard | standard | agent discovery for external frameworks (`/.well-known/agent-card.json`) | `a2a_langchain` |
 | AgentFacts | standard | self-certified cross-domain federation (`/.well-known/agent-facts.json`) | `federation_facts` |
 | Receipt | native | what an ack proves, by rung: local application · local sync · replica sync · destination commit (contracts axis item 1) | `design/contracts-receipts.md` |
 | `operation_id` / `attempt_id` | native | caller-minted identity of an operation (stable across retries) and of each attempt; the key of every receipt | `design/contracts-receipts.md` |

@@ -150,7 +150,8 @@ Layer explainers: gossip-KV [ch01](../../guide/01-gossip-kv.md) · signal-mesh
   `PIPELINE_MODE=pull` (canonical, tuple-space) vs `push` (baseline comparison). CI
   `afn-smoke`. Concept essay: `flow_networks.html`.
 - **A2A LangChain/AutoGen** (`examples/a2a_langchain/`): external agents auto-discover
-  Mycelium skills via `/.well-known/agent.json`.
+  Mycelium skills via the agent card (`/.well-known/agent-card.json`; the examples' clients still read the
+  pre-0.3 path, kept for one release). An unmodified `a2a-sdk` client drives `a2a_sdk_node` in CI (`tests/a2a-sdk/`).
 - **Skills / community cluster** (`examples/community/`, the `skillrunner` bin at `:9050`): LLM agents
   as first-class mesh citizens (skills = capabilities, live load-balancing). The de-facto **audit**
   demo — every invocation writes a signed audit record; the mgmt UI (`:9050/mgmt`) shows the trail

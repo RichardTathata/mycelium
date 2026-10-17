@@ -215,7 +215,7 @@ evidence saying both.
 
 `/mcp` is where your own agent code calls in, and it is gated: a bearer carrying `mcp:invoke` is
 required before the evaluator is ever consulted. **`/a2a` is not.** An A2A client discovers
-`/.well-known/agent.json` and calls; the gateway resolves a bearer if one is offered and calls the
+`/.well-known/agent-card.json` and calls; the gateway resolves a bearer if one is offered and calls the
 caller `anonymous` if not, but it does **not refuse for want of one**. The route is public by design
 — that is what makes it an interoperable A2A endpoint.
 

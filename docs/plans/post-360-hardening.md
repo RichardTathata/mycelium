@@ -86,7 +86,7 @@ Four places strain that line today, and the rows in §3 address each:
 | **K** | Policy over history | the action evaluator can decide on what an actor has already done, not only on the request: a bounded, read-only history view (the actor's recent decisions and executions from the evidence journal — `src/agent/evidence_journal.rs`) reaches `ActionEvaluator::evaluate` beside the envelope (`ActionEnvelope`, `src/agent/action_evaluator.rs:101`, which today carries no history); a rule such as *at most three posts in ten minutes* is expressible and tested in the reference evaluator and the AE contract suite (`mycelium::ae_contract`); the scope of a count is stated by name — **per node** (the journal is node-local and never gossiped) unless the design question in §5 is decided otherwise; a history that cannot be read is `Indeterminate`, never an empty history; replay records the history view as a decision input | design question §5 |
 | **L** | Credentials attached at egress | a secret need not enter a component's or an activation command's environment: an outbound request names a credential binding, and the egress gate (`EgressPolicy`, `mycelium-core/src/config.rs:280`, which today checks the host and every redirect hop) attaches it on the way out — bearer, header and basic forms at least — only to the host the binding names; a redirect off that host drops it; the binding's use is counted and its value never logged, traced or written to the evidence journal; the places a secret is read into the node today (`[[serve]].api_key_env`, federation credentials, an activation command's environment) are listed and each either moved behind a binding or stated as unchanged *From NVIDIA OpenShell (2026-10-12):* the component holds an opaque placeholder and never the value — the gate resolves the placeholder only at an endpoint the binding authorises — so a leaked environment or log carries nothing usable. | — |
 | **M** | Activation commands confined | an `[[activation]]` command — today "not a sandbox: there is no allowlist and no confinement" (`docs/reference/unit-file.md:276`) and run with the stem's privileges — can be run under an OS confinement profile the unit file names (macOS Seatbelt first, Linux namespaces/Landlock or seccomp where available): filesystem access limited to the placed artifact's directory and declared paths, network limited to declared hosts or none; a profile the platform cannot apply refuses the activation by name, never runs it unconfined; the unconfined default stays, stated, and the guarantee report says which applies *From NVIDIA OpenShell (2026-10-12):* a profile's filesystem and syscall limits are fixed for the activation's life and its network allow-list may change live (OpenShell's split: filesystem and process locked at creation, network hot-reloadable); OpenShell itself (containers, seccomp, an unprivileged identity; needs Docker) is a candidate backend for a stem, beside a native Seatbelt/Landlock profile, rather than something to rebuild. | — |
-| **N** | A2A at the current specification | an A2A client built on the current `a2a-sdk` (1.2.2, the library Strands Agents uses) reaches Mycelium's skills through `/a2a`, with the same authority as today — **the 2026-10-12 probe found it cannot**: the card is served only at `/.well-known/agent.json` (the SDK reads `/.well-known/agent-card.json`, 404); the card's `url` is the node's **gossip** address, not its gateway, and omits `/a2a` (`src/agent/a2a.rs:445`, so the SDK's `send_message` failed with a network error); the methods are the pre-0.2 `tasks/send` / `tasks/sendSubscribe` / `tasks/get` / `tasks/cancel` (`SendMessage` and `message/send` both answer `-32601`); and the skill is chosen by a Mycelium-only `skillId` parameter that a standard client never sends. Promises: the card at `/.well-known/agent-card.json` (the old path kept for one release), naming the gateway's own URL and scheme (https under `gateway_tls`) with `/a2a` and its supported interfaces and protocol versions; the A2A 1.0 methods (`SendMessage`, `SendStreamingMessage`, `GetTask`, `CancelTask`) and the 0.3 names (`message/send`, `message/stream`) served beside the old ones, which stay for one release with a deprecation entry; a message reaches a skill without `skillId` (a declared default skill, or the skill named in the message's metadata — decided in the PR, stated on the card); every new method runs the same doors as `tasks/send` — the action evaluator, mandates, evidence, task ownership — and the C7 bypass matrix gains each new method; the probe becomes a CI test driving the real `a2a-sdk` client against a node | — |
+| **N** — *delivered after 2.34.0, unreleased (#PRNUM), §3.5* | A2A at the current specification | an A2A client built on the current `a2a-sdk` (1.2.2, the library Strands Agents uses) reaches Mycelium's skills through `/a2a`, with the same authority as today — **the 2026-10-12 probe found it cannot**: the card is served only at `/.well-known/agent.json` (the SDK reads `/.well-known/agent-card.json`, 404); the card's `url` is the node's **gossip** address, not its gateway, and omits `/a2a` (`src/agent/a2a.rs:445`, so the SDK's `send_message` failed with a network error); the methods are the pre-0.2 `tasks/send` / `tasks/sendSubscribe` / `tasks/get` / `tasks/cancel` (`SendMessage` and `message/send` both answer `-32601`); and the skill is chosen by a Mycelium-only `skillId` parameter that a standard client never sends. Promises: the card at `/.well-known/agent-card.json` (the old path kept for one release), naming the gateway's own URL and scheme (https under `gateway_tls`) with `/a2a` and its supported interfaces and protocol versions; the A2A 1.0 methods (`SendMessage`, `SendStreamingMessage`, `GetTask`, `CancelTask`) and the 0.3 names (`message/send`, `message/stream`) served beside the old ones, which stay for one release with a deprecation entry; a message reaches a skill without `skillId` (a declared default skill, or the skill named in the message's metadata — decided in the PR, stated on the card); every new method runs the same doors as `tasks/send` — the action evaluator, mandates, evidence, task ownership — and the C7 bypass matrix gains each new method; the probe becomes a CI test driving the real `a2a-sdk` client against a node | — |
 | **O** | A Strands session store on Mycelium | a companion package (Python, beside `langgraph-checkpoint-mycelium`) implementing Strands Agents' `SessionManager` over the Mycelium Python SDK, so an agent's conversation and state, and a swarm's shared memory, live in the fleet's KV rather than a file or a bucket; a save returns the SDK's receipt and its docs say which rung it names (a local application, not replication — the checkpointer's wording); an incomplete or unreadable session is an error, never an empty one; concurrent agents in one session do not lose each other's writes, or the limit is stated; its live suite runs in CI against a real node; pinned to a Strands release and re-checked when Strands changes the interface | — (N for the cross-host demo) |
 | **P** | A Strands fleet, demonstrated | a runnable example, in CI like the co-op demos, in which Strands agents on three Mycelium nodes plan one shared task (a constructive domain — food redistribution or a microgrid), keep their session and swarm memory in the fleet through O, and call fleet skills through `/a2a` (N): a call outside an agent's mandate is refused and the refusal is in the evidence journal; one node is stopped and the work resumes on another from the stored session; the README states what Strands provides and what Mycelium adds, and which properties the run shows versus which it does not | N, O |
 | **Q** — *delivered 2.33.0 (#616), §3.5* | Revocation reaches every verifier | a key a node has revoked (`rotate_identity_on_compromise`, `sys/revocation/`) is filtered from the `peer_keys`-based KV `SignedData` verifier, from identity-proof chaining (`validate_and_merge_identity`'s trusted signer) and from the unsigned identity exemption (`connection::self_authenticating_identity`), not only from consensus and `known_verifying_keys`; a test that a `SignedData` signed by a revoked key is refused at a peer that has seen the revocation; `src/agent/revocation.rs`'s `revoke_key` doc made true (corrected in #611 to say what holds today) | — (independent of F2) |
@@ -900,6 +900,61 @@ first); no other caller.
 - **Not built, stated:** the CA key stays on every node in the development posture (the warning says so; it does
   not move the key); no dev-specific log line for the trade-off; the warning's emission is not asserted by a test.
 
+**N — A2A at the current specification (#PRNUM, unreleased).** The doors enumerated first
+(`git grep -n 'agent.json\|"/a2a"\|tasks/send\|tasks/sendSubscribe\|tasks/get\|tasks/cancel' -- src examples tests mycelium-py/src mycelium-ts/src`):
+the card handler and the one JSON-RPC handler in `src/agent/a2a.rs`; the router's public list
+(`http::PUBLIC_PATHS`) and `/a2a`'s optional auth (`authz::gateway_auth_if_gateway_path`, by path, unchanged); the
+federation edge's authorisation inside the send; the federation client (`src/federation/client.rs`, sends
+`tasks/send` — unchanged, kept); `mycelium-py`'s and `mycelium-ts`' `A2aClient` (old path and methods — not moved,
+below); the examples `a2a_skill_authority` (moved to the new card path), `a2a_langchain`, `federated_domains`,
+`federation_trust_is_not_transitive`, `confined_fleet_node` and `community/ci_smoke.sh` (old methods, kept for the
+window).
+- *The card at `/.well-known/agent-card.json` (the old path kept for one release)* — both routes on one handler
+  (`a2a_router_full`), both in `PUBLIC_PATHS`, so `every_listed_public_path_is_mounted_and_public_and_gated_paths_are_not`
+  asserts each is mounted and public (seen failing with the new route removed: "is mounted");
+  `deprecations.md` §46 names the window.
+- *naming the gateway's own URL and scheme (https under `gateway_tls`) with `/a2a`* — delivered in 2.34.0 (#621):
+  `a2a_endpoint_url`, `the_agent_card_names_the_gateways_a2a_endpoint_not_the_gossip_port`.
+- *and its supported interfaces and protocol versions* — `supportedInterfaces`, JSON-RPC `1.0` then `0.3`, each at
+  the `/a2a` URL; `the_card_names_a2a_once_per_protocol_version_and_how_a_message_reaches_a_skill`, and the SDK's own
+  resolver reading it (`test_the_card_resolves_at_the_sdks_default_path_and_offers_jsonrpc_1_0`).
+- *the A2A 1.0 methods (`SendMessage`, `SendStreamingMessage`, `GetTask`, `CancelTask`) and the 0.3 names
+  (`message/send`, `message/stream`) served beside the old ones* — the dispatcher's method table in
+  `a2a_jsonrpc_full`, each answering in its generation's shapes (`render_task`, `render_send_result`,
+  `stream_events`); `tasks/get` / `tasks/cancel`, shared by pre-0.2 and 0.3, answer in the generation that created
+  the task. `the_current_a2a_methods_reach_the_skill_and_answer_in_their_generations_shapes` (seen failing first:
+  every new name `-32601`).
+- *which stay for one release with a deprecation entry* — `deprecations.md` §46 and its table row.
+- *a message reaches a skill without `skillId` (a declared default skill, or the skill named in the message's
+  metadata — decided in the PR, stated on the card)* — decided: **both**, `metadata.skillId` (the message's or the
+  request's, which must agree) first, then the default an embedder declares (`GossipAgent::with_a2a_default_skill`),
+  else `-32602` naming `metadata.skillId`; the card's `description` states which applies.
+  `a_current_send_names_its_skill_in_metadata_or_reaches_the_default`; with the SDK,
+  `test_send_message_reaches_the_default_skill` and `test_a_skill_named_in_metadata_is_called_and_an_unknown_one_is_refused`.
+- *every new method runs the same doors as `tasks/send` — the action evaluator, mandates, evidence, task ownership* —
+  every send in every generation goes through `dispatch_send` (unary) or `tasks_send_subscribe` (streamed), the paths
+  `tasks/send` and `tasks/sendSubscribe` ran: the federation edge (a federated stream, get or cancel refused in every
+  generation's name), the reservation and its owner rule, skill resolution, `ae_preflight` with the request's
+  `metadata._meta`, the mandate to the provider, `ae_record_execution`. Task ownership:
+  `GetTask`/`CancelTask` refuse another identity and an anonymous caller `-32004` in the end-to-end test; the
+  federated refusals in `a_federated_call_crosses_and_the_meshes_still_never_merge` (5a-bis, 5g, and 6b — a federated
+  `SendMessage` crosses and is authorised against `metadata.skillId`'s export; seen failing first, `-32601`). *The
+  evidence record per new method is not asserted separately:* it is the shared call in the shared path.
+- *and the C7 bypass matrix gains each new method* — `test_c7_the_bypass_matrix_no_door_runs_revoked_work` tries all
+  six send names, plant (each reaches the skill once, seen failing first on `message/send`) and revocation (none
+  does). `GetTask`/`CancelTask` dispatch nothing and are not rows.
+- *the probe becomes a CI test driving the real `a2a-sdk` client against a node* — CI job `a2a-sdk`:
+  `a2a-sdk[http-server]==1.2.2` (pinned; `test_the_sdk_is_the_version_the_row_names`) against
+  `examples/a2a_sdk_node.rs`, `tests/a2a-sdk/test_a2a_sdk.py` — the card resolver at its default path, a client from
+  `ClientFactory`, `send_message` unary and streamed, `get_task`, and the 0.3 compatibility transport; collected by
+  the test universe, `MYCELIUM_A2A_LIVE_REQUIRED` in the step that starts the node. Its failing-first is the probe's
+  own output (`docs/plans/external/2026-10-12-a2a-sdk-probe/probe-output.txt`).
+- **Not built, stated:** `mycelium-py`'s and `mycelium-ts`' `A2aClient` still use `/.well-known/agent.json` and
+  `tasks/send` (they move before the old names are removed); a message naming a `taskId` is refused rather than
+  continuing a task (a task here is complete when its send returns); push notifications, `ListTasks`,
+  `SubscribeToTask`, the extended card, a task's `history`, and the HTTP+JSON and gRPC bindings are not served;
+  `A2A-Version` is not checked.
+
 ### 3.6 · State of play and the next iteration (2026-10-12)
 
 Where the work stands at the end of 2026-10-12, so the next session starts here rather than from a conversation.
@@ -912,8 +967,7 @@ queues before the shutdown signal), and N, O, P recorded by #614 with the `a2a-s
 **Delivered in v2.34.0 (2026-10-16):** F2 (#624 — the unsigned-frame and bare-signature refusal unconditional, `kv_require_signed_frames` retired, `secure-single-domain` rev 5; §3.5), T (#622), S (#623 — identity proofs required by default; §3.5); the wasmtime 49.0.3 / rustls 0.23.46 advisories (#625).
 
 **Not started:** K (policy over history — decide §5's fleet question first), L (credentials attached at egress), M
-(activation commands confined), N (A2A at the current specification — independent of E and F, and it carries a defect
-worth fixing on its own: the agent card names the gossip port), O and P (after N), and §5's inference-routing question. (Q, revocation at every verifier, is delivered — #616, §3.5; S, identity proofs on by default, is delivered in 2.34.0 — #623, §3.5.)
+(activation commands confined), O and P (N is delivered, #PRNUM, §3.5), and §5's inference-routing question. (Q, revocation at every verifier, is delivered — #616, §3.5; S, identity proofs on by default, is delivered in 2.34.0 — #623, §3.5.)
 
 **Follow-ups recorded as not built in delivered rows (each in its §3.5 block):**
 - **H:** carry each named offer's signed bytes inside the close and award from that copy (today a member who deletes a
@@ -964,6 +1018,9 @@ worth fixing on its own: the agent card names the gossip port), O and P (after N
   stated in F's §3.5 block: first sighting is trust on first use; with identity proofs off another member's identity
   is writable under the writer's own signature; anti-entropy entries carry no author; role claims, audit records and
   revocation events are signed untagged.
+- **N:** `mycelium-py`'s and `mycelium-ts`' `A2aClient` move to `/.well-known/agent-card.json` and `SendMessage`
+  (with a fallback for a node before this release) before the pre-0.2 `tasks/send` / `tasks/sendSubscribe` and the
+  old card path are removed — as do `examples/a2a_langchain` and `examples/community`'s smoke.
 - **B:** connection preemption and WAL group commit, removed in review.
 - **Q:** ~~the mTLS handshake does not refuse a revoked key's certificate~~ — *delivered after 2.34.0, unreleased:*
   both sides of the handshake refuse a certificate whose key its owner revoked by a revocation this node counted (kept
