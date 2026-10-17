@@ -84,7 +84,7 @@ Four places strain that line today, and the rows in §3 address each:
 | **I** — *delivered with 2.33.0 (private #30), §3.5; Cedar narrower* | Private repo P3s | RA5 correction chains and competing corrections; attempt keys carry the operation id; a lock-order table; the outbox directory fsynced at create; Cedar policies schema-validated at load; the CI pin check refuses `[patch]`, `rev =` and multi-line tables | R0's re-pin |
 | **J** — *delivered 2.33.0 (#608), §3.5* | Hygiene | the sim-seam gate's test-skip bug (the one the KV gate fixed in #591); every feature and bench linted or built by some CI step; the two CI jobs on `stable` pinned; unreferenced public items deprecated, not removed (nothing is removed on the 2.x line); only the duplicates that disagree are unified (`hex_line`'s whitespace, `now_ms` copies outside the seam) | — |
 | **K** — *delivered after 2.34.0, unreleased (#638), §3.5* | Policy over history | the action evaluator can decide on what an actor has already done, not only on the request: a bounded, read-only history view (the actor's recent decisions and executions from the evidence journal — `src/agent/evidence_journal.rs`) reaches `ActionEvaluator::evaluate` beside the envelope (`ActionEnvelope`, `src/agent/action_evaluator.rs:101`, which today carries no history); a rule such as *at most three posts in ten minutes* is expressible and tested in the reference evaluator and the AE contract suite (`mycelium::ae_contract`); the scope of a count is stated by name — **per node** (the journal is node-local and never gossiped) unless the design question in §5 is decided otherwise; a history that cannot be read is `Indeterminate`, never an empty history; replay records the history view as a decision input | design question §5 |
-| **L** — *delivered after 2.34.0, unreleased (#637), §3.5* | Credentials attached at egress | a secret need not enter a component's or an activation command's environment: an outbound request names a credential binding, and the egress gate (`EgressPolicy`, `mycelium-core/src/config.rs:280`, which today checks the host and every redirect hop) attaches it on the way out — bearer, header and basic forms at least — only to the host the binding names; a redirect off that host drops it; the binding's use is counted and its value never logged, traced or written to the evidence journal; the places a secret is read into the node today (`[[serve]].api_key_env`, federation credentials, an activation command's environment) are listed and each either moved behind a binding or stated as unchanged *From NVIDIA OpenShell (2026-10-12):* the component holds an opaque placeholder and never the value — the gate resolves the placeholder only at an endpoint the binding authorises — so a leaked environment or log carries nothing usable. | — |
+| **L** — *delivered after 2.34.0, unreleased (#637), §3.5; the activation-command half not built* | Credentials attached at egress | a secret need not enter a component's or an activation command's environment: an outbound request names a credential binding, and the egress gate (`EgressPolicy`, `mycelium-core/src/config.rs:280`, which today checks the host and every redirect hop) attaches it on the way out — bearer, header and basic forms at least — only to the host the binding names; a redirect off that host drops it; the binding's use is counted and its value never logged, traced or written to the evidence journal; the places a secret is read into the node today (`[[serve]].api_key_env`, federation credentials, an activation command's environment) are listed and each either moved behind a binding or stated as unchanged *From NVIDIA OpenShell (2026-10-12):* the component holds an opaque placeholder and never the value — the gate resolves the placeholder only at an endpoint the binding authorises — so a leaked environment or log carries nothing usable. | — |
 | **M** | Activation commands confined | an `[[activation]]` command — today "not a sandbox: there is no allowlist and no confinement" (`docs/reference/unit-file.md:276`) and run with the stem's privileges — can be run under an OS confinement profile the unit file names (macOS Seatbelt first, Linux namespaces/Landlock or seccomp where available): filesystem access limited to the placed artifact's directory and declared paths, network limited to declared hosts or none; a profile the platform cannot apply refuses the activation by name, never runs it unconfined; the unconfined default stays, stated, and the guarantee report says which applies *From NVIDIA OpenShell (2026-10-12):* a profile's filesystem and syscall limits are fixed for the activation's life and its network allow-list may change live (OpenShell's split: filesystem and process locked at creation, network hot-reloadable); OpenShell itself (containers, seccomp, an unprivileged identity; needs Docker) is a candidate backend for a stem, beside a native Seatbelt/Landlock profile, rather than something to rebuild. | — |
 | **N** — *delivered after 2.34.0, unreleased (#633), §3.5* | A2A at the current specification | an A2A client built on the current `a2a-sdk` (1.2.2, the library Strands Agents uses) reaches Mycelium's skills through `/a2a`, with the same authority as today — **the 2026-10-12 probe found it cannot**: the card is served only at `/.well-known/agent.json` (the SDK reads `/.well-known/agent-card.json`, 404); the card's `url` is the node's **gossip** address, not its gateway, and omits `/a2a` (`src/agent/a2a.rs:445`, so the SDK's `send_message` failed with a network error); the methods are the pre-0.2 `tasks/send` / `tasks/sendSubscribe` / `tasks/get` / `tasks/cancel` (`SendMessage` and `message/send` both answer `-32601`); and the skill is chosen by a Mycelium-only `skillId` parameter that a standard client never sends. Promises: the card at `/.well-known/agent-card.json` (the old path kept for one release), naming the gateway's own URL and scheme (https under `gateway_tls`) with `/a2a` and its supported interfaces and protocol versions; the A2A 1.0 methods (`SendMessage`, `SendStreamingMessage`, `GetTask`, `CancelTask`) and the 0.3 names (`message/send`, `message/stream`) served beside the old ones, which stay for one release with a deprecation entry; a message reaches a skill without `skillId` (a declared default skill, or the skill named in the message's metadata — decided in the PR, stated on the card); every new method runs the same doors as `tasks/send` — the action evaluator, mandates, evidence, task ownership — and the C7 bypass matrix gains each new method; the probe becomes a CI test driving the real `a2a-sdk` client against a node | — |
 | **O** — *delivered after 2.34.0, unreleased (#634), §3.5* | A Strands session store on Mycelium | a companion package (Python, beside `langgraph-checkpoint-mycelium`) implementing Strands Agents' `SessionManager` over the Mycelium Python SDK, so an agent's conversation and state, and a swarm's shared memory, live in the fleet's KV rather than a file or a bucket; a save returns the SDK's receipt and its docs say which rung it names (a local application, not replication — the checkpointer's wording); an incomplete or unreadable session is an error, never an empty one; concurrent agents in one session do not lose each other's writes, or the limit is stated; its live suite runs in CI against a real node; pinned to a Strands release and re-checked when Strands changes the interface | — (N for the cross-host demo) |
@@ -1236,7 +1236,14 @@ and `git grep -n "env::var" -- src mycelium-*/src`): `[[serve]]`'s `api_key` / `
 federation call header (a per-call signature, `federation/client.rs`), the object store's environment
 (`object_store::parse_url_opts`), `mycelium-artifact`'s `--key`/`--key-env` (local signing), the gateway's inbound
 tokens, and an `[[activation]]` command's inherited environment.
-- *a secret need not enter a component's or an activation command's environment: an outbound request names a
+- *a secret need not enter … an activation command's environment* — **not built.** An `[[activation]]` command is a
+  separate process with no path to the gate — it opens its own connections — and it inherits the stem's whole
+  environment, so a secret it needs is in that environment (or a file it reads), and a `value_env` binding's variable
+  is in it too. What would close it: the gate reachable by the command — a node-side forward proxy on loopback that
+  resolves placeholders in the command's requests by the same rule — together with the command started with a cleared
+  environment (an allow-list of variables, and the placeholders it may hold), which row M's confinement can supply.
+  The crown-jewel table's "unchanged here" line stands.
+- *a secret need not enter a component's … environment: an outbound request names a
   credential binding* — `CredentialBinding` (`mycelium-core/src/config.rs`): a host, an optional path prefix, a form
   and a value source (`value_env` / `value_file`), **never the value**; a caller names it by an opaque placeholder,
   `credential_placeholder(name)` = `mycelium-credential:<name>`. The value is read once at `start()`
@@ -1297,12 +1304,35 @@ tokens, and an `[[activation]]` command's inherited environment.
   without the refusal). Fail-first: seven of the gate's eleven tests failed with its
   attachment stubbed out (the placeholder went out as written, to every host, through every redirect); the core tests
   and the field were written before the types existed and failed to compile.
-- **Not built, stated:** a placeholder in a query string or a request body is not resolved (sent as written); a
-  binding names a host, not a port; the value is not zeroised when the gate is dropped; a `value_env` variable stays
-  in the process environment, which a child process inherits (`value_file` avoids it); no SkillRunner,
-  `HttpLibrarySource` or MCP-bridge binding; the gate compares names, not resolved addresses (the allow-list's limit);
-  the gate sends on its own client, so a client-level timeout on the caller's builder does not carry (a per-request one
-  does).
+- *The independent review (#637)* — eleven findings, no blocker; each defect's test seen failing first on the PR's
+  code. (1) The activation-command half was marked delivered — now *not built*, above. (2) A start-time refusal could
+  echo a value pasted into the wrong field: `parse_egress_credentials_env` printed the whole entry,
+  `EgressCredentials::load` the `value_env` name and the `value_file` path, and `resolve_serve_key` (Z2's message) the
+  `api_key_env` name — each now names the entry by index and binding name (or the `[[serve]]` section) and which field
+  failed, never its contents (`a_refusal_never_echoes_a_field_that_could_hold_the_value`,
+  `a_secret_in_a_source_field_is_not_echoed_by_a_refusal`, `a_served_skill_reads_its_key_from_the_environment`;
+  `deprecations.md` §48 records Z2's message change). (3) Matching ignored the port, so `localhost:A` → `localhost:B`
+  re-attached: `CredentialBinding.port` (matched when set, the scheme's default counted) and **a loopback binding must
+  name its port** — chosen over pinning to the first use's port, which would make what a binding authorises depend on
+  request order, invisible to the operator and to a replay; on loopback each port is a different process
+  (`a_redirect_to_another_port_on_the_bound_host_drops_the_credential`, `a_binding_matches_its_port_and_a_loopback_binding_must_name_one`,
+  and another-port refusal in `a_request_the_binding_does_not_authorise_is_refused_and_never_sent`). (4) Two bindings
+  setting one header were both counted, one sent — refused, `CredentialError::ConflictingBindings`, nothing counted
+  (`two_bindings_that_would_set_one_header_are_refused`). (5) Any 3xx with a `Location` was followed, and a 300 replayed
+  the body — only 301, 302, 303, 307 and 308 are (`a_300_is_not_followed`). (6) §3.6 fixed. (7) `deprecations.md` §48.
+  (8) `load()` validated a whole default `GossipConfig` — it calls `validate_credential_bindings`, which
+  `GossipConfig::validate` calls too. (9) A `[[serve]]` endpoint its binding does not authorise now refuses the stem's
+  start by name (`a_serve_whose_endpoint_its_binding_does_not_authorise_refuses_the_start`). (10) Documented, not
+  changed: a placeholder request goes out under the node's egress policy as the gate captured it at `start()`, not
+  the backend's own `with_egress` policy (`OpenAiBackend::with_credentials`' doc, crown-jewel). (11) The proxy, stated
+  below.
+- **Not built, stated:** the activation-command half (above); a placeholder in a query string or a request body is not
+  resolved (sent as written); the value is not zeroised when the gate is dropped; a `value_env` variable stays in the
+  process environment, which a child process inherits (`value_file` avoids it); no SkillRunner, `HttpLibrarySource` or
+  MCP-bridge binding; the gate compares names, not resolved addresses (the allow-list's limit); the gate sends on its
+  own client, so a client-level timeout on the caller's builder does not carry (a per-request one does); the gate's
+  client honours `HTTP_PROXY` / `HTTPS_PROXY`, so a configured proxy sees a plaintext or loopback request's header (an
+  https request's header is inside the tunnel).
 
 ### 3.6 · State of play and the next iteration (2026-10-12)
 
@@ -1315,8 +1345,9 @@ queues before the shutdown signal), and N, O, P recorded by #614 with the `a2a-s
 
 **Delivered in v2.34.0 (2026-10-16):** F2 (#624 — the unsigned-frame and bare-signature refusal unconditional, `kv_require_signed_frames` retired, `secure-single-domain` rev 5; §3.5), T (#622), S (#623 — identity proofs required by default; §3.5); the wasmtime 49.0.3 / rustls 0.23.46 advisories (#625).
 
-**Not started:** L (credentials attached at egress), M
-(activation commands confined), and §5's inference-routing question. N, O, P and K are delivered (#633, #634, #635, #638; §3.5). (Q, revocation at every verifier, is delivered — #616, §3.5; S, identity proofs on by default, is delivered in 2.34.0 — #623, §3.5.)
+**Not started:** M
+(activation commands confined), and §5's inference-routing question. N, O, P and K are delivered (#633, #634, #635, #638; §3.5);
+L is delivered (#637, §3.5) except its activation-command half, which is *not built*. (Q, revocation at every verifier, is delivered — #616, §3.5; S, identity proofs on by default, is delivered in 2.34.0 — #623, §3.5.)
 
 **Follow-ups recorded as not built in delivered rows (each in its §3.5 block):**
 - **H:** carry each named offer's signed bytes inside the close and award from that copy (today a member who deletes a

@@ -75,6 +75,7 @@ async fn a_credential_binding_refuses_the_start_and_reads_not_in_build() {
         value_env: Some("MYCELIUM_ROW_L_GATEWAY_FREE".into()),
         value_file: None,
         allow_plaintext: false,
+        port: None,
     }];
     let e = node(cfg.clone()).guarantee_report();
     let entry = e.entries.iter().find(|e| e.id == "egress.credentials").expect("registered");

@@ -68,6 +68,7 @@ the notice.
 | 45 | a gateway caller envelope without an id (`n`), target (`o`) and v2 signature (`sn`) — a pre-row-E gateway's | unreleased (post-360 row E) — accepted and counted for one release from a gateway without `sys/caller-context-id/` | upgrade every gateway node; watch `caller_envelopes_without_id` (`GET /stats`) stop rising on every provider; a raw-signal loop calls `receive_gateway_caller` once per signal | No — behaviour: an envelope is served once, at its target; a replay (repeated, misaddressed, id stripped) is dropped unanswered and counted (`caller_envelopes_replayed`); two subscribers verifying one kind on one node no longer both serve; a bridged MCP call whose context fails verification is refused `-32022` |
 | 46 | the A2A card at `/.well-known/agent.json`; the pre-0.2 `/a2a` methods `tasks/send` and `tasks/sendSubscribe`, and `skillId` as a send's parameter | unreleased (post-360 row N) — served beside the replacements for one release | read the card at `/.well-known/agent-card.json`; send with `SendMessage` / `SendStreamingMessage` (or 0.3's `message/send` / `message/stream`), the skill in `metadata.skillId` and a mandate in `metadata._meta` | No — behaviour: the old path and methods answer as before; a task created by `message/send` answers `tasks/get` in 0.3's shapes; the refusal for another identity's task names `GetTask`/`CancelTask` too |
 | 47 | an exhaustive `Rule { .. }` or `ContractCase { .. }` literal; an evaluator that wraps another and forwards only `evaluate` | unreleased (post-360 row K) | build a `Rule` with `Rule::new` and its builders, and give a `ContractCase` `history: None` (or a history); a wrapping evaluator forwards `history_request` and `evaluate_with_history` | Yes for the literals (a new field); no for a wrapper — it compiles, and its limited rules decide `Indeterminate` |
+| 48 | an exhaustive struct literal of `GossipConfig`, `OpenAiBackend`, `ServeDecl` or `CredentialBinding`; a `{:?}` of a `ServeDecl` showing its `api_key`; Z2's `api_key_env` refusal naming the variable | unreleased (post-360 row L) | `..Default::default()` (or the new fields: `egress_credentials`, `credentials`, `credential`, `port`); read the section name in the refusal | **Yes** for an exhaustive literal — it will not compile; otherwise no — `Debug` prints `api_key: Some("<redacted>")`, and the refusal names the `[[serve]]` section and the field, not the variable |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -1553,4 +1554,24 @@ closed, but not what was meant. Forward `history_request` and `evaluate_with_his
 express `PolicyClause::AllowAtMost` must decline them and list them in `declared_limits`, or `Report::conformant` fails
 — the private companion's Cedar adapter, on its next re-pin. `AeEvidence`'s schema stays `mycelium.ae/evidence/1`: the
 new `history` field is additive and absent when no history was read.
+
+## 48. Credentials attached at egress: four structs gained fields, a `ServeDecl`'s `Debug` hides its key, Z2's refusal names the section (unreleased, post-360 plan row L)
+
+**What changes.** Row L adds credential bindings (`docs/operations/crown-jewel.md` § Credentials attached at egress).
+Additive for a running node — no binding configured, nothing changes — but four public structs gained fields:
+`GossipConfig.egress_credentials`, `OpenAiBackend.credentials`, `ServeDecl.credential`, and the new
+`CredentialBinding`'s `port` (added by the PR's review). Two outputs change: `ServeDecl`'s `Debug` (hand-written now)
+prints `api_key: Some("<redacted>")` and the new `credential` field, where the derived one printed the literal key; and
+the stem's refusal for an unset `api_key_env` variable (zero-gaps Z2) names the `[[serve]]` section and the field, no
+longer the variable — a value pasted into `api_key_env` would have been echoed into a start-time log line.
+
+**Will the compiler tell me?** **Yes** for an exhaustive struct literal of any of the four — it will not compile.
+No for the two outputs.
+
+**Migration.**
+- A struct literal: add `..Default::default()` (`GossipConfig`), or the new field (`credentials: None`,
+  `credential: None`, `port: None`); `OpenAiBackend::new` is unaffected.
+- A test or a log parser matching a `ServeDecl`'s `Debug` or the `api_key_env` refusal's text: match the section name
+  (`[[serve]] llm/<name>`) and `api_key_env`; the variable is whatever the unit file says.
+- A loopback binding (`localhost`, `127.0.0.0/8`, `::1`) must set `port` — new, so nothing written before it breaks.
 

@@ -11,6 +11,12 @@ const SECRET: &str = "sk-row-L-7f3a9c-never-print-me";
 /// A listener that records every request head it receives and answers `200` (or, when `redirect` is
 /// set, `307` to it). The recording is the witness: a refused request's listener has none.
 async fn recorder(redirect: Option<String>) -> (u16, Arc<Mutex<Vec<String>>>) {
+    recorder_with(307, redirect, false).await
+}
+
+/// [`recorder`] with the redirect's status chosen, and (`only_root`) a redirect only for `/` — so a
+/// redirect can land on the same listener (the same host and port) at another path.
+async fn recorder_with(status: u16, redirect: Option<String>, only_root: bool) -> (u16, Arc<Mutex<Vec<String>>>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind recorder");
     let port = listener.local_addr().expect("addr").port();
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -25,8 +31,10 @@ async fn recorder(redirect: Option<String>) -> (u16, Arc<Mutex<Vec<String>>>) {
                 let mut buf = vec![0u8; 16384];
                 let n = sock.read(&mut buf).await.unwrap_or(0);
                 log.lock().unwrap().push(String::from_utf8_lossy(&buf[..n]).to_string());
-                let reply = match redirect {
-                    Some(loc) => format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: {loc}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let at_root = head.starts_with("GET / ") || head.starts_with("POST / ");
+                let reply = match redirect.filter(|_| !only_root || at_root) {
+                    Some(loc) => format!("HTTP/1.1 {status} Redirect\r\nLocation: {loc}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
                     None => {
                         let body = r#"{"choices":[{"message":{"content":"ok"}}],"usage":{"total_tokens":1},"model":"m"}"#;
                         format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
@@ -45,8 +53,15 @@ fn secret_file(tag: &str, contents: &str) -> std::path::PathBuf {
     p
 }
 
+/// A binding to `host`; a loopback host is pinned to `port` (row L's review, finding 3: a loopback
+/// binding must name its port).
+fn binding_at(name: &str, host: &str, port: u16, form: CredentialForm, file: &std::path::Path) -> CredentialBinding {
+    CredentialBinding { port: Some(port), ..binding(name, host, form, file) }
+}
+
 fn binding(name: &str, host: &str, form: CredentialForm, file: &std::path::Path) -> CredentialBinding {
     CredentialBinding {
+        port: None,
         name: name.into(),
         host: host.into(),
         path_prefix: None,
@@ -71,8 +86,8 @@ fn get(url: String, header: &str, value: &str) -> reqwest::Request {
 #[tokio::test]
 async fn a_binding_attaches_its_value_at_its_host_in_place_of_the_placeholder() {
     let f = secret_file("attach", &format!("{SECRET}\n"));
-    let g = gate(&[binding("model", "localhost", CredentialForm::Bearer, &f)]);
     let (port, seen) = recorder(None).await;
+    let g = gate(&[binding_at("model", "localhost", port, CredentialForm::Bearer, &f)]);
     let r = g
         .send(get(format!("http://localhost:{port}/v1/chat"), "authorization", &format!("Bearer {}", credential_placeholder("model"))))
         .await
@@ -90,11 +105,11 @@ async fn a_binding_attaches_its_value_at_its_host_in_place_of_the_placeholder() 
 #[tokio::test]
 async fn the_header_and_basic_forms_attach_their_own_header() {
     let f = secret_file("forms", SECRET);
-    let g = gate(&[
-        binding("hdr", "localhost", CredentialForm::Header, &f),
-        CredentialBinding { name: "basic".into(), ..binding("basic", "localhost", CredentialForm::Basic, &f) },
-    ]);
     let (port, seen) = recorder(None).await;
+    let g = gate(&[
+        binding_at("hdr", "localhost", port, CredentialForm::Header, &f),
+        binding_at("basic", "localhost", port, CredentialForm::Basic, &f),
+    ]);
     g.send(get(format!("http://localhost:{port}/"), "authorization", &format!("Bearer {}", credential_placeholder("hdr")))).await.unwrap();
     g.send(get(format!("http://localhost:{port}/"), "authorization", &credential_placeholder("basic"))).await.unwrap();
     let seen = seen.lock().unwrap().clone();
@@ -106,25 +121,27 @@ async fn the_header_and_basic_forms_attach_their_own_header() {
     assert!(seen[1].contains(&format!("Basic {basic}")), "{}", seen[1]);
 }
 
-/// A request for any URL the binding does not authorise — another host, a host that merely ends in
-/// the bound one, a path outside the prefix, plain http to a non-loopback host — is refused **before
-/// it is sent**, and counted.
+/// A request for any URL the binding does not authorise — another host, a path outside the prefix,
+/// another port — is refused **before it is sent**, and counted.
 #[tokio::test]
 async fn a_request_the_binding_does_not_authorise_is_refused_and_never_sent() {
     let f = secret_file("refuse", SECRET);
-    let mut scoped = binding("scoped", "localhost", CredentialForm::Bearer, &f);
-    scoped.path_prefix = Some("/v1".into());
-    let g = gate(&[binding("model", "localhost", CredentialForm::Bearer, &f), scoped]);
     let (port, seen) = recorder(None).await;
+    let (other_port, at_other_port) = recorder(None).await;
+    let mut scoped = binding_at("scoped", "localhost", port, CredentialForm::Bearer, &f);
+    scoped.path_prefix = Some("/v1".into());
+    let g = gate(&[binding_at("model", "localhost", port, CredentialForm::Bearer, &f), scoped]);
     let other_host = g.send(get(format!("http://127.0.0.1:{port}/"), "authorization", &credential_placeholder("model"))).await;
     assert!(matches!(other_host, Err(CredentialError::NotAuthorised { .. })), "{other_host:?}");
     let outside = g.send(get(format!("http://localhost:{port}/v10/x"), "authorization", &credential_placeholder("scoped"))).await;
     assert!(matches!(outside, Err(CredentialError::NotAuthorised { .. })), "{outside:?}");
     let dotdot = g.send(get(format!("http://localhost:{port}/v1/../admin"), "authorization", &credential_placeholder("scoped"))).await;
     assert!(matches!(dotdot, Err(CredentialError::NotAuthorised { .. })), "the normalised path is compared: {dotdot:?}");
-    assert!(seen.lock().unwrap().is_empty(), "nothing reached the listener");
+    let wrong_port = g.send(get(format!("http://localhost:{other_port}/"), "authorization", &credential_placeholder("model"))).await;
+    assert!(matches!(wrong_port, Err(CredentialError::NotAuthorised { .. })), "another port on the host: {wrong_port:?}");
+    assert!(seen.lock().unwrap().is_empty() && at_other_port.lock().unwrap().is_empty(), "nothing reached a listener");
     let uses = g.uses();
-    assert_eq!((uses[0].refused, uses[1].refused), (1, 2));
+    assert_eq!((uses[0].refused, uses[1].refused), (2, 2));
     assert_eq!((uses[0].attached, uses[1].attached), (0, 0));
     // The plant: under the prefix it is attached.
     g.send(get(format!("http://localhost:{port}/v1/chat"), "authorization", &credential_placeholder("scoped"))).await.expect("under the prefix");
@@ -135,8 +152,8 @@ async fn a_request_the_binding_does_not_authorise_is_refused_and_never_sent() {
 #[tokio::test]
 async fn an_unknown_placeholder_is_refused_and_never_sent() {
     let f = secret_file("unknown", SECRET);
-    let g = gate(&[binding("model", "localhost", CredentialForm::Bearer, &f)]);
     let (port, seen) = recorder(None).await;
+    let g = gate(&[binding_at("model", "localhost", port, CredentialForm::Bearer, &f)]);
     let r = g.send(get(format!("http://localhost:{port}/"), "x-api-key", &credential_placeholder("nope"))).await;
     assert!(matches!(r, Err(CredentialError::UnknownBinding { ref name }) if name == "nope"), "{r:?}");
     assert!(seen.lock().unwrap().is_empty());
@@ -144,13 +161,13 @@ async fn an_unknown_placeholder_is_refused_and_never_sent() {
 
 /// **A redirect off the host drops the credential.** The first hop (the bound host) gets it; the
 /// redirect target (another host) gets neither the value nor the placeholder, and the drop is
-/// counted. The plant: a redirect to the bound host carries it again.
+/// counted. The plant: a redirect that stays on the bound host and port carries it again.
 #[tokio::test]
 async fn a_redirect_off_the_bound_host_drops_the_credential() {
     let f = secret_file("redirect", SECRET);
-    let g = gate(&[binding("model", "localhost", CredentialForm::Header, &f)]);
     let (target, at_target) = recorder(None).await;
     let (hop, at_hop) = recorder(Some(format!("http://127.0.0.1:{target}/landing"))).await;
+    let g = gate(&[binding_at("model", "localhost", hop, CredentialForm::Header, &f)]);
     let r = g.send(get(format!("http://localhost:{hop}/"), "x-api-key", &credential_placeholder("model"))).await.expect("followed");
     assert!(r.status().is_success());
     assert!(at_hop.lock().unwrap()[0].contains(SECRET), "the bound host received it");
@@ -161,12 +178,64 @@ async fn a_redirect_off_the_bound_host_drops_the_credential() {
     let u = &g.uses()[0];
     assert_eq!((u.attached, u.dropped_on_redirect), (1, 1));
 
-    // Plant: a redirect that stays on the bound host keeps it.
-    let (same, at_same) = recorder(None).await;
-    let (hop2, _) = recorder(Some(format!("http://localhost:{same}/again"))).await;
-    g.send(get(format!("http://localhost:{hop2}/"), "x-api-key", &credential_placeholder("model"))).await.expect("followed");
-    assert!(at_same.lock().unwrap()[0].contains(SECRET), "a redirect within the binding re-attaches");
-    assert_eq!(g.uses()[0].attached, 3);
+    // Plant: a redirect that stays on the bound host and port keeps it.
+    let (same, at_same) = recorder_with(307, Some("/again".to_string()), true).await;
+    let g2 = gate(&[binding_at("model", "localhost", same, CredentialForm::Header, &f)]);
+    g2.send(get(format!("http://localhost:{same}/"), "x-api-key", &credential_placeholder("model"))).await.expect("followed");
+    let seen = at_same.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2, "the root, then /again on the same listener");
+    assert!(seen[1].starts_with("GET /again") && seen[1].contains(SECRET), "a redirect within the binding re-attaches: {}", seen[1]);
+    assert_eq!(g2.uses()[0].attached, 2);
+}
+
+/// **A redirect to another port on the bound host drops the credential** (row L's review, finding 3):
+/// on loopback each port is a different process, so the port is part of what the binding names.
+#[tokio::test]
+async fn a_redirect_to_another_port_on_the_bound_host_drops_the_credential() {
+    let f = secret_file("port", SECRET);
+    let (other, at_other) = recorder(None).await;
+    let (hop, at_hop) = recorder(Some(format!("http://localhost:{other}/elsewhere"))).await;
+    let g = gate(&[binding_at("model", "localhost", hop, CredentialForm::Bearer, &f)]);
+    g.send(get(format!("http://localhost:{hop}/"), "authorization", &credential_placeholder("model"))).await.expect("followed");
+    assert!(at_hop.lock().unwrap()[0].contains(SECRET));
+    let landed = at_other.lock().unwrap()[0].clone();
+    assert!(!landed.contains(SECRET) && !landed.contains("mycelium-credential:"), "another port received it: {landed}");
+    assert_eq!(g.uses()[0].dropped_on_redirect, 1);
+}
+
+/// **Two bindings on one header are refused** (row L's review, finding 4): only one value could be
+/// sent, and counting both over-reported. Nothing is sent, nothing is counted as attached.
+#[tokio::test]
+async fn two_bindings_that_would_set_one_header_are_refused() {
+    let f = secret_file("two", SECRET);
+    let (port, seen) = recorder(None).await;
+    let g = gate(&[
+        binding_at("a", "localhost", port, CredentialForm::Bearer, &f),
+        binding_at("b", "localhost", port, CredentialForm::Bearer, &f),
+    ]);
+    let req = reqwest::Client::new()
+        .get(format!("http://localhost:{port}/"))
+        .header("authorization", credential_placeholder("a"))
+        .header("x-api-key", credential_placeholder("b"))
+        .build()
+        .unwrap();
+    let r = g.send(req).await;
+    assert!(matches!(r, Err(CredentialError::ConflictingBindings { .. })), "{r:?}");
+    assert!(seen.lock().unwrap().is_empty());
+    assert!(g.uses().iter().all(|u| u.attached == 0), "{:?}", g.uses());
+}
+
+/// **Only 301, 302, 303, 307 and 308 are followed** (row L's review, finding 5): a 300 is handed back
+/// as it arrived, so its `Location` receives nothing — not a replayed body either.
+#[tokio::test]
+async fn a_300_is_not_followed() {
+    let (target, at_target) = recorder(None).await;
+    let (hop, _) = recorder_with(300, Some(format!("http://127.0.0.1:{target}/")), false).await;
+    let g = gate(&[]);
+    let req = reqwest::Client::new().post(format!("http://localhost:{hop}/")).body("the body").build().unwrap();
+    let r = g.send(req).await.expect("answered");
+    assert_eq!(r.status().as_u16(), 300);
+    assert!(at_target.lock().unwrap().is_empty(), "a 300 was followed");
 }
 
 /// The node's allow-list still governs: a request the list denies is refused before it is sent, and
@@ -175,9 +244,9 @@ async fn a_redirect_off_the_bound_host_drops_the_credential() {
 async fn the_allow_list_still_gates_the_first_url_and_every_hop() {
     let f = secret_file("allow", SECRET);
     let egress = EgressPolicy { allow_hosts: vec!["localhost".into()] };
-    let g = EgressCredentials::load(&[binding("model", "localhost", CredentialForm::Bearer, &f)], &egress).unwrap();
     let (target, at_target) = recorder(None).await;
     let (hop, _) = recorder(Some(format!("http://127.0.0.1:{target}/"))).await;
+    let g = EgressCredentials::load(&[binding_at("model", "localhost", hop, CredentialForm::Bearer, &f)], &egress).unwrap();
     let r = g.send(get(format!("http://localhost:{hop}/"), "authorization", &credential_placeholder("model"))).await;
     assert!(matches!(r, Err(CredentialError::Redirect(_))), "{r:?}");
     assert!(at_target.lock().unwrap().is_empty());
@@ -191,9 +260,9 @@ async fn the_allow_list_still_gates_the_first_url_and_every_hop() {
 #[tokio::test]
 async fn the_value_is_in_no_debug_display_or_error() {
     let f = secret_file("debug", SECRET);
-    let b = binding("model", "localhost", CredentialForm::Bearer, &f);
-    let g = gate(std::slice::from_ref(&b));
     let (port, _) = recorder(None).await;
+    let b = binding_at("model", "localhost", port, CredentialForm::Bearer, &f);
+    let g = gate(std::slice::from_ref(&b));
     let mut strings = vec![format!("{g:?}"), format!("{b:?}"), format!("{:?}", g.uses())];
     for e in [
         g.send(get(format!("http://127.0.0.1:{port}/"), "authorization", &credential_placeholder("model"))).await.unwrap_err(),
@@ -204,7 +273,7 @@ async fn the_value_is_in_no_debug_display_or_error() {
     }
     // A value that is not a header value: refused by name, the value not echoed.
     let bad = secret_file("bad", &format!("{SECRET}\nsecond-line"));
-    let e = EgressCredentials::load(&[binding("bad", "localhost", CredentialForm::Bearer, &bad)], &EgressPolicy::default()).unwrap_err();
+    let e = EgressCredentials::load(&[binding_at("bad", "localhost", port, CredentialForm::Bearer, &bad)], &EgressPolicy::default()).unwrap_err();
     strings.push(format!("{e}"));
     strings.push(format!("{e:?}"));
     // A sent request's own Debug (what a client error or a trace would print).
@@ -217,19 +286,38 @@ async fn the_value_is_in_no_debug_display_or_error() {
     }
 }
 
+/// **A secret put in the wrong field is not echoed** (row L's review, finding 2): an operator who
+/// writes the value where `value_env` or `value_file` names it gets a refusal naming the binding by
+/// index and name, never the field's contents.
+#[test]
+fn a_secret_in_a_source_field_is_not_echoed_by_a_refusal() {
+    for (field, mutate) in [
+        ("value_env", Box::new(|b: &mut CredentialBinding| { b.value_file = None; b.value_env = Some(SECRET.into()); }) as Box<dyn Fn(&mut CredentialBinding)>),
+        ("value_file", Box::new(|b: &mut CredentialBinding| { b.value_file = Some(SECRET.into()); })),
+    ] {
+        let mut b = binding("model", "api.example.com", CredentialForm::Bearer, std::path::Path::new("/x"));
+        mutate(&mut b);
+        let e = EgressCredentials::load(&[b], &EgressPolicy::default()).unwrap_err();
+        for shown in [e.to_string(), format!("{e:?}")] {
+            assert!(!shown.contains(SECRET), "{field}: the refusal echoed it: {shown}");
+            assert!(shown.contains("[0]") && shown.contains("model"), "{field}: names the binding: {shown}");
+        }
+    }
+}
+
 /// The values are read once, at load: an unset variable, an unreadable file and an empty value are
-/// refusals that name the binding and the source.
+/// refusals that name the binding (by index and name) and which source failed.
 #[test]
 fn a_value_that_cannot_be_read_is_refused_by_name() {
-    let mut b = binding("model", "localhost", CredentialForm::Bearer, std::path::Path::new("/nonexistent/row-l"));
+    let mut b = binding("model", "api.example.com", CredentialForm::Bearer, std::path::Path::new("/nonexistent/row-l"));
     let e = EgressCredentials::load(std::slice::from_ref(&b), &EgressPolicy::default()).unwrap_err().to_string();
-    assert!(e.contains("model") && e.contains("/nonexistent/row-l"), "{e}");
+    assert!(e.contains("[0]") && e.contains("model") && e.contains("value_file"), "{e}");
     b.value_file = None;
     b.value_env = Some("MYCELIUM_ROW_L_UNSET_7F".into());
     let e = EgressCredentials::load(std::slice::from_ref(&b), &EgressPolicy::default()).unwrap_err().to_string();
-    assert!(e.contains("MYCELIUM_ROW_L_UNSET_7F"), "{e}");
+    assert!(e.contains("model") && e.contains("value_env"), "{e}");
     let empty = secret_file("empty", "\n");
-    let e = EgressCredentials::load(&[binding("model", "localhost", CredentialForm::Bearer, &empty)], &EgressPolicy::default()).unwrap_err().to_string();
+    let e = EgressCredentials::load(&[binding("model", "api.example.com", CredentialForm::Bearer, &empty)], &EgressPolicy::default()).unwrap_err().to_string();
     assert!(e.contains("empty"), "{e}");
 }
 
@@ -240,8 +328,8 @@ fn a_value_that_cannot_be_read_is_refused_by_name() {
 async fn an_llm_backend_holding_a_placeholder_sends_the_value_only_through_the_gate() {
     use crate::agent::llm::{LlmBackend as _, OpenAiBackend};
     let f = secret_file("llm", SECRET);
-    let g = Arc::new(gate(&[binding("model", "localhost", CredentialForm::Bearer, &f)]));
     let (port, seen) = recorder(None).await;
+    let g = Arc::new(gate(&[binding_at("model", "localhost", port, CredentialForm::Bearer, &f)]));
     let backend = OpenAiBackend::new(format!("http://localhost:{port}/v1"), credential_placeholder("model"), "m");
     let refused = backend.complete("s", "u", 8, 0.0).await;
     assert!(refused.is_err() && seen.lock().unwrap().is_empty(), "no gate: refused, nothing sent");
@@ -266,12 +354,12 @@ fn an_llm_backend_debug_redacts_a_literal_key() {
 }
 
 /// `start()` reads the values once into the agent's gate, and refuses a value it cannot read — by
-/// the binding's name and its source.
+/// the binding's index and name.
 #[tokio::test]
 async fn start_loads_the_gate_and_refuses_an_unreadable_binding() {
     let f = secret_file("start", SECRET);
     let mut cfg = crate::config::GossipConfig { bind_port: crate::test_util::alloc_port(), ..Default::default() };
-    cfg.egress_credentials = vec![binding("model", "localhost", CredentialForm::Bearer, &f)];
+    cfg.egress_credentials = vec![binding("model", "api.example.com", CredentialForm::Bearer, &f)];
     let plain = crate::GossipAgent::new(crate::NodeId::new("127.0.0.1", cfg.bind_port).unwrap(), crate::config::GossipConfig::default());
     assert!(matches!(
         plain.guarantee_report().entry("egress.credentials").expect("registered").resolution,
@@ -292,5 +380,5 @@ async fn start_loads_the_gate_and_refuses_an_unreadable_binding() {
     cfg.egress_credentials[0].value_env = Some("MYCELIUM_ROW_L_START_UNSET_7F".into());
     let agent = crate::GossipAgent::new(crate::NodeId::new("127.0.0.1", cfg.bind_port).unwrap(), cfg);
     let e = agent.start().await.unwrap_err().to_string();
-    assert!(e.contains("egress_credentials") && e.contains("MYCELIUM_ROW_L_START_UNSET_7F"), "{e}");
+    assert!(e.contains("egress_credentials") && e.contains("model") && e.contains("value_env"), "{e}");
 }

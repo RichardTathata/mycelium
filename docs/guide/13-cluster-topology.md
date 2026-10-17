@@ -190,7 +190,7 @@ A keyed `[[serve]]` endpoint names its **variable**, never its secret:
 name        = "inference"
 endpoint    = "https://api.example/v1"
 model       = "coop-storyteller"
-api_key_env = "COOP_INFERENCE_KEY"      # read once at stem start; unset → the stem refuses to start, naming it
+api_key_env = "COOP_INFERENCE_KEY"      # read once at stem start; unset → the stem refuses to start, naming the section
 ```
 
 so the unit directory stays safe to commit (`reference/unit-file.md` § `[[serve]]`).

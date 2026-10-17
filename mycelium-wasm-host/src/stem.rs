@@ -161,8 +161,10 @@ pub fn resolve_serve_key(d: &mycelium::ServeDecl) -> Result<Option<String>, Stem
     }
     match &d.api_key_env {
         None => Ok(None),
+        // Named by its section and field, never by the field's contents: a key pasted into
+        // `api_key_env` was echoed into a start-time log line (row L's review, finding 2).
         Some(var) => std::env::var(var).map(Some).map_err(|_| StemError(format!(
-            "[[serve]] {}/{}: api_key_env `{var}` is not set — export it on this host, or use api_key for a literal", d.ns, d.name
+            "[[serve]] {}/{}: the variable its api_key_env names is not set — export it on this host, or use api_key for a literal", d.ns, d.name
         ))),
     }
 }
@@ -389,13 +391,18 @@ impl Stem {
             // Row L: a `credential` must name a binding this node's gate holds — refused by name here,
             // not discovered as an endpoint's 401 (or a skill that never answers) later.
             for d in &units.serves {
-                if let Some(binding) = &d.credential
-                    && !agent.egress_credentials().is_some_and(|g| g.has(binding))
-                {
+                let Some(binding) = &d.credential else { continue };
+                let Some(gate) = agent.egress_credentials().filter(|g| g.has(binding)) else {
                     return Err(StemError(format!(
                         "[[serve]] {}/{}: credential `{binding}` is not a binding on this node — add [[egress_credentials]] name = \"{binding}\" to the node's config (it is read at the agent's start)",
                         d.ns, d.name
                     )));
+                };
+                // Row L's review, finding 9: the endpoint the skill calls must be one its binding
+                // authorises — refused here, by name, not as every call's refusal at the gate.
+                let url = format!("{}/chat/completions", d.endpoint.trim_end_matches('/'));
+                if let Err(e) = gate.authorises(binding, &url) {
+                    return Err(StemError(format!("[[serve]] {}/{}: its endpoint is not one credential `{binding}` authorises — {e}", d.ns, d.name)));
                 }
             }
             Some(crate::serve::spawn(Arc::clone(&agent), resolved, opts.tick))
@@ -769,7 +776,13 @@ mod tests {
         assert_eq!(resolve_serve_key(&decl(Some("sk-lit"), None)).unwrap().as_deref(), Some("sk-lit"));
         assert_eq!(resolve_serve_key(&decl(None, Some("MYCELIUM_TEST_SERVE_KEY_SET_7F"))).unwrap().as_deref(), Some("sk-test-7f"));
         let e = resolve_serve_key(&decl(None, Some("MYCELIUM_TEST_SERVE_KEY_UNSET_7F"))).unwrap_err();
-        assert!(e.to_string().contains("MYCELIUM_TEST_SERVE_KEY_UNSET_7F") && e.to_string().contains("api_key_env"), "{e}");
+        // Named by its section and field, never by the field's contents (row L's review, finding 2: a key
+        // pasted into `api_key_env` was echoed into a start-time log line).
+        assert!(e.to_string().contains("llm/m") && e.to_string().contains("api_key_env"), "{e}");
+        assert!(!e.to_string().contains("MYCELIUM_TEST_SERVE_KEY_UNSET_7F"), "{e}");
+        let pasted = "sk-live-pasted-into-the-name-field-7f";
+        let e = resolve_serve_key(&decl(None, Some(pasted))).unwrap_err();
+        assert!(!e.to_string().contains(pasted) && !format!("{e:?}").contains(pasted), "{e}");
     }
 
     /// Post-360 plan row L, end to end: a stem whose `[[serve]]` names a credential binding serves a
@@ -814,7 +827,7 @@ mod tests {
             egress_credentials: vec![mycelium::CredentialBinding {
                 name: "model".into(), host: "localhost".into(), path_prefix: Some("/v1".into()),
                 form: mycelium::CredentialForm::Bearer, header: None, username: None,
-                value_env: None, value_file: Some(secret_file.clone()), allow_plaintext: false,
+                value_env: None, value_file: Some(secret_file.clone()), allow_plaintext: false, port: Some(endpoint_port),
             }],
             ..Default::default()
         };
@@ -831,6 +844,42 @@ mod tests {
         assert_eq!(node.egress_credentials().unwrap().uses()[0].attached as usize, seen.len());
 
         stem.stop().await;
+        node.shutdown().await;
+        seed.shutdown().await;
+        let _ = std::fs::remove_file(&secret_file);
+    }
+
+    /// Row L's review, finding 9: a `[[serve]]` whose endpoint its binding does not authorise (another
+    /// host, port or path) **refuses the start**, naming the section and the binding — not a skill
+    /// served whose every call the gate refuses.
+    #[cfg(feature = "llm")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_serve_whose_endpoint_its_binding_does_not_authorise_refuses_the_start() {
+        let secret_file = std::env::temp_dir().join(format!("mycelium-row-l-serve-misdirected-{}", std::process::id()));
+        std::fs::write(&secret_file, "sk-row-L-misdirected").unwrap();
+        let (seed, lib_dir, head, _ids) = blob_library("credential-misdirected", &[("pack", b"weights standing in")]).await;
+        let units = NodeCapabilityConfig::from_toml_str(&format!(
+            "{head}[[serve]]\nname=\"keyed\"\nendpoint=\"https://elsewhere.example/v1\"\nmodel=\"pack\"\ncredential=\"model\"\n"
+        )).unwrap();
+        let port = alloc_port();
+        let cfg = mycelium::GossipConfig {
+            bind_port: port,
+            bootstrap_peers: vec![NodeId::new("127.0.0.1", seed.node_id().to_socket_addr().port()).unwrap()],
+            health_check_interval_secs: 2,
+            egress_credentials: vec![mycelium::CredentialBinding {
+                name: "model".into(), host: "api.example.com".into(), path_prefix: None,
+                form: mycelium::CredentialForm::Bearer, header: None, username: None,
+                value_env: None, value_file: Some(secret_file.clone()), allow_plaintext: false, port: None,
+            }],
+            ..Default::default()
+        };
+        let node = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg));
+        node.start().await.expect("agent start");
+        let err = match Stem::start(Arc::clone(&node), &units, stem_opts(&lib_dir)) {
+            Ok(stem) => { stem.stop().await; panic!("a serve whose endpoint its binding does not authorise must refuse the start") }
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("llm/keyed") && err.contains("`model`") && err.contains("elsewhere.example"), "{err}");
         node.shutdown().await;
         seed.shutdown().await;
         let _ = std::fs::remove_file(&secret_file);
@@ -877,7 +926,7 @@ mod tests {
             Ok(stem) => { stem.stop().await; panic!("a serve whose key variable is unset must refuse the start") }
             Err(e) => e.to_string(),
         };
-        assert!(err.contains("MYCELIUM_TEST_SERVE_KEY_UNSET_7F") && err.contains("api_key_env"), "{err}");
+        assert!(err.contains("llm/keyed") && err.contains("api_key_env"), "{err}");
         node.shutdown().await;
         seed.shutdown().await;
     }

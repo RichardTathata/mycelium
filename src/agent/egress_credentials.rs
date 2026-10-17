@@ -81,6 +81,9 @@ pub enum CredentialError {
     NotAuthorised { binding: String, reason: String },
     /// The node's egress allow-list does not permit the request's host.
     EgressDenied { url: String },
+    /// Two different bindings would set the same header on one request — refused, since only one value
+    /// could be sent and neither caller asked for the other's.
+    ConflictingBindings { header: String },
     /// A redirect was refused (the hop cap, a downgrade, a denied host, a body that cannot be re-sent).
     Redirect(String),
     /// The HTTP client's own error.
@@ -93,6 +96,7 @@ impl std::fmt::Display for CredentialError {
             Self::UnknownBinding { name } => write!(f, "egress credential: no binding named `{name}` on this node"),
             Self::NotAuthorised { reason, .. } => write!(f, "egress credential refused: {reason}"),
             Self::EgressDenied { url } => write!(f, "egress: the allow-list does not permit {url}"),
+            Self::ConflictingBindings { header } => write!(f, "egress credential: two bindings would set the {header} header on one request"),
             Self::Redirect(why) => write!(f, "egress credential: redirect refused: {why}"),
             Self::Http(e) => write!(f, "egress credential: {e}"),
         }
@@ -122,33 +126,31 @@ impl EgressCredentials {
     /// trailing newline trimmed) — once, now. A binding that does not validate, whose value is unset,
     /// unreadable, empty, or not a valid header value is refused by name; the error never holds a value.
     pub fn load(bindings: &[CredentialBinding], egress: &EgressPolicy) -> Result<Self, GossipError> {
-        // The rules `validate()` applies (names, forms, sources, the allow-list), so an embedder that
-        // builds a gate without a config is held to them too.
-        let probe = crate::config::GossipConfig {
-            egress: egress.clone(),
-            egress_credentials: bindings.to_vec(),
-            ..Default::default()
-        };
-        probe.validate()?;
-        let refuse = |name: &str, why: String| GossipError::InvalidField {
+        // The bindings' own rules (names, hosts and ports, forms, sources, the allow-list) — the ones
+        // `GossipConfig::validate` runs — so an embedder that builds a gate without a config is held to
+        // them too (row L's review, finding 8: this validated a whole default config).
+        crate::config::validate_credential_bindings(bindings, egress)?;
+        // Named by index and binding name; never the variable's name or the file's path, which a value
+        // pasted into the wrong field would put in a start-time log line (row L's review, finding 2).
+        let refuse = |i: usize, name: &str, why: String| GossipError::InvalidField {
             field:  "egress_credentials",
-            reason: format!("`{name}`: {why}"),
+            reason: format!("[{i}] `{name}`: {why}"),
         };
         let mut bound = Vec::with_capacity(bindings.len());
-        for b in bindings {
+        for (i, b) in bindings.iter().enumerate() {
             let raw = match (&b.value_env, &b.value_file) {
                 (Some(var), _) => std::env::var(var)
-                    .map_err(|_| refuse(&b.name, format!("value_env `{var}` is not set (or not unicode) on this host")))?,
+                    .map_err(|_| refuse(i, &b.name, "the variable its value_env names is not set (or not unicode) on this host".into()))?,
                 (None, Some(path)) => {
                     let text = std::fs::read_to_string(path)
-                        .map_err(|e| refuse(&b.name, format!("value_file {} cannot be read ({})", path.display(), e.kind())))?;
+                        .map_err(|e| refuse(i, &b.name, format!("the file its value_file names cannot be read ({})", e.kind())))?;
                     let text = text.strip_suffix('\n').unwrap_or(&text);
                     text.strip_suffix('\r').unwrap_or(text).to_string()
                 }
-                (None, None) => return Err(refuse(&b.name, "names no value source".into())),
+                (None, None) => return Err(refuse(i, &b.name, "names no value source".into())),
             };
             if raw.is_empty() {
-                return Err(refuse(&b.name, "its value is empty".into()));
+                return Err(refuse(i, &b.name, "its value is empty".into()));
             }
             let (header, attached) = match b.form {
                 CredentialForm::Bearer => (reqwest::header::AUTHORIZATION, format!("Bearer {raw}")),
@@ -159,12 +161,12 @@ impl EgressCredentials {
                 }
                 CredentialForm::Header => {
                     let name = b.header.as_deref().unwrap_or_default();
-                    let h = HeaderName::from_bytes(name.as_bytes()).map_err(|_| refuse(&b.name, format!("{name:?} is not a header name")))?;
+                    let h = HeaderName::from_bytes(name.as_bytes()).map_err(|_| refuse(i, &b.name, "its header is not a header name".into()))?;
                     (h, raw)
                 }
             };
             let mut value = HeaderValue::from_str(&attached)
-                .map_err(|_| refuse(&b.name, "its value is not a valid header value (a control character or a non-visible byte)".into()))?;
+                .map_err(|_| refuse(i, &b.name, "its value is not a valid header value (a control character or a non-visible byte)".into()))?;
             value.set_sensitive(true);
             bound.push(Bound { cfg: b.clone(), header, value, used: AtomicU64::new(0), refused: AtomicU64::new(0), dropped: AtomicU64::new(0) });
         }
@@ -175,6 +177,13 @@ impl EgressCredentials {
     /// True if this gate holds a binding called `name`.
     pub fn has(&self, name: &str) -> bool {
         self.bound.iter().any(|b| b.cfg.name == name)
+    }
+
+    /// Would the binding `name` attach to a request for `url`? What a caller checks at its own start
+    /// (a stem's `[[serve]]`) so a misdirected endpoint is refused there, not at its first call.
+    pub fn authorises(&self, name: &str, url: &str) -> Result<(), CredentialError> {
+        let b = self.bound.iter().find(|b| b.cfg.name == name).ok_or_else(|| CredentialError::UnknownBinding { name: name.to_string() })?;
+        b.cfg.authorises_url(url).map_err(|reason| CredentialError::NotAuthorised { binding: name.to_string(), reason })
     }
 
     /// The bindings' names, in configuration order.
@@ -214,7 +223,9 @@ impl EgressCredentials {
             let out = self.resolve(out, hop)?;
             let resp = self.client.execute(out).await.map_err(CredentialError::Http)?;
             let status = resp.status();
-            if !status.is_redirection() {
+            // Only the redirects reqwest follows (row L's review, finding 5): a 300, 304 or 305 is an
+            // answer, handed back as it arrived — following a 300 replayed the body to its Location.
+            if !matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308) {
                 return Ok(resp);
             }
             let Some(location) = resp.headers().get(reqwest::header::LOCATION).and_then(|l| l.to_str().ok()) else {
@@ -292,6 +303,14 @@ impl EgressCredentials {
                         tracing::info!(binding = %b.cfg.name, hop, "egress credential: a redirect left the binding — sent without it");
                     }
                 }
+            }
+        }
+        // Two bindings that would set one header (two bearers, or a header form naming `authorization`)
+        // are refused: only one value could be sent, and neither caller asked for the other's
+        // (row L's review, finding 4 — both used to be counted, one sent).
+        for (k, a) in attach.iter().enumerate() {
+            if attach[k + 1..].iter().any(|b| b.header == a.header) {
+                return Err(CredentialError::ConflictingBindings { header: a.header.as_str().to_string() });
             }
         }
         for b in attach {

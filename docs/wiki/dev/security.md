@@ -381,7 +381,11 @@ their broker IS the crown jewel). Two opt-in controls:
   hop afresh: off the binding, no value and no placeholder. Elsewhere a placeholder request is refused before it is
   sent. Users: `[[serve]].credential`, `OpenAiBackend::with_credentials`. Guarantee `egress.credentials`. The places a
   secret enters a node, and which use a binding, are tabled in `operations/crown-jewel.md`. Not covered: placeholders
-  in a query or body, ports, zeroisation, a `value_env` variable's presence in the process environment.
+  in a query or body, zeroisation, a `value_env` variable's presence in the process environment, a proxy the gate's
+  client honours, and an `[[activation]]` command (a separate process with no path to the gate). A binding may name a
+  `port`, and a loopback one must (each loopback port is a different process; pinning to the first use was rejected as
+  order-dependent); only 301/302/303/307/308 are followed; two bindings on one header are refused; a refusal names a
+  binding by index and name, never a field's contents (a value pasted into the wrong field was being echoed).
 - **Crypto-shred erasure (WS-F, `tls`)** — `SubjectKeyRegistry` (`mycelium-core/src/erasure.rs`):
   per-subject DEK envelope encryption; GDPR erase = destroy the DEK → all ciphertext dead. The
   per-subject layer *above* the KV value, composing with `DataAtRestCipher`. Physical deletion isn't

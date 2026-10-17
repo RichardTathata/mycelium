@@ -113,6 +113,12 @@ impl OpenAiBackend {
     /// with a placeholder for `api_key` — `credential_placeholder("openai")` — and the gate attaches
     /// the binding's value, at its host only. The gate follows redirects under its own (the node's)
     /// egress policy. What `[[serve]]`'s `credential` does.
+    ///
+    /// **Which policy applies** (row L's review, finding 10): a request carrying a placeholder is sent
+    /// by the gate, on the gate's client, under the egress policy the gate was built with — the node's,
+    /// as `start()` read it. This backend's own [`with_egress`](Self::with_egress) client is not used on
+    /// that path; it still sends a request with a literal key. Give both the node's policy (as
+    /// `[[serve]]` does) and they are one policy.
     pub fn with_credentials(mut self, gate: std::sync::Arc<crate::agent::egress_credentials::EgressCredentials>) -> Self {
         self.credentials = Some(gate);
         self

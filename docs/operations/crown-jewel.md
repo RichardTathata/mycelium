@@ -126,6 +126,7 @@ on a request to the host the binding names:
 [[egress_credentials]]
 name        = "openai"
 host        = "api.openai.com"        # exact host — never a suffix
+# port      = 443                     # optional: the one port (the scheme's default counts); REQUIRED for localhost / 127.x / ::1
 path_prefix = "/v1"                   # optional; /v10 and /v1/../admin are outside it
 form        = "bearer"                # or "header" + header = "x-api-key", or "basic" + username = "svc"
 value_file  = "/run/secrets/openai"   # or value_env = "OPENAI_API_KEY"; read once, at start()
@@ -133,16 +134,21 @@ value_file  = "/run/secrets/openai"   # or value_env = "OPENAI_API_KEY"; read on
 ```
 
 Env form, which replaces the TOML's bindings: `GOSSIP_EGRESS_CREDENTIALS="openai|api.openai.com/v1|bearer|file:/run/secrets/openai"`
-(`name|host[/prefix]|bearer, header:<name> or basic:<user>|env:<VAR> or file:<path>[|plaintext]`, entries split by `;`).
+(`name|host[:port][/prefix]|bearer, header:<name> or basic:<user>|env:<VAR> or file:<path>[|plaintext]`, entries split by `;`).
+A refusal names a binding by its index and name and the field that failed — never a field's contents, so a value
+pasted into the wrong field does not reach the start-time log.
 
 What the gate does, per request:
 
 - **attaches** the value in its form, replacing the header that carried the placeholder, when the URL's host
-  is the bound host (case-insensitive), its normalised path is under `path_prefix`, and the scheme is https
-  (or http to `localhost` / a loopback address, or `allow_plaintext`);
-- **refuses** the request — before a byte is sent — anywhere else, and when a placeholder names no binding;
-- follows redirects itself, through the allow-list's per-hop verdict (≤ 5, never https → http), and **drops**
-  the credential on a hop the binding does not authorise (no value, no placeholder);
+  is the bound host (case-insensitive), its port is `port` (when set), its normalised path is under `path_prefix`,
+  and the scheme is https (or http to `localhost` / a loopback address, or `allow_plaintext`). A loopback binding
+  must name its port: each port on loopback is a different local process;
+- **refuses** the request — before a byte is sent — anywhere else, when a placeholder names no binding, and when two
+  bindings would set the same header;
+- follows redirects itself — 301, 302, 303, 307 and 308 only; any other 3xx is handed back as it arrived — through the
+  allow-list's per-hop verdict (≤ 5, never https → http), and **drops** the credential on a hop the binding does not
+  authorise, another port on the same host included (no value, no placeholder);
 - **counts** each binding's attachments, refusals and redirect drops (`EgressCredentials::uses()`; under
   `metrics`, `mycelium_egress_credential_total{binding, event}`) — the label is the binding's name.
 
@@ -151,8 +157,9 @@ line or trace field carries it, and nothing writes it to the evidence journal. G
 `egress.credentials` reports `enforced` when a binding is configured.
 
 Who sends through the gate: `[[serve]]`'s `credential = "<binding>"` (a stem refuses to start if the node has
-no such binding), `OpenAiBackend::new(url, credential_placeholder("openai"), model).with_credentials(gate)`,
-and your own code via `agent.egress_credentials()` → `EgressCredentials::send(request)`.
+no such binding, or if the binding does not authorise the section's endpoint), `OpenAiBackend::new(url, credential_placeholder("openai"), model).with_credentials(gate)`,
+and your own code via `agent.egress_credentials()` → `EgressCredentials::send(request)`. A placeholder request goes
+out under the egress policy the gate captured at `start()` — the node's — not a backend's own `with_egress` policy.
 
 **The places a secret is read into a node, and which use a binding:**
 
@@ -167,11 +174,12 @@ and your own code via `agent.egress_credentials()` → `EgressCredentials::send(
 | Wiki git mirror push | git's own credential helpers | unchanged — git's process, not an HTTP client of the node's |
 | OIDC | none sent (JWKS and discovery are public) | n/a |
 | Artifact signing keys (`mycelium-artifact`) | `--key` (a file) or `--key-env` (a variable) | unchanged — used to sign locally, never sent |
-| An `[[activation]]` command | inherits the stem's whole environment | unchanged here — a `value_env` variable stays in that environment, so prefer `value_file`; confining the command is row M |
+| An `[[activation]]` command | inherits the stem's whole environment | unchanged here, **not built** — the command is a separate process with no path to the gate, so a secret it needs is in its environment or a file it reads; a `value_env` variable stays in that environment, so prefer `value_file`; confining the command is row M |
 | Gateway tokens, mTLS keys | inbound credentials, not egress | n/a |
 
-**Not covered:** a placeholder in a query string or a request body (sent as written — an opaque name); a
-binding pinned to a port (the host is compared, not the port); zeroising the value when the gate is dropped.
+**Not covered:** a placeholder in a query string or a request body (sent as written — an opaque name); zeroising the
+value when the gate is dropped; the gate's client honours `HTTP_PROXY` / `HTTPS_PROXY`, so a configured proxy sees a
+plaintext or loopback request's header (an https request's is inside the tunnel).
 
 ---
 

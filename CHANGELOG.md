@@ -89,9 +89,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   allow-list's per-hop verdict and **drops** the credential on a hop that leaves the binding, and counts each binding's
   attachments, refusals and drops (`uses()`; `mycelium_egress_credential_total{binding, event}` under `metrics`). The
   value is held as a sensitive header value inside the gate: no `Debug`, `Display`, error, log line or trace field
-  carries it. Moved behind a binding: `[[serve]]`'s new `credential = "<binding>"` (a stem refuses to start if the node
+  carries it, and a refusal names a binding by index and name, never a field's contents (so a value pasted into the
+  wrong field is not logged). A binding may name a `port`, and a loopback binding must; only 301, 302, 303, 307 and 308
+  are followed; two bindings that would set one header are refused. Moved behind a binding: `[[serve]]`'s new `credential = "<binding>"` (a stem refuses to start if the node
   lacks it) and `OpenAiBackend::with_credentials` (a placeholder `api_key` without a gate is refused, never sent).
-  Guarantee `egress.credentials`. Every other place a secret enters a node is listed in
+  A `[[serve]]` whose endpoint its binding does not authorise refuses the stem's start. A placeholder request goes out
+  under the node's egress policy as the gate captured it at `start()`, not a backend's own `with_egress`. Guarantee
+  `egress.credentials`. **Not built:** the row's activation-command half — an `[[activation]]` command is a separate
+  process with no path to the gate and inherits the stem's environment. Every other place a secret enters a node is listed in
   `docs/operations/crown-jewel.md` § Credentials attached at egress and stated unchanged, with the reason. Found on the
   way: a `{:?}` of a unit file printed a `[[serve]]`'s literal `api_key` (the derived `Debug`) — now redacted;
   `OpenAiBackend` gained a `Debug` that redacts a literal key. Tests: `egress_credentials_tests.rs` (seven seen failing
@@ -101,10 +106,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `a_serve_naming_a_binding_the_node_lacks_refuses_the_start` (seen failing first without the check),
   `a_served_skill_sends_its_binding_value_which_the_stem_never_held` (seen failing first without the gate handed to the
   backend), `a_credential_binding_refuses_the_start_and_reads_not_in_build` (a gateway-free build; seen failing first
-  without the refusal), and the core binding tests. Additive: no binding configured, nothing changes. **Upgrade notes:** `GossipConfig` gained
-  `egress_credentials`, `OpenAiBackend` gained `credentials` and `ServeDecl` gained `credential` (an exhaustive struct
-  literal breaks; `..Default::default()` is unaffected). **Not covered:** a placeholder in a query string or a body;
-  a port in a binding; zeroising the value; a `value_env` variable stays in the process environment, which an
+  without the refusal), and the core binding tests; the review's findings each with a test seen failing first
+  (`a_300_is_not_followed`, `two_bindings_that_would_set_one_header_are_refused`,
+  `a_redirect_to_another_port_on_the_bound_host_drops_the_credential`, `a_secret_in_a_source_field_is_not_echoed_by_a_refusal`,
+  `a_refusal_never_echoes_a_field_that_could_hold_the_value`, `a_serve_whose_endpoint_its_binding_does_not_authorise_refuses_the_start`).
+  Additive: no binding configured, nothing changes. **Upgrade notes** (`docs/guide/deprecations.md` §48): `GossipConfig`
+  gained `egress_credentials`, `OpenAiBackend` gained `credentials` and `ServeDecl` gained `credential` (an exhaustive
+  struct literal breaks; `..Default::default()` is unaffected); a `ServeDecl`'s `Debug` redacts `api_key`; zero-gaps
+  Z2's refusal for an unset `api_key_env` variable names the `[[serve]]` section and the field, no longer the variable.
+  **Not covered:** a placeholder in a query string or a body; a proxy the gate's client honours (`HTTP(S)_PROXY`) sees
+  a plaintext or loopback request's header; zeroising the value; a `value_env` variable stays in the process environment, which an
   `[[activation]]` command inherits (`value_file` keeps it out of every environment; confining the command is row M).
 
 ### Added
