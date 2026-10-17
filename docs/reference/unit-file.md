@@ -27,7 +27,7 @@ TOML needs one key per line. `ns = "a"; name = "b"` is not valid TOML.
 | `[[mandate]]`, `[[rule]]` | the authority overlay | logged, nothing to do at runtime | accepted, reported in `not_enforced` |
 | `[hosts]` | who could host an artifact | runs a provisioner | refused, **422** |
 | `[[presence]]` | `presence unhostable`, `presence bands overlap` | a standing want (needs `[hosts]`) | refused, **422** |
-| `[[activation]]` | not read | run after a blob is placed | refused, **422** |
+| `[[activation]]` | not read | run after a blob is placed, confined when it names `[activation.confine]` | refused, **422** |
 | `[[serve]]` | counted as an offer | registers a routable skill (needs feature `llm`) | refused, **422** |
 
 An SDK agent hosts nothing, so the four hosting sections are a stem's. The route's guide is
@@ -272,10 +272,89 @@ probe        = ["sh", "/repo/examples/units/model_deploy/ollama-probe.sh", "coop
 timeout_secs = 300
 ```
 
-**Security.** An activation command is the operator's. The stem runs it with its own privileges,
-from a file someone reviewed. It is **not a sandbox**: there is no allowlist and no confinement.
-The WASM sandbox covers components, not these commands. Review unit files as code and run the
-stem as a least-privileged user.
+**Security.** An activation command is the operator's, from a file someone reviewed. **By default it is
+unconfined**: the stem runs it, and its probe, with its own privileges — the WASM sandbox covers components,
+not these commands. Name an [`[activation.confine]`](#activationconfine) profile to run both under OS
+confinement instead. Either way, review unit files as code and run the stem as a least-privileged user:
+confinement narrows what a command can reach; it does not make an untrusted command safe to run.
+
+### `[activation.confine]`
+
+The OS confinement an activation's `command` and `probe` run under (post-360 row M). With the table, the
+stem runs both under the profile **or refuses the activation by name and runs nothing** — never unconfined.
+An empty table is the strictest profile: the placement directory read-only, no network.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `backend` | string | `"auto"` | `auto` (this platform's own), `seatbelt` (macOS) or `landlock` (Linux). A backend this platform does not have refuses the activation. |
+| `read` | array of strings | empty | Paths the command may read, beyond the system set and the placement directory. |
+| `write` | array of strings | empty | Paths the command may read and write. |
+| `connect` | array of strings | empty | TCP destinations, `localhost:<port>` or `*:<port>`. Empty: no network at all. |
+
+A path is absolute, or starts with `{dir}` (the placement root — see below) or `{path}` (the placed file); no
+other placeholder, and no `..` segment. Each must exist when the activation runs, or the activation is
+refused naming it. A `connect` entry naming a hostname or an address is refused at load: neither backend
+can limit a connection to one. An unknown key in the table, in the `[[activation]]` itself, or at the top
+level of the file is refused at load — so neither `[activation.confined]` nor `[activations.confine]` can
+load as *no profile* (`deprecations.md` §49).
+
+What each backend allows, besides the profile's own paths and ports:
+
+| | Seatbelt (macOS) | Landlock + seccomp (Linux) |
+|---|---|---|
+| How | `/usr/bin/sandbox-exec` with a generated profile (`deny default`); paths passed as `-D` parameters | a Landlock ruleset and a seccomp filter on a dedicated thread, inherited by the command |
+| Always readable — exactly these | `/usr/bin`, `/usr/sbin`, `/usr/lib`, `/usr/libexec`, `/usr/share`, `/bin`, `/sbin`, `/System`, `/private/var/select`, `/private/var/db/timezone`, `/private/etc/hosts`, `/private/etc/resolv.conf`, `/private/var/run/resolv.conf`, `/private/etc/passwd`, `/private/etc/group`, `/private/etc/localtime`, `/private/etc/ssl/cert.pem`, `/private/etc/ssl/certs`, `/private/etc/ssl/openssl.cnf`, `/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom` | `/usr/bin`, `/usr/sbin`, `/usr/lib`, `/usr/lib32`, `/usr/lib64`, `/usr/libx32`, `/usr/libexec`, `/usr/share`, `/bin`, `/sbin`, `/lib`, `/lib32`, `/lib64`, `/libx32`, `/etc/ld.so.cache`, `/etc/ld.so.conf`, `/etc/ld.so.conf.d`, `/etc/hosts`, `/etc/resolv.conf`, `/etc/host.conf`, `/etc/gai.conf`, `/etc/nsswitch.conf`, `/etc/passwd`, `/etc/group`, `/etc/localtime`, `/etc/alternatives`, `/etc/ssl/certs`, `/etc/ssl/openssl.cnf`, `/etc/ca-certificates`, and the same devices (each skipped where absent) |
+| Always writable | `/dev/null` | `/dev/null` |
+| `localhost:<port>` | held | **refused** — Landlock limits a port, not an address; write `*:<port>` |
+| `*:<port>` | that port at any address, and the resolver's socket, so a name resolves | that port at any address; no DNS (UDP is refused), so a name resolves only through `/etc/hosts` |
+| Other sockets | denied (`deny default`), listening included | every socket but an IP stream over TCP refused, and every socket without `connect`; no `listen`, no TCP Fast Open (`MSG_FASTOPEN` on `sendto`/`sendmsg`/`sendmmsg`, the `TCP_FASTOPEN*` options), no `io_uring`; on x86_64 no x32 syscall |
+| Needs | `sandbox-exec` | Landlock ABI 3 (Linux 6.2); ABI 4 (Linux 6.7) with `connect`; x86_64 or aarch64 |
+
+Nothing else in `/etc` (or `/private/etc`), and nothing under `/usr/local`, is readable: the node's own
+key, certificates and configuration stay out of reach unless a path names them.
+
+`{dir}` is the **placement root** — the one directory every blob this stem places lands in, by content
+address — not a directory of the artifact's own. `write = ["{dir}"]` therefore lets the command rewrite
+every other placed artifact; write to a subdirectory you create for it (`{dir}/<name>`) or to a path
+outside. A declared path that is a symlink, or reaches its target through a symlink below the placement
+root or below a write path (which a confined command could have planted), is refused. Each path is
+resolved the first time the activation runs and kept — on Linux held open, so the rules are made from those
+descriptors, not re-resolved by name. Before each run, and each re-probe, the stem checks that every kept
+path still names the same file (device and inode, not a symlink). A path removed and recreated — a cleaned
+scratch directory, a re-placed blob — is resolved again, with every check above; a re-probe that finds one
+fails, so the install is withdrawn and its reinstall resolves afresh. Profiles of placed files that are
+gone are forgotten at the next resolution, and a stem keeps at most 1024.
+
+Neither limits reading a path's metadata (`stat`), CPU or memory, and the command inherits the stem's
+environment (row L's credential bindings are the way to keep a secret out of it). On Linux below Landlock ABI 6, signals to
+the stem user's other processes are not limited either. `/opt/homebrew` and `/Applications` are not in the
+macOS set: an Ollama installed as an app needs `read = ["/Applications/Ollama.app"]` and its
+`command` naming `/Applications/Ollama.app/Contents/Resources/ollama` (the `/usr/local/bin` link is not
+readable).
+
+The profile is resolved once, when the activation runs, and its re-probes reuse it; the unit file is read
+at start, so every limit holds until the stem restarts. A network allow-list that changes live is **not
+built**. Each refusal is recorded as `prov.activation`'s `confinement_unavailable` (the platform cannot apply
+the profile) or `confinement_failed` (it could, and this run could not — a declared path missing).
+
+The stem says which applies. At start it logs each activation as confined (and by which backend),
+unconfined, or refused, and `Stem::activation_confinement` returns the same. `mycelium-stem` registers the
+guarantee `stem.activation_confined` before it starts, so the guarantee report (`GET /gateway/guarantees`)
+reads `enforced` when every activation is confined here, `not_configured` naming *unconfined* or *refused*
+otherwise, and `not_applicable` with no `[[activation]]`.
+
+```toml
+# A model runtime on macOS: read the placed weights, reach the local Ollama server, nothing else.
+[[activation]]
+ns   = "llm"
+name = "storyteller"
+resolve_artifact_refs = true
+command = ["/Applications/Ollama.app/Contents/Resources/ollama", "create", "coop-storyteller", "-f", "{rendered}"]
+probe   = ["/Applications/Ollama.app/Contents/Resources/ollama", "show", "coop-storyteller"]
+  [activation.confine]
+  read    = ["/Applications/Ollama.app"]
+  connect = ["localhost:11434"]
+```
 
 ## `[[serve]]`
 

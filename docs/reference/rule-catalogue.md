@@ -15,7 +15,7 @@ Schema `mycelium.rules/1` · 28 rules.
 | [`kv.expiry`](#kvexpiry) | Propagation | catalogue only | An advertisement its writer stopped refreshing leaves the view after its TTL; a stale view is possible in between. |
 | [`kv.propagation`](#kvpropagation) | Propagation | catalogue only | Every update converges by last-writer-wins on the HLC; propagation is unconditional and never taught a higher-layer law (detection, not prevention). |
 | [`membership.governed`](#membershipgoverned) | Response | instrumented | This node rolls to join or leave a governed group against the intent's band — after spacing and settling, and (under an enforcing profile) only on a confident view. |
-| [`prov.activation`](#provactivation) | Response | instrumented | After placement the declared command hands the blob to its local runtime; a failure is an install failure at stage `activation`, retried next round. |
+| [`prov.activation`](#provactivation) | Response | instrumented | After placement the declared command hands the blob to its local runtime — confined when the unit names a profile, which a node that cannot apply it refuses by name rather than run unconfined; a failure is an install failure at stage `activation`, retried next round. |
 | [`prov.advertise`](#provadvertise) | Propagation | catalogue only | A completed install advertises its capability to the mesh; the advertisement's lifetime is the install's. |
 | [`prov.demand_response`](#provdemand_response) | Response | instrumented | A requirement with demanding nodes and no provider, as this node sees it, makes this node a candidate installer; an observed unmet requirement is not an instruction to install. |
 | [`prov.eligible`](#proveligible) | Response | instrumented | This node hosts the entry's kind, has install budget left, and has memory and disk headroom for it. The check has side effects (counters) and is never re-evaluated for a record. |
@@ -197,9 +197,9 @@ This node rolls to join or leave a governed group against the intent's band — 
 
 ## `prov.activation`
 
-rev 1 · `mycelium-wasm-host::activation` · Response · trace: instrumented
+rev 2 · `mycelium-wasm-host::activation` · Response · trace: instrumented
 
-After placement the declared command hands the blob to its local runtime; a failure is an install failure at stage `activation`, retried next round.
+After placement the declared command hands the blob to its local runtime — confined when the unit names a profile, which a node that cannot apply it refuses by name rather than run unconfined; a failure is an install failure at stage `activation`, retried next round.
 
 - **Trigger:** a placed blob whose capability a `[[activation]]` names
 - **Reads:**
@@ -207,13 +207,13 @@ After placement the declared command hands the blob to its local runtime; a fail
   - the placed path, and `artifact:<hex>` references rendered to placed paths — scope: this node; freshness: local
 - **Outcomes:**
   - Action: `activated`
-  - Refusal: `command_failed`, `command_timed_out`, `reference_not_placed_yet`, `render_failed`
+  - Refusal: `command_failed`, `command_timed_out`, `reference_not_placed_yet`, `render_failed`, `confinement_unavailable`, `confinement_failed`
   - NoAction: `no_declaration`
-- **Effects:** the operator's command, run with the stem's privileges — not a sandbox
+- **Effects:** the operator's command — under its `[activation.confine]` profile (Seatbelt, or Landlock with seccomp) when the unit names one, else with the stem's privileges
 - **Guards:** Other
 - **May trigger:** [`prov.probe`](#provprobe)
 - **Depends on:** [`prov.install`](#provinstall)
-- **Code:** `activation::hook` · **Docs:** docs/reference/unit-file.md · **Tests:** `a_declared_activation_runs_after_placement_and_its_probe_gates_the_capability`, `an_activation_resolves_artifact_references_to_placed_paths`, `a_verbose_command_that_succeeds_is_not_reported_as_a_timeout`
+- **Code:** `activation::hook` · **Docs:** docs/reference/unit-file.md · **Tests:** `a_declared_activation_runs_after_placement_and_its_probe_gates_the_capability`, `an_activation_resolves_artifact_references_to_placed_paths`, `a_verbose_command_that_succeeds_is_not_reported_as_a_timeout`, `a_hung_activation_is_recorded_as_a_timeout`, `a_profile_the_platform_cannot_apply_refuses_the_activation_by_name`, `a_confined_activation_reads_and_writes_only_what_its_profile_names`, `a_confined_activation_reaches_only_its_declared_tcp_ports`, `a_confined_activation_runs_in_a_stem_and_the_stem_says_which_applies`
 
 ## `prov.advertise`
 

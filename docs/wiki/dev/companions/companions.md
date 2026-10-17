@@ -81,7 +81,9 @@ via wasm-host).
   (F1/D19 — `FuelPolicy`; a trap poisons a wasmtime instance, so the serve loop replaces it),
   proposed → shadow → accept (F2/D20 — manifest v2, the `{name}.shadow` lane), the gateway publish door
   (A3, `artifact_router`, feature `gateway`), declared blob activation (D21, `[[activation]]`,
-  `activation.rs`, re-probed off the provisioner's lock) and declared model serving (D22,
+  `activation.rs`, re-probed off the provisioner's lock; confined under an `[activation.confine]` profile
+  or refused, never run unconfined — post-360 row M, `activation_sandbox.rs`,
+  [security](../security.md#the-wasm-hosts-doors-2026-10-10-pr-586)) and declared model serving (D22,
   `[[serve]]`, `serve.rs`, feature `llm`) — each with its dated `.log/` entry, and the
   stem-examples suite that runs every artifact-shaped demo both ways
   ([testing](../testing/testing.md#the-stem-examples-suite-the-same-demos-as-stem-nodes-x2-2026-09-30--10-01));

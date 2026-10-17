@@ -302,6 +302,9 @@ jobs:
     # MYCELIUM_S3_TEST_URL; without the variable the same test exercises the adapter over file://
     # and says so.
     env:
+      # Post-360 row M: the confined-activation tests show Landlock and seccomp on this runner; with the
+      # variable set, a runner that cannot confine fails them instead of skipping green.
+      MYCELIUM_CONFINE_LIVE_REQUIRED: "1"
       MYCELIUM_S3_TEST_URL: s3://mycelium-test/library
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
@@ -349,6 +352,20 @@ jobs:
       # The stem node binary (design-time-tooling.md §13): opt-in feature, so check it explicitly.
       - run: cargo check -p mycelium-wasm-host --bin mycelium-stem --bin mycelium-artifact --features stem
       - run: cargo clippy -p mycelium-wasm-host --all-targets -- -D warnings
+
+  wasm-host-macos:
+    # Post-360 row M (#636's review finding 8): the confined-activation tests on Seatbelt. The Linux job
+    # shows Landlock and seccomp; this one shows sandbox-exec. Name-filtered to the confinement tests (the
+    # rest of the crate runs on Linux), with the guard set so a runner that cannot confine fails them.
+    name: WASM host confinement (macOS Seatbelt)
+    runs-on: macos-latest
+    env:
+      MYCELIUM_CONFINE_LIVE_REQUIRED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p mycelium-wasm-host --lib -- activation confined
 
   agentfacts:
     # WS-F M16-A companion crate (self-certified AgentFacts emission). Public-API

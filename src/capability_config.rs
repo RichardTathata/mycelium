@@ -107,6 +107,8 @@
 //! command = ["ollama", "create", "storyteller", "-f", "{rendered}"]
 //! probe   = ["ollama", "show", "storyteller"]
 //! resolve_artifact_refs = true           # `FROM artifact:<hex>` → the placed path
+//!   [activation.confine]                 # run it confined, or refuse it — never unconfined (row M)
+//!   connect = ["localhost:11434"]        # TCP only to the local runtime; no other network
 //!
 //! [[serve]]                              # a routable skill while a local install is live (X2)
 //! name     = "storyteller"               # ns defaults to "llm"
@@ -135,7 +137,9 @@
 //! or `operator_publishers` that are not all in `trusted_publishers`; an `[[activation]]` with an
 //! empty `command`, `timeout_secs = 0`, a placeholder outside `{path} {dir} {artifact} {ns} {name}
 //! {rendered}`, `{rendered}` without `resolve_artifact_refs = true`, or in a unit whose `[hosts]`
-//! does not name the `blob` kind; and a `[[serve]]` with an empty `endpoint` or `model`, or whose
+//! does not name the `blob` kind; an `[activation.confine]` with an unknown key or backend, a path that
+//! is relative, `..`-bearing or starts with a placeholder other than `{dir}`/`{path}`, or a `connect`
+//! entry that is not `localhost:<port>` / `*:<port>`; and a `[[serve]]` with an empty `endpoint` or `model`, or whose
 //! `while_live` names the skill itself.
 //!
 //! Who reads the file at runtime: a stem (`mycelium-stem --units <file>`, a binary of
@@ -168,6 +172,10 @@ use std::{
 /// Load with [`NodeCapabilityConfig::load_from_file`], then drive the probe
 /// loop with [`run_capability_probes`].
 #[derive(Debug, Default, Clone, Deserialize)]
+// Review follow-up 3 (#636): an unknown top-level key or section is refused by name — a misspelt
+// `[activations.confine]` after an `[[activation]]` would otherwise be dropped and the activation run
+// unconfined; a misspelt `[[capabilty]]` would declare nothing.
+#[serde(deny_unknown_fields)]
 pub struct NodeCapabilityConfig {
     /// The issuer-qualified principal this unit presents at a gateway — the one key a runtime
     /// observation also carries, and so the join between a declaration and what the fleet later
@@ -272,7 +280,11 @@ fn default_serve_ns() -> String {
 /// `artifact:<64 hex>` reference is replaced by that artifact's placed path (a Modelfile's
 /// `FROM artifact:…`). A reference not yet placed fails the activation, and the next round
 /// retries: ordering without a dependency resolver, as the model demo does in code.
+///
+/// Unknown keys are refused (review finding 3, #636): a misspelt `[activation.confined]` would otherwise
+/// load as no profile at all, and the activation run unconfined without a word.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActivationDecl {
     pub ns:   String,
     pub name: String,
@@ -283,6 +295,111 @@ pub struct ActivationDecl {
     pub timeout_secs: Option<u64>,
     #[serde(default)]
     pub resolve_artifact_refs: bool,
+    /// The OS confinement `command` and `probe` run under (post-360 row M). Absent — the default —
+    /// runs them **unconfined**, with the stem's own privileges; present, a stem runs them under the
+    /// profile or refuses the activation by name, never unconfined. An empty table is the strictest
+    /// profile: the placement directory read-only, no network.
+    #[serde(default)]
+    pub confine: Option<ConfineDecl>,
+}
+
+/// An `[activation.confine]` table — the confinement profile an activation's commands run under
+/// (post-360 row M). Beyond a fixed system read set (the platform's executables and libraries, named in
+/// `docs/reference/unit-file.md`) and the placement directory, which is readable, a confined command
+/// may read `read`, read and write `write`, and open TCP connections to `connect` — nothing else.
+/// Fixed for the stem's life: the unit file is read once, at start.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfineDecl {
+    /// Which mechanism applies it; `auto` (the default) is the platform's own.
+    #[serde(default)]
+    pub backend: ConfineBackend,
+    /// Paths readable beyond the system set and the placement directory. Absolute, or starting with
+    /// `{dir}` or `{path}`. Each must exist when the activation runs.
+    #[serde(default)]
+    pub read: Vec<String>,
+    /// Paths readable and writable. Same form as `read`.
+    #[serde(default)]
+    pub write: Vec<String>,
+    /// TCP destinations, `localhost:<port>` or `*:<port>`. Empty: no network at all. A hostname or an
+    /// address is refused at load — neither backend can limit a connection to one.
+    #[serde(default)]
+    pub connect: Vec<String>,
+}
+
+/// The mechanism an `[activation.confine]` profile is applied with.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ConfineBackend {
+    /// The platform's own: Seatbelt on macOS, Landlock with seccomp on Linux, none elsewhere (refused).
+    #[default]
+    Auto,
+    /// macOS `sandbox-exec` with a generated Seatbelt profile.
+    Seatbelt,
+    /// Linux Landlock (filesystem, TCP ports) with a seccomp filter (socket families and types).
+    Landlock,
+}
+
+impl ConfineBackend {
+    /// The name a refusal or a report uses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConfineBackend::Auto => "auto",
+            ConfineBackend::Seatbelt => "seatbelt",
+            ConfineBackend::Landlock => "landlock",
+        }
+    }
+}
+
+/// The placeholders an `[activation.confine]` path may start with — the two that name paths.
+pub const CONFINE_PATH_PLACEHOLDERS: &[&str] = &["dir", "path"];
+
+/// One `connect` entry, parsed: `(host, port)` with host `localhost` or `*`.
+pub fn parse_confine_connect(entry: &str) -> Result<(&str, u16), String> {
+    let Some((host, port)) = entry.rsplit_once(':') else {
+        return Err(format!("connect {entry:?} is not host:port (`localhost:<port>` or `*:<port>`)"));
+    };
+    if host != "localhost" && host != "*" {
+        return Err(format!(
+            "connect {entry:?} names {host:?}: a hostname or an address cannot be held by either backend \
+             (Seatbelt and Landlock limit a connection by port, Seatbelt also to localhost) — write `localhost:<port>` or `*:<port>`"
+        ));
+    }
+    match port.parse::<u16>() {
+        Ok(p) if p > 0 => Ok((host, p)),
+        _ => Err(format!("connect {entry:?}: the port must be 1–65535")),
+    }
+}
+
+impl ConfineDecl {
+    /// Refuse a profile no backend can hold, naming the entry.
+    fn check(&self) -> Result<(), String> {
+        for p in self.read.iter().chain(&self.write) {
+            let rest = if let Some(r) = p.strip_prefix('{') {
+                let Some((name, rest)) = r.split_once('}') else {
+                    return Err(format!("path {p:?}: an unclosed placeholder"));
+                };
+                if !CONFINE_PATH_PLACEHOLDERS.contains(&name) {
+                    return Err(format!("path {p:?}: {{{name}}} is not a path (a path may start with {{dir}} or {{path}})"));
+                }
+                rest
+            } else if p.starts_with('/') {
+                p.as_str()
+            } else {
+                return Err(format!("path {p:?} is not absolute (start it with `/`, {{dir}} or {{path}})"));
+            };
+            if rest.contains('{') {
+                return Err(format!("path {p:?}: a placeholder may only start a path"));
+            }
+            if rest.split('/').any(|seg| seg == "..") {
+                return Err(format!("path {p:?}: a `..` segment — name the directory itself"));
+            }
+        }
+        for c in &self.connect {
+            parse_confine_connect(c)?;
+        }
+        Ok(())
+    }
 }
 
 /// The placeholders an `[[activation]]` may use.
@@ -809,6 +926,9 @@ impl NodeCapabilityConfig {
             }
             if !self.hosts.as_ref().is_some_and(|h| h.kinds.iter().any(|k| k == "blob")) {
                 return Err(invalid("activation", format!("{at}: activations are for placed blobs, and this unit's [hosts] does not name the blob kind")));
+            }
+            if let Some(c) = &a.confine {
+                c.check().map_err(|e| invalid("activation.confine", format!("{at}: {e}")))?;
             }
         }
         for (i, sv) in self.serves.iter().enumerate() {
@@ -1356,5 +1476,75 @@ max_providers = 4
         // Both at once name two policies.
         let e = refused("[hosts]\nkinds = [\"wasm-component\"]\naccept_unsigned = true\ntrusted_publishers = [\"ed25519:aa\"]\n");
         assert!(e.contains("hosts.accept_unsigned"), "{e}");
+    }
+
+    /// Post-360 row M: an `[[activation]]` may name a confinement profile — paths beyond the placement
+    /// directory, read-only and read-write, and the TCP destinations it may reach (none when absent) — and
+    /// a profile that says something no backend can hold is refused at load, by name, rather than
+    /// discovered at the first activation or, worse, applied loosely. Seen failing first: the table was
+    /// an unknown key the loader ignored, so every case below validated and the profile vanished.
+    #[test]
+    fn an_activation_confinement_profile_parses_and_a_bad_one_is_refused_by_name() {
+        let head = "[hosts]\nkinds = [\"blob\"]\naccept_unsigned = true\n[[activation]]\nns = \"a\"\nname = \"b\"\ncommand = [\"run\", \"{path}\"]\n";
+        let cfg = NodeCapabilityConfig::from_toml_str(&format!(
+            "{head}[activation.confine]\nbackend = \"seatbelt\"\nread = [\"/opt/models\", \"{{path}}\"]\nwrite = [\"{{dir}}/scratch\"]\nconnect = [\"localhost:11434\", \"*:443\"]\n"
+        ))
+        .expect("a profile validates");
+        let c = cfg.activations[0].confine.as_ref().expect("the profile is kept");
+        assert_eq!(c.backend, ConfineBackend::Seatbelt);
+        assert_eq!(c.read, ["/opt/models", "{path}"]);
+        assert_eq!(c.write, ["{dir}/scratch"]);
+        assert_eq!(c.connect, ["localhost:11434", "*:443"]);
+        // An empty table is a profile too — the strictest: the placement directory read-only, no network.
+        let cfg = NodeCapabilityConfig::from_toml_str(&format!("{head}[activation.confine]\n")).unwrap();
+        let c = cfg.activations[0].confine.as_ref().expect("an empty table still confines");
+        assert_eq!((c.backend, c.read.len(), c.write.len(), c.connect.len()), (ConfineBackend::Auto, 0, 0, 0));
+        // Absent: unconfined, the stated default.
+        assert!(NodeCapabilityConfig::from_toml_str(head).unwrap().activations[0].confine.is_none());
+
+        let bad = |table: &str| refused(&format!("{head}[activation.confine]\n{table}"));
+        let e = bad("netwrok = \"none\"\n");
+        assert!(e.contains("netwrok"), "a misspelt key in a security table is refused, not ignored: {e}");
+        let e = bad("backend = \"docker\"\n");
+        assert!(e.contains("docker"), "{e}");
+        let e = bad("read = [\"models\"]\n");
+        assert!(e.contains("activation.confine") && e.contains("absolute"), "{e}");
+        let e = bad("write = [\"{artifact}/x\"]\n");
+        assert!(e.contains("activation.confine") && e.contains("{artifact}"), "{e}");
+        let e = bad("read = [\"/opt/../etc\"]\n");
+        assert!(e.contains("activation.confine") && e.contains(".."), "{e}");
+        let e = bad("connect = [\"ollama.internal:11434\"]\n");
+        assert!(e.contains("activation.confine") && e.contains("ollama.internal") && e.contains("hostname"), "{e}");
+        let e = bad("connect = [\"localhost\"]\n");
+        assert!(e.contains("activation.confine") && e.contains("host:port"), "{e}");
+        let e = bad("connect = [\"*:0\"]\n");
+        assert!(e.contains("activation.confine") && e.contains("port"), "{e}");
+        let e = bad("connect = [\"*:70000\"]\n");
+        assert!(e.contains("activation.confine") && e.contains("port"), "{e}");
+    }
+
+    #[test]
+    fn a_misspelt_top_level_section_is_refused_not_dropped() {
+        // Review follow-up 3 (#636): `[activations.confine]` after an `[[activation]]` is a new top-level
+        // table, `activations`, which the unit file dropped — the activation then ran unconfined. Seen
+        // failing first: it loaded.
+        let head = "[hosts]\nkinds = [\"blob\"]\naccept_unsigned = true\n[[activation]]\nns = \"a\"\nname = \"b\"\ncommand = [\"run\"]\n";
+        let e = refused(&format!("{head}[activations.confine]\n"));
+        assert!(e.contains("activations"), "{e}");
+        let e = refused("[[capabilty]]\nns = \"a\"\nname = \"b\"\n");
+        assert!(e.contains("capabilty"), "{e}");
+    }
+
+    /// Review finding 3 (#636): a misspelt table — `[activation.confined]`, `[activation.sandbox]` — was an
+    /// unknown key the loader dropped, so the activation ran **unconfined** with no word said. An
+    /// `[[activation]]` now refuses an unknown key by name. Seen failing first: both loaded, `confine` None.
+    #[test]
+    fn a_misspelt_confinement_table_is_refused_not_dropped() {
+        let head = "[hosts]\nkinds = [\"blob\"]\naccept_unsigned = true\n[[activation]]\nns = \"a\"\nname = \"b\"\ncommand = [\"run\"]\n";
+        for table in ["[activation.confined]\n", "[activation.sandbox]\nread = [\"/x\"]\n", "confnie = 1\n"] {
+            let e = refused(&format!("{head}{table}"));
+            let key = table.trim_start_matches("[activation.").split([']', ' ', '\n']).next().unwrap();
+            assert!(e.contains(key), "names {key:?}: {e}");
+        }
     }
 }

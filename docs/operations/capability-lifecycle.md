@@ -244,7 +244,12 @@ The stem runs `command` after placement and before the capability is advertised,
 in the background, and withdraws the install when the probe fails — the next round reinstalls and
 re-activates. A profile that references weights not yet placed fails its activation and is retried,
 which is how the profile waits for its weights without a dependency resolver. The commands are the
-operator's, run with the stem's privileges, from a reviewed file: this is not a sandbox.
+operator's, from a reviewed file, and by default run with the stem's privileges. A unit that names an
+`[activation.confine]` profile runs them under OS confinement — Seatbelt on macOS, Landlock and seccomp on
+Linux: the placement directory and declared paths, declared TCP ports or no network — and a stem that cannot
+apply the profile refuses the activation by name rather than run it unconfined
+([unit-file reference](../reference/unit-file.md#activationconfine)). The guarantee report's
+`stem.activation_confined` says which applies on the node.
 
 ## 6 · Read — what actually bound
 

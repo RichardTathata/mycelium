@@ -75,6 +75,9 @@ pub use mesh_source::{pull_artifact, serve_artifacts, MeshArtifactSource, ARTIFA
 pub use provisioner::{shadow_name, verify_published_head, InstallRights, Provisioner, SupervisionPolicy};
 pub use stem::{resolve_serve_key, Stem, StemError, StemOptions, StemSource};
 pub mod activation;
+/// Confined activations (post-360 row M): an `[[activation]]` run under its `[activation.confine]` profile.
+pub mod activation_sandbox;
+pub use activation_sandbox::{confinement_guarantee, Confinement};
 /// The provisioning rules, described — the catalogue entries the stem pilot instruments (plan I1).
 pub mod rules;
 #[cfg(feature = "llm")]

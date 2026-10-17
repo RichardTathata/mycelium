@@ -69,6 +69,7 @@ the notice.
 | 46 | the A2A card at `/.well-known/agent.json`; the pre-0.2 `/a2a` methods `tasks/send` and `tasks/sendSubscribe`, and `skillId` as a send's parameter | unreleased (post-360 row N) — served beside the replacements for one release | read the card at `/.well-known/agent-card.json`; send with `SendMessage` / `SendStreamingMessage` (or 0.3's `message/send` / `message/stream`), the skill in `metadata.skillId` and a mandate in `metadata._meta` | No — behaviour: the old path and methods answer as before; a task created by `message/send` answers `tasks/get` in 0.3's shapes; the refusal for another identity's task names `GetTask`/`CancelTask` too |
 | 47 | an exhaustive `Rule { .. }` or `ContractCase { .. }` literal; an evaluator that wraps another and forwards only `evaluate` | unreleased (post-360 row K) | build a `Rule` with `Rule::new` and its builders, and give a `ContractCase` `history: None` (or a history); a wrapping evaluator forwards `history_request` and `evaluate_with_history` | Yes for the literals (a new field); no for a wrapper — it compiles, and its limited rules decide `Indeterminate` |
 | 48 | an exhaustive struct literal of `GossipConfig`, `OpenAiBackend`, `ServeDecl` or `CredentialBinding`; a `{:?}` of a `ServeDecl` showing its `api_key`; Z2's `api_key_env` refusal naming the variable | unreleased (post-360 row L) | `..Default::default()` (or the new fields: `egress_credentials`, `credentials`, `credential`, `port`); read the section name in the refusal | **Yes** for an exhaustive literal — it will not compile; otherwise no — `Debug` prints `api_key: Some("<redacted>")`, and the refusal names the `[[serve]]` section and the field, not the variable |
+| 49 | a unit file with a key or section the loader does not know — at the top level or in an `[[activation]]` | unreleased (post-360 row M) | correct the spelling, or remove the key | No — behaviour: the file is refused at load, naming the key (`units/declare` answers 400, `wire-check` and a stem refuse it); it was silently dropped |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -1574,4 +1575,20 @@ No for the two outputs.
 - A test or a log parser matching a `ServeDecl`'s `Debug` or the `api_key_env` refusal's text: match the section name
   (`[[serve]] llm/<name>`) and `api_key_env`; the variable is whatever the unit file says.
 - A binding to `localhost` (any spelling, a trailing dot included) or to any IP literal must set `port` — new, so nothing written before it breaks.
+
+## 49. A unit file with an unknown key is refused, not read without it (unreleased, post-360 plan row M)
+
+**What changes** (#636's review, finding 3 and its follow-up). The unit-file loader dropped any key it did not know.
+A misspelt confinement table — `[activation.confined]` inside an `[[activation]]`, or `[activations.confine]` at the
+top level — therefore loaded as **no profile**, and the activation ran unconfined without a word; a misspelt
+`[[capabilty]]` declared nothing. `NodeCapabilityConfig` (the top level), `[[activation]]` and `[activation.confine]`
+now refuse an unknown key by name. The other sections keep their tolerance.
+
+Where it is refused: `NodeCapabilityConfig::from_toml_str` / `load_from_file`, so `POST /gateway/units/declare`
+(400), `mycelium wire-check` and `mycelium-stem --units`.
+
+**Will the compiler tell me?** No. It is a change in behaviour.
+
+**Migration.** Every unit file in this repository loads unchanged. A file of yours that the loader now refuses held a
+key that was never read: correct its spelling or remove it.
 

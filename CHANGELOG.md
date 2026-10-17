@@ -186,6 +186,45 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `mycelium-ts`) still send `tasks/send` and read `/.well-known/agent.json`, and move before those are removed; push
   notifications, `ListTasks`, `SubscribeToTask` and the HTTP+JSON and gRPC bindings are not served.
 
+- **An activation command can run confined** (post-360 plan row M). An `[[activation]]` ran its `command` and
+  `probe` with the stem's privileges — "not a sandbox: there is no allowlist and no confinement". A unit may now name
+  an `[activation.confine]` profile: beyond a fixed system read set, the command may read the placement directory and
+  `read`, read and write `write`, and open TCP connections only to `connect` (`localhost:<port>` or `*:<port>`; empty:
+  no network). On macOS the stem applies it with Seatbelt (`sandbox-exec`, a generated profile, paths passed as
+  parameters); on Linux with Landlock (filesystem at ABI 3, TCP ports at ABI 4) and a seccomp filter (no socket but an
+  IP stream over TCP, and none at all without `connect`; no `io_uring`), applied to a dedicated thread that spawns
+  the command. **No silent fallback:** a profile this node cannot apply — the backend absent, a kernel without
+  Landlock or below the ABI it needs, `localhost:<port>` under Landlock (which limits ports, not addresses), a declared
+  path that does not exist — refuses the activation by name and runs nothing (`confinement_unavailable`,
+  `confinement_failed` in the decision trace; `prov.activation` revision 2). The probe and every re-probe run under
+  the same profile, resolved once per activation. A profile naming a hostname or an address, a relative path, a
+  placeholder other than `{dir}`/`{path}`, a `..` segment or an unknown key is refused at load. **The default stays
+  unconfined**, and the stem says which applies — per activation at start (`Stem::activation_confinement`) and node-wide
+  in the guarantee report: `mycelium-stem` registers `stem.activation_confined` (enforced · not configured, naming
+  *unconfined* or *refused* · not applicable). Tests: `an_activation_confinement_profile_parses_and_a_bad_one_is_refused_by_name`
+  (seen failing to compile), `a_profile_the_platform_cannot_apply_refuses_the_activation_by_name` (forces the backend
+  this platform lacks, so it runs on both; seen failing first — the profile was ignored and the command ran),
+  `a_confined_activation_reads_and_writes_only_what_its_profile_names` and
+  `a_confined_activation_reaches_only_its_declared_tcp_ports` (seen failing first, unconfined; run on macOS with
+  Seatbelt and on Linux with Landlock — CI's wasm-host job sets `MYCELIUM_CONFINE_LIVE_REQUIRED`, so a runner that
+  cannot confine fails them rather than skipping green), `a_confined_activation_runs_in_a_stem_and_the_stem_says_which_applies`
+  and `the_guarantee_report_says_confined_unconfined_or_refused` (planted). **Not built:** a network allow-list that
+  changes live (every limit holds until the stem restarts), limits by hostname or address (neither backend has
+  them; an egress proxy would), an OpenShell (container) backend, resource limits; on Linux below Landlock ABI 6,
+  signals to the stem user's processes are not limited. From the PR's independent review: on Linux no TCP Fast
+  Open (`MSG_FASTOPEN` sends, the `TCP_FASTOPEN*` options), no `listen`, and on x86_64 no x32 syscall; the
+  always-readable set is exactly the executables, libraries and the few `/etc` files a loader, resolver and TLS read
+  (not `/etc`, `/private/etc` or `/usr/local` whole, so not the node's key); an `[[activation]]` refuses unknown keys,
+  and so does the unit file's top level, so neither `[activation.confined]` nor `[activations.confine]` can load as no
+  profile; a profile is resolved once and kept (on Linux held open), re-resolved when a kept path no longer names
+  the same file, and a declared path through a symlink below the placement root or a write path — compared
+  canonically — is refused; a macOS CI job
+  runs the Seatbelt tests. `landlock` 0.4.7 and `seccompiler` 0.5 are new, Linux-only
+  dependencies of `mycelium-wasm-host`. **Upgrade notes:** `ActivationDecl` gained `confine` (an exhaustive struct
+  literal breaks); a unit file with an unknown key — at the top level, in an `[[activation]]` or in its
+  `[activation.confine]` — is now refused at load (`docs/guide/deprecations.md` §49; every unit in the repository
+  loads unchanged).
+
 ### Fixed
 
 - **A fleet of `mycelium` binaries could not decide anything by consensus.** The binary never started a consensus
@@ -195,6 +234,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `consensus`, a default feature). Found while building row O's claims: a probe on three binaries answered
   `consensus timed out after 3 ballot(s)` for every write, and commits in milliseconds with the listener; the Strands
   session store's live suite runs on such a fleet in CI.
+- **A timed-out activation was recorded as `command_failed`.** The hook matched `"timed out"` against the runner's
+  error, which says `did not finish within`, so the rule catalogue's `command_timed_out` was never recorded. Found
+  while enumerating row M's doors; `a_hung_activation_is_recorded_as_a_timeout`, seen failing first.
 
 ## [2.34.0] — 2026-10-16
 

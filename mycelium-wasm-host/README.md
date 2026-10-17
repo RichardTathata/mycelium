@@ -76,7 +76,11 @@ mycelium-stem --units examples/units/model_deploy/model-host.toml --library /lib
 - **Publishing, verifying and accepting entries; object stores and their limits:**
   [`docs/operations/artifacts.md`](../docs/operations/artifacts.md).
 
-An activation command is the operator's, run with the stem's privileges. It is not a sandbox.
+An activation command is the operator's, run by default with the stem's privileges. A unit may name an
+`[activation.confine]` profile (post-360 row M): the stem then runs the command and its probe under Seatbelt
+(macOS) or Landlock and seccomp (Linux) — the placement directory and declared paths, declared TCP ports or no
+network — or refuses the activation by name, never running it unconfined (`activation_sandbox`,
+[`docs/reference/unit-file.md`](../docs/reference/unit-file.md#activationconfine)).
 
 ## What landed (history)
 
