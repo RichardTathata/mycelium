@@ -98,7 +98,8 @@ from before it.
 Resume where the session's rows have arrived, in full. Two cases look fine to the reading node and
 are not:
 
-- **Nothing of a record has arrived.** "Absent" and "not here yet" are the same to a node. A session,
+- **Nothing of a record has arrived** (for an agent, nothing but its `count` of 0, which
+  `create_agent` writes before the agent row). "Absent" and "not here yet" are the same to a node. A session,
   an agent or a swarm's or graph's state read there before any of its rows is new as far as Strands
   is concerned. Strands creates it, and the two copies compete, last writer wins.
 - **An older version has arrived.** An older count with none of the later messages reads as a
