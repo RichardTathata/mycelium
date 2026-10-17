@@ -9,6 +9,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A confined activation's re-probe no longer withdraws an install whose declared path was replaced legitimately**
+  (post-360 row M's follow-up, #PRNUM). A write directory rotated or a read file replaced by an atomic rename failed
+  the next re-probe, so the install was withdrawn and reinstalled, a flap if the path churned. The re-probe now
+  re-resolves the profile, repeating every check (symlinks, the canonical comparison, existence), and runs the probe
+  under the fresh profile. The install is withdrawn only when re-resolution refuses, and the trace names the refusal
+  (`prov.probe`'s `confinement_failed` / `confinement_unavailable`, rule revision 3). A path that changes while the
+  probe runs makes the verdict untrusted: the probe is re-resolved and run once more, and a change under both runs is
+  `confinement_changed`. A path replaced by a symlink is refused, never followed. **Upgrade note:** a probe that
+  replaces one of its own declared paths on every run now fails as `confinement_changed`.
+
 ## [2.35.0] — 2026-10-17
 
 **Two security fixes, and the post-360 plan's comparison rows.** A revoked key's certificate is now refused at the mTLS

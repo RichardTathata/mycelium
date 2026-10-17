@@ -10,7 +10,8 @@
 //! with the stem's own privileges — the same trust as the stem's command line. An activation whose
 //! unit names an `[activation.confine]` profile runs its command **and** its probe under that profile,
 //! or is refused by name and runs nothing (post-360 row M, [`crate::activation_sandbox`]). The profile
-//! is resolved once, when the activation runs, and its re-probes reuse it.
+//! is resolved once, when the activation runs, and its re-probes reuse it — re-resolved, every check
+//! repeated, when a declared path was replaced; only a refused re-resolution withdraws the install.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,8 +34,11 @@ pub struct Watched {
     entry:  InstallableEntry,
     path:   PathBuf,
     health: Arc<AtomicBool>,
-    /// The confinement the activation ran under, reused by every re-probe (row M: fixed for its life).
-    profile: Option<Profile>,
+    /// The declaration's index and the hook's resolved profiles: each re-probe takes the profile from
+    /// there, re-resolved — every check repeated — when a declared path was replaced (plan §3.6, M's
+    /// follow-up), so a legitimate replacement does not withdraw the install and a stale profile never runs.
+    index:    usize,
+    resolved: Arc<ResolvedProfiles>,
     /// The install's token and trace, so a re-probe's verdict records under the same token.
     token:  u64,
     trace:  Option<Arc<TraceCtx>>,
@@ -176,7 +180,7 @@ pub fn hook(
     // Review finding 5 (#636): each activation's profile is resolved once — per declaration and placed
     // file — and kept for the stem's life, its paths held open, re-probes included. Lock-order table row
     // 63: a leaf, held for a lookup or an insert, never while a command runs.
-    let resolved = ResolvedProfiles::with_capacity(RESOLVED_PROFILES_CAP);
+    let resolved = Arc::new(ResolvedProfiles::with_capacity(RESOLVED_PROFILES_CAP));
     move |entry, path, actx| {
         let target = format!("{}/{}", entry.provides.namespace, entry.provides.name);
         let trigger = format!("install token {}", actx.install_token);
@@ -196,7 +200,8 @@ pub fn hook(
             return Ok(None);
         };
         // Row M: the profile first — a profile this node cannot apply refuses the activation by name and
-        // nothing runs, not even the render. Resolved once, here; the re-probes reuse it.
+        // nothing runs, not even the render. Resolved once, here; the re-probes take it from the same
+        // resolved profiles, re-resolved only when a declared path was replaced.
         let profile = match &decl.confine {
             None => None,
             Some(c) => match resolved.get_or_resolve(index, c, path) {
@@ -240,7 +245,8 @@ pub fn hook(
             entry: entry.clone(),
             path: path.to_path_buf(),
             health: Arc::clone(&health),
-            profile,
+            index,
+            resolved: Arc::clone(&resolved),
             token: actx.install_token,
             trace: actx.trace.clone(),
         });
@@ -300,6 +306,60 @@ impl ResolvedProfiles {
     }
 }
 
+/// How many times a re-probe runs its probe when the profile changed under the run, before it refuses.
+const REPROBE_ATTEMPTS: usize = 2;
+
+/// One re-probe of one live activation: run its probe, set its health flag, and record a change of
+/// verdict under the install's token. Blocking (it runs the probe); `spawn_reprobe` calls it off the
+/// async workers.
+///
+/// A confined probe takes its profile from the hook's resolved profiles, which re-resolve — every check
+/// `prepare` makes, symlinks, the canonical comparison and existence included — when a declared path was
+/// removed, recreated or replaced (plan §3.6, M's follow-up): a path replaced legitimately (a rotated
+/// directory, an atomic rename) keeps the install live, and only a refused re-resolution withdraws it, the
+/// refusal named. A profile that is no longer current **after** the run ran stale for some of it (a path
+/// swapped between the currency check and the run): its verdict is not trusted, the profile is re-resolved
+/// and the probe run again, and a change under every attempt refuses (`confinement_changed`).
+fn reprobe_one(w: &Watched) -> bool {
+    let target = format!("{}/{}", w.entry.provides.namespace, w.entry.provides.name);
+    let rendered = w.decl.resolve_artifact_refs.then(|| PathBuf::from(format!("{}.rendered", w.path.display())));
+    let argv = expand(&w.decl.probe, &w.entry, &w.path, rendered.as_deref());
+    let was = w.health.load(Ordering::Relaxed);
+    // `Err((reason, why))`: the trace's reason and what the warning and the record's effect name.
+    let verdict: Result<(), (&'static str, String)> = match &w.decl.confine {
+        None => run_under(&argv, PROBE_TIMEOUT, None).map_err(|e| ("probe_failed", e)),
+        Some(c) => (|| {
+            for _ in 0..REPROBE_ATTEMPTS {
+                let profile = w.resolved.get_or_resolve(w.index, c, &w.path).map_err(|refusal| {
+                    (refusal.reason(), format!("its [activation.confine] profile cannot be re-resolved — {refusal}; refused, not run"))
+                })?;
+                let ran = run_under(&argv, PROBE_TIMEOUT, Some(&profile));
+                if profile.is_current() {
+                    return ran.map_err(|e| ("probe_failed", e));
+                }
+            }
+            Err(("confinement_changed", format!(
+                "a declared path of its [activation.confine] profile changed while each of {REPROBE_ATTEMPTS} probes ran; the verdict is not trusted"
+            )))
+        })(),
+    };
+    let ok = verdict.is_ok();
+    w.health.store(ok, Ordering::Relaxed);
+    if let Err((reason, why)) = &verdict {
+        tracing::warn!(activation = %target, reason = *reason, "activation re-probe failed — the provisioner will withdraw and reinstall: {why}");
+    }
+    // A re-probe records only a **change** of verdict (the steady state is the install's record), under
+    // the install's token.
+    if ok != was && let Some(t) = &w.trace {
+        let (outcome, reason, effect) = match &verdict {
+            Ok(()) => (OutcomeKind::Action, "healthy", "health flag set".to_string()),
+            Err((reason, why)) => (OutcomeKind::Refusal, *reason, format!("health flag cleared; the next health pass withdraws — {why}")),
+        };
+        t.record("prov.probe", format!("install token {}", w.token), outcome, reason, target, Vec::new(), Some(effect));
+    }
+    ok
+}
+
 /// Re-run every live activation's probe each `every`, flipping its flag; drop the ones whose
 /// install is gone (no holder but this list).
 pub fn spawn_reprobe(watch: WatchList, every: Duration) -> tokio::task::JoinHandle<()> {
@@ -312,33 +372,9 @@ pub fn spawn_reprobe(watch: WatchList, every: Duration) -> tokio::task::JoinHand
                 g.clone()
             };
             for w in live {
-                let ok = tokio::task::spawn_blocking(move || {
-                    let rendered = w.decl.resolve_artifact_refs.then(|| PathBuf::from(format!("{}.rendered", w.path.display())));
-                    let was = w.health.load(Ordering::Relaxed);
-                    // A profile whose pinned paths no longer name what they pinned is not run stale (review
-                    // follow-up 1, #636): the probe fails, the install is withdrawn, and the reinstall's
-                    // activation re-resolves the profile.
-                    let stale = w.profile.as_ref().is_some_and(|p| !p.is_current());
-                    if stale {
-                        tracing::warn!(activation = %format!("{}/{}", w.entry.provides.namespace, w.entry.provides.name),
-                            "a confinement profile's declared path was removed, recreated or replaced: probe failed, the install will be withdrawn and re-resolved");
-                    }
-                    let ok = !stale && run_under(&expand(&w.decl.probe, &w.entry, &w.path, rendered.as_deref()), PROBE_TIMEOUT, w.profile.as_ref()).is_ok();
-                    w.health.store(ok, Ordering::Relaxed);
-                    // A re-probe records only a **change** of verdict (the steady state is the
-                    // install's record), under the install's token.
-                    if ok != was && let Some(t) = &w.trace {
-                        let target = format!("{}/{}", w.entry.provides.namespace, w.entry.provides.name);
-                        let (outcome, reason) = if ok { (OutcomeKind::Action, "healthy") } else { (OutcomeKind::Refusal, "probe_failed") };
-                        t.record("prov.probe", format!("install token {}", w.token), outcome, reason, target, Vec::new(),
-                            Some(if ok { "health flag set".into() } else { "health flag cleared; the next health pass withdraws".into() }));
-                    }
-                    ok
-                })
-                .await
-                .unwrap_or(false);
-                if !ok {
-                    tracing::warn!("activation probe failed — the provisioner will withdraw and reinstall");
+                // `reprobe_one` warns on a failed probe, naming the activation and why.
+                if let Err(e) = tokio::task::spawn_blocking(move || reprobe_one(&w)).await {
+                    tracing::warn!("activation re-probe task failed: {e}");
                 }
             }
         }
@@ -742,6 +778,110 @@ except OSError as e:
         let got = h(&pack_entry(), &s.placed, &actx);
         assert!(got.is_ok(), "the recreated directory is the declared one: {got:?}");
         assert_eq!(std::fs::read(s.root.join("out/f")).unwrap(), b"run\n");
+    }
+
+    /// Activate through one hook with a trace, and hand back the watched entry the re-probe task keeps,
+    /// its health flag and the trace.
+    fn activate_watched(decl: ActivationDecl, path: &Path) -> (Watched, Arc<AtomicBool>, Arc<mycelium::decision::DecisionSink>) {
+        let sink = Arc::new(mycelium::decision::DecisionSink::default());
+        let actx = ActivationCtx { install_token: 13, trace: Some(Arc::new(TraceCtx { sink: Arc::clone(&sink), node: "n".into(), build: "t".into(), config_digest: "d".into(), profile: None })) };
+        let watch: WatchList = Default::default();
+        let health = hook(vec![decl], Arc::clone(&watch))(&pack_entry(), path, &actx)
+            .expect("the activation runs")
+            .expect("a declared probe yields a health flag");
+        let w = watch.lock().unwrap()[0].clone();
+        (w, health, sink)
+    }
+
+    /// The re-probe records after the activation's own (`prov.probe`, reason, effect).
+    fn probe_records(sink: &mycelium::decision::DecisionSink) -> Vec<(String, String, String)> {
+        sink.snapshot()
+            .into_iter()
+            .filter(|r| r.rule == "prov.probe" && r.reason != "healthy")
+            .map(|r| (r.rule, r.reason, r.effect.unwrap_or_default()))
+            .collect()
+    }
+
+    /// Plan §3.6, M's follow-up: a declared path replaced legitimately — a write directory rotated, a
+    /// read file replaced by an atomic rename — is re-resolved inside the re-probe, every check repeated,
+    /// and the probe runs under the fresh profile: the install stays live. Seen failing first: the
+    /// re-probe found the profile stale and failed, so the install was withdrawn and reinstalled.
+    #[test]
+    fn a_replaced_write_directory_keeps_the_install_live_across_a_reprobe() {
+        const T: &str = "a_replaced_write_directory_keeps_the_install_live_across_a_reprobe";
+        if !crate::activation_sandbox::native_backend_or_skip(T) {
+            return;
+        }
+        let s = Scene::new("rotate");
+        let (out, model) = (s.p("out"), s.p("models/m"));
+        let profile = mycelium::ConfineDecl { read: vec![model.clone()], write: vec![out.clone()], ..Default::default() };
+        let (w, health, sink) = activate_watched(confined(sh("true"), sh(&format!("cat {model} > {out}/probe")), profile), &s.placed);
+        assert!(reprobe_one(&w), "the plant: an unchanged profile re-probes healthy");
+
+        // The write directory rotated: a new one renamed into place, the old one moved aside.
+        std::fs::create_dir(s.root.join("out.new")).unwrap();
+        std::fs::rename(&out, s.root.join("out.old")).unwrap();
+        std::fs::rename(s.root.join("out.new"), &out).unwrap();
+        // The read file replaced by an atomic rename.
+        std::fs::write(s.root.join("models/m.tmp"), b"a new model").unwrap();
+        std::fs::rename(s.root.join("models/m.tmp"), &model).unwrap();
+
+        assert!(reprobe_one(&w), "a legitimately replaced path is re-resolved, not a failed probe: {:?}", probe_records(&sink));
+        assert!(health.load(Ordering::Relaxed), "the install stays live");
+        assert_eq!(std::fs::read(s.root.join("out/probe")).unwrap(), b"a new model", "the probe ran under the fresh profile, writing the new directory");
+        assert!(reprobe_one(&w), "and the next re-probe uses the re-resolved profile");
+        assert_eq!(probe_records(&sink), [], "no failed probe recorded");
+    }
+
+    /// A declared path replaced by a symlink is refused at the re-probe's re-resolution, never followed:
+    /// the install is withdrawn and the refusal named in the trace. Seen failing first: the probe failed
+    /// as `probe_failed`, the symlink unnamed.
+    #[test]
+    fn a_declared_path_replaced_by_a_symlink_is_refused_at_the_reprobe_by_name() {
+        const T: &str = "a_declared_path_replaced_by_a_symlink_is_refused_at_the_reprobe_by_name";
+        if !crate::activation_sandbox::native_backend_or_skip(T) {
+            return;
+        }
+        let s = Scene::new("relink");
+        let out = s.p("out");
+        let profile = mycelium::ConfineDecl { write: vec![out.clone()], ..Default::default() };
+        let (w, health, sink) = activate_watched(confined(sh("true"), sh(&format!("echo ok > {out}/probe")), profile), &s.placed);
+        std::fs::rename(&out, s.root.join("out.old")).unwrap();
+        std::os::unix::fs::symlink(s.root.join("outside"), &out).unwrap();
+
+        assert!(!reprobe_one(&w), "a declared path that is now a symlink is refused");
+        assert!(!health.load(Ordering::Relaxed), "the install is withdrawn");
+        assert!(!s.root.join("outside/probe").exists(), "the symlink was not followed");
+        let recs = probe_records(&sink);
+        assert_eq!(recs.len(), 1, "{recs:?}");
+        let (_, reason, effect) = &recs[0];
+        assert_eq!(reason, "confinement_failed", "the refusal is named: {recs:?}");
+        assert!(effect.contains("symlink") && effect.contains(&out), "the effect names the path and why: {effect}");
+    }
+
+    /// A declared path swapped under the run — after the currency check — fails closed: the verdict of a
+    /// probe whose profile changed while it ran is not trusted, the profile is re-resolved and the probe
+    /// run once more, and a second change refuses by name. Shown with a probe that swaps a declared read
+    /// path inside its write root on every run, the deterministic form of the race. Seen failing first:
+    /// the probe passed and the install stayed live on a profile that no longer named its paths.
+    #[test]
+    fn a_declared_path_swapped_during_the_probe_fails_closed() {
+        const T: &str = "a_declared_path_swapped_during_the_probe_fails_closed";
+        if !crate::activation_sandbox::native_backend_or_skip(T) {
+            return;
+        }
+        let s = Scene::new("swap");
+        let out = s.p("out");
+        std::fs::create_dir(s.root.join("out/models")).unwrap();
+        let profile = mycelium::ConfineDecl { read: vec![format!("{out}/models")], write: vec![out.clone()], ..Default::default() };
+        let (w, health, sink) = activate_watched(confined(sh("true"), sh("true"), profile), &s.placed);
+        let mut w = w;
+        w.decl.probe = sh(&format!("mv {out}/models {out}/models.$$ && mkdir {out}/models"));
+
+        assert!(!reprobe_one(&w), "a profile that changed under each run is refused, not trusted");
+        assert!(!health.load(Ordering::Relaxed));
+        let recs = probe_records(&sink);
+        assert_eq!(recs.iter().map(|r| r.1.as_str()).collect::<Vec<_>>(), ["confinement_changed"], "{recs:?}");
     }
 
     /// Review follow-up 1 (#636): the resolved profiles are bounded and forget a placed file that is gone

@@ -1069,7 +1069,7 @@
     },
     {
       "id": "prov.probe",
-      "revision": 2,
+      "revision": 3,
       "subsystem": "mycelium-wasm-host::activation",
       "responsibilities": [
         "response"
@@ -1098,7 +1098,10 @@
           "kind": "refusal",
           "reasons": [
             "initial_probe_failed",
-            "probe_failed"
+            "probe_failed",
+            "confinement_unavailable",
+            "confinement_failed",
+            "confinement_changed"
           ]
         },
         {
@@ -1127,10 +1130,13 @@
       "docs": "docs/reference/unit-file.md",
       "tests": [
         "a_failing_initial_probe_is_an_activation_error",
-        "a_declared_activation_runs_after_placement_and_its_probe_gates_the_capability"
+        "a_declared_activation_runs_after_placement_and_its_probe_gates_the_capability",
+        "a_replaced_write_directory_keeps_the_install_live_across_a_reprobe",
+        "a_declared_path_replaced_by_a_symlink_is_refused_at_the_reprobe_by_name",
+        "a_declared_path_swapped_during_the_probe_fails_closed"
       ],
       "trace": "instrumented",
-      "summary": "The probe gates the capability: a failing initial probe is an activation error (nothing advertised); a later failure flips the health flag the next health pass withdraws on. Recorded under the install's token; a re-probe records only a change of verdict."
+      "summary": "The probe gates the capability: a failing initial probe is an activation error (nothing advertised); a later failure flips the health flag the next health pass withdraws on. A confined re-probe re-resolves a profile whose declared path was replaced, every check repeated, and runs under the fresh one; only a refused re-resolution (`confinement_*`), or a path that changed under every attempt (`confinement_changed`), withdraws. Recorded under the install's token; a re-probe records only a change of verdict."
     },
     {
       "id": "prov.promotion",

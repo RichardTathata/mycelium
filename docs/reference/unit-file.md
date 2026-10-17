@@ -326,8 +326,11 @@ root or below a write path (which a confined command could have planted), is ref
 resolved the first time the activation runs and kept — on Linux held open, so the rules are made from those
 descriptors, not re-resolved by name. Before each run, and each re-probe, the stem checks that every kept
 path still names the same file (device and inode, not a symlink). A path removed and recreated — a cleaned
-scratch directory, a re-placed blob — is resolved again, with every check above; a re-probe that finds one
-fails, so the install is withdrawn and its reinstall resolves afresh. Profiles of placed files that are
+scratch directory, a re-placed blob, a directory rotated or a file replaced by an atomic rename — is resolved
+again, with every check above, and the run or re-probe goes ahead under the fresh profile; only a resolution
+that refuses (the path now a symlink, or gone) fails the re-probe, so the install is withdrawn, the refusal
+recorded by name (`prov.probe`'s `confinement_failed`). A re-probe whose path changes while the probe runs does
+not trust its verdict: it resolves and runs once more, and a change under both is `confinement_changed`. Profiles of placed files that are
 gone are forgotten at the next resolution, and a stem keeps at most 1024.
 
 Neither limits reading a path's metadata (`stat`), CPU or memory, and the command inherits the stem's
@@ -337,7 +340,8 @@ macOS set: an Ollama installed as an app needs `read = ["/Applications/Ollama.ap
 `command` naming `/Applications/Ollama.app/Contents/Resources/ollama` (the `/usr/local/bin` link is not
 readable).
 
-The profile is resolved once, when the activation runs, and its re-probes reuse it; the unit file is read
+The profile is resolved once, when the activation runs, and its re-probes reuse it (re-resolving a replaced
+path, above); the unit file is read
 at start, so every limit holds until the stem restarts. A network allow-list that changes live is **not
 built**. Each refusal is recorded as `prov.activation`'s `confinement_unavailable` (the platform cannot apply
 the profile) or `confinement_failed` (it could, and this run could not — a declared path missing).

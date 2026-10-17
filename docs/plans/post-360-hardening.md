@@ -1467,10 +1467,11 @@ CC8, `docs/capabilities.md`, the crate README). The example units with `[[activa
   `NodeCapabilityConfig` is `deny_unknown_fields` (`a_misspelt_top_level_section_is_refused_not_dropped`, seen failing
   first; every unit file in the repository loads — the mesh presets and artifact descriptions beside them are other
   formats, never loaded as units; `deprecations.md` §49). Confirmed by the reviewer at `a1161463` (macOS and Linux 6.8;
-  every door that parses a unit file refuses an unknown key; 91 unit-bearing TOML files load). **Follow-up, open:** a
-  declared path replaced legitimately (a model file by atomic rename, a rotated directory) fails the next re-probe, so the
-  install is withdrawn and reinstalled — a blip, and a flap if the path churns; re-resolving inside the re-probe would
-  avoid it.
+  every door that parses a unit file refuses an unknown key; 91 unit-bearing TOML files load). **Follow-up, delivered
+  (#PRNUM):** a declared path replaced legitimately (a model file by atomic rename, a rotated directory) failed the next
+  re-probe, so the install was withdrawn and reinstalled — a flap if the path churned. The re-probe now takes its profile
+  from the hook's resolved profiles, re-resolved inside the re-probe with every check repeated, and runs under the fresh
+  one; only a refused re-resolution withdraws, named in the trace (§3.6).
 - **Not built, stated:** limits by hostname or address; a live network allow-list; an OpenShell backend; resource
   limits (CPU, memory); on Linux below Landlock ABI 6, a limit on signals to the stem user's processes; device
   `ioctl`s (Landlock ABI 5); metadata (`stat`) of any path stays readable on both backends; a socket inherited across
@@ -1498,8 +1499,18 @@ envelope's nonce cache) and Q (the handshake refuses a revoked key's certificate
 **Not started:** §5's inference-routing question. Every row K–P is released in 2.35.0; the rows' own *not built* lists stand. (Q, revocation at every verifier, is delivered — #616, §3.5; S, identity proofs on by default, is delivered in 2.34.0 — #623, §3.5.)
 
 **Follow-ups recorded as not built in delivered rows (each in its §3.5 block):**
-- **M:** a declared path replaced legitimately (atomic rename, rotated directory) fails the next re-probe, so the
-  install is withdrawn and reinstalled — a flap if the path churns. Not built: limits by hostname or address, a live
+- **M:** ~~a declared path replaced legitimately (atomic rename, rotated directory) fails the next re-probe, so the
+  install is withdrawn and reinstalled — a flap if the path churns~~ — *delivered (#PRNUM):* the re-probe re-resolves a
+  profile whose declared path was replaced, every check repeated (symlinks, the canonical comparison, existence), and
+  runs the probe under the fresh profile (`reprobe_one`, the hook's `ResolvedProfiles` shared through each `Watched`);
+  only a refused re-resolution withdraws the install, named as `prov.probe`'s `confinement_failed` /
+  `confinement_unavailable`; a profile no longer current after the run is not trusted — re-resolved and run once more,
+  and a change under both attempts refuses as `confinement_changed`
+  (`a_replaced_write_directory_keeps_the_install_live_across_a_reprobe`,
+  `a_declared_path_replaced_by_a_symlink_is_refused_at_the_reprobe_by_name`,
+  `a_declared_path_swapped_during_the_probe_fails_closed`, each seen failing first on macOS under
+  `MYCELIUM_CONFINE_LIVE_REQUIRED=1`). A probe that itself replaces one of its declared paths on every run now fails
+  as `confinement_changed`. Not built: limits by hostname or address, a live
   network allow-list, an OpenShell backend, resource limits.
 - **H:** carry each named offer's signed bytes inside the close and award from that copy (today a member who deletes a
   named offer steers the checked path); a declarer that restarts without keeping its close can re-decide.

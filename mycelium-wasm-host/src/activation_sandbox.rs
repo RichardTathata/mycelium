@@ -22,7 +22,8 @@
 //! exist — refuses the activation by name and runs nothing ([`Refusal`]).
 //!
 //! **Fixed for the activation's life** (row M's OpenShell note): the profile is resolved once, when the
-//! activation runs, and its re-probes reuse it. A network allow-list that changes live is **not built**:
+//! activation runs, and its re-probes reuse it — re-resolved, every check repeated, only when a declared
+//! path no longer names what it named ([`Profile::is_current`]). A network allow-list that changes live is **not built**:
 //! the unit file is read at start, and every limit it states holds until the stem restarts.
 //!
 //! **What neither backend limits**, stated: metadata (`stat`) of any path; on Linux below Landlock ABI 6,
