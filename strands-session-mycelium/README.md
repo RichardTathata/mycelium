@@ -51,7 +51,10 @@ and, as `local_durability`, that node's own disk state (`"on_disk"`, `"buffered"
 and a session saved through node A is readable through node B only once its rows have gossiped
 there. This is the checkpointer's wording, and the substrate's
 ([contracts and receipts](../docs/design/contracts-receipts.md)). `require_on_disk=True` raises on
-any write the gateway node did not report `"on_disk"`; a `"failed"` one is logged either way.
+any write the gateway node did not report `"on_disk"`; a `"failed"` one is logged either way. The
+write is applied all the same, and a message refused this way is held and re-sent before the next
+one (below), so on a node without `[persistence]`, which reports `"not_configured"`,
+`require_on_disk=True` fails every turn: set it only against nodes that persist.
 
 ## Incomplete is an error, never an empty session
 
@@ -65,7 +68,9 @@ names (a message whose `message_id` disagrees with its key included), and a gate
 
 The tail is covered once the count arrives. Each agent has a count row written after each message,
 so a node that holds the count but not the last message raises. Messages that arrive ahead of their
-count are read, not dropped.
+count are read, not dropped. So is the other direction: an agent row whose conversation manager has
+moved past the messages this node holds (a sliding window's removed count at or beyond them) raises,
+rather than reading as an empty conversation that Strands would restart at message 0.
 
 What it cannot see is a node that is **behind as a whole**: one holding an older count and none of
 the messages after it reads a complete, older conversation without error, and an agent resumed there

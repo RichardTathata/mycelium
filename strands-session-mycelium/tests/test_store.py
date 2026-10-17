@@ -294,3 +294,50 @@ def test_a_message_whose_index_disagrees_with_its_key_is_unreadable():
     gw.rows[key] = json.dumps(row).encode()
     with pytest.raises(SessionException, match="unreadable"):
         Agent(agent_id="planner", model=ScriptedModel([]), session_manager=manager(gw), callback_handler=None)
+
+
+# ── confirmation round (findings A and B) ───────────────────────────────────
+
+
+def test_a_failed_count_write_at_creation_leaves_the_agent_resumable():
+    gw = FakeGateway()
+    manager(gw)
+    gw.fail_once.add("strands/s1/agent/planner/count")
+    with pytest.raises(SessionException):
+        Agent(agent_id="planner", model=ScriptedModel([]), session_manager=manager(gw), callback_handler=None)
+    again = Agent(agent_id="planner", model=ScriptedModel(["r1"]), session_manager=manager(gw), callback_handler=None)
+    assert again.messages == []
+    again("one")
+    back = Agent(agent_id="planner", model=ScriptedModel([]), session_manager=manager(gw), callback_handler=None)
+    assert texts(back) == ["one", "r1"]
+
+
+@pytest.mark.parametrize("offset", [2, 4])
+def test_an_offset_past_the_messages_here_is_incomplete_not_empty(offset):
+    """The agent row (its conversation manager's removed count) arrived ahead of the messages it counts."""
+    gw = FakeGateway()
+    run_agent(gw, ["one"])  # messages 0 and 1, count 2
+    repo = MyceliumSessionRepository(gw)
+    with pytest.raises(IncompleteSession) as e:
+        repo.list_messages("s1", "planner", offset=offset)
+    assert e.value.missing[-1] == f"strands/s1/agent/planner/msg/{offset:010d}"
+    assert repo.list_messages("s1", "planner", offset=1)[0].message_id == 1
+
+
+def test_an_agent_whose_window_moved_on_resumes_only_once_its_messages_have():
+    from strands.agent.conversation_manager import SlidingWindowConversationManager
+
+    gw = FakeGateway()
+    m = manager(gw)
+    a = Agent(agent_id="planner", model=ScriptedModel(["r1", "r2", "r3"]), session_manager=m, callback_handler=None,
+              conversation_manager=SlidingWindowConversationManager(window_size=2))
+    for p in ("one", "two", "three"):
+        a(p)
+    # A node holding the newest agent row but only the first two messages and their count.
+    for i in range(2, 6):
+        del gw.rows[f"strands/s1/agent/planner/msg/{i:010d}"]
+    gw.rows["strands/s1/agent/planner/count"] = b'{"count":2}'
+    with pytest.raises(IncompleteSession):
+        Agent(agent_id="planner", model=ScriptedModel(["r"]), session_manager=manager(gw), callback_handler=None,
+              conversation_manager=SlidingWindowConversationManager(window_size=2))
+    assert json.loads(gw.rows["strands/s1/agent/planner/msg/0000000000"])["message"]["content"][0]["text"] == "one"

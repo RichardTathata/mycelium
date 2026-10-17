@@ -326,8 +326,9 @@ class MyceliumSessionRepository(SessionRepository):
                 later = sorted(i for i in held if i > index)
                 held_back = f"; messages {later} are held back until it is" if later else ""
                 raise SessionException(
-                    f"message {index} of agent {agent_id!r} in session {session_id!r} is not stored "
-                    f"({e}){held_back}. The stored session ends before it."
+                    f"message {index} of agent {agent_id!r} in session {session_id!r} is held: its write "
+                    f"did not complete as required ({e}){held_back}. It is re-sent, in order, before the "
+                    f"next message; until then the conversation this store vouches for ends before it."
                 ) from e
             del held[index]
             known = self._counts.get((session_id, agent_id))
@@ -381,13 +382,23 @@ class MyceliumSessionRepository(SessionRepository):
             tail = unquote(key[len(prefix):])
             if tail.isdigit():
                 present.add(int(tail))
+        what = f"the messages of agent {agent_id!r} in session {session_id!r}"
         count = self._stored_count(session_id, agent_id)
         if count is None:
-            # `create_agent` writes the count with the agent, so its absence is a row in flight —
-            # or no such agent, which Strands never asks to list.
-            raise IncompleteSession(f"the messages of agent {agent_id!r} in session {session_id!r}", [count_key])
+            if present:  # messages here and the count written after the first of them is not
+                raise IncompleteSession(what, [count_key])
+            # No messages and no count: an agent with no messages yet. `create_agent` writes the
+            # count after the agent row, and if that write failed nothing would ever write it, so
+            # its absence here cannot be a row in flight that this read must wait for.
+            count = 0
         end = max(count, max(present) + 1 if present else 0)
         start = max(offset, 0)
+        if start > 0 and start >= end:
+            # Strands' offset is the conversation manager's removed-message count, from the agent
+            # row. Messages up to it were written, and the window kept at least the one at it — so
+            # an offset at or past what is here is an agent row ahead of its messages. Answering
+            # empty would make Strands append at index 0, over the conversation's first message.
+            raise IncompleteSession(what, [self._message_key(session_id, agent_id, i) for i in range(end, start + 1)])
         wanted = list(range(start, end))
         if limit is not None:
             wanted = wanted[: max(limit, 0)]

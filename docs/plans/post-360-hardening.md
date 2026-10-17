@@ -1026,7 +1026,15 @@ window).
   table names `strands/`. Answered: (9) the interface record covers `SessionRepository`'s signatures; the
   `RepositorySessionManager` behaviour the store relies on (the index advanced before `create_message`, the offset
   from `removed_message_count`) is exercised by the behaviour tests under the exact pin, and a resumed swarm is
-  Strands' (it resets a completed swarm) — the store's half, its row, is tested.
+  Strands' (it resets a completed swarm) — the store's half, its row, is tested. The reviewer confirmed 1, 2, 4–7 and
+  accepted 3, 8, 9, and found two more of finding 1's family, fixed with tests seen failing first: (A) a failed
+  count write at `create_agent` left the agent unresumable — a missing count with no messages now reads as zero
+  (`test_a_failed_count_write_at_creation_leaves_the_agent_resumable`); (B) an agent row ahead of its messages (a
+  sliding window's removed count at or past the messages here) read as empty, and Strands restarted at message 0,
+  overwriting it — now `IncompleteSession` (`test_an_offset_past_the_messages_here_is_incomplete_not_empty`,
+  `test_an_agent_whose_window_moved_on_resumes_only_once_its_messages_have`). (C) The held-message error no longer
+  says an applied write is unstored, and the README says `require_on_disk` fails every turn on a node without
+  `[persistence]`.
 - **Not built, stated:** a session's rows are replicated by gossip only (no `set_with_min_acks` option); a message
   listing reads one row per message; a row over about 1.5 MiB is refused rather than moved to the blob tier; no async
   variant (Strands' repository interface is synchronous); not published to PyPI.
