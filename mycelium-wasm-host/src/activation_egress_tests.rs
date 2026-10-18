@@ -363,19 +363,20 @@ async fn another_users_connection_is_closed_at_accept() {
     let (u, seen) = upstream().await;
     let p = start_limited(vec![format!("http://127.0.0.1:{u}")], ProxyLimits::default());
     let script = format!(
-        "exec 3<>/dev/tcp/127.0.0.1/{port}; printf 'GET http://127.0.0.1:{u}/ HTTP/1.1\r\nHost: x\r\nProxy-Authorization: {auth}\r\nConnection: close\r\n\r\n' >&3; cat <&3",
+        "echo client-ran; exec 3<>/dev/tcp/127.0.0.1/{port} || exit 9; printf 'GET http://127.0.0.1:{u}/ HTTP/1.1\r\nHost: x\r\nProxy-Authorization: {auth}\r\nConnection: close\r\n\r\n' >&3 2>/dev/null; cat <&3 2>/dev/null; true",
         port = p.port(),
         auth = token_header(&p)
     );
-    let out = tokio::task::spawn_blocking(move || std::process::Command::new("sudo").args(["-n", "-u", "nobody", "bash", "-c", &script]).output())
+    let out = tokio::task::spawn_blocking(move || std::process::Command::new("sudo").current_dir("/").args(["-n", "-u", "nobody", "bash", "-c", &script]).output())
         .await
         .unwrap()
         .expect("sudo runs");
     let answer = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    // The connection was made (sudo ran bash, bash connected), then closed: `cat` saw EOF, so bash exits 0. A sudo
-    // that could not run exits 1 before any connection — refused here rather than read as a closed connection.
-    assert!(out.status.success(), "sudo -u nobody did not run the client: {} {stderr}", out.status);
+    // sudo ran the client (`client-ran`) and its connection was made (exit 0, not 9) — then closed, which `cat`
+    // sees as EOF (Linux) or a reset (macOS), both ignored. A sudo that could not run prints nothing and exits 1:
+    // refused here rather than read as a closed connection.
+    assert!(answer.starts_with("client-ran") && out.status.success(), "sudo -u nobody did not run and connect the client: {} {answer} {stderr}", out.status);
     assert!(!answer.contains("HTTP/1.1"), "another user's connection got an answer: {answer} ({stderr})");
     assert!(seen.lock().unwrap().is_empty(), "nothing was forwarded");
     let c = p.counts();
