@@ -201,6 +201,8 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
     for (name, value) in feature_gated_counters() {
         body[name] = json!(value);
     }
+    // Post-360 row R: client serve streams closed because an in-process receiver took their kind.
+    body["signal_client_evictions"] = json!(ctx.agent_ctx.signal_handlers.client_evictions());
     // Post-360 row E: signed caller envelopes accepted without an id (a pre-row-E gateway's — the
     // one-release window; `deprecations.md` §45), and envelopes dropped as replays.
     {

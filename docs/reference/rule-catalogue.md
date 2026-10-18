@@ -18,7 +18,7 @@ Schema `mycelium.rules/1` · 28 rules.
 | [`prov.activation`](#provactivation) | Response | instrumented | After placement the declared command hands the blob to its local runtime — confined when the unit names a profile, which a node that cannot apply it refuses by name rather than run unconfined; a failure is an install failure at stage `activation`, retried next round. |
 | [`prov.advertise`](#provadvertise) | Propagation | catalogue only | A completed install advertises its capability to the mesh; the advertisement's lifetime is the install's. |
 | [`prov.demand_response`](#provdemand_response) | Response | instrumented | A requirement with demanding nodes and no provider, as this node sees it, makes this node a candidate installer; an observed unmet requirement is not an instruction to install. |
-| [`prov.eligible`](#proveligible) | Response | instrumented | This node hosts the entry's kind, has install budget left, and has memory and disk headroom for it. The check has side effects (counters) and is never re-evaluated for a record. |
+| [`prov.eligible`](#proveligible) | Response | instrumented | An entry providing an `llm-meta` ad is never hosted (a model's metadata is its serving node's own, post-360 row R); otherwise this node hosts the entry's kind, has install budget left, and has memory and disk headroom for it. The check has side effects (counters) and is never re-evaluated for a record. |
 | [`prov.health_pass`](#provhealth_pass) | Response | instrumented | A live install whose probe fails this round is withdrawn; restart ≡ provisioning brings it back. |
 | [`prov.install`](#provinstall) | Response | instrumented | Fetch, verify, place and host the artifact under an install token; a superseded token tears its install down rather than advertising it. |
 | [`prov.loadable`](#provloadable) | Authority | catalogue only | A proposed entry loads live only once a listed reviewer has accepted it; until then it may load into the shadow lane only (D20). |
@@ -53,7 +53,7 @@ An absent credential is anonymous and a present bearer's scopes are dropped: a b
 
 ## `ae.preflight`
 
-rev 2 · `mycelium::agent::http` · Authority · trace: catalogue only
+rev 3 · `mycelium::agent::http` · Authority · trace: catalogue only
 
 Permit, deny or indeterminate, recorded before the work runs; a refused mandate denies before policy runs, so a policy engine cannot launder a revocation.
 
@@ -61,6 +61,7 @@ Permit, deny or indeterminate, recorded before the work runs; a refused mandate 
 - **Reads:**
   - `the action envelope, the presented mandate, the deployed policy revision` — scope: this request; freshness: the decision clock
   - `the actor's recent decisions, when the evaluator asks for them (post-360 row K); carried on the evidence record` — scope: this enforcement point (its evidence journal); freshness: the journal, read in the background once an evaluator that asks for history is attached (unavailable until then), and kept current by every record appended
+  - `from a routing door (post-360 row R), the destination decided on with its declared locality and the request's data class; carried on the evidence record with the destinations already refused` — scope: this request; the locality is the provider's own `llm-meta` declaration; freshness: the provider's ad as gossiped; the class as classified at the door
 - **Outcomes:**
   - Action: `permit`
   - Refusal: `deny`, `indeterminate`, `mandate_revoked`, `mandate_expired`, `stale_policy`
@@ -68,7 +69,7 @@ Permit, deny or indeterminate, recorded before the work runs; a refused mandate 
 - **Effects:** the evidence journal record before dispatch; the audit chain reference under `compliance`
 - **Guards:** Authority
 - **Depends on:** [`gateway.auth`](#gatewayauth)
-- **Code:** `http::ae_preflight / ae_record` · **Docs:** docs/guide/20-authorising-actions.md · **Tests:** `an_expired_envelope_is_denied_before_the_evaluator_runs`, `test_c7_the_bypass_matrix_no_door_runs_revoked_work`, `at_most_three_posts_in_ten_minutes_counted_at_this_gateway`
+- **Code:** `http::ae_preflight / ae_record` · **Docs:** docs/guide/20-authorising-actions.md · **Tests:** `an_expired_envelope_is_denied_before_the_evaluator_runs`, `test_c7_the_bypass_matrix_no_door_runs_revoked_work`, `at_most_three_posts_in_ten_minutes_counted_at_this_gateway`, `a_confidential_request_to_an_external_destination_is_denied_naming_class_and_locality`
 
 ## `cap.match`
 
@@ -256,9 +257,9 @@ A requirement with demanding nodes and no provider, as this node sees it, makes 
 
 ## `prov.eligible`
 
-rev 1 · `mycelium-wasm-host::provisioner` · Response · trace: instrumented
+rev 2 · `mycelium-wasm-host::provisioner` · Response · trace: instrumented
 
-This node hosts the entry's kind, has install budget left, and has memory and disk headroom for it. The check has side effects (counters) and is never re-evaluated for a record.
+An entry providing an `llm-meta` ad is never hosted (a model's metadata is its serving node's own, post-360 row R); otherwise this node hosts the entry's kind, has install budget left, and has memory and disk headroom for it. The check has side effects (counters) and is never re-evaluated for a record.
 
 - **Trigger:** a candidate entry that passed provenance
 - **Reads:**
@@ -268,12 +269,12 @@ This node hosts the entry's kind, has install budget left, and has memory and di
   - `Provisioner::hosted (lock-order row 21)` — scope: this node; freshness: local, atomic
 - **Outcomes:**
   - Action: `eligible`
-  - Refusal: `no_runtime`, `budget`, `memory`, `disk`
+  - Refusal: `reserved_namespace`, `no_runtime`, `budget`, `memory`, `disk`
 - **Effects:** `mycelium_artifact_ineligible_skips_total{reason}`
 - **Guards:** ResourceBudget
 - **May inhibit:** [`prov.demand_response`](#provdemand_response), [`prov.presence_floor`](#provpresence_floor)
 - **Depends on:** [`prov.provenance`](#provprovenance)
-- **Code:** `provisioner::Provisioner::eligible` · **Docs:** docs/operations/capability-lifecycle.md · **Tests:** `the_stem_fleet_fills_a_presence_floor_and_reheals`
+- **Code:** `provisioner::Provisioner::eligible` · **Docs:** docs/operations/capability-lifecycle.md · **Tests:** `the_stem_fleet_fills_a_presence_floor_and_reheals`, `an_entry_providing_a_model_metadata_ad_is_never_installed`
 
 ## `prov.health_pass`
 

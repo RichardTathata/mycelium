@@ -142,11 +142,28 @@ pub(super) async fn gw_rpc_serve(
     Path(kind):  Path<String>,
     State(ctx):  State<Arc<HttpCtx>>,
     caller: Option<Extension<ResolvedPrincipal>>,
-) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
-    let rx = ctx.agent_ctx.signal_handlers.register_with_capacity(
-        Arc::from(kind.as_str()),
-        256,
-    );
+) -> axum::response::Response {
+    // Post-360 row R's review: a kind this node serves itself is never handed to a client stream.
+    if let Some(refused) = refuse_unservable_kind(&kind) {
+        return refused;
+    }
+    // Round-2 review B: a client stream never shares a kind with a receiver this node serves itself — a
+    // hosted component's `cap.invoke` kind, an operator's `rpc_rx` — because a signal fans to every
+    // receiver. Refused here when one is registered; evicted (the stream ends) if one registers later.
+    let Some(serve) = ctx.agent_ctx.signal_handlers.register_client(Arc::from(kind.as_str()), 256) else {
+        warn!(%kind, "rpc/serve: refused, this node serves the kind in process");
+        return (StatusCode::FORBIDDEN, Json(json!({
+            "ok": false,
+            "error": "served_in_process",
+            "kind": kind,
+            "message": format!("`{kind}` is served by a receiver on this node; a client stream for it would \
+                                receive every such request this node is sent"),
+        }))).into_response();
+    };
+    let mut evicted = serve.evicted;
+    let seen_evicted = evicted.clone();
+    let evicted_kind = kind.clone();
+    let rx = serve.rx;
     let principal: Arc<str> = Arc::from(
         caller.map(|Extension(c)| c.principal).unwrap_or_else(|| gateway_caller::PRINCIPAL_ANONYMOUS.to_string()).as_str(),
     );
@@ -202,13 +219,28 @@ pub(super) async fn gw_rpc_serve(
         if let Some(c) = caller {
             data["caller"] = c;
         }
-        Some(Ok(Event::default()
+        Some(Ok::<_, Infallible>(Event::default()
             .event(req.kind().as_ref())
             .data(data.to_string())))
       }
     });
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    // Evicted: a terminal `evicted` event naming the kind, then the stream ends — so the client is told why,
+    // rather than seeing a stream that simply stopped (#643's round-3 review; the SDKs raise on it).
+    let stream = futures_util::StreamExt::take_until(stream, async move {
+        let _ = evicted.wait_for(|e| *e).await;
+    });
+    let tail = futures_util::StreamExt::filter_map(futures_util::stream::once(async move {
+        (*seen_evicted.borrow()).then(|| {
+            Ok::<_, Infallible>(Event::default().event("evicted").data(json!({
+                "error": "evicted",
+                "kind": evicted_kind,
+                "message": format!("`{evicted_kind}` is now served by a receiver on this node; this serve stream is closed"),
+            }).to_string()))
+        })
+    }), |e| async move { e });
+    let stream = futures_util::StreamExt::chain(stream, tail);
+    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
 }
 
 /// `POST /gateway/rpc/respond` — send a reply to an in-flight RPC request.

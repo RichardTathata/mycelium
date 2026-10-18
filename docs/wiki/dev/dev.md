@@ -79,6 +79,14 @@ unreadable history `Unavailable` and so `Indeterminate`, never empty. Two lesson
 check-then-count, so one actor's are serialised (lock-order row 61) and a permit counted as it is decided; and a view
 capped near the limit is filled by the actor's *other* records, so a counting evaluator asks for the whole window. The
 decision trace does not carry `ae.preflight`, so the history input is recorded on the evidence record.
+**Inference routing as policy (post-360 row R, 2026-10-17):** a routing door hands the preflight what it established
+— `gateway_preflight_routed` with `RouteFacts` (the destination and its `Locality`, the request's `DataClass` and its
+`ClassSource`, the destinations already refused) — onto `ActionEnvelope::{destination, data_class}` and
+`AeEvidence::route`. `mycelium-reason`'s router asks per candidate, in its own order, and dispatches to the first the
+policy permits. The design rule that keeps it closed: a class or locality the door **did not establish** matches a rule
+about it and is reported *not established* — so a door that classifies nothing (`/gateway/llm/call`) cannot pass a class
+rule, and an undeclared locality is never in-domain. Declared, not detected: the class is the client's or the operator's
+statement, the locality the provider's.
 **The reader seam shipped the same day** (PR #226): `read_evidence_journal_from(path, cursor, …)`,
 §6.7's outbox shape — batch, ship, advance, with a byte-offset cursor so resuming stays cheap, and
 each entry carrying the same content hash the chain's `AeReference` cites. Needed because moving

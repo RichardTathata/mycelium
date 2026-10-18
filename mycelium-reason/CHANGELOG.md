@@ -6,6 +6,64 @@ All notable changes to this crate. It versions **independently** of the Mycelium
 
 ---
 
+## [0.10.0] — unreleased
+
+**Inference routing as policy** (post-360 hardening row R). The router chose a provider by load and reservation, and
+nothing could say whether a request *may* go there: the gateway's preflight saw `prompt:llm/{model}@{provider}` and
+nothing about where that provider's inference runs or what the request carries.
+
+- **The evaluator sees the destination.** Each candidate's preflight now runs through
+  `GossipAgent::gateway_preflight_routed` with `llm/{model}@{provider}` and the provider's declared **locality** —
+  the new `llm_meta::LOCALITY` attribute of its `llm-meta/{model}` ad (`in_domain` · `external`; set with
+  `ModelProfile::in_domain()` / `external()`; `InferenceRouter::localities` reads them). Undeclared is
+  `Locality::Unknown`, which a rule about locality reads as not established, never as in-domain.
+- **Per candidate, before the router commits.** A candidate the policy refuses is passed over for the next in the
+  router's order, without counting as an attempt, so a classified request is routed to a permitted model when one
+  exists and is refused when none does — `RouteError::Refused`'s `data.refused_destinations` names every candidate with
+  its locality and reason, `data.data_class` the class. A decision that could not be recorded stops the route. A
+  successful `Routed` names the class (`data_class`) and the providers passed over (`refused`); `/route` and the
+  façade's `mycelium` block carry both when present.
+- **A data classification.** `DataClassPolicy` (classes least to most restrictive): a floor bound to the caller's
+  verified principal (`floor_for`, `floor_for_all`), a client declaration in the `x-mycelium-data-class` header
+  (`DATA_CLASS_HEADER`) that may raise it and **never lower it**, and for an unclassified request the most restrictive
+  class unless `unclassified_as` says otherwise. `InferenceRouter::with_data_classes`, `call_as_classified`, and
+  `reason_router_classified` mount it. An unknown class, or a declaration to a router that classifies nothing, is
+  `RouteError::Unclassifiable` — `400 unclassifiable` on `/route`, `400 invalid_request_error` / `data_class` on the
+  façade — and nothing is routed.
+- **A client cannot set a locality, or stand in for a model.** The substrate's `capability/advertise` and
+  `units/declare` refuse any `llm-meta` ad from a gateway client (`403 reserved_namespace`); a catalogue entry
+  providing one is never installed; and `GET /gateway/rpc/serve/llm.invoke` (with `mcp.invoke`, `skill.invoke`) is
+  refused, since a serve stream received every prompt the node was sent — found by the round-1 review. A fleet member
+  can still write another node's ad: an ad's key is not bound to its writer (stated, not built).
+- **Decided, or not routed.** A router built with a `DataClassPolicy` refuses every request
+  (`authority_not_established`, 403) while no action evaluator is attached — before `with_action_evaluator`, or in a
+  build without `tls` — and dispatches nothing (round-2 review A: between `start()` and the attachment, a
+  confidential request went to an external model). Attach the evaluator before `start()`.
+- **The default class is a floor.** A caller with no floor bound is held at the default (most restrictive) class: it
+  may declare higher, never lower. Only an explicitly bound floor sits lower. The header given twice is `400`.
+- **No SDK declares a class yet** — `mycelium-py`'s `reason.route()` and `mycelium-ts` have no class parameter, so an
+  SDK caller is classified by its floor.
+- **One operation id per call.** Every candidate's evidence record for one routed call carries the same
+  `operation_id` (`reason:{node}/…`), so the refused candidates and the dispatched one join.
+- **Write class policies as allow-lists.** A class rule names one class; the evaluator does not know the classifier's
+  order, so a prohibition on `confidential` does not cover a stricter class (guide 20).
+- **Residuals, stated:** a provider refreshing its `llm-meta` ad reads as unknown meanwhile (refused, closed); an
+  attempt gets the short `failover_timeout` while untried candidates remain even if the policy refuses them all; a
+  route where some candidates failed and the rest were refused answers `Exhausted`.
+- **Metric.** `mycelium_reason_route_policy_refusals_total` counts candidates passed over by the policy.
+- **Evidence.** Each candidate's decision is recorded with the substrate's new `AeEvidence::route`: the class and who
+  declared it, the destination and its locality, and the destinations refused before it.
+- **Behaviour change with no evaluator:** a request carrying `x-mycelium-data-class` to a router that classifies
+  nothing is now `400`, not ignored.
+- **Behaviour change for any evaluator:** a per-provider refusal used to answer `403` at the first refused
+  candidate; now the router tries the next. A policy that refuses every candidate still answers `403`, with the same
+  `reason` and `code` the first refusal carried.
+- **Breaking (hence the MINOR):** `Routed` gained `data_class` and `refused`, and `RouteError` gained `Unclassifiable`
+  (an exhaustive `match` needs an arm).
+- **Not built:** content inspection (the class is declared, never detected); observing a provider's backend (the
+  locality is its declaration); classification of the in-process `call` (the node's own action runs no preflight);
+  a `[[serve]]` skill's locality (it advertises no `llm-meta` ad, so it is unknown).
+
 ## [0.9.0] — 2026-10-12
 
 **Bounded, and every caller-chosen id one segment** (post-360 hardening row H, #609).

@@ -210,16 +210,31 @@ struct FilteredSender {
     tx:     mpsc::Sender<Signal>,
     /// An observer (an SSE stream) rather than a subscriber that bears work: never counted in fill.
     tap:    bool,
+    /// A **client** serve stream (`GET /gateway/rpc/serve/{kind}`) rather than this node's own receiver
+    /// (post-360 row R, round-2 review B): admitted only to a kind no in-process receiver holds, and
+    /// evicted when one registers.
+    client: bool,
+    /// For a client stream: told `true` when it is evicted, so its owner can end the stream (the
+    /// receiver alone cannot tell — a removed sender's clones may outlive the table entry).
+    evict: Option<Arc<tokio::sync::watch::Sender<bool>>>,
+    /// A **transient** listener — the node *waiting for* a signal (`signal_once`, a request's result kind),
+    /// not *serving* a kind (#643's round-3 review). It neither evicts client streams nor is a reason to
+    /// refuse one: sharing a kind with a client stream leaks nothing, because the client already receives
+    /// that kind's traffic, and the listener answers nothing. A node that answers what it receives serves
+    /// the kind, and registers a long-lived receiver (`rpc_rx`), which is in-process.
+    transient: bool,
 }
 
 impl FilteredSender {
     fn unfiltered(tx: mpsc::Sender<Signal>) -> Self {
-        Self { filter: None, tx, tap: false }
+        Self { filter: None, tx, tap: false, client: false, evict: None, transient: false }
     }
     fn filtered(tx: mpsc::Sender<Signal>, trusted: Arc<[NodeId]>) -> Self {
-        Self { filter: Some(trusted), tx, tap: false }
+        Self { filter: Some(trusted), tx, tap: false, client: false, evict: None, transient: false }
     }
     fn is_closed(&self) -> bool { self.tx.is_closed() }
+    /// An open receiver this node serves the kind with itself — not a tap, not a client stream.
+    fn serves_in_process(&self) -> bool { !self.tap && !self.client && !self.transient && !self.is_closed() }
 }
 
 /// Handler fan-out registry: maps signal kind → list of `FilteredSender`.
@@ -228,17 +243,96 @@ impl FilteredSender {
 /// and registrations happen rarely. Value is `Arc<Vec<FilteredSender>>` so the
 /// snapshot in `deliver_to_handlers` is a single atomic refcount increment;
 /// the guard drops before the per-sender try_send loop.
+/// A client serve stream's registration ([`SignalHandlers::register_client`]): the signals, and a watch
+/// that turns `true` when an in-process receiver registers for the kind and the stream is evicted —
+/// end the stream then; nothing more will be delivered to it.
+pub struct ClientServe {
+    /// The signals of the kind, while the stream holds it.
+    pub rx: mpsc::Receiver<Signal>,
+    /// `true` once evicted.
+    pub evicted: tokio::sync::watch::Receiver<bool>,
+}
+
 struct HandlerTable {
     map:   PapayaMap<Arc<str>, Arc<Vec<FilteredSender>>>,
     /// Signals dropped to a full subscriber channel (row B).
     drops: std::sync::atomic::AtomicU64,
+    /// Client serve streams closed because an in-process receiver registered for their kind.
+    client_evictions: std::sync::atomic::AtomicU64,
 }
 
 impl HandlerTable {
-    fn new() -> Self { Self { map: PapayaMap::new(), drops: std::sync::atomic::AtomicU64::new(0) } }
+    fn new() -> Self {
+        Self {
+            map: PapayaMap::new(),
+            drops: std::sync::atomic::AtomicU64::new(0),
+            client_evictions: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Add `fs` to `kind`'s senders. An in-process receiver (not a tap, not a client) **evicts every
+    /// client serve stream** on the kind — its sender is dropped from the table, so the client's stream
+    /// ends — and the evictions are counted. The ordering is decided here, once: whichever registers
+    /// first, a kind this node serves itself is never also fanned to a client stream.
+    fn add_sender(&self, kind: Arc<str>, fs: FilteredSender) {
+        let evicts = !fs.tap && !fs.client && !fs.transient;
+        let pinned = self.map.pin();
+        // Retry-safe: everything is cloned per invocation (see `register_as`).
+        let result = pinned.compute(kind, |existing| -> papaya::Operation<Arc<Vec<FilteredSender>>, ()> {
+            let mut v: Vec<FilteredSender> = existing.map(|(_, arc)| (**arc).clone()).unwrap_or_default();
+            if evicts {
+                v.retain(|s| !s.client);
+            }
+            v.push(fs.clone());
+            papaya::Operation::Insert(Arc::new(v))
+        });
+        if evicts
+            && let papaya::Compute::Updated { old: (_, old), .. } = result
+        {
+            let mut evicted = 0u64;
+            for s in old.iter().filter(|s| s.client && !s.is_closed()) {
+                if let Some(e) = &s.evict {
+                    let _ = e.send(true);
+                }
+                evicted += 1;
+            }
+            if evicted > 0 {
+                self.client_evictions.fetch_add(evicted, std::sync::atomic::Ordering::Relaxed);
+                #[cfg(feature = "metrics")]
+                metrics::counter!("gossip_signal_client_evictions_total").increment(evicted);
+                tracing::warn!(evicted, "an in-process receiver registered for a kind client serve streams held: they are closed");
+            }
+        }
+    }
+
+    /// A client serve stream, admitted only if no in-process receiver holds `kind`. `None`: refused.
+    fn register_client(&self, kind: Arc<str>, cap: usize) -> Option<ClientServe> {
+        let (tx, rx) = mpsc::channel(cap);
+        let (evict_tx, evicted) = tokio::sync::watch::channel(false);
+        let fs = FilteredSender { client: true, evict: Some(Arc::new(evict_tx)), ..FilteredSender::unfiltered(tx) };
+        let pinned = self.map.pin();
+        let result = pinned.compute(kind, |existing| -> papaya::Operation<Arc<Vec<FilteredSender>>, ()> {
+            match existing {
+                Some((_, arc)) if arc.iter().any(FilteredSender::serves_in_process) => papaya::Operation::Abort(()),
+                Some((_, arc)) => {
+                    let mut v = (**arc).clone();
+                    v.push(fs.clone());
+                    papaya::Operation::Insert(Arc::new(v))
+                }
+                None => papaya::Operation::Insert(Arc::new(vec![fs.clone()])),
+            }
+        });
+        (!matches!(result, papaya::Compute::Aborted(()))).then_some(ClientServe { rx, evicted })
+    }
 
     fn register_with_capacity(&self, kind: Arc<str>, cap: usize) -> mpsc::Receiver<Signal> {
         self.register_as(kind, cap, false)
+    }
+
+    fn register_transient(&self, kind: Arc<str>, cap: usize) -> mpsc::Receiver<Signal> {
+        let (tx, rx) = mpsc::channel(cap);
+        self.add_sender(kind, FilteredSender { transient: true, ..FilteredSender::unfiltered(tx) });
+        rx
     }
 
     fn register_as(&self, kind: Arc<str>, cap: usize, tap: bool) -> mpsc::Receiver<Signal> {
@@ -250,16 +344,7 @@ impl HandlerTable {
         // panicked on the retry (M2 Run-18 sweep finding; regression test:
         // `concurrent_same_kind_signal_registration_does_not_panic`).
         let fs = FilteredSender { tap, ..FilteredSender::unfiltered(tx) };
-        self.map.pin().compute(kind, |existing| -> papaya::Operation<Arc<Vec<FilteredSender>>, ()> {
-            match existing {
-                None => papaya::Operation::Insert(Arc::new(vec![fs.clone()])),
-                Some((_, arc)) => {
-                    let mut v = (**arc).clone();
-                    v.push(fs.clone());
-                    papaya::Operation::Insert(Arc::new(v))
-                }
-            }
-        });
+        self.add_sender(kind, fs);
         rx
     }
 
@@ -272,16 +357,7 @@ impl HandlerTable {
         let (tx, rx) = mpsc::channel(cap);
         // Closure must be retry-safe — see `register_with_capacity`.
         let fs = FilteredSender::filtered(tx, trusted);
-        self.map.pin().compute(kind, |existing| -> papaya::Operation<Arc<Vec<FilteredSender>>, ()> {
-            match existing {
-                None => papaya::Operation::Insert(Arc::new(vec![fs.clone()])),
-                Some((_, arc)) => {
-                    let mut v = (**arc).clone();
-                    v.push(fs.clone());
-                    papaya::Operation::Insert(Arc::new(v))
-                }
-            }
-        });
+        self.add_sender(kind, fs);
         rx
     }
 
@@ -914,6 +990,31 @@ impl SignalHandlers {
     /// read the subscribers that bear work, so a fast tap cannot hide a saturated worker.
     pub fn register_tap(&self, kind: Arc<str>, cap: usize) -> mpsc::Receiver<Signal> {
         self.handlers.register_as(kind, cap, true)
+    }
+
+    /// Registers a **client serve stream** for `kind` (`GET /gateway/rpc/serve/{kind}`; post-360 row R,
+    /// round-2 review B): admitted only when no receiver this node serves the kind with itself is
+    /// registered — a hosted component's `cap.invoke` kind, an MCP tool loop, an operator's own
+    /// `rpc_rx` — since a signal fans out to every receiver, so a client stream beside one would receive
+    /// every request and could answer it first. `None`: refused. The reverse order is decided too: an
+    /// in-process registration closes every client stream on its kind
+    /// ([`client_evictions`](Self::client_evictions)). Client streams on one kind coexist with each
+    /// other (several SDK workers), and taps (SSE observers) neither block nor are evicted.
+    pub fn register_client(&self, kind: Arc<str>, cap: usize) -> Option<ClientServe> {
+        self.handlers.register_client(kind, cap)
+    }
+
+    /// Registers a **transient** listener for `kind`: the node waiting for a signal — [`MeshHandle::signal_once`](crate::MeshHandle::signal_once),
+    /// a request's result kind — rather than serving the kind. It receives like any receiver, but neither
+    /// evicts a client serve stream nor makes [`register_client`](Self::register_client) refuse one (see
+    /// `FilteredSender::transient`).
+    pub fn register_transient(&self, kind: Arc<str>, cap: usize) -> mpsc::Receiver<Signal> {
+        self.handlers.register_transient(kind, cap)
+    }
+
+    /// Client serve streams closed because an in-process receiver registered for their kind.
+    pub fn client_evictions(&self) -> u64 {
+        self.handlers.client_evictions.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Senders held in `kind`'s evidence set (tests and diagnostics).
@@ -2211,5 +2312,50 @@ mod bound_tests {
         }));
         h.trim_sender_log(Duration::from_millis(50));
         assert_eq!(h.log_entries("k"), 1, "the replacing log, written after the scan, must survive the trim");
+    }
+
+    /// Post-360 row R, round-2 review B: a client serve stream is refused on a kind an in-process
+    /// receiver holds, and an in-process registration closes the client streams on its kind. Seen failing
+    /// first: with the in-process check and the eviction removed, the client stream was admitted and kept
+    /// receiving every signal.
+    #[test]
+    fn a_client_serve_stream_never_shares_a_kind_with_an_in_process_receiver() {
+        let h = SignalHandlers::new(Duration::from_secs(60));
+        let hosted: Arc<str> = Arc::from("cap.invoke.demo/echo");
+        let mut in_process = h.register(Arc::clone(&hosted));
+        assert!(h.register_client(Arc::clone(&hosted), 8).is_none(), "refused beside an in-process receiver");
+
+        // A tap neither blocks a client nor is evicted; clients coexist with each other.
+        let free: Arc<str> = Arc::from("work");
+        let _tap = h.register_tap(Arc::clone(&free), 8);
+        let mut c1 = h.register_client(Arc::clone(&free), 8).expect("admitted: no in-process receiver");
+        let mut c2 = h.register_client(Arc::clone(&free), 8).expect("several client streams coexist");
+        h.deliver(&sig("work", id(1)));
+        assert!(c1.rx.try_recv().is_ok() && c2.rx.try_recv().is_ok());
+        assert!(!*c1.evicted.borrow());
+
+        // The reverse order: an in-process registration evicts them — told, and delivered nothing more.
+        let mut worker = h.register(Arc::clone(&free));
+        assert_eq!(h.client_evictions(), 2);
+        assert!(*c1.evicted.borrow() && *c2.evicted.borrow(), "each eviction is told");
+        h.deliver(&sig("work", id(2)));
+        assert!(worker.try_recv().is_ok(), "the in-process receiver gets it");
+        assert!(c1.rx.try_recv().is_err() && c2.rx.try_recv().is_err(), "the evicted streams do not");
+        assert!(h.register_client(Arc::clone(&free), 8).is_none(), "and later clients are refused");
+
+        // A transient listener (`signal_once`, a request's result kind) neither evicts a client stream nor
+        // blocks one (#643's round-3 review: a 100 ms `signal_once` ended every SDK worker on its kind).
+        let waited: Arc<str> = Arc::from("waited");
+        let mut c3 = h.register_client(Arc::clone(&waited), 8).expect("admitted");
+        let mut waiting = h.register_transient(Arc::clone(&waited), 8);
+        assert!(!*c3.evicted.borrow(), "a transient listener does not evict");
+        assert!(h.register_client(Arc::clone(&waited), 8).is_some(), "nor refuse a client");
+        h.deliver(&sig("waited", id(3)));
+        assert!(c3.rx.try_recv().is_ok() && waiting.try_recv().is_ok(), "both receive");
+
+        // A closed in-process receiver does not hold the kind.
+        drop(in_process.try_recv());
+        drop(in_process);
+        assert!(h.register_client(hosted, 8).is_some(), "the in-process receiver is gone");
     }
 }

@@ -9,6 +9,11 @@ export interface SseOptions {
   maxPending?: number;
   /** Cancels the request and ends the stream when aborted. */
   signal?: AbortSignal;
+  /**
+   * Maps a refused request (a non-2xx answer, its body parsed as JSON when it is JSON) to the error to throw,
+   * or `undefined` for the generic one. Lets a caller raise its typed refusal instead of an SSE failure.
+   */
+  refusal?: (status: number, body: unknown) => Error | undefined;
 }
 
 /** A consumer fell further behind than `maxPending`; the stream was closed rather than truncated. */
@@ -48,6 +53,16 @@ export async function* sseStream<T>(
   const resp = await fetch(url, { headers, signal: controller.signal });
   if (!resp.ok || !resp.body) {
     options.signal?.removeEventListener("abort", onAbort);
+    if (!resp.ok && options.refusal) {
+      let body: unknown = undefined;
+      try {
+        body = JSON.parse(await resp.text());
+      } catch {
+        // not JSON: the generic error below
+      }
+      const typed = options.refusal(resp.status, body);
+      if (typed) throw typed;
+    }
     throw new Error(`SSE request failed: ${resp.status} ${resp.statusText}`);
   }
   const reader = resp.body.getReader();

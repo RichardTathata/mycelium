@@ -224,6 +224,7 @@ impl GossipAgent {
             anti_entropy_replies_skipped:
                 self.task_ctx.transport_bounds.anti_entropy_replies_skipped.load(Ordering::Relaxed),
             signal_handler_drops:     self.task_ctx.signal_handlers.handler_drops(),
+            signal_client_evictions:  self.task_ctx.signal_handlers.client_evictions(),
             signal_log_kinds_evicted: self.task_ctx.signal_handlers.log_kinds_evicted(),
             signal_log_kinds_refused: self.task_ctx.signal_handlers.log_kinds_refused(),
         }

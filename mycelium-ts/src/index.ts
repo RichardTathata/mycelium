@@ -3,6 +3,7 @@ export {
   ProtectedKeyError,
   ProtectedKindError,
   ProtectedStreamError,
+  ServeEvictedError,
   SupersededError,
 } from "./agent";
 export {

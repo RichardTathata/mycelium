@@ -133,9 +133,27 @@ reply kinds `rpc.result` and `bulk.result` too: a reply the caller did not claim
 them, carrying tool and LLM output.
 
 **What a `mesh:serve` stream sees** (by design): `GET /gateway/rpc/serve/{kind}` streams every request of that kind
-this node receives — for a protected kind (`mcp.invoke`, …) the whole frame, caller envelope and carried mandate
+this node receives — for an operator-listed protected kind the whole frame, caller envelope and carried mandate
 included, after the provider check (C3) has admitted it. That is the serving agent's job: it is the provider, and the
 provider is where the mandate is verified. Grant `mesh:serve` only to the agents that serve those kinds.
+
+**Which kinds a stream may hold** (post-360 row R, #643): a signal fans out to every receiver of its kind, so a client
+stream beside one of the node's own receivers would see every request and could answer it first. Therefore:
+- `mcp.invoke`, `skill.invoke`, `llm.invoke`, `rpc.result` and `bulk.result` are never streamed — `403 protected_kind`;
+  the node serves the first three itself (MCP tools, skills, prompt skills).
+- Any kind the node already serves **in process** — a hosted component's `cap.invoke` kind, an embedder's `rpc_rx` — is
+  refused `403 served_in_process`, naming the kind.
+- The reverse order: when an in-process receiver registers for a kind client streams hold, those streams are **closed**
+  with a terminal `evicted` event naming the kind, so the kind is never shared. Counted: `signal_client_evictions` on
+  `GET /stats` and `SystemStats`, and `gossip_signal_client_evictions_total` on `/metrics`.
+- A **transient** listener — the node waiting for a signal (`signal_once`) or for a request's reply (`request`,
+  `route_to`) — neither closes a client stream nor is a reason to refuse one: it waits, it does not serve, and the
+  client already receives that kind's traffic. A node that answers what it receives serves the kind, with a
+  long-lived receiver (`rpc_rx`), which is in-process.
+- Several client streams may hold one kind together (scaled-out SDK workers); each gets every request. SSE observers
+  (`/signals/{kind}`) neither block a stream nor are closed by one.
+- The SDKs raise `ProtectedKindError` for both refusals, and `ServeEvictedError` (a `ProtectedKindError`) when a stream
+  is closed by eviction — never a quiet end of the loop (`mycelium-py` 0.2.12, `mycelium-ts` 0.2.6).
 
 **Public, never scope-gated** (M16 edge criterion): `/health`, `/ready`, `/stats`, `/metrics`,
 the A2A descriptor (`/.well-known/agent-card.json`, and `/.well-known/agent.json` for one release), `POST /a2a` (an A2A peer needs no Mycelium

@@ -4,7 +4,7 @@
  * `rpcCall` body: the route reads `method`, and this SDK sent `kind` until 2026-09-25.
  * No node needed — `fetch` is stubbed.
  */
-import { MyceliumAgent, ProtectedKindError } from "../src/index";
+import { MyceliumAgent, ProtectedKindError, ServeEvictedError } from "../src/index";
 
 const realFetch = globalThis.fetch;
 afterAll(() => { globalThis.fetch = realFetch; });
@@ -41,4 +41,35 @@ test("an ordinary 403 is not mistaken for it (the plant)", async () => {
   const a = new MyceliumAgent("127.0.0.1", 1, 1000);
   const err = await a.rpcCall("127.0.0.1:1", "echo").catch((e) => e);
   expect(err).not.toBeInstanceOf(ProtectedKindError);
+});
+
+test("rpcServe on a kind the node serves itself throws ProtectedKindError, not an SSE failure", async () => {
+  for (const [error, kind] of [["protected_kind", "llm.invoke"], ["served_in_process", "cap.invoke.demo/echo"]]) {
+    stub({ ok: false, error, kind, message: `\`${kind}\` is served by this node's own registrations` }, 403);
+    const a = new MyceliumAgent("127.0.0.1", 1, 1000);
+    const err = await a.rpcServe(kind).next().catch((e) => e);
+    expect(err).toBeInstanceOf(ProtectedKindError);
+    expect(err.kind).toBe(kind);
+  }
+  // An ordinary refusal stays the generic error (the plant).
+  stub({ error: "insufficient scope", required_scope: "mesh:serve" }, 403);
+  const err = await new MyceliumAgent("127.0.0.1", 1, 1000).rpcServe("work").next().catch((e) => e);
+  expect(err).not.toBeInstanceOf(ProtectedKindError);
+});
+
+test("an evicted serve stream throws ServeEvictedError rather than ending quietly", async () => {
+  globalThis.fetch = (async () => new Response(
+    "event: work\ndata: {\"nonce_hex\":\"0000000000000001\",\"sender\":\"127.0.0.1:1\",\"payload_b64\":\"aGk=\"}\n\n" +
+    "event: evicted\ndata: {\"error\":\"evicted\",\"kind\":\"work\",\"message\":\"now served by the node\"}\n\n",
+    { status: 200, headers: { "content-type": "text/event-stream" } },
+  )) as typeof fetch;
+  const a = new MyceliumAgent("127.0.0.1", 1, 1000);
+  const seen: string[] = [];
+  const err = await (async () => {
+    for await (const req of a.rpcServe("work")) seen.push(req.nonceHex);
+  })().catch((e) => e);
+  expect(seen).toEqual(["0000000000000001"]);
+  expect(err).toBeInstanceOf(ServeEvictedError);
+  expect(err).toBeInstanceOf(ProtectedKindError);
+  expect(err.kind).toBe("work");
 });

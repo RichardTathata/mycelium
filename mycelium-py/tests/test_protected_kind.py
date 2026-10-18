@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from mycelium import MyceliumAgent, ProtectedKindError
+from mycelium import MyceliumAgent, ProtectedKindError, ServeEvictedError
 
 
 class _Stub(BaseHTTPRequestHandler):
@@ -21,10 +21,28 @@ class _Stub(BaseHTTPRequestHandler):
     status: int = 403
     reply: dict = {}
     seen: list = []
+    sse: str = ""
 
     def do_POST(self) -> None:  # noqa: N802
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         _Stub.seen.append((self.path, json.loads(body or b"{}")))
+        data = json.dumps(_Stub.reply).encode()
+        self.send_response(_Stub.status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self) -> None:  # noqa: N802
+        _Stub.seen.append((self.path, {}))
+        if _Stub.status == 200:
+            data = _Stub.sse.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         data = json.dumps(_Stub.reply).encode()
         self.send_response(_Stub.status)
         self.send_header("Content-Type", "application/json")
@@ -89,3 +107,49 @@ def test_emit_reliable_raises_it_too(agent):
     with pytest.raises(ProtectedKindError) as e:
         agent.emit_reliable("127.0.0.1:1", "mcp.invoke", b"x")
     assert e.value.kind == "mcp.invoke"
+
+
+def test_rpc_serve_on_a_node_served_kind_raises_protected_kind_error(agent):
+    """Post-360 row R (round-2 review E): a serve stream refused ``403 protected_kind`` or
+    ``403 served_in_process`` raised an SSE content-type error; it raises ``ProtectedKindError`` naming the kind."""
+    import asyncio
+
+    async def first(kind):
+        gen = agent.rpc_serve(kind)
+        return await gen.__anext__()
+
+    for error, kind in (("protected_kind", "llm.invoke"), ("served_in_process", "cap.invoke.demo/echo")):
+        _Stub.status = 403
+        _Stub.reply = {"ok": False, "error": error, "kind": kind, "message": f"`{kind}` is served by this node"}
+        with pytest.raises(ProtectedKindError) as e:
+            asyncio.run(first(kind))
+        assert e.value.kind == kind
+    # An ordinary refusal is not mistaken for it (the plant).
+    _Stub.reply = {"error": "insufficient scope", "required_scope": "mesh:serve"}
+    with pytest.raises(Exception) as e:
+        asyncio.run(first("work"))
+    assert not isinstance(e.value, ProtectedKindError)
+
+
+def test_an_evicted_serve_stream_raises_rather_than_ending_quietly(agent):
+    """Post-360 row R (#643's round-3 review): the node closes a serve stream with a terminal ``evicted`` event
+    when a receiver of its own takes the kind; ``rpc_serve`` raises ``ServeEvictedError`` (a
+    ``ProtectedKindError``) instead of returning as though the stream had simply ended."""
+    import asyncio
+
+    _Stub.status = 200
+    _Stub.sse = (
+        'event: work\ndata: {"nonce_hex":"0000000000000001","sender":"127.0.0.1:1","payload_b64":"aGk="}\n\n'
+        'event: evicted\ndata: {"error":"evicted","kind":"work","message":"now served by the node"}\n\n'
+    )
+    seen = []
+
+    async def drain():
+        async for req in agent.rpc_serve("work"):
+            seen.append(req.nonce_hex)
+
+    with pytest.raises(ServeEvictedError) as e:
+        asyncio.run(drain())
+    assert e.value.kind == "work"
+    assert isinstance(e.value, ProtectedKindError)
+    assert seen == ["0000000000000001"]

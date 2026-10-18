@@ -11,6 +11,7 @@ from .agent import (
     CommitResult,
     KvReceipt,
     ProtectedKindError,
+    ServeEvictedError,
     ProtectedKeyError,
     ProtectedStreamError,
     SupersededError,
@@ -33,6 +34,7 @@ from ._pool import SCHEMES, TOKEN_ENV, auth_headers, base_url, resolve_token
 __all__ = [
     "MyceliumAgent",
     "ProtectedKindError",
+    "ServeEvictedError",
     "ProtectedKeyError",
     "ProtectedStreamError",
     "SupersededError",

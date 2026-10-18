@@ -51,7 +51,7 @@
     },
     {
       "id": "ae.preflight",
-      "revision": 2,
+      "revision": 3,
       "subsystem": "mycelium::agent::http",
       "responsibilities": [
         "authority"
@@ -67,6 +67,11 @@
           "source": "the actor's recent decisions, when the evaluator asks for them (post-360 row K); carried on the evidence record",
           "scope": "this enforcement point (its evidence journal)",
           "freshness": "the journal, read in the background once an evaluator that asks for history is attached (unavailable until then), and kept current by every record appended"
+        },
+        {
+          "source": "from a routing door (post-360 row R), the destination decided on with its declared locality and the request's data class; carried on the evidence record with the destinations already refused",
+          "scope": "this request; the locality is the provider's own `llm-meta` declaration",
+          "freshness": "the provider's ad as gossiped; the class as classified at the door"
         }
       ],
       "outcomes": [
@@ -109,7 +114,8 @@
       "tests": [
         "an_expired_envelope_is_denied_before_the_evaluator_runs",
         "test_c7_the_bypass_matrix_no_door_runs_revoked_work",
-        "at_most_three_posts_in_ten_minutes_counted_at_this_gateway"
+        "at_most_three_posts_in_ten_minutes_counted_at_this_gateway",
+        "a_confidential_request_to_an_external_destination_is_denied_naming_class_and_locality"
       ],
       "trace": "catalogue_only",
       "summary": "Permit, deny or indeterminate, recorded before the work runs; a refused mandate denies before policy runs, so a policy engine cannot launder a revocation."
@@ -731,7 +737,7 @@
     },
     {
       "id": "prov.eligible",
-      "revision": 1,
+      "revision": 2,
       "subsystem": "mycelium-wasm-host::provisioner",
       "responsibilities": [
         "response"
@@ -769,6 +775,7 @@
         {
           "kind": "refusal",
           "reasons": [
+            "reserved_namespace",
             "no_runtime",
             "budget",
             "memory",
@@ -793,10 +800,11 @@
       "symbol": "provisioner::Provisioner::eligible",
       "docs": "docs/operations/capability-lifecycle.md",
       "tests": [
-        "the_stem_fleet_fills_a_presence_floor_and_reheals"
+        "the_stem_fleet_fills_a_presence_floor_and_reheals",
+        "an_entry_providing_a_model_metadata_ad_is_never_installed"
       ],
       "trace": "instrumented",
-      "summary": "This node hosts the entry's kind, has install budget left, and has memory and disk headroom for it. The check has side effects (counters) and is never re-evaluated for a record."
+      "summary": "An entry providing an `llm-meta` ad is never hosted (a model's metadata is its serving node's own, post-360 row R); otherwise this node hosts the entry's kind, has install budget left, and has memory and disk headroom for it. The check has side effects (counters) and is never re-evaluated for a record."
     },
     {
       "id": "prov.health_pass",

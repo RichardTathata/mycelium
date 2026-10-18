@@ -131,7 +131,8 @@ impl MeshHandle {
     where
         F: Fn(&Signal) -> bool,
     {
-        let mut rx = self.ctx.signal_handlers.register_with_capacity(kind.into(), 256);
+        // Transient: the node waits for a signal, it does not serve the kind (#643's round-3 review).
+        let mut rx = self.ctx.signal_handlers.register_transient(kind.into(), 256);
         async move {
             let deadline = time::Instant::now() + timeout;
             loop {
@@ -159,7 +160,8 @@ impl MeshHandle {
         buf.put_u64_le(nonce);
         buf.put(payload_bytes);
         let frozen = buf.freeze();
-        let mut rx = self.ctx.signal_handlers.register_with_capacity(result_kind.into(), 256);
+        // Transient: waiting for this request's reply, not serving the result kind (#643's round-3 review).
+        let mut rx = self.ctx.signal_handlers.register_transient(result_kind.into(), 256);
         let _ = self.emit(kind.into(), scope, frozen);
         async move {
             let deadline = time::Instant::now() + timeout;

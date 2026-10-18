@@ -43,6 +43,35 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **Upgrade note:** a probe that replaces one of its own declared paths on every run now fails as
   `confinement_changed` (`deprecations.md` §50).
 
+### Added
+
+- **Inference routing as policy (post-360 plan row R).** The action evaluator can decide where data may go. A routing
+  door hands the gateway's preflight what it established — `GossipAgent::gateway_preflight_routed` with `RouteFacts`:
+  the `Destination` it is deciding on and its `Locality` (`in_domain` · `external` · `unknown`), the request's
+  `DataClass` and who declared it (`ClassSource::{Principal, Declared, Default}`), and the destinations already refused
+  for the call. `ActionEnvelope` gained `destination` and `data_class`; `AeEvidence` gained `route` (absent from a
+  door that does not route, so a record without it serialises as before) and fills `destination`, which no door could
+  state until now. The reference evaluator's `Rule::for_class` and `Rule::at_locality` express *confidential may only
+  reach in-domain models*; a class or locality a door did not establish is **not established**, never in-domain — so
+  `/gateway/llm/call` and `/gateway/llm/stream`, which classify nothing, cannot pass a class rule. The contract suite
+  gains `PolicyClause::ForbidClassAt` and five `route_*` cases; `ae.preflight` is catalogue revision 3.
+  `mycelium-reason` 0.10.0 is the first routing door: it passes each candidate's declared locality and the request's
+  class, and dispatches to the first candidate the policy permits. **Not built:** content inspection (the class is
+  declared, never detected), observing where a provider's backend sends a prompt (the locality is its declaration),
+  any class or destination at the provider's own re-check, and binding an ad's key to the member that wrote it (a fleet
+member can write another node's `llm-meta` ad). A gateway client cannot set a model's locality:
+`/gateway/capability/advertise` and `/gateway/units/declare` refuse a `locality` attribute on an `llm-meta` ad
+(`403 reserved_namespace`), a catalogue entry providing one is never installed (`prov.eligible` revision 2), and
+`GET /gateway/rpc/serve/{kind}` refuses `llm.invoke`, `mcp.invoke`, `skill.invoke` and the reply kinds — a serve stream
+for one received every such request its node was sent. The private Cedar adapter does not yet enforce class or
+locality (its next re-pin). Upgrade notes: `deprecations.md` §52.
+
+- **`mycelium-py` 0.2.12** and **`mycelium-ts` 0.2.6** (their own tags): `rpc_serve` / `rpcServe` raise
+  `ProtectedKindError`, naming the kind, when the node refuses the stream (`403 protected_kind` or
+  `403 served_in_process`) — before, an SSE content-type error (#643's round-2 review, E) — and the new
+  `ServeEvictedError` (a `ProtectedKindError`) when the node closes the stream because a receiver of its own took the
+  kind, rather than ending the worker's loop silently (round 3).
+
 ## [2.35.0] — 2026-10-17
 
 **Two security fixes, and the post-360 plan's comparison rows.** A revoked key's certificate is now refused at the mTLS
