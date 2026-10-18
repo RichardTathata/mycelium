@@ -294,12 +294,15 @@ An empty table is the strictest profile: the placement directory read-only, no n
 | `backend` | string | `"auto"` | `auto` (this platform's own), `seatbelt` (macOS) or `landlock` (Linux). A backend this platform does not have refuses the activation. |
 | `read` | array of strings | empty | Paths the command may read, beyond the system set and the placement directory. |
 | `write` | array of strings | empty | Paths the command may read and write. |
-| `connect` | array of strings | empty | TCP destinations, `localhost:<port>` or `*:<port>`. Empty: no network at all. |
+| `connect` | array of strings | empty | TCP destinations, `localhost:<port>` or `*:<port>`. Empty: no network at all (beyond the egress proxy, below). |
+| `egress` | table | absent | [`[activation.confine.egress]`](#activationconfineegress): hosts reached **by name** through an egress proxy the stem runs for this activation, and the credential bindings it attaches. |
+| `env` | array of strings | empty | Variables passed through from the stem's environment. **A confined command starts with a cleared environment**: `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`, `TMPDIR`, these names (each as the stem has it), and with `egress` the proxy's address — nothing else. A name that is a binding's `value_env`, a variable whose value is a binding's value, `NO_PROXY` and the proxy variables refuse the start. |
 
 A path is absolute, or starts with `{dir}` (the placement root — see below) or `{path}` (the placed file); no
 other placeholder, and no `..` segment. Each must exist when the activation runs, or the activation is
 refused naming it. A `connect` entry naming a hostname or an address is refused at load: neither backend
-can limit a connection to one. An unknown key in the table, in the `[[activation]]` itself, or at the top
+can limit a connection to one — name the host in [`egress`](#activationconfineegress), which the stem's
+egress proxy limits by name. An unknown key in the table, in the `[[activation]]` itself, or at the top
 level of the file is refused at load — so neither `[activation.confined]` nor `[activations.confine]` can
 load as *no profile* (`deprecations.md` §49).
 
@@ -366,8 +369,12 @@ symlink above it.
 Profiles of placed files that are
 gone are forgotten at the next resolution, and a stem keeps at most 1024.
 
-Neither limits reading a path's metadata (`stat`), CPU or memory, and the command inherits the stem's
-environment (row L's credential bindings are the way to keep a secret out of it). On Linux below Landlock ABI 6, signals to
+Neither limits reading a path's metadata (`stat`), CPU or memory. The command never inherits the stem's
+environment (`env`, above). A credential binding's `value_file` under the placement root, a `read` or `write`
+path, or the system set refuses the stem's start, for every confined activation: the command could read it; so
+does a `value_file` with a second hard link, and an `env` variable holding a binding's value anywhere in its
+text. These are checked once, at start: a file moved or linked into a readable path afterwards is not seen.
+Two `[[activation]]`s for one `ns/name` are refused at load. On Linux below Landlock ABI 6, signals to
 the stem user's other processes are not limited either. `/opt/homebrew` and `/Applications` are not in the
 macOS set: an Ollama installed as an app needs `read = ["/Applications/Ollama.app"]` and its
 `command` naming `/Applications/Ollama.app/Contents/Resources/ollama` (the `/usr/local/bin` link is not
@@ -375,9 +382,10 @@ readable).
 
 The profile is resolved once, when the activation runs, and its re-probes reuse it (re-resolving a replaced
 path, above); the unit file is read
-at start, so every limit holds until the stem restarts. A network allow-list that changes live is **not
-built**. Each refusal is recorded as `prov.activation`'s `confinement_unavailable` (the platform cannot apply
-the profile) or `confinement_failed` (it could, and this run could not — a declared path missing).
+at start, so its filesystem and port limits hold until the stem restarts. The network allow-list **by host**
+changes live: it is the egress proxy's (below). Each refusal is recorded as `prov.activation`'s
+`confinement_unavailable` (the platform cannot apply the profile), `confinement_failed` (it could, and this
+run could not — a declared path missing) or `egress_proxy_unavailable` (its egress proxy could not start).
 
 The stem says which applies. At start it logs each activation as confined (and by which backend),
 unconfined, or refused, and `Stem::activation_confinement` returns the same. `mycelium-stem` registers the
@@ -397,6 +405,114 @@ probe   = ["/Applications/Ollama.app/Contents/Resources/ollama", "show", "coop-s
   read    = ["/Applications/Ollama.app"]
   connect = ["localhost:11434"]
 ```
+
+### `[activation.confine.egress]`
+
+Hosts an activation reaches **by name**, and the credentials it may use without holding them (post-360 rows
+L and M). With the table, the stem starts an **egress proxy** for this activation when it starts — an HTTP/1.1
+forward proxy on `127.0.0.1`, on a free port, kept for the stem's life — and the activation's profile lets its
+command and probe connect to that one port. The proxy carries the command's traffic only to `hosts`, under the
+node's own egress allow-list, and attaches `credentials` through the node's egress gate.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `hosts` | array of strings | empty | Upstreams, each `https://host[:port]` or `http://host[:port]` — one host name or address, no path, query, userinfo or wildcard; matched exactly (case-insensitive), never as a suffix. Empty: the proxy carries nothing (until the list is set live). An entry the node's `egress.allow_hosts` denies refuses the stem's start. |
+| `credentials` | array of strings | empty | Names of the node's [`[[egress_credentials]]`](../operations/crown-jewel.md#credentials-attached-at-egress) bindings this activation's requests may name by placeholder. A name that is not a binding on the node refuses the stem's start; a placeholder naming any other binding is refused at the proxy. |
+
+**What the command must do.** Like every confined command it starts with a **cleared environment**
+(`[activation.confine] env`, above); with an egress table it also gets `HTTP_PROXY`, `HTTPS_PROXY`,
+`ALL_PROXY`, their lower-case forms and `MYCELIUM_EGRESS_PROXY`, each
+`http://mycelium:<token>@127.0.0.1:<port>` — the token, drawn per proxy, is required on every request
+(`Proxy-Authorization`, which clients send from the URL's userinfo), so no other local process can use the
+proxy. Clients that honour the proxy variables (curl, Python's `urllib` and `requests`, Go, most SDKs) need
+nothing else. There are two ways through:
+
+| The command asks for | The proxy | A credential |
+|---|---|---|
+| `http://api.example.com/v1/…` — sent through `HTTP_PROXY` in absolute form (`GET http://api.example.com/v1/… HTTP/1.1`) | matches the host (and the port, when written) to a `hosts` entry and sends the request on over **the entry's scheme** — TLS for an `https://` entry — through the node's egress gate | **attached** — a header carrying `mycelium-credential:<name>` gets the binding's value, only where the binding authorises (its host, port, path prefix, https or loopback); anywhere else the request is refused, 403, and nothing is sent |
+| `https://api.example.com/…` — through `HTTPS_PROXY` as `CONNECT api.example.com:443` | opens a byte tunnel to a listed host and port — **except a granted binding's host**, refused 403: reach that one as `http://`, where the answer is checked | **not attached** — the proxy does not terminate TLS, so it cannot see or change a header inside |
+
+So a command that needs a credential writes its URL with `http://` (the hop to the proxy is loopback; the hop
+that leaves the host is the entry's `https`), and puts the placeholder where the secret would go:
+`Authorization: Bearer mycelium-credential:openai`. The proxy mints no certificate authority and intercepts
+no TLS: a key that could impersonate every host is not worth a header the plain-HTTP hop rewrites without it.
+A redirect comes back to the command, which follows it through the proxy again — each hop meets the list and
+the gate afresh. A refusal is a `403` (`407` without the token, `400` for a request that is not absolute form,
+`503` past the buffering cap, `502` for an encoded answer below) with `x-mycelium-egress: refused` and a body
+naming why — never a credential's value.
+
+**An echo carries nothing back.** Every answer relayed to the command has the granted bindings' values masked —
+in each header and in the body, a value split across chunks included — by the same number of `*`, so
+`Content-Length` stays true; values are masked longest first, so one that prefixes another leaves nothing of
+the longer. With a value to mask the proxy asks the upstream for an unencoded body (`Accept-Encoding:
+identity`) and refuses (`502`) an answer that could carry one encoded — more than one `Content-Encoding`
+header, any coding but `identity` in one, or a `Transfer-Encoding` naming anything but `chunked` — since a
+value inside a compressed body could not be found.
+
+**The list changes live.** `Stem::set_activation_egress_hosts(ns, name, hosts)` replaces an activation's
+`hosts` while the stem runs, and `mycelium-stem` re-reads its unit file on `SIGHUP` and applies each
+activation's `hosts` the same way. A running proxy whose activation the re-read file no longer names with an
+egress table (the table removed, the activation removed or renamed) is narrowed to an **empty** list, logged by
+name. Every entry is checked first, as at start; a bad list is refused and the old one stands. The next request
+meets the new list; the command, its profile and the proxy's port are unchanged, and an open `CONNECT` tunnel is
+not closed. `credentials`, `env` and everything else in the file are read once, at start.
+
+**Bounded.** Any local process can connect to the proxy (only the token admits a request), so a connection that
+has not presented the token is closed after 2 s, on its `407`, or — past 16 such connections — to make room for a
+newer one, so idle token-less connections cannot keep the command out. Connections that have presented it count
+against a cap of 64, a `CONNECT` tunnel's for the tunnel's life; an authenticated request past the cap is
+refused `503`. The proxy allows 10 s for a request's headers, closes a tunnel that carries nothing for 5 minutes (2 s once
+the command has closed its side),
+and buffers at most 4 request bodies of up to 16 MiB at once (a request without a body takes no such place). A
+local process that opens token-less connections faster than they are closed can still crowd the command's
+connections out — the proxy cannot tell who connects before the token arrives.
+
+**No silent fallback.** A proxy that cannot start (its address in use, no runtime) refuses its activation by
+name each time it would run — `prov.activation`'s `egress_proxy_unavailable` — and `Stem::activation_confinement`
+reports it refused. A build of the stem without feature `gateway` or `llm` has no egress gate, so a
+`credentials` entry refuses the stem's start.
+
+**What it holds, by backend.** Under Seatbelt the command can connect to `localhost:<proxy port>` and
+nothing else beyond its own `connect` entries, so every other host is reachable only through the proxy, by
+name. Under Landlock, which limits a port and not an address, the command can also open a TCP connection to
+**the proxy's port on any address**: the hostname limit holds for everything the proxy carries, and a host
+elsewhere listening on that port is reachable directly. `mycelium-stem` registers the guarantee
+`stem.activation_egress` before it starts: `enforced` when every activation is confined by a backend that limits
+by address and has no `connect` entry — no `*:<port>` (any address on that port) and
+no `localhost:<port>` (a local service may forward it anywhere; list it in `hosts` as `http://localhost:<port>`
+instead) — and `not_configured` naming which otherwise (an unconfined or refused activation, either kind of
+`connect` entry, Landlock).
+
+**Not built:** limits by path (a binding's `path_prefix` limits where its value goes, not where the command
+goes); host names compared, not the addresses they resolve to (the node allow-list's own limit); a placeholder
+in a URL or a body is not resolved; a credential inside a `CONNECT` tunnel; a value an upstream returns
+transformed (re-encoded, split by its own encoding, hashed) is not recognised — only the value's bytes, and for
+`basic` its base64 credential, are masked; `credentials` and `env` changing live; HTTP/2 between the command and
+the proxy; a proxy for an unconfined activation.
+
+```toml
+# A model card fetch: reach one API by name, with the node's key attached at the proxy.
+[hosts]
+kinds              = ["blob"]
+trusted_publishers = ["ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"]
+placement_root     = "/var/lib/mycelium/artifacts"
+
+[[activation]]
+ns   = "llm"
+name = "tuned"
+# http:// to the proxy: the proxy originates TLS to the https:// entry and attaches the key.
+command = ["/usr/bin/curl", "-sf", "-o", "/var/lib/mycelium/out/card.json",
+           "-H", "Authorization: Bearer mycelium-credential:example-api",
+           "http://api.example.com/v1/models/{name}"]
+  [activation.confine]
+  write = ["/var/lib/mycelium/out"]   # must exist when the activation runs
+  [activation.confine.egress]
+  hosts       = ["https://api.example.com"]
+  credentials = ["example-api"]       # the node's [[egress_credentials]] name = "example-api", host = "api.example.com"
+```
+
+This file loads as written (`unit_file_md_egress_example_loads_as_written` reads it from this page); the node
+needs the binding, and the write directory must exist, before the activation runs.
 
 ## `[[serve]]`
 

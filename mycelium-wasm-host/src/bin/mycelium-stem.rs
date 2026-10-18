@@ -160,6 +160,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // whether this stem's activations run confined, unconfined, or are refused — registered before
         // start(), the lifecycle boundary after which a registration is refused.
         agent.register_guarantee(mycelium_wasm_host::confinement_guarantee(&units))?;
+        // Rows L and M: whether each activation reaches other hosts only through its egress proxy, by name.
+        agent.register_guarantee(mycelium_wasm_host::egress_guarantee(&units))?;
         agent.start().await?;
 
         let _librarian = match (&librarian, &library) {
@@ -227,7 +229,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let stem = Stem::start(Arc::clone(&agent), &units, opts)?;
         tracing::info!(units = %units_path, hosting = units.hosts.is_some(), "stem node up");
-        shutdown.wait().await?;
+        // Row M's live allow-list: with any `[activation.confine.egress]`, SIGHUP re-reads the unit file and
+        // applies each activation's `hosts` to its running proxy (nothing else is re-read). Without one, SIGHUP
+        // keeps its default — the handler is installed only when there is something to reload.
+        let wait = shutdown.wait();
+        tokio::pin!(wait);
+        #[cfg(unix)]
+        let mut hup = if units.activations.iter().any(|a| a.confine.as_ref().is_some_and(|c| c.egress.is_some())) {
+            Some(tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?)
+        } else {
+            None
+        };
+        loop {
+            #[cfg(unix)]
+            let hup_recv = async {
+                match hup.as_mut() {
+                    Some(h) => h.recv().await,
+                    None => std::future::pending().await,
+                }
+            };
+            #[cfg(not(unix))]
+            let hup_recv = std::future::pending::<Option<()>>();
+            tokio::select! {
+                r = &mut wait => { r?; break; }
+                _ = hup_recv => {
+                    match NodeCapabilityConfig::load_from_file(&units_path) {
+                        Ok(fresh) => {
+                            for (at, applied) in stem.reload_egress_hosts(&fresh) {
+                                match applied {
+                                    Ok(hosts) => tracing::info!(activation = %at, ?hosts, "SIGHUP: egress allow-list applied"),
+                                    Err(e) => tracing::warn!(activation = %at, error = %e, "SIGHUP: egress allow-list refused; the old one stands"),
+                                }
+                            }
+                        }
+                        Err(e) => tracing::warn!(units = %units_path, error = %e, "SIGHUP: the unit file does not load; every egress allow-list stands"),
+                    }
+                }
+            }
+        }
         tracing::info!("shutting down");
         stem.stop().await;
         if let (Some(dir), Some(sink)) = (&trace_dir, &sink) {

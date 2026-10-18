@@ -70,6 +70,8 @@ the notice.
 | 47 | an exhaustive `Rule { .. }` or `ContractCase { .. }` literal; an evaluator that wraps another and forwards only `evaluate` | 2.35.0 (post-360 row K) | build a `Rule` with `Rule::new` and its builders, and give a `ContractCase` `history: None` (or a history); a wrapping evaluator forwards `history_request` and `evaluate_with_history` | Yes for the literals (a new field); no for a wrapper — it compiles, and its limited rules decide `Indeterminate` |
 | 48 | an exhaustive struct literal of `GossipConfig`, `OpenAiBackend` or `ServeDecl`; a `{:?}` of a `ServeDecl` showing its `api_key`; Z2's `api_key_env` refusal naming the variable | 2.35.0 (post-360 row L) | `..Default::default()` (or the new fields: `egress_credentials`, `credentials`, `credential`); read the section name in the refusal | **Yes** for an exhaustive literal — it will not compile; otherwise no — `Debug` prints `api_key: Some("<redacted>")`, and the refusal names the `[[serve]]` section and the field, not the variable |
 | 49 | a unit file with a key or section the loader does not know — at the top level or in an `[[activation]]` | 2.35.0 (post-360 row M) | correct the spelling, or remove the key | No — behaviour: the file is refused at load, naming the key (`units/declare` answers 400, `wire-check` and a stem refuse it); it was silently dropped |
+| 50 | a trace consumer or alert keyed on `prov.probe`'s `probe_failed` for a confined re-probe; a probe that replaces one of its own declared paths on every run | unreleased (post-360 row M's follow-up, #641; `prov.probe` rule revision 3) | read the three new refusal reasons — `confinement_unavailable`, `confinement_failed` and `confinement_changed` — beside `probe_failed`, which now means only that the probe failed; move a step that replaces a declared path into the activation `command` | No — behaviour: a confined re-probe re-resolves a replaced path, a refused re-resolution is recorded by its own reason, and a probe that replaces its own declared path fails as `confinement_changed` ([§50](#50-provprobe-is-rule-revision-3-a-confined-re-probe-re-resolves-and-three-new-refusal-reasons-unreleased-post-360-plan-row-ms-follow-up-641)) |
+| 51 | an exhaustive `ConfineDecl { .. }` or `Profile { .. }` literal; an exhaustive `match` on `activation_sandbox::Refusal`; a confined command relying on the stem's environment; two `[[activation]]`s for one `ns/name` | after 2.35.0 (post-360 rows L and M, the activation egress proxy, #644) | `..Default::default()` for `ConfineDecl` (or `egress: None`); a `_` arm, or `Refusal::EgressUnavailable`; name a needed variable in `[activation.confine] env`; merge duplicate activations | **Partly** — the literals and the `match` fail to compile; the behaviour changes do not ([§51](#51-an-activation-egress-proxy-confinedecl-and-profile-gained-a-field-refusal-a-variant-after-2350-post-360-plan-rows-l-and-m)) |
 | 52 | an exhaustive `Rule { .. }` literal; an evaluator adapter held to the contract suite that cannot express `PolicyClause::ForbidClassAt`; a `mycelium-reason` caller matching `RouteError` exhaustively or building `Routed`; a client relying on the façade answering `403` at the first refused provider | Unreleased (post-360 row R) — also: an `llm-meta` ad from a gateway client is `403 reserved_namespace`; `GET /gateway/rpc/serve/{kind}` for `llm.invoke`, `mcp.invoke`, `skill.invoke`, `rpc.result` or `bulk.result` is `403 protected_kind`, for a kind the node serves in process `403 served_in_process`, and an in-process registration closes client streams on its kind; a classifying router routes nothing without an evaluator; a catalogue entry providing `llm-meta/…` is never installed; on a classifying router a caller with no bound floor cannot declare below the default class, and the header given twice or to a router that classifies nothing is `400` | `Rule::new` and its builders; decline the five `route_*` cases in `declared_limits` or express them; a `RouteError::Unclassifiable` arm; read `refused` / `data.refused_destinations` | Yes for the literals and the `match`; no for the façade — a refused provider is now passed over for the next, and `403` comes only when every candidate is refused |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
@@ -1613,6 +1615,40 @@ Before this change, every re-probe refusal was recorded as `probe_failed`.
 - `probe_failed` now means the probe itself failed, not its confinement.
 - A probe that replaces one of its own declared paths on every run now fails as `confinement_changed`. Move that step
   into the activation `command`, which may replace them.
+
+## 51. An activation egress proxy: `ConfineDecl` and `Profile` gained a field, `Refusal` a variant (after 2.35.0, post-360 plan rows L and M)
+
+**What changes.** An `[activation.confine]` table may name `[activation.confine.egress]` — hosts an activation reaches
+by name through an egress proxy its stem runs for it, and the credential bindings that proxy attaches
+(`docs/reference/unit-file.md` § `[activation.confine.egress]`). Additive for a unit file: one without the table runs
+as before. Three public shapes grew: `mycelium::ConfineDecl` gained `egress: Option<EgressDecl>`;
+`mycelium_wasm_host::activation_sandbox::Profile` gained `env` (it has a crate-private field, so only this crate
+builds one); and `activation_sandbox::Refusal` gained `EgressUnavailable`, recorded as `prov.activation`'s
+`egress_proxy_unavailable` (the rule's revision 3). The refusal for a hostname in `connect` now also points at
+`egress`.
+
+**Behaviour changes** (#644's review). **Every confined command and probe starts with a cleared environment** —
+`PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`, `TMPDIR`, and the names in the new
+`[activation.confine] env` (also a `ConfineDecl` field) — where a 2.35.0 confined command inherited the stem's
+whole environment; the guarantee `stem.activation_confined` is revision 2 and says so. A stem refuses to start
+when a binding's value could reach a confined command: an `env` entry naming a binding's `value_env`, an `env`
+entry whose value is a binding's value, or a binding's `value_file` the command could read. Two `[[activation]]`s
+for one `ns/name` are refused at load. `stem.activation_egress` reads `not_configured` for a `localhost:<port>`
+`connect` entry.
+
+**Will the compiler tell me?** **Yes** for an exhaustive `ConfineDecl` literal and an exhaustive `match` on
+`Refusal`. No for the refusal's text, or for the behaviour changes.
+
+**Migration.**
+- A `ConfineDecl` literal: add `..Default::default()` or `egress: None`.
+- A `match` on `Refusal`: add an arm for `EgressUnavailable` (its `reason()` is `egress_proxy_unavailable`) or a `_`.
+- A test matching `connect`'s hostname refusal: match `hostname`; the message now names `[activation.confine.egress]`
+  as the way to name a host.
+- A confined command that read a variable from the stem's environment: name it in `[activation.confine] env` (not a
+  binding's `value_env`; to use a credential, grant it in `[activation.confine.egress] credentials`).
+- A unit with two `[[activation]]`s for one capability: merge them into one.
+- A binding's `value_file` refused as readable: move it outside the placement root and every confined `read`/`write`
+  path.
 
 ## 52. The evaluator sees where a routed call would go and what it carries (unreleased, post-360 plan row R)
 

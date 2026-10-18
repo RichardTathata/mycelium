@@ -139,7 +139,10 @@
 //! {rendered}`, `{rendered}` without `resolve_artifact_refs = true`, or in a unit whose `[hosts]`
 //! does not name the `blob` kind; an `[activation.confine]` with an unknown key or backend, a path that
 //! is relative, `..`-bearing or starts with a placeholder other than `{dir}`/`{path}`, or a `connect`
-//! entry that is not `localhost:<port>` / `*:<port>`; and a `[[serve]]` with an empty `endpoint` or `model`, or whose
+//! entry that is not `localhost:<port>` / `*:<port>`; an `[activation.confine.egress]` with an unknown key, a `hosts`
+//! entry that is not one `https://host[:port]` / `http://host[:port]` (a path, userinfo or wildcard) or is listed twice,
+//! or a `credentials` entry that is not a binding name; an `[activation.confine] env` entry that is not a variable
+//! name or names a proxy variable or `NO_PROXY`; two `[[activation]]`s for one `ns/name`; and a `[[serve]]` with an empty `endpoint` or `model`, or whose
 //! `while_live` names the skill itself.
 //!
 //! Who reads the file at runtime: a stem (`mycelium-stem --units <file>`, a binary of
@@ -322,9 +325,131 @@ pub struct ConfineDecl {
     #[serde(default)]
     pub write: Vec<String>,
     /// TCP destinations, `localhost:<port>` or `*:<port>`. Empty: no network at all. A hostname or an
-    /// address is refused at load — neither backend can limit a connection to one.
+    /// address is refused here — neither backend can limit a connection to one; name it in `egress`.
     #[serde(default)]
     pub connect: Vec<String>,
+    /// The activation's **egress proxy** (`[activation.confine.egress]`): the stem runs a proxy on
+    /// loopback for this activation, the profile lets the command connect to that one port, and the
+    /// proxy carries its traffic only to `hosts` — by hostname — attaching `credentials` from the node's
+    /// egress gate on the way out. Absent: no proxy.
+    #[serde(default)]
+    pub egress: Option<EgressDecl>,
+    /// Variables passed through from the stem's environment to the confined command and probe, beyond the
+    /// base set ([`ACTIVATION_EGRESS_BASE_ENV`]). **A confined command starts with a cleared environment**:
+    /// the base set, these names, and — with `egress` — the proxy's address; nothing else the stem holds. A
+    /// binding's `value_env` variable, or a variable whose value is a binding's value, refuses the stem's
+    /// start; so do `NO_PROXY` and the proxy variables.
+    #[serde(default)]
+    pub env: Vec<String>,
+}
+
+/// An `[activation.confine.egress]` table: what a confined activation reaches **by hostname**, through a
+/// proxy the stem runs for it on loopback, and which of the node's credential bindings that proxy attaches.
+///
+/// The command is started with a **cleared environment** (as every confined command is) — a fixed base set
+/// ([`ACTIVATION_EGRESS_BASE_ENV`]), the variables `[activation.confine] env` names, and the proxy's address in `HTTP_PROXY`,
+/// `HTTPS_PROXY`, `ALL_PROXY` (and their lower-case forms) and `MYCELIUM_EGRESS_PROXY` — so a secret in
+/// the stem's environment is not in the command's. A request carrying a placeholder
+/// (`mycelium-credential:<name>`) goes to the proxy over plain HTTP in absolute form
+/// (`GET http://api.example.com/v1/… HTTP/1.1`, what `HTTP_PROXY` makes a client send), and the proxy sends
+/// it on to the entry's scheme (https for an `https://` entry) with the value attached; an `https://` URL
+/// the command dials itself goes through `CONNECT`, a tunnel the proxy limits by host and cannot look
+/// inside.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EgressDecl {
+    /// Upstreams, each `https://host[:port]` or `http://host[:port]` — a host name or an address, no path,
+    /// no wildcard. The list the stem starts with; it may be replaced while the stem runs
+    /// (`Stem::set_activation_egress_hosts`, or `mycelium-stem` re-reading its unit file on `SIGHUP`).
+    #[serde(default)]
+    pub hosts: Vec<String>,
+    /// The node's `[[egress_credentials]]` bindings this activation's requests may name by placeholder.
+    /// A placeholder naming any other binding is refused at the proxy. Each must be a binding on the node
+    /// (checked when the stem starts).
+    #[serde(default)]
+    pub credentials: Vec<String>,
+}
+
+/// The variables a confined activation keeps from the stem's environment without naming them.
+pub const ACTIVATION_EGRESS_BASE_ENV: &[&str] = &["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR"];
+
+/// The variables the stem sets to the proxy's address for an egress-proxied activation (an `env` entry
+/// naming one, in any confined activation, is refused).
+pub const ACTIVATION_EGRESS_PROXY_ENV: &[&str] =
+    &["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "MYCELIUM_EGRESS_PROXY"];
+
+/// One `[activation.confine.egress]` `hosts` entry, parsed ([`parse_activation_egress_host`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EgressHost {
+    /// `true` for an `https://` entry: the proxy originates TLS to it.
+    pub https: bool,
+    /// The host, lower-case; an IPv6 address without brackets.
+    pub host: String,
+    /// The port — written, or the scheme's default.
+    pub port: u16,
+}
+
+impl EgressHost {
+    /// The entry as written back: `https://host:port`.
+    pub fn url_base(&self) -> String {
+        let scheme = if self.https { "https" } else { "http" };
+        if self.host.contains(':') {
+            format!("{scheme}://[{}]:{}", self.host, self.port)
+        } else {
+            format!("{scheme}://{}:{}", self.host, self.port)
+        }
+    }
+}
+
+/// Parse one `hosts` entry: `https://host[:port]` or `http://host[:port]`, nothing else — no path (a
+/// trailing `/` alone is allowed), query, fragment, userinfo, wildcard or leading `.`. The URL is read with
+/// the HTTP client's own (WHATWG) parser, so the host is the one the proxy will dial.
+pub fn parse_activation_egress_host(entry: &str) -> Result<EgressHost, String> {
+    let bad = |why: &str| format!("egress host {entry:?}: {why} (write `https://host[:port]` or `http://host[:port]`)");
+    if entry.contains('*') {
+        return Err(bad("a wildcard names no one host"));
+    }
+    let u = url::Url::parse(entry).map_err(|_| bad("not a URL"))?;
+    let https = match u.scheme() {
+        "https" => true,
+        "http" => false,
+        _ => return Err(bad("the scheme must be http or https")),
+    };
+    if !u.username().is_empty() || u.password().is_some() {
+        return Err(bad("credentials go in a binding, never in the URL"));
+    }
+    if u.path() != "/" || u.query().is_some() || u.fragment().is_some() || entry.trim_end_matches('/').ends_with('?') {
+        return Err(bad("a host has no path, query or fragment"));
+    }
+    let host = match u.host() {
+        Some(url::Host::Domain(d)) if !d.is_empty() && !d.starts_with('.') => d.to_ascii_lowercase(),
+        Some(url::Host::Ipv4(a)) => a.to_string(),
+        Some(url::Host::Ipv6(a)) => a.to_string(),
+        _ => return Err(bad("no host")),
+    };
+    let port = u.port_or_known_default().ok_or_else(|| bad("no port"))?;
+    if port == 0 {
+        return Err(bad("port 0 names no endpoint"));
+    }
+    Ok(EgressHost { https, host, port })
+}
+
+impl EgressDecl {
+    fn check(&self) -> Result<(), String> {
+        let mut seen = std::collections::HashSet::new();
+        for h in &self.hosts {
+            let e = parse_activation_egress_host(h)?;
+            if !seen.insert((e.host.clone(), e.port)) {
+                return Err(format!("egress host {h:?}: {}:{} is listed twice", e.host, e.port));
+            }
+        }
+        for c in &self.credentials {
+            if c.is_empty() || !c.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-')) {
+                return Err(format!("egress credential {c:?} is not a binding name (non-empty, only [A-Za-z0-9._-])"));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The mechanism an `[activation.confine]` profile is applied with.
@@ -362,7 +487,8 @@ pub fn parse_confine_connect(entry: &str) -> Result<(&str, u16), String> {
     if host != "localhost" && host != "*" {
         return Err(format!(
             "connect {entry:?} names {host:?}: a hostname or an address cannot be held by either backend \
-             (Seatbelt and Landlock limit a connection by port, Seatbelt also to localhost) — write `localhost:<port>` or `*:<port>`"
+             (Seatbelt and Landlock limit a connection by port, Seatbelt also to localhost) — write `localhost:<port>` or `*:<port>`, \
+             or name the host in [activation.confine.egress] hosts, which the stem's egress proxy holds by name"
         ));
     }
     match port.parse::<u16>() {
@@ -397,6 +523,19 @@ impl ConfineDecl {
         }
         for c in &self.connect {
             parse_confine_connect(c)?;
+        }
+        if let Some(e) = &self.egress {
+            e.check()?;
+        }
+        for v in &self.env {
+            let ok = v.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if !ok {
+                return Err(format!("env {v:?} is not a variable name ([A-Za-z_][A-Za-z0-9_]*)"));
+            }
+            if ACTIVATION_EGRESS_PROXY_ENV.contains(&v.as_str()) || v.eq_ignore_ascii_case("NO_PROXY") {
+                return Err(format!("env {v:?}: the stem sets the proxy variables itself, and NO_PROXY would route around the proxy"));
+            }
         }
         Ok(())
     }
@@ -910,6 +1049,11 @@ impl NodeCapabilityConfig {
         }
         for (i, a) in self.activations.iter().enumerate() {
             let at = format!("[{i}] {}/{}", a.ns, a.name);
+            // #644's review, finding 9: one `ns/name`, one activation — the hook dispatches by it and the
+            // stem's egress accessors look it up by it.
+            if self.activations[..i].iter().any(|b| b.ns == a.ns && b.name == a.name) {
+                return Err(invalid("activation", format!("{at}: {}/{} is declared twice — one [[activation]] per capability", a.ns, a.name)));
+            }
             if a.command.is_empty() {
                 return Err(invalid("activation.command", format!("{at}: an activation with no command does nothing")));
             }
@@ -1521,6 +1665,88 @@ max_providers = 4
         assert!(e.contains("activation.confine") && e.contains("port"), "{e}");
         let e = bad("connect = [\"*:70000\"]\n");
         assert!(e.contains("activation.confine") && e.contains("port"), "{e}");
+    }
+
+    /// #644's review, finding 7: the `[activation.confine.egress]` example in `docs/reference/unit-file.md`
+    /// loads as written — read from the page, so the page cannot drift from the loader. Seen failing first: the
+    /// old example had no `[hosts]` table and was refused.
+    #[test]
+    fn unit_file_md_egress_example_loads_as_written() {
+        let page = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/reference/unit-file.md")).unwrap();
+        let section = &page[page.find("### `[activation.confine.egress]`").expect("the section")..];
+        let start = section.find("```toml\n").expect("its example") + "```toml\n".len();
+        let body = &section[start..start + section[start..].find("```").unwrap()];
+        let cfg = NodeCapabilityConfig::from_toml_str(body).unwrap_or_else(|e| panic!("the example loads: {e}\n{body}"));
+        let e = cfg.activations[0].confine.as_ref().and_then(|c| c.egress.as_ref()).expect("its egress table");
+        assert_eq!((e.hosts.as_slice(), e.credentials.as_slice()), (&["https://api.example.com".to_string()][..], &["example-api".to_string()][..]));
+    }
+
+    /// #644's review, finding 9: two `[[activation]]`s for one `ns/name` — the hook ran the first while the
+    /// stem's egress accessors could act on another. Refused at load by name. And finding 1: the pass-through
+    /// list belongs to `[activation.confine]` (every confined command starts with a cleared environment), not
+    /// to the egress table. Seen failing first: the duplicate validated, and `confine.env` was an unknown key.
+    #[test]
+    fn a_duplicate_activation_is_refused_and_env_is_a_confinement_key() {
+        let act = |name: &str, extra: &str| format!("[[activation]]\nns = \"a\"\nname = \"{name}\"\ncommand = [\"run\"]\n{extra}");
+        let head = "[hosts]\nkinds = [\"blob\"]\naccept_unsigned = true\n";
+        let e = refused(&format!("{head}{}{}", act("b", ""), act("b", "")));
+        assert!(e.contains("a/b") && e.contains("twice"), "{e}");
+        NodeCapabilityConfig::from_toml_str(&format!("{head}{}{}", act("b", ""), act("c", ""))).expect("distinct names validate");
+        let cfg = NodeCapabilityConfig::from_toml_str(&format!("{head}{}", act("b", "[activation.confine]\nenv = [\"HF_HOME\"]\n"))).expect("env in confine");
+        assert_eq!(cfg.activations[0].confine.as_ref().unwrap().env, ["HF_HOME"]);
+        for (bad, needle) in [("NO_PROXY", "NO_PROXY"), ("HTTPS_PROXY", "proxy"), ("1BAD", "variable name")] {
+            let e = refused(&format!("{head}{}", act("b", &format!("[activation.confine]\nenv = [\"{bad}\"]\n"))));
+            assert!(e.contains(needle) && e.contains("activation.confine"), "{e}");
+        }
+        let e = refused(&format!("{head}{}", act("b", "[activation.confine]\n[activation.confine.egress]\nenv = [\"X\"]\n")));
+        assert!(e.contains("env"), "env is no longer an egress key: {e}");
+    }
+
+    /// Post-360 rows L and M: `[activation.confine.egress]` names the hosts an activation reaches **by
+    /// name**, through the stem's egress proxy, the credential bindings that proxy may attach, and the
+    /// variables passed through a cleared environment. Each malformed shape is refused at load by name.
+    /// Seen failing first: on 2.35.0 `egress` was an unknown key of `[activation.confine]`, refused as such.
+    #[test]
+    fn an_activation_egress_table_parses_and_a_bad_one_is_refused_by_name() {
+        let head = "[hosts]\nkinds = [\"blob\"]\naccept_unsigned = true\n[[activation]]\nns = \"a\"\nname = \"b\"\ncommand = [\"run\", \"{path}\"]\n[activation.confine]\n";
+        let cfg = NodeCapabilityConfig::from_toml_str(&format!(
+            "{head}[activation.confine.egress]\nhosts = [\"https://API.example.com\", \"http://localhost:11434\", \"https://[::1]:8443/\"]\ncredentials = [\"openai\"]\n"
+        ))
+        .expect("an egress table validates");
+        let e = cfg.activations[0].confine.as_ref().unwrap().egress.as_ref().expect("the egress table is kept");
+        assert_eq!(e.credentials, ["openai"]);
+        let parsed: Vec<EgressHost> = e.hosts.iter().map(|h| parse_activation_egress_host(h).unwrap()).collect();
+        assert_eq!(parsed, [
+            EgressHost { https: true, host: "api.example.com".into(), port: 443 },
+            EgressHost { https: false, host: "localhost".into(), port: 11434 },
+            EgressHost { https: true, host: "::1".into(), port: 8443 },
+        ]);
+        assert_eq!(parsed[2].url_base(), "https://[::1]:8443");
+        // An empty egress table: a proxy that carries nothing yet (the list may be set live).
+        let cfg = NodeCapabilityConfig::from_toml_str(&format!("{head}[activation.confine.egress]\n")).unwrap();
+        assert!(cfg.activations[0].confine.as_ref().unwrap().egress.as_ref().is_some_and(|e| e.hosts.is_empty()));
+
+        let bad = |table: &str| refused(&format!("{head}[activation.confine.egress]\n{table}"));
+        for (table, needle) in [
+            ("hostz = []\n", "hostz"),
+            ("hosts = [\"api.example.com:443\"]\n", "scheme"),
+            ("hosts = [\"ftp://api.example.com\"]\n", "scheme"),
+            ("hosts = [\"https://*.example.com\"]\n", "wildcard"),
+            ("hosts = [\"https://api.example.com/v1\"]\n", "path"),
+            ("hosts = [\"https://api.example.com?x=1\"]\n", "path"),
+            ("hosts = [\"https://user:pw@api.example.com\"]\n", "binding"),
+            ("hosts = [\"https://api.example.com\", \"https://api.example.com:443\"]\n", "twice"),
+            ("credentials = [\"open ai\"]\n", "binding name"),
+        ] {
+            let e = bad(table);
+            assert!(e.contains(needle), "{table:?} must be refused naming {needle:?}: {e}");
+            if table.contains("hosts") && !table.contains("hostz") {
+                assert!(e.contains("activation.confine") && e.contains("egress host"), "{e}");
+            }
+        }
+        // The `connect` refusal of a hostname now points at `egress`.
+        let e = refused(&format!("{head}connect = [\"ollama.internal:11434\"]\n"));
+        assert!(e.contains("egress"), "{e}");
     }
 
     #[test]

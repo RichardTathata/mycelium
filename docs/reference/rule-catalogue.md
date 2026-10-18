@@ -2,7 +2,7 @@
 
 **Generated** from the `RuleDescriptor`s each crate registers (`mycelium_core::rule`); do not edit. Regenerate with `UPDATE_RULE_CATALOGUE=1 cargo test -p mycelium-wasm-host --features stem --test rule_catalogue`. A rule is a decision point the substrate already has, described: what triggers it, what it reads, how it can end and why, what it writes, which guards it passes, how it may relate to other rules, where its code and tests are, and whether the decision trace records it. A descriptor executes nothing. A relationship is a hypothesis until a trace or a test shows it. The plan is `docs/plans/guarantees-and-rule-catalogue.md`.
 
-Schema `mycelium.rules/1` · 28 rules.
+Schema `mycelium.rules/1` · 29 rules.
 
 | Rule | Responsibilities | Trace | Summary |
 |---|---|---|---|
@@ -15,7 +15,8 @@ Schema `mycelium.rules/1` · 28 rules.
 | [`kv.expiry`](#kvexpiry) | Propagation | catalogue only | An advertisement its writer stopped refreshing leaves the view after its TTL; a stale view is possible in between. |
 | [`kv.propagation`](#kvpropagation) | Propagation | catalogue only | Every update converges by last-writer-wins on the HLC; propagation is unconditional and never taught a higher-layer law (detection, not prevention). |
 | [`membership.governed`](#membershipgoverned) | Response | instrumented | This node rolls to join or leave a governed group against the intent's band — after spacing and settling, and (under an enforcing profile) only on a confident view. |
-| [`prov.activation`](#provactivation) | Response | instrumented | After placement the declared command hands the blob to its local runtime — confined when the unit names a profile, which a node that cannot apply it refuses by name rather than run unconfined; a failure is an install failure at stage `activation`, retried next round. |
+| [`prov.activation`](#provactivation) | Response | instrumented | After placement the declared command hands the blob to its local runtime — confined when the unit names a profile, which a node that cannot apply it refuses by name rather than run unconfined, as it refuses one whose egress proxy is not running; a failure is an install failure at stage `activation`, retried next round. |
+| [`prov.activation_egress`](#provactivation_egress) | Authority | catalogue only | An activation's command reaches another host only through its proxy: a listed host by name, a credential attached by the node's gate where its binding authorises; anything else is refused with the proxy's marker, logged and counted per activation by reason (`mycelium_activation_egress_total{activation, event}`) — not recorded in the decision trace. |
 | [`prov.advertise`](#provadvertise) | Propagation | catalogue only | A completed install advertises its capability to the mesh; the advertisement's lifetime is the install's. |
 | [`prov.demand_response`](#provdemand_response) | Response | instrumented | A requirement with demanding nodes and no provider, as this node sees it, makes this node a candidate installer; an observed unmet requirement is not an instruction to install. |
 | [`prov.eligible`](#proveligible) | Response | instrumented | An entry providing an `llm-meta` ad is never hosted (a model's metadata is its serving node's own, post-360 row R); otherwise this node hosts the entry's kind, has install budget left, and has memory and disk headroom for it. The check has side effects (counters) and is never re-evaluated for a record. |
@@ -198,23 +199,42 @@ This node rolls to join or leave a governed group against the intent's band — 
 
 ## `prov.activation`
 
-rev 2 · `mycelium-wasm-host::activation` · Response · trace: instrumented
+rev 3 · `mycelium-wasm-host::activation` · Response · trace: instrumented
 
-After placement the declared command hands the blob to its local runtime — confined when the unit names a profile, which a node that cannot apply it refuses by name rather than run unconfined; a failure is an install failure at stage `activation`, retried next round.
+After placement the declared command hands the blob to its local runtime — confined when the unit names a profile, which a node that cannot apply it refuses by name rather than run unconfined, as it refuses one whose egress proxy is not running; a failure is an install failure at stage `activation`, retried next round.
 
 - **Trigger:** a placed blob whose capability a `[[activation]]` names
 - **Reads:**
   - the unit file (`[hosts]`, `[[presence]]`, `[[activation]]`) — scope: this node; freshness: read at start
   - the placed path, and `artifact:<hex>` references rendered to placed paths — scope: this node; freshness: local
+  - the activation's egress proxy, started with the stem (`[activation.confine.egress]`) — scope: this node; freshness: local; started once, at the stem's start
 - **Outcomes:**
   - Action: `activated`
-  - Refusal: `command_failed`, `command_timed_out`, `reference_not_placed_yet`, `render_failed`, `confinement_unavailable`, `confinement_failed`
+  - Refusal: `command_failed`, `command_timed_out`, `reference_not_placed_yet`, `render_failed`, `confinement_unavailable`, `confinement_failed`, `egress_proxy_unavailable`
   - NoAction: `no_declaration`
-- **Effects:** the operator's command — under its `[activation.confine]` profile (Seatbelt, or Landlock with seccomp) when the unit names one, else with the stem's privileges
+- **Effects:** the operator's command — under its `[activation.confine]` profile (Seatbelt, or Landlock with seccomp) when the unit names one, else with the stem's privileges; with `[activation.confine.egress]`, confined to its egress proxy's port in a cleared environment
 - **Guards:** Other
 - **May trigger:** [`prov.probe`](#provprobe)
 - **Depends on:** [`prov.install`](#provinstall)
-- **Code:** `activation::hook` · **Docs:** docs/reference/unit-file.md · **Tests:** `a_declared_activation_runs_after_placement_and_its_probe_gates_the_capability`, `an_activation_resolves_artifact_references_to_placed_paths`, `a_verbose_command_that_succeeds_is_not_reported_as_a_timeout`, `a_hung_activation_is_recorded_as_a_timeout`, `a_profile_the_platform_cannot_apply_refuses_the_activation_by_name`, `a_confined_activation_reads_and_writes_only_what_its_profile_names`, `a_confined_activation_reaches_only_its_declared_tcp_ports`, `a_confined_activation_runs_in_a_stem_and_the_stem_says_which_applies`
+- **Code:** `activation::hook` · **Docs:** docs/reference/unit-file.md · **Tests:** `a_declared_activation_runs_after_placement_and_its_probe_gates_the_capability`, `an_activation_resolves_artifact_references_to_placed_paths`, `a_verbose_command_that_succeeds_is_not_reported_as_a_timeout`, `a_hung_activation_is_recorded_as_a_timeout`, `a_profile_the_platform_cannot_apply_refuses_the_activation_by_name`, `a_confined_activation_reads_and_writes_only_what_its_profile_names`, `a_confined_activation_reaches_only_its_declared_tcp_ports`, `a_confined_activation_runs_in_a_stem_and_the_stem_says_which_applies`, `a_proxy_that_cannot_start_refuses_the_activation`
+
+## `prov.activation_egress`
+
+rev 1 · `mycelium-wasm-host::activation_egress` · Authority · trace: catalogue only
+
+An activation's command reaches another host only through its proxy: a listed host by name, a credential attached by the node's gate where its binding authorises; anything else is refused with the proxy's marker, logged and counted per activation by reason (`mycelium_activation_egress_total{activation, event}`) — not recorded in the decision trace.
+
+- **Trigger:** a request an egress-proxied activation's command sends through its proxy (absolute-form HTTP or `CONNECT`)
+- **Reads:**
+  - the activation's egress allow-list (`[activation.confine.egress] hosts`, replaced live by `Stem::set_activation_egress_hosts` / SIGHUP; lock-order row 64) — scope: this activation; freshness: read per request
+  - the node's egress allow-list and credential bindings (`EgressCredentials`) — scope: this node; freshness: read at the agent's start
+- **Outcomes:**
+  - Action: `forwarded`, `tunnelled`
+  - Refusal: `no_proxy_token`, `malformed_request`, `host_not_listed`, `credential_not_granted`, `credential_not_authorised`, `node_egress_denied`, `body_too_large`, `body_cap`, `connection_cap`, `preauth_evicted`, `credential_host_tunnel`, `encoded_response`
+- **Effects:** the request sent on over the entry's scheme with placeholders resolved by the node's gate, its answer relayed with the granted bindings' values masked; or a byte tunnel, closed when idle; `mycelium_activation_egress_total{activation, event}`
+- **Guards:** Authority
+- **Depends on:** [`prov.activation`](#provactivation)
+- **Code:** `activation_egress::Inner::handle` · **Docs:** docs/reference/unit-file.md · **Tests:** `a_confined_command_reaches_an_allowed_host_through_its_proxy_and_is_refused_another`, `an_allow_list_change_takes_effect_without_a_restart`, `a_placeholder_is_replaced_only_at_the_bound_host_and_the_value_is_never_in_the_commands_environment`, `the_proxy_requires_its_token_and_limits_by_host`, `a_placeholder_the_activation_may_not_name_is_refused_and_never_sent`, `an_https_entry_gets_the_credential_over_tls_and_an_echo_of_it_is_masked`, `an_encoded_response_is_refused_where_a_value_could_hide_in_it`, `the_proxy_bounds_connections_header_reads_tunnels_and_bodies`, `token_less_connections_cannot_lock_the_command_out`, `a_tunnel_counts_against_the_connection_cap_until_it_closes`, `bodiless_requests_in_flight_are_not_counted_as_buffered_bodies`, `every_encoding_header_is_read_before_a_body_is_relayed`
 
 ## `prov.advertise`
 

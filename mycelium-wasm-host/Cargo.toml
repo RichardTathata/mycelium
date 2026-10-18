@@ -36,7 +36,7 @@ fastrand = "2"
 ed25519-dalek = "2"
 # `rt` only — the provisioner spawns a serve task per hosted capability (tokio::spawn +
 # JoinHandle). The embedder supplies the runtime (same one the GossipAgent runs on).
-tokio    = { version = "1.35", features = ["rt", "fs", "io-util", "sync"] }  # fs + io-util: the disk stage (S1); sync: the re-probe round's semaphore
+tokio    = { version = "1.35", features = ["rt", "fs", "io-util", "net", "sync", "macros", "signal"] }  # fs + io-util: the disk stage (S1); sync: the re-probe round's semaphore and the egress proxy; net + macros: the activation egress proxy; signal: mycelium-stem's SIGHUP
 # Resource-aware install eligibility (artifact-library §4.4): the default ResourceProbe
 # reads available memory + disk so a node never elects for an artifact it cannot fit.
 # system+disk features only — no process/network/component scanning.
@@ -50,6 +50,13 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # (unlike core's feature gate) by choice: this crate already carries wasmtime, and the facade
 # is tiny.
 metrics = "0.24"
+# Post-360 rows L and M: the activation egress proxy — an HTTP/1.1 forward proxy on loopback (hyper's
+# server half; hyper, hyper-util and http-body-util are already in the tree under reqwest and axum), and
+# its per-proxy token from the OS random source (getrandom 0.2, already in the tree).
+hyper          = { version = "1", features = ["server", "http1"] }
+hyper-util     = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+getrandom      = "0.2"
 
 # The stem node binary (design-time-tooling.md §13, R1/R2): a node that declares from its unit
 # file and provisions what the declarations call for. Opt-in so the library carries no logging
@@ -108,3 +115,9 @@ metrics-util = "0.20.4"
 tokio = { version = "1.35", features = ["full"] }
 reqwest = { version = "0.12", features = ["json"] }
 serde_json = "1.0"
+# #644's review, finding 6: a loopback TLS upstream signed by a test CA, so the egress proxy's https
+# origination is exercised without the network (all four already in the tree under `tls`).
+rcgen        = "0.13"
+tokio-rustls = "0.26"
+rustls       = { version = "0.23", default-features = false, features = ["ring", "std"] }
+time         = "0.3"

@@ -344,7 +344,7 @@ pub use agent::ae_contract;
 pub use agent::egress_client;
 /// Credentials attached at egress (post-360 plan row L).
 #[cfg(feature = "gateway")]
-pub use agent::egress_credentials::{CredentialError, CredentialUse, EgressCredentials};
+pub use agent::egress_credentials::{CredentialError, CredentialUse, EgressCredentials, RedactStream, Redactor};
 pub use agent::confinement::{ClockSync, ConfinementReport, NetworkConfinement, Setting as ConfinementSetting};
 pub use agent::guarantee::{
     GuaranteeDescriptor, GuaranteeEntry, GuaranteeId, GuaranteeKind, GuaranteeReport, ProfileRef,
@@ -417,7 +417,7 @@ pub use capability::{
     WiredEmitOutcome, WiringProvider, WiringStatus,
 };
 pub use capability_config::{
-    CapDecl, CapabilityProbeEntry, FilterDecl, GroupDecl, HostsDecl, ActivationDecl, ACTIVATION_PLACEHOLDERS, ConfineDecl, ConfineBackend, CONFINE_PATH_PLACEHOLDERS, parse_confine_connect, ServeDecl, LaneDecl, LaneRole, MandateDecl,
+    CapDecl, CapabilityProbeEntry, FilterDecl, GroupDecl, HostsDecl, ActivationDecl, ACTIVATION_PLACEHOLDERS, ConfineDecl, ConfineBackend, CONFINE_PATH_PLACEHOLDERS, parse_confine_connect, EgressDecl, EgressHost, parse_activation_egress_host, ACTIVATION_EGRESS_BASE_ENV, ACTIVATION_EGRESS_PROXY_ENV, ServeDecl, LaneDecl, LaneRole, MandateDecl,
     NodeCapabilityConfig, PresenceDecl, ProbeEvent, ProbeState, RankingDecl, RuleDecl, SemverTriple,
     TomlCapValue, TomlConstraint, HOSTABLE_KINDS,
 };
@@ -427,7 +427,7 @@ pub use mesh_manifest::{
     GroupManifest, GroupStatus, MeshManifest, MeshMeta, MeshStatus,
     manifest_keys, semver_gt,
 };
-pub use config::{CredentialBinding, CredentialForm, credential_placeholder, DomainProfile, EgressPolicy, PROFILE_NAMES, GatewayCallerProfile, GatewayNamedToken, GatewayToken, GatewayTlsConfig, GossipConfig, GroupTopologyPolicy, PersistenceConfig, SyncMode, TlsConfig, TopologyEnforcement};
+pub use config::{CredentialBinding, CredentialForm, credential_placeholder, credential_placeholders_in, CREDENTIAL_PLACEHOLDER_MARKER, DomainProfile, EgressPolicy, PROFILE_NAMES, GatewayCallerProfile, GatewayNamedToken, GatewayToken, GatewayTlsConfig, GossipConfig, GroupTopologyPolicy, PersistenceConfig, SyncMode, TlsConfig, TopologyEnforcement};
 pub use persistence::DataAtRestCipher;
 /// Exclusive ownership of a persistence file (`<file>.lock`), the lock the KV WAL and the node-local
 /// journal hold — re-exported so a companion's own log is refused to a second owner the same way.

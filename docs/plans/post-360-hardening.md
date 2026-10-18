@@ -1,6 +1,6 @@
 # Post-360 hardening — the next batch, and consensus as a protocol, not a service
 
-**Status:** adopted 2026-10-10, rev 1.10 (2026-10-16: the v2.34.0 cut — F2, S and T closed on evidence in §3.5 by an independent reviewer, T's block written then, its `dev` log line *not built*; rev 1.9, 2026-10-13: the v2.33.0 cut — every row since 2.32.0 closed on evidence in §3.5, and the table's state markers moved; rev 1.8, 2026-10-12: Φ closed; P5, J, I, H, E and F delivered; rows K, L, M added from the Strands Box comparison; rows N, O, P added — Strands agents on Mycelium, after an `a2a-sdk` probe; Q delivered; rows S and T added). **R0 was released as v2.32.0 (2026-10-11)**, delivering rows **G, P3, C, D,
+**Status:** adopted 2026-10-10, rev 1.11 (2026-10-17: rows L and M — the activation-command credential, limits by hostname and a live network allow-list — delivered by the activation egress proxy, #644, §3.5; rev 1.10, 2026-10-16: the v2.34.0 cut — F2, S and T closed on evidence in §3.5 by an independent reviewer, T's block written then, its `dev` log line *not built*; rev 1.9, 2026-10-13: the v2.33.0 cut — every row since 2.32.0 closed on evidence in §3.5, and the table's state markers moved; rev 1.8, 2026-10-12: Φ closed; P5, J, I, H, E and F delivered; rows K, L, M added from the Strands Box comparison; rows N, O, P added — Strands agents on Mycelium, after an `a2a-sdk` probe; Q delivered; rows S and T added). **R0 was released as v2.32.0 (2026-10-11)**, delivering rows **G, P3, C, D,
 P1, A (with C1, C2), B (as narrowed 2026-10-11) and P2 (without migration, as decided 2026-10-11)**; R0's private re-pin landed as private #29. **v2.33.0 (cut 2026-10-13) delivers rows Φ (#607), P2's migration (#606, with #604 and #605), J (#608), P5 (#610), H (#609), E (#613), F (#611, with its window — the flip is F2), Q (#616) and, in the private repository on that pin, I (private #30)**; its private re-pin landed as private #31 — each closed on evidence in §3.5. **v2.34.0 (cut 2026-10-16) delivers rows F2 (#624), S (#623) and T (#622)**, with three §3.6 follow-ups (#627–#629) and
 the wasmtime/rustls advisories (#625). Open: K, L, M, N, O, P. It follows the 2026-10-09 360 review and the eleven
 PRs that addressed its must-do list (#582–#592, private #28); those are recorded in the CHANGELOG and are not
@@ -84,8 +84,8 @@ Four places strain that line today, and the rows in §3 address each:
 | **I** — *delivered with 2.33.0 (private #30), §3.5; Cedar narrower* | Private repo P3s | RA5 correction chains and competing corrections; attempt keys carry the operation id; a lock-order table; the outbox directory fsynced at create; Cedar policies schema-validated at load; the CI pin check refuses `[patch]`, `rev =` and multi-line tables | R0's re-pin |
 | **J** — *delivered 2.33.0 (#608), §3.5* | Hygiene | the sim-seam gate's test-skip bug (the one the KV gate fixed in #591); every feature and bench linted or built by some CI step; the two CI jobs on `stable` pinned; unreferenced public items deprecated, not removed (nothing is removed on the 2.x line); only the duplicates that disagree are unified (`hex_line`'s whitespace, `now_ms` copies outside the seam) | — |
 | **K** — *delivered 2.35.0 (#638), §3.5* | Policy over history | the action evaluator can decide on what an actor has already done, not only on the request: a bounded, read-only history view (the actor's recent decisions and executions from the evidence journal — `src/agent/evidence_journal.rs`) reaches `ActionEvaluator::evaluate` beside the envelope (`ActionEnvelope`, `src/agent/action_evaluator.rs:101`, which today carries no history); a rule such as *at most three posts in ten minutes* is expressible and tested in the reference evaluator and the AE contract suite (`mycelium::ae_contract`); the scope of a count is stated by name — **per node** (the journal is node-local and never gossiped) unless the design question in §5 is decided otherwise; a history that cannot be read is `Indeterminate`, never an empty history; replay records the history view as a decision input | design question §5 |
-| **L** — *delivered 2.35.0 (#637), §3.5; the activation-command half not built* | Credentials attached at egress | a secret need not enter a component's or an activation command's environment: an outbound request names a credential binding, and the egress gate (`EgressPolicy`, `mycelium-core/src/config.rs:280`, which today checks the host and every redirect hop) attaches it on the way out — bearer, header and basic forms at least — only to the host the binding names; a redirect off that host drops it; the binding's use is counted and its value never logged, traced or written to the evidence journal; the places a secret is read into the node today (`[[serve]].api_key_env`, federation credentials, an activation command's environment) are listed and each either moved behind a binding or stated as unchanged *From NVIDIA OpenShell (2026-10-12):* the component holds an opaque placeholder and never the value — the gate resolves the placeholder only at an endpoint the binding authorises — so a leaked environment or log carries nothing usable. | — |
-| **M** — *partly delivered 2.35.0 (#636), §3.5; not built: network limited to declared hosts (ports only), a live-changing network allow-list, the OpenShell backend* | Activation commands confined | an `[[activation]]` command — today "not a sandbox: there is no allowlist and no confinement" (`docs/reference/unit-file.md:276`) and run with the stem's privileges — can be run under an OS confinement profile the unit file names (macOS Seatbelt first, Linux namespaces/Landlock or seccomp where available): filesystem access limited to the placed artifact's directory and declared paths, network limited to declared hosts or none; a profile the platform cannot apply refuses the activation by name, never runs it unconfined; the unconfined default stays, stated, and the guarantee report says which applies *From NVIDIA OpenShell (2026-10-12):* a profile's filesystem and syscall limits are fixed for the activation's life and its network allow-list may change live (OpenShell's split: filesystem and process locked at creation, network hot-reloadable); OpenShell itself (containers, seccomp, an unprivileged identity; needs Docker) is a candidate backend for a stem, beside a native Seatbelt/Landlock profile, rather than something to rebuild. | — |
+| **L** — *delivered 2.35.0 (#637), §3.5; the activation-command half delivered by the activation egress proxy (#644), §3.5* | Credentials attached at egress | a secret need not enter a component's or an activation command's environment: an outbound request names a credential binding, and the egress gate (`EgressPolicy`, `mycelium-core/src/config.rs:280`, which today checks the host and every redirect hop) attaches it on the way out — bearer, header and basic forms at least — only to the host the binding names; a redirect off that host drops it; the binding's use is counted and its value never logged, traced or written to the evidence journal; the places a secret is read into the node today (`[[serve]].api_key_env`, federation credentials, an activation command's environment) are listed and each either moved behind a binding or stated as unchanged *From NVIDIA OpenShell (2026-10-12):* the component holds an opaque placeholder and never the value — the gate resolves the placeholder only at an endpoint the binding authorises — so a leaked environment or log carries nothing usable. | — |
+| **M** — *delivered 2.35.0 (#636) with hosts and the live allow-list by the activation egress proxy (#644), §3.5; not built: the OpenShell backend, resource limits; under Landlock the proxy's port is open on any address* | Activation commands confined | an `[[activation]]` command — today "not a sandbox: there is no allowlist and no confinement" (`docs/reference/unit-file.md:276`) and run with the stem's privileges — can be run under an OS confinement profile the unit file names (macOS Seatbelt first, Linux namespaces/Landlock or seccomp where available): filesystem access limited to the placed artifact's directory and declared paths, network limited to declared hosts or none; a profile the platform cannot apply refuses the activation by name, never runs it unconfined; the unconfined default stays, stated, and the guarantee report says which applies *From NVIDIA OpenShell (2026-10-12):* a profile's filesystem and syscall limits are fixed for the activation's life and its network allow-list may change live (OpenShell's split: filesystem and process locked at creation, network hot-reloadable); OpenShell itself (containers, seccomp, an unprivileged identity; needs Docker) is a candidate backend for a stem, beside a native Seatbelt/Landlock profile, rather than something to rebuild. | — |
 | **N** — *delivered 2.35.0 (#633), §3.5* | A2A at the current specification | an A2A client built on the current `a2a-sdk` (1.2.2, the library Strands Agents uses) reaches Mycelium's skills through `/a2a`, with the same authority as today — **the 2026-10-12 probe found it cannot**: the card is served only at `/.well-known/agent.json` (the SDK reads `/.well-known/agent-card.json`, 404); the card's `url` is the node's **gossip** address, not its gateway, and omits `/a2a` (`src/agent/a2a.rs:445`, so the SDK's `send_message` failed with a network error); the methods are the pre-0.2 `tasks/send` / `tasks/sendSubscribe` / `tasks/get` / `tasks/cancel` (`SendMessage` and `message/send` both answer `-32601`); and the skill is chosen by a Mycelium-only `skillId` parameter that a standard client never sends. Promises: the card at `/.well-known/agent-card.json` (the old path kept for one release), naming the gateway's own URL and scheme (https under `gateway_tls`) with `/a2a` and its supported interfaces and protocol versions; the A2A 1.0 methods (`SendMessage`, `SendStreamingMessage`, `GetTask`, `CancelTask`) and the 0.3 names (`message/send`, `message/stream`) served beside the old ones, which stay for one release with a deprecation entry; a message reaches a skill without `skillId` (a declared default skill, or the skill named in the message's metadata — decided in the PR, stated on the card); every new method runs the same doors as `tasks/send` — the action evaluator, mandates, evidence, task ownership — and the C7 bypass matrix gains each new method; the probe becomes a CI test driving the real `a2a-sdk` client against a node | — |
 | **O** — *delivered 2.35.0 (#634), §3.5* | A Strands session store on Mycelium | a companion package (Python, beside `langgraph-checkpoint-mycelium`) implementing Strands Agents' `SessionManager` over the Mycelium Python SDK, so an agent's conversation and state, and a swarm's shared memory, live in the fleet's KV rather than a file or a bucket; a save returns the SDK's receipt and its docs say which rung it names (a local application, not replication — the checkpointer's wording); an incomplete or unreadable session is an error, never an empty one; concurrent agents in one session do not lose each other's writes, or the limit is stated; its live suite runs in CI against a real node; pinned to a Strands release and re-checked when Strands changes the interface | — (N for the cross-host demo) |
 | **P** — *delivered 2.35.0 (#635), §3.5* | A Strands fleet, demonstrated | a runnable example, in CI like the co-op demos, in which Strands agents on three Mycelium nodes plan one shared task (a constructive domain — food redistribution or a microgrid), keep their session and swarm memory in the fleet through O, and call fleet skills through `/a2a` (N): a call outside an agent's mandate is refused and the refusal is in the evidence journal; one node is stopped and the work resumes on another from the stored session; the README states what Strands provides and what Mycelium adds, and which properties the run shows versus which it does not | N, O |
@@ -1240,13 +1240,34 @@ and `git grep -n "env::var" -- src mycelium-*/src`): `[[serve]]`'s `api_key` / `
 federation call header (a per-call signature, `federation/client.rs`), the object store's environment
 (`object_store::parse_url_opts`), `mycelium-artifact`'s `--key`/`--key-env` (local signing), the gateway's inbound
 tokens, and an `[[activation]]` command's inherited environment.
-- *a secret need not enter … an activation command's environment* — **not built.** An `[[activation]]` command is a
-  separate process with no path to the gate — it opens its own connections — and it inherits the stem's whole
-  environment, so a secret it needs is in that environment (or a file it reads), and a `value_env` binding's variable
-  is in it too. What would close it: the gate reachable by the command — a node-side forward proxy on loopback that
-  resolves placeholders in the command's requests by the same rule — together with the command started with a cleared
-  environment (an allow-list of variables, and the placeholders it may hold), which row M's confinement can supply.
-  The crown-jewel table's "unchanged here" line stands.
+- *a secret need not enter … an activation command's environment* — **delivered by the activation egress proxy
+  (#644)**; at 2.35.0 it was *not built* (the command had no path to the gate and inherited the stem's whole
+  environment). An `[activation.confine]` profile may name `[activation.confine.egress]` (`EgressDecl`,
+  `src/capability_config.rs`): `hosts`, `credentials` (bindings the command may name) and `env`. The stem starts one
+  forward proxy per such activation on `127.0.0.1` (`mycelium-wasm-host/src/activation_egress.rs`,
+  `stem::start_egress_proxies`), confines the command and probe to its port (`activation_sandbox::prepare_with`) and
+  starts them in a **cleared environment** (`EgressProxy::command_env`, `activation::run_with_env`): a base set, the
+  `env` names, and the proxy URL with a per-proxy token. A header placeholder goes out through
+  `EgressCredentials::send_once` (the gate's first hop; no redirect followed). Evidence:
+  `a_placeholder_is_replaced_only_at_the_bound_host_and_the_value_is_never_in_the_commands_environment` (live): the bound
+  host receives `Bearer <value>` and never the placeholder or the proxy token; another listed host is refused (the
+  binding does not authorise it), as is a binding the activation was not given, and that host sees nothing; the
+  command's whole environment holds neither the value nor its `value_env` variable, which the stem's holds. Seen
+  failing first twice: with the proxy forwarding headers as written, the upstream received the placeholder; with the
+  environment inherited, the variable and value were in it. `a_placeholder_the_activation_may_not_name_is_refused_and_never_sent`;
+  `send_once_attaches_at_the_bound_host_and_follows_no_redirect` (seen failing first with `send_once` delegating to
+  `send`: the redirect was followed). At the stem's start: an `env` entry passing a binding's `value_env`, a
+  credential the node has no binding for, a host its allow-list denies — each refuses by name
+  (`a_misconfigured_activation_egress_refuses_the_start_and_a_reload_applies_hosts`). A per-proxy token keeps other
+  local processes from having a credential attached (`the_proxy_requires_its_token_and_limits_by_host`, seen failing
+  first with the check removed: the token-less request was forwarded). **HTTPS, decided:** both (a) and (b) — a
+  credential travels only on plain HTTP to the proxy, which originates TLS to an `https://` entry; `CONNECT` tunnels
+  for URLs the command dials as `https://`, allow-list only, no rewrite; no TLS interception (a minted CA is a key
+  that impersonates every host). The crown-jewel table's activation row now says *yes, with
+  `[activation.confine.egress] credentials`*. **Not built:** a credential inside a `CONNECT` tunnel; a placeholder in
+  a URL or body; a value an upstream returns transformed rather than as its bytes; a proxy for an unconfined
+  activation. (A value the command could read from a file or another variable, and an upstream's echo of it, were
+  closed by the review — the block below row M's proxy bullets.)
 - *a secret need not enter a component's … environment: an outbound request names a
   credential binding* — `CredentialBinding` (`mycelium-core/src/config.rs`): a host, an optional path prefix, a form
   and a value source (`value_env` / `value_file`), **never the value**; a caller names it by an opaque placeholder,
@@ -1336,7 +1357,7 @@ tokens, and an `[[activation]]` command's inherited environment.
   and a secret pasted into `name` was echoed by an env refusal, and `value_env` / `value_file` by a binding's `Debug` —
   an env refusal names its entry by index alone, and the `Debug` redacts both sources
   (`neither_an_env_refusal_nor_a_bindings_debug_prints_a_pasted_secret`). The residual is stated in crown-jewel.
-- **Not built, stated:** the activation-command half (above); a `ServeDecl`'s `Debug` prints `api_key_env` as written
+- **Not built, stated:** for the activation-command half, what its bullet above lists; a `ServeDecl`'s `Debug` prints `api_key_env` as written
   (`src/capability_config.rs`), so a key pasted into that field is echoed by a `{:?}` of the unit (found at the 2.35.0 cut);
   with `value_env` the value stays in the node's process environment (`value_file` avoids it); a binding whose `name` or `header` is itself a secret is
   printed and used as a metric label or a header name; a placeholder in a query string or a request body is not
@@ -1385,10 +1406,17 @@ CC8, `docs/capabilities.md`, the crate README). The example units with `[[activa
   usable; a secret outside unreadable; the placement directory, a read path and an undeclared path unwritable; a
   probe reading outside fails the activation. Seen failing first (unconfined, the secret was read and every write
   landed); run on macOS (Seatbelt) and in a Linux 6.8 container (Landlock ABI 4) with `MYCELIUM_CONFINE_LIVE_REQUIRED=1`.
-- *network limited to declared hosts or none* — **declared TCP ports, or none; hosts not built.** `connect` takes
-  `localhost:<port>` or `*:<port>`; empty is no network. A hostname or an address is refused at load
-  (`parse_confine_connect`): Seatbelt limits to `localhost` or any address, Landlock to a port only, and neither by
-  name — an egress proxy would, and none is built. `a_confined_activation_reaches_only_its_declared_tcp_ports` — two
+- *network limited to declared hosts or none* — **declared TCP ports or none (2.35.0); hosts by the activation egress
+  proxy (#644).** `connect` takes `localhost:<port>` or `*:<port>`; empty is no network. A hostname or an address
+  in `connect` is still refused at load (`parse_confine_connect`, its message now pointing at `egress`): Seatbelt
+  limits to `localhost` or any address, Landlock to a port only. Hosts go in `[activation.confine.egress] hosts`
+  (`https://host[:port]` / `http://host[:port]`, `parse_activation_egress_host`), held **by name** by the stem's
+  proxy: `a_confined_command_reaches_an_allowed_host_through_its_proxy_and_is_refused_another` (live) — the listed
+  host reached through the proxy, another port and the same address under another name refused (the upstream sees
+  nothing), `CONNECT` to the listed host only, and a direct connection to the listed upstream refused by the
+  confinement (plant: unconfined it connects); seen failing first with the proxy ignoring `hosts` (the other host was
+  reached). Under Landlock the proxy's port is open on any address, so `stem.activation_egress` reads
+  `not_configured` there (`the_egress_guarantee_says_which_applies`); under Seatbelt, `enforced`. `a_confined_activation_reaches_only_its_declared_tcp_ports` — two
   listening ports (a plant shows both answer unconfined): no `connect` reaches neither, `*:<a>` reaches `a` and not
   `b`, UDP is refused; `localhost:<a>` holds under Seatbelt and is refused by name under Landlock. Seen failing first
   (unconfined, every connection opened). On Linux a `*:<port>` profile resolves names only through `/etc/hosts` (DNS
@@ -1413,9 +1441,16 @@ CC8, `docs/capabilities.md`, the crate README). The example units with `[[activa
   `start()` cannot register it then (the lifecycle boundary refuses) — it registers `confinement_guarantee` before
   its own `start()`, as the binary does.
 - *a profile's filesystem and syscall limits are fixed for the activation's life and its network allow-list may
-  change live* — the first half delivered: the profile is resolved once when the activation runs and every re-probe
-  reuses it, and the unit file is read at start. **A network allow-list that changes live is not built**: every limit
-  holds until the stem restarts.
+  change live* — the first half delivered in 2.35.0: the profile is resolved once when the activation runs and every
+  re-probe reuses it. **The second half by the activation egress proxy (#644):** the list is the proxy's, behind
+  one lock (lock-order row 64), replaced by `Stem::set_activation_egress_hosts` or `mycelium-stem`'s `SIGHUP`
+  (`Stem::reload_egress_hosts`, the unit file re-read and only `hosts` applied), checked before it changes —
+  `an_allow_list_change_takes_effect_without_a_restart` (live: one hook, one proxy, one port; an added host reached, a
+  bad list refused with the old one standing, a removed host refused again; seen failing first with `set_hosts` a
+  no-op) and `a_misconfigured_activation_egress_refuses_the_start_and_a_reload_applies_hosts`. Why not KV or a gateway
+  route: KV is fleet-writable (detection, not prevention — any member could widen a stem's list), and a route would be
+  a door, with a scope and an audit, for a node-local concern the unit file already owns. `credentials` and `env` stay
+  fixed for the stem's life.
 - *OpenShell … is a candidate backend for a stem … rather than something to rebuild* — **not built**; `backend`
   is an enum with room for it.
 - *Found on the way* — the hook recorded every timeout as `command_failed`: it matched `"timed out"`, and the runner
@@ -1473,7 +1508,57 @@ CC8, `docs/capabilities.md`, the crate README). The example units with `[[activa
   re-probe, so the install was withdrawn and reinstalled — a flap if the path churned. The re-probe now takes its profile
   from the hook's resolved profiles, re-resolved inside the re-probe with every check repeated, and runs under the fresh
   one; only a refused re-resolution withdraws, named in the trace (§3.6).
-- **Not built, stated:** limits by hostname or address; a live network allow-list; an OpenShell backend; resource
+- *No silent fallback for the proxy* (#644) — a proxy that cannot start refuses its activation by name,
+  `prov.activation`'s `egress_proxy_unavailable` (revision 3), and nothing runs: `a_proxy_that_cannot_start_refuses_the_activation`
+  (its address taken; and a hook with no proxy at all), seen failing first with the hook ignoring the missing proxy
+  (the command ran). The proxy's decisions are catalogued as `prov.activation_egress` (catalogue-only: counted and
+  logged by reason, not traced).
+- *The independent review (#644, round 1)* — nine findings, each fixed at the root where it could be; each code
+  defect's test seen failing first with its plant applied alone. (1) `stem.activation_egress` read `enforced` for a
+  confined activation that inherited the stem's environment: **every confined command now starts with a cleared
+  environment** (`activation_egress::confined_env`; `env` moved to `[activation.confine]`; `stem.activation_confined`
+  revision 2; a behaviour change in `deprecations.md` §51) — `a_confined_activation_starts_with_a_cleared_environment`
+  (live; failing first, the environment was the stem's). (2) A SIGHUP reload never narrowed a proxy whose activation
+  the file no longer named: narrowed to an empty list and logged by name (`Stem::reload_egress_hosts`; the stem test,
+  failing first with the narrowing removed). (3) Three ways a value could reach the command, each closed: a
+  `value_file` the command can read, and an `env` entry whose value is a binding's value, refuse the start for every
+  confined activation (`stem::check_confined_secrets`, `activation_sandbox::readable_roots`,
+  `EgressCredentials::holds_value`; `no_credential_reaches_a_confined_command_another_way`, failing first: both
+  started); an echoing upstream's copy is masked in every relayed header and body, across chunk boundaries and keeping
+  `Content-Length` (`mycelium::Redactor`; `a_redactor_masks_every_value_across_chunk_boundaries_and_keeps_the_length`,
+  failing first with nothing withheld between chunks; `an_https_entry_gets_the_credential_over_tls_and_an_echo_of_it_is_masked`,
+  failing first with the redactor off), an encoded answer is refused where a value could hide
+  (`an_encoded_response_is_refused_where_a_value_could_hide_in_it`, failing first: relayed), and a `CONNECT` to a
+  granted binding's host is refused (the https test, failing first: tunnelled). (4) A `localhost:<port>` `connect`
+  entry now reads `not_configured` (a local service may forward) — chosen over refusing the combination, since a
+  local runtime is the common case and the report is where the trade is stated (`the_egress_guarantee_says_which_applies`,
+  failing first: `enforced`). (5) The proxy is bounded — 64 connections, a 10 s header read, a 5-minute idle tunnel,
+  4 buffered bodies (`ProxyLimits`; `the_proxy_bounds_connections_header_reads_tunnels_and_bodies`, failing first with
+  the limits widened). (6) The https origination path is exercised against a loopback TLS upstream signed by a test CA
+  (`EgressCredentials::load_trusting_root`, built only under `cfg(test)` / `test-util`). (7) The unit-file example
+  loads as written (`unit_file_md_egress_example_loads_as_written`, reading the page; failing first on the old
+  example). (8) `egress.credentials` names `send_once`; `stem.activation_confined` names the proxy port and the cleared
+  environment. (9) Two `[[activation]]`s for one `ns/name` are refused at load
+  (`a_duplicate_activation_is_refused_and_env_is_a_confinement_key`, failing first: validated).
+- *The confirmation review (#644, round 2)* — round 1 confirmed fixed; seven new findings, each fixed with a test
+  seen failing first. (N1) The body cap counted requests in flight: a permit only while a body is buffered
+  (`bodiless_requests_in_flight_are_not_counted_as_buffered_bodies`, failing first: the fifth answered 503). (N2)
+  Token-less connections could fill the cap: only a connection that presented the token counts against it; one that
+  has not is closed after 2 s, on its 407, or — past 16 — to make room for a newer one (`Conn`, lock-order row 65;
+  `token_less_connections_cannot_lock_the_command_out`, failing first: the command's request was refused). (N3) A
+  tunnel held no place: it holds its connection's until it closes, closed 2 s after the command's side closes
+  (`a_tunnel_counts_against_the_connection_cap_until_it_closes`, failing first: served past the cap). (N4) Values are
+  masked longest first (`a_value_that_prefixes_another_leaves_nothing_of_the_longer_one`, failing first: the tail
+  leaked). (N5) Every `Content-Encoding` and `Transfer-Encoding` header and coding is read
+  (`every_encoding_header_is_read_before_a_body_is_relayed`, failing first on two headers and, planted alone, on
+  `Transfer-Encoding: gzip, chunked`). (N6) §51's table row (§50 at the review) says *Partly*. (N7) A `value_file` with a second hard link,
+  and an `env` value holding a binding's value inside a longer string, refuse the start (the stem test, failing first:
+  both started); a file moved or linked into a readable path after start is not seen, stated, and the guarantee says
+  so. The librarian tests use the bind-verified port allocator. Stated: a local process that opens token-less
+  connections faster than they are closed can still crowd the command out — the proxy cannot tell who connects
+  before the token arrives.
+- **Not built, stated:** limits by address (names are compared, not what they resolve to) and by path; under Landlock,
+  a limit on the proxy's port by address; an OpenShell backend; resource
   limits (CPU, memory); on Linux below Landlock ABI 6, a limit on signals to the stem user's processes; device
   `ioctl`s (Landlock ABI 5); metadata (`stat`) of any path stays readable on both backends; a socket inherited across
   `exec` is not looked at; the command inherits the stem's environment (row L's concern). Confinement narrows what an operator's command can reach; it does not make an untrusted
@@ -1741,7 +1826,8 @@ envelope's nonce cache) and Q (the handshake refuses a revoked key's certificate
   - **(L-b, low) Answered.** It fails closed: a relative operator link through a root and back out is refused,
     and the refusal names the cause.
 
-  Not built: limits by hostname or address, a live network allow-list, an OpenShell backend, resource limits.
+  Not built: an OpenShell backend, resource limits; limits by hostname and a live allow-list are delivered by the
+  activation egress proxy (#644), with its own *not built* list (§3.5, rows L and M).
 - **H:** carry each named offer's signed bytes inside the close and award from that copy (today a member who deletes a
   named offer steers the checked path); a declarer that restarts without keeping its close can re-decide.
 - **J:** the seam and KV gates end an unstarted skip at the first trailing `,`, so a test item with a multi-line header

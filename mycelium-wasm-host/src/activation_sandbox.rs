@@ -23,15 +23,18 @@
 //!
 //! **Fixed for the activation's life** (row M's OpenShell note): the profile is resolved once, when the
 //! activation runs, and its re-probes reuse it — re-resolved, every check repeated, only when a declared
-//! path no longer names what it named ([`Profile::is_current`]). A network allow-list that changes live is **not built**:
-//! the unit file is read at start, and every limit it states holds until the stem restarts.
+//! path no longer names what it named ([`Profile::is_current`]). The unit file is read at start, and its
+//! filesystem and port limits hold until the stem restarts. The network allow-list **by host** changes live:
+//! it is the activation's egress proxy's ([`crate::activation_egress`]), whose one loopback port the profile
+//! names ([`prepare_with`]).
 //!
 //! **What neither backend limits**, stated: metadata (`stat`) of any path; on Linux below Landlock ABI 6,
 //! signals to the stem's own user's processes (Unix sockets, which Landlock there does not limit either,
 //! cannot be created: the filter refuses every socket but TCP; a socket inherited across `exec` is not
 //! looked at); device `ioctl`s (Landlock ABI 5); on Linux, name resolution beyond `/etc/hosts`
 //! under a `*:<port>` profile (DNS is UDP, which the filter refuses); CPU and memory (no resource
-//! limits); the environment, which the command inherits from the stem. The command is still the
+//! limits). The environment is **cleared** for every confined command — the base set, `env`, and with an
+//! egress table the proxy's address ([`crate::activation_egress::confined_env`]). The command is still the
 //! operator's, run as the stem's user: confinement narrows what it can reach, it does not make an
 //! untrusted command safe to run.
 
@@ -59,6 +62,9 @@ pub enum Refusal {
     /// The platform could, and this run could not: a declared path missing, the kernel refusing a rule
     /// (recorded as `confinement_failed`).
     Failed(String),
+    /// The profile names `[activation.confine.egress]` and the activation's egress proxy is not running —
+    /// it could not start (recorded as `egress_proxy_unavailable`). Never run without it.
+    EgressUnavailable(String),
 }
 
 impl Refusal {
@@ -67,6 +73,7 @@ impl Refusal {
         match self {
             Refusal::Unavailable(_) => "confinement_unavailable",
             Refusal::Failed(_) => "confinement_failed",
+            Refusal::EgressUnavailable(_) => "egress_proxy_unavailable",
         }
     }
 }
@@ -74,7 +81,7 @@ impl Refusal {
 impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Refusal::Unavailable(m) | Refusal::Failed(m) => f.write_str(m),
+            Refusal::Unavailable(m) | Refusal::Failed(m) | Refusal::EgressUnavailable(m) => f.write_str(m),
         }
     }
 }
@@ -156,7 +163,7 @@ fn backend_for(c: &ConfineDecl) -> Result<ConfineBackend, String> {
                     "backend landlock limits a TCP port, not an address, so it cannot hold connect {local:?} — write `*:<port>` to accept any address on that port"
                 ));
             }
-            linux::available(!c.connect.is_empty())?;
+            linux::available(!c.connect.is_empty() || c.egress.is_some())?;
         }
         ConfineBackend::Auto => unreachable!("resolved above"),
     }
@@ -180,8 +187,12 @@ pub struct Profile {
     pub read:    Vec<PathBuf>,
     /// Readable and writable.
     pub write:   Vec<PathBuf>,
-    /// TCP destinations: `(localhost only, port)`.
+    /// TCP destinations: `(localhost only, port)` — the declared ones, then the egress proxy's port.
     pub connect: Vec<(bool, u16)>,
+    /// The **whole** environment the command and probe start with — for every confined activation, cleared
+    /// of everything else ([`crate::activation_egress::confined_env`]). `None`: inherited from the stem (built
+    /// by hand only; [`prepare_with`] always sets it).
+    pub env: Option<Vec<(String, String)>>,
     /// `read` then `write`, held open from the walk (Linux; empty elsewhere).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) pinned: Pinned,
@@ -487,8 +498,27 @@ fn final_component(dir: &std::os::fd::OwnedFd, name: &std::ffi::OsStr) -> rustix
 /// directory or a write path (review finding 5, #636: a confined run may write there, so a link there
 /// could be its own plant — name its target instead). Ancestors outside every writable root are the
 /// operator's and may be symlinks (`/tmp` is one on macOS).
+/// A profile with `[activation.confine.egress]` needs its proxy: [`prepare_with`]; here it is
+/// [`Refusal::EgressUnavailable`].
 pub fn prepare(c: &ConfineDecl, placed: &Path) -> Result<Profile, Refusal> {
+    prepare_with(c, placed, None)
+}
+
+/// [`prepare`], with the activation's egress proxy (post-360 rows L and M): its port joins `connect` as
+/// `localhost:<port>` and the command's environment is the proxy's cleared one. A profile naming
+/// `[activation.confine.egress]` without a running proxy is [`Refusal::EgressUnavailable`] — never run
+/// without it, never run with the stem's environment.
+pub fn prepare_with(c: &ConfineDecl, placed: &Path, proxy: Option<&crate::EgressProxy>) -> Result<Profile, Refusal> {
     let backend = backend_for(c).map_err(Refusal::Unavailable)?;
+    let egress = match (&c.egress, proxy) {
+        (None, _) => None,
+        (Some(_), Some(p)) => Some((p.port(), p.command_env(&c.env))),
+        (Some(_), None) => {
+            return Err(Refusal::EgressUnavailable(
+                "its [activation.confine.egress] proxy is not running — refused, not run without it".into(),
+            ))
+        }
+    };
     let dir = placed.parent().unwrap_or_else(|| Path::new("/"));
     let expand = |raw: &str| -> PathBuf {
         PathBuf::from(if let Some(rest) = raw.strip_prefix("{dir}") {
@@ -505,7 +535,7 @@ pub fn prepare(c: &ConfineDecl, placed: &Path) -> Result<Profile, Refusal> {
     let root_paths: Vec<PathBuf> = std::iter::once(dir.to_path_buf()).chain(c.write.iter().map(|w| expand(w))).collect();
     let roots: Vec<(u64, u64)> = root_paths.iter().map(|r| root_identity(r)).collect::<Result<_, _>>()?;
     at_stage("checked");
-    let connect = c
+    let mut connect = c
         .connect
         .iter()
         .map(|e| mycelium::parse_confine_connect(e).map(|(host, port)| (host == "localhost", port)))
@@ -535,7 +565,15 @@ pub fn prepare(c: &ConfineDecl, placed: &Path) -> Result<Profile, Refusal> {
         Pinned::default()
     };
     let (read, write) = (paths[..n_read].to_vec(), paths[n_read..].to_vec());
-    let profile = Profile { backend, read, write, connect, pinned, ids, sources, roots, shared_devs };
+    // #644's review, finding 1: every confined command starts with a cleared environment, proxy or not.
+    let env = Some(match egress {
+        Some((port, env)) => {
+            connect.push((true, port));
+            env
+        }
+        None => crate::activation_egress::confined_env(&c.env, None),
+    });
+    let profile = Profile { backend, read, write, connect, env, pinned, ids, sources, roots, shared_devs };
     at_stage("pinned");
     at_stage("rechecked");
     // Walked again: a component toggled while the profile resolved (a link at one walk, a directory at the
@@ -547,6 +585,32 @@ pub fn prepare(c: &ConfineDecl, placed: &Path) -> Result<Profile, Refusal> {
         )));
     }
     Ok(profile)
+}
+
+/// Every path a confined command under `c` may read, as far as the stem can tell before any blob is placed
+/// (#644's review, finding 3): the placement root (`{dir}`; `{path}` lies under it), each `read` and `write`
+/// path with those placeholders expanded, and this platform's always-readable set. Canonical where the path
+/// exists, absolute otherwise. What the stem checks a credential binding's `value_file` against.
+pub fn readable_roots(c: &ConfineDecl, placement_root: &Path) -> Vec<PathBuf> {
+    let root = std::path::absolute(placement_root).unwrap_or_else(|_| placement_root.to_path_buf());
+    let expand = |raw: &str| -> PathBuf {
+        match raw.strip_prefix("{dir}").or_else(|| raw.strip_prefix("{path}").map(|_| "")) {
+            Some(rest) => PathBuf::from(format!("{}{rest}", root.display())),
+            None => PathBuf::from(raw),
+        }
+    };
+    let system: &[&str] = if cfg!(target_os = "macos") { SEATBELT_SYSTEM_READ } else { LANDLOCK_SYSTEM_READ };
+    std::iter::once(root.clone())
+        .chain(c.read.iter().chain(&c.write).map(|r| expand(r)))
+        .chain(system.iter().chain(SYSTEM_DEVICES).map(PathBuf::from))
+        .map(|p| canonical(&p).unwrap_or(p))
+        .collect()
+}
+
+/// How many names (hard links) the file at `p` has; 0 when it cannot be read (#644's round-2 review, N7).
+pub fn hard_links(p: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    p.symlink_metadata().map(|m| m.nlink()).unwrap_or(0)
 }
 
 // A test-only hook `prepare` and `walk` call between their stages (`checked`, `anchored`, `walked`,
@@ -582,7 +646,7 @@ fn canonical(p: &Path) -> std::io::Result<PathBuf> {
 /// drained, killed at the deadline). `Err` names the command and why, or the confinement that failed.
 pub fn run_confined(argv: &[String], timeout: std::time::Duration, profile: &Profile) -> Result<(), String> {
     match profile.backend {
-        ConfineBackend::Seatbelt => crate::activation::run(&seatbelt_argv(profile, argv), timeout),
+        ConfineBackend::Seatbelt => crate::activation::run_with_env(&seatbelt_argv(profile, argv), timeout, profile.env.as_deref()),
         ConfineBackend::Landlock => linux::run(argv, timeout, profile),
         ConfineBackend::Auto => Err("an unresolved backend — refused, not run unconfined".into()),
     }
@@ -814,7 +878,7 @@ mod linux {
             .name("activation-confined".into())
             .spawn(move || {
                 restrict(&profile).map_err(|e| format!("confinement could not be applied: {e} — refused, not run unconfined"))?;
-                crate::activation::run(&argv, timeout)
+                crate::activation::run_with_env(&argv, timeout, profile.env.as_deref())
             })
             .map_err(|e| format!("confined runner: {e}"))?
             .join()
@@ -848,12 +912,12 @@ pub fn confinement_guarantee(units: &mycelium::NodeCapabilityConfig) -> mycelium
     let none = assessed.is_empty();
     GuaranteeDescriptor::new(
         "stem.activation_confined",
-        1,
+        2,
         "stem",
         GuaranteeKind::NodeEnforced,
-        "every `[[activation]]` command and probe runs under its OS confinement profile — reading only the placement directory, its declared paths and the system set (Linux: /usr/{bin,sbin,lib,lib32,lib64,libx32,libexec,share}, /bin, /sbin, /lib, /lib32, /lib64, /libx32, /etc/{ld.so.cache,ld.so.conf,ld.so.conf.d,hosts,resolv.conf,host.conf,gai.conf,nsswitch.conf,passwd,group,localtime,alternatives,ssl/certs,ssl/openssl.cnf,ca-certificates}; macOS: /usr/{bin,sbin,lib,libexec,share}, /bin, /sbin, /System, /private/var/select, /private/var/db/timezone, /private/etc/{hosts,resolv.conf,passwd,group,localtime,ssl/cert.pem,ssl/certs,ssl/openssl.cnf}, /private/var/run/resolv.conf; both: /dev/{null,zero,random,urandom}), writing only its declared write paths and /dev/null, connecting only to declared TCP ports (no Fast Open, no listen) or nowhere — never by hostname",
+        "every `[[activation]]` command and probe runs under its OS confinement profile — reading only the placement directory, its declared paths and the system set (Linux: /usr/{bin,sbin,lib,lib32,lib64,libx32,libexec,share}, /bin, /sbin, /lib, /lib32, /lib64, /libx32, /etc/{ld.so.cache,ld.so.conf,ld.so.conf.d,hosts,resolv.conf,host.conf,gai.conf,nsswitch.conf,passwd,group,localtime,alternatives,ssl/certs,ssl/openssl.cnf,ca-certificates}; macOS: /usr/{bin,sbin,lib,libexec,share}, /bin, /sbin, /System, /private/var/select, /private/var/db/timezone, /private/etc/{hosts,resolv.conf,passwd,group,localtime,ssl/cert.pem,ssl/certs,ssl/openssl.cnf}, /private/var/run/resolv.conf; both: /dev/{null,zero,random,urandom}), writing only its declared write paths and /dev/null, connecting only to declared TCP ports and, with `[activation.confine.egress]`, its egress proxy's loopback port (no Fast Open, no listen) or nowhere — a host by name only through that proxy — and starting with a cleared environment (PATH, HOME, USER, LOGNAME, LANG, LC_ALL, LC_CTYPE, TZ, TMPDIR, the declared `env`, and the proxy's address)",
         "`[activation.confine]` on every `[[activation]]`; Seatbelt (`sandbox-exec`, macOS) or Landlock ABI 3 (ABI 4 with `connect`) and seccomp (Linux)",
-        &["activation::hook", "activation::spawn_reprobe", "activation_sandbox::run_confined"],
+        &["activation::hook", "activation::spawn_reprobe", "activation_sandbox::prepare_with", "activation_sandbox::run_confined"],
         "docs/reference/unit-file.md",
         move |_| none.then_some("this unit declares no [[activation]]"),
         move |_| {
@@ -899,6 +963,7 @@ mod tests {
             read: vec![PathBuf::from("/a\")(allow default)")],
             write: vec![PathBuf::from("/w")],
             connect: vec![(true, 11434), (false, 443)],
+            env: None,
             pinned: Pinned::default(),
             ids: Vec::new(),
             sources: Vec::new(),

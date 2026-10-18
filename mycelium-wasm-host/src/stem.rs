@@ -130,6 +130,126 @@ pub struct Stem {
     serve: Option<tokio::task::JoinHandle<()>>,
     /// Row M: what applies to each `[[activation]]` on this node, as assessed at start.
     confinement: Vec<(String, crate::activation_sandbox::Confinement)>,
+    /// Rows L and M: each `[activation.confine.egress]` activation's proxy (or why it could not start),
+    /// by its index in the unit's `[[activation]]` list, kept for the stem's life.
+    egress: crate::activation::EgressProxies,
+    /// `ns/name` of each `[[activation]]`, by index — what [`Stem::set_activation_egress_hosts`] looks up.
+    activation_names: Vec<String>,
+}
+
+/// Start an egress proxy for every `[[activation]]` whose profile names `[activation.confine.egress]`
+/// (post-360 rows L and M). A misconfiguration refuses the stem's start by name — a credential that is not
+/// a binding on this node, a host the node's allow-list denies, or any way a binding's value could reach a
+/// confined command ([`check_confined_secrets`]). A proxy that cannot **start** (it cannot
+/// bind, no runtime) is not a start refusal: its activation is refused, by name, each time it would run.
+pub fn start_egress_proxies(agent: &GossipAgent, units: &NodeCapabilityConfig) -> Result<crate::activation::EgressProxies, StemError> {
+    start_egress_proxies_on(agent, units, crate::EgressProxy::DEFAULT_BIND)
+}
+
+/// [`start_egress_proxies`] on `bind` — a test forces a proxy that cannot start with an address in use.
+pub fn start_egress_proxies_on(agent: &GossipAgent, units: &NodeCapabilityConfig, bind: std::net::SocketAddr) -> Result<crate::activation::EgressProxies, StemError> {
+    check_confined_secrets(agent, units)?;
+    let mut out = std::collections::HashMap::new();
+    for (i, a) in units.activations.iter().enumerate() {
+        let Some(e) = a.confine.as_ref().and_then(|c| c.egress.as_ref()) else { continue };
+        let at = format!("{}/{}", a.ns, a.name);
+        // A host the node's own allow-list refuses is a misconfiguration, refused here by name.
+        crate::activation_egress::parse_hosts(&e.hosts, agent.egress_policy()).map_err(|why| StemError(format!("[[activation]] {at}: {why}")))?;
+        #[cfg(any(feature = "gateway", feature = "llm"))]
+        let gate = {
+            for c in &e.credentials {
+                if !agent.egress_credentials().is_some_and(|g| g.has(c)) {
+                    return Err(StemError(format!(
+                        "[[activation]] {at}: [activation.confine.egress] credential `{c}` is not a binding on this node — add [[egress_credentials]] name = \"{c}\" to the node's config (it is read at the agent's start)"
+                    )));
+                }
+            }
+            agent.egress_credentials()
+        };
+        #[cfg(not(any(feature = "gateway", feature = "llm")))]
+        if let Some(c) = e.credentials.first() {
+            return Err(StemError(format!(
+                "[[activation]] {at}: [activation.confine.egress] credential `{c}` needs a stem built with the `gateway` or `llm` feature (the node's egress gate attaches it)"
+            )));
+        }
+        let started = crate::EgressProxy::start(crate::activation_egress::ProxyOptions {
+            label: at.clone(),
+            decl: e,
+            node_egress: agent.egress_policy(),
+            bind,
+            limits: Default::default(),
+            #[cfg(any(feature = "gateway", feature = "llm"))]
+            gate,
+        });
+        if let Err(why) = &started {
+            tracing::warn!(activation = %at, reason = %why, "activation egress proxy could not start: the activation is refused, never run without it");
+        }
+        out.insert(i, started.map(Arc::new));
+    }
+    Ok(Arc::new(out))
+}
+
+/// No credential reaches a **confined** command another way (#644's review, finding 3): for every confined
+/// `[[activation]]`, refused by name —
+/// - an `[activation.confine] env` entry naming a binding's `value_env` variable;
+/// - an `env` entry whose value, as the stem has it, **is** a binding's value (under any name);
+/// - a binding's `value_file` the command could read: under the placement root, a `read` or `write` path, or
+///   the platform's always-readable set ([`crate::activation_sandbox::readable_roots`]).
+///
+/// Every binding is checked against every confined activation, not only those granted it: a confined command
+/// that can read a value file needs no grant. Names and paths are never echoed (a value pasted into a field
+/// would be).
+pub fn check_confined_secrets(agent: &GossipAgent, units: &NodeCapabilityConfig) -> Result<(), StemError> {
+    let bindings = &agent.config().egress_credentials;
+    let root = units.hosts.as_ref().and_then(|h| h.placement_root.clone()).unwrap_or_else(|| "artifacts".into());
+    // #644's round-2 review, N7: a value file with a second hard link has another name that may lie in a
+    // confined command's readable paths — refused while any activation is confined. (A file moved or linked
+    // into a readable path **after** this check is not seen: the check runs once, at start.)
+    if units.activations.iter().any(|a| a.confine.is_some()) {
+        for (i, b) in bindings.iter().enumerate() {
+            if let Some(file) = &b.value_file
+                && crate::activation_sandbox::hard_links(file) > 1
+            {
+                return Err(StemError(format!(
+                    "[[egress_credentials]] [{i}] `{}`: its value_file has another hard link, which a confined command might read — give the value one name",
+                    b.name
+                )));
+            }
+        }
+    }
+    for a in &units.activations {
+        let Some(c) = &a.confine else { continue };
+        let at = format!("{}/{}", a.ns, a.name);
+        for v in &c.env {
+            if bindings.iter().any(|b| b.value_env.as_deref() == Some(v.as_str())) {
+                return Err(StemError(format!(
+                    "[[activation]] {at}: [activation.confine] env passes a variable an [[egress_credentials]] binding reads its value from — the value would be in the command's environment; name the binding in [activation.confine.egress] credentials instead"
+                )));
+            }
+            // #644's round-2 review, N7: a value **inside** a longer string, not only equal to one.
+            #[cfg(any(feature = "gateway", feature = "llm"))]
+            if let (Ok(value), Some(gate)) = (std::env::var(v), agent.egress_credentials())
+                && gate.appears_in(&value)
+            {
+                return Err(StemError(format!(
+                    "[[activation]] {at}: [activation.confine] env passes a variable that holds an [[egress_credentials]] binding's value — it would be in the command's environment"
+                )));
+            }
+        }
+        let roots = crate::activation_sandbox::readable_roots(c, std::path::Path::new(&root));
+        for (i, b) in bindings.iter().enumerate() {
+            let Some(file) = &b.value_file else { continue };
+            let abs = std::path::absolute(file).unwrap_or_else(|_| file.clone());
+            let file = abs.canonicalize().unwrap_or(abs);
+            if roots.iter().any(|r| file.starts_with(r)) {
+                return Err(StemError(format!(
+                    "[[activation]] {at}: [[egress_credentials]] [{i}] `{}`: its value_file is readable by this confined command (under the placement root, a declared read or write path, or the system set) — move the file out of every confined command's reach",
+                    b.name
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `"ed25519:<64 hex>"` → the verifying key bytes; `field` names the table entry in the refusal.
@@ -177,6 +297,8 @@ impl Stem {
     pub fn start(agent: Arc<GossipAgent>, units: &NodeCapabilityConfig, opts: StemOptions) -> Result<Self, StemError> {
         let watch: crate::activation::WatchList = Arc::new(std::sync::Mutex::new(Vec::new()));
         units.validate().map_err(|e| StemError(e.to_string()))?;
+        // Rows L and M: each `[activation.confine.egress]` activation's proxy, before anything can run it.
+        let egress = start_egress_proxies(&agent, units)?;
 
         #[cfg(not(feature = "llm"))]
         if !units.serves.is_empty() {
@@ -275,7 +397,7 @@ impl Stem {
                     let root = h.placement_root.clone().unwrap_or_else(|| "artifacts".into());
                     let mut blob = BlobRuntime::new(root);
                     if !units.activations.is_empty() {
-                        blob = blob.with_entry_activation(crate::activation::hook(units.activations.clone(), Arc::clone(&watch)));
+                        blob = blob.with_entry_activation(crate::activation::hook_with_egress(units.activations.clone(), Arc::clone(&watch), Arc::clone(&egress)));
                     }
                     prov.register_runtime(Arc::new(blob));
                 }
@@ -382,10 +504,18 @@ impl Stem {
 
         // Row M: say once, at start, what applies to each activation — confined (and how), unconfined
         // (the default, with the stem's privileges), or refused (a profile this node cannot apply).
+        // An activation whose egress proxy could not start is refused (rows L and M).
         let confinement: Vec<(String, crate::activation_sandbox::Confinement)> = units
             .activations
             .iter()
-            .map(|a| (format!("{}/{}", a.ns, a.name), crate::activation_sandbox::assess(a.confine.as_ref())))
+            .enumerate()
+            .map(|(i, a)| {
+                let assessed = match egress.get(&i) {
+                    Some(Err(why)) => crate::activation_sandbox::Confinement::Refused { reason: why.clone() },
+                    _ => crate::activation_sandbox::assess(a.confine.as_ref()),
+                };
+                (format!("{}/{}", a.ns, a.name), assessed)
+            })
             .collect();
         for (at, c) in &confinement {
             use crate::activation_sandbox::Confinement::*;
@@ -426,7 +556,68 @@ impl Stem {
         };
         #[cfg(not(feature = "llm"))]
         let serve: Option<tokio::task::JoinHandle<()>> = None;
-        Ok(Self { _caps: caps, _reqs: reqs, _groups: groups, stop, ticker, hosted, _peer_serve: peer_serve, reprobe, serve, confinement })
+        let activation_names = units.activations.iter().map(|a| format!("{}/{}", a.ns, a.name)).collect();
+        Ok(Self { _caps: caps, _reqs: reqs, _groups: groups, stop, ticker, hosted, _peer_serve: peer_serve, reprobe, serve, confinement, egress, activation_names })
+    }
+
+    /// The egress proxy of the `[[activation]]` providing `ns/name`, when its profile names one and it is
+    /// running (rows L and M).
+    pub fn activation_egress(&self, ns: &str, name: &str) -> Option<Arc<crate::EgressProxy>> {
+        let at = format!("{ns}/{name}");
+        self.activation_names
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| **n == at)
+            .find_map(|(i, _)| self.egress.get(&i).and_then(|r| r.as_ref().ok()).cloned())
+    }
+
+    /// Replace the egress allow-list of the `[[activation]]` providing `ns/name` **while the stem runs**
+    /// (post-360 row M's live network allow-list): the next request its command makes meets the new list;
+    /// the command, its confinement profile and the proxy's port are unchanged. Every entry is checked as
+    /// at start (form, duplicates, the node's egress allow-list) before anything changes — on `Err` the old
+    /// list stands. Only `hosts` changes live; `credentials` and `env` are fixed for the stem's life.
+    pub fn set_activation_egress_hosts(&self, ns: &str, name: &str, hosts: &[String]) -> Result<(), StemError> {
+        let proxy = self.activation_egress(ns, name).ok_or_else(|| {
+            StemError(format!("[[activation]] {ns}/{name}: no running egress proxy (the unit names no [activation.confine.egress] for it, or its proxy could not start)"))
+        })?;
+        proxy.set_hosts(hosts).map_err(|e| StemError(format!("[[activation]] {ns}/{name}: {e}")))
+    }
+
+    /// Apply `units`' `[activation.confine.egress] hosts` to each running proxy — what `mycelium-stem` does on
+    /// `SIGHUP` with its unit file re-read. One answer per activation in `units` that names an egress table —
+    /// the list now in force, or why it was refused (the old list then stands) — and one per running proxy the
+    /// file no longer names, narrowed to an empty list. Only `hosts` is applied; every other change in the
+    /// file needs a restart.
+    pub fn reload_egress_hosts(&self, units: &NodeCapabilityConfig) -> Vec<(String, Result<Vec<String>, StemError>)> {
+        let named: Vec<(String, &mycelium::EgressDecl)> = units
+            .activations
+            .iter()
+            .filter_map(|a| a.confine.as_ref().and_then(|c| c.egress.as_ref()).map(|e| (format!("{}/{}", a.ns, a.name), e)))
+            .collect();
+        let mut out: Vec<(String, Result<Vec<String>, StemError>)> = named
+            .iter()
+            .map(|(at, e)| {
+                let (ns, name) = at.split_once('/').unwrap_or((at.as_str(), ""));
+                let applied = self
+                    .set_activation_egress_hosts(ns, name, &e.hosts)
+                    .and_then(|()| self.activation_egress(ns, name).map(|p| p.hosts()).ok_or_else(|| StemError("its proxy is gone".into())));
+                (at.clone(), applied)
+            })
+            .collect();
+        // #644's review, finding 2: a running proxy the re-read file no longer names — its table removed, its
+        // activation removed or renamed — is narrowed to nothing, by name; the narrowest list is the one the
+        // file now states for it.
+        for (i, at) in self.activation_names.iter().enumerate() {
+            if named.iter().any(|(n, _)| n == at) {
+                continue;
+            }
+            if let Some(Ok(proxy)) = self.egress.get(&i) {
+                let applied = proxy.set_hosts(&[]).map(|()| proxy.hosts()).map_err(StemError);
+                tracing::warn!(activation = %at, "egress reload: the unit file no longer names this activation's egress table — its proxy now carries nothing (restart the stem to remove it)");
+                out.push((at.clone(), applied));
+            }
+        }
+        out
     }
 
     /// What applies to each `[[activation]]` (`ns/name`) on this node, as assessed at start (row M):
@@ -609,6 +800,139 @@ mod tests {
         let d = std::env::temp_dir().join(format!("mycelium-stem-{tag}-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
         let _ = std::fs::remove_dir_all(&d);
         d
+    }
+
+    /// Rows L and M at the stem: a misconfigured `[activation.confine.egress]` refuses the start by name — an
+    /// `env` passing a binding's `value_env` variable, a credential the node has no binding for, a host the
+    /// node's allow-list denies — while a proxy that cannot *start* is not a start refusal but its activation's
+    /// (`Confinement::Refused`, naming it). A running stem replaces an activation's list live
+    /// (`set_activation_egress_hosts`, `reload_egress_hosts` — `mycelium-stem`'s `SIGHUP`), a bad list leaving the
+    /// old one in force. Seen failing first with the `env` check removed: the stem started.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_misconfigured_activation_egress_refuses_the_start_and_a_reload_applies_hosts() {
+        let units_with = |name: &str, confine: &str, egress: Option<&str>| {
+            NodeCapabilityConfig::from_toml_str(&format!(
+                "[hosts]\nkinds=[\"blob\"]\naccept_unsigned=true\nplacement_root=\"{}\"\n\
+                 [[activation]]\nns=\"data\"\nname=\"{name}\"\ncommand=[\"true\"]\n[activation.confine]\n{confine}{}",
+                scratch("egress-units").display(),
+                egress.map(|e| format!("[activation.confine.egress]\n{e}")).unwrap_or_default()
+            ))
+            .unwrap()
+        };
+        let units = |egress: &str| units_with("pack", "", Some(egress));
+        let cfg = mycelium::GossipConfig {
+            egress: mycelium::EgressPolicy { allow_hosts: vec!["127.0.0.1".into(), "api.example.com".into()] },
+            egress_credentials: vec![mycelium::CredentialBinding {
+                name: "model".into(), host: "api.example.com".into(), port: None, path_prefix: None,
+                form: mycelium::CredentialForm::Bearer, header: None, username: None,
+                value_env: Some("MYCELIUM_TEST_EGRESS_VALUE_ENV_7F".into()), value_file: None, allow_plaintext: false,
+            }],
+            ..Default::default()
+        };
+        let unstarted = GossipAgent::new(NodeId::new("127.0.0.1", alloc_port()).unwrap(), cfg);
+        let e = start_egress_proxies(&unstarted, &units_with("pack", "env = [\"MYCELIUM_TEST_EGRESS_VALUE_ENV_7F\"]\n", None)).unwrap_err().to_string();
+        assert!(e.contains("data/pack") && e.contains("env passes a variable") && !e.contains("MYCELIUM_TEST_EGRESS_VALUE_ENV_7F"), "{e}");
+        let e = start_egress_proxies(&unstarted, &units("credentials = [\"model\"]\n")).unwrap_err().to_string();
+        assert!(e.contains("data/pack") && e.contains("`model`"), "a credential with no gate to attach it (unstarted, or no gateway build): {e}");
+        let e = start_egress_proxies(&unstarted, &units("hosts = [\"https://other.example\"]\n")).unwrap_err().to_string();
+        assert!(e.contains("data/pack") && e.contains("allow-list does not permit other.example"), "{e}");
+
+        // A proxy that cannot start: its activation's refusal, not the stem's.
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let map = start_egress_proxies_on(&unstarted, &units("hosts = [\"https://api.example.com\"]\n"), taken.local_addr().unwrap()).expect("not a start refusal");
+        assert!(matches!(map.get(&0), Some(Err(why)) if why.contains("data/pack") && why.contains("could not start")), "{map:?}");
+        drop(taken);
+
+        // A running stem: the list replaced live, a bad one refused with the old one standing.
+        let a = agent(alloc_port(), None).await;
+        let stem = Stem::start(Arc::clone(&a), &units("hosts = [\"http://127.0.0.1:9\"]\n"), StemOptions::default()).expect("starts");
+        let proxy = stem.activation_egress("data", "pack").expect("a running proxy");
+        assert_eq!(proxy.hosts(), ["http://127.0.0.1:9"]);
+        let reloaded = stem.reload_egress_hosts(&units("hosts = [\"http://127.0.0.1:9\", \"https://api.example.com\"]\n"));
+        assert!(matches!(reloaded.as_slice(), [(at, Ok(h))] if at == "data/pack" && h.len() == 2), "{reloaded:?}");
+        assert_eq!(stem.activation_egress("data", "pack").unwrap().port(), proxy.port(), "the same proxy");
+        let e = stem.set_activation_egress_hosts("data", "pack", &["https://*.example.com".into()]).unwrap_err().to_string();
+        assert!(e.contains("wildcard"), "{e}");
+        assert_eq!(proxy.hosts().len(), 2, "the old list stands");
+        assert!(stem.set_activation_egress_hosts("data", "other", &[]).is_err(), "no such activation");
+        assert!(matches!(stem.activation_confinement(), [(at, _)] if at == "data/pack"));
+
+        // #644's review, finding 2: a reload whose file no longer names the activation's egress table — table
+        // removed, or the activation renamed — narrows the running proxy to nothing, by name. Seen failing
+        // first: the old list stayed live and the reload said nothing about it.
+        let reloaded = stem.reload_egress_hosts(&units_with("pack", "", None));
+        assert!(matches!(reloaded.as_slice(), [(at, Ok(h))] if at == "data/pack" && h.is_empty()), "{reloaded:?}");
+        assert!(proxy.hosts().is_empty(), "the removed table's list is gone: {:?}", proxy.hosts());
+        proxy.set_hosts(&["http://127.0.0.1:9".into()]).unwrap();
+        let reloaded = stem.reload_egress_hosts(&units_with("renamed", "", Some("hosts = [\"http://127.0.0.1:9\"]\n")));
+        assert!(reloaded.iter().any(|(at, r)| at == "data/pack" && r.as_ref().is_ok_and(|h| h.is_empty())), "{reloaded:?}");
+        assert!(proxy.hosts().is_empty(), "a renamed activation's old proxy is narrowed");
+        stem.stop().await;
+        a.shutdown().await;
+    }
+
+    /// #644's review, finding 3: no binding's value reaches a confined command another way — a `value_file`
+    /// the command could read (under a `read` path, under the placement root, or the system set), or an
+    /// `env` entry whose *value* is a binding's value under another name. Each refuses the start by name,
+    /// for every confined activation (not only one granted the binding). Seen failing first: both started.
+    #[cfg(any(feature = "gateway", feature = "llm"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn no_credential_reaches_a_confined_command_another_way() {
+        const VALUE: &str = "sk-act-egress-value-file-7f";
+        let dir = scratch("secret-dir");
+        let placement = scratch("secret-placement");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&placement).unwrap();
+        let file = dir.join("key");
+        std::fs::write(&file, VALUE).unwrap();
+        let cfg = mycelium::GossipConfig {
+            bind_port: alloc_port(),
+            egress_credentials: vec![mycelium::CredentialBinding {
+                name: "model".into(), host: "api.example.com".into(), port: None, path_prefix: None,
+                form: mycelium::CredentialForm::Bearer, header: None, username: None,
+                value_env: None, value_file: Some(file.clone()), allow_plaintext: false,
+            }],
+            ..Default::default()
+        };
+        let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", cfg.bind_port).unwrap(), cfg));
+        a.start().await.expect("starts");
+        let units = |placement: &std::path::Path, confine: &str| {
+            NodeCapabilityConfig::from_toml_str(&format!(
+                "[hosts]\nkinds=[\"blob\"]\naccept_unsigned=true\nplacement_root=\"{}\"\n\
+                 [[activation]]\nns=\"data\"\nname=\"pack\"\ncommand=[\"true\"]\n[activation.confine]\n{confine}",
+                placement.display()
+            ))
+            .unwrap()
+        };
+        let e = check_confined_secrets(&a, &units(&placement, &format!("read = [\"{}\"]\n", dir.display()))).unwrap_err().to_string();
+        assert!(e.contains("data/pack") && e.contains("`model`") && e.contains("value_file") && !e.contains(&file.display().to_string()), "{e}");
+        let e = check_confined_secrets(&a, &units(&dir, "")).unwrap_err().to_string();
+        assert!(e.contains("value_file"), "under the placement root: {e}");
+        check_confined_secrets(&a, &units(&placement, "")).expect("out of reach: fine");
+        // SAFETY: as `a_served_skill_reads_its_key_from_the_environment` — test code, a unique variable, written once.
+        #[allow(unsafe_code)]
+        unsafe { std::env::set_var("MYCELIUM_TEST_SAME_VALUE_7F", VALUE); }
+        let e = check_confined_secrets(&a, &units(&placement, "env = [\"MYCELIUM_TEST_SAME_VALUE_7F\"]\n")).unwrap_err().to_string();
+        assert!(e.contains("holds an [[egress_credentials]] binding's value") && !e.contains(VALUE), "{e}");
+        // #644's round-2 review, N7: a value inside a longer string, and a value file with a second hard link
+        // (its other name may sit in a readable directory), each refuse the start while any activation is
+        // confined. Seen failing first: both started.
+        // SAFETY: as above — test code, a unique variable, written once.
+        #[allow(unsafe_code)]
+        unsafe { std::env::set_var("MYCELIUM_TEST_HOLDS_VALUE_7F", format!("prefix-{VALUE}-suffix")); }
+        let e = check_confined_secrets(&a, &units(&placement, "env = [\"MYCELIUM_TEST_HOLDS_VALUE_7F\"]\n")).unwrap_err().to_string();
+        assert!(e.contains("holds an [[egress_credentials]] binding's value") && !e.contains(VALUE), "{e}");
+        let other = scratch("secret-link");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::hard_link(&file, other.join("alias")).unwrap();
+        let e = check_confined_secrets(&a, &units(&placement, "")).unwrap_err().to_string();
+        assert!(e.contains("`model`") && e.contains("hard link"), "{e}");
+        std::fs::remove_file(other.join("alias")).unwrap();
+        check_confined_secrets(&a, &units(&placement, "")).expect("one link again: fine");
+        // Stem::start runs the same check.
+        let e = Stem::start(Arc::clone(&a), &units(&placement, &format!("read = [\"{}\"]\n", dir.display())), StemOptions::default()).err().expect("refused").to_string();
+        assert!(e.contains("value_file"), "{e}");
+        a.shutdown().await;
     }
 
     /// R1's runtime half: a node started from a unit file declares what the file says — the

@@ -160,8 +160,29 @@ line or trace field carries it, and nothing writes it to the evidence journal. G
 
 Who sends through the gate: `[[serve]]`'s `credential = "<binding>"` (a stem refuses to start if the node has
 no such binding, or if the binding does not authorise the section's endpoint), `OpenAiBackend::new(url, credential_placeholder("openai"), model).with_credentials(gate)`,
-and your own code via `agent.egress_credentials()` → `EgressCredentials::send(request)`. A placeholder request goes
-out under the egress policy the gate captured at `start()` — the node's — not a backend's own `with_egress` policy.
+and your own code via `agent.egress_credentials()` → `EgressCredentials::send(request)` (or `send_once`, which
+follows no redirect). A placeholder request goes out under the egress policy the gate captured at `start()` — the
+node's — not a backend's own `with_egress` policy.
+
+**An `[[activation]]` command** reaches the gate through its stem's **egress proxy** (rows L and M, after 2.35.0):
+an `[activation.confine.egress]` table names the hosts the command may reach and the bindings it may name
+(`credentials = ["openai"]`); the stem runs a forward proxy on loopback for that activation, confines the command
+to the proxy's port, and starts it with a **cleared environment** (as every confined command now starts). At the
+stem's start, for every confined activation, a binding's value is kept from the command three ways, each a refusal by
+name: an `[activation.confine] env` entry naming a binding's `value_env`; an `env` entry whose **value** holds a
+binding's value, alone or inside a longer string; a binding's `value_file` under the placement root, a declared
+`read` or `write` path, or the platform's always-readable set, or with a second hard link. This is checked once, at
+start: a file moved or linked into a readable path afterwards is not seen. The command sends
+`http://api.openai.com/v1/…` through `HTTP_PROXY` with `Authorization: Bearer mycelium-credential:openai`; the proxy
+checks the host against the activation's list, the binding against its `credentials`, and sends the request on over
+the entry's `https` through `EgressCredentials::send_once`, which attaches the value only where the binding
+authorises. Every answer relayed back has the granted bindings' values **masked** — headers, and the body across
+chunk boundaries (`mycelium::Redactor`) — and an encoded body is refused where a value could hide in it, so an
+upstream that echoes the value hands the command nothing. An `https://` URL the command dials itself goes through
+`CONNECT` — a tunnel, no credential attached (the proxy does not terminate TLS) — and a tunnel to a granted
+binding's host is refused, so that host is only reached where its answers are checked. The proxy requires a per-proxy token (in the proxy URL the command's environment
+carries), so another local process cannot have a credential attached through it. Every field, and what it holds per
+backend: [`unit-file.md` § `[activation.confine.egress]`](../reference/unit-file.md#activationconfineegress).
 
 **The places a secret is read into a node, and which use a binding:**
 
@@ -176,7 +197,7 @@ out under the egress policy the gate captured at `start()` — the node's — no
 | Wiki git mirror push | git's own credential helpers | unchanged — git's process, not an HTTP client of the node's |
 | OIDC | none sent (JWKS and discovery are public) | n/a |
 | Artifact signing keys (`mycelium-artifact`) | `--key` (a file) or `--key-env` (a variable) | unchanged — used to sign locally, never sent |
-| An `[[activation]]` command | inherits the stem's whole environment | unchanged here, **not built** — the command is a separate process with no path to the gate, so a secret it needs is in its environment or a file it reads; a `value_env` variable stays in that environment, so prefer `value_file`; confining the command is row M |
+| An `[[activation]]` command | inherits the stem's whole environment — unless its profile names `[activation.confine.egress]` | **yes**, with `[activation.confine.egress] credentials = ["<binding>"]`: the stem's egress proxy attaches the value at the bound host and masks it in what comes back; every confined command starts with a cleared environment, and a binding whose value the command could read (a `value_env` or same-valued `env` entry, a `value_file` within its read paths) refuses the stem's start. **Unchanged** for an **unconfined** activation, which inherits the stem's whole environment (a `value_env` variable included — prefer `value_file`) and can read what the stem's user can; and not covered: a value an upstream returns transformed (re-encoded, hashed) rather than as its bytes |
 | Gateway tokens, mTLS keys | inbound credentials, not egress | n/a |
 
 **Not covered:** a placeholder in a query string or a request body (sent as written — an opaque name); zeroising the
@@ -184,7 +205,10 @@ value when the gate is dropped; a binding whose `name`, `header` or `username` i
 is printed — its `Debug`, a refusal naming the binding, the drop log line — and used as the metric label or as the
 header name sent (`value_env` and `value_file` are redacted in `Debug`, and an env refusal names its entry by index
 alone); the gate's client honours `HTTP_PROXY` / `HTTPS_PROXY`, so a configured proxy sees a
-plaintext or loopback request's header (an https request's is inside the tunnel).
+plaintext or loopback request's header (an https request's is inside the tunnel). At an activation's egress
+proxy: a placeholder inside a `CONNECT` tunnel or in a URL or body; a credential the command reads from a file its
+profile lets it read; under Landlock, a connection to the proxy's port on another address (Landlock limits ports,
+not addresses — the `stem.activation_egress` guarantee says so).
 
 ---
 

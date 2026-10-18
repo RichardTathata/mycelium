@@ -11,7 +11,9 @@
 //! unit names an `[activation.confine]` profile runs its command **and** its probe under that profile,
 //! or is refused by name and runs nothing (post-360 row M, [`crate::activation_sandbox`]). The profile
 //! is resolved once, when the activation runs, and its re-probes reuse it — re-resolved, every check
-//! repeated, when a declared path was replaced; only a refused re-resolution withdraws the install.
+//! repeated, when a declared path was replaced; only a refused re-resolution withdraws the install. A profile
+//! naming `[activation.confine.egress]` runs confined to its egress proxy's port in a cleared environment, or —
+//! its proxy not running — is refused by name (rows L and M, [`crate::activation_egress`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,6 +41,9 @@ pub struct Watched {
     /// follow-up), so a legitimate replacement does not withdraw the install and a stale profile never runs.
     index:    usize,
     resolved: Arc<ResolvedProfiles>,
+    /// The activation's egress proxy, when its profile names one — every re-resolution confines to its port
+    /// and its cleared environment (rows L and M).
+    proxy:    Option<Arc<crate::EgressProxy>>,
     /// The install's token and trace, so a re-probe's verdict records under the same token.
     token:  u64,
     trace:  Option<Arc<TraceCtx>>,
@@ -98,8 +103,18 @@ const STDERR_TAIL_BYTES: usize = 4096;
 /// the command is killed and reaped. A descendant that inherited the pipe and outlives the command
 /// cannot hold the result hostage either: the tail is awaited only briefly after exit.
 pub fn run(argv: &[String], timeout: Duration) -> Result<(), String> {
+    run_with_env(argv, timeout, None)
+}
+
+/// [`run`], with the command's **whole** environment given (`Some`: cleared, then exactly these — an
+/// egress-proxied activation, rows L and M) or inherited from the stem (`None`).
+pub fn run_with_env(argv: &[String], timeout: Duration, env: Option<&[(String, String)]>) -> Result<(), String> {
     let (cmd, args) = argv.split_first().ok_or("empty command")?;
-    let mut child = std::process::Command::new(cmd)
+    let mut command = std::process::Command::new(cmd);
+    if let Some(env) = env {
+        command.env_clear().envs(env.iter().map(|(k, v)| (k, v)));
+    }
+    let mut child = command
         .args(args)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -171,11 +186,30 @@ pub fn render(path: &Path) -> Result<PathBuf, String> {
     Ok(rendered)
 }
 
+/// Each `[[activation]]`'s egress proxy, by its index in the unit's list, as the stem started it — or why it
+/// could not start (post-360 rows L and M). An activation naming `[activation.confine.egress]` with no
+/// entry here is refused.
+pub type EgressProxies = Arc<std::collections::HashMap<usize, Result<Arc<crate::EgressProxy>, String>>>;
+
 /// The hook a stem gives its [`BlobRuntime`](crate::BlobRuntime): dispatch by the entry's
 /// capability to its `[[activation]]`; no matching section means placement is the whole install.
+/// An activation naming `[activation.confine.egress]` is refused here — it needs its proxy
+/// ([`hook_with_egress`]).
 pub fn hook(
     decls: Vec<ActivationDecl>,
     watch: WatchList,
+) -> impl Fn(&InstallableEntry, &Path, &ActivationCtx) -> Result<Option<Arc<AtomicBool>>, String> + Send + Sync + 'static {
+    hook_with_egress(decls, watch, EgressProxies::default())
+}
+
+/// [`hook`], with each activation's egress proxy (post-360 rows L and M): an activation whose
+/// `[activation.confine.egress]` proxy is missing or could not start is refused by name
+/// (`egress_proxy_unavailable`) and nothing runs; one whose proxy is up runs confined to that proxy's port,
+/// in the proxy's cleared environment.
+pub fn hook_with_egress(
+    decls: Vec<ActivationDecl>,
+    watch: WatchList,
+    proxies: EgressProxies,
 ) -> impl Fn(&InstallableEntry, &Path, &ActivationCtx) -> Result<Option<Arc<AtomicBool>>, String> + Send + Sync + 'static {
     // Review finding 5 (#636): each activation's profile is resolved once — per declaration and placed
     // file — and kept for the stem's life, its paths held open, re-probes included. Lock-order table row
@@ -204,7 +238,7 @@ pub fn hook(
         // resolved profiles, re-resolved only when a declared path was replaced.
         let profile = match &decl.confine {
             None => None,
-            Some(c) => match resolved.get_or_resolve(index, c, path) {
+            Some(c) => match proxy_for(&proxies, index, c).and_then(|proxy| resolved.get_or_resolve(index, c, path, proxy.as_deref())) {
                 Ok(p) => Some(p),
                 Err(refusal) => {
                     rec("prov.activation", OutcomeKind::Refusal, refusal.reason(), None);
@@ -212,6 +246,8 @@ pub fn hook(
                 }
             },
         };
+        // The proxy the profile was resolved with (rows L and M); the probes re-resolve with it.
+        let proxy = decl.confine.as_ref().and_then(|c| proxy_for(&proxies, index, c).ok().flatten());
         let rendered = if decl.resolve_artifact_refs {
             match render(path) {
                 Ok(r) => Some(r),
@@ -240,7 +276,7 @@ pub fn hook(
         let probe_argv = expand(&decl.probe, entry, path, rendered.as_deref());
         let probed = match &decl.confine {
             None => run_under(&probe_argv, PROBE_TIMEOUT, None).map_err(|e| ("initial_probe_failed", e)),
-            Some(c) => probe_confined(&resolved, index, c, path, &probe_argv).map_err(|(reason, e)| {
+            Some(c) => probe_confined(&resolved, index, c, path, &probe_argv, proxy.as_deref()).map_err(|(reason, e)| {
                 (if reason == "probe_failed" { "initial_probe_failed" } else { reason }, e)
             }),
         };
@@ -257,10 +293,24 @@ pub fn hook(
             health: Arc::clone(&health),
             index,
             resolved: Arc::clone(&resolved),
+            proxy,
             token: actx.install_token,
             trace: actx.trace.clone(),
         });
         Ok(Some(health))
+    }
+}
+
+/// The running egress proxy an activation's profile names, `None` when it names none, or the refusal.
+fn proxy_for(proxies: &EgressProxies, index: usize, c: &mycelium::ConfineDecl) -> Result<Option<Arc<crate::EgressProxy>>, crate::activation_sandbox::Refusal> {
+    use crate::activation_sandbox::Refusal;
+    if c.egress.is_none() {
+        return Ok(None);
+    }
+    match proxies.get(&index) {
+        Some(Ok(p)) => Ok(Some(Arc::clone(p))),
+        Some(Err(why)) => Err(Refusal::EgressUnavailable(format!("{why} — refused, not run without it"))),
+        None => Err(Refusal::EgressUnavailable("its [activation.confine.egress] proxy was never started — refused, not run without it".into())),
     }
 }
 
@@ -290,14 +340,14 @@ impl ResolvedProfiles {
     /// pinned; re-resolved — with every check `prepare` makes, symlinks included — when one was removed,
     /// recreated or replaced (review follow-up 1, #636), never used stale. A placed file that is gone
     /// (`BlobRuntime::uninstall` removed it) is forgotten, and at most `cap` profiles are kept.
-    pub(crate) fn get_or_resolve(&self, index: usize, c: &mycelium::ConfineDecl, placed: &Path) -> Result<Profile, crate::activation_sandbox::Refusal> {
+    pub(crate) fn get_or_resolve(&self, index: usize, c: &mycelium::ConfineDecl, placed: &Path, proxy: Option<&crate::EgressProxy>) -> Result<Profile, crate::activation_sandbox::Refusal> {
         let key = (index, placed.to_path_buf());
         let cached = self.map.lock().unwrap_or_else(|e| e.into_inner()).get(&key).cloned();
         // Checked outside the lock (it reads the filesystem).
         if let Some(p) = cached.filter(|p| p.is_current()) {
             return Ok(p);
         }
-        let fresh = crate::activation_sandbox::prepare(c, placed)?;
+        let fresh = crate::activation_sandbox::prepare_with(c, placed, proxy)?;
         let gone: Vec<(usize, PathBuf)> = {
             let g = self.map.lock().unwrap_or_else(|e| e.into_inner());
             g.keys().filter(|(_, p)| p != placed).cloned().collect()
@@ -338,9 +388,10 @@ fn probe_confined(
     c: &mycelium::ConfineDecl,
     path: &Path,
     argv: &[String],
+    proxy: Option<&crate::EgressProxy>,
 ) -> Result<(), (&'static str, String)> {
     for _ in 0..REPROBE_ATTEMPTS {
-        let profile = resolved.get_or_resolve(index, c, path).map_err(|refusal| {
+        let profile = resolved.get_or_resolve(index, c, path, proxy).map_err(|refusal| {
             (refusal.reason(), format!("its [activation.confine] profile cannot be re-resolved — {refusal}; refused, not run"))
         })?;
         if !profile.is_current() {
@@ -375,7 +426,7 @@ fn reprobe_one(w: &Watched) -> bool {
     // `Err((reason, why))`: the trace's reason and what the warning and the record's effect name.
     let verdict: Result<(), (&'static str, String)> = match &w.decl.confine {
         None => run_under(&argv, PROBE_TIMEOUT, None).map_err(|e| ("probe_failed", e)),
-        Some(c) => probe_confined(&w.resolved, w.index, c, &w.path, &argv),
+        Some(c) => probe_confined(&w.resolved, w.index, c, &w.path, &argv, w.proxy.as_deref()),
     };
     let ok = verdict.is_ok();
     w.health.store(ok, Ordering::Relaxed);
@@ -1048,7 +1099,7 @@ except OSError as e:
         for i in 0..3 {
             let p = s.root.join(format!("placed/blob{i}"));
             std::fs::write(&p, b"x").unwrap();
-            cache.get_or_resolve(0, &c, &p).unwrap();
+            cache.get_or_resolve(0, &c, &p, None).unwrap();
             placed.push(p);
         }
         assert!(cache.len() <= 2, "bounded: {}", cache.len());
@@ -1056,7 +1107,7 @@ except OSError as e:
         std::fs::remove_file(&placed[2]).unwrap();
         let next = s.root.join("placed/blob3");
         std::fs::write(&next, b"x").unwrap();
-        cache.get_or_resolve(0, &c, &next).unwrap();
+        cache.get_or_resolve(0, &c, &next, None).unwrap();
         assert!(!cache.contains(0, &placed[2]), "a removed placement is forgotten at the next resolution");
         assert!(cache.len() <= 2, "still bounded: {}", cache.len());
     }
@@ -1087,5 +1138,314 @@ except OSError as e:
         let (got, recs) = activate(decl, Path::new("/nonexistent/pack"));
         assert!(got.is_err());
         assert_eq!(recs, [("prov.activation".to_string(), "command_timed_out".to_string())]);
+    }
+
+    // ── Post-360 rows L and M: the activation egress proxy ──────────────────────────────────────────
+
+    /// A loopback upstream that records every request head and answers `200 ok`.
+    async fn upstream() -> (u16, Arc<Mutex<Vec<String>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&seen);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { return };
+                let log = Arc::clone(&log);
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+                    let mut buf = vec![0u8; 16384];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    log.lock().unwrap().push(String::from_utf8_lossy(&buf[..n]).to_string());
+                    let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").await;
+                });
+            }
+        });
+        (port, seen)
+    }
+
+    /// What a confined command does through its proxy, in Python (no curl on every runner): `get URL
+    /// [Header: value]…` through the environment's proxy (urllib reads `http_proxy`, its userinfo the
+    /// token); `connect HOST PORT` — a `CONNECT` tunnel, then a request inside it; `direct HOST PORT` — a TCP
+    /// connection past the proxy; `env FILE` — the whole environment, written out. Exit 0 on success.
+    const EGRESS_PROBE: &str = r#"import os,sys,socket,base64,urllib.request,urllib.parse
+mode=sys.argv[1]
+try:
+    if mode=='get':
+        req=urllib.request.Request(sys.argv[2])
+        for h in sys.argv[3:]:
+            k,v=h.split(':',1); req.add_header(k.strip(),v.strip())
+        r=urllib.request.urlopen(req,timeout=10); r.read()
+        sys.exit(0 if r.status==200 else 4)
+    elif mode=='connect':
+        u=urllib.parse.urlsplit(os.environ['MYCELIUM_EGRESS_PROXY'])
+        s=socket.create_connection((u.hostname,u.port),timeout=10)
+        auth=base64.b64encode((u.username+':'+u.password).encode()).decode()
+        s.sendall(('CONNECT %s:%s HTTP/1.1\r\nHost: %s:%s\r\nProxy-Authorization: Basic %s\r\n\r\n'%(sys.argv[2],sys.argv[3],sys.argv[2],sys.argv[3],auth)).encode())
+        head=s.recv(4096)
+        if not head.startswith(b'HTTP/1.1 200'):
+            print(head,file=sys.stderr); sys.exit(3)
+        s.sendall(b'GET /tunnelled HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n')
+        data=b''
+        while True:
+            c=s.recv(4096)
+            if not c: break
+            data+=c
+        sys.exit(0 if data.startswith(b'HTTP/1.1 200') else 5)
+    elif mode=='direct':
+        socket.create_connection((sys.argv[2],int(sys.argv[3])),timeout=5)
+    elif mode=='env':
+        open(sys.argv[2],'w').write('\n'.join(k+'='+v for k,v in os.environ.items()))
+except Exception as e:
+    print(e,file=sys.stderr); sys.exit(3)
+"#;
+
+    fn egress_probe(args: &[&str]) -> Vec<String> {
+        let mut v: Vec<String> = vec!["python3".into(), "-I".into(), "-S".into(), "-c".into(), EGRESS_PROBE.into()];
+        v.extend(args.iter().map(|a| a.to_string()));
+        v
+    }
+
+    fn proxied(egress: mycelium::EgressDecl, write: Vec<String>) -> mycelium::ConfineDecl {
+        mycelium::ConfineDecl { read: vec![python_prefix()], write, egress: Some(egress), ..Default::default() }
+    }
+
+    fn proxy_for_test(label: &str, egress: &mycelium::EgressDecl) -> Arc<crate::EgressProxy> {
+        Arc::new(
+            crate::EgressProxy::start(crate::activation_egress::ProxyOptions {
+                label: label.into(),
+                decl: egress,
+                node_egress: &mycelium::EgressPolicy::default(),
+                bind: crate::EgressProxy::DEFAULT_BIND,
+                limits: Default::default(),
+                #[cfg(any(feature = "gateway", feature = "llm"))]
+                gate: None,
+            })
+            .expect("the proxy starts"),
+        )
+    }
+
+    type TestHook = Arc<dyn Fn(&InstallableEntry, &Path, &ActivationCtx) -> Result<Option<Arc<AtomicBool>>, String> + Send + Sync>;
+
+    /// One activation run through a hook that holds `proxy` for declaration 0, off the runtime (the hook
+    /// blocks; the proxy serves on the runtime's other threads).
+    async fn activate_via(h: TestHook, placed: PathBuf) -> Result<(), String> {
+        tokio::task::spawn_blocking(move || h(&pack_entry(), &placed, &ActivationCtx { install_token: 3, trace: None }).map(|_| ()))
+            .await
+            .unwrap()
+    }
+
+    fn egress_hook(command: Vec<String>, confine: mycelium::ConfineDecl, proxy: Arc<crate::EgressProxy>) -> TestHook {
+        let proxies: EgressProxies = Arc::new([(0usize, Ok(proxy))].into_iter().collect());
+        Arc::new(hook_with_egress(vec![confined(command, Vec::new(), confine)], Default::default(), proxies))
+    }
+
+    /// Rows L and M — **limits by hostname**: a confined command reaches an allowed host through its
+    /// stem's egress proxy and is refused another — another port, and the same address under another name
+    /// — while a connection past the proxy, even to the allowed upstream, is refused by the confinement
+    /// itself. `CONNECT` tunnels to the allowed host and is refused elsewhere. Plants: unconfined, the
+    /// direct connection succeeds, so its refusal is the profile's doing. Seen failing first with the proxy
+    /// forwarding every host (`hosts` ignored): the other host was reached.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_confined_command_reaches_an_allowed_host_through_its_proxy_and_is_refused_another() {
+        const T: &str = "a_confined_command_reaches_an_allowed_host_through_its_proxy_and_is_refused_another";
+        if !crate::activation_sandbox::native_backend_or_skip(T) || !python3_or_skip(T) {
+            return;
+        }
+        let s = Scene::new("egress-host");
+        let ((a, at_a), (b, at_b)) = (upstream().await, upstream().await);
+        let egress = mycelium::EgressDecl { hosts: vec![format!("http://127.0.0.1:{a}")], ..Default::default() };
+        let proxy = proxy_for_test("data/pack", &egress);
+        let confine = proxied(egress, Vec::new());
+        let run = |args: Vec<String>| activate_via(egress_hook(egress_probe(&args.iter().map(String::as_str).collect::<Vec<_>>()), confine.clone(), Arc::clone(&proxy)), s.placed.clone());
+
+        assert_eq!(run(vec!["get".into(), format!("http://127.0.0.1:{a}/through")]).await, Ok(()), "the allowed host, through the proxy");
+        assert!(at_a.lock().unwrap().iter().any(|h| h.starts_with("GET /through")), "{:?}", at_a.lock().unwrap());
+        assert!(run(vec!["get".into(), format!("http://127.0.0.1:{b}/no")]).await.is_err(), "another host:port is refused");
+        assert!(run(vec!["get".into(), format!("http://localhost:{a}/no")]).await.is_err(), "the same address under another name is refused: by name");
+        assert!(at_b.lock().unwrap().is_empty(), "the refused host saw nothing");
+        assert!(!at_a.lock().unwrap().iter().any(|h| h.starts_with("GET /no")), "nor did the allowed one, asked by another name");
+
+        // CONNECT: a tunnel to the listed host:port; refused to another.
+        assert_eq!(run(vec!["connect".into(), "127.0.0.1".into(), a.to_string()]).await, Ok(()), "a tunnel to the allowed host");
+        assert!(at_a.lock().unwrap().iter().any(|h| h.starts_with("GET /tunnelled")));
+        assert!(run(vec!["connect".into(), "127.0.0.1".into(), b.to_string()]).await.is_err(), "no tunnel to another");
+        assert!(at_b.lock().unwrap().is_empty());
+
+        // Past the proxy: refused by the confinement (on Seatbelt by address; on Landlock by port).
+        assert_eq!(super::run(&egress_probe(&["direct", "127.0.0.1", &a.to_string()]), Duration::from_secs(10)), Ok(()), "plant: unconfined it connects");
+        assert!(run(vec!["direct".into(), "127.0.0.1".into(), a.to_string()]).await.is_err(), "confined, only the proxy's port is open");
+        let c = proxy.counts();
+        assert!(c.forwarded >= 1 && c.tunnelled >= 1 && c.refused >= 3, "{c:?}");
+    }
+
+    /// Row M's live allow-list: the list changes while the stem runs — same proxy, same port, the same
+    /// hook with its profile resolved once — and the next request meets the new list; a bad list is
+    /// refused and the old one stands. Seen failing first with `set_hosts` a no-op: the added host stayed
+    /// refused.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_allow_list_change_takes_effect_without_a_restart() {
+        const T: &str = "an_allow_list_change_takes_effect_without_a_restart";
+        if !crate::activation_sandbox::native_backend_or_skip(T) || !python3_or_skip(T) {
+            return;
+        }
+        let s = Scene::new("egress-live");
+        let ((a, _), (b, at_b)) = (upstream().await, upstream().await);
+        let egress = mycelium::EgressDecl { hosts: vec![format!("http://127.0.0.1:{a}")], ..Default::default() };
+        let proxy = proxy_for_test("data/pack", &egress);
+        let port = proxy.port();
+        let to_b = format!("http://127.0.0.1:{b}/live");
+        // One hook for every run, as one stem's provisioner holds it.
+        let h = egress_hook(egress_probe(&["get", &to_b]), proxied(egress, Vec::new()), Arc::clone(&proxy));
+        assert!(activate_via(Arc::clone(&h), s.placed.clone()).await.is_err(), "b is not listed yet");
+        assert!(at_b.lock().unwrap().is_empty());
+
+        proxy.set_hosts(&[format!("http://127.0.0.1:{a}"), format!("http://127.0.0.1:{b}")]).expect("a valid list");
+        assert_eq!(activate_via(Arc::clone(&h), s.placed.clone()).await, Ok(()), "listed live: reached, no restart");
+        assert_eq!(at_b.lock().unwrap().len(), 1);
+        assert_eq!(proxy.port(), port, "the same proxy, the same port");
+
+        let e = proxy.set_hosts(&["https://*.example.com".into()]).expect_err("a bad list is refused");
+        assert!(e.contains("wildcard"), "{e}");
+        assert_eq!(proxy.hosts(), [format!("http://127.0.0.1:{a}"), format!("http://127.0.0.1:{b}")], "and the old one stands");
+
+        proxy.set_hosts(&[]).expect("an empty list");
+        assert!(activate_via(h, s.placed.clone()).await.is_err(), "removed live: refused again");
+        assert_eq!(at_b.lock().unwrap().len(), 1);
+    }
+
+    /// Row L's activation-command half: a placeholder is replaced **only at the bound host** — the node's
+    /// gate attaches the value there; another listed host gets a refusal, not the value; a binding the
+    /// activation was not given is refused — and **the value is never in the command's environment**: the
+    /// command starts with a cleared environment, so the binding's `value_env` variable, set in the stem's,
+    /// is not in it. Seen failing first with the proxy forwarding headers as written and the environment
+    /// inherited: the upstream received the placeholder, and the command's environment held the variable.
+    #[cfg(any(feature = "gateway", feature = "llm"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_placeholder_is_replaced_only_at_the_bound_host_and_the_value_is_never_in_the_commands_environment() {
+        const T: &str = "a_placeholder_is_replaced_only_at_the_bound_host_and_the_value_is_never_in_the_commands_environment";
+        if !crate::activation_sandbox::native_backend_or_skip(T) || !python3_or_skip(T) {
+            return;
+        }
+        const VAR: &str = "MYCELIUM_TEST_ACT_EGRESS_KEY_7F";
+        const SECRET: &str = "sk-act-egress-7f3a-never-in-the-env";
+        // SAFETY: see `stem::tests::a_served_skill_reads_its_key_from_the_environment` — test code, a
+        // variable unique to this test, written once; the residual is a libc `getenv` race on another test
+        // thread, whose worst outcome is a crashed test run.
+        #[allow(unsafe_code)]
+        unsafe { std::env::set_var(VAR, SECRET); }
+        let s = Scene::new("egress-cred");
+        let ((a, at_a), (b, at_b)) = (upstream().await, upstream().await);
+        let bind = |name: &str, port: u16| mycelium::CredentialBinding {
+            name: name.into(), host: "127.0.0.1".into(), port: Some(port), path_prefix: None,
+            form: mycelium::CredentialForm::Bearer, header: None, username: None,
+            value_env: Some(VAR.into()), value_file: None, allow_plaintext: false,
+        };
+        let gate = Arc::new(mycelium::EgressCredentials::load(&[bind("model", a), bind("other", b)], &mycelium::EgressPolicy::default()).expect("the gate loads"));
+        let egress = mycelium::EgressDecl {
+            hosts: vec![format!("http://127.0.0.1:{a}"), format!("http://127.0.0.1:{b}")],
+            credentials: vec!["model".into()],
+        };
+        let proxy = Arc::new(
+            crate::EgressProxy::start(crate::activation_egress::ProxyOptions {
+                label: "data/pack".into(),
+                decl: &egress,
+                node_egress: &mycelium::EgressPolicy::default(),
+                bind: crate::EgressProxy::DEFAULT_BIND,
+                limits: Default::default(),
+                gate: Some(Arc::clone(&gate)),
+            })
+            .expect("the proxy starts"),
+        );
+        let confine = proxied(egress, vec![s.p("out")]);
+        let run = |args: Vec<String>| activate_via(egress_hook(egress_probe(&args.iter().map(String::as_str).collect::<Vec<_>>()), confine.clone(), Arc::clone(&proxy)), s.placed.clone());
+        let bearer = |name: &str| format!("Authorization: Bearer {}", mycelium::credential_placeholder(name));
+
+        assert_eq!(run(vec!["get".into(), format!("http://127.0.0.1:{a}/v1/chat"), bearer("model")]).await, Ok(()), "the bound host");
+        let got = at_a.lock().unwrap().clone();
+        assert_eq!(got.len(), 1);
+        assert!(got[0].to_ascii_lowercase().contains(&format!("authorization: bearer {SECRET}")), "the value attached at the bound host: {}", got[0]);
+        assert!(!got[0].contains("mycelium-credential:") && !got[0].to_ascii_lowercase().contains("proxy-authorization"), "nor the placeholder, nor the proxy token: {}", got[0]);
+
+        assert!(run(vec!["get".into(), format!("http://127.0.0.1:{b}/v1/chat"), bearer("model")]).await.is_err(), "another listed host: the binding does not authorise it");
+        assert!(run(vec!["get".into(), format!("http://127.0.0.1:{b}/v1/chat"), bearer("other")]).await.is_err(), "a binding this activation was not given");
+        assert!(at_b.lock().unwrap().is_empty(), "the other host saw neither the value nor the request");
+        assert_eq!(gate.uses().iter().map(|u| (u.name.as_str(), u.attached)).collect::<Vec<_>>(), [("model", 1), ("other", 0)]);
+
+        // The command's whole environment: no value, no variable — the proxy's address, the base set.
+        let dump = s.root.join("out/env");
+        assert_eq!(run(vec!["env".into(), dump.display().to_string()]).await, Ok(()));
+        let env = std::fs::read_to_string(&dump).unwrap();
+        assert!(!env.contains(SECRET) && !env.contains(VAR), "the value and its variable are not in the command's environment:\n{env}");
+        assert!(env.contains("HTTP_PROXY=http://mycelium:") && env.contains(&format!("@127.0.0.1:{}", proxy.port())), "{env}");
+        assert!(std::env::var(VAR).is_ok(), "plant: the stem's own environment holds it");
+    }
+
+    /// #644's review, finding 1: **every** confined command starts with a cleared environment, egress table or
+    /// not — a variable in the stem's environment (a binding's `value_env` would be one) is not in it, the base
+    /// set and the declared `env` are. Seen failing first: the confined command's environment was the stem's.
+    #[test]
+    fn a_confined_activation_starts_with_a_cleared_environment() {
+        const T: &str = "a_confined_activation_starts_with_a_cleared_environment";
+        if !crate::activation_sandbox::native_backend_or_skip(T) {
+            return;
+        }
+        // SAFETY: as `stem::tests::a_served_skill_reads_its_key_from_the_environment` — test code, unique
+        // variables, each written once.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var("MYCELIUM_TEST_STEM_ONLY_7F", "sk-stem-only-7f");
+            std::env::set_var("MYCELIUM_TEST_PASSED_7F", "passed-7f");
+        }
+        let s = Scene::new("cleared");
+        let dump = s.p("out/env");
+        let profile = mycelium::ConfineDecl { write: vec![s.p("out")], env: vec!["MYCELIUM_TEST_PASSED_7F".into()], ..Default::default() };
+        let got = activate(confined(sh(&format!("env > {dump}")), Vec::new(), profile), &s.placed).0;
+        assert_eq!(got, Ok(()));
+        let env = std::fs::read_to_string(&dump).unwrap();
+        assert!(!env.contains("MYCELIUM_TEST_STEM_ONLY_7F") && !env.contains("sk-stem-only-7f"), "the stem's variable is not passed:\n{env}");
+        assert!(env.contains("MYCELIUM_TEST_PASSED_7F=passed-7f") && env.contains("PATH="), "the declared and base variables are:\n{env}");
+        assert!(std::env::var("MYCELIUM_TEST_STEM_ONLY_7F").is_ok(), "plant: the stem holds it");
+    }
+
+    /// No silent fallback: an activation whose egress proxy could not start — here its address is taken —
+    /// is refused by name (`egress_proxy_unavailable`) and its command never runs; so is one whose proxy was
+    /// never started (the plain `hook`). Runs on every platform: the refusal comes before any backend. Seen
+    /// failing first with the hook ignoring the missing proxy: the command ran.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_proxy_that_cannot_start_refuses_the_activation() {
+        let s = Scene::new("egress-down");
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let egress = mycelium::EgressDecl { hosts: vec!["https://api.example.com".into()], ..Default::default() };
+        let failed = crate::EgressProxy::start(crate::activation_egress::ProxyOptions {
+            label: "data/pack".into(),
+            decl: &egress,
+            node_egress: &mycelium::EgressPolicy::default(),
+            bind: taken.local_addr().unwrap(),
+            limits: Default::default(),
+            #[cfg(any(feature = "gateway", feature = "llm"))]
+            gate: None,
+        })
+        .expect_err("the address is in use");
+        assert!(failed.contains("data/pack") && failed.contains("egress proxy could not start"), "{failed}");
+        let ran = s.p("placed/ran");
+        let decl = confined(sh(&format!("touch {ran}")), Vec::new(), mycelium::ConfineDecl { egress: Some(egress), ..Default::default() });
+        let sink = Arc::new(mycelium::decision::DecisionSink::default());
+        let actx = ActivationCtx { install_token: 5, trace: Some(Arc::new(TraceCtx { sink: Arc::clone(&sink), node: "n".into(), build: "t".into(), config_digest: "d".into(), profile: None })) };
+        let proxies: EgressProxies = Arc::new([(0usize, Err(failed))].into_iter().collect());
+        let (placed, d) = (s.placed.clone(), decl.clone());
+        let e = tokio::task::spawn_blocking(move || hook_with_egress(vec![d], Default::default(), proxies)(&pack_entry(), &placed, &actx).map(|_| ()))
+            .await
+            .unwrap()
+            .expect_err("refused");
+        assert!(e.contains("data/pack") && e.contains("egress proxy") && e.contains("not run without it"), "{e}");
+        assert!(!Path::new(&ran).exists(), "the command never ran");
+        assert_eq!(sink.snapshot().into_iter().map(|r| r.reason).collect::<Vec<_>>(), ["egress_proxy_unavailable"]);
+        // Never started (a hook without proxies): refused the same way.
+        let (got, recs) = activate(decl, &s.placed);
+        assert!(got.expect_err("refused").contains("never started"));
+        assert_eq!(recs, [("prov.activation".to_string(), "egress_proxy_unavailable".to_string())]);
+        assert!(!Path::new(&ran).exists());
+        drop(taken);
     }
 }

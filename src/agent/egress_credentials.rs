@@ -39,6 +39,9 @@ struct Bound {
     header:  HeaderName,
     /// The value in its attached form (`Bearer …`, `Basic …` or the bare value), marked sensitive.
     value:   HeaderValue,
+    /// What a [`Redactor`] masks for this binding: the bare value, and for `basic` the base64 credential
+    /// that carries it. Never printed.
+    secrets: Vec<Vec<u8>>,
     used:    AtomicU64,
     refused: AtomicU64,
     dropped: AtomicU64,
@@ -126,6 +129,21 @@ impl EgressCredentials {
     /// trailing newline trimmed) — once, now. A binding that does not validate, whose value is unset,
     /// unreadable, empty, or not a valid header value is refused by name; the error never holds a value.
     pub fn load(bindings: &[CredentialBinding], egress: &EgressPolicy) -> Result<Self, GossipError> {
+        Self::load_with(bindings, egress, crate::agent::egress_client::without_redirects())
+    }
+
+    /// [`load`](Self::load), with the gate's client also trusting `root_pem` — **for tests only** (a loopback
+    /// TLS upstream signed by a test CA, so the https path is exercised without the network). Not built
+    /// outside `cfg(test)` and feature `test-util`.
+    #[cfg(any(test, feature = "test-util"))]
+    #[doc(hidden)]
+    pub fn load_trusting_root(bindings: &[CredentialBinding], egress: &EgressPolicy, root_pem: &[u8]) -> Result<Self, GossipError> {
+        let root = reqwest::Certificate::from_pem(root_pem)
+            .map_err(|e| GossipError::InvalidField { field: "egress_credentials", reason: format!("test root: {e}") })?;
+        Self::load_with(bindings, egress, crate::agent::egress_client::without_redirects().add_root_certificate(root))
+    }
+
+    fn load_with(bindings: &[CredentialBinding], egress: &EgressPolicy, builder: reqwest::ClientBuilder) -> Result<Self, GossipError> {
         // The bindings' own rules (names, hosts and ports, forms, sources, the allow-list) — the ones
         // `GossipConfig::validate` runs — so an embedder that builds a gate without a config is held to
         // them too (row L's review, finding 8: this validated a whole default config).
@@ -152,12 +170,15 @@ impl EgressCredentials {
             if raw.is_empty() {
                 return Err(refuse(i, &b.name, "its value is empty".into()));
             }
+            let mut secrets = vec![raw.as_bytes().to_vec()];
             let (header, attached) = match b.form {
                 CredentialForm::Bearer => (reqwest::header::AUTHORIZATION, format!("Bearer {raw}")),
                 CredentialForm::Basic => {
                     use base64::Engine as _;
                     let user = b.username.as_deref().unwrap_or_default();
-                    (reqwest::header::AUTHORIZATION, format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{user}:{raw}"))))
+                    let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{raw}"));
+                    secrets.push(encoded.as_bytes().to_vec());
+                    (reqwest::header::AUTHORIZATION, format!("Basic {encoded}"))
                 }
                 CredentialForm::Header => {
                     let name = b.header.as_deref().unwrap_or_default();
@@ -168,9 +189,9 @@ impl EgressCredentials {
             let mut value = HeaderValue::from_str(&attached)
                 .map_err(|_| refuse(i, &b.name, "its value is not a valid header value (a control character or a non-visible byte)".into()))?;
             value.set_sensitive(true);
-            bound.push(Bound { cfg: b.clone(), header, value, used: AtomicU64::new(0), refused: AtomicU64::new(0), dropped: AtomicU64::new(0) });
+            bound.push(Bound { cfg: b.clone(), header, value, secrets, used: AtomicU64::new(0), refused: AtomicU64::new(0), dropped: AtomicU64::new(0) });
         }
-        let client = crate::agent::egress_client::build_or_none(crate::agent::egress_client::without_redirects());
+        let client = crate::agent::egress_client::build_or_none(builder);
         Ok(Self { bound, egress: egress.clone(), client })
     }
 
@@ -184,6 +205,45 @@ impl EgressCredentials {
     pub fn authorises(&self, name: &str, url: &str) -> Result<(), CredentialError> {
         let b = self.bound.iter().find(|b| b.cfg.name == name).ok_or_else(|| CredentialError::UnknownBinding { name: name.to_string() })?;
         b.cfg.authorises_url(url).map_err(|reason| CredentialError::NotAuthorised { binding: name.to_string(), reason })
+    }
+
+    /// Is `candidate` the value of any binding here? Compared in constant time per binding; for a check that
+    /// keeps a value out of somewhere it must not be (a confined command's environment), never to print it.
+    pub fn holds_value(&self, candidate: &str) -> bool {
+        let c = candidate.as_bytes();
+        self.bound.iter().any(|b| b.secrets.first().is_some_and(|s| s.len() == c.len() && s.iter().zip(c).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0))
+    }
+
+    /// Does any binding's value appear **inside** `text` (#644's round-2 review, N7)? What keeps a value out of a
+    /// variable that carries it within a longer string. Never prints either.
+    pub fn appears_in(&self, text: &str) -> bool {
+        let t = text.as_bytes();
+        self.bound.iter().any(|b| b.secrets.first().is_some_and(|s| !s.is_empty() && t.windows(s.len()).any(|w| w == &s[..])))
+    }
+
+    /// A [`Redactor`] for the bindings named (unknown names are skipped): what masks their values in a
+    /// response before it is relayed to a party that must not hold them (an activation's command, behind its
+    /// egress proxy, when an upstream echoes what it was sent).
+    pub fn redactor(&self, names: &[String]) -> Redactor {
+        let needles = self
+            .bound
+            .iter()
+            .filter(|b| names.contains(&b.cfg.name))
+            .flat_map(|b| b.secrets.iter().cloned())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<Vec<u8>>>();
+        // #644's round-2 review, N4: longest first, so a value that prefixes another cannot mask the longer
+        // one's head and leave its tail.
+        let mut needles = needles;
+        needles.sort_by_key(|n| std::cmp::Reverse(n.len()));
+        Redactor { needles }
+    }
+
+    /// Is the binding `name` bound to `host` (any port, any scheme)? What an activation's egress proxy asks
+    /// before it opens a tunnel it cannot see into to a host that receives a value.
+    pub fn binds_host(&self, name: &str, host: &str) -> bool {
+        let bare = |h: &str| h.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
+        self.bound.iter().any(|b| b.cfg.name == name && bare(&b.cfg.host) == bare(host))
     }
 
     /// The bindings' names, in configuration order.
@@ -261,6 +321,20 @@ impl EgressCredentials {
         }
     }
 
+    /// Send `req` once, resolving its placeholders at the gate as [`send`](Self::send) does on its first
+    /// hop — under the node's allow-list, the value attached only where the binding authorises, a request it
+    /// does not authorise refused before it is sent — and **follow no redirect**: a 3xx comes back as it
+    /// arrived. For a caller that must judge every hop by a rule of its own before it is taken (a stem's
+    /// activation egress proxy, whose command follows the redirect through the proxy again, so the hop meets
+    /// the activation's allow-list and this gate afresh).
+    pub async fn send_once(&self, req: reqwest::Request) -> Result<reqwest::Response, CredentialError> {
+        if !self.egress.permits_url(req.url().as_str()) {
+            return Err(CredentialError::EgressDenied { url: req.url().as_str().to_string() });
+        }
+        let out = self.resolve(req, 0)?;
+        self.client.execute(out).await.map_err(CredentialError::Http)
+    }
+
     /// Replace every placeholder-carrying header of `req` with its binding's form — or, on a
     /// redirect hop the binding does not authorise, with nothing.
     fn resolve(&self, mut req: reqwest::Request, hop: usize) -> Result<reqwest::Request, CredentialError> {
@@ -319,6 +393,90 @@ impl EgressCredentials {
             count(&b.cfg.name, "attached");
         }
         Ok(req)
+    }
+}
+
+/// Masks credential values in bytes headed somewhere they must not arrive ([`EgressCredentials::redactor`]):
+/// every occurrence of a value becomes the same number of `*`, so a length (`Content-Length`) stays true.
+/// Its `Debug` prints how many values it masks, never one.
+pub struct Redactor {
+    needles: Vec<Vec<u8>>,
+}
+
+impl std::fmt::Debug for Redactor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Redactor").field("values", &self.needles.len()).finish()
+    }
+}
+
+impl Redactor {
+    /// Masks nothing.
+    pub fn is_empty(&self) -> bool {
+        self.needles.is_empty()
+    }
+
+    /// Mask every value in `buf` in place; true if any was found.
+    pub fn mask(&self, buf: &mut [u8]) -> bool {
+        let mut hit = false;
+        for n in &self.needles {
+            let mut i = 0;
+            while i + n.len() <= buf.len() {
+                if buf[i..i + n.len()] == n[..] {
+                    buf[i..i + n.len()].fill(b'*');
+                    hit = true;
+                    i += n.len();
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        hit
+    }
+
+    /// A header value with every value masked — `None` when it held none.
+    pub fn header(&self, v: &HeaderValue) -> Option<HeaderValue> {
+        let mut b = v.as_bytes().to_vec();
+        self.mask(&mut b).then(|| HeaderValue::from_bytes(&b).unwrap_or_else(|_| HeaderValue::from_static("*")))
+    }
+
+    /// A masker for a body that arrives in chunks: a value split across chunks is masked too. It withholds
+    /// the last (longest value − 1) bytes of each chunk until the next arrives or [`RedactStream::finish`].
+    pub fn stream(&self) -> RedactStream {
+        let keep = self.needles.iter().map(Vec::len).max().unwrap_or(1).saturating_sub(1);
+        RedactStream { redactor: Redactor { needles: self.needles.clone() }, tail: Vec::new(), keep }
+    }
+}
+
+/// [`Redactor::stream`]'s state.
+pub struct RedactStream {
+    redactor: Redactor,
+    tail: Vec<u8>,
+    keep: usize,
+}
+
+impl std::fmt::Debug for RedactStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RedactStream").field("withheld", &self.tail.len()).finish()
+    }
+}
+
+impl RedactStream {
+    /// The masked bytes now safe to send. A value that ends in a later chunk starts within the withheld
+    /// tail, so it is masked when that chunk arrives.
+    pub fn feed(&mut self, chunk: &[u8]) -> Vec<u8> {
+        let mut buf = std::mem::take(&mut self.tail);
+        buf.extend_from_slice(chunk);
+        self.redactor.mask(&mut buf);
+        let split = buf.len().saturating_sub(self.keep);
+        self.tail = buf.split_off(split);
+        buf
+    }
+
+    /// What is withheld, masked.
+    pub fn finish(mut self) -> Vec<u8> {
+        let mut t = std::mem::take(&mut self.tail);
+        self.redactor.mask(&mut t);
+        t
     }
 }
 

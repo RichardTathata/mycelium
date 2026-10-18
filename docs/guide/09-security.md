@@ -334,9 +334,24 @@ request to the bound host. It refuses the request before a byte is sent anywhere
 the credential on a redirect the binding does not authorise. `[[serve]]`'s `credential = "<binding>"`
 and `OpenAiBackend` with `.with_credentials(gate)` send through it.
 
+An `[[activation]]` command reaches the gate through an **egress proxy** its stem runs for it (rows L
+and M, after 2.35.0). Its `[activation.confine.egress]` table names the hosts the command may reach —
+`https://api.example.com`, by name, the list replaceable while the stem runs — and the bindings it may
+name. The command is confined to the proxy's loopback port and started with a cleared environment (every
+confined command is) that
+holds the proxy's address and no secret. It sends `http://api.example.com/…` through `HTTP_PROXY` with
+the placeholder in a header; the proxy checks the host and the binding, then sends the request on over
+`https` through the gate, which attaches the value only where the binding authorises. An `https://` URL
+the command dials itself goes through `CONNECT`, a tunnel that carries no credential, because the proxy
+does not terminate TLS ([unit-file § `[activation.confine.egress]`](../reference/unit-file.md#activationconfineegress)).
+Under Landlock the proxy's port is open on any address, so the guarantee `stem.activation_egress` reads
+`not_configured` on Linux; under Seatbelt it reads `enforced`.
+
 What it does not cover (guarantee `egress.credentials`, `src/agent/guarantee.rs`): a secret a component
-or command reads from its own environment or files — an `[[activation]]` command is a separate process
-with no path to the gate; a proxy the gate's client is configured with (`HTTP_PROXY` / `HTTPS_PROXY`),
+or command reads from its own environment or files — an **unconfined** `[[activation]]` command inherits the
+stem's environment and has no path to the gate (a confined one starts with a cleared environment, and a binding
+it could read refuses the stem's start); a value an upstream echoes back transformed rather than as its bytes
+(the egress proxy masks the bytes); a proxy the gate's client is configured with (`HTTP_PROXY` / `HTTPS_PROXY`),
 which sees a plaintext or loopback request's header; a placeholder in a query string or a request body
 (sent as written, not resolved); and `[[serve]]`'s `api_key` / `api_key_env`, federation, object-store
 and git credentials, which keep their own paths. SkillRunner's own key is outside it too
