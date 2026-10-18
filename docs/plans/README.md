@@ -74,8 +74,9 @@ record, not duplicates of those.
 > unconditional, #624), S (identity proofs on by default, #623), T (the CA-key warning, #622), and three §3.6
 > follow-ups (#627–#629). **Delivered in v2.35.0 (2026-10-17):** K (policy over history, #638), L (credentials at
 > egress, #637), M (activation commands confined, partly, #636), N (#633), O (`strands-session-mycelium` 0.1.0, #634),
-> P (#635), E's envelope nonce cache and Q's handshake refusal. **Next:** the rows' *not built* lists (§3.6), §5's
-> inference-routing question, and the private re-pin with `COMPATIBILITY.md`.
+> P (#635), E's envelope nonce cache and Q's handshake refusal. The private re-pin to v2.35.0 is done (private #32,
+> `5e807a2`: `rustls` 0.23.46, and the Cedar adapter passes row K's five history cases). **Next:** the rows' *not
+> built* lists (§3.6) and §5's inference-routing question.
 >
 > **Realignment repairs (adopted 2026-10-04; delivered — piece 1 in v2.23.0, #518–#524; pieces 2 and 4 with R7 in v2.24.0, #526–#532; the private exporter, piece 3, on the same pin; R8 and R9 in v2.25.0, #534–#535 — every row closed; S5's and A3's unbuilt halves found by doc-coverage run 20 and delivered in v2.26.0, #542–#543):** [`realignment-repairs.md`](realignment-repairs.md) —
 > an external review's twelve findings, each verified by `file:line` and six re-run as probes (eleven hold; F01 is

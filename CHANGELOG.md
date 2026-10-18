@@ -9,6 +9,40 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **A symlink planted while a confinement profile resolved could widen it for good** (post-360 row M; #641's review,
+  finding 1, present since 2.35.0). There was a window between `prepare`'s symlink check and its `canonicalize`, and
+  another before the Linux pin, which opened without `O_NOFOLLOW`. A confined command still running in that window
+  could swap a declared path, or any component of it below a writable root, for a link to a directory the profile
+  never named. Two further routes existed: an operator symlink pointing into a root's interior, and a placement
+  directory inside a write root. Either way the profile would name and pin the link's target, and every later run
+  would reuse it. Now every path is resolved from `/`, one component at a time from its parent's descriptor. A
+  symlink is followed only before the resolution enters a writable root, recognised by identity rather than spelling.
+  The identity comes from what was opened, Landlock's rule from that descriptor, and every currency check walks the
+  path again. A profile runs only while it is current. On Linux, a symlink on a filesystem that holds a write path and
+  is mounted more than once, such as by a bind mount, is not followed (`unit-file.md` § Mounts). The rule's limit:
+  views of a write path through another filesystem are not detected. These are FUSE `bindfs`, overlayfs, and NFS or
+  SMB loopback.
+
+### Fixed
+
+- **A confined activation's re-probe no longer withdraws an install whose declared path was replaced legitimately**
+  (post-360 row M's follow-up, #641). A write directory rotated or a read file replaced by an atomic rename failed
+  the next re-probe, so the install was withdrawn and reinstalled, a flap if the path churned. The re-probe now
+  re-resolves the profile, repeating every check (symlinks, the canonical comparison, existence), and runs the probe
+  under the fresh profile. The install is withdrawn only when re-resolution refuses, and the trace names the refusal
+  (`prov.probe`'s `confinement_failed` / `confinement_unavailable`, rule revision 3). A path that changes while the
+  probe runs makes the verdict untrusted: the probe is re-resolved and run once more, and a change under both runs is
+  `confinement_changed`. A path replaced by a symlink is refused, never followed.
+  - A rotation by flipping an ancestor symlink (`current` → `v2`) is now seen and re-resolved. Before, the old profile
+    stayed current and wedged the install.
+  - The activation's initial probe takes the same check.
+  - A re-probe round runs its entries concurrently, at most eight at once, so one churning entry delays no other.
+
+  **Upgrade note:** a probe that replaces one of its own declared paths on every run now fails as
+  `confinement_changed` (`deprecations.md` §50).
+
 ## [2.35.0] — 2026-10-17
 
 **Two security fixes, and the post-360 plan's comparison rows.** A revoked key's certificate is now refused at the mTLS

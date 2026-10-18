@@ -22,7 +22,8 @@
 //! exist — refuses the activation by name and runs nothing ([`Refusal`]).
 //!
 //! **Fixed for the activation's life** (row M's OpenShell note): the profile is resolved once, when the
-//! activation runs, and its re-probes reuse it. A network allow-list that changes live is **not built**:
+//! activation runs, and its re-probes reuse it — re-resolved, every check repeated, only when a declared
+//! path no longer names what it named ([`Profile::is_current`]). A network allow-list that changes live is **not built**:
 //! the unit file is read at start, and every limit it states holds until the stem restarts.
 //!
 //! **What neither backend limits**, stated: metadata (`stat`) of any path; on Linux below Landlock ABI 6,
@@ -162,11 +163,16 @@ fn backend_for(c: &ConfineDecl) -> Result<ConfineBackend, String> {
     Ok(backend)
 }
 
-/// A profile resolved against one placed file: every path expanded, canonical and present — resolved
-/// **once**, when the activation is first prepared, and kept (review finding 5, #636): on Linux the paths
-/// are held open (`O_PATH`) from that resolution and Landlock's rules are made from those descriptors, so
-/// a path a confined run later replaces with a symlink grants nothing new; Seatbelt matches the resolved
-/// path strings, so a symlink planted under one resolves to its target, which the profile does not name.
+/// A profile resolved against one placed file: every path expanded, present and resolved — resolved
+/// **once**, when the activation is first prepared, and kept (review finding 5, #636) while it is current.
+///
+/// Each path is resolved by a **walk** (review of #641, round 2): the part of it outside every writable
+/// root (the operator's — an ancestor symlink there is followed) is canonicalised, and every component
+/// below a root is opened from its parent's descriptor with `O_NOFOLLOW`, so a symlink a confined command
+/// planted — at the last component or any between — is refused, never followed, whenever it is planted.
+/// The identity (device, inode) is read from what the walk opened. On Linux the final descriptor
+/// (`O_PATH`) is kept and Landlock's rules are made from it; Seatbelt matches path strings, so the profile
+/// names the path's on-disk spelling, accepted only when it names exactly what the walk opened.
 #[derive(Debug, Clone)]
 pub struct Profile {
     pub backend: ConfineBackend,
@@ -176,22 +182,45 @@ pub struct Profile {
     pub write:   Vec<PathBuf>,
     /// TCP destinations: `(localhost only, port)`.
     pub connect: Vec<(bool, u16)>,
-    /// `read` then `write`, held open from the first resolution (Linux; empty elsewhere).
+    /// `read` then `write`, held open from the walk (Linux; empty elsewhere).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) pinned: Pinned,
-    /// `read` then `write`: each path's (device, inode) at the resolution — what a pin refers to.
+    /// `read` then `write`: each path's (device, inode), read from what the walk opened.
     pub(crate) ids: Vec<(u64, u64)>,
+    /// `read` then `write`: each path as declared, expanded but not resolved — what the currency check
+    /// walks again, so a flipped ancestor symlink or a component replaced below a root is seen.
+    pub(crate) sources: Vec<PathBuf>,
+    /// The writable roots' identities (the placement directory, then each `write`): at or below one, every
+    /// component is walked without following a symlink.
+    pub(crate) roots: Vec<(u64, u64)>,
+    /// Devices that hold a write root and are mounted more than once (Linux): a symlink on one is not
+    /// followed even outside every root, since the root's interior may show there (review of #641 round 4).
+    pub(crate) shared_devs: Vec<u64>,
 }
 
 impl Profile {
-    /// Whether every path still names what was resolved (review follow-up 1, #636): not a symlink now,
-    /// and the same device and inode. A path removed and recreated, or replaced, is not — the caller
-    /// re-resolves it rather than run with a stale pin.
+    /// Whether every path still names what was resolved (review follow-up 1, #636): each declared path
+    /// walked again — no symlink below a writable root, at any component — reaching the same device and
+    /// inode under the same name. A path removed, recreated or replaced is not current, nor one whose
+    /// operator-side ancestor symlink was flipped (`current` → `v2`). The caller re-resolves it rather
+    /// than run with a stale pin.
     pub fn is_current(&self) -> bool {
-        use std::os::unix::fs::MetadataExt;
-        self.read.iter().chain(&self.write).zip(&self.ids).all(|(p, id)| {
-            std::fs::symlink_metadata(p).is_ok_and(|m| !m.file_type().is_symlink() && (m.dev(), m.ino()) == *id)
-        })
+        self.stale_path().is_none()
+    }
+
+    /// The first path that no longer names what was resolved, if any.
+    fn stale_path(&self) -> Option<&Path> {
+        let paths: Vec<&PathBuf> = self.read.iter().chain(&self.write).collect();
+        if self.ids.len() != paths.len() || self.sources.len() != paths.len() {
+            return Some(Path::new("(an incomplete profile)"));
+        }
+        for (i, (p, src)) in paths.iter().zip(&self.sources).enumerate() {
+            let again = walk(src, &self.roots, &self.shared_devs, &src.display().to_string(), i == 0);
+            if !again.is_ok_and(|w| w.path == **p && w.id == self.ids[i]) {
+                return Some(p);
+            }
+        }
+        None
     }
 }
 
@@ -199,9 +228,265 @@ impl Profile {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Pinned(#[cfg_attr(not(target_os = "linux"), allow(dead_code))] pub(crate) Vec<std::sync::Arc<std::os::fd::OwnedFd>>);
 
+/// One declared path, walked.
+struct Walked {
+    /// The path the profile names: the on-disk spelling of what the walk opened.
+    path: PathBuf,
+    /// Its (device, inode), from what the walk opened.
+    id:   (u64, u64),
+    /// The final descriptor (`O_PATH`, Linux only).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fd:   Option<std::os::fd::OwnedFd>,
+}
+
+fn refused_symlink(raw: &str, p: &Path, at: &Path) -> Refusal {
+    Refusal::Failed(format!(
+        "confine path {raw:?} ({}) passes through a symlink at {} — a declared path is never a symlink, nor reached \
+         through one a confined command could have planted; name its target",
+        p.display(),
+        at.display()
+    ))
+}
+
+/// The most symlinks one walk follows (the kernel's own bound is 32–40).
+const MAX_FOLLOWS: usize = 40;
+
+/// Resolve one declared path by a walk from `/` (review of #641, rounds 2 and 3). Each component is
+/// looked at from its parent's descriptor without following it. A symlink is followed only while the walk
+/// has not yet entered a **writable root** — a directory whose (device, inode) is one of `roots` (the
+/// placement directory and each `write` path) — so the operator's own links outside every root are
+/// followed (`/tmp` on macOS, `/opt/models/current`, a shortcut into a root), and from the moment the
+/// walk is at or below a root nothing is: a symlink there, at any component and whenever it was planted,
+/// is refused, and so is a `..`. Roots are recognised by identity, not by spelling, so a path that reaches
+/// a root through any name is treated as inside it (finding H1), the placement directory included
+/// (finding H2).
+///
+/// The identity comes from what the walk opened. The name the profile carries (which Seatbelt matches)
+/// is the path's canonical, on-disk spelling (case and normalisation as stored — round 2, B), accepted
+/// only if it has the walked depth and names the walked identity. `allow_final_link`: the declared path's
+/// own last component may be the operator's symlink (the placement directory); for every other declared
+/// path it is refused, as `[activation.confine]` has always said.
+///
+/// **A second mount** (round 4, N1): on Linux a write root's filesystem may be mounted again elsewhere (a
+/// bind mount of a subtree), showing the root's interior under a path that never passes the root's own
+/// inode. A symlink found in a directory on a device that holds a write root **and** is mounted more than
+/// once (`shared_devs`, from `/proc/self/mountinfo`) is therefore not followed, outside a root or not: a
+/// confined command could have written it through the root. On a device mounted once, every directory has
+/// one path from `/`, so a walk that never met a root's inode is outside it. Not detected, on either
+/// platform: a *view* of a root through another filesystem (FUSE `bindfs`, overlayfs, NFS or SMB loopback),
+/// which shows the root's interior under a device of its own.
+fn walk(src: &Path, roots: &[(u64, u64)], shared_devs: &[u64], raw: &str, allow_final_link: bool) -> Result<Walked, Refusal> {
+    use rustix::fs::{openat, readlinkat, statat, AtFlags, Mode, OFlags, CWD};
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStrExt;
+    let missing = |e: &dyn std::fmt::Display| {
+        Refusal::Failed(format!("confine path {raw:?} ({}): {e} — a declared path must exist when the activation runs", src.display()))
+    };
+    // A directory opened for lookup only; a kernel that does not know the search flag answers `EINVAL`, and
+    // the open is retried read-only.
+    let open_dir = |at: &dyn std::os::fd::AsFd, name: &Path, follow: bool| -> rustix::io::Result<std::os::fd::OwnedFd> {
+        let base = OFlags::DIRECTORY | OFlags::CLOEXEC | if follow { OFlags::empty() } else { OFlags::NOFOLLOW };
+        match openat(at.as_fd(), name, base | search_flag(), Mode::empty()) {
+            Err(rustix::io::Errno::INVAL) => openat(at.as_fd(), name, base | OFlags::RDONLY, Mode::empty()),
+            other => other,
+        }
+    };
+    let abs = std::path::absolute(src).map_err(|e| missing(&e))?;
+    // The components still to resolve, front first; `true` marks the declared path's own last component.
+    let mut queue: std::collections::VecDeque<(OsString, bool)> = std::collections::VecDeque::new();
+    let push_path = |queue: &mut std::collections::VecDeque<(OsString, bool)>, p: &Path, declared_last: bool| -> bool {
+        let comps: Vec<std::path::Component> = p.components().collect();
+        let n = comps.len();
+        let mut absolute = false;
+        for (i, c) in comps.into_iter().enumerate().rev() {
+            match c {
+                std::path::Component::RootDir => absolute = true,
+                std::path::Component::CurDir | std::path::Component::Prefix(_) => {}
+                std::path::Component::ParentDir => queue.push_front((OsString::from(".."), false)),
+                std::path::Component::Normal(n_) => queue.push_front((n_.to_os_string(), declared_last && i + 1 == n)),
+            }
+        }
+        absolute
+    };
+    push_path(&mut queue, &abs, true);
+    // The walk's state: the directories from `/` (descriptor, name), and whether a root has been entered.
+    let root_fd = open_dir(&CWD, Path::new("/"), true).map_err(|e| missing(&e))?;
+    let id_of = |fd: &std::os::fd::OwnedFd| rustix::fs::fstat(fd).map(|st| dev_ino(&st));
+    let mut inside = roots.contains(&id_of(&root_fd).map_err(|e| missing(&e))?);
+    let mut stack: Vec<(std::os::fd::OwnedFd, OsString)> = Vec::new();
+    let here = |stack: &Vec<(std::os::fd::OwnedFd, OsString)>| -> PathBuf {
+        let mut p = PathBuf::from("/");
+        for (_, n) in stack {
+            p.push(n);
+        }
+        p
+    };
+    let mut follows = 0;
+    at_stage("anchored");
+    while let Some((name, declared_last)) = queue.pop_front() {
+        let at = here(&stack).join(&name);
+        if name == ".." {
+            if inside {
+                return Err(Refusal::Failed(format!(
+                    "confine path {raw:?} ({}): `..` at or below a writable root is not resolved — name the path directly",
+                    src.display()
+                )));
+            }
+            stack.pop();
+            continue;
+        }
+        let cur: &std::os::fd::OwnedFd = stack.last().map(|(fd, _)| fd).unwrap_or(&root_fd);
+        let st = statat(cur, &name, AtFlags::SYMLINK_NOFOLLOW).map_err(|e| missing(&e))?;
+        let last = queue.is_empty();
+        if rustix::fs::FileType::from_raw_mode(st.st_mode).is_symlink() {
+            // Followed only on the operator's side, and never as a declared path's own last component.
+            if inside || (declared_last && !allow_final_link) {
+                return Err(refused_symlink(raw, src, &at));
+            }
+            let dev = id_of(cur).map_err(|e| missing(&e))?.0;
+            if shared_devs.contains(&dev) {
+                return Err(Refusal::Failed(format!(
+                    "confine path {raw:?} ({}) passes through a symlink at {} on a filesystem that holds a writable root \
+                     and is mounted more than once — a symlink there is not followed, since a confined command could have \
+                     written it through the root; name its target",
+                    src.display(),
+                    at.display()
+                )));
+            }
+            follows += 1;
+            if follows > MAX_FOLLOWS {
+                return Err(missing(&"too many levels of symbolic links"));
+            }
+            let target = readlinkat(cur, &name, Vec::new()).map_err(|e| missing(&e))?;
+            let target = PathBuf::from(std::ffi::OsStr::from_bytes(target.as_bytes()));
+            if push_path(&mut queue, &target, false) {
+                stack.clear();
+                inside = roots.contains(&id_of(&root_fd).map_err(|e| missing(&e))?);
+            }
+            continue;
+        }
+        if !last {
+            let fd = open_dir(cur, Path::new(&name), false).map_err(|e| {
+                if e == rustix::io::Errno::LOOP || e == rustix::io::Errno::NOTDIR { refused_symlink(raw, src, &at) } else { missing(&e) }
+            })?;
+            inside = inside || roots.contains(&id_of(&fd).map_err(|e| missing(&e))?);
+            stack.push((fd, name));
+            continue;
+        }
+        let (id, final_fd) = final_component(cur, &name).map_err(|e| {
+            if e == rustix::io::Errno::LOOP { refused_symlink(raw, src, &at) } else { missing(&e) }
+        })?;
+        let Some(id) = id else { return Err(refused_symlink(raw, src, &at)) };
+        at_stage("walked");
+        // The on-disk spelling, accepted only when it names what was opened: the walked depth, the same
+        // device and inode, not a symlink.
+        let walked_to = at;
+        let path = canonical(&abs).map_err(|e| missing(&e))?;
+        let same = path.components().count() == walked_to.components().count()
+            && statat(CWD, &path, AtFlags::SYMLINK_NOFOLLOW).is_ok_and(|m| {
+                !rustix::fs::FileType::from_raw_mode(m.st_mode).is_symlink() && dev_ino(&m) == id
+            });
+        if !same {
+            return Err(Refusal::Failed(format!(
+                "confine path {raw:?} ({}) resolved to {}, which is not what was opened at {} — a declared path changed \
+                 while it was resolved; refused",
+                src.display(),
+                path.display(),
+                walked_to.display()
+            )));
+        }
+        return Ok(Walked { path, id, fd: final_fd });
+    }
+    // The path was `/` itself, or ended in `..`: name it directly.
+    Err(missing(&"a declared path must name a file or directory below `/`"))
+}
+
+/// The devices among `write_roots` that are mounted more than once in this mount namespace (Linux,
+/// `/proc/self/mountinfo`: more than one entry with the device's `major:minor`). Unreadable mount information
+/// counts every write root's device as shared — fail closed. Elsewhere none: macOS has no bind mounts.
+fn shared_devices(write_roots: &[(u64, u64)]) -> Vec<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let devs = write_roots.iter().map(|(dev, _)| *dev);
+        let Ok(info) = std::fs::read_to_string("/proc/self/mountinfo") else { return devs.collect() };
+        devs.filter(|dev| {
+            let key = format!("{}:{}", rustix::fs::major(*dev), rustix::fs::minor(*dev));
+            info.lines().filter(|l| l.split(' ').nth(2) == Some(key.as_str())).count() != 1
+        })
+        .collect()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = write_roots;
+        Vec::new()
+    }
+}
+
+/// The identity a root has now: its canonical path's (device, inode), followed — the starting set the
+/// walks then confirm (each root is itself a declared path, walked against this set).
+fn root_identity(p: &Path) -> Result<(u64, u64), Refusal> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(p)
+        .map(|m| (m.dev(), m.ino()))
+        .map_err(|e| Refusal::Failed(format!("confine path {}: {e} — a declared path must exist when the activation runs", p.display())))
+}
+
+/// A stat's (device, inode) — `u64` on Linux, narrower types on macOS.
+#[allow(clippy::unnecessary_cast)]
+fn dev_ino(st: &rustix::fs::Stat) -> (u64, u64) {
+    (st.st_dev as u64, st.st_ino as u64)
+}
+
+/// The flag that opens a directory for lookup only: `O_PATH` on Linux; `O_SEARCH` (`O_EXEC`) on macOS, so a
+/// directory the stem may search but not list is walked as `stat` would (a kernel without it answers
+/// `EINVAL`, and the walk retries read-only).
+fn search_flag() -> rustix::fs::OFlags {
+    #[cfg(target_os = "linux")]
+    {
+        rustix::fs::OFlags::PATH
+    }
+    #[cfg(target_os = "macos")]
+    {
+        rustix::fs::OFlags::from_bits_retain(0x4000_0000) // O_EXEC; with O_DIRECTORY, O_SEARCH
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        rustix::fs::OFlags::RDONLY
+    }
+}
+
+/// The last component: its identity, `None` if it is a symlink, and on Linux its `O_PATH | O_NOFOLLOW`
+/// descriptor (which opens a FIFO, a socket or a write-only file without blocking or needing access).
+/// Elsewhere it is not opened at all (review of #641 round 2, finding C): `fstatat` without following.
+#[allow(clippy::type_complexity)]
+fn final_component(dir: &std::os::fd::OwnedFd, name: &std::ffi::OsStr) -> rustix::io::Result<(Option<(u64, u64)>, Option<std::os::fd::OwnedFd>)> {
+    use rustix::fs::FileType;
+    #[cfg(target_os = "linux")]
+    {
+        use rustix::fs::{fstat, openat, Mode, OFlags};
+        let fd = openat(dir, name, OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty())?;
+        let st = fstat(&fd)?;
+        if FileType::from_raw_mode(st.st_mode).is_symlink() {
+            return Ok((None, None));
+        }
+        Ok((Some(dev_ino(&st)), Some(fd)))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let st = rustix::fs::statat(dir, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?;
+        if FileType::from_raw_mode(st.st_mode).is_symlink() {
+            return Ok((None, None));
+        }
+        Ok((Some(dev_ino(&st)), None))
+    }
+}
+
 /// Resolve `c` against the placed file `placed`: the backend (or [`Refusal::Unavailable`]), then each
-/// path with `{dir}`/`{path}` expanded and canonicalised — one that does not exist is
-/// [`Refusal::Failed`], naming it.
+/// path with `{dir}`/`{path}` expanded and walked ([`walk`]) — one that does not exist is
+/// [`Refusal::Failed`], naming it, and so is one that is, or passes through, a symlink below the placement
+/// directory or a write path (review finding 5, #636: a confined run may write there, so a link there
+/// could be its own plant — name its target instead). Ancestors outside every writable root are the
+/// operator's and may be symlinks (`/tmp` is one on macOS).
 pub fn prepare(c: &ConfineDecl, placed: &Path) -> Result<Profile, Refusal> {
     let backend = backend_for(c).map_err(Refusal::Unavailable)?;
     let dir = placed.parent().unwrap_or_else(|| Path::new("/"));
@@ -214,68 +499,79 @@ pub fn prepare(c: &ConfineDecl, placed: &Path) -> Result<Profile, Refusal> {
             raw.to_string()
         })
     };
-    // Review finding 5 (#636): a confined run may write under the placement directory (with
-    // `write = ["{dir}"]`) and under its write paths, so a symlink there could be its own plant. A declared
-    // path that is itself a symlink, or passes through one below the placement directory or a write path,
-    // is refused — name its target instead.
-    // Compared canonically (review follow-up 2, #636): a root and a prefix spelt differently — an alias
-    // directory, `/tmp` against `/private/tmp`, a relative placement root — are compared as the kernel sees
-    // them, each prefix by its canonical parent and its own last component (the component itself may be the
-    // symlink being looked for).
-    let canon_or = |p: &Path| canonical(p).unwrap_or_else(|_| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()));
-    let roots: Vec<PathBuf> = std::iter::once(dir.to_path_buf()).chain(c.write.iter().map(|w| expand(w))).map(|r| canon_or(&r)).collect();
-    let norm = |q: &Path| -> PathBuf {
-        match (q.parent(), q.file_name()) {
-            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => canon_or(parent).join(name),
-            _ => canon_or(q),
-        }
-    };
-    for raw in c.read.iter().chain(&c.write) {
-        let p = expand(raw);
-        let mut q = PathBuf::new();
-        for part in p.components() {
-            q.push(part);
-            let nq = norm(&q);
-            let in_root = roots.iter().any(|r| nq != *r && nq.starts_with(r));
-            if (q == p || in_root) && std::fs::symlink_metadata(&q).is_ok_and(|m| m.file_type().is_symlink()) {
-                return Err(Refusal::Failed(format!(
-                    "confine path {raw:?} ({}) passes through a symlink at {} — a declared path is never a symlink, \
-                     nor reached through one a confined command could have planted; name its target",
-                    p.display(), q.display()
-                )));
-            }
-        }
-    }
-    let resolve = |raw: &str| -> Result<PathBuf, Refusal> {
-        let expanded = expand(raw);
-        canonical(&expanded).map_err(|e| {
-            Refusal::Failed(format!("confine path {raw:?} ({}): {e} — a declared path must exist when the activation runs", expanded.display()))
-        })
-    };
-    let mut read = vec![canonical(dir).map_err(|e| Refusal::Failed(format!("the placement directory {}: {e}", dir.display())))?];
-    for r in &c.read {
-        read.push(resolve(r)?);
-    }
-    let write = c.write.iter().map(|w| resolve(w)).collect::<Result<Vec<_>, _>>()?;
+    // The writable roots by identity (review of #641 round 3): however a path is spelt — an alias
+    // directory, `/tmp` against `/private/tmp`, an operator shortcut into a root — the walk knows when it is
+    // inside one. The set is confirmed below: each root is itself walked, and must reach the same identity.
+    let root_paths: Vec<PathBuf> = std::iter::once(dir.to_path_buf()).chain(c.write.iter().map(|w| expand(w))).collect();
+    let roots: Vec<(u64, u64)> = root_paths.iter().map(|r| root_identity(r)).collect::<Result<_, _>>()?;
+    at_stage("checked");
     let connect = c
         .connect
         .iter()
         .map(|e| mycelium::parse_confine_connect(e).map(|(host, port)| (host == "localhost", port)))
         .collect::<Result<Vec<_>, _>>()
         .map_err(Refusal::Failed)?;
-    let pinned = linux::pin(read.iter().chain(&write)).map_err(Refusal::Failed)?;
-    let ids = read
-        .iter()
-        .chain(&write)
-        .map(|p| {
-            use std::os::unix::fs::MetadataExt;
-            std::fs::symlink_metadata(p)
-                .map(|m| (m.dev(), m.ino()))
-                .map_err(|e| Refusal::Failed(format!("confine path {}: {e}", p.display())))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(Profile { backend, read, write, connect, pinned, ids })
+    let shared_devs = shared_devices(&roots[1..]);
+    let mut walked = vec![walk(dir, &roots, &shared_devs, &dir.display().to_string(), true)?];
+    for raw in c.read.iter().chain(&c.write) {
+        walked.push(walk(&expand(raw), &roots, &shared_devs, raw, false)?);
+    }
+    // Each root reached by its walk is the root the set named: the placement directory first, then each
+    // `write` (the last `c.write.len()` walks).
+    let walked_roots = std::iter::once(walked[0].id).chain(walked[walked.len() - c.write.len()..].iter().map(|w| w.id));
+    if !walked_roots.eq(roots.iter().copied()) {
+        return Err(Refusal::Failed(
+            "a writable root changed while the profile resolved (its walk reached another file than its name) — refused".into(),
+        ));
+    }
+    at_stage("resolved");
+    let n_read = 1 + c.read.len();
+    let sources: Vec<PathBuf> = std::iter::once(dir.to_path_buf()).chain(c.read.iter().chain(&c.write).map(|r| expand(r))).collect();
+    let ids = walked.iter().map(|w| w.id).collect();
+    let paths: Vec<PathBuf> = walked.iter().map(|w| w.path.clone()).collect();
+    let pinned = if cfg!(target_os = "linux") {
+        Pinned(walked.into_iter().filter_map(|w| w.fd.map(std::sync::Arc::new)).collect())
+    } else {
+        Pinned::default()
+    };
+    let (read, write) = (paths[..n_read].to_vec(), paths[n_read..].to_vec());
+    let profile = Profile { backend, read, write, connect, pinned, ids, sources, roots, shared_devs };
+    at_stage("pinned");
+    at_stage("rechecked");
+    // Walked again: a component toggled while the profile resolved (a link at one walk, a directory at the
+    // next) is caught by whichever walk saw the link, or by the identities differing.
+    if let Some(p) = profile.stale_path() {
+        return Err(Refusal::Failed(format!(
+            "confine path {} changed while it was resolved (a symlink, another file, or another target now) — refused",
+            p.display()
+        )));
+    }
+    Ok(profile)
 }
+
+// A test-only hook `prepare` and `walk` call between their stages (`checked`, `anchored`, `walked`,
+// `resolved`, `pinned`, `rechecked`), so a test can plant the swap a confined command racing the resolution
+// would (review of #641, findings 1 and A). Nothing outside the tests sets it.
+#[cfg(test)]
+pub(crate) type StageHook = Option<Box<dyn FnMut(&str)>>;
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static PREPARE_STAGE_HOOK: std::cell::RefCell<StageHook> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn at_stage(stage: &str) {
+    PREPARE_STAGE_HOOK.with(|h| {
+        if let Some(f) = h.borrow_mut().as_mut() {
+            f(stage);
+        }
+    });
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn at_stage(_stage: &str) {}
 
 /// The kernel matches resolved paths (`/tmp` is `/private/tmp` on macOS), so a profile names those.
 fn canonical(p: &Path) -> std::io::Result<PathBuf> {
@@ -481,22 +777,6 @@ mod linux {
         Ok(())
     }
 
-    /// Open each path `O_PATH`, once, at the profile's resolution (review finding 5, #636).
-    pub(super) fn pin<'a>(paths: impl Iterator<Item = &'a std::path::PathBuf>) -> Result<super::Pinned, String> {
-        use std::os::unix::fs::OpenOptionsExt;
-        paths
-            .map(|p| {
-                std::fs::OpenOptions::new()
-                    .read(true)
-                    .custom_flags(libc::O_PATH | libc::O_CLOEXEC)
-                    .open(p)
-                    .map(|f| std::sync::Arc::new(std::os::fd::OwnedFd::from(f)))
-                    .map_err(|e| format!("confine path {}: {e}", p.display()))
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map(super::Pinned)
-    }
-
     /// On x86_64, refuse every syscall with the x32 bit (`nr & 0x40000000`) — review finding 4 (#636). The
     /// main filter matches syscall numbers exactly and allows the rest, so `socket(2)` through the x32
     /// table (41 | 0x40000000) matched no rule. A raw cBPF program: check the architecture, load the
@@ -549,11 +829,6 @@ mod linux {
 
     pub(super) fn available(_net: bool) -> Result<(), String> {
         Err(format!("backend landlock is Linux's, and this is {}", std::env::consts::OS))
-    }
-
-    /// Seatbelt matches the resolved path strings; nothing to hold open.
-    pub(super) fn pin<'a>(_paths: impl Iterator<Item = &'a std::path::PathBuf>) -> Result<super::Pinned, String> {
-        Ok(super::Pinned::default())
     }
 
     pub(super) fn run(_argv: &[String], _timeout: Duration, _profile: &Profile) -> Result<(), String> {
@@ -613,6 +888,7 @@ pub(crate) fn native_backend_or_skip(test: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     /// The generated Seatbelt profile refers to every path by parameter — a path holding `"` or `)`
     /// cannot become profile text — and states exactly the declared TCP destinations.
@@ -625,6 +901,9 @@ mod tests {
             connect: vec![(true, 11434), (false, 443)],
             pinned: Pinned::default(),
             ids: Vec::new(),
+            sources: Vec::new(),
+            roots: Vec::new(),
+            shared_devs: Vec::new(),
         };
         let text = seatbelt_profile(&p);
         assert!(!text.contains("allow default"), "no path is spliced into the profile: {text}");
@@ -718,6 +997,344 @@ mod tests {
             let leaf = p.rsplit('/').next().unwrap();
             assert!(promise.contains(leaf), "the promise names {p}");
         }
+    }
+
+    /// Review of #641, finding 1: a declared path swapped for a symlink **while `prepare` resolves it** —
+    /// after the symlink check and before the canonicalisation, or after it and before the pinning — must
+    /// be refused, never resolved to (or pinned at) the symlink's target. Planted deterministically through
+    /// the test-only stage hook. Seen failing first: at both stages `prepare` returned a profile.
+    #[test]
+    fn a_symlink_planted_while_prepare_resolves_is_refused() {
+        if !native_backend_or_skip("a_symlink_planted_while_prepare_resolves_is_refused") {
+            return;
+        }
+        for stage in ["checked", "resolved"] {
+            let root = std::env::temp_dir().join(format!("confine-race-{stage}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            for d in ["placed", "out", "outside"] {
+                std::fs::create_dir_all(root.join(d)).unwrap();
+            }
+            let root = root.canonicalize().unwrap();
+            let (out, outside) = (root.join("out"), root.join("outside"));
+            let c = ConfineDecl { write: vec![out.display().to_string()], ..Default::default() };
+            let (o, x, aside) = (out.clone(), outside.clone(), root.join("out.real"));
+            PREPARE_STAGE_HOOK.with(|h| {
+                *h.borrow_mut() = Some(Box::new(move |at: &str| {
+                    if at == stage {
+                        std::fs::rename(&o, &aside).unwrap();
+                        std::os::unix::fs::symlink(&x, &o).unwrap();
+                    }
+                }))
+            });
+            let got = prepare(&c, &root.join("placed/blob"));
+            PREPARE_STAGE_HOOK.with(|h| *h.borrow_mut() = None);
+            let _ = std::fs::remove_dir_all(&root);
+            match got {
+                Err(Refusal::Failed(m)) => assert!(m.contains("symlink") || m.contains("changed"), "{stage}: {m}"),
+                other => panic!("{stage}: a symlink planted during the resolution must be refused, got {:?}", other.map(|p| p.write)),
+            }
+        }
+    }
+
+    /// Review of #641 round 2, finding A: an **intermediate** component inside a write root toggled between
+    /// a real directory and a symlink out of it — real at one check, a link at the next resolution — must
+    /// never leave a profile naming the link's target. Every combination over `prepare`'s three stages is
+    /// tried. Seen failing first at `bd22b544`'s logic (with the test hook's stages placed as here): a link
+    /// at `checked` and `resolved`, the real directory at `pinned`, a link at `rechecked` returned a profile
+    /// reading `outside/x`.
+    #[test]
+    fn an_intermediate_component_toggled_during_prepare_never_widens_the_profile() {
+        const T: &str = "an_intermediate_component_toggled_during_prepare_never_widens_the_profile";
+        if !native_backend_or_skip(T) {
+            return;
+        }
+        // `anchored` and `walked` are the walk's own stages (absent before it), so the combinations that
+        // failed first are among these.
+        let stages = ["checked", "resolved", "pinned", "rechecked", "anchored", "walked"];
+        for combo in 0u8..64 {
+            let root = std::env::temp_dir().join(format!("confine-toggle-{combo}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            for d in ["placed", "out/sub", "outside"] {
+                std::fs::create_dir_all(root.join(d)).unwrap();
+            }
+            let root = root.canonicalize().unwrap();
+            std::fs::write(root.join("out/sub/x"), b"inside").unwrap();
+            std::fs::write(root.join("outside/x"), b"outside").unwrap();
+            let c = ConfineDecl {
+                write: vec![root.join("out").display().to_string()],
+                read: vec![root.join("out/sub/x").display().to_string()],
+                ..Default::default()
+            };
+            let (sub, real, outside) = (root.join("out/sub"), root.join("out/sub.real"), root.join("outside"));
+            // Bit i set: a link at stage i; clear: the real directory.
+            let toggle = move |link: bool| {
+                let is_link = std::fs::symlink_metadata(&sub).is_ok_and(|m| m.file_type().is_symlink());
+                if link && !is_link {
+                    std::fs::rename(&sub, &real).unwrap();
+                    std::os::unix::fs::symlink(&outside, &sub).unwrap();
+                } else if !link && is_link {
+                    std::fs::remove_file(&sub).unwrap();
+                    std::fs::rename(&real, &sub).unwrap();
+                }
+            };
+            PREPARE_STAGE_HOOK.with(|h| {
+                *h.borrow_mut() = Some(Box::new(move |at: &str| {
+                    if let Some(i) = stages.iter().position(|s| *s == at) {
+                        toggle(combo & (1 << i) != 0);
+                    }
+                }))
+            });
+            let got = prepare(&c, &root.join("placed/blob"));
+            PREPARE_STAGE_HOOK.with(|h| *h.borrow_mut() = None);
+            if combo == 0 {
+                assert!(got.is_ok(), "the plant: untouched, the profile resolves: {:?}", got.as_ref().err());
+            }
+            let named: Vec<PathBuf> = got.as_ref().map(|p| p.read.iter().chain(&p.write).cloned().collect()).unwrap_or_default();
+            let _ = std::fs::remove_dir_all(&root);
+            assert!(
+                !named.iter().any(|p| p.starts_with(root.join("outside"))),
+                "combination {combo:06b} (bits: walked/anchored/rechecked/pinned/resolved/checked; 1 = link): the profile names {named:?}"
+            );
+        }
+    }
+
+    /// Review of #641 round 3, finding H1: an operator symlink outside every root (`shortcut`) that points
+    /// into a write root's interior (`out/sub`) is followed — the operator's — but from the moment the
+    /// resolution enters the root nothing is followed, so a confined command that replaces `out/sub` with a
+    /// link out of the root is refused, and the profile resolved before it stops being current. Seen failing
+    /// first at `656388c0`: `prepare` named `outside/m` and `outside/w`, and the old profile stayed current.
+    #[test]
+    fn an_operator_symlink_into_a_write_roots_interior_cannot_be_redirected() {
+        const T: &str = "an_operator_symlink_into_a_write_roots_interior_cannot_be_redirected";
+        if !native_backend_or_skip(T) {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("confine-shortcut-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for d in ["placed", "out/sub/w", "outside/w"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let root = root.canonicalize().unwrap();
+        std::fs::write(root.join("out/sub/m"), b"inside").unwrap();
+        std::fs::write(root.join("outside/m"), b"outside").unwrap();
+        std::os::unix::fs::symlink("out/sub", root.join("shortcut")).unwrap();
+        let c = ConfineDecl {
+            write: vec![root.join("out").display().to_string(), root.join("shortcut/w").display().to_string()],
+            read: vec![root.join("shortcut/m").display().to_string()],
+            ..Default::default()
+        };
+        let placed = root.join("placed/blob");
+        let before = prepare(&c, &placed).expect("the plant: an operator shortcut into the root resolves while untouched");
+        assert!(before.read.contains(&root.join("out/sub/m")), "{:?}", before.read);
+        // What the confined command (write on `out`) can do.
+        std::fs::rename(root.join("out/sub"), root.join("out/sub.real")).unwrap();
+        std::os::unix::fs::symlink(root.join("outside"), root.join("out/sub")).unwrap();
+        let current = before.is_current();
+        let after = prepare(&c, &placed).map(|p| (p.read, p.write));
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!current, "the profile resolved before the redirect is not current after it");
+        match after {
+            Err(Refusal::Failed(m)) => assert!(m.contains("symlink"), "{m}"),
+            other => panic!("a redirect inside the write root must be refused, got {other:?}"),
+        }
+    }
+
+    /// Review of #641 round 4, finding N1 (Linux): a write root's filesystem mounted a second time — here
+    /// its `models/` bind-mounted beside it — shows the root's interior under a path the walk does not see
+    /// as inside the root, so a symlink the confined command writes through the root (`data/models/current`)
+    /// would be followed through the second mount. A symlink on a filesystem that holds a write root and is
+    /// mounted more than once is not followed; the path is refused by name. It mounts only when
+    /// `MYCELIUM_CONFINE_MOUNT_LIVE_REQUIRED` is set, run alone in a mount namespace of its own (`unshare -m`
+    /// as root, as CI's step does) — never beside other tests, whose devices the mount would make shared —
+    /// and then a failure to mount fails it; unset, it skips. Seen failing first at `9bb6cd3f` in a Linux 6.8
+    /// container (`docker run --privileged`, `unshare -m --propagation private <test binary> --exact …`): the
+    /// profile named `outside/m`.
+    #[test]
+    fn a_symlink_on_a_second_mount_of_a_write_roots_filesystem_is_not_followed() {
+        const T: &str = "a_symlink_on_a_second_mount_of_a_write_roots_filesystem_is_not_followed";
+        if !cfg!(target_os = "linux") {
+            eprintln!("{T}: not applicable — Linux bind mounts (macOS has none; see `unit-file.md`)");
+            return;
+        }
+        if !native_backend_or_skip(T) {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("confine-bind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for d in ["placed", "data/models/v1", "models", "outside"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let root = root.canonicalize().unwrap();
+        std::fs::write(root.join("data/models/v1/m"), b"declared").unwrap();
+        std::fs::write(root.join("outside/m"), b"outside").unwrap();
+        std::os::unix::fs::symlink("v1", root.join("data/models/current")).unwrap();
+        if std::env::var_os("MYCELIUM_CONFINE_MOUNT_LIVE_REQUIRED").is_none() {
+            let _ = std::fs::remove_dir_all(&root);
+            eprintln!("{T}: SKIPPED — mounts only under MYCELIUM_CONFINE_MOUNT_LIVE_REQUIRED, alone in its own mount namespace (`unshare -m`)");
+            return;
+        }
+        let mounted = std::process::Command::new("mount")
+            .args(["--bind"])
+            .arg(root.join("data/models"))
+            .arg(root.join("models"))
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if !mounted {
+            let _ = std::fs::remove_dir_all(&root);
+            panic!("{T}: MYCELIUM_CONFINE_MOUNT_LIVE_REQUIRED is set and this process cannot bind-mount");
+        }
+        let c = ConfineDecl {
+            write: vec![root.join("data").display().to_string()],
+            read: vec![root.join("models/current/m").display().to_string()],
+            ..Default::default()
+        };
+        // What the confined command (write on `data`) can do: repoint `current` through the root.
+        std::fs::remove_file(root.join("data/models/current")).unwrap();
+        std::os::unix::fs::symlink(root.join("outside"), root.join("data/models/current")).unwrap();
+        let got = prepare(&c, &root.join("placed/blob")).map(|p| p.read);
+        let _ = std::process::Command::new("umount").arg(root.join("models")).status();
+        let _ = std::fs::remove_dir_all(&root);
+        match got {
+            Err(Refusal::Failed(m)) => assert!(m.contains("mounted more than once"), "{m}"),
+            other => panic!("a symlink reached through a second mount of a write root's filesystem must not be followed, got {other:?}"),
+        }
+    }
+
+    /// Review of #641 round 3, finding H2: a placement directory inside a write root is walked like any
+    /// path below one — a confined command that replaces it with a link widens nothing; the profile is
+    /// refused. Seen failing first at `656388c0`: the placement directory resolved to the link's target.
+    #[test]
+    fn a_placement_directory_inside_a_write_root_cannot_be_redirected() {
+        const T: &str = "a_placement_directory_inside_a_write_root_cannot_be_redirected";
+        if !native_backend_or_skip(T) {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("confine-placement-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for d in ["stem/placement", "outside"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let root = root.canonicalize().unwrap();
+        std::fs::write(root.join("stem/placement/blob"), b"placed").unwrap();
+        let c = ConfineDecl { write: vec![root.join("stem").display().to_string()], ..Default::default() };
+        let placed = root.join("stem/placement/blob");
+        let before = prepare(&c, &placed).expect("the plant: untouched, the profile resolves");
+        assert_eq!(before.read[0], root.join("stem/placement"));
+        std::fs::rename(root.join("stem/placement"), root.join("stem/placement.real")).unwrap();
+        std::os::unix::fs::symlink(root.join("outside"), root.join("stem/placement")).unwrap();
+        let current = before.is_current();
+        let after = prepare(&c, &placed).map(|p| p.read);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!current, "the profile resolved before the redirect is not current after it");
+        match after {
+            Err(Refusal::Failed(m)) => assert!(m.contains("symlink"), "{m}"),
+            other => panic!("a placement directory redirected inside a write root must be refused, got {other:?}"),
+        }
+    }
+
+    /// Review of #641 round 2, finding B: on a case-insensitive volume (APFS by default) a declared path
+    /// spelt in another case, or in another Unicode normalisation, names the same file and is accepted, the
+    /// profile naming the on-disk spelling. Seen failing first at `bd22b544`: refused as "not where the
+    /// symlink check found it".
+    #[test]
+    fn a_declared_path_spelt_in_another_case_or_normalisation_is_accepted() {
+        const T: &str = "a_declared_path_spelt_in_another_case_or_normalisation_is_accepted";
+        if !native_backend_or_skip(T) {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("confine-case-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("placed")).unwrap();
+        let root = root.canonicalize().unwrap();
+        std::fs::create_dir(root.join("models")).unwrap();
+        std::fs::create_dir(root.join("cafe\u{301}")).unwrap(); // NFD on disk
+        let insensitive = root.join("MODELS").exists();
+        let mut cases = vec![("models", "models"), ("cafe\u{301}", "cafe\u{301}")];
+        if insensitive {
+            cases.push(("Models", "models"));
+        }
+        if root.join("caf\u{e9}").exists() {
+            cases.push(("caf\u{e9}", "cafe\u{301}")); // NFC declared
+        }
+        for (declared, on_disk) in cases {
+            let c = ConfineDecl { read: vec![root.join(declared).display().to_string()], ..Default::default() };
+            let got = prepare(&c, &root.join("placed/blob")).map(|p| p.read);
+            let ok = got.as_ref().map(|r| r.iter().any(|p| p.parent() == Some(root.as_path())
+                && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.eq_ignore_ascii_case(on_disk) || n == on_disk || (declared != on_disk && n == declared)))).unwrap_or(false);
+            assert!(ok, "{declared:?} (on disk {on_disk:?}): {got:?}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Review of #641 round 2, finding C: a declared path that is a FIFO, a Unix socket or a write-only file
+    /// resolves (as it did before #641) — never a hang on the FIFO, never a refusal for want of read access.
+    /// Seen failing first at `bd22b544` on macOS: the socket and the write-only file were refused (the FIFO
+    /// is run on a thread with a deadline, so a hang fails the test rather than wedging it).
+    #[test]
+    fn a_declared_fifo_socket_or_write_only_file_resolves_without_hanging() {
+        const T: &str = "a_declared_fifo_socket_or_write_only_file_resolves_without_hanging";
+        if !native_backend_or_skip(T) {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("confine-kinds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("placed")).unwrap();
+        let root = root.canonicalize().unwrap();
+        assert!(std::process::Command::new("mkfifo").arg(root.join("fifo")).status().unwrap().success());
+        let _sock = std::os::unix::net::UnixListener::bind(root.join("sock")).unwrap();
+        std::fs::write(root.join("wo"), b"").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(root.join("wo"), std::fs::Permissions::from_mode(0o200)).unwrap();
+        for name in ["fifo", "sock", "wo"] {
+            let c = ConfineDecl { write: vec![root.join(name).display().to_string()], ..Default::default() };
+            let placed = root.join("placed/blob");
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(prepare(&c, &placed).map(|p| p.write));
+            });
+            let got = rx.recv_timeout(Duration::from_secs(5));
+            if got.is_err() && name == "fifo" {
+                // Unblock the stuck open so the thread can end.
+                let _ = std::fs::OpenOptions::new().write(true).open(root.join("fifo"));
+            }
+            match got {
+                Ok(Ok(w)) => assert_eq!(w, vec![root.join(name)], "{name}"),
+                Ok(Err(e)) => panic!("{name}: refused: {e}"),
+                Err(_) => panic!("{name}: prepare did not return within 5 s"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Review of #641, finding 2: a declared path reached through an ancestor symlink that is flipped (a
+    /// `current` link rotated from `v1` to `v2`) no longer resolves to what the profile named, so the
+    /// profile is not current and is re-resolved. Seen failing first: `is_current` held after the flip.
+    #[test]
+    fn a_flipped_ancestor_symlink_makes_the_profile_not_current() {
+        if !native_backend_or_skip("a_flipped_ancestor_symlink_makes_the_profile_not_current") {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("confine-flip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for d in ["placed", "models/v1", "models/v2"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let root = root.canonicalize().unwrap();
+        std::fs::write(root.join("models/v1/m"), b"1").unwrap();
+        std::fs::write(root.join("models/v2/m"), b"2").unwrap();
+        std::os::unix::fs::symlink(root.join("models/v1"), root.join("models/current")).unwrap();
+        let c = ConfineDecl { read: vec![root.join("models/current/m").display().to_string()], ..Default::default() };
+        let p = prepare(&c, &root.join("placed/blob")).expect("an operator's ancestor symlink outside every root is allowed");
+        assert!(p.read.contains(&root.join("models/v1/m")));
+        assert!(p.is_current());
+        std::os::unix::fs::symlink(root.join("models/v2"), root.join("models/next")).unwrap();
+        std::fs::rename(root.join("models/next"), root.join("models/current")).unwrap();
+        let current = p.is_current();
+        let again = prepare(&c, &root.join("placed/blob")).map(|p| p.read);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!current, "the declared path now resolves elsewhere: the profile is not current");
+        assert!(again.unwrap().contains(&root.join("models/v2/m")), "and a re-resolution names the new target");
     }
 
     /// Review follow-up 2 (#636): the symlink check compared spellings, so a declared path written through

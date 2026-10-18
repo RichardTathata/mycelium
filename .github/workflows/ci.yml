@@ -327,6 +327,17 @@ jobs:
       # gateway tests and the stem's `[[serve]]` tests — ran in no step until 2026-10-06: no wasm-host step
       # enabled those features without a name filter.
       - run: ./scripts/ci-retest.sh -p mycelium-wasm-host --features stem,gateway,llm
+      # #641's review, round 4 (N1): a write root's filesystem mounted a second time (a bind mount). The test
+      # mounts, so it runs alone, as root, in a mount namespace of its own; its guard makes a failure to
+      # mount a failure rather than a skip. The binary is the one the first step built.
+      - name: Confinement beside a bind mount (sudo unshare -m)
+        run: |
+          bin=$(cargo test -p mycelium-wasm-host --lib --no-run --message-format=json \
+            | jq -r 'select(.profile.test == true and .target.kind == ["lib"] and .executable != null) | .executable' | head -1)
+          test -x "$bin"
+          sudo env MYCELIUM_CONFINE_LIVE_REQUIRED=1 MYCELIUM_CONFINE_MOUNT_LIVE_REQUIRED=1 \
+            unshare -m --propagation private "$bin" --exact \
+            activation_sandbox::tests::a_symlink_on_a_second_mount_of_a_write_roots_filesystem_is_not_followed
       # The S3-compatible fixture: MinIO in a container, one bucket made with the runner's AWS CLI.
       - name: Start an S3-compatible store with the test bucket
         run: |

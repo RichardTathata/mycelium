@@ -36,7 +36,7 @@ fastrand = "2"
 ed25519-dalek = "2"
 # `rt` only — the provisioner spawns a serve task per hosted capability (tokio::spawn +
 # JoinHandle). The embedder supplies the runtime (same one the GossipAgent runs on).
-tokio    = { version = "1.35", features = ["rt", "fs", "io-util"] }  # fs + io-util: the disk stage (S1)
+tokio    = { version = "1.35", features = ["rt", "fs", "io-util", "sync"] }  # fs + io-util: the disk stage (S1); sync: the re-probe round's semaphore
 # Resource-aware install eligibility (artifact-library §4.4): the default ResourceProbe
 # reads available memory + disk so a node never elects for an artifact it cannot fit.
 # system+disk features only — no process/network/component scanning.
@@ -71,6 +71,12 @@ serde_json = { version = "1.0", optional = true }
 landlock    = "0.4.7"
 seccompiler = "0.5"
 libc        = "0.2"
+
+# A confinement profile resolves each path below a writable root by a walk of `openat(O_NOFOLLOW)` from
+# the root's own descriptor (#641's review, round 2): a safe wrapper over `openat`/`fstatat`/`fstat`, already
+# in the tree through wasmtime, so `deny(unsafe_code)` holds.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs"] }
 
 [features]
 stem = ["dep:tracing-subscriber"]

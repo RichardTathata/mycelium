@@ -1211,7 +1211,7 @@ directly. The evidence journal is written only by `ae_record`.
   complete shorter history — the journal reports a truncation (`truncated_at_open`) and both mark older history as not
   held; (7) `at_most(n, 0)` permitted without limit — not established now, and `at_most(0, w)` documented as never.
   Stated: (6) a permit whose client went away, or that a downstream check refused, stays counted; (8) the private Cedar
-  adapter must decline the five new cases on its re-pin (§47), and the evidence schema is unchanged; (9) the history input
+  adapter passes the five new cases on its v2.35.0 re-pin (private #32, `5e807a2`; all sixteen, none declined — §47), and the evidence schema is unchanged; (9) the history input
   is recorded, and no replay consumes it yet.
 - *Its confirmation* — F1 and F2 confirmed fixed, F3–F7 fixed or stated; four more, fixed: (N1) the actor cap counted the
   whole map and an eviction marked every actor's views incomplete at every point, after an O(actors) scan under the
@@ -1467,10 +1467,11 @@ CC8, `docs/capabilities.md`, the crate README). The example units with `[[activa
   `NodeCapabilityConfig` is `deny_unknown_fields` (`a_misspelt_top_level_section_is_refused_not_dropped`, seen failing
   first; every unit file in the repository loads — the mesh presets and artifact descriptions beside them are other
   formats, never loaded as units; `deprecations.md` §49). Confirmed by the reviewer at `a1161463` (macOS and Linux 6.8;
-  every door that parses a unit file refuses an unknown key; 91 unit-bearing TOML files load). **Follow-up, open:** a
-  declared path replaced legitimately (a model file by atomic rename, a rotated directory) fails the next re-probe, so the
-  install is withdrawn and reinstalled — a blip, and a flap if the path churns; re-resolving inside the re-probe would
-  avoid it.
+  every door that parses a unit file refuses an unknown key; 91 unit-bearing TOML files load). **Follow-up, delivered
+  (#641):** a declared path replaced legitimately (a model file by atomic rename, a rotated directory) failed the next
+  re-probe, so the install was withdrawn and reinstalled — a flap if the path churned. The re-probe now takes its profile
+  from the hook's resolved profiles, re-resolved inside the re-probe with every check repeated, and runs under the fresh
+  one; only a refused re-resolution withdraws, named in the trace (§3.6).
 - **Not built, stated:** limits by hostname or address; a live network allow-list; an OpenShell backend; resource
   limits (CPU, memory); on Linux below Landlock ABI 6, a limit on signals to the stem user's processes; device
   `ioctl`s (Landlock ABI 5); metadata (`stat`) of any path stays readable on both backends; a socket inherited across
@@ -1498,9 +1499,131 @@ envelope's nonce cache) and Q (the handshake refuses a revoked key's certificate
 **Not started:** §5's inference-routing question. Every row K–P is released in 2.35.0; the rows' own *not built* lists stand. (Q, revocation at every verifier, is delivered — #616, §3.5; S, identity proofs on by default, is delivered in 2.34.0 — #623, §3.5.)
 
 **Follow-ups recorded as not built in delivered rows (each in its §3.5 block):**
-- **M:** a declared path replaced legitimately (atomic rename, rotated directory) fails the next re-probe, so the
-  install is withdrawn and reinstalled — a flap if the path churns. Not built: limits by hostname or address, a live
-  network allow-list, an OpenShell backend, resource limits.
+- **M:** ~~a declared path replaced legitimately (atomic rename, rotated directory) fails the next re-probe, so the
+  install is withdrawn and reinstalled — a flap if the path churns~~ — *delivered (#641):* the re-probe re-resolves a
+  profile whose declared path was replaced, every check repeated (symlinks, the canonical comparison, existence), and
+  runs the probe under the fresh profile (`reprobe_one`, the hook's `ResolvedProfiles` shared through each `Watched`);
+  only a refused re-resolution withdraws the install, named as `prov.probe`'s `confinement_failed` /
+  `confinement_unavailable`; a profile no longer current after the run is not trusted — re-resolved and run once more,
+  and a change under both attempts refuses as `confinement_changed`
+  (`a_replaced_write_directory_keeps_the_install_live_across_a_reprobe`,
+  `a_declared_path_replaced_by_a_symlink_is_refused_at_the_reprobe_by_name`,
+  `a_declared_path_swapped_during_the_probe_fails_closed`, each seen failing first on macOS under
+  `MYCELIUM_CONFINE_LIVE_REQUIRED=1`). A probe that itself replaces one of its declared paths on every run now fails
+  as `confinement_changed`. *Its review (round 1):*
+  - **(1, high) Narrowed in round 1, closed in round 2 (A).** A symlink planted while a profile resolves was
+    followed. The race windows lay between the symlink check and `canonicalize`, and between that and the pin. The bug
+    predates #641, which made it reachable on every re-probe. Round 1 did two things:
+    - it opened the last component without following a symlink and checked the resolution twice;
+    - it made a probe run only under a profile that is current before it.
+
+    That covered the last component and not one between. The round-2 fix, under (A), resolves every component below a
+    writable root by a walk. Test: `a_symlink_planted_while_prepare_resolves_is_refused`, which plants the swap
+    through a test-only stage hook. It was seen failing first at both stages: the profile named the link's target, then
+    pinned the link.
+  - **(2, medium) Fixed.** A rotation by flipping an ancestor symlink (`current` → `v2`) left the v1 profile
+    "current", which wedged the install. Currency now also re-canonicalises the declared path and compares it with
+    what the profile names. The flip is seen and re-resolved, with every check. Ancestor symlinks outside every root
+    stay allowed (`/tmp` is one on macOS). This keeps the sandbox closed because the profile only ever names the
+    re-resolved target. Test: `a_flipped_ancestor_symlink_makes_the_profile_not_current`, seen failing first.
+  - **(3, low) Stated.** A rotation that is not atomic (`mv out out.old && mkdir out`), caught between its two steps,
+    finds the path missing. It refuses as `confinement_failed`, and the install is withdrawn and reinstalled. Rotate
+    by `rename(2)` over the old path, or by flipping a symlink above it.
+  - **(4, low) Fixed.** The activation's initial probe takes the same check on both sides of the run. The `command`
+    before it may replace its own declared paths, and the probe re-resolves them. Test:
+    `a_declared_path_swapped_during_the_initial_probe_fails_the_activation`, seen failing first.
+  - **(7, low) Fixed.** A round runs every entry's probe concurrently, so one churning entry delays only the next
+    round. Test: `one_slow_reprobe_does_not_delay_the_others`, seen failing first. Findings 5 and 6, the documents,
+    were fixed in place (`deprecations.md` §47, §50).
+
+  *Its review (round 2):*
+  - **(A, medium) Fixed.** An intermediate component below a write root could still be toggled between a directory
+    and a symlink, timed so that each check saw the directory and the resolution saw the link. `O_NOFOLLOW` covered
+    only the last component, and currency did not repeat the component check. Each declared path is now resolved by
+    a walk (`activation_sandbox::walk`):
+    - the anchor is the part of the path outside every writable root, which is the operator's and may hold a
+      symlink; it is canonicalised and opened;
+    - every component after it, at least the last, is opened from its parent's descriptor with `O_NOFOLLOW`. That is
+      `O_PATH` on Linux and `O_SEARCH` on macOS for directories. The last component is opened `O_PATH` on Linux and
+      only `fstatat`-ed elsewhere;
+    - the identity comes from what the walk opened, and on Linux Landlock's rule comes from the walk's final
+      descriptor;
+    - `is_current` walks every path again.
+
+    The name the profile carries, which Seatbelt matches, is the canonical spelling. It is accepted only if it lies
+    under the anchor at the walked depth and names the walked identity. Test:
+    `an_intermediate_component_toggled_during_prepare_never_widens_the_profile` tries all 64 combinations of six
+    stages. It was seen failing first on `bd22b544`'s logic, with the stage hooks placed the same way: link at
+    `checked`, directory at `resolved` and `pinned`, link at `rechecked`.
+  - **(B, medium) Fixed.** On macOS a declared path spelt in another case, or another Unicode normalisation, was
+    refused (round 1 compared spellings). The profile now names the on-disk spelling, and identity decides. Test:
+    `a_declared_path_spelt_in_another_case_or_normalisation_is_accepted`, seen failing first (`Models` against
+    `models`).
+  - **(C, low–medium) Fixed.** On macOS round 1's `O_RDONLY | O_NOFOLLOW` open hung on a FIFO and refused a socket
+    and a write-only file. The last component is no longer opened there; it is `fstatat`-ed without following. Test:
+    `a_declared_fifo_socket_or_write_only_file_resolves_without_hanging`, seen failing first (the FIFO hit the 5 s
+    deadline).
+  - **(D, low) Fixed.** A round runs at most `REPROBE_CONCURRENCY` (8) probes at once. Test:
+    `a_reprobe_round_runs_a_bounded_number_of_probes_at_once`, seen failing first (20 at once).
+  - **Stated:**
+    - `..` below a writable root is refused, not resolved.
+    - The placement directory is the operator's and may be reached through a symlink. Round 3 narrows this to
+      outside every write root; see H2.
+    - The walk's `rustix` calls were invisible to the seam gate. Round 3 closes this; see L2.
+
+  *Its review (round 3):*
+  - **(H1, high) Fixed.** The walk decided its anchor by spelling and canonicalised it by name. An operator
+    symlink outside every root that pointed into a write root's interior (`shortcut` → `out/sub`) was therefore
+    followed through components the confined command controls. Replacing `out/sub` with a link out of the root then
+    widened the profile, and `is_current` kept it. The walk now resolves every path from `/`, one component at a time
+    from its parent's descriptor:
+    - a symlink is followed, by `readlinkat`, only while the walk has not yet entered a writable root;
+    - roots are recognised by identity (device and inode), not spelling. The starting set is confirmed: each root
+      is itself walked and must reach the same identity;
+    - from the first root entered, nothing is followed, including a symlink target's components, and a `..` is
+      refused;
+    - `is_current` walks again by the same rule.
+
+    Test: `an_operator_symlink_into_a_write_roots_interior_cannot_be_redirected`, the reviewer's shape. It was seen
+    failing first on `656388c0`: the profile named `outside/m` and `outside/w`, and the old profile stayed current.
+  - **(H2, high) Fixed.** The placement directory was canonicalised by name even inside a write root. It is now
+    walked by the same rule, so its own last component may be the operator's symlink only outside every root.
+    Test: `a_placement_directory_inside_a_write_root_cannot_be_redirected`. It was seen failing first: the placement
+    directory resolved to the link's target.
+  - **(L1, low) Fixed.** The 64-combination test now asserts that combination 0, untouched, resolves. H1's and H2's
+    shapes are tests of their own (above).
+  - **(L2, low) Fixed.** `rustix::fs::` is in the seam gate's pattern. `activation_sandbox.rs` is baselined at 14
+    sites, in the open, and the inventory §6 records this as the gate's fourth gap.
+  - **Optional, done:** `stem_shutdown`'s spawned stem is killed on drop, so a panic leaves no process behind. The
+    test's exec hang also happens on `main` and is not addressed here.
+
+  *Its review (round 4):*
+  - **(N1, medium, Linux) Fixed by a mount rule.** A write root's filesystem mounted a second time (a bind mount
+    of `data/models` at `/models`) showed the root's interior under a path whose walk never met the root's inode. A
+    symlink the command wrote through the root was therefore followed.
+    - The rule: a symlink found in a directory on a device that holds a write root **and** is mounted more than
+      once (`shared_devices`, from `/proc/self/mountinfo`) is not followed, and the path is refused by name.
+    - Unreadable mount information, or a device not listed exactly once, counts as shared, so the rule fails
+      closed (btrfs subvolumes can trigger this).
+    - On a device mounted once, every directory has one path from `/`, so a walk that never met a root's inode is
+      outside the root.
+    - The plain device rule (refuse any symlink on a write root's device) was not taken. It would refuse the
+      common single-filesystem layout with an operator rotation link (`/opt/models/current` beside a write root on
+      `/`), which round 1's finding 2 exists to support.
+    - macOS has no bind mounts, so the rule is Linux-only.
+    - Not detected on either platform: a view through another filesystem (FUSE `bindfs`, overlayfs, NFS or SMB
+      loopback). Stated in `unit-file.md`.
+
+    Test: `a_symlink_on_a_second_mount_of_a_write_roots_filesystem_is_not_followed`. It mounts only under
+    `MYCELIUM_CONFINE_MOUNT_LIVE_REQUIRED`, alone in its own mount namespace. CI's `wasm-host` job runs it with
+    `sudo unshare -m --propagation private <test binary> --exact …`. It was seen failing first at `9bb6cd3f` in a
+    Linux 6.8 container (`docker run --privileged rust:1.96`, the same command): the profile named `outside/m`.
+  - **(L-a, low) Stated.** The seam gate's §6 now says that a bare call under an existing
+    `use rustix::fs::{…}` or `use std::fs::…` import passes it.
+  - **(L-b, low) Answered.** It fails closed: a relative operator link through a root and back out is refused,
+    and the refusal names the cause.
+
+  Not built: limits by hostname or address, a live network allow-list, an OpenShell backend, resource limits.
 - **H:** carry each named offer's signed bytes inside the close and award from that copy (today a member who deletes a
   named offer steers the checked path); a declarer that restarts without keeping its close can re-decide.
 - **J:** the seam and KV gates end an unstarted skip at the first trailing `,`, so a test item with a multi-line header

@@ -326,8 +326,44 @@ root or below a write path (which a confined command could have planted), is ref
 resolved the first time the activation runs and kept — on Linux held open, so the rules are made from those
 descriptors, not re-resolved by name. Before each run, and each re-probe, the stem checks that every kept
 path still names the same file (device and inode, not a symlink). A path removed and recreated — a cleaned
-scratch directory, a re-placed blob — is resolved again, with every check above; a re-probe that finds one
-fails, so the install is withdrawn and its reinstall resolves afresh. Profiles of placed files that are
+scratch directory, a re-placed blob, a directory rotated or a file replaced by an atomic rename — is resolved
+again, with every check above, and the run or re-probe goes ahead under the fresh profile; only a resolution
+that refuses (the path now a symlink, or gone) fails the re-probe, so the install is withdrawn, the refusal
+recorded by name (`prov.probe`'s `confinement_failed`).
+
+Each path is resolved from `/`, one component at a time. A symlink is followed only until the resolution enters the
+placement root or a write path, which are recognised by identity, however the path spells them. From there on every
+component is opened from its parent without following, so a symlink planted inside, at any component and at any
+moment, is refused rather than followed. A `..` there is refused too: name the path directly.
+
+An operator symlink outside every root may still point into one (a shortcut to `out/sub`). Everything past the point
+where it enters the root is held to the same rule.
+
+**Mounts.** On Linux a write path's filesystem may be mounted a second time, for example by a bind mount of a
+directory inside it. The root's interior then shows under a path that never passes the root itself, so a symlink
+there could be one the command wrote. A symlink on a filesystem that holds a write path **and** is mounted more
+than once is therefore not followed: the declared path is refused by name. Name the path through the root, or
+declare it without a symlink. The check reads `/proc/self/mountinfo`. If that cannot be read, or a device does not
+appear there exactly once (btrfs subvolumes can do this), the filesystem is treated as mounted more than once.
+In a container, `/etc/hosts`, `/etc/hostname` and `/etc/resolv.conf` are usually bind mounts from the host's disk.
+A volume on that same disk therefore counts as mounted more than once. Keep rotation links outside the write volume,
+or rotate with `rename(2)` over the old path. macOS has no bind mounts. Not detected, on either platform: a view of a write path through another filesystem (FUSE
+`bindfs`, overlayfs, NFS or SMB loopback). Do not reach a declared path through such a view of a write path.
+
+A path reached through an ancestor symlink that is flipped (`/models/current` → `v2`) resolves to the new target.
+The profile re-resolves to name that target and no longer names the old one.
+The profile names each path's on-disk spelling, so a different case or Unicode normalisation of a path that exists is
+accepted.
+
+A probe whose path changes while it runs, the activation's initial probe included, does not trust its verdict. It
+resolves and runs once more, and a change under both runs is `confinement_changed`. The activation `command` may
+replace its own declared paths; the probe after it re-resolves them.
+
+A rotation that is not atomic (`mv out out.old && mkdir out`), caught between its two steps, finds the path missing.
+It is refused, so the install is withdrawn and reinstalled. Rotate with `rename(2)` over the old path, or flip a
+symlink above it.
+
+Profiles of placed files that are
 gone are forgotten at the next resolution, and a stem keeps at most 1024.
 
 Neither limits reading a path's metadata (`stat`), CPU or memory, and the command inherits the stem's
@@ -337,7 +373,8 @@ macOS set: an Ollama installed as an app needs `read = ["/Applications/Ollama.ap
 `command` naming `/Applications/Ollama.app/Contents/Resources/ollama` (the `/usr/local/bin` link is not
 readable).
 
-The profile is resolved once, when the activation runs, and its re-probes reuse it; the unit file is read
+The profile is resolved once, when the activation runs, and its re-probes reuse it (re-resolving a replaced
+path, above); the unit file is read
 at start, so every limit holds until the stem restarts. A network allow-list that changes live is **not
 built**. Each refusal is recorded as `prov.activation`'s `confinement_unavailable` (the platform cannot apply
 the profile) or `confinement_failed` (it could, and this run could not — a declared path missing).

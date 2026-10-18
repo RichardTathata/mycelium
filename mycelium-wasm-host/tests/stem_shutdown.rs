@@ -12,6 +12,19 @@ use std::net::TcpStream;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+/// Kills the stem if the test panics before it exits, so a failed run leaves no process behind (#641's
+/// review, round 3).
+struct KillOnDrop(std::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
 #[test]
 fn sigterm_writes_the_trace_and_exits_cleanly() {
     let dir = std::env::temp_dir().join(format!("stem-sigterm-{}", std::process::id()));
@@ -22,13 +35,15 @@ fn sigterm_writes_the_trace_and_exits_cleanly() {
     let trace = dir.join("trace");
     let port = mycelium::test_util::alloc_port();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_mycelium-stem"))
+    let child = Command::new(env!("CARGO_BIN_EXE_mycelium-stem"))
         .args(["--units", units.to_str().unwrap(), "--port", &port.to_string(), "--host", "127.0.0.1",
                "--trace-dir", trace.to_str().unwrap()])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .expect("the stem binary starts");
+    let mut guard = KillOnDrop(child);
+    let child = &mut guard.0;
 
     // Up when its gossip port accepts a connection.
     let deadline = Instant::now() + Duration::from_secs(30);

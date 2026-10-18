@@ -23,7 +23,7 @@ Schema `mycelium.rules/1` · 28 rules.
 | [`prov.install`](#provinstall) | Response | instrumented | Fetch, verify, place and host the artifact under an install token; a superseded token tears its install down rather than advertising it. |
 | [`prov.loadable`](#provloadable) | Authority | catalogue only | A proposed entry loads live only once a listed reviewer has accepted it; until then it may load into the shadow lane only (D20). |
 | [`prov.presence_floor`](#provpresence_floor) | Response | instrumented | Fewer live providers than the declared floor, as this node sees it, makes this node a candidate installer of the cheapest loadable entry. |
-| [`prov.probe`](#provprobe) | Response | instrumented | The probe gates the capability: a failing initial probe is an activation error (nothing advertised); a later failure flips the health flag the next health pass withdraws on. Recorded under the install's token; a re-probe records only a change of verdict. |
+| [`prov.probe`](#provprobe) | Response | instrumented | The probe gates the capability: a failing initial probe is an activation error (nothing advertised); a later failure flips the health flag the next health pass withdraws on. A confined re-probe re-resolves a profile whose declared path was replaced, every check repeated, and runs under the fresh one; only a refused re-resolution (`confinement_*`), or a path that changed under every attempt (`confinement_changed`), withdraws. Recorded under the install's token; a re-probe records only a change of verdict. |
 | [`prov.promotion`](#provpromotion) | Response | instrumented | A shadow install whose entry a listed reviewer has since accepted is withdrawn from the shadow lane (D20). |
 | [`prov.provenance`](#provprovenance) | Authority | catalogue only | An entry is a candidate only if a trusted publisher signed it; an empty trust list trusts everything, which the report says. |
 | [`prov.rights_admission`](#provrights_admission) | Authority | instrumented | An install takes a right from this node's allocation first; under the enforcing profile a node with none left refuses, and records that it did. |
@@ -357,9 +357,9 @@ Fewer live providers than the declared floor, as this node sees it, makes this n
 
 ## `prov.probe`
 
-rev 2 · `mycelium-wasm-host::activation` · Response · trace: instrumented
+rev 3 · `mycelium-wasm-host::activation` · Response · trace: instrumented
 
-The probe gates the capability: a failing initial probe is an activation error (nothing advertised); a later failure flips the health flag the next health pass withdraws on. Recorded under the install's token; a re-probe records only a change of verdict.
+The probe gates the capability: a failing initial probe is an activation error (nothing advertised); a later failure flips the health flag the next health pass withdraws on. A confined re-probe re-resolves a profile whose declared path was replaced, every check repeated, and runs under the fresh one; only a refused re-resolution (`confinement_*`), or a path that changed under every attempt (`confinement_changed`), withdraws. Recorded under the install's token; a re-probe records only a change of verdict.
 
 - **Trigger:** after activation, and on every re-probe tick
 - **Reads:**
@@ -367,14 +367,14 @@ The probe gates the capability: a failing initial probe is an activation error (
   - `the declared probe argv's exit status` — scope: this node; freshness: sampled
 - **Outcomes:**
   - Action: `healthy`
-  - Refusal: `initial_probe_failed`, `probe_failed`
+  - Refusal: `initial_probe_failed`, `probe_failed`, `confinement_unavailable`, `confinement_failed`, `confinement_changed`
   - NoAction: `no_probe_declared`
 - **Effects:** the install's health flag, which `prov.health_pass` reads
 - **Guards:** Health
 - **May trigger:** [`prov.health_pass`](#provhealth_pass)
 - **May inhibit:** [`prov.advertise`](#provadvertise)
 - **Depends on:** [`prov.activation`](#provactivation)
-- **Code:** `activation::hook / activation::spawn_reprobe` · **Docs:** docs/reference/unit-file.md · **Tests:** `a_failing_initial_probe_is_an_activation_error`, `a_declared_activation_runs_after_placement_and_its_probe_gates_the_capability`
+- **Code:** `activation::hook / activation::spawn_reprobe` · **Docs:** docs/reference/unit-file.md · **Tests:** `a_failing_initial_probe_is_an_activation_error`, `a_declared_activation_runs_after_placement_and_its_probe_gates_the_capability`, `a_replaced_write_directory_keeps_the_install_live_across_a_reprobe`, `a_declared_path_replaced_by_a_symlink_is_refused_at_the_reprobe_by_name`, `a_declared_path_swapped_during_the_probe_fails_closed`, `a_declared_path_swapped_during_the_initial_probe_fails_the_activation`, `a_symlink_planted_while_prepare_resolves_is_refused`, `a_flipped_ancestor_symlink_makes_the_profile_not_current`, `one_slow_reprobe_does_not_delay_the_others`, `an_intermediate_component_toggled_during_prepare_never_widens_the_profile`, `a_declared_path_spelt_in_another_case_or_normalisation_is_accepted`, `a_declared_fifo_socket_or_write_only_file_resolves_without_hanging`, `a_reprobe_round_runs_a_bounded_number_of_probes_at_once`, `an_operator_symlink_into_a_write_roots_interior_cannot_be_redirected`, `a_placement_directory_inside_a_write_root_cannot_be_redirected`, `a_symlink_on_a_second_mount_of_a_write_roots_filesystem_is_not_followed`
 
 ## `prov.promotion`
 
