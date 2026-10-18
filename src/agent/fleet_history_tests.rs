@@ -1196,20 +1196,23 @@ async fn residue_is_collected_and_a_decision_does_not_read_it() {
     let counter = crate::FleetCounter::new(HistoryScope::FleetTally, "c-posts", 3, TEN_MIN);
     let reads = |c: &crate::FleetCounter| super::tally_state_counted(&ctx, c, "gateway", crate::PRINCIPAL_ANONYMOUS, ctx.hlc.decision_now_ms()).1;
 
-    // One silent node, one entry, then two hundred: the decision's reads do not change.
+    // One silent node, one entry, then two hundred: the decision's reads do not grow. The node is planted inside
+    // the horizon (3.5 s), so `b`'s own residue collector cannot remove it between the measurements — it once did,
+    // past the horizon, and the second count came out *lower* (CI on #645). The claim is "does not grow", so `<=`.
     let silent = NodeId::new("127.0.0.1", port()).unwrap().to_string();
-    plant(super::heartbeat_key(&silent), serde_json::json!({"as_of": now - 5_000, "enforces": true, "departed": true}));
-    plant(super::tally_key(&silent, "c-posts", "gateway", "actor-0"), serde_json::json!({"w": 1_000, "t": [now - 4_000]}));
+    plant(super::heartbeat_key(&silent), serde_json::json!({"as_of": now, "enforces": true, "departed": true}));
+    plant(super::tally_key(&silent, "c-posts", "gateway", "actor-0"), serde_json::json!({"w": 1_000, "t": [now]}));
     let with_one = reads(&counter);
+    assert!(with_one >= 2, "the silent node's heartbeat and entry are read: {with_one}");
     for i in 1..200 {
         plant(super::tally_key(&silent, "c-posts", "gateway", &format!("actor-{i}")), serde_json::json!({"w": 1_000, "t": [now - 4_000]}));
     }
-    assert_eq!(reads(&counter), with_one, "a decision's cost does not grow with a node's entries");
+    assert!(reads(&counter) <= with_one, "a decision's cost does not grow with a node's entries");
     // Nor with another scoped namespace's scopes: two thousand consensus slots on this node (round 5, finding 1).
     for slot in 0..2_000 {
         let _ = mycelium_core::ops::kv_set(&ctx, Arc::from(format!("consensus/life/k2-{slot}/r/1").as_str()), bytes::Bytes::from_static(b"x"));
     }
-    assert_eq!(reads(&counter), with_one, "a decision's cost does not grow with consensus slots");
+    assert!(reads(&counter) <= with_one, "a decision's cost does not grow with consensus slots");
 
     // Twenty departed ids, silent past the horizon (their longest window + staleness + drift = 3.5 s).
     let ids: Vec<String> = (0..20).map(|_| NodeId::new("127.0.0.1", port()).unwrap().to_string()).collect();
@@ -1217,8 +1220,8 @@ async fn residue_is_collected_and_a_decision_does_not_read_it() {
         plant(super::heartbeat_key(id), serde_json::json!({"as_of": now - 10_000, "enforces": true, "departed": true}));
         plant(super::tally_key(id, "c-posts", "gateway", "x"), serde_json::json!({"w": 1_000, "t": [now - 9_000]}));
     }
-    let collected = super::collect_residue(&ctx, ctx.hlc.decision_now_ms());
-    assert!(collected >= 21, "every silent id collected (the twenty and the one): {collected}");
+    // Collected by this call or by `b`'s own collector tick before it — which one is not the claim; the keys' absence is.
+    super::collect_residue(&ctx, ctx.hlc.decision_now_ms());
     for id in &ids {
         for key in [super::heartbeat_key(id), super::tally_key(id, "c-posts", "gateway", "x")] {
             assert!(mycelium_core::ops::kv_get(&ctx, &key).is_none(), "{key} collected");
