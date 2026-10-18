@@ -21,7 +21,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   symlink is followed only before the resolution enters a writable root, recognised by identity rather than spelling.
   The identity comes from what was opened, Landlock's rule from that descriptor, and every currency check walks the
   path again. A profile runs only while it is current. On Linux, a symlink on a filesystem that holds a write path and
-  is mounted more than once, such as by a bind mount, is not followed (`unit-file.md` § Mounts).
+  is mounted more than once, such as by a bind mount, is not followed (`unit-file.md` § Mounts). The rule's limit:
+  views of a write path through another filesystem are not detected. These are FUSE `bindfs`, overlayfs, and NFS or
+  SMB loopback.
 
 ### Fixed
 

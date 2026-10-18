@@ -345,7 +345,9 @@ there could be one the command wrote. A symlink on a filesystem that holds a wri
 than once is therefore not followed: the declared path is refused by name. Name the path through the root, or
 declare it without a symlink. The check reads `/proc/self/mountinfo`. If that cannot be read, or a device does not
 appear there exactly once (btrfs subvolumes can do this), the filesystem is treated as mounted more than once.
-macOS has no bind mounts. Not detected, on either platform: a view of a write path through another filesystem (FUSE
+In a container, `/etc/hosts`, `/etc/hostname` and `/etc/resolv.conf` are usually bind mounts from the host's disk.
+A volume on that same disk therefore counts as mounted more than once. Keep rotation links outside the write volume,
+or rotate with `rename(2)` over the old path. macOS has no bind mounts. Not detected, on either platform: a view of a write path through another filesystem (FUSE
 `bindfs`, overlayfs, NFS or SMB loopback). Do not reach a declared path through such a view of a write path.
 
 A path reached through an ancestor symlink that is flipped (`/models/current` → `v2`) resolves to the new target.
