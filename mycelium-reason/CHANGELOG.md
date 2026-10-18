@@ -35,6 +35,10 @@ nothing about where that provider's inference runs or what the request carries.
   providing one is never installed; and `GET /gateway/rpc/serve/llm.invoke` (with `mcp.invoke`, `skill.invoke`) is
   refused, since a serve stream received every prompt the node was sent — found by the round-1 review. A fleet member
   can still write another node's ad: an ad's key is not bound to its writer (stated, not built).
+- **Decided, or not routed.** A router built with a `DataClassPolicy` refuses every request
+  (`authority_not_established`, 403) while no action evaluator is attached — before `with_action_evaluator`, or in a
+  build without `tls` — and dispatches nothing (round-2 review A: between `start()` and the attachment, a
+  confidential request went to an external model). Attach the evaluator before `start()`.
 - **The default class is a floor.** A caller with no floor bound is held at the default (most restrictive) class: it
   may declare higher, never lower. Only an explicitly bound floor sits lower. The header given twice is `400`.
 - **No SDK declares a class yet** — `mycelium-py`'s `reason.route()` and `mycelium-ts` have no class parameter, so an

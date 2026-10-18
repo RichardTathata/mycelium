@@ -32,6 +32,15 @@ class _Stub(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def do_GET(self) -> None:  # noqa: N802
+        _Stub.seen.append((self.path, {}))
+        data = json.dumps(_Stub.reply).encode()
+        self.send_response(_Stub.status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def log_message(self, *_: object) -> None:
         pass
 
@@ -89,3 +98,25 @@ def test_emit_reliable_raises_it_too(agent):
     with pytest.raises(ProtectedKindError) as e:
         agent.emit_reliable("127.0.0.1:1", "mcp.invoke", b"x")
     assert e.value.kind == "mcp.invoke"
+
+
+def test_rpc_serve_on_a_node_served_kind_raises_protected_kind_error(agent):
+    """Post-360 row R (round-2 review E): a serve stream refused ``403 protected_kind`` or
+    ``403 served_in_process`` raised an SSE content-type error; it raises ``ProtectedKindError`` naming the kind."""
+    import asyncio
+
+    async def first(kind):
+        gen = agent.rpc_serve(kind)
+        return await gen.__anext__()
+
+    for error, kind in (("protected_kind", "llm.invoke"), ("served_in_process", "cap.invoke.demo/echo")):
+        _Stub.status = 403
+        _Stub.reply = {"ok": False, "error": error, "kind": kind, "message": f"`{kind}` is served by this node"}
+        with pytest.raises(ProtectedKindError) as e:
+            asyncio.run(first(kind))
+        assert e.value.kind == kind
+    # An ordinary refusal is not mistaken for it (the plant).
+    _Stub.reply = {"error": "insufficient scope", "required_scope": "mesh:serve"}
+    with pytest.raises(Exception) as e:
+        asyncio.run(first("work"))
+    assert not isinstance(e.value, ProtectedKindError)

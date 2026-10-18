@@ -156,6 +156,20 @@ class ProtectedStreamError(_ProtectedWriteError):
         self.stream = stream
 
 
+def _raise_if_serve_refused(resp: httpx.Response) -> None:
+    """Raise :class:`ProtectedKindError` for a serve stream refused on a kind its node serves itself: ``403
+    protected_kind`` (``mcp.invoke``, ``skill.invoke``, ``llm.invoke``) or ``403 served_in_process`` (any kind
+    with a receiver on that node). Anything else is left to ``raise_for_status``."""
+    if resp.status_code != 403:
+        return
+    try:
+        data = resp.json()
+    except ValueError:
+        return
+    if isinstance(data, dict) and data.get("error") in ("protected_kind", "served_in_process"):
+        raise ProtectedKindError(str(data.get("kind", "")), str(data.get("message", data.get("error"))))
+
+
 def _raise_if_protected(
     resp: httpx.Response, *, key: Optional[str] = None, stream: Optional[str] = None,
 ) -> None:
@@ -916,6 +930,13 @@ class MyceliumAgent:
         url = f"{self._base_url}/gateway/rpc/serve/{path_segment(kind)}"
         async with httpx.AsyncClient(timeout=None, headers=self._pool.headers, verify=self._pool.verify) as client:
             async with aconnect_sse(client, "GET", url) as event_source:
+                resp = event_source.response
+                if resp.status_code >= 400:
+                    # A kind the node serves itself is refused 403 with a JSON body (0.2.12): raised as
+                    # ProtectedKindError rather than as an SSE content-type error.
+                    await resp.aread()
+                    _raise_if_serve_refused(resp)
+                    resp.raise_for_status()
                 async for event in event_source.aiter_sse():
                     import json as _json
                     data    = _json.loads(event.data)

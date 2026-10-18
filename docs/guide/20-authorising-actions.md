@@ -413,9 +413,9 @@ async fn routing_policy(
         .floor_for(format!("token:{}/web-agent", agent.node_id()), "public")?;
     let store = Arc::new(FsBlobStore::open(dir.join("blobs"))?);
     agent.with_http_routes(reason_router_classified(Arc::clone(&agent), store, RouterConfig::default(), classes));
-    agent.start().await?;
 
-    // Evidence first: an evaluator without a journal enforces and records nothing.
+    // Evidence and policy, attached before start: from the first request on, every route is decided and
+    // recorded. (A classifying router refuses to route while no evaluator is attached.)
     agent.with_evidence_journal(EvidenceJournal::open(dir.join("evidence.journal"), EvidenceProfile::Strict)?);
     // Policy, as an allow-list: public and internal data may go anywhere; confidential only in-domain.
     // A class not listed here (a typo, a class added later, `restricted`) matches no allowance: refused.
@@ -427,6 +427,7 @@ async fn routing_policy(
             .allow(Rule::new("*", "llm.invoke", "*").for_class("internal"))
             .allow(Rule::new("*", "llm.invoke", "*").for_class("confidential").at_locality(Locality::InDomain)),
     ));
+    agent.start().await?;
 
     // Serve side: each provider declares where its inference runs (the `locality` attribute of its llm-meta ad).
     let template = PromptTemplate {
@@ -461,9 +462,15 @@ inference runs — `ModelProfile::in_domain()` (an engine on a fleet node) or `e
 off the mesh), the `locality` attribute of its `llm-meta/{model}` ad. A gateway client cannot write an `llm-meta` ad at
 all — `capability/advertise` and `units/declare` refuse the namespace `403 reserved_namespace` — and a catalogue entry
 whose `provides` is one is never installed (`prov.eligible`, `reserved_namespace`). And no client can stand in for a
-model: `GET /gateway/rpc/serve/{kind}` refuses `llm.invoke`, `mcp.invoke` and `skill.invoke` `403 protected_kind` —
-those fan out to every receiver on a node, so a serve stream for one would receive every prompt the node was sent. A provider that declares nothing is
+model: `GET /gateway/rpc/serve/{kind}` refuses `llm.invoke`, `mcp.invoke` and `skill.invoke` `403 protected_kind`, and
+any kind the node already serves in process `403 served_in_process` — a signal fans out to every receiver on a node,
+so a serve stream beside one would receive every request the node was sent ([rbac](../operations/rbac.md)). A provider that declares nothing is
 `Locality::Unknown`, and a rule about locality reads it as **not established** — never as in-domain.
+
+**Decided, or not routed.** A classifying router (`reason_router_classified`) routes only under an action evaluator:
+with none attached — before `with_action_evaluator`, or in a build without `tls` — every request is refused `403
+authority_not_established` and nothing is dispatched (a classification no one decides on is no control). Attach the
+journal and the evaluator before `start()`, as above. The plain `reason_router` is unchanged.
 
 **Per candidate, in the router's order.** The preflight runs for each candidate before the router commits to it. A
 refusal (`action_denied`, `authority_not_established`) passes that candidate over without counting as an attempt; the

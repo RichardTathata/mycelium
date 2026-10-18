@@ -544,6 +544,15 @@ export class MyceliumAgent {
    */
   async *rpcServe(kind: string): AsyncGenerator<RpcRequest> {
     const url = this._sseUrl(`/gateway/rpc/serve/${pathSegment(kind)}`);
+    // A kind the node serves itself (`protected_kind`: mcp.invoke, skill.invoke, llm.invoke; `served_in_process`:
+    // any kind with a receiver on that node) is refused 403 with a JSON body: thrown as ProtectedKindError.
+    const refusal = (status: number, body: unknown): Error | undefined => {
+      const b = body as { error?: string; kind?: string; message?: string } | undefined;
+      if (status === 403 && (b?.error === "protected_kind" || b?.error === "served_in_process")) {
+        return new ProtectedKindError(String(b.kind ?? kind), String(b.message ?? b.error));
+      }
+      return undefined;
+    };
     yield* sseStream<RpcRequest>({ url, headers: this.auth }, (data, event) => {
       const raw = JSON.parse(data) as {
         kind?: string; nonce_hex: string; sender: string; payload_b64: string;
@@ -558,7 +567,7 @@ export class MyceliumAgent {
       };
       if (raw.caller) req.caller = raw.caller;
       return req;
-    });
+    }, { refusal });
   }
 
   /** Sends a reply to an in-flight RPC request. */

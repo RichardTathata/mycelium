@@ -42,3 +42,17 @@ test("an ordinary 403 is not mistaken for it (the plant)", async () => {
   const err = await a.rpcCall("127.0.0.1:1", "echo").catch((e) => e);
   expect(err).not.toBeInstanceOf(ProtectedKindError);
 });
+
+test("rpcServe on a kind the node serves itself throws ProtectedKindError, not an SSE failure", async () => {
+  for (const [error, kind] of [["protected_kind", "llm.invoke"], ["served_in_process", "cap.invoke.demo/echo"]]) {
+    stub({ ok: false, error, kind, message: `\`${kind}\` is served by this node's own registrations` }, 403);
+    const a = new MyceliumAgent("127.0.0.1", 1, 1000);
+    const err = await a.rpcServe(kind).next().catch((e) => e);
+    expect(err).toBeInstanceOf(ProtectedKindError);
+    expect(err.kind).toBe(kind);
+  }
+  // An ordinary refusal stays the generic error (the plant).
+  stub({ error: "insufficient scope", required_scope: "mesh:serve" }, 403);
+  const err = await new MyceliumAgent("127.0.0.1", 1, 1000).rpcServe("work").next().catch((e) => e);
+  expect(err).not.toBeInstanceOf(ProtectedKindError);
+});

@@ -392,22 +392,27 @@ pub(super) fn required_scope(method: &axum::http::Method, matched_path: &str) ->
     }
 }
 
-/// **Closure plan C1.** The gateway's raw routes (`rpc/call`, `scatter`, `signal/emit`,
-/// `mailbox/deliver`, `shard/emit`, `overlay/emit_reliable`) take the RPC kind from the request
-/// body. Before this, a client with `mesh:write` could send `mcp.invoke` or `skill.invoke` straight
-/// to a provider through them, framed with its own principal, and the AE preflight that `/mcp` and
-/// `/a2a` run, mandates included, never ran. `llm.invoke` the same, around `llm:invoke`.
-///
-/// A protected kind is refused `403` with the door to use instead. It is refused whatever the
-/// token's scopes (the legacy token holds `*`), and whether or not `compliance` is built in.
-///
-/// The two signal SSE doors (`/signals/{kind}`, `/gateway/signal/sse/{kind}`) refuse it too: they
-/// register on the same handler table the serve routes and the native MCP tools use, and a signal
-/// fans to every receiver, so observing a protected kind is reading every protected request's frame.
 /// The signal SSE doors' refusal: a protected kind (as on the raw routes), or an RPC reply kind
 /// (`rpc.result`, `bulk.result`). A reply the interceptor did not claim — late, or from a node the
 /// call was not sent to — falls through to the handler table, so streaming the reply kinds handed
 /// tool and LLM output to any `mesh:read` holder (#587 F7). Same body as the raw routes' refusal.
+pub(super) fn refuse_unobservable_kind(cfg: &crate::config::GossipConfig, kind: &str) -> Option<axum::response::Response> {
+    use crate::signal::signal_kind::{BULK_RESULT, RPC_RESULT};
+    if kind == RPC_RESULT || kind == BULK_RESULT {
+        warn!(kind, "gateway: an RPC reply kind refused on a signal stream");
+        return Some((
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "ok": false,
+                "error": "protected_kind",
+                "kind": kind,
+                "message": format!("`{kind}` carries RPC replies and is not observable on a signal stream; a reply reaches only its caller"),
+            })),
+        ).into_response());
+    }
+    refuse_protected_kind(cfg, kind)
+}
+
 /// The serve stream's refusal (post-360 row R's review, finding 1): `GET /gateway/rpc/serve/{kind}` registers a
 /// receiver on the same handler table, and `mcp.invoke`, `skill.invoke` and `llm.invoke` fan out to every receiver
 /// — so a `mesh:serve` client serving one of them received every request of that kind this node was sent, a
@@ -435,23 +440,18 @@ pub(super) fn refuse_unservable_kind(kind: &str) -> Option<axum::response::Respo
     ).into_response())
 }
 
-pub(super) fn refuse_unobservable_kind(cfg: &crate::config::GossipConfig, kind: &str) -> Option<axum::response::Response> {
-    use crate::signal::signal_kind::{BULK_RESULT, RPC_RESULT};
-    if kind == RPC_RESULT || kind == BULK_RESULT {
-        warn!(kind, "gateway: an RPC reply kind refused on a signal stream");
-        return Some((
-            StatusCode::FORBIDDEN,
-            Json(json!({
-                "ok": false,
-                "error": "protected_kind",
-                "kind": kind,
-                "message": format!("`{kind}` carries RPC replies and is not observable on a signal stream; a reply reaches only its caller"),
-            })),
-        ).into_response());
-    }
-    refuse_protected_kind(cfg, kind)
-}
-
+/// **Closure plan C1.** The gateway's raw routes (`rpc/call`, `scatter`, `signal/emit`,
+/// `mailbox/deliver`, `shard/emit`, `overlay/emit_reliable`) take the RPC kind from the request
+/// body. Before this, a client with `mesh:write` could send `mcp.invoke` or `skill.invoke` straight
+/// to a provider through them, framed with its own principal, and the AE preflight that `/mcp` and
+/// `/a2a` run, mandates included, never ran. `llm.invoke` the same, around `llm:invoke`.
+///
+/// A protected kind is refused `403` with the door to use instead. It is refused whatever the
+/// token's scopes (the legacy token holds `*`), and whether or not `compliance` is built in.
+///
+/// The two signal SSE doors (`/signals/{kind}`, `/gateway/signal/sse/{kind}`) refuse it too: they
+/// register on the same handler table the serve routes and the native MCP tools use, and a signal
+/// fans to every receiver, so observing a protected kind is reading every protected request's frame.
 pub(super) fn refuse_protected_kind(cfg: &crate::config::GossipConfig, kind: &str) -> Option<axum::response::Response> {
     if !is_protected_kind(cfg, kind) {
         return None;
@@ -540,8 +540,9 @@ impl GatewayPreflight {
     }
 
     /// `true` when no evaluator is attached (or none can be in this build): nothing was decided
-    /// and nothing will be recorded.
-    #[deprecated(since = "2.33.0", note = "no caller, test, SDK or document in the repository or the private companion references it (post-360 hardening row E, 2026-10-12); kept on the 2.x line — open an issue if you use it and it will be undeprecated")]
+    /// and nothing will be recorded. A door whose guarantee needs a decision — `mycelium-reason`'s
+    /// classifying router (post-360 row R, round-2 review A) — refuses on it rather than dispatch.
+    /// Deprecated in 2.33.0 as unreferenced, with the promise to undeprecate it once used; used now.
     pub fn is_inert(&self) -> bool {
         #[cfg(feature = "tls")]
         return matches!(self.inner, Preflight::Inert);

@@ -147,10 +147,21 @@ pub(super) async fn gw_rpc_serve(
     if let Some(refused) = refuse_unservable_kind(&kind) {
         return refused;
     }
-    let rx = ctx.agent_ctx.signal_handlers.register_with_capacity(
-        Arc::from(kind.as_str()),
-        256,
-    );
+    // Round-2 review B: a client stream never shares a kind with a receiver this node serves itself — a
+    // hosted component's `cap.invoke` kind, an operator's `rpc_rx` — because a signal fans to every
+    // receiver. Refused here when one is registered; evicted (the stream ends) if one registers later.
+    let Some(serve) = ctx.agent_ctx.signal_handlers.register_client(Arc::from(kind.as_str()), 256) else {
+        warn!(%kind, "rpc/serve: refused, this node serves the kind in process");
+        return (StatusCode::FORBIDDEN, Json(json!({
+            "ok": false,
+            "error": "served_in_process",
+            "kind": kind,
+            "message": format!("`{kind}` is served by a receiver on this node; a client stream for it would \
+                                receive every such request this node is sent"),
+        }))).into_response();
+    };
+    let mut evicted = serve.evicted;
+    let rx = serve.rx;
     let principal: Arc<str> = Arc::from(
         caller.map(|Extension(c)| c.principal).unwrap_or_else(|| gateway_caller::PRINCIPAL_ANONYMOUS.to_string()).as_str(),
     );
@@ -212,6 +223,10 @@ pub(super) async fn gw_rpc_serve(
       }
     });
 
+    // Evicted: the stream ends, so the client sees it close rather than wait on a kind it no longer holds.
+    let stream = futures_util::StreamExt::take_until(stream, async move {
+        let _ = evicted.wait_for(|e| *e).await;
+    });
     Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
 }
 

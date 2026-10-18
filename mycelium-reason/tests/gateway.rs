@@ -978,7 +978,22 @@ async fn start_classified_pair(
     evaluator: mycelium::ReferenceEvaluator,
     classes: mycelium_reason::DataClassPolicy,
 ) -> (Arc<GossipAgent>, Arc<GossipAgent>, u16) {
+    start_classified_pair_with(dir, evaluator, classes, |_| {}).await
+}
+
+/// [`start_classified_pair`] with a hook over the gateway node's config. The journal and the evaluator are
+/// attached **before** `start()` (round-2 review A: after it, the gateway answers in between).
+#[cfg(feature = "knowledge")]
+async fn start_classified_pair_with(
+    dir: &std::path::Path,
+    evaluator: mycelium::ReferenceEvaluator,
+    classes: mycelium_reason::DataClassPolicy,
+    tune: impl Fn(&mut GossipConfig),
+) -> (Arc<GossipAgent>, Arc<GossipAgent>, u16) {
     let store = Arc::new(FsBlobStore::open(dir.join("blobs")).unwrap());
+    let journal =
+        mycelium::EvidenceJournal::open(dir.join("evidence.journal"), mycelium::EvidenceProfile::Strict).unwrap();
+    let evaluator: Arc<dyn mycelium::ActionEvaluator> = Arc::new(evaluator);
     let mut started = None;
     for _ in 0..16 {
         let base = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
@@ -986,6 +1001,7 @@ async fn start_classified_pair(
         let mut cfg = GossipConfig::default();
         cfg.bind_port = base;
         cfg.http_port = Some(http_port);
+        tune(&mut cfg);
         let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", base).unwrap(), cfg));
         agent.with_http_routes(mycelium_reason::reason_router_classified(
             Arc::clone(&agent),
@@ -993,16 +1009,14 @@ async fn start_classified_pair(
             mycelium_reason::RouterConfig::default(),
             classes.clone(),
         ));
+        agent.with_evidence_journal(Arc::clone(&journal));
+        agent.with_action_evaluator(Arc::clone(&evaluator));
         if agent.start().await.is_ok() {
             started = Some((agent, base, http_port));
             break;
         }
     }
     let (agent, base, http_port) = started.expect("could not bind agent + gateway");
-    agent.with_evidence_journal(
-        mycelium::EvidenceJournal::open(dir.join("evidence.journal"), mycelium::EvidenceProfile::Strict).unwrap(),
-    );
-    agent.with_action_evaluator(Arc::new(evaluator));
     let http = reqwest::Client::new();
     for _ in 0..100 {
         if http.get(format!("http://127.0.0.1:{http_port}/health")).send().await.is_ok() {
@@ -1532,9 +1546,9 @@ async fn routing_policy(
         .floor_for(format!("token:{}/web-agent", agent.node_id()), "public")?;
     let store = Arc::new(FsBlobStore::open(dir.join("blobs"))?);
     agent.with_http_routes(reason_router_classified(Arc::clone(&agent), store, RouterConfig::default(), classes));
-    agent.start().await?;
 
-    // Evidence first: an evaluator without a journal enforces and records nothing.
+    // Evidence and policy, attached before start: from the first request on, every route is decided and
+    // recorded. (A classifying router refuses to route while no evaluator is attached.)
     agent.with_evidence_journal(EvidenceJournal::open(dir.join("evidence.journal"), EvidenceProfile::Strict)?);
     // Policy, as an allow-list: public and internal data may go anywhere; confidential only in-domain.
     // A class not listed here (a typo, a class added later, `restricted`) matches no allowance: refused.
@@ -1546,6 +1560,7 @@ async fn routing_policy(
             .allow(Rule::new("*", "llm.invoke", "*").for_class("internal"))
             .allow(Rule::new("*", "llm.invoke", "*").for_class("confidential").at_locality(Locality::InDomain)),
     ));
+    agent.start().await?;
 
     // Serve side: each provider declares where its inference runs (the `locality` attribute of its llm-meta ad).
     let template = PromptTemplate {
@@ -1597,5 +1612,164 @@ async fn guide_20_routing_policy() {
     assert_eq!(v["data_class"], "confidential", "{v}");
     let records = mycelium::read_evidence_journal(&dir.path().join("evidence.journal")).unwrap();
     assert!(!records.is_empty(), "the decision was recorded");
+    agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+// ── Row R, round-2 review ───────────────────────────────────────────────────────────────────────────
+
+/// Finding A: a classifying router routed anywhere while no evaluator was attached — the reviewer's probe
+/// (`review2_window_between_start_and_evaluator`) got `200` from the external provider for a `confidential`
+/// request between `start()` and `with_action_evaluator`. Now it refuses `403 authority_not_established` and
+/// nothing is dispatched; once an evaluator is attached, it routes. Seen failing first: `200`, external.
+#[cfg(feature = "knowledge")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_classifying_router_routes_nothing_without_an_evaluator() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(FsBlobStore::open(dir.path().join("blobs")).unwrap());
+    let (agent, http_port) = {
+        let mut started = None;
+        for _ in 0..16 {
+            let base = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+            let http_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+            let mut cfg = GossipConfig::default();
+            cfg.bind_port = base;
+            cfg.http_port = Some(http_port);
+            let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", base).unwrap(), cfg));
+            // Unclassified is public here, so a request may go anywhere once something decides it may.
+            let classes = mycelium_reason::DataClassPolicy::new(["public", "internal", "confidential"])
+                .unwrap()
+                .unclassified_as("public")
+                .unwrap();
+            agent.with_http_routes(mycelium_reason::reason_router_classified(
+                Arc::clone(&agent),
+                Arc::clone(&store),
+                mycelium_reason::RouterConfig::default(),
+                classes,
+            ));
+            if agent.start().await.is_ok() {
+                started = Some((agent, http_port));
+                break;
+            }
+        }
+        started.expect("could not start")
+    };
+    let _ext = serve_model(&agent, ModelProfile::new("m").external(), echo_template(), Arc::new(EchoBackend))
+        .await
+        .unwrap();
+    await_providers(&agent, "m", 1, &[]).await;
+    let http = reqwest::Client::new();
+    for _ in 0..100 {
+        if http.get(format!("http://127.0.0.1:{http_port}/health")).send().await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    for class in ["confidential", "public"] {
+        let r = http
+            .post(format!("http://127.0.0.1:{http_port}/gateway/reason/route"))
+            .header(mycelium_reason::DATA_CLASS_HEADER, class)
+            .json(&serde_json::json!({ "model": "m", "input": "SECRET" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 403, "{class}: nothing decides, so nothing is routed");
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["reason"], "authority_not_established", "{v}");
+    }
+    // Attached (late — counted and warned), it routes: public may go to the external model.
+    agent.with_evidence_journal(
+        mycelium::EvidenceJournal::open(dir.path().join("evidence.journal"), mycelium::EvidenceProfile::Strict).unwrap(),
+    );
+    agent.with_action_evaluator(Arc::new(confidential_stays_in_domain()));
+    let r = http
+        .post(format!("http://127.0.0.1:{http_port}/gateway/reason/route"))
+        .header(mycelium_reason::DATA_CLASS_HEADER, "public")
+        .json(&serde_json::json!({ "model": "m", "input": "x" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200, "decided now");
+    agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// Finding D: a floor bound **below** the default, through a real named token: `web-agent` (bound to `public`)
+/// may send `public` to an external model, and a caller without the credential is refused at the gateway. The
+/// token table needs `compliance` (a build without it refuses the table at start), so CI's reason job runs its
+/// gateway suite with `compliance`.
+#[cfg(all(feature = "knowledge", feature = "compliance"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_floor_bound_below_the_default_lets_that_credential_send_lower() {
+    let dir = tempfile::tempdir().unwrap();
+    let classes = mycelium_reason::DataClassPolicy::new(["public", "confidential"])
+        .unwrap()
+        .floor_for("token:gw/web-agent", "public")
+        .unwrap();
+    let (a, b, http_port) = start_classified_pair_with(dir.path(), confidential_stays_in_domain(), classes, |cfg| {
+        cfg.gateway_identity_issuer = Some("gw".into());
+        cfg.gateway_named_tokens = vec![mycelium::GatewayNamedToken {
+            name: "web-agent".into(),
+            token: "web-secret".into(),
+            scopes: vec!["*".into()],
+        }];
+    })
+    .await;
+    let _ext = serve_model(&b, ModelProfile::new("fable-mini").external(), echo_template(), Arc::new(EchoBackend))
+        .await
+        .unwrap();
+    await_providers(&a, "fable-mini", 1, &[&b]).await;
+    let http = reqwest::Client::new();
+    let route = |bearer: Option<&'static str>| {
+        let mut r = http
+            .post(format!("http://127.0.0.1:{http_port}/gateway/reason/route"))
+            .header(mycelium_reason::DATA_CLASS_HEADER, "public")
+            .json(&serde_json::json!({ "model": "fable-mini", "input": "x" }));
+        if let Some(t) = bearer {
+            r = r.bearer_auth(t);
+        }
+        r.send()
+    };
+    let r = route(Some("web-secret")).await.unwrap();
+    assert_eq!(r.status().as_u16(), 200, "the bound floor is public, so the credential may send public");
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(v["data_class"], "public", "{v}");
+    assert_eq!(v["provider"], b.node_id().to_string(), "{v}");
+    // Without the credential: refused at the gateway (named tokens close it), never routed as public.
+    let r = route(None).await.unwrap();
+    assert_eq!(r.status().as_u16(), 401);
+    a.shutdown_with_timeout(Duration::from_secs(5)).await;
+    b.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// Finding B, through the gateway: a client serve stream is refused on a kind this node serves in process
+/// (`403 served_in_process`, naming it), and a stream already holding a kind ends when an in-process receiver
+/// registers for it. Seen failing first: the stream opened `200` beside the receiver, and stayed open after one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_rpc_serve_stream_never_shares_a_kind_with_the_nodes_own_receiver() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(FsBlobStore::open(dir.path()).unwrap());
+    let (agent, _base, http_port) = start_gateway_node(store, None).await;
+    let http = reqwest::Client::new();
+    let url = |kind: &str| format!("http://127.0.0.1:{http_port}/gateway/rpc/serve/{kind}");
+
+    let _own = agent.service().rpc_rx("cap.invoke.demo.echo");
+    let r = http.get(url("cap.invoke.demo.echo")).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 403);
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(v["error"], "served_in_process", "{v}");
+    assert_eq!(v["kind"], "cap.invoke.demo.echo", "{v}");
+
+    // The reverse order: a stream holding a kind ends when the node registers its own receiver for it.
+    let mut stream = http.get(url("depot.work")).send().await.unwrap();
+    assert_eq!(stream.status().as_u16(), 200);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _later = agent.service().rpc_rx("depot.work");
+    let ended = tokio::time::timeout(Duration::from_secs(5), async {
+        // Keep-alive comments until the stream ends.
+        while let Ok(Some(_)) = stream.chunk().await {}
+    })
+    .await;
+    assert!(ended.is_ok(), "the evicted stream ends");
+    let r = http.get(url("depot.work")).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 403, "and the kind is the node's now");
     agent.shutdown_with_timeout(Duration::from_secs(5)).await;
 }

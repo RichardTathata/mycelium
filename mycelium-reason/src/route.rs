@@ -772,6 +772,24 @@ impl InferenceRouter {
                             tried.push(node.clone());
                             continue; // passed over: not an attempt
                         }
+                        // Round-2 review A: a classifying router's guarantee is a decision on the class and
+                        // the destination. With no evaluator attached (before one is attached, or a build
+                        // without `tls`), nothing decides — so nothing is dispatched, rather than anywhere.
+                        if class.is_some() && preflight.is_inert() {
+                            metrics::counter!("mycelium_reason_route_policy_refusals_total").increment(1);
+                            return Err(RouteError::Refused {
+                                code: -32031,
+                                reason: "authority_not_established".into(),
+                                message: "this router classifies requests, and no action evaluator is attached to \
+                                          decide where a class may go: nothing is routed until one is"
+                                    .into(),
+                                data: serde_json::json!({
+                                    "reason": "authority_not_established",
+                                    "errors": ["no action evaluator is attached"],
+                                    "data_class": class.map(|c| serde_json::json!({ "class": c.class, "source": c.source.label() })),
+                                }),
+                            });
+                        }
                         let dispatched = self
                             .agent
                             .service()
