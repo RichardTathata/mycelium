@@ -258,6 +258,10 @@ fn spawn_handler_with(
         #[cfg(all(feature = "gateway", feature = "tls"))]
         history_index: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
+        ae_tally_heartbeat: std::sync::atomic::AtomicBool::new(false),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        ae_tally_lock: std::sync::Mutex::new(()),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
         execution_authority: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         provider_enforcement: std::sync::atomic::AtomicBool::new(false),
@@ -4088,6 +4092,10 @@ async fn test_subscribe_notified_via_gossip() {
         evidence_journal: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         history_index: std::sync::OnceLock::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        ae_tally_heartbeat: std::sync::atomic::AtomicBool::new(false),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        ae_tally_lock: std::sync::Mutex::new(()),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         execution_authority: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]

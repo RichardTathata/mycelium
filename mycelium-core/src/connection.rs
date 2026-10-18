@@ -43,11 +43,13 @@ use tracing::{error, warn};
 /// reported as unverified, never sealed over, and now counted here too.
 /// And the caller-envelope id marker (`sys/caller-context-id/{node}`, post-360 row E): a peer
 /// tombstoning it at a provider reopens the id-less path for this node's envelopes there.
-const SELF_OWNED_SYS_PREFIXES: [&str; 13] = [
+const SELF_OWNED_SYS_PREFIXES: [&str; 14] = [
     "sys/identity/", "sys/load/", "sys/role/", "sys/tuple/", "sys/caller-context/",
     "sys/consensus-accepted/", "sys/identity-signed/", "sys/identity-proof/",
     "sys/identity-cert/", "sys/revocation/", "sys/audit/", "sys/audit-checkpoint/",
     "sys/caller-context-id/",
+    // Post-360 row K2: an enforcement point's fleet tally and heartbeat — unsigned, so this is its only signal.
+    "sys/ae-tally/",
 ];
 
 /// Whether `key` lies in a `sys/` namespace this node owns — a self-owned prefix whose node-id

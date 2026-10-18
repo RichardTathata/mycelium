@@ -87,6 +87,24 @@ policy permits. The design rule that keeps it closed: a class or locality the do
 about it and is reported *not established* — so a door that classifies nothing (`/gateway/llm/call`) cannot pass a class
 rule, and an undeclared locality is never in-domain. Declared, not detected: the class is the client's or the operator's
 statement, the locality the provider's.
+**Fleet-wide history scopes (post-360 row K2, 2026-10-17):** a rule may name `HistoryScope::FleetConsensus` or
+`FleetTally` (`Rule::at_most(..).scoped(..)`, the policy choosing per rule; per-point stays the default). The evaluator
+names the counter its deciding rule relies on (`fleet_counters`), the point reads it into `HistoryView::fleet`
+(`src/agent/fleet_history.rs`). **Exact** = N consensus *seats* (`ae-seat/…` slots, leased for the window, decided by the
+exclusive verbs' electorate): a permit claims one by `exclusive_propose` after the evaluator permits and before
+admission, read back from the converged decision record (the #164 discipline) — the seat, not the evaluator's reading, is
+what bounds the fleet; no quorum ⇒ `Indeterminate`. **Approximate** = per-point permit times under `sys/ae-tally/`
+(self-owned) plus a heartbeat; the sum over self and fresh peers; coverage judged by the governors' confidence bound
+and per-publisher staleness — stale or unknown is *not established* (the strict-eligibility style). Gateway and
+provider count apart fleet-wide, as at one node. The per-actor gate (lock-order row 61) is now held across the claim's
+consensus round — no longer: #642's review (round 1) moved the claim after the gate (finding 1), leased a seat for
+the window + 2 s and refused one whose remaining lease is under a window (finding 2), started every node's heartbeat at
+`start()` and withdrew it in the shutdown sweep (3), tombstoned aged tally entries and kept seats only for named actors
+(4 — row A forbids collecting a top record or sentinel), keyed counters by a declared opaque id (5), and made a peer
+without a heartbeat unknown coverage (6). Round 2: the provider decides whether to defer from the real envelope
+(`ae_decide` / `Settling`, `check_or_defer`), bounded and always answered; a graceful leave is a departed heartbeat
+(entries kept to age out); tally writes under one leaf lock (row 64). Not built: early seat release, seat collection,
+signed tallies.
 **The reader seam shipped the same day** (PR #226): `read_evidence_journal_from(path, cursor, …)`,
 §6.7's outbox shape — batch, ship, advance, with a byte-offset cursor so resuming stays cheap, and
 each entry carrying the same content hash the chain's `AeReference` cites. Needed because moving

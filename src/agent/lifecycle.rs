@@ -665,6 +665,11 @@ impl GossipAgent {
         // not — any node can hold a replica, so any node may be asked. The loop ends on its own
         // when the agent shuts down (`rpc_rx` yields `None`), so it holds nothing open.
         super::replica_sync::serve(self);
+        // Post-360 row K2: this node's fleet-tally heartbeat — from start, whether or not it ever admits under a
+        // tally rule, so its peers can tell a node that has nothing to report from one they cannot hear (review
+        // finding 3); it says whether this node enforces.
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        super::fleet_history::start_heartbeat(&self.task_ctx);
         info!("Gossip agent started: {}", self.node_id);
         Ok(())
     }
@@ -1091,6 +1096,10 @@ impl GossipAgent {
         for key in load_keys {
             let _ = kv_delete(&self.task_ctx, Arc::from(key.as_str()));
         }
+        // Post-360 row K2: this node's last word to the fleet tally — a heartbeat marked departed, its entries kept to
+        // age out — rather than a withdrawal its peers would read as unknown coverage (#642's review, N3).
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        super::fleet_history::depart(&self.task_ctx);
         // Retract our locality advertisement so peers stop using a stale entry
         // for topology-aware fan-out and quorum diversity.
         if !self.config.locality_path.is_empty() {

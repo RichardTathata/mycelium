@@ -63,6 +63,51 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   comes from a `sock_diag` query for its exact addresses (`/proc/net/tcp{,6}` only where netlink is unavailable),
   so the cost does not grow with the host's TCP table; a read that panics after its bound no longer stops later
   reads.
+- **A history-limited rule may count across the fleet, the policy choosing per rule** (post-360 plan row K2, decided
+  2026-10-17; upgrade note `docs/guide/deprecations.md` §53). Row K counted at one enforcement point, so an actor that
+  spread its calls over N gateways could be admitted up to N times a limit. `Rule::at_most(n, w).scoped(scope,
+  counter_id)` now names one of two fleet scopes and an opaque counter id; the per-point count stays the default.
+  - **`HistoryScope::FleetConsensus` — exact.** A counter of `n` seats, each a consensus slot (`ae-seat/…`) leased
+    for the window plus two seconds. A permit claims a free seat by an exclusive consensus write *before* the work is
+    admitted — after the per-actor history gate is released, so a claim waiting on a quorum holds up no other call —
+    and a seat whose remaining lease no longer covers a whole window is refused, so one seat cannot admit twice in a
+    window. The fleet admits at most `n` in any window, whichever gateways the calls reach — to within the nodes'
+    wall-clock skew. Every seat held: `Deny`. No quorum, the electorate refusing or a claim too slow: `Indeterminate`.
+    Decided in the exclusive verbs' electorate (the declared `exclusive_default` group, the cluster otherwise). The
+    reference evaluator does not establish it over a wildcard actor: a seat's records are kept for good.
+  - **`HistoryScope::FleetTally` — approximate.** Every node built with `gateway` and `tls` publishes a heartbeat
+    (`sys/ae-tally/{node}/hb`, saying whether it enforces) from `start()`, and at a graceful shutdown a last one
+    marked departed, its entries kept to age out; an enforcement point
+    publishes, per counter and actor, its recent permit times (`sys/ae-tally/{node}/c/…`, self-owned under the `sys/`
+    tripwire, withdrawn once they age out). A limit reads the sum over this node and every enforcing peer.
+    Available without a quorum; **detection, not prevention** — every decision says so and names its coverage. A node
+    whose own view fails the governors' confidence bound, or a peer with no heartbeat, a stale one or one from the
+    future, gives *not established*, never an empty tally.
+  - `ActionEvaluator::fleet_counters` (default: none) names the counter a decision would rely on; the enforcement
+    point reads each into `HistoryView::fleet` before the evaluator decides. The evidence record names the fleet scope
+    and carries each counter's state and coverage, and an admitted call's seat (`history.fleet`, `history.seats`).
+  - At a provider under enforcement, a check that must claim a seat — decided from the envelope the check builds —
+    settles the claim beside the serve loop (`rpc_rx`, the MCP tool loop), at most 64 at a time, so it does not stall
+    the requests behind it; every other check stays inline. A panicking claim, or one still waiting when its loop
+    ends, is answered `authority_not_established`.
+  - **Upgrade order:** tally rules fail closed until every member runs this release built with `gateway` and `tls`
+    (`docs/guide/deprecations.md` §53).
+  - The AE contract suite gains `PolicyClause::AllowAtMostAcross` and six `fleet_*` cases.
+  - Tests: `the_consensus_scope_admits_at_most_n_across_three_gateways_under_concurrent_calls`,
+    `the_consensus_scope_admits_exactly_n_spread_over_gateways`, `without_a_quorum_the_consensus_scope_is_not_established`,
+    `a_claim_waiting_on_a_quorum_holds_up_no_other_call`, `a_provider_claim_does_not_stall_its_tool_loop`,
+    `a_seat_decided_too_late_for_its_window_is_not_admitted`, `a_seat_is_reclaimed_after_its_window`,
+    `under_a_required_electorate_the_seats_are_decided_in_it`, `the_gateway_and_the_provider_count_apart`,
+    `a_wrapper_that_hides_the_fleet_counters_is_not_established`,
+    `the_tally_scope_converges_and_refuses_after_convergence`, `a_restarted_node_keeps_its_heartbeat_fresh_without_permits`,
+    `an_aged_tally_entry_is_withdrawn`, `an_isolated_node_does_not_establish_a_tally`,
+    `a_stale_publisher_makes_the_tally_not_established`, `a_peer_with_no_heartbeat_makes_the_tally_not_established`,
+    `a_heartbeat_from_the_future_makes_the_tally_not_established`, and the evaluator's unit tests.
+  - **Not built:** a seat released early (a seat is held for its whole lease, even if the call's evidence is not
+    recorded or its dispatch fails); collection of a seat's records (each counter, kind of point and actor that ever
+    claims keeps up to `count` slots of three to five keys on every member, and `count` shrunk acceptor entries on
+    every voter); a tally entry signed by its publisher. As at one node, the gateway's doors count together and the
+    provider check apart.
 
 ### Changed
 

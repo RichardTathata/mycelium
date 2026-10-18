@@ -1,0 +1,974 @@
+//! Row K2's promises against live nodes: the exact scope admits at most N across gateways under concurrent calls; no
+//! quorum is not established; the tally converges and refuses after it; stale or unknown coverage is not established;
+//! every decision names its scope.
+//!
+//! The decisions are driven through `ae_preflight` — the function every door runs (`/mcp`, `/a2a` unary and stream,
+//! the LLM doors, the federation route and the provider check) — on each node's own context, so the counting is the
+//! enforcement point's and the network between the nodes is real. Multi-node consensus: a listener on every voting
+//! node, registered before the first proposal, and a structural peer-ready poll, never a fixed sleep.
+
+use super::super::action_evaluator::{AeEvidence, FleetState, HistoryScope, PreflightRefusal};
+use super::super::evidence_journal::{EvidenceJournal, EvidenceProfile};
+use super::super::http::{ae_preflight, Preflight};
+use crate::consensus::ConsensusConfig;
+use crate::{GossipAgent, GossipConfig, NodeId, ReferenceEvaluator, Rule};
+use std::sync::Arc;
+use std::time::Duration;
+
+const TEN_MIN: u64 = 600_000;
+const POINT: &str = "gateway:mcp/tools/call";
+
+fn port() -> u16 {
+    crate::test_util::alloc_port()
+}
+
+/// A node at `p` dialling `peers`, with a strict evidence journal and *at most `limit` posts in ten minutes* for the
+/// anonymous actor, counted at `scope`.
+async fn node(p: u16, peers: &[u16], limit: u32, scope: HistoryScope, tune: impl FnOnce(&mut GossipConfig)) -> Arc<GossipAgent> {
+    node_with(p, peers, posts(limit, TEN_MIN, scope), tune).await
+}
+
+/// *At most `limit` posts in `window_ms`* for the anonymous actor, counted at `scope` under the counter `c-posts`.
+fn posts(limit: u32, window_ms: u64, scope: HistoryScope) -> ReferenceEvaluator {
+    ReferenceEvaluator::new("rev-k2")
+        .with_catalogue("cat-k2", "1")
+        .map_action("tools/call", "*")
+        .allow(Rule::new(crate::PRINCIPAL_ANONYMOUS, "tools/call", "tool:post").at_most(limit, window_ms).scoped(scope, "c-posts"))
+}
+
+/// A node at `p` dialling `peers`, with a strict evidence journal and `policy`.
+async fn node_with(p: u16, peers: &[u16], policy: ReferenceEvaluator, tune: impl FnOnce(&mut GossipConfig)) -> Arc<GossipAgent> {
+    let mut cfg = GossipConfig {
+        bind_address: "127.0.0.1".parse().unwrap(),
+        bind_port: p,
+        bootstrap_peers: peers.iter().map(|q| NodeId::new("127.0.0.1", *q).unwrap()).collect(),
+        ..GossipConfig::default()
+    };
+    tune(&mut cfg);
+    let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", p).unwrap(), cfg));
+    let dir = std::env::temp_dir().join(format!("k2-fleet-{p}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    agent.with_evidence_journal(EvidenceJournal::open(dir.join("evidence.log"), EvidenceProfile::Strict).unwrap());
+    agent.with_action_evaluator(Arc::new(policy));
+    agent.start().await.unwrap();
+    agent
+}
+
+async fn until(cond: impl Fn() -> bool, within: Duration) -> bool {
+    let deadline = std::time::Instant::now() + within;
+    while std::time::Instant::now() < deadline {
+        if cond() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    cond()
+}
+
+/// Structural readiness: every node sees `n - 1` peers and its history index has been read.
+async fn ready(nodes: &[&Arc<GossipAgent>]) {
+    let n = nodes.len();
+    for a in nodes {
+        let ctx = Arc::clone(&a.task_ctx);
+        let others: Vec<String> = nodes.iter().map(|o| o.node_id().to_string()).filter(|o| *o != a.node_id().to_string()).collect();
+        assert!(
+            until(
+                || ctx.peers.pin().len() + 1 >= n
+                    && ctx.history_index.get().is_some_and(|i| matches!(
+                        i.view("gateway", "probe", crate::HistoryRequest { window_ms: 1, max_entries: 1 }, 1).0,
+                        crate::History::View(_)
+                    ))
+                    // Every other node's tally heartbeat has arrived (it is written from start).
+                    && others.iter().all(|o| mycelium_core::ops::kv_get(&ctx, &super::heartbeat_key(o)).is_some()),
+                Duration::from_secs(20),
+            )
+            .await,
+            "the mesh forms, the history is read and every heartbeat has arrived"
+        );
+    }
+}
+
+/// One limited call at `a`'s gateway.
+async fn post(a: &Arc<GossipAgent>) -> Preflight {
+    ae_preflight(&a.task_ctx, None, "tools/call", "tool:post", &serde_json::json!({}), &serde_json::json!({}), POINT).await
+}
+
+fn admitted(p: &Preflight) -> Option<&AeEvidence> {
+    match p {
+        Preflight::Proceed(e) => Some(e),
+        _ => None,
+    }
+}
+
+fn refusal(p: &Preflight) -> &PreflightRefusal {
+    match p {
+        Preflight::Refuse(r) => r,
+        Preflight::Proceed(_) => panic!("admitted, expected a refusal"),
+        Preflight::Inert => panic!("inert, expected a refusal"),
+    }
+}
+
+fn said(r: &PreflightRefusal) -> String {
+    let d = r.decision();
+    format!("{} {} {}", d.reason, d.checked.join(" "), d.errors.join(" "))
+}
+
+/// **The exact scope admits at most N across three gateways under concurrent calls** — twelve calls, four at each
+/// gateway at once, under *at most three in ten minutes*: at most three are admitted, each holding a different seat
+/// decided by consensus; once the seats are full, every gateway denies, naming the scope.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn the_consensus_scope_admits_at_most_n_across_three_gateways_under_concurrent_calls() {
+    let (p1, p2, p3) = (port(), port(), port());
+    let a = node(p1, &[], 3, HistoryScope::FleetConsensus, |_| {}).await;
+    let b = node(p2, &[p1], 3, HistoryScope::FleetConsensus, |_| {}).await;
+    let c = node(p3, &[p1, p2], 3, HistoryScope::FleetConsensus, |_| {}).await;
+    let _listeners: Vec<_> =
+        [&a, &b, &c].iter().map(|n| n.consensus().start_consensus_listener(ConsensusConfig::default())).collect();
+    ready(&[&a, &b, &c]).await;
+
+    let mut calls = Vec::new();
+    for gw in [&a, &b, &c] {
+        for _ in 0..4 {
+            let gw = Arc::clone(gw);
+            calls.push(tokio::spawn(async move { post(&gw).await }));
+        }
+    }
+    let mut outcomes = Vec::new();
+    for call in calls {
+        outcomes.push(call.await.unwrap());
+    }
+    let seats: Vec<_> = outcomes
+        .iter()
+        .filter_map(admitted)
+        .map(|e| {
+            let h = e.history.as_ref().expect("a fleet decision carries what it read");
+            assert_eq!(h.fleet.len(), 1, "{h:?}");
+            assert_eq!(h.fleet[0].counter.scope, HistoryScope::FleetConsensus, "the decision names its scope");
+            assert_eq!(h.seats.len(), 1, "an admitted call holds a seat: {h:?}");
+            h.seats[0].seat
+        })
+        .collect();
+    assert!(!seats.is_empty() && seats.len() <= 3, "at most three of twelve concurrent calls admitted: {seats:?}");
+    let mut distinct = seats.clone();
+    distinct.sort_unstable();
+    distinct.dedup();
+    assert_eq!(distinct.len(), seats.len(), "each admitted call holds its own seat: {seats:?}");
+    for r in outcomes.iter().filter_map(|o| match o {
+        Preflight::Refuse(r) => Some(r),
+        _ => None,
+    }) {
+        assert!(said(r).contains("fleet_consensus"), "every refusal names the scope: {r:?}");
+    }
+
+    // Filled to the limit, sequentially: then every gateway denies — an authority deciding no, naming the scope.
+    let mut total = seats.len();
+    for gw in [&a, &b, &c].iter().cycle().take(6) {
+        let out = post(gw).await;
+        if admitted(&out).is_some() {
+            total += 1;
+            continue;
+        }
+        if total == 3 {
+            let r = refusal(&out);
+            assert!(matches!(r, PreflightRefusal::Denied(_)), "full seats deny: {r:?}");
+            assert!(said(r).contains("fleet_consensus"), "{r:?}");
+        }
+    }
+    assert!(total <= 3, "the fleet admitted {total} under a limit of three");
+    for gw in [&a, &b, &c] {
+        if total == 3 {
+            let out = post(gw).await;
+            assert!(matches!(refusal(&out), PreflightRefusal::Denied(_)), "{:?}", refusal(&out));
+        }
+    }
+    for n in [a, b, c] {
+        n.shutdown().await;
+    }
+}
+
+/// Sequentially, the exact scope admits exactly N across gateways — the first three calls, wherever they land — and
+/// the fourth is denied at a gateway that admitted nothing itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn the_consensus_scope_admits_exactly_n_spread_over_gateways() {
+    let (p1, p2) = (port(), port());
+    let a = node(p1, &[], 3, HistoryScope::FleetConsensus, |_| {}).await;
+    let b = node(p2, &[p1], 3, HistoryScope::FleetConsensus, |_| {}).await;
+    let _listeners: Vec<_> =
+        [&a, &b].iter().map(|n| n.consensus().start_consensus_listener(ConsensusConfig::default())).collect();
+    ready(&[&a, &b]).await;
+
+    for (i, gw) in [&a, &a, &a].iter().enumerate() {
+        let out = post(gw).await;
+        assert!(admitted(&out).is_some(), "call {i} is within the fleet's limit: {:?}", refusal(&out));
+    }
+    // A per-point count would admit three more at `b`; the fleet's counter admits none.
+    let out = post(&b).await;
+    let r = refusal(&out);
+    assert!(matches!(r, PreflightRefusal::Denied(_)), "{r:?}");
+    assert!(said(r).contains("fleet_consensus"), "{r:?}");
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **No quorum gives `Indeterminate`**: a peer that does not vote leaves a two-node cluster without a quorum, so no
+/// seat can be decided and the limited call is not established — never admitted, never denied.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn without_a_quorum_the_consensus_scope_is_not_established() {
+    let (p1, p2) = (port(), port());
+    let a = node(p1, &[], 3, HistoryScope::FleetConsensus, |_| {}).await;
+    // `b` runs no consensus listener: it is a peer that never votes.
+    let b = node(p2, &[p1], 3, HistoryScope::FleetConsensus, |_| {}).await;
+    let _listener = a.consensus().start_consensus_listener(ConsensusConfig::default());
+    ready(&[&a, &b]).await;
+
+    let out = post(&a).await;
+    let r = refusal(&out);
+    assert!(matches!(r, PreflightRefusal::NotEstablished(_)), "no quorum is not established: {r:?}");
+    let text = said(r);
+    assert!(text.contains("fleet_consensus") && text.contains("no quorum"), "{text}");
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **The tally converges and refuses after convergence**: two permits at `a`; once `a`'s tally has reached `b`, `b`
+/// admits the third and refuses the fourth — and `a`, once `b`'s tally reaches it, refuses too. Every decision names
+/// the scope, says it is approximate, and carries its coverage.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn the_tally_scope_converges_and_refuses_after_convergence() {
+    let (p1, p2) = (port(), port());
+    let a = node(p1, &[], 3, HistoryScope::FleetTally, |_| {}).await;
+    let b = node(p2, &[p1], 3, HistoryScope::FleetTally, |_| {}).await;
+    ready(&[&a, &b]).await;
+
+    for i in 0..2 {
+        let out = post(&a).await;
+        let e = admitted(&out).unwrap_or_else(|| panic!("permit {i} at a: {:?}", refusal(&out)));
+        let h = e.history.as_ref().unwrap();
+        assert_eq!(h.fleet[0].counter.scope, HistoryScope::FleetTally);
+        assert!(e.checked.iter().any(|c| c.contains("history scope=fleet_tally") && c.contains(crate::FLEET_TALLY_CAVEAT)), "{:?}", e.checked);
+    }
+    // Convergence, observed: `b` holds `a`'s heartbeat and a tally entry with both permits.
+    let a_id = a.node_id().to_string();
+    let bctx = Arc::clone(&b.task_ctx);
+    assert!(
+        until(
+            || {
+                let prefix = format!("{}{a_id}/c/", super::TALLY_PREFIX);
+                mycelium_core::ops::kv_get(&bctx, &super::heartbeat_key(&a_id)).is_some()
+                    && bctx.kv_state.store.pin().iter().any(|(k, e)| {
+                        k.starts_with(&prefix)
+                            && e.data.as_ref().and_then(|v| serde_json::from_slice::<serde_json::Value>(v).ok())
+                                .is_some_and(|v| v["t"].as_array().is_some_and(|t| t.len() >= 2))
+                    })
+            },
+            Duration::from_secs(20),
+        )
+        .await,
+        "a's tally reaches b"
+    );
+    let out = post(&b).await;
+    let e = admitted(&out).unwrap_or_else(|| panic!("the third, at b: {:?}", refusal(&out)));
+    match &e.history.as_ref().unwrap().fleet[0].state {
+        FleetState::Tally { counted, publishers, .. } => {
+            assert_eq!(*counted, 2, "a's two, summed at b");
+            assert!(publishers.contains(&a_id), "a is in the coverage: {publishers:?}");
+        }
+        other => panic!("{other:?}"),
+    }
+    let out = post(&b).await;
+    let r = refusal(&out);
+    assert!(matches!(r, PreflightRefusal::Denied(_)), "the fourth, after convergence: {r:?}");
+    assert!(said(r).contains("fleet_tally") && said(r).contains("approximate"), "{r:?}");
+
+    let actx = Arc::clone(&a.task_ctx);
+    let b_id = b.node_id().to_string();
+    assert!(
+        until(|| mycelium_core::ops::kv_get(&actx, &super::heartbeat_key(&b_id)).is_some(), Duration::from_secs(20)).await,
+        "b's tally reaches a"
+    );
+    assert!(
+        until(
+            || {
+                matches!(
+                    super::establish(
+                        &actx,
+                        &[crate::FleetCounter::new(HistoryScope::FleetTally, "c-posts", 3, TEN_MIN)],
+                        "gateway",
+                        crate::PRINCIPAL_ANONYMOUS,
+                        actx.hlc.decision_now_ms(),
+                    )[0].state,
+                    FleetState::Tally { counted: 3, .. }
+                )
+            },
+            Duration::from_secs(20),
+        )
+        .await,
+        "a sums b's permit"
+    );
+    let out = post(&a).await;
+    assert!(matches!(refusal(&out), PreflightRefusal::Denied(_)), "{:?}", refusal(&out));
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **Unknown coverage is not established**: a node that has heard from no peer cannot say whose tallies it is
+/// missing, so a tally rule decides nothing — not an empty tally, not a permit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_isolated_node_does_not_establish_a_tally() {
+    let a = node(port(), &[], 3, HistoryScope::FleetTally, |_| {}).await;
+    ready(&[&a]).await;
+    let out = post(&a).await;
+    let r = refusal(&out);
+    assert!(matches!(r, PreflightRefusal::NotEstablished(_)), "{r:?}");
+    let text = said(r);
+    assert!(text.contains("fleet_tally") && text.contains("view of the fleet is not established"), "{text}");
+    a.shutdown().await;
+}
+
+/// **Stale coverage is not established**: a peer whose heartbeat is older than `control_max_staleness_ms` may have
+/// admitted calls this node cannot see, so its count is not zero and the tally decides nothing, naming the peer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_stale_publisher_makes_the_tally_not_established() {
+    let (p1, p2) = (port(), port());
+    let a = node(p1, &[], 3, HistoryScope::FleetTally, |_| {}).await;
+    let b = node(p2, &[p1], 3, HistoryScope::FleetTally, |_| {}).await;
+    ready(&[&a, &b]).await;
+
+    // A member `b` hears from — never started, so no real heartbeat can overwrite the forgery — that last published
+    // ten minutes ago.
+    let silent = NodeId::new("127.0.0.1", port()).unwrap();
+    b.task_ctx.peers.pin().insert(silent.clone(), mycelium_core::sim_seam::mono_instant());
+    let a_id = silent.to_string();
+    let stale = serde_json::json!({ "as_of": b.task_ctx.hlc.decision_now_ms() - TEN_MIN, "enforces": true });
+    let _ = mycelium_core::ops::kv_set(
+        &b.task_ctx,
+        Arc::from(super::heartbeat_key(&a_id).as_str()),
+        bytes::Bytes::from(serde_json::to_vec(&stale).unwrap()),
+    );
+    let out = post(&b).await;
+    let r = refusal(&out);
+    assert!(matches!(r, PreflightRefusal::NotEstablished(_)), "{r:?}");
+    let text = said(r);
+    assert!(text.contains("fleet_tally") && text.contains("stale") && text.contains(&a_id), "{text}");
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **Through a door, not only the function**: three posts over `/mcp` at gateway `a` fill the fleet's counter, so a
+/// call reaching gateway `b` is denied — the doors run `ae_preflight`, and the count is the fleet's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn the_mcp_door_counts_into_the_fleet_counter() {
+    let (p1, p2, http) = (port(), port(), port());
+    let any_post = |scope| {
+        ReferenceEvaluator::new("rev-k2")
+            .with_catalogue("cat-k2", "1")
+            .map_action("tools/call", "*")
+            .allow(Rule::new(crate::PRINCIPAL_ANONYMOUS, "tools/call", "*").at_most(3, TEN_MIN).scoped(scope, "c-posts"))
+    };
+    let start = |p: u16, peers: Vec<u16>, http_port: Option<u16>| async move {
+        let cfg = GossipConfig {
+            bind_address: "127.0.0.1".parse().unwrap(),
+            bind_port: p,
+            http_port,
+            bootstrap_peers: peers.iter().map(|q| NodeId::new("127.0.0.1", *q).unwrap()).collect(),
+            ..GossipConfig::default()
+        };
+        let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", p).unwrap(), cfg));
+        let dir = std::env::temp_dir().join(format!("k2-door-{p}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        agent.with_evidence_journal(EvidenceJournal::open(dir.join("evidence.log"), EvidenceProfile::Strict).unwrap());
+        agent.with_action_evaluator(Arc::new(any_post(HistoryScope::FleetConsensus)));
+        agent.start().await.unwrap();
+        agent
+    };
+    let a = start(p1, vec![], Some(http)).await;
+    let b = start(p2, vec![p1], None).await;
+    let _listeners: Vec<_> =
+        [&a, &b].iter().map(|n| n.consensus().start_consensus_listener(ConsensusConfig::default())).collect();
+    ready(&[&a, &b]).await;
+    let _tool = a.mcp().register_mcp_tool("post", serde_json::json!({"type": "object", "properties": {}}), |_args| async {
+        Ok(serde_json::json!("ran"))
+    });
+    let client = reqwest::Client::new();
+    let call = || async {
+        client
+            .post(format!("http://127.0.0.1:{http}/mcp"))
+            .json(&serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                      "params": {"name": "post", "arguments": {}}}))
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap()
+    };
+    assert!(
+        until(|| a.task_ctx.kv_state.store.pin().keys().any(|k| k.starts_with("tools/post/")), Duration::from_secs(5)).await,
+        "the tool is registered"
+    );
+    for i in 0..3 {
+        let r = call().await;
+        assert!(r.get("error").is_none(), "post {i} over /mcp is within the fleet's limit: {r}");
+    }
+    let r = call().await;
+    assert_eq!(r["error"]["code"], -32030, "the fourth over /mcp is denied: {r}");
+    let out = post(&b).await;
+    let r = refusal(&out);
+    assert!(matches!(r, PreflightRefusal::Denied(_)) && said(r).contains("fleet_consensus"), "{r:?}");
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+// ── #642's review, round 1 ──────────────────────────────────────────────────────────────────────
+
+/// A limited call by `actor` on `resource` at `a`'s gateway.
+async fn call_as(a: &Arc<GossipAgent>, actor: &str, resource: &str, point: &str) -> Preflight {
+    let who = super::super::gateway_caller::ResolvedPrincipal { principal: actor.to_string(), scopes: Vec::new() };
+    ae_preflight(&a.task_ctx, Some(&who), "tools/call", resource, &serde_json::json!({}), &serde_json::json!({}), point).await
+}
+
+/// **Finding 1: a claim waiting on a quorum holds up no other call.** `b` never votes, so `a`'s claim for the
+/// anonymous actor waits out its ballots. Meanwhile a call by another actor whose history shares the anonymous
+/// actor's gate stripe, under a per-point limit, and an uncovered call by the anonymous actor itself, are decided at
+/// once — the claim runs after the stripe is released.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_claim_waiting_on_a_quorum_holds_up_no_other_call() {
+    let (p1, p2) = (port(), port());
+    let anon = crate::PRINCIPAL_ANONYMOUS;
+    // An actor on the anonymous actor's stripe, found against a scratch index of the same shape.
+    let scratch = super::super::evidence_journal::EvidenceJournal::open(
+        std::env::temp_dir().join(format!("k2-stripe-{p1}")).join("e.log"), EvidenceProfile::Strict,
+    ).unwrap();
+    let index = super::super::evidence_journal::HistoryIndex::new(&scratch);
+    let neighbour = (0..10_000)
+        .map(|i| format!("oidc:idp/u{i}"))
+        .find(|x| std::ptr::eq(index.gate(x), index.gate(anon)))
+        .expect("an actor on the same stripe");
+    let policy = posts(3, TEN_MIN, HistoryScope::FleetConsensus)
+        .allow(Rule::new(neighbour.clone(), "tools/call", "tool:read").at_most(3, TEN_MIN))
+        .allow(Rule::new(anon, "tools/call", "tool:free"));
+    let a = node_with(p1, &[], policy.clone(), |_| {}).await;
+    let b = node_with(p2, &[p1], policy, |_| {}).await; // runs no consensus listener: no quorum
+    let _listener = a.consensus().start_consensus_listener(ConsensusConfig::default());
+    ready(&[&a, &b]).await;
+
+    let claimer = Arc::clone(&a);
+    let claim = tokio::spawn(async move { post(&claimer).await });
+    tokio::time::sleep(Duration::from_millis(300)).await; // the claim is under way
+    let started = std::time::Instant::now();
+    let other = call_as(&a, &neighbour, "tool:read", POINT).await;
+    let uncovered = call_as(&a, anon, "tool:free", POINT).await;
+    let took = started.elapsed();
+    assert!(admitted(&other).is_some() && admitted(&uncovered).is_some(), "both are within their own rules");
+    assert!(took < Duration::from_secs(2), "neither waited on the claim: {took:?}");
+    assert!(!claim.is_finished(), "the claim was still waiting on its quorum");
+    let out = claim.await.unwrap();
+    assert!(matches!(refusal(&out), PreflightRefusal::NotEstablished(_)), "{:?}", refusal(&out));
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// A provider pair for the serve-loop tests (#642's review, N1, N2, N5): `a` enforces at the provider and serves
+/// `tool:slow@a` and the protected kind `depot.custom`; `b` never votes, so a claim at `a` waits out its quorum. The
+/// gateway client `oidc:idp/alice`, holding `mcp:invoke`, is limited at the exact scope by a rule that **requires that
+/// scope** — the shape of every guide and contract example; `b`'s own calls are uncovered.
+async fn provider_pair(tune_a: impl FnOnce(&mut GossipConfig)) -> (Arc<GossipAgent>, Arc<GossipAgent>, NodeId, NodeId) {
+    let (p1, p2) = (port(), port());
+    let a_id = NodeId::new("127.0.0.1", p1).unwrap();
+    let b_id = NodeId::new("127.0.0.1", p2).unwrap();
+    let node_of = super::super::gateway_caller::node_principal;
+    let policy = ReferenceEvaluator::new("rev-k2")
+        .with_catalogue("cat-k2", "1")
+        .map_action("tools/call", "*")
+        .map_action("depot.custom", "*")
+        .allow(
+            Rule::new(ALICE, "tools/call", format!("tool:slow@{a_id}"))
+                .requiring_scopes(["mcp:invoke"])
+                .at_most(3, TEN_MIN)
+                .scoped(HistoryScope::FleetConsensus, "c-slow"),
+        )
+        .allow(
+            Rule::new(ALICE, "depot.custom", format!("res:x@{a_id}"))
+                .requiring_scopes(["mcp:invoke"])
+                .at_most(3, TEN_MIN)
+                .scoped(HistoryScope::FleetConsensus, "c-custom"),
+        )
+        .allow(Rule::new(node_of(&b_id), "*", "*"));
+    let a = node_with(p1, &[], policy.clone(), |c| {
+        c.protected_rpc_kinds = vec!["depot.custom".into()];
+        tune_a(c);
+    })
+    .await;
+    let b = node_with(p2, &[p1], policy, |_| {}).await;
+    a.with_provider_enforcement();
+    let _listener = a.consensus().start_consensus_listener(ConsensusConfig::default());
+    std::mem::forget(_listener); // `a` votes for the life of the test; `b` never does
+    ready(&[&a, &b]).await;
+    (a, b, a_id, b_id)
+}
+
+const ALICE: &str = "oidc:idp/alice";
+
+/// `alice`'s call to `target`, framed by `from` as its gateway would, holding `mcp:invoke`.
+async fn alice_calls(
+    from: &Arc<GossipAgent>, target: &NodeId, kind: &str, resource: Option<&str>, app: Vec<u8>, within: Duration,
+) -> Result<bytes::Bytes, super::super::rpc::RpcError> {
+    let framed = super::super::gateway_caller::frame_with_context_and_mandate(
+        &from.task_ctx, target, ALICE, &["mcp:invoke".to_string()], bytes::Bytes::from(app), None, resource,
+    )
+    .expect("an envelope");
+    super::super::rpc::rpc_call_framed(&from.task_ctx, target.clone(), Arc::from(kind), framed, within).await
+}
+
+fn slow_call() -> Vec<u8> {
+    serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "slow", "arguments": {}}})
+        .to_string()
+        .into_bytes()
+}
+
+/// **Finding 1 and N1, at the provider:** a check waiting on a claim does not stall its tool's serve loop — for a
+/// rule that **requires a scope**, decided from the envelope the check itself builds. `alice`'s call (holding
+/// `mcp:invoke`) waits on a quorum `b` will not give, while `b`'s call to the same tool is answered at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_provider_claim_does_not_stall_its_tool_loop() {
+    let (a, b, a_id, _) = provider_pair(|_| {}).await;
+    let _tool = a.mcp().register_mcp_tool("slow", serde_json::json!({"type": "object"}), |_args| async { Ok(serde_json::json!("ran")) });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (from, to) = (Arc::clone(&a), a_id.clone());
+    let hers = tokio::spawn(async move { alice_calls(&from, &to, "mcp.invoke", None, slow_call(), Duration::from_secs(40)).await });
+    tokio::time::sleep(Duration::from_millis(300)).await; // alice's check is waiting on its claim
+    let started = std::time::Instant::now();
+    let theirs = b.service().rpc_call(a_id.clone(), "mcp.invoke", slow_call(), Duration::from_secs(3)).await;
+    let took = started.elapsed();
+    let body: serde_json::Value = serde_json::from_slice(&theirs.expect("answered within 3 s")).unwrap();
+    assert!(body.get("error").is_none(), "b's uncovered call ran: {body}");
+    assert!(took < Duration::from_secs(2), "the tool loop was not held by the claim: {took:?}");
+    let own: serde_json::Value = serde_json::from_slice(&hers.await.unwrap().expect("answered")).unwrap();
+    let text = own.to_string();
+    assert!(own.get("error").is_some() && text.contains("fleet_consensus"), "alice's claim found no quorum: {own}");
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **N2: the deferred checks are bounded.** With a bound of one, a second waiting call is left in the channel, so the
+/// loop stops draining it — the channel's own bound pushes back again — and `b`'s uncovered call behind it waits for
+/// the first claim to end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_full_set_of_deferred_checks_stops_draining_the_channel() {
+    let (a, b, a_id, _) = provider_pair(|_| {}).await;
+    super::super::provider_enforcement::TEST_DEFERRED_BOUND.pin().insert(a_id.to_string(), 1);
+    let _tool = a.mcp().register_mcp_tool("slow", serde_json::json!({"type": "object"}), |_args| async { Ok(serde_json::json!("ran")) });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut hers = Vec::new();
+    for _ in 0..2 {
+        let (from, to) = (Arc::clone(&a), a_id.clone());
+        hers.push(tokio::spawn(async move { alice_calls(&from, &to, "mcp.invoke", None, slow_call(), Duration::from_secs(60)).await }));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let started = std::time::Instant::now();
+    let theirs = b.service().rpc_call(a_id.clone(), "mcp.invoke", slow_call(), Duration::from_secs(60)).await;
+    let took = started.elapsed();
+    assert!(theirs.is_ok(), "b's call is answered in the end");
+    assert!(took > Duration::from_secs(2), "b's call waited behind the full set: {took:?}");
+    for h in hers {
+        let _ = h.await;
+    }
+    super::super::provider_enforcement::TEST_DEFERRED_BOUND.pin().remove(&a_id.to_string());
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **N2: a check that panics is answered**, `authority_not_established`, never left to time out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_deferred_check_that_panics_is_answered() {
+    let (a, b, a_id, _) = provider_pair(|_| {}).await;
+    super::TEST_PANIC_CLAIM.pin().insert(a_id.to_string(), ());
+    let _tool = a.mcp().register_mcp_tool("slow", serde_json::json!({"type": "object"}), |_args| async { Ok(serde_json::json!("ran")) });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let answered = alice_calls(&a, &a_id, "mcp.invoke", None, slow_call(), Duration::from_secs(10)).await;
+    super::TEST_PANIC_CLAIM.pin().remove(&a_id.to_string());
+    let body: serde_json::Value = serde_json::from_slice(&answered.expect("answered, not timed out")).unwrap();
+    assert!(body.to_string().contains("authority_not_established"), "{body}");
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **N5: a serve loop that ends answers what it was still deciding.** The MCP tool withdrawn, and an `rpc_rx`
+/// receiver dropped, each while `alice`'s claim waits on a quorum: both calls are answered at once with a refusal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_serve_loop_that_ends_answers_its_deferred_checks() {
+    let (a, b, a_id, _) = provider_pair(|_| {}).await;
+    let tool = a.mcp().register_mcp_tool("slow", serde_json::json!({"type": "object"}), |_args| async { Ok(serde_json::json!("ran")) });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (from, to) = (Arc::clone(&a), a_id.clone());
+    let hers = tokio::spawn(async move { alice_calls(&from, &to, "mcp.invoke", None, slow_call(), Duration::from_secs(40)).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let started = std::time::Instant::now();
+    drop(tool);
+    let body: serde_json::Value = serde_json::from_slice(&hers.await.unwrap().expect("answered")).unwrap();
+    assert!(started.elapsed() < Duration::from_secs(3), "answered when the loop ended: {:?}", started.elapsed());
+    assert!(body.to_string().contains("authority_not_established"), "{body}");
+
+    let mut rx = a.service().rpc_rx("depot.custom");
+    let resource = format!("res:x@{a_id}");
+    let (from, to) = (Arc::clone(&a), a_id.clone());
+    let hers = tokio::spawn(async move {
+        alice_calls(&from, &to, "depot.custom", Some(&resource), b"work".to_vec(), Duration::from_secs(40)).await
+    });
+    let started = std::time::Instant::now();
+    assert!(tokio::time::timeout(Duration::from_millis(800), rx.recv()).await.is_err(), "nothing is yielded while it waits");
+    drop(rx);
+    let body = hers.await.unwrap().expect("answered");
+    assert!(started.elapsed() < Duration::from_secs(3), "answered when the receiver was dropped: {:?}", started.elapsed());
+    assert!(String::from_utf8_lossy(&body).contains("authority_not_established"), "{}", String::from_utf8_lossy(&body));
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **Finding 2: a seat decided too late for its window does not admit.** A seat's lease is fixed when it is
+/// proposed and the call is admitted after the round; admitting one whose remaining lease is shorter than the window
+/// would let the seat reopen, and admit again, within one window. With the margin cut to half a second, a claim
+/// answered at once is admitted, and one delayed past the margin is not established — its seat stays held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_seat_decided_too_late_for_its_window_is_not_admitted() {
+    let (p1, p2) = (port(), port());
+    // A 1.5 s window and a 0.5 s margin: a lease of exactly two seconds, so a claim delayed 0.8 s leaves 1.2 s.
+    let a = node_with(p1, &[], posts(3, 1_500, HistoryScope::FleetConsensus), |_| {}).await;
+    let b = node_with(p2, &[p1], posts(3, 1_500, HistoryScope::FleetConsensus), |_| {}).await;
+    let _listeners: Vec<_> =
+        [&a, &b].iter().map(|n| n.consensus().start_consensus_listener(ConsensusConfig::default())).collect();
+    ready(&[&a, &b]).await;
+    let me = a.node_id().to_string();
+    super::TEST_CLAIM_HOOKS.pin().insert(me.clone(), (500, 0));
+    let out = post(&a).await;
+    assert!(admitted(&out).is_some(), "a claim inside the margin is admitted: {:?}", refusal(&out));
+    super::TEST_CLAIM_HOOKS.pin().insert(me.clone(), (500, 800));
+    let out = post(&a).await;
+    let r = refusal(&out);
+    assert!(matches!(r, PreflightRefusal::NotEstablished(_)), "{r:?}");
+    assert!(said(r).contains("decided too late"), "{r:?}");
+    super::TEST_CLAIM_HOOKS.pin().remove(&me);
+    assert!(super::seat_admissible(5_000, 4_000, 1_000) && !super::seat_admissible(5_000, 4_001, 1_000));
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **Finding 12: a seat is reclaimed after its window.** One seat in a one-second window: the first call holds it,
+/// the second is denied, and once the seat's lease has ended a third is admitted on the same seat.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_seat_is_reclaimed_after_its_window() {
+    let (p1, p2) = (port(), port());
+    let a = node_with(p1, &[], posts(1, 1_000, HistoryScope::FleetConsensus), |_| {}).await;
+    let b = node_with(p2, &[p1], posts(1, 1_000, HistoryScope::FleetConsensus), |_| {}).await;
+    let _listeners: Vec<_> =
+        [&a, &b].iter().map(|n| n.consensus().start_consensus_listener(ConsensusConfig::default())).collect();
+    ready(&[&a, &b]).await;
+    let first = post(&a).await;
+    let seat = admitted(&first).expect("the first holds the seat").history.as_ref().unwrap().seats[0].clone();
+    assert!(matches!(refusal(&post(&b).await), PreflightRefusal::Denied(_)), "the window is full");
+    let ctx = Arc::clone(&a.task_ctx);
+    let slot = seat.slot.clone();
+    assert!(until(|| super::seat_live(&ctx, &slot).is_none(), Duration::from_secs(10)).await, "the seat's lease ends");
+    let third = post(&b).await;
+    let again = admitted(&third).unwrap_or_else(|| panic!("reclaimed: {:?}", refusal(&third)));
+    assert_eq!(again.history.as_ref().unwrap().seats[0].slot, seat.slot, "the same seat, decided afresh");
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **Finding 12: the electorate decides the seats.** Under `consensus_require_electorate`, a seat outside an
+/// electorate is refused, so the limit is not established; once the fleet's `exclusive_default` electorate is
+/// declared, the seat is decided there and the call admitted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn under_a_required_electorate_the_seats_are_decided_in_it() {
+    use crate::config::{OnUnreadable, PersistenceConfig, SyncMode};
+    let p1 = port();
+    let base = std::env::temp_dir().join(format!("k2-electorate-{p1}"));
+    let _ = std::fs::remove_dir_all(&base);
+    let a = node_with(p1, &[], posts(3, TEN_MIN, HistoryScope::FleetConsensus), |c| {
+        c.consensus_require_electorate = true;
+        c.persistence = Some(PersistenceConfig {
+            base_path: base.clone(), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 1_000,
+            snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse,
+        });
+    })
+    .await;
+    let _listener = a.consensus().start_consensus_listener(ConsensusConfig::default());
+    ready(&[&a]).await;
+    let out = post(&a).await;
+    let r = refusal(&out);
+    assert!(matches!(r, PreflightRefusal::NotEstablished(_)) && said(r).contains("ElectorateNotGoverned"), "{r:?}");
+
+    a.mesh().join_group("council");
+    let ctx = Arc::clone(&a.task_ctx);
+    let member = format!("{}{}", crate::signal::grp_prefix("council"), a.node_id());
+    assert!(until(|| mycelium_core::ops::kv_get(&ctx, &member).is_some(), Duration::from_secs(5)).await);
+    let mut declared = false;
+    for _ in 0..5 {
+        if a.declare_electorate("council", true).await.is_ok() {
+            declared = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(declared, "the electorate is declared");
+    let out = post(&a).await;
+    assert!(admitted(&out).is_some(), "decided in the fleet's electorate: {:?}", refusal(&out));
+    a.shutdown().await;
+}
+
+/// **Finding 12: the gateway and the provider count apart, fleet-wide as at one node.** The gateway's three seats
+/// full, the provider check of the same rule still has its own three — a call the gateway admitted and the provider
+/// re-checks holds a seat at each, never two of one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn the_gateway_and_the_provider_count_apart() {
+    let (p1, p2) = (port(), port());
+    let a = node(p1, &[], 3, HistoryScope::FleetConsensus, |_| {}).await;
+    let b = node(p2, &[p1], 3, HistoryScope::FleetConsensus, |_| {}).await;
+    let _listeners: Vec<_> =
+        [&a, &b].iter().map(|n| n.consensus().start_consensus_listener(ConsensusConfig::default())).collect();
+    ready(&[&a, &b]).await;
+    for _ in 0..3 {
+        assert!(admitted(&post(&a).await).is_some());
+    }
+    assert!(matches!(refusal(&post(&a).await), PreflightRefusal::Denied(_)), "the gateway's seats are full");
+    let at_provider = call_as(&b, crate::PRINCIPAL_ANONYMOUS, "tool:post", "provider").await;
+    assert!(admitted(&at_provider).is_some(), "the provider counts apart: {:?}", refusal(&at_provider));
+    assert_ne!(super::seat_slot("c-posts", "gateway", "x", 0), super::seat_slot("c-posts", "provider", "x", 0));
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **Finding 12: a wrapper that does not forward `fleet_counters` decides `Indeterminate`.** It forwards the history
+/// methods but hides the inner evaluator's counters, so the enforcement point gives no fleet count and the
+/// fleet-limited rule is not established — closed, never a permit on a count nobody read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_wrapper_that_hides_the_fleet_counters_is_not_established() {
+    use crate::{ActionEnvelope, ActionEvaluator, Decision, History};
+    struct Wrapper(ReferenceEvaluator);
+    impl ActionEvaluator for Wrapper {
+        fn evaluate(&self, env: &ActionEnvelope) -> Decision {
+            self.0.evaluate(env)
+        }
+        fn mapping(&self, operation: &str, resource: &str) -> crate::ActionMapping {
+            self.0.mapping(operation, resource)
+        }
+        fn history_request(&self) -> Option<crate::HistoryRequest> {
+            self.0.history_request()
+        }
+        fn evaluate_with_history(&self, env: &ActionEnvelope, history: &History) -> Decision {
+            self.0.evaluate_with_history(env, history)
+        }
+    }
+    let p1 = port();
+    let mut cfg = GossipConfig { bind_address: "127.0.0.1".parse().unwrap(), bind_port: p1, ..GossipConfig::default() };
+    cfg.bootstrap_peers = Vec::new();
+    let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", p1).unwrap(), cfg));
+    let dir = std::env::temp_dir().join(format!("k2-wrapper-{p1}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    a.with_evidence_journal(EvidenceJournal::open(dir.join("evidence.log"), EvidenceProfile::Strict).unwrap());
+    a.with_action_evaluator(Arc::new(Wrapper(posts(3, TEN_MIN, HistoryScope::FleetConsensus))));
+    a.start().await.unwrap();
+    let _listener = a.consensus().start_consensus_listener(ConsensusConfig::default());
+    ready(&[&a]).await;
+    let out = post(&a).await;
+    let r = refusal(&out);
+    assert!(matches!(r, PreflightRefusal::NotEstablished(_)), "{r:?}");
+    assert!(said(r).contains("gave no count"), "{r:?}");
+    a.shutdown().await;
+}
+
+/// **Finding 3: a restarted node keeps its heartbeat fresh without admitting anything.** `a` restarts and admits
+/// nothing; after more than the staleness bound, `b`'s tally is still established — its heartbeat runs from start.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_restarted_node_keeps_its_heartbeat_fresh_without_permits() {
+    let (p1, p2) = (port(), port());
+    let tune = |c: &mut GossipConfig| c.control_max_staleness_ms = 1_500;
+    let a = node(p1, &[p2], 3, HistoryScope::FleetTally, tune).await;
+    let b = node(p2, &[p1], 3, HistoryScope::FleetTally, tune).await;
+    ready(&[&a, &b]).await;
+    let a_id = a.node_id().to_string();
+    a.shutdown().await;
+    drop(a);
+    // Whatever `b` last heard from `a` — its departed heartbeat, delivered by shutdown's best-effort flush, or its last
+    // live one — the restarted `a` must make current again without admitting anything.
+    let a = node(p1, &[p2], 3, HistoryScope::FleetTally, tune).await;
+    ready(&[&a, &b]).await;
+    tokio::time::sleep(Duration::from_millis(2_000)).await; // past the staleness bound, a admitting nothing
+    let out = post(&b).await;
+    let e = admitted(&out).unwrap_or_else(|| panic!("a's coverage is current: {:?}", refusal(&out)));
+    match &e.history.as_ref().unwrap().fleet[0].state {
+        FleetState::Tally { publishers, .. } => assert!(publishers.contains(&a_id), "{publishers:?}"),
+        other => panic!("{other:?}"),
+    }
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **Finding 4: a tally entry is withdrawn once every time in it has aged out.**
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn an_aged_tally_entry_is_withdrawn() {
+    let (p1, p2) = (port(), port());
+    let a = node_with(p1, &[], posts(3, 300, HistoryScope::FleetTally), |_| {}).await;
+    let b = node_with(p2, &[p1], posts(3, 300, HistoryScope::FleetTally), |_| {}).await;
+    ready(&[&a, &b]).await;
+    assert!(admitted(&post(&a).await).is_some());
+    let ctx = Arc::clone(&a.task_ctx);
+    let prefix = format!("{}{}/c/", super::TALLY_PREFIX, a.node_id());
+    assert_eq!(mycelium_core::ops::kv_scan_prefix(&ctx, &prefix).len(), 1, "the permit is published");
+    assert_eq!(super::withdraw_aged_entries(&ctx, ctx.hlc.decision_now_ms()), 0, "still inside its window");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(super::withdraw_aged_entries(&ctx, ctx.hlc.decision_now_ms()), 1);
+    assert!(mycelium_core::ops::kv_scan_prefix(&ctx, &prefix).is_empty(), "withdrawn");
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **Finding 6: a peer with no heartbeat is unknown coverage**, never counted as zero.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_peer_with_no_heartbeat_makes_the_tally_not_established() {
+    let (p1, p2) = (port(), port());
+    let a = node(p1, &[], 3, HistoryScope::FleetTally, |_| {}).await;
+    let b = node(p2, &[p1], 3, HistoryScope::FleetTally, |_| {}).await;
+    ready(&[&a, &b]).await;
+    // A member `b` hears from that has published nothing.
+    let silent = NodeId::new("127.0.0.1", port()).unwrap();
+    b.task_ctx.peers.pin().insert(silent.clone(), mycelium_core::sim_seam::mono_instant());
+    let out = post(&b).await;
+    let r = refusal(&out);
+    assert!(matches!(r, PreflightRefusal::NotEstablished(_)), "{r:?}");
+    assert!(said(r).contains(&silent.to_string()) && said(r).contains("no heartbeat"), "{r:?}");
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **Finding 8: a heartbeat from beyond the clock-drift bound is unknown coverage**, not fresh.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_heartbeat_from_the_future_makes_the_tally_not_established() {
+    let (p1, p2) = (port(), port());
+    let a = node(p1, &[], 3, HistoryScope::FleetTally, |_| {}).await;
+    let b = node(p2, &[p1], 3, HistoryScope::FleetTally, |c| c.max_clock_drift_ms = 1_000).await;
+    ready(&[&a, &b]).await;
+    // A never-started member, so no real heartbeat can overwrite the forgery.
+    let silent = NodeId::new("127.0.0.1", port()).unwrap();
+    b.task_ctx.peers.pin().insert(silent.clone(), mycelium_core::sim_seam::mono_instant());
+    let a_id = silent.to_string();
+    let future = serde_json::json!({ "as_of": b.task_ctx.hlc.decision_now_ms() + TEN_MIN, "enforces": true });
+    let _ = mycelium_core::ops::kv_set(
+        &b.task_ctx,
+        Arc::from(super::heartbeat_key(&a_id).as_str()),
+        bytes::Bytes::from(serde_json::to_vec(&future).unwrap()),
+    );
+    let out = post(&b).await;
+    let r = refusal(&out);
+    assert!(matches!(r, PreflightRefusal::NotEstablished(_)), "{r:?}");
+    assert!(said(r).contains("in the future") && said(r).contains(&a_id), "{r:?}");
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **N3: a graceful leave keeps the tally established.** `b` admits one permit and shuts down: its last word is a
+/// departed heartbeat, its entry kept, so `a`'s tally decisions stay established — counting `b`'s permit, not
+/// waiting for `b` — through the leave and after failure detection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_graceful_leave_keeps_the_tally_established() {
+    let (p1, p2) = (port(), port());
+    let a = node(p1, &[], 3, HistoryScope::FleetTally, |_| {}).await;
+    let b = node(p2, &[p1], 3, HistoryScope::FleetTally, |_| {}).await;
+    ready(&[&a, &b]).await;
+    assert!(admitted(&post(&b).await).is_some(), "b admits one");
+    let b_id = b.node_id().to_string();
+    let actx = Arc::clone(&a.task_ctx);
+    let prefix = format!("{}{b_id}/c/", super::TALLY_PREFIX);
+    assert!(until(|| !mycelium_core::ops::kv_scan_prefix(&actx, &prefix).is_empty(), Duration::from_secs(10)).await, "b's entry reaches a");
+    b.shutdown().await;
+    assert!(
+        until(
+            || mycelium_core::ops::kv_get(&actx, &super::heartbeat_key(&b_id))
+                .is_some_and(|v| String::from_utf8_lossy(&v).contains("\"departed\":true")),
+            Duration::from_secs(5)
+        )
+        .await,
+        "b's departed heartbeat reaches a"
+    );
+    let out = post(&a).await;
+    let e = admitted(&out).unwrap_or_else(|| panic!("a's tally stays established through b's leave: {:?}", refusal(&out)));
+    match &e.history.as_ref().unwrap().fleet[0].state {
+        FleetState::Tally { counted, publishers, .. } => {
+            assert_eq!(*counted, 1, "b's permit still counts");
+            assert!(publishers.contains(&b_id), "{publishers:?}");
+        }
+        other => panic!("{other:?}"),
+    }
+    a.shutdown().await;
+}
+
+/// **N6: an entry an enforcing peer published that this node cannot read is unknown coverage**, never zero.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn an_unreadable_tally_entry_makes_the_tally_not_established() {
+    let (p1, p2) = (port(), port());
+    let a = node(p1, &[], 3, HistoryScope::FleetTally, |_| {}).await;
+    let b = node(p2, &[p1], 3, HistoryScope::FleetTally, |_| {}).await;
+    ready(&[&a, &b]).await;
+    let a_id = a.node_id().to_string();
+    let key = super::tally_key(&a_id, "c-posts", "gateway", crate::PRINCIPAL_ANONYMOUS);
+    let _ = mycelium_core::ops::kv_set(&b.task_ctx, Arc::from(key.as_str()), bytes::Bytes::from_static(b"not a tally"));
+    let out = post(&b).await;
+    let r = refusal(&out);
+    assert!(matches!(r, PreflightRefusal::NotEstablished(_)), "{r:?}");
+    assert!(said(r).contains("cannot read") && said(r).contains(&a_id), "{r:?}");
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **N7: a permit published while an aged entry is being withdrawn is not lost.** The withdrawal reads the aged entry
+/// and pauses before its delete; a permit for the same actor lands meanwhile. Under the tally lock it waits for the
+/// withdrawal and writes after it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_permit_published_during_a_withdrawal_is_not_lost() {
+    let a = node(port(), &[], 3, HistoryScope::FleetTally, |_| {}).await;
+    let ctx = Arc::clone(&a.task_ctx);
+    let counter = crate::FleetCounter::new(HistoryScope::FleetTally, "c-race", 3, 300);
+    let now = ctx.hlc.decision_now_ms();
+    super::publish_permit(&ctx, &counter, "gateway", "actor", now - 1_000); // aged out of its 300 ms window
+    let key = super::tally_key(&ctx.node_id.to_string(), "c-race", "gateway", "actor");
+    super::TEST_WITHDRAW_PAUSE_MS.pin().insert(ctx.node_id.to_string(), 300);
+    let wctx = Arc::clone(&ctx);
+    let withdrawal = std::thread::spawn(move || super::withdraw_aged_entries(&wctx, now));
+    std::thread::sleep(Duration::from_millis(100)); // the withdrawal has read the aged entry and is pausing
+    super::publish_permit(&ctx, &counter, "gateway", "actor", now);
+    assert_eq!(withdrawal.join().unwrap(), 1);
+    super::TEST_WITHDRAW_PAUSE_MS.pin().remove(&ctx.node_id.to_string());
+    let entry = mycelium_core::ops::kv_get(&ctx, &key).expect("the fresh permit survives the withdrawal");
+    assert!(String::from_utf8_lossy(&entry).contains(&now.to_string()), "{}", String::from_utf8_lossy(&entry));
+    a.shutdown().await;
+}
+
+/// **A routed call takes part in fleet counting** (post-360 rows R and K2 together): a routing door's preflight is
+/// decided and settled as any other, so its permit claims a seat, and its evidence carries both the seat and the route.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_routed_call_claims_a_seat_and_carries_its_route() {
+    use crate::agent::route_facts::{Destination, Locality, RouteFacts};
+    let (p1, p2) = (port(), port());
+    let a = node(p1, &[], 1, HistoryScope::FleetConsensus, |_| {}).await;
+    let b = node(p2, &[p1], 1, HistoryScope::FleetConsensus, |_| {}).await;
+    let _listeners: Vec<_> =
+        [&a, &b].iter().map(|n| n.consensus().start_consensus_listener(ConsensusConfig::default())).collect();
+    ready(&[&a, &b]).await;
+    let route = RouteFacts::new(Destination::new("llm/m@n1", Locality::InDomain));
+    let routed = |gw: Arc<GossipAgent>, route: RouteFacts| async move {
+        super::super::http::ae_preflight_routed(
+            &gw.task_ctx, None, "tools/call", "tool:post", &serde_json::json!({}), &serde_json::json!({}), POINT, Some(&route),
+        )
+        .await
+    };
+    let first = routed(Arc::clone(&a), route.clone()).await;
+    let e = admitted(&first).unwrap_or_else(|| panic!("the routed call is within the limit: {:?}", refusal(&first)));
+    assert_eq!(e.history.as_ref().unwrap().seats.len(), 1, "the routed permit holds a seat");
+    assert!(e.route.is_some(), "and its evidence carries the route");
+    let second = routed(Arc::clone(&b), route).await;
+    let r = refusal(&second);
+    assert!(matches!(r, PreflightRefusal::Denied(_)) && said(r).contains("fleet_consensus"), "the seat is the fleet's: {r:?}");
+    a.shutdown().await;
+    b.shutdown().await;
+}

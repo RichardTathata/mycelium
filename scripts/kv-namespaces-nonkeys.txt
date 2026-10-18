@@ -28,6 +28,7 @@ consistent/           # consensus_handle.rs + http/overlay.rs: the overlay-consi
 leader/               # consensus_handle.rs + http/overlay.rs: the leader-election slot
 electorate/           # electorate.rs: the electorate slots `electorate/{group}/{epoch}` (a genesis), `…/{group}/retire` (a retirement), `…/{group}/carried/{predecessor}` (a migration's completion) and `…/{group}/drop/{predecessor}` (a dropped predecessor) (P2) — slot names; their values live under consensus/committed/
 capauthz/             # agent/mod.rs: the cluster-proposed capability-authz policy's slot (sys/capauthz/ has its own row)
+ae-seat/              # agent/fleet_history.rs SEAT_SLOT_PREFIX: a fleet history counter's seat slot (row K2) — its keys are consensus/life/{escaped slot}/…, which have rows
 
 # ── election ring names and governor actuator names (inputs to rendezvous / the control contract)
 blackboard/           # mycelium-blackboard lib.rs: the primary election's ring name (blackboard/{ns}.primary)

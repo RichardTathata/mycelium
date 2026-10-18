@@ -73,6 +73,7 @@ the notice.
 | 50 | a trace consumer or alert keyed on `prov.probe`'s `probe_failed` for a confined re-probe; a probe that replaces one of its own declared paths on every run | unreleased (post-360 row M's follow-up, #641; `prov.probe` rule revision 3) | read the three new refusal reasons — `confinement_unavailable`, `confinement_failed` and `confinement_changed` — beside `probe_failed`, which now means only that the probe failed; move a step that replaces a declared path into the activation `command` | No — behaviour: a confined re-probe re-resolves a replaced path, a refused re-resolution is recorded by its own reason, and a probe that replaces its own declared path fails as `confinement_changed` ([§50](#50-provprobe-is-rule-revision-3-a-confined-re-probe-re-resolves-and-three-new-refusal-reasons-unreleased-post-360-plan-row-ms-follow-up-641)) |
 | 51 | an exhaustive `ConfineDecl { .. }` or `Profile { .. }` literal; an exhaustive `match` on `activation_sandbox::Refusal`; a confined command relying on the stem's environment; two `[[activation]]`s for one `ns/name` | after 2.35.0 (post-360 rows L and M, the activation egress proxy, #644) | `..Default::default()` for `ConfineDecl` (or `egress: None`); a `_` arm, or `Refusal::EgressUnavailable`; name a needed variable in `[activation.confine] env`; merge duplicate activations | **Partly** — the literals and the `match` fail to compile; the behaviour changes do not ([§51](#51-an-activation-egress-proxy-confinedecl-and-profile-gained-a-field-refusal-a-variant-after-2350-post-360-plan-rows-l-and-m)) |
 | 52 | an exhaustive `Rule { .. }` literal; an evaluator adapter held to the contract suite that cannot express `PolicyClause::ForbidClassAt`; a `mycelium-reason` caller matching `RouteError` exhaustively or building `Routed`; a client relying on the façade answering `403` at the first refused provider | Unreleased (post-360 row R) — also: an `llm-meta` ad from a gateway client is `403 reserved_namespace`; `GET /gateway/rpc/serve/{kind}` for `llm.invoke`, `mcp.invoke`, `skill.invoke`, `rpc.result` or `bulk.result` is `403 protected_kind`, for a kind the node serves in process `403 served_in_process`, and an in-process registration closes client streams on its kind; a classifying router routes nothing without an evaluator; a catalogue entry providing `llm-meta/…` is never installed; on a classifying router a caller with no bound floor cannot declare below the default class, and the header given twice or to a router that classifies nothing is `400` | `Rule::new` and its builders; decline the five `route_*` cases in `declared_limits` or express them; a `RouteError::Unclassifiable` arm; read `refused` / `data.refused_destinations` | Yes for the literals and the `match`; no for the façade — a refused provider is now passed over for the next, and `403` comes only when every candidate is refused |
+| 53 | an exhaustive `Rule`, `HistoryLimit`, `HistoryView` or `HistoryInput` literal; an evaluator that wraps another and forwards only `evaluate`, `history_request` and `evaluate_with_history`; a fleet-consensus-limited request's position in an `rpc_rx` stream under provider enforcement | unreleased (post-360 row K2) | `Rule::at_most(..)` and `.scoped(scope, counter_id)`; `fleet: Vec::new()` (and `seats: Vec::new()`) in a view or input literal; a wrapper forwards `fleet_counters` too | **Yes** for the literals (a new field); `HistoryScope` was already `#[non_exhaustive]`, so a `_` arm takes the new scopes; no for a wrapper — it compiles, and its fleet-limited rules decide `Indeterminate`; no for the order — behaviour |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -1706,3 +1707,46 @@ is passed over for the next** — before, the façade answered `403` at the firs
 **Not claimed.** The class is declared, never detected; the locality is the provider's declaration, never observed; a
 provider re-checking with its own evaluator sees neither (a class rule there decides not established).
 
+## 53. A history-limited rule may count across the fleet: two new scopes, and four structs gained a field (unreleased, post-360 plan row K2)
+
+**What changes.** `HistoryScope` gains `FleetConsensus` (exact: a counter of seats agreed by consensus, each permit
+claiming one before it is admitted; `Indeterminate` without a quorum) and `FleetTally` (approximate: the sum of every
+enforcement point's gossiped tally; available without a quorum, detection not prevention, not established when its
+coverage is not). A rule chooses with `Rule::at_most(n, w).scoped(scope, counter_id)` — the counter id is opaque, the
+policy's own, and what other members see; without `scoped` it counts at the enforcement point, as before. The
+reference evaluator does not establish an exact fleet limit over `*`. `ActionEvaluator` gains `fleet_counters`
+(default: none), which names the counter a decision on an envelope would rely on; the enforcement point gives each
+counter's state to the evaluator in `HistoryView::fleet` and, on a permit, claims a seat in every consensus counter
+before admitting it — after releasing the per-actor history gate.
+
+**Behaviour, for every node built with the `gateway` and `tls` features:** it writes a heartbeat under
+`sys/ae-tally/{node}/hb` from `start()` (every third of `control_max_staleness_ms`, at most every ten seconds), whether
+or not any policy uses the tally, and at a graceful shutdown leaves a last heartbeat marked departed. Under provider enforcement, a protected request the evaluator puts under a
+fleet-consensus counter is checked beside the serve loop, so `rpc_rx` and the MCP tool loop yield it when its claim
+completes rather than strictly in arrival order; every other request is checked inline, as before, and handlers still
+run one at a time.
+
+**Will the compiler tell me?** For four struct literals: `Rule` gained `counter`, `HistoryLimit` gained `scope`,
+`HistoryView` gained `fleet`, `HistoryInput` gained `fleet` and `seats` — build a rule with `Rule::new` and its
+builders, and give a view or an input literal `fleet: Vec::new()` (and `seats: Vec::new()`). `HistoryScope` was
+already `#[non_exhaustive]`, so a match outside this crate already has a `_` arm — make it fail closed. `AeEvidence`'s
+schema stays `mycelium.ae/evidence/1`: `history.fleet` and `history.seats` are absent when empty, so a record without
+a fleet count serialises exactly as before; on a fleet decision `history.scope` names the fleet scope. **Not for a
+wrapper**: an evaluator that wraps another and does not forward `fleet_counters` compiles, and hides the inner
+evaluator's counters, so every fleet-limited rule behind it decides `Indeterminate`.
+
+**Migration.** None for a policy without fleet-scoped limits. To count across the fleet, both scopes need an evidence
+journal (`with_evidence_journal`), as the per-point count does — the fleet count travels in the history view. The exact
+scope also needs a consensus listener on the voting nodes and, under `consensus_require_electorate`, a declared
+`exclusive_default` electorate. The tally scope needs every member built with `gateway` **and** `tls`, and is not
+established on a node that has heard from fewer than `control_min_peers_heard` peers.
+
+**Upgrade order.** Tally rules fail closed — `Indeterminate` — until every member runs this release built with both
+features: an older member, or one built without them, publishes no heartbeat and is unknown coverage. Deploy the
+release fleet-wide before a policy names `HistoryScope::FleetTally`.
+
+**An adapter held to the contract suite** (`ae_contract::run`) meets six new cases (`fleet_*`) and a new clause,
+`PolicyClause::AllowAtMostAcross` (with a `counter` id). One that cannot express it must decline the cases and list
+them in `declared_limits`, or `Report::conformant` fails — the private companion's Cedar adapter, on its next re-pin.
+The suite binds a fixture's fleet state to whatever counter the evaluator names, so an adapter's own counter keys are
+held to the same cases.

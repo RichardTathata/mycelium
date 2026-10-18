@@ -47,8 +47,9 @@
 //! adopter reading that sentence should be able to find out exactly what passing it buys them.
 
 use super::action_evaluator::{
-    ActionEnvelope, ActionEvaluator, ActionMapping, Decision, DecisionKind, Execution, History, HistoryEntry,
-    HistoryScope, HistoryView, PreflightRefusal, ReferenceEvaluator, Rule, Verdict, preflight, preflight_with_history,
+    ActionEnvelope, ActionEvaluator, ActionMapping, Decision, DecisionKind, Execution, FleetCount, FleetCounter,
+    FleetState, History, HistoryEntry, HistoryScope, HistoryView, PreflightRefusal, ReferenceEvaluator, Rule, Verdict,
+    preflight, preflight_with_history,
 };
 use super::route_facts::{ClassSource, DataClass, Destination, Locality};
 use mycelium_core::NodeId;
@@ -124,6 +125,26 @@ pub enum PolicyClause {
         /// The destination locality it forbids that class to reach.
         locality: Locality,
     },
+    /// `AllowAtMost`, counted **across the fleet** at `scope` (row K2): [`HistoryScope::FleetConsensus`] — an agreed
+    /// counter, exact — or [`HistoryScope::FleetTally`] — the gossiped tallies' sum, approximate. The enforcement
+    /// point establishes the count for the counter the evaluator names ([`ActionEvaluator::fleet_counters`]); a count
+    /// at another scope never satisfies it, and a count not established decides nothing.
+    AllowAtMostAcross {
+        /// Actor principal, or `*`.
+        actor: String,
+        /// Operation, or `*`.
+        operation: String,
+        /// Resource, or `*`.
+        resource: String,
+        /// How many the window may hold fleet-wide, the one being decided included.
+        count: u32,
+        /// How far back, in milliseconds.
+        window_ms: u64,
+        /// Which fleet scope counts it.
+        scope: HistoryScope,
+        /// The counter id the policy declares — opaque, so what other members see never names the rule.
+        counter: String,
+    },
     /// A clause name this policy uses that the evaluator has declared it does not support.
     ///
     /// The case that matters: an adapter must not silently ignore a clause it cannot evaluate,
@@ -163,6 +184,16 @@ impl PolicyClause {
             resource: resource.into(),
             class: class.into(),
             locality,
+        }
+    }
+
+    /// `AllowAtMostAcross`, with `&str` arguments.
+    pub fn allow_at_most_across(
+        actor: &str, operation: &str, resource: &str, count: u32, window_ms: u64, scope: HistoryScope, counter: &str,
+    ) -> Self {
+        Self::AllowAtMostAcross {
+            actor: actor.into(), operation: operation.into(), resource: resource.into(), count, window_ms, scope,
+            counter: counter.into(),
         }
     }
 
@@ -427,7 +458,10 @@ pub fn run_cases(subject: &dyn EvaluatorUnderTest, cases: &[ContractCase]) -> Re
             }
         }
 
-        let outcome = preflight_with_history(Some(&evaluator), &envelope, case.history.as_ref(), case.now_ms);
+        // Row K2: a case states a fleet counter's state by scope; the counter is the one this evaluator names for
+        // the envelope — its key is the evaluator's own, as the enforcement point would read it.
+        let history = case.history.as_ref().map(|h| bind_fleet_counters(h, evaluator.as_ref(), &envelope));
+        let outcome = preflight_with_history(Some(&evaluator), &envelope, history.as_ref(), case.now_ms);
         let (actual, decision) = match &outcome {
             Ok(Some(d)) => (Expected::Admitted, Some(d.clone())),
             // No evaluator attached is impossible here: one was just built.
@@ -821,6 +855,81 @@ pub fn cases() -> Vec<ContractCase> {
             must_mention: vec!["class".into()],
             revision: RevisionBinding::Matching,
         },
+        // ── Post-360 row K2: the fleet scopes ───────────────────────────────────────────────────
+        ContractCase {
+            id: "fleet_consensus_below_limit",
+            requirement: "an allowance limited across the fleet by an agreed counter admits an action while seats \
+                          remain, naming the scope it counted at",
+            policy: fleet_policy(HistoryScope::FleetConsensus),
+            envelope: base("oidc:idp/alice", "tools/call", "tool:post@n1"),
+            history: Some(fleet_history_of(now, HistoryScope::FleetConsensus, FleetState::Seats { held: 2 })),
+            now_ms: now,
+            expect: Expected::Admitted,
+            must_mention: vec![HistoryScope::FleetConsensus.label().to_string()],
+            revision: RevisionBinding::Matching,
+        },
+        ContractCase {
+            id: "fleet_consensus_at_limit",
+            requirement: "every seat of the fleet's agreed counter held: the next action is denied, naming the scope",
+            policy: fleet_policy(HistoryScope::FleetConsensus),
+            envelope: base("oidc:idp/alice", "tools/call", "tool:post@n1"),
+            history: Some(fleet_history_of(now, HistoryScope::FleetConsensus, FleetState::Seats { held: 3 })),
+            now_ms: now,
+            expect: Expected::Denied,
+            must_mention: vec![HistoryScope::FleetConsensus.label().to_string()],
+            revision: RevisionBinding::Matching,
+        },
+        ContractCase {
+            id: "fleet_tally_below_limit",
+            requirement: "an allowance limited across the fleet by the gossiped tallies admits below the sum, naming \
+                          the scope — the approximate one",
+            policy: fleet_policy(HistoryScope::FleetTally),
+            envelope: base("oidc:idp/alice", "tools/call", "tool:post@n1"),
+            history: Some(fleet_history_of(now, HistoryScope::FleetTally, tally(2))),
+            now_ms: now,
+            expect: Expected::Admitted,
+            must_mention: vec![HistoryScope::FleetTally.label().to_string()],
+            revision: RevisionBinding::Matching,
+        },
+        ContractCase {
+            id: "fleet_tally_at_limit",
+            requirement: "the tallies' sum at the limit: the next action is denied, naming the scope",
+            policy: fleet_policy(HistoryScope::FleetTally),
+            envelope: base("oidc:idp/alice", "tools/call", "tool:post@n1"),
+            history: Some(fleet_history_of(now, HistoryScope::FleetTally, tally(3))),
+            now_ms: now,
+            expect: Expected::Denied,
+            must_mention: vec![HistoryScope::FleetTally.label().to_string()],
+            revision: RevisionBinding::Matching,
+        },
+        ContractCase {
+            id: "fleet_coverage_not_established",
+            requirement: "a fleet count whose coverage could not be established is not an empty one: the limited \
+                          allowance is not established",
+            policy: fleet_policy(HistoryScope::FleetTally),
+            envelope: base("oidc:idp/alice", "tools/call", "tool:post@n1"),
+            history: Some(fleet_history_of(
+                now,
+                HistoryScope::FleetTally,
+                FleetState::NotEstablished("a publisher's tally is stale".into()),
+            )),
+            now_ms: now,
+            expect: Expected::NotEstablished,
+            must_mention: vec![HistoryScope::FleetTally.label().to_string()],
+            revision: RevisionBinding::Matching,
+        },
+        ContractCase {
+            id: "fleet_rule_not_satisfied_by_the_point",
+            requirement: "a fleet-scoped allowance is not decided on the enforcement point's own count: given only \
+                          the point's history, it is not established",
+            policy: fleet_policy(HistoryScope::FleetConsensus),
+            envelope: base("oidc:idp/alice", "tools/call", "tool:post@n1"),
+            history: Some(history_of(now, &[1_800], true)),
+            now_ms: now,
+            expect: Expected::NotEstablished,
+            must_mention: vec![HistoryScope::FleetConsensus.label().to_string()],
+            revision: RevisionBinding::Matching,
+        },
     ]
 }
 
@@ -842,6 +951,48 @@ fn routed(class: Option<&str>, locality: Option<Locality>) -> ActionEnvelope {
     env.data_class = class.map(|c| DataClass::new(c, ClassSource::Declared));
     env.destination = locality.map(|l| Destination::new("llm/m@n1", l));
     env
+}
+
+/// *At most three posts in 500 ms, across the fleet at `scope`* (row K2).
+fn fleet_policy(scope: HistoryScope) -> PolicyIntent {
+    PolicyIntent::new(
+        "rev-1",
+        vec![PolicyClause::allow_at_most_across("oidc:idp/alice", "tools/call", "tool:post@n1", 3, 500, scope, "c-posts")],
+    )
+}
+
+/// A tally summing `counted` over two publishers.
+fn tally(counted: u32) -> FleetState {
+    FleetState::Tally { counted, publishers: vec!["127.0.0.1:9000".into(), "127.0.0.1:9001".into()], stalest_ms: 20 }
+}
+
+/// Row K2's binding: the fixture's fleet entries say only a scope and a state; the counters are whatever the
+/// evaluator names for the envelope, each given the state its scope's fixture states — so an evaluator whose counter
+/// key is its own (any adapter's) is held to the same case. A counter named at a scope the case gives no state for is
+/// left out, as an enforcement point that could not read it would leave it.
+fn bind_fleet_counters(history: &History, evaluator: &dyn ActionEvaluator, envelope: &ActionEnvelope) -> History {
+    let History::View(view) = history else { return history.clone() };
+    if view.fleet.is_empty() {
+        return history.clone();
+    }
+    let fleet = evaluator
+        .fleet_counters(envelope)
+        .into_iter()
+        .filter_map(|c| {
+            let state = view.fleet.iter().find(|f| f.counter.scope == c.scope)?.state.clone();
+            Some(FleetCount::new(c, state))
+        })
+        .collect();
+    History::View(HistoryView { fleet, ..view.clone() })
+}
+
+/// A fleet history fixture (row K2): no permits at this point, and the counter at `scope` in `state`.
+fn fleet_history_of(as_of_ms: u64, scope: HistoryScope, state: FleetState) -> History {
+    let History::View(view) = history_of(as_of_ms, &[], true) else { unreachable!("a view") };
+    History::View(HistoryView {
+        fleet: vec![FleetCount::new(FleetCounter::new(scope, "bound by the suite", 3, 500), state)],
+        ..view
+    })
 }
 
 /// A history at `as_of_ms` holding a permitted `tools/call` on `tool:post@n1` at each time in `at`.
@@ -867,6 +1018,7 @@ fn history_of(as_of_ms: u64, at: &[u64], complete: bool) -> History {
         complete,
         // An incomplete view here is missing something as recent as its clock: no window over it is complete.
         omitted_through_ms: (!complete).then_some(as_of_ms),
+        fleet: Vec::new(),
     })
 }
 
@@ -906,6 +1058,12 @@ impl EvaluatorUnderTest for ReferenceUnderTest {
                 PolicyClause::ForbidClassAt { actor, operation, resource, class, locality } => {
                     ev.prohibit(Rule::new(actor, operation, resource).for_class(class).at_locality(*locality))
                 }
+                PolicyClause::AllowAtMostAcross { actor, operation, resource, count, window_ms, scope, counter } => ev.allow(
+                    Rule::new(actor, operation, resource)
+                        .requiring_scopes(["mcp:invoke"])
+                        .at_most(*count, *window_ms)
+                        .scoped(*scope, counter.clone()),
+                ),
                 PolicyClause::UnsupportedClause(name) => ev.unsupported_clause(name),
                 // No wildcard arm, deliberately. `PolicyClause` is `#[non_exhaustive]` for
                 // downstream adapters, but in this crate the match is exhaustive — so adding a
@@ -962,6 +1120,8 @@ mod tests {
         Rationed { who: String, what: String, on: String, room: u32, span: u64 },
         /// A refusal of one data class reaching one destination locality (row R).
         RefuseFlow { who: String, what: String, on: String, data: String, to: Locality },
+        /// `Rationed`, counted across the fleet at `at` (row K2).
+        FleetRationed { who: String, what: String, on: String, room: u32, span: u64, at: HistoryScope },
     }
 
     /// A table-driven evaluator. Prohibitions are scanned **last** here and still win, which is a
@@ -988,6 +1148,18 @@ mod tests {
 
         fn evaluate(&self, env: &ActionEnvelope) -> Decision {
             self.evaluate_with_history(env, &History::Unavailable("this table was consulted without a history".into()))
+        }
+
+        // The table names its own counter key — a different derivation from the reference's, on purpose.
+        fn fleet_counters(&self, env: &ActionEnvelope) -> Vec<FleetCounter> {
+            self.entries.iter().find_map(|e| match e {
+                Entry::FleetRationed { who, what, on, room, span, at }
+                    if glob(who, &env.actor) && glob(what, &env.operation) && glob(on, &env.resource) =>
+                {
+                    Some(vec![FleetCounter::new(*at, format!("table:{what}:{on}"), *room, *span)])
+                }
+                _ => None,
+            }).unwrap_or_default()
         }
 
         fn evaluate_with_history(&self, env: &ActionEnvelope, history: &History) -> Decision {
@@ -1101,6 +1273,38 @@ mod tests {
                 }
             }
 
+            // Fleet-rationed entries: the enforcement point's count of this table's own counter, and nothing else.
+            for entry in &self.entries {
+                if let Entry::FleetRationed { who, what, on, room, at, .. } = entry
+                    && hits(who, what, on)
+                {
+                    let label = at.label();
+                    let key = format!("table:{what}:{on}");
+                    let History::View(seen) = history else {
+                        return Decision::indeterminate(format!("fleet ration at {label}: no history"), &self.revision)
+                            .with_errors(["history: none available"]);
+                    };
+                    let Some(count) = seen.fleet.iter().find(|f| f.counter.scope == *at && f.counter.key == key) else {
+                        return Decision::indeterminate(format!("fleet ration at {label}: no count for this table's counter"), &self.revision)
+                            .with_errors([format!("{label}: not given")]);
+                    };
+                    let used = match &count.state {
+                        FleetState::Seats { held } => *held,
+                        FleetState::Tally { counted, .. } => *counted,
+                        FleetState::NotEstablished(why) => {
+                            return Decision::indeterminate(format!("fleet ration at {label} unsettled"), &self.revision)
+                                .with_errors([why.clone()]);
+                        }
+                    };
+                    if used >= *room {
+                        return Decision::deny(format!("fleet ration of {room} exhausted ({used} used at {label})"), &self.revision)
+                            .checking(["entry.fleet_rationed", label]);
+                    }
+                    return Decision::permit(format!("{used} of {room} used at {label}"), &self.revision)
+                        .checking(["entry.fleet_rationed", label]);
+                }
+            }
+
             Decision::indeterminate(
                 "no entry in this table covers the request",
                 &self.revision,
@@ -1159,6 +1363,16 @@ mod tests {
                             on: resource.clone(),
                             data: class.clone(),
                             to: *locality,
+                        })
+                    }
+                    PolicyClause::AllowAtMostAcross { actor, operation, resource, count, window_ms, scope, .. } => {
+                        entries.push(Entry::FleetRationed {
+                            who: actor.clone(),
+                            what: operation.clone(),
+                            on: resource.clone(),
+                            room: *count,
+                            span: *window_ms,
+                            at: *scope,
                         })
                     }
                     PolicyClause::UnsupportedClause(name) => cannot_evaluate.push(name.clone()),
@@ -1249,6 +1463,9 @@ mod tests {
             fn evaluate_with_history(&self, env: &ActionEnvelope, history: &History) -> Decision {
                 Decision { policy_revision: self.0.clone(), ..self.1.evaluate_with_history(env, history) }
             }
+            fn fleet_counters(&self, env: &ActionEnvelope) -> Vec<FleetCounter> {
+                self.1.fleet_counters(env)
+            }
         }
 
         struct Subject;
@@ -1294,6 +1511,12 @@ mod tests {
                         PolicyClause::ForbidClassAt { actor, operation, resource, class, locality } => {
                             inner.prohibit(Rule::new(actor, operation, resource).for_class(class).at_locality(*locality))
                         }
+                        PolicyClause::AllowAtMostAcross { actor, operation, resource, count, window_ms, scope, counter } => inner.allow(
+                            Rule::new(actor, operation, resource)
+                                .requiring_scopes(["mcp:invoke"])
+                                .at_most(*count, *window_ms)
+                                .scoped(*scope, counter.clone()),
+                        ),
                         PolicyClause::UnsupportedClause(name) => inner.unsupported_clause(name),
                     };
                 }

@@ -501,6 +501,7 @@ impl HistoryIndex {
             entries,
             complete: false,
             omitted_through_ms: omitted,
+            fleet: Vec::new(),
         };
         let complete = view.complete_for(request.window_ms);
         (History::View(HistoryView { complete, ..view }), version)
