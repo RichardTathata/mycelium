@@ -244,8 +244,10 @@ async fn serve_stream_loop(
     #[cfg(all(feature = "gateway", feature = "tls"))]
     let mut pending: super::provider_enforcement::DeferredChecks<(super::rpc::RpcRequest, Option<serde_json::Value>)> =
         super::provider_enforcement::DeferredChecks::new(&agent_ctx);
-    'serve: loop {
+    loop {
         // Stream what is ready while the stream asks.
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        let mut gone = false;
         #[cfg(all(feature = "gateway", feature = "tls"))]
         while want.is_some() && let Some((req, caller, admission)) = ready.pop_front() {
             let event = serve_event(&ctx, &req, caller.clone(), &principal);
@@ -253,9 +255,14 @@ async fn serve_stream_loop(
                 Some(Ok(())) => super::provider_enforcement::park(&agent_ctx, req.sender(), req.nonce(), admission),
                 _ => {
                     ready.push_front((req, caller, admission));
-                    break 'serve;
+                    gone = true;
+                    break;
                 }
             }
+        }
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        if gone {
+            break;
         }
         #[cfg(all(feature = "gateway", feature = "tls"))]
         let take = want.is_some() && ready.is_empty() && !pending.is_full();
