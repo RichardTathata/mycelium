@@ -190,9 +190,9 @@ pub struct Profile {
     /// `read` then `write`: each path as declared, expanded but not resolved — what the currency check
     /// walks again, so a flipped ancestor symlink or a component replaced below a root is seen.
     pub(crate) sources: Vec<PathBuf>,
-    /// The writable roots (the placement directory, then each `write`), canonical: below one, every
+    /// The writable roots' identities (the placement directory, then each `write`): at or below one, every
     /// component is walked without following a symlink.
-    pub(crate) roots: Vec<PathBuf>,
+    pub(crate) roots: Vec<(u64, u64)>,
 }
 
 impl Profile {
@@ -212,7 +212,7 @@ impl Profile {
             return Some(Path::new("(an incomplete profile)"));
         }
         for (i, (p, src)) in paths.iter().zip(&self.sources).enumerate() {
-            let again = if i == 0 { walk_placement_dir(src) } else { walk(src, &self.roots, &src.display().to_string()) };
+            let again = walk(src, &self.roots, &src.display().to_string(), i == 0);
             if !again.is_ok_and(|w| w.path == **p && w.id == self.ids[i]) {
                 return Some(p);
             }
@@ -236,20 +236,6 @@ struct Walked {
     fd:   Option<std::os::fd::OwnedFd>,
 }
 
-/// Is `q` strictly below one of `roots`? Compared as the kernel sees it: `q`'s canonical parent and its own
-/// last component (which may be the symlink being looked for).
-fn below_a_root(q: &Path, roots: &[PathBuf]) -> bool {
-    let nq = match (q.parent(), q.file_name()) {
-        (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => canon_or(parent).join(name),
-        _ => canon_or(q),
-    };
-    roots.iter().any(|r| nq != *r && nq.starts_with(r))
-}
-
-fn canon_or(p: &Path) -> PathBuf {
-    canonical(p).unwrap_or_else(|_| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()))
-}
-
 fn refused_symlink(raw: &str, p: &Path, at: &Path) -> Refusal {
     Refusal::Failed(format!(
         "confine path {raw:?} ({}) passes through a symlink at {} — a declared path is never a symlink, nor reached \
@@ -259,40 +245,31 @@ fn refused_symlink(raw: &str, p: &Path, at: &Path) -> Refusal {
     ))
 }
 
-/// The placement directory: the operator's (it may be reached through a symlink), canonicalised and then
-/// identified without following one at its last component.
-fn walk_placement_dir(dir: &Path) -> Result<Walked, Refusal> {
-    let canon = canonical(dir).map_err(|e| Refusal::Failed(format!("the placement directory {}: {e}", dir.display())))?;
-    walk(&canon, &[], &dir.display().to_string())
-}
+/// The most symlinks one walk follows (the kernel's own bound is 32–40).
+const MAX_FOLLOWS: usize = 40;
 
-/// Resolve one declared path (review of #641, round 2, finding A). The **anchor** is the longest prefix
-/// that is not below a writable root — the operator's side, where a symlink is followed: it is
-/// canonicalised and opened. Every component after it (at least the last) is opened from its parent's
-/// descriptor with `O_NOFOLLOW`, so a symlink there is refused at whatever moment it was planted; the
-/// identity comes from what was opened. The name the profile carries is the path's canonical, on-disk
-/// spelling (case and normalisation as stored — finding B), accepted only if it sits under the anchor at
-/// the walked depth and names the same device and inode.
-fn walk(src: &Path, roots: &[PathBuf], raw: &str) -> Result<Walked, Refusal> {
-    use rustix::fs::{openat, statat, AtFlags, Mode, OFlags, CWD};
+/// Resolve one declared path by a walk from `/` (review of #641, rounds 2 and 3). Each component is
+/// looked at from its parent's descriptor without following it. A symlink is followed only while the walk
+/// has not yet entered a **writable root** — a directory whose (device, inode) is one of `roots` (the
+/// placement directory and each `write` path) — so the operator's own links outside every root are
+/// followed (`/tmp` on macOS, `/opt/models/current`, a shortcut into a root), and from the moment the
+/// walk is at or below a root nothing is: a symlink there, at any component and whenever it was planted,
+/// is refused, and so is a `..`. Roots are recognised by identity, not by spelling, so a path that reaches
+/// a root through any name is treated as inside it (finding H1), the placement directory included
+/// (finding H2).
+///
+/// The identity comes from what the walk opened. The name the profile carries (which Seatbelt matches)
+/// is the path's canonical, on-disk spelling (case and normalisation as stored — round 2, B), accepted
+/// only if it has the walked depth and names the walked identity. `allow_final_link`: the declared path's
+/// own last component may be the operator's symlink (the placement directory); for every other declared
+/// path it is refused, as `[activation.confine]` has always said.
+fn walk(src: &Path, roots: &[(u64, u64)], raw: &str, allow_final_link: bool) -> Result<Walked, Refusal> {
+    use rustix::fs::{openat, readlinkat, statat, AtFlags, Mode, OFlags, CWD};
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStrExt;
     let missing = |e: &dyn std::fmt::Display| {
         Refusal::Failed(format!("confine path {raw:?} ({}): {e} — a declared path must exist when the activation runs", src.display()))
     };
-    let abs = std::path::absolute(src).map_err(|e| missing(&e))?;
-    let comps: Vec<std::path::Component> = abs.components().collect();
-    // The first component below a root; the anchor ends just before it (and at the parent at the latest).
-    let mut first_below = comps.len().saturating_sub(1).max(1);
-    let mut q = PathBuf::new();
-    for (i, c) in comps.iter().enumerate() {
-        q.push(c);
-        if i >= 1 && below_a_root(&q, roots) {
-            first_below = first_below.min(i);
-            break;
-        }
-    }
-    let anchor: PathBuf = comps[..first_below].iter().collect();
-    let anchor_canon = canonical(&anchor).map_err(|e| missing(&e))?;
-    at_stage("anchored");
     // A directory opened for lookup only; a kernel that does not know the search flag answers `EINVAL`, and
     // the open is retried read-only.
     let open_dir = |at: &dyn std::os::fd::AsFd, name: &Path, follow: bool| -> rustix::io::Result<std::os::fd::OwnedFd> {
@@ -302,65 +279,113 @@ fn walk(src: &Path, roots: &[PathBuf], raw: &str) -> Result<Walked, Refusal> {
             other => other,
         }
     };
-    let mut fd = open_dir(&CWD, &anchor_canon, true).map_err(|e| missing(&e))?;
-    let tail = &comps[first_below..];
-    let mut walked_to = anchor.clone();
-    for (k, c) in tail.iter().enumerate() {
-        let name = match c {
-            std::path::Component::Normal(n) => *n,
-            std::path::Component::CurDir => continue,
-            _ => {
-                return Err(Refusal::Failed(format!(
-                    "confine path {raw:?} ({}): `..` below a writable root is not resolved — name the path directly",
-                    src.display()
-                )))
+    let abs = std::path::absolute(src).map_err(|e| missing(&e))?;
+    // The components still to resolve, front first; `true` marks the declared path's own last component.
+    let mut queue: std::collections::VecDeque<(OsString, bool)> = std::collections::VecDeque::new();
+    let push_path = |queue: &mut std::collections::VecDeque<(OsString, bool)>, p: &Path, declared_last: bool| -> bool {
+        let comps: Vec<std::path::Component> = p.components().collect();
+        let n = comps.len();
+        let mut absolute = false;
+        for (i, c) in comps.into_iter().enumerate().rev() {
+            match c {
+                std::path::Component::RootDir => absolute = true,
+                std::path::Component::CurDir | std::path::Component::Prefix(_) => {}
+                std::path::Component::ParentDir => queue.push_front((OsString::from(".."), false)),
+                std::path::Component::Normal(n_) => queue.push_front((n_.to_os_string(), declared_last && i + 1 == n)),
             }
-        };
-        walked_to.push(name);
-        let last = k + 1 == tail.len();
-        // A symlink at this component is refused by name, whatever the open would have said.
-        let st = statat(&fd, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|e| missing(&e))?;
-        if rustix::fs::FileType::from_raw_mode(st.st_mode).is_symlink() {
-            return Err(refused_symlink(raw, src, &walked_to));
         }
-        if !last {
-            fd = open_dir(&fd, Path::new(name), false).map_err(|e| {
-                if e == rustix::io::Errno::LOOP || e == rustix::io::Errno::NOTDIR {
-                    refused_symlink(raw, src, &walked_to)
-                } else {
-                    missing(&e)
-                }
-            })?;
+        absolute
+    };
+    push_path(&mut queue, &abs, true);
+    // The walk's state: the directories from `/` (descriptor, name), and whether a root has been entered.
+    let root_fd = open_dir(&CWD, Path::new("/"), true).map_err(|e| missing(&e))?;
+    let id_of = |fd: &std::os::fd::OwnedFd| rustix::fs::fstat(fd).map(|st| dev_ino(&st));
+    let mut inside = roots.contains(&id_of(&root_fd).map_err(|e| missing(&e))?);
+    let mut stack: Vec<(std::os::fd::OwnedFd, OsString)> = Vec::new();
+    let here = |stack: &Vec<(std::os::fd::OwnedFd, OsString)>| -> PathBuf {
+        let mut p = PathBuf::from("/");
+        for (_, n) in stack {
+            p.push(n);
+        }
+        p
+    };
+    let mut follows = 0;
+    at_stage("anchored");
+    while let Some((name, declared_last)) = queue.pop_front() {
+        let at = here(&stack).join(&name);
+        if name == ".." {
+            if inside {
+                return Err(Refusal::Failed(format!(
+                    "confine path {raw:?} ({}): `..` at or below a writable root is not resolved — name the path directly",
+                    src.display()
+                )));
+            }
+            stack.pop();
             continue;
         }
-        let (id, final_fd) = final_component(&fd, name).map_err(|e| {
-            if e == rustix::io::Errno::LOOP { refused_symlink(raw, src, &walked_to) } else { missing(&e) }
+        let cur: &std::os::fd::OwnedFd = stack.last().map(|(fd, _)| fd).unwrap_or(&root_fd);
+        let st = statat(cur, &name, AtFlags::SYMLINK_NOFOLLOW).map_err(|e| missing(&e))?;
+        let last = queue.is_empty();
+        if rustix::fs::FileType::from_raw_mode(st.st_mode).is_symlink() {
+            // Followed only on the operator's side, and never as a declared path's own last component.
+            if inside || (declared_last && !allow_final_link) {
+                return Err(refused_symlink(raw, src, &at));
+            }
+            follows += 1;
+            if follows > MAX_FOLLOWS {
+                return Err(missing(&"too many levels of symbolic links"));
+            }
+            let target = readlinkat(cur, &name, Vec::new()).map_err(|e| missing(&e))?;
+            let target = PathBuf::from(std::ffi::OsStr::from_bytes(target.as_bytes()));
+            if push_path(&mut queue, &target, false) {
+                stack.clear();
+                inside = roots.contains(&id_of(&root_fd).map_err(|e| missing(&e))?);
+            }
+            continue;
+        }
+        if !last {
+            let fd = open_dir(cur, Path::new(&name), false).map_err(|e| {
+                if e == rustix::io::Errno::LOOP || e == rustix::io::Errno::NOTDIR { refused_symlink(raw, src, &at) } else { missing(&e) }
+            })?;
+            inside = inside || roots.contains(&id_of(&fd).map_err(|e| missing(&e))?);
+            stack.push((fd, name));
+            continue;
+        }
+        let (id, final_fd) = final_component(cur, &name).map_err(|e| {
+            if e == rustix::io::Errno::LOOP { refused_symlink(raw, src, &at) } else { missing(&e) }
         })?;
-        let id = match id {
-            Some(id) => id,
-            None => return Err(refused_symlink(raw, src, &walked_to)),
-        };
+        let Some(id) = id else { return Err(refused_symlink(raw, src, &at)) };
         at_stage("walked");
-        // The on-disk spelling, accepted only when it names what was opened: under the anchor, at the walked
-        // depth, the same device and inode, not a symlink.
+        // The on-disk spelling, accepted only when it names what was opened: the walked depth, the same
+        // device and inode, not a symlink.
+        let walked_to = at;
         let path = canonical(&abs).map_err(|e| missing(&e))?;
-        let depth = |p: &Path| p.components().count();
-        let same = path.starts_with(&anchor_canon)
-            && depth(&path) == depth(&anchor_canon) + tail.iter().filter(|c| matches!(c, std::path::Component::Normal(_))).count()
+        let same = path.components().count() == walked_to.components().count()
             && statat(CWD, &path, AtFlags::SYMLINK_NOFOLLOW).is_ok_and(|m| {
                 !rustix::fs::FileType::from_raw_mode(m.st_mode).is_symlink() && dev_ino(&m) == id
             });
         if !same {
             return Err(Refusal::Failed(format!(
-                "confine path {raw:?} ({}) resolved to {}, which is not what was opened — a declared path changed while it \
-                 was resolved; refused",
+                "confine path {raw:?} ({}) resolved to {}, which is not what was opened at {} — a declared path changed \
+                 while it was resolved; refused",
                 src.display(),
-                path.display()
+                path.display(),
+                walked_to.display()
             )));
         }
         return Ok(Walked { path, id, fd: final_fd });
     }
-    Err(missing(&"an empty path"))
+    // The path was `/` itself, or ended in `..`: name it directly.
+    Err(missing(&"a declared path must name a file or directory below `/`"))
+}
+
+/// The identity a root has now: its canonical path's (device, inode), followed — the starting set the
+/// walks then confirm (each root is itself a declared path, walked against this set).
+fn root_identity(p: &Path) -> Result<(u64, u64), Refusal> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(p)
+        .map(|m| (m.dev(), m.ino()))
+        .map_err(|e| Refusal::Failed(format!("confine path {}: {e} — a declared path must exist when the activation runs", p.display())))
 }
 
 /// A stat's (device, inode) — `u64` on Linux, narrower types on macOS.
@@ -431,9 +456,11 @@ pub fn prepare(c: &ConfineDecl, placed: &Path) -> Result<Profile, Refusal> {
             raw.to_string()
         })
     };
-    // Roots and prefixes compared as the kernel sees them (review follow-up 2, #636): an alias directory,
-    // `/tmp` against `/private/tmp`, a relative placement root.
-    let roots: Vec<PathBuf> = std::iter::once(dir.to_path_buf()).chain(c.write.iter().map(|w| expand(w))).map(|r| canon_or(&r)).collect();
+    // The writable roots by identity (review of #641 round 3): however a path is spelt — an alias
+    // directory, `/tmp` against `/private/tmp`, an operator shortcut into a root — the walk knows when it is
+    // inside one. The set is confirmed below: each root is itself walked, and must reach the same identity.
+    let root_paths: Vec<PathBuf> = std::iter::once(dir.to_path_buf()).chain(c.write.iter().map(|w| expand(w))).collect();
+    let roots: Vec<(u64, u64)> = root_paths.iter().map(|r| root_identity(r)).collect::<Result<_, _>>()?;
     at_stage("checked");
     let connect = c
         .connect
@@ -441,9 +468,17 @@ pub fn prepare(c: &ConfineDecl, placed: &Path) -> Result<Profile, Refusal> {
         .map(|e| mycelium::parse_confine_connect(e).map(|(host, port)| (host == "localhost", port)))
         .collect::<Result<Vec<_>, _>>()
         .map_err(Refusal::Failed)?;
-    let mut walked = vec![walk_placement_dir(dir)?];
+    let mut walked = vec![walk(dir, &roots, &dir.display().to_string(), true)?];
     for raw in c.read.iter().chain(&c.write) {
-        walked.push(walk(&expand(raw), &roots, raw)?);
+        walked.push(walk(&expand(raw), &roots, raw, false)?);
+    }
+    // Each root reached by its walk is the root the set named: the placement directory first, then each
+    // `write` (the last `c.write.len()` walks).
+    let walked_roots = std::iter::once(walked[0].id).chain(walked[walked.len() - c.write.len()..].iter().map(|w| w.id));
+    if !walked_roots.eq(roots.iter().copied()) {
+        return Err(Refusal::Failed(
+            "a writable root changed while the profile resolved (its walk reached another file than its name) — refused".into(),
+        ));
     }
     at_stage("resolved");
     let n_read = 1 + c.read.len();
@@ -1006,12 +1041,88 @@ mod tests {
             });
             let got = prepare(&c, &root.join("placed/blob"));
             PREPARE_STAGE_HOOK.with(|h| *h.borrow_mut() = None);
+            if combo == 0 {
+                assert!(got.is_ok(), "the plant: untouched, the profile resolves: {:?}", got.as_ref().err());
+            }
             let named: Vec<PathBuf> = got.as_ref().map(|p| p.read.iter().chain(&p.write).cloned().collect()).unwrap_or_default();
             let _ = std::fs::remove_dir_all(&root);
             assert!(
                 !named.iter().any(|p| p.starts_with(root.join("outside"))),
                 "combination {combo:06b} (bits: walked/anchored/rechecked/pinned/resolved/checked; 1 = link): the profile names {named:?}"
             );
+        }
+    }
+
+    /// Review of #641 round 3, finding H1: an operator symlink outside every root (`shortcut`) that points
+    /// into a write root's interior (`out/sub`) is followed — the operator's — but from the moment the
+    /// resolution enters the root nothing is followed, so a confined command that replaces `out/sub` with a
+    /// link out of the root is refused, and the profile resolved before it stops being current. Seen failing
+    /// first at `656388c0`: `prepare` named `outside/m` and `outside/w`, and the old profile stayed current.
+    #[test]
+    fn an_operator_symlink_into_a_write_roots_interior_cannot_be_redirected() {
+        const T: &str = "an_operator_symlink_into_a_write_roots_interior_cannot_be_redirected";
+        if !native_backend_or_skip(T) {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("confine-shortcut-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for d in ["placed", "out/sub/w", "outside/w"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let root = root.canonicalize().unwrap();
+        std::fs::write(root.join("out/sub/m"), b"inside").unwrap();
+        std::fs::write(root.join("outside/m"), b"outside").unwrap();
+        std::os::unix::fs::symlink("out/sub", root.join("shortcut")).unwrap();
+        let c = ConfineDecl {
+            write: vec![root.join("out").display().to_string(), root.join("shortcut/w").display().to_string()],
+            read: vec![root.join("shortcut/m").display().to_string()],
+            ..Default::default()
+        };
+        let placed = root.join("placed/blob");
+        let before = prepare(&c, &placed).expect("the plant: an operator shortcut into the root resolves while untouched");
+        assert!(before.read.contains(&root.join("out/sub/m")), "{:?}", before.read);
+        // What the confined command (write on `out`) can do.
+        std::fs::rename(root.join("out/sub"), root.join("out/sub.real")).unwrap();
+        std::os::unix::fs::symlink(root.join("outside"), root.join("out/sub")).unwrap();
+        let current = before.is_current();
+        let after = prepare(&c, &placed).map(|p| (p.read, p.write));
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!current, "the profile resolved before the redirect is not current after it");
+        match after {
+            Err(Refusal::Failed(m)) => assert!(m.contains("symlink"), "{m}"),
+            other => panic!("a redirect inside the write root must be refused, got {other:?}"),
+        }
+    }
+
+    /// Review of #641 round 3, finding H2: a placement directory inside a write root is walked like any
+    /// path below one — a confined command that replaces it with a link widens nothing; the profile is
+    /// refused. Seen failing first at `656388c0`: the placement directory resolved to the link's target.
+    #[test]
+    fn a_placement_directory_inside_a_write_root_cannot_be_redirected() {
+        const T: &str = "a_placement_directory_inside_a_write_root_cannot_be_redirected";
+        if !native_backend_or_skip(T) {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("confine-placement-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for d in ["stem/placement", "outside"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let root = root.canonicalize().unwrap();
+        std::fs::write(root.join("stem/placement/blob"), b"placed").unwrap();
+        let c = ConfineDecl { write: vec![root.join("stem").display().to_string()], ..Default::default() };
+        let placed = root.join("stem/placement/blob");
+        let before = prepare(&c, &placed).expect("the plant: untouched, the profile resolves");
+        assert_eq!(before.read[0], root.join("stem/placement"));
+        std::fs::rename(root.join("stem/placement"), root.join("stem/placement.real")).unwrap();
+        std::os::unix::fs::symlink(root.join("outside"), root.join("stem/placement")).unwrap();
+        let current = before.is_current();
+        let after = prepare(&c, &placed).map(|p| p.read);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!current, "the profile resolved before the redirect is not current after it");
+        match after {
+            Err(Refusal::Failed(m)) => assert!(m.contains("symlink"), "{m}"),
+            other => panic!("a placement directory redirected inside a write root must be refused, got {other:?}"),
         }
     }
 

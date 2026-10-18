@@ -331,10 +331,16 @@ again, with every check above, and the run or re-probe goes ahead under the fres
 that refuses (the path now a symlink, or gone) fails the re-probe, so the install is withdrawn, the refusal
 recorded by name (`prov.probe`'s `confinement_failed`).
 
+Each path is resolved from `/`, one component at a time. A symlink is followed only until the resolution enters the
+placement root or a write path, which are recognised by identity, however the path spells them. From there on every
+component is opened from its parent without following, so a symlink planted inside, at any component and at any
+moment, is refused rather than followed. A `..` there is refused too: name the path directly.
+
+An operator symlink outside every root may still point into one (a shortcut to `out/sub`). Everything past the point
+where it enters the root is held to the same rule.
+
 A path reached through an ancestor symlink that is flipped (`/models/current` → `v2`) resolves to the new target.
-The profile re-resolves to name that target and no longer names the old one. Below the placement root and each write
-path, every component is opened from its parent without following a symlink, so a symlink planted there, at any
-component and at any moment, is refused rather than followed. A `..` there is refused too: name the path directly.
+The profile re-resolves to name that target and no longer names the old one.
 The profile names each path's on-disk spelling, so a different case or Unicode normalisation of a path that exists is
 accepted.
 

@@ -1567,9 +1567,35 @@ envelope's nonce cache) and Q (the handshake refuses a revoked key's certificate
     `a_reprobe_round_runs_a_bounded_number_of_probes_at_once`, seen failing first (20 at once).
   - **Stated:**
     - `..` below a writable root is refused, not resolved.
-    - The placement directory is the operator's and may be reached through a symlink.
-    - The walk's `rustix` calls are invisible to the seam gate, so they are admitted by name in the nondeterminism
-      inventory.
+    - The placement directory is the operator's and may be reached through a symlink. Round 3 narrows this to
+      outside every write root; see H2.
+    - The walk's `rustix` calls were invisible to the seam gate. Round 3 closes this; see L2.
+
+  *Its review (round 3):*
+  - **(H1, high) Fixed.** The walk decided its anchor by spelling and canonicalised it by name. An operator
+    symlink outside every root that pointed into a write root's interior (`shortcut` → `out/sub`) was therefore
+    followed through components the confined command controls. Replacing `out/sub` with a link out of the root then
+    widened the profile, and `is_current` kept it. The walk now resolves every path from `/`, one component at a time
+    from its parent's descriptor:
+    - a symlink is followed, by `readlinkat`, only while the walk has not yet entered a writable root;
+    - roots are recognised by identity (device and inode), not spelling. The starting set is confirmed: each root
+      is itself walked and must reach the same identity;
+    - from the first root entered, nothing is followed, including a symlink target's components, and a `..` is
+      refused;
+    - `is_current` walks again by the same rule.
+
+    Test: `an_operator_symlink_into_a_write_roots_interior_cannot_be_redirected`, the reviewer's shape. It was seen
+    failing first on `656388c0`: the profile named `outside/m` and `outside/w`, and the old profile stayed current.
+  - **(H2, high) Fixed.** The placement directory was canonicalised by name even inside a write root. It is now
+    walked by the same rule, so its own last component may be the operator's symlink only outside every root.
+    Test: `a_placement_directory_inside_a_write_root_cannot_be_redirected`. It was seen failing first: the placement
+    directory resolved to the link's target.
+  - **(L1, low) Fixed.** The 64-combination test now asserts that combination 0, untouched, resolves. H1's and H2's
+    shapes are tests of their own (above).
+  - **(L2, low) Fixed.** `rustix::fs::` is in the seam gate's pattern. `activation_sandbox.rs` is baselined at 14
+    sites, in the open, and the inventory §6 records this as the gate's fourth gap.
+  - **Optional, done:** `stem_shutdown`'s spawned stem is killed on drop, so a panic leaves no process behind. The
+    test's exec hang also happens on `main` and is not addressed here.
 
   Not built: limits by hostname or address, a live network allow-list, an OpenShell backend, resource limits.
 - **H:** carry each named offer's signed bytes inside the close and award from that copy (today a member who deletes a

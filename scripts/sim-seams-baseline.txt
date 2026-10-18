@@ -17,7 +17,7 @@
 2 mycelium-core/src/swim_membership.rs
 10 mycelium-core/src/swim.rs
 6 mycelium-core/src/writer.rs
-1 mycelium-wasm-host/src/activation_sandbox.rs
+14 mycelium-wasm-host/src/activation_sandbox.rs
 6 mycelium-wasm-host/src/activation.rs
 8 mycelium-wasm-host/src/artifact.rs
 2 mycelium-wasm-host/src/bin/mycelium-artifact.rs

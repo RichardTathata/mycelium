@@ -178,7 +178,9 @@ pub static RULES: &[RuleDescriptor] = &[
                  "one_slow_reprobe_does_not_delay_the_others", "an_intermediate_component_toggled_during_prepare_never_widens_the_profile",
                  "a_declared_path_spelt_in_another_case_or_normalisation_is_accepted",
                  "a_declared_fifo_socket_or_write_only_file_resolves_without_hanging",
-                 "a_reprobe_round_runs_a_bounded_number_of_probes_at_once"], trace: Instrumented,
+                 "a_reprobe_round_runs_a_bounded_number_of_probes_at_once",
+                 "an_operator_symlink_into_a_write_roots_interior_cannot_be_redirected",
+                 "a_placement_directory_inside_a_write_root_cannot_be_redirected"], trace: Instrumented,
         summary: "The probe gates the capability: a failing initial probe is an activation error (nothing advertised); a later failure flips the health flag the next health pass withdraws on. A confined re-probe re-resolves a profile whose declared path was replaced, every check repeated, and runs under the fresh one; only a refused re-resolution (`confinement_*`), or a path that changed under every attempt (`confinement_changed`), withdraws. Recorded under the install's token; a re-probe records only a change of verdict.",
     },
     RuleDescriptor {

@@ -23,9 +23,12 @@ the profile, and the currency check then kept the widened profile. Now each path
 symlink, its identity comes from `fstat` on that descriptor, and the check and the resolution are repeated. Currency
 also re-canonicalises the declared path, so a flipped ancestor link is seen. Round 2 found that this covered only the
 last component: an intermediate one could be toggled between the checks. The resolution is now a walk. Each component
-below a writable root is opened from its parent with `O_NOFOLLOW`, and the profile names what the walk opened. Lesson: **a resolution is a read like any
+below a writable root is opened from its parent with `O_NOFOLLOW`, and the profile names what the walk opened. Round 3
+found that the walk still decided by spelling where a root began. An operator shortcut into a root's interior, or a
+placement directory inside one, was canonicalised by name. The walk now starts at `/`, follows symlinks itself, and
+stops following at the first directory whose identity is a root's. Lesson: **a resolution is a read like any
 other, and a check-then-use on the filesystem is a race unless the use is pinned without following and the check is
-re-run against what was pinned** — at every component, not only the last: resolve by walking descriptors, never by name.
+re-run against what was pinned** — at every component, not only the last: resolve by walking descriptors, never by name, and decide where trust ends by identity, never by spelling.
 
 Pages: `dev/concurrency/lock-order.md` (row 63: the re-probe task now takes it). Repo: `docs/reference/unit-file.md`
 §`[activation.confine]`, the rule catalogue, and the plan's row M block and §3.6.

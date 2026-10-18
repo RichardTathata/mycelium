@@ -15,10 +15,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   finding 1, present since 2.35.0). There was a window between `prepare`'s symlink check and its `canonicalize`, and
   another before the Linux pin, which opened without `O_NOFOLLOW`. A confined command still running in that window
   could swap a declared path, or any component of it below a writable root, for a link to a directory the profile
-  never named. The profile would then name and pin the link's target, and every later run would reuse it. Now every
-  component below the placement root or a write path is opened from its parent's descriptor without following a
-  symlink. The identity comes from what was opened, Landlock's rule from that descriptor, and every currency check walks
-  the path again. A profile runs only while it is current.
+  never named. Two further routes existed: an operator symlink pointing into a root's interior, and a placement
+  directory inside a write root. Either way the profile would name and pin the link's target, and every later run
+  would reuse it. Now every path is resolved from `/`, one component at a time from its parent's descriptor. A
+  symlink is followed only before the resolution enters a writable root, recognised by identity rather than spelling.
+  The identity comes from what was opened, Landlock's rule from that descriptor, and every currency check walks the
+  path again. A profile runs only while it is current.
 
 ### Fixed
 
