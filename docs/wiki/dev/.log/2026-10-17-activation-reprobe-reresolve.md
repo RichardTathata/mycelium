@@ -21,9 +21,11 @@ The PR's review (round 1) found the older hole underneath: `prepare` checked for
 `canonicalize`, which follows them. A swap planted between the two, or before the Linux pin (no `O_NOFOLLOW`), widened
 the profile, and the currency check then kept the widened profile. Now each path is opened without following a
 symlink, its identity comes from `fstat` on that descriptor, and the check and the resolution are repeated. Currency
-also re-canonicalises the declared path, so a flipped ancestor link is seen. Lesson: **a resolution is a read like any
+also re-canonicalises the declared path, so a flipped ancestor link is seen. Round 2 found that this covered only the
+last component: an intermediate one could be toggled between the checks. The resolution is now a walk. Each component
+below a writable root is opened from its parent with `O_NOFOLLOW`, and the profile names what the walk opened. Lesson: **a resolution is a read like any
 other, and a check-then-use on the filesystem is a race unless the use is pinned without following and the check is
-re-run against what was pinned.**
+re-run against what was pinned** — at every component, not only the last: resolve by walking descriptors, never by name.
 
 Pages: `dev/concurrency/lock-order.md` (row 63: the re-probe task now takes it). Repo: `docs/reference/unit-file.md`
 §`[activation.confine]`, the rule catalogue, and the plan's row M block and §3.6.

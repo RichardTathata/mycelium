@@ -163,11 +163,16 @@ fn backend_for(c: &ConfineDecl) -> Result<ConfineBackend, String> {
     Ok(backend)
 }
 
-/// A profile resolved against one placed file: every path expanded, canonical and present — resolved
-/// **once**, when the activation is first prepared, and kept (review finding 5, #636): on Linux the paths
-/// are held open (`O_PATH`) from that resolution and Landlock's rules are made from those descriptors, so
-/// a path a confined run later replaces with a symlink grants nothing new; Seatbelt matches the resolved
-/// path strings, so a symlink planted under one resolves to its target, which the profile does not name.
+/// A profile resolved against one placed file: every path expanded, present and resolved — resolved
+/// **once**, when the activation is first prepared, and kept (review finding 5, #636) while it is current.
+///
+/// Each path is resolved by a **walk** (review of #641, round 2): the part of it outside every writable
+/// root (the operator's — an ancestor symlink there is followed) is canonicalised, and every component
+/// below a root is opened from its parent's descriptor with `O_NOFOLLOW`, so a symlink a confined command
+/// planted — at the last component or any between — is refused, never followed, whenever it is planted.
+/// The identity (device, inode) is read from what the walk opened. On Linux the final descriptor
+/// (`O_PATH`) is kept and Landlock's rules are made from it; Seatbelt matches path strings, so the profile
+/// names the path's on-disk spelling, accepted only when it names exactly what the walk opened.
 #[derive(Debug, Clone)]
 pub struct Profile {
     pub backend: ConfineBackend,
@@ -177,38 +182,38 @@ pub struct Profile {
     pub write:   Vec<PathBuf>,
     /// TCP destinations: `(localhost only, port)`.
     pub connect: Vec<(bool, u16)>,
-    /// `read` then `write`, held open from the first resolution (Linux; empty elsewhere).
+    /// `read` then `write`, held open from the walk (Linux; empty elsewhere).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) pinned: Pinned,
-    /// `read` then `write`: each path's (device, inode) at the resolution, read from the descriptor opened
-    /// without following a symlink — what a pin refers to.
+    /// `read` then `write`: each path's (device, inode), read from what the walk opened.
     pub(crate) ids: Vec<(u64, u64)>,
     /// `read` then `write`: each path as declared, expanded but not resolved — what the currency check
-    /// re-resolves, so a flipped ancestor symlink is seen (review of #641, finding 2).
+    /// walks again, so a flipped ancestor symlink or a component replaced below a root is seen.
     pub(crate) sources: Vec<PathBuf>,
+    /// The writable roots (the placement directory, then each `write`), canonical: below one, every
+    /// component is walked without following a symlink.
+    pub(crate) roots: Vec<PathBuf>,
 }
 
 impl Profile {
-    /// Whether every path still names what was resolved (review follow-up 1, #636): not a symlink now,
-    /// the same device and inode, and the declared path still resolving to it — so an ancestor symlink
-    /// flipped to another target (`current` → `v2`) is not current either (review of #641, finding 2). A
-    /// path removed and recreated, or replaced, is not current — the caller re-resolves it rather than run
-    /// with a stale pin.
+    /// Whether every path still names what was resolved (review follow-up 1, #636): each declared path
+    /// walked again — no symlink below a writable root, at any component — reaching the same device and
+    /// inode under the same name. A path removed, recreated or replaced is not current, nor one whose
+    /// operator-side ancestor symlink was flipped (`current` → `v2`). The caller re-resolves it rather
+    /// than run with a stale pin.
     pub fn is_current(&self) -> bool {
         self.stale_path().is_none()
     }
 
     /// The first path that no longer names what was resolved, if any.
     fn stale_path(&self) -> Option<&Path> {
-        use std::os::unix::fs::MetadataExt;
-        let paths = self.read.iter().chain(&self.write);
-        if self.ids.len() != self.read.len() + self.write.len() || self.sources.len() != self.ids.len() {
+        let paths: Vec<&PathBuf> = self.read.iter().chain(&self.write).collect();
+        if self.ids.len() != paths.len() || self.sources.len() != paths.len() {
             return Some(Path::new("(an incomplete profile)"));
         }
-        for ((p, id), src) in paths.zip(&self.ids).zip(&self.sources) {
-            let same = std::fs::symlink_metadata(p).is_ok_and(|m| !m.file_type().is_symlink() && (m.dev(), m.ino()) == *id)
-                && canonical(src).is_ok_and(|c| c == *p);
-            if !same {
+        for (i, (p, src)) in paths.iter().zip(&self.sources).enumerate() {
+            let again = if i == 0 { walk_placement_dir(src) } else { walk(src, &self.roots, &src.display().to_string()) };
+            if !again.is_ok_and(|w| w.path == **p && w.id == self.ids[i]) {
                 return Some(p);
             }
         }
@@ -220,9 +225,200 @@ impl Profile {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Pinned(#[cfg_attr(not(target_os = "linux"), allow(dead_code))] pub(crate) Vec<std::sync::Arc<std::os::fd::OwnedFd>>);
 
+/// One declared path, walked.
+struct Walked {
+    /// The path the profile names: the on-disk spelling of what the walk opened.
+    path: PathBuf,
+    /// Its (device, inode), from what the walk opened.
+    id:   (u64, u64),
+    /// The final descriptor (`O_PATH`, Linux only).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fd:   Option<std::os::fd::OwnedFd>,
+}
+
+/// Is `q` strictly below one of `roots`? Compared as the kernel sees it: `q`'s canonical parent and its own
+/// last component (which may be the symlink being looked for).
+fn below_a_root(q: &Path, roots: &[PathBuf]) -> bool {
+    let nq = match (q.parent(), q.file_name()) {
+        (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => canon_or(parent).join(name),
+        _ => canon_or(q),
+    };
+    roots.iter().any(|r| nq != *r && nq.starts_with(r))
+}
+
+fn canon_or(p: &Path) -> PathBuf {
+    canonical(p).unwrap_or_else(|_| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()))
+}
+
+fn refused_symlink(raw: &str, p: &Path, at: &Path) -> Refusal {
+    Refusal::Failed(format!(
+        "confine path {raw:?} ({}) passes through a symlink at {} — a declared path is never a symlink, nor reached \
+         through one a confined command could have planted; name its target",
+        p.display(),
+        at.display()
+    ))
+}
+
+/// The placement directory: the operator's (it may be reached through a symlink), canonicalised and then
+/// identified without following one at its last component.
+fn walk_placement_dir(dir: &Path) -> Result<Walked, Refusal> {
+    let canon = canonical(dir).map_err(|e| Refusal::Failed(format!("the placement directory {}: {e}", dir.display())))?;
+    walk(&canon, &[], &dir.display().to_string())
+}
+
+/// Resolve one declared path (review of #641, round 2, finding A). The **anchor** is the longest prefix
+/// that is not below a writable root — the operator's side, where a symlink is followed: it is
+/// canonicalised and opened. Every component after it (at least the last) is opened from its parent's
+/// descriptor with `O_NOFOLLOW`, so a symlink there is refused at whatever moment it was planted; the
+/// identity comes from what was opened. The name the profile carries is the path's canonical, on-disk
+/// spelling (case and normalisation as stored — finding B), accepted only if it sits under the anchor at
+/// the walked depth and names the same device and inode.
+fn walk(src: &Path, roots: &[PathBuf], raw: &str) -> Result<Walked, Refusal> {
+    use rustix::fs::{openat, statat, AtFlags, Mode, OFlags, CWD};
+    let missing = |e: &dyn std::fmt::Display| {
+        Refusal::Failed(format!("confine path {raw:?} ({}): {e} — a declared path must exist when the activation runs", src.display()))
+    };
+    let abs = std::path::absolute(src).map_err(|e| missing(&e))?;
+    let comps: Vec<std::path::Component> = abs.components().collect();
+    // The first component below a root; the anchor ends just before it (and at the parent at the latest).
+    let mut first_below = comps.len().saturating_sub(1).max(1);
+    let mut q = PathBuf::new();
+    for (i, c) in comps.iter().enumerate() {
+        q.push(c);
+        if i >= 1 && below_a_root(&q, roots) {
+            first_below = first_below.min(i);
+            break;
+        }
+    }
+    let anchor: PathBuf = comps[..first_below].iter().collect();
+    let anchor_canon = canonical(&anchor).map_err(|e| missing(&e))?;
+    at_stage("anchored");
+    // A directory opened for lookup only; a kernel that does not know the search flag answers `EINVAL`, and
+    // the open is retried read-only.
+    let open_dir = |at: &dyn std::os::fd::AsFd, name: &Path, follow: bool| -> rustix::io::Result<std::os::fd::OwnedFd> {
+        let base = OFlags::DIRECTORY | OFlags::CLOEXEC | if follow { OFlags::empty() } else { OFlags::NOFOLLOW };
+        match openat(at.as_fd(), name, base | search_flag(), Mode::empty()) {
+            Err(rustix::io::Errno::INVAL) => openat(at.as_fd(), name, base | OFlags::RDONLY, Mode::empty()),
+            other => other,
+        }
+    };
+    let mut fd = open_dir(&CWD, &anchor_canon, true).map_err(|e| missing(&e))?;
+    let tail = &comps[first_below..];
+    let mut walked_to = anchor.clone();
+    for (k, c) in tail.iter().enumerate() {
+        let name = match c {
+            std::path::Component::Normal(n) => *n,
+            std::path::Component::CurDir => continue,
+            _ => {
+                return Err(Refusal::Failed(format!(
+                    "confine path {raw:?} ({}): `..` below a writable root is not resolved — name the path directly",
+                    src.display()
+                )))
+            }
+        };
+        walked_to.push(name);
+        let last = k + 1 == tail.len();
+        // A symlink at this component is refused by name, whatever the open would have said.
+        let st = statat(&fd, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|e| missing(&e))?;
+        if rustix::fs::FileType::from_raw_mode(st.st_mode).is_symlink() {
+            return Err(refused_symlink(raw, src, &walked_to));
+        }
+        if !last {
+            fd = open_dir(&fd, Path::new(name), false).map_err(|e| {
+                if e == rustix::io::Errno::LOOP || e == rustix::io::Errno::NOTDIR {
+                    refused_symlink(raw, src, &walked_to)
+                } else {
+                    missing(&e)
+                }
+            })?;
+            continue;
+        }
+        let (id, final_fd) = final_component(&fd, name).map_err(|e| {
+            if e == rustix::io::Errno::LOOP { refused_symlink(raw, src, &walked_to) } else { missing(&e) }
+        })?;
+        let id = match id {
+            Some(id) => id,
+            None => return Err(refused_symlink(raw, src, &walked_to)),
+        };
+        at_stage("walked");
+        // The on-disk spelling, accepted only when it names what was opened: under the anchor, at the walked
+        // depth, the same device and inode, not a symlink.
+        let path = canonical(&abs).map_err(|e| missing(&e))?;
+        let depth = |p: &Path| p.components().count();
+        let same = path.starts_with(&anchor_canon)
+            && depth(&path) == depth(&anchor_canon) + tail.iter().filter(|c| matches!(c, std::path::Component::Normal(_))).count()
+            && statat(CWD, &path, AtFlags::SYMLINK_NOFOLLOW).is_ok_and(|m| {
+                !rustix::fs::FileType::from_raw_mode(m.st_mode).is_symlink() && dev_ino(&m) == id
+            });
+        if !same {
+            return Err(Refusal::Failed(format!(
+                "confine path {raw:?} ({}) resolved to {}, which is not what was opened — a declared path changed while it \
+                 was resolved; refused",
+                src.display(),
+                path.display()
+            )));
+        }
+        return Ok(Walked { path, id, fd: final_fd });
+    }
+    Err(missing(&"an empty path"))
+}
+
+/// A stat's (device, inode) — `u64` on Linux, narrower types on macOS.
+#[allow(clippy::unnecessary_cast)]
+fn dev_ino(st: &rustix::fs::Stat) -> (u64, u64) {
+    (st.st_dev as u64, st.st_ino as u64)
+}
+
+/// The flag that opens a directory for lookup only: `O_PATH` on Linux; `O_SEARCH` (`O_EXEC`) on macOS, so a
+/// directory the stem may search but not list is walked as `stat` would (a kernel without it answers
+/// `EINVAL`, and the walk retries read-only).
+fn search_flag() -> rustix::fs::OFlags {
+    #[cfg(target_os = "linux")]
+    {
+        rustix::fs::OFlags::PATH
+    }
+    #[cfg(target_os = "macos")]
+    {
+        rustix::fs::OFlags::from_bits_retain(0x4000_0000) // O_EXEC; with O_DIRECTORY, O_SEARCH
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        rustix::fs::OFlags::RDONLY
+    }
+}
+
+/// The last component: its identity, `None` if it is a symlink, and on Linux its `O_PATH | O_NOFOLLOW`
+/// descriptor (which opens a FIFO, a socket or a write-only file without blocking or needing access).
+/// Elsewhere it is not opened at all (review of #641 round 2, finding C): `fstatat` without following.
+#[allow(clippy::type_complexity)]
+fn final_component(dir: &std::os::fd::OwnedFd, name: &std::ffi::OsStr) -> rustix::io::Result<(Option<(u64, u64)>, Option<std::os::fd::OwnedFd>)> {
+    use rustix::fs::FileType;
+    #[cfg(target_os = "linux")]
+    {
+        use rustix::fs::{fstat, openat, Mode, OFlags};
+        let fd = openat(dir, name, OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty())?;
+        let st = fstat(&fd)?;
+        if FileType::from_raw_mode(st.st_mode).is_symlink() {
+            return Ok((None, None));
+        }
+        Ok((Some(dev_ino(&st)), Some(fd)))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let st = rustix::fs::statat(dir, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?;
+        if FileType::from_raw_mode(st.st_mode).is_symlink() {
+            return Ok((None, None));
+        }
+        Ok((Some(dev_ino(&st)), None))
+    }
+}
+
 /// Resolve `c` against the placed file `placed`: the backend (or [`Refusal::Unavailable`]), then each
-/// path with `{dir}`/`{path}` expanded and canonicalised — one that does not exist is
-/// [`Refusal::Failed`], naming it.
+/// path with `{dir}`/`{path}` expanded and walked ([`walk`]) — one that does not exist is
+/// [`Refusal::Failed`], naming it, and so is one that is, or passes through, a symlink below the placement
+/// directory or a write path (review finding 5, #636: a confined run may write there, so a link there
+/// could be its own plant — name its target instead). Ancestors outside every writable root are the
+/// operator's and may be symlinks (`/tmp` is one on macOS).
 pub fn prepare(c: &ConfineDecl, placed: &Path) -> Result<Profile, Refusal> {
     let backend = backend_for(c).map_err(Refusal::Unavailable)?;
     let dir = placed.parent().unwrap_or_else(|| Path::new("/"));
@@ -235,80 +431,36 @@ pub fn prepare(c: &ConfineDecl, placed: &Path) -> Result<Profile, Refusal> {
             raw.to_string()
         })
     };
-    // Review finding 5 (#636): a confined run may write under the placement directory (with
-    // `write = ["{dir}"]`) and under its write paths, so a symlink there could be its own plant. A declared
-    // path that is itself a symlink, or passes through one below the placement directory or a write path,
-    // is refused — name its target instead.
-    // Compared canonically (review follow-up 2, #636): a root and a prefix spelt differently — an alias
-    // directory, `/tmp` against `/private/tmp`, a relative placement root — are compared as the kernel sees
-    // them, each prefix by its canonical parent and its own last component (the component itself may be the
-    // symlink being looked for).
-    let canon_or = |p: &Path| canonical(p).unwrap_or_else(|_| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()));
+    // Roots and prefixes compared as the kernel sees them (review follow-up 2, #636): an alias directory,
+    // `/tmp` against `/private/tmp`, a relative placement root.
     let roots: Vec<PathBuf> = std::iter::once(dir.to_path_buf()).chain(c.write.iter().map(|w| expand(w))).map(|r| canon_or(&r)).collect();
-    let norm = |q: &Path| -> PathBuf {
-        match (q.parent(), q.file_name()) {
-            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => canon_or(parent).join(name),
-            _ => canon_or(q),
-        }
-    };
-    let symlink_check = || -> Result<(), Refusal> {
-    for raw in c.read.iter().chain(&c.write) {
-        let p = expand(raw);
-        let mut q = PathBuf::new();
-        for part in p.components() {
-            q.push(part);
-            let nq = norm(&q);
-            let in_root = roots.iter().any(|r| nq != *r && nq.starts_with(r));
-            if (q == p || in_root) && std::fs::symlink_metadata(&q).is_ok_and(|m| m.file_type().is_symlink()) {
-                return Err(Refusal::Failed(format!(
-                    "confine path {raw:?} ({}) passes through a symlink at {} — a declared path is never a symlink, \
-                     nor reached through one a confined command could have planted; name its target",
-                    p.display(), q.display()
-                )));
-            }
-        }
-    }
-    Ok(())
-    };
-    symlink_check()?;
     at_stage("checked");
-    let resolve = |raw: &str| -> Result<PathBuf, Refusal> {
-        let expanded = expand(raw);
-        canonical(&expanded).map_err(|e| {
-            Refusal::Failed(format!("confine path {raw:?} ({}): {e} — a declared path must exist when the activation runs", expanded.display()))
-        })
-    };
-    let mut read = vec![canonical(dir).map_err(|e| Refusal::Failed(format!("the placement directory {}: {e}", dir.display())))?];
-    for r in &c.read {
-        read.push(resolve(r)?);
-    }
-    let write = c.write.iter().map(|w| resolve(w)).collect::<Result<Vec<_>, _>>()?;
     let connect = c
         .connect
         .iter()
         .map(|e| mycelium::parse_confine_connect(e).map(|(host, port)| (host == "localhost", port)))
         .collect::<Result<Vec<_>, _>>()
         .map_err(Refusal::Failed)?;
-    at_stage("resolved");
-    let sources: Vec<PathBuf> = std::iter::once(dir.to_path_buf()).chain(c.read.iter().chain(&c.write).map(|r| expand(r))).collect();
-    // Review of #641, finding 1: between the symlink check and the canonicalisation a racing confined
-    // command could swap a declared path for a symlink, and `canonicalize` would follow it. Each declared
-    // path's resolution must agree with what the check saw — its canonical parent and its own name, the last
-    // component not a link — and each is opened **without following a symlink**, its identity read from
-    // that descriptor; then the check and the resolution are repeated against what was opened.
-    for (src, p) in sources.iter().zip(read.iter().chain(&write)).skip(1) {
-        if norm(src) != *p {
-            return Err(Refusal::Failed(format!(
-                "confine path {} resolved to {}, which is not where the symlink check found it — a declared path changed \
-                 while it was resolved; refused",
-                src.display(), p.display()
-            )));
-        }
+    let mut walked = vec![walk_placement_dir(dir)?];
+    for raw in c.read.iter().chain(&c.write) {
+        walked.push(walk(&expand(raw), &roots, raw)?);
     }
-    let pinned = linux::pin(read.iter().chain(&write)).map_err(Refusal::Failed)?;
-    let ids = linux::ids_nofollow(read.iter().chain(&write), &pinned).map_err(Refusal::Failed)?;
-    let profile = Profile { backend, read, write, connect, pinned, ids, sources };
-    symlink_check()?;
+    at_stage("resolved");
+    let n_read = 1 + c.read.len();
+    let sources: Vec<PathBuf> = std::iter::once(dir.to_path_buf()).chain(c.read.iter().chain(&c.write).map(|r| expand(r))).collect();
+    let ids = walked.iter().map(|w| w.id).collect();
+    let paths: Vec<PathBuf> = walked.iter().map(|w| w.path.clone()).collect();
+    let pinned = if cfg!(target_os = "linux") {
+        Pinned(walked.into_iter().filter_map(|w| w.fd.map(std::sync::Arc::new)).collect())
+    } else {
+        Pinned::default()
+    };
+    let (read, write) = (paths[..n_read].to_vec(), paths[n_read..].to_vec());
+    let profile = Profile { backend, read, write, connect, pinned, ids, sources, roots };
+    at_stage("pinned");
+    at_stage("rechecked");
+    // Walked again: a component toggled while the profile resolved (a link at one walk, a directory at the
+    // next) is caught by whichever walk saw the link, or by the identities differing.
     if let Some(p) = profile.stale_path() {
         return Err(Refusal::Failed(format!(
             "confine path {} changed while it was resolved (a symlink, another file, or another target now) — refused",
@@ -318,9 +470,9 @@ pub fn prepare(c: &ConfineDecl, placed: &Path) -> Result<Profile, Refusal> {
     Ok(profile)
 }
 
-// A test-only hook `prepare` calls between its stages (`"checked"`: after the symlink check, before the
-// canonicalisation; `"resolved"`: after it, before the pinning), so a test can plant the swap a confined
-// command racing the resolution would (review of #641, finding 1). Nothing outside the tests sets it.
+// A test-only hook `prepare` and `walk` call between their stages (`checked`, `anchored`, `walked`,
+// `resolved`, `pinned`, `rechecked`), so a test can plant the swap a confined command racing the resolution
+// would (review of #641, findings 1 and A). Nothing outside the tests sets it.
 #[cfg(test)]
 pub(crate) type StageHook = Option<Box<dyn FnMut(&str)>>;
 
@@ -546,40 +698,6 @@ mod linux {
         Ok(())
     }
 
-    /// Open each path `O_PATH`, once, at the profile's resolution (review finding 5, #636).
-    pub(super) fn pin<'a>(paths: impl Iterator<Item = &'a std::path::PathBuf>) -> Result<super::Pinned, String> {
-        use std::os::unix::fs::OpenOptionsExt;
-        paths
-            .map(|p| {
-                std::fs::OpenOptions::new()
-                    .read(true)
-                    .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-                    .open(p)
-                    .map(|f| std::sync::Arc::new(std::os::fd::OwnedFd::from(f)))
-                    .map_err(|e| format!("confine path {}: {e}", p.display()))
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map(super::Pinned)
-    }
-
-    /// Each pinned descriptor's (device, inode), from `fstat` on the descriptor itself (review of #641,
-    /// finding 1): `O_PATH | O_NOFOLLOW` opens a symlink as itself, so a link planted at the path is seen
-    /// here and refused, never pinned at its target.
-    pub(super) fn ids_nofollow<'a>(paths: impl Iterator<Item = &'a std::path::PathBuf>, pinned: &super::Pinned) -> Result<Vec<(u64, u64)>, String> {
-        use std::os::unix::fs::MetadataExt;
-        paths
-            .zip(&pinned.0)
-            .map(|(p, fd)| {
-                let f = std::fs::File::from(fd.try_clone().map_err(|e| format!("confine path {}: {e}", p.display()))?);
-                let m = f.metadata().map_err(|e| format!("confine path {}: {e}", p.display()))?;
-                if m.file_type().is_symlink() {
-                    return Err(format!("confine path {} is a symlink now — refused, not followed", p.display()));
-                }
-                Ok((m.dev(), m.ino()))
-            })
-            .collect()
-    }
-
     /// On x86_64, refuse every syscall with the x32 bit (`nr & 0x40000000`) — review finding 4 (#636). The
     /// main filter matches syscall numbers exactly and allows the rest, so `socket(2)` through the x32
     /// table (41 | 0x40000000) matched no rule. A raw cBPF program: check the architecture, load the
@@ -632,30 +750,6 @@ mod linux {
 
     pub(super) fn available(_net: bool) -> Result<(), String> {
         Err(format!("backend landlock is Linux's, and this is {}", std::env::consts::OS))
-    }
-
-    /// Seatbelt matches the resolved path strings; nothing to hold open.
-    pub(super) fn pin<'a>(_paths: impl Iterator<Item = &'a std::path::PathBuf>) -> Result<super::Pinned, String> {
-        Ok(super::Pinned::default())
-    }
-
-    /// Each path's (device, inode), from `fstat` on a descriptor opened with `O_NOFOLLOW` (review of #641,
-    /// finding 1): a symlink planted at the path fails the open (`ELOOP`) and is refused, never followed.
-    pub(super) fn ids_nofollow<'a>(paths: impl Iterator<Item = &'a std::path::PathBuf>, _pinned: &super::Pinned) -> Result<Vec<(u64, u64)>, String> {
-        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-        // `O_NOFOLLOW` on macOS and the BSDs (`<sys/fcntl.h>`); this crate takes `libc` on Linux only.
-        const O_NOFOLLOW: i32 = 0x0100;
-        paths
-            .map(|p| {
-                let f = std::fs::OpenOptions::new()
-                    .read(true)
-                    .custom_flags(O_NOFOLLOW)
-                    .open(p)
-                    .map_err(|e| format!("confine path {}: {e} — opened without following a symlink; refused", p.display()))?;
-                let m = f.metadata().map_err(|e| format!("confine path {}: {e}", p.display()))?;
-                Ok((m.dev(), m.ino()))
-            })
-            .collect()
     }
 
     pub(super) fn run(_argv: &[String], _timeout: Duration, _profile: &Profile) -> Result<(), String> {
@@ -715,6 +809,7 @@ pub(crate) fn native_backend_or_skip(test: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     /// The generated Seatbelt profile refers to every path by parameter — a path holding `"` or `)`
     /// cannot become profile text — and states exactly the declared TCP destinations.
@@ -728,6 +823,7 @@ mod tests {
             pinned: Pinned::default(),
             ids: Vec::new(),
             sources: Vec::new(),
+            roots: Vec::new(),
         };
         let text = seatbelt_profile(&p);
         assert!(!text.contains("allow default"), "no path is spliced into the profile: {text}");
@@ -858,6 +954,139 @@ mod tests {
                 other => panic!("{stage}: a symlink planted during the resolution must be refused, got {:?}", other.map(|p| p.write)),
             }
         }
+    }
+
+    /// Review of #641 round 2, finding A: an **intermediate** component inside a write root toggled between
+    /// a real directory and a symlink out of it — real at one check, a link at the next resolution — must
+    /// never leave a profile naming the link's target. Every combination over `prepare`'s three stages is
+    /// tried. Seen failing first at `bd22b544`'s logic (with the test hook's stages placed as here): a link
+    /// at `checked` and `resolved`, the real directory at `pinned`, a link at `rechecked` returned a profile
+    /// reading `outside/x`.
+    #[test]
+    fn an_intermediate_component_toggled_during_prepare_never_widens_the_profile() {
+        const T: &str = "an_intermediate_component_toggled_during_prepare_never_widens_the_profile";
+        if !native_backend_or_skip(T) {
+            return;
+        }
+        // `anchored` and `walked` are the walk's own stages (absent before it), so the combinations that
+        // failed first are among these.
+        let stages = ["checked", "resolved", "pinned", "rechecked", "anchored", "walked"];
+        for combo in 0u8..64 {
+            let root = std::env::temp_dir().join(format!("confine-toggle-{combo}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            for d in ["placed", "out/sub", "outside"] {
+                std::fs::create_dir_all(root.join(d)).unwrap();
+            }
+            let root = root.canonicalize().unwrap();
+            std::fs::write(root.join("out/sub/x"), b"inside").unwrap();
+            std::fs::write(root.join("outside/x"), b"outside").unwrap();
+            let c = ConfineDecl {
+                write: vec![root.join("out").display().to_string()],
+                read: vec![root.join("out/sub/x").display().to_string()],
+                ..Default::default()
+            };
+            let (sub, real, outside) = (root.join("out/sub"), root.join("out/sub.real"), root.join("outside"));
+            // Bit i set: a link at stage i; clear: the real directory.
+            let toggle = move |link: bool| {
+                let is_link = std::fs::symlink_metadata(&sub).is_ok_and(|m| m.file_type().is_symlink());
+                if link && !is_link {
+                    std::fs::rename(&sub, &real).unwrap();
+                    std::os::unix::fs::symlink(&outside, &sub).unwrap();
+                } else if !link && is_link {
+                    std::fs::remove_file(&sub).unwrap();
+                    std::fs::rename(&real, &sub).unwrap();
+                }
+            };
+            PREPARE_STAGE_HOOK.with(|h| {
+                *h.borrow_mut() = Some(Box::new(move |at: &str| {
+                    if let Some(i) = stages.iter().position(|s| *s == at) {
+                        toggle(combo & (1 << i) != 0);
+                    }
+                }))
+            });
+            let got = prepare(&c, &root.join("placed/blob"));
+            PREPARE_STAGE_HOOK.with(|h| *h.borrow_mut() = None);
+            let named: Vec<PathBuf> = got.as_ref().map(|p| p.read.iter().chain(&p.write).cloned().collect()).unwrap_or_default();
+            let _ = std::fs::remove_dir_all(&root);
+            assert!(
+                !named.iter().any(|p| p.starts_with(root.join("outside"))),
+                "combination {combo:06b} (bits: walked/anchored/rechecked/pinned/resolved/checked; 1 = link): the profile names {named:?}"
+            );
+        }
+    }
+
+    /// Review of #641 round 2, finding B: on a case-insensitive volume (APFS by default) a declared path
+    /// spelt in another case, or in another Unicode normalisation, names the same file and is accepted, the
+    /// profile naming the on-disk spelling. Seen failing first at `bd22b544`: refused as "not where the
+    /// symlink check found it".
+    #[test]
+    fn a_declared_path_spelt_in_another_case_or_normalisation_is_accepted() {
+        const T: &str = "a_declared_path_spelt_in_another_case_or_normalisation_is_accepted";
+        if !native_backend_or_skip(T) {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("confine-case-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("placed")).unwrap();
+        let root = root.canonicalize().unwrap();
+        std::fs::create_dir(root.join("models")).unwrap();
+        std::fs::create_dir(root.join("cafe\u{301}")).unwrap(); // NFD on disk
+        let insensitive = root.join("MODELS").exists();
+        let mut cases = vec![("models", "models"), ("cafe\u{301}", "cafe\u{301}")];
+        if insensitive {
+            cases.push(("Models", "models"));
+        }
+        if root.join("caf\u{e9}").exists() {
+            cases.push(("caf\u{e9}", "cafe\u{301}")); // NFC declared
+        }
+        for (declared, on_disk) in cases {
+            let c = ConfineDecl { read: vec![root.join(declared).display().to_string()], ..Default::default() };
+            let got = prepare(&c, &root.join("placed/blob")).map(|p| p.read);
+            let ok = got.as_ref().map(|r| r.iter().any(|p| p.parent() == Some(root.as_path())
+                && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.eq_ignore_ascii_case(on_disk) || n == on_disk || (declared != on_disk && n == declared)))).unwrap_or(false);
+            assert!(ok, "{declared:?} (on disk {on_disk:?}): {got:?}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Review of #641 round 2, finding C: a declared path that is a FIFO, a Unix socket or a write-only file
+    /// resolves (as it did before #641) — never a hang on the FIFO, never a refusal for want of read access.
+    /// Seen failing first at `bd22b544` on macOS: the socket and the write-only file were refused (the FIFO
+    /// is run on a thread with a deadline, so a hang fails the test rather than wedging it).
+    #[test]
+    fn a_declared_fifo_socket_or_write_only_file_resolves_without_hanging() {
+        const T: &str = "a_declared_fifo_socket_or_write_only_file_resolves_without_hanging";
+        if !native_backend_or_skip(T) {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("confine-kinds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("placed")).unwrap();
+        let root = root.canonicalize().unwrap();
+        assert!(std::process::Command::new("mkfifo").arg(root.join("fifo")).status().unwrap().success());
+        let _sock = std::os::unix::net::UnixListener::bind(root.join("sock")).unwrap();
+        std::fs::write(root.join("wo"), b"").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(root.join("wo"), std::fs::Permissions::from_mode(0o200)).unwrap();
+        for name in ["fifo", "sock", "wo"] {
+            let c = ConfineDecl { write: vec![root.join(name).display().to_string()], ..Default::default() };
+            let placed = root.join("placed/blob");
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(prepare(&c, &placed).map(|p| p.write));
+            });
+            let got = rx.recv_timeout(Duration::from_secs(5));
+            if got.is_err() && name == "fifo" {
+                // Unblock the stuck open so the thread can end.
+                let _ = std::fs::OpenOptions::new().write(true).open(root.join("fifo"));
+            }
+            match got {
+                Ok(Ok(w)) => assert_eq!(w, vec![root.join(name)], "{name}"),
+                Ok(Err(e)) => panic!("{name}: refused: {e}"),
+                Err(_) => panic!("{name}: prepare did not return within 5 s"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Review of #641, finding 2: a declared path reached through an ancestor symlink that is flipped (a

@@ -316,6 +316,9 @@ impl ResolvedProfiles {
     }
 }
 
+/// How many probes one re-probe round runs at once (review of #641 round 2, finding D).
+const REPROBE_CONCURRENCY: usize = 8;
+
 /// How many times a probe runs when the profile changed under the run, before it refuses.
 const REPROBE_ATTEMPTS: usize = 2;
 
@@ -407,15 +410,28 @@ pub fn spawn_reprobe(watch: WatchList, every: Duration) -> tokio::task::JoinHand
     })
 }
 
-/// One re-probe round over `live`: every entry's probe at once, each on its own blocking thread, so one
-/// slow or churning entry (at most `REPROBE_ATTEMPTS` × `PROBE_TIMEOUT`) delays no other entry's verdict —
-/// only the next round, which starts when the slowest finishes (review of #641, finding 7).
+/// One re-probe round over `live`: the entries' probes concurrently, each on its own blocking thread, at
+/// most [`REPROBE_CONCURRENCY`] at once — so one slow or churning entry (at most `REPROBE_ATTEMPTS` ×
+/// `PROBE_TIMEOUT`) holds one slot and delays no other entry's verdict beyond the queue for a slot, and a
+/// stem with hundreds of installs does not fork every probe at one instant (review of #641, findings 7 and
+/// D). The next round starts when the slowest finishes.
 async fn reprobe_round(live: Vec<Watched>) {
-    let probes: Vec<_> = live.into_iter().map(|w| tokio::task::spawn_blocking(move || reprobe_one(&w))).collect();
+    let slots = Arc::new(tokio::sync::Semaphore::new(REPROBE_CONCURRENCY));
+    let probes: Vec<_> = live
+        .into_iter()
+        .map(|w| {
+            let slots = Arc::clone(&slots);
+            tokio::spawn(async move {
+                let _slot = slots.acquire_owned().await;
+                tokio::task::spawn_blocking(move || reprobe_one(&w)).await
+            })
+        })
+        .collect();
     for p in probes {
         // `reprobe_one` warns on a failed probe, naming the activation and why.
-        if let Err(e) = p.await {
-            tracing::warn!("activation re-probe task failed: {e}");
+        match p.await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) | Err(e) => tracing::warn!("activation re-probe task failed: {e}"),
         }
     }
 }
@@ -976,6 +992,46 @@ except OSError as e:
         round.await.unwrap();
         assert!(marker.exists(), "the fast entry was re-probed");
         assert!(waited < Duration::from_millis(2500), "the fast entry's probe did not wait for the slow one: {waited:?}");
+    }
+
+    /// Review of #641 round 2, finding D: a round runs at most `REPROBE_CONCURRENCY` probes at once, so a
+    /// stem hosting hundreds of installs does not fork them all at one instant. Each probe records how many
+    /// were running when it started. Seen failing first: all twenty ran together.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_reprobe_round_runs_a_bounded_number_of_probes_at_once() {
+        let s = Scene::new("bounded");
+        let (running, seen, gate) = (s.root.join("out/running"), s.root.join("out/seen"), s.root.join("out/gate"));
+        std::fs::create_dir_all(&running).unwrap();
+        std::fs::create_dir_all(&seen).unwrap();
+        let n = 20;
+        let decls: Vec<ActivationDecl> = (0..n)
+            .map(|i| ActivationDecl {
+                ns: "data".into(), name: format!("e{i}"), command: vec!["true".into()], timeout_secs: Some(10),
+                probe: sh(&format!(
+                    "[ ! -e {g} ] && exit 0; touch {r}/e{i}; ls {r} | wc -l > {s}/e{i}; sleep 0.4; rm {r}/e{i}",
+                    g = gate.display(), r = running.display(), s = seen.display()
+                )),
+                resolve_artifact_refs: false, confine: None,
+            })
+            .collect();
+        let watch: WatchList = Default::default();
+        let actx = ActivationCtx { install_token: 1, trace: None };
+        let h = hook(decls, Arc::clone(&watch));
+        let healths: Vec<_> = (0..n)
+            .map(|i| {
+                let e = crate::InstallableEntry::new(mycelium::Capability::new("data", format!("e{i}").as_str()), crate::ArtifactId::from_bytes([i as u8; 32]));
+                h(&e, &s.placed, &actx).unwrap()
+            })
+            .collect();
+        std::fs::write(&gate, b"").unwrap();
+        let live = watch.lock().unwrap().clone();
+        reprobe_round(live).await;
+        let peak = (0..n)
+            .map(|i| std::fs::read_to_string(seen.join(format!("e{i}"))).unwrap().trim().parse::<usize>().unwrap())
+            .max()
+            .unwrap();
+        drop(healths);
+        assert!(peak <= REPROBE_CONCURRENCY, "at most {REPROBE_CONCURRENCY} probes at once, saw {peak}");
     }
 
     /// Review follow-up 1 (#636): the resolved profiles are bounded and forget a placed file that is gone

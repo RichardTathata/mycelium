@@ -1511,14 +1511,16 @@ envelope's nonce cache) and Q (the handshake refuses a revoked key's certificate
   `a_declared_path_swapped_during_the_probe_fails_closed`, each seen failing first on macOS under
   `MYCELIUM_CONFINE_LIVE_REQUIRED=1`). A probe that itself replaces one of its declared paths on every run now fails
   as `confinement_changed`. *Its review (round 1):*
-  - **(1, high) Fixed.** A symlink planted while a profile resolves was followed. The race window lay between the
-    symlink check and `canonicalize`, and between that and the pin. The bug predates #641, which made it reachable on
-    every re-probe. Now each declared path's resolution must agree with what the check saw (its canonical parent and
-    its own name). Each path is opened without following a symlink: `O_PATH | O_NOFOLLOW` on Linux, `O_NOFOLLOW` on
-    macOS. Its identity comes from `fstat` on that descriptor. The check and the resolution are then repeated against
-    what was opened. A probe also runs only under a profile that is current before it.
-    Test: `a_symlink_planted_while_prepare_resolves_is_refused`, which plants the swap through a test-only stage hook.
-    It was seen failing first at both stages: the profile named the link's target, then pinned the link.
+  - **(1, high) Narrowed in round 1, closed in round 2 (A).** A symlink planted while a profile resolves was
+    followed. The race windows lay between the symlink check and `canonicalize`, and between that and the pin. The bug
+    predates #641, which made it reachable on every re-probe. Round 1 did two things:
+    - it opened the last component without following a symlink and checked the resolution twice;
+    - it made a probe run only under a profile that is current before it.
+
+    That covered the last component and not one between. The round-2 fix, under (A), resolves every component below a
+    writable root by a walk. Test: `a_symlink_planted_while_prepare_resolves_is_refused`, which plants the swap
+    through a test-only stage hook. It was seen failing first at both stages: the profile named the link's target, then
+    pinned the link.
   - **(2, medium) Fixed.** A rotation by flipping an ancestor symlink (`current` → `v2`) left the v1 profile
     "current", which wedged the install. Currency now also re-canonicalises the declared path and compares it with
     what the profile names. The flip is seen and re-resolved, with every check. Ancestor symlinks outside every root
@@ -1533,6 +1535,41 @@ envelope's nonce cache) and Q (the handshake refuses a revoked key's certificate
   - **(7, low) Fixed.** A round runs every entry's probe concurrently, so one churning entry delays only the next
     round. Test: `one_slow_reprobe_does_not_delay_the_others`, seen failing first. Findings 5 and 6, the documents,
     were fixed in place (`deprecations.md` §47, §50).
+
+  *Its review (round 2):*
+  - **(A, medium) Fixed.** An intermediate component below a write root could still be toggled between a directory
+    and a symlink, timed so that each check saw the directory and the resolution saw the link. `O_NOFOLLOW` covered
+    only the last component, and currency did not repeat the component check. Each declared path is now resolved by
+    a walk (`activation_sandbox::walk`):
+    - the anchor is the part of the path outside every writable root, which is the operator's and may hold a
+      symlink; it is canonicalised and opened;
+    - every component after it, at least the last, is opened from its parent's descriptor with `O_NOFOLLOW`. That is
+      `O_PATH` on Linux and `O_SEARCH` on macOS for directories. The last component is opened `O_PATH` on Linux and
+      only `fstatat`-ed elsewhere;
+    - the identity comes from what the walk opened, and on Linux Landlock's rule comes from the walk's final
+      descriptor;
+    - `is_current` walks every path again.
+
+    The name the profile carries, which Seatbelt matches, is the canonical spelling. It is accepted only if it lies
+    under the anchor at the walked depth and names the walked identity. Test:
+    `an_intermediate_component_toggled_during_prepare_never_widens_the_profile` tries all 64 combinations of six
+    stages. It was seen failing first on `bd22b544`'s logic, with the stage hooks placed the same way: link at
+    `checked`, directory at `resolved` and `pinned`, link at `rechecked`.
+  - **(B, medium) Fixed.** On macOS a declared path spelt in another case, or another Unicode normalisation, was
+    refused (round 1 compared spellings). The profile now names the on-disk spelling, and identity decides. Test:
+    `a_declared_path_spelt_in_another_case_or_normalisation_is_accepted`, seen failing first (`Models` against
+    `models`).
+  - **(C, low–medium) Fixed.** On macOS round 1's `O_RDONLY | O_NOFOLLOW` open hung on a FIFO and refused a socket
+    and a write-only file. The last component is no longer opened there; it is `fstatat`-ed without following. Test:
+    `a_declared_fifo_socket_or_write_only_file_resolves_without_hanging`, seen failing first (the FIFO hit the 5 s
+    deadline).
+  - **(D, low) Fixed.** A round runs at most `REPROBE_CONCURRENCY` (8) probes at once. Test:
+    `a_reprobe_round_runs_a_bounded_number_of_probes_at_once`, seen failing first (20 at once).
+  - **Stated:**
+    - `..` below a writable root is refused, not resolved.
+    - The placement directory is the operator's and may be reached through a symlink.
+    - The walk's `rustix` calls are invisible to the seam gate, so they are admitted by name in the nondeterminism
+      inventory.
 
   Not built: limits by hostname or address, a live network allow-list, an OpenShell backend, resource limits.
 - **H:** carry each named offer's signed bytes inside the close and award from that copy (today a member who deletes a

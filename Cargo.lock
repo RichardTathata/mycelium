@@ -2679,6 +2679,7 @@ dependencies = [
  "mycelium-sim",
  "object_store",
  "reqwest 0.12.28",
+ "rustix",
  "seccompiler",
  "serde",
  "serde_json",

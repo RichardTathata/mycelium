@@ -332,9 +332,11 @@ that refuses (the path now a symlink, or gone) fails the re-probe, so the instal
 recorded by name (`prov.probe`'s `confinement_failed`).
 
 A path reached through an ancestor symlink that is flipped (`/models/current` → `v2`) resolves to the new target.
-The profile re-resolves to name that target and no longer names the old one. Every path is resolved and pinned
-without following a symlink at its last component, so a symlink planted while a profile resolves is refused, not
-followed.
+The profile re-resolves to name that target and no longer names the old one. Below the placement root and each write
+path, every component is opened from its parent without following a symlink, so a symlink planted there, at any
+component and at any moment, is refused rather than followed. A `..` there is refused too: name the path directly.
+The profile names each path's on-disk spelling, so a different case or Unicode normalisation of a path that exists is
+accepted.
 
 A probe whose path changes while it runs, the activation's initial probe included, does not trust its verdict. It
 resolves and runs once more, and a change under both runs is `confinement_changed`. The activation `command` may
