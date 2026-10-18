@@ -408,6 +408,33 @@ pub(super) fn required_scope(method: &axum::http::Method, matched_path: &str) ->
 /// (`rpc.result`, `bulk.result`). A reply the interceptor did not claim — late, or from a node the
 /// call was not sent to — falls through to the handler table, so streaming the reply kinds handed
 /// tool and LLM output to any `mesh:read` holder (#587 F7). Same body as the raw routes' refusal.
+/// The serve stream's refusal (post-360 row R's review, finding 1): `GET /gateway/rpc/serve/{kind}` registers a
+/// receiver on the same handler table, and `mcp.invoke`, `skill.invoke` and `llm.invoke` fan out to every receiver
+/// — so a `mesh:serve` client serving one of them received every request of that kind this node was sent, a
+/// confidential prompt routed in-domain included, and could answer first in the provider's place. Those three are
+/// served by this node's own registrations (MCP tools, skills, prompt skills), never over a client stream. An
+/// **operator-listed** protected kind (`protected_rpc_kinds`) stays servable: an SDK agent is its provider, checked
+/// by provider enforcement before each request is streamed (closure plan C3). The RPC reply kinds are refused as on
+/// the signal streams.
+pub(super) fn refuse_unservable_kind(kind: &str) -> Option<axum::response::Response> {
+    use crate::signal::signal_kind::{BULK_RESULT, RPC_RESULT};
+    let builtin = crate::agent::BUILTIN_PROTECTED_RPC_KINDS.contains(&kind);
+    if !builtin && kind != RPC_RESULT && kind != BULK_RESULT {
+        return None;
+    }
+    warn!(kind, "gateway: a kind this node serves itself refused on rpc/serve");
+    Some((
+        StatusCode::FORBIDDEN,
+        Json(json!({
+            "ok": false,
+            "error": "protected_kind",
+            "kind": kind,
+            "message": format!("`{kind}` is served by this node's own registrations and is not served over rpc/serve: \
+                                a stream for it would receive every such request this node is sent"),
+        })),
+    ).into_response())
+}
+
 pub(super) fn refuse_unobservable_kind(cfg: &crate::config::GossipConfig, kind: &str) -> Option<axum::response::Response> {
     use crate::signal::signal_kind::{BULK_RESULT, RPC_RESULT};
     if kind == RPC_RESULT || kind == BULK_RESULT {

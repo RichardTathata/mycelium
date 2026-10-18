@@ -61,7 +61,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   any class or destination at the provider's own re-check, and binding an ad's key to the member that wrote it (a fleet
 member can write another node's `llm-meta` ad). A gateway client cannot set a model's locality:
 `/gateway/capability/advertise` and `/gateway/units/declare` refuse a `locality` attribute on an `llm-meta` ad
-(`403 reserved_attribute`). Upgrade notes: `deprecations.md` §50.
+(`403 reserved_namespace`), a catalogue entry providing one is never installed (`prov.eligible` revision 2), and
+`GET /gateway/rpc/serve/{kind}` refuses `llm.invoke`, `mcp.invoke`, `skill.invoke` and the reply kinds — a serve stream
+for one received every such request its node was sent. The private Cedar adapter does not yet enforce class or
+locality (its next re-pin). Upgrade notes: `deprecations.md` §50.
 
 ## [2.35.0] — 2026-10-17
 

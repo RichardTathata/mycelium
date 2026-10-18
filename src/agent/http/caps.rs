@@ -47,19 +47,19 @@ pub(super) struct GatewayCapHandle {
 /// DELETEd. Beat at `lease_secs / 3` for margin — mirroring the mesh's own 3×
 /// evaporation convention. Without it, the refresh task keeps the advert fresh
 /// until DELETE or node shutdown — which outlives a crashed bridge client.
-/// Post-360 row R: a model's `llm-meta/{model}` `locality` is what an inference-routing policy decides on, and it is
-/// the **serving node's** declaration (`mycelium_reason::ModelProfile::in_domain` / `external`). A gateway client
-/// writes ads under this node's key, so letting it set the attribute would let any `cap:write` holder declare another
-/// process's model in-domain — or overwrite this node's own ad — and steer classified prompts. Refused at both doors
-/// that write an ad for a client: `capability/advertise` and `units/declare`.
-const LOCALITY_NS: &str = "llm-meta";
-const LOCALITY_ATTR: &str = "locality";
+/// Post-360 row R: a model's `llm-meta/{model}` ad — its `locality` above all — is what an inference-routing policy
+/// decides on, and it is the **serving node's** declaration (`mycelium_reason::serve_model`). A gateway client writes
+/// ads under this node's key, so any `llm-meta` ad it wrote would either declare a model's locality for it or, written
+/// without one, replace this node's own ad (last writer wins on one key) and drop its locality. The namespace is
+/// therefore refused at both doors that write an ad for a client — `capability/advertise` and `units/declare` — with
+/// or without a `locality` attribute (the review's finding 2: the first cut refused only the attribute).
+const MODEL_META_NS: &str = "llm-meta";
 
-fn refuse_locality_declaration(ns: &str, name: &str) -> axum::response::Response {
+fn refuse_model_meta(ns: &str, name: &str) -> axum::response::Response {
     (StatusCode::FORBIDDEN, Json(json!({
-        "ok": false, "error": "reserved_attribute",
-        "message": format!("{ns}/{name}: `{LOCALITY_ATTR}` is the serving node's own declaration of where its \
-                            inference runs (post-360 row R); a gateway client cannot set it"),
+        "ok": false, "error": "reserved_namespace",
+        "message": format!("{ns}/{name}: `{MODEL_META_NS}` ads are the serving node's own declaration of its model \
+                            (where its inference runs, post-360 row R); a gateway client cannot write one"),
     }))).into_response()
 }
 
@@ -77,8 +77,8 @@ pub(super) async fn gw_cap_advertise(
             "message": format!("{ns:?}/{name:?}: {problem}"),
         }))).into_response();
     }
-    if ns == LOCALITY_NS && body["attributes"].get(LOCALITY_ATTR).is_some() {
-        return refuse_locality_declaration(&ns, &name);
+    if ns == MODEL_META_NS {
+        return refuse_model_meta(&ns, &name);
     }
     let (interval_secs, lease_secs) = match (timer_secs(&body, "interval_secs"), timer_secs(&body, "lease_secs")) {
         (Ok(i), Ok(l)) => (i.unwrap_or(DEFAULT_INTERVAL_SECS), l),
@@ -232,9 +232,9 @@ pub(super) async fn gw_units_declare(
             "detail": format!("{} belong to a stem (mycelium-stem): an SDK agent hosts nothing", hosting.join(", ")),
         }))).into_response();
     }
-    // Row R: the locality of a served model is not a client's to declare (see `refuse_locality_declaration`).
-    if let Some(c) = units.capabilities.iter().find(|c| c.ns == LOCALITY_NS && c.attrs.contains_key(LOCALITY_ATTR)) {
-        return refuse_locality_declaration(&c.ns, &c.name);
+    // Row R: a served model's ad is not a client's to write (see `refuse_model_meta`).
+    if let Some(c) = units.capabilities.iter().find(|c| c.ns == MODEL_META_NS) {
+        return refuse_model_meta(&c.ns, &c.name);
     }
     // Convert everything before declaring anything: a refusal leaves nothing half-declared.
     let filters = match units.requirements.iter().map(|r| r.to_filter()).collect::<Result<Vec<_>, _>>() {

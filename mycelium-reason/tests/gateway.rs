@@ -1123,10 +1123,12 @@ async fn a_confidential_request_is_routed_to_an_in_domain_model_and_the_external
     assert_eq!(v["refused"][0]["provider"], external.as_str(), "{v}");
     assert_eq!(v["refused"][0]["reason"], "action_denied", "{v}");
 
+    // No floor is bound for this (anonymous) caller, so the default is its floor: declaring `public`
+    // does not lower it (the round-1 review's finding 3) — it stays in the domain.
     let r = route(Some("public")).await.unwrap();
     let v: serde_json::Value = r.json().await.unwrap();
-    assert_eq!(v["provider"], external.as_str(), "public may go anywhere — the first-ranked: {v}");
-    assert!(v.get("refused").is_none(), "{v}");
+    assert_eq!(v["data_class"], "confidential", "the default is a floor: {v}");
+    assert_eq!(v["provider"], in_domain.as_str(), "{v}");
 
     let r = route(None).await.unwrap();
     let v: serde_json::Value = r.json().await.unwrap();
@@ -1195,7 +1197,9 @@ async fn a_confidential_request_is_routed_to_an_in_domain_model_and_the_external
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn with_no_permitted_destination_a_classified_request_is_refused_naming_every_candidate() {
     let dir = tempfile::tempdir().unwrap();
-    let classes = mycelium_reason::DataClassPolicy::new(["public", "confidential"]).unwrap();
+    // Unclassified is `public` here, so a request may go anywhere unless it declares itself confidential.
+    let classes =
+        mycelium_reason::DataClassPolicy::new(["public", "confidential"]).unwrap().unclassified_as("public").unwrap();
     let (a, b, http_port) = start_classified_pair(dir.path(), confidential_stays_in_domain(), classes).await;
     let _ext = serve_model(&a, ModelProfile::new("fable-mini").external(), echo_template(), Arc::new(EchoBackend))
         .await
@@ -1234,15 +1238,16 @@ async fn with_no_permitted_destination_a_classified_request_is_refused_naming_ev
     let message = v["error"]["message"].as_str().unwrap();
     assert!(message.contains("confidential"), "{message}");
 
-    // Public goes anywhere — including the undeclared one: the prohibition is about one class.
+    // Public (here the default) goes anywhere — including the undeclared one: the prohibition is about one class.
     let r = http
         .post(format!("http://127.0.0.1:{http_port}/gateway/reason/route"))
-        .header(mycelium_reason::DATA_CLASS_HEADER, "public")
         .json(&serde_json::json!({ "model": "fable-mini", "input": "x" }))
         .send()
         .await
         .unwrap();
     assert_eq!(r.status().as_u16(), 200);
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(v["data_class"], "public", "{v}");
 
     a.shutdown_with_timeout(Duration::from_secs(5)).await;
     b.shutdown_with_timeout(Duration::from_secs(5)).await;
@@ -1317,11 +1322,12 @@ async fn a_declared_class_on_a_node_that_classifies_nothing_is_refused() {
     agent.shutdown_with_timeout(Duration::from_secs(5)).await;
 }
 
-/// **Row R (review finding 1): a client cannot declare a served model's locality.** `locality` on an
-/// `llm-meta/{model}` ad is what a routing policy decides on, and a gateway client writes ads under the
-/// gateway node's key — so `capability/advertise` and `units/declare` refuse it `403 reserved_attribute`,
-/// and nothing is advertised. Other `llm-meta` attributes are unaffected. Seen failing first: with the two
-/// refusals disabled, `capability/advertise` answered `200` to the forged ad.
+/// **Row R: a client cannot write a served model's `llm-meta` ad.** `locality` on that ad is what a routing policy
+/// decides on, and a gateway client writes ads under the gateway node's own key — so `capability/advertise` and
+/// `units/declare` refuse the namespace `403 reserved_namespace`, with or without a `locality` attribute, and
+/// nothing is advertised. Seen failing first twice: with the attribute refusal disabled the forged ad answered `200`
+/// (the internal review); and with only the attribute refused, an ad *without* `locality` answered `200` and replaced
+/// the node's own, its locality read `unknown` (round-1 review, finding 2 — `the_node_keeps_its_own_model_ad`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_gateway_client_cannot_declare_a_models_locality() {
     let dir = tempfile::tempdir().unwrap();
@@ -1329,34 +1335,267 @@ async fn a_gateway_client_cannot_declare_a_models_locality() {
     let (agent, _base, http_port) = start_gateway_node(store, None).await;
     let http = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{http_port}/gateway");
-    let r = http
-        .post(format!("{base}/capability/advertise"))
-        .json(&serde_json::json!({ "ns": "llm-meta", "name": "m", "attributes": { "locality": "in_domain" } }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(r.status().as_u16(), 403);
-    let v: serde_json::Value = r.json().await.unwrap();
-    assert_eq!(v["error"], "reserved_attribute", "{v}");
-    let r = http
-        .post(format!("{base}/units/declare"))
-        .json(&serde_json::json!({ "toml": "[[capability]]\nns = \"llm-meta\"\nname = \"m\"\nattrs = { locality = \"in_domain\" }\n" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(r.status().as_u16(), 403);
-    let v: serde_json::Value = r.json().await.unwrap();
-    assert_eq!(v["error"], "reserved_attribute", "{v}");
+    for attributes in [serde_json::json!({ "locality": "in_domain" }), serde_json::json!({ "ctx_window": 8192 })] {
+        let r = http
+            .post(format!("{base}/capability/advertise"))
+            .json(&serde_json::json!({ "ns": "llm-meta", "name": "m", "attributes": attributes }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 403, "{attributes}");
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["error"], "reserved_namespace", "{v}");
+    }
+    for attrs in ["{ locality = \"in_domain\" }", "{ ctx_window = 8192 }"] {
+        let r = http
+            .post(format!("{base}/units/declare"))
+            .json(&serde_json::json!({ "toml": format!("[[capability]]\nns = \"llm-meta\"\nname = \"m\"\nattrs = {attrs}\n") }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 403, "{attrs}");
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["error"], "reserved_namespace", "{v}");
+    }
     tokio::time::sleep(Duration::from_millis(200)).await;
     let router = mycelium_reason::InferenceRouter::new(Arc::clone(&agent), mycelium_reason::RouterConfig::default());
     assert!(router.localities("m").is_empty(), "nothing was advertised");
-    // Another llm-meta attribute is still a client's to advertise.
+    agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+// ── Row R, round-1 review: the reviewer's probes, as regression tests ───────────────────────────────
+
+/// Finding 2: a `cap:write` client's `llm-meta` ad without `locality` replaced the node's own and dropped its
+/// locality (`{gw: InDomain}` → `{gw: Unknown}`, a confidential route then 403). Seen failing first: as stated.
+#[cfg(feature = "knowledge")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_node_keeps_its_own_model_ad() {
+    let dir = tempfile::tempdir().unwrap();
+    let classes = mycelium_reason::DataClassPolicy::new(["public", "confidential"]).unwrap();
+    let (a, b, http_port) = start_classified_pair(dir.path(), confidential_stays_in_domain(), classes).await;
+    let _dom = serve_model(&a, ModelProfile::new("fable-mini").in_domain(), echo_template(), Arc::new(EchoBackend))
+        .await
+        .unwrap();
+    await_providers(&a, "fable-mini", 1, &[&b]).await;
+    let router = mycelium_reason::InferenceRouter::new(Arc::clone(&a), mycelium_reason::RouterConfig::default());
+    assert_eq!(router.localities("fable-mini").get(a.node_id()), Some(&mycelium::Locality::InDomain));
+    let http = reqwest::Client::new();
     let r = http
-        .post(format!("{base}/capability/advertise"))
-        .json(&serde_json::json!({ "ns": "llm-meta", "name": "m", "attributes": { "ctx_window": 8192 } }))
+        .post(format!("http://127.0.0.1:{http_port}/gateway/capability/advertise"))
+        .json(&serde_json::json!({ "ns": "llm-meta", "name": "fable-mini", "attributes": { "ctx_window": 8192 } }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 403);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(router.localities("fable-mini").get(a.node_id()), Some(&mycelium::Locality::InDomain), "unchanged");
+    let r = http
+        .post(format!("http://127.0.0.1:{http_port}/gateway/reason/route"))
+        .header(mycelium_reason::DATA_CLASS_HEADER, "confidential")
+        .json(&serde_json::json!({ "model": "fable-mini", "input": "x" }))
         .send()
         .await
         .unwrap();
     assert_eq!(r.status().as_u16(), 200);
+    a.shutdown_with_timeout(Duration::from_secs(5)).await;
+    b.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// Finding 1: `GET /gateway/rpc/serve/llm.invoke` registered a receiver beside the node's prompt skill, and
+/// `llm.invoke` fans to every receiver — so a `mesh:serve` client received the confidential prompt routed
+/// in-domain, and could answer it first. The stream is now refused `403 protected_kind` and receives nothing.
+/// Seen failing first: the stream opened `200` and carried `TOP-SECRET-PAYLOAD`.
+#[cfg(feature = "knowledge")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_rpc_serve_stream_cannot_receive_a_routed_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let classes = mycelium_reason::DataClassPolicy::new(["public", "confidential"]).unwrap();
+    let (a, b, http_port) = start_classified_pair(dir.path(), confidential_stays_in_domain(), classes).await;
+    let _dom = serve_model(&a, ModelProfile::new("fable-mini").in_domain(), echo_template(), Arc::new(EchoBackend))
+        .await
+        .unwrap();
+    await_providers(&a, "fable-mini", 1, &[&b]).await;
+    let http = reqwest::Client::new();
+    for kind in ["llm.invoke", "mcp.invoke", "skill.invoke", "rpc.result"] {
+        let r = http.get(format!("http://127.0.0.1:{http_port}/gateway/rpc/serve/{kind}")).send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 403, "{kind}");
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["error"], "protected_kind", "{v}");
+    }
+    let mut sse = http.get(format!("http://127.0.0.1:{http_port}/gateway/rpc/serve/llm.invoke")).send().await.unwrap();
+    let seen = tokio::spawn(async move {
+        let mut buf = String::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_secs(1), sse.chunk()).await {
+                Ok(Ok(Some(c))) => buf.push_str(&String::from_utf8_lossy(&c)),
+                Ok(_) => break,
+                Err(_) => {}
+            }
+        }
+        buf
+    });
+    let r = http
+        .post(format!("http://127.0.0.1:{http_port}/gateway/reason/route"))
+        .header(mycelium_reason::DATA_CLASS_HEADER, "confidential")
+        .json(&serde_json::json!({ "model": "fable-mini", "input": "TOP-SECRET-PAYLOAD" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200, "served by the node's own prompt skill");
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(v["output"], "echo: TOP-SECRET-PAYLOAD", "{v}");
+    let body = seen.await.unwrap();
+    assert!(!body.contains("payload_b64"), "nothing streamed to the client: {body}");
+    a.shutdown_with_timeout(Duration::from_secs(5)).await;
+    b.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// Finding 4: a repeated `x-mycelium-data-class` took the first value (`public` then `confidential` routed
+/// external). Now `400`, and nothing is routed. Seen failing first: `200` from the external provider.
+#[cfg(feature = "knowledge")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_repeated_class_header_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let classes =
+        mycelium_reason::DataClassPolicy::new(["public", "confidential"]).unwrap().unclassified_as("public").unwrap();
+    let (a, b, http_port) = start_classified_pair(dir.path(), confidential_stays_in_domain(), classes).await;
+    let _ext = serve_model(&a, ModelProfile::new("fable-mini").external(), echo_template(), Arc::new(EchoBackend))
+        .await
+        .unwrap();
+    await_providers(&a, "fable-mini", 1, &[&b]).await;
+    let http = reqwest::Client::new();
+    let r = http
+        .post(format!("http://127.0.0.1:{http_port}/gateway/reason/route"))
+        .header(mycelium_reason::DATA_CLASS_HEADER, "public")
+        .header(mycelium_reason::DATA_CLASS_HEADER, "confidential")
+        .json(&serde_json::json!({ "model": "fable-mini", "input": "x" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 400);
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(v["error"], "unclassifiable", "{v}");
+    let r = http
+        .post(format!("http://127.0.0.1:{http_port}/gateway/reason/v1/chat/completions"))
+        .header(mycelium_reason::DATA_CLASS_HEADER, "public")
+        .header(mycelium_reason::DATA_CLASS_HEADER, "public")
+        .json(&serde_json::json!({ "model": "fable-mini", "messages": [{ "role": "user", "content": "x" }] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 400, "twice, even the same value");
+    a.shutdown_with_timeout(Duration::from_secs(5)).await;
+    b.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// Finding 3: with no floor bound, an anonymous caller declared ` public ` on confidential text and it went to
+/// the external model. The default is now the floor: refused `403`, nothing dispatched. Seen failing first: `200`.
+#[cfg(feature = "knowledge")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_default_class_is_a_floor_a_client_cannot_declare_below() {
+    let dir = tempfile::tempdir().unwrap();
+    let classes = mycelium_reason::DataClassPolicy::new(["public", "confidential"]).unwrap();
+    let (a, b, http_port) = start_classified_pair(dir.path(), confidential_stays_in_domain(), classes).await;
+    let _ext = serve_model(&b, ModelProfile::new("fable-mini").external(), echo_template(), Arc::new(EchoBackend))
+        .await
+        .unwrap();
+    await_providers(&a, "fable-mini", 1, &[&b]).await;
+    let r = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{http_port}/gateway/reason/route"))
+        .header(mycelium_reason::DATA_CLASS_HEADER, " public ")
+        .json(&serde_json::json!({ "model": "fable-mini", "input": "confidential text" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 403, "held at the default class, which may not go external");
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(v["data"]["data_class"]["class"], "confidential", "{v}");
+    assert_eq!(v["data"]["data_class"]["source"], "default", "{v}");
+    a.shutdown_with_timeout(Duration::from_secs(5)).await;
+    b.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+// ── Guide 20's snippet, compiled and run (round-1 review, finding 7) ─────────────────────────────────
+
+/// Guide 20 § *Deciding where data may go* — the snippet's body verbatim (its imports are here as `use`s). Keep the two in step.
+#[cfg(feature = "knowledge")]
+async fn routing_policy(
+    agent: Arc<GossipAgent>,
+    dir: &std::path::Path,
+) -> Result<mycelium_reason::ModelReg, Box<dyn std::error::Error>> {
+    use mycelium::{EvidenceJournal, EvidenceProfile, Locality, ReferenceEvaluator, Rule};
+    use mycelium_reason::{DataClassPolicy, RouterConfig, reason_router_classified};
+    // Gateway door, mounted before start: classes least to most restrictive. An unclassified request — and any
+    // caller with no floor bound — is the most restrictive class; `web-agent`'s credential may send `public`.
+    let classes = DataClassPolicy::new(["public", "internal", "confidential"])?
+        .floor_for(format!("token:{}/web-agent", agent.node_id()), "public")?;
+    let store = Arc::new(FsBlobStore::open(dir.join("blobs"))?);
+    agent.with_http_routes(reason_router_classified(Arc::clone(&agent), store, RouterConfig::default(), classes));
+    agent.start().await?;
+
+    // Evidence first: an evaluator without a journal enforces and records nothing.
+    agent.with_evidence_journal(EvidenceJournal::open(dir.join("evidence.journal"), EvidenceProfile::Strict)?);
+    // Policy, as an allow-list: public and internal data may go anywhere; confidential only in-domain.
+    // A class not listed here (a typo, a class added later, `restricted`) matches no allowance: refused.
+    agent.with_action_evaluator(Arc::new(
+        ReferenceEvaluator::new("rev-route")
+            .with_catalogue("cat-route", "1")
+            .map_action("llm.invoke", "*")
+            .allow(Rule::new("*", "llm.invoke", "*").for_class("public"))
+            .allow(Rule::new("*", "llm.invoke", "*").for_class("internal"))
+            .allow(Rule::new("*", "llm.invoke", "*").for_class("confidential").at_locality(Locality::InDomain)),
+    ));
+
+    // Serve side: each provider declares where its inference runs (the `locality` attribute of its llm-meta ad).
+    let template = PromptTemplate {
+        system: "You answer briefly.".into(),
+        user_template: "{{input}}".into(),
+        max_tokens: 256,
+        temperature: 0.0,
+        metadata: Default::default(),
+    };
+    Ok(serve_model(&agent, ModelProfile::new("qwen3").in_domain(), template, Arc::new(EchoBackend)).await?)
+}
+
+/// The guide's snippet runs: an unclassified request is confidential and goes to the in-domain model, and the
+/// decision is in the evidence journal the snippet attached.
+#[cfg(feature = "knowledge")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn guide_20_routing_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut started = None;
+    for _ in 0..16 {
+        let base = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let http_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = base;
+        cfg.http_port = Some(http_port);
+        let agent = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", base).unwrap(), cfg));
+        if let Ok(reg) = routing_policy(Arc::clone(&agent), dir.path()).await {
+            started = Some((agent, reg, http_port));
+            break;
+        }
+    }
+    let (agent, _reg, http_port) = started.expect("the snippet starts a node");
+    await_providers(&agent, "qwen3", 1, &[]).await;
+    let http = reqwest::Client::new();
+    for _ in 0..100 {
+        if http.get(format!("http://127.0.0.1:{http_port}/health")).send().await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let r = http
+        .post(format!("http://127.0.0.1:{http_port}/gateway/reason/route"))
+        .json(&serde_json::json!({ "model": "qwen3", "input": "x" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(v["data_class"], "confidential", "{v}");
+    let records = mycelium::read_evidence_journal(&dir.path().join("evidence.journal")).unwrap();
+    assert!(!records.is_empty(), "the decision was recorded");
     agent.shutdown_with_timeout(Duration::from_secs(5)).await;
 }

@@ -7,12 +7,15 @@
 //!    verified principal (the gateway auth layer's `token:{issuer}/{name}`, `oidc:{issuer}/{subject}`,
 //!    …); [`DataClassPolicy::floor_for_all`] binds one to every caller. A request from that principal
 //!    is **at least** that class: a client may raise it, **never lower it**.
-//! 2. **A class the client declares** — the `x-mycelium-data-class` header on the façade's two doors
-//!    ([`DATA_CLASS_HEADER`]). Taken when it is at or above the floor; a declaration below the floor is
-//!    overruled by the floor, and the record says the class came from the principal. A declaration
-//!    naming a class the policy does not have is refused, never guessed at.
-//! 3. **The default for an unclassified request** — the **most restrictive** class unless
-//!    [`DataClassPolicy::unclassified_as`] says otherwise.
+//! 2. **The default, as a floor.** A caller with no bound floor has the default class — the **most
+//!    restrictive** unless [`DataClassPolicy::unclassified_as`] says otherwise — as its floor, so it
+//!    cannot declare itself below it. Only an explicitly bound floor can sit lower (a principal bound to
+//!    `public` may send `public`). Until the round-1 review the default applied only to a request that
+//!    declared nothing, so any caller, anonymous included, could declare `public` and lower it.
+//! 3. **A class the client declares** — the `x-mycelium-data-class` header on the façade's two doors
+//!    ([`DATA_CLASS_HEADER`]), given once. Taken when it is at or above the floor; below it, the floor
+//!    applies and the record says where the floor came from. A declaration naming a class the policy
+//!    does not have is refused, never guessed at.
 //!
 //! **What is verified and what is not.** The principal is the gateway's, so a floor is as strong as
 //! the credential it is bound to. The declared class is the client's assertion and is used only to
@@ -127,16 +130,19 @@ impl DataClassPolicy {
     /// Classify one request from `principal` (`None`: anonymous) that declared `declared`.
     pub fn classify(&self, principal: Option<&str>, declared: Option<&str>) -> Result<DataClass, ClassError> {
         let declared = declared.map(|d| self.rank(d)).transpose()?;
-        let floor = [principal, Some(EVERY_CALLER)]
+        let bound = [principal, Some(EVERY_CALLER)]
             .into_iter()
             .flatten()
             .filter_map(|p| self.floors.get(p).copied())
             .max();
-        let (rank, source) = match (declared, floor) {
-            (Some(d), Some(f)) if d < f => (f, ClassSource::Principal),
-            (Some(d), _) => (d, ClassSource::Declared),
-            (None, Some(f)) => (f, ClassSource::Principal),
-            (None, None) => (self.unclassified, ClassSource::Default),
+        // No bound floor: the default is the floor (a declaration may raise it, never lower it).
+        let (floor, floor_source) = match bound {
+            Some(f) => (f, ClassSource::Principal),
+            None => (self.unclassified, ClassSource::Default),
+        };
+        let (rank, source) = match declared {
+            Some(d) if d >= floor => (d, ClassSource::Declared),
+            _ => (floor, floor_source),
         };
         Ok(DataClass::new(self.classes[rank].clone(), source))
     }
@@ -159,6 +165,27 @@ mod tests {
         assert_eq!((c.class.as_str(), c.source), ("internal", ClassSource::Default));
     }
 
+    /// The round-1 review's finding 3: with no bound floor the default is the floor, so a caller —
+    /// anonymous included — cannot declare itself below it. Seen failing first: `public` was taken.
+    #[test]
+    fn the_default_is_a_floor_a_declaration_cannot_lower() {
+        let c = three().classify(None, Some("public")).unwrap();
+        assert_eq!((c.class.as_str(), c.source), ("confidential", ClassSource::Default));
+        let c = three().classify(Some("token:gw/anyone"), Some("internal")).unwrap();
+        assert_eq!(c.class, "confidential");
+        let p = three().unclassified_as("internal").unwrap();
+        assert_eq!(p.classify(None, Some("public")).unwrap().class, "internal");
+        let c = p.classify(None, Some("confidential")).unwrap();
+        assert_eq!((c.class.as_str(), c.source), ("confidential", ClassSource::Declared), "raised");
+        // Only an explicitly bound floor sits lower than the default.
+        let p = three().floor_for("token:gw/web", "public").unwrap();
+        let c = p.classify(Some("token:gw/web"), Some("public")).unwrap();
+        assert_eq!((c.class.as_str(), c.source), ("public", ClassSource::Declared));
+        let c = p.classify(Some("token:gw/web"), None).unwrap();
+        assert_eq!((c.class.as_str(), c.source), ("public", ClassSource::Principal));
+        assert_eq!(p.classify(Some("token:gw/other"), Some("public")).unwrap().class, "confidential");
+    }
+
     /// A client may raise the class its credential carries and never lower it.
     #[test]
     fn a_declaration_raises_a_credential_floor_and_never_lowers_it() {
@@ -170,9 +197,9 @@ mod tests {
         assert_eq!((c.class.as_str(), c.source), ("confidential", ClassSource::Declared), "raised");
         let c = p.classify(Some("token:gw/eng"), None).unwrap();
         assert_eq!((c.class.as_str(), c.source), ("internal", ClassSource::Principal));
-        // Another principal is not bound by eng's floor.
+        // Another principal is not bound by eng's floor — the default floor applies to it.
         let c = p.classify(Some("token:gw/web"), Some("public")).unwrap();
-        assert_eq!((c.class.as_str(), c.source), ("public", ClassSource::Declared));
+        assert_eq!((c.class.as_str(), c.source), ("confidential", ClassSource::Default));
     }
 
     #[test]
@@ -181,6 +208,7 @@ mod tests {
         for who in [None, Some("token:gw/anyone")] {
             let c = p.classify(who, Some("public")).unwrap();
             assert_eq!(c.class, "internal", "{who:?}");
+            assert_eq!(p.classify(who, None).unwrap().class, "internal", "a bound floor replaces the default");
         }
     }
 

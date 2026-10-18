@@ -18,7 +18,7 @@ Schema `mycelium.rules/1` · 28 rules.
 | [`prov.activation`](#provactivation) | Response | instrumented | After placement the declared command hands the blob to its local runtime — confined when the unit names a profile, which a node that cannot apply it refuses by name rather than run unconfined; a failure is an install failure at stage `activation`, retried next round. |
 | [`prov.advertise`](#provadvertise) | Propagation | catalogue only | A completed install advertises its capability to the mesh; the advertisement's lifetime is the install's. |
 | [`prov.demand_response`](#provdemand_response) | Response | instrumented | A requirement with demanding nodes and no provider, as this node sees it, makes this node a candidate installer; an observed unmet requirement is not an instruction to install. |
-| [`prov.eligible`](#proveligible) | Response | instrumented | This node hosts the entry's kind, has install budget left, and has memory and disk headroom for it. The check has side effects (counters) and is never re-evaluated for a record. |
+| [`prov.eligible`](#proveligible) | Response | instrumented | An entry providing an `llm-meta` ad is never hosted (a model's metadata is its serving node's own, post-360 row R); otherwise this node hosts the entry's kind, has install budget left, and has memory and disk headroom for it. The check has side effects (counters) and is never re-evaluated for a record. |
 | [`prov.health_pass`](#provhealth_pass) | Response | instrumented | A live install whose probe fails this round is withdrawn; restart ≡ provisioning brings it back. |
 | [`prov.install`](#provinstall) | Response | instrumented | Fetch, verify, place and host the artifact under an install token; a superseded token tears its install down rather than advertising it. |
 | [`prov.loadable`](#provloadable) | Authority | catalogue only | A proposed entry loads live only once a listed reviewer has accepted it; until then it may load into the shadow lane only (D20). |
@@ -257,9 +257,9 @@ A requirement with demanding nodes and no provider, as this node sees it, makes 
 
 ## `prov.eligible`
 
-rev 1 · `mycelium-wasm-host::provisioner` · Response · trace: instrumented
+rev 2 · `mycelium-wasm-host::provisioner` · Response · trace: instrumented
 
-This node hosts the entry's kind, has install budget left, and has memory and disk headroom for it. The check has side effects (counters) and is never re-evaluated for a record.
+An entry providing an `llm-meta` ad is never hosted (a model's metadata is its serving node's own, post-360 row R); otherwise this node hosts the entry's kind, has install budget left, and has memory and disk headroom for it. The check has side effects (counters) and is never re-evaluated for a record.
 
 - **Trigger:** a candidate entry that passed provenance
 - **Reads:**
@@ -269,12 +269,12 @@ This node hosts the entry's kind, has install budget left, and has memory and di
   - `Provisioner::hosted (lock-order row 21)` — scope: this node; freshness: local, atomic
 - **Outcomes:**
   - Action: `eligible`
-  - Refusal: `no_runtime`, `budget`, `memory`, `disk`
+  - Refusal: `reserved_namespace`, `no_runtime`, `budget`, `memory`, `disk`
 - **Effects:** `mycelium_artifact_ineligible_skips_total{reason}`
 - **Guards:** ResourceBudget
 - **May inhibit:** [`prov.demand_response`](#provdemand_response), [`prov.presence_floor`](#provpresence_floor)
 - **Depends on:** [`prov.provenance`](#provprovenance)
-- **Code:** `provisioner::Provisioner::eligible` · **Docs:** docs/operations/capability-lifecycle.md · **Tests:** `the_stem_fleet_fills_a_presence_floor_and_reheals`
+- **Code:** `provisioner::Provisioner::eligible` · **Docs:** docs/operations/capability-lifecycle.md · **Tests:** `the_stem_fleet_fills_a_presence_floor_and_reheals`, `an_entry_providing_a_model_metadata_ad_is_never_installed`
 
 ## `prov.health_pass`
 

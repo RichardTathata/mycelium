@@ -737,7 +737,7 @@
     },
     {
       "id": "prov.eligible",
-      "revision": 1,
+      "revision": 2,
       "subsystem": "mycelium-wasm-host::provisioner",
       "responsibilities": [
         "response"
@@ -775,6 +775,7 @@
         {
           "kind": "refusal",
           "reasons": [
+            "reserved_namespace",
             "no_runtime",
             "budget",
             "memory",
@@ -799,10 +800,11 @@
       "symbol": "provisioner::Provisioner::eligible",
       "docs": "docs/operations/capability-lifecycle.md",
       "tests": [
-        "the_stem_fleet_fills_a_presence_floor_and_reheals"
+        "the_stem_fleet_fills_a_presence_floor_and_reheals",
+        "an_entry_providing_a_model_metadata_ad_is_never_installed"
       ],
       "trace": "instrumented",
-      "summary": "This node hosts the entry's kind, has install budget left, and has memory and disk headroom for it. The check has side effects (counters) and is never re-evaluated for a record."
+      "summary": "An entry providing an `llm-meta` ad is never hosted (a model's metadata is its serving node's own, post-360 row R); otherwise this node hosts the entry's kind, has install budget left, and has memory and disk headroom for it. The check has side effects (counters) and is never re-evaluated for a record."
     },
     {
       "id": "prov.health_pass",

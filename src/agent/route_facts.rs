@@ -17,9 +17,9 @@
 //! `mycelium-reason`, the `locality` attribute of its `llm-meta/{model}` ad) — not observed: nothing
 //! here watches where a provider's backend actually sends a prompt. Nor is it bound to its writer:
 //! a capability ad's key names the node, and nothing ties the key to the member that wrote it, so a
-//! member of the fleet can write another node's ad. A gateway *client* cannot set it — the two
-//! gateway doors that write ads for clients refuse the attribute (`capability/advertise`,
-//! `units/declare`). A provider that declares nothing is [`Locality::Unknown`], which a rule about
+//! member of the fleet can write another node's ad. A gateway *client* cannot — the two gateway
+//! doors that write ads for clients refuse the `llm-meta` namespace (`capability/advertise`,
+//! `units/declare`), and the provisioner never installs an entry providing one. A provider that declares nothing is [`Locality::Unknown`], which a rule about
 //! locality reads as *not established*, never as in-domain. The class is **declared, not detected**:
 //! no content is inspected. Its [`ClassSource`] says who declared it, so a reader can tell a class
 //! the operator bound to the caller's credential from one the client asserted.

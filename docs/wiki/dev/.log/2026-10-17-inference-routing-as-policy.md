@@ -9,7 +9,10 @@ model exists. Every door a model call leaves by was enumerated (the plan's R blo
 substrate's `/gateway/llm/*` doors and provider enforcement fail closed under a class rule (neither establishes a
 class), the node's in-process calls and a provider's backend are not covered. Declared, never detected. The
 independent review found the doors that *establish* the facts: a `cap:write` client could declare any model in-domain
-through `capability/advertise` / `units/declare` — now refused (`reserved_attribute`); a member writing another
+through `capability/advertise` / `units/declare` — now refused, the whole `llm-meta` namespace after round 1
+(`reserved_namespace`); round 1 also found `rpc/serve` handing a client every `llm.invoke` (a kind in the URL path,
+which the enumeration greps missed — now refused for the node-served kinds), the default class not a floor (now it
+is), and the provisioner as a third writer of `llm-meta` (closed); a member writing another
 node's ad stays open (an ad's key is not bound to its writer). A class rule names one class, so policies are
 written as allow-lists.
 

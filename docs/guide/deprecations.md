@@ -70,7 +70,7 @@ the notice.
 | 47 | an exhaustive `Rule { .. }` or `ContractCase { .. }` literal; an evaluator that wraps another and forwards only `evaluate` | 2.35.0 (post-360 row K) | build a `Rule` with `Rule::new` and its builders, and give a `ContractCase` `history: None` (or a history); a wrapping evaluator forwards `history_request` and `evaluate_with_history` | Yes for the literals (a new field); no for a wrapper — it compiles, and its limited rules decide `Indeterminate` |
 | 48 | an exhaustive struct literal of `GossipConfig`, `OpenAiBackend` or `ServeDecl`; a `{:?}` of a `ServeDecl` showing its `api_key`; Z2's `api_key_env` refusal naming the variable | 2.35.0 (post-360 row L) | `..Default::default()` (or the new fields: `egress_credentials`, `credentials`, `credential`); read the section name in the refusal | **Yes** for an exhaustive literal — it will not compile; otherwise no — `Debug` prints `api_key: Some("<redacted>")`, and the refusal names the `[[serve]]` section and the field, not the variable |
 | 49 | a unit file with a key or section the loader does not know — at the top level or in an `[[activation]]` | 2.35.0 (post-360 row M) | correct the spelling, or remove the key | No — behaviour: the file is refused at load, naming the key (`units/declare` answers 400, `wire-check` and a stem refuse it); it was silently dropped |
-| 50 | an exhaustive `Rule { .. }` literal; an evaluator adapter held to the contract suite that cannot express `PolicyClause::ForbidClassAt`; a `mycelium-reason` caller matching `RouteError` exhaustively or building `Routed`; a client relying on the façade answering `403` at the first refused provider | Unreleased (post-360 row R) — also: a `locality` attribute on an `llm-meta` ad from a gateway client is `403 reserved_attribute`, and `x-mycelium-data-class` to a router that classifies nothing is `400` | `Rule::new` and its builders; decline the five `route_*` cases in `declared_limits` or express them; a `RouteError::Unclassifiable` arm; read `refused` / `data.refused_destinations` | Yes for the literals and the `match`; no for the façade — a refused provider is now passed over for the next, and `403` comes only when every candidate is refused |
+| 50 | an exhaustive `Rule { .. }` literal; an evaluator adapter held to the contract suite that cannot express `PolicyClause::ForbidClassAt`; a `mycelium-reason` caller matching `RouteError` exhaustively or building `Routed`; a client relying on the façade answering `403` at the first refused provider | Unreleased (post-360 row R) — also: an `llm-meta` ad from a gateway client is `403 reserved_namespace`; `GET /gateway/rpc/serve/{kind}` for `llm.invoke`, `mcp.invoke`, `skill.invoke`, `rpc.result` or `bulk.result` is `403 protected_kind`; a catalogue entry providing `llm-meta/…` is never installed; on a classifying router a caller with no bound floor cannot declare below the default class, and the header given twice or to a router that classifies nothing is `400` | `Rule::new` and its builders; decline the five `route_*` cases in `declared_limits` or express them; a `RouteError::Unclassifiable` arm; read `refused` / `data.refused_destinations` | Yes for the literals and the `match`; no for the façade — a refused provider is now passed over for the next, and `403` comes only when every candidate is refused |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -1637,8 +1637,22 @@ is passed over for the next** — before, the façade answered `403` at the firs
   its locality and reason. A `200` may name providers passed over (`refused`). A request carrying
   `x-mycelium-data-class` to a node whose router classifies nothing is now `400` (it was ignored), with or without an
   evaluator.
-- A gateway client advertising an `llm-meta` ad with a `locality` attribute (`capability/advertise`,
-  `units/declare`) is refused `403 reserved_attribute`; other `llm-meta` attributes are unaffected.
+- A gateway client writing any `llm-meta` ad (`capability/advertise`, `units/declare`) is refused
+  `403 reserved_namespace` — with or without `locality`: a client ad on that key replaced the serving node's own.
+  Serve a model with `mycelium_reason::serve_model` on the node.
+- `GET /gateway/rpc/serve/{kind}` refuses `llm.invoke`, `mcp.invoke` and `skill.invoke` (and the reply kinds
+  `rpc.result`, `bulk.result`) with `403 protected_kind`. Those kinds fan out to every receiver on a node, so a client
+  serve stream for one received every such request the node was sent and could answer it first. No SDK or example
+  served them this way; an **operator-listed** protected kind (`protected_rpc_kinds`) is still servable, checked by
+  provider enforcement.
+- A catalogue entry whose `provides` is an `llm-meta/…` ad is never installed (`prov.eligible`, reason
+  `reserved_namespace`, catalogue revision 2).
+- **The default class is a floor.** On a classifying router (`reason_router_classified`), a caller with no floor bound
+  is held at the default class: a declaration may raise it, not lower it. A deployment that relied on clients
+  declaring `public` binds those principals lower (`floor_for(principal, "public")`) or lowers the default
+  (`unclassified_as`).
+- **Not yet in the Cedar adapter.** Until the private companion's next re-pin, a Cedar-backed fleet enforces no class
+  or locality rule.
 - A policy written with `for_class` or `at_locality` refuses `llm.invoke` through `/gateway/llm/call` and
   `/gateway/llm/stream` (they establish neither) — by design; route classified calls through the façade.
 

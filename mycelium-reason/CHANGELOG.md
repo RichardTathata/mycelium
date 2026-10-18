@@ -30,9 +30,15 @@ nothing about where that provider's inference runs or what the request carries.
   `reason_router_classified` mount it. An unknown class, or a declaration to a router that classifies nothing, is
   `RouteError::Unclassifiable` — `400 unclassifiable` on `/route`, `400 invalid_request_error` / `data_class` on the
   façade — and nothing is routed.
-- **A client cannot set a locality.** The substrate's `capability/advertise` and `units/declare` refuse an
-  `llm-meta` ad carrying `locality` from a gateway client (`403 reserved_attribute`). A fleet member can still write
-  another node's ad: an ad's key is not bound to its writer (stated, not built).
+- **A client cannot set a locality, or stand in for a model.** The substrate's `capability/advertise` and
+  `units/declare` refuse any `llm-meta` ad from a gateway client (`403 reserved_namespace`); a catalogue entry
+  providing one is never installed; and `GET /gateway/rpc/serve/llm.invoke` (with `mcp.invoke`, `skill.invoke`) is
+  refused, since a serve stream received every prompt the node was sent — found by the round-1 review. A fleet member
+  can still write another node's ad: an ad's key is not bound to its writer (stated, not built).
+- **The default class is a floor.** A caller with no floor bound is held at the default (most restrictive) class: it
+  may declare higher, never lower. Only an explicitly bound floor sits lower. The header given twice is `400`.
+- **No SDK declares a class yet** — `mycelium-py`'s `reason.route()` and `mycelium-ts` have no class parameter, so an
+  SDK caller is classified by its floor.
 - **One operation id per call.** Every candidate's evidence record for one routed call carries the same
   `operation_id` (`reason:{node}/…`), so the refused candidates and the dispatched one join.
 - **Write class policies as allow-lists.** A class rule names one class; the evaluator does not know the classifier's

@@ -142,7 +142,11 @@ pub(super) async fn gw_rpc_serve(
     Path(kind):  Path<String>,
     State(ctx):  State<Arc<HttpCtx>>,
     caller: Option<Extension<ResolvedPrincipal>>,
-) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+) -> axum::response::Response {
+    // Post-360 row R's review: a kind this node serves itself is never handed to a client stream.
+    if let Some(refused) = refuse_unservable_kind(&kind) {
+        return refused;
+    }
     let rx = ctx.agent_ctx.signal_handlers.register_with_capacity(
         Arc::from(kind.as_str()),
         256,
@@ -202,13 +206,13 @@ pub(super) async fn gw_rpc_serve(
         if let Some(c) = caller {
             data["caller"] = c;
         }
-        Some(Ok(Event::default()
+        Some(Ok::<_, Infallible>(Event::default()
             .event(req.kind().as_ref())
             .data(data.to_string())))
       }
     });
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
 }
 
 /// `POST /gateway/rpc/respond` — send a reply to an in-flight RPC request.

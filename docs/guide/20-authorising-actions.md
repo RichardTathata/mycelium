@@ -397,41 +397,72 @@ nothing about where its inference runs or what the request carries. Now a routin
 candidate, and the router dispatches to the first candidate the policy permits:
 
 ```rust
-use mycelium::{Locality, ReferenceEvaluator, Rule};
-use mycelium_reason::{DataClassPolicy, ModelProfile, RouterConfig, reason_router_classified};
+use std::sync::Arc;
+use mycelium::{
+    EchoBackend, EvidenceJournal, EvidenceProfile, GossipAgent, Locality, PromptTemplate, ReferenceEvaluator, Rule,
+};
+use mycelium_reason::{DataClassPolicy, FsBlobStore, ModelProfile, ModelReg, RouterConfig, reason_router_classified, serve_model};
 
-// Serve side: each provider declares where its inference runs (the `locality` attribute of its llm-meta ad).
-let _reg = serve_model(&agent, ModelProfile::new("qwen3").in_domain(), template, ollama).await?;
+async fn routing_policy(
+    agent: Arc<GossipAgent>,
+    dir: &std::path::Path,
+) -> Result<ModelReg, Box<dyn std::error::Error>> {
+    // Gateway door, mounted before start: classes least to most restrictive. An unclassified request — and any
+    // caller with no floor bound — is the most restrictive class; `web-agent`'s credential may send `public`.
+    let classes = DataClassPolicy::new(["public", "internal", "confidential"])?
+        .floor_for(format!("token:{}/web-agent", agent.node_id()), "public")?;
+    let store = Arc::new(FsBlobStore::open(dir.join("blobs"))?);
+    agent.with_http_routes(reason_router_classified(Arc::clone(&agent), store, RouterConfig::default(), classes));
+    agent.start().await?;
 
-// Policy, as an allow-list: public and internal data may go anywhere; confidential only in-domain.
-// A class not listed here (a typo, a class added later, `restricted`) matches no allowance: refused.
-agent.with_action_evaluator(Arc::new(
-    ReferenceEvaluator::new("rev-route")
-        .with_catalogue("cat-route", "1")
-        .map_action("llm.invoke", "*")
-        .allow(Rule::new("*", "llm.invoke", "*").for_class("public"))
-        .allow(Rule::new("*", "llm.invoke", "*").for_class("internal"))
-        .allow(Rule::new("*", "llm.invoke", "*").for_class("confidential").at_locality(Locality::InDomain)),
-));
+    // Evidence first: an evaluator without a journal enforces and records nothing.
+    agent.with_evidence_journal(EvidenceJournal::open(dir.join("evidence.journal"), EvidenceProfile::Strict)?);
+    // Policy, as an allow-list: public and internal data may go anywhere; confidential only in-domain.
+    // A class not listed here (a typo, a class added later, `restricted`) matches no allowance: refused.
+    agent.with_action_evaluator(Arc::new(
+        ReferenceEvaluator::new("rev-route")
+            .with_catalogue("cat-route", "1")
+            .map_action("llm.invoke", "*")
+            .allow(Rule::new("*", "llm.invoke", "*").for_class("public"))
+            .allow(Rule::new("*", "llm.invoke", "*").for_class("internal"))
+            .allow(Rule::new("*", "llm.invoke", "*").for_class("confidential").at_locality(Locality::InDomain)),
+    ));
 
-// Gateway door: classes least to most restrictive; an unclassified request is the most restrictive.
-let classes = DataClassPolicy::new(["public", "internal", "confidential"])?
-    .floor_for("token:gw/hr-agent", "confidential")?;
-agent.with_http_routes(reason_router_classified(agent.clone(), store, RouterConfig::default(), classes));
+    // Serve side: each provider declares where its inference runs (the `locality` attribute of its llm-meta ad).
+    let template = PromptTemplate {
+        system: "You answer briefly.".into(),
+        user_template: "{{input}}".into(),
+        max_tokens: 256,
+        temperature: 0.0,
+        metadata: Default::default(),
+    };
+    Ok(serve_model(&agent, ModelProfile::new("qwen3").in_domain(), template, Arc::new(EchoBackend)).await?)
+}
 ```
 
-**Where the class comes from.** In order: a **floor** the operator binds to the caller's verified principal
-(`floor_for`, or `floor_for_all` for everyone); a class the client **declares** in the `x-mycelium-data-class` header,
-which may raise the floor and never lower it; otherwise the policy's **default for an unclassified request**, the most
-restrictive class unless `unclassified_as` says otherwise. A class the policy does not have is `400`; so is any
-declaration to a node whose router classifies nothing (`reason_router` without classes) — a declaration that cannot be
-honoured is not silently dropped. The envelope carries the class and who declared it (`DataClass { class, source }`,
+This is `guide_20_routing_policy` in `mycelium-reason/tests/gateway.rs`, compiled and run in CI (a confidential
+request routes to the in-domain model and the evidence journal records the decision); in production the
+`EchoBackend` is your engine's backend and the issuer in the token principal is your gateway's.
+
+**Where the class comes from.** Every caller has a **floor**: the class the operator bound to its verified principal
+(`floor_for`, or `floor_for_all` for everyone), or, when none is bound, the policy's **default** — the most restrictive
+class unless `unclassified_as` says otherwise. The client may **declare** a class in the `x-mycelium-data-class`
+header, once; a declaration at or above the floor is taken, one below it is overruled by the floor. So an unclassified
+request is the default class, no caller can declare itself below the default, and only a principal the operator bound
+lower (above, `web-agent` → `public`) can send a lower class. A class the policy does not have is `400`, so is the
+header given twice, and so is any declaration to a node whose router classifies nothing (`reason_router` without
+classes) — a declaration that cannot be honoured is not silently dropped. **No SDK declares a class yet**: neither
+`mycelium-py`'s `reason.route()` nor `mycelium-ts` takes one, so an SDK caller is classified by its floor (set the
+header yourself with a raw HTTP client or an OpenAI client's default headers). The envelope carries the class and who declared it (`DataClass { class, source }`,
 `ClassSource::{Principal, Declared, Default}`).
 
 **Where the destination is.** The candidate's `llm/{model}@{provider}` and the provider's own declaration of where its
 inference runs — `ModelProfile::in_domain()` (an engine on a fleet node) or `external()` (the backend sends the prompt
-off the mesh), the `locality` attribute of its `llm-meta/{model}` ad. A gateway client cannot set that attribute:
-`capability/advertise` and `units/declare` refuse it `403 reserved_attribute`. A provider that declares nothing is
+off the mesh), the `locality` attribute of its `llm-meta/{model}` ad. A gateway client cannot write an `llm-meta` ad at
+all — `capability/advertise` and `units/declare` refuse the namespace `403 reserved_namespace` — and a catalogue entry
+whose `provides` is one is never installed (`prov.eligible`, `reserved_namespace`). And no client can stand in for a
+model: `GET /gateway/rpc/serve/{kind}` refuses `llm.invoke`, `mcp.invoke` and `skill.invoke` `403 protected_kind` —
+those fan out to every receiver on a node, so a serve stream for one would receive every prompt the node was sent. A provider that declares nothing is
 `Locality::Unknown`, and a rule about locality reads it as **not established** — never as in-domain.
 
 **Per candidate, in the router's order.** The preflight runs for each candidate before the router commits to it. A
@@ -463,7 +494,7 @@ the `route_*` cases).
 - **No observation of the backend, and no binding to the writer.** The locality is a declaration in a capability ad,
   not an observation: a member that declares `in_domain` and forwards prompts off the mesh is outside the guarantee.
   And an ad's key names its node without anything binding the key to the member that wrote it, so a fleet **member**
-  can write another node's `llm-meta` ad (a gateway client cannot — the attribute is refused at its doors). The
+  can write another node's `llm-meta` ad (a gateway client cannot — the namespace is refused at its doors). The
   provider's own egress allow-list (`[egress]`) is the complementary control on what its backend can reach.
 - **A provider refreshing its ad reads as unknown meanwhile.** `ModelReg::refresh_meta` (the Ollama collector drives it
   as `warm` and the VRAM figures change) retracts the old ad before writing the new one; between the two the provider's
@@ -474,7 +505,10 @@ the `route_*` cases).
   first can time out early. A route where some candidates failed and the rest were refused answers `502 exhausted`,
   the refusals only in the evidence.
 - **Floors are exact principals.** `floor_for` keys are the gateway's principal strings (`token:{issuer}/{name}`,
-  `oidc:{issuer}/{subject}`); a key that matches no principal binds nothing, silently. `ClassSource` is on the record,
+  `oidc:{issuer}/{subject}`); a key that matches no principal binds nothing, silently — its caller gets the default.
+- **A Cedar-backed fleet enforces no class or locality yet.** The private companion's Cedar adapter has not been
+  given `ForbidClassAt` or the `route_*` cases; until its next re-pin, a gateway running it decides as though no class
+  or locality rule were written. `ClassSource` is on the record,
   but the reference rules do not distinguish a declared class from a principal-bound one.
 - **The refusal names the candidates.** `refused_destinations` and `refused` give the client each candidate's provider
   address and declared locality.

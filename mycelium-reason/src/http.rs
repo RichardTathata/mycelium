@@ -137,6 +137,11 @@ struct RouteBody {
 
 /// The class a request declared in [`DATA_CLASS_HEADER`], or the header's own problem (row R).
 fn declared_class(headers: &HeaderMap) -> Result<Option<&str>, String> {
+    // Given twice, it names two classes; which one a proxy or this door reads first is not the client's
+    // statement of one class (the round-1 review's finding 4: the first was taken).
+    if headers.get_all(DATA_CLASS_HEADER).iter().count() > 1 {
+        return Err(format!("{DATA_CLASS_HEADER} was given more than once; declare one class"));
+    }
     match headers.get(DATA_CLASS_HEADER) {
         None => Ok(None),
         Some(v) => v

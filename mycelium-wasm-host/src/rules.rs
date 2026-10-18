@@ -107,14 +107,14 @@ pub static RULES: &[RuleDescriptor] = &[
         summary: "A proposed entry loads live only once a listed reviewer has accepted it; until then it may load into the shadow lane only (D20).",
     },
     RuleDescriptor {
-        id: "prov.eligible", revision: 1, subsystem: "mycelium-wasm-host::provisioner", responsibilities: &[Response],
+        id: "prov.eligible", revision: 2, subsystem: "mycelium-wasm-host::provisioner", responsibilities: &[Response],
         trigger: "a candidate entry that passed provenance",
         inputs: &[CATALOG, UNIT, PROBE, HOSTED],
-        outcomes: &[Outcome { kind: Action, reasons: &["eligible"] }, Outcome { kind: Refusal, reasons: &["no_runtime", "budget", "memory", "disk"] }],
+        outcomes: &[Outcome { kind: Action, reasons: &["eligible"] }, Outcome { kind: Refusal, reasons: &["reserved_namespace", "no_runtime", "budget", "memory", "disk"] }],
         effects: &["`mycelium_artifact_ineligible_skips_total{reason}`"], guards: &[Guard::ResourceBudget], may_trigger: &[], may_inhibit: &["prov.demand_response", "prov.presence_floor"], depends_on: &["prov.provenance"],
         symbol: "provisioner::Provisioner::eligible", docs: "docs/operations/capability-lifecycle.md",
-        tests: &["the_stem_fleet_fills_a_presence_floor_and_reheals"], trace: Instrumented,
-        summary: "This node hosts the entry's kind, has install budget left, and has memory and disk headroom for it. The check has side effects (counters) and is never re-evaluated for a record.",
+        tests: &["the_stem_fleet_fills_a_presence_floor_and_reheals", "an_entry_providing_a_model_metadata_ad_is_never_installed"], trace: Instrumented,
+        summary: "An entry providing an `llm-meta` ad is never hosted (a model's metadata is its serving node's own, post-360 row R); otherwise this node hosts the entry's kind, has install budget left, and has memory and disk headroom for it. The check has side effects (counters) and is never re-evaluated for a record.",
     },
     RuleDescriptor {
         id: "prov.rights_admission", revision: 1, subsystem: "mycelium-wasm-host::provisioner", responsibilities: &[Authority],

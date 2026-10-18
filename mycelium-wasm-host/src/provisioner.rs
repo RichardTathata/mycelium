@@ -525,6 +525,18 @@ impl Provisioner {
     /// the fleet's placement algorithm, with no scheduler and no resource gossip — plus a
     /// tripwire tick, see [`ineligible_skips`](Self::ineligible_skips).
     fn eligibility(&self, entry: &InstallableEntry) -> Result<(), &'static str> {
+        // Post-360 row R: an `llm-meta/{model}` ad — its `locality` above all — is what an inference-routing policy
+        // decides on, and it is the serving node's own declaration (`mycelium_reason::serve_model` writes it beside
+        // the `llm/{model}` skill). A manifest's `provides` in that namespace would let a publisher declare where a
+        // model's inference runs for whichever node installs it; refused, so the declaration stays the server's.
+        if entry.provides.namespace.as_ref() == "llm-meta" {
+            self.ineligible.fetch_add(1, Ordering::Relaxed);
+            metrics::counter!("mycelium_artifact_ineligible_skips_total", "reason" => "reserved_namespace")
+                .increment(1);
+            tracing::warn!(name = %entry.provides.name,
+                "an entry providing llm-meta/… is not installed: a model's metadata ad is its serving node's own");
+            return Err("reserved_namespace");
+        }
         let Some(runtime) = self.runtimes.get(&entry.kind) else {
             self.ineligible.fetch_add(1, Ordering::Relaxed);
             metrics::counter!("mycelium_artifact_ineligible_skips_total", "reason" => "no_runtime")
@@ -3017,6 +3029,29 @@ mod tests {
             }
             other => panic!("expected the no_runtime skip counter in the snapshot, got {other:?}"),
         }
+    }
+
+    /// Post-360 row R's review, finding 5: a manifest whose `provides` is an `llm-meta/…` ad would write a model's
+    /// `locality` for whichever node installs it; it is ineligible by name. Seen failing first: the round elected
+    /// and installed it.
+    #[tokio::test]
+    async fn an_entry_providing_a_model_metadata_ad_is_never_installed() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let id = mycelium::NodeId::new("127.0.0.1", port).unwrap();
+        let agent = Arc::new(GossipAgent::new(id, mycelium::GossipConfig { bind_port: port, ..Default::default() }));
+        let host = Arc::new(WasmHost::new().expect("engine"));
+        let mut source = InMemorySource::new();
+        let blob = source.insert(b"not a model".to_vec());
+        let mut catalog = InstallableCatalog::new();
+        let provides = Capability::new("llm-meta", "m").with("locality", mycelium::CapValue::Text("in_domain".into()));
+        let entry = InstallableEntry::new(provides, blob).with_kind(ArtifactKind::Blob);
+        catalog.add(entry.clone());
+        let mut prov = Provisioner::new(agent, host, catalog, Arc::new(source), 1.0);
+        prov.register_runtime(Arc::new(crate::runtime::BlobRuntime::new(std::env::temp_dir())));
+        assert_eq!(prov.eligibility(&entry), Err("reserved_namespace"));
+        prov.supervise(CapFilter::new("llm-meta", "m"), 1);
+        assert_eq!(prov.provision_round(), 0, "never elected");
+        assert!(prov.ineligible_skips() >= 1);
     }
 
     #[tokio::test]
