@@ -386,7 +386,11 @@ async fn the_mcp_door_counts_into_the_fleet_counter() {
     let _listeners: Vec<_> =
         [&a, &b].iter().map(|n| n.consensus().start_consensus_listener(ConsensusConfig::default())).collect();
     ready(&[&a, &b]).await;
-    let _tool = a.mcp().register_mcp_tool("post", serde_json::json!({"type": "object", "properties": {}}), |_args| async {
+    // A tool name no other test uses: the door resolves a tool's provider from `tools/{name}/…`, and a node of
+    // another test that once held this test's port can briefly share the mesh — a shared name like `post` then
+    // resolves to that test's node (the CI flake seen twice on this test).
+    let tool_name = format!("k2-door-{p1}");
+    let _tool = a.mcp().register_mcp_tool(tool_name.as_str(), serde_json::json!({"type": "object", "properties": {}}), |_args| async {
         Ok(serde_json::json!("ran"))
     });
     let client = reqwest::Client::new();
@@ -394,7 +398,7 @@ async fn the_mcp_door_counts_into_the_fleet_counter() {
         client
             .post(format!("http://127.0.0.1:{http}/mcp"))
             .json(&serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                                      "params": {"name": "post", "arguments": {}}}))
+                                      "params": {"name": tool_name, "arguments": {}}}))
             .send()
             .await
             .unwrap()
@@ -403,7 +407,7 @@ async fn the_mcp_door_counts_into_the_fleet_counter() {
             .unwrap()
     };
     assert!(
-        until(|| a.task_ctx.kv_state.store.pin().keys().any(|k| k.starts_with("tools/post/")), Duration::from_secs(5)).await,
+        until(|| a.task_ctx.kv_state.store.pin().keys().any(|k| k.starts_with(&format!("tools/{tool_name}/"))), Duration::from_secs(5)).await,
         "the tool is registered"
     );
     for i in 0..3 {
