@@ -1583,7 +1583,23 @@ CC8, `docs/capabilities.md`, the crate README). The example units with `[[activa
   row's uid 0). (4) Every drop-the-listener port allocation in the wasm-host tests uses `test_util::alloc_port`. (5)
   The live other-user test asserts the `peer_uid_other` count and `sudo`'s exit status. (6) The live other-user step
   runs on macOS too (`wasm-host-macos`). Stated: more than 64 connections within one table read can close the
-  command's waiting connection.
+  command's waiting connection — closed at the root in round 5.
+- *The fifth review (#644, round 5)* — round 4 confirmed. (5, the stated limit) The proxy stops accepting while
+  `max_unchecked` (64) wait to be named, so newer connections wait in the kernel's first-in, first-out listen
+  backlog; no waiter is closed, and `peer_check_evicted` is gone — the residue is a sustained flood filling the
+  backlog faster than reads drain it, which costs a SYN retry rather than a refusal
+  (`the_oldest_waiter_is_never_closed_to_make_room`: the command first, then 80 others within one 300 ms read;
+  failing first on round 4: the command was closed). (1) Linux looks an IPv4 pair up under its IPv4-mapped spelling
+  in `/proc/net/tcp6` too — a dual-stack (JVM) client — and macOS compares mapped and plain addresses as one
+  (`half_closed_and_dual_stack_clients_are_named`, failing first with the mapped lookup removed;
+  `a_live_dual_stack_client_is_named`, live on macOS and in a Linux container). (2) One descriptor budget for the
+  whole stem, a quarter of the soft `RLIMIT_NOFILE` (at least 32, not raised), shared by every proxy and counting
+  upstream sockets (`FdBudget`; `two_proxies_share_one_descriptor_budget`, failing first with the budget unchecked:
+  16 held against 10). (3) A kernel-table read is bounded (`peer_read_timeout_ms`, 2 s; macOS kills `sysctl` at
+  1.5 s), its batch refused and the next served (`a_hung_table_read_is_bounded_and_the_next_batch_is_served`,
+  failing first: the hung read stalled the next connection; `a_command_past_its_bound_is_killed`, failing first
+  with the kill removed). (4) Linux names a client in FIN_WAIT1/2 or CLOSE_WAIT too, never TIME_WAIT (the same
+  parser test, failing first with ESTABLISHED only).
 - **Not built, stated:** limits by address (names are compared, not what they resolve to) and by path; under Landlock,
   a limit on the proxy's port by address; an OpenShell backend; resource
   limits (CPU, memory); on Linux below Landlock ABI 6, a limit on signals to the stem user's processes; device

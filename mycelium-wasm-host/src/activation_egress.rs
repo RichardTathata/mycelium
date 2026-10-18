@@ -125,6 +125,8 @@ struct Inner {
     open: AtomicUsize,
     refused_other_user: AtomicU64,
     peer_gate: Arc<PeerGate>,
+    /// The descriptors every proxy of the stem shares.
+    fd_budget: Arc<FdBudget>,
     /// The connections that have not presented the token, oldest first, to close past
     /// `limits.max_unauthenticated`. Lock-order table row 65: a leaf, held for a push or a scan of weak
     /// references, never across an `await`.
@@ -195,8 +197,13 @@ pub struct ProxyLimits {
     pub max_unauthenticated: usize,
     /// How long a connection may stay without presenting the token before it is closed (N2).
     pub preauth_timeout_ms: u64,
-    /// Connections waiting for their owner to be named; past it the oldest is closed (#644's round-4 review).
+    /// Connections waiting for their owner to be named. While this many wait the proxy **stops accepting**, so
+    /// newer connections wait in the kernel's first-in, first-out listen backlog; none is closed to make room
+    /// (#644's round-5 review).
     pub max_unchecked: usize,
+    /// How long one read of the kernel's socket table may take before its batch is refused (`peer_uid_unknown`)
+    /// and the next read begins (#644's round-5 review).
+    pub peer_read_timeout_ms: u64,
     /// Sockets the proxy holds at once, whatever their state; one accepted past it is closed at once, so one
     /// activation's proxy cannot take the stem's descriptor table (#644's round-4 review).
     pub max_open: usize,
@@ -210,7 +217,7 @@ pub struct ProxyLimits {
 
 impl Default for ProxyLimits {
     fn default() -> Self {
-        ProxyLimits { max_connections: 64, max_unauthenticated: 16, preauth_timeout_ms: 2_000, max_unchecked: 64, max_open: 256, header_read_timeout_ms: 10_000, tunnel_idle_ms: 300_000, max_buffered_bodies: 4 }
+        ProxyLimits { max_connections: 64, max_unauthenticated: 16, preauth_timeout_ms: 2_000, max_unchecked: 64, peer_read_timeout_ms: 2_000, max_open: 256, header_read_timeout_ms: 10_000, tunnel_idle_ms: 300_000, max_buffered_bodies: 4 }
     }
 }
 
@@ -232,6 +239,62 @@ pub struct ProxyOptions<'a> {
     /// a test injects its own. A connection whose owner is not this process's user, or cannot be read, is
     /// closed at accept (#644's round-3 review).
     pub peer_uid: Option<PeerUidLookup>,
+    /// The descriptor budget every proxy of the stem shares — `None` for the process-wide one
+    /// ([`FdBudget::stem`]); a test injects its own.
+    pub fd_budget: Option<Arc<FdBudget>>,
+}
+
+/// The descriptors every egress proxy in this process may hold together — accepted sockets and the upstream
+/// sockets they open (#644's round-5 review: a per-proxy cap multiplied by the number of activations could still
+/// take the stem's descriptor table, which gossip, the gateway and the WAL need).
+#[derive(Debug)]
+pub struct FdBudget {
+    used: AtomicUsize,
+    cap: usize,
+}
+
+impl FdBudget {
+    /// A budget of `cap` descriptors.
+    pub fn new(cap: usize) -> Arc<Self> {
+        Arc::new(FdBudget { used: AtomicUsize::new(0), cap: cap.max(1) })
+    }
+
+    /// The process-wide budget: a quarter of the soft `RLIMIT_NOFILE` (at least 32), leaving three quarters to the
+    /// node itself. The limit is read once and not raised.
+    pub fn stem() -> Arc<Self> {
+        static STEM: std::sync::OnceLock<Arc<FdBudget>> = std::sync::OnceLock::new();
+        Arc::clone(STEM.get_or_init(|| {
+            let soft = rustix::process::getrlimit(rustix::process::Resource::Nofile).current.unwrap_or(1024);
+            FdBudget::new(((soft / 4) as usize).clamp(32, 16_384))
+        }))
+    }
+
+    /// Descriptors held now.
+    pub fn used(&self) -> usize {
+        self.used.load(Ordering::Acquire)
+    }
+
+    /// Its size.
+    pub fn cap(&self) -> usize {
+        self.cap
+    }
+
+    /// Take one, if any is left; released when the slot drops.
+    fn take(self: &Arc<Self>) -> Option<BudgetSlot> {
+        self.used
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < self.cap).then_some(n + 1))
+            .ok()
+            .map(|_| BudgetSlot(Arc::clone(self)))
+    }
+}
+
+/// One descriptor of the shared [`FdBudget`], given back on drop.
+struct BudgetSlot(Arc<FdBudget>);
+
+impl Drop for BudgetSlot {
+    fn drop(&mut self) {
+        self.0.used.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// Every `(our address, the peer's address)` pair's owner from one read of the kernel's table, in order — or why
@@ -247,41 +310,56 @@ struct Waiter {
 
 /// The connections waiting for their owners to be named, and the one task that names them: every connection
 /// accepted before a read of the kernel's table begins is answered by that read, so the work done grows with
-/// reads, not connections, and a connection waits about one read whatever the arrival rate (#644's round-4
-/// review, finding 1). At most `ProxyLimits::max_unchecked` wait; past it the **oldest** is closed.
+/// reads, not connections (#644's round-4 review, finding 1). At most `ProxyLimits::max_unchecked` wait: at that
+/// many the accept loop stops accepting until a read answers some, so the rest wait in the kernel's first-in,
+/// first-out listen backlog and **no waiter is ever closed to make room** (#644's round-5 review). A read is
+/// bounded by `peer_read_timeout_ms`; its batch is then refused and the next read begins.
 struct PeerGate {
-    /// Lock-order table row 66: a leaf, held for a push, an eviction or a drain — never across an `await`, a
-    /// lookup or another lock.
+    /// Lock-order table row 66: a leaf, held for a push or a drain — never across an `await`, a lookup or
+    /// another lock.
     queue: std::sync::Mutex<std::collections::VecDeque<Waiter>>,
     wake: tokio::sync::Notify,
+    /// Waiters enqueued and not yet answered (the batch being read included).
+    pending: AtomicUsize,
+    /// Signalled when answers free room under `max_unchecked`.
+    space: tokio::sync::Notify,
     lookups: AtomicU64,
     waiting_max: AtomicUsize,
 }
 
 impl PeerGate {
-    /// Queue a connection; past `cap`, the oldest waiters are dropped (their connections close, counted).
-    fn enqueue(&self, w: Waiter, cap: usize, label: &str) {
-        let evicted = {
-            let mut q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
-            q.push_back(w);
-            let mut out = Vec::new();
-            while q.len() > cap.max(1) {
-                if let Some(old) = q.pop_front() {
-                    out.push(old);
-                }
-            }
-            self.waiting_max.fetch_max(q.len(), Ordering::Relaxed);
-            out
-        };
-        for _ in &evicted {
-            count(label, "peer_check_evicted");
-        }
-        drop(evicted);
+    /// Count an accepted connection as waiting — in the accept loop, before the next `accept`, so the brake
+    /// sees it at once.
+    fn reserve(&self) {
+        let now = self.pending.fetch_add(1, Ordering::AcqRel) + 1;
+        self.waiting_max.fetch_max(now, Ordering::Relaxed);
+    }
+
+    /// Give back a reservation that never reached the queue.
+    fn release(&self) {
+        self.pending.fetch_sub(1, Ordering::AcqRel);
+        self.space.notify_one();
+    }
+
+    /// Queue a reserved connection for the next read.
+    fn enqueue(&self, w: Waiter) {
+        self.queue.lock().unwrap_or_else(|e| e.into_inner()).push_back(w);
         self.wake.notify_one();
     }
 
-    /// The naming task: drain everything queued, answer it with one read, repeat until nothing waits.
-    async fn run(self: Arc<Self>, lookup: PeerUidLookup) {
+    /// Wait until fewer than `cap` are waiting — the accept loop's brake.
+    async fn room(&self, cap: usize) {
+        loop {
+            let freed = self.space.notified();
+            if self.pending.load(Ordering::Acquire) < cap.max(1) {
+                return;
+            }
+            freed.await;
+        }
+    }
+
+    /// The naming task: drain everything queued, answer it with one bounded read, repeat until nothing waits.
+    async fn run(self: Arc<Self>, lookup: PeerUidLookup, read_timeout_ms: u64) {
         loop {
             self.wake.notified().await;
             loop {
@@ -292,19 +370,29 @@ impl PeerGate {
                 self.lookups.fetch_add(1, Ordering::Relaxed);
                 let pairs: Vec<(SocketAddr, SocketAddr)> = batch.iter().map(|w| (w.local, w.peer)).collect();
                 let lookup = Arc::clone(&lookup);
-                let answers = tokio::task::spawn_blocking(move || lookup(&pairs)).await.unwrap_or_default();
+                let read = tokio::task::spawn_blocking(move || lookup(&pairs));
+                // A read that hangs is abandoned (its thread finishes or not on its own); its batch is refused.
+                let answers: Vec<Result<u32, String>> = tokio::select! {
+                    r = read => r.unwrap_or_default(),
+                    _ = mycelium::sim_seam::sleep_ms("activation_egress.peer_read", read_timeout_ms.max(1)) => {
+                        batch.iter().map(|_| Err(format!("the socket-table read took longer than {read_timeout_ms} ms"))).collect()
+                    }
+                };
+                let n = batch.len();
                 let mut answers = answers.into_iter();
                 for w in batch {
                     let _ = w.reply.send(answers.next().unwrap_or_else(|| Err("the lookup gave no answer".into())));
                 }
+                self.pending.fetch_sub(n, Ordering::AcqRel);
+                self.space.notify_one();
             }
         }
     }
 }
 
-/// One accepted socket held by the proxy, counted against `ProxyLimits::max_open` until dropped — by the
-/// connection's task, or, inside its [`Conn`], by a `CONNECT` tunnel's.
-struct OpenSlot(Arc<Inner>);
+/// One accepted socket held by the proxy, counted against `ProxyLimits::max_open` and the stem's [`FdBudget`]
+/// until dropped — by the connection's task, or, inside its [`Conn`], by a `CONNECT` tunnel's.
+struct OpenSlot(Arc<Inner>, #[allow(dead_code)] BudgetSlot);
 
 impl Drop for OpenSlot {
     fn drop(&mut self) {
@@ -359,9 +447,12 @@ impl EgressProxy {
             peer_gate: Arc::new(PeerGate {
                 queue: std::sync::Mutex::new(std::collections::VecDeque::new()),
                 wake: tokio::sync::Notify::new(),
+                pending: AtomicUsize::new(0),
+                space: tokio::sync::Notify::new(),
                 lookups: AtomicU64::new(0),
                 waiting_max: AtomicUsize::new(0),
             }),
+            fd_budget: opts.fd_budget.clone().unwrap_or_else(FdBudget::stem),
             preauth_queue: std::sync::Mutex::new(std::collections::VecDeque::new()),
             bodies: Arc::new(tokio::sync::Semaphore::new(opts.limits.max_buffered_bodies.max(1))),
             client,
@@ -376,10 +467,13 @@ impl EgressProxy {
         let served = Arc::clone(&inner);
         let peer_uid: PeerUidLookup = opts.peer_uid.unwrap_or_else(|| Arc::new(crate::peer_uid::loopback_peer_uids));
         let own_uid = crate::peer_uid::own_uid();
-        let namer = rt.spawn(Arc::clone(&inner.peer_gate).run(peer_uid));
+        let namer = rt.spawn(Arc::clone(&inner.peer_gate).run(peer_uid, opts.limits.peer_read_timeout_ms));
         let task = rt.spawn(async move {
             let _namer = AbortOnDrop(namer);
             loop {
+                // #644's round-5 review: while `max_unchecked` wait to be named, accept nothing — the next
+                // connections wait, in order, in the kernel's listen backlog.
+                served.peer_gate.room(served.limits.max_unchecked).await;
                 let (sock, peer) = match listener.accept().await {
                     Ok(pair) => pair,
                     Err(e) => {
@@ -388,15 +482,23 @@ impl EgressProxy {
                         continue;
                     }
                 };
-                // #644's round-4 review: a hard ceiling on the sockets this proxy holds.
+                // #644's round-4 review: a hard ceiling on the sockets this proxy holds; round 5: and on the
+                // descriptors every proxy of the stem holds together.
+                let Some(budget) = served.fd_budget.take() else {
+                    served.refused.fetch_add(1, Ordering::Relaxed);
+                    count(&served.label, "fd_budget");
+                    drop(sock);
+                    continue;
+                };
                 if served.open.fetch_add(1, Ordering::AcqRel) >= served.limits.max_open.max(1) {
                     served.open.fetch_sub(1, Ordering::AcqRel);
                     served.refused.fetch_add(1, Ordering::Relaxed);
                     count(&served.label, "open_cap");
-                    drop(sock);
+                    drop((sock, budget));
                     continue;
                 }
-                let slot = OpenSlot(Arc::clone(&served));
+                let slot = OpenSlot(Arc::clone(&served), budget);
+                served.peer_gate.reserve();
                 let inner = Arc::clone(&served);
                 tokio::spawn(async move {
                     // #644's round-3 review: only this user's processes are served. Another user's connection —
@@ -606,6 +708,10 @@ impl Inner {
                 "{host} is credential `{c}`'s host — reach it as http://{host}/… through the proxy, which originates TLS, not by CONNECT"
             ));
         }
+        // Round 5: the upstream socket is a descriptor of the stem's budget too, held for the tunnel's life.
+        let Some(upstream_slot) = self.fd_budget.take() else {
+            return self.refuse(StatusCode::SERVICE_UNAVAILABLE, &host, "fd_budget", "the stem's egress descriptor budget is spent".into());
+        };
         let dial = tokio::net::TcpStream::connect((host.as_str(), port));
         let upstream = tokio::select! {
             r = dial => r,
@@ -626,6 +732,7 @@ impl Inner {
         tokio::spawn(async move {
             // N3: the tunnel holds its connection's place against the cap until it closes.
             let _conn = conn;
+            let _upstream_slot = upstream_slot;
             let Ok(up) = on_upgrade.await else { return };
             // #644's review, finding 5: a tunnel that carries nothing either way for `tunnel_idle_ms` is closed.
             let last = Arc::new(AtomicU64::new(mycelium::sim_seam::mono_now_ns()));
@@ -737,6 +844,10 @@ impl Inner {
         if !body.is_empty() {
             *out.body_mut() = Some(body.into());
         }
+        // Round 5: the upstream connection is a descriptor of the stem's budget, held until the body is relayed.
+        let Some(upstream_slot) = self.fd_budget.take() else {
+            return self.refuse(StatusCode::SERVICE_UNAVAILABLE, &host, "fd_budget", "the stem's egress descriptor budget is spent".into());
+        };
         let sent = self.send(out, !named.is_empty()).await;
         let resp = match sent {
             Ok(r) => r,
@@ -776,6 +887,7 @@ impl Inner {
         // The body streams back as it arrives (a model download is not held in memory).
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(8);
         tokio::spawn(async move {
+            let _upstream_slot = upstream_slot;
             let mut resp = resp;
             loop {
                 match resp.chunk().await {
@@ -843,17 +955,16 @@ impl Inner {
 }
 
 /// Is the connection from `peer` this user's? Queued for the next batched read of the kernel's table
-/// ([`PeerGate`]). `Err` names the refusal counted: `peer_uid_other` (another user), `peer_uid_unknown` (no answer
-/// — refused, never assumed), `peer_check_evicted` (closed to make room, past `max_unchecked`), `peer_check_busy`
-/// (no answer within the pre-auth timeout).
+/// ([`PeerGate`]), which answers within its read bound. `Err` names the refusal counted: `peer_uid_other`
+/// (another user), `peer_uid_unknown` (no answer, a read that timed out included — refused, never assumed).
 async fn admit_peer(inner: &Inner, sock: &tokio::net::TcpStream, peer: SocketAddr, own_uid: u32) -> Result<(), &'static str> {
-    let local = sock.local_addr().map_err(|_| "peer_uid_unknown")?;
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    inner.peer_gate.enqueue(Waiter { local, peer, reply: tx }, inner.limits.max_unchecked, &inner.label);
-    let answer = tokio::select! {
-        r = rx => r.map_err(|_| "peer_check_evicted")?,
-        _ = mycelium::sim_seam::sleep_ms("activation_egress.peer_check", inner.limits.preauth_timeout_ms.max(1)) => return Err("peer_check_busy"),
+    let Ok(local) = sock.local_addr() else {
+        inner.peer_gate.release();
+        return Err("peer_uid_unknown");
     };
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    inner.peer_gate.enqueue(Waiter { local, peer, reply: tx });
+    let answer = rx.await.map_err(|_| "peer_uid_unknown")?;
     match answer {
         Ok(uid) if uid == own_uid => Ok(()),
         Ok(uid) => {

@@ -49,7 +49,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **After its fourth:** owners are named in batches, one kernel-table read per batch, at most 64 connections waiting
   (oldest closed first), and one proxy holds at most 256 sockets, so a flood can neither queue without bound nor take
   the stem's descriptors; the parsers match addresses and ports (macOS) and only established rows (Linux), and a socket
-  record that is not a TCP stream matches nothing.
+  record that is not a TCP stream matches nothing. **After its fifth:** no waiting connection is closed to make room —
+  while 64 wait the proxy accepts nothing more, so newer ones wait in the kernel's listen backlog
+  (`peer_check_evicted` and `peer_check_busy` are gone); every proxy of the stem shares one descriptor budget, a
+  quarter of the soft `RLIMIT_NOFILE` (not raised), counting upstream sockets (`fd_budget`); a kernel-table read is
+  bounded at 2 s (macOS kills `sysctl`), its batch refused and the next served; Linux names a dual-stack client
+  under its IPv4-mapped spelling in `/proc/net/tcp6`, and a client in FIN_WAIT1/2 or CLOSE_WAIT.
 
 ### Changed
 

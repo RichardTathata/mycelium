@@ -18,6 +18,10 @@
 
 use std::net::SocketAddr;
 
+/// How long `sysctl` may run before it is killed (the proxy's own read bound is the backstop).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const SYSCTL_TIMEOUT_MS: u64 = 1_500;
+
 /// This process's real user id.
 pub fn own_uid() -> u32 {
     rustix::process::getuid().as_raw()
@@ -46,18 +50,73 @@ fn proc_spelling(a: SocketAddr) -> String {
     format!("{addr}:{:04X}", a.port())
 }
 
-/// The uid on the **ESTABLISHED** (`01`) `/proc/net/tcp{,6}` row whose local address is `peer` and remote address
-/// `local` — a `TIME_WAIT` row of an earlier connection on the same addresses shows uid 0 and is never read
-/// (#644's round-4 review, finding 3).
+/// The `/proc/net/tcp{,6}` states of a client socket whose connection is still open on its side: ESTABLISHED
+/// (`01`), FIN_WAIT1 (`04`), FIN_WAIT2 (`05`) and CLOSE_WAIT (`08`) — a client may half-close before the read
+/// (#644's round-5 review, finding 4). Never `TIME_WAIT` (`06`): an earlier connection's row, uid 0 (round 4).
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+const LIVE_STATES: &[&str] = &["01", "04", "05", "08"];
+
+/// The uid on the live `/proc/net/tcp{,6}` row whose local address is `peer` and remote address `local`.
 #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
 fn parse_proc_net_tcp(text: &str, local: SocketAddr, peer: SocketAddr) -> Option<u32> {
     let (want_local, want_remote) = (proc_spelling(peer), proc_spelling(local));
     text.lines().skip(1).find_map(|line| {
         let f: Vec<&str> = line.split_whitespace().collect();
-        (f.len() > 7 && f[3] == "01" && f[1].eq_ignore_ascii_case(&want_local) && f[2].eq_ignore_ascii_case(&want_remote))
+        (f.len() > 7 && LIVE_STATES.contains(&f[3]) && f[1].eq_ignore_ascii_case(&want_local) && f[2].eq_ignore_ascii_case(&want_remote))
             .then(|| f[7].parse::<u32>().ok())
             .flatten()
     })
+}
+
+/// The owner of `peer` → `local` from the Linux tables: an IPv4 pair in `/proc/net/tcp`, or — a dual-stack client
+/// that reached the IPv4 listener through `::ffff:127.0.0.1` — under the IPv4-mapped spelling in `/proc/net/tcp6`
+/// (#644's round-5 review, finding 1: the JVM's default); an IPv6 pair in `/proc/net/tcp6`.
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+fn lookup_in_tables(tcp: Option<&str>, tcp6: Option<&str>, local: SocketAddr, peer: SocketAddr) -> Option<u32> {
+    let mapped = |a: SocketAddr| match a {
+        SocketAddr::V4(v4) => SocketAddr::new(std::net::IpAddr::V6(v4.ip().to_ipv6_mapped()), v4.port()),
+        v6 => v6,
+    };
+    match peer {
+        SocketAddr::V4(_) => tcp
+            .and_then(|t| parse_proc_net_tcp(t, local, peer))
+            .or_else(|| tcp6.and_then(|t| parse_proc_net_tcp(t, mapped(local), mapped(peer)))),
+        SocketAddr::V6(_) => tcp6.and_then(|t| parse_proc_net_tcp(t, local, peer)),
+    }
+}
+
+/// Run `program args`, its standard output read as it is written, killing it past `timeout_ms` (#644's round-5
+/// review, finding 3: a hung `sysctl` must not stall the proxy). `Err` names why.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn run_bounded(program: &str, args: &[&str], timeout_ms: u64) -> Result<Vec<u8>, String> {
+    use std::io::Read as _;
+    let mut child = std::process::Command::new(program)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("{program}: {e}"))?;
+    let mut out = child.stdout.take().ok_or("no stdout")?;
+    let reader = std::thread::spawn(move || {
+        let mut v = Vec::new();
+        let _ = out.read_to_end(&mut v);
+        v
+    });
+    let deadline = mycelium::sim_seam::mono_now_ns().saturating_add(timeout_ms.saturating_mul(1_000_000));
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if mycelium::sim_seam::mono_now_ns() < deadline => std::thread::sleep(std::time::Duration::from_millis(5)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return Err(format!("{program} did not finish within {timeout_ms} ms — killed"));
+            }
+        }
+    };
+    let bytes = reader.join().map_err(|_| format!("{program}: its output reader panicked"))?;
+    if status.success() { Ok(bytes) } else { Err(format!("{program} exited {status}")) }
 }
 
 /// One TCP connection in a `net.inet.tcp.pcblist_n` buffer: (local address, local port, foreign address,
@@ -124,8 +183,10 @@ fn parse_pcblist_n(data: &[u8]) -> Vec<PcbRow> {
 /// **and** ports matched (#644's round-4 review, finding 2).
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 fn match_pcb(rows: &[PcbRow], local: SocketAddr, peer: SocketAddr) -> Option<u32> {
+    // An IPv4-mapped address and its IPv4 address are one address (a dual-stack client, round 5).
+    let same = |a: &std::net::IpAddr, b: std::net::IpAddr| a.to_canonical() == b.to_canonical();
     rows.iter()
-        .find(|(la, lp, fa, fp, _)| *la == peer.ip() && *lp == peer.port() && *fa == local.ip() && *fp == local.port())
+        .find(|(la, lp, fa, fp, _)| same(la, peer.ip()) && *lp == peer.port() && same(fa, local.ip()) && *fp == local.port())
         .map(|r| r.4)
 }
 
@@ -134,18 +195,15 @@ mod os {
     use std::net::SocketAddr;
 
     pub(super) fn lookup_all(pairs: &[(SocketAddr, SocketAddr)]) -> Vec<Result<u32, String>> {
-        let read = |table: &str| std::fs::read_to_string(table).map_err(|e| format!("{table}: {e}"));
-        let v4 = pairs.iter().any(|(_, p)| p.is_ipv4()).then(|| read("/proc/net/tcp"));
-        let v6 = pairs.iter().any(|(_, p)| p.is_ipv6()).then(|| read("/proc/net/tcp6"));
+        let read = |table: &str| std::fs::read_to_string(table).ok();
+        // tcp6 also holds a dual-stack client of the IPv4 listener, under the IPv4-mapped spelling.
+        let tcp = pairs.iter().any(|(_, p)| p.is_ipv4()).then(|| read("/proc/net/tcp")).flatten();
+        let tcp6 = read("/proc/net/tcp6");
         pairs
             .iter()
             .map(|(local, peer)| {
-                let text = if peer.is_ipv4() { v4.as_ref() } else { v6.as_ref() };
-                match text {
-                    Some(Ok(t)) => super::parse_proc_net_tcp(t, *local, *peer).ok_or_else(|| format!("{peer} → {local} is not an established connection")),
-                    Some(Err(e)) => Err(e.clone()),
-                    None => Err("no table read".into()),
-                }
+                super::lookup_in_tables(tcp.as_deref(), tcp6.as_deref(), *local, *peer)
+                    .ok_or_else(|| format!("{peer} → {local} is not a live connection in /proc/net/tcp or tcp6"))
             })
             .collect()
     }
@@ -156,17 +214,8 @@ mod os {
     use std::net::SocketAddr;
 
     pub(super) fn lookup_all(pairs: &[(SocketAddr, SocketAddr)]) -> Vec<Result<u32, String>> {
-        let rows = std::process::Command::new("/usr/sbin/sysctl")
-            .args(["-b", "net.inet.tcp.pcblist_n"])
-            .output()
-            .map_err(|e| format!("sysctl net.inet.tcp.pcblist_n: {e}"))
-            .and_then(|out| {
-                if out.status.success() {
-                    Ok(super::parse_pcblist_n(&out.stdout))
-                } else {
-                    Err(format!("sysctl net.inet.tcp.pcblist_n exited {}", out.status))
-                }
-            });
+        let rows = super::run_bounded("/usr/sbin/sysctl", &["-b", "net.inet.tcp.pcblist_n"], super::SYSCTL_TIMEOUT_MS)
+            .map(|out| super::parse_pcblist_n(&out));
         pairs
             .iter()
             .map(|(local, peer)| match &rows {
@@ -272,6 +321,57 @@ mod tests {
         );
         assert_eq!(parse_proc_net_tcp(&text, local, peer), Some(1001), "the client's established row, not TIME_WAIT's, the listener's or ours");
         assert_eq!(parse_proc_net_tcp(&text, local, "127.0.0.1:40001".parse().unwrap()), None);
+    }
+
+    /// #644's round-5 review: a client that half-closed is still named (FIN_WAIT1/2, CLOSE_WAIT), `TIME_WAIT` never
+    /// (finding 4; seen failing first with ESTABLISHED only: the half-closed client was refused); and a dual-stack
+    /// client of the IPv4 listener is found under its IPv4-mapped spelling in `tcp6` (finding 1; seen failing
+    /// first: an IPv4 peer was looked up in `tcp` alone).
+    #[test]
+    fn half_closed_and_dual_stack_clients_are_named() {
+        let local: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let peer: SocketAddr = "127.0.0.1:40000".parse().unwrap();
+        let (l, p) = (proc_spelling(local), proc_spelling(peer));
+        let header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
+        for state in ["01", "04", "05", "08"] {
+            let t = format!("{header}0: {p} {l} {state} 00000000:00000000 00:00000000 00000000  1001        0 2\n");
+            assert_eq!(parse_proc_net_tcp(&t, local, peer), Some(1001), "state {state}");
+        }
+        let t = format!("{header}0: {p} {l} 06 00000000:00000000 00:00000000 00000000     0        0 0\n");
+        assert_eq!(parse_proc_net_tcp(&t, local, peer), None, "TIME_WAIT");
+        // The dual-stack client: only in tcp6, as ::ffff:127.0.0.1.
+        let (ml, mp) = ("0000000000000000FFFF00000100007F:1F90", "0000000000000000FFFF00000100007F:9C40");
+        assert_eq!(proc_spelling(SocketAddr::new("::ffff:127.0.0.1".parse().unwrap(), 8080)), ml);
+        let tcp6 = format!("{header}0: {mp} {ml} 01 00000000:00000000 00:00000000 00000000  1002        0 3\n");
+        assert_eq!(lookup_in_tables(Some(header), Some(&tcp6), local, peer), Some(1002));
+        assert_eq!(lookup_in_tables(Some(header), None, local, peer), None);
+        // macOS: a mapped inpcb row matches the IPv4 peer.
+        let rows = vec![("::ffff:127.0.0.1".parse().unwrap(), 40000, "::ffff:127.0.0.1".parse().unwrap(), 8080, 1003)];
+        assert_eq!(match_pcb(&rows, local, peer), Some(1003));
+    }
+
+    /// A child that does not finish is killed at its bound (the macOS `sysctl` read, round 5).
+    #[test]
+    fn a_command_past_its_bound_is_killed() {
+        let started = std::time::Instant::now();
+        let e = run_bounded("/bin/sleep", &["5"], 200).unwrap_err();
+        assert!(e.contains("killed") && started.elapsed() < std::time::Duration::from_secs(2), "{e} {:?}", started.elapsed());
+        assert_eq!(run_bounded("/bin/echo", &["hi"], 2_000).unwrap(), b"hi\n");
+    }
+
+    /// A dual-stack client — a socket of the IPv6 family reaching the IPv4 listener at `::ffff:127.0.0.1` — is named
+    /// by the kernel's own table, live (where the platform lets an IPv6 socket reach a mapped address).
+    #[test]
+    fn a_live_dual_stack_client_is_named() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let local = listener.local_addr().unwrap();
+        let Ok(client) = std::net::TcpStream::connect(SocketAddr::new("::ffff:127.0.0.1".parse().unwrap(), local.port())) else {
+            eprintln!("a_live_dual_stack_client_is_named: SKIPPED — this host does not connect an IPv6 socket to a mapped address");
+            return;
+        };
+        let (_server, peer) = listener.accept().unwrap();
+        assert!(client.local_addr().unwrap().is_ipv6(), "the client is of the IPv6 family");
+        assert_eq!(loopback_peer_uid(local, peer), Ok(own_uid()));
     }
 
     /// One read answers many: a batch of pairs comes back in order, each its own answer.

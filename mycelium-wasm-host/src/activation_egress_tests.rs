@@ -42,6 +42,7 @@ fn start(hosts: Vec<String>, credentials: Vec<String>, node: &EgressPolicy) -> R
         bind: EgressProxy::DEFAULT_BIND,
         limits: Default::default(),
         peer_uid: None,
+        fd_budget: None,
         #[cfg(any(feature = "gateway", feature = "llm"))]
         gate: None,
     })
@@ -158,6 +159,7 @@ async fn a_host_the_node_denies_is_refused_and_the_proxy_binds_loopback_only() {
         bind: "0.0.0.0:0".parse().unwrap(),
         limits: Default::default(),
         peer_uid: None,
+        fd_budget: None,
         #[cfg(any(feature = "gateway", feature = "llm"))]
         gate: None,
     })
@@ -248,6 +250,10 @@ fn start_limited(hosts: Vec<String>, limits: ProxyLimits) -> EgressProxy {
 }
 
 fn start_with_peer_uid(hosts: Vec<String>, limits: ProxyLimits, peer_uid: Option<PeerUidLookup>) -> EgressProxy {
+    start_with_budget(hosts, limits, peer_uid, FdBudget::new(10_000))
+}
+
+fn start_with_budget(hosts: Vec<String>, limits: ProxyLimits, peer_uid: Option<PeerUidLookup>, budget: Arc<FdBudget>) -> EgressProxy {
     let decl = EgressDecl { hosts, ..Default::default() };
     EgressProxy::start(ProxyOptions {
         label: "data/pack".into(),
@@ -258,6 +264,8 @@ fn start_with_peer_uid(hosts: Vec<String>, limits: ProxyLimits, peer_uid: Option
         gate: None,
         limits,
         peer_uid,
+        // A budget of its own, so a test's floods are not judged against this process's descriptor limit.
+        fd_budget: Some(budget),
     })
     .unwrap()
 }
@@ -288,11 +296,11 @@ async fn a_connection_another_user_owns_or_no_one_can_name_is_closed_at_accept()
 }
 
 /// #644's round-4 review, finding 1: a flood of another user's connections neither queues without bound nor
-/// multiplies the kernel reads, and the command still gets in. 150 connections arrive while each read takes
-/// 150 ms (a stub that names every flood connection another user's): at most `max_unchecked` (16 here) ever
-/// wait, reads grow per batch, not per connection, and the command's own connection, made after the flood, is
-/// served within a bound. Seen failing first on round 3's per-connection checks: 150 waited and every
-/// connection paid its own read.
+/// multiplies the kernel reads, and the command still gets in. 100 connections arrive while each read takes
+/// 150 ms (a stub that names every flood connection another user's): at most `max_unchecked` (64) ever wait —
+/// the rest in the kernel's backlog since round 5 — reads grow per batch, not per connection, and the command's
+/// own connection, made after the flood, is served within a bound. Seen failing first on round 3's
+/// per-connection checks: every connection waited and paid its own read.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_flood_of_other_users_connections_is_bounded_and_batched() {
     let (u, _) = upstream().await;
@@ -304,10 +312,10 @@ async fn a_flood_of_other_users_connections_is_bounded_and_batched() {
         let mine = mine_seen.lock().unwrap();
         pairs.iter().map(|(_, peer)| Ok(if mine.contains(&peer.port()) { me } else { me.wrapping_add(1) })).collect()
     });
-    let limits = ProxyLimits { max_unchecked: 16, preauth_timeout_ms: 5_000, ..ProxyLimits::default() };
+    let limits = ProxyLimits { max_unchecked: 64, preauth_timeout_ms: 5_000, ..ProxyLimits::default() };
     let p = start_with_peer_uid(vec![format!("http://127.0.0.1:{u}")], limits, Some(lookup));
     let mut flood = Vec::new();
-    for _ in 0..150 {
+    for _ in 0..100 {
         flood.push(tokio::net::TcpStream::connect(("127.0.0.1", p.port())).await.unwrap());
     }
     // The command's connection, after the flood: registered as this user's, then a request on it.
@@ -320,11 +328,106 @@ async fn a_flood_of_other_users_connections_is_bounded_and_batched() {
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), cmd.read_to_end(&mut answer)).await;
     let answer = String::from_utf8_lossy(&answer).to_string();
     assert!(answer.starts_with("HTTP/1.1 200"), "the command is served: {answer:?}");
-    assert!(started.elapsed() < std::time::Duration::from_secs(2), "within about two reads: {:?}", started.elapsed());
+    assert!(started.elapsed() < std::time::Duration::from_secs(3), "within a few reads: {:?}", started.elapsed());
     let c = p.counts();
-    assert!(c.waiting_max <= 16, "at most max_unchecked wait: {c:?}");
-    assert!(c.peer_lookups < 30, "reads per batch, not per connection (151 connections): {c:?}");
+    assert!(c.waiting_max <= 64, "at most max_unchecked wait: {c:?}");
+    assert!(c.peer_lookups < 20, "reads per batch, not per connection (101 connections): {c:?}");
     drop(flood);
+}
+
+/// #644's round-5 review: the command's connection is never closed to make room — even when it is the **oldest**
+/// waiter and more than `max_unchecked` other-user connections arrive within one read. The proxy stops accepting
+/// while `max_unchecked` wait, so the rest stay in the kernel's first-in, first-out listen backlog; each read
+/// classifies every waiter. Seen failing first on round 4's oldest-first eviction: the command was closed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_oldest_waiter_is_never_closed_to_make_room() {
+    let (u, _) = upstream().await;
+    let me = crate::peer_uid::own_uid();
+    let mine: Arc<Mutex<std::collections::HashSet<u16>>> = Arc::default();
+    let mine_seen = Arc::clone(&mine);
+    let lookup: PeerUidLookup = Arc::new(move |pairs: &[(std::net::SocketAddr, std::net::SocketAddr)]| {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let mine = mine_seen.lock().unwrap();
+        pairs.iter().map(|(_, peer)| Ok(if mine.contains(&peer.port()) { me } else { me.wrapping_add(1) })).collect()
+    });
+    let limits = ProxyLimits { max_unchecked: 16, preauth_timeout_ms: 10_000, ..ProxyLimits::default() };
+    let p = start_with_peer_uid(vec![format!("http://127.0.0.1:{u}")], limits, Some(lookup));
+    // An idle connection first, so the next read is in flight when the command and the flood arrive.
+    let _first = tokio::net::TcpStream::connect(("127.0.0.1", p.port())).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let mut cmd = tokio::net::TcpStream::connect(("127.0.0.1", p.port())).await.unwrap();
+    mine.lock().unwrap().insert(cmd.local_addr().unwrap().port());
+    let mut flood = Vec::new();
+    for _ in 0..80 {
+        flood.push(tokio::net::TcpStream::connect(("127.0.0.1", p.port())).await.unwrap());
+    }
+    cmd.write_all(format!("GET http://127.0.0.1:{u}/ HTTP/1.1\r\nHost: x\r\nProxy-Authorization: {}\r\nConnection: close\r\n\r\n", token_header(&p)).as_bytes()).await.unwrap();
+    let mut answer = Vec::new();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(8), cmd.read_to_end(&mut answer)).await;
+    let answer = String::from_utf8_lossy(&answer).to_string();
+    assert!(answer.starts_with("HTTP/1.1 200"), "the oldest waiter, the command, is served: {answer:?} {:?}", p.counts());
+    assert!(p.counts().waiting_max <= 16, "{:?}", p.counts());
+    drop(flood);
+}
+
+/// #644's round-5 review, finding 3: a read of the kernel's table that hangs is bounded — that batch is refused
+/// (`peer_uid_unknown`) and the next batch is served. Seen failing first: the hung read stalled every later
+/// connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hung_table_read_is_bounded_and_the_next_batch_is_served() {
+    let (u, _) = upstream().await;
+    let me = crate::peer_uid::own_uid();
+    let calls = Arc::new(AtomicU64::new(0));
+    let seen = Arc::clone(&calls);
+    let lookup: PeerUidLookup = Arc::new(move |pairs: &[(std::net::SocketAddr, std::net::SocketAddr)]| {
+        if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+            std::thread::sleep(std::time::Duration::from_secs(20));
+        }
+        pairs.iter().map(|_| Ok(me)).collect()
+    });
+    let p = start_with_peer_uid(vec![format!("http://127.0.0.1:{u}")], ProxyLimits::default(), Some(lookup));
+    let (token, get) = (token_header(&p), format!("GET http://127.0.0.1:{u}/ HTTP/1.1\r\nHost: x\r\n\r\n"));
+    let first = tokio::time::timeout(std::time::Duration::from_secs(8), raw(p.port(), &token, &get)).await.expect("the hung read is bounded");
+    assert!(first.is_empty(), "the hung batch is refused: {first}");
+    let second = tokio::time::timeout(std::time::Duration::from_secs(8), raw(p.port(), &token, &get))
+        .await
+    .expect("the next batch is not stuck behind it");
+    assert!(second.starts_with("HTTP/1.1 200"), "{second}");
+}
+
+/// #644's round-5 review, finding 2: every proxy of the stem draws on **one** descriptor budget — two proxies
+/// flooded together hold at most the budget between them, and what is past it is closed at once; each held
+/// socket gives its descriptor back when it closes. Seen failing first with each proxy judged only by its own
+/// `max_open`: the two held 16 sockets against a budget of 10.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_proxies_share_one_descriptor_budget() {
+    let me = crate::peer_uid::own_uid();
+    let slow: PeerUidLookup = Arc::new(move |pairs: &[(std::net::SocketAddr, std::net::SocketAddr)]| {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        pairs.iter().map(|_| Ok(me)).collect()
+    });
+    let budget = FdBudget::new(10);
+    let limits = ProxyLimits { max_open: 8, max_unchecked: 100, peer_read_timeout_ms: 10_000, preauth_timeout_ms: 60_000, ..ProxyLimits::default() };
+    let a = start_with_budget(Vec::new(), limits, Some(Arc::clone(&slow)), Arc::clone(&budget));
+    let b = start_with_budget(Vec::new(), limits, Some(slow), Arc::clone(&budget));
+    let mut held = Vec::new();
+    for p in [&a, &b] {
+        for _ in 0..8 {
+            held.push(tokio::net::TcpStream::connect(("127.0.0.1", p.port())).await.unwrap());
+        }
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(budget.used(), 10, "the budget is spent and not exceeded");
+    let mut closed = 0;
+    for s in &mut held {
+        if closed_within(s, 0).await || closed_within(s, 1).await {
+            closed += 1;
+        }
+    }
+    assert_eq!(closed, 6, "the six past the shared budget were closed at once");
+    assert!(a.counts().refused + b.counts().refused >= 6);
+    drop(held);
 }
 
 /// #644's round-4 review: one proxy holds at most `max_open` sockets — one accepted past it is closed at once, so
@@ -337,7 +440,7 @@ async fn a_proxy_holds_at_most_max_open_sockets() {
         std::thread::sleep(std::time::Duration::from_secs(3));
         pairs.iter().map(|_| Ok(me)).collect()
     });
-    let limits = ProxyLimits { max_open: 4, max_unchecked: 100, preauth_timeout_ms: 60_000, ..ProxyLimits::default() };
+    let limits = ProxyLimits { max_open: 4, max_unchecked: 100, peer_read_timeout_ms: 10_000, preauth_timeout_ms: 60_000, ..ProxyLimits::default() };
     let p = start_with_peer_uid(Vec::new(), limits, Some(lookup));
     let mut held = Vec::new();
     for _ in 0..4 {
@@ -408,7 +511,7 @@ async fn closed_within(s: &mut tokio::net::TcpStream, secs: u64) -> bool {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_proxy_bounds_connections_header_reads_tunnels_and_bodies() {
     use tokio::io::AsyncWriteExt as _;
-    let wide = ProxyLimits { max_connections: 1000, max_unauthenticated: 1000, preauth_timeout_ms: 600_000, max_unchecked: 1000, max_open: 10_000, header_read_timeout_ms: 600_000, tunnel_idle_ms: 600_000, max_buffered_bodies: 1000 };
+    let wide = ProxyLimits { max_connections: 1000, max_unauthenticated: 1000, preauth_timeout_ms: 600_000, max_unchecked: 1000, peer_read_timeout_ms: 600_000, max_open: 10_000, header_read_timeout_ms: 600_000, tunnel_idle_ms: 600_000, max_buffered_bodies: 1000 };
     // Connections: two authenticated and held open, a third authenticated one refused 503 (#644's round-2
     // review, N2: only a connection that presented the token counts against the cap).
     let (cu, _) = upstream().await;
@@ -608,7 +711,7 @@ async fn every_encoding_header_is_read_before_a_body_is_relayed() {
         let decl = EgressDecl { hosts: vec![format!("http://127.0.0.1:{port}")], credentials: vec!["model".into()] };
         let p = EgressProxy::start(ProxyOptions {
             label: "data/pack".into(), decl: &decl, node_egress: &EgressPolicy::default(), bind: EgressProxy::DEFAULT_BIND,
-            gate: Some(gate), limits: ProxyLimits::default(), peer_uid: None,
+            gate: Some(gate), limits: ProxyLimits::default(), peer_uid: None, fd_budget: None,
         })
         .unwrap();
         let r = client_via(&proxy_url(&p)).get(format!("http://127.0.0.1:{port}/")).send().await.unwrap();
@@ -660,7 +763,7 @@ async fn a_bodiless_answer_or_repeated_identity_is_relayed() {
         let decl = EgressDecl { hosts: vec![format!("http://127.0.0.1:{port}")], credentials: vec!["model".into()] };
         let p = EgressProxy::start(ProxyOptions {
             label: "data/pack".into(), decl: &decl, node_egress: &EgressPolicy::default(), bind: EgressProxy::DEFAULT_BIND,
-            gate: Some(gate), limits: ProxyLimits::default(), peer_uid: None,
+            gate: Some(gate), limits: ProxyLimits::default(), peer_uid: None, fd_budget: None,
         })
         .unwrap();
         let r = client_via(&proxy_url(&p)).request(method.clone(), format!("http://127.0.0.1:{port}/")).send().await.unwrap();
@@ -746,7 +849,7 @@ async fn an_https_entry_gets_the_credential_over_tls_and_an_echo_of_it_is_masked
     let decl = EgressDecl { hosts: vec![format!("https://localhost:{port}")], credentials: vec!["model".into()] };
     let p = EgressProxy::start(ProxyOptions {
         label: "data/pack".into(), decl: &decl, node_egress: &EgressPolicy::default(), bind: EgressProxy::DEFAULT_BIND,
-        gate: Some(Arc::clone(&gate)), limits: ProxyLimits::default(), peer_uid: None,
+        gate: Some(Arc::clone(&gate)), limits: ProxyLimits::default(), peer_uid: None, fd_budget: None,
     })
     .unwrap();
     let r = client_via(&proxy_url(&p))
@@ -803,7 +906,7 @@ async fn an_encoded_response_is_refused_where_a_value_could_hide_in_it() {
     let decl = EgressDecl { hosts: vec![format!("http://127.0.0.1:{port}")], credentials: vec!["model".into()] };
     let p = EgressProxy::start(ProxyOptions {
         label: "data/pack".into(), decl: &decl, node_egress: &EgressPolicy::default(), bind: EgressProxy::DEFAULT_BIND,
-        gate: Some(gate), limits: ProxyLimits::default(), peer_uid: None,
+        gate: Some(gate), limits: ProxyLimits::default(), peer_uid: None, fd_budget: None,
     })
     .unwrap();
     let r = client_via(&proxy_url(&p)).get(format!("http://127.0.0.1:{port}/")).header("accept-encoding", "gzip").send().await.unwrap();

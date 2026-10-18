@@ -1219,6 +1219,7 @@ except Exception as e:
                 bind: crate::EgressProxy::DEFAULT_BIND,
                 limits: Default::default(),
                 peer_uid: None,
+                fd_budget: None,
                 #[cfg(any(feature = "gateway", feature = "llm"))]
                 gate: None,
             })
@@ -1355,6 +1356,7 @@ except Exception as e:
                 bind: crate::EgressProxy::DEFAULT_BIND,
                 limits: Default::default(),
                 peer_uid: None,
+                fd_budget: None,
                 gate: Some(Arc::clone(&gate)),
             })
             .expect("the proxy starts"),
@@ -1426,6 +1428,7 @@ except Exception as e:
             bind: taken.local_addr().unwrap(),
             limits: Default::default(),
             peer_uid: None,
+            fd_budget: None,
             #[cfg(any(feature = "gateway", feature = "llm"))]
             gate: None,
         })

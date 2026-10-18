@@ -459,14 +459,20 @@ meets the new list; the command, its profile and the proxy's port are unchanged,
 not closed. `credentials`, `env` and everything else in the file are read once, at start.
 
 **Only this user's processes.** At accept the proxy asks the kernel which user owns the connecting socket
-(`/proc/net/tcp` on Linux, `net.inet.tcp.pcblist_n` on macOS) and closes, before it holds any place, a connection
-another user's process opened — or one whose owner cannot be read (fail closed). One read of the kernel's table
-answers every connection accepted before it began, so a flood costs reads per batch, not per connection, and the
-command's connection waits about one read; at most 64 connections wait to be named (past that the oldest is
-closed), and one proxy holds at most 256 sockets in all (one accepted past that is closed at once), so a flood
-cannot take the stem's descriptor table. Another user on the host can neither use the proxy nor crowd the command
-out of it — short of opening more than 64 connections within one read of the table, which closes the command's
-waiting connection, and its client retries.
+(`/proc/net/tcp` and `/proc/net/tcp6` on Linux — a dual-stack client reaching `127.0.0.1` as `::ffff:127.0.0.1`
+included — `net.inet.tcp.pcblist_n` on macOS) and closes, before it holds any place, a connection another user's
+process opened — or one whose owner cannot be read (fail closed; a client that has half-closed is still named).
+One read of the kernel's table answers every connection accepted before it began, so a flood costs reads per
+batch, not per connection, and the command's connection waits about one read; a read that takes longer than 2 s
+(on macOS, `sysctl` killed after 1.5 s) refuses its batch and the next read begins. While 64 connections wait to
+be named the proxy accepts nothing more: newer connections wait, in arrival order, in the kernel's listen
+backlog, and **no waiting connection is closed to make room**. Every proxy of the stem draws on one descriptor
+budget — a quarter of the process's soft `RLIMIT_NOFILE` (at least 32; the limit is read, not raised) — counting
+accepted sockets and the upstream sockets they open; one proxy also holds at most 256 accepted sockets. A
+connection past either is closed at once, a request needing an upstream socket past the budget is refused `503`,
+so a flood cannot take the stem's descriptor table. Another user on the host can neither use the proxy nor crowd
+the command out of it short of filling the listen backlog faster than reads drain it — which costs the command's
+client a SYN retry, not a refusal.
 
 **Bounded.** Any process of the stem's own user can connect (only the token admits a request), so a connection
 that has not presented the token is closed after 2 s, on its `407`, or — past 16 such connections — to make room for a

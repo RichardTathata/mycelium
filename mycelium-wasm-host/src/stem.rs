@@ -179,6 +179,7 @@ pub fn start_egress_proxies_on(agent: &GossipAgent, units: &NodeCapabilityConfig
             bind,
             limits: Default::default(),
             peer_uid: None,
+            fd_budget: None,
             #[cfg(any(feature = "gateway", feature = "llm"))]
             gate,
         });
