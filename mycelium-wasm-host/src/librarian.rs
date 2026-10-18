@@ -161,8 +161,10 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use mycelium::{Capability, NodeId};
 
+    /// The bind-verified, process-unique allocator (#644's round-2 review: a bind-and-drop here raced the
+    /// egress tests' port-0 binds).
     fn alloc_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+        mycelium::test_util::alloc_port()
     }
 
     async fn agent(port: u16, bootstrap: Option<u16>) -> Arc<GossipAgent> {

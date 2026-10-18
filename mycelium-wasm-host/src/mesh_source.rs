@@ -311,7 +311,7 @@ mod tests {
     use crate::InMemorySource;
 
     fn alloc_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+        mycelium::test_util::alloc_port()
     }
 
     async fn agent(port: u16, bootstrap: Option<u16>) -> Arc<GossipAgent> {

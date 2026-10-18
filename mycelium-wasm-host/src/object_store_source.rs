@@ -417,7 +417,7 @@ mod tests {
         use mycelium::{GossipAgent, NodeCapabilityConfig, NodeId};
         use std::time::Duration;
 
-        fn alloc_port() -> u16 { std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port() }
+        fn alloc_port() -> u16 { mycelium::test_util::alloc_port() }
         async fn agent(port: u16, bootstrap: Option<u16>) -> Arc<GossipAgent> {
             let cfg = mycelium::GossipConfig {
                 bind_port: port,

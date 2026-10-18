@@ -188,6 +188,89 @@ async fn a_redirect_off_the_bound_host_drops_the_credential() {
     assert_eq!(g2.uses()[0].attached, 2);
 }
 
+/// `send_once` (an activation's egress proxy): the value attached at the bound host, the 3xx handed back as
+/// it arrived — never followed, so the redirect target sees nothing — and a request the binding does not
+/// authorise refused before it is sent, the node's allow-list still first. Seen failing first with
+/// `send_once` delegating to `send`: the redirect was followed and its target received a request.
+#[tokio::test]
+async fn send_once_attaches_at_the_bound_host_and_follows_no_redirect() {
+    let f = secret_file("once", SECRET);
+    let (target, at_target) = recorder(None).await;
+    let (hop, at_hop) = recorder(Some(format!("http://localhost:{target}/landing"))).await;
+    let g = gate(&[binding_at("model", "localhost", hop, CredentialForm::Bearer, &f)]);
+    let r = g
+        .send_once(get(format!("http://localhost:{hop}/"), "authorization", &format!("Bearer {}", credential_placeholder("model"))))
+        .await
+        .expect("sent");
+    assert_eq!(r.status().as_u16(), 307, "the redirect is the answer");
+    assert!(at_hop.lock().unwrap()[0].contains(SECRET), "attached at the bound host");
+    assert!(at_target.lock().unwrap().is_empty(), "the redirect was not followed");
+    // Not authorised: another port on the same host — refused, nothing sent.
+    let e = g
+        .send_once(get(format!("http://localhost:{target}/"), "authorization", &format!("Bearer {}", credential_placeholder("model"))))
+        .await
+        .expect_err("refused");
+    assert!(matches!(e, CredentialError::NotAuthorised { .. }), "{e}");
+    assert!(at_target.lock().unwrap().is_empty());
+    // The node's allow-list first.
+    let strict = EgressCredentials::load(&[], &EgressPolicy { allow_hosts: vec!["only.example".into()] }).unwrap();
+    let e = strict.send_once(get(format!("http://localhost:{target}/"), "x", "y")).await.expect_err("denied");
+    assert!(matches!(e, CredentialError::EgressDenied { .. }), "{e}");
+    assert!(at_target.lock().unwrap().is_empty());
+}
+
+/// #644's round-6 review, finding 2: `send_once` (an activation egress proxy's path) keeps no idle upstream
+/// socket — each closes once its answer is read, so a caller counting its upstream sockets counts every one. Seen
+/// failing first on the gate's pooled client: eight idle connections stayed open after a burst of eight.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn send_once_keeps_no_idle_upstream_socket() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let live = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&live);
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else { return };
+            let live = Arc::clone(&count);
+            live.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+                let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+                loop {
+                    match sock.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    }
+                    while let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        buf.drain(..end + 4);
+                        let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
+                    }
+                }
+                live.fetch_sub(1, Ordering::SeqCst);
+            });
+        }
+    });
+    let g = Arc::new(gate(&[]));
+    let mut burst = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let g = Arc::clone(&g);
+        burst.spawn(async move { g.send_once(get(format!("http://127.0.0.1:{port}/"), "x", "y")).await.unwrap().text().await.unwrap() });
+    }
+    while let Some(body) = burst.join_next().await {
+        assert_eq!(body.unwrap(), "ok");
+    }
+    let mut open = live.load(Ordering::SeqCst);
+    for _ in 0..20 {
+        if open == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        open = live.load(Ordering::SeqCst);
+    }
+    assert_eq!(open, 0, "no upstream socket is kept idle by send_once");
+}
+
 /// **A redirect to another port on the bound host drops the credential** (row L's review, finding 3):
 /// on loopback each port is a different process, so the port is part of what the binding names.
 #[tokio::test]
@@ -381,4 +464,64 @@ async fn start_loads_the_gate_and_refuses_an_unreadable_binding() {
     let agent = crate::GossipAgent::new(crate::NodeId::new("127.0.0.1", cfg.bind_port).unwrap(), cfg);
     let e = agent.start().await.unwrap_err().to_string();
     assert!(e.contains("egress_credentials") && e.contains("model") && e.contains("value_env"), "{e}");
+}
+
+/// #644's review, finding 3: what an activation's proxy needs to keep a value out of a command — the value
+/// recognised wherever it is (`holds_value`, constant-time), and a masker that finds it in a header, in a body,
+/// and **across every chunk boundary** of a streamed body, keeping the length. The basic form's base64 is
+/// masked too (it carries the value).
+#[test]
+fn a_redactor_masks_every_value_across_chunk_boundaries_and_keeps_the_length() {
+    let f = secret_file("redact", SECRET);
+    let g = gate(&[binding_at("model", "localhost", 1, CredentialForm::Bearer, &f), binding_at("svc", "localhost", 2, CredentialForm::Basic, &f)]);
+    assert!(g.holds_value(SECRET) && !g.holds_value("sk-row-L") && !g.holds_value(""));
+    let r = g.redactor(&["model".into(), "svc".into()]);
+    assert!(!format!("{r:?}").contains(SECRET));
+    let h = r.header(&HeaderValue::from_str(&format!("echo Bearer {SECRET}")).unwrap()).expect("masked");
+    assert!(!String::from_utf8_lossy(h.as_bytes()).contains(SECRET) && h.len() == "echo Bearer ".len() + SECRET.len());
+    assert!(r.header(&HeaderValue::from_static("nothing here")).is_none());
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(format!("svc:{SECRET}"));
+    let body = format!("{{\"a\":\"{SECRET}\",\"b\":\"{b64}\",\"c\":\"{SECRET}{SECRET}\"}}").into_bytes();
+    let mut whole = body.clone();
+    r.mask(&mut whole);
+    let w = String::from_utf8_lossy(&whole).to_string();
+    assert!(!w.contains(SECRET) && !w.contains(&b64) && whole.len() == body.len(), "{w}");
+    // Every two-way and a sample of three-way splits give the same masked bytes.
+    for i in 0..=body.len() {
+        for j in [i, (i + 7).min(body.len()), body.len()] {
+            let mut s = r.stream();
+            let mut out = s.feed(&body[..i]);
+            out.extend(s.feed(&body[i..j]));
+            out.extend(s.feed(&body[j..]));
+            out.extend(s.finish());
+            assert_eq!(out, whole, "split at {i}/{j}");
+        }
+    }
+    // One byte at a time.
+    let mut s = r.stream();
+    let mut out: Vec<u8> = body.iter().flat_map(|b| s.feed(&[*b])).collect();
+    out.extend(s.finish());
+    assert_eq!(out, whole);
+    assert!(g.redactor(&["absent".into()]).is_empty());
+}
+
+/// #644's round-2 review, N4: a value that is a prefix of another must not leave the longer one's suffix in
+/// the clear — values are masked longest first. And N7: `appears_in` finds a value inside a longer string.
+/// Seen failing first: masking in binding order left the longer value's tail.
+#[test]
+fn a_value_that_prefixes_another_leaves_nothing_of_the_longer_one() {
+    let short = secret_file("prefix-short", "sk-shared");
+    let long = secret_file("prefix-long", "sk-shared-and-longer-7f");
+    let g = gate(&[binding_at("a", "localhost", 1, CredentialForm::Bearer, &short), binding_at("b", "localhost", 2, CredentialForm::Bearer, &long)]);
+    let r = g.redactor(&["a".into(), "b".into()]);
+    let mut body = b"x sk-shared-and-longer-7f y sk-shared z".to_vec();
+    r.mask(&mut body);
+    let out = String::from_utf8_lossy(&body).to_string();
+    assert!(!out.contains("and-longer") && !out.contains("sk-shared"), "{out}");
+    let mut s = r.stream();
+    let mut streamed = s.feed(b"x sk-shared-and-longer-7f y sk-shared z");
+    streamed.extend(s.finish());
+    assert_eq!(streamed, body);
+    assert!(g.appears_in("export X=pre-sk-shared-and-longer-7f-post") && g.appears_in("sk-shared") && !g.appears_in("sk-share"));
 }

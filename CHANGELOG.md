@@ -9,6 +9,69 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **An egress proxy for activation commands** (post-360 rows L and M — the three items those rows left *not
+  built*). An `[activation.confine]` profile may name `[activation.confine.egress]`: `hosts` (`https://host[:port]`
+  or `http://host[:port]`), `credentials` (the node's `[[egress_credentials]]` bindings the command may name) and
+  `env` (variables passed through). The stem starts a forward proxy for that activation on `127.0.0.1` when it
+  starts, confines the command and probe to the proxy's one port, and starts them with a **cleared environment**
+  carrying the proxy's address (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, lower-case forms, `MYCELIUM_EGRESS_PROXY`)
+  and a per-proxy token. The proxy carries requests only to the listed hosts, **by name**, under the node's egress
+  allow-list: an absolute-form `http://` request is sent on over the entry's scheme (TLS for `https://`) through
+  the node's egress gate, which attaches a placeholder's value only where its binding authorises; an `https://` URL
+  goes through `CONNECT`, a tunnel that carries no credential — the proxy terminates no TLS and mints no CA.
+  Redirects go back to the command. The list **changes live**: `Stem::set_activation_egress_hosts`, and
+  `mycelium-stem` re-reads its unit file on `SIGHUP`. A proxy that cannot start refuses its activation by name
+  (`prov.activation`'s `egress_proxy_unavailable`, the rule's revision 3); a credential that is not a binding on
+  the node, an `env` entry passing a binding's `value_env` variable, or a host the node's allow-list denies refuses
+  the stem's start. New guarantee `stem.activation_egress` (`enforced` under Seatbelt; `not_configured` under
+  Landlock, which limits the proxy's port and not its address). New `EgressCredentials::send_once` (the gate's
+  first hop, no redirect followed). `docs/reference/unit-file.md` § `[activation.confine.egress]`.
+  **Not built:** a credential inside a `CONNECT` tunnel; limits by path; addresses rather than names; on Linux, a
+  limit on the proxy's port by address; `credentials` and `env` changing live; a proxy for an unconfined activation.
+
+  **After the PR's first review:** every confined command starts with a cleared environment
+  (`[activation.confine] env` names what passes); a stem refuses to start when a binding's value could reach a
+  confined command (a `value_env` or same-valued `env` entry, a `value_file` under its readable paths); an echoed
+  value is masked in every relayed header and body (`mycelium::Redactor`, across chunk boundaries), an encoded
+  answer refused where a value could hide in it, and a tunnel to a granted binding's host refused; a SIGHUP reload
+  narrows a proxy whose activation the file no longer names to nothing; the proxy caps connections (64), header
+  reads (10 s), idle tunnels (5 min) and buffered bodies (4); `stem.activation_egress` counts a `localhost:<port>`
+  `connect` entry as `not_configured`; two `[[activation]]`s for one `ns/name` are refused. **After its second:**
+  only connections that presented the token count against the cap (a token-less one is closed after 2 s, on its
+  407, or past 16 to admit a newer one), a tunnel counts until it closes, the body cap counts only bodies being
+  buffered, values are masked longest first, every encoding header is read, and a hard-linked `value_file` or an
+  `env` value containing a binding's value refuses the start. **After its third:** the proxy closes at accept every
+  connection another user's process opened, or whose owner the kernel cannot name (`/proc/net/tcp` on Linux,
+  `net.inet.tcp.pcblist_n` on macOS), so another user can neither use the proxy nor crowd it; a symlinked
+  `value_file` is judged by the file it names; an answer with no body is relayed whatever its `Content-Encoding`.
+  **After its fourth:** owners are named in batches, one kernel-table read per batch, at most 64 connections waiting
+  (oldest closed first), and one proxy holds at most 256 sockets, so a flood can neither queue without bound nor take
+  the stem's descriptors; the parsers match addresses and ports (macOS) and only established rows (Linux), and a socket
+  record that is not a TCP stream matches nothing. **After its fifth:** no waiting connection is closed to make room —
+  while 64 wait the proxy accepts nothing more, so newer ones wait in the kernel's listen backlog
+  (`peer_check_evicted` and `peer_check_busy` are gone); every proxy of the stem shares one descriptor budget, a
+  quarter of the soft `RLIMIT_NOFILE` (not raised), counting upstream sockets (`fd_budget`); a kernel-table read is
+  bounded at 2 s (macOS kills `sysctl`), its batch refused and the next served; Linux names a dual-stack client
+  under its IPv4-mapped spelling in `/proc/net/tcp6`, and a client in FIN_WAIT1/2 or CLOSE_WAIT. **After its
+  sixth:** each proxy draws on its share of that budget (at least 8 — an egress activation that would push it lower
+  is refused at start), a quarter of each share is kept for upstream sockets, and a proxy at its share or at 256
+  sockets stops accepting instead of accepting and closing (`open_cap` is gone), so a flood on one proxy leaves the
+  others theirs; no idle upstream connection is kept (the proxy's client and `EgressCredentials::send_once`); and a
+  kernel-table read that has not returned is never doubled. **After its seventh:** on Linux a connection's owner
+  comes from a `sock_diag` query for its exact addresses (`/proc/net/tcp{,6}` only where netlink is unavailable),
+  so the cost does not grow with the host's TCP table; a read that panics after its bound no longer stops later
+  reads.
+
+### Changed
+
+- **Behaviour:** a confined `[[activation]]` command no longer inherits the stem's environment (2.35.0 passed it
+  whole); `stem.activation_confined` revision 2. A unit with two `[[activation]]`s for one capability is refused.
+- `mycelium::ConfineDecl` gained `egress` and `env`, `activation_sandbox::Profile` gained `env` and
+  `activation_sandbox::Refusal` gained `EgressUnavailable` (`deprecations.md` §51). A `connect` entry naming a
+  hostname is still refused; its message now points at `[activation.confine.egress]`.
+
 ### Security
 
 - **A symlink planted while a confinement profile resolved could widen it for good** (post-360 row M; #641's review,

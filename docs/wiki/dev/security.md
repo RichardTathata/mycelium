@@ -382,7 +382,8 @@ their broker IS the crown jewel). Two opt-in controls:
   sent. Users: `[[serve]].credential`, `OpenAiBackend::with_credentials`. Guarantee `egress.credentials`. The places a
   secret enters a node, and which use a binding, are tabled in `operations/crown-jewel.md`. Not covered: placeholders
   in a query or body, zeroisation, a `value_env` variable's presence in the process environment, a proxy the gate's
-  client honours, and an `[[activation]]` command (a separate process with no path to the gate). A binding may name a
+  client honours, and an `[[activation]]` command without `[activation.confine.egress]` (a separate process with no
+  path to the gate; with the table it reaches the gate through its stem's egress proxy — below). A binding may name a
   `port`, and one to `localhost` in any spelling or an IP literal must (each port is a different process; pinning to the first use was rejected as
   order-dependent); only 301/302/303/307/308 are followed; two bindings on one header are refused; a refusal names a
   binding by index and name, never a field's contents (a value pasted into the wrong field was being echoed).
@@ -729,8 +730,28 @@ requirement**: an older kernel is a refusal, never a quieter sandbox. The rule i
 cannot apply refuses the activation by name, never runs it unconfined** — and a profile no backend can hold (a
 hostname, an address) is refused at load. The guarantee report says which applies (`stem.activation_confined`,
 registered by `mycelium-stem` before `start()`); the per-activation answer is `Stem::activation_confinement`. Its review (#636) found what each hook does not see: Landlock's TCP rules miss TCP Fast Open (`MSG_FASTOPEN` sends) and `listen`'s auto-bind, and seccomp's syscall-number match misses x32 — all three refused by the filter now; the always-readable set names files, not `/etc` whole (the node key's home); a profile is resolved once and held open, so a symlink a confined run plants cannot widen the next. A replaced path is re-resolved with every check (#641), and its review closed the race underneath. Every path is now resolved from `/`, one component at a time from its parent's descriptor. Symlinks are followed only until the walk enters a writable root, recognised by identity rather than spelling. The identity comes from what was opened, so a link planted inside a root, at any component and at any moment, is refused, even when the path reaches the root through an operator shortcut. On Linux, a symlink on a filesystem that holds a write root and is mounted more than once (a bind mount) is not followed either. Views through another filesystem (FUSE, overlay, NFS) are stated as undetected. Currency walks the path again, so a flipped ancestor link is seen too. Not
-built: a live-reloaded network allow-list, limits by host, an OpenShell (container) backend, resource limits, and on
-Linux below Landlock ABI 6 a limit on signals. [`.log/2026-10-17-activation-confined.md`](.log/2026-10-17-activation-confined.md).
+built: an OpenShell (container) backend, resource limits, and on Linux below Landlock ABI 6 a limit on signals.
+[`.log/2026-10-17-activation-confined.md`](.log/2026-10-17-activation-confined.md).
+
+**The activation egress proxy (after 2.35.0 — rows L and M's *not built* items).** Limits by host and a live list are
+not something either backend can do — Landlock limits ports, Seatbelt `localhost` or any address — so they live in a
+process the stem owns: `[activation.confine.egress]` (`EgressDecl`) makes the stem start a forward proxy per such
+activation on `127.0.0.1` (`mycelium-wasm-host/src/activation_egress.rs`), confine the command to that one port
+(`activation_sandbox::prepare_with` adds it to `connect`) and start it in a **cleared environment** naming the proxy and
+a per-proxy token. The proxy matches the requested **name** to the list (`RwLock` row 64, swapped by
+`Stem::set_activation_egress_hosts` or `mycelium-stem`'s `SIGHUP`), sends absolute-form `http://` requests on over the
+entry's scheme through `EgressCredentials::send_once` (the gate attaches a placeholder's value only where the binding
+authorises; no redirect followed — the command follows it through the proxy again), and tunnels `CONNECT` with no
+header rewrite. Decided against: TLS interception with a minted CA (a key that impersonates every host, for a header
+the plain-HTTP hop rewrites anyway); a KV- or gateway-held list (KV is fleet-writable — detection, not prevention —
+and a route would be a door for a node-local concern). One proxy per activation rather than per stem: a port and a
+token name exactly one allow-list and one set of bindings, and a proxy that cannot start refuses only its activation.
+Its first review (#644) widened the point to every confined command: each starts with a cleared environment, a
+binding it could read another way (a `value_file` in its read paths, a same-valued variable) refuses the start, and
+an upstream's echo of a value is masked before it is relayed (`Redactor`). What stays: under Landlock the proxy's
+port is open on any address (`stem.activation_egress` reads `not_configured` there), names not addresses, no
+credential inside `CONNECT`, no path limit, a value returned transformed. [`.log/2026-10-18-activation-egress-review.md`](.log/2026-10-18-activation-egress-review.md).
+[`.log/2026-10-17-activation-egress-proxy.md`](.log/2026-10-17-activation-egress-proxy.md).
 
 ## `unsafe` — denied in every library crate (2026-10-10, post-360 P3)
 

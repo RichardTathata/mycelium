@@ -1575,7 +1575,7 @@ mod tests {
     }
 
     fn alloc_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+        mycelium::test_util::alloc_port()
     }
 
     async fn live_agent() -> Arc<GossipAgent> {
@@ -3000,7 +3000,7 @@ mod tests {
             // An unstarted agent suffices: the presence pass reads only local (empty) state,
             // resolves the catalog, and skips on "no runtime for kind" — the tripwire path.
             let port =
-                std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+                mycelium::test_util::alloc_port();
             let id = mycelium::NodeId::new("127.0.0.1", port).unwrap();
             let agent = Arc::new(GossipAgent::new(
                 id,
@@ -3036,7 +3036,7 @@ mod tests {
     /// and installed it.
     #[tokio::test]
     async fn an_entry_providing_a_model_metadata_ad_is_never_installed() {
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let port = mycelium::test_util::alloc_port();
         let id = mycelium::NodeId::new("127.0.0.1", port).unwrap();
         let agent = Arc::new(GossipAgent::new(id, mycelium::GossipConfig { bind_port: port, ..Default::default() }));
         let host = Arc::new(WasmHost::new().expect("engine"));

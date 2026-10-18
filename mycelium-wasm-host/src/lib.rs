@@ -73,11 +73,16 @@ pub use librarian::{
 };
 pub use mesh_source::{pull_artifact, serve_artifacts, MeshArtifactSource, ARTIFACT_FETCH_KIND, MeshRangedFetcher, ARTIFACT_SIZE_KIND, ARTIFACT_RANGE_KIND, MESH_RANGE_CHUNK_BYTES};
 pub use provisioner::{shadow_name, verify_published_head, InstallRights, Provisioner, SupervisionPolicy};
-pub use stem::{resolve_serve_key, Stem, StemError, StemOptions, StemSource};
+pub use stem::{resolve_serve_key, start_egress_proxies, start_egress_proxies_on, Stem, StemError, StemOptions, StemSource};
 pub mod activation;
 /// Confined activations (post-360 row M): an `[[activation]]` run under its `[activation.confine]` profile.
 pub mod activation_sandbox;
 pub use activation_sandbox::{confinement_guarantee, Confinement};
+/// The egress proxy a confined activation reaches the network through (post-360 rows L and M).
+pub mod activation_egress;
+/// The user owning a loopback connection's client socket, from the kernel (#644's round-3 review).
+pub mod peer_uid;
+pub use activation_egress::{egress_guarantee, EgressCounts, EgressProxy};
 /// The provisioning rules, described — the catalogue entries the stem pilot instruments (plan I1).
 pub mod rules;
 #[cfg(feature = "llm")]

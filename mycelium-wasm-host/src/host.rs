@@ -597,7 +597,7 @@ mod tests {
     use super::*;
 
     fn alloc_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+        mycelium::test_util::alloc_port()
     }
 
     async fn live_agent() -> std::sync::Arc<mycelium::GossipAgent> {

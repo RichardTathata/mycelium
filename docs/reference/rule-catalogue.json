@@ -530,7 +530,7 @@
     },
     {
       "id": "prov.activation",
-      "revision": 2,
+      "revision": 3,
       "subsystem": "mycelium-wasm-host::activation",
       "responsibilities": [
         "response"
@@ -546,6 +546,11 @@
           "source": "the placed path, and `artifact:<hex>` references rendered to placed paths",
           "scope": "this node",
           "freshness": "local"
+        },
+        {
+          "source": "the activation's egress proxy, started with the stem (`[activation.confine.egress]`)",
+          "scope": "this node",
+          "freshness": "local; started once, at the stem's start"
         }
       ],
       "outcomes": [
@@ -563,7 +568,8 @@
             "reference_not_placed_yet",
             "render_failed",
             "confinement_unavailable",
-            "confinement_failed"
+            "confinement_failed",
+            "egress_proxy_unavailable"
           ]
         },
         {
@@ -574,7 +580,7 @@
         }
       ],
       "effects": [
-        "the operator's command — under its `[activation.confine]` profile (Seatbelt, or Landlock with seccomp) when the unit names one, else with the stem's privileges"
+        "the operator's command — under its `[activation.confine]` profile (Seatbelt, or Landlock with seccomp) when the unit names one, else with the stem's privileges; with `[activation.confine.egress]`, confined to its egress proxy's port in a cleared environment"
       ],
       "guards": [
         "other"
@@ -596,10 +602,95 @@
         "a_profile_the_platform_cannot_apply_refuses_the_activation_by_name",
         "a_confined_activation_reads_and_writes_only_what_its_profile_names",
         "a_confined_activation_reaches_only_its_declared_tcp_ports",
-        "a_confined_activation_runs_in_a_stem_and_the_stem_says_which_applies"
+        "a_confined_activation_runs_in_a_stem_and_the_stem_says_which_applies",
+        "a_proxy_that_cannot_start_refuses_the_activation"
       ],
       "trace": "instrumented",
-      "summary": "After placement the declared command hands the blob to its local runtime — confined when the unit names a profile, which a node that cannot apply it refuses by name rather than run unconfined; a failure is an install failure at stage `activation`, retried next round."
+      "summary": "After placement the declared command hands the blob to its local runtime — confined when the unit names a profile, which a node that cannot apply it refuses by name rather than run unconfined, as it refuses one whose egress proxy is not running; a failure is an install failure at stage `activation`, retried next round."
+    },
+    {
+      "id": "prov.activation_egress",
+      "revision": 1,
+      "subsystem": "mycelium-wasm-host::activation_egress",
+      "responsibilities": [
+        "authority"
+      ],
+      "trigger": "a request an egress-proxied activation's command sends through its proxy (absolute-form HTTP or `CONNECT`)",
+      "inputs": [
+        {
+          "source": "the activation's egress allow-list (`[activation.confine.egress] hosts`, replaced live by `Stem::set_activation_egress_hosts` / SIGHUP; lock-order row 64)",
+          "scope": "this activation",
+          "freshness": "read per request"
+        },
+        {
+          "source": "the node's egress allow-list and credential bindings (`EgressCredentials`)",
+          "scope": "this node",
+          "freshness": "read at the agent's start"
+        }
+      ],
+      "outcomes": [
+        {
+          "kind": "action",
+          "reasons": [
+            "forwarded",
+            "tunnelled"
+          ]
+        },
+        {
+          "kind": "refusal",
+          "reasons": [
+            "no_proxy_token",
+            "malformed_request",
+            "host_not_listed",
+            "credential_not_granted",
+            "credential_not_authorised",
+            "node_egress_denied",
+            "body_too_large",
+            "body_cap",
+            "connection_cap",
+            "preauth_evicted",
+            "peer_uid_other",
+            "peer_uid_unknown",
+            "fd_budget",
+            "credential_host_tunnel",
+            "encoded_response"
+          ]
+        }
+      ],
+      "effects": [
+        "the request sent on over the entry's scheme with placeholders resolved by the node's gate, its answer relayed with the granted bindings' values masked; or a byte tunnel, closed when idle; `mycelium_activation_egress_total{activation, event}`"
+      ],
+      "guards": [
+        "authority"
+      ],
+      "may_trigger": [],
+      "may_inhibit": [],
+      "depends_on": [
+        "prov.activation"
+      ],
+      "symbol": "activation_egress::Inner::handle",
+      "docs": "docs/reference/unit-file.md",
+      "tests": [
+        "a_confined_command_reaches_an_allowed_host_through_its_proxy_and_is_refused_another",
+        "an_allow_list_change_takes_effect_without_a_restart",
+        "a_placeholder_is_replaced_only_at_the_bound_host_and_the_value_is_never_in_the_commands_environment",
+        "the_proxy_requires_its_token_and_limits_by_host",
+        "a_placeholder_the_activation_may_not_name_is_refused_and_never_sent",
+        "an_https_entry_gets_the_credential_over_tls_and_an_echo_of_it_is_masked",
+        "an_encoded_response_is_refused_where_a_value_could_hide_in_it",
+        "the_proxy_bounds_connections_header_reads_tunnels_and_bodies",
+        "token_less_connections_cannot_lock_the_command_out",
+        "a_tunnel_counts_against_the_connection_cap_until_it_closes",
+        "bodiless_requests_in_flight_are_not_counted_as_buffered_bodies",
+        "every_encoding_header_is_read_before_a_body_is_relayed",
+        "a_connection_another_user_owns_or_no_one_can_name_is_closed_at_accept",
+        "another_users_connection_is_closed_at_accept",
+        "a_bodiless_answer_or_repeated_identity_is_relayed",
+        "a_flood_of_other_users_connections_is_bounded_and_batched",
+        "a_proxy_holds_at_most_max_open_sockets"
+      ],
+      "trace": "catalogue_only",
+      "summary": "An activation's command reaches another host only through its proxy: a listed host by name, a credential attached by the node's gate where its binding authorises; anything else is refused with the proxy's marker, logged and counted per activation by reason (`mycelium_activation_egress_total{activation, event}`) — not recorded in the decision trace."
     },
     {
       "id": "prov.advertise",

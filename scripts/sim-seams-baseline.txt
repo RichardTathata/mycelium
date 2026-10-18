@@ -25,6 +25,7 @@
 3 mycelium-wasm-host/src/catalog.rs
 4 mycelium-wasm-host/src/http_source.rs
 1 mycelium-wasm-host/src/librarian.rs
+1 mycelium-wasm-host/src/peer_uid.rs
 6 mycelium-wasm-host/src/runtime.rs
 1 mycelium-wasm-host/src/serve.rs
 1 mycelium-wasm-host/src/stem.rs
