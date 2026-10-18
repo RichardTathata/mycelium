@@ -213,7 +213,17 @@ pub struct ProxyOptions<'a> {
     pub gate: Option<Arc<mycelium::EgressCredentials>>,
     /// What it holds at once ([`ProxyLimits::default`] for a stem's).
     pub limits: ProxyLimits,
+    /// Who owns a connecting socket — `None` for the kernel's answer ([`crate::peer_uid::loopback_peer_uid`]);
+    /// a test injects its own. A connection whose owner is not this process's user, or cannot be read, is
+    /// closed at accept (#644's round-3 review).
+    pub peer_uid: Option<PeerUidLookup>,
 }
+
+/// `(our address, the peer's address) → the uid owning the peer's socket`, or why it cannot be told.
+pub type PeerUidLookup = Arc<dyn Fn(SocketAddr, SocketAddr) -> Result<u32, String> + Send + Sync>;
+
+/// How many peer-uid lookups run at once; a connection waiting longer than the pre-auth timeout for one is closed.
+const PEER_CHECKS: usize = 8;
 
 impl EgressProxy {
     /// The address a stem's proxy listens on: loopback, a free port.
@@ -269,19 +279,30 @@ impl EgressProxy {
             tokio::net::TcpListener::from_std(listener).map_err(|e| fail(format!("{e}")))?
         };
         let served = Arc::clone(&inner);
+        let peer_uid: PeerUidLookup = opts.peer_uid.unwrap_or_else(|| Arc::new(crate::peer_uid::loopback_peer_uid));
+        let own_uid = crate::peer_uid::own_uid();
+        let checks = Arc::new(tokio::sync::Semaphore::new(PEER_CHECKS));
         let task = rt.spawn(async move {
             loop {
-                let sock = match listener.accept().await {
-                    Ok((sock, _)) => sock,
+                let (sock, peer) = match listener.accept().await {
+                    Ok(pair) => pair,
                     Err(e) => {
                         tracing::warn!(activation = %served.label, error = %e, "egress proxy: accept failed");
                         mycelium::sim_seam::sleep_ms("activation_egress.accept", 50).await;
                         continue;
                     }
                 };
-                let conn = Conn::admit(&served);
                 let inner = Arc::clone(&served);
+                let (peer_uid, checks) = (Arc::clone(&peer_uid), Arc::clone(&checks));
                 tokio::spawn(async move {
+                    // #644's round-3 review: only this user's processes are served. Another user's connection —
+                    // or one whose owner cannot be read (fail closed) — is closed before it holds any place.
+                    if let Err(event) = admit_peer(&inner, &sock, peer, own_uid, peer_uid, checks).await {
+                        inner.refused.fetch_add(1, Ordering::Relaxed);
+                        count(&inner.label, event);
+                        return;
+                    }
+                    let conn = Conn::admit(&inner);
                     let header_timeout = std::time::Duration::from_millis(inner.limits.header_read_timeout_ms.max(1));
                     let preauth_ms = inner.limits.preauth_timeout_ms.max(1);
                     let svc = {
@@ -572,6 +593,7 @@ impl Inner {
         }
         let upstream = format!("{}{}", entry.url_base(), uri.path_and_query().map(|p| p.as_str()).unwrap_or("/"));
         let method = req.method().clone();
+        let head = method == Method::HEAD;
         let mut headers = req.headers().clone();
         for h in HOP_BY_HOP {
             headers.remove(*h);
@@ -620,7 +642,10 @@ impl Inner {
         let redactor = self.redactor.as_ref();
         #[cfg(not(any(feature = "gateway", feature = "llm")))]
         let redactor: Option<&NoRedactor> = None;
-        if redactor.is_some() && encoded(resp.headers()) {
+        // Round 3: an answer that carries no body (to a `HEAD`, or a 1xx, 204 or 304) has nothing to mask,
+        // whatever its `Content-Encoding` says.
+        let bodiless = head || resp.status().is_informational() || matches!(resp.status().as_u16(), 204 | 304);
+        if redactor.is_some() && !bodiless && encoded(resp.headers()) {
             return self.refuse(StatusCode::BAD_GATEWAY, &host, "encoded_response", "the upstream answered with an encoded body, which cannot be checked for a credential's value".into());
         }
         self.forwarded.fetch_add(1, Ordering::Relaxed);
@@ -707,9 +732,44 @@ impl Inner {
     }
 }
 
-/// Could a value hide, encoded, in this answer's body (#644's round-2 review, N5)? More than one
-/// `Content-Encoding` header, any coding but `identity` in one, or a `Transfer-Encoding` naming anything but
-/// `chunked` — every header of each name read, every comma-separated coding in each.
+/// Is the connection from `peer` this user's? `Err` names the refusal counted: `peer_uid_other` (another user),
+/// `peer_uid_unknown` (no answer — refused, never assumed), `peer_check_busy` (no lookup slot within the pre-auth
+/// timeout).
+async fn admit_peer(
+    inner: &Inner,
+    sock: &tokio::net::TcpStream,
+    peer: SocketAddr,
+    own_uid: u32,
+    lookup: PeerUidLookup,
+    checks: Arc<tokio::sync::Semaphore>,
+) -> Result<(), &'static str> {
+    let local = sock.local_addr().map_err(|_| "peer_uid_unknown")?;
+    let permit = tokio::select! {
+        p = checks.acquire_owned() => p.map_err(|_| "peer_check_busy")?,
+        _ = mycelium::sim_seam::sleep_ms("activation_egress.peer_check", inner.limits.preauth_timeout_ms.max(1)) => return Err("peer_check_busy"),
+    };
+    let answer = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        lookup(local, peer)
+    })
+    .await
+    .unwrap_or_else(|_| Err("the lookup panicked".into()));
+    match answer {
+        Ok(uid) if uid == own_uid => Ok(()),
+        Ok(uid) => {
+            tracing::info!(activation = %inner.label, %peer, uid, "activation egress: a connection from another user, closed at accept");
+            Err("peer_uid_other")
+        }
+        Err(why) => {
+            tracing::info!(activation = %inner.label, %peer, reason = %why, "activation egress: a connection whose owner cannot be read, closed at accept");
+            Err("peer_uid_unknown")
+        }
+    }
+}
+
+/// Could a value hide, encoded, in this answer's body (#644's round-2 review, N5)? Any coding but `identity`
+/// in any `Content-Encoding` header, or a `Transfer-Encoding` naming anything but `chunked` — every header of
+/// each name read, every comma-separated coding in each (repeated `identity` headers are no encoding; round 3).
 fn encoded(h: &reqwest::header::HeaderMap) -> bool {
     let codings_other_than = |name: reqwest::header::HeaderName, allowed: &str| {
         h.get_all(name).iter().any(|v| match v.to_str() {
@@ -717,8 +777,7 @@ fn encoded(h: &reqwest::header::HeaderMap) -> bool {
             Err(_) => true,
         })
     };
-    h.get_all(reqwest::header::CONTENT_ENCODING).iter().count() > 1
-        || codings_other_than(reqwest::header::CONTENT_ENCODING, "identity")
+    codings_other_than(reqwest::header::CONTENT_ENCODING, "identity")
         || codings_other_than(reqwest::header::TRANSFER_ENCODING, "chunked")
 }
 

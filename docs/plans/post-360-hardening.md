@@ -1554,9 +1554,21 @@ CC8, `docs/capabilities.md`, the crate README). The example units with `[[activa
   `Transfer-Encoding: gzip, chunked`). (N6) §51's table row (§50 at the review) says *Partly*. (N7) A `value_file` with a second hard link,
   and an `env` value holding a binding's value inside a longer string, refuse the start (the stem test, failing first:
   both started); a file moved or linked into a readable path after start is not seen, stated, and the guarantee says
-  so. The librarian tests use the bind-verified port allocator. Stated: a local process that opens token-less
-  connections faster than they are closed can still crowd the command out — the proxy cannot tell who connects
-  before the token arrives.
+  so. The librarian tests use the bind-verified port allocator. Stated then: a local process that opens token-less
+  connections faster than they are closed can still crowd the command out — closed for other users in round 3.
+- *The third review (#644, round 3)* — N1–N6 and both rebases confirmed. (1) A symlinked `value_file` was judged
+  by the link's own link count: `hard_links` follows it now (`a_symlinked_value_file_is_judged_by_the_file_it_names`,
+  failing first: the start went through). (The crowding limit) **closed for other users at the root:** at accept
+  the proxy asks the kernel which user owns the connecting socket — `/proc/net/tcp{,6}` on Linux,
+  `sysctl -b net.inet.tcp.pcblist_n` on macOS (`peer_uid.rs`, no `unsafe`) — and closes a connection another
+  user's process opened, or one whose owner cannot be read, before it holds any place
+  (`a_connection_another_user_owns_or_no_one_can_name_is_closed_at_accept`, through an injected lookup, failing first
+  with admission skipped: answered 200; `the_kernel_names_this_users_own_loopback_connection` on both platforms;
+  `another_users_connection_is_closed_at_accept`, live as user `nobody` under passwordless `sudo` in CI's Linux job).
+  Same-user crowding stays, stated: that user is inside the stem's trust boundary. (2) The 2 s half-close grace is
+  stated in `unit-file.md`. (3) An answer with no body (a `HEAD`'s, 1xx, 204, 304) is relayed whatever its
+  `Content-Encoding`, and repeated `identity` headers pass (`a_bodiless_answer_or_repeated_identity_is_relayed`,
+  failing first: 502).
 - **Not built, stated:** limits by address (names are compared, not what they resolve to) and by path; under Landlock,
   a limit on the proxy's port by address; an OpenShell backend; resource
   limits (CPU, memory); on Linux below Landlock ABI 6, a limit on signals to the stem user's processes; device

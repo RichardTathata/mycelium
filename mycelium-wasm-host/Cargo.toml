@@ -83,7 +83,7 @@ libc        = "0.2"
 # the root's own descriptor (#641's review, round 2): a safe wrapper over `openat`/`fstatat`/`fstat`, already
 # in the tree through wasmtime, so `deny(unsafe_code)` holds.
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", features = ["fs"] }
+rustix = { version = "1", features = ["fs", "process"] }  # process: `getuid`, the egress proxy's peer-uid admission
 
 [features]
 stem = ["dep:tracing-subscriber"]

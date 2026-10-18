@@ -41,6 +41,7 @@ fn start(hosts: Vec<String>, credentials: Vec<String>, node: &EgressPolicy) -> R
         node_egress: node,
         bind: EgressProxy::DEFAULT_BIND,
         limits: Default::default(),
+        peer_uid: None,
         #[cfg(any(feature = "gateway", feature = "llm"))]
         gate: None,
     })
@@ -156,6 +157,7 @@ async fn a_host_the_node_denies_is_refused_and_the_proxy_binds_loopback_only() {
         node_egress: &EgressPolicy::default(),
         bind: "0.0.0.0:0".parse().unwrap(),
         limits: Default::default(),
+        peer_uid: None,
         #[cfg(any(feature = "gateway", feature = "llm"))]
         gate: None,
     })
@@ -242,6 +244,10 @@ fn token_header(p: &EgressProxy) -> String {
 }
 
 fn start_limited(hosts: Vec<String>, limits: ProxyLimits) -> EgressProxy {
+    start_with_peer_uid(hosts, limits, None)
+}
+
+fn start_with_peer_uid(hosts: Vec<String>, limits: ProxyLimits, peer_uid: Option<PeerUidLookup>) -> EgressProxy {
     let decl = EgressDecl { hosts, ..Default::default() };
     EgressProxy::start(ProxyOptions {
         label: "data/pack".into(),
@@ -251,8 +257,63 @@ fn start_limited(hosts: Vec<String>, limits: ProxyLimits) -> EgressProxy {
         #[cfg(any(feature = "gateway", feature = "llm"))]
         gate: None,
         limits,
+        peer_uid,
     })
     .unwrap()
+}
+
+/// #644's round-3 review: a connection whose socket another user owns is closed at accept, before it holds any
+/// place — and so is one whose owner cannot be read (fail closed). Through the injectable lookup, so it runs on
+/// every platform and needs no second user; `another_users_connection_is_closed_at_accept` (live, under
+/// `MYCELIUM_EGRESS_OTHER_UID_LIVE_REQUIRED`) shows the kernel's lookup doing it for a real other user. Seen
+/// failing first: before peer-uid admission both were served (the token check answered 200).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_connection_another_user_owns_or_no_one_can_name_is_closed_at_accept() {
+    let (u, seen) = upstream().await;
+    let me = crate::peer_uid::own_uid();
+    for (label, lookup) in [
+        ("another user", Arc::new(move |_: std::net::SocketAddr, _: std::net::SocketAddr| Ok(me.wrapping_add(1))) as PeerUidLookup),
+        ("unknown", Arc::new(|_: std::net::SocketAddr, _: std::net::SocketAddr| Err("no answer".to_string())) as PeerUidLookup),
+    ] {
+        let p = start_with_peer_uid(vec![format!("http://127.0.0.1:{u}")], ProxyLimits::default(), Some(lookup));
+        let answer = raw(p.port(), &token_header(&p), &format!("GET http://127.0.0.1:{u}/ HTTP/1.1\r\nHost: x\r\n\r\n")).await;
+        assert!(answer.is_empty(), "{label}: closed with no answer: {answer}");
+        assert!(p.counts().refused >= 1, "{label}: counted");
+    }
+    assert!(seen.lock().unwrap().is_empty(), "nothing was forwarded");
+    // The plant: the same request from this user, through the kernel's own lookup, is served.
+    let p = start_limited(vec![format!("http://127.0.0.1:{u}")], ProxyLimits::default());
+    let answer = raw(p.port(), &token_header(&p), &format!("GET http://127.0.0.1:{u}/ HTTP/1.1\r\nHost: x\r\n\r\n")).await;
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+}
+
+/// The real thing: a process of **another user** connects to the proxy and is closed at accept, with no answer
+/// — by the kernel's lookup, not an injected one. Needs a second user and passwordless `sudo`; runs where
+/// `MYCELIUM_EGRESS_OTHER_UID_LIVE_REQUIRED` is set (CI's Linux `wasm-host` job), skips elsewhere.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn another_users_connection_is_closed_at_accept() {
+    if std::env::var_os("MYCELIUM_EGRESS_OTHER_UID_LIVE_REQUIRED").is_none() {
+        eprintln!("another_users_connection_is_closed_at_accept: SKIPPED — set MYCELIUM_EGRESS_OTHER_UID_LIVE_REQUIRED where passwordless sudo and the user `nobody` exist");
+        return;
+    }
+    let (u, seen) = upstream().await;
+    let p = start_limited(vec![format!("http://127.0.0.1:{u}")], ProxyLimits::default());
+    let script = format!(
+        "exec 3<>/dev/tcp/127.0.0.1/{port}; printf 'GET http://127.0.0.1:{u}/ HTTP/1.1\r\nHost: x\r\nProxy-Authorization: {auth}\r\nConnection: close\r\n\r\n' >&3; cat <&3",
+        port = p.port(),
+        auth = token_header(&p)
+    );
+    let out = tokio::task::spawn_blocking(move || std::process::Command::new("sudo").args(["-n", "-u", "nobody", "bash", "-c", &script]).output())
+        .await
+        .unwrap()
+        .expect("sudo runs");
+    let answer = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(!answer.contains("HTTP/1.1"), "another user's connection got an answer: {answer} ({})", String::from_utf8_lossy(&out.stderr));
+    assert!(seen.lock().unwrap().is_empty(), "nothing was forwarded");
+    assert!(p.counts().refused >= 1);
+    // The plant: this user, the same request, is served.
+    let mine = raw(p.port(), &token_header(&p), &format!("GET http://127.0.0.1:{u}/ HTTP/1.1\r\nHost: x\r\n\r\n")).await;
+    assert!(mine.starts_with("HTTP/1.1 200"), "{mine}");
 }
 
 /// Has the server closed `s` (EOF or reset) within `secs`?
@@ -477,11 +538,63 @@ async fn every_encoding_header_is_read_before_a_body_is_relayed() {
         let decl = EgressDecl { hosts: vec![format!("http://127.0.0.1:{port}")], credentials: vec!["model".into()] };
         let p = EgressProxy::start(ProxyOptions {
             label: "data/pack".into(), decl: &decl, node_egress: &EgressPolicy::default(), bind: EgressProxy::DEFAULT_BIND,
-            gate: Some(gate), limits: ProxyLimits::default(),
+            gate: Some(gate), limits: ProxyLimits::default(), peer_uid: None,
         })
         .unwrap();
         let r = client_via(&proxy_url(&p)).get(format!("http://127.0.0.1:{port}/")).send().await.unwrap();
         assert_eq!(r.status().as_u16(), 502, "{extra:?} must be refused");
+        let _ = std::fs::remove_file(&file);
+    }
+}
+
+/// An upstream answering every request with `status` and `extra` headers and, unless `HEAD` or bodiless, a
+/// two-byte body.
+#[cfg(any(feature = "gateway", feature = "llm"))]
+async fn answering_status(status: &'static str, extra: &'static str) -> u16 {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            let mut buf = vec![0u8; 8192];
+            let n = sock.read(&mut buf).await.unwrap_or(0);
+            let head = buf[..n].starts_with(b"HEAD ");
+            let body = if head || status.starts_with("304") { "" } else { "ok" };
+            let len = if status.starts_with("304") { String::new() } else { "Content-Length: 2\r\n".into() };
+            let _ = sock.write_all(format!("HTTP/1.1 {status}\r\n{extra}{len}Connection: close\r\n\r\n{body}").as_bytes()).await;
+        }
+    });
+    port
+}
+
+/// #644's round-3 review, finding 3: what carries no body has nothing to mask — a `HEAD`'s answer and a 304
+/// are relayed whatever their `Content-Encoding` says — and repeated `identity` headers are no encoding. Seen
+/// failing first: all three answered 502.
+#[cfg(any(feature = "gateway", feature = "llm"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bodiless_answer_or_repeated_identity_is_relayed() {
+    for (status, extra, method, want) in [
+        ("200 OK", "Content-Encoding: gzip\r\n", reqwest::Method::HEAD, 200u16),
+        ("304 Not Modified", "Content-Encoding: gzip\r\n", reqwest::Method::GET, 304),
+        ("200 OK", "Content-Encoding: identity\r\nContent-Encoding: identity\r\n", reqwest::Method::GET, 200),
+    ] {
+        let port = answering_status(status, extra).await;
+        let file = std::env::temp_dir().join(format!("act-egress-r3-{}-{port}", std::process::id()));
+        std::fs::write(&file, "sk-r3-7f").unwrap();
+        let binding = mycelium::CredentialBinding {
+            name: "model".into(), host: "127.0.0.1".into(), port: Some(port), path_prefix: None,
+            form: mycelium::CredentialForm::Bearer, header: None, username: None,
+            value_env: None, value_file: Some(file.clone()), allow_plaintext: false,
+        };
+        let gate = Arc::new(mycelium::EgressCredentials::load(&[binding], &EgressPolicy::default()).unwrap());
+        let decl = EgressDecl { hosts: vec![format!("http://127.0.0.1:{port}")], credentials: vec!["model".into()] };
+        let p = EgressProxy::start(ProxyOptions {
+            label: "data/pack".into(), decl: &decl, node_egress: &EgressPolicy::default(), bind: EgressProxy::DEFAULT_BIND,
+            gate: Some(gate), limits: ProxyLimits::default(), peer_uid: None,
+        })
+        .unwrap();
+        let r = client_via(&proxy_url(&p)).request(method.clone(), format!("http://127.0.0.1:{port}/")).send().await.unwrap();
+        assert_eq!(r.status().as_u16(), want, "{status} {extra:?} {method}");
         let _ = std::fs::remove_file(&file);
     }
 }
@@ -563,7 +676,7 @@ async fn an_https_entry_gets_the_credential_over_tls_and_an_echo_of_it_is_masked
     let decl = EgressDecl { hosts: vec![format!("https://localhost:{port}")], credentials: vec!["model".into()] };
     let p = EgressProxy::start(ProxyOptions {
         label: "data/pack".into(), decl: &decl, node_egress: &EgressPolicy::default(), bind: EgressProxy::DEFAULT_BIND,
-        gate: Some(Arc::clone(&gate)), limits: ProxyLimits::default(),
+        gate: Some(Arc::clone(&gate)), limits: ProxyLimits::default(), peer_uid: None,
     })
     .unwrap();
     let r = client_via(&proxy_url(&p))
@@ -620,7 +733,7 @@ async fn an_encoded_response_is_refused_where_a_value_could_hide_in_it() {
     let decl = EgressDecl { hosts: vec![format!("http://127.0.0.1:{port}")], credentials: vec!["model".into()] };
     let p = EgressProxy::start(ProxyOptions {
         label: "data/pack".into(), decl: &decl, node_egress: &EgressPolicy::default(), bind: EgressProxy::DEFAULT_BIND,
-        gate: Some(gate), limits: ProxyLimits::default(),
+        gate: Some(gate), limits: ProxyLimits::default(), peer_uid: None,
     })
     .unwrap();
     let r = client_via(&proxy_url(&p)).get(format!("http://127.0.0.1:{port}/")).header("accept-encoding", "gzip").send().await.unwrap();

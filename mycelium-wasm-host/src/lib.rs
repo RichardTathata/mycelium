@@ -80,6 +80,8 @@ pub mod activation_sandbox;
 pub use activation_sandbox::{confinement_guarantee, Confinement};
 /// The egress proxy a confined activation reaches the network through (post-360 rows L and M).
 pub mod activation_egress;
+/// The user owning a loopback connection's client socket, from the kernel (#644's round-3 review).
+pub mod peer_uid;
 pub use activation_egress::{egress_guarantee, EgressCounts, EgressProxy};
 /// The provisioning rules, described — the catalogue entries the stem pilot instruments (plan I1).
 pub mod rules;

@@ -42,7 +42,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   only connections that presented the token count against the cap (a token-less one is closed after 2 s, on its
   407, or past 16 to admit a newer one), a tunnel counts until it closes, the body cap counts only bodies being
   buffered, values are masked longest first, every encoding header is read, and a hard-linked `value_file` or an
-  `env` value containing a binding's value refuses the start.
+  `env` value containing a binding's value refuses the start. **After its third:** the proxy closes at accept every
+  connection another user's process opened, or whose owner the kernel cannot name (`/proc/net/tcp` on Linux,
+  `net.inet.tcp.pcblist_n` on macOS), so another user can neither use the proxy nor crowd it; a symlinked
+  `value_file` is judged by the file it names; an answer with no body is relayed whatever its `Content-Encoding`.
 
 ### Changed
 

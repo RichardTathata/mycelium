@@ -1218,6 +1218,7 @@ except Exception as e:
                 node_egress: &mycelium::EgressPolicy::default(),
                 bind: crate::EgressProxy::DEFAULT_BIND,
                 limits: Default::default(),
+                peer_uid: None,
                 #[cfg(any(feature = "gateway", feature = "llm"))]
                 gate: None,
             })
@@ -1353,6 +1354,7 @@ except Exception as e:
                 node_egress: &mycelium::EgressPolicy::default(),
                 bind: crate::EgressProxy::DEFAULT_BIND,
                 limits: Default::default(),
+                peer_uid: None,
                 gate: Some(Arc::clone(&gate)),
             })
             .expect("the proxy starts"),
@@ -1423,6 +1425,7 @@ except Exception as e:
             node_egress: &mycelium::EgressPolicy::default(),
             bind: taken.local_addr().unwrap(),
             limits: Default::default(),
+            peer_uid: None,
             #[cfg(any(feature = "gateway", feature = "llm"))]
             gate: None,
         })

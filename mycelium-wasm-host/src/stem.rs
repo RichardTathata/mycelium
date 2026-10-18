@@ -178,6 +178,7 @@ pub fn start_egress_proxies_on(agent: &GossipAgent, units: &NodeCapabilityConfig
             node_egress: agent.egress_policy(),
             bind,
             limits: Default::default(),
+            peer_uid: None,
             #[cfg(any(feature = "gateway", feature = "llm"))]
             gate,
         });
@@ -933,6 +934,39 @@ mod tests {
         let e = Stem::start(Arc::clone(&a), &units(&placement, &format!("read = [\"{}\"]\n", dir.display())), StemOptions::default()).err().expect("refused").to_string();
         assert!(e.contains("value_file"), "{e}");
         a.shutdown().await;
+    }
+
+    /// #644's round-3 review, finding 1: a `value_file` that is a symlink is judged by the file it points to — one
+    /// with a second hard link refuses the start like a hard-linked file named directly. Seen failing first: the
+    /// link's own count (1) was read, and the start went through.
+    #[test]
+    fn a_symlinked_value_file_is_judged_by_the_file_it_names() {
+        let dir = scratch("symlinked-value");
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("secret");
+        std::fs::write(&target, "sk-symlinked-7f").unwrap();
+        std::fs::hard_link(&target, dir.join("second-name")).unwrap();
+        let link = dir.join("value-file");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let cfg = mycelium::GossipConfig {
+            egress_credentials: vec![mycelium::CredentialBinding {
+                name: "model".into(), host: "api.example.com".into(), port: None, path_prefix: None,
+                form: mycelium::CredentialForm::Bearer, header: None, username: None,
+                value_env: None, value_file: Some(link.clone()), allow_plaintext: false,
+            }],
+            ..Default::default()
+        };
+        let a = GossipAgent::new(NodeId::new("127.0.0.1", alloc_port()).unwrap(), cfg);
+        let units = NodeCapabilityConfig::from_toml_str(&format!(
+            "[hosts]\nkinds=[\"blob\"]\naccept_unsigned=true\nplacement_root=\"{}\"\n[[activation]]\nns=\"data\"\nname=\"pack\"\ncommand=[\"true\"]\n[activation.confine]\n",
+            scratch("symlinked-placement").display()
+        ))
+        .unwrap();
+        let e = check_confined_secrets(&a, &units).unwrap_err().to_string();
+        assert!(e.contains("`model`") && e.contains("hard link"), "{e}");
+        std::fs::remove_file(dir.join("second-name")).unwrap();
+        check_confined_secrets(&a, &units).expect("one name again: fine");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// R1's runtime half: a node started from a unit file declares what the file says — the

@@ -338,6 +338,15 @@ jobs:
           sudo env MYCELIUM_CONFINE_LIVE_REQUIRED=1 MYCELIUM_CONFINE_MOUNT_LIVE_REQUIRED=1 \
             unshare -m --propagation private "$bin" --exact \
             activation_sandbox::tests::a_symlink_on_a_second_mount_of_a_write_roots_filesystem_is_not_followed
+      # #644's round-3 review: the egress proxy closes at accept a connection another user's process opened. The
+      # test connects as `nobody` through passwordless sudo; its guard makes a missing sudo a failure, not a skip.
+      - name: Egress proxy refuses another user's connection (sudo -u nobody)
+        run: |
+          bin=$(cargo test -p mycelium-wasm-host --lib --no-run --message-format=json \
+            | jq -r 'select(.profile.test == true and .target.kind == ["lib"] and .executable != null) | .executable' | head -1)
+          test -x "$bin"
+          MYCELIUM_EGRESS_OTHER_UID_LIVE_REQUIRED=1 "$bin" --exact \
+            activation_egress::tests::another_users_connection_is_closed_at_accept
       # The S3-compatible fixture: MinIO in a container, one bucket made with the runner's AWS CLI.
       - name: Start an S3-compatible store with the test bucket
         run: |

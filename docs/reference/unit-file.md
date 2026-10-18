@@ -445,9 +445,10 @@ naming why — never a credential's value.
 in each header and in the body, a value split across chunks included — by the same number of `*`, so
 `Content-Length` stays true; values are masked longest first, so one that prefixes another leaves nothing of
 the longer. With a value to mask the proxy asks the upstream for an unencoded body (`Accept-Encoding:
-identity`) and refuses (`502`) an answer that could carry one encoded — more than one `Content-Encoding`
-header, any coding but `identity` in one, or a `Transfer-Encoding` naming anything but `chunked` — since a
-value inside a compressed body could not be found.
+identity`) and refuses (`502`) an answer that could carry one encoded — any coding but `identity` in any
+`Content-Encoding` header, or a `Transfer-Encoding` naming anything but `chunked` — since a value inside a
+compressed body could not be found. An answer with no body (to a `HEAD`, or a 1xx, 204 or 304) is relayed whatever
+its `Content-Encoding` says, and repeated `identity` headers are no encoding.
 
 **The list changes live.** `Stem::set_activation_egress_hosts(ns, name, hosts)` replaces an activation's
 `hosts` while the stem runs, and `mycelium-stem` re-reads its unit file on `SIGHUP` and applies each
@@ -457,15 +458,22 @@ name. Every entry is checked first, as at start; a bad list is refused and the o
 meets the new list; the command, its profile and the proxy's port are unchanged, and an open `CONNECT` tunnel is
 not closed. `credentials`, `env` and everything else in the file are read once, at start.
 
-**Bounded.** Any local process can connect to the proxy (only the token admits a request), so a connection that
-has not presented the token is closed after 2 s, on its `407`, or — past 16 such connections — to make room for a
+**Only this user's processes.** At accept the proxy asks the kernel which user owns the connecting socket
+(`/proc/net/tcp` on Linux, `net.inet.tcp.pcblist_n` on macOS) and closes, before it holds any place, a connection
+another user's process opened — or one whose owner cannot be read (fail closed). Another user on the host can
+neither use the proxy nor crowd the command out of it.
+
+**Bounded.** Any process of the stem's own user can connect (only the token admits a request), so a connection
+that has not presented the token is closed after 2 s, on its `407`, or — past 16 such connections — to make room for a
 newer one, so idle token-less connections cannot keep the command out. Connections that have presented it count
 against a cap of 64, a `CONNECT` tunnel's for the tunnel's life; an authenticated request past the cap is
 refused `503`. The proxy allows 10 s for a request's headers, closes a tunnel that carries nothing for 5 minutes (2 s once
-the command has closed its side),
+the command has closed its side — so a client that half-closes its write side and waits on an upstream silent
+for longer than 2 s is cut off; TLS clients do not half-close),
 and buffers at most 4 request bodies of up to 16 MiB at once (a request without a body takes no such place). A
-local process that opens token-less connections faster than they are closed can still crowd the command's
-connections out — the proxy cannot tell who connects before the token arrives.
+process of the stem's own user that opens token-less connections faster than they are closed can still crowd
+the command's connections out — that user is inside the stem's trust boundary already (it can read the stem's
+environment and its value files).
 
 **No silent fallback.** A proxy that cannot start (its address in use, no runtime) refuses its activation by
 name each time it would run — `prov.activation`'s `egress_proxy_unavailable` — and `Stem::activation_confinement`

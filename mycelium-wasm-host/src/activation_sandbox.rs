@@ -607,10 +607,11 @@ pub fn readable_roots(c: &ConfineDecl, placement_root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// How many names (hard links) the file at `p` has; 0 when it cannot be read (#644's round-2 review, N7).
+/// How many names (hard links) the file `p` names has — the file a symlink points to, not the link itself
+/// (#644's round-3 review: a symlinked `value_file` reported the link's own count); 0 when it cannot be read.
 pub fn hard_links(p: &Path) -> u64 {
     use std::os::unix::fs::MetadataExt;
-    p.symlink_metadata().map(|m| m.nlink()).unwrap_or(0)
+    p.metadata().map(|m| m.nlink()).unwrap_or(0)
 }
 
 // A test-only hook `prepare` and `walk` call between their stages (`checked`, `anchored`, `walked`,

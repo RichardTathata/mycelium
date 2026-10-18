@@ -649,6 +649,9 @@
             "body_cap",
             "connection_cap",
             "preauth_evicted",
+            "peer_uid_other",
+            "peer_uid_unknown",
+            "peer_check_busy",
             "credential_host_tunnel",
             "encoded_response"
           ]
@@ -679,7 +682,10 @@
         "token_less_connections_cannot_lock_the_command_out",
         "a_tunnel_counts_against_the_connection_cap_until_it_closes",
         "bodiless_requests_in_flight_are_not_counted_as_buffered_bodies",
-        "every_encoding_header_is_read_before_a_body_is_relayed"
+        "every_encoding_header_is_read_before_a_body_is_relayed",
+        "a_connection_another_user_owns_or_no_one_can_name_is_closed_at_accept",
+        "another_users_connection_is_closed_at_accept",
+        "a_bodiless_answer_or_repeated_identity_is_relayed"
       ],
       "trace": "catalogue_only",
       "summary": "An activation's command reaches another host only through its proxy: a listed host by name, a credential attached by the node's gate where its binding authorises; anything else is refused with the proxy's marker, logged and counted per activation by reason (`mycelium_activation_egress_total{activation, event}`) — not recorded in the decision trace."
