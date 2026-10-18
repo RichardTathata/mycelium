@@ -130,6 +130,33 @@ mod tests {
         assert!(loopback_peer_uid(local, gone).is_err());
     }
 
+    /// The macOS parser on a synthetic `pcblist_n` buffer: the socket record that follows the matching inpcb
+    /// record gives the uid, not a neighbour's (run on every platform; the live test shows the real layout).
+    #[test]
+    fn a_pcblist_n_group_is_matched_on_both_ports() {
+        let record = |kind: u32, fill: &dyn Fn(&mut Vec<u8>)| {
+            let mut r = vec![0u8; 104];
+            r[0..4].copy_from_slice(&104u32.to_le_bytes());
+            r[4..8].copy_from_slice(&kind.to_le_bytes());
+            fill(&mut r);
+            r
+        };
+        let inpcb = |fport: u16, lport: u16| record(0x010, &move |r: &mut Vec<u8>| {
+            r[16..18].copy_from_slice(&fport.to_be_bytes());
+            r[18..20].copy_from_slice(&lport.to_be_bytes());
+        });
+        let socket = |uid: u32| record(0x001, &move |r: &mut Vec<u8>| r[64..68].copy_from_slice(&uid.to_le_bytes()));
+        let mut buf = vec![0u8; 24];
+        buf[0..4].copy_from_slice(&24u32.to_le_bytes());
+        for r in [inpcb(8080, 40001), socket(7), record(0x002, &|_: &mut Vec<u8>| {}), inpcb(8080, 40000), socket(501)] {
+            buf.extend(r);
+        }
+        assert_eq!(parse_pcblist_n(&buf, 8080, 40000), Some(501));
+        assert_eq!(parse_pcblist_n(&buf, 8080, 40001), Some(7));
+        assert_eq!(parse_pcblist_n(&buf, 8080, 40002), None);
+        assert_eq!(parse_pcblist_n(&buf[..30], 8080, 40000), None, "a truncated buffer is no answer");
+    }
+
     #[test]
     fn a_proc_net_tcp_row_is_matched_on_both_addresses() {
         let local: SocketAddr = "127.0.0.1:8080".parse().unwrap();
