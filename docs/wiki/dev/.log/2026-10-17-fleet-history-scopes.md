@@ -51,3 +51,18 @@ tripwire. Instead readers count every enforcing non-peer's entries until they ag
 under-count after a crash — and the residue of a node that never returns is stated as bounded. Lesson: in a
 gossiped namespace, "delete what looks dead" by a non-owner is unsound unless the delete is conditional on a version
 the owner cannot have superseded; absent that, let readers ignore what has aged.
+
+## [2026-10-18] review round 4 | Fleet-wide history scopes (#642)
+
+Residue is collected again, in a form that cannot erase a returned node: a non-owner tombstones a non-peer's tally keys
+only past the horizon (longest window among its entries + staleness + drift), each **at the timestamp of the record it
+holds** (`ops::kv_delete_at`) — under LWW an equal-stamp tombstone removes exactly that record and any later write
+beats it. The returning owner re-asserts its own heartbeat and withdraws its own aged entries with local-only writes
+(`ops::kv_write_local`) before `start_listener`, so a collector's tombstone reaches it older than what it holds, is not
+applied, and the `sys/` tripwire (which counts only applied foreign writes) does not count it. Readers ignore a
+non-peer past the horizon, count one only if it is a verified member (`trusted_keys` non-empty, not removed — a
+fabricated id counts for nothing), and list nodes from the store's scope index (`sys/ae-tally/` registered as a scoped
+prefix) rather than scanning entries. `Settling::finish` disarms the retraction before the journal await (an abort
+there is delivery unknown). The `rpc/serve` loop is pull-based. The `/mcp` door-test flake is recorded open with
+instrumentation. Lesson (amending round 3's): a non-owner delete *is* sound in a gossiped LWW namespace when it is
+stamped at the version observed — it is then conditional on that version by construction.

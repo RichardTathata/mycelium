@@ -97,6 +97,9 @@ pub(super) async fn mcp_handler(
                 })).into_response();
             };
 
+            // Where a call's time went, kept for the one answer that cannot say why: a dispatch timeout (the
+            // #642 door-test flake, open — `docs/plans/post-360-hardening.md` §3.6).
+            let started = mycelium_core::sim_seam::mono_instant();
             let tool_req = json!({
                 "jsonrpc": "2.0",
                 "id": req["id"],
@@ -133,11 +136,12 @@ pub(super) async fn mcp_handler(
             // client put in `params`), or is refused — it is never dispatched as the node.
             // Closure plan C2/C3: the presented mandate, and the resource it is presented for, travel
             // to the provider, which verifies them itself.
+            let decided = mycelium_core::sim_seam::mono_instant();
             let resource_claim = format!("tool:{name}@{provider_node_id}");
             let dispatched = gateway_caller::gateway_rpc_call_with_mandate(
                 &ctx.agent_ctx,
                 caller.as_ref(),
-                provider_node_id,
+                provider_node_id.clone(),
                 std::sync::Arc::from(crate::signal::signal_kind::MCP_INVOKE),
                 Bytes::from(tool_req.to_string().into_bytes()),
                 Duration::from_secs(30),
@@ -171,10 +175,23 @@ pub(super) async fn mcp_handler(
                         }));
                     Json(resp).into_response()
                 }
-                Err(GatewayDispatchError::Rpc(super::rpc::RpcError::Timeout)) => Json(json!({
-                    "jsonrpc": "2.0", "id": id,
-                    "error": {"code": -32000, "message": "tool invocation timed out"},
-                })).into_response(),
+                Err(GatewayDispatchError::Rpc(super::rpc::RpcError::Timeout)) => {
+                    let now = mycelium_core::sim_seam::mono_instant();
+                    let preflight_ms = mycelium_core::sim_seam::mono_span(&started, &decided).as_millis() as u64;
+                    let dispatch_ms = mycelium_core::sim_seam::mono_span(&decided, &now).as_millis() as u64;
+                    let to_self = provider_node_id == ctx.agent_ctx.node_id;
+                    let peers = ctx.agent_ctx.peers.pin().len();
+                    let dropped = ctx.agent_ctx.kv_state.dropped_frames.load(std::sync::atomic::Ordering::Relaxed);
+                    warn!(tool = %name, provider = %provider_node_id, preflight_ms, dispatch_ms, to_self, peers, dropped,
+                          "mcp tools/call: the dispatch timed out");
+                    Json(json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "error": {"code": -32000, "message": "tool invocation timed out",
+                                  "data": {"provider": provider_node_id.to_string(), "to_self": to_self,
+                                           "preflight_ms": preflight_ms, "dispatch_ms": dispatch_ms,
+                                           "peers": peers, "dropped_frames": dropped}},
+                    })).into_response()
+                }
                 Err(e) => Json(json!({
                     "jsonrpc": "2.0", "id": id,
                     "error": {"code": e.json_rpc_code(), "message": e.to_string(),

@@ -321,18 +321,34 @@ fn counted_in(entry: Option<Bytes>, now_ms: u64, window_ms: u64) -> Result<u32, 
 /// than `control_max_staleness_ms`, or one dated beyond `max_clock_drift_ms` in this node's future. A publisher
 /// failure detection has declared dead, or that was removed, is no longer a peer and is not consulted.
 fn tally_state(ctx: &Arc<TaskCtx>, c: &FleetCounter, point: &str, actor: &str, now_ms: u64) -> FleetState {
+    tally_state_counted(ctx, c, point, actor, now_ms).0
+}
+
+/// [`tally_state`], with the number of keys it read — its cost, which grows with the nodes it knows of and never with
+/// the entries any of them holds (#642's review, round 4, finding 1).
+pub(crate) fn tally_state_counted(
+    ctx: &Arc<TaskCtx>, c: &FleetCounter, point: &str, actor: &str, now_ms: u64,
+) -> (FleetState, usize) {
     let bound = crate::control::ConfidenceBound::from_config(&ctx.config);
     let view = super::emergent::compute_view_confidence_at(ctx, mycelium_core::sim_seam::mono_instant());
     if let Err(why) = crate::control::assess(&view, &bound) {
-        return FleetState::NotEstablished(format!(
-            "this node's view of the fleet is not established ({why:?}), so the tally's coverage is unknown"
-        ));
+        return (
+            FleetState::NotEstablished(format!(
+                "this node's view of the fleet is not established ({why:?}), so the tally's coverage is unknown"
+            )),
+            0,
+        );
     }
+    let reads = std::cell::Cell::new(0usize);
+    let read = |key: &str| {
+        reads.set(reads.get() + 1);
+        mycelium_core::ops::kv_get(ctx, key)
+    };
     let me = ctx.node_id.to_string();
     let mut unknown = Vec::new();
     let mut counted = 0;
     let mut add = |node: &str, unknown: &mut Vec<String>| {
-        match counted_in(mycelium_core::ops::kv_get(ctx, &tally_key(node, &c.key, point, actor)), now_ms, c.window_ms) {
+        match counted_in(read(&tally_key(node, &c.key, point, actor)), now_ms, c.window_ms) {
             Ok(n) => counted += n,
             Err(()) => unknown.push(format!("{node} (an entry this node cannot read)")),
         }
@@ -342,9 +358,7 @@ fn tally_state(ctx: &Arc<TaskCtx>, c: &FleetCounter, point: &str, actor: &str, n
     let mut stalest_ms = 0;
     let peers: std::collections::BTreeSet<String> = ctx.peers.pin().keys().map(|p| p.to_string()).collect();
     for peer in &peers {
-        let Some(hb) = mycelium_core::ops::kv_get(ctx, &heartbeat_key(peer))
-            .and_then(|b| serde_json::from_slice::<Heartbeat>(&b).ok())
-        else {
+        let Some(hb) = read(&heartbeat_key(peer)).and_then(|b| serde_json::from_slice::<Heartbeat>(&b).ok()) else {
             unknown.push(format!("{peer} (no heartbeat)"));
             continue;
         };
@@ -367,27 +381,64 @@ fn tally_state(ctx: &Arc<TaskCtx>, c: &FleetCounter, point: &str, actor: &str, n
         publishers.push(peer.clone());
     }
     // An enforcing node that is no longer a peer — departed, or declared dead after a crash or a lost last word —
-    // still counts: its recent permits stand until they age out (#642's review, round 3, finding 6). It is not
-    // waited for: it admits nothing more unless it returns, and then it is a peer again.
-    for (node, hb) in known_heartbeats(ctx) {
-        if node == me || peers.contains(&node) || !hb.enforces {
+    // still counts while its permits can be inside this counter's window (#642's review, round 3, finding 6), and
+    // only if it is a member this node can verify (round 4, finding 2): an identity record it trusts, and not removed.
+    // A fabricated id has neither, so its "entries" count for nothing. Its heartbeat older than the window plus the
+    // staleness bound plus the clock-drift bound means every entry it wrote has aged out: it is not read further.
+    let horizon = c.window_ms.saturating_add(bound.max_staleness_ms).saturating_add(ctx.config.max_clock_drift_ms);
+    let (nodes, listed) = tally_nodes(ctx);
+    reads.set(reads.get() + listed);
+    for node in nodes {
+        if node == me || peers.contains(&node) {
+            continue;
+        }
+        let Some(hb) = read(&heartbeat_key(&node)).and_then(|b| serde_json::from_slice::<Heartbeat>(&b).ok()) else {
+            continue;
+        };
+        if !hb.enforces || now_ms.saturating_sub(hb.as_of) > horizon {
             continue;
         }
         if hb.as_of > now_ms.saturating_add(ctx.config.max_clock_drift_ms) {
             unknown.push(format!("{node} (a heartbeat {} ms in the future)", hb.as_of - now_ms));
             continue;
         }
+        if !verified_member(ctx, &node) {
+            continue;
+        }
         add(&node, &mut unknown);
         publishers.push(node);
     }
+    let reads = reads.get();
     if !unknown.is_empty() {
-        return FleetState::NotEstablished(format!(
-            "the tally of {} is unknown (fresh within {} ms is required) — a count that cannot be read is not zero",
-            unknown.join(", "),
-            bound.max_staleness_ms
-        ));
+        return (
+            FleetState::NotEstablished(format!(
+                "the tally of {} is unknown (fresh within {} ms is required) — a count that cannot be read is not zero",
+                unknown.join(", "),
+                bound.max_staleness_ms
+            )),
+            reads,
+        );
     }
-    FleetState::Tally { counted, publishers, stalest_ms }
+    (FleetState::Tally { counted, publishers, stalest_ms }, reads)
+}
+
+/// Whether `node` is a member this node can verify: an identity record it trusts — the keys every verifier of a
+/// node's signature uses (`CoreCtx::trusted_keys`: sealed identity records, certificate standing, revocations) — and
+/// not removed. A node id nobody issued an identity for is not one.
+fn verified_member(ctx: &TaskCtx, node: &str) -> bool {
+    let Ok(id) = node.parse::<mycelium_core::NodeId>() else { return false };
+    !ctx.removed.is_node_removed(&id) && !ctx.trusted_keys(&id).is_empty()
+}
+
+/// Every node this node holds tally keys for, from the store's scope index (`sys/ae-tally/` is a scoped prefix) —
+/// one name per node, never a scan of the nodes' entries — and how many names it listed.
+fn tally_nodes(ctx: &TaskCtx) -> (Vec<String>, usize) {
+    let nodes: Vec<String> = mycelium_core::store::scopes_under(&ctx.kv_state, TALLY_PREFIX)
+        .into_iter()
+        .filter_map(|outer| outer.strip_prefix(TALLY_PREFIX).map(str::to_string))
+        .collect();
+    let listed = nodes.len();
+    (nodes, listed)
 }
 
 /// Publish a permit admitted under `c` into this node's tally of `actor`, and keep this node's heartbeat current.
@@ -467,16 +518,70 @@ pub(crate) fn withdraw_aged_entries(ctx: &Arc<TaskCtx>, now_ms: u64) -> usize {
     withdrawn
 }
 
-/// Every node's heartbeat this node holds, by node — departed or not, peer or not.
-fn known_heartbeats(ctx: &TaskCtx) -> Vec<(String, Heartbeat)> {
-    mycelium_core::ops::kv_scan_prefix(ctx, TALLY_PREFIX)
-        .into_iter()
-        .filter_map(|(key, value)| {
-            let node = key.strip_prefix(TALLY_PREFIX)?.strip_suffix("/hb")?.to_string();
-            let hb = serde_json::from_slice::<Heartbeat>(&value).ok()?;
-            Some((node, hb))
-        })
-        .collect()
+/// **Collect residue** (#642's review, round 4, finding 1): the tally keys of a node that is not a peer and whose
+/// heartbeat is older than the longest window any of its entries was kept for, plus the staleness bound, plus the
+/// clock-drift bound — by then every permit it wrote has aged out of every window, and no reader counts it.
+///
+/// **Why a non-owner may delete here.** Each key is tombstoned *at the timestamp of the record this node holds*
+/// (`kv_delete_at`). Under last-writer-wins that removes exactly that record or an older one, and loses to anything
+/// written after it — so a node that returned and wrote a newer heartbeat or a newer permit, even one that has not
+/// reached this collector yet, keeps it everywhere: the tombstone can never overtake it. At the returning owner
+/// itself the tombstone is older than what it holds (it re-asserts its own keys locally before its connections come
+/// up, [`reassert_own`]), so it is not applied and its `sys/` tripwire does not count it. The one case left: an owner
+/// that returns holding the collected record and nothing newer — it re-asserts first, so this does not arise.
+pub(crate) fn collect_residue(ctx: &Arc<TaskCtx>, now_ms: u64) -> usize {
+    let me = ctx.node_id.to_string();
+    let bound = crate::control::ConfidenceBound::from_config(&ctx.config);
+    let mut collected = 0;
+    for node in tally_nodes(ctx).0 {
+        if node == me || node.parse::<mycelium_core::NodeId>().is_ok_and(|id| ctx.peers.pin().contains_key(&id)) {
+            continue;
+        }
+        let keys = mycelium_core::store::scan_scope(&ctx.kv_state, &format!("{TALLY_PREFIX}{node}"));
+        let Some(hb) = keys
+            .iter()
+            .find(|(k, _)| k.ends_with("/hb"))
+            .and_then(|(_, v)| serde_json::from_slice::<Heartbeat>(v).ok())
+        else {
+            continue;
+        };
+        let longest = keys
+            .iter()
+            .filter_map(|(_, v)| serde_json::from_slice::<TallyEntry>(v).ok())
+            .map(|e| e.w)
+            .max()
+            .unwrap_or(0);
+        let horizon = longest.saturating_add(bound.max_staleness_ms).saturating_add(ctx.config.max_clock_drift_ms);
+        if now_ms.saturating_sub(hb.as_of) <= horizon {
+            continue;
+        }
+        for (key, _) in keys {
+            let stamp = ctx.kv_state.store.pin().get(key.as_ref()).map(|e| e.timestamp);
+            if let Some(ts) = stamp {
+                let _ = mycelium_core::ops::kv_delete_at(ctx, key, ts);
+            }
+        }
+        collected += 1;
+    }
+    collected
+}
+
+/// **Before this node's connections come up**: re-assert its own heartbeat and withdraw its own aged entries, on this
+/// node only (anti-entropy and the heartbeat task carry them on). Its copies are then newer than any tombstone a peer
+/// wrote at the stamp of its old records while it was away, so those tombstones are not applied here and its `sys/`
+/// tripwire does not count them (#642's review, round 4, finding 1).
+pub(crate) fn reassert_own(ctx: &TaskCtx) {
+    let now = ctx.hlc.decision_now_ms();
+    let hb = Heartbeat { as_of: now, enforces: ctx.action_evaluator.get().is_some(), departed: false };
+    if let Ok(bytes) = serde_json::to_vec(&hb) {
+        mycelium_core::ops::kv_write_local(ctx, Arc::from(heartbeat_key(&ctx.node_id.to_string()).as_str()), Some(Bytes::from(bytes)));
+    }
+    let prefix = format!("{TALLY_PREFIX}{}/c/", ctx.node_id);
+    for (key, value) in mycelium_core::ops::kv_scan_prefix(ctx, &prefix) {
+        if aged(&value, now) {
+            mycelium_core::ops::kv_write_local(ctx, key, None);
+        }
+    }
 }
 
 /// This node's **last word** at a graceful shutdown (N3): a heartbeat marked departed, written past the soft-state
@@ -534,6 +639,7 @@ pub(crate) fn start_heartbeat(ctx: &Arc<TaskCtx>) {
                     write_heartbeat(&task_ctx);
                     let now = task_ctx.hlc.decision_now_ms();
                     withdraw_aged_entries(&task_ctx, now);
+                    collect_residue(&task_ctx, now);
                 }
             }
         }

@@ -386,12 +386,18 @@ async fn the_mcp_door_counts_into_the_fleet_counter() {
     let _listeners: Vec<_> =
         [&a, &b].iter().map(|n| n.consensus().start_consensus_listener(ConsensusConfig::default())).collect();
     ready(&[&a, &b]).await;
-    // A tool name no other test uses: the door resolves a tool's provider from `tools/{name}/…`, and a node of
-    // another test that once held this test's port can briefly share the mesh — a shared name like `post` then
-    // resolves to that test's node (the CI flake seen twice on this test).
+    // An open flake (#642): twice in CI a call here timed out in the dispatch after its preflight admitted it, and
+    // the cause is not known. The tool name is this test's own; the handler counts its runs, and a timeout's answer
+    // carries where the time went (`mcp_bridge`), so the next failure names its half.
     let tool_name = format!("k2-door-{p1}");
-    let _tool = a.mcp().register_mcp_tool(tool_name.as_str(), serde_json::json!({"type": "object", "properties": {}}), |_args| async {
-        Ok(serde_json::json!("ran"))
+    let ran = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let ran_in = Arc::clone(&ran);
+    let _tool = a.mcp().register_mcp_tool(tool_name.as_str(), serde_json::json!({"type": "object", "properties": {}}), move |_args| {
+        let ran = Arc::clone(&ran_in);
+        async move {
+            ran.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(serde_json::json!("ran"))
+        }
     });
     let client = reqwest::Client::new();
     let call = || async {
@@ -412,7 +418,13 @@ async fn the_mcp_door_counts_into_the_fleet_counter() {
     );
     for i in 0..3 {
         let r = call().await;
-        assert!(r.get("error").is_none(), "post {i} over /mcp is within the fleet's limit: {r}");
+        assert!(
+            r.get("error").is_none(),
+            "post {i} over /mcp is within the fleet's limit: {r}; handler ran {} time(s); a's peers {:?}; tool keys {:?}",
+            ran.load(std::sync::atomic::Ordering::SeqCst),
+            a.task_ctx.peers.pin().keys().map(|k| k.to_string()).collect::<Vec<_>>(),
+            mycelium_core::ops::kv_scan_prefix(&a.task_ctx, "tools/").into_iter().map(|(k, _)| k.to_string()).collect::<Vec<_>>(),
+        );
     }
     let r = call().await;
     assert_eq!(r["error"]["code"], -32030, "the fourth over /mcp is denied: {r}");
@@ -877,41 +889,6 @@ async fn a_heartbeat_from_the_future_makes_the_tally_not_established() {
     b.shutdown().await;
 }
 
-/// **N3: a graceful leave keeps the tally established.** `b` admits one permit and shuts down: its last word is a
-/// departed heartbeat, its entry kept, so `a`'s tally decisions stay established — counting `b`'s permit, not
-/// waiting for `b` — through the leave and after failure detection.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn a_graceful_leave_keeps_the_tally_established() {
-    let (p1, p2) = (port(), port());
-    let a = node(p1, &[], 3, HistoryScope::FleetTally, |_| {}).await;
-    let b = node(p2, &[p1], 3, HistoryScope::FleetTally, |_| {}).await;
-    ready(&[&a, &b]).await;
-    assert!(admitted(&post(&b).await).is_some(), "b admits one");
-    let b_id = b.node_id().to_string();
-    let actx = Arc::clone(&a.task_ctx);
-    let prefix = format!("{}{b_id}/c/", super::TALLY_PREFIX);
-    assert!(until(|| !mycelium_core::ops::kv_scan_prefix(&actx, &prefix).is_empty(), Duration::from_secs(10)).await, "b's entry reaches a");
-    b.shutdown().await;
-    assert!(
-        until(
-            || mycelium_core::ops::kv_get(&actx, &super::heartbeat_key(&b_id))
-                .is_some_and(|v| String::from_utf8_lossy(&v).contains("\"departed\":true")),
-            Duration::from_secs(5)
-        )
-        .await,
-        "b's departed heartbeat reaches a"
-    );
-    let out = post(&a).await;
-    let e = admitted(&out).unwrap_or_else(|| panic!("a's tally stays established through b's leave: {:?}", refusal(&out)));
-    match &e.history.as_ref().unwrap().fleet[0].state {
-        FleetState::Tally { counted, publishers, .. } => {
-            assert_eq!(*counted, 1, "b's permit still counts");
-            assert!(publishers.contains(&b_id), "{publishers:?}");
-        }
-        other => panic!("{other:?}"),
-    }
-    a.shutdown().await;
-}
 
 /// **N6: an entry an enforcing peer published that this node cannot read is unknown coverage**, never zero.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
@@ -1082,17 +1059,183 @@ async fn an_abandoned_check_records_nothing_and_counts_nothing() {
     b.shutdown().await;
 }
 
-/// **Round 3, finding 2: no node deletes another's tally keys** — so a node that departs, then restarts and
-/// heartbeats, cannot have its new heartbeat or a new permit erased by a peer that had not yet seen them, and a
-/// graceful restart under `[persistence]` trips no `sys/` tripwire.
+
+
+// ── #642's review, round 4 ──────────────────────────────────────────────────────────────────────
+
+/// A TLS node at `p` dialling `peers`, sharing `cert_dir`'s fleet CA, with a journal and `policy`: members whose
+/// identities verify, as the non-peer rule needs.
+async fn node_tls(
+    p: u16, peers: &[u16], policy: ReferenceEvaluator, cert_dir: &std::path::Path, tune: impl FnOnce(&mut GossipConfig),
+) -> Arc<GossipAgent> {
+    let dir = cert_dir.to_path_buf();
+    node_with(p, peers, policy, move |c| {
+        c.tls = Some(crate::TlsConfig { auto_cert_dir: dir, ..Default::default() });
+        tune(c);
+    })
+    .await
+}
+
+/// [`ready`], and every node trusts every other's identity.
+async fn ready_tls(nodes: &[&Arc<GossipAgent>]) {
+    ready(nodes).await;
+    for a in nodes {
+        let ctx = Arc::clone(&a.task_ctx);
+        let others: Vec<NodeId> = nodes.iter().map(|o| o.node_id().clone()).filter(|o| o != a.node_id()).collect();
+        assert!(
+            until(|| others.iter().all(|o| !ctx.trusted_keys(o).is_empty()), Duration::from_secs(20)).await,
+            "every identity verifies"
+        );
+    }
+}
+
+fn tally_counted(e: &AeEvidence) -> (u32, Vec<String>) {
+    match &e.history.as_ref().unwrap().fleet[0].state {
+        FleetState::Tally { counted, publishers, .. } => (*counted, publishers.clone()),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// **N3, round 4: a graceful leave keeps the tally established** — through the leave and after the departed node
+/// stops being a peer, its recent permit still counts (a verified member).
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn a_departed_node_keeps_its_keys_and_returns_without_tripping_its_tripwire() {
+async fn a_graceful_leave_keeps_the_tally_established() {
+    let (p1, p2, p3) = (port(), port(), port());
+    let certs = std::env::temp_dir().join(format!("k2-tls-leave-{p1}"));
+    let _ = std::fs::remove_dir_all(&certs);
+    let a = node_tls(p1, &[], posts(3, TEN_MIN, HistoryScope::FleetTally), &certs, |_| {}).await;
+    let b = node_tls(p2, &[p1], posts(3, TEN_MIN, HistoryScope::FleetTally), &certs, |_| {}).await;
+    // A third member, so `a` still hears the fleet once `b` is gone.
+    let c = node_tls(p3, &[p1, p2], posts(3, TEN_MIN, HistoryScope::FleetTally), &certs, |_| {}).await;
+    ready_tls(&[&a, &b, &c]).await;
+    assert!(admitted(&post(&b).await).is_some(), "b admits one");
+    let b_id = b.node_id().to_string();
+    let actx = Arc::clone(&a.task_ctx);
+    let prefix = format!("{}{b_id}/c/", super::TALLY_PREFIX);
+    assert!(until(|| !mycelium_core::ops::kv_scan_prefix(&actx, &prefix).is_empty(), Duration::from_secs(10)).await, "b's entry reaches a");
+    // The departed heartbeat travels on shutdown's best-effort flush; whether or not it arrives, b's last heartbeat is
+    // fresh and its permit counts.
+    b.shutdown().await;
+    for leave in ["while b is still a peer", "after b is no longer a peer"] {
+        if leave.starts_with("after") {
+            actx.peers.pin().remove(&b_id.parse::<NodeId>().unwrap());
+        }
+        let out = post(&a).await;
+        let e = admitted(&out).unwrap_or_else(|| panic!("established {leave}: {:?}", refusal(&out)));
+        let (counted, publishers) = tally_counted(e);
+        assert!(counted >= 1 && publishers.contains(&b_id), "b's permit still counts {leave}: {counted} {publishers:?}");
+    }
+    a.shutdown().await;
+    c.shutdown().await;
+}
+
+/// **Round 3 finding 6, round 4 finding 2: a dead member's permits count; a fabricated id's do not.** `c`, a member,
+/// admits one and goes; once it is no longer `b`'s peer its permit still counts. A heartbeat and a full set of entries
+/// written under a node id nobody issued an identity for count for nothing — they deny nobody.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_dead_members_permits_count_and_a_fabricated_id_counts_nothing() {
+    let (p1, p2, p3) = (port(), port(), port());
+    let certs = std::env::temp_dir().join(format!("k2-tls-dead-{p1}"));
+    let _ = std::fs::remove_dir_all(&certs);
+    let a = node_tls(p1, &[], posts(3, TEN_MIN, HistoryScope::FleetTally), &certs, |_| {}).await;
+    let b = node_tls(p2, &[p1], posts(3, TEN_MIN, HistoryScope::FleetTally), &certs, |_| {}).await;
+    let c = node_tls(p3, &[p1, p2], posts(3, TEN_MIN, HistoryScope::FleetTally), &certs, |_| {}).await;
+    ready_tls(&[&a, &b, &c]).await;
+
+    // A fabricated id, current and enforcing, holding the whole limit for the actor.
+    let fake = NodeId::new("127.0.0.1", port()).unwrap().to_string();
+    let now = b.task_ctx.hlc.decision_now_ms();
+    for (key, value) in [
+        (super::heartbeat_key(&fake), serde_json::json!({"as_of": now, "enforces": true})),
+        (
+            super::tally_key(&fake, "c-posts", "gateway", crate::PRINCIPAL_ANONYMOUS),
+            serde_json::json!({"w": TEN_MIN, "t": [now - 3, now - 2, now - 1]}),
+        ),
+    ] {
+        let _ = mycelium_core::ops::kv_set(&b.task_ctx, Arc::from(key.as_str()), bytes::Bytes::from(serde_json::to_vec(&value).unwrap()));
+    }
+    let out = post(&b).await;
+    let e = admitted(&out).unwrap_or_else(|| panic!("a fabricated id denies nobody: {:?}", refusal(&out)));
+    assert!(!tally_counted(e).1.contains(&fake), "the fabricated id is not a publisher");
+
+    // A member that admits one and goes.
+    assert!(admitted(&post(&c).await).is_some());
+    let c_id = c.node_id().to_string();
+    let bctx = Arc::clone(&b.task_ctx);
+    let prefix = format!("{}{c_id}/c/", super::TALLY_PREFIX);
+    assert!(until(|| !mycelium_core::ops::kv_scan_prefix(&bctx, &prefix).is_empty(), Duration::from_secs(10)).await);
+    c.shutdown().await;
+    bctx.peers.pin().remove(&c_id.parse::<NodeId>().unwrap());
+    let out = post(&b).await;
+    let e = admitted(&out).unwrap_or_else(|| panic!("established: {:?}", refusal(&out)));
+    let (counted, publishers) = tally_counted(e);
+    assert!(counted >= 2 && publishers.contains(&c_id), "c's permit still counts once c is gone: {counted} {publishers:?}");
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **Round 4, finding 1: residue is collected, and a decision does not read it.** Twenty departed ids, long silent,
+/// with aged entries: one collection pass tombstones every key they had. And a decision reads the same number of keys
+/// whether a silent node holds one entry or two hundred.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn residue_is_collected_and_a_decision_does_not_read_it() {
+    let (p1, p2) = (port(), port());
+    let tune = |c: &mut GossipConfig| {
+        c.control_max_staleness_ms = 1_500;
+        c.max_clock_drift_ms = 1_000;
+    };
+    let a = node(p1, &[], 3, HistoryScope::FleetTally, tune).await;
+    let b = node(p2, &[p1], 3, HistoryScope::FleetTally, tune).await;
+    ready(&[&a, &b]).await;
+    let ctx = Arc::clone(&b.task_ctx);
+    let now = ctx.hlc.decision_now_ms();
+    let plant = |key: String, value: serde_json::Value| {
+        let _ = mycelium_core::ops::kv_set(&ctx, Arc::from(key.as_str()), bytes::Bytes::from(serde_json::to_vec(&value).unwrap()));
+    };
+    let counter = crate::FleetCounter::new(HistoryScope::FleetTally, "c-posts", 3, TEN_MIN);
+    let reads = |c: &crate::FleetCounter| super::tally_state_counted(&ctx, c, "gateway", crate::PRINCIPAL_ANONYMOUS, ctx.hlc.decision_now_ms()).1;
+
+    // One silent node, one entry, then two hundred: the decision's reads do not change.
+    let silent = NodeId::new("127.0.0.1", port()).unwrap().to_string();
+    plant(super::heartbeat_key(&silent), serde_json::json!({"as_of": now - 5_000, "enforces": true, "departed": true}));
+    plant(super::tally_key(&silent, "c-posts", "gateway", "actor-0"), serde_json::json!({"w": 1_000, "t": [now - 4_000]}));
+    let with_one = reads(&counter);
+    for i in 1..200 {
+        plant(super::tally_key(&silent, "c-posts", "gateway", &format!("actor-{i}")), serde_json::json!({"w": 1_000, "t": [now - 4_000]}));
+    }
+    assert_eq!(reads(&counter), with_one, "a decision's cost does not grow with a node's entries");
+
+    // Twenty departed ids, silent past the horizon (their longest window + staleness + drift = 3.5 s).
+    let ids: Vec<String> = (0..20).map(|_| NodeId::new("127.0.0.1", port()).unwrap().to_string()).collect();
+    for id in &ids {
+        plant(super::heartbeat_key(id), serde_json::json!({"as_of": now - 10_000, "enforces": true, "departed": true}));
+        plant(super::tally_key(id, "c-posts", "gateway", "x"), serde_json::json!({"w": 1_000, "t": [now - 9_000]}));
+    }
+    let collected = super::collect_residue(&ctx, ctx.hlc.decision_now_ms());
+    assert!(collected >= 21, "every silent id collected (the twenty and the one): {collected}");
+    for id in &ids {
+        for key in [super::heartbeat_key(id), super::tally_key(id, "c-posts", "gateway", "x")] {
+            assert!(mycelium_core::ops::kv_get(&ctx, &key).is_none(), "{key} collected");
+        }
+    }
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **Round 4, finding 1: a returning node's newer records survive a collector that held its old ones**, and its
+/// `sys/` tripwire counts nothing. `a` departs; `b`, a peer no longer, collects `a`'s keys at their own stamps; `a`
+/// returns under `[persistence]` — re-asserting its keys before its connections come up — and its heartbeat is current
+/// at both nodes, with no foreign write counted. A collector's tombstone, stamped at an old record, never removes a
+/// newer one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_returning_nodes_newer_records_survive_a_collector() {
     use crate::config::{OnUnreadable, PersistenceConfig, SyncMode};
     let (p1, p2) = (port(), port());
     let persist = |p: u16| {
         let base = std::env::temp_dir().join(format!("k2-persist-{p}"));
         move |c: &mut GossipConfig| {
             c.control_max_staleness_ms = 1_500; // a heartbeat tick every 500 ms
+            c.max_clock_drift_ms = 500;
             c.persistence = Some(PersistenceConfig {
                 base_path: base.clone(), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 1_000,
                 snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse,
@@ -1105,50 +1248,177 @@ async fn a_departed_node_keeps_its_keys_and_returns_without_tripping_its_tripwir
     let b = node(p2, &[p1], 3, HistoryScope::FleetTally, persist(p2)).await;
     ready(&[&a, &b]).await;
     let a_id = a.node_id().to_string();
+    let a_node = a.node_id().clone();
     a.shutdown().await;
     drop(a);
-    tokio::time::sleep(Duration::from_secs(2)).await; // b's heartbeat task ticks several times meanwhile
-    let held = b.task_ctx.kv_state.store.pin().get(super::heartbeat_key(&a_id).as_str()).map(|e| e.data.is_some());
-    assert_eq!(held, Some(true), "b deleted nothing of a's");
+    let bctx = Arc::clone(&b.task_ctx);
+    bctx.peers.pin().remove(&a_node);
+    let hb = super::heartbeat_key(&a_id);
+    assert!(
+        until(|| bctx.peers.pin().remove(&a_node).is_none() && mycelium_core::ops::kv_get(&bctx, &hb).is_none(), Duration::from_secs(10)).await,
+        "b collected a's keys once a was silent past the horizon"
+    );
 
     let a = node(p1, &[p2], 3, HistoryScope::FleetTally, persist(p1)).await;
     ready(&[&a, &b]).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
-    let violations = a.task_ctx.sys_namespace_violations.load(std::sync::atomic::Ordering::Relaxed);
-    assert_eq!(violations, 0, "a graceful restart trips no sys/ tripwire");
+    for (who, ctx) in [("a", &a.task_ctx), ("b", &b.task_ctx)] {
+        let v = mycelium_core::ops::kv_get(ctx, &hb).unwrap_or_else(|| panic!("a's heartbeat is current at {who}"));
+        assert!(!String::from_utf8_lossy(&v).contains("departed"), "a's newer heartbeat at {who}");
+    }
+    assert_eq!(a.task_ctx.sys_namespace_violations.load(std::sync::atomic::Ordering::Relaxed), 0, "no foreign write counted");
+
+    // And at one store, either order: a tombstone at an old record's stamp never removes a newer write.
+    let key: Arc<str> = Arc::from(super::heartbeat_key("127.0.0.1:1").as_str());
+    let _ = mycelium_core::ops::kv_set(&bctx, Arc::clone(&key), bytes::Bytes::from_static(b"old"));
+    let old = bctx.kv_state.store.pin().get(key.as_ref()).unwrap().timestamp;
+    let _ = mycelium_core::ops::kv_set(&bctx, Arc::clone(&key), bytes::Bytes::from_static(b"new"));
+    let _ = mycelium_core::ops::kv_delete_at(&bctx, Arc::clone(&key), old);
+    assert_eq!(mycelium_core::ops::kv_get(&bctx, &key).as_deref(), Some(&b"new"[..]));
     a.shutdown().await;
     b.shutdown().await;
 }
 
-/// **Round 3, finding 6: a node that is no longer a peer still counts** — crashed, or its last word lost, it is
-/// declared dead and leaves the peer set, but the permits it published stand until they age out.
+/// **Round 4, finding 3: an abort after the record is on disk does not take the permit back.** `alice`'s claim
+/// succeeds (both nodes vote) and her decision is appended; the tool is withdrawn while the history update is paused.
+/// The record is in the journal, and the permit stays counted at the point — delivery unknown, never retracted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn a_dead_nodes_permits_still_count_until_they_age_out() {
+async fn an_abort_after_the_record_keeps_the_permit_counted() {
     let (p1, p2) = (port(), port());
-    let a = node(p1, &[], 3, HistoryScope::FleetTally, |_| {}).await;
-    let b = node(p2, &[p1], 3, HistoryScope::FleetTally, |_| {}).await;
+    let a_id = NodeId::new("127.0.0.1", p1).unwrap();
+    let policy = ReferenceEvaluator::new("rev-k2")
+        .with_catalogue("cat-k2", "1")
+        .map_action("tools/call", "*")
+        .allow(
+            Rule::new(ALICE, "tools/call", format!("tool:slow@{a_id}"))
+                .requiring_scopes(["mcp:invoke"])
+                .at_most(3, TEN_MIN)
+                .scoped(HistoryScope::FleetConsensus, "c-record"),
+        );
+    let a = node_with(p1, &[], policy.clone(), |_| {}).await;
+    let b = node_with(p2, &[p1], policy, |_| {}).await;
+    a.with_provider_enforcement();
+    let _listeners: Vec<_> =
+        [&a, &b].iter().map(|n| n.consensus().start_consensus_listener(ConsensusConfig::default())).collect();
     ready(&[&a, &b]).await;
-    // A node `b` no longer counts as a peer: its last heartbeat long stale, not departed, one permit a second ago.
-    let dead = NodeId::new("127.0.0.1", port()).unwrap().to_string();
-    let now = b.task_ctx.hlc.decision_now_ms();
-    for (key, value) in [
-        (super::heartbeat_key(&dead), serde_json::json!({"as_of": now - TEN_MIN / 2, "enforces": true})),
-        (
-            super::tally_key(&dead, "c-posts", "gateway", crate::PRINCIPAL_ANONYMOUS),
-            serde_json::json!({"w": TEN_MIN, "t": [now - 1_000]}),
-        ),
-    ] {
-        let _ = mycelium_core::ops::kv_set(&b.task_ctx, Arc::from(key.as_str()), bytes::Bytes::from(serde_json::to_vec(&value).unwrap()));
-    }
-    let out = post(&b).await;
-    let e = admitted(&out).unwrap_or_else(|| panic!("established: {:?}", refusal(&out)));
-    match &e.history.as_ref().unwrap().fleet[0].state {
-        FleetState::Tally { counted, publishers, .. } => {
-            assert_eq!(*counted, 1, "the dead node's permit still counts");
-            assert!(publishers.contains(&dead), "{publishers:?}");
-        }
-        other => panic!("{other:?}"),
-    }
+    let tool = a.mcp().register_mcp_tool("slow", serde_json::json!({"type": "object"}), |_args| async { Ok(serde_json::json!("ran")) });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    super::super::http::TEST_RECORD_PAUSE_MS.pin().insert(a_id.to_string(), 2_000);
+    let (from, to) = (Arc::clone(&a), a_id.clone());
+    let hers = tokio::spawn(async move { alice_calls(&from, &to, "mcp.invoke", None, slow_call(), Duration::from_secs(40)).await });
+    let journal = std::env::temp_dir().join(format!("k2-fleet-{p1}")).join("evidence.log");
+    let recorded = || {
+        super::super::evidence_journal::read_evidence_journal(&journal)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|b| serde_json::from_slice::<AeEvidence>(b).ok())
+            .any(|e| e.subject == ALICE)
+    };
+    assert!(until(recorded, Duration::from_secs(10)).await, "alice's decision reached the journal");
+    drop(tool); // the loop ends while the history update is paused
+    let _ = hers.await;
+    super::super::http::TEST_RECORD_PAUSE_MS.pin().remove(&a_id.to_string());
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let index = a.task_ctx.history_index.get().unwrap();
+    let crate::History::View(view) =
+        index.view("provider", ALICE, crate::HistoryRequest { window_ms: TEN_MIN, max_entries: usize::MAX }, a.task_ctx.hlc.decision_now_ms()).0
+    else {
+        panic!("a view")
+    };
+    assert_eq!(view.entries.len(), 1, "the recorded permit stays counted: {:?}", view.entries);
     a.shutdown().await;
     b.shutdown().await;
+}
+
+/// **Round 4, finding 4: `rpc/serve` never runs ahead, and answers what it took.** With the client connected but its
+/// claim for `alice` still settling, the client disconnects: `alice` is answered at once, not left to time out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn the_rpc_serve_stream_answers_what_it_took_when_the_client_goes() {
+    let http = port();
+    let (a, b, a_id, _) = provider_pair(|c| c.http_port = Some(http)).await;
+    let stream = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{http}/gateway/rpc/serve/depot.custom"))
+        .send()
+        .await
+        .expect("the serve stream opens");
+    assert_eq!(stream.status(), 200);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let resource = format!("res:x@{a_id}");
+    let (from, to) = (Arc::clone(&a), a_id.clone());
+    let hers = tokio::spawn(async move {
+        alice_calls(&from, &to, "depot.custom", Some(&resource), b"work".to_vec(), Duration::from_secs(40)).await
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await; // the loop took alice's call; her claim is settling
+    let started = std::time::Instant::now();
+    drop(stream);
+    let body = hers.await.unwrap().expect("answered, not timed out");
+    assert!(started.elapsed() < Duration::from_secs(10), "answered when the client went: {:?}", started.elapsed());
+    assert!(String::from_utf8_lossy(&body).contains("authority_not_established"), "{}", String::from_utf8_lossy(&body));
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **Round 4, finding 1: a collector's tombstone loses to a newer write it had not seen.** The collector holds a silent
+/// node's old heartbeat; the node wrote a newer one that is still in flight. Collection runs, then the newer write
+/// arrives: it stands. A tombstone stamped at the collector's own clock would have beaten it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_collectors_tombstone_loses_to_a_newer_write_it_had_not_seen() {
+    let p1 = port();
+    let a = node(p1, &[], 3, HistoryScope::FleetTally, |c| {
+        c.control_max_staleness_ms = 1_500;
+        c.max_clock_drift_ms = 500;
+    })
+    .await;
+    let ctx = Arc::clone(&a.task_ctx);
+    let silent = NodeId::new("127.0.0.1", port()).unwrap();
+    let key: Arc<str> = Arc::from(super::heartbeat_key(&silent.to_string()).as_str());
+    let now = ctx.hlc.decision_now_ms();
+    let old = serde_json::to_vec(&serde_json::json!({"as_of": now - 60_000, "enforces": true, "departed": true})).unwrap();
+    let _ = mycelium_core::ops::kv_set(&ctx, Arc::clone(&key), bytes::Bytes::from(old));
+    // The node's newer heartbeat, written after the record the collector holds, not yet delivered.
+    let newer_ts = ctx.hlc.tick();
+    let newer = mycelium_core::framing::make_gossip_update_stamped(
+        &silent, 4, Arc::clone(&key), bytes::Bytes::from_static(b"{\"as_of\":1,\"enforces\":true}"), false, newer_ts,
+    );
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(super::collect_residue(&ctx, ctx.hlc.decision_now_ms()), 1, "the silent node is collected");
+    assert!(mycelium_core::ops::kv_get(&ctx, &key).is_none());
+    mycelium_core::store::apply_and_notify(&ctx.kv_state, &newer);
+    assert!(mycelium_core::ops::kv_get(&ctx, &key).is_some(), "the newer heartbeat stands");
+    a.shutdown().await;
+}
+
+/// **Round 4, finding 1: the owner's re-assert makes a collector's tombstone lose at the owner.** The node holds its own
+/// heartbeat and an aged entry, as a restart restores them; a peer's collection tombstones both at their stamps. After
+/// [`super::reassert_own`] — what `start()` runs before its connections come up — neither tombstone applies, so the
+/// tripwire, which counts an applied foreign write, has nothing to count.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_owners_reassert_makes_a_collectors_tombstone_lose() {
+    let p1 = port();
+    let a = node(p1, &[], 3, HistoryScope::FleetTally, |c| c.control_max_staleness_ms = 60_000).await;
+    let ctx = Arc::clone(&a.task_ctx);
+    let me = a.node_id().to_string();
+    let now = ctx.hlc.decision_now_ms();
+    let hb: Arc<str> = Arc::from(super::heartbeat_key(&me).as_str());
+    let entry: Arc<str> = Arc::from(super::tally_key(&me, "c-posts", "gateway", "x").as_str());
+    let _ = mycelium_core::ops::kv_set(&ctx, Arc::clone(&hb), bytes::Bytes::from_static(b"{\"as_of\":1,\"enforces\":true}"));
+    let _ = mycelium_core::ops::kv_set(
+        &ctx, Arc::clone(&entry),
+        bytes::Bytes::from(serde_json::to_vec(&serde_json::json!({"w": 1_000, "t": [now - 50_000]})).unwrap()),
+    );
+    let stamp = |k: &Arc<str>| ctx.kv_state.store.pin().get(k.as_ref()).unwrap().timestamp;
+    let (hb_ts, entry_ts) = (stamp(&hb), stamp(&entry));
+    super::reassert_own(&ctx);
+    let collector = NodeId::new("127.0.0.1", port()).unwrap();
+    for (key, ts) in [(&hb, hb_ts), (&entry, entry_ts)] {
+        let tomb = mycelium_core::framing::make_gossip_update_stamped(&collector, 4, Arc::clone(key), bytes::Bytes::new(), true, ts);
+        let applied = mycelium_core::store::apply_and_notify_reporting(&ctx.kv_state, &tomb);
+        assert!(
+            !matches!(applied, mycelium_core::receipt::LocalApplication::Applied),
+            "{key}: a collector's tombstone at the old stamp does not apply ({applied:?})"
+        );
+    }
+    let v = mycelium_core::ops::kv_get(&ctx, &hb).expect("the re-asserted heartbeat stands");
+    assert!(!String::from_utf8_lossy(&v).contains("\"as_of\":1,"), "re-asserted, current");
+    a.shutdown().await;
 }

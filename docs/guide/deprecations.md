@@ -1721,7 +1721,9 @@ before admitting it — after releasing the per-actor history gate.
 
 **Behaviour, for every node built with the `gateway` and `tls` features:** it writes a heartbeat under
 `sys/ae-tally/{node}/hb` from `start()` (every third of `control_max_staleness_ms`, at most every ten seconds), whether
-or not any policy uses the tally, and at a graceful shutdown leaves a last heartbeat marked departed. Under provider enforcement, a protected request the evaluator puts under a
+or not any policy uses the tally, and at a graceful shutdown leaves a last heartbeat marked departed. It tombstones a
+non-peer's tally keys once that node's heartbeat is past the horizon, each at the timestamp of the record it holds, and
+before its own connections come up re-asserts its own heartbeat and withdraws its own aged entries locally. Under provider enforcement, a protected request the evaluator puts under a
 fleet-consensus counter is checked beside the serve loop, so `rpc_rx` and the MCP tool loop yield it when its claim
 completes rather than strictly in arrival order; every other request is checked inline, as before, and handlers still
 run one at a time.

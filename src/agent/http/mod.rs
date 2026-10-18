@@ -149,7 +149,7 @@ pub use authz::{GatewayPreflight, GatewayRefusal};
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(crate) use authz::{ae_decide, ae_preflight, ae_record_execution, observed_execution, Decided, Preflight};
 #[cfg(all(test, feature = "gateway", feature = "tls", feature = "consensus"))]
-pub(crate) use authz::ae_preflight_routed;
+pub(crate) use authz::{ae_preflight_routed, TEST_RECORD_PAUSE_MS};
 #[cfg(all(feature = "gateway", feature = "tls", feature = "a2a"))]
 pub(crate) use authz::ENFORCEMENT_POINT_A2A;
 

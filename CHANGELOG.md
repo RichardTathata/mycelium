@@ -91,8 +91,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     stream), at most 64 at a time, so it does not stall the requests behind it; every other check stays inline. A
     panicking claim, or one still waiting when its loop ends, is answered `authority_not_established` and stopped:
     nothing more is claimed or recorded for it, and its provisional permit is taken back.
-  - A node that is no longer a peer — departed, or declared dead — still counts until its permits age out; no node
-    deletes another's tally keys.
+  - A node that is no longer a peer — departed, or declared dead — still counts until its permits age out, if it is a
+    verified member (a trusted identity, not removed); a fabricated node id counts for nothing. Past the horizon (window
+    + staleness + drift) its keys are not read, and any node collects them with tombstones stamped at the observed
+    records' own timestamps, which lose to anything the owner wrote later; a returning node re-asserts its own keys
+    before its connections come up. A decision lists nodes from the store's scope index, never every entry.
+  - An admitted decision's permit is no longer taken back once its record has been handed to the journal: an abort
+    there is delivery unknown, and the permit stays counted. The `rpc/serve` stream's loop pulls one request per event
+    the client asks for, and answers every request it took when the client goes, on eviction or at shutdown.
   - **Upgrade order:** tally rules fail closed until every member runs this release built with `gateway` and `tls`
     (`docs/guide/deprecations.md` §53).
   - The AE contract suite gains `PolicyClause::AllowAtMostAcross` and six `fleet_*` cases.

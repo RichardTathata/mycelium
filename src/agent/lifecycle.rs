@@ -505,6 +505,10 @@ impl GossipAgent {
             super::audit::restore_chain_head(&self.task_ctx);
         }
 
+        // Post-360 row K2: this node's own tally keys re-asserted before any connection comes up, so a peer's
+        // collection of its old records while it was away is older than what it holds (#642's review, round 4).
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        super::fleet_history::reassert_own(&self.task_ctx);
         self.start_listener(bind_addr).await.inspect_err(|_| {
             self.state.store(AgentState::Idle as u8, Ordering::Release);
         })?;

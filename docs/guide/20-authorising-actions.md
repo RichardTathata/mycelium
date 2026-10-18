@@ -450,11 +450,16 @@ more than `max_clock_drift_ms` in this node's future, or an entry this node cann
 A peer that enforces nothing admits nothing under a tally rule and is not counted. The departed heartbeat travels on
 shutdown's best-effort flush; a node whose last word is lost, or that crashes rather than leaving, reads as stale —
 closed, not open — until failure detection declares it dead; from then its entries still count, as a departed node's
-do, until they age out. **Nobody deletes another node's tally keys:** a collector cannot tell a node's old record from
-one it wrote after returning that has not reached the collector yet, so a foreign delete could erase a returned node's
-heartbeat or a permit, and would trip its `sys/` tripwire. A node withdraws its own aged entries; a node that never
-returns leaves its heartbeat and one entry per counter and actor of its last window, read as aged and counting
-nothing. So a
+do, until they age out — but only for a node this node can verify: an identity record it trusts (`trusted_keys`) and
+not removed. A heartbeat and entries written under a node id nobody issued an identity for count for nothing. A
+non-peer whose heartbeat is older than the counter's window plus the staleness bound plus the clock-drift bound is not
+read at all, and a decision lists the nodes it knows of from the store's scope index — its cost grows with nodes, never
+with the entries they hold. **Residue is collected at its own stamp.** Once a non-peer's heartbeat is older than the
+longest window among its entries plus both bounds, any node tombstones its keys *at the timestamp of the record it
+holds*: under last-writer-wins that removes that record and loses to anything the owner wrote after it, so it cannot
+erase a returned node's newer heartbeat or permit, wherever it is. A returning node re-asserts its own heartbeat and
+withdraws its own aged entries locally before its connections come up, so a collector's tombstone reaches it older than
+what it holds, is not applied, and its `sys/` tripwire does not count it. So a
 fleet using the tally runs every member with both features. **Upgrading:** tally rules fail closed until every
 member runs this release built with `gateway` and `tls` — an older member, or one built without them, publishes no
 heartbeat and is unknown coverage. A forged `departed` heartbeat stops peers waiting on a live node that has gone quiet,

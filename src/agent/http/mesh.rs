@@ -172,11 +172,19 @@ pub(super) async fn gw_rpc_serve(
     // that settles a seat claim runs beside it — bounded, answered when the stream ends — and one claim never holds
     // up the requests behind it (#642's review, round 3, finding 1). Closure plan C3: a refused protected call is
     // answered here and never streamed.
-    let (out_tx, out_rx) = tokio::sync::mpsc::channel::<Event>(16);
+    // **Pulled, never pushed** (#642's review, round 4, finding 4): the stream asks for one event at a time, and the
+    // loop takes a request off the channel only while an ask is open — so it never runs ahead of its client, and a
+    // request it has taken is either streamed or answered when the loop ends.
+    let (pull_tx, pull_rx) = tokio::sync::mpsc::channel::<tokio::sync::oneshot::Sender<Event>>(1);
     let loop_ctx = Arc::clone(&ctx);
     let loop_evicted = evicted.clone();
-    ctx.agent_ctx.spawn_task(serve_stream_loop(loop_ctx, rx, out_tx, principal, loop_evicted));
-    let stream = futures_util::StreamExt::map(ReceiverStream::new(out_rx), Ok::<_, Infallible>);
+    ctx.agent_ctx.spawn_task(serve_stream_loop(loop_ctx, rx, pull_rx, principal, loop_evicted));
+    let stream = futures_util::stream::unfold(pull_tx, |pull_tx| async move {
+        let (want, event) = tokio::sync::oneshot::channel();
+        pull_tx.send(want).await.ok()?;
+        let event = event.await.ok()?;
+        Some((Ok::<_, Infallible>(event), pull_tx))
+    });
 
     // Evicted: a terminal `evicted` event naming the kind, then the stream ends — so the client is told why,
     // rather than seeing a stream that simply stopped (#643's round-3 review; the SDKs raise on it).
@@ -215,53 +223,76 @@ fn serve_event(http_ctx: &HttpCtx, req: &super::rpc::RpcRequest, caller: Option<
 }
 
 /// The `rpc/serve` loop: receive, verify the caller context, check — inline, or beside the loop when the check settles
-/// a seat claim — and stream. Ends when the client goes (the channel closes), on eviction or at shutdown; checks
-/// still settling then are stopped and their callers answered.
+/// a seat claim — and stream, **one event per ask of the stream**. It takes a request off the channel only while an
+/// ask is open and nothing checked is waiting to be streamed, so it never runs ahead of its client. It ends when the
+/// client goes, on eviction or at shutdown; a request it took and did not stream — checked and waiting, or still
+/// settling a claim — is then answered, never dropped.
 async fn serve_stream_loop(
     ctx: Arc<HttpCtx>,
     mut rx: tokio::sync::mpsc::Receiver<crate::signal::Signal>,
-    out: tokio::sync::mpsc::Sender<Event>,
+    mut pull: tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<Event>>,
     principal: Arc<str>,
     mut evicted: tokio::sync::watch::Receiver<bool>,
 ) {
     let agent_ctx = Arc::clone(&ctx.agent_ctx);
     let mut shutdown = agent_ctx.shutdown_tx.subscribe();
+    // An open ask of the stream, and the requests checked and admitted while none was open.
+    let mut want: Option<tokio::sync::oneshot::Sender<Event>> = None;
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    let mut ready: std::collections::VecDeque<(super::rpc::RpcRequest, Option<serde_json::Value>, super::provider_enforcement::Admission)> =
+        std::collections::VecDeque::new();
     #[cfg(all(feature = "gateway", feature = "tls"))]
     let mut pending: super::provider_enforcement::DeferredChecks<(super::rpc::RpcRequest, Option<serde_json::Value>)> =
         super::provider_enforcement::DeferredChecks::new(&agent_ctx);
-    loop {
+    'serve: loop {
+        // Stream what is ready while the stream asks.
         #[cfg(all(feature = "gateway", feature = "tls"))]
-        let sig = {
-            let full = pending.is_full();
-            tokio::select! { biased;
-                _ = async { let _ = shutdown.wait_for(|v| *v).await; } => break,
-                _ = async { let _ = evicted.wait_for(|e| *e).await; } => break,
-                _ = out.closed() => break,
-                Some(((req, caller), checked)) = pending.next(), if !pending.is_empty() => {
-                    match checked {
-                        // C4: the admission is parked until the SDK agent replies through `/rpc/respond`.
-                        Ok(admission) => {
-                            super::provider_enforcement::park(&agent_ctx, req.sender(), req.nonce(), admission);
-                            if out.send(serve_event(&ctx, &req, caller, &principal)).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(refusal) => refuse_served(&agent_ctx, &req, &refusal),
-                    }
-                    continue;
+        while want.is_some() && let Some((req, caller, admission)) = ready.pop_front() {
+            let event = serve_event(&ctx, &req, caller.clone(), &principal);
+            match want.take().map(|w| w.send(event)) {
+                Some(Ok(())) => super::provider_enforcement::park(&agent_ctx, req.sender(), req.nonce(), admission),
+                _ => {
+                    ready.push_front((req, caller, admission));
+                    break 'serve;
                 }
-                sig = rx.recv(), if !full => match sig {
-                    Some(sig) => sig,
-                    None => break,
-                },
             }
+        }
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        let take = want.is_some() && ready.is_empty() && !pending.is_full();
+        #[cfg(not(all(feature = "gateway", feature = "tls")))]
+        let take = want.is_some();
+        let asking = want.is_none();
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        let sig = tokio::select! { biased;
+            _ = async { let _ = shutdown.wait_for(|v| *v).await; } => break,
+            _ = async { let _ = evicted.wait_for(|e| *e).await; } => break,
+            _ = async { if let Some(w) = want.as_mut() { w.closed().await } }, if !asking => break,
+            ask = pull.recv(), if asking => match ask {
+                Some(w) => { want = Some(w); continue; }
+                None => break,
+            },
+            Some(((req, caller), checked)) = pending.next(), if !pending.is_empty() => {
+                match checked {
+                    Ok(admission) => ready.push_back((req, caller, admission)),
+                    Err(refusal) => refuse_served(&agent_ctx, &req, &refusal),
+                }
+                continue;
+            }
+            sig = rx.recv(), if take => match sig {
+                Some(sig) => sig,
+                None => break,
+            },
         };
         #[cfg(not(all(feature = "gateway", feature = "tls")))]
         let sig = tokio::select! { biased;
             _ = async { let _ = shutdown.wait_for(|v| *v).await; } => break,
             _ = async { let _ = evicted.wait_for(|e| *e).await; } => break,
-            _ = out.closed() => break,
-            sig = rx.recv() => match sig {
+            _ = async { if let Some(w) = want.as_mut() { w.closed().await } }, if !asking => break,
+            ask = pull.recv(), if asking => match ask {
+                Some(w) => { want = Some(w); continue; }
+                None => break,
+            },
+            sig = rx.recv(), if take => match sig {
                 Some(sig) => sig,
                 None => break,
             },
@@ -288,26 +319,27 @@ async fn serve_stream_loop(
         };
         #[cfg(all(feature = "gateway", feature = "tls"))]
         match super::provider_enforcement::check(&agent_ctx, &req).await {
-            super::provider_enforcement::Checked::Done(Ok(admission)) => {
-                super::provider_enforcement::park(&agent_ctx, req.sender(), req.nonce(), admission);
-            }
-            super::provider_enforcement::Checked::Done(Err(refusal)) => {
-                refuse_served(&agent_ctx, &req, &refusal);
-                continue;
-            }
-            super::provider_enforcement::Checked::Waiting(waiting) => {
-                pending.spawn(waiting, (req, caller));
-                continue;
-            }
+            super::provider_enforcement::Checked::Done(Ok(admission)) => ready.push_back((req, caller, admission)),
+            super::provider_enforcement::Checked::Done(Err(refusal)) => refuse_served(&agent_ctx, &req, &refusal),
+            super::provider_enforcement::Checked::Waiting(waiting) => pending.spawn(waiting, (req, caller)),
         }
-        if out.send(serve_event(&ctx, &req, caller, &principal)).await.is_err() {
-            break;
+        #[cfg(not(all(feature = "gateway", feature = "tls")))]
+        {
+            let event = serve_event(&ctx, &req, caller, &principal);
+            if want.take().map(|w| w.send(event)).is_none_or(|r| r.is_err()) {
+                break;
+            }
         }
     }
-    // Checks still settling when the stream ends are stopped, and their callers answered.
+    // A request this loop took and did not stream is answered: checked and waiting for an ask, or still settling.
     #[cfg(all(feature = "gateway", feature = "tls"))]
-    for (req, _) in pending.abandon() {
-        refuse_served(&agent_ctx, &req, &super::provider_enforcement::withdrawn());
+    {
+        for (req, _, _) in ready.drain(..) {
+            refuse_served(&agent_ctx, &req, &super::provider_enforcement::withdrawn());
+        }
+        for (req, _) in pending.abandon() {
+            refuse_served(&agent_ctx, &req, &super::provider_enforcement::withdrawn());
+        }
     }
 }
 

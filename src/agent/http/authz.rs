@@ -957,6 +957,11 @@ pub(crate) async fn ae_decide(
     }))
 }
 
+/// Test hook: a pause, per node, after the evidence journal acknowledges a record and before the history observes it.
+#[cfg(all(test, feature = "gateway", feature = "tls"))]
+pub(crate) static TEST_RECORD_PAUSE_MS: std::sync::LazyLock<papaya::HashMap<String, u64>> =
+    std::sync::LazyLock::new(papaya::HashMap::new);
+
 /// Takes back a provisionally counted permit if the settling it belongs to is dropped before its decision is settled.
 #[cfg(all(feature = "gateway", feature = "tls"))]
 struct RetractOnDrop {
@@ -1080,9 +1085,11 @@ impl Settling {
             // Row R: the class, the destination decided on and the destinations already refused.
             evidence = evidence.with_route(r);
         }
-        let recorded = ae_record(ctx, &evidence).await;
-        // From here the decision is settled either way; the retractions below are the only ones.
+        // Disarmed **before** the record is awaited (#642's review, round 4, finding 3): once the record is handed to
+        // the journal, an abort leaves its delivery unknown — the record may be on disk — so the permit stays counted
+        // rather than being taken back from under a record that exists. The retractions below are the only ones.
         provisional.armed = false;
+        let recorded = ae_record(ctx, &evidence).await;
         if let Err(e) = recorded {
             // Not recorded, so not done: a permit counted into the history is taken back.
             if admitted && let Some(index) = history_index {
@@ -1200,6 +1207,15 @@ pub(super) async fn ae_record(
         None => (None, EvidenceState::NotConfigured, None),
         Some(journal) => match journal.append(bytes).await {
             Ok(appended) => {
+                #[cfg(test)]
+                {
+                    // A pause between the journal's acknowledgement and the history's update — where an abort lands
+                    // after the record is on disk (#642's review, round 4, finding 3).
+                    let pause = TEST_RECORD_PAUSE_MS.pin().get(&ctx.node_id.to_string()).copied();
+                    if let Some(ms) = pause {
+                        mycelium_core::sim_seam::sleep_ms("ae/record-test-pause", ms).await;
+                    }
+                }
                 // On the record, so in the actor's history this point keeps (post-360 row K).
                 if let Some(index) = ctx.history_index.get() {
                     index.observe(evidence);

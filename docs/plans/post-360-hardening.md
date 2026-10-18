@@ -1770,6 +1770,14 @@ envelope's nonce cache) and Q (the handshake refuses a revoked key's certificate
 **In flight (2026-10-17):** K2, the fleet-wide history scopes (§3.3, §5) — #642; the private Cedar adapter's re-pin
 then meets the new contract cases.
 
+**Known flake, open (K2, #642):** `the_fleet_scopes_hold_at_every_door_that_runs_the_preflight` — twice in CI a
+`/mcp` call timed out in the dispatch (30 s) after its preflight admitted it. The cause is not known: the earlier
+explanation (a shared tool name resolving to another test's node) does not hold, since no other test in that build
+registers the name and `alloc_port` does not reuse ports. Instrumented, not fixed: a dispatch timeout at the MCP bridge
+now logs and answers with where the time went (`preflight_ms`, `dispatch_ms`, `to_self`, `peers`, `dropped_frames`),
+and the test's failure message carries how many times the handler ran, the node's peers and the tool keys it holds —
+so the next occurrence names whether the request reached the provider.
+
 **In review:** row R (inference routing as policy — §5's question, decided a row on 2026-10-17; §3.5). Every row K–P is released in 2.35.0; the rows' own *not built* lists stand. (Q, revocation at every verifier, is delivered — #616, §3.5; S, identity proofs on by default, is delivered in 2.34.0 — #623, §3.5.)
 
 **Follow-ups recorded as not built in delivered rows (each in its §3.5 block):**

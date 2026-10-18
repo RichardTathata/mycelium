@@ -1194,10 +1194,14 @@ impl GossipAgent {
         let signal_window = std::time::Duration::from_secs(config.signal_window_secs);
         // The decision-record namespace is indexed per slot (row A, `consensus_life`) — registered here,
         // before any key is applied or replayed; core names no Layer III prefix itself.
-        #[cfg(feature = "consensus")]
-        let scoped: &[&str] = &[crate::consensus_life::LIFE_PREFIX];
-        #[cfg(not(feature = "consensus"))]
-        let scoped: &[&str] = &[];
+        // So is the fleet tally, per node (post-360 row K2): a tally decision lists the nodes it knows of from the
+        // index rather than scanning every node's entries.
+        let scoped: &[&str] = &[
+            #[cfg(feature = "consensus")]
+            crate::consensus_life::LIFE_PREFIX,
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            fleet_history::TALLY_PREFIX,
+        ];
         let kv_state      = KvState::with_scoped_prefixes(config.max_store_entries, scoped);
         let default_ttl   = config.default_ttl;
         let gossip_txs: Arc<[mpsc::Sender<(Bytes, u64, ForwardHint)>]> = gossip_txs_vec.into();

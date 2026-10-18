@@ -499,6 +499,36 @@ pub async fn kv_set_requiring_sync(
         .queued(queued))
 }
 
+/// Tombstones `key` **at `timestamp`** — the stamp of the record the caller observed — applies locally, queues
+/// WAL (try-send), gossips (try-send). Under last-writer-wins a tombstone at a record's own timestamp removes that
+/// record (an equal-timestamp tombstone wins) and nothing written after it: a newer write, wherever it is, beats it.
+/// What a non-owner deletes with when it may not have seen the owner's latest write.
+pub fn kv_delete_at(ctx: &CoreCtx, key: Arc<str>, timestamp: u64) -> bool {
+    let update = crate::framing::make_gossip_update_stamped(&ctx.node_id, ctx.default_ttl, key, Bytes::new(), true, timestamp);
+    apply_and_notify(&ctx.kv_state, &update);
+    if let Some(wal) = ctx.wal.get() {
+        wal.append_try(sync_entry_from(&update));
+    }
+    let tls = ctx.tls.get().map(Arc::as_ref);
+    let msg = make_kv_wire_msg(update, ctx.node_id.id_hash(), tls);
+    dispatch_gossip_try_send(
+        &ctx.gossip_txs, msg,
+        ctx.node_id.id_hash(), ForwardHint::All, &ctx.kv_state.dropped_frames,
+    )
+}
+
+/// Writes `value` under `key` (or tombstones it, `value: None`) **on this node only**: applied and handed to the
+/// WAL, never gossiped. Anti-entropy carries it from there. For a write made before the node's connections are up,
+/// where a gossip fan-out to a bootstrap peer not yet listening would put the writer into backoff.
+pub fn kv_write_local(ctx: &CoreCtx, key: Arc<str>, value: Option<Bytes>) {
+    let tombstone = value.is_none();
+    let update = make_gossip_update(&ctx.node_id, ctx.default_ttl, key, value.unwrap_or_default(), tombstone, &ctx.hlc);
+    apply_and_notify(&ctx.kv_state, &update);
+    if let Some(wal) = ctx.wal.get() {
+        wal.append_try(sync_entry_from(&update));
+    }
+}
+
 /// Tombstones `key`, applies locally, queues WAL (try-send), gossips (try-send).
 pub fn kv_delete(ctx: &CoreCtx, key: Arc<str>) -> bool {
     let update = make_gossip_update(&ctx.node_id, ctx.default_ttl, key, Bytes::new(), true, &ctx.hlc);
