@@ -46,6 +46,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   connection another user's process opened, or whose owner the kernel cannot name (`/proc/net/tcp` on Linux,
   `net.inet.tcp.pcblist_n` on macOS), so another user can neither use the proxy nor crowd it; a symlinked
   `value_file` is judged by the file it names; an answer with no body is relayed whatever its `Content-Encoding`.
+  **After its fourth:** owners are named in batches, one kernel-table read per batch, at most 64 connections waiting
+  (oldest closed first), and one proxy holds at most 256 sockets, so a flood can neither queue without bound nor take
+  the stem's descriptors; the parsers match addresses and ports (macOS) and only established rows (Linux), and a socket
+  record that is not a TCP stream matches nothing.
 
 ### Changed
 

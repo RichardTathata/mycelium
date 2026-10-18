@@ -717,7 +717,7 @@ mod tests {
         let agent = {
             let mut a = None;
             for _ in 0..16 {
-                let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+                let port = mycelium::test_util::alloc_port();
                 let id = NodeId::new("127.0.0.1", port).unwrap();
                 let cfg = GossipConfig { bind_port: port, ..Default::default() };
                 let agent = Arc::new(GossipAgent::new(id, cfg));

@@ -878,7 +878,7 @@ mod tests {
 
     /// Unstarted agent — the blob runtime never touches the mesh; `RuntimeCtx` just needs one.
     fn idle_ctx() -> RuntimeCtx {
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let port = mycelium::test_util::alloc_port();
         let id = mycelium::NodeId::new("127.0.0.1", port).unwrap();
         let agent = Arc::new(GossipAgent::new(
             id,
@@ -913,7 +913,7 @@ mod tests {
         const SPIN_COMPONENT: &[u8] = include_bytes!("../tests/fixtures/spin_component.wasm");
         let mut agent = None;
         for _ in 0..16 {
-            let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+            let port = mycelium::test_util::alloc_port();
             let id = mycelium::NodeId::new("127.0.0.1", port).unwrap();
             let a = Arc::new(GossipAgent::new(id, mycelium::GossipConfig { bind_port: port, ..Default::default() }));
             if a.start().await.is_ok() {

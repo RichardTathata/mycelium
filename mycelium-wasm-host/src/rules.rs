@@ -172,7 +172,7 @@ pub static RULES: &[RuleDescriptor] = &[
         ],
         outcomes: &[
             Outcome { kind: Action, reasons: &["forwarded", "tunnelled"] },
-            Outcome { kind: Refusal, reasons: &["no_proxy_token", "malformed_request", "host_not_listed", "credential_not_granted", "credential_not_authorised", "node_egress_denied", "body_too_large", "body_cap", "connection_cap", "preauth_evicted", "peer_uid_other", "peer_uid_unknown", "peer_check_busy", "credential_host_tunnel", "encoded_response"] },
+            Outcome { kind: Refusal, reasons: &["no_proxy_token", "malformed_request", "host_not_listed", "credential_not_granted", "credential_not_authorised", "node_egress_denied", "body_too_large", "body_cap", "connection_cap", "preauth_evicted", "peer_uid_other", "peer_uid_unknown", "peer_check_busy", "peer_check_evicted", "open_cap", "credential_host_tunnel", "encoded_response"] },
         ],
         effects: &["the request sent on over the entry's scheme with placeholders resolved by the node's gate, its answer relayed with the granted bindings' values masked; or a byte tunnel, closed when idle; `mycelium_activation_egress_total{activation, event}`"],
         guards: &[Guard::Authority], may_trigger: &[], may_inhibit: &[], depends_on: &["prov.activation"],
@@ -184,7 +184,8 @@ pub static RULES: &[RuleDescriptor] = &[
                  "token_less_connections_cannot_lock_the_command_out", "a_tunnel_counts_against_the_connection_cap_until_it_closes",
                  "bodiless_requests_in_flight_are_not_counted_as_buffered_bodies", "every_encoding_header_is_read_before_a_body_is_relayed",
                  "a_connection_another_user_owns_or_no_one_can_name_is_closed_at_accept", "another_users_connection_is_closed_at_accept",
-                 "a_bodiless_answer_or_repeated_identity_is_relayed"],
+                 "a_bodiless_answer_or_repeated_identity_is_relayed", "a_flood_of_other_users_connections_is_bounded_and_batched",
+                 "a_proxy_holds_at_most_max_open_sockets"],
         trace: CatalogueOnly,
         summary: "An activation's command reaches another host only through its proxy: a listed host by name, a credential attached by the node's gate where its binding authorises; anything else is refused with the proxy's marker, logged and counted per activation by reason (`mycelium_activation_egress_total{activation, event}`) — not recorded in the decision trace.",
     },

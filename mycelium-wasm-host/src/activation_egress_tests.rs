@@ -272,8 +272,8 @@ async fn a_connection_another_user_owns_or_no_one_can_name_is_closed_at_accept()
     let (u, seen) = upstream().await;
     let me = crate::peer_uid::own_uid();
     for (label, lookup) in [
-        ("another user", Arc::new(move |_: std::net::SocketAddr, _: std::net::SocketAddr| Ok(me.wrapping_add(1))) as PeerUidLookup),
-        ("unknown", Arc::new(|_: std::net::SocketAddr, _: std::net::SocketAddr| Err("no answer".to_string())) as PeerUidLookup),
+        ("another user", Arc::new(move |pairs: &[(std::net::SocketAddr, std::net::SocketAddr)]| pairs.iter().map(|_| Ok(me.wrapping_add(1))).collect()) as PeerUidLookup),
+        ("unknown", Arc::new(|pairs: &[(std::net::SocketAddr, std::net::SocketAddr)]| pairs.iter().map(|_| Err("no answer".to_string())).collect()) as PeerUidLookup),
     ] {
         let p = start_with_peer_uid(vec![format!("http://127.0.0.1:{u}")], ProxyLimits::default(), Some(lookup));
         let answer = raw(p.port(), &token_header(&p), &format!("GET http://127.0.0.1:{u}/ HTTP/1.1\r\nHost: x\r\n\r\n")).await;
@@ -285,6 +285,70 @@ async fn a_connection_another_user_owns_or_no_one_can_name_is_closed_at_accept()
     let p = start_limited(vec![format!("http://127.0.0.1:{u}")], ProxyLimits::default());
     let answer = raw(p.port(), &token_header(&p), &format!("GET http://127.0.0.1:{u}/ HTTP/1.1\r\nHost: x\r\n\r\n")).await;
     assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+}
+
+/// #644's round-4 review, finding 1: a flood of another user's connections neither queues without bound nor
+/// multiplies the kernel reads, and the command still gets in. 150 connections arrive while each read takes
+/// 150 ms (a stub that names every flood connection another user's): at most `max_unchecked` (16 here) ever
+/// wait, reads grow per batch, not per connection, and the command's own connection, made after the flood, is
+/// served within a bound. Seen failing first on round 3's per-connection checks: 150 waited and every
+/// connection paid its own read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_flood_of_other_users_connections_is_bounded_and_batched() {
+    let (u, _) = upstream().await;
+    let me = crate::peer_uid::own_uid();
+    let mine: Arc<Mutex<std::collections::HashSet<u16>>> = Arc::default();
+    let mine_seen = Arc::clone(&mine);
+    let lookup: PeerUidLookup = Arc::new(move |pairs: &[(std::net::SocketAddr, std::net::SocketAddr)]| {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let mine = mine_seen.lock().unwrap();
+        pairs.iter().map(|(_, peer)| Ok(if mine.contains(&peer.port()) { me } else { me.wrapping_add(1) })).collect()
+    });
+    let limits = ProxyLimits { max_unchecked: 16, preauth_timeout_ms: 5_000, ..ProxyLimits::default() };
+    let p = start_with_peer_uid(vec![format!("http://127.0.0.1:{u}")], limits, Some(lookup));
+    let mut flood = Vec::new();
+    for _ in 0..150 {
+        flood.push(tokio::net::TcpStream::connect(("127.0.0.1", p.port())).await.unwrap());
+    }
+    // The command's connection, after the flood: registered as this user's, then a request on it.
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let mut cmd = tokio::net::TcpStream::connect(("127.0.0.1", p.port())).await.unwrap();
+    mine.lock().unwrap().insert(cmd.local_addr().unwrap().port());
+    let started = std::time::Instant::now();
+    cmd.write_all(format!("GET http://127.0.0.1:{u}/ HTTP/1.1\r\nHost: x\r\nProxy-Authorization: {}\r\nConnection: close\r\n\r\n", token_header(&p)).as_bytes()).await.unwrap();
+    let mut answer = Vec::new();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), cmd.read_to_end(&mut answer)).await;
+    let answer = String::from_utf8_lossy(&answer).to_string();
+    assert!(answer.starts_with("HTTP/1.1 200"), "the command is served: {answer:?}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(2), "within about two reads: {:?}", started.elapsed());
+    let c = p.counts();
+    assert!(c.waiting_max <= 16, "at most max_unchecked wait: {c:?}");
+    assert!(c.peer_lookups < 30, "reads per batch, not per connection (151 connections): {c:?}");
+    drop(flood);
+}
+
+/// #644's round-4 review: one proxy holds at most `max_open` sockets — one accepted past it is closed at once, so
+/// an activation's proxy cannot take the stem's descriptor table. Seen failing first: the extra connection was held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_proxy_holds_at_most_max_open_sockets() {
+    let me = crate::peer_uid::own_uid();
+    // Owners are named only after 3 s, so every connection is still held while the fifth arrives.
+    let lookup: PeerUidLookup = Arc::new(move |pairs: &[(std::net::SocketAddr, std::net::SocketAddr)]| {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        pairs.iter().map(|_| Ok(me)).collect()
+    });
+    let limits = ProxyLimits { max_open: 4, max_unchecked: 100, preauth_timeout_ms: 60_000, ..ProxyLimits::default() };
+    let p = start_with_peer_uid(Vec::new(), limits, Some(lookup));
+    let mut held = Vec::new();
+    for _ in 0..4 {
+        held.push(tokio::net::TcpStream::connect(("127.0.0.1", p.port())).await.unwrap());
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let mut fifth = tokio::net::TcpStream::connect(("127.0.0.1", p.port())).await.unwrap();
+    assert!(closed_within(&mut fifth, 3).await, "a socket past max_open is closed");
+    for h in &mut held {
+        assert!(!closed_within(h, 1).await, "the four held stay open");
+    }
 }
 
 /// The real thing: a process of **another user** connects to the proxy and is closed at accept, with no answer
@@ -308,9 +372,14 @@ async fn another_users_connection_is_closed_at_accept() {
         .unwrap()
         .expect("sudo runs");
     let answer = String::from_utf8_lossy(&out.stdout).to_string();
-    assert!(!answer.contains("HTTP/1.1"), "another user's connection got an answer: {answer} ({})", String::from_utf8_lossy(&out.stderr));
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    // The connection was made (sudo ran bash, bash connected), then closed: `cat` saw EOF, so bash exits 0. A sudo
+    // that could not run exits 1 before any connection — refused here rather than read as a closed connection.
+    assert!(out.status.success(), "sudo -u nobody did not run the client: {} {stderr}", out.status);
+    assert!(!answer.contains("HTTP/1.1"), "another user's connection got an answer: {answer} ({stderr})");
     assert!(seen.lock().unwrap().is_empty(), "nothing was forwarded");
-    assert!(p.counts().refused >= 1);
+    let c = p.counts();
+    assert_eq!(c.refused_other_user, 1, "refused as another user's, by the kernel's lookup: {c:?}");
     // The plant: this user, the same request, is served.
     let mine = raw(p.port(), &token_header(&p), &format!("GET http://127.0.0.1:{u}/ HTTP/1.1\r\nHost: x\r\n\r\n")).await;
     assert!(mine.starts_with("HTTP/1.1 200"), "{mine}");
@@ -338,7 +407,7 @@ async fn closed_within(s: &mut tokio::net::TcpStream, secs: u64) -> bool {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_proxy_bounds_connections_header_reads_tunnels_and_bodies() {
     use tokio::io::AsyncWriteExt as _;
-    let wide = ProxyLimits { max_connections: 1000, max_unauthenticated: 1000, preauth_timeout_ms: 600_000, header_read_timeout_ms: 600_000, tunnel_idle_ms: 600_000, max_buffered_bodies: 1000 };
+    let wide = ProxyLimits { max_connections: 1000, max_unauthenticated: 1000, preauth_timeout_ms: 600_000, max_unchecked: 1000, max_open: 10_000, header_read_timeout_ms: 600_000, tunnel_idle_ms: 600_000, max_buffered_bodies: 1000 };
     // Connections: two authenticated and held open, a third authenticated one refused 503 (#644's round-2
     // review, N2: only a connection that presented the token counts against the cap).
     let (cu, _) = upstream().await;

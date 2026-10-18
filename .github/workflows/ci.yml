@@ -387,6 +387,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # `gateway`: the activation egress proxy's credential case attaches through the node's gate (rows L and M).
       - run: cargo test -p mycelium-wasm-host --lib --features gateway -- activation confined egress
+      # #644's round-4 review: the egress proxy closes another user's connection on macOS too — the kernel's
+      # `pcblist_n` read, not the synthetic buffer. Connects as `nobody` through passwordless sudo; guarded, so a
+      # runner without it fails rather than skips.
+      - name: Egress proxy refuses another user's connection (sudo -u nobody)
+        run: >-
+          MYCELIUM_EGRESS_OTHER_UID_LIVE_REQUIRED=1 cargo test -p mycelium-wasm-host --lib --features gateway --
+          --exact activation_egress::tests::another_users_connection_is_closed_at_accept
 
   agentfacts:
     # WS-F M16-A companion crate (self-certified AgentFacts emission). Public-API

@@ -460,8 +460,13 @@ not closed. `credentials`, `env` and everything else in the file are read once, 
 
 **Only this user's processes.** At accept the proxy asks the kernel which user owns the connecting socket
 (`/proc/net/tcp` on Linux, `net.inet.tcp.pcblist_n` on macOS) and closes, before it holds any place, a connection
-another user's process opened — or one whose owner cannot be read (fail closed). Another user on the host can
-neither use the proxy nor crowd the command out of it.
+another user's process opened — or one whose owner cannot be read (fail closed). One read of the kernel's table
+answers every connection accepted before it began, so a flood costs reads per batch, not per connection, and the
+command's connection waits about one read; at most 64 connections wait to be named (past that the oldest is
+closed), and one proxy holds at most 256 sockets in all (one accepted past that is closed at once), so a flood
+cannot take the stem's descriptor table. Another user on the host can neither use the proxy nor crowd the command
+out of it — short of opening more than 64 connections within one read of the table, which closes the command's
+waiting connection, and its client retries.
 
 **Bounded.** Any process of the stem's own user can connect (only the token admits a request), so a connection
 that has not presented the token is closed after 2 s, on its `407`, or — past 16 such connections — to make room for a

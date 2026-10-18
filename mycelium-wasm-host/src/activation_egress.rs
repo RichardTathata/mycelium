@@ -89,6 +89,12 @@ pub struct EgressCounts {
     pub tunnelled: u64,
     /// Requests refused here (host not listed, credential not granted or not authorised, no token, …).
     pub refused: u64,
+    /// Of those, connections another user's process opened, closed at accept (`peer_uid_other`).
+    pub refused_other_user: u64,
+    /// Reads of the kernel's socket table made to name connections' owners — one per batch, not per connection.
+    pub peer_lookups: u64,
+    /// The most connections ever waiting for a lookup at once (never above `ProxyLimits::max_unchecked`).
+    pub waiting_max: u64,
 }
 
 struct Inner {
@@ -115,6 +121,10 @@ struct Inner {
     /// yet (N2, N3) — each kept by its [`Conn`]'s life.
     authed_live: AtomicUsize,
     preauth_live: AtomicUsize,
+    /// Sockets held ([`OpenSlot`]), against `limits.max_open`.
+    open: AtomicUsize,
+    refused_other_user: AtomicU64,
+    peer_gate: Arc<PeerGate>,
     /// The connections that have not presented the token, oldest first, to close past
     /// `limits.max_unauthenticated`. Lock-order table row 65: a leaf, held for a push or a scan of weak
     /// references, never across an `await`.
@@ -185,6 +195,11 @@ pub struct ProxyLimits {
     pub max_unauthenticated: usize,
     /// How long a connection may stay without presenting the token before it is closed (N2).
     pub preauth_timeout_ms: u64,
+    /// Connections waiting for their owner to be named; past it the oldest is closed (#644's round-4 review).
+    pub max_unchecked: usize,
+    /// Sockets the proxy holds at once, whatever their state; one accepted past it is closed at once, so one
+    /// activation's proxy cannot take the stem's descriptor table (#644's round-4 review).
+    pub max_open: usize,
     /// How long a connection may take to send a request's headers (hyper's header-read timeout).
     pub header_read_timeout_ms: u64,
     /// How long a `CONNECT` tunnel may carry nothing either way before it is closed.
@@ -195,7 +210,7 @@ pub struct ProxyLimits {
 
 impl Default for ProxyLimits {
     fn default() -> Self {
-        ProxyLimits { max_connections: 64, max_unauthenticated: 16, preauth_timeout_ms: 2_000, header_read_timeout_ms: 10_000, tunnel_idle_ms: 300_000, max_buffered_bodies: 4 }
+        ProxyLimits { max_connections: 64, max_unauthenticated: 16, preauth_timeout_ms: 2_000, max_unchecked: 64, max_open: 256, header_read_timeout_ms: 10_000, tunnel_idle_ms: 300_000, max_buffered_bodies: 4 }
     }
 }
 
@@ -213,17 +228,89 @@ pub struct ProxyOptions<'a> {
     pub gate: Option<Arc<mycelium::EgressCredentials>>,
     /// What it holds at once ([`ProxyLimits::default`] for a stem's).
     pub limits: ProxyLimits,
-    /// Who owns a connecting socket — `None` for the kernel's answer ([`crate::peer_uid::loopback_peer_uid`]);
+    /// Who owns connecting sockets — `None` for the kernel's answer ([`crate::peer_uid::loopback_peer_uids`]);
     /// a test injects its own. A connection whose owner is not this process's user, or cannot be read, is
     /// closed at accept (#644's round-3 review).
     pub peer_uid: Option<PeerUidLookup>,
 }
 
-/// `(our address, the peer's address) → the uid owning the peer's socket`, or why it cannot be told.
-pub type PeerUidLookup = Arc<dyn Fn(SocketAddr, SocketAddr) -> Result<u32, String> + Send + Sync>;
+/// Every `(our address, the peer's address)` pair's owner from one read of the kernel's table, in order — or why
+/// a pair's cannot be told ([`crate::peer_uid::loopback_peer_uids`]).
+pub type PeerUidLookup = Arc<dyn Fn(&[(SocketAddr, SocketAddr)]) -> Vec<Result<u32, String>> + Send + Sync>;
 
-/// How many peer-uid lookups run at once; a connection waiting longer than the pre-auth timeout for one is closed.
-const PEER_CHECKS: usize = 8;
+/// A connection waiting to have its owner named (#644's round-4 review).
+struct Waiter {
+    local: SocketAddr,
+    peer: SocketAddr,
+    reply: tokio::sync::oneshot::Sender<Result<u32, String>>,
+}
+
+/// The connections waiting for their owners to be named, and the one task that names them: every connection
+/// accepted before a read of the kernel's table begins is answered by that read, so the work done grows with
+/// reads, not connections, and a connection waits about one read whatever the arrival rate (#644's round-4
+/// review, finding 1). At most `ProxyLimits::max_unchecked` wait; past it the **oldest** is closed.
+struct PeerGate {
+    /// Lock-order table row 66: a leaf, held for a push, an eviction or a drain — never across an `await`, a
+    /// lookup or another lock.
+    queue: std::sync::Mutex<std::collections::VecDeque<Waiter>>,
+    wake: tokio::sync::Notify,
+    lookups: AtomicU64,
+    waiting_max: AtomicUsize,
+}
+
+impl PeerGate {
+    /// Queue a connection; past `cap`, the oldest waiters are dropped (their connections close, counted).
+    fn enqueue(&self, w: Waiter, cap: usize, label: &str) {
+        let evicted = {
+            let mut q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+            q.push_back(w);
+            let mut out = Vec::new();
+            while q.len() > cap.max(1) {
+                if let Some(old) = q.pop_front() {
+                    out.push(old);
+                }
+            }
+            self.waiting_max.fetch_max(q.len(), Ordering::Relaxed);
+            out
+        };
+        for _ in &evicted {
+            count(label, "peer_check_evicted");
+        }
+        drop(evicted);
+        self.wake.notify_one();
+    }
+
+    /// The naming task: drain everything queued, answer it with one read, repeat until nothing waits.
+    async fn run(self: Arc<Self>, lookup: PeerUidLookup) {
+        loop {
+            self.wake.notified().await;
+            loop {
+                let batch: Vec<Waiter> = self.queue.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect();
+                if batch.is_empty() {
+                    break;
+                }
+                self.lookups.fetch_add(1, Ordering::Relaxed);
+                let pairs: Vec<(SocketAddr, SocketAddr)> = batch.iter().map(|w| (w.local, w.peer)).collect();
+                let lookup = Arc::clone(&lookup);
+                let answers = tokio::task::spawn_blocking(move || lookup(&pairs)).await.unwrap_or_default();
+                let mut answers = answers.into_iter();
+                for w in batch {
+                    let _ = w.reply.send(answers.next().unwrap_or_else(|| Err("the lookup gave no answer".into())));
+                }
+            }
+        }
+    }
+}
+
+/// One accepted socket held by the proxy, counted against `ProxyLimits::max_open` until dropped — by the
+/// connection's task, or, inside its [`Conn`], by a `CONNECT` tunnel's.
+struct OpenSlot(Arc<Inner>);
+
+impl Drop for OpenSlot {
+    fn drop(&mut self) {
+        self.0.open.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 impl EgressProxy {
     /// The address a stem's proxy listens on: loopback, a free port.
@@ -267,6 +354,14 @@ impl EgressProxy {
             limits: opts.limits,
             authed_live: AtomicUsize::new(0),
             preauth_live: AtomicUsize::new(0),
+            open: AtomicUsize::new(0),
+            refused_other_user: AtomicU64::new(0),
+            peer_gate: Arc::new(PeerGate {
+                queue: std::sync::Mutex::new(std::collections::VecDeque::new()),
+                wake: tokio::sync::Notify::new(),
+                lookups: AtomicU64::new(0),
+                waiting_max: AtomicUsize::new(0),
+            }),
             preauth_queue: std::sync::Mutex::new(std::collections::VecDeque::new()),
             bodies: Arc::new(tokio::sync::Semaphore::new(opts.limits.max_buffered_bodies.max(1))),
             client,
@@ -279,10 +374,11 @@ impl EgressProxy {
             tokio::net::TcpListener::from_std(listener).map_err(|e| fail(format!("{e}")))?
         };
         let served = Arc::clone(&inner);
-        let peer_uid: PeerUidLookup = opts.peer_uid.unwrap_or_else(|| Arc::new(crate::peer_uid::loopback_peer_uid));
+        let peer_uid: PeerUidLookup = opts.peer_uid.unwrap_or_else(|| Arc::new(crate::peer_uid::loopback_peer_uids));
         let own_uid = crate::peer_uid::own_uid();
-        let checks = Arc::new(tokio::sync::Semaphore::new(PEER_CHECKS));
+        let namer = rt.spawn(Arc::clone(&inner.peer_gate).run(peer_uid));
         let task = rt.spawn(async move {
+            let _namer = AbortOnDrop(namer);
             loop {
                 let (sock, peer) = match listener.accept().await {
                     Ok(pair) => pair,
@@ -292,17 +388,28 @@ impl EgressProxy {
                         continue;
                     }
                 };
+                // #644's round-4 review: a hard ceiling on the sockets this proxy holds.
+                if served.open.fetch_add(1, Ordering::AcqRel) >= served.limits.max_open.max(1) {
+                    served.open.fetch_sub(1, Ordering::AcqRel);
+                    served.refused.fetch_add(1, Ordering::Relaxed);
+                    count(&served.label, "open_cap");
+                    drop(sock);
+                    continue;
+                }
+                let slot = OpenSlot(Arc::clone(&served));
                 let inner = Arc::clone(&served);
-                let (peer_uid, checks) = (Arc::clone(&peer_uid), Arc::clone(&checks));
                 tokio::spawn(async move {
                     // #644's round-3 review: only this user's processes are served. Another user's connection —
                     // or one whose owner cannot be read (fail closed) — is closed before it holds any place.
-                    if let Err(event) = admit_peer(&inner, &sock, peer, own_uid, peer_uid, checks).await {
+                    if let Err(event) = admit_peer(&inner, &sock, peer, own_uid).await {
                         inner.refused.fetch_add(1, Ordering::Relaxed);
+                        if event == "peer_uid_other" {
+                            inner.refused_other_user.fetch_add(1, Ordering::Relaxed);
+                        }
                         count(&inner.label, event);
                         return;
                     }
-                    let conn = Conn::admit(&inner);
+                    let conn = Conn::admit(&inner, slot);
                     let header_timeout = std::time::Duration::from_millis(inner.limits.header_read_timeout_ms.max(1));
                     let preauth_ms = inner.limits.preauth_timeout_ms.max(1);
                     let svc = {
@@ -368,6 +475,9 @@ impl EgressProxy {
             forwarded: self.inner.forwarded.load(Ordering::Relaxed),
             tunnelled: self.inner.tunnelled.load(Ordering::Relaxed),
             refused: self.inner.refused.load(Ordering::Relaxed),
+            refused_other_user: self.inner.refused_other_user.load(Ordering::Relaxed),
+            peer_lookups: self.inner.peer_gate.lookups.load(Ordering::Relaxed),
+            waiting_max: self.inner.peer_gate.waiting_max.load(Ordering::Relaxed) as u64,
         }
     }
 
@@ -732,28 +842,18 @@ impl Inner {
     }
 }
 
-/// Is the connection from `peer` this user's? `Err` names the refusal counted: `peer_uid_other` (another user),
-/// `peer_uid_unknown` (no answer — refused, never assumed), `peer_check_busy` (no lookup slot within the pre-auth
-/// timeout).
-async fn admit_peer(
-    inner: &Inner,
-    sock: &tokio::net::TcpStream,
-    peer: SocketAddr,
-    own_uid: u32,
-    lookup: PeerUidLookup,
-    checks: Arc<tokio::sync::Semaphore>,
-) -> Result<(), &'static str> {
+/// Is the connection from `peer` this user's? Queued for the next batched read of the kernel's table
+/// ([`PeerGate`]). `Err` names the refusal counted: `peer_uid_other` (another user), `peer_uid_unknown` (no answer
+/// — refused, never assumed), `peer_check_evicted` (closed to make room, past `max_unchecked`), `peer_check_busy`
+/// (no answer within the pre-auth timeout).
+async fn admit_peer(inner: &Inner, sock: &tokio::net::TcpStream, peer: SocketAddr, own_uid: u32) -> Result<(), &'static str> {
     let local = sock.local_addr().map_err(|_| "peer_uid_unknown")?;
-    let permit = tokio::select! {
-        p = checks.acquire_owned() => p.map_err(|_| "peer_check_busy")?,
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    inner.peer_gate.enqueue(Waiter { local, peer, reply: tx }, inner.limits.max_unchecked, &inner.label);
+    let answer = tokio::select! {
+        r = rx => r.map_err(|_| "peer_check_evicted")?,
         _ = mycelium::sim_seam::sleep_ms("activation_egress.peer_check", inner.limits.preauth_timeout_ms.max(1)) => return Err("peer_check_busy"),
     };
-    let answer = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        lookup(local, peer)
-    })
-    .await
-    .unwrap_or_else(|_| Err("the lookup panicked".into()));
     match answer {
         Ok(uid) if uid == own_uid => Ok(()),
         Ok(uid) => {
@@ -764,6 +864,15 @@ async fn admit_peer(
             tracing::info!(activation = %inner.label, %peer, reason = %why, "activation egress: a connection whose owner cannot be read, closed at accept");
             Err("peer_uid_unknown")
         }
+    }
+}
+
+/// Aborts a task when dropped (the proxy's naming task ends with its listener).
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
@@ -788,14 +897,16 @@ struct Conn {
     /// 0 unauthenticated, 1 authenticated.
     phase: AtomicU8,
     inner: Arc<Inner>,
+    /// Its place against `max_open`, released with the last holder.
+    _open: OpenSlot,
     /// Closes an unauthenticated connection to make room for a newer one.
     evict: tokio::sync::Notify,
 }
 
 impl Conn {
     /// Count a new connection as unauthenticated; past `max_unauthenticated`, close the oldest ones.
-    fn admit(inner: &Arc<Inner>) -> Arc<Conn> {
-        let conn = Arc::new(Conn { phase: AtomicU8::new(0), inner: Arc::clone(inner), evict: tokio::sync::Notify::new() });
+    fn admit(inner: &Arc<Inner>, open: OpenSlot) -> Arc<Conn> {
+        let conn = Arc::new(Conn { phase: AtomicU8::new(0), inner: Arc::clone(inner), _open: open, evict: tokio::sync::Notify::new() });
         let live = inner.preauth_live.fetch_add(1, Ordering::AcqRel) + 1;
         let mut excess = live.saturating_sub(inner.limits.max_unauthenticated.max(1));
         let mut q = inner.preauth_queue.lock().unwrap_or_else(|e| e.into_inner());

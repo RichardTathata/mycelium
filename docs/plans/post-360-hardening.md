@@ -1569,6 +1569,21 @@ CC8, `docs/capabilities.md`, the crate README). The example units with `[[activa
   stated in `unit-file.md`. (3) An answer with no body (a `HEAD`'s, 1xx, 204, 304) is relayed whatever its
   `Content-Encoding`, and repeated `identity` headers pass (`a_bodiless_answer_or_repeated_identity_is_relayed`,
   failing first: 502).
+- *The fourth review (#644, round 4)* — round 3 confirmed. (1, a regression of round 3) Each connection waited for
+  one of eight lookup slots with no cap on waiters, and each lookup read the whole table, so a flood held
+  descriptors without bound: now one read of the kernel's table answers every connection accepted before it began
+  (`PeerGate`, lock-order row 66, `loopback_peer_uids`), at most `max_unchecked` (64) wait and the oldest is closed
+  past it, and one proxy holds at most `max_open` (256) sockets (`OpenSlot`, carried by a tunnel's `Conn`) —
+  `a_flood_of_other_users_connections_is_bounded_and_batched` (150 connections, 150 ms reads: at most 16 wait,
+  under 30 reads, the command served within 2 s; failing first on the per-connection checks) and
+  `a_proxy_holds_at_most_max_open_sockets` (failing first: the fifth was held). (2) The macOS parser matches local
+  and foreign addresses as well as ports, and (6) refuses a socket record that is not a TCP stream
+  (`a_pcblist_n_group_is_matched_on_both_addresses_and_ports`, failing first on each). (3) The Linux parser reads only
+  ESTABLISHED rows (`a_proc_net_tcp_row_is_matched_on_both_addresses_when_established`, failing first: a `TIME_WAIT`
+  row's uid 0). (4) Every drop-the-listener port allocation in the wasm-host tests uses `test_util::alloc_port`. (5)
+  The live other-user test asserts the `peer_uid_other` count and `sudo`'s exit status. (6) The live other-user step
+  runs on macOS too (`wasm-host-macos`). Stated: more than 64 connections within one table read can close the
+  command's waiting connection.
 - **Not built, stated:** limits by address (names are compared, not what they resolve to) and by path; under Landlock,
   a limit on the proxy's port by address; an OpenShell backend; resource
   limits (CPU, memory); on Linux below Landlock ABI 6, a limit on signals to the stem user's processes; device
