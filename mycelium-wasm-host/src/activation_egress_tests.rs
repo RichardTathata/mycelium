@@ -403,6 +403,52 @@ async fn a_hung_table_read_is_bounded_and_the_next_batch_is_served() {
     assert!(served.starts_with("HTTP/1.1 200"), "once the read returns, the next batch is served: {served}");
 }
 
+/// #644's round-7 review: a read abandoned past its bound that then **panics** still clears the one-read flag, so a
+/// later batch is served. Seen failing first with the flag cleared only on a normal return: every later batch was
+/// refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_read_that_panics_after_its_bound_does_not_stop_later_reads() {
+    let (u, _) = upstream().await;
+    let me = crate::peer_uid::own_uid();
+    let calls = Arc::new(AtomicU64::new(0));
+    let seen = Arc::clone(&calls);
+    let lookup: PeerUidLookup = Arc::new(move |pairs: &[(std::net::SocketAddr, std::net::SocketAddr)]| {
+        if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            panic!("a read that outlived its bound, then failed");
+        }
+        pairs.iter().map(|_| Ok(me)).collect()
+    });
+    let limits = ProxyLimits { peer_read_timeout_ms: 300, ..ProxyLimits::default() };
+    let p = start_with_peer_uid(vec![format!("http://127.0.0.1:{u}")], limits, Some(lookup));
+    let (token, get) = (token_header(&p), format!("GET http://127.0.0.1:{u}/ HTTP/1.1\r\nHost: x\r\n\r\n"));
+    let first = tokio::time::timeout(std::time::Duration::from_secs(8), raw(p.port(), &token, &get)).await.expect("bounded");
+    assert!(first.is_empty(), "the abandoned batch is refused: {first}");
+    // Once the abandoned read has panicked, a later batch is served (polled: while it is still out, refused).
+    let mut later = String::new();
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        later = tokio::time::timeout(std::time::Duration::from_secs(8), raw(p.port(), &token, &get)).await.expect("answered");
+        if later.starts_with("HTTP/1.1 200") {
+            break;
+        }
+    }
+    assert!(later.starts_with("HTTP/1.1 200"), "a later batch is served: {later:?} after {} reads", calls.load(Ordering::SeqCst));
+}
+
+/// #644's round-7 review: the stem's budget is a quarter of the soft open-file limit, at least 32 and at most
+/// 16,384 (`None`, unlimited, read as 1,024).
+#[test]
+fn the_stem_budget_is_a_quarter_of_the_soft_limit_clamped() {
+    assert_eq!(stem_budget(Some(256)), 64, "launchd's default: a quarter");
+    assert_eq!(stem_budget(Some(1024)), 256);
+    assert_eq!(stem_budget(Some(64)), 32, "clamped up to 32");
+    assert_eq!(stem_budget(Some(0)), 32);
+    assert_eq!(stem_budget(Some(1 << 20)), 16_384, "clamped down to 16,384");
+    assert_eq!(stem_budget(Some(u64::MAX)), 16_384);
+    assert_eq!(stem_budget(None), 256);
+}
+
 /// A keep-alive upstream that answers every request on a connection and counts the connections still open.
 async fn keepalive_upstream() -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
     use std::sync::atomic::{AtomicUsize, Ordering};

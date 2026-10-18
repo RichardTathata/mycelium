@@ -1613,6 +1613,17 @@ CC8, `docs/capabilities.md`, the crate README). The example units with `[[activa
   (`a_read_that_never_returns_leaves_one_read_outstanding`, failing first: 4 reads for 4 batches). (4) The
   two-proxy budget test is replaced by the flood test, its header-read bound 60 s. Not done, with the reason:
   draining every ready connection per read — accepting past the share would hold descriptors, which (1) forbids.
+- *The seventh review (#644, round 7)* — clear to merge; three lows closed first. (1) The one-read flag is
+  cleared by a drop guard inside the read, so a read abandoned past its bound that then panics no longer refuses
+  every later batch (`a_read_that_panics_after_its_bound_does_not_stop_later_reads`, failing first with the flag
+  cleared only on return). (2) On Linux the owner comes from a `sock_diag` query for the exact 4-tuple, answered
+  from the kernel's connection hash — its cost does not grow with the TCP table another user can inflate — built
+  and parsed as bytes over `rustix`'s netlink socket, no `unsafe`; `/proc/net/tcp{,6}` only where a netlink
+  socket cannot be opened, still fail-closed (`a_sock_diag_request_and_its_answer_are_the_kernels_bytes`;
+  `sock_diag_names_own_dual_stack_and_half_closed_clients_and_not_time_wait`, live in a Linux container). On macOS
+  no per-socket query is known; that another user can push the `sysctl` read past its bound, failing closed, is
+  stated in `unit-file.md`. (3) `stem_budget` is a pure function, its quarter and both clamps tested
+  (`the_stem_budget_is_a_quarter_of_the_soft_limit_clamped`).
 - **Not built, stated:** limits by address (names are compared, not what they resolve to) and by path; under Landlock,
   a limit on the proxy's port by address; an OpenShell backend; resource
   limits (CPU, memory); on Linux below Landlock ABI 6, a limit on signals to the stem user's processes; device

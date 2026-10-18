@@ -59,7 +59,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is refused at start), a quarter of each share is kept for upstream sockets, and a proxy at its share or at 256
   sockets stops accepting instead of accepting and closing (`open_cap` is gone), so a flood on one proxy leaves the
   others theirs; no idle upstream connection is kept (the proxy's client and `EgressCredentials::send_once`); and a
-  kernel-table read that has not returned is never doubled.
+  kernel-table read that has not returned is never doubled. **After its seventh:** on Linux a connection's owner
+  comes from a `sock_diag` query for its exact addresses (`/proc/net/tcp{,6}` only where netlink is unavailable),
+  so the cost does not grow with the host's TCP table; a read that panics after its bound no longer stops later
+  reads.
 
 ### Changed
 

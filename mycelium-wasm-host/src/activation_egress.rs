@@ -260,6 +260,12 @@ pub struct FdBudget {
     freed: tokio::sync::Notify,
 }
 
+/// The stem's budget for a soft `RLIMIT_NOFILE` of `soft` (`None`: unlimited, read as 1,024): a quarter, at
+/// least 32, at most 16,384.
+pub fn stem_budget(soft: Option<u64>) -> usize {
+    ((soft.unwrap_or(1024) / 4).min(16_384) as usize).clamp(32, 16_384)
+}
+
 /// The fewest descriptors any proxy's share holds; a budget that cannot give one more proxy this many refuses it.
 pub const MIN_SHARE: usize = 8;
 
@@ -278,8 +284,7 @@ impl FdBudget {
             if cfg!(test) {
                 return FdBudget::new(10_000);
             }
-            let soft = rustix::process::getrlimit(rustix::process::Resource::Nofile).current.unwrap_or(1024);
-            FdBudget::new(((soft / 4) as usize).clamp(32, 16_384))
+            FdBudget::new(stem_budget(rustix::process::getrlimit(rustix::process::Resource::Nofile).current))
         }))
     }
 
@@ -463,9 +468,10 @@ impl PeerGate {
                     reading.store(true, Ordering::Release);
                     let (lookup, done) = (Arc::clone(&lookup), Arc::clone(&reading));
                     let read = tokio::task::spawn_blocking(move || {
-                        let answers = lookup(&pairs);
-                        done.store(false, Ordering::Release);
-                        answers
+                        // Cleared on return **and** on unwind (#644's round-7 review: a read abandoned past its
+                        // bound that then panicked left every later batch refused).
+                        let _done = ClearOnDrop(done);
+                        lookup(&pairs)
                     });
                     // A read that hangs is abandoned (its thread finishes or not on its own); its batch is refused.
                     tokio::select! {
@@ -487,6 +493,15 @@ impl PeerGate {
                 self.space.notify_one();
             }
         }
+    }
+}
+
+/// Clears its flag when dropped — on return or unwind.
+struct ClearOnDrop(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for ClearOnDrop {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 

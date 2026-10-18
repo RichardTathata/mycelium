@@ -3,8 +3,13 @@
 //! proxy can refuse at accept every connection that is not the stem's own user's — another user on the host
 //! cannot hold a place in the proxy's accounting, token or not.
 //!
-//! - **Linux:** `/proc/net/tcp` (and `tcp6`), the ESTABLISHED row whose local address is the peer's and whose
-//!   remote address is ours; its `uid` column.
+//! - **Linux:** a `sock_diag` (`NETLINK_SOCK_DIAG`, `SOCK_DIAG_BY_FAMILY`) query for the exact 4-tuple — the
+//!   kernel answers it from its connection hash, so its cost does not grow with the host's TCP table, which
+//!   another user can inflate (#644's round-7 review) — its `idiag_uid`, the socket in a live state
+//!   ([`LIVE_STATES`]). Built and parsed as plain bytes over `rustix`'s netlink socket, no `unsafe`. Where a
+//!   netlink socket cannot be opened (a sandbox that forbids it), `/proc/net/tcp` (and `tcp6`) instead: the live
+//!   row whose local address is the peer's and whose remote address is ours, its `uid` column — still
+//!   fail-closed, but a read of the whole table.
 //! - **macOS:** `sysctl -b net.inet.tcp.pcblist_n` (run as `/usr/sbin/sysctl`, so no `unsafe` call): the
 //!   `XSO_INPCB` record whose addresses and ports are the peer's and ours, then the `XSO_SOCKET` record that
 //!   follows it in the same group — checked to be a TCP stream, its `so_uid` (offset 64 of `struct xsocket_n`,
@@ -21,6 +26,125 @@ use std::net::SocketAddr;
 /// How long `sysctl` may run before it is killed (the proxy's own read bound is the backstop).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const SYSCTL_TIMEOUT_MS: u64 = 1_500;
+
+/// `sock_diag`: one request for one socket by its exact addresses, and its answer — plain bytes, native-endian
+/// headers and network-order ports and addresses, per `linux/netlink.h`, `linux/sock_diag.h` and
+/// `linux/inet_diag.h` (`struct nlmsghdr`, `struct inet_diag_req_v2`, `struct inet_diag_msg`).
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+mod diag {
+    use std::net::{IpAddr, SocketAddr};
+
+    pub(super) const SOCK_DIAG_BY_FAMILY: u16 = 20;
+    const NLMSG_ERROR: u16 = 2;
+    const NLM_F_REQUEST: u16 = 1;
+    const IPPROTO_TCP: u8 = 6;
+    const AF_INET: u8 = 2;
+    const AF_INET6: u8 = 10;
+    /// `nlmsghdr` (16) + `inet_diag_req_v2` (56).
+    pub(super) const REQUEST_LEN: usize = 72;
+    /// Where `inet_diag_msg`'s fields sit after the 16-byte header.
+    const MSG: usize = 16;
+
+    /// The 48-byte `inet_diag_sockid` of the socket whose local address is `local` and remote `remote`, cookie
+    /// `INET_DIAG_NOCOOKIE`. An IPv4 pair is asked for as `AF_INET` — the kernel's IPv4 lookup also finds a
+    /// dual-stack socket reaching the IPv4 listener through `::ffff:…`.
+    fn sockid(local: SocketAddr, remote: SocketAddr, cookie: bool) -> (u8, Vec<u8>) {
+        sockid_as(local, remote, cookie, false)
+    }
+
+    /// [`sockid`], or with `as_v6` the IPv6 spelling (an IPv4 pair as `::ffff:…`).
+    fn sockid_as(local: SocketAddr, remote: SocketAddr, cookie: bool, as_v6: bool) -> (u8, Vec<u8>) {
+        let mut id = Vec::with_capacity(48);
+        id.extend_from_slice(&local.port().to_be_bytes());
+        id.extend_from_slice(&remote.port().to_be_bytes());
+        let v4 = |a: IpAddr| match a {
+            IpAddr::V4(v) => Some(v),
+            IpAddr::V6(v) => v.to_ipv4_mapped(),
+        };
+        let family = match (v4(local.ip()), v4(remote.ip())) {
+            (Some(l), Some(r)) if !as_v6 => {
+                for a in [l, r] {
+                    id.extend_from_slice(&a.octets());
+                    id.extend_from_slice(&[0; 12]);
+                }
+                AF_INET
+            }
+            _ => {
+                for a in [local.ip(), remote.ip()] {
+                    let v6 = match a {
+                        IpAddr::V4(v) => v.to_ipv6_mapped(),
+                        IpAddr::V6(v) => v,
+                    };
+                    id.extend_from_slice(&v6.octets());
+                }
+                AF_INET6
+            }
+        };
+        id.extend_from_slice(&0u32.to_ne_bytes()); // idiag_if: any
+        if cookie {
+            id.extend_from_slice(&[0xff; 8]); // INET_DIAG_NOCOOKIE
+        }
+        (family, id)
+    }
+
+    /// The request for the TCP socket whose local address is `local` and remote `remote` (the client's socket:
+    /// its local address is the peer's, its remote ours), sequence `seq`. Not a dump: one socket, looked up.
+    pub(super) fn request(seq: u32, local: SocketAddr, remote: SocketAddr) -> Vec<u8> {
+        let (family, id) = sockid(local, remote, true);
+        let mut b = Vec::with_capacity(REQUEST_LEN);
+        b.extend_from_slice(&(REQUEST_LEN as u32).to_ne_bytes());
+        b.extend_from_slice(&SOCK_DIAG_BY_FAMILY.to_ne_bytes());
+        b.extend_from_slice(&NLM_F_REQUEST.to_ne_bytes());
+        b.extend_from_slice(&seq.to_ne_bytes());
+        b.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_pid: the kernel
+        b.extend_from_slice(&[family, IPPROTO_TCP, 0, 0]); // family, protocol, ext, pad
+        b.extend_from_slice(&u32::MAX.to_ne_bytes()); // idiag_states: any
+        b.extend_from_slice(&id);
+        debug_assert_eq!(b.len(), REQUEST_LEN);
+        b
+    }
+
+    /// The answer in `buf` to request `seq` for `local` → `remote`: `Ok((state, uid))`, or why not — the kernel's
+    /// error (`ENOENT`: no such socket), another message, or a socket whose addresses are not the ones asked for.
+    pub(super) fn parse(buf: &[u8], seq: u32, local: SocketAddr, remote: SocketAddr) -> Result<(u8, u32), String> {
+        let u16_at = |o: usize| buf.get(o..o + 2).map(|b| u16::from_ne_bytes([b[0], b[1]]));
+        let u32_at = |o: usize| buf.get(o..o + 4).map(|b| u32::from_ne_bytes([b[0], b[1], b[2], b[3]]));
+        let (Some(len), Some(kind), Some(got_seq)) = (u32_at(0), u16_at(4), u32_at(8)) else {
+            return Err("a sock_diag answer shorter than its header".into());
+        };
+        if got_seq != seq || (len as usize) > buf.len() {
+            return Err("a sock_diag answer to another request".into());
+        }
+        if kind == NLMSG_ERROR {
+            let errno = u32_at(MSG).map(|e| -(e as i32)).unwrap_or(0);
+            return Err(if errno == 2 { "no such connection (sock_diag: ENOENT)".into() } else { format!("sock_diag error {errno}") });
+        }
+        if kind != SOCK_DIAG_BY_FAMILY || (len as usize) < MSG + 72 {
+            return Err(format!("an unexpected sock_diag answer (type {kind}, {len} bytes)"));
+        }
+        // The ports and addresses (36 bytes) must be the ones asked for — in the IPv4 spelling, or, for a dual-stack
+        // socket the IPv4 lookup found, the IPv4-mapped IPv6 one the kernel describes it in.
+        let same = |as_v6: bool| {
+            let (family, id) = sockid_as(local, remote, false, as_v6);
+            buf[MSG] == family && buf.get(MSG + 4..MSG + 40) == Some(&id[..36])
+        };
+        if !same(false) && !same(true) {
+            return Err("sock_diag described another socket".into());
+        }
+        let state = buf[MSG + 1];
+        let uid = u32_at(MSG + 64).ok_or("a sock_diag answer without a uid")?;
+        Ok((state, uid))
+    }
+}
+
+/// The `TCP_*` states (`include/net/tcp_states.h`) of a client socket whose connection is still open on its
+/// side — the numeric twins of [`LIVE_STATES`].
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const LIVE_TCP_STATES: &[u8] = &[1, 4, 5, 8];
+
+/// How long one `sock_diag` answer may take.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const DIAG_TIMEOUT_MS: u64 = 500;
 
 /// This process's real user id.
 pub fn own_uid() -> u32 {
@@ -192,9 +316,47 @@ fn match_pcb(rows: &[PcbRow], local: SocketAddr, peer: SocketAddr) -> Option<u32
 
 #[cfg(target_os = "linux")]
 mod os {
+    use rustix::net::{netlink, AddressFamily, RecvFlags, SendFlags, SocketType};
     use std::net::SocketAddr;
+    use std::os::fd::OwnedFd;
 
     pub(super) fn lookup_all(pairs: &[(SocketAddr, SocketAddr)]) -> Vec<Result<u32, String>> {
+        match open() {
+            Ok(fd) => pairs.iter().enumerate().map(|(i, (local, peer))| one(&fd, i as u32 + 1, *local, *peer)).collect(),
+            // No netlink here (a sandbox that forbids it): the whole-table read, still fail-closed.
+            Err(e) => {
+                tracing::debug!(error = %e, "peer uid: no sock_diag socket; reading /proc/net/tcp");
+                proc_tables(pairs)
+            }
+        }
+    }
+
+    fn open() -> rustix::io::Result<OwnedFd> {
+        let fd = rustix::net::socket(AddressFamily::NETLINK, SocketType::DGRAM, Some(netlink::SOCK_DIAG))?;
+        rustix::net::sockopt::set_socket_timeout(&fd, rustix::net::sockopt::Timeout::Recv, Some(std::time::Duration::from_millis(super::DIAG_TIMEOUT_MS)))?;
+        Ok(fd)
+    }
+
+    /// One socket by its exact addresses: the client's socket, whose local address is `peer` and remote `local`.
+    pub(super) fn one(fd: &OwnedFd, seq: u32, local: SocketAddr, peer: SocketAddr) -> Result<u32, String> {
+        let req = super::diag::request(seq, peer, local);
+        rustix::net::sendto(fd, &req, SendFlags::empty(), &netlink::SocketAddrNetlink::new(0, 0)).map_err(|e| format!("sock_diag send: {e}"))?;
+        let mut buf = [0u8; 8192];
+        // Skip a stale answer to an earlier request on this socket (one that timed out), at most a few.
+        for _ in 0..8 {
+            let (n, _) = rustix::net::recv(fd, &mut buf[..], RecvFlags::empty()).map_err(|e| format!("sock_diag receive: {e}"))?;
+            match super::diag::parse(&buf[..n], seq, peer, local) {
+                Err(e) if e.contains("another request") => continue,
+                Err(e) => return Err(format!("{peer} → {local}: {e}")),
+                Ok((state, uid)) if super::LIVE_TCP_STATES.contains(&state) => return Ok(uid),
+                Ok((state, _)) => return Err(format!("{peer} → {local} is not a live connection (TCP state {state})")),
+            }
+        }
+        Err("sock_diag: no answer to this request".into())
+    }
+
+    /// The fallback: `/proc/net/tcp` and `tcp6`, read whole.
+    pub(super) fn proc_tables(pairs: &[(SocketAddr, SocketAddr)]) -> Vec<Result<u32, String>> {
         let read = |table: &str| std::fs::read_to_string(table).ok();
         // tcp6 also holds a dual-stack client of the IPv4 listener, under the IPv4-mapped spelling.
         let tcp = pairs.iter().any(|(_, p)| p.is_ipv4()).then(|| read("/proc/net/tcp")).flatten();
@@ -206,6 +368,13 @@ mod os {
                     .ok_or_else(|| format!("{peer} → {local} is not a live connection in /proc/net/tcp or tcp6"))
             })
             .collect()
+    }
+
+    /// For the tests: the sock_diag path alone, no fallback.
+    #[cfg(test)]
+    pub(super) fn diag_only(pairs: &[(SocketAddr, SocketAddr)]) -> Result<Vec<Result<u32, String>>, String> {
+        let fd = open().map_err(|e| e.to_string())?;
+        Ok(pairs.iter().enumerate().map(|(i, (local, peer))| one(&fd, i as u32 + 1, *local, *peer)).collect())
     }
 }
 
@@ -372,6 +541,98 @@ mod tests {
         let (_server, peer) = listener.accept().unwrap();
         assert!(client.local_addr().unwrap().is_ipv6(), "the client is of the IPv6 family");
         assert_eq!(loopback_peer_uid(local, peer), Ok(own_uid()));
+    }
+
+    /// #644's round-7 review: the `sock_diag` request for one socket, byte for byte (the netlink header in native
+    /// order, ports and addresses in network order), and its answer parsed — the uid and state, the kernel's
+    /// `ENOENT`, an answer to another request, an answer about another socket.
+    #[test]
+    fn a_sock_diag_request_and_its_answer_are_the_kernels_bytes() {
+        let client: SocketAddr = "127.0.0.1:40000".parse().unwrap();
+        let ours: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        // nlmsghdr: len 72, SOCK_DIAG_BY_FAMILY, NLM_F_REQUEST, seq 7, pid 0.
+        let header = |len: u32, kind: u16, flags: u16, seq: u32| [&len.to_ne_bytes()[..], &kind.to_ne_bytes(), &flags.to_ne_bytes(), &seq.to_ne_bytes(), &[0; 4]].concat();
+        let mut want = header(72, 20, 1, 7);
+        want.extend_from_slice(&[2, 6, 0, 0, 0xff, 0xff, 0xff, 0xff]); // AF_INET, IPPROTO_TCP, ext, pad, every state
+        want.extend_from_slice(&[0x9c, 0x40, 0x1f, 0x90]); // sport 40000, dport 8080, network order
+        want.extend_from_slice(&[127, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        want.extend_from_slice(&[127, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        want.extend_from_slice(&[0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]); // if, INET_DIAG_NOCOOKIE
+        assert_eq!(diag::request(7, client, ours), want);
+        // A dual-stack client is asked for by its IPv4 address.
+        let mapped = SocketAddr::new("::ffff:127.0.0.1".parse().unwrap(), 40000);
+        assert_eq!(diag::request(7, mapped, ours), want);
+        // An IPv6 pair: AF_INET6, sixteen-byte addresses.
+        let v6 = diag::request(1, "[::1]:40000".parse().unwrap(), "[::1]:8080".parse().unwrap());
+        assert_eq!((v6[16], &v6[24..28], v6[43], v6[59]), (10, &[0x9c, 0x40, 0x1f, 0x90][..], 1, 1));
+        // The answer: nlmsghdr, then inet_diag_msg — family, state, timer, retrans, the sockid, expires, rqueue,
+        // wqueue, uid, inode.
+        let answer = |seq: u32, state: u8, sport: u16| {
+            let mut a = header(88, 20, 0, seq);
+            a.extend_from_slice(&[2, state, 0, 0]);
+            a.extend_from_slice(&sport.to_be_bytes());
+            a.extend_from_slice(&[0x1f, 0x90]);
+            a.extend_from_slice(&[127, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            a.extend_from_slice(&[127, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            a.extend_from_slice(&[0, 0, 0, 0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x08]); // if, cookie
+            a.extend_from_slice(&[0; 12]); // expires, rqueue, wqueue
+            a.extend_from_slice(&1001u32.to_ne_bytes());
+            a.extend_from_slice(&5u32.to_ne_bytes());
+            a
+        };
+        assert_eq!(answer(7, 1, 40000).len(), 88);
+        assert_eq!(diag::parse(&answer(7, 1, 40000), 7, client, ours), Ok((1, 1001)));
+        assert_eq!(diag::parse(&answer(7, 5, 40000), 7, client, ours), Ok((5, 1001)));
+        assert!(diag::parse(&answer(6, 1, 40000), 7, client, ours).unwrap_err().contains("another request"));
+        assert!(diag::parse(&answer(7, 1, 40001), 7, client, ours).unwrap_err().contains("another socket"));
+        // A dual-stack socket, which the kernel describes as AF_INET6 with IPv4-mapped addresses.
+        let mut v6answer = header(88, 20, 0, 7);
+        v6answer.extend_from_slice(&[10, 1, 0, 0, 0x9c, 0x40, 0x1f, 0x90]);
+        for _ in 0..2 {
+            v6answer.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 127, 0, 0, 1]);
+        }
+        v6answer.extend_from_slice(&[0; 24]);
+        v6answer.extend_from_slice(&1002u32.to_ne_bytes());
+        v6answer.extend_from_slice(&6u32.to_ne_bytes());
+        assert_eq!(v6answer.len(), 88);
+        assert_eq!(diag::parse(&v6answer, 7, client, ours), Ok((1, 1002)));
+        let mut enoent = header(36, 2, 0, 7);
+        enoent.extend_from_slice(&(-2i32).to_ne_bytes());
+        enoent.extend_from_slice(&diag::request(7, client, ours)[..16]);
+        assert!(diag::parse(&enoent, 7, client, ours).unwrap_err().contains("ENOENT"));
+        assert!(diag::parse(&[1, 2, 3], 7, client, ours).is_err());
+    }
+
+    /// Live, Linux: the kernel's `sock_diag` answer names this user's own connection, a dual-stack client, and a
+    /// client that has half-closed (FIN_WAIT2); a client in TIME_WAIT is not named.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sock_diag_names_own_dual_stack_and_half_closed_clients_and_not_time_wait() {
+        let me = own_uid();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let local = listener.local_addr().unwrap();
+        let plain = std::net::TcpStream::connect(local).unwrap();
+        let (_s1, p1) = listener.accept().unwrap();
+        let dual = std::net::TcpStream::connect(SocketAddr::new("::ffff:127.0.0.1".parse().unwrap(), local.port())).expect("dual-stack connect");
+        assert!(dual.local_addr().unwrap().is_ipv6());
+        let (_s2, p2) = listener.accept().unwrap();
+        let half = std::net::TcpStream::connect(local).unwrap();
+        let (_s3, p3) = listener.accept().unwrap();
+        half.shutdown(std::net::Shutdown::Write).unwrap();
+        let gone = std::net::TcpStream::connect(local).unwrap();
+        let (s4, p4) = listener.accept().unwrap();
+        drop(gone); // the client closes first …
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        drop(s4); // … then the server: the client's socket is in TIME_WAIT
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let answers = os::diag_only(&[(local, p1), (local, p2), (local, p3), (local, p4)]).expect("a sock_diag socket opens");
+        assert_eq!(answers[0], Ok(me), "own");
+        assert_eq!(answers[1], Ok(me), "dual-stack");
+        assert_eq!(answers[2], Ok(me), "half-closed");
+        assert!(answers[3].as_ref().unwrap_err().contains("not a live connection") || answers[3].as_ref().unwrap_err().contains("ENOENT"), "TIME_WAIT: {:?}", answers[3]);
+        // And the whole path the proxy calls agrees.
+        assert_eq!(loopback_peer_uid(local, p2), Ok(me));
+        drop((plain, dual, half));
     }
 
     /// One read answers many: a batch of pairs comes back in order, each its own answer.

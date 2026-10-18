@@ -458,10 +458,15 @@ name. Every entry is checked first, as at start; a bad list is refused and the o
 meets the new list; the command, its profile and the proxy's port are unchanged, and an open `CONNECT` tunnel is
 not closed. `credentials`, `env` and everything else in the file are read once, at start.
 
-**Only this user's processes.** At accept the proxy asks the kernel which user owns the connecting socket
-(`/proc/net/tcp` and `/proc/net/tcp6` on Linux — a dual-stack client reaching `127.0.0.1` as `::ffff:127.0.0.1`
-included — `net.inet.tcp.pcblist_n` on macOS) and closes, before it holds any place, a connection another user's
-process opened — or one whose owner cannot be read (fail closed; a client that has half-closed is still named).
+**Only this user's processes.** At accept the proxy asks the kernel which user owns the connecting socket and
+closes, before it holds any place, a connection another user's process opened — or one whose owner cannot be read
+(fail closed; a client that has half-closed is still named, and a dual-stack client reaching `127.0.0.1` as
+`::ffff:127.0.0.1`). On Linux it asks `sock_diag` for that one socket by its exact addresses, which the kernel
+answers from its connection hash, so the cost does not grow with the host's TCP table; where a netlink socket
+cannot be opened (a sandbox that forbids it) it reads `/proc/net/tcp` and `tcp6` whole instead, still failing
+closed. On macOS no per-socket query is known: it reads the whole table (`net.inet.tcp.pcblist_n`), so another
+user who opens enough idle sockets anywhere on the host can push that read past its bound — every connection is
+then refused until the table shrinks (fail closed, never open).
 One read of the kernel's table answers every connection accepted before it began, so a flood costs reads per
 batch, not per connection, and the command's connection waits about one read; a read that takes longer than 2 s
 (on macOS, `sysctl` killed after 1.5 s) refuses its batch and the next read begins. While 64 connections wait to
