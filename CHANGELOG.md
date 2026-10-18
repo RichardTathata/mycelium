@@ -68,7 +68,9 @@ locality (its next re-pin). Upgrade notes: `deprecations.md` §50.
 
 - **`mycelium-py` 0.2.12** and **`mycelium-ts` 0.2.6** (their own tags): `rpc_serve` / `rpcServe` raise
   `ProtectedKindError`, naming the kind, when the node refuses the stream (`403 protected_kind` or
-  `403 served_in_process`) — before, an SSE content-type error (#643's round-2 review, E).
+  `403 served_in_process`) — before, an SSE content-type error (#643's round-2 review, E) — and the new
+  `ServeEvictedError` (a `ProtectedKindError`) when the node closes the stream because a receiver of its own took the
+  kind, rather than ending the worker's loop silently (round 3).
 
 ## [2.35.0] — 2026-10-17
 

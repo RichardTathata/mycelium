@@ -15,7 +15,9 @@ which the enumeration greps missed — now refused for the node-served kinds), t
 is), and the provisioner as a third writer of `llm-meta` (closed); round 2 found the sibling of the `rpc/serve`
 finding — any kind the node serves in process, e.g. a hosted component's — closed at the root in the handler table
 (`register_client`: refused beside an in-process receiver, evicted when one registers), and a classifying router that
-routed before its evaluator was attached (now refused until one is); a member writing another
+routed before its evaluator was attached (now refused until one is); round 3 found that rule too wide — a
+`signal_once` evicted SDK workers — so transient listeners (waiting, not serving) are exempt, and an eviction is
+told (an `evicted` event, typed in both SDKs) and counted; a member writing another
 node's ad stays open (an ad's key is not bound to its writer). A class rule names one class, so policies are
 written as allow-lists.
 

@@ -77,6 +77,18 @@ export class ProtectedKindError extends Error {
 }
 
 /**
+ * A serve stream (`rpcServe`) was **closed by the node** because a receiver of its own registered for the kind:
+ * the node now serves it, so no client stream may hold it (0.2.6; substrate post-360 row R). A
+ * `ProtectedKindError`, so a handler for the refusal at open catches this too.
+ */
+export class ServeEvictedError extends ProtectedKindError {
+  constructor(kind: string, message: string) {
+    super(kind, message);
+    this.name = "ServeEvictedError";
+  }
+}
+
+/**
  * The gateway refused a **protected key** on a raw KV route (HTTP 403 `protected_key`). `set`, `delete`,
  * `setWithMinAcks` and `consistentSet` write application keys only (`ckpt/`, `manifest/`, `schemas/`,
  * your own namespaces); a key in a namespace the substrate or a companion owns (`sys/`, `grp/`, `cap/`,
@@ -553,11 +565,16 @@ export class MyceliumAgent {
       }
       return undefined;
     };
-    yield* sseStream<RpcRequest>({ url, headers: this.auth }, (data, event) => {
+    type Item = { req?: RpcRequest; evicted?: { kind: string; message: string } };
+    const items = sseStream<Item>({ url, headers: this.auth }, (data, event) => {
       const raw = JSON.parse(data) as {
-        kind?: string; nonce_hex: string; sender: string; payload_b64: string;
+        kind?: string; nonce_hex: string; sender: string; payload_b64: string; error?: string; message?: string;
         caller?: { principal: string; via: string; scopes: string[]; attested: boolean };
       };
+      // The node took the kind: a terminal `evicted` event, thrown below — never a quiet end of the stream.
+      if (event === "evicted" && raw.error === "evicted") {
+        return { evicted: { kind: String(raw.kind ?? kind), message: String(raw.message ?? "evicted") } };
+      }
       const req: RpcRequest = {
         // The serve stream's data has no `kind`: it is the SSE event name (sweep 2026-10-06).
         kind: raw.kind ?? event ?? kind,
@@ -566,8 +583,12 @@ export class MyceliumAgent {
         payload: fromb64(raw.payload_b64),
       };
       if (raw.caller) req.caller = raw.caller;
-      return req;
+      return { req };
     }, { refusal });
+    for await (const item of items) {
+      if (item.evicted) throw new ServeEvictedError(item.evicted.kind, item.evicted.message);
+      if (item.req) yield item.req;
+    }
   }
 
   /** Sends a reply to an in-flight RPC request. */

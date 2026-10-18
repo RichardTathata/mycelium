@@ -507,6 +507,11 @@ pub struct SystemStats {
     /// other subscriber; it drops its own copies, counted here.
     pub signal_handler_drops: u64,
 
+    /// Cumulative client serve streams (`GET /gateway/rpc/serve/{kind}`) closed because a receiver this node
+    /// serves the kind with itself registered for their kind (post-360 row R; `rbac.md`). Rising means an
+    /// SDK worker and an in-process handler are contending for one kind on this node — serve it one way.
+    pub signal_client_evictions: u64,
+
     /// Cumulative signal kinds the sender log evicted, least recently seen first, to make room at
     /// [`SIGNAL_LOG_MAX_KINDS`](mycelium_core::signal::SIGNAL_LOG_MAX_KINDS) (row B; #602's review).
     /// Kinds with a local handler or that were queried are never evicted. Non-zero means some sender

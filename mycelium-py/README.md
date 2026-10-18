@@ -559,7 +559,9 @@ twice — it is the only thing that lets a silent gateway be retried elsewhere, 
 
 `rpc_serve(kind)` raises `ProtectedKindError` (naming the kind) when the node refuses the stream: `403 protected_kind`
 for `mcp.invoke`, `skill.invoke` and `llm.invoke`, and `403 served_in_process` for any kind the node already serves
-with a receiver of its own (substrate post-360 row R). Before 0.2.12 both surfaced as an SSE content-type error.
+with a receiver of its own (substrate post-360 row R). Before 0.2.12 both surfaced as an SSE content-type error. A
+stream the node later closes because a receiver of its own took the kind raises `ServeEvictedError` (a
+`ProtectedKindError`) — the `async for` never just ends.
 
 ### Timer periods (0.2.11)
 

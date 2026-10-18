@@ -1647,9 +1647,12 @@ is passed over for the next** — before, the façade answered `403` at the firs
   provider enforcement.
 - `GET /gateway/rpc/serve/{kind}` also refuses any kind this node already serves in process (`403
   served_in_process`, naming it — a hosted component's `cap.invoke` kind, an embedder's `rpc_rx`), and a client stream
-  holding a kind is **closed** when an in-process receiver registers for it. Serve a kind either in process or over
-  client streams, not both. The SDKs raise `ProtectedKindError` for either refusal (`mycelium-py` 0.2.12,
-  `mycelium-ts` 0.2.6). `mycelium-core`'s `SignalHandlers` gains `register_client` and `client_evictions`.
+  holding a kind is **closed** — a terminal `evicted` event, counted as `signal_client_evictions` — when an in-process
+  receiver registers for it; a transient listener (`signal_once`, a request's reply) does neither. Serve a kind either
+  in process or over client streams, not both. The SDKs raise `ProtectedKindError` for either refusal and
+  `ServeEvictedError` on eviction (`mycelium-py` 0.2.12, `mycelium-ts` 0.2.6). `mycelium-core`'s `SignalHandlers`
+  gains `register_client`, `register_transient` and `client_evictions`; `SystemStats` gains `signal_client_evictions`
+  (an exhaustive struct literal breaks).
 - A classifying router (`reason_router_classified`) refuses every request `403 authority_not_established` while no
   action evaluator is attached: attach it (and the journal) before `start()`. `GatewayPreflight::is_inert` is
   undeprecated — deprecated in 2.33.0 as unreferenced (§38), it now has its caller.

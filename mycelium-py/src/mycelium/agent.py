@@ -85,6 +85,13 @@ class ProtectedKindError(PermissionError):
         self.kind = kind
 
 
+class ServeEvictedError(ProtectedKindError):
+    """A serve stream (:meth:`MyceliumAgent.rpc_serve`) was **closed by the node** because a receiver of its own
+    registered for the kind: the node now serves it, so no client stream may hold it (0.2.12; substrate post-360
+    row R). A :class:`ProtectedKindError`, so a handler for the refusal at open catches this too. ``kind`` names
+    the kind. The worker should stop serving it on this node, or serve it elsewhere."""
+
+
 class _ProtectedWriteError(PermissionError, httpx.HTTPStatusError):
     """A raw KV or log route refused a namespace that a component owns (HTTP 403).
 
@@ -940,6 +947,9 @@ class MyceliumAgent:
                 async for event in event_source.aiter_sse():
                     import json as _json
                     data    = _json.loads(event.data)
+                    if event.event == "evicted" and data.get("error") == "evicted":
+                        # The node took the kind: never return as though the stream had simply ended.
+                        raise ServeEvictedError(str(data.get("kind", kind)), str(data.get("message", "evicted")))
                     payload = base64.b64decode(data.get("payload_b64", ""))
                     yield RpcRequest(
                         kind      = event.event or kind,

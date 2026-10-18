@@ -1764,12 +1764,54 @@ async fn an_rpc_serve_stream_never_shares_a_kind_with_the_nodes_own_receiver() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     let _later = agent.service().rpc_rx("depot.work");
     let ended = tokio::time::timeout(Duration::from_secs(5), async {
-        // Keep-alive comments until the stream ends.
-        while let Ok(Some(_)) = stream.chunk().await {}
+        // Keep-alive comments, then the terminal event, until the stream ends.
+        let mut body = String::new();
+        while let Ok(Some(c)) = stream.chunk().await {
+            body.push_str(&String::from_utf8_lossy(&c));
+        }
+        body
     })
     .await;
-    assert!(ended.is_ok(), "the evicted stream ends");
+    let body = ended.expect("the evicted stream ends");
+    // Round 3: the client is told why, with a terminal event naming the kind (the SDKs raise on it).
+    assert!(body.contains("event: evicted") && body.contains("\"kind\":\"depot.work\""), "{body}");
     let r = http.get(url("depot.work")).send().await.unwrap();
     assert_eq!(r.status().as_u16(), 403, "and the kind is the node's now");
+    // Round 3: the eviction is observable — `/stats` and the agent's own stats.
+    assert_eq!(agent.system_stats().signal_client_evictions, 1);
+    let stats: serde_json::Value =
+        http.get(format!("http://127.0.0.1:{http_port}/stats")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(stats["signal_client_evictions"], 1, "{stats}");
+    agent.shutdown_with_timeout(Duration::from_secs(5)).await;
+}
+
+/// Round-3 finding 1 (the reviewer's probe): a **transient** in-process listener — the node waiting for a signal
+/// with `signal_once`, or for a request's reply — ended every SDK worker's serve stream on its kind, permanently.
+/// A transient listener waits, it does not serve: it neither evicts a client stream nor is refused because of one.
+/// Seen failing first: the worker's stream ended after a 100 ms `signal_once`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_transient_listener_does_not_end_a_client_serve_stream() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(FsBlobStore::open(dir.path()).unwrap());
+    let (agent, _base, http_port) = start_gateway_node(store, None).await;
+    let http = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{http_port}/gateway/rpc/serve/work");
+    let mut worker = http.get(&url).send().await.unwrap();
+    assert_eq!(worker.status().as_u16(), 200);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _ = agent.mesh().signal_once("work", Duration::from_millis(100), |_| true).await;
+    let ended = tokio::time::timeout(Duration::from_secs(2), async { while let Ok(Some(_)) = worker.chunk().await {} }).await;
+    assert!(ended.is_err(), "the worker's stream is still open after the transient listener");
+    assert_eq!(agent.system_stats().signal_client_evictions, 0);
+    // And a client may open a stream while the node waits.
+    let waiting = {
+        let agent = Arc::clone(&agent);
+        tokio::spawn(async move { agent.mesh().signal_once("work", Duration::from_secs(2), |_| true).await })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let r = http.get(&url).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 200, "a waiting node does not hold the kind");
+    drop(r);
+    let _ = waiting.await;
     agent.shutdown_with_timeout(Duration::from_secs(5)).await;
 }

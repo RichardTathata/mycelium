@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from mycelium import MyceliumAgent, ProtectedKindError
+from mycelium import MyceliumAgent, ProtectedKindError, ServeEvictedError
 
 
 class _Stub(BaseHTTPRequestHandler):
@@ -21,6 +21,7 @@ class _Stub(BaseHTTPRequestHandler):
     status: int = 403
     reply: dict = {}
     seen: list = []
+    sse: str = ""
 
     def do_POST(self) -> None:  # noqa: N802
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
@@ -34,6 +35,14 @@ class _Stub(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         _Stub.seen.append((self.path, {}))
+        if _Stub.status == 200:
+            data = _Stub.sse.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         data = json.dumps(_Stub.reply).encode()
         self.send_response(_Stub.status)
         self.send_header("Content-Type", "application/json")
@@ -120,3 +129,27 @@ def test_rpc_serve_on_a_node_served_kind_raises_protected_kind_error(agent):
     with pytest.raises(Exception) as e:
         asyncio.run(first("work"))
     assert not isinstance(e.value, ProtectedKindError)
+
+
+def test_an_evicted_serve_stream_raises_rather_than_ending_quietly(agent):
+    """Post-360 row R (#643's round-3 review): the node closes a serve stream with a terminal ``evicted`` event
+    when a receiver of its own takes the kind; ``rpc_serve`` raises ``ServeEvictedError`` (a
+    ``ProtectedKindError``) instead of returning as though the stream had simply ended."""
+    import asyncio
+
+    _Stub.status = 200
+    _Stub.sse = (
+        'event: work\ndata: {"nonce_hex":"0000000000000001","sender":"127.0.0.1:1","payload_b64":"aGk="}\n\n'
+        'event: evicted\ndata: {"error":"evicted","kind":"work","message":"now served by the node"}\n\n'
+    )
+    seen = []
+
+    async def drain():
+        async for req in agent.rpc_serve("work"):
+            seen.append(req.nonce_hex)
+
+    with pytest.raises(ServeEvictedError) as e:
+        asyncio.run(drain())
+    assert e.value.kind == "work"
+    assert isinstance(e.value, ProtectedKindError)
+    assert seen == ["0000000000000001"]

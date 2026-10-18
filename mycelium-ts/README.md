@@ -461,6 +461,14 @@ protected kind — is thrown, never reported as `"timeout"`.
   `sseStream`) bounds only the events parsed from a single network read (`maxPending`, default 1024,
   when you call `sseStream` yourself).
 
+### A serve stream refused or closed (0.2.6)
+
+`rpcServe(kind)` throws `ProtectedKindError` (naming the kind) when the node refuses the stream: `403 protected_kind`
+for `mcp.invoke`, `skill.invoke` and `llm.invoke`, and `403 served_in_process` for any kind the node already serves
+with a receiver of its own (substrate post-360 row R). Before 0.2.6 both surfaced as `SSE request failed: 403`. A
+stream the node later closes because a receiver of its own took the kind throws `ServeEvictedError` (a
+`ProtectedKindError`) — the `for await` never just ends.
+
 ### Timer periods (0.2.5)
 
 - **`intervalSecs` and `leaseSecs` are whole seconds in `1..=3600`** (`advertiseCapability`, `declareUnits`),
