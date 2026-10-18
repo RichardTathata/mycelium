@@ -339,6 +339,15 @@ moment, is refused rather than followed. A `..` there is refused too: name the p
 An operator symlink outside every root may still point into one (a shortcut to `out/sub`). Everything past the point
 where it enters the root is held to the same rule.
 
+**Mounts.** On Linux a write path's filesystem may be mounted a second time, for example by a bind mount of a
+directory inside it. The root's interior then shows under a path that never passes the root itself, so a symlink
+there could be one the command wrote. A symlink on a filesystem that holds a write path **and** is mounted more
+than once is therefore not followed: the declared path is refused by name. Name the path through the root, or
+declare it without a symlink. The check reads `/proc/self/mountinfo`. If that cannot be read, or a device does not
+appear there exactly once (btrfs subvolumes can do this), the filesystem is treated as mounted more than once.
+macOS has no bind mounts. Not detected, on either platform: a view of a write path through another filesystem (FUSE
+`bindfs`, overlayfs, NFS or SMB loopback). Do not reach a declared path through such a view of a write path.
+
 A path reached through an ancestor symlink that is flipped (`/models/current` → `v2`) resolves to the new target.
 The profile re-resolves to name that target and no longer names the old one.
 The profile names each path's on-disk spelling, so a different case or Unicode normalisation of a path that exists is

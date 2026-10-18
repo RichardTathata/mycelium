@@ -193,6 +193,9 @@ pub struct Profile {
     /// The writable roots' identities (the placement directory, then each `write`): at or below one, every
     /// component is walked without following a symlink.
     pub(crate) roots: Vec<(u64, u64)>,
+    /// Devices that hold a write root and are mounted more than once (Linux): a symlink on one is not
+    /// followed even outside every root, since the root's interior may show there (review of #641 round 4).
+    pub(crate) shared_devs: Vec<u64>,
 }
 
 impl Profile {
@@ -212,7 +215,7 @@ impl Profile {
             return Some(Path::new("(an incomplete profile)"));
         }
         for (i, (p, src)) in paths.iter().zip(&self.sources).enumerate() {
-            let again = walk(src, &self.roots, &src.display().to_string(), i == 0);
+            let again = walk(src, &self.roots, &self.shared_devs, &src.display().to_string(), i == 0);
             if !again.is_ok_and(|w| w.path == **p && w.id == self.ids[i]) {
                 return Some(p);
             }
@@ -263,7 +266,16 @@ const MAX_FOLLOWS: usize = 40;
 /// only if it has the walked depth and names the walked identity. `allow_final_link`: the declared path's
 /// own last component may be the operator's symlink (the placement directory); for every other declared
 /// path it is refused, as `[activation.confine]` has always said.
-fn walk(src: &Path, roots: &[(u64, u64)], raw: &str, allow_final_link: bool) -> Result<Walked, Refusal> {
+///
+/// **A second mount** (round 4, N1): on Linux a write root's filesystem may be mounted again elsewhere (a
+/// bind mount of a subtree), showing the root's interior under a path that never passes the root's own
+/// inode. A symlink found in a directory on a device that holds a write root **and** is mounted more than
+/// once (`shared_devs`, from `/proc/self/mountinfo`) is therefore not followed, outside a root or not: a
+/// confined command could have written it through the root. On a device mounted once, every directory has
+/// one path from `/`, so a walk that never met a root's inode is outside it. Not detected, on either
+/// platform: a *view* of a root through another filesystem (FUSE `bindfs`, overlayfs, NFS or SMB loopback),
+/// which shows the root's interior under a device of its own.
+fn walk(src: &Path, roots: &[(u64, u64)], shared_devs: &[u64], raw: &str, allow_final_link: bool) -> Result<Walked, Refusal> {
     use rustix::fs::{openat, readlinkat, statat, AtFlags, Mode, OFlags, CWD};
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStrExt;
@@ -331,6 +343,16 @@ fn walk(src: &Path, roots: &[(u64, u64)], raw: &str, allow_final_link: bool) -> 
             if inside || (declared_last && !allow_final_link) {
                 return Err(refused_symlink(raw, src, &at));
             }
+            let dev = id_of(cur).map_err(|e| missing(&e))?.0;
+            if shared_devs.contains(&dev) {
+                return Err(Refusal::Failed(format!(
+                    "confine path {raw:?} ({}) passes through a symlink at {} on a filesystem that holds a writable root \
+                     and is mounted more than once — a symlink there is not followed, since a confined command could have \
+                     written it through the root; name its target",
+                    src.display(),
+                    at.display()
+                )));
+            }
             follows += 1;
             if follows > MAX_FOLLOWS {
                 return Err(missing(&"too many levels of symbolic links"));
@@ -377,6 +399,27 @@ fn walk(src: &Path, roots: &[(u64, u64)], raw: &str, allow_final_link: bool) -> 
     }
     // The path was `/` itself, or ended in `..`: name it directly.
     Err(missing(&"a declared path must name a file or directory below `/`"))
+}
+
+/// The devices among `write_roots` that are mounted more than once in this mount namespace (Linux,
+/// `/proc/self/mountinfo`: more than one entry with the device's `major:minor`). Unreadable mount information
+/// counts every write root's device as shared — fail closed. Elsewhere none: macOS has no bind mounts.
+fn shared_devices(write_roots: &[(u64, u64)]) -> Vec<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let devs = write_roots.iter().map(|(dev, _)| *dev);
+        let Ok(info) = std::fs::read_to_string("/proc/self/mountinfo") else { return devs.collect() };
+        devs.filter(|dev| {
+            let key = format!("{}:{}", rustix::fs::major(*dev), rustix::fs::minor(*dev));
+            info.lines().filter(|l| l.split(' ').nth(2) == Some(key.as_str())).count() != 1
+        })
+        .collect()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = write_roots;
+        Vec::new()
+    }
 }
 
 /// The identity a root has now: its canonical path's (device, inode), followed — the starting set the
@@ -468,9 +511,10 @@ pub fn prepare(c: &ConfineDecl, placed: &Path) -> Result<Profile, Refusal> {
         .map(|e| mycelium::parse_confine_connect(e).map(|(host, port)| (host == "localhost", port)))
         .collect::<Result<Vec<_>, _>>()
         .map_err(Refusal::Failed)?;
-    let mut walked = vec![walk(dir, &roots, &dir.display().to_string(), true)?];
+    let shared_devs = shared_devices(&roots[1..]);
+    let mut walked = vec![walk(dir, &roots, &shared_devs, &dir.display().to_string(), true)?];
     for raw in c.read.iter().chain(&c.write) {
-        walked.push(walk(&expand(raw), &roots, raw, false)?);
+        walked.push(walk(&expand(raw), &roots, &shared_devs, raw, false)?);
     }
     // Each root reached by its walk is the root the set named: the placement directory first, then each
     // `write` (the last `c.write.len()` walks).
@@ -491,7 +535,7 @@ pub fn prepare(c: &ConfineDecl, placed: &Path) -> Result<Profile, Refusal> {
         Pinned::default()
     };
     let (read, write) = (paths[..n_read].to_vec(), paths[n_read..].to_vec());
-    let profile = Profile { backend, read, write, connect, pinned, ids, sources, roots };
+    let profile = Profile { backend, read, write, connect, pinned, ids, sources, roots, shared_devs };
     at_stage("pinned");
     at_stage("rechecked");
     // Walked again: a component toggled while the profile resolved (a link at one walk, a directory at the
@@ -859,6 +903,7 @@ mod tests {
             ids: Vec::new(),
             sources: Vec::new(),
             roots: Vec::new(),
+            shared_devs: Vec::new(),
         };
         let text = seatbelt_profile(&p);
         assert!(!text.contains("allow default"), "no path is spliced into the profile: {text}");
@@ -1091,6 +1136,68 @@ mod tests {
         match after {
             Err(Refusal::Failed(m)) => assert!(m.contains("symlink"), "{m}"),
             other => panic!("a redirect inside the write root must be refused, got {other:?}"),
+        }
+    }
+
+    /// Review of #641 round 4, finding N1 (Linux): a write root's filesystem mounted a second time — here
+    /// its `models/` bind-mounted beside it — shows the root's interior under a path the walk does not see
+    /// as inside the root, so a symlink the confined command writes through the root (`data/models/current`)
+    /// would be followed through the second mount. A symlink on a filesystem that holds a write root and is
+    /// mounted more than once is not followed; the path is refused by name. It mounts only when
+    /// `MYCELIUM_CONFINE_MOUNT_LIVE_REQUIRED` is set, run alone in a mount namespace of its own (`unshare -m`
+    /// as root, as CI's step does) — never beside other tests, whose devices the mount would make shared —
+    /// and then a failure to mount fails it; unset, it skips. Seen failing first at `9bb6cd3f` in a Linux 6.8
+    /// container (`docker run --privileged`, `unshare -m --propagation private <test binary> --exact …`): the
+    /// profile named `outside/m`.
+    #[test]
+    fn a_symlink_on_a_second_mount_of_a_write_roots_filesystem_is_not_followed() {
+        const T: &str = "a_symlink_on_a_second_mount_of_a_write_roots_filesystem_is_not_followed";
+        if !cfg!(target_os = "linux") {
+            eprintln!("{T}: not applicable — Linux bind mounts (macOS has none; see `unit-file.md`)");
+            return;
+        }
+        if !native_backend_or_skip(T) {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("confine-bind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for d in ["placed", "data/models/v1", "models", "outside"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let root = root.canonicalize().unwrap();
+        std::fs::write(root.join("data/models/v1/m"), b"declared").unwrap();
+        std::fs::write(root.join("outside/m"), b"outside").unwrap();
+        std::os::unix::fs::symlink("v1", root.join("data/models/current")).unwrap();
+        if std::env::var_os("MYCELIUM_CONFINE_MOUNT_LIVE_REQUIRED").is_none() {
+            let _ = std::fs::remove_dir_all(&root);
+            eprintln!("{T}: SKIPPED — mounts only under MYCELIUM_CONFINE_MOUNT_LIVE_REQUIRED, alone in its own mount namespace (`unshare -m`)");
+            return;
+        }
+        let mounted = std::process::Command::new("mount")
+            .args(["--bind"])
+            .arg(root.join("data/models"))
+            .arg(root.join("models"))
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if !mounted {
+            let _ = std::fs::remove_dir_all(&root);
+            panic!("{T}: MYCELIUM_CONFINE_MOUNT_LIVE_REQUIRED is set and this process cannot bind-mount");
+        }
+        let c = ConfineDecl {
+            write: vec![root.join("data").display().to_string()],
+            read: vec![root.join("models/current/m").display().to_string()],
+            ..Default::default()
+        };
+        // What the confined command (write on `data`) can do: repoint `current` through the root.
+        std::fs::remove_file(root.join("data/models/current")).unwrap();
+        std::os::unix::fs::symlink(root.join("outside"), root.join("data/models/current")).unwrap();
+        let got = prepare(&c, &root.join("placed/blob")).map(|p| p.read);
+        let _ = std::process::Command::new("umount").arg(root.join("models")).status();
+        let _ = std::fs::remove_dir_all(&root);
+        match got {
+            Err(Refusal::Failed(m)) => assert!(m.contains("mounted more than once"), "{m}"),
+            other => panic!("a symlink reached through a second mount of a write root's filesystem must not be followed, got {other:?}"),
         }
     }
 

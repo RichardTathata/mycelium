@@ -1597,6 +1597,32 @@ envelope's nonce cache) and Q (the handshake refuses a revoked key's certificate
   - **Optional, done:** `stem_shutdown`'s spawned stem is killed on drop, so a panic leaves no process behind. The
     test's exec hang also happens on `main` and is not addressed here.
 
+  *Its review (round 4):*
+  - **(N1, medium, Linux) Fixed by a mount rule.** A write root's filesystem mounted a second time (a bind mount
+    of `data/models` at `/models`) showed the root's interior under a path whose walk never met the root's inode. A
+    symlink the command wrote through the root was therefore followed.
+    - The rule: a symlink found in a directory on a device that holds a write root **and** is mounted more than
+      once (`shared_devices`, from `/proc/self/mountinfo`) is not followed, and the path is refused by name.
+    - Unreadable mount information, or a device not listed exactly once, counts as shared, so the rule fails
+      closed (btrfs subvolumes can trigger this).
+    - On a device mounted once, every directory has one path from `/`, so a walk that never met a root's inode is
+      outside the root.
+    - The plain device rule (refuse any symlink on a write root's device) was not taken. It would refuse the
+      common single-filesystem layout with an operator rotation link (`/opt/models/current` beside a write root on
+      `/`), which round 1's finding 2 exists to support.
+    - macOS has no bind mounts, so the rule is Linux-only.
+    - Not detected on either platform: a view through another filesystem (FUSE `bindfs`, overlayfs, NFS or SMB
+      loopback). Stated in `unit-file.md`.
+
+    Test: `a_symlink_on_a_second_mount_of_a_write_roots_filesystem_is_not_followed`. It mounts only under
+    `MYCELIUM_CONFINE_MOUNT_LIVE_REQUIRED`, alone in its own mount namespace. CI's `wasm-host` job runs it with
+    `sudo unshare -m --propagation private <test binary> --exact …`. It was seen failing first at `9bb6cd3f` in a
+    Linux 6.8 container (`docker run --privileged rust:1.96`, the same command): the profile named `outside/m`.
+  - **(L-a, low) Stated.** The seam gate's §6 now says that a bare call under an existing
+    `use rustix::fs::{…}` or `use std::fs::…` import passes it.
+  - **(L-b, low) Answered.** It fails closed: a relative operator link through a root and back out is refused,
+    and the refusal names the cause.
+
   Not built: limits by hostname or address, a live network allow-list, an OpenShell backend, resource limits.
 - **H:** carry each named offer's signed bytes inside the close and award from that copy (today a member who deletes a
   named offer steers the checked path); a declarer that restarts without keeping its close can re-decide.
