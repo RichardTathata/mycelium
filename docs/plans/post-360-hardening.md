@@ -1817,7 +1817,7 @@ suite's in `ae_contract.rs`.
 - *it is detection, not prevention, stated on every such decision with its freshness and coverage* —
   `FLEET_TALLY_CAVEAT` and the publishers and `stalest_ms` on every tally decision's line
   (`the_tally_scope_states_it_is_approximate_on_every_decision`).
-- *unknown or stale coverage is not established, never empty (the governors' confidence bound reused)* —
+- *unknown or stale coverage is not established, never empty (the strict-eligibility house style; the governors' confidence bound reused)* —
   `control_max_staleness_ms` and `control_min_peers_heard` bound the tally (`tally_state_counted`); a peer with no
   heartbeat, a stale one, one beyond `max_clock_drift_ms` in the future, or an unreadable entry is unknown coverage:
   `an_isolated_node_does_not_establish_a_tally`, `a_stale_publisher_makes_the_tally_not_established`,
@@ -1888,7 +1888,7 @@ suite's in `ae_contract.rs`.
 
 ### 3.6 · State of play and the next iteration (2026-10-12; updated at the 2.35.0 cut, 2026-10-17, and after #641–#644 merged, 2026-10-18)
 
-Where the work stands at the end of 2026-10-12, so the next session starts here rather than from a conversation.
+Where the work stood at the end of 2026-10-12 (the paragraphs from *Delivered after v2.35.0* onward bring it to 2026-10-18), so the next session starts here rather than from a conversation.
 
 **In flight:** nothing. Every PR in the batch is merged — E as #613, F as #611 (each after its independent reviews;
 CI on F also caught a co-op demo regression its own changes caused, fixed in the PR by draining outbound
