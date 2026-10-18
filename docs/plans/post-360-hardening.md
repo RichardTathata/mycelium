@@ -1,8 +1,11 @@
 # Post-360 hardening — the next batch, and consensus as a protocol, not a service
 
-**Status:** adopted 2026-10-10, rev 1.11 (2026-10-17: rows L and M — the activation-command credential, limits by hostname and a live network allow-list — delivered by the activation egress proxy, #644, §3.5; rev 1.10, 2026-10-16: the v2.34.0 cut — F2, S and T closed on evidence in §3.5 by an independent reviewer, T's block written then, its `dev` log line *not built*; rev 1.9, 2026-10-13: the v2.33.0 cut — every row since 2.32.0 closed on evidence in §3.5, and the table's state markers moved; rev 1.8, 2026-10-12: Φ closed; P5, J, I, H, E and F delivered; rows K, L, M added from the Strands Box comparison; rows N, O, P added — Strands agents on Mycelium, after an `a2a-sdk` probe; Q delivered; rows S and T added). **R0 was released as v2.32.0 (2026-10-11)**, delivering rows **G, P3, C, D,
+**Status:** adopted 2026-10-10, rev 1.12 (2026-10-18: the four PRs merged after the v2.35.0 tag recorded as delivered, unreleased on `main` — M's re-probe follow-up (#641), R (#643), the activation egress proxy for L and M (#644) and K2 (#642), K2's block written in §3.5; the OpenShell backend decided *skip for now*, §3.6; rev 1.11, 2026-10-17: rows L and M — the activation-command credential, limits by hostname and a live network allow-list — delivered by the activation egress proxy, #644, §3.5; rev 1.10, 2026-10-16: the v2.34.0 cut — F2, S and T closed on evidence in §3.5 by an independent reviewer, T's block written then, its `dev` log line *not built*; rev 1.9, 2026-10-13: the v2.33.0 cut — every row since 2.32.0 closed on evidence in §3.5, and the table's state markers moved; rev 1.8, 2026-10-12: Φ closed; P5, J, I, H, E and F delivered; rows K, L, M added from the Strands Box comparison; rows N, O, P added — Strands agents on Mycelium, after an `a2a-sdk` probe; Q delivered; rows S and T added). **R0 was released as v2.32.0 (2026-10-11)**, delivering rows **G, P3, C, D,
 P1, A (with C1, C2), B (as narrowed 2026-10-11) and P2 (without migration, as decided 2026-10-11)**; R0's private re-pin landed as private #29. **v2.33.0 (cut 2026-10-13) delivers rows Φ (#607), P2's migration (#606, with #604 and #605), J (#608), P5 (#610), H (#609), E (#613), F (#611, with its window — the flip is F2), Q (#616) and, in the private repository on that pin, I (private #30)**; its private re-pin landed as private #31 — each closed on evidence in §3.5. **v2.34.0 (cut 2026-10-16) delivers rows F2 (#624), S (#623) and T (#622)**, with three §3.6 follow-ups (#627–#629) and
-the wasmtime/rustls advisories (#625). Open: K, L, M, N, O, P. It follows the 2026-10-09 360 review and the eleven
+the wasmtime/rustls advisories (#625). **v2.35.0 (cut 2026-10-17) delivers rows K (#638), L (#637), M (#636, partly),
+N (#633), O (#634) and P (#635).** **Delivered after it, unreleased on `main`:** M's re-probe follow-up (#641), R
+(#643), L's activation-command half and M's hosts and live allow-list by the activation egress proxy (#644), and K2
+(#642) — each in §3.5. Open: each delivered row's own *not built* list (§3.6). It follows the 2026-10-09 360 review and the eleven
 PRs that addressed its must-do list (#582–#592, private #28); those are recorded in the CHANGELOG and are not
 repeated here. Rows close on evidence (verification policy rule 2): a row is closed by quoting each promise next to
 the code or test that delivers it, and a promise that is not delivered is written *not built*.
@@ -84,14 +87,14 @@ Four places strain that line today, and the rows in §3 address each:
 | **I** — *delivered with 2.33.0 (private #30), §3.5; Cedar narrower* | Private repo P3s | RA5 correction chains and competing corrections; attempt keys carry the operation id; a lock-order table; the outbox directory fsynced at create; Cedar policies schema-validated at load; the CI pin check refuses `[patch]`, `rev =` and multi-line tables | R0's re-pin |
 | **J** — *delivered 2.33.0 (#608), §3.5* | Hygiene | the sim-seam gate's test-skip bug (the one the KV gate fixed in #591); every feature and bench linted or built by some CI step; the two CI jobs on `stable` pinned; unreferenced public items deprecated, not removed (nothing is removed on the 2.x line); only the duplicates that disagree are unified (`hex_line`'s whitespace, `now_ms` copies outside the seam) | — |
 | **K** — *delivered 2.35.0 (#638), §3.5* | Policy over history | the action evaluator can decide on what an actor has already done, not only on the request: a bounded, read-only history view (the actor's recent decisions and executions from the evidence journal — `src/agent/evidence_journal.rs`) reaches `ActionEvaluator::evaluate` beside the envelope (`ActionEnvelope`, `src/agent/action_evaluator.rs:101`, which today carries no history); a rule such as *at most three posts in ten minutes* is expressible and tested in the reference evaluator and the AE contract suite (`mycelium::ae_contract`); the scope of a count is stated by name — **per node** (the journal is node-local and never gossiped) unless the design question in §5 is decided otherwise; a history that cannot be read is `Indeterminate`, never an empty history; replay records the history view as a decision input | design question §5 |
-| **K2** — *in review (#642), §5* | Fleet-wide history scopes | a history-limited rule names its scope, the policy choosing per rule (`Rule::at_most(n, w).scoped(scope)`), and the per-point count (`HistoryScope::EnforcementPoint`) stays the default; **a consensus counter, exact** (`HistoryScope::FleetConsensus`): each permit claims a slot in an agreed counter by a consensus write before it is admitted, so the fleet admits at most N in the window across two or three gateways under concurrent calls, and without a quorum the rule decides `Indeterminate` (fails closed) — a consensus round per limited call; the counter's slots are an owned namespace, decided by the electorate the exclusive verbs use (`exclusive_default` under `consensus_require_electorate`), expire with the window, and their growth is stated exactly (a seat's records are kept for good by row A's design, so the reference evaluator requires a named actor; #642's review, finding 4); a claim holds up no other call (finding 1) and a seat admits at most once a window (finding 2); **a gossiped tally, approximate** (`HistoryScope::FleetTally`): each enforcement point publishes its counts per actor and rule — never the records — and a limit reads the fleet sum, available without a quorum; it is detection, not prevention, stated on every such decision with its freshness and coverage; unknown or stale coverage is not established, never empty (the strict-eligibility house style; the governors' confidence bound reused); what the keys make visible fleet-wide, and to whom, is stated — an opaque, policy-declared counter id and the actor's digest, never the rule's operation or resource (finding 5); every member publishes a heartbeat from start, and a member without one is unknown coverage (findings 3, 6); the scope, the seat or tally, and its coverage are on the evidence record (`HistoryInput`); the AE contract suite's clause and cases extend, and the private Cedar adapter handles the new cases on its next re-pin | K |
-| **L** — *delivered 2.35.0 (#637), §3.5; the activation-command half delivered by the activation egress proxy (#644), §3.5* | Credentials attached at egress | a secret need not enter a component's or an activation command's environment: an outbound request names a credential binding, and the egress gate (`EgressPolicy`, `mycelium-core/src/config.rs:280`, which today checks the host and every redirect hop) attaches it on the way out — bearer, header and basic forms at least — only to the host the binding names; a redirect off that host drops it; the binding's use is counted and its value never logged, traced or written to the evidence journal; the places a secret is read into the node today (`[[serve]].api_key_env`, federation credentials, an activation command's environment) are listed and each either moved behind a binding or stated as unchanged *From NVIDIA OpenShell (2026-10-12):* the component holds an opaque placeholder and never the value — the gate resolves the placeholder only at an endpoint the binding authorises — so a leaked environment or log carries nothing usable. | — |
-| **M** — *delivered 2.35.0 (#636) with hosts and the live allow-list by the activation egress proxy (#644), §3.5; not built: the OpenShell backend, resource limits; under Landlock the proxy's port is open on any address* | Activation commands confined | an `[[activation]]` command — today "not a sandbox: there is no allowlist and no confinement" (`docs/reference/unit-file.md:276`) and run with the stem's privileges — can be run under an OS confinement profile the unit file names (macOS Seatbelt first, Linux namespaces/Landlock or seccomp where available): filesystem access limited to the placed artifact's directory and declared paths, network limited to declared hosts or none; a profile the platform cannot apply refuses the activation by name, never runs it unconfined; the unconfined default stays, stated, and the guarantee report says which applies *From NVIDIA OpenShell (2026-10-12):* a profile's filesystem and syscall limits are fixed for the activation's life and its network allow-list may change live (OpenShell's split: filesystem and process locked at creation, network hot-reloadable); OpenShell itself (containers, seccomp, an unprivileged identity; needs Docker) is a candidate backend for a stem, beside a native Seatbelt/Landlock profile, rather than something to rebuild. | — |
+| **K2** — *delivered after 2.35.0, unreleased on `main` (#642), §3.5; not built: signed tally entries; the Cedar adapter's cases wait on its next re-pin* | Fleet-wide history scopes | a history-limited rule names its scope, the policy choosing per rule (`Rule::at_most(n, w).scoped(scope)`), and the per-point count (`HistoryScope::EnforcementPoint`) stays the default; **a consensus counter, exact** (`HistoryScope::FleetConsensus`): each permit claims a slot in an agreed counter by a consensus write before it is admitted, so the fleet admits at most N in the window across two or three gateways under concurrent calls, and without a quorum the rule decides `Indeterminate` (fails closed) — a consensus round per limited call; the counter's slots are an owned namespace, decided by the electorate the exclusive verbs use (`exclusive_default` under `consensus_require_electorate`), expire with the window, and their growth is stated exactly (a seat's records are kept for good by row A's design, so the reference evaluator requires a named actor; #642's review, finding 4); a claim holds up no other call (finding 1) and a seat admits at most once a window (finding 2); **a gossiped tally, approximate** (`HistoryScope::FleetTally`): each enforcement point publishes its counts per actor and rule — never the records — and a limit reads the fleet sum, available without a quorum; it is detection, not prevention, stated on every such decision with its freshness and coverage; unknown or stale coverage is not established, never empty (the strict-eligibility house style; the governors' confidence bound reused); what the keys make visible fleet-wide, and to whom, is stated — an opaque, policy-declared counter id and the actor's digest, never the rule's operation or resource (finding 5); every member publishes a heartbeat from start, and a member without one is unknown coverage (findings 3, 6); the scope, the seat or tally, and its coverage are on the evidence record (`HistoryInput`); the AE contract suite's clause and cases extend, and the private Cedar adapter handles the new cases on its next re-pin | K |
+| **L** — *delivered 2.35.0 (#637), §3.5; the activation-command half delivered after 2.35.0 by the activation egress proxy (#644, unreleased on `main`), §3.5* | Credentials attached at egress | a secret need not enter a component's or an activation command's environment: an outbound request names a credential binding, and the egress gate (`EgressPolicy`, `mycelium-core/src/config.rs:280`, which today checks the host and every redirect hop) attaches it on the way out — bearer, header and basic forms at least — only to the host the binding names; a redirect off that host drops it; the binding's use is counted and its value never logged, traced or written to the evidence journal; the places a secret is read into the node today (`[[serve]].api_key_env`, federation credentials, an activation command's environment) are listed and each either moved behind a binding or stated as unchanged *From NVIDIA OpenShell (2026-10-12):* the component holds an opaque placeholder and never the value — the gate resolves the placeholder only at an endpoint the binding authorises — so a leaked environment or log carries nothing usable. | — |
+| **M** — *delivered 2.35.0 (#636), with the re-probe follow-up (#641) and hosts and the live allow-list by the activation egress proxy (#644) after 2.35.0, unreleased on `main`, §3.5; not built (the OpenShell backend decided *skip for now*, 2026-10-17, §3.6): the OpenShell backend, resource limits; under Landlock the proxy's port is open on any address* | Activation commands confined | an `[[activation]]` command — today "not a sandbox: there is no allowlist and no confinement" (`docs/reference/unit-file.md:276`) and run with the stem's privileges — can be run under an OS confinement profile the unit file names (macOS Seatbelt first, Linux namespaces/Landlock or seccomp where available): filesystem access limited to the placed artifact's directory and declared paths, network limited to declared hosts or none; a profile the platform cannot apply refuses the activation by name, never runs it unconfined; the unconfined default stays, stated, and the guarantee report says which applies *From NVIDIA OpenShell (2026-10-12):* a profile's filesystem and syscall limits are fixed for the activation's life and its network allow-list may change live (OpenShell's split: filesystem and process locked at creation, network hot-reloadable); OpenShell itself (containers, seccomp, an unprivileged identity; needs Docker) is a candidate backend for a stem, beside a native Seatbelt/Landlock profile, rather than something to rebuild. | — |
 | **N** — *delivered 2.35.0 (#633), §3.5* | A2A at the current specification | an A2A client built on the current `a2a-sdk` (1.2.2, the library Strands Agents uses) reaches Mycelium's skills through `/a2a`, with the same authority as today — **the 2026-10-12 probe found it cannot**: the card is served only at `/.well-known/agent.json` (the SDK reads `/.well-known/agent-card.json`, 404); the card's `url` is the node's **gossip** address, not its gateway, and omits `/a2a` (`src/agent/a2a.rs:445`, so the SDK's `send_message` failed with a network error); the methods are the pre-0.2 `tasks/send` / `tasks/sendSubscribe` / `tasks/get` / `tasks/cancel` (`SendMessage` and `message/send` both answer `-32601`); and the skill is chosen by a Mycelium-only `skillId` parameter that a standard client never sends. Promises: the card at `/.well-known/agent-card.json` (the old path kept for one release), naming the gateway's own URL and scheme (https under `gateway_tls`) with `/a2a` and its supported interfaces and protocol versions; the A2A 1.0 methods (`SendMessage`, `SendStreamingMessage`, `GetTask`, `CancelTask`) and the 0.3 names (`message/send`, `message/stream`) served beside the old ones, which stay for one release with a deprecation entry; a message reaches a skill without `skillId` (a declared default skill, or the skill named in the message's metadata — decided in the PR, stated on the card); every new method runs the same doors as `tasks/send` — the action evaluator, mandates, evidence, task ownership — and the C7 bypass matrix gains each new method; the probe becomes a CI test driving the real `a2a-sdk` client against a node | — |
 | **O** — *delivered 2.35.0 (#634), §3.5* | A Strands session store on Mycelium | a companion package (Python, beside `langgraph-checkpoint-mycelium`) implementing Strands Agents' `SessionManager` over the Mycelium Python SDK, so an agent's conversation and state, and a swarm's shared memory, live in the fleet's KV rather than a file or a bucket; a save returns the SDK's receipt and its docs say which rung it names (a local application, not replication — the checkpointer's wording); an incomplete or unreadable session is an error, never an empty one; concurrent agents in one session do not lose each other's writes, or the limit is stated; its live suite runs in CI against a real node; pinned to a Strands release and re-checked when Strands changes the interface | — (N for the cross-host demo) |
 | **P** — *delivered 2.35.0 (#635), §3.5* | A Strands fleet, demonstrated | a runnable example, in CI like the co-op demos, in which Strands agents on three Mycelium nodes plan one shared task (a constructive domain — food redistribution or a microgrid), keep their session and swarm memory in the fleet through O, and call fleet skills through `/a2a` (N): a call outside an agent's mandate is refused and the refusal is in the evidence journal; one node is stopped and the work resumes on another from the stored session; the README states what Strands provides and what Mycelium adds, and which properties the run shows versus which it does not | N, O |
 | **Q** — *delivered 2.33.0 (#616), §3.5* | Revocation reaches every verifier | a key a node has revoked (`rotate_identity_on_compromise`, `sys/revocation/`) is filtered from the `peer_keys`-based KV `SignedData` verifier, from identity-proof chaining (`validate_and_merge_identity`'s trusted signer) and from the unsigned identity exemption (`connection::self_authenticating_identity`), not only from consensus and `known_verifying_keys`; a test that a `SignedData` signed by a revoked key is refused at a peer that has seen the revocation; `src/agent/revocation.rs`'s `revoke_key` doc made true (corrected in #611 to say what holds today) | — (independent of F2) |
-| **R** — *built, in review (this PR), §3.5* | Inference routing as policy (decided a row, §5, 2026-10-17) | the action evaluator sees **where a routed call would go**: for each candidate the router considers, the destination (`llm/{model}@{provider}`) and its **locality** — in-domain (an engine on a fleet node) or external (an endpoint off the mesh), the provider's own declaration in its `llm-meta` ad, and *unknown* when it declares none, which a rule reads as not established, never as in-domain; the request's **data class** reaches the envelope with who declared it — a floor bound to the caller's verified principal, a client declaration that may raise it and never lower it, otherwise the most restrictive configured class; a policy can say *confidential may only reach in-domain models, public may go anywhere* in the reference evaluator's rule types, extended additively, and the AE contract suite states it (the private Cedar adapter handles the new clause, or declines it by name — *not built here; at the next re-pin*, and until then a Cedar-backed fleet has no class or locality enforcement); the preflight runs **per candidate, before the router commits**, so a classified request is routed to a permitted model when one exists and refused, naming every candidate and why, when none does; the evidence record names the class, the destination chosen and the candidates refused; every door by which a model call leaves a node is enumerated and each is covered or stated as not; a door that does not classify cannot pass a class rule; **not built, stated:** content inspection (the class is declared, never detected), observing a provider's backend, exfiltration through a permitted model | — |
+| **R** — *delivered after 2.35.0, unreleased on `main` (#643), §3.5; the Cedar adapter's cases wait on its next re-pin* | Inference routing as policy (decided a row, §5, 2026-10-17) | the action evaluator sees **where a routed call would go**: for each candidate the router considers, the destination (`llm/{model}@{provider}`) and its **locality** — in-domain (an engine on a fleet node) or external (an endpoint off the mesh), the provider's own declaration in its `llm-meta` ad, and *unknown* when it declares none, which a rule reads as not established, never as in-domain; the request's **data class** reaches the envelope with who declared it — a floor bound to the caller's verified principal, a client declaration that may raise it and never lower it, otherwise the most restrictive configured class; a policy can say *confidential may only reach in-domain models, public may go anywhere* in the reference evaluator's rule types, extended additively, and the AE contract suite states it (the private Cedar adapter handles the new clause, or declines it by name — *not built here; at the next re-pin*, and until then a Cedar-backed fleet has no class or locality enforcement); the preflight runs **per candidate, before the router commits**, so a classified request is routed to a permitted model when one exists and refused, naming every candidate and why, when none does; the evidence record names the class, the destination chosen and the candidates refused; every door by which a model call leaves a node is enumerated and each is covered or stated as not; a door that does not classify cannot pass a class rule; **not built, stated:** content inspection (the class is declared, never detected), observing a provider's backend, exfiltration through a permitted model | — |
 | **S** — *delivered 2.34.0 (#623), §3.5* | Identity proofs on by default | `require_identity_proofs` defaults to `true` (today `false`, `mycelium-core/src/config.rs`; the `secure-single-domain` profile already requires it as `id.proofs_required`): a bare `sys/identity/{N}` key list without a proof is refused everywhere a node's keys are learned, closing the identity-poisoning residual rows F and Q state — a member writing its own key into another's identity, which still reaches the verify-only history set (forged audit history, a steered checkpoint anchor) and fully impersonates a node on a legacy certificate; a mixed-fleet window in the 2.30.0 shape (the MINOR that flips it says so; a node from before 2.3.0, which cannot prove, is cut off until upgraded, and `false` stays available as an explicit opt-out for that window and for TLS-less development fleets, where the setting is inert); an upgrade note in `deprecations.md`; the guarantee `id.proofs_required` resolves `enforced` by default; the 2.14.0 attempt that was reverted is re-examined first (the failure it was blamed on was not its doing) | — (best in the MINOR with F2) |
 | **T** — *delivered 2.34.0 (#622), §3.5* | Say loudly when the CA key is on the node | the dev posture keeps the fleet CA's private key on every node (`auto_cert_dir`'s `ca-key.pem`, `mycelium-core/src/tls.rs`), so one compromised host yields every node's identity and revocation (row Q) cannot recover it; today this is only the guarantee `id.ca_key_off_node` resolving unmet, one line among the start-time report, worded for member removal alone. Promises: at `start()` a node that holds the CA key and runs no profile, or a profile other than `dev`, logs one prominent warning naming the consequence (a single host compromise compromises every identity in the fleet; key revocation does not recover it) and the remedy (`mycelium tls issue` on a separate CA host, then `[tls] cert_pem` + `key_pem` on the node — `docs/operations/cert-rotation.md`); the `id.ca_key_off_node` guarantee text names identity compromise and revocation, not only removal (catalogue regenerated); `dev` states the trade-off rather than warning; the quick-start and production-readiness pages say which posture they set up; a test pins the warning on and off | — |
 
@@ -139,7 +142,7 @@ non-loopback one refuses to start without a credential unless `gateway_allow_una
 (`docs/reference/guarantee-catalogue.md` and `.json` carry `gw.exposed_closed`; regenerated and gated by the catalogue
 test) — done. Every row: the CHANGELOG entries and dated wiki `.log/` entries landed with each PR.
 
-### 3.5 · Delivered in 2.32.0 and 2.33.0 — each promise beside its evidence
+### 3.5 · Delivered rows (2.32.0 onward, and on `main` after 2.35.0) — each promise beside its evidence
 
 Read against the merged code on `main` at `6b675720`, not against the PR descriptions The 2.33.0 rows (P2's migration, Φ, J, P5, I, H, E, F, Q) were re-read at the cut against `main` at `b5e07a9d` (private `b6d6faa`) by reviewers who wrote none of the PRs: every cited test and function exists; the wording fixes they found (a miscount, a mis-cited counter, `sys/revoked/`, the #587 window that never opened, three stale limits) are made in place.
 
@@ -1242,7 +1245,7 @@ federation call header (a per-call signature, `federation/client.rs`), the objec
 (`object_store::parse_url_opts`), `mycelium-artifact`'s `--key`/`--key-env` (local signing), the gateway's inbound
 tokens, and an `[[activation]]` command's inherited environment.
 - *a secret need not enter … an activation command's environment* — **delivered by the activation egress proxy
-  (#644)**; at 2.35.0 it was *not built* (the command had no path to the gate and inherited the stem's whole
+  (#644, after 2.35.0; unreleased on `main`)**; at 2.35.0 it was *not built* (the command had no path to the gate and inherited the stem's whole
   environment). An `[activation.confine]` profile may name `[activation.confine.egress]` (`EgressDecl`,
   `src/capability_config.rs`): `hosts`, `credentials` (bindings the command may name) and `env`. The stem starts one
   forward proxy per such activation on `127.0.0.1` (`mycelium-wasm-host/src/activation_egress.rs`,
@@ -1369,7 +1372,7 @@ tokens, and an `[[activation]]` command's inherited environment.
   client honours `HTTP_PROXY` / `HTTPS_PROXY`, so a configured proxy sees a plaintext or loopback request's header (an
   https request's header is inside the tunnel).
 
-**M — Activation commands confined (#636, released in 2.35.0; partly delivered — three promises not built, below).** The doors enumerated first
+**M — Activation commands confined (#636, released in 2.35.0; partly delivered — three promises not built, below; hosts and the live allow-list since delivered by #644, and the re-probe follow-up by #641, both after 2.35.0 and unreleased on `main`).** The doors enumerated first
 (`git grep -n -i 'activation' -- src mycelium-wasm-host/src mycelium-core/src docs/reference scripts .github`, the
 core hits in `connection.rs`/`swim.rs` being SWIM's fan-out "activation", unrelated): the unit-file parse and
 `validate()` (`src/capability_config.rs`, `ActivationDecl`); the stem's activation runner, `activation::hook` (command,
@@ -1634,7 +1637,7 @@ CC8, `docs/capabilities.md`, the crate README). The example units with `[[activa
   five `std::fs` sites are admitted in the baseline and the nondeterminism inventory (review finding 10); its
   `Path::canonicalize`/`exists`/`is_dir` calls are ones `scripts/check-sim-seams.sh` does not see.
 
-**R — Inference routing as policy (this PR; in review).** The doors enumerated first — every path by which a model call
+**R — Inference routing as policy (#643, merged `ab8ff686` after the v2.35.0 tag; unreleased on `main`).** The doors enumerated first — every path by which a model call
 leaves a node: `git grep -ln 'LLM_INVOKE\|"llm.invoke"' -- src mycelium-*/src` (who sends or names `llm.invoke`),
 `git grep -n 'LlmBackend for' -- src mycelium-*/src` (`OpenAiBackend`, `EchoBackend`),
 `git grep -ln 'register_prompt_skill' -- src mycelium-*/src` (who serves one), `git grep -ln 'chat/completions' -- src
@@ -1751,9 +1754,141 @@ mycelium-*/src` (who calls an OpenAI-compatible endpoint), and `ae_preflight(`'s
   consequence; (7) guide 20's snippet is now `guide_20_routing_policy`, compiled and run in CI, with an evidence
   journal; (8) no SDK can declare a class — stated.
 
-### 3.6 · State of play and the next iteration (2026-10-12; updated at the 2.35.0 cut, 2026-10-17)
+**K2 — Fleet-wide history scopes (#642, merged `3f21e4a1` after the v2.35.0 tag; unreleased on `main`; upgrade note
+`deprecations.md` §53).** The doors enumerated first, as for K (`git grep -n "ae_preflight\|preflight(\|\.evaluate(" --
+src`), and then every serve loop that runs provider enforcement (`git grep -n "DeferredChecks::new" -- src`): every
+gateway decision goes through `http::ae_preflight` (`src/agent/http/authz.rs`) — `/mcp`, `/a2a`, and since R the routed
+calls (`gateway_preflight_routed`) — now split into `ae_decide` (the decision from the real envelope, up to releasing
+the per-actor gate) and `Settling::finish` (the seat claims and the record); provider enforcement
+(`provider_enforcement::check`) runs in four serve loops — `rpc_rx` (`service_handle.rs`), the MCP tool loop and the
+bridged MCP loop (`mcp.rs`), and the `rpc/serve` SSE stream (`http/mesh.rs`, `serve_stream_loop`) — each holding its
+deferred claims in a `DeferredChecks`. The fleet state is read and written only by `src/agent/fleet_history.rs`; the
+tests are `src/agent/fleet_history_tests.rs`, with the reference evaluator's in `action_evaluator.rs` and the contract
+suite's in `ae_contract.rs`.
+- *a history-limited rule names its scope, the policy choosing per rule (`Rule::at_most(n, w).scoped(scope)`), and the
+  per-point count (`HistoryScope::EnforcementPoint`) stays the default* — `Rule::scoped(scope, counter)`
+  (`src/agent/action_evaluator.rs`; the signature gained an opaque counter id in review, finding 5), `Rule::at_most`
+  still setting `HistoryScope::EnforcementPoint`; `HistoryScope::{FleetConsensus, FleetTally}` labelled
+  `fleet_consensus` / `fleet_tally` in every decision. `ActionEvaluator::fleet_counters` (a third method, default none)
+  names the counter a decision would rely on, and the enforcement point puts its state in `HistoryView::fleet` before the
+  evaluator decides. Tests `a_fleet_scoped_rule_names_its_counter`, `a_fleet_rule_is_not_satisfied_by_the_points_count`,
+  `a_wrapper_that_hides_the_fleet_counters_is_not_established` (a wrapper that does not forward `fleet_counters` decides
+  `Indeterminate`, §53).
+- *a consensus counter, exact: each permit claims a slot in an agreed counter by a consensus write before it is
+  admitted, so the fleet admits at most N in the window across two or three gateways under concurrent calls* —
+  `fleet_history::claim_seat`: `count` seats, each a consensus slot `ae-seat/{counter}/{actor}/{i}` claimed by
+  `exclusive_propose` before the work is admitted. Tests
+  `the_consensus_scope_admits_at_most_n_across_three_gateways_under_concurrent_calls`,
+  `the_consensus_scope_admits_exactly_n_spread_over_gateways`, `the_consensus_scope_decides_on_the_seats_and_names_itself`,
+  and through a door, `the_mcp_door_counts_into_the_fleet_counter` (three posts over `/mcp` at one gateway, the next at
+  another denied naming `fleet_consensus`) and `a_routed_call_claims_a_seat_and_carries_its_route`.
+- *without a quorum the rule decides `Indeterminate` (fails closed) — a consensus round per limited call* —
+  `without_a_quorum_the_consensus_scope_is_not_established`; a claim slower than `SEAT_LEASE_MARGIN_MS` is
+  `Indeterminate` too. The round per call (more when seats are contended) is stated in the module doc and §53.
+- *the counter's slots are an owned namespace, decided by the electorate the exclusive verbs use (`exclusive_default`
+  under `consensus_require_electorate`), expire with the window* — the seats are decision records under
+  `consensus/life/` (an owned namespace the raw KV routes refuse; `ae-seat/` is listed in
+  `scripts/kv-namespaces-nonkeys.txt` as a slot name, not a key family), leased for the window plus
+  `SEAT_LEASE_MARGIN_MS` (2 s). Tests `under_a_required_electorate_the_seats_are_decided_in_it`,
+  `a_seat_is_reclaimed_after_its_window`.
+- *their growth is stated exactly (a seat's records are kept for good by row A's design, so the reference evaluator
+  requires a named actor; finding 4)* — the module doc's *Growth* paragraph (at most `count` slots of three to five keys
+  per counter, kind of point and actor, on every member, plus `count` shrunk acceptor entries on every voter), and
+  `fleet_limit`'s refusal of `*` (`an_exact_fleet_limit_over_a_wildcard_actor_is_not_established`).
+- *a claim holds up no other call (finding 1)* — the claim runs after the per-actor gate is released, the permit counted
+  provisionally under it and taken back if the claim fails (`RetractOnDrop`):
+  `a_claim_waiting_on_a_quorum_holds_up_no_other_call`.
+  At the provider only a permit that must claim is deferred, settled beside the loop in a `DeferredChecks` bounded at
+  `MAX_DEFERRED_CHECKS` (64), every check answered on a panic and when its loop ends, and aborted when abandoned:
+  `a_provider_claim_does_not_stall_its_tool_loop`, `a_bridged_mcp_claim_does_not_stall_its_loop`,
+  `the_rpc_serve_stream_does_not_stall_on_a_claim`, `a_full_set_of_deferred_checks_stops_draining_the_channel`,
+  `a_deferred_check_that_panics_is_answered`, `a_serve_loop_that_ends_answers_its_deferred_checks`,
+  `an_abandoned_check_records_nothing_and_counts_nothing`,
+  `the_rpc_serve_stream_answers_what_it_took_when_the_client_goes`, `an_abort_after_the_record_keeps_the_permit_counted`.
+  The head-of-line limit with 64 claims pending is stated in §53.
+- *a seat admits at most once a window (finding 2)* — `seat_admissible`: a seat is admitted only if its remaining lease
+  covers a whole window from admission (`a_seat_decided_too_late_for_its_window_is_not_admitted`).
+- *a gossiped tally, approximate: each enforcement point publishes its counts per actor and rule — never the records —
+  and a limit reads the fleet sum, available without a quorum* — `fleet_history::publish_permit` writes, per counter and
+  actor, the times of its recent permits under `sys/ae-tally/{node}/c/{counter}/{actor}` (self-owned), withdrawn once aged
+  out (`withdraw_aged_entries`, under the leaf lock `TaskCtx::ae_tally_lock`, lock-order row 67); `establish` reads the
+  sum. Tests `the_tally_scope_converges_and_refuses_after_convergence`, `an_aged_tally_entry_is_withdrawn`,
+  `a_permit_published_during_a_withdrawal_is_not_lost`.
+- *it is detection, not prevention, stated on every such decision with its freshness and coverage* —
+  `FLEET_TALLY_CAVEAT` and the publishers and `stalest_ms` on every tally decision's line
+  (`the_tally_scope_states_it_is_approximate_on_every_decision`).
+- *unknown or stale coverage is not established, never empty (the strict-eligibility house style; the governors' confidence bound reused)* —
+  `control_max_staleness_ms` and `control_min_peers_heard` bound the tally (`tally_state_counted`); a peer with no
+  heartbeat, a stale one, one beyond `max_clock_drift_ms` in the future, or an unreadable entry is unknown coverage:
+  `an_isolated_node_does_not_establish_a_tally`, `a_stale_publisher_makes_the_tally_not_established`,
+  `a_peer_with_no_heartbeat_makes_the_tally_not_established`, `a_heartbeat_from_the_future_makes_the_tally_not_established`,
+  `an_unreadable_tally_entry_makes_the_tally_not_established`, `without_tls_a_non_peers_absence_is_not_established`.
+  A non-peer counts only as a verified member, and its entries count until they age out:
+  `a_dead_members_permits_count_and_a_fabricated_id_counts_nothing`.
+- *what the keys make visible fleet-wide, and to whom, is stated — an opaque, policy-declared counter id and the actor's
+  digest, never the rule's operation or resource (finding 5)* — the module doc's *What is visible fleet-wide* paragraph and
+  `src/lib.rs`'s namespace row; keys carry the first 128 bits of a SHA-256 of the counter id with the kind of point, and
+  of the actor (`digest16`, `counter_at`; `the_gateway_and_the_provider_count_apart`).
+- *every member publishes a heartbeat from start, and a member without one is unknown coverage (findings 3, 6)* —
+  `fleet_history::start_heartbeat` from `start()` (`lifecycle.rs`) on every node built with `gateway` and `tls`, a last
+  heartbeat marked departed at a graceful shutdown (`depart`), and the node's own heartbeat re-asserted before its
+  connections come up (`reassert_own`): `a_restarted_node_keeps_its_heartbeat_fresh_without_permits`,
+  `a_graceful_leave_keeps_the_tally_established`. A non-peer's keys past the horizon are tombstoned at the stamp of the
+  record held (`collect_residue` through `mycelium_core::ops::kv_delete_held`), so a newer write wins:
+  `residue_is_collected_and_a_decision_does_not_read_it`, `a_returning_nodes_newer_records_survive_a_collector`,
+  `a_collectors_tombstone_loses_to_a_newer_write_it_had_not_seen`, `the_owners_reassert_makes_a_collectors_tombstone_lose`,
+  `a_held_delete_never_writes_a_tombstone_newer_than_the_record`; the read visits only the tally's scopes
+  (`KvStore::scope_roster`, `scopes_under_a_registered_prefix_visits_only_its_own_scopes` in `mycelium-core/src/store.rs`).
+- *the scope, the seat or tally, and its coverage are on the evidence record (`HistoryInput`)* — `HistoryInput::fleet`
+  and `HistoryInput::seats` (`SeatClaim`), `history.scope` naming the fleet scope; absent when empty, so the evidence
+  schema stays `mycelium.ae/evidence/1` (`the_fleet_count_and_the_seat_are_on_the_evidence_record`).
+- *the AE contract suite's clause and cases extend* — `PolicyClause::AllowAtMostAcross` (with a counter id) and six cases,
+  `fleet_consensus_below_limit`, `fleet_consensus_at_limit`, `fleet_tally_below_limit`, `fleet_tally_at_limit`,
+  `fleet_coverage_not_established`, `fleet_rule_not_satisfied_by_the_point`, passed by the reference evaluator
+  (`the_reference_evaluator_is_conformant`), the independent `TableEvaluator`
+  (`a_replacement_evaluator_passes_the_same_fixtures`) and the derived-revision wrapper
+  (`an_evaluator_with_a_derived_revision_passes_the_same_fixtures`). Documented in guide 20 (*Deciding on what an actor
+  has already done*, "Across the fleet (row K2)") and `deprecations.md` §53.
+- *the private Cedar adapter handles the new cases on its next re-pin* — **not built here; at the next re-pin after a
+  release**. The private repository is not touched by #642; until that re-pin a Cedar-backed fleet has no fleet-wide
+  history limit.
+- *Seen failing:* each review round's fixes were planted out together and exactly their target tests failed (the plant
+  runs are recorded on #642's thread); round 1's plant C (no heartbeat at start) also failed every multi-node readiness
+  wait, which now waits for heartbeats.
+- *The review rounds (#642, six)* — round 1 (twelve findings): the claim ran under the per-actor gate, so a claim
+  waiting on a quorum held up the actor's other calls, and at the provider the whole serve loop — released before the
+  claim, deferred beside the loop; a seat's lease started before its call was admitted — leased for the window plus
+  2 s and `seat_admissible`; a restarted publisher stalled the tally fleet-wide — a heartbeat from `start()` on every
+  node; growth — aged tallies
+  withdrawn, seats kept, a named actor required; keys exposing the operation and resource — the opaque counter id;
+  a peer with no heartbeat, or one from the future — unknown coverage; the evidence record's scope. Round 2 (N1–N9):
+  the provider's deferral built an envelope with no scopes, so a rule requiring scopes was still checked inline — the
+  preflight split into `ae_decide` and `Settling::finish`, deciding from the real envelope; an
+  unbounded deferred set — 64, every check answered; a graceful shutdown left the tally not established fleet-wide —
+  a departed heartbeat;
+  an unreadable entry read as zero; a publish racing a withdrawal — `ae_tally_lock`. Round 3: the SSE serve stream and
+  the bridged MCP loop still awaited inline — every serve loop defers; a collector deleting another node's keys could
+  erase a newer permit — no foreign deletes; abandoned checks kept running — aborted, `RetractOnDrop`; a dead
+  member's permits stopped counting — counted until they age out. Round 4: residue unbounded — collected by a
+  tombstone at the held record's stamp; fabricated node ids — verified members only; a retraction racing the record —
+  disarmed before the await; the SSE loop running ahead — pulled one event at a time; the door-test flake recorded
+  open and instrumented. Round 5: the tally read walked every scope — `KvStore::scope_roster`; `kv_delete_at` could
+  write a tombstone newer than the record held — `kv_delete_held`; the `/mcp` timeout leaked mesh diagnostics to the
+  caller — the warning only; without `[tls]` a non-peer was ignored — `Indeterminate`; the unsigned-entry forgery
+  residual — stated. Round 6: clear; merged after the rebase onto #644 (the tally lock renumbered to lock-order row 67).
+- **Not built, stated:** tally entries are unsigned, so a forgery under a dead member's namespace is not detected (while
+  the owner is alive its `sys/` tripwire counts the foreign write and its next publish overwrites it); without `[tls]` a
+  non-peer inside the horizon cannot be verified, so a tally rule reads `Indeterminate` until it leaves the horizon, and
+  with `require_identity_proofs = false` a fabricated id's entries can count; the exact bound holds to within the
+  nodes' wall-clock skew, and without a declared `exclusive_default` electorate the counter is decided over the peers a
+  node currently sees, so a partitioned minority can decide alone; a claim that times out may still hold a seat no call
+  used (fewer admitted, never more); the `/mcp` door test's flake is open, instrumented (§3.6); the private Cedar
+  adapter's `fleet_*` / `AllowAtMostAcross` cases, and R's `route_*` / `ForbidClassAt`, wait on its next re-pin after a
+  release.
 
-Where the work stands at the end of 2026-10-12, so the next session starts here rather than from a conversation.
+### 3.6 · State of play and the next iteration (2026-10-12; updated at the 2.35.0 cut, 2026-10-17, and after #641–#644 merged, 2026-10-18)
+
+Where the work stood at the end of 2026-10-12 (the paragraphs from *Delivered after v2.35.0* onward bring it to 2026-10-18), so the next session starts here rather than from a conversation.
 
 **In flight:** nothing. Every PR in the batch is merged — E as #613, F as #611 (each after its independent reviews;
 CI on F also caught a co-op demo regression its own changes caused, fixed in the PR by draining outbound
@@ -1763,22 +1898,47 @@ queues before the shutdown signal), and N, O, P recorded by #614 with the `a2a-s
 **Delivered in v2.34.0 (2026-10-16):** F2 (#624 — the unsigned-frame and bare-signature refusal unconditional, `kv_require_signed_frames` retired, `secure-single-domain` rev 5; §3.5), T (#622), S (#623 — identity proofs required by default; §3.5); the wasmtime 49.0.3 / rustls 0.23.46 advisories (#625).
 
 **Delivered in v2.35.0 (2026-10-17):** K (#638 — policy over history, counted per enforcement point), L (#637 — credentials attached
-at egress; its activation-command half *not built*), M (#636 — activation commands confined, partly: hosts, a live allow-list and
-OpenShell *not built*), N (#633), O (#634 — `strands-session-mycelium` 0.1.0), P (#635), and the follow-ups to E (the caller
+at egress; its activation-command half *not built* at the cut, since delivered by #644), M (#636 — activation commands confined,
+partly: hosts, a live allow-list and OpenShell *not built* at the cut — the first two since delivered by #644), N (#633), O (#634 — `strands-session-mycelium` 0.1.0), P (#635), and the follow-ups to E (the caller
 envelope's nonce cache) and Q (the handshake refuses a revoked key's certificate; no TLS resumption); §3.5 and below.
 
-**In flight (2026-10-17):** K2, the fleet-wide history scopes (§3.3, §5) — #642; the private Cedar adapter's re-pin
-then meets the new contract cases.
+**Delivered after v2.35.0, unreleased on `main` (merged 2026-10-18):** all four PRs that were in flight or in review
+at the cut have landed — M's re-probe follow-up (#641, `3981947c` — a replaced declared path re-resolved rather than
+withdrawn; below, under M), R (#643, `ab8ff686` — inference routing as policy; §3.5), the activation egress proxy
+(#644, `1c0daa4e` — L's activation-command half and M's hosts and live allow-list; §3.5, rows L and M) and K2 (#642,
+`3f21e4a1` — history limits counted across the fleet, a consensus counter and a gossiped tally; §3.5). None is in a
+release yet; their upgrade notes are `deprecations.md` §50–§53. Every row K–P is released in 2.35.0; the rows' own
+*not built* lists stand. (Q, revocation at every verifier, is delivered — #616, §3.5; S, identity proofs on by default,
+is delivered in 2.34.0 — #623, §3.5.)
 
-**Known flake, open (K2, #642):** `the_fleet_scopes_hold_at_every_door_that_runs_the_preflight` — twice in CI a
-`/mcp` call timed out in the dispatch (30 s) after its preflight admitted it. The cause is not known: the earlier
-explanation (a shared tool name resolving to another test's node) does not hold, since no other test in that build
-registers the name and `alloc_port` does not reuse ports. Instrumented, not fixed: a dispatch timeout at the MCP bridge
-now logs and answers with where the time went (`preflight_ms`, `dispatch_ms`, `to_self`, `peers`, `dropped_frames`),
-and the test's failure message carries how many times the handler ran, the node's peers and the tool keys it holds —
-so the next occurrence names whether the request reached the provider.
+**Decided 2026-10-17 (the user): the OpenShell backend — skip for now.** Row M's candidate backend (OpenShell's
+containers, seccomp and an unprivileged identity, which need Docker) is not built; the native Seatbelt and Landlock
+profiles and the activation egress proxy stand in its place. It stays on M's *not built* list.
 
-**In review:** row R (inference routing as policy — §5's question, decided a row on 2026-10-17; §3.5). Every row K–P is released in 2.35.0; the rows' own *not built* lists stand. (Q, revocation at every verifier, is delivered — #616, §3.5; S, identity proofs on by default, is delivered in 2.34.0 — #623, §3.5.)
+**Known flake, open (K2, #642):** `the_mcp_door_counts_into_the_fleet_counter` (`src/agent/fleet_history_tests.rs`; an
+earlier version of this line named it `the_fleet_scopes_hold_at_every_door_that_runs_the_preflight`, a name no test
+carries) — twice in CI (at `098f6f3c` and `518283e4`) a `/mcp` call timed out in the dispatch (30 s) after its
+preflight admitted it. The cause is not known: the explanation tried in review (a shared tool name resolving to
+another test's node; the test now uses a tool name of its own) does not hold, since no other test in that build
+registers the name and `alloc_port` does not reuse ports. Instrumented, not fixed: a dispatch timeout at the MCP
+bridge logs where the time went (`preflight_ms`, `dispatch_ms`, `to_self`, `peers`, `dropped_frames`;
+`src/agent/http/mcp_bridge.rs`) and, since round 5, tells the caller only that it timed out
+(`an_mcp_timeout_tells_the_caller_nothing_about_the_mesh`); the test's failure message carries how many times the
+handler ran, the node's peers, the tool keys it holds and the last timeout's diagnostics — so the next occurrence names
+whether the request reached the provider.
+
+**Open next:**
+- each delivered row's *not built* list, in its §3.5 block and below — for K2: signed tally entries (a forgery under a
+  dead member's namespace is not detected), a membership check without `[tls]` (a non-peer inside the horizon reads
+  `Indeterminate`); for R: content inspection, a provider's backend observed, the node's own in-process calls, a class
+  at the provider's re-check, an ad's key bound to its writer; for M: the OpenShell backend (skipped for now, above),
+  resource limits, limits by address and by path, a limit on the proxy's port by address under Landlock; for K: a
+  history beyond 24 hours, 1 024 records per actor or 65 536 actors per point, and a replay of the history input;
+- the K2 `/mcp` door-test flake, above;
+- the private Cedar adapter's re-pin after the next release: it meets K2's `PolicyClause::AllowAtMostAcross` and six
+  `fleet_*` cases and R's `PolicyClause::ForbidClassAt` and five `route_*` cases — expressed, or declined by name in
+  `declared_limits` (`deprecations.md` §52, §53). Until then a Cedar-backed fleet has neither fleet-wide history limits
+  nor class or locality enforcement.
 
 **Follow-ups recorded as not built in delivered rows (each in its §3.5 block):**
 - **M:** ~~a declared path replaced legitimately (atomic rename, rotated directory) fails the next re-probe, so the
@@ -1905,8 +2065,8 @@ so the next occurrence names whether the request reached the provider.
   - **(L-b, low) Answered.** It fails closed: a relative operator link through a root and back out is refused,
     and the refusal names the cause.
 
-  Not built: an OpenShell backend, resource limits; limits by hostname and a live allow-list are delivered by the
-  activation egress proxy (#644), with its own *not built* list (§3.5, rows L and M).
+  Not built: an OpenShell backend (decided *skip for now*, 2026-10-17, above), resource limits; limits by hostname and a
+  live allow-list are delivered by the activation egress proxy (#644, after 2.35.0), with its own *not built* list (§3.5, rows L and M).
 - **H:** carry each named offer's signed bytes inside the close and award from that copy (today a member who deletes a
   named offer steers the checked path); a declarer that restarts without keeping its close can re-decide.
 - **J:** the seam and KV gates end an unstarted skip at the first trailing `,`, so a test item with a multi-line header

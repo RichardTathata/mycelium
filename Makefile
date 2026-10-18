@@ -171,12 +171,19 @@ check:
 	cargo clippy --lib --tests --features test-frame-filter -- -D warnings
 	cargo clippy --lib --tests --features tls,metrics,a2a,llm -- -D warnings
 	cargo clippy --lib --tests --features compliance -- -D warnings
+	cargo clippy --lib --bins --tests --no-default-features -- -D warnings  # CI's line; NOT gateway-free (dev-deps re-enable gateway/tls) -- it catches test-only items and the skillrunner bin (a test-only re-export slipped past --lib, #642)
 	cargo clippy --lib --no-default-features -- -D warnings
 	cargo clippy --lib --no-default-features --features metrics -- -D warnings  # metrics without gateway: a half-live `emergent` (row J)
 	cargo clippy -p mycelium-core --lib --tests -- -D warnings
 	cargo clippy -p mycelium-sim --all-targets -- -D warnings   # the replay harness (item 6)
 	cargo clippy -p mycelium-core --lib --tests --features sim -- -D warnings  # the seams' OTHER arm
 	cargo build --examples --features tls,metrics,a2a,llm       # CI builds these; `--lib --tests` does not
+	cargo clippy -p mycelium-tuple-space --features gateway,metrics --all-targets -- -D warnings  # CI's Clippy job
+	cargo clippy -p mycelium-gateway-free-tests --all-targets -- -D warnings  # the gateway-free test crate (R8)
+	cargo clippy -p mycelium-tls-free-tests --all-targets -- -D warnings      # the tls-free test crate
+	cargo check --bin mycelium --features cli,sim                            # the node binary's recording path
+	cargo check --all-targets --no-default-features                          # an example missing required-features
+	./scripts/check-hlc-current.sh                                           # every Hlc::current() read classified
 	./scripts/check-sim-seams.sh                                # no new nondeterminism outside the seams
 	./scripts/test-check-sim-seams.sh                           # …and it sees every timer-alias spelling (planted files)
 	./scripts/with-pyyaml.sh scripts/check-test-inventory.py    # every test requirement runs in some CI step, with its features (verification policy rule 3)
