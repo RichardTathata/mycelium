@@ -36,7 +36,7 @@ and the record), and the provider check returns `Checked::Waiting` only when the
 decided twice. The deferred set is bounded (64; full, the loop stops draining, so backpressure returns), a panicking
 check or one still waiting at loop end is answered `authority_not_established`, and the closed-channel spin is gone.
 A graceful leave now writes a departed heartbeat and keeps the entries (peers count them, do not wait, and collect
-them once aged), an unreadable entry is unknown, and tally writes take one leaf lock (row 64). Lesson: when a fast
+them once aged), an unreadable entry is unknown, and tally writes take one leaf lock (row 67). Lesson: when a fast
 path decides "is this the slow case?", it must decide from the same object the slow path uses, or the two drift on
 exactly the fields the shortcut omitted.
 

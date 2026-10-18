@@ -103,7 +103,7 @@ the window + 2 s and refused one whose remaining lease is under a window (findin
 (4 — row A forbids collecting a top record or sentinel), keyed counters by a declared opaque id (5), and made a peer
 without a heartbeat unknown coverage (6). Round 2: the provider decides whether to defer from the real envelope
 (`ae_decide` / `Settling`, `provider_enforcement::check` → `Checked`), bounded and always answered; a graceful leave is a departed heartbeat
-(entries kept to age out); tally writes under one leaf lock (row 64). Not built: early seat release, seat collection,
+(entries kept to age out); tally writes under one leaf lock (row 67). Not built: early seat release, seat collection,
 signed tallies.
 **The reader seam shipped the same day** (PR #226): `read_evidence_journal_from(path, cursor, …)`,
 §6.7's outbox shape — batch, ship, advance, with a byte-offset cursor so resuming stays cheap, and

@@ -802,7 +802,7 @@ pub(crate) struct TaskCtx {
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) ae_tally_heartbeat: std::sync::atomic::AtomicBool,
     /// Orders this node's tally writes (row K2, #642's review N7): a permit's read-modify-write and an aged entry's
-    /// read-then-delete. A leaf: nothing is taken under it but the KV store's own apply (lock-order row 64).
+    /// read-then-delete. A leaf: nothing is taken under it but the KV store's own apply (lock-order row 67).
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) ae_tally_lock: std::sync::Mutex<()>,
     /// The gateway's execution authority (Boundary H A1), set via `with_execution_authority`.

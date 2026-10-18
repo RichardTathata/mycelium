@@ -449,7 +449,7 @@ fn tally_nodes(ctx: &TaskCtx) -> (Vec<String>, usize) {
 /// Called under the actor's gate, so two permits of one actor at this point do not lose each other's update.
 pub(crate) fn publish_permit(ctx: &Arc<TaskCtx>, c: &FleetCounter, point: &str, actor: &str, at_ms: u64) {
     let key = tally_key(&ctx.node_id.to_string(), &c.key, point, actor);
-    // The read-modify-write and the withdrawal's read-then-delete take one lock (lock-order row 64, #642's review N7),
+    // The read-modify-write and the withdrawal's read-then-delete take one lock (lock-order row 67, #642's review N7),
     // so an aged entry's withdrawal cannot delete a permit published between its read and its delete.
     let tally = ctx.ae_tally_lock.lock().unwrap_or_else(|e| e.into_inner());
     let mut entry = mycelium_core::ops::kv_get(ctx, &key)
