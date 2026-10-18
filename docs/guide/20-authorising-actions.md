@@ -386,8 +386,133 @@ given by id, and whether that was all of them. That is what a replay would decid
 decisions consumes it yet (`ae.preflight` is not in the decision trace), and an attempt it names may be one whose own
 evidence was then not written.
 
-**An evaluator that wraps another** forwards `history_request` and `evaluate_with_history` as well as `evaluate`; one
-that does not hides the inner request, and its limited rules decide `Indeterminate`.
+**Across the fleet (row K2).** A rule may count across the fleet instead, naming one of two scopes and a **counter
+id** — the policy chooses per rule, and the per-point count stays the default:
+
+```rust
+use mycelium::{HistoryScope, ReferenceEvaluator, Rule};
+
+let posts = |scope| Rule::new("oidc:idp/alice", "tools/call", "tool:post")
+    .at_most(3, 600_000)
+    .scoped(scope, "c-7f3a"); // an opaque counter id: what other members see, never the rule's operation or resource
+let policy = ReferenceEvaluator::new("rev-posts")
+    .allow(posts(HistoryScope::FleetConsensus)); // or HistoryScope::FleetTally
+```
+
+| | `FleetConsensus` — exact | `FleetTally` — approximate |
+|---|---|---|
+| What is counted | three *seats*, each a consensus slot leased for the window plus two seconds | the permit times every enforcement point publishes for this actor and counter |
+| When a call is admitted | after its permit **claims a seat** by a consensus write whose lease still covers a whole window from admission; every seat held → `Deny` | when the fleet's sum, as this node has heard it, is below the limit |
+| Without a quorum | the claim cannot be decided → `Indeterminate` (closed) | available — no quorum is needed |
+| Guarantee | the fleet admits at most three in any window, whichever gateways the calls reach — to within the nodes' wall-clock skew | **detection, not prevention**: two gateways can each admit before either's tally reaches the other |
+| Cost | a consensus round per limited call (more while seats are contended) | a gossiped write per permit, and every node's heartbeat |
+| Actor | must be named — the reference evaluator does not establish `*` (see *Growth*) | any, `*` included |
+
+The evaluator names the counter its deciding rule relies on (`fleet_counters`, a third method with a default), and the
+enforcement point reads its state into the view (`HistoryView::fleet`) before the evaluator decides: for the exact
+scope, the seats this node sees held — a full set is a decided denial, anything less a hint, because the seat claimed
+afterwards is what admits the call; for the tally, the sum over this node and every enforcing peer, and who they were.
+A count at another scope never satisfies a fleet rule. As at one node, every gateway's doors count together and the
+provider check apart: a call a gateway admitted and its provider re-checks holds a seat (or a tally entry) in each
+count, never two in one. Both scopes need the evidence journal, as the per-point count does: the fleet count travels in
+the history view, and without a journal every view is unavailable.
+
+*Claiming without holding anyone up.* The gateway decides one actor's history-limited calls one after another under a
+striped per-actor gate — but it releases the gate **before** claiming a seat, counting the permit locally first and
+taking it back if the claim fails; consensus is what orders the seat's contenders. So a claim waiting out a lost
+quorum (up to 2 s per phase × 4 ballots per seat tried, plus a second's convergence poll) holds up no other call — not
+another actor on the same stripe, and not a call no fleet-consensus rule covers. At a provider, the check decides
+from the envelope it builds — the verified caller's scopes, the derived arguments, the presented mandate — and, when
+its permit must claim a seat, hands the claim to run beside the serve loop (the MCP tool loop and `rpc_rx`); every
+other check stays inline, in arrival order. At most 64 claims wait beside a loop: with that many, the loop stops
+draining its channel, so the channel's bound pushes back on senders again. A claim that panics is answered
+`authority_not_established`, and one still waiting when its loop ends (the tool withdrawn, the receiver dropped) is
+answered the same way — no caller is left to time out. Handlers still run one at a time; a claimed call is yielded
+when its claim completes, and holds its admission (a cohort-budget slot, if one is attached) from then until its
+handler returns. No built-in protected kind's consumer depends on arrival order across callers (`mcp.invoke`,
+`skill.invoke`, `llm.invoke` each answer per request); an operator-listed kind that does should not be put under an
+exact fleet limit.
+
+*A seat admits once a window.* A seat's lease is fixed when the claim is proposed and the call is admitted after the
+round, so the lease is the window **plus two seconds**, and a seat whose remaining lease is less than a whole window at
+admission is refused (`Indeterminate`, the seat held until its lease ends) — otherwise a slow claim's seat could reopen,
+and admit again, within one window. A seat is held for its whole lease even when the call's evidence is then not
+recorded or its dispatch fails, so the exact scope errs towards admitting fewer.
+
+*Coverage, strictly.* Every node built with the `gateway` **and** `tls` features publishes a heartbeat from
+`start()`, saying whether it enforces (has an evaluator), re-asserted every third of `control_max_staleness_ms`. At a
+graceful shutdown its last word is a heartbeat marked **departed**, and its entries are kept: peers go on counting
+its recent permits until they age out, and do not wait for it. A tally
+is not established — `Indeterminate`, never an empty tally — when this node's own view of the fleet is not (it has
+heard from fewer than `control_min_peers_heard` peers, or the freshest is older than the bound: the governors'
+confidence bound, reused), or when any peer's coverage is unknown: no heartbeat, a stale one (not departed), one dated
+more than `max_clock_drift_ms` in this node's future, or an entry this node cannot read; the refusal names the peer.
+A peer that enforces nothing admits nothing under a tally rule and is not counted. The departed heartbeat travels on
+shutdown's best-effort flush; a node whose last word is lost, or that crashes rather than leaving, reads as stale —
+closed, not open — until failure detection declares it dead; from then its entries still count, as a departed node's
+do, until they age out — but only for a node this node can verify: an identity record it trusts (`trusted_keys`) and
+not removed. A heartbeat and entries written under a node id nobody issued an identity for count for nothing. A
+non-peer whose heartbeat is older than the counter's window plus the staleness bound plus the clock-drift bound is not
+read at all, and a decision lists the nodes it knows of from the store's scope index — its cost grows with nodes, never
+with the entries they hold. **Residue is collected at its own stamp.** Once a non-peer's heartbeat is older than the
+longest window among its entries plus both bounds, any node tombstones its keys *at the timestamp of the record it
+holds*: under last-writer-wins that removes that record and loses to anything the owner wrote after it, so it cannot
+erase a returned node's newer heartbeat or permit, wherever it is. A returning node re-asserts its own heartbeat and
+withdraws its own aged entries locally before its connections come up, so a collector's tombstone reaches it older than
+what it holds, is not applied, and its `sys/` tripwire does not count it.
+
+*What "verified member" rests on.* With `[tls]` and `require_identity_proofs` (the default), a member is one whose
+sealed identity record or certificate this node holds and has not seen revoked or removed. **Without `[tls]`** this
+node can verify nobody, so a non-peer inside the horizon is unknown coverage: the tally decides `Indeterminate`, naming
+it, until its heartbeat passes the horizon — closed, never an under-count of a crashed node's permits. **With
+`require_identity_proofs = false`** a bare identity record is accepted, so any member can mint one for a made-up id
+and that id's entries count again: the fabricated-id defence assumes proofs. **Not built — a residual:** tally entries
+are not signed, so a member that writes forged entries under a *real* member's namespace after that member has died
+is not detected (the `sys/` tripwire runs only at the owner, which is gone). While the owner lives, its tripwire
+counts the foreign write and its next publish overwrites it.
+
+So a fleet using the tally runs every member with both features. **Upgrading:** tally rules fail closed until every
+member runs this release built with `gateway` and `tls` — an older member, or one built without them, publishes no
+heartbeat and is unknown coverage. A forged `departed` heartbeat stops peers waiting on a live node that has gone quiet,
+until its next real heartbeat overwrites the forgery (its entries are still counted) — no more than a forged
+`enforces: false` already does, which stops them counting it; both are detection only, counted by the `sys/` tripwire
+at the owner. Every tally decision carries the sentence
+*approximate: detection, not prevention — concurrent calls at different gateways can exceed the limit before the
+tallies converge*, and its coverage (`publishers=[…] stalest_ms=…`).
+
+*Which electorate decides a seat.* The exclusive verbs' (`exclusive_propose`): the fleet's `exclusive_default`
+electorate group when one is declared, the cluster otherwise. Under `consensus_require_electorate` (required by
+`secure-single-domain`) a seat outside an electorate is refused, so the rule is not established until one is declared.
+Without a declared electorate the cluster's roster is the peers a node currently sees, and a partitioned minority that
+has declared the rest dead can decide a seat alone — exactness across a partition needs the electorate.
+
+*Where the counts live, and who sees them.* Seats are decision records under `consensus/life/` (slot
+`ae-seat/{counter}/{actor}/{n}`); tallies are `sys/ae-tally/{node}/c/{counter}/{actor}` and a heartbeat
+`sys/ae-tally/{node}/hb`. In a key, `{counter}` is a 128-bit SHA-256 digest of the declared counter id with the kind of
+point, and `{actor}` one of the principal; the values are an attempt id or permit times. Every member holds them, as it
+holds every gossiped key, and the gateway's raw KV routes refuse both namespaces. A member learns *that* an actor counted
+against *some* counter, and when — the audit chain's reference record already tells every member, under `compliance`,
+the principal, the attempt and its time; the counter id is the policy's own and never encodes the operation or
+resource. A guessable counter id or principal is a pseudonym, not a secret. Tally entries are unsigned: another member
+writing one is counted by the `sys/` tripwire, not refused.
+
+*Growth.* A tally entry is withdrawn once every time in it has aged out of its window, so tallies hold only the actors
+active within a window. A seat is not collected: its decision record and its slot's sentinel are kept for good, by the
+lock lifecycle's design (`docs/design/lock-lifecycle.md` §2 and §8 — a slot that has had a record must never fall back
+to the legacy reading, where a committed value with no lease reads live for ever, and the top record is what later
+decisions and the acceptors' shrunk floor are ordered against). So each (counter, kind of point, actor) that ever
+claims holds, on every member, at most `count` slots of three to five keys — sentinel, top record and its marker, and
+the legacy committed and lease keys — and, on every voter, `count` shrunk acceptor entries, for good. That is why the
+reference evaluator does not establish an exact fleet limit over `*`: the actors that can grow it are the ones the
+policy names. An evaluator of your own that names exact counters for open-ended actors lets each new principal add
+that much.
+
+*On the record.* A fleet decision's evidence names the fleet scope (`history.scope`) and carries each counter with its
+scope and state — seats held, or the sum and its publishers — and an admitted call's seat (`slot`, seat number,
+fencing token, lease expiry).
+
+**An evaluator that wraps another** forwards `history_request`, `evaluate_with_history` and `fleet_counters` as well as
+`evaluate`; one that does not hides the inner request, and its limited rules decide `Indeterminate`.
 
 ## Deciding where data may go: inference routing as policy
 

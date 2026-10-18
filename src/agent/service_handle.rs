@@ -129,7 +129,14 @@ impl ServiceHandle {
 
     /// Returns a typed receiver for incoming RPC requests of `kind`.
     pub fn rpc_rx(&self, kind: impl Into<Arc<str>>) -> RpcRequestRx {
-        RpcRequestRx { rx: self.ctx.signal_handlers.register(kind.into()), ctx: Arc::clone(&self.ctx) }
+        RpcRequestRx {
+            rx: self.ctx.signal_handlers.register(kind.into()),
+            ctx: Arc::clone(&self.ctx),
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            pending: super::provider_enforcement::DeferredChecks::new(&self.ctx),
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            closed: false,
+        }
     }
 
     // ── Bulk ─────────────────────────────────────────────────────────────────

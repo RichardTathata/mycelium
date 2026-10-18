@@ -499,6 +499,48 @@ pub async fn kv_set_requiring_sync(
         .queued(queued))
 }
 
+/// Tombstones `key` **at the stamp of the record this node holds**, provided that record is still the one the caller
+/// observed (`observed`, its timestamp): applies locally, queues WAL (try-send), gossips (try-send). Returns `false`,
+/// writing nothing, when nothing live is held under `key` or the held record is not the observed one.
+///
+/// Under last-writer-wins a tombstone at a record's own stamp removes that record (an equal-stamp tombstone wins) and
+/// nothing written after it — so this can never produce a tombstone newer than the record held, and a newer write,
+/// here or still in flight, beats it. What a node that does not own a key deletes with (post-360 row K2's residue
+/// collection), since it may not have seen the owner's latest write.
+pub fn kv_delete_held(ctx: &CoreCtx, key: Arc<str>, observed: u64) -> bool {
+    let held = ctx.kv_state.store.pin().get(key.as_ref()).and_then(|e| e.data.as_ref().map(|_| e.timestamp));
+    if held != Some(observed) {
+        return false;
+    }
+    let update = crate::framing::make_gossip_update_stamped(&ctx.node_id, ctx.default_ttl, key, Bytes::new(), true, observed);
+    apply_and_notify(&ctx.kv_state, &update);
+    if let Some(wal) = ctx.wal.get() {
+        wal.append_try(sync_entry_from(&update));
+    }
+    let tls = ctx.tls.get().map(Arc::as_ref);
+    let msg = make_kv_wire_msg(update, ctx.node_id.id_hash(), tls);
+    dispatch_gossip_try_send(
+        &ctx.gossip_txs, msg,
+        ctx.node_id.id_hash(), ForwardHint::All, &ctx.kv_state.dropped_frames,
+    )
+}
+
+/// **Not a general write.** Public only because the layer above (`mycelium`) re-asserts its own `sys/ae-tally/` keys
+/// with it before its connections come up; hidden from the docs for that reason.
+///
+/// Writes `value` under `key` (or tombstones it, `value: None`) **on this node only**: applied and handed to the
+/// WAL, never gossiped. Anti-entropy carries it from there. For a write made before the node's connections are up,
+/// where a gossip fan-out to a bootstrap peer not yet listening would put the writer into backoff.
+#[doc(hidden)]
+pub fn kv_write_local(ctx: &CoreCtx, key: Arc<str>, value: Option<Bytes>) {
+    let tombstone = value.is_none();
+    let update = make_gossip_update(&ctx.node_id, ctx.default_ttl, key, value.unwrap_or_default(), tombstone, &ctx.hlc);
+    apply_and_notify(&ctx.kv_state, &update);
+    if let Some(wal) = ctx.wal.get() {
+        wal.append_try(sync_entry_from(&update));
+    }
+}
+
 /// Tombstones `key`, applies locally, queues WAL (try-send), gossips (try-send).
 pub fn kv_delete(ctx: &CoreCtx, key: Arc<str>) -> bool {
     let update = make_gossip_update(&ctx.node_id, ctx.default_ttl, key, Bytes::new(), true, &ctx.hlc);

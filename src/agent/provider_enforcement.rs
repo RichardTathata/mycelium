@@ -196,99 +196,257 @@ impl ProviderRefusal {
     }
 }
 
+/// A provider check still deciding: a seat claim in a fleet-consensus counter (post-360 row K2), which may wait on a
+/// consensus round.
+pub(crate) type WaitingCheck =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<Admission, ProviderRefusal>> + Send + 'static>>;
+
+/// What [`check`] came to: decided now, or a check that must still settle a seat claim.
+pub(crate) enum Checked {
+    /// Decided.
+    Done(Result<Admission, ProviderRefusal>),
+    /// The policy permitted the call on a fleet-consensus counter, and its seat is still to be claimed: settle it
+    /// beside the serve loop ([`DeferredChecks`]), so one claim does not stall the requests behind it.
+    Waiting(WaitingCheck),
+}
+
 /// **May this node run `req` now?** An empty admission for anything that is not protected work, or
 /// when neither provider enforcement nor a cohort budget is on. Call it after the caller context has
 /// been verified and before any handler sees the request, and keep the [`Admission`] until the call
 /// is done.
-pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest) -> Result<Admission, ProviderRefusal> {
+///
+/// It decides **from the envelope the preflight itself builds** — the verified caller's scopes, the derived
+/// arguments, the presented mandate — whether it must wait on a seat claim (post-360 row K2; #642's review, N1): if
+/// it must, the decision is made, the history gate released, and the claim and everything after it returned as a
+/// [`Checked::Waiting`] for the serve loop to settle beside itself ([`DeferredChecks`]); otherwise the whole check
+/// runs here. Nothing is decided twice and no second envelope is built. Every serve loop on this node — `rpc_rx`,
+/// the MCP tool loop, the bridged MCP loop and the `rpc/serve` stream — settles a `Waiting` check that way.
+pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest) -> Checked {
     let enforcing = ctx.provider_enforcement.load(Ordering::Acquire);
     let budget = ctx.cohort_budget.get();
     if !enforcing && budget.is_none() {
-        return Ok(Admission::default());
+        return Checked::Done(Ok(Admission::default()));
     }
     let kind: &str = req.kind();
     if !super::is_protected_kind(&ctx.config, kind) {
-        return Ok(Admission::default());
+        return Checked::Done(Ok(Admission::default()));
     }
     if enforcing && ctx.action_evaluator.get().is_none() {
         // Fail closed: enforcement was asked for and nothing can decide.
-        return Err(ProviderRefusal::local(
+        return Checked::Done(Err(ProviderRefusal::local(
             "no_evaluator",
             "provider enforcement is on and no action evaluator is attached; protected work is refused".into(),
-        ));
+        )));
     }
 
-    let caller = gateway_caller::verify(ctx, req).map_err(|e| {
-        ProviderRefusal::local("caller_context_refused", format!("caller context refused: {e}"))
-    })?;
+    let caller = match gateway_caller::verify(ctx, req) {
+        Ok(c) => c,
+        Err(e) => {
+            return Checked::Done(Err(ProviderRefusal::local("caller_context_refused", format!("caller context refused: {e}"))))
+        }
+    };
     let (principal, scopes, mandate, claim) = match caller {
         Some(c) => (c.principal, c.scopes, c.mandate, c.resource),
         None => (gateway_caller::node_principal(req.sender()), Vec::new(), None, None),
     };
-
-    let mut work = None;
-    if enforcing {
-        let me = ctx.node_id.to_string();
-        let payload = req.payload();
-        let (operation, resource, arguments) = derive(ctx, kind, &payload, claim.as_deref(), &me)?;
-        let resolved = ResolvedPrincipal { principal: principal.clone(), scopes };
-        let params = match &mandate {
-            Some(m) => json!({ "_meta": { "mandate": m } }),
-            None => Value::Null,
-        };
-        if let super::http::Preflight::Refuse(refusal) = super::http::ae_preflight(
-            ctx,
-            Some(&resolved),
-            &operation,
-            &resource,
-            &arguments,
-            &params,
-            ENFORCEMENT_POINT_PROVIDER,
-        )
-        .await
-        {
-            return Err(ProviderRefusal {
-                reason: refusal.reason().to_string(),
-                message: refusal.to_string(),
-                code: refusal.json_rpc_code(),
-                data: refusal.error_data(),
-            });
+    if !enforcing {
+        return Checked::Done(admit_after(ctx, &principal, None));
+    }
+    let me = ctx.node_id.to_string();
+    let payload = req.payload();
+    let (operation, resource, arguments) = match derive(ctx, kind, &payload, claim.as_deref(), &me) {
+        Ok(d) => d,
+        Err(refusal) => return Checked::Done(Err(refusal)),
+    };
+    let resolved = ResolvedPrincipal { principal: principal.clone(), scopes };
+    let params = match &mandate {
+        Some(m) => json!({ "_meta": { "mandate": m } }),
+        None => Value::Null,
+    };
+    let decided =
+        super::http::ae_decide(ctx, Some(&resolved), &operation, &resource, &arguments, &params, ENFORCEMENT_POINT_PROVIDER, None).await;
+    let call = AdmittedCall { principal, mandate, operation, resource, arguments };
+    match decided {
+        super::http::Decided::Done(p) => Checked::Done(refusal_of(p).and_then(|()| admit_after(ctx, &call.principal, Some(&call)))),
+        super::http::Decided::Settle(settling) if settling.will_claim() => {
+            let ctx = Arc::clone(ctx);
+            Checked::Waiting(Box::pin(async move {
+                refusal_of(settling.finish().await)?;
+                admit_after(&ctx, &call.principal, Some(&call))
+            }))
         }
-        // `Inert` cannot happen here (an evaluator is attached), and `Proceed` is admission.
+        super::http::Decided::Settle(settling) => {
+            Checked::Done(refusal_of(settling.finish().await).and_then(|()| admit_after(ctx, &call.principal, Some(&call))))
+        }
+    }
+}
 
-        // C10: work acting under an **established** mandate is registered as running, so the
-        // authority's sweep can stop it if the mandate lapses while it runs. Asking the authority
-        // again duplicates one assessment the preflight made; the evidence record does not carry
-        // the binding, and registering work under a mandate that is not established would cancel
-        // work the policy admitted without one.
-        if let (Some(m), Some(authority)) = (&mandate, ctx.execution_authority.get())
-            && let Ok(presented) = serde_json::from_value::<super::gateway_authority::PresentedMandate>(m.clone())
-        {
-            let digest = super::action_evaluator::arguments_digest(&serde_json::to_vec(&arguments).unwrap_or_default());
-            let now = ctx.hlc.decision_now_ms();
-            let assessed = authority.assess(&principal, &operation, &resource, &digest, Some(&presented), now, &super::gateway_member_keys(ctx));
-            if assessed.binding.is_some_and(|b| b.state == super::action_evaluator::MandateState::Established) {
-                let g = &presented.grant.mandate;
-                let clock_ctx = Arc::clone(ctx);
-                work = Some(authority.begin(
-                    crate::mandate::authority::AuthorizedWork::new(
-                        super::gateway_authority::mandate_operation(&operation, &resource),
-                        Some(g.clone()),
-                        g.valid_until_ms,
-                    ),
-                    Arc::new(move || clock_ctx.hlc.decision_now_ms()),
-                ));
-            }
+/// What an enforced call was decided on, for what follows the decision.
+struct AdmittedCall {
+    principal: String,
+    mandate: Option<Value>,
+    operation: String,
+    resource: String,
+    arguments: Value,
+}
+
+/// A preflight's refusal as the provider's.
+fn refusal_of(p: super::http::Preflight) -> Result<(), ProviderRefusal> {
+    match p {
+        super::http::Preflight::Refuse(refusal) => Err(ProviderRefusal {
+            reason: refusal.reason().to_string(),
+            message: refusal.to_string(),
+            code: refusal.json_rpc_code(),
+            data: refusal.error_data(),
+        }),
+        // `Inert` cannot happen here (an evaluator is attached), and `Proceed` is admission.
+        _ => Ok(()),
+    }
+}
+
+/// After the policy admitted the call (or with enforcement off): the running-work registration and the cohort slot.
+fn admit_after(ctx: &Arc<TaskCtx>, principal: &str, call: Option<&AdmittedCall>) -> Result<Admission, ProviderRefusal> {
+    let mut work = None;
+    // C10: work acting under an **established** mandate is registered as running, so the
+    // authority's sweep can stop it if the mandate lapses while it runs. Asking the authority
+    // again duplicates one assessment the preflight made; the evidence record does not carry
+    // the binding, and registering work under a mandate that is not established would cancel
+    // work the policy admitted without one.
+    if let Some(call) = call
+        && let (Some(m), Some(authority)) = (&call.mandate, ctx.execution_authority.get())
+        && let Ok(presented) = serde_json::from_value::<super::gateway_authority::PresentedMandate>(m.clone())
+    {
+        let digest = super::action_evaluator::arguments_digest(&serde_json::to_vec(&call.arguments).unwrap_or_default());
+        let now = ctx.hlc.decision_now_ms();
+        let assessed = authority.assess(principal, &call.operation, &call.resource, &digest, Some(&presented), now, &super::gateway_member_keys(ctx));
+        if assessed.binding.is_some_and(|b| b.state == super::action_evaluator::MandateState::Established) {
+            let g = &presented.grant.mandate;
+            let clock_ctx = Arc::clone(ctx);
+            work = Some(authority.begin(
+                crate::mandate::authority::AuthorizedWork::new(
+                    super::gateway_authority::mandate_operation(&call.operation, &call.resource),
+                    Some(g.clone()),
+                    g.valid_until_ms,
+                ),
+                Arc::new(move || clock_ctx.hlc.decision_now_ms()),
+            ));
         }
     }
 
     // C4: a place in every cohort the verified principal belongs to, or a refusal. Taken only after
     // the policy admitted the call, so a refused call never holds budget.
-    let slot = match budget {
-        Some(b) => Some(b.admit(&principal, ctx.hlc.decision_now_ms())?),
+    let slot = match ctx.cohort_budget.get() {
+        Some(b) => Some(b.admit(principal, ctx.hlc.decision_now_ms())?),
         None => None,
     };
     Ok(Admission { _slot: slot, work })
+}
+
+/// How many deferred checks a serve loop holds at once (#642's review, N2). Full, it stops draining its channel, so
+/// the channel's own bound pushes back on senders again.
+pub(crate) const MAX_DEFERRED_CHECKS: usize = 64;
+
+/// Test hook: a per-node bound in place of [`MAX_DEFERRED_CHECKS`].
+#[cfg(test)]
+pub(crate) static TEST_DEFERRED_BOUND: std::sync::LazyLock<papaya::HashMap<String, usize>> =
+    std::sync::LazyLock::new(papaya::HashMap::new);
+
+/// The deferred checks a serve loop has in flight, each with what it needs to answer its caller (`C`): bounded, and
+/// never losing an answer — a check whose task panics answers `authority_not_established`, and one still in flight
+/// when the loop ends is handed back to be answered ([`abandon`](Self::abandon)).
+pub(crate) struct DeferredChecks<C> {
+    set: tokio::task::JoinSet<(u64, Result<Admission, ProviderRefusal>)>,
+    carried: HashMap<u64, C>,
+    /// Each check's own task, so abandoning the set — or dropping it — stops the check too (#642's review, round 3,
+    /// finding 4): a caller answered `withdrawn` has no claim still running behind its answer.
+    checks: HashMap<u64, tokio::task::AbortHandle>,
+    next_id: u64,
+    bound: usize,
+}
+
+impl<C> DeferredChecks<C> {
+    /// An empty set for `ctx`'s serve loop.
+    pub(crate) fn new(ctx: &TaskCtx) -> Self {
+        let _ = ctx;
+        #[cfg(test)]
+        let bound = TEST_DEFERRED_BOUND.pin().get(&ctx.node_id.to_string()).copied().unwrap_or(MAX_DEFERRED_CHECKS);
+        #[cfg(not(test))]
+        let bound = MAX_DEFERRED_CHECKS;
+        Self { set: tokio::task::JoinSet::new(), carried: HashMap::new(), checks: HashMap::new(), next_id: 0, bound }
+    }
+
+    /// No check in flight.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.carried.is_empty()
+    }
+
+    /// At the bound: the loop stops taking requests until one completes.
+    pub(crate) fn is_full(&self) -> bool {
+        self.carried.len() >= self.bound
+    }
+
+    /// Settle `waiting` beside the loop, answering with `carry` when it completes. The check runs on its own task,
+    /// awaited by one that cannot panic, so a panic in the check comes back as a refusal rather than a lost answer.
+    pub(crate) fn spawn(&mut self, waiting: WaitingCheck, carry: C) {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.carried.insert(id, carry);
+        let check = tokio::spawn(waiting);
+        self.checks.insert(id, check.abort_handle());
+        self.set.spawn(async move {
+            let result = match check.await {
+                Ok(r) => r,
+                Err(_) => Err(ProviderRefusal::local(
+                    "authority_not_established",
+                    "the provider check failed while it was being decided".into(),
+                )),
+            };
+            (id, result)
+        });
+    }
+
+    /// The next check to complete, with its carry. `None` only when none is in flight.
+    pub(crate) async fn next(&mut self) -> Option<(C, Result<Admission, ProviderRefusal>)> {
+        loop {
+            match self.set.join_next().await? {
+                Ok((id, result)) => {
+                    self.checks.remove(&id);
+                    if let Some(carry) = self.carried.remove(&id) {
+                        return Some((carry, result));
+                    }
+                }
+                // Only an abort ends the awaiting task without a result; `abandon` answers those.
+                Err(_) => continue,
+            }
+        }
+    }
+
+    /// The loop is ending: stop every check — its claim and its record go no further — and hand back each one still
+    /// in flight so its caller is answered. A seat whose proposal had already left may still be decided, holding a
+    /// seat no call used; the permit counted provisionally at this point is taken back.
+    pub(crate) fn abandon(&mut self) -> Vec<C> {
+        for (_, check) in self.checks.drain() {
+            check.abort();
+        }
+        self.set.abort_all();
+        self.carried.drain().map(|(_, c)| c).collect()
+    }
+}
+
+impl<C> Drop for DeferredChecks<C> {
+    fn drop(&mut self) {
+        for (_, check) in self.checks.drain() {
+            check.abort();
+        }
+    }
+}
+
+/// The refusal a deferred check still in flight is answered with when its serve loop ends.
+pub(crate) fn withdrawn() -> ProviderRefusal {
+    ProviderRefusal::local(
+        "authority_not_established",
+        "the serve loop ended while this call's authority was being decided".into(),
+    )
 }
 
 /// The operation, resource and arguments of a protected call, derived as the gateway derives them.

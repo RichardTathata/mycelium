@@ -485,6 +485,24 @@ pub trait ActionEvaluator: Send + Sync + 'static {
         let _ = history;
         self.evaluate(envelope)
     }
+
+    /// The **fleet-wide counters** a decision on `envelope` would rely on (row K2): for each allowance limited
+    /// at a fleet scope ([`HistoryScope::FleetConsensus`], [`HistoryScope::FleetTally`]) that would decide this
+    /// envelope, its counter. The default — none — is right for every policy that counts only at the enforcement
+    /// point. Asked after the envelope is built, behind the same unwind boundary as the other facts.
+    ///
+    /// The enforcement point reads each counter's state into [`HistoryView::fleet`] before the evaluator decides
+    /// and, on a permit, **claims a seat** in every [`HistoryScope::FleetConsensus`] counter named here before the
+    /// work is admitted — a claim that fails turns the permit into a denial (the counter is full) or a decision
+    /// not established (no quorum). So an evaluator names here the counters of the rule that would permit, and
+    /// only those: a counter named for a rule that does not decide consumes a seat for nothing.
+    ///
+    /// **An evaluator that wraps another forwards this too**, as it forwards
+    /// [`history_request`](Self::history_request).
+    fn fleet_counters(&self, envelope: &ActionEnvelope) -> Vec<FleetCounter> {
+        let _ = envelope;
+        Vec::new()
+    }
 }
 
 // ── History (post-360 row K) ─────────────────────────────────────────────────
@@ -492,18 +510,35 @@ pub trait ActionEvaluator: Send + Sync + 'static {
 /// **Whose** history a count covers. Every history decision names it, because a limit means nothing until
 /// it is said what was counted.
 ///
-/// Decided for row K (plan §5): a count is what **this enforcement point** at this node saw — its own evidence
-/// journal, node-local and never gossiped. The point is the gateway (all its doors, `/mcp`, `/a2a`, the LLM and
-/// federation routes, count together) or the provider check, each counted apart, so a call the gateway decided
-/// and the provider re-checks on one node is counted once at each, never twice at one. Exact there and needing no
-/// quorum; an actor that spreads its calls over N gateways can be admitted up to N times a per-gateway limit. A
-/// fleet scope would be a new variant, and a rule naming it would not be satisfied by this one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Decided for row K (plan §5): by default a count is what **this enforcement point** at this node saw — its own
+/// evidence journal, node-local and never gossiped. The point is the gateway (all its doors, `/mcp`, `/a2a`, the
+/// LLM and federation routes, count together) or the provider check, each counted apart, so a call the gateway
+/// decided and the provider re-checks on one node is counted once at each, never twice at one. Exact there and
+/// needing no quorum; an actor that spreads its calls over N gateways can be admitted up to N times a per-gateway
+/// limit.
+///
+/// Decided for row K2 (plan §5, 2026-10-17): a rule may instead name one of **two fleet scopes**, the policy
+/// choosing per rule — [`FleetConsensus`](Self::FleetConsensus), exact and unavailable without a quorum, and
+/// [`FleetTally`](Self::FleetTally), approximate and available without one. A rule naming one scope is never
+/// satisfied by a count at another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum HistoryScope {
     /// The decisions this enforcement point recorded in its own evidence journal.
     EnforcementPoint,
+    /// **Exact, fleet-wide** (row K2): a counter of `count` seats agreed by consensus. Each permit claims a seat by
+    /// a consensus write — leased for the rule's window — *before* the work is admitted, so the fleet admits at most
+    /// `count` in any window whichever gateways the calls arrive at. Without a quorum a claim cannot be made and the
+    /// rule decides `Indeterminate`. One consensus round per limited call.
+    FleetConsensus,
+    /// **Approximate, fleet-wide** (row K2): every enforcement point publishes its counts per actor and rule, and a
+    /// limit reads the fleet's sum over the publishers it has heard from recently. Available without a quorum.
+    /// **Detection, not prevention:** concurrent calls at different gateways can exceed the limit before the tallies
+    /// converge, and every decision at this scope says so and names its coverage. Coverage that cannot be
+    /// established — a publisher gone stale, this node's own view of the fleet not established — is not established,
+    /// never an empty tally.
+    FleetTally,
 }
 
 impl HistoryScope {
@@ -511,7 +546,111 @@ impl HistoryScope {
     pub fn label(&self) -> &'static str {
         match self {
             HistoryScope::EnforcementPoint => "enforcement_point",
+            HistoryScope::FleetConsensus => "fleet_consensus",
+            HistoryScope::FleetTally => "fleet_tally",
         }
+    }
+
+    /// Whether this scope counts across the fleet rather than at one enforcement point.
+    pub fn is_fleet(&self) -> bool {
+        matches!(self, HistoryScope::FleetConsensus | HistoryScope::FleetTally)
+    }
+}
+
+/// The sentence every decision at [`HistoryScope::FleetTally`] carries — the scope's limit stated where it is relied
+/// on, not only in its documentation.
+pub const FLEET_TALLY_CAVEAT: &str = "approximate: detection, not prevention — concurrent calls at different \
+     gateways can exceed the limit before the tallies converge";
+
+/// One fleet-wide counter a decision relies on (row K2): which scope counts it, the counter's identity, and its limit.
+///
+/// `key` names the counter — the rule's identity, not the actor's: the enforcement point counts per **actor and
+/// key**, so one rule limits each actor separately. It is digested before it reaches a consensus slot or a tally key,
+/// so any string is safe here; two rules that should share a count share a key. The reference evaluator derives it
+/// from the rule's actor, operation and resource patterns ([`Rule::counter_key`]) — so changing a rule's count or
+/// window keeps its counter, and changing what it matches starts a new one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct FleetCounter {
+    /// Which fleet scope counts it.
+    pub scope: HistoryScope,
+    /// The counter's identity.
+    pub key: String,
+    /// How many permits the window may hold, the one being decided included.
+    pub count: u32,
+    /// How far back, in milliseconds.
+    pub window_ms: u64,
+}
+
+impl FleetCounter {
+    /// A counter at `scope`, named `key`, permitting `count` in `window_ms`.
+    pub fn new(scope: HistoryScope, key: impl Into<String>, count: u32, window_ms: u64) -> Self {
+        Self { scope, key: key.into(), count, window_ms }
+    }
+}
+
+/// What the enforcement point established about one fleet counter before the evaluator decided (row K2).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum FleetState {
+    /// [`HistoryScope::FleetConsensus`]: how many of the counter's seats this node sees held by a live decision. A
+    /// count at or above the limit is a decided fact (each seat is a decision); one below it is a hint — the seat
+    /// this permit needs is claimed by consensus afterwards, and the claim is what admits it.
+    Seats {
+        /// Seats held, as this node's replica of the decisions shows them.
+        held: u32,
+    },
+    /// [`HistoryScope::FleetTally`]: the fleet's sum over the publishers heard, and who they were.
+    Tally {
+        /// Permits in the window, summed over `publishers`.
+        counted: u32,
+        /// The enforcement points whose tallies were summed — this node and every peer whose heartbeat is fresh.
+        publishers: Vec<String>,
+        /// The oldest heartbeat summed, in milliseconds before the decision.
+        stalest_ms: u64,
+    },
+    /// The counter's state could not be established, and why. Never read as zero.
+    NotEstablished(String),
+}
+
+/// One fleet counter and its state, as an evaluator is given it in [`HistoryView::fleet`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct FleetCount {
+    /// The counter.
+    pub counter: FleetCounter,
+    /// What was established about it.
+    pub state: FleetState,
+}
+
+impl FleetCount {
+    /// `counter` in `state`.
+    pub fn new(counter: FleetCounter, state: FleetState) -> Self {
+        Self { counter, state }
+    }
+}
+
+/// A seat a permit claimed in a [`HistoryScope::FleetConsensus`] counter (row K2), carried on its evidence record.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SeatClaim {
+    /// The counter's key, as the evaluator named it.
+    pub counter: String,
+    /// The consensus slot the seat was decided in.
+    pub slot: String,
+    /// Which seat, `0..count`.
+    pub seat: u32,
+    /// The decision's fencing token.
+    pub token: u64,
+    /// When the seat's lease ends, on the proposer's wall clock (epoch ms).
+    pub expires_at_ms: u64,
+}
+
+impl SeatClaim {
+    /// A claim of `seat` in `slot` for `counter`.
+    pub fn new(counter: impl Into<String>, slot: impl Into<String>, seat: u32, token: u64, expires_at_ms: u64) -> Self {
+        Self { counter: counter.into(), slot: slot.into(), seat, token, expires_at_ms }
     }
 }
 
@@ -565,6 +704,9 @@ pub struct HistoryView {
     /// after it sees all of its records whatever `complete` says of the widest window; one reaching back past
     /// it does not. `None`: nothing is missing.
     pub omitted_through_ms: Option<u64>,
+    /// The fleet counters the evaluator named ([`ActionEvaluator::fleet_counters`]) and what the enforcement point
+    /// established about each (row K2). Empty for a policy that counts only at the enforcement point.
+    pub fleet: Vec<FleetCount>,
 }
 
 impl HistoryView {
@@ -606,6 +748,13 @@ pub struct HistoryInput {
     /// Why no history could be established, when none could.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unavailable: Option<String>,
+    /// The fleet counters the decision read, with their scope, state and coverage (row K2). Absent for a policy that
+    /// counts only at the enforcement point, so such a record serialises exactly as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fleet: Vec<FleetCount>,
+    /// The seats a permit claimed in [`HistoryScope::FleetConsensus`] counters before it was admitted (row K2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seats: Vec<SeatClaim>,
 }
 
 impl HistoryInput {
@@ -613,12 +762,16 @@ impl HistoryInput {
     pub fn of(history: &History) -> Self {
         match history {
             History::View(v) => HistoryInput {
-                scope: Some(v.scope),
+                // A decision on a fleet counter names the fleet scope it counted at, not the point whose view
+                // carried it (row K2, review finding 7).
+                scope: Some(v.fleet.first().map_or(v.scope, |c| c.counter.scope)),
                 window_ms: v.window_ms,
                 as_of_ms: v.as_of_ms,
                 attempts: v.entries.iter().map(|e| e.attempt_id.clone()).collect(),
                 complete: v.complete,
                 unavailable: None,
+                fleet: v.fleet.clone(),
+                seats: Vec::new(),
             },
             History::Unavailable(why) => HistoryInput {
                 scope: None,
@@ -627,8 +780,16 @@ impl HistoryInput {
                 attempts: Vec::new(),
                 complete: false,
                 unavailable: Some(why.clone()),
+                fleet: Vec::new(),
+                seats: Vec::new(),
             },
         }
+    }
+
+    /// This input, with the seats its permit claimed (row K2).
+    pub fn with_seats(mut self, seats: Vec<SeatClaim>) -> Self {
+        self.seats = seats;
+        self
     }
 }
 
@@ -1464,7 +1625,7 @@ pub struct Rule {
     /// established*, never a silent mismatch.
     pub requires_values: Vec<(String, serde_json::Value)>,
     /// At most this many permitted actions matching the rule in a window, counted in the actor's history at
-    /// this enforcement point (post-360 row K). `None`: no limit.
+    /// the limit's scope (post-360 rows K and K2). `None`: no limit.
     pub limit: Option<HistoryLimit>,
     /// The request's data class this rule is about (post-360 row R): the rule applies only to a request
     /// of this class. A request whose class was not established matches, so the rule reports the class
@@ -1474,16 +1635,25 @@ pub struct Rule {
     /// destination at this locality. A destination that was not established, or is
     /// [`Locality::Unknown`], matches, so the rule reports the locality as *not established*. `None`: anywhere.
     pub locality: Option<Locality>,
+    /// The **counter id** a fleet-scoped limit counts under (row K2) — an opaque name the policy declares, so a
+    /// fleet-visible key names the counter without naming the rule's operation or resource. `None` for a rule
+    /// without a fleet limit (and, in a struct literal that leaves it out, a digest of the rule's patterns —
+    /// [`Rule::counter_key`]).
+    pub counter: Option<String>,
 }
 
-/// *At most `count` in `window_ms`* — a limit over the actor's history, counted at the enforcement point
-/// ([`HistoryScope::EnforcementPoint`]).
+/// *At most `count` in `window_ms`* — a limit over the actor's history, counted at `scope`: this enforcement point
+/// ([`HistoryScope::EnforcementPoint`], the default) or the fleet ([`HistoryScope::FleetConsensus`],
+/// [`HistoryScope::FleetTally`] — row K2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HistoryLimit {
     /// How many permitted actions matching the rule the window may hold, this one included.
     pub count: u32,
     /// How far back, in milliseconds.
     pub window_ms: u64,
+    /// Where the count is kept (row K2). [`Rule::at_most`] sets [`HistoryScope::EnforcementPoint`];
+    /// [`Rule::scoped`] chooses another.
+    pub scope: HistoryScope,
 }
 
 impl Rule {
@@ -1500,6 +1670,7 @@ impl Rule {
             limit: None,
             data_class: None,
             locality: None,
+            counter: None,
         }
     }
 
@@ -1521,8 +1692,37 @@ impl Rule {
     /// this enforcement point — e.g. *at most three posts in ten minutes*. An evaluator holding such a rule
     /// asks for history; without it the rule decides `Indeterminate`.
     pub fn at_most(mut self, count: u32, window_ms: u64) -> Self {
-        self.limit = Some(HistoryLimit { count, window_ms });
+        self.limit = Some(HistoryLimit { count, window_ms, scope: HistoryScope::EnforcementPoint });
         self
+    }
+
+    /// Count this rule's limit at `scope` instead of at the enforcement point (row K2), under the counter id
+    /// `counter` — after [`at_most`](Self::at_most): `Rule::new(..).at_most(3, TEN_MIN).scoped(HistoryScope::FleetConsensus,
+    /// "c-posts-7f3a")` is *at most three in ten minutes across the fleet, exactly*; with `HistoryScope::FleetTally`
+    /// the same limit read from the gossiped tallies, approximately. A rule without a limit is unchanged.
+    ///
+    /// **The counter id is what other members see** (digested with the kind of enforcement point): choose one that
+    /// does not name what the rule covers if that is not for every member to know — it never encodes the rule's
+    /// operation or resource. Two rules that should share a count share an id; the count survives a change of limit
+    /// or window, and a new id starts a new count.
+    pub fn scoped(mut self, scope: HistoryScope, counter: impl Into<String>) -> Self {
+        if let Some(limit) = self.limit.as_mut() {
+            limit.scope = scope;
+            self.counter = Some(counter.into());
+        }
+        self
+    }
+
+    /// The identity of this rule's fleet counter (row K2): the declared counter id, or — for a rule built as a struct
+    /// literal without one — a digest of its actor, operation and resource patterns, which anyone who can guess the
+    /// patterns can recompute.
+    pub fn counter_key(&self) -> String {
+        if let Some(id) = &self.counter {
+            return id.clone();
+        }
+        use sha2::Digest as _;
+        let d = sha2::Sha256::digest(format!("{}\n{}\n{}", self.actor, self.operation, self.resource).as_bytes());
+        hex32(&d.into())[..32].to_string()
     }
 
     /// Require these scopes for the rule to apply.
@@ -1659,6 +1859,18 @@ impl ReferenceEvaluator {
 }
 
 impl ActionEvaluator for ReferenceEvaluator {
+    fn fleet_counters(&self, env: &ActionEnvelope) -> Vec<FleetCounter> {
+        // The rule that would decide: a matching prohibition decides first and counts nothing; then the first
+        // matching allowance — the same order `evaluate_with_history` takes.
+        if self.prohibitions.iter().any(|r| r.matches(env)) {
+            return Vec::new();
+        }
+        match self.allowances.iter().find(|r| r.matches(env)).and_then(|a| a.limit.map(|l| (a, l))) {
+            Some((a, l)) if l.scope.is_fleet() => vec![FleetCounter::new(l.scope, a.counter_key(), l.count, l.window_ms)],
+            _ => Vec::new(),
+        }
+    }
+
     fn history_request(&self) -> Option<HistoryRequest> {
         let limits: Vec<HistoryLimit> = self.allowances.iter().filter_map(|r| r.limit).collect();
         (!limits.is_empty()).then(|| HistoryRequest {
@@ -1838,6 +2050,12 @@ impl ActionEvaluator for ReferenceEvaluator {
                         errors: vec!["history limit with a window of 0 ms".into()],
                     };
                 }
+                if limit.scope.is_fleet() {
+                    return match fleet_limit(a, limit, view, &rev, limited) {
+                        Ok(line) => permit_of(a, env, Some(line), rev),
+                        Err(decision) => decision,
+                    };
+                }
                 let any = |pat: &str, v: &str| pat == "*" || pat == v;
                 // Everything in the window *and after its start* counts — a record stamped later than this
                 // view's clock (a call that read its clock after this one, decided first) is one more, not none.
@@ -1880,30 +2098,7 @@ impl ActionEvaluator for ReferenceEvaluator {
                 }
                 counted = Some(tally);
             }
-            return Decision {
-                verdict: Verdict::Permit,
-                checked: {
-                    let mut c = vec![
-                        format!("allowance actor={} operation={} resource={}", a.actor, a.operation, a.resource),
-                        format!("scopes {:?}", a.requires_scopes),
-                        format!("values {:?}", a.requires_values.iter().map(|(n, _)| n).collect::<Vec<_>>()),
-                    ];
-                    // Evidence has to answer *which appointment* was relied on, not merely that
-                    // one was: `term` is which appointment, `epoch` orders authority.
-                    if let (Some(scope), Some(b)) = (&a.requires_mandate, &env.mandate) {
-                        c.push(format!(
-                            "mandate scope={scope} holder={} term={} epoch={}",
-                            b.holder, b.term, b.epoch
-                        ));
-                    }
-                    c.extend(a.route_clause(env));
-                    c.extend(counted);
-                    c
-                },
-                reason: "an allowance matches this action".into(),
-                policy_revision: rev,
-                errors: Vec::new(),
-            };
+            return permit_of(a, env, counted, rev);
         }
 
         // Nothing matched. Authority is *not established* — never a denial (AE0 §9).
@@ -1911,6 +2106,101 @@ impl ActionEvaluator for ReferenceEvaluator {
             "no allowance matches this action; the allow-list does not cover it",
             rev,
         )
+    }
+}
+
+/// The reference evaluator's permit for allowance `a`, naming what it relied on.
+fn permit_of(a: &Rule, env: &ActionEnvelope, counted: Option<String>, rev: String) -> Decision {
+    Decision {
+        verdict: Verdict::Permit,
+        checked: {
+            let mut c = vec![
+                format!("allowance actor={} operation={} resource={}", a.actor, a.operation, a.resource),
+                format!("scopes {:?}", a.requires_scopes),
+                format!("values {:?}", a.requires_values.iter().map(|(n, _)| n).collect::<Vec<_>>()),
+            ];
+            // Evidence has to answer *which appointment* was relied on, not merely that
+            // one was: `term` is which appointment, `epoch` orders authority.
+            if let (Some(scope), Some(b)) = (&a.requires_mandate, &env.mandate) {
+                c.push(format!(
+                    "mandate scope={scope} holder={} term={} epoch={}",
+                    b.holder, b.term, b.epoch
+                ));
+            }
+            c.extend(a.route_clause(env));
+            c.extend(counted);
+            c
+        },
+        reason: "an allowance matches this action".into(),
+        policy_revision: rev,
+        errors: Vec::new(),
+    }
+}
+
+/// A limit at a fleet scope (row K2), decided on the counter the enforcement point established: `Ok` with the line a
+/// permit names, or the denial or undecided decision. A count at another scope never satisfies it — the point's
+/// own history is not consulted.
+fn fleet_limit(a: &Rule, limit: HistoryLimit, view: &HistoryView, rev: &str, limited: String) -> Result<String, Decision> {
+    let scope = limit.scope.label();
+    let key = a.counter_key();
+    // An exact counter keeps seats per actor for good (a decision record and its sentinel each, never collected —
+    // `docs/design/lock-lifecycle.md` §2, §8), so a wildcard actor would let every new principal add `count` slots
+    // to every member. The reference evaluator bounds that growth by the policy: an exact fleet limit names its
+    // actor (review finding 4).
+    if limit.scope == HistoryScope::FleetConsensus && a.actor == "*" {
+        return Err(Decision {
+            verdict: Verdict::Indeterminate,
+            checked: vec![limited],
+            reason: format!("a limit at scope {scope} must name its actor, not `*`"),
+            policy_revision: rev.to_string(),
+            errors: vec![format!(
+                "fleet history not established at scope {scope}: a wildcard actor would let each new principal add \
+                 seats that are never collected"
+            )],
+        });
+    }
+    let undecided = |why: String| Decision {
+        verdict: Verdict::Indeterminate,
+        checked: vec![limited.clone()],
+        reason: format!("the matching allowance is limited at scope {scope}, whose count was not established"),
+        policy_revision: rev.to_string(),
+        errors: vec![format!("fleet history not established at scope {scope}: {why}")],
+    };
+    let Some(found) = view.fleet.iter().find(|c| c.counter.scope == limit.scope && c.counter.key == key) else {
+        return Err(undecided("the enforcement point gave no count for this rule's counter".into()));
+    };
+    let deny = |line: String, held: u32, caveat: &str| Decision {
+        verdict: Verdict::Deny,
+        checked: vec![limited.clone(), line],
+        reason: format!(
+            "the allowance permits at most {} in {} ms and the fleet's count at scope {scope} already holds {held}{caveat}",
+            limit.count, limit.window_ms
+        ),
+        policy_revision: rev.to_string(),
+        errors: Vec::new(),
+    };
+    match &found.state {
+        FleetState::Seats { held } => {
+            let line = format!(
+                "history scope={scope} counter={key} window_ms={} seats_held={held} limit={} — a permit claims a seat by consensus before it is admitted",
+                limit.window_ms, limit.count
+            );
+            if *held >= limit.count {
+                return Err(deny(line, *held, ""));
+            }
+            Ok(line)
+        }
+        FleetState::Tally { counted, publishers, stalest_ms } => {
+            let line = format!(
+                "history scope={scope} counter={key} window_ms={} counted={counted} limit={} publishers={publishers:?} stalest_ms={stalest_ms} — {FLEET_TALLY_CAVEAT}",
+                limit.window_ms, limit.count
+            );
+            if *counted >= limit.count {
+                return Err(deny(line, *counted, " (approximate: a gossiped tally)"));
+            }
+            Ok(line)
+        }
+        FleetState::NotEstablished(why) => Err(undecided(why.clone())),
     }
 }
 
@@ -2187,6 +2477,7 @@ mod tests {
             entries,
             complete,
             omitted_through_ms: (!complete).then_some(as_of_ms),
+            fleet: Vec::new(),
         })
     }
 
@@ -2285,6 +2576,153 @@ mod tests {
         let none = HistoryInput::of(&History::Unavailable("no journal".into()));
         assert_eq!(none.scope, None);
         assert_eq!(none.unavailable.as_deref(), Some("no journal"));
+    }
+
+    // ── Row K2: the fleet scopes ─────────────────────────────────────────────────────────────────
+
+    fn fleet_posts(limit: u32, scope: HistoryScope) -> ReferenceEvaluator {
+        ReferenceEvaluator::new("rev-1").allow(
+            Rule::new("oidc:idp/alice", "tools/call", "tool:post@n1")
+                .requiring_scopes(["mcp:invoke"])
+                .at_most(limit, TEN_MIN)
+                .scoped(scope, "c-posts"),
+        )
+    }
+
+    /// The view an enforcement point gives: `local` permits at the point, and the fleet counter in `state`.
+    fn fleet_view(ev: &ReferenceEvaluator, env: &ActionEnvelope, local: usize, state: Option<FleetState>) -> History {
+        let now = 2_000_000;
+        let mut h = history(now, (0..local).map(|i| entry(now - 1_000 - i as u64, &format!("p{i}"), DecisionKind::Permit)).collect(), true);
+        if let (History::View(v), Some(state)) = (&mut h, state) {
+            v.fleet = ev.fleet_counters(env).into_iter().map(|c| FleetCount::new(c, state.clone())).collect();
+        }
+        h
+    }
+
+    /// A rule names its scope with `scoped`, and asks for the fleet counter of the allowance that would decide —
+    /// none for a per-point rule, none when a prohibition decides first.
+    #[test]
+    fn a_fleet_scoped_rule_names_its_counter() {
+        let env = envelope("oidc:idp/alice", "tools/call", "tool:post@n1");
+        let exact = fleet_posts(3, HistoryScope::FleetConsensus);
+        let named = exact.fleet_counters(&env);
+        assert_eq!(named.len(), 1);
+        assert_eq!((named[0].scope, named[0].count, named[0].window_ms), (HistoryScope::FleetConsensus, 3, TEN_MIN));
+        assert_eq!(named[0].key, "c-posts", "the declared counter id, never the rule's operation or resource");
+        assert_eq!(fleet_posts(3, HistoryScope::FleetTally).fleet_counters(&env)[0].scope, HistoryScope::FleetTally);
+        assert!(posts(3).fleet_counters(&env).is_empty(), "a per-point limit names no fleet counter");
+        let forbidden = fleet_posts(3, HistoryScope::FleetConsensus).prohibit(Rule::new("*", "tools/call", "*"));
+        assert!(forbidden.fleet_counters(&env).is_empty(), "a prohibition decides first and counts nothing");
+        assert!(exact.fleet_counters(&envelope("oidc:idp/bob", "tools/call", "tool:post@n1")).is_empty());
+        // The count survives a change of limit or window; what the rule matches is its identity.
+        assert_eq!(Rule::new("a", "o", "r").at_most(9, 9).scoped(HistoryScope::FleetTally, "k").counter_key(), "k");
+        assert!(!named[0].key.contains("tools/call") && !named[0].key.contains("tool:post"));
+        // `scoped` without a limit changes nothing.
+        let unlimited = Rule::new("a", "o", "r").scoped(HistoryScope::FleetTally, "k");
+        assert_eq!((unlimited.limit, unlimited.counter), (None, None));
+    }
+
+    /// A count at another scope never satisfies a fleet rule: the point's own history below the limit, and no
+    /// fleet count given, is not established — and a full point history does not deny it either.
+    #[test]
+    fn a_fleet_rule_is_not_satisfied_by_the_points_count() {
+        let env = envelope("oidc:idp/alice", "tools/call", "tool:post@n1");
+        for scope in [HistoryScope::FleetConsensus, HistoryScope::FleetTally] {
+            let ev = fleet_posts(3, scope);
+            let d = ev.evaluate_with_history(&env, &fleet_view(&ev, &env, 0, None));
+            assert_eq!(d.verdict, Verdict::Indeterminate, "{scope:?}: {d:?}");
+            assert!(d.errors.iter().any(|e| e.contains("fleet history not established") && e.contains(scope.label())), "{d:?}");
+            let d = ev.evaluate_with_history(&env, &fleet_view(&ev, &env, 5, Some(FleetState::Seats { held: 0 })));
+            if scope == HistoryScope::FleetConsensus {
+                assert_eq!(d.verdict, Verdict::Permit, "five permits at this point do not fill the fleet's seats: {d:?}");
+            }
+        }
+    }
+
+    /// The exact scope: seats held at the limit deny, naming the scope; below it, a permit that says a seat is
+    /// claimed before admission; a counter not established is not established.
+    #[test]
+    fn the_consensus_scope_decides_on_the_seats_and_names_itself() {
+        let env = envelope("oidc:idp/alice", "tools/call", "tool:post@n1");
+        let ev = fleet_posts(3, HistoryScope::FleetConsensus);
+        let d = ev.evaluate_with_history(&env, &fleet_view(&ev, &env, 0, Some(FleetState::Seats { held: 3 })));
+        assert_eq!(d.verdict, Verdict::Deny, "{d:?}");
+        assert!(d.reason.contains("fleet_consensus") && d.checked.iter().any(|c| c.contains("seats_held=3")), "{d:?}");
+        let d = ev.evaluate_with_history(&env, &fleet_view(&ev, &env, 0, Some(FleetState::Seats { held: 2 })));
+        assert_eq!(d.verdict, Verdict::Permit, "{d:?}");
+        assert!(d.checked.iter().any(|c| c.contains("history scope=fleet_consensus") && c.contains("claims a seat")), "{d:?}");
+        let d = ev.evaluate_with_history(&env, &fleet_view(&ev, &env, 0, Some(FleetState::NotEstablished("no consensus".into()))));
+        assert_eq!(d.verdict, Verdict::Indeterminate, "{d:?}");
+        assert!(d.errors.iter().any(|e| e.contains("fleet_consensus") && e.contains("no consensus")), "{d:?}");
+        let d = ev.evaluate_with_history(&env, &History::Unavailable("no journal".into()));
+        assert_eq!(d.verdict, Verdict::Indeterminate, "an unreadable history is not an empty one at a fleet scope either");
+    }
+
+    /// An exact fleet limit names its actor: a wildcard would let every new principal add seats that are never
+    /// collected (review finding 4), so the reference evaluator does not establish it. The tally, whose entries are
+    /// collected once they age out, takes a wildcard.
+    #[test]
+    fn an_exact_fleet_limit_over_a_wildcard_actor_is_not_established() {
+        let env = envelope("oidc:idp/alice", "tools/call", "tool:post@n1");
+        for (scope, expect) in [(HistoryScope::FleetConsensus, Verdict::Indeterminate), (HistoryScope::FleetTally, Verdict::Permit)] {
+            let ev = ReferenceEvaluator::new("rev-1")
+                .allow(Rule::new("*", "tools/call", "tool:post@n1").requiring_scopes(["mcp:invoke"]).at_most(3, TEN_MIN).scoped(scope, "c"));
+            let state = match scope {
+                HistoryScope::FleetConsensus => FleetState::Seats { held: 0 },
+                _ => FleetState::Tally { counted: 0, publishers: vec!["n1".into()], stalest_ms: 0 },
+            };
+            let d = ev.evaluate_with_history(&env, &fleet_view(&ev, &env, 0, Some(state)));
+            assert_eq!(d.verdict, expect, "{scope:?}: {d:?}");
+            if expect == Verdict::Indeterminate {
+                assert!(d.reason.contains("must name its actor"), "{d:?}");
+            }
+        }
+    }
+
+    /// The approximate scope: the sum at the limit denies; below it permits — and **every** tally decision says it is
+    /// approximate, detection not prevention, and names its coverage. Unknown coverage is not established.
+    #[test]
+    fn the_tally_scope_states_it_is_approximate_on_every_decision() {
+        let env = envelope("oidc:idp/alice", "tools/call", "tool:post@n1");
+        let ev = fleet_posts(3, HistoryScope::FleetTally);
+        let tally = |counted| FleetState::Tally { counted, publishers: vec!["n1".into(), "n2".into()], stalest_ms: 40 };
+        let d = ev.evaluate_with_history(&env, &fleet_view(&ev, &env, 0, Some(tally(3))));
+        assert_eq!(d.verdict, Verdict::Deny, "{d:?}");
+        assert!(d.reason.contains("fleet_tally") && d.reason.contains("approximate"), "{d:?}");
+        let d = ev.evaluate_with_history(&env, &fleet_view(&ev, &env, 0, Some(tally(2))));
+        assert_eq!(d.verdict, Verdict::Permit, "{d:?}");
+        let line = d.checked.iter().find(|c| c.contains("history scope=fleet_tally")).expect("names its scope");
+        assert!(line.contains(FLEET_TALLY_CAVEAT) && line.contains("publishers=[\"n1\", \"n2\"]") && line.contains("stalest_ms=40"), "{line}");
+        let d = ev.evaluate_with_history(&env, &fleet_view(&ev, &env, 0, Some(FleetState::NotEstablished("the tally of n2 is stale".into()))));
+        assert_eq!(d.verdict, Verdict::Indeterminate, "unknown coverage is not established, never an empty tally: {d:?}");
+        assert!(d.errors.iter().any(|e| e.contains("fleet_tally") && e.contains("stale")), "{d:?}");
+        // A count of the other fleet scope does not stand in for this one.
+        let d = ev.evaluate_with_history(&env, &fleet_view(&fleet_posts(3, HistoryScope::FleetConsensus), &env, 0, Some(FleetState::Seats { held: 0 })));
+        assert_eq!(d.verdict, Verdict::Indeterminate, "{d:?}");
+    }
+
+    /// The fleet counters a decision read and the seats its permit claimed are on its evidence record; a record
+    /// without them serialises as before.
+    #[test]
+    fn the_fleet_count_and_the_seat_are_on_the_evidence_record() {
+        let env = envelope("oidc:idp/alice", "tools/call", "tool:post@n1");
+        let ev = fleet_posts(3, HistoryScope::FleetConsensus);
+        let h = fleet_view(&ev, &env, 0, Some(FleetState::Seats { held: 1 }));
+        let seat = SeatClaim::new("k", "ae-seat/x/y/1", 1, 7, 2_600_000);
+        let input = HistoryInput::of(&h).with_seats(vec![seat.clone()]);
+        let back: HistoryInput = serde_json::from_str(&serde_json::to_string(&input).unwrap()).unwrap();
+        assert_eq!(back.scope, Some(HistoryScope::FleetConsensus), "a fleet decision names its fleet scope (finding 7)");
+        assert_eq!(back.fleet.len(), 1);
+        assert_eq!(back.fleet[0].counter.scope, HistoryScope::FleetConsensus);
+        assert_eq!(back.fleet[0].state, FleetState::Seats { held: 1 });
+        assert_eq!(back.seats, vec![seat]);
+        let plain = HistoryInput::of(&history(2_000_000, Vec::new(), true));
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("fleet") && !json.contains("seats"), "{json}");
+        // The labels are the evidence's wire form.
+        assert_eq!(serde_json::to_string(&HistoryScope::FleetConsensus).unwrap(), "\"fleet_consensus\"");
+        assert_eq!(serde_json::to_string(&HistoryScope::FleetTally).unwrap(), "\"fleet_tally\"");
+        assert_eq!(HistoryScope::FleetTally.label(), "fleet_tally");
     }
 
     // ── AE1: the authenticated action envelope binds a scoped mandate ───────────────────────────

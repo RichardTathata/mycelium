@@ -139,6 +139,15 @@ impl From<Signal> for RpcRequest {
 pub struct RpcRequestRx {
     pub(crate) rx:  mpsc::Receiver<Signal>,
     pub(crate) ctx: Arc<TaskCtx>,
+    /// Provider checks still settling a seat claim (post-360 row K2): run beside the receive loop, so one claim never
+    /// stalls the requests behind it (#642's review, findings 1 and N2), and bounded — full, the loop stops draining
+    /// the channel, so its bound pushes back on senders. Such a request is yielded when its claim completes; every
+    /// other request is checked inline, in arrival order.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(crate) pending: super::provider_enforcement::DeferredChecks<RpcRequest>,
+    /// The channel has closed: yield what is still settling, then end (N5 — never spin on the closed channel).
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(crate) closed: bool,
 }
 
 impl RpcRequestRx {
@@ -151,30 +160,58 @@ impl RpcRequestRx {
     pub async fn recv(&mut self) -> Option<RpcRequest> {
         let mut shutdown = self.ctx.shutdown_tx.subscribe();
         loop {
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            let next = {
+                if self.closed && self.pending.is_empty() {
+                    return None;
+                }
+                let full = self.pending.is_full();
+                let open = !self.closed;
+                tokio::select! { biased;
+                    _ = shutdown.wait_for(|v| *v) => {
+                        self.answer_withdrawn();
+                        return None;
+                    }
+                    Some((req, checked)) = self.pending.next(), if !self.pending.is_empty() => {
+                        if let Some(req) = self.admit_checked(req, checked) {
+                            return Some(req);
+                        }
+                        continue;
+                    }
+                    s = self.rx.recv(), if open && !full => match s {
+                        Some(s) => s,
+                        None => {
+                            self.closed = true;
+                            continue;
+                        }
+                    },
+                }
+            };
+            #[cfg(not(all(feature = "gateway", feature = "tls")))]
             let next = tokio::select! { biased;
                 _ = shutdown.wait_for(|v| *v) => return None,
                 s = self.rx.recv() => s?,
             };
-            #[allow(unused_mut)] // mutated only when the provider check can attach a budget slot
-            let mut req = RpcRequest::from(next);
+            let req = RpcRequest::from(next);
             match super::gateway_caller::verify_received(&self.ctx, &req) {
                 Ok(_) => {
                     // Closure plan C3: protected work is decided at this boundary, so every serve
                     // loop built on `rpc_rx`, in this crate or a companion, gets it without calling
                     // anything. Inert unless provider enforcement is on.
                     #[cfg(all(feature = "gateway", feature = "tls"))]
-                    match super::provider_enforcement::check(&self.ctx, &req).await {
-                        // C4: the admission (a cohort-budget slot, if a budget is attached) lives as
-                        // long as the request does, so the call counts as in flight until the serve
-                        // loop drops it.
-                        Ok(admission) => req.1 = Held::new(admission),
-                        Err(refusal) => {
-                            tracing::warn!(kind = %req.kind(), sender = %req.sender(), reason = %refusal.reason,
-                                "rpc_rx: refused by provider enforcement");
-                            rpc_respond_ctx(&self.ctx, &req, Bytes::from(refusal.rpc_body()));
-                            continue;
+                    {
+                        match super::provider_enforcement::check(&self.ctx, &req).await {
+                            super::provider_enforcement::Checked::Done(checked) => match self.admit_checked(req, checked) {
+                                Some(req) => return Some(req),
+                                None => continue,
+                            },
+                            super::provider_enforcement::Checked::Waiting(waiting) => {
+                                self.pending.spawn(waiting, req);
+                                continue;
+                            }
                         }
                     }
+                    #[cfg(not(all(feature = "gateway", feature = "tls")))]
                     return Some(req);
                 }
                 // Post-360 row E: a replay is dropped unanswered — a refusal under the original's
@@ -188,6 +225,48 @@ impl RpcRequestRx {
                     rpc_respond_ctx(&self.ctx, &req, Bytes::from(caller_refusal_body(&e)));
                 }
             }
+        }
+    }
+
+    /// A checked request: admitted, holding its admission for its lifetime (C4: the call counts as in flight
+    /// until the serve loop drops it), or refused with an answer.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    fn admit_checked(
+        &self,
+        mut req: RpcRequest,
+        checked: Result<super::provider_enforcement::Admission, super::provider_enforcement::ProviderRefusal>,
+    ) -> Option<RpcRequest> {
+        match checked {
+            Ok(admission) => {
+                req.1 = Held::new(admission);
+                Some(req)
+            }
+            Err(refusal) => {
+                tracing::warn!(kind = %req.kind(), sender = %req.sender(), reason = %refusal.reason,
+                    "rpc_rx: refused by provider enforcement");
+                rpc_respond_ctx(&self.ctx, &req, Bytes::from(refusal.rpc_body()));
+                None
+            }
+        }
+    }
+}
+
+/// A receiver dropped with checks still settling answers each of their callers, never leaving one to time out
+/// (#642's review, N5).
+#[cfg(all(feature = "gateway", feature = "tls"))]
+impl Drop for RpcRequestRx {
+    fn drop(&mut self) {
+        self.answer_withdrawn();
+    }
+}
+
+#[cfg(all(feature = "gateway", feature = "tls"))]
+impl RpcRequestRx {
+    /// Stop every check still settling and answer its caller (#642's review, N5 and round 3 finding 4).
+    fn answer_withdrawn(&mut self) {
+        for req in self.pending.abandon() {
+            let refusal = super::provider_enforcement::withdrawn();
+            rpc_respond_ctx(&self.ctx, &req, Bytes::from(refusal.rpc_body()));
         }
     }
 }

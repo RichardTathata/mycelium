@@ -70,6 +70,9 @@ pub mod ae_contract;
 pub(crate) mod journal;
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(crate) mod evidence_journal;
+/// Row K2: the fleet-wide history scopes — the consensus counter and the gossiped tally.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) mod fleet_history;
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(crate) mod federation_http;
 #[cfg(feature = "gateway")]
@@ -189,8 +192,8 @@ pub fn is_protected_kind(cfg: &GossipConfig, kind: &str) -> bool {
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use action_evaluator::{
     preflight, preflight_with_history, ActionEnvelope, ActionEvaluator, ActionMapping, AeEvidence, AeReference,
-    Decision, DecisionKind, EvidenceState, Execution, History, HistoryEntry, HistoryInput, HistoryLimit,
-    HistoryRequest, HistoryScope, HistoryView, MandateBinding, MandateState, MappingKind, MappingStatus,
+    Decision, DecisionKind, EvidenceState, Execution, FleetCount, FleetCounter, FleetState, History, HistoryEntry,
+    HistoryInput, HistoryLimit, HistoryRequest, HistoryScope, HistoryView, SeatClaim, FLEET_TALLY_CAVEAT, MandateBinding, MandateState, MappingKind, MappingStatus,
     PreflightRefusal, RecordKind, ReferenceEvaluator, Rule, Verdict, AE_EVIDENCE_SCHEMA, AE_REFERENCE_SCHEMA,
 };
 #[cfg(feature = "gateway")]
@@ -794,6 +797,14 @@ pub(crate) struct TaskCtx {
     /// asks for is then `Unavailable`.
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub(crate) history_index: std::sync::OnceLock<Arc<evidence_journal::HistoryIndex>>,
+    /// Whether this node's fleet-tally heartbeat is running (row K2) — started by its first permit under a
+    /// [`HistoryScope::FleetTally`] rule, stopped at shutdown.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(crate) ae_tally_heartbeat: std::sync::atomic::AtomicBool,
+    /// Orders this node's tally writes (row K2, #642's review N7): a permit's read-modify-write and an aged entry's
+    /// read-then-delete. A leaf: nothing is taken under it but the KV store's own apply (lock-order row 67).
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    pub(crate) ae_tally_lock: std::sync::Mutex<()>,
     /// The gateway's execution authority (Boundary H A1), set via `with_execution_authority`.
     /// Absent = the gateway binds no mandate, exactly as before.
     #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -1183,10 +1194,14 @@ impl GossipAgent {
         let signal_window = std::time::Duration::from_secs(config.signal_window_secs);
         // The decision-record namespace is indexed per slot (row A, `consensus_life`) — registered here,
         // before any key is applied or replayed; core names no Layer III prefix itself.
-        #[cfg(feature = "consensus")]
-        let scoped: &[&str] = &[crate::consensus_life::LIFE_PREFIX];
-        #[cfg(not(feature = "consensus"))]
-        let scoped: &[&str] = &[];
+        // So is the fleet tally, per node (post-360 row K2): a tally decision lists the nodes it knows of from the
+        // index rather than scanning every node's entries.
+        let scoped: &[&str] = &[
+            #[cfg(feature = "consensus")]
+            crate::consensus_life::LIFE_PREFIX,
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            fleet_history::TALLY_PREFIX,
+        ];
         let kv_state      = KvState::with_scoped_prefixes(config.max_store_entries, scoped);
         let default_ttl   = config.default_ttl;
         let gossip_txs: Arc<[mpsc::Sender<(Bytes, u64, ForwardHint)>]> = gossip_txs_vec.into();
@@ -1361,6 +1376,10 @@ impl GossipAgent {
             evidence_journal: std::sync::OnceLock::new(),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             history_index: std::sync::OnceLock::new(),
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            ae_tally_heartbeat: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(all(feature = "gateway", feature = "tls"))]
+            ae_tally_lock: std::sync::Mutex::new(()),
             #[cfg(all(feature = "gateway", feature = "tls"))]
             execution_authority: std::sync::OnceLock::new(),
             #[cfg(all(feature = "gateway", feature = "tls"))]

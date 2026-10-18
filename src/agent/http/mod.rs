@@ -110,7 +110,7 @@ use super::{consensus_handle, migration};
 #[cfg(feature = "compliance")]
 use super::{audit, revocation, transparency};
 #[cfg(all(feature = "gateway", feature = "tls"))]
-use super::{action_evaluator, evidence_journal, federation_http, gateway_authority, gateway_member_keys, provider_enforcement};
+use super::{action_evaluator, evidence_journal, federation_http, fleet_history, gateway_authority, gateway_member_keys, provider_enforcement};
 
 mod authz;
 mod caps;
@@ -123,6 +123,8 @@ mod kv;
 #[cfg(feature = "llm")]
 mod llm_bridge;
 mod mcp_bridge;
+#[cfg(all(test, feature = "tls", feature = "consensus"))]
+pub(crate) use mcp_bridge::{TEST_DISPATCH_TIMEOUT_MS, TEST_LAST_TIMEOUT};
 mod mesh;
 mod node;
 mod overlay;
@@ -147,7 +149,9 @@ use signals::*;
 // The public surface of this module, unchanged: what `agent/mod.rs`, `a2a.rs` and `provider_enforcement.rs` name.
 pub use authz::{GatewayPreflight, GatewayRefusal};
 #[cfg(all(feature = "gateway", feature = "tls"))]
-pub(crate) use authz::{ae_preflight, ae_record_execution, observed_execution, Preflight};
+pub(crate) use authz::{ae_decide, ae_preflight, ae_record_execution, observed_execution, Decided, Preflight};
+#[cfg(all(test, feature = "gateway", feature = "tls", feature = "consensus"))]
+pub(crate) use authz::{ae_preflight_routed, TEST_RECORD_PAUSE_MS};
 #[cfg(all(feature = "gateway", feature = "tls", feature = "a2a"))]
 pub(crate) use authz::ENFORCEMENT_POINT_A2A;
 

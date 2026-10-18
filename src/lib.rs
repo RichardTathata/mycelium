@@ -137,6 +137,7 @@
 //! | `sys/identity-signed/{node}`       | identity-auth Phase 3b — the **sealed** record: `version(1)‖history‖proof(96)` in ONE entry, so keys and proof can never arrive apart; preferred by readers, and the only form accepted under `require_identity_proofs` (`tls`) |
 //! | `sys/caller-context/{node}`        | v3 item 7 — the node strips + verifies the `GatewayCaller` envelope on its RPC receive path (value `b"1"`, the envelope version); a secure-profile gateway dispatches only to nodes carrying it. Written at start by every node; self-owned (`sys/` tripwire) |
 //! | `sys/caller-context-id/{node}`     | post-360 row E — the node's signed, dated statement that every caller envelope it frames carries an id; a provider honours it while signed by the node and fresh, and drops an id-less signed envelope in its name as a replay. Re-asserted every minute under `tls`, never tombstoned; self-owned (`sys/` tripwire) |
+//! | `sys/ae-tally/{node}/hb` · `sys/ae-tally/{node}/c/{counter}/{actor}` | post-360 row K2 — the **fleet tally** (`HistoryScope::FleetTally`): every node built with `gateway` and `tls` writes a heartbeat (`{"as_of": ms, "enforces": bool}`) from `start()`, re-asserted every third of `control_max_staleness_ms`, and at a graceful shutdown a last one with `"departed": true`; a node withdraws its own aged entries, and no other node deletes its keys; an enforcement point writes, per counter (a digest of the policy's declared counter id with the kind of point) and actor (digested), the times of its recent permits (`{"w": window_ms, "t": [ms…]}`, the newest `limit`), withdrawn once every time has aged out. Unsigned; self-owned (`sys/` tripwire). The consensus scope's seats are decision records under `consensus/life/` (slot `ae-seat/{counter}/{actor}/{n}`, leased for the window plus two seconds, kept for good) (`src/agent/fleet_history.rs`) |
 //! | `sys/membership/removed/{node}`    | closure plan C5 — an operator-signed `SignedMemberRemoval` for `{node}` (JSON), written by the node that accepted it so the removal reaches every member by gossip as well as by direct offer. Verified on ingest; a forged entry has no effect. The removed node's own `sys/` tripwire may count it |
 //! | `cap/{node}/llm/inference`         | LLM backend capability (model, context, backend, endpoint attrs) |
 //! | `cap/{node}/llm/installable`       | LLM models that can be pulled (model, size_gb, est_mins attrs) |
@@ -318,8 +319,8 @@ pub use agent::{
 pub use agent::{
     preflight, preflight_with_history,
     ActionEnvelope, ActionEvaluator, ActionMapping, AeEvidence, AeReference, Decision, DecisionKind,
-    EvidenceState, Execution, History, HistoryEntry, HistoryInput, HistoryLimit, HistoryRequest,
-    HistoryScope, HistoryView, MandateBinding, MandateState, MappingKind, MappingStatus,
+    EvidenceState, Execution, FleetCount, FleetCounter, FleetState, History, HistoryEntry, HistoryInput,
+    HistoryLimit, HistoryRequest, HistoryScope, HistoryView, SeatClaim, FLEET_TALLY_CAVEAT, MandateBinding, MandateState, MappingKind, MappingStatus,
     PreflightRefusal, RecordKind, ReferenceEvaluator, Rule, Verdict, AE_EVIDENCE_SCHEMA,
     AE_REFERENCE_SCHEMA,
 };

@@ -129,6 +129,7 @@ fn spawn_handler_with(
             index_stripes:     Arc::new(std::array::from_fn(|_| std::sync::Mutex::new(()))),
             cap_ns_index:      Arc::new(crate::store::PrefixIndex::new()),
             scope_index: Arc::new(papaya::HashMap::new()),
+            scope_roster: Arc::new(papaya::HashMap::new()),
             #[cfg(feature = "test-frame-filter")]
             frame_filter: Arc::new(papaya::HashMap::new()),
             scoped_prefixes: Arc::from(Vec::<Arc<str>>::new()),
@@ -257,6 +258,10 @@ fn spawn_handler_with(
         evidence_journal: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         history_index: std::sync::OnceLock::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        ae_tally_heartbeat: std::sync::atomic::AtomicBool::new(false),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        ae_tally_lock: std::sync::Mutex::new(()),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         execution_authority: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -3964,6 +3969,7 @@ async fn test_subscribe_notified_via_gossip() {
                 index_stripes:     Arc::new(std::array::from_fn(|_| std::sync::Mutex::new(()))),
                 cap_ns_index:      Arc::new(crate::store::PrefixIndex::new()),
                 scope_index: Arc::new(papaya::HashMap::new()),
+            scope_roster: Arc::new(papaya::HashMap::new()),
                 #[cfg(feature = "test-frame-filter")]
             frame_filter: Arc::new(papaya::HashMap::new()),
             scoped_prefixes: Arc::from(Vec::<Arc<str>>::new()),
@@ -4088,6 +4094,10 @@ async fn test_subscribe_notified_via_gossip() {
         evidence_journal: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         history_index: std::sync::OnceLock::new(),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        ae_tally_heartbeat: std::sync::atomic::AtomicBool::new(false),
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        ae_tally_lock: std::sync::Mutex::new(()),
         #[cfg(all(feature = "gateway", feature = "tls"))]
         execution_authority: std::sync::OnceLock::new(),
         #[cfg(all(feature = "gateway", feature = "tls"))]

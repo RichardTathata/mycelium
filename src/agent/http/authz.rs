@@ -699,7 +699,8 @@ pub(crate) async fn ae_preflight(
 /// [`ae_preflight`] for a **routing** door (post-360 row R): `route` is what the door established
 /// about the destination it is deciding on and the request's data class. Both enter the envelope, so
 /// the evaluator decides on them; all of it, the destinations already refused for this call
-/// included, enters the evidence record. `None` is [`ae_preflight`] exactly.
+/// included, enters the evidence record. `None` is [`ae_preflight`] exactly. A routed call takes part in
+/// fleet counting (row K2) as any other: it is decided by [`ae_decide`] and settled by [`Settling::finish`].
 #[cfg(all(feature = "gateway", feature = "tls"))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn ae_preflight_routed(
@@ -712,16 +713,63 @@ pub(crate) async fn ae_preflight_routed(
     enforcement_point: &str,
     route: Option<&crate::agent::route_facts::RouteFacts>,
 ) -> Preflight {
+    match ae_decide(ctx, caller, operation, resource, arguments, params, enforcement_point, route).await {
+        Decided::Done(p) => p,
+        Decided::Settle(s) => s.finish().await,
+    }
+}
+
+/// What [`ae_decide`] came to: a preflight already complete, or a decision still to be **settled** — its seat claims
+/// and its record (post-360 row K2). [`Settling::will_claim`] says whether settling may wait on a consensus round,
+/// so an enforcement point that must not stall — a provider's serve loop — can settle it beside its loop instead.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) enum Decided {
+    /// Complete: nothing is left to settle.
+    Done(Preflight),
+    /// Decided, the per-actor gate released; the claims and the record are still to come.
+    Settle(Box<Settling>),
+}
+
+/// A decision whose seat claims and record are still to come (see [`Decided`]). Owns everything it needs, so it can
+/// be settled on another task.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) struct Settling {
+    ctx: Arc<TaskCtx>,
+    envelope: super::action_evaluator::ActionEnvelope,
+    counters: Vec<super::action_evaluator::FleetCounter>,
+    outcome: Result<Option<super::action_evaluator::Decision>, super::action_evaluator::PreflightRefusal>,
+    history: Option<super::action_evaluator::History>,
+    admitted: bool,
+    point: String,
+    enforcement_point: String,
+    /// Row R: what a routing door established about the destination, for the evidence record.
+    route: Option<crate::agent::route_facts::RouteFacts>,
+}
+
+/// The decision half of [`ae_preflight`], from the real envelope: everything up to and including the release of the
+/// per-actor history gate. What is left — seat claims and the record — is a [`Settling`].
+#[cfg(all(feature = "gateway", feature = "tls"))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn ae_decide(
+    ctx: &Arc<TaskCtx>,
+    caller: Option<&ResolvedPrincipal>,
+    operation: &str,
+    resource: &str,
+    arguments: &serde_json::Value,
+    params: &serde_json::Value,
+    enforcement_point: &str,
+    route: Option<&crate::agent::route_facts::RouteFacts>,
+) -> Decided {
     use super::action_evaluator as ae;
-    let Some(evaluator) = ctx.action_evaluator.get() else { return Preflight::Inert };
+    let Some(evaluator) = ctx.action_evaluator.get() else { return Decided::Done(Preflight::Inert) };
 
     // Both evaluator questions asked behind the unwind boundary (AE0 §3): a panicking adapter
     // cannot be used to build the envelope either.
     let Some((wanted, mapping, history_request)) = ae::evaluator_facts(evaluator, operation, resource) else {
         warn!(%operation, %resource, "AE preflight: evaluator panicked while reporting its facts");
-        return Preflight::Refuse(ae::PreflightRefusal::NotEstablished(
+        return Decided::Done(Preflight::Refuse(ae::PreflightRefusal::NotEstablished(
             ae::Decision::indeterminate("evaluator panicked while reporting its facts", ""),
-        ));
+        )));
     };
 
     // Only the argument names the policy declared cross into the envelope — and thence into the
@@ -813,6 +861,23 @@ pub(crate) async fn ae_preflight_routed(
     // be established. A permit decided on a view is counted into the history only if the history is still the
     // one it was decided on, so concurrent calls by one actor cannot both slip under a limit; otherwise decide
     // again on a fresh view (twice), then refuse as not established.
+    //
+    // Row K2: the fleet counters the evaluator names for this envelope are read into the view beside it, and a
+    // permit claims a seat in each consensus counter before it is admitted.
+    let counters = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| evaluator.fleet_counters(&envelope))) {
+        Ok(c) => c,
+        Err(_) => {
+            warn!(%operation, %resource, "AE preflight: evaluator panicked while naming its fleet counters");
+            return Decided::Done(Preflight::Refuse(ae::PreflightRefusal::NotEstablished(ae::Decision::indeterminate(
+                "evaluator panicked while naming its fleet counters",
+                envelope.expected_policy_revision.clone().unwrap_or_default(),
+            ))));
+        }
+    };
+    // A fleet counter is history too: an evaluator naming one gets a view even if it asked for no window of its own.
+    let history_request = history_request.or_else(|| {
+        counters.iter().map(|c| c.window_ms).max().map(|window_ms| ae::HistoryRequest { window_ms, max_entries: 0 })
+    });
     let history_index = ctx.history_index.get();
     let point = super::evidence_journal::point_of(enforcement_point);
     if let (Some(_), Some(index)) = (history_request, history_index) {
@@ -831,7 +896,10 @@ pub(crate) async fn ae_preflight_routed(
         let (history, version) = match (history_request, history_index) {
             (None, _) => (None, None),
             (Some(request), Some(index)) => {
-                let (h, v) = index.view(&point, &envelope.actor, request, history_now);
+                let (mut h, v) = index.view(&point, &envelope.actor, request, history_now);
+                if let ae::History::View(view) = &mut h {
+                    view.fleet = super::fleet_history::establish(ctx, &counters, &point, &envelope.actor, history_now);
+                }
                 (Some(h), Some(v))
             }
             (Some(_), None) => (
@@ -865,60 +933,185 @@ pub(crate) async fn ae_preflight_routed(
             break (Err(ae::PreflightRefusal::NotEstablished(refused)), history, false);
         }
     };
-    // Counted: the next decision on this actor's history may proceed while this one is recorded.
-    drop(_gate);
-    let (decision, execution) = match &outcome {
-        Ok(Some(d)) => (d.clone(), ae::Execution::Attempted),
-        // No evaluator — unreachable here, one was fetched above. Nothing decided, nothing to
-        // record, nothing to refuse.
-        Ok(None) => return Preflight::Inert,
-        Err(refusal) => (refusal.decision().clone(), ae::Execution::None),
-    };
-
-    // Every decision, permits included — the refusal counter below has no denominator on its own,
-    // so a denial *rate* is not computable from it and an alert on denial volume fires on traffic
-    // growth. Labels are the evidence document's own vocabulary (`DecisionKind`/`MappingKind`), so
-    // a reader never has to translate between a dashboard and a record. Both label sets are small
-    // closed sets: nothing here is labelled by principal, operation or resource, whose value spaces
-    // grow with traffic.
-    #[cfg(feature = "metrics")]
-    {
-        let verdict = ae::DecisionKind::from(decision.verdict).label();
-        let mapping = ae::MappingKind::from(envelope.mapping.status).label();
-        metrics::counter!("mycelium_ae_decisions_total", "verdict" => verdict, "mapping" => mapping)
-            .increment(1);
-    }
-
-    let mut evidence = ae::AeEvidence::for_decision(&envelope, &decision, execution, enforcement_point);
-    if let Some(h) = &history {
-        // The history this decision read, as a decision input: a replay finds the attempts in the journal.
-        evidence = evidence.with_history(ae::HistoryInput::of(h));
-    }
-    if let Some(r) = route {
-        // Row R: the class, the destination decided on and the destinations already refused.
-        evidence = evidence.with_route(r.clone());
-    }
-    if let Err(e) = ae_record(ctx, &evidence).await {
-        // Not recorded, so not done: a permit counted into the history is taken back.
-        if admitted && let Some(index) = history_index {
-            index.retract(&point, &envelope.actor, &envelope.attempt_id);
+    // Row K2's tally: a permit admitted under a tally rule is published under the actor's gate (a KV read and
+    // write), so two permits of one actor at this point do not lose each other's update.
+    if let Ok(Some(_)) = &outcome {
+        for counter in counters.iter().filter(|c| c.scope == ae::HistoryScope::FleetTally) {
+            super::fleet_history::publish_permit(ctx, counter, &point, &envelope.actor, history_now);
         }
-        warn!(actor = %envelope.actor, %operation, %resource,
-              "AE preflight: the decision could not be recorded, so the action is refused: {e}");
-        #[cfg(feature = "metrics")]
-        metrics::counter!("mycelium_ae_preflight_refusals_total", "reason" => "evidence_not_recorded")
-            .increment(1);
-        return Preflight::Refuse(ae::PreflightRefusal::NotRecorded(decision));
+    }
+    // Counted: the next decision on this actor's history may proceed — before any seat claim, which can wait on a
+    // quorum for seconds and must hold up no other call on this stripe (#642's review, finding 1). The permit is
+    // counted locally already, provisionally: a claim that fails takes it back.
+    drop(_gate);
+    Decided::Settle(Box::new(Settling {
+        ctx: Arc::clone(ctx),
+        envelope,
+        counters,
+        outcome,
+        history,
+        admitted,
+        point,
+        enforcement_point: enforcement_point.to_string(),
+        route: route.cloned(),
+    }))
+}
+
+/// Test hook: a pause, per node, after the evidence journal acknowledges a record and before the history observes it.
+#[cfg(all(test, feature = "gateway", feature = "tls"))]
+pub(crate) static TEST_RECORD_PAUSE_MS: std::sync::LazyLock<papaya::HashMap<String, u64>> =
+    std::sync::LazyLock::new(papaya::HashMap::new);
+
+/// Takes back a provisionally counted permit if the settling it belongs to is dropped before its decision is settled.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+struct RetractOnDrop {
+    armed: bool,
+    ctx: Arc<TaskCtx>,
+    point: String,
+    actor: String,
+    attempt: String,
+}
+
+#[cfg(all(feature = "gateway", feature = "tls"))]
+impl Drop for RetractOnDrop {
+    fn drop(&mut self) {
+        if self.armed && let Some(index) = self.ctx.history_index.get() {
+            index.retract(&self.point, &self.actor, &self.attempt);
+        }
+    }
+}
+
+#[cfg(all(feature = "gateway", feature = "tls"))]
+impl Settling {
+    /// Whether settling may wait on a consensus round: a permit relying on a fleet-consensus counter.
+    pub(crate) fn will_claim(&self) -> bool {
+        matches!(self.outcome, Ok(Some(_)))
+            && self.counters.iter().any(|c| c.scope == super::action_evaluator::HistoryScope::FleetConsensus)
     }
 
-    match outcome {
-        Ok(_) => Preflight::Proceed(Box::new(evidence)),
-        Err(refusal) => {
+    /// Claim the permit's seats and record the decision: the rest of [`ae_preflight`].
+    pub(crate) async fn finish(self) -> Preflight {
+        use super::action_evaluator as ae;
+        let Settling { ctx, envelope, counters, mut outcome, history, admitted, point, enforcement_point, route } = self;
+        let ctx = &ctx;
+        let enforcement_point = enforcement_point.as_str();
+        let (operation, resource) = (envelope.operation.clone(), envelope.resource.clone());
+        let history_index = ctx.history_index.get();
+        // Dropped before it is recorded — its serve loop abandoned it (#642's review, round 3, finding 4) — a permit
+        // counted provisionally is taken back, as a refused one is.
+        let mut provisional = RetractOnDrop {
+            armed: admitted,
+            ctx: Arc::clone(ctx),
+            point: point.clone(),
+            actor: envelope.actor.clone(),
+            attempt: envelope.attempt_id.clone(),
+        };
+
+        // Row K2's check-then-act: a permit relying on a consensus counter holds a seat before it is admitted — the
+        // seat, not the evaluator's reading of the counter, is what bounds the fleet, and consensus serialises the
+        // seat's contenders, so no local gate is needed across the claim. A claim that fails takes the permit back:
+        // every seat held is a denial; an undecidable or too-late claim is not established.
+        let mut seats = Vec::new();
+        if let Ok(Some(permit)) = &outcome {
+            let mut refused = None;
+            for counter in counters.iter().filter(|c| c.scope == ae::HistoryScope::FleetConsensus) {
+                let scope = counter.scope.label();
+                let line = format!("history scope={scope} counter={} limit={} window_ms={}", counter.key, counter.count, counter.window_ms);
+                match super::fleet_history::claim_seat(ctx, counter, &point, &envelope.actor, &envelope.attempt_id).await {
+                    super::fleet_history::Claim::Seat(seat) => seats.push(seat),
+                    super::fleet_history::Claim::Full => {
+                        refused = Some(ae::PreflightRefusal::Denied(
+                            ae::Decision::deny(
+                                format!(
+                                    "the allowance permits at most {} in {} ms and every seat of the fleet-wide counter \
+                                     is held (scope {scope})",
+                                    counter.count, counter.window_ms
+                                ),
+                                permit.policy_revision.clone(),
+                            )
+                            .checking([line, format!("seat claim: all {} seats held", counter.count)]),
+                        ));
+                        break;
+                    }
+                    super::fleet_history::Claim::NotEstablished(why) => {
+                        refused = Some(ae::PreflightRefusal::NotEstablished(
+                            ae::Decision::indeterminate(
+                                format!("the fleet-wide count at scope {scope} could not be claimed, so the limit is not established"),
+                                permit.policy_revision.clone(),
+                            )
+                            .checking([line])
+                            .with_errors([format!("seat claim not established at scope {scope}: {why}")]),
+                        ));
+                        break;
+                    }
+                }
+            }
+            if let Some(refusal) = refused {
+                if admitted && let Some(index) = history_index {
+                    index.retract(&point, &envelope.actor, &envelope.attempt_id);
+                }
+                outcome = Err(refusal);
+            }
+        }
+        let (decision, execution) = match &outcome {
+            Ok(Some(d)) => (d.clone(), ae::Execution::Attempted),
+            // No evaluator — unreachable here, one was fetched above. Nothing decided, nothing to
+            // record, nothing to refuse.
+            Ok(None) => return Preflight::Inert,
+            Err(refusal) => (refusal.decision().clone(), ae::Execution::None),
+        };
+
+        // Every decision, permits included — the refusal counter below has no denominator on its own,
+        // so a denial *rate* is not computable from it and an alert on denial volume fires on traffic
+        // growth. Labels are the evidence document's own vocabulary (`DecisionKind`/`MappingKind`), so
+        // a reader never has to translate between a dashboard and a record. Both label sets are small
+        // closed sets: nothing here is labelled by principal, operation or resource, whose value spaces
+        // grow with traffic.
+        #[cfg(feature = "metrics")]
+        {
+            let verdict = ae::DecisionKind::from(decision.verdict).label();
+            let mapping = ae::MappingKind::from(envelope.mapping.status).label();
+            metrics::counter!("mycelium_ae_decisions_total", "verdict" => verdict, "mapping" => mapping)
+                .increment(1);
+        }
+
+        let mut evidence = ae::AeEvidence::for_decision(&envelope, &decision, execution, enforcement_point);
+        if let Some(h) = &history {
+            // The history this decision read, as a decision input: a replay finds the attempts in the journal. With
+            // a fleet scope, the counters' state and coverage, and the seats the permit claimed (row K2).
+            evidence = evidence.with_history(ae::HistoryInput::of(h).with_seats(seats));
+        }
+        if let Some(r) = route {
+            // Row R: the class, the destination decided on and the destinations already refused.
+            evidence = evidence.with_route(r);
+        }
+        // Disarmed **before** the record is awaited (#642's review, round 4, finding 3): once the record is handed to
+        // the journal, an abort leaves its delivery unknown — the record may be on disk — so the permit stays counted
+        // rather than being taken back from under a record that exists. The retractions below are the only ones.
+        provisional.armed = false;
+        let recorded = ae_record(ctx, &evidence).await;
+        if let Err(e) = recorded {
+            // Not recorded, so not done: a permit counted into the history is taken back.
+            if admitted && let Some(index) = history_index {
+                index.retract(&point, &envelope.actor, &envelope.attempt_id);
+            }
             warn!(actor = %envelope.actor, %operation, %resource,
-                  "AE preflight refused: {refusal}");
+                  "AE preflight: the decision could not be recorded, so the action is refused: {e}");
             #[cfg(feature = "metrics")]
-            metrics::counter!("mycelium_ae_preflight_refusals_total", "reason" => refusal.reason()).increment(1);
-            Preflight::Refuse(refusal)
+            metrics::counter!("mycelium_ae_preflight_refusals_total", "reason" => "evidence_not_recorded")
+                .increment(1);
+            return Preflight::Refuse(ae::PreflightRefusal::NotRecorded(decision));
+        }
+
+        match outcome {
+            Ok(_) => Preflight::Proceed(Box::new(evidence)),
+            Err(refusal) => {
+                warn!(actor = %envelope.actor, %operation, %resource,
+                      "AE preflight refused: {refusal}");
+                #[cfg(feature = "metrics")]
+                metrics::counter!("mycelium_ae_preflight_refusals_total", "reason" => refusal.reason()).increment(1);
+                Preflight::Refuse(refusal)
+            }
         }
     }
 }
@@ -1014,6 +1207,15 @@ pub(super) async fn ae_record(
         None => (None, EvidenceState::NotConfigured, None),
         Some(journal) => match journal.append(bytes).await {
             Ok(appended) => {
+                #[cfg(test)]
+                {
+                    // A pause between the journal's acknowledgement and the history's update — where an abort lands
+                    // after the record is on disk (#642's review, round 4, finding 3).
+                    let pause = TEST_RECORD_PAUSE_MS.pin().get(&ctx.node_id.to_string()).copied();
+                    if let Some(ms) = pause {
+                        mycelium_core::sim_seam::sleep_ms("ae/record-test-pause", ms).await;
+                    }
+                }
                 // On the record, so in the actor's history this point keeps (post-360 row K).
                 if let Some(index) = ctx.history_index.get() {
                     index.observe(evidence);
