@@ -372,7 +372,8 @@ async fn the_oldest_waiter_is_never_closed_to_make_room() {
 }
 
 /// #644's round-5 review, finding 3: a read of the kernel's table that hangs is bounded — that batch is refused
-/// (`peer_uid_unknown`) and the next batch is served. Seen failing first: the hung read stalled every later
+/// (`peer_uid_unknown`) and, once the read returns, the next batch is served (round 6: while it has not, later
+/// batches are refused rather than given a read each). Seen failing first: the hung read stalled every later
 /// connection.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_hung_table_read_is_bounded_and_the_next_batch_is_served() {
@@ -382,56 +383,170 @@ async fn a_hung_table_read_is_bounded_and_the_next_batch_is_served() {
     let seen = Arc::clone(&calls);
     let lookup: PeerUidLookup = Arc::new(move |pairs: &[(std::net::SocketAddr, std::net::SocketAddr)]| {
         if seen.fetch_add(1, Ordering::SeqCst) == 0 {
-            std::thread::sleep(std::time::Duration::from_secs(20));
+            std::thread::sleep(std::time::Duration::from_millis(1_500));
         }
         pairs.iter().map(|_| Ok(me)).collect()
     });
-    let p = start_with_peer_uid(vec![format!("http://127.0.0.1:{u}")], ProxyLimits::default(), Some(lookup));
+    let limits = ProxyLimits { peer_read_timeout_ms: 500, ..ProxyLimits::default() };
+    let p = start_with_peer_uid(vec![format!("http://127.0.0.1:{u}")], limits, Some(lookup));
     let (token, get) = (token_header(&p), format!("GET http://127.0.0.1:{u}/ HTTP/1.1\r\nHost: x\r\n\r\n"));
     let first = tokio::time::timeout(std::time::Duration::from_secs(8), raw(p.port(), &token, &get)).await.expect("the hung read is bounded");
     assert!(first.is_empty(), "the hung batch is refused: {first}");
-    let second = tokio::time::timeout(std::time::Duration::from_secs(8), raw(p.port(), &token, &get))
-        .await
-    .expect("the next batch is not stuck behind it");
-    assert!(second.starts_with("HTTP/1.1 200"), "{second}");
+    let mut served = String::new();
+    for _ in 0..20 {
+        served = tokio::time::timeout(std::time::Duration::from_secs(8), raw(p.port(), &token, &get)).await.expect("a later batch is answered");
+        if served.starts_with("HTTP/1.1 200") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    assert!(served.starts_with("HTTP/1.1 200"), "once the read returns, the next batch is served: {served}");
 }
 
-/// #644's round-5 review, finding 2: every proxy of the stem draws on **one** descriptor budget — two proxies
-/// flooded together hold at most the budget between them, and what is past it is closed at once; each held
-/// socket gives its descriptor back when it closes. Seen failing first with each proxy judged only by its own
-/// `max_open`: the two held 16 sockets against a budget of 10.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn two_proxies_share_one_descriptor_budget() {
-    let me = crate::peer_uid::own_uid();
-    let slow: PeerUidLookup = Arc::new(move |pairs: &[(std::net::SocketAddr, std::net::SocketAddr)]| {
-        std::thread::sleep(std::time::Duration::from_secs(3));
-        pairs.iter().map(|_| Ok(me)).collect()
-    });
-    let budget = FdBudget::new(10);
-    let limits = ProxyLimits { max_open: 8, max_unchecked: 100, peer_read_timeout_ms: 10_000, preauth_timeout_ms: 60_000, ..ProxyLimits::default() };
-    let a = start_with_budget(Vec::new(), limits, Some(Arc::clone(&slow)), Arc::clone(&budget));
-    let b = start_with_budget(Vec::new(), limits, Some(slow), Arc::clone(&budget));
-    let mut held = Vec::new();
-    for p in [&a, &b] {
-        for _ in 0..8 {
-            held.push(tokio::net::TcpStream::connect(("127.0.0.1", p.port())).await.unwrap());
+/// A keep-alive upstream that answers every request on a connection and counts the connections still open.
+async fn keepalive_upstream() -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let live = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&live);
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else { return };
+            let live = Arc::clone(&count);
+            live.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    match sock.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    }
+                    while let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        buf.drain(..end + 4);
+                        if sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                live.fetch_sub(1, Ordering::SeqCst);
+            });
         }
+    });
+    (port, live)
+}
+
+/// #644's round-6 review, finding 1: another user's flood on one proxy cannot spend the stem's descriptor budget.
+/// Each proxy draws on its share of the budget; a proxy at its share **stops accepting** (the flood waits in the
+/// kernel's backlog, holding no descriptor of the stem's), and part of each share is reserved for upstream sockets.
+/// So proxy B's command is still accepted and forwarded, and proxy A's own command — admitted before the flood —
+/// still reaches its upstream. Seen failing first on round 5's single shared pool: A's flood took all 16
+/// descriptors and B's command's connection was accepted and closed (`fd_budget`); and with the share or the
+/// reserve planted out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_flood_on_one_proxy_leaves_every_other_proxy_its_share() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let (u, _) = upstream().await;
+    let me = crate::peer_uid::own_uid();
+    // A's first read (its command) answers at once; every later read (the flood) takes 12 s, so the flood holds
+    // what it was given for the whole test.
+    let reads = Arc::new(AtomicU64::new(0));
+    let slow: PeerUidLookup = Arc::new(move |pairs: &[(std::net::SocketAddr, std::net::SocketAddr)]| {
+        if reads.fetch_add(1, Ordering::SeqCst) == 0 {
+            return pairs.iter().map(|_| Ok(me)).collect();
+        }
+        std::thread::sleep(std::time::Duration::from_secs(12));
+        pairs.iter().map(|_| Ok(me.wrapping_add(1))).collect()
+    });
+    let fast: PeerUidLookup = Arc::new(move |pairs: &[(std::net::SocketAddr, std::net::SocketAddr)]| pairs.iter().map(|_| Ok(me)).collect());
+    let budget = FdBudget::new(16);
+    let limits = ProxyLimits { max_unchecked: 100, peer_read_timeout_ms: 60_000, preauth_timeout_ms: 60_000, header_read_timeout_ms: 60_000, ..ProxyLimits::default() };
+    let hosts = vec![format!("http://127.0.0.1:{u}")];
+    let a = start_with_budget(hosts.clone(), limits, Some(slow), Arc::clone(&budget));
+    let b = start_with_budget(hosts, limits, Some(fast), Arc::clone(&budget));
+    // A's command connects and is admitted before the flood.
+    let mut cmd_a = tokio::net::TcpStream::connect(("127.0.0.1", a.port())).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let mut flood = Vec::new();
+    for _ in 0..40 {
+        flood.push(tokio::net::TcpStream::connect(("127.0.0.1", a.port())).await.unwrap());
     }
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    assert_eq!(budget.used(), 10, "the budget is spent and not exceeded");
-    let mut closed = 0;
-    for s in &mut held {
-        if closed_within(s, 0).await || closed_within(s, 1).await {
-            closed += 1;
-        }
-    }
-    assert_eq!(closed, 6, "the six past the shared budget were closed at once");
-    assert!(a.counts().refused + b.counts().refused >= 6);
-    drop(held);
+    assert_eq!(a.counts().refused, 0, "nothing was accepted only to be closed: {:?}", a.counts());
+    // B's command: accepted, admitted, forwarded.
+    let get = format!("GET http://127.0.0.1:{u}/ HTTP/1.1\r\nHost: x\r\n\r\n");
+    let via_b = raw(b.port(), &token_header(&b), &get).await;
+    assert!(via_b.starts_with("HTTP/1.1 200"), "B's command is served while A is flooded: {via_b:?} {:?} used {}", b.counts(), budget.used());
+    // A's own admitted command still reaches its upstream (the reserve).
+    cmd_a.write_all(format!("GET http://127.0.0.1:{u}/ HTTP/1.1\r\nHost: x\r\nProxy-Authorization: {}\r\nConnection: close\r\n\r\n", token_header(&a)).as_bytes()).await.unwrap();
+    let mut answer = Vec::new();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(8), cmd_a.read_to_end(&mut answer)).await;
+    let answer = String::from_utf8_lossy(&answer).to_string();
+    assert!(answer.starts_with("HTTP/1.1 200"), "A's admitted command reaches its upstream: {answer:?} {:?}", a.counts());
+    // A's share is 8, less its upstream reserve of 2; B's accept loop holds one more for its next connection.
+    assert!(budget.used() <= 7, "A holds no more than its share: {}", budget.used());
+    drop(flood);
 }
 
-/// #644's round-4 review: one proxy holds at most `max_open` sockets — one accepted past it is closed at once, so
-/// an activation's proxy cannot take the stem's descriptor table. Seen failing first: the extra connection was held.
+/// #644's round-6 review, finding 2: the proxy keeps no idle upstream socket — each closes when its answer has been
+/// relayed, so the descriptor budget counts every upstream socket the proxy holds. Seen failing first with
+/// reqwest's default pool: eight idle upstream connections stayed open after a burst of eight forwards.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn no_idle_upstream_socket_outlives_its_answer() {
+    use std::sync::atomic::Ordering;
+    let (u, live) = keepalive_upstream().await;
+    let p = start_limited(vec![format!("http://127.0.0.1:{u}")], ProxyLimits::default());
+    let token = token_header(&p);
+    let get = format!("GET http://127.0.0.1:{u}/ HTTP/1.1\r\nHost: x\r\n\r\n");
+    let mut burst = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let (port, token, get) = (p.port(), token.clone(), get.clone());
+        burst.spawn(async move { raw(port, &token, &get).await });
+    }
+    while let Some(answer) = burst.join_next().await {
+        let answer = answer.unwrap();
+        assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+    }
+    let mut open = live.load(Ordering::SeqCst);
+    for _ in 0..20 {
+        if open == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        open = live.load(Ordering::SeqCst);
+    }
+    assert_eq!(open, 0, "no upstream socket is kept idle");
+}
+
+/// #644's round-6 review, finding 3: a read of the kernel's table that never returns leaves **one** read
+/// outstanding — later batches are refused while it is in flight, not given a thread each. Seen failing first:
+/// every batch past the bound started a new read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_read_that_never_returns_leaves_one_read_outstanding() {
+    let (u, _) = upstream().await;
+    let calls = Arc::new(AtomicU64::new(0));
+    let seen = Arc::clone(&calls);
+    let lookup: PeerUidLookup = Arc::new(move |_pairs: &[(std::net::SocketAddr, std::net::SocketAddr)]| {
+        seen.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        Vec::new()
+    });
+    let limits = ProxyLimits { peer_read_timeout_ms: 200, ..ProxyLimits::default() };
+    let p = start_with_peer_uid(vec![format!("http://127.0.0.1:{u}")], limits, Some(lookup));
+    let (token, get) = (token_header(&p), format!("GET http://127.0.0.1:{u}/ HTTP/1.1\r\nHost: x\r\n\r\n"));
+    for _ in 0..4 {
+        let answer = tokio::time::timeout(std::time::Duration::from_secs(5), raw(p.port(), &token, &get)).await.expect("refused within a bound");
+        assert!(answer.is_empty(), "refused: {answer}");
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "one read outstanding, not one per batch");
+    assert!(p.counts().refused >= 4);
+}
+
+/// #644's round-4 review: one proxy holds at most `max_open` sockets, so an activation's proxy cannot take the
+/// stem's descriptor table. Seen failing first: the extra connection was held. Since round 6 the fifth is not
+/// accepted only to be closed: it waits in the kernel's backlog and is served once one of the four closes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_proxy_holds_at_most_max_open_sockets() {
     let me = crate::peer_uid::own_uid();
@@ -448,9 +563,17 @@ async fn a_proxy_holds_at_most_max_open_sockets() {
     }
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     let mut fifth = tokio::net::TcpStream::connect(("127.0.0.1", p.port())).await.unwrap();
-    assert!(closed_within(&mut fifth, 3).await, "a socket past max_open is closed");
+    assert!(!closed_within(&mut fifth, 1).await, "the fifth waits, not closed");
+    assert_eq!(p.counts().waiting_max, 4, "only four were accepted: {:?}", p.counts());
+    assert_eq!(p.counts().refused, 0);
+    drop(held.pop());
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    fifth.write_all(b"GET http://127.0.0.1:1/ HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await.unwrap();
+    let mut answer = Vec::new();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), fifth.read_to_end(&mut answer)).await;
+    assert!(String::from_utf8_lossy(&answer).starts_with("HTTP/1.1 407"), "the fifth is accepted once one closes: {:?}", String::from_utf8_lossy(&answer));
     for h in &mut held {
-        assert!(!closed_within(h, 1).await, "the four held stay open");
+        assert!(!closed_within(h, 1).await, "the others stay open");
     }
 }
 

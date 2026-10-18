@@ -466,13 +466,18 @@ One read of the kernel's table answers every connection accepted before it began
 batch, not per connection, and the command's connection waits about one read; a read that takes longer than 2 s
 (on macOS, `sysctl` killed after 1.5 s) refuses its batch and the next read begins. While 64 connections wait to
 be named the proxy accepts nothing more: newer connections wait, in arrival order, in the kernel's listen
-backlog, and **no waiting connection is closed to make room**. Every proxy of the stem draws on one descriptor
-budget — a quarter of the process's soft `RLIMIT_NOFILE` (at least 32; the limit is read, not raised) — counting
-accepted sockets and the upstream sockets they open; one proxy also holds at most 256 accepted sockets. A
-connection past either is closed at once, a request needing an upstream socket past the budget is refused `503`,
-so a flood cannot take the stem's descriptor table. Another user on the host can neither use the proxy nor crowd
-the command out of it short of filling the listen backlog faster than reads drain it — which costs the command's
-client a SYN retry, not a refusal.
+backlog, and **no waiting connection is closed to make room**. The stem's proxies share one descriptor budget — a
+quarter of the process's soft `RLIMIT_NOFILE` (at least 32; the limit is read, not raised) — counting accepted
+sockets and the upstream sockets they open; the proxy keeps no idle upstream connection, so every upstream socket
+is counted. Each proxy draws on its **share**, the budget divided among the proxies (never under 8: an egress
+activation that would push the share below 8 is refused at start, `egress_proxy_unavailable`), and a quarter of
+each share is kept for upstream sockets. A proxy at its share, or at 256 accepted sockets, **stops accepting** —
+newer connections wait in the backlog, not closed — and a request that finds no upstream descriptor within 10 s is
+refused `503`. So a flood on one proxy cannot spend another proxy's descriptors or its own command's upstream, and
+no flood can take the stem's descriptor table. Another user on the host can neither use the proxy nor crowd the
+command out of it short of filling the listen backlog faster than reads drain it — which costs the command's
+client a SYN retry, not a refusal. A read of the kernel's table that has not returned is never doubled: while it
+is out, later connections are refused (`peer_uid_unknown`) rather than given a read each.
 
 **Bounded.** Any process of the stem's own user can connect (only the token admits a request), so a connection
 that has not presented the token is closed after 2 s, on its `407`, or — past 16 such connections — to make room for a

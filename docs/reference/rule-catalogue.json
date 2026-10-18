@@ -651,7 +651,6 @@
             "preauth_evicted",
             "peer_uid_other",
             "peer_uid_unknown",
-            "open_cap",
             "fd_budget",
             "credential_host_tunnel",
             "encoded_response"

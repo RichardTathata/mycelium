@@ -125,8 +125,8 @@ struct Inner {
     open: AtomicUsize,
     refused_other_user: AtomicU64,
     peer_gate: Arc<PeerGate>,
-    /// The descriptors every proxy of the stem shares.
-    fd_budget: Arc<FdBudget>,
+    /// This proxy's share of the descriptors every proxy of the stem shares.
+    share: Arc<Share>,
     /// The connections that have not presented the token, oldest first, to close past
     /// `limits.max_unauthenticated`. Lock-order table row 65: a leaf, held for a push or a scan of weak
     /// references, never across an `await`.
@@ -246,24 +246,38 @@ pub struct ProxyOptions<'a> {
 
 /// The descriptors every egress proxy in this process may hold together — accepted sockets and the upstream
 /// sockets they open (#644's round-5 review: a per-proxy cap multiplied by the number of activations could still
-/// take the stem's descriptor table, which gossip, the gateway and the WAL need).
+/// take the stem's descriptor table, which gossip, the gateway and the WAL need). Each proxy draws on its **share**
+/// — the budget divided by the proxies that hold one, never under [`MIN_SHARE`] (a proxy that would push the share
+/// below it is refused at start) — and of each share a reserve (a quarter, at least one) is for upstream sockets
+/// only, so another user's flood on one proxy can neither spend another proxy's descriptors nor starve its own
+/// command's upstream (#644's round-6 review).
 #[derive(Debug)]
 pub struct FdBudget {
     used: AtomicUsize,
     cap: usize,
+    proxies: AtomicUsize,
+    /// Signalled whenever a descriptor is given back or a share grows.
+    freed: tokio::sync::Notify,
 }
+
+/// The fewest descriptors any proxy's share holds; a budget that cannot give one more proxy this many refuses it.
+pub const MIN_SHARE: usize = 8;
 
 impl FdBudget {
     /// A budget of `cap` descriptors.
     pub fn new(cap: usize) -> Arc<Self> {
-        Arc::new(FdBudget { used: AtomicUsize::new(0), cap: cap.max(1) })
+        Arc::new(FdBudget { used: AtomicUsize::new(0), cap: cap.max(1), proxies: AtomicUsize::new(0), freed: tokio::sync::Notify::new() })
     }
 
     /// The process-wide budget: a quarter of the soft `RLIMIT_NOFILE` (at least 32), leaving three quarters to the
-    /// node itself. The limit is read once and not raised.
+    /// node itself. The limit is read once and not raised. (A test build uses 10,000, so tests running proxies in
+    /// parallel do not share a small host limit; a test of the budget injects its own.)
     pub fn stem() -> Arc<Self> {
         static STEM: std::sync::OnceLock<Arc<FdBudget>> = std::sync::OnceLock::new();
         Arc::clone(STEM.get_or_init(|| {
+            if cfg!(test) {
+                return FdBudget::new(10_000);
+            }
             let soft = rustix::process::getrlimit(rustix::process::Resource::Nofile).current.unwrap_or(1024);
             FdBudget::new(((soft / 4) as usize).clamp(32, 16_384))
         }))
@@ -279,21 +293,93 @@ impl FdBudget {
         self.cap
     }
 
-    /// Take one, if any is left; released when the slot drops.
-    fn take(self: &Arc<Self>) -> Option<BudgetSlot> {
-        self.used
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < self.cap).then_some(n + 1))
-            .ok()
-            .map(|_| BudgetSlot(Arc::clone(self)))
+    /// Each proxy's share now.
+    pub fn share(&self) -> usize {
+        self.cap / self.proxies.load(Ordering::Acquire).max(1)
+    }
+
+    /// A proxy's share, if the budget can give one more proxy at least [`MIN_SHARE`].
+    fn join(self: &Arc<Self>) -> Result<Arc<Share>, String> {
+        self.proxies
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (self.cap / (n + 1) >= MIN_SHARE).then_some(n + 1))
+            .map_err(|n| {
+                format!(
+                    "the stem's egress descriptor budget ({} — a quarter of the soft open-file limit) cannot give a {}th egress proxy its minimum share of {MIN_SHARE}",
+                    self.cap,
+                    n + 1
+                )
+            })?;
+        Ok(Arc::new(Share { budget: Arc::clone(self), held: AtomicUsize::new(0) }))
     }
 }
 
-/// One descriptor of the shared [`FdBudget`], given back on drop.
-struct BudgetSlot(Arc<FdBudget>);
+/// What a descriptor is for: an accepted socket may use its proxy's share less the reserve; an upstream socket
+/// the whole share.
+#[derive(Clone, Copy)]
+enum Use {
+    Accept,
+    Upstream,
+}
+
+/// One proxy's share of the [`FdBudget`].
+struct Share {
+    budget: Arc<FdBudget>,
+    held: AtomicUsize,
+}
+
+impl Drop for Share {
+    fn drop(&mut self) {
+        self.budget.proxies.fetch_sub(1, Ordering::AcqRel);
+        self.budget.freed.notify_waiters();
+    }
+}
+
+impl Share {
+    fn limit(&self, u: Use) -> usize {
+        let share = self.budget.share();
+        match u {
+            Use::Upstream => share,
+            Use::Accept => share - (share / 4).max(1),
+        }
+    }
+
+    /// One descriptor for `u`, if the share and the budget have one.
+    fn try_take(self: &Arc<Self>, u: Use) -> Option<BudgetSlot> {
+        let limit = self.limit(u);
+        self.held.fetch_update(Ordering::AcqRel, Ordering::Acquire, |h| (h < limit).then_some(h + 1)).ok()?;
+        let cap = self.budget.cap;
+        if self.budget.used.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < cap).then_some(n + 1)).is_err() {
+            self.held.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
+        Some(BudgetSlot(Arc::clone(self)))
+    }
+
+    /// Wait for a descriptor for `u` while `ready()` also holds — no wake-up is lost: the wait is registered
+    /// before each check.
+    async fn take_when(self: &Arc<Self>, u: Use, ready: impl Fn() -> bool) -> BudgetSlot {
+        loop {
+            let freed = self.budget.freed.notified();
+            tokio::pin!(freed);
+            freed.as_mut().enable();
+            if ready()
+                && let Some(slot) = self.try_take(u)
+            {
+                return slot;
+            }
+            freed.await;
+        }
+    }
+}
+
+/// One descriptor of a proxy's [`Share`], given back on drop.
+struct BudgetSlot(Arc<Share>);
 
 impl Drop for BudgetSlot {
     fn drop(&mut self) {
-        self.0.used.fetch_sub(1, Ordering::AcqRel);
+        self.0.held.fetch_sub(1, Ordering::AcqRel);
+        self.0.budget.used.fetch_sub(1, Ordering::AcqRel);
+        self.0.budget.freed.notify_waiters();
     }
 }
 
@@ -360,6 +446,8 @@ impl PeerGate {
 
     /// The naming task: drain everything queued, answer it with one bounded read, repeat until nothing waits.
     async fn run(self: Arc<Self>, lookup: PeerUidLookup, read_timeout_ms: u64) {
+        // An abandoned read still holds its thread; while it does, no new read starts (#644's round-6 review).
+        let reading = Arc::new(std::sync::atomic::AtomicBool::new(false));
         loop {
             self.wake.notified().await;
             loop {
@@ -369,13 +457,25 @@ impl PeerGate {
                 }
                 self.lookups.fetch_add(1, Ordering::Relaxed);
                 let pairs: Vec<(SocketAddr, SocketAddr)> = batch.iter().map(|w| (w.local, w.peer)).collect();
-                let lookup = Arc::clone(&lookup);
-                let read = tokio::task::spawn_blocking(move || lookup(&pairs));
-                // A read that hangs is abandoned (its thread finishes or not on its own); its batch is refused.
-                let answers: Vec<Result<u32, String>> = tokio::select! {
-                    r = read => r.unwrap_or_default(),
-                    _ = mycelium::sim_seam::sleep_ms("activation_egress.peer_read", read_timeout_ms.max(1)) => {
-                        batch.iter().map(|_| Err(format!("the socket-table read took longer than {read_timeout_ms} ms"))).collect()
+                let answers: Vec<Result<u32, String>> = if reading.load(Ordering::Acquire) {
+                    batch.iter().map(|_| Err("an earlier socket-table read has not returned".to_string())).collect()
+                } else {
+                    reading.store(true, Ordering::Release);
+                    let (lookup, done) = (Arc::clone(&lookup), Arc::clone(&reading));
+                    let read = tokio::task::spawn_blocking(move || {
+                        let answers = lookup(&pairs);
+                        done.store(false, Ordering::Release);
+                        answers
+                    });
+                    // A read that hangs is abandoned (its thread finishes or not on its own); its batch is refused.
+                    tokio::select! {
+                        r = read => r.unwrap_or_else(|_| {
+                            reading.store(false, Ordering::Release);
+                            Vec::new()
+                        }),
+                        _ = mycelium::sim_seam::sleep_ms("activation_egress.peer_read", read_timeout_ms.max(1)) => {
+                            batch.iter().map(|_| Err(format!("the socket-table read took longer than {read_timeout_ms} ms"))).collect()
+                        }
                     }
                 };
                 let n = batch.len();
@@ -426,8 +526,11 @@ impl EgressProxy {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(std::time::Duration::from_millis(CONNECT_TIMEOUT_MS))
+            // #644's round-6 review: no idle connection is kept, so every upstream socket is one the budget counts.
+            .pool_max_idle_per_host(0)
             .build()
             .map_err(|e| fail(format!("http client: {e}")))?;
+        let share = opts.fd_budget.clone().unwrap_or_else(FdBudget::stem).join().map_err(&fail)?;
         let inner = Arc::new(Inner {
             label: label.clone(),
             hosts: RwLock::new(Arc::new(hosts)),
@@ -452,7 +555,7 @@ impl EgressProxy {
                 lookups: AtomicU64::new(0),
                 waiting_max: AtomicUsize::new(0),
             }),
-            fd_budget: opts.fd_budget.clone().unwrap_or_else(FdBudget::stem),
+            share,
             preauth_queue: std::sync::Mutex::new(std::collections::VecDeque::new()),
             bodies: Arc::new(tokio::sync::Semaphore::new(opts.limits.max_buffered_bodies.max(1))),
             client,
@@ -474,6 +577,13 @@ impl EgressProxy {
                 // #644's round-5 review: while `max_unchecked` wait to be named, accept nothing — the next
                 // connections wait, in order, in the kernel's listen backlog.
                 served.peer_gate.room(served.limits.max_unchecked).await;
+                // #644's round-6 review: and while this proxy's share of the stem's descriptors (less the upstream
+                // reserve) or its `max_open` is spent — a descriptor is taken before the socket is accepted, so
+                // nothing is accepted only to be closed.
+                let budget = served
+                    .share
+                    .take_when(Use::Accept, || served.open.load(Ordering::Acquire) < served.limits.max_open.max(1))
+                    .await;
                 let (sock, peer) = match listener.accept().await {
                     Ok(pair) => pair,
                     Err(e) => {
@@ -482,21 +592,8 @@ impl EgressProxy {
                         continue;
                     }
                 };
-                // #644's round-4 review: a hard ceiling on the sockets this proxy holds; round 5: and on the
-                // descriptors every proxy of the stem holds together.
-                let Some(budget) = served.fd_budget.take() else {
-                    served.refused.fetch_add(1, Ordering::Relaxed);
-                    count(&served.label, "fd_budget");
-                    drop(sock);
-                    continue;
-                };
-                if served.open.fetch_add(1, Ordering::AcqRel) >= served.limits.max_open.max(1) {
-                    served.open.fetch_sub(1, Ordering::AcqRel);
-                    served.refused.fetch_add(1, Ordering::Relaxed);
-                    count(&served.label, "open_cap");
-                    drop((sock, budget));
-                    continue;
-                }
+                // The accept loop is the only place `open` grows, so the check above still holds.
+                served.open.fetch_add(1, Ordering::AcqRel);
                 let slot = OpenSlot(Arc::clone(&served), budget);
                 served.peer_gate.reserve();
                 let inner = Arc::clone(&served);
@@ -709,8 +806,8 @@ impl Inner {
             ));
         }
         // Round 5: the upstream socket is a descriptor of the stem's budget too, held for the tunnel's life.
-        let Some(upstream_slot) = self.fd_budget.take() else {
-            return self.refuse(StatusCode::SERVICE_UNAVAILABLE, &host, "fd_budget", "the stem's egress descriptor budget is spent".into());
+        let Some(upstream_slot) = self.upstream_slot().await else {
+            return self.refuse(StatusCode::SERVICE_UNAVAILABLE, &host, "fd_budget", "this proxy's share of the stem's egress descriptors stayed spent".into());
         };
         let dial = tokio::net::TcpStream::connect((host.as_str(), port));
         let upstream = tokio::select! {
@@ -845,8 +942,8 @@ impl Inner {
             *out.body_mut() = Some(body.into());
         }
         // Round 5: the upstream connection is a descriptor of the stem's budget, held until the body is relayed.
-        let Some(upstream_slot) = self.fd_budget.take() else {
-            return self.refuse(StatusCode::SERVICE_UNAVAILABLE, &host, "fd_budget", "the stem's egress descriptor budget is spent".into());
+        let Some(upstream_slot) = self.upstream_slot().await else {
+            return self.refuse(StatusCode::SERVICE_UNAVAILABLE, &host, "fd_budget", "this proxy's share of the stem's egress descriptors stayed spent".into());
         };
         let sent = self.send(out, !named.is_empty()).await;
         let resp = match sent {
@@ -944,6 +1041,14 @@ impl Inner {
             return Err((StatusCode::FORBIDDEN, "credential_not_authorised", "a credential placeholder, and this build attaches none (feature gateway or llm)".into()));
         }
         self.send_plain(req).await
+    }
+
+    /// A descriptor of this proxy's share for an upstream socket, waiting up to the connect bound for one.
+    async fn upstream_slot(&self) -> Option<BudgetSlot> {
+        tokio::select! {
+            slot = self.share.take_when(Use::Upstream, || true) => Some(slot),
+            _ = mycelium::sim_seam::sleep_ms("activation_egress.upstream_slot", CONNECT_TIMEOUT_MS) => None,
+        }
     }
 
     async fn send_plain(&self, req: reqwest::Request) -> Result<reqwest::Response, (StatusCode, &'static str, String)> {

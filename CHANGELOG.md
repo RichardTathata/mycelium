@@ -54,7 +54,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`peer_check_evicted` and `peer_check_busy` are gone); every proxy of the stem shares one descriptor budget, a
   quarter of the soft `RLIMIT_NOFILE` (not raised), counting upstream sockets (`fd_budget`); a kernel-table read is
   bounded at 2 s (macOS kills `sysctl`), its batch refused and the next served; Linux names a dual-stack client
-  under its IPv4-mapped spelling in `/proc/net/tcp6`, and a client in FIN_WAIT1/2 or CLOSE_WAIT.
+  under its IPv4-mapped spelling in `/proc/net/tcp6`, and a client in FIN_WAIT1/2 or CLOSE_WAIT. **After its
+  sixth:** each proxy draws on its share of that budget (at least 8 — an egress activation that would push it lower
+  is refused at start), a quarter of each share is kept for upstream sockets, and a proxy at its share or at 256
+  sockets stops accepting instead of accepting and closing (`open_cap` is gone), so a flood on one proxy leaves the
+  others theirs; no idle upstream connection is kept (the proxy's client and `EgressCredentials::send_once`); and a
+  kernel-table read that has not returned is never doubled.
 
 ### Changed
 

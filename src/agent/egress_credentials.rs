@@ -116,6 +116,9 @@ pub struct EgressCredentials {
     egress: EgressPolicy,
     /// Follows no redirect itself: [`send`](Self::send) follows them, re-resolving each hop.
     client: reqwest::Client,
+    /// [`send_once`](Self::send_once)'s: keeps no idle connection, so a caller that counts the upstream sockets it
+    /// holds (an activation egress proxy's descriptor budget) counts every one (#644's round-6 review).
+    unpooled: reqwest::Client,
 }
 
 impl std::fmt::Debug for EgressCredentials {
@@ -129,7 +132,7 @@ impl EgressCredentials {
     /// trailing newline trimmed) — once, now. A binding that does not validate, whose value is unset,
     /// unreadable, empty, or not a valid header value is refused by name; the error never holds a value.
     pub fn load(bindings: &[CredentialBinding], egress: &EgressPolicy) -> Result<Self, GossipError> {
-        Self::load_with(bindings, egress, crate::agent::egress_client::without_redirects())
+        Self::load_with(bindings, egress, None)
     }
 
     /// [`load`](Self::load), with the gate's client also trusting `root_pem` — **for tests only** (a loopback
@@ -140,10 +143,10 @@ impl EgressCredentials {
     pub fn load_trusting_root(bindings: &[CredentialBinding], egress: &EgressPolicy, root_pem: &[u8]) -> Result<Self, GossipError> {
         let root = reqwest::Certificate::from_pem(root_pem)
             .map_err(|e| GossipError::InvalidField { field: "egress_credentials", reason: format!("test root: {e}") })?;
-        Self::load_with(bindings, egress, crate::agent::egress_client::without_redirects().add_root_certificate(root))
+        Self::load_with(bindings, egress, Some(root))
     }
 
-    fn load_with(bindings: &[CredentialBinding], egress: &EgressPolicy, builder: reqwest::ClientBuilder) -> Result<Self, GossipError> {
+    fn load_with(bindings: &[CredentialBinding], egress: &EgressPolicy, root: Option<reqwest::Certificate>) -> Result<Self, GossipError> {
         // The bindings' own rules (names, hosts and ports, forms, sources, the allow-list) — the ones
         // `GossipConfig::validate` runs — so an embedder that builds a gate without a config is held to
         // them too (row L's review, finding 8: this validated a whole default config).
@@ -191,8 +194,16 @@ impl EgressCredentials {
             value.set_sensitive(true);
             bound.push(Bound { cfg: b.clone(), header, value, secrets, used: AtomicU64::new(0), refused: AtomicU64::new(0), dropped: AtomicU64::new(0) });
         }
-        let client = crate::agent::egress_client::build_or_none(builder);
-        Ok(Self { bound, egress: egress.clone(), client })
+        let builder = || {
+            let b = crate::agent::egress_client::without_redirects();
+            match &root {
+                Some(root) => b.add_root_certificate(root.clone()),
+                None => b,
+            }
+        };
+        let client = crate::agent::egress_client::build_or_none(builder());
+        let unpooled = crate::agent::egress_client::build_or_none(builder().pool_max_idle_per_host(0));
+        Ok(Self { bound, egress: egress.clone(), client, unpooled })
     }
 
     /// True if this gate holds a binding called `name`.
@@ -326,13 +337,14 @@ impl EgressCredentials {
     /// does not authorise refused before it is sent — and **follow no redirect**: a 3xx comes back as it
     /// arrived. For a caller that must judge every hop by a rule of its own before it is taken (a stem's
     /// activation egress proxy, whose command follows the redirect through the proxy again, so the hop meets
-    /// the activation's allow-list and this gate afresh).
+    /// the activation's allow-list and this gate afresh). Its connection is not kept for reuse: it closes once the
+    /// answer has been read.
     pub async fn send_once(&self, req: reqwest::Request) -> Result<reqwest::Response, CredentialError> {
         if !self.egress.permits_url(req.url().as_str()) {
             return Err(CredentialError::EgressDenied { url: req.url().as_str().to_string() });
         }
         let out = self.resolve(req, 0)?;
-        self.client.execute(out).await.map_err(CredentialError::Http)
+        self.unpooled.execute(out).await.map_err(CredentialError::Http)
     }
 
     /// Replace every placeholder-carrying header of `req` with its binding's form — or, on a

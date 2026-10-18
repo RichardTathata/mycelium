@@ -1600,6 +1600,19 @@ CC8, `docs/capabilities.md`, the crate README). The example units with `[[activa
   failing first: the hung read stalled the next connection; `a_command_past_its_bound_is_killed`, failing first
   with the kill removed). (4) Linux names a client in FIN_WAIT1/2 or CLOSE_WAIT too, never TIME_WAIT (the same
   parser test, failing first with ESTABLISHED only).
+- *The sixth review (#644, round 6)* — round 5 confirmed. (1, medium) One proxy's flood could spend the shared
+  budget: each proxy now draws on its **share** (the budget over the proxies, at least `MIN_SHARE` = 8 — a proxy
+  that would push it lower is refused at start), a quarter of each share is reserved for upstream sockets, and a
+  proxy at its share or at `max_open` **pauses accepting** instead of accepting and closing (`open_cap` is gone)
+  (`a_flood_on_one_proxy_leaves_every_other_proxy_its_share`: another user floods A; B's command is served and A's
+  admitted command reaches its upstream; failing first on round 5: 25 of A's flood accepted and closed, B's
+  command closed; planted again with the share removed and with the reserve removed). (2) No idle upstream socket:
+  the proxy's client and the gate's `send_once` keep no pool (`no_idle_upstream_socket_outlives_its_answer`,
+  failing first with 6 idle; `send_once_keeps_no_idle_upstream_socket` in the core crate, failing first with 8).
+  (3) A table read that has not returned is never doubled — later batches are refused while it is out
+  (`a_read_that_never_returns_leaves_one_read_outstanding`, failing first: 4 reads for 4 batches). (4) The
+  two-proxy budget test is replaced by the flood test, its header-read bound 60 s. Not done, with the reason:
+  draining every ready connection per read — accepting past the share would hold descriptors, which (1) forbids.
 - **Not built, stated:** limits by address (names are compared, not what they resolve to) and by path; under Landlock,
   a limit on the proxy's port by address; an OpenShell backend; resource
   limits (CPU, memory); on Linux below Landlock ABI 6, a limit on signals to the stem user's processes; device

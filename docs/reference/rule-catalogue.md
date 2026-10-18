@@ -230,7 +230,7 @@ An activation's command reaches another host only through its proxy: a listed ho
   - the node's egress allow-list and credential bindings (`EgressCredentials`) — scope: this node; freshness: read at the agent's start
 - **Outcomes:**
   - Action: `forwarded`, `tunnelled`
-  - Refusal: `no_proxy_token`, `malformed_request`, `host_not_listed`, `credential_not_granted`, `credential_not_authorised`, `node_egress_denied`, `body_too_large`, `body_cap`, `connection_cap`, `preauth_evicted`, `peer_uid_other`, `peer_uid_unknown`, `open_cap`, `fd_budget`, `credential_host_tunnel`, `encoded_response`
+  - Refusal: `no_proxy_token`, `malformed_request`, `host_not_listed`, `credential_not_granted`, `credential_not_authorised`, `node_egress_denied`, `body_too_large`, `body_cap`, `connection_cap`, `preauth_evicted`, `peer_uid_other`, `peer_uid_unknown`, `fd_budget`, `credential_host_tunnel`, `encoded_response`
 - **Effects:** the request sent on over the entry's scheme with placeholders resolved by the node's gate, its answer relayed with the granted bindings' values masked; or a byte tunnel, closed when idle; `mycelium_activation_egress_total{activation, event}`
 - **Guards:** Authority
 - **Depends on:** [`prov.activation`](#provactivation)

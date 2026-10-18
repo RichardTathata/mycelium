@@ -219,6 +219,58 @@ async fn send_once_attaches_at_the_bound_host_and_follows_no_redirect() {
     assert!(at_target.lock().unwrap().is_empty());
 }
 
+/// #644's round-6 review, finding 2: `send_once` (an activation egress proxy's path) keeps no idle upstream
+/// socket — each closes once its answer is read, so a caller counting its upstream sockets counts every one. Seen
+/// failing first on the gate's pooled client: eight idle connections stayed open after a burst of eight.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn send_once_keeps_no_idle_upstream_socket() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let live = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&live);
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else { return };
+            let live = Arc::clone(&count);
+            live.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+                let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+                loop {
+                    match sock.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    }
+                    while let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        buf.drain(..end + 4);
+                        let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
+                    }
+                }
+                live.fetch_sub(1, Ordering::SeqCst);
+            });
+        }
+    });
+    let g = Arc::new(gate(&[]));
+    let mut burst = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let g = Arc::clone(&g);
+        burst.spawn(async move { g.send_once(get(format!("http://127.0.0.1:{port}/"), "x", "y")).await.unwrap().text().await.unwrap() });
+    }
+    while let Some(body) = burst.join_next().await {
+        assert_eq!(body.unwrap(), "ok");
+    }
+    let mut open = live.load(Ordering::SeqCst);
+    for _ in 0..20 {
+        if open == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        open = live.load(Ordering::SeqCst);
+    }
+    assert_eq!(open, 0, "no upstream socket is kept idle by send_once");
+}
+
 /// **A redirect to another port on the bound host drops the credential** (row L's review, finding 3):
 /// on loopback each port is a different process, so the port is part of what the binding names.
 #[tokio::test]

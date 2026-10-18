@@ -172,7 +172,7 @@ pub static RULES: &[RuleDescriptor] = &[
         ],
         outcomes: &[
             Outcome { kind: Action, reasons: &["forwarded", "tunnelled"] },
-            Outcome { kind: Refusal, reasons: &["no_proxy_token", "malformed_request", "host_not_listed", "credential_not_granted", "credential_not_authorised", "node_egress_denied", "body_too_large", "body_cap", "connection_cap", "preauth_evicted", "peer_uid_other", "peer_uid_unknown", "open_cap", "fd_budget", "credential_host_tunnel", "encoded_response"] },
+            Outcome { kind: Refusal, reasons: &["no_proxy_token", "malformed_request", "host_not_listed", "credential_not_granted", "credential_not_authorised", "node_egress_denied", "body_too_large", "body_cap", "connection_cap", "preauth_evicted", "peer_uid_other", "peer_uid_unknown", "fd_budget", "credential_host_tunnel", "encoded_response"] },
         ],
         effects: &["the request sent on over the entry's scheme with placeholders resolved by the node's gate, its answer relayed with the granted bindings' values masked; or a byte tunnel, closed when idle; `mycelium_activation_egress_total{activation, event}`"],
         guards: &[Guard::Authority], may_trigger: &[], may_inhibit: &[], depends_on: &["prov.activation"],
