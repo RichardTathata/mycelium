@@ -442,19 +442,25 @@ recorded or its dispatch fails, so the exact scope errs towards admitting fewer.
 *Coverage, strictly.* Every node built with the `gateway` **and** `tls` features publishes a heartbeat from
 `start()`, saying whether it enforces (has an evaluator), re-asserted every third of `control_max_staleness_ms`. At a
 graceful shutdown its last word is a heartbeat marked **departed**, and its entries are kept: peers go on counting
-its recent permits until they age out, and do not wait for it; once they have aged out, peers collect them. A tally
+its recent permits until they age out, and do not wait for it. A tally
 is not established — `Indeterminate`, never an empty tally — when this node's own view of the fleet is not (it has
 heard from fewer than `control_min_peers_heard` peers, or the freshest is older than the bound: the governors'
 confidence bound, reused), or when any peer's coverage is unknown: no heartbeat, a stale one (not departed), one dated
 more than `max_clock_drift_ms` in this node's future, or an entry this node cannot read; the refusal names the peer.
 A peer that enforces nothing admits nothing under a tally rule and is not counted. The departed heartbeat travels on
-shutdown's best-effort flush; a node whose last word is lost, or that crashes rather than leaving, reads as stale until
-failure detection declares it dead, and its entries are then no longer consulted — closed, not open. So a
+shutdown's best-effort flush; a node whose last word is lost, or that crashes rather than leaving, reads as stale —
+closed, not open — until failure detection declares it dead; from then its entries still count, as a departed node's
+do, until they age out. **Nobody deletes another node's tally keys:** a collector cannot tell a node's old record from
+one it wrote after returning that has not reached the collector yet, so a foreign delete could erase a returned node's
+heartbeat or a permit, and would trip its `sys/` tripwire. A node withdraws its own aged entries; a node that never
+returns leaves its heartbeat and one entry per counter and actor of its last window, read as aged and counting
+nothing. So a
 fleet using the tally runs every member with both features. **Upgrading:** tally rules fail closed until every
 member runs this release built with `gateway` and `tls` — an older member, or one built without them, publishes no
-heartbeat and is unknown coverage. A forged `departed` heartbeat stops peers waiting on a live node (its entries
-still counted, its next real heartbeat overwriting the forgery) — no more than a forged `enforces: false` already
-does; both are detection only, counted by the `sys/` tripwire at the owner. Every tally decision carries the sentence
+heartbeat and is unknown coverage. A forged `departed` heartbeat stops peers waiting on a live node that has gone quiet,
+until its next real heartbeat overwrites the forgery (its entries are still counted) — no more than a forged
+`enforces: false` already does, which stops them counting it; both are detection only, counted by the `sys/` tripwire
+at the owner. Every tally decision carries the sentence
 *approximate: detection, not prevention — concurrent calls at different gateways can exceed the limit before the
 tallies converge*, and its coverage (`publishers=[…] stalest_ms=…`).
 

@@ -87,9 +87,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     point reads each into `HistoryView::fleet` before the evaluator decides. The evidence record names the fleet scope
     and carries each counter's state and coverage, and an admitted call's seat (`history.fleet`, `history.seats`).
   - At a provider under enforcement, a check that must claim a seat — decided from the envelope the check builds —
-    settles the claim beside the serve loop (`rpc_rx`, the MCP tool loop), at most 64 at a time, so it does not stall
-    the requests behind it; every other check stays inline. A panicking claim, or one still waiting when its loop
-    ends, is answered `authority_not_established`.
+    settles the claim beside the serve loop (`rpc_rx`, the MCP tool loop, the bridged MCP loop and the `rpc/serve`
+    stream), at most 64 at a time, so it does not stall the requests behind it; every other check stays inline. A
+    panicking claim, or one still waiting when its loop ends, is answered `authority_not_established` and stopped:
+    nothing more is claimed or recorded for it, and its provisional permit is taken back.
+  - A node that is no longer a peer — departed, or declared dead — still counts until its permits age out; no node
+    deletes another's tally keys.
   - **Upgrade order:** tally rules fail closed until every member runs this release built with `gateway` and `tls`
     (`docs/guide/deprecations.md` §53).
   - The AE contract suite gains `PolicyClause::AllowAtMostAcross` and six `fleet_*` cases.

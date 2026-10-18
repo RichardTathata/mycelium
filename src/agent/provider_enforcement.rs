@@ -201,7 +201,7 @@ impl ProviderRefusal {
 pub(crate) type WaitingCheck =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<Admission, ProviderRefusal>> + Send + 'static>>;
 
-/// What [`check_or_defer`] came to: decided now, or a check that must still settle a seat claim.
+/// What [`check`] came to: decided now, or a check that must still settle a seat claim.
 pub(crate) enum Checked {
     /// Decided.
     Done(Result<Admission, ProviderRefusal>),
@@ -213,19 +213,15 @@ pub(crate) enum Checked {
 /// **May this node run `req` now?** An empty admission for anything that is not protected work, or
 /// when neither provider enforcement nor a cohort budget is on. Call it after the caller context has
 /// been verified and before any handler sees the request, and keep the [`Admission`] until the call
-/// is done. A serve loop calls [`check_or_defer`] instead, so a seat claim does not stall it.
-pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest) -> Result<Admission, ProviderRefusal> {
-    match check_or_defer(ctx, req).await {
-        Checked::Done(r) => r,
-        Checked::Waiting(w) => w.await,
-    }
-}
-
-/// [`check`], deciding **from the envelope the preflight itself builds** — the verified caller's scopes, the derived
-/// arguments, the presented mandate — whether it must wait on a seat claim (#642's review, N1): if it must, the
-/// decision is made, the history gate released, and the claim and everything after it returned as a
-/// [`Checked::Waiting`]; otherwise the whole check runs here. Nothing is decided twice and no second envelope is built.
-pub(crate) async fn check_or_defer(ctx: &Arc<TaskCtx>, req: &RpcRequest) -> Checked {
+/// is done.
+///
+/// It decides **from the envelope the preflight itself builds** — the verified caller's scopes, the derived
+/// arguments, the presented mandate — whether it must wait on a seat claim (post-360 row K2; #642's review, N1): if
+/// it must, the decision is made, the history gate released, and the claim and everything after it returned as a
+/// [`Checked::Waiting`] for the serve loop to settle beside itself ([`DeferredChecks`]); otherwise the whole check
+/// runs here. Nothing is decided twice and no second envelope is built. Every serve loop on this node — `rpc_rx`,
+/// the MCP tool loop, the bridged MCP loop and the `rpc/serve` stream — settles a `Waiting` check that way.
+pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest) -> Checked {
     let enforcing = ctx.provider_enforcement.load(Ordering::Acquire);
     let budget = ctx.cohort_budget.get();
     if !enforcing && budget.is_none() {
@@ -361,6 +357,9 @@ pub(crate) static TEST_DEFERRED_BOUND: std::sync::LazyLock<papaya::HashMap<Strin
 pub(crate) struct DeferredChecks<C> {
     set: tokio::task::JoinSet<(u64, Result<Admission, ProviderRefusal>)>,
     carried: HashMap<u64, C>,
+    /// Each check's own task, so abandoning the set — or dropping it — stops the check too (#642's review, round 3,
+    /// finding 4): a caller answered `withdrawn` has no claim still running behind its answer.
+    checks: HashMap<u64, tokio::task::AbortHandle>,
     next_id: u64,
     bound: usize,
 }
@@ -373,7 +372,7 @@ impl<C> DeferredChecks<C> {
         let bound = TEST_DEFERRED_BOUND.pin().get(&ctx.node_id.to_string()).copied().unwrap_or(MAX_DEFERRED_CHECKS);
         #[cfg(not(test))]
         let bound = MAX_DEFERRED_CHECKS;
-        Self { set: tokio::task::JoinSet::new(), carried: HashMap::new(), next_id: 0, bound }
+        Self { set: tokio::task::JoinSet::new(), carried: HashMap::new(), checks: HashMap::new(), next_id: 0, bound }
     }
 
     /// No check in flight.
@@ -392,8 +391,10 @@ impl<C> DeferredChecks<C> {
         let id = self.next_id;
         self.next_id += 1;
         self.carried.insert(id, carry);
+        let check = tokio::spawn(waiting);
+        self.checks.insert(id, check.abort_handle());
         self.set.spawn(async move {
-            let result = match tokio::spawn(waiting).await {
+            let result = match check.await {
                 Ok(r) => r,
                 Err(_) => Err(ProviderRefusal::local(
                     "authority_not_established",
@@ -409,6 +410,7 @@ impl<C> DeferredChecks<C> {
         loop {
             match self.set.join_next().await? {
                 Ok((id, result)) => {
+                    self.checks.remove(&id);
                     if let Some(carry) = self.carried.remove(&id) {
                         return Some((carry, result));
                     }
@@ -419,10 +421,23 @@ impl<C> DeferredChecks<C> {
         }
     }
 
-    /// The loop is ending: stop waiting, and hand back every check still in flight so its caller is answered.
+    /// The loop is ending: stop every check — its claim and its record go no further — and hand back each one still
+    /// in flight so its caller is answered. A seat whose proposal had already left may still be decided, holding a
+    /// seat no call used; the permit counted provisionally at this point is taken back.
     pub(crate) fn abandon(&mut self) -> Vec<C> {
+        for (_, check) in self.checks.drain() {
+            check.abort();
+        }
         self.set.abort_all();
         self.carried.drain().map(|(_, c)| c).collect()
+    }
+}
+
+impl<C> Drop for DeferredChecks<C> {
+    fn drop(&mut self) {
+        for (_, check) in self.checks.drain() {
+            check.abort();
+        }
     }
 }
 

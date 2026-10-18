@@ -366,8 +366,10 @@ fn tally_state(ctx: &Arc<TaskCtx>, c: &FleetCounter, point: &str, actor: &str, n
         add(peer, &mut unknown);
         publishers.push(peer.clone());
     }
-    // A departed enforcing node that is no longer a peer still counts: its recent permits stand until they age out.
-    for (node, hb) in departed_heartbeats(ctx) {
+    // An enforcing node that is no longer a peer — departed, or declared dead after a crash or a lost last word —
+    // still counts: its recent permits stand until they age out (#642's review, round 3, finding 6). It is not
+    // waited for: it admits nothing more unless it returns, and then it is a peer again.
+    for (node, hb) in known_heartbeats(ctx) {
         if node == me || peers.contains(&node) || !hb.enforces {
             continue;
         }
@@ -465,45 +467,34 @@ pub(crate) fn withdraw_aged_entries(ctx: &Arc<TaskCtx>, now_ms: u64) -> usize {
     withdrawn
 }
 
-/// Every departed node's heartbeat this node holds, by node.
-fn departed_heartbeats(ctx: &TaskCtx) -> Vec<(String, Heartbeat)> {
+/// Every node's heartbeat this node holds, by node — departed or not, peer or not.
+fn known_heartbeats(ctx: &TaskCtx) -> Vec<(String, Heartbeat)> {
     mycelium_core::ops::kv_scan_prefix(ctx, TALLY_PREFIX)
         .into_iter()
         .filter_map(|(key, value)| {
             let node = key.strip_prefix(TALLY_PREFIX)?.strip_suffix("/hb")?.to_string();
             let hb = serde_json::from_slice::<Heartbeat>(&value).ok()?;
-            hb.departed.then_some((node, hb))
+            Some((node, hb))
         })
         .collect()
 }
 
-/// Collect a departed node's heartbeat and entries once every one of its entries has aged out (N3): from then it can
-/// add nothing to any count. Collecting on its removal from the peer set instead would drop permits still inside
-/// their window, so it is not done. A node that returns writes a newer heartbeat, which wins.
-pub(crate) fn collect_departed(ctx: &Arc<TaskCtx>, now_ms: u64) -> usize {
-    let mut collected = 0;
-    for (node, _) in departed_heartbeats(ctx) {
-        if node == ctx.node_id.to_string() {
-            continue;
-        }
-        let entries = mycelium_core::ops::kv_scan_prefix(ctx, &format!("{TALLY_PREFIX}{node}/c/"));
-        if entries.iter().all(|(_, v)| aged(v, now_ms)) {
-            for (key, _) in entries {
-                let _ = mycelium_core::ops::kv_delete(ctx, key);
-            }
-            let _ = mycelium_core::ops::kv_delete(ctx, Arc::from(heartbeat_key(&node).as_str()));
-            collected += 1;
-        }
-    }
-    collected
-}
-
 /// This node's **last word** at a graceful shutdown (N3): a heartbeat marked departed, written past the soft-state
 /// gate by the shutdown sweep. Its entries are kept: peers go on counting its recent permits until they age out, and
-/// do not wait for it. A forged `departed` lets a member stop peers waiting on a node that is in fact live — its
-/// entries still counted, and its own next heartbeat overwriting the forgery — which is no more than a forged
-/// `enforces: false` does, which stops them counting it at all; both are detection only (the `sys/` tripwire at the
-/// owner), as every unsigned tally key is.
+/// do not wait for it.
+///
+/// **Nobody else deletes a node's tally keys** (#642's review, round 3, finding 2): a collector cannot tell a node's
+/// old record from one it wrote after returning that has not reached the collector yet, so any delete by another
+/// node could erase a returned node's heartbeat or a permit it published, and would trip its `sys/` tripwire. A node
+/// withdraws its own aged entries (every heartbeat tick, from its next start). What a node that never returns
+/// leaves behind is bounded: its heartbeat and one entry per (counter, actor) it counted in its last window, each
+/// read as aged and counting nothing.
+///
+/// **A forged `departed`** — another member writing this node's heartbeat — makes peers skip the staleness check
+/// for this node until its next real heartbeat overwrites the forgery (one period at most): for that long a node
+/// that is in fact live but has gone quiet is not waited for, though its published entries are still counted. That
+/// is no more than a forged `enforces: false` does, which stops peers counting the node at all. Both are detection
+/// only — the `sys/` tripwire counts the foreign write at the owner — as every unsigned tally key is.
 pub(crate) fn depart(ctx: &TaskCtx) {
     let hb = Heartbeat { as_of: ctx.hlc.decision_now_ms(), enforces: ctx.action_evaluator.get().is_some(), departed: true };
     if let Ok(bytes) = serde_json::to_vec(&hb) {
@@ -543,7 +534,6 @@ pub(crate) fn start_heartbeat(ctx: &Arc<TaskCtx>) {
                     write_heartbeat(&task_ctx);
                     let now = task_ctx.hlc.decision_now_ms();
                     withdraw_aged_entries(&task_ctx, now);
-                    collect_departed(&task_ctx, now);
                 }
             }
         }

@@ -39,3 +39,15 @@ A graceful leave now writes a departed heartbeat and keeps the entries (peers co
 them once aged), an unreadable entry is unknown, and tally writes take one leaf lock (row 64). Lesson: when a fast
 path decides "is this the slow case?", it must decide from the same object the slow path uses, or the two drift on
 exactly the fields the shortcut omitted.
+
+## [2026-10-18] review round 3 | Fleet-wide history scopes (#642)
+
+Two more serve loops (`rpc/serve`'s SSE stream and the bridged MCP loop) awaited a claim in place; every loop now
+settles a `Checked::Waiting` beside itself (`provider_enforcement::check` is the one deferring entry point). An
+abandoned check is aborted, not detached, and a dropped `Settling` takes its provisional permit back. Collection of a
+departed node's keys by its peers was removed: a collector cannot distinguish a node's old record from a newer one
+it has not yet received, so a foreign delete could erase a returned node's permit (fails open) and trips its `sys/`
+tripwire. Instead readers count every enforcing non-peer's entries until they age out — which also closes the
+under-count after a crash — and the residue of a node that never returns is stated as bounded. Lesson: in a
+gossiped namespace, "delete what looks dead" by a non-owner is unsound unless the delete is conditional on a version
+the owner cannot have superseded; absent that, let readers ignore what has aged.

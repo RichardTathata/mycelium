@@ -488,6 +488,12 @@ async fn provider_pair(tune_a: impl FnOnce(&mut GossipConfig)) -> (Arc<GossipAge
                 .scoped(HistoryScope::FleetConsensus, "c-slow"),
         )
         .allow(
+            Rule::new(ALICE, "tools/call", format!("tool:remote-echo@{a_id}"))
+                .requiring_scopes(["mcp:invoke"])
+                .at_most(3, TEN_MIN)
+                .scoped(HistoryScope::FleetConsensus, "c-bridged"),
+        )
+        .allow(
             Rule::new(ALICE, "depot.custom", format!("res:x@{a_id}"))
                 .requiring_scopes(["mcp:invoke"])
                 .at_most(3, TEN_MIN)
@@ -969,6 +975,176 @@ async fn a_routed_call_claims_a_seat_and_carries_its_route() {
     let second = routed(Arc::clone(&b), route).await;
     let r = refusal(&second);
     assert!(matches!(r, PreflightRefusal::Denied(_)) && said(r).contains("fleet_consensus"), "the seat is the fleet's: {r:?}");
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+// ── #642's review, round 3 ──────────────────────────────────────────────────────────────────────
+
+/// **Round 3, finding 1: the bridged MCP loop does not stall on a claim.** An external MCP server bridged at `a`
+/// (`connect_mcp_server`) serves `remote-echo`; `alice`'s call waits on a quorum `b` will not give, while `b`'s call to
+/// the same bridged tool is forwarded and answered at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_bridged_mcp_claim_does_not_stall_its_loop() {
+    let (a, b, a_id, _) = provider_pair(|_| {}).await;
+    let tools = vec![serde_json::json!({"name": "remote-echo", "inputSchema": {"type": "object"}})];
+    let (mock_port, _mock) = super::super::mcp::tests::spawn_mock_mcp_server(tools).await;
+    let _bridge = a.mcp().connect_mcp_server(format!("http://127.0.0.1:{mock_port}/")).await.expect("bridged");
+    let call = || {
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "remote-echo", "arguments": {}}})
+            .to_string()
+            .into_bytes()
+    };
+    let (from, to) = (Arc::clone(&a), a_id.clone());
+    let hers = tokio::spawn(async move { alice_calls(&from, &to, "mcp.invoke", None, call(), Duration::from_secs(40)).await });
+    tokio::time::sleep(Duration::from_millis(300)).await; // alice's check is waiting on its claim
+    let started = std::time::Instant::now();
+    let theirs = b.service().rpc_call(a_id.clone(), "mcp.invoke", call(), Duration::from_secs(3)).await;
+    let took = started.elapsed();
+    let body: serde_json::Value = serde_json::from_slice(&theirs.expect("answered within 3 s")).unwrap();
+    assert!(body.to_string().contains("echo:remote-echo"), "b's call was forwarded: {body}");
+    assert!(took < Duration::from_secs(2), "the bridged loop was not held by the claim: {took:?}");
+    let own: serde_json::Value = serde_json::from_slice(&hers.await.unwrap().expect("answered")).unwrap();
+    assert!(own.get("error").is_some(), "alice's claim found no quorum: {own}");
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **Round 3, finding 1: the `rpc/serve` stream does not stall on a claim.** An SDK agent serves `depot.custom` through
+/// `GET /gateway/rpc/serve/depot.custom` at `a`; `alice`'s call waits on a quorum, while `b`'s call behind it is checked
+/// and answered at once (refused: it names no resource) rather than waiting for the claim.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn the_rpc_serve_stream_does_not_stall_on_a_claim() {
+    let http = port();
+    let (a, b, a_id, _) = provider_pair(|c| c.http_port = Some(http)).await;
+    let mut stream = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{http}/gateway/rpc/serve/depot.custom"))
+        .send()
+        .await
+        .expect("the serve stream opens");
+    assert_eq!(stream.status(), 200);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let resource = format!("res:x@{a_id}");
+    let (from, to) = (Arc::clone(&a), a_id.clone());
+    let hers = tokio::spawn(async move {
+        alice_calls(&from, &to, "depot.custom", Some(&resource), b"work".to_vec(), Duration::from_secs(40)).await
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await; // alice's check is waiting on its claim
+    let started = std::time::Instant::now();
+    let theirs = b.service().rpc_call(a_id.clone(), "depot.custom", b"work".to_vec(), Duration::from_secs(3)).await;
+    let took = started.elapsed();
+    let body = theirs.expect("answered within 3 s");
+    assert!(String::from_utf8_lossy(&body).contains("resource_unnamed"), "{}", String::from_utf8_lossy(&body));
+    assert!(took < Duration::from_secs(2), "the serve stream was not held by the claim: {took:?}");
+    let own = hers.await.unwrap().expect("answered");
+    assert!(String::from_utf8_lossy(&own).contains("fleet_consensus"), "{}", String::from_utf8_lossy(&own));
+    let _ = stream.chunk().await;
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **Round 3, finding 4: an abandoned check stops.** `alice`'s claim is waiting when the tool is withdrawn; she is
+/// answered at once — and after the claim would have timed out, nothing was recorded for her and her provisional
+/// permit was taken back: the check stopped with the loop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn an_abandoned_check_records_nothing_and_counts_nothing() {
+    let (a, b, a_id, _) = provider_pair(|_| {}).await;
+    let tool = a.mcp().register_mcp_tool("slow", serde_json::json!({"type": "object"}), |_args| async { Ok(serde_json::json!("ran")) });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (from, to) = (Arc::clone(&a), a_id.clone());
+    let hers = tokio::spawn(async move { alice_calls(&from, &to, "mcp.invoke", None, slow_call(), Duration::from_secs(40)).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    drop(tool);
+    let body = hers.await.unwrap().expect("answered");
+    assert!(String::from_utf8_lossy(&body).contains("authority_not_established"));
+    // Past the claim's own bound (2 s × 4 ballots): a check still running would have recorded its refusal by now.
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let journal = std::env::temp_dir().join(format!("k2-fleet-{}", a_id.to_string().rsplit(':').next().unwrap())).join("evidence.log");
+    let alice_records = super::super::evidence_journal::read_evidence_journal(&journal)
+        .unwrap()
+        .iter()
+        .filter_map(|b| serde_json::from_slice::<AeEvidence>(b).ok())
+        .filter(|e| e.subject == ALICE)
+        .count();
+    assert_eq!(alice_records, 0, "nothing recorded for a call answered withdrawn");
+    let index = a.task_ctx.history_index.get().unwrap();
+    let crate::History::View(view) =
+        index.view("provider", ALICE, crate::HistoryRequest { window_ms: TEN_MIN, max_entries: usize::MAX }, a.task_ctx.hlc.decision_now_ms()).0
+    else {
+        panic!("a view")
+    };
+    assert!(view.entries.is_empty(), "the provisional permit was taken back: {:?}", view.entries);
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **Round 3, finding 2: no node deletes another's tally keys** — so a node that departs, then restarts and
+/// heartbeats, cannot have its new heartbeat or a new permit erased by a peer that had not yet seen them, and a
+/// graceful restart under `[persistence]` trips no `sys/` tripwire.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_departed_node_keeps_its_keys_and_returns_without_tripping_its_tripwire() {
+    use crate::config::{OnUnreadable, PersistenceConfig, SyncMode};
+    let (p1, p2) = (port(), port());
+    let persist = |p: u16| {
+        let base = std::env::temp_dir().join(format!("k2-persist-{p}"));
+        move |c: &mut GossipConfig| {
+            c.control_max_staleness_ms = 1_500; // a heartbeat tick every 500 ms
+            c.persistence = Some(PersistenceConfig {
+                base_path: base.clone(), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 1_000,
+                snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse,
+            });
+        }
+    };
+    let _ = std::fs::remove_dir_all(std::env::temp_dir().join(format!("k2-persist-{p1}")));
+    let _ = std::fs::remove_dir_all(std::env::temp_dir().join(format!("k2-persist-{p2}")));
+    let a = node(p1, &[p2], 3, HistoryScope::FleetTally, persist(p1)).await;
+    let b = node(p2, &[p1], 3, HistoryScope::FleetTally, persist(p2)).await;
+    ready(&[&a, &b]).await;
+    let a_id = a.node_id().to_string();
+    a.shutdown().await;
+    drop(a);
+    tokio::time::sleep(Duration::from_secs(2)).await; // b's heartbeat task ticks several times meanwhile
+    let held = b.task_ctx.kv_state.store.pin().get(super::heartbeat_key(&a_id).as_str()).map(|e| e.data.is_some());
+    assert_eq!(held, Some(true), "b deleted nothing of a's");
+
+    let a = node(p1, &[p2], 3, HistoryScope::FleetTally, persist(p1)).await;
+    ready(&[&a, &b]).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let violations = a.task_ctx.sys_namespace_violations.load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(violations, 0, "a graceful restart trips no sys/ tripwire");
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **Round 3, finding 6: a node that is no longer a peer still counts** — crashed, or its last word lost, it is
+/// declared dead and leaves the peer set, but the permits it published stand until they age out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_dead_nodes_permits_still_count_until_they_age_out() {
+    let (p1, p2) = (port(), port());
+    let a = node(p1, &[], 3, HistoryScope::FleetTally, |_| {}).await;
+    let b = node(p2, &[p1], 3, HistoryScope::FleetTally, |_| {}).await;
+    ready(&[&a, &b]).await;
+    // A node `b` no longer counts as a peer: its last heartbeat long stale, not departed, one permit a second ago.
+    let dead = NodeId::new("127.0.0.1", port()).unwrap().to_string();
+    let now = b.task_ctx.hlc.decision_now_ms();
+    for (key, value) in [
+        (super::heartbeat_key(&dead), serde_json::json!({"as_of": now - TEN_MIN / 2, "enforces": true})),
+        (
+            super::tally_key(&dead, "c-posts", "gateway", crate::PRINCIPAL_ANONYMOUS),
+            serde_json::json!({"w": TEN_MIN, "t": [now - 1_000]}),
+        ),
+    ] {
+        let _ = mycelium_core::ops::kv_set(&b.task_ctx, Arc::from(key.as_str()), bytes::Bytes::from(serde_json::to_vec(&value).unwrap()));
+    }
+    let out = post(&b).await;
+    let e = admitted(&out).unwrap_or_else(|| panic!("established: {:?}", refusal(&out)));
+    match &e.history.as_ref().unwrap().fleet[0].state {
+        FleetState::Tally { counted, publishers, .. } => {
+            assert_eq!(*counted, 1, "the dead node's permit still counts");
+            assert!(publishers.contains(&dead), "{publishers:?}");
+        }
+        other => panic!("{other:?}"),
+    }
     a.shutdown().await;
     b.shutdown().await;
 }

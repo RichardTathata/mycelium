@@ -957,6 +957,25 @@ pub(crate) async fn ae_decide(
     }))
 }
 
+/// Takes back a provisionally counted permit if the settling it belongs to is dropped before its decision is settled.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+struct RetractOnDrop {
+    armed: bool,
+    ctx: Arc<TaskCtx>,
+    point: String,
+    actor: String,
+    attempt: String,
+}
+
+#[cfg(all(feature = "gateway", feature = "tls"))]
+impl Drop for RetractOnDrop {
+    fn drop(&mut self) {
+        if self.armed && let Some(index) = self.ctx.history_index.get() {
+            index.retract(&self.point, &self.actor, &self.attempt);
+        }
+    }
+}
+
 #[cfg(all(feature = "gateway", feature = "tls"))]
 impl Settling {
     /// Whether settling may wait on a consensus round: a permit relying on a fleet-consensus counter.
@@ -973,6 +992,15 @@ impl Settling {
         let enforcement_point = enforcement_point.as_str();
         let (operation, resource) = (envelope.operation.clone(), envelope.resource.clone());
         let history_index = ctx.history_index.get();
+        // Dropped before it is recorded — its serve loop abandoned it (#642's review, round 3, finding 4) — a permit
+        // counted provisionally is taken back, as a refused one is.
+        let mut provisional = RetractOnDrop {
+            armed: admitted,
+            ctx: Arc::clone(ctx),
+            point: point.clone(),
+            actor: envelope.actor.clone(),
+            attempt: envelope.attempt_id.clone(),
+        };
 
         // Row K2's check-then-act: a permit relying on a consensus counter holds a seat before it is admitted — the
         // seat, not the evaluator's reading of the counter, is what bounds the fleet, and consensus serialises the
@@ -1052,7 +1080,10 @@ impl Settling {
             // Row R: the class, the destination decided on and the destinations already refused.
             evidence = evidence.with_route(r);
         }
-        if let Err(e) = ae_record(ctx, &evidence).await {
+        let recorded = ae_record(ctx, &evidence).await;
+        // From here the decision is settled either way; the retractions below are the only ones.
+        provisional.armed = false;
+        if let Err(e) = recorded {
             // Not recorded, so not done: a permit counted into the history is taken back.
             if admitted && let Some(index) = history_index {
                 index.retract(&point, &envelope.actor, &envelope.attempt_id);

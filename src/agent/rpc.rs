@@ -168,7 +168,10 @@ impl RpcRequestRx {
                 let full = self.pending.is_full();
                 let open = !self.closed;
                 tokio::select! { biased;
-                    _ = shutdown.wait_for(|v| *v) => return None,
+                    _ = shutdown.wait_for(|v| *v) => {
+                        self.answer_withdrawn();
+                        return None;
+                    }
                     Some((req, checked)) = self.pending.next(), if !self.pending.is_empty() => {
                         if let Some(req) = self.admit_checked(req, checked) {
                             return Some(req);
@@ -197,7 +200,7 @@ impl RpcRequestRx {
                     // anything. Inert unless provider enforcement is on.
                     #[cfg(all(feature = "gateway", feature = "tls"))]
                     {
-                        match super::provider_enforcement::check_or_defer(&self.ctx, &req).await {
+                        match super::provider_enforcement::check(&self.ctx, &req).await {
                             super::provider_enforcement::Checked::Done(checked) => match self.admit_checked(req, checked) {
                                 Some(req) => return Some(req),
                                 None => continue,
@@ -253,6 +256,14 @@ impl RpcRequestRx {
 #[cfg(all(feature = "gateway", feature = "tls"))]
 impl Drop for RpcRequestRx {
     fn drop(&mut self) {
+        self.answer_withdrawn();
+    }
+}
+
+#[cfg(all(feature = "gateway", feature = "tls"))]
+impl RpcRequestRx {
+    /// Stop every check still settling and answer its caller (#642's review, N5 and round 3 finding 4).
+    fn answer_withdrawn(&mut self) {
         for req in self.pending.abandon() {
             let refusal = super::provider_enforcement::withdrawn();
             rpc_respond_ctx(&self.ctx, &req, Bytes::from(refusal.rpc_body()));

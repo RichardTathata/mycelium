@@ -189,7 +189,7 @@ where
         // C4: the admission (a cohort-budget slot, if a budget is attached) is held across the
         // handler, so the call counts as in flight until it returns.
         #[cfg(all(feature = "gateway", feature = "tls"))]
-        match super::provider_enforcement::check_or_defer(&ctx, &req).await {
+        match super::provider_enforcement::check(&ctx, &req).await {
             super::provider_enforcement::Checked::Done(Ok(admission)) => {
                 serve_mcp_call(&ctx, &req, &rpc_req, call, admission, &handler).await
             }
@@ -270,6 +270,46 @@ where
     rpc_respond_ctx(ctx, req, Bytes::from(response.to_string().into_bytes()));
 }
 
+/// Answer a bridged call the provider check refused.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+fn refuse_bridged(
+    ctx: &Arc<TaskCtx>,
+    req: &RpcRequest,
+    rpc_req: &serde_json::Value,
+    refusal: &super::provider_enforcement::ProviderRefusal,
+) {
+    warn!(tool = rpc_req["params"]["name"].as_str().unwrap_or(""), sender = %req.sender(), reason = %refusal.reason,
+          "mcp.invoke (bridged): refused by provider enforcement");
+    rpc_respond_ctx(ctx, req, Bytes::from(refusal.jsonrpc_body(&rpc_req["id"])));
+}
+
+/// Forward an admitted bridged call to the external MCP server and answer with its reply.
+#[cfg(feature = "gateway")]
+async fn forward_bridged(
+    ctx: &Arc<TaskCtx>,
+    http_client: &reqwest::Client,
+    server_url: &str,
+    req: &RpcRequest,
+    rpc_req: &serde_json::Value,
+) {
+    let call_req = json!({
+        "jsonrpc": "2.0",
+        "id": rpc_req["id"],
+        "method": "tools/call",
+        "params": {"name": rpc_req["params"]["name"], "arguments": rpc_req["params"]["arguments"]},
+    });
+    let response: serde_json::Value = match http_client.post(server_url).json(&call_req).send().await {
+        Ok(resp) => match resp.json().await {
+            Ok(v) => v,
+            Err(e) => json!({"jsonrpc":"2.0","id":rpc_req["id"],
+                             "error":{"code":-32603,"message":e.to_string()}}),
+        },
+        Err(e) => json!({"jsonrpc":"2.0","id":rpc_req["id"],
+                         "error":{"code":-32000,"message":e.to_string()}}),
+    };
+    rpc_respond_ctx(ctx, req, Bytes::from(response.to_string().into_bytes()));
+}
+
 pub(super) async fn await_shutdown(rx: &mut watch::Receiver<bool>) {
     while !*rx.borrow() {
         if rx.changed().await.is_err() {
@@ -304,7 +344,32 @@ pub(super) async fn run_mcp_client_task(
     server_url:      String,
     http_client:     reqwest::Client,
 ) {
+    // As at the native tool loop: a provider check settling a seat claim runs beside this loop, bounded, and is
+    // answered when the loop ends (#642's review, round 3, finding 1); forwarding stays one call at a time.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    let mut pending: super::provider_enforcement::DeferredChecks<(RpcRequest, serde_json::Value)> =
+        super::provider_enforcement::DeferredChecks::new(&ctx);
     loop {
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        let req = {
+            let full = pending.is_full();
+            tokio::select! { biased;
+                _ = &mut cancel_rx => break,
+                _ = await_shutdown(&mut shutdown_rx) => break,
+                Some(((req, rpc_req), checked)) = pending.next(), if !pending.is_empty() => {
+                    match checked {
+                        Ok(_admission) => forward_bridged(&ctx, &http_client, &server_url, &req, &rpc_req).await,
+                        Err(refusal) => refuse_bridged(&ctx, &req, &rpc_req, &refusal),
+                    }
+                    continue;
+                }
+                result = rx.recv(), if !full => match result {
+                    Some(req) => req,
+                    None => break,
+                },
+            }
+        };
+        #[cfg(not(all(feature = "gateway", feature = "tls")))]
         let req = tokio::select! { biased;
             _ = &mut cancel_rx => break,
             _ = await_shutdown(&mut shutdown_rx) => break,
@@ -348,40 +413,21 @@ pub(super) async fn run_mcp_client_task(
 
         // Closure plan C3: the bridged external server is protected at this node's boundary.
         #[cfg(all(feature = "gateway", feature = "tls"))]
-        let _admission = match super::provider_enforcement::check(&ctx, &req).await {
-            Ok(a) => a,
-            Err(refusal) => {
-                warn!(tool = req_name, sender = %req.sender(), reason = %refusal.reason,
-                      "mcp.invoke (bridged): refused by provider enforcement");
-                rpc_respond_ctx(&ctx, &req, Bytes::from(refusal.jsonrpc_body(&rpc_req["id"])));
-                continue;
+        match super::provider_enforcement::check(&ctx, &req).await {
+            super::provider_enforcement::Checked::Done(Ok(_admission)) => {
+                forward_bridged(&ctx, &http_client, &server_url, &req, &rpc_req).await
             }
-        };
+            super::provider_enforcement::Checked::Done(Err(refusal)) => refuse_bridged(&ctx, &req, &rpc_req, &refusal),
+            super::provider_enforcement::Checked::Waiting(waiting) => pending.spawn(waiting, (req, rpc_req)),
+        }
+        #[cfg(not(all(feature = "gateway", feature = "tls")))]
+        forward_bridged(&ctx, &http_client, &server_url, &req, &rpc_req).await;
+    }
 
-        let arguments = rpc_req["params"]["arguments"].clone();
-        let call_req  = json!({
-            "jsonrpc": "2.0",
-            "id": rpc_req["id"],
-            "method": "tools/call",
-            "params": {"name": req_name, "arguments": arguments},
-        });
-
-        let response: serde_json::Value = match http_client
-            .post(&server_url)
-            .json(&call_req)
-            .send()
-            .await
-        {
-            Ok(resp) => match resp.json().await {
-                Ok(v)  => v,
-                Err(e) => json!({"jsonrpc":"2.0","id":rpc_req["id"],
-                                 "error":{"code":-32603,"message":e.to_string()}}),
-            },
-            Err(e) => json!({"jsonrpc":"2.0","id":rpc_req["id"],
-                             "error":{"code":-32000,"message":e.to_string()}}),
-        };
-
-        rpc_respond_ctx(&ctx, &req, Bytes::from(response.to_string().into_bytes()));
+    // Calls still settling a claim when the loop ends are answered, never left to time out.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    for (req, rpc_req) in pending.abandon() {
+        refuse_bridged(&ctx, &req, &rpc_req, &super::provider_enforcement::withdrawn());
     }
 
     // Tombstone all KV entries for bridged tools.
@@ -402,7 +448,7 @@ pub(super) async fn run_mcp_client_task(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::{GossipAgent, GossipConfig, NodeId};
     use crate::signal::signal_kind;
@@ -580,7 +626,7 @@ mod tests {
 
     #[cfg(feature = "gateway")]
     /// Minimal in-process mock MCP server using axum.
-    async fn spawn_mock_mcp_server(tools: Vec<serde_json::Value>) -> (u16, tokio::task::JoinHandle<()>) {
+    pub(crate) async fn spawn_mock_mcp_server(tools: Vec<serde_json::Value>) -> (u16, tokio::task::JoinHandle<()>) {
         use axum::{Router, extract::Json as AJson, routing::post};
         let tools = std::sync::Arc::new(tools);
         let app = Router::new().route("/", post({

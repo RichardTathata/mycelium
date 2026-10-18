@@ -1741,6 +1741,11 @@ scope also needs a consensus listener on the voting nodes and, under `consensus_
 `exclusive_default` electorate. The tally scope needs every member built with `gateway` **and** `tls`, and is not
 established on a node that has heard from fewer than `control_min_peers_heard` peers.
 
+**Head-of-line limit.** A serve loop holds at most 64 checks that are settling a seat claim. With 64 waiting — under a
+lost quorum, each for up to 2 s per phase × 4 ballots per seat — the loop stops taking requests, so every request
+behind them waits too, uncovered calls included: the channel's own bound then pushes back on senders. A fleet that
+puts a high-rate kind under an exact limit should expect that while a quorum is lost.
+
 **Upgrade order.** Tally rules fail closed — `Indeterminate` — until every member runs this release built with both
 features: an older member, or one built without them, publishes no heartbeat and is unknown coverage. Deploy the
 release fleet-wide before a policy names `HistoryScope::FleetTally`.
