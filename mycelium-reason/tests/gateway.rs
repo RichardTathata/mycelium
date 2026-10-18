@@ -648,8 +648,15 @@ async fn probe_facade_hostile_inputs_never_5xx_and_node_stays_serviceable() {
     let r = http.post(&url).body("model=m").send().await.unwrap();
     assert!((400..500).contains(&r.status().as_u16()), "wrong content type → 4xx");
     let huge = serde_json::json!({ "model": "m", "messages": [{ "role": "user", "content": "x".repeat(3 * 1024 * 1024) }] });
-    let r = http.post(&url).json(&huge).send().await.unwrap();
-    assert!((400..500).contains(&r.status().as_u16()), "3 MiB body → 4xx (413), got {}", r.status());
+    // The server may answer 413 and reset the connection before the whole body is sent; a reset on that send is
+    // the refusal arriving early, not a fault — the node must still be serviceable below.
+    match http.post(&url).json(&huge).send().await {
+        Ok(r) => assert!((400..500).contains(&r.status().as_u16()), "3 MiB body → 4xx (413), got {}", r.status()),
+        Err(e) => assert!(
+            e.is_request() || e.is_body() || e.is_connect() || e.to_string().contains("reset"),
+            "3 MiB body: only a refused send is acceptable, got {e}"
+        ),
+    }
 
     // Still serviceable.
     let h = http.get(format!("http://127.0.0.1:{http_port}/health")).send().await.unwrap();

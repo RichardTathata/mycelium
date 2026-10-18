@@ -1528,7 +1528,7 @@ mycelium-*/src` (who calls an OpenAI-compatible endpoint), and `ae_preflight(`'s
   `route_class_forbidden_at_locality`, `route_class_permitted_elsewhere`, `route_other_class_unaffected`,
   `route_locality_unknown`, `route_class_absent`, passed by the reference evaluator, the derived-revision wrapper and
   the independent `TableEvaluator`. **The private companion's Cedar adapter: *not built here; at the next re-pin*** — it
-  must express the clause or decline the five cases in `declared_limits` (`deprecations.md` §50); the private
+  must express the clause or decline the five cases in `declared_limits` (`deprecations.md` §52); the private
   repository is not touched here, and **until that re-pin a Cedar-backed fleet has no class or locality enforcement**.
 - *per candidate, before the router commits: routed to a permitted model when one exists, refused naming every
   candidate and why when none does* — `call_inner` (`mycelium-reason/src/route.rs`): a refused candidate is passed over
@@ -1564,7 +1564,7 @@ mycelium-*/src` (who calls an OpenAI-compatible endpoint), and `ae_preflight(`'s
   records shared no `operation_id` — one per call now, asserted end to end; (5) a refused candidate traced as a failed
   call — now traced *refused by policy, not dispatched*. Answered in the docs: (2) a class rule names one class — the
   guide's policy is an allow-list, so an unlisted or stricter class is refused; (3) the refresh gap; (4) the timeout and
-  mixed-outcome residuals; (7) the header's new `400` in `deprecations.md` §50; (8) floor keys exact, the topology a
+  mixed-outcome residuals; (7) the header's new `400` in `deprecations.md` §52; (8) floor keys exact, the topology a
   refusal discloses, `at_locality(Unknown)` never deciding.
 - *Round-3 confirmation review (#643)* — round 2's A–E confirmed fixed; new: (1) the eviction rule evicted on short-lived
   listeners too, and the SDKs ended silently — fixed both halves, above (seen failing first: the core test's transient
@@ -1574,7 +1574,7 @@ mycelium-*/src` (who calls an OpenAI-compatible endpoint), and `ae_preflight(`'s
   (4) `mycelium-ts/README.md` gained its 0.2.6 note.
 - *Round-2 confirmation review (#643)* — round 1's 1–5 and 7 confirmed fixed, 6 and 8 answered; new: (A) a
   classifying router dispatched before its evaluator was attached (the guide's order: attach after `start()`) — it
-  now refuses `authority_not_established` while `GatewayPreflight::is_inert` (undeprecated, §50), and the guide's
+  now refuses `authority_not_established` while `GatewayPreflight::is_inert` (undeprecated, §52), and the guide's
   snippet and the tests attach journal and evaluator before `start()`
   (`a_classifying_router_routes_nothing_without_an_evaluator`, the reviewer's probe, seen answering 200 from the
   external model first); (B) the in-process sibling of finding 1, above (seen failing first: the client stream was

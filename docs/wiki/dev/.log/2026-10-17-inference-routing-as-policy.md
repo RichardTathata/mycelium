@@ -22,4 +22,4 @@ node's ad stays open (an ad's key is not bound to its writer). A class rule name
 written as allow-lists.
 
 Pages: `dev/dev.md`, `dev/companions/companions.md`. Repo: `src/agent/route_facts.rs`, guide 20 § Deciding where data
-may go, `00-concepts.md`, guide 15's `llm-meta` table, `deprecations.md` §50, the plan's row R and §5.
+may go, `00-concepts.md`, guide 15's `llm-meta` table, `deprecations.md` §52, the plan's row R and §5.

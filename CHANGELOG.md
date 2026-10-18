@@ -64,7 +64,7 @@ member can write another node's `llm-meta` ad). A gateway client cannot set a mo
 (`403 reserved_namespace`), a catalogue entry providing one is never installed (`prov.eligible` revision 2), and
 `GET /gateway/rpc/serve/{kind}` refuses `llm.invoke`, `mcp.invoke`, `skill.invoke` and the reply kinds — a serve stream
 for one received every such request its node was sent. The private Cedar adapter does not yet enforce class or
-locality (its next re-pin). Upgrade notes: `deprecations.md` §50.
+locality (its next re-pin). Upgrade notes: `deprecations.md` §52.
 
 - **`mycelium-py` 0.2.12** and **`mycelium-ts` 0.2.6** (their own tags): `rpc_serve` / `rpcServe` raise
   `ProtectedKindError`, naming the kind, when the node refuses the stream (`403 protected_kind` or
