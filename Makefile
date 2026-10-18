@@ -171,6 +171,7 @@ check:
 	cargo clippy --lib --tests --features test-frame-filter -- -D warnings
 	cargo clippy --lib --tests --features tls,metrics,a2a,llm -- -D warnings
 	cargo clippy --lib --tests --features compliance -- -D warnings
+	cargo clippy --lib --bins --tests --no-default-features -- -D warnings  # CI's line: test-only items and the binaries (a test-only re-export slipped past --lib, #642)
 	cargo clippy --lib --no-default-features -- -D warnings
 	cargo clippy --lib --no-default-features --features metrics -- -D warnings  # metrics without gateway: a half-live `emergent` (row J)
 	cargo clippy -p mycelium-core --lib --tests -- -D warnings
