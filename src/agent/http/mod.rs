@@ -123,6 +123,8 @@ mod kv;
 #[cfg(feature = "llm")]
 mod llm_bridge;
 mod mcp_bridge;
+#[cfg(all(test, feature = "tls", feature = "consensus"))]
+pub(crate) use mcp_bridge::{TEST_DISPATCH_TIMEOUT_MS, TEST_LAST_TIMEOUT};
 mod mesh;
 mod node;
 mod overlay;

@@ -459,8 +459,19 @@ longest window among its entries plus both bounds, any node tombstones its keys 
 holds*: under last-writer-wins that removes that record and loses to anything the owner wrote after it, so it cannot
 erase a returned node's newer heartbeat or permit, wherever it is. A returning node re-asserts its own heartbeat and
 withdraws its own aged entries locally before its connections come up, so a collector's tombstone reaches it older than
-what it holds, is not applied, and its `sys/` tripwire does not count it. So a
-fleet using the tally runs every member with both features. **Upgrading:** tally rules fail closed until every
+what it holds, is not applied, and its `sys/` tripwire does not count it.
+
+*What "verified member" rests on.* With `[tls]` and `require_identity_proofs` (the default), a member is one whose
+sealed identity record or certificate this node holds and has not seen revoked or removed. **Without `[tls]`** this
+node can verify nobody, so a non-peer inside the horizon is unknown coverage: the tally decides `Indeterminate`, naming
+it, until its heartbeat passes the horizon — closed, never an under-count of a crashed node's permits. **With
+`require_identity_proofs = false`** a bare identity record is accepted, so any member can mint one for a made-up id
+and that id's entries count again: the fabricated-id defence assumes proofs. **Not built — a residual:** tally entries
+are not signed, so a member that writes forged entries under a *real* member's namespace after that member has died
+is not detected (the `sys/` tripwire runs only at the owner, which is gone). While the owner lives, its tripwire
+counts the foreign write and its next publish overwrites it.
+
+So a fleet using the tally runs every member with both features. **Upgrading:** tally rules fail closed until every
 member runs this release built with `gateway` and `tls` — an older member, or one built without them, publishes no
 heartbeat and is unknown coverage. A forged `departed` heartbeat stops peers waiting on a live node that has gone quiet,
 until its next real heartbeat overwrites the forgery (its entries are still counted) — no more than a forged

@@ -95,7 +95,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     verified member (a trusted identity, not removed); a fabricated node id counts for nothing. Past the horizon (window
     + staleness + drift) its keys are not read, and any node collects them with tombstones stamped at the observed
     records' own timestamps, which lose to anything the owner wrote later; a returning node re-asserts its own keys
-    before its connections come up. A decision lists nodes from the store's scope index, never every entry.
+    before its connections come up. A decision lists nodes from the store's per-prefix scope roster, never every
+    entry nor another namespace's scopes. Without `[tls]` a non-peer inside the horizon is unknown coverage
+    (`Indeterminate`); with `require_identity_proofs = false` a fabricated id can count again. Not built: tally entries
+    are unsigned, so forgery under a dead member's namespace is not detected.
+  - `mycelium-core`: `ops::kv_delete_held(ctx, key, observed)` — a tombstone at the stamp of the record held, refused
+    unless that record is the observed one; `ops::kv_write_local` (`#[doc(hidden)]`, for this crate's start-up
+    re-assert); `store::scopes_under_visiting`; and `KvStore` gained `scope_roster` (an exhaustive struct literal
+    breaks). A `/mcp` dispatch timeout logs its diagnostics and tells the caller only that it timed out.
   - An admitted decision's permit is no longer taken back once its record has been handed to the journal: an abort
     there is delivery unknown, and the permit stays counted. The `rpc/serve` stream's loop pulls one request per event
     the client asks for, and answers every request it took when the client goes, on eviction or at shutdown.

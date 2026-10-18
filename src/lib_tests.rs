@@ -129,6 +129,7 @@ fn spawn_handler_with(
             index_stripes:     Arc::new(std::array::from_fn(|_| std::sync::Mutex::new(()))),
             cap_ns_index:      Arc::new(crate::store::PrefixIndex::new()),
             scope_index: Arc::new(papaya::HashMap::new()),
+            scope_roster: Arc::new(papaya::HashMap::new()),
             #[cfg(feature = "test-frame-filter")]
             frame_filter: Arc::new(papaya::HashMap::new()),
             scoped_prefixes: Arc::from(Vec::<Arc<str>>::new()),
@@ -3968,6 +3969,7 @@ async fn test_subscribe_notified_via_gossip() {
                 index_stripes:     Arc::new(std::array::from_fn(|_| std::sync::Mutex::new(()))),
                 cap_ns_index:      Arc::new(crate::store::PrefixIndex::new()),
                 scope_index: Arc::new(papaya::HashMap::new()),
+            scope_roster: Arc::new(papaya::HashMap::new()),
                 #[cfg(feature = "test-frame-filter")]
             frame_filter: Arc::new(papaya::HashMap::new()),
             scoped_prefixes: Arc::from(Vec::<Arc<str>>::new()),

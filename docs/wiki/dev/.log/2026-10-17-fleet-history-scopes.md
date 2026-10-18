@@ -56,7 +56,7 @@ the owner cannot have superseded; absent that, let readers ignore what has aged.
 
 Residue is collected again, in a form that cannot erase a returned node: a non-owner tombstones a non-peer's tally keys
 only past the horizon (longest window among its entries + staleness + drift), each **at the timestamp of the record it
-holds** (`ops::kv_delete_at`) — under LWW an equal-stamp tombstone removes exactly that record and any later write
+holds** (`ops::kv_delete_at`, renamed `kv_delete_held` in round 5) — under LWW an equal-stamp tombstone removes exactly that record and any later write
 beats it. The returning owner re-asserts its own heartbeat and withdraws its own aged entries with local-only writes
 (`ops::kv_write_local`) before `start_listener`, so a collector's tombstone reaches it older than what it holds, is not
 applied, and the `sys/` tripwire (which counts only applied foreign writes) does not count it. Readers ignore a
@@ -66,3 +66,14 @@ prefix) rather than scanning entries. `Settling::finish` disarms the retraction 
 there is delivery unknown). The `rpc/serve` loop is pull-based. The `/mcp` door-test flake is recorded open with
 instrumentation. Lesson (amending round 3's): a non-owner delete *is* sound in a gossiped LWW namespace when it is
 stamped at the version observed — it is then conditional on that version by construction.
+
+## [2026-10-18] review round 5 | Fleet-wide history scopes (#642)
+
+No blocking defect; five lows closed. The scope index gained a per-prefix roster (`KvStore::scope_roster`), so
+`scopes_under` a registered prefix visits that prefix's scopes only — a tally read no longer walks every consensus
+slot; a reader prunes an emptied scope and re-checks the bucket after pruning, so a racing insert (bucket first, roster
+second) is never lost. `kv_delete_at` became `kv_delete_held(ctx, key, observed)`: refused unless the live record held
+carries the observed stamp, so it cannot write a tombstone newer than the record held. `kv_write_local` is
+`#[doc(hidden)]`. A `/mcp` dispatch timeout's diagnostics stay in the operator's log. Without `[tls]`, a non-peer
+inside the horizon is unknown coverage (fail closed) rather than ignored; `require_identity_proofs = false` re-opens
+fabricated ids; forgery under a dead member's namespace (unsigned entries) is stated as not built.

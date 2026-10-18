@@ -387,8 +387,8 @@ async fn the_mcp_door_counts_into_the_fleet_counter() {
         [&a, &b].iter().map(|n| n.consensus().start_consensus_listener(ConsensusConfig::default())).collect();
     ready(&[&a, &b]).await;
     // An open flake (#642): twice in CI a call here timed out in the dispatch after its preflight admitted it, and
-    // the cause is not known. The tool name is this test's own; the handler counts its runs, and a timeout's answer
-    // carries where the time went (`mcp_bridge`), so the next failure names its half.
+    // the cause is not known. The tool name is this test's own; the handler counts its runs, and a timeout's
+    // diagnostics (`mcp_bridge`'s warning, kept for tests per gateway node) say where the time went.
     let tool_name = format!("k2-door-{p1}");
     let ran = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let ran_in = Arc::clone(&ran);
@@ -420,10 +420,11 @@ async fn the_mcp_door_counts_into_the_fleet_counter() {
         let r = call().await;
         assert!(
             r.get("error").is_none(),
-            "post {i} over /mcp is within the fleet's limit: {r}; handler ran {} time(s); a's peers {:?}; tool keys {:?}",
+            "post {i} over /mcp is within the fleet's limit: {r}; handler ran {} time(s); a's peers {:?}; tool keys {:?}; timeout {:?}",
             ran.load(std::sync::atomic::Ordering::SeqCst),
             a.task_ctx.peers.pin().keys().map(|k| k.to_string()).collect::<Vec<_>>(),
             mycelium_core::ops::kv_scan_prefix(&a.task_ctx, "tools/").into_iter().map(|(k, _)| k.to_string()).collect::<Vec<_>>(),
+            super::super::http::TEST_LAST_TIMEOUT.pin().get(&a.node_id().to_string()),
         );
     }
     let r = call().await;
@@ -1204,6 +1205,11 @@ async fn residue_is_collected_and_a_decision_does_not_read_it() {
         plant(super::tally_key(&silent, "c-posts", "gateway", &format!("actor-{i}")), serde_json::json!({"w": 1_000, "t": [now - 4_000]}));
     }
     assert_eq!(reads(&counter), with_one, "a decision's cost does not grow with a node's entries");
+    // Nor with another scoped namespace's scopes: two thousand consensus slots on this node (round 5, finding 1).
+    for slot in 0..2_000 {
+        let _ = mycelium_core::ops::kv_set(&ctx, Arc::from(format!("consensus/life/k2-{slot}/r/1").as_str()), bytes::Bytes::from_static(b"x"));
+    }
+    assert_eq!(reads(&counter), with_one, "a decision's cost does not grow with consensus slots");
 
     // Twenty departed ids, silent past the horizon (their longest window + staleness + drift = 3.5 s).
     let ids: Vec<String> = (0..20).map(|_| NodeId::new("127.0.0.1", port()).unwrap().to_string()).collect();
@@ -1273,7 +1279,7 @@ async fn a_returning_nodes_newer_records_survive_a_collector() {
     let _ = mycelium_core::ops::kv_set(&bctx, Arc::clone(&key), bytes::Bytes::from_static(b"old"));
     let old = bctx.kv_state.store.pin().get(key.as_ref()).unwrap().timestamp;
     let _ = mycelium_core::ops::kv_set(&bctx, Arc::clone(&key), bytes::Bytes::from_static(b"new"));
-    let _ = mycelium_core::ops::kv_delete_at(&bctx, Arc::clone(&key), old);
+    assert!(!mycelium_core::ops::kv_delete_held(&bctx, Arc::clone(&key), old), "the held record is not the observed one");
     assert_eq!(mycelium_core::ops::kv_get(&bctx, &key).as_deref(), Some(&b"new"[..]));
     a.shutdown().await;
     b.shutdown().await;
@@ -1421,4 +1427,88 @@ async fn the_owners_reassert_makes_a_collectors_tombstone_lose() {
     let v = mycelium_core::ops::kv_get(&ctx, &hb).expect("the re-asserted heartbeat stands");
     assert!(!String::from_utf8_lossy(&v).contains("\"as_of\":1,"), "re-asserted, current");
     a.shutdown().await;
+}
+
+/// **Round 5, finding 2: a `/mcp` timeout tells the caller it timed out, and nothing about the mesh.** The provider,
+/// whether it was this node, the timings, the peer count and the dropped frames stay in the operator's log.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_mcp_timeout_tells_the_caller_nothing_about_the_mesh() {
+    let (p1, http) = (port(), port());
+    let cfg = GossipConfig {
+        bind_address: "127.0.0.1".parse().unwrap(),
+        bind_port: p1,
+        http_port: Some(http),
+        ..GossipConfig::default()
+    };
+    let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", p1).unwrap(), cfg));
+    a.start().await.unwrap();
+    let me = a.node_id().to_string();
+    // A tool advertised with no handler behind it: the call is dispatched and never answered.
+    let _ = mycelium_core::ops::kv_set(&a.task_ctx, Arc::from(format!("tools/ghost-{p1}/{me}").as_str()), bytes::Bytes::from_static(b"{}"));
+    super::super::http::TEST_DISPATCH_TIMEOUT_MS.pin().insert(me.clone(), 300);
+    let r = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{http}/mcp"))
+        .json(&serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                  "params": {"name": format!("ghost-{p1}"), "arguments": {}}}))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    super::super::http::TEST_DISPATCH_TIMEOUT_MS.pin().remove(&me);
+    assert_eq!(r["error"]["message"], "tool invocation timed out", "{r}");
+    assert!(r["error"].get("data").is_none(), "no diagnostics to the caller: {r}");
+    let text = r.to_string();
+    for leak in [me.as_str(), "to_self", "preflight_ms", "dispatch_ms", "peers", "dropped_frames"] {
+        assert!(!text.contains(leak), "{leak} in the caller's error: {r}");
+    }
+    assert!(super::super::http::TEST_LAST_TIMEOUT.pin().get(&me).is_some(), "the operator's diagnostics were taken");
+    a.shutdown().await;
+}
+
+/// **Round 5, finding 3: `kv_delete_held` cannot write a tombstone newer than the record held.** Nothing held: it
+/// refuses and writes nothing. A held record that is not the observed one: it refuses. The observed one: the tombstone
+/// carries exactly its stamp.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_delete_never_writes_a_tombstone_newer_than_the_record() {
+    let p1 = port();
+    let a = node(p1, &[], 3, HistoryScope::FleetTally, |_| {}).await;
+    let ctx = Arc::clone(&a.task_ctx);
+    let key: Arc<str> = Arc::from("sys/ae-tally/127.0.0.1:1/hb");
+    let stamp = |k: &Arc<str>| ctx.kv_state.store.pin().get(k.as_ref()).map(|e| (e.timestamp, e.data.is_none()));
+    let far = ctx.hlc.tick();
+    assert!(!mycelium_core::ops::kv_delete_held(&ctx, Arc::clone(&key), far), "nothing held");
+    assert_eq!(stamp(&key), None, "nothing written");
+    let _ = mycelium_core::ops::kv_set(&ctx, Arc::clone(&key), bytes::Bytes::from_static(b"v"));
+    let (held, _) = stamp(&key).unwrap();
+    assert!(!mycelium_core::ops::kv_delete_held(&ctx, Arc::clone(&key), held + 1), "a stamp the record does not have");
+    assert!(!mycelium_core::ops::kv_delete_held(&ctx, Arc::clone(&key), held - 1), "an older observation");
+    assert_eq!(stamp(&key), Some((held, false)));
+    assert!(mycelium_core::ops::kv_delete_held(&ctx, Arc::clone(&key), held));
+    assert_eq!(stamp(&key), Some((held, true)), "the tombstone carries the held record's stamp, no newer");
+    assert!(!mycelium_core::ops::kv_delete_held(&ctx, Arc::clone(&key), held), "a tombstone is not a held record");
+    a.shutdown().await;
+}
+
+/// **Round 5, finding 4: without `[tls]`, a non-peer's absence is unknown coverage.** No member can be verified, so an
+/// enforcing node that is no longer a peer is neither counted nor ignored: the tally is not established until its
+/// heartbeat passes the horizon — fail closed, never an under-count of a crashed node's permits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn without_tls_a_non_peers_absence_is_not_established() {
+    let (p1, p2) = (port(), port());
+    let a = node(p1, &[], 3, HistoryScope::FleetTally, |_| {}).await;
+    let b = node(p2, &[p1], 3, HistoryScope::FleetTally, |_| {}).await;
+    ready(&[&a, &b]).await;
+    assert!(admitted(&post(&b).await).is_some(), "established while every enforcing node is a peer");
+    let gone = NodeId::new("127.0.0.1", port()).unwrap().to_string();
+    let now = b.task_ctx.hlc.decision_now_ms();
+    let hb = serde_json::to_vec(&serde_json::json!({"as_of": now - 1_000, "enforces": true})).unwrap();
+    let _ = mycelium_core::ops::kv_set(&b.task_ctx, Arc::from(super::heartbeat_key(&gone).as_str()), bytes::Bytes::from(hb));
+    let out = post(&b).await;
+    assert!(admitted(&out).is_none(), "not established");
+    let why = format!("{:?}", refusal(&out));
+    assert!(why.contains(&gone) && why.contains("cannot be verified"), "{why}");
+    a.shutdown().await;
+    b.shutdown().await;
 }

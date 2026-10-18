@@ -79,6 +79,12 @@ pub struct KvStore {
     /// `"{prefix}{scope}"`. A read index only — it never conditions a write; maintained alongside
     /// `cap_ns_index` in `apply_and_notify`, live keys only.
     pub scope_index:       Arc<PrefixIndex>,
+    /// The scopes of each registered prefix: outer key the prefix itself, inner keys the scope-index outer
+    /// keys filed under it. So [`scopes_under`] a registered prefix visits that prefix's scopes only, never
+    /// another prefix's (post-360 row K2, #642's review round 5: a tally read must not walk every consensus
+    /// slot). Added to on every live insert into [`scope_index`](Self::scope_index); a scope whose bucket
+    /// has emptied is pruned by the reader that finds it so, and re-added by the next insert.
+    pub scope_roster:      Arc<PrefixIndex>,
     /// The prefixes [`scope_index`](Self::scope_index) files keys under — fixed at construction by the
     /// layer above ([`KvState::with_scoped_prefixes`]); empty by default. Core names none itself.
     pub scoped_prefixes:   Arc<[Arc<str>]>,
@@ -195,6 +201,7 @@ impl KvState {
                 index_stripes:     Arc::new(std::array::from_fn(|_| Mutex::new(()))),
                 cap_ns_index:      Arc::new(PrefixIndex::new()),
                 scope_index:       Arc::new(PrefixIndex::new()),
+                scope_roster:      Arc::new(PrefixIndex::new()),
                 scoped_prefixes:   scoped_prefixes.iter().map(|p| Arc::from(*p)).collect(),
                 #[cfg(any(test, feature = "test-frame-filter"))]
                 frame_filter:      Arc::new(papaya::HashMap::new()),
@@ -308,10 +315,40 @@ pub fn scan_scope(kv: &KvState, outer: &str) -> Vec<(Arc<str>, Bytes)> {
 
 /// The scope-index outer keys under `prefix` (one per scope that has live keys).
 pub fn scopes_under(kv: &KvState, prefix: &str) -> Vec<Arc<str>> {
-    kv.scope_index.pin().iter()
+    scopes_under_visiting(kv, prefix).0
+}
+
+/// [`scopes_under`], with the number of index entries it visited: for a registered prefix, that prefix's
+/// scopes only ([`KvStore::scope_roster`]); for any other prefix, the whole scope index.
+pub fn scopes_under_visiting(kv: &KvState, prefix: &str) -> (Vec<Arc<str>>, usize) {
+    if kv.scoped_prefixes.iter().any(|p| p.as_ref() == prefix) {
+        let Some(roster) = kv.scope_roster.pin().get(prefix).cloned() else { return (Vec::new(), 0) };
+        let index = kv.scope_index.pin();
+        let mut visited = 0;
+        let mut live = Vec::new();
+        for (outer, _) in roster.pin().iter() {
+            visited += 1;
+            if index.get(outer.as_ref()).is_some_and(|b| !b.pin().is_empty()) {
+                live.push(Arc::clone(outer));
+            } else {
+                // Prune, then re-check: an insert that raced the check has put its key in the bucket before
+                // adding the scope here, so either this re-check sees the key or the insert re-adds the scope.
+                roster.pin().remove(outer.as_ref());
+                if index.get(outer.as_ref()).is_some_and(|b| !b.pin().is_empty()) {
+                    roster.pin().insert(Arc::clone(outer), ());
+                    live.push(Arc::clone(outer));
+                }
+            }
+        }
+        return (live, visited);
+    }
+    let index = kv.scope_index.pin();
+    let visited = index.len();
+    let live = index.iter()
         .filter(|(outer, bucket)| outer.starts_with(prefix) && !bucket.pin().is_empty())
         .map(|(outer, _)| Arc::clone(outer))
-        .collect()
+        .collect();
+    (live, visited)
 }
 
 /// What the test-only frame filter sees of an inbound frame.
@@ -757,7 +794,11 @@ fn apply_and_notify_inner(kv: &KvState, update: &GossipUpdate) -> crate::receipt
             }
             if let Some(scope) = scope_index_key(&kv.scoped_prefixes, &update.key) {
                 if current_live.is_some() {
-                    index_bucket_insert(&kv.scope_index, scope, Arc::clone(&update.key));
+                    index_bucket_insert(&kv.scope_index, Arc::clone(&scope), Arc::clone(&update.key));
+                    // After the bucket insert, so a reader pruning this scope re-finds the key (scopes_under).
+                    if let Some(prefix) = kv.scoped_prefixes.iter().find(|p| update.key.starts_with(p.as_ref())) {
+                        index_bucket_insert(&kv.scope_roster, Arc::clone(prefix), scope);
+                    }
                 } else {
                     index_bucket_remove(&kv.scope_index, &scope, &update.key);
                 }
@@ -953,6 +994,41 @@ mod tests {
         assert!(guard.get("fresh-tomb").is_some(), "tombstone inside the window must survive");
         assert!(guard.get("live").is_some(), "live entries are never time-evicted regardless of age");
         assert_eq!(live, 1, "sweep reports the live-entry count");
+    }
+
+    /// #642's review round 5, finding 1: listing one registered prefix's scopes visits that prefix's scopes,
+    /// not every scope of every prefix.
+    #[test]
+    fn scopes_under_a_registered_prefix_visits_only_its_own_scopes() {
+        let kv = KvState::with_scoped_prefixes(0, &["consensus/life/", "sys/ae-tally/"]);
+        let put = |key: String, ts: u64, tomb: bool| {
+            apply_and_notify(&kv, &GossipUpdate {
+                sender: 0, key: Arc::from(key.as_str()),
+                value: if tomb { Bytes::new() } else { Bytes::from_static(b"v") },
+                timestamp: ts, nonce: ts, ttl: 1, is_tombstone: tomb,
+            });
+        };
+        let mut ts = 1 << 20;
+        for slot in 0..2_000 {
+            ts += 1;
+            put(format!("consensus/life/slot-{slot}/r/1"), ts, false);
+        }
+        for node in 0..3 {
+            ts += 1;
+            put(format!("sys/ae-tally/node-{node}/hb"), ts, false);
+        }
+        let (nodes, visited) = scopes_under_visiting(&kv, "sys/ae-tally/");
+        assert_eq!(nodes.len(), 3);
+        assert!(visited <= 3, "visited {visited} index entries for three tally nodes");
+        // A scope that empties is pruned by the next reader, and comes back with its next key.
+        ts += 1;
+        put("sys/ae-tally/node-0/hb".into(), ts, true);
+        assert_eq!(scopes_under(&kv, "sys/ae-tally/").len(), 2);
+        assert_eq!(scopes_under_visiting(&kv, "sys/ae-tally/").1, 2, "pruned");
+        ts += 1;
+        put("sys/ae-tally/node-0/hb".into(), ts, false);
+        assert_eq!(scopes_under(&kv, "sys/ae-tally/").len(), 3);
+        assert_eq!(scopes_under(&kv, "consensus/life/").len(), 2_000);
     }
 
     #[test]

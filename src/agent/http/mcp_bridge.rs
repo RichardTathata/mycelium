@@ -144,7 +144,7 @@ pub(super) async fn mcp_handler(
                 provider_node_id.clone(),
                 std::sync::Arc::from(crate::signal::signal_kind::MCP_INVOKE),
                 Bytes::from(tool_req.to_string().into_bytes()),
-                Duration::from_secs(30),
+                mcp_dispatch_timeout(&ctx.agent_ctx.node_id),
                 gateway_caller::presented_mandate(&req["params"]),
                 Some(&resource_claim),
             ).await;
@@ -182,14 +182,19 @@ pub(super) async fn mcp_handler(
                     let to_self = provider_node_id == ctx.agent_ctx.node_id;
                     let peers = ctx.agent_ctx.peers.pin().len();
                     let dropped = ctx.agent_ctx.kv_state.dropped_frames.load(std::sync::atomic::Ordering::Relaxed);
+                    // Operator diagnostics only: the provider, the mesh's shape and the timings are not the
+                    // caller's to see (#642's review round 5, finding 2).
                     warn!(tool = %name, provider = %provider_node_id, preflight_ms, dispatch_ms, to_self, peers, dropped,
                           "mcp tools/call: the dispatch timed out");
+                    #[cfg(test)]
+                    TEST_LAST_TIMEOUT.pin().insert(
+                        ctx.agent_ctx.node_id.to_string(),
+                        format!("provider={provider_node_id} to_self={to_self} preflight_ms={preflight_ms} \
+                                 dispatch_ms={dispatch_ms} peers={peers} dropped_frames={dropped}"),
+                    );
                     Json(json!({
                         "jsonrpc": "2.0", "id": id,
-                        "error": {"code": -32000, "message": "tool invocation timed out",
-                                  "data": {"provider": provider_node_id.to_string(), "to_self": to_self,
-                                           "preflight_ms": preflight_ms, "dispatch_ms": dispatch_ms,
-                                           "peers": peers, "dropped_frames": dropped}},
+                        "error": {"code": -32000, "message": "tool invocation timed out"},
                     })).into_response()
                 }
                 Err(e) => Json(json!({
@@ -206,3 +211,22 @@ pub(super) async fn mcp_handler(
         })).into_response(),
     }
 }
+
+/// How long `/mcp` waits for a tool's answer: 30 s, or a test's override for this gateway node.
+fn mcp_dispatch_timeout(_node: &crate::node_id::NodeId) -> Duration {
+    #[cfg(test)]
+    if let Some(ms) = TEST_DISPATCH_TIMEOUT_MS.pin().get(&_node.to_string()).copied() {
+        return Duration::from_millis(ms);
+    }
+    Duration::from_secs(30)
+}
+
+/// Test hook: `/mcp`'s dispatch timeout in milliseconds, per gateway node.
+#[cfg(test)]
+pub(crate) static TEST_DISPATCH_TIMEOUT_MS: std::sync::LazyLock<papaya::HashMap<String, u64>> =
+    std::sync::LazyLock::new(papaya::HashMap::new);
+
+/// Test hook: the last dispatch timeout's diagnostics, per gateway node — what the `warn!` logs.
+#[cfg(test)]
+pub(crate) static TEST_LAST_TIMEOUT: std::sync::LazyLock<papaya::HashMap<String, String>> =
+    std::sync::LazyLock::new(papaya::HashMap::new);

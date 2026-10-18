@@ -402,6 +402,12 @@ pub(crate) fn tally_state_counted(
             unknown.push(format!("{node} (a heartbeat {} ms in the future)", hb.as_of - now_ms));
             continue;
         }
+        // Without a `[tls]` identity this node can verify no member, so a non-peer's absence is unknown coverage —
+        // not established, never an under-count (#642's review round 5, finding 4). Until the horizon passes.
+        if ctx.tls.get().is_none() {
+            unknown.push(format!("{node} (not a peer, and without [tls] its membership cannot be verified)"));
+            continue;
+        }
         if !verified_member(ctx, &node) {
             continue;
         }
@@ -431,14 +437,12 @@ fn verified_member(ctx: &TaskCtx, node: &str) -> bool {
 }
 
 /// Every node this node holds tally keys for, from the store's scope index (`sys/ae-tally/` is a scoped prefix) —
-/// one name per node, never a scan of the nodes' entries — and how many names it listed.
+/// one name per node, never a scan of the nodes' entries nor of another prefix's scopes — and how many index
+/// entries it visited.
 fn tally_nodes(ctx: &TaskCtx) -> (Vec<String>, usize) {
-    let nodes: Vec<String> = mycelium_core::store::scopes_under(&ctx.kv_state, TALLY_PREFIX)
-        .into_iter()
-        .filter_map(|outer| outer.strip_prefix(TALLY_PREFIX).map(str::to_string))
-        .collect();
-    let listed = nodes.len();
-    (nodes, listed)
+    let (scopes, visited) = mycelium_core::store::scopes_under_visiting(&ctx.kv_state, TALLY_PREFIX);
+    let nodes = scopes.into_iter().filter_map(|outer| outer.strip_prefix(TALLY_PREFIX).map(str::to_string)).collect();
+    (nodes, visited)
 }
 
 /// Publish a permit admitted under `c` into this node's tally of `actor`, and keep this node's heartbeat current.
@@ -523,7 +527,7 @@ pub(crate) fn withdraw_aged_entries(ctx: &Arc<TaskCtx>, now_ms: u64) -> usize {
 /// clock-drift bound — by then every permit it wrote has aged out of every window, and no reader counts it.
 ///
 /// **Why a non-owner may delete here.** Each key is tombstoned *at the timestamp of the record this node holds*
-/// (`kv_delete_at`). Under last-writer-wins that removes exactly that record or an older one, and loses to anything
+/// (`kv_delete_held`). Under last-writer-wins that removes exactly that record or an older one, and loses to anything
 /// written after it — so a node that returned and wrote a newer heartbeat or a newer permit, even one that has not
 /// reached this collector yet, keeps it everywhere: the tombstone can never overtake it. At the returning owner
 /// itself the tombstone is older than what it holds (it re-asserts its own keys locally before its connections come
@@ -538,6 +542,11 @@ pub(crate) fn collect_residue(ctx: &Arc<TaskCtx>, now_ms: u64) -> usize {
             continue;
         }
         let keys = mycelium_core::store::scan_scope(&ctx.kv_state, &format!("{TALLY_PREFIX}{node}"));
+        // The stamps of the records read here: what the collection removes, and nothing written after them.
+        let stamps: Vec<Option<u64>> = {
+            let store = ctx.kv_state.store.pin();
+            keys.iter().map(|(k, _)| store.get(k.as_ref()).map(|e| e.timestamp)).collect()
+        };
         let Some(hb) = keys
             .iter()
             .find(|(k, _)| k.ends_with("/hb"))
@@ -555,10 +564,9 @@ pub(crate) fn collect_residue(ctx: &Arc<TaskCtx>, now_ms: u64) -> usize {
         if now_ms.saturating_sub(hb.as_of) <= horizon {
             continue;
         }
-        for (key, _) in keys {
-            let stamp = ctx.kv_state.store.pin().get(key.as_ref()).map(|e| e.timestamp);
+        for ((key, _), stamp) in keys.into_iter().zip(stamps) {
             if let Some(ts) = stamp {
-                let _ = mycelium_core::ops::kv_delete_at(ctx, key, ts);
+                let _ = mycelium_core::ops::kv_delete_held(ctx, key, ts);
             }
         }
         collected += 1;
