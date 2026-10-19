@@ -1455,7 +1455,12 @@ CC8, `docs/capabilities.md`, the crate README). The example units with `[[activa
   path by `mycelium-wasm-host/tests/stem_sighup.rs` (the real `mycelium-stem`, a confined activation behind its proxy:
   an unlisted host refused, the unit file rewritten and `kill -HUP` sent, the host served by the same process and
   proxy; a rewrite that does not load leaves every list standing; seen failing first with the SIGHUP branch a no-op;
-  CI's `wasm-host` job and `wasm-host-macos`, added after v2.36.0's review found the path untested). Why not KV or a gateway
+  CI's `wasm-host` job and `wasm-host-macos`, added after v2.36.0's review found the path untested). #646's review
+  closed four lows at the root: the handler is installed before anything slow and for every unit file, so SIGHUP
+  never takes its default and terminates the stem (`a_stem_without_an_egress_table_survives_sighup`, seen failing
+  first: `signal: 1 (SIGHUP)`); the per-activation refusal reached through the binary (a host the node's
+  `egress.allow_hosts` denies; seen failing first with that branch silent); atomic replacement and a vanished table's
+  fail-closed narrowing documented in `unit-file.md`. Why not KV or a gateway
   route: KV is fleet-writable (detection, not prevention — any member could widen a stem's list), and a route would be
   a door, with a scope and an audit, for a node-local concern the unit file already owns. `credentials` and `env` stay
   fixed for the stem's life.

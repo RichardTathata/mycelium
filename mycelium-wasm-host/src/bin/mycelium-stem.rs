@@ -142,6 +142,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(async move {
         // Before anything binds: a stop that arrives during startup is then an orderly shutdown too.
         let shutdown = mycelium::shutdown::ShutdownSignal::install()?;
+        // Row M's live allow-list: SIGHUP re-reads the unit file and applies each activation's egress `hosts`.
+        // Installed here, before anything slow and whatever the unit file says, so a SIGHUP never takes SIGHUP's
+        // default (terminate) — one that arrives during startup waits in tokio's buffer and is handled once the
+        // stem is up (#646's review, finding 1).
+        #[cfg(unix)]
+        let mut hup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
+        tracing::info!(units = %units_path, "SIGHUP re-reads the unit file and applies each activation's egress hosts");
         let node = NodeId::new(&config.bind_address, config.bind_port)?;
         let agent = Arc::new(GossipAgent::new(node, config));
         // A3: the gateway publish route, before start(), from the hosts table's trusted keys.
@@ -229,28 +236,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let stem = Stem::start(Arc::clone(&agent), &units, opts)?;
         tracing::info!(units = %units_path, hosting = units.hosts.is_some(), "stem node up");
-        // Row M's live allow-list: with any `[activation.confine.egress]`, SIGHUP re-reads the unit file and
-        // applies each activation's `hosts` to its running proxy (nothing else is re-read). Without one, SIGHUP
-        // keeps its default — the handler is installed only when there is something to reload.
+        // Nothing else in the file is re-read; a proxy the stem did not start at start (a table added later)
+        // is refused by name, since a new table needs a restart.
         let wait = shutdown.wait();
         tokio::pin!(wait);
-        #[cfg(unix)]
-        let mut hup = if units.activations.iter().any(|a| a.confine.as_ref().is_some_and(|c| c.egress.is_some())) {
-            let h = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
-            // Logged once the handler is installed: until then SIGHUP's default (terminate) applies.
-            tracing::info!(units = %units_path, "SIGHUP re-reads the unit file and applies each activation's egress hosts");
-            Some(h)
-        } else {
-            None
-        };
         loop {
             #[cfg(unix)]
-            let hup_recv = async {
-                match hup.as_mut() {
-                    Some(h) => h.recv().await,
-                    None => std::future::pending().await,
-                }
-            };
+            let hup_recv = hup.recv();
             #[cfg(not(unix))]
             let hup_recv = std::future::pending::<Option<()>>();
             tokio::select! {
@@ -258,7 +250,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 _ = hup_recv => {
                     match NodeCapabilityConfig::load_from_file(&units_path) {
                         Ok(fresh) => {
-                            for (at, applied) in stem.reload_egress_hosts(&fresh) {
+                            let applied = stem.reload_egress_hosts(&fresh);
+                            if applied.is_empty() {
+                                tracing::info!(units = %units_path, "SIGHUP: no egress allow-list to apply (no running proxy, and the file names no [activation.confine.egress])");
+                            }
+                            for (at, applied) in applied {
                                 match applied {
                                     Ok(hosts) => tracing::info!(activation = %at, ?hosts, "SIGHUP: egress allow-list applied"),
                                     Err(e) => tracing::warn!(activation = %at, error = %e, "SIGHUP: egress allow-list refused; the old one stands"),

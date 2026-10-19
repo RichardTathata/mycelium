@@ -580,7 +580,7 @@ impl Stem {
     /// list stands. Only `hosts` changes live; `credentials` and `env` are fixed for the stem's life.
     pub fn set_activation_egress_hosts(&self, ns: &str, name: &str, hosts: &[String]) -> Result<(), StemError> {
         let proxy = self.activation_egress(ns, name).ok_or_else(|| {
-            StemError(format!("[[activation]] {ns}/{name}: no running egress proxy (the unit names no [activation.confine.egress] for it, or its proxy could not start)"))
+            StemError(format!("[[activation]] {ns}/{name}: no running egress proxy (the stem started without an [activation.confine.egress] table for it — a table added later needs a restart — or its proxy could not start)"))
         })?;
         proxy.set_hosts(hosts).map_err(|e| StemError(format!("[[activation]] {ns}/{name}: {e}")))
     }

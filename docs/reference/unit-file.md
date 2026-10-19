@@ -458,6 +458,17 @@ name. Every entry is checked first, as at start; a bad list is refused and the o
 meets the new list; the command, its profile and the proxy's port are unchanged, and an open `CONNECT` tunnel is
 not closed. `credentials`, `env` and everything else in the file are read once, at start.
 
+`mycelium-stem` installs its `SIGHUP` handler before anything else starts, whatever the unit file names, so a
+`SIGHUP` never terminates it: one that arrives during startup is handled once the stem is up, and a stem with no
+egress table re-reads the file and logs that there is nothing to apply. A table added to an activation that
+started without one is refused by name — its proxy is started only at start, so a new table needs a restart. A
+file that does not load leaves every list standing; a file that loads but names a list one proxy refuses (a host
+the node's `egress.allow_hosts` denies) leaves that proxy's list standing, logged by activation. **Replace the file
+atomically:** write the new file beside it, then `rename(2)` it over the old one (`mv` on one filesystem does
+this), so a reload never reads a partial file. A partial file that still parses but has lost an activation's
+`[activation.confine.egress]` table is read as that table removed: the proxy is narrowed to an empty list and
+refuses everything (fail closed) until the next reload restores it.
+
 **Only this user's processes.** At accept the proxy asks the kernel which user owns the connecting socket and
 closes, before it holds any place, a connection another user's process opened — or one whose owner cannot be read
 (fail closed; a client that has half-closed is still named, and a dual-stack client reaching `127.0.0.1` as

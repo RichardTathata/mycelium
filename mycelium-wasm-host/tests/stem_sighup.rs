@@ -2,7 +2,8 @@
 //! allow-list, the binary's half). `Stem::reload_egress_hosts` is tested in the library; this runs the real
 //! binary and sends the real signal, so what it pins is the path between them — the handler installed, the unit
 //! file re-read, the list reaching the running proxy — and the handler's promise for a file that does not load:
-//! every list stands.
+//! every list stands; for a file that loads but names a list the node refuses: that activation's list stands; and
+//! for a stem whose unit file names no egress table: SIGHUP is handled, never SIGHUP's default (terminate).
 //!
 //! The observable is the proxy itself. The stem is its own librarian over a one-blob library; the blob's
 //! confined activation writes its proxy URL (port and token, from its cleared environment) into its placement
@@ -81,20 +82,26 @@ impl Proxy {
         Self { port, auth: format!("Basic {}", base64(userinfo.as_bytes())) }
     }
 
-    /// The status of `GET http://127.0.0.1:<upstream>/<path>` through the proxy, with its token.
-    fn get(&self, upstream: u16, path: &str) -> u16 {
-        let mut s = TcpStream::connect(("127.0.0.1", self.port)).expect("the proxy accepts");
-        s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    /// The status of `GET http://127.0.0.1:<upstream>/<path>` through the proxy, with its token — or the
+    /// transport error, which a caller polling to a deadline counts as "not yet" (#646's review, finding 4).
+    fn try_get(&self, upstream: u16, path: &str) -> Result<u16, String> {
+        let mut s = TcpStream::connect(("127.0.0.1", self.port)).map_err(|e| format!("connect: {e}"))?;
+        s.set_read_timeout(Some(Duration::from_secs(10))).map_err(|e| e.to_string())?;
         write!(
             s,
             "GET http://127.0.0.1:{upstream}/{path} HTTP/1.1\r\nHost: 127.0.0.1:{upstream}\r\nProxy-Authorization: {}\r\nConnection: close\r\n\r\n",
             self.auth
         )
-        .unwrap();
+        .map_err(|e| format!("write: {e}"))?;
         let mut resp = Vec::new();
         let _ = s.read_to_end(&mut resp);
         let resp = String::from_utf8_lossy(&resp);
-        resp.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or_else(|| panic!("an HTTP answer: {resp:?}"))
+        resp.split_whitespace().nth(1).and_then(|c| c.parse().ok()).ok_or_else(|| format!("no HTTP answer: {resp:?}"))
+    }
+
+    /// [`Self::try_get`] where an answer is expected now.
+    fn get(&self, upstream: u16, path: &str) -> u16 {
+        self.try_get(upstream, path).unwrap_or_else(|e| panic!("through the proxy to :{upstream}: {e}"))
     }
 }
 
@@ -123,6 +130,14 @@ fn wait_for(what: &str, child: &mut std::process::Child, log: &Path, secs: u64, 
         assert!(Instant::now() < deadline, "{what}: not within {secs} s; the stem's log:\n{}", log_of(log));
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// Replace the unit file as `unit-file.md` says to: write a new file, then `rename(2)` it over the old one, so a
+/// reload never reads half a file.
+fn replace(units: &Path, body: &str) {
+    let tmp = units.with_extension("toml.new");
+    std::fs::write(&tmp, body).unwrap();
+    std::fs::rename(&tmp, units).unwrap();
 }
 
 fn sighup(child: &std::process::Child) {
@@ -168,11 +183,15 @@ fn sighup_applies_a_rewritten_egress_allow_list_and_a_file_that_does_not_load_ke
     let ((a, at_a), (b, at_b)) = (upstream(), upstream());
     let units = dir.join("units.toml");
     std::fs::write(&units, unit_file(&head, &format!("[\"http://127.0.0.1:{a}\"]"))).unwrap();
+    // The node's own egress allow-list: loopback only, so a reload naming another host loads and is refused.
+    let config = dir.join("gossip.toml");
+    std::fs::write(&config, "[egress]\nallow_hosts = [\"127.0.0.1\"]\n").unwrap();
     let log = dir.join("stem.log");
     let port = mycelium::test_util::alloc_port();
     let child = Command::new(env!("CARGO_BIN_EXE_mycelium-stem"))
         .args([
-            "--units", units.to_str().unwrap(), "--port", &port.to_string(), "--host", "127.0.0.1",
+            "--units", units.to_str().unwrap(), "-c", config.to_str().unwrap(),
+            "--port", &port.to_string(), "--host", "127.0.0.1",
             "--library", lib_dir.to_str().unwrap(),
             "--librarian", lib_dir.join(MANIFEST_FILE).to_str().unwrap(),
             "--publisher", &format!("ed25519:{publisher}"),
@@ -200,16 +219,16 @@ fn sighup_applies_a_rewritten_egress_allow_list_and_a_file_that_does_not_load_ke
     assert!(at_b.lock().unwrap().is_empty(), "the refused host saw nothing: {:?}", at_b.lock().unwrap());
 
     // 3–4. The unit file rewritten to list B too, then SIGHUP: B is served by the same process, the same proxy.
-    std::fs::write(&units, unit_file(&head, &format!("[\"http://127.0.0.1:{a}\", \"http://127.0.0.1:{b}\"]"))).unwrap();
+    replace(&units, &unit_file(&head, &format!("[\"http://127.0.0.1:{a}\", \"http://127.0.0.1:{b}\"]")));
     sighup(child);
-    wait_for("B served after SIGHUP", child, &log, 30, || proxy.get(b, "after-hup") == 200);
+    wait_for("B served after SIGHUP", child, &log, 30, || proxy.try_get(b, "after-hup") == Ok(200));
     assert!(log_of(&log).contains("SIGHUP: egress allow-list applied"), "the reload is logged");
     assert!(at_b.lock().unwrap().iter().any(|l| l.starts_with("GET /after-hup")), "{:?}", at_b.lock().unwrap());
     assert!(child.try_wait().unwrap().is_none(), "no restart: the stem is still the same process");
 
     // 5. A rewrite that does not load (a wildcard names no one host): the handler says so and every list
     //    stands — A and B both still served, by the same process.
-    std::fs::write(&units, unit_file(&head, "[\"https://*.example.com\"]")).unwrap();
+    replace(&units, &unit_file(&head, "[\"https://*.example.com\"]"));
     sighup(child);
     wait_for("the refused reload's log line", child, &log, 30, || log_of(&log).contains("SIGHUP: the unit file does not load"));
     assert_eq!(proxy.get(b, "kept"), 200, "the old list stands: B");
@@ -217,11 +236,70 @@ fn sighup_applies_a_rewritten_egress_allow_list_and_a_file_that_does_not_load_ke
     assert!(at_a.lock().unwrap().iter().any(|l| l.starts_with("GET /kept")));
     assert!(child.try_wait().unwrap().is_none(), "a bad reload is not a crash");
 
+    // 6. A rewrite that loads, but whose list this activation's proxy refuses — a host the node's egress
+    //    allow-list denies (#646's review, finding 3: the handler's per-activation refusal, through the binary):
+    //    that refusal is logged by name, and the old list stands.
+    replace(&units, &unit_file(&head, &format!("[\"http://127.0.0.1:{a}\", \"http://denied.example\"]")));
+    sighup(child);
+    wait_for("the per-activation refusal's log line", child, &log, 30, || {
+        log_of(&log).lines().any(|l| l.contains("SIGHUP: egress allow-list refused; the old one stands") && l.contains("data/pack"))
+    });
+    assert_eq!(proxy.get(b, "still"), 200, "the refused list did not replace the old one: B still served");
+    assert!(at_b.lock().unwrap().iter().any(|l| l.starts_with("GET /still")));
+    assert!(child.try_wait().unwrap().is_none());
+
     let _ = Command::new("kill").args(["-TERM", &child.id().to_string()]).status();
     let deadline = Instant::now() + Duration::from_secs(20);
     while child.try_wait().unwrap().is_none() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(100));
     }
+    drop(guard);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #646's review, finding 1: a stem whose unit file names **no** egress table handles SIGHUP — re-reads the file,
+/// says there is nothing to apply — and keeps running. Seen failing first: the handler was installed only for a
+/// unit with an egress table, so SIGHUP took its default action and the stem died.
+#[test]
+fn a_stem_without_an_egress_table_survives_sighup() {
+    let dir = std::env::temp_dir().join(format!("stem-sighup-none-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let units = dir.join("units.toml");
+    std::fs::write(&units, "").unwrap();
+    let log = dir.join("stem.log");
+    let port = mycelium::test_util::alloc_port();
+    let child = Command::new(env!("CARGO_BIN_EXE_mycelium-stem"))
+        .args(["--units", units.to_str().unwrap(), "--port", &port.to_string(), "--host", "127.0.0.1"])
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::null())
+        .stdout(std::fs::File::create(&log).unwrap())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("the stem binary starts");
+    let mut guard = KillOnDrop(child);
+    let child = &mut guard.0;
+
+    // Up when its gossip port accepts a connection, and running its loop.
+    wait_for("the stem's port", child, &log, 90, || TcpStream::connect(("127.0.0.1", port)).is_ok());
+    wait_for("the stem up", child, &log, 30, || log_of(&log).contains("stem node up"));
+    sighup(child);
+    wait_for("the SIGHUP handled", child, &log, 30, || log_of(&log).contains("SIGHUP: no egress allow-list to apply"));
+    sighup(child);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(child.try_wait().unwrap().is_none(), "SIGHUP never terminates the stem");
+
+    // And it still stops in order.
+    let _ = Command::new("kill").args(["-TERM", &child.id().to_string()]).status();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "the stem ignored SIGTERM for 20 s");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(status.success(), "{status}");
     drop(guard);
     let _ = std::fs::remove_dir_all(&dir);
 }
