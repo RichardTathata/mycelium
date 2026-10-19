@@ -23,8 +23,8 @@
 //! whole bound (never forever — the wait is bounded). The senders are not reachable raw, so a send
 //! that skips the count does not compile.
 //!
-//! Lock-free (one `AtomicUsize`), so it adds no row to the lock-order table. Cost: one or two atomic
-//! read-modify-writes per frame at each hand.
+//! Lock-free (one `AtomicUsize`, `Relaxed` — see [`Unsent`]), so it adds no row to the lock-order table.
+//! Cost: one or two atomic read-modify-writes per frame at each hand, on one shared cache line.
 
 use crate::framing::ForwardHint;
 use crate::sim_seam::ChanVerdict;
@@ -39,27 +39,57 @@ use tokio::sync::mpsc;
 pub type GossipItem = (Bytes, u64, ForwardHint);
 
 /// The node-wide count of outbound frames not yet on the wire (module docs).
+///
+/// **`Relaxed` is enough.** The count publishes no data; a reader only asks whether it is zero. Every
+/// update is a read-modify-write on the one atomic, so all of them fall in its single modification order
+/// whatever the ordering, and each reads the latest value. A frame's raise happens-before its release: by
+/// program order on one thread (the producer's failed enqueue, the shard's hand-off raise before its own
+/// release), or through the channel, whose send synchronises with the receive that precedes the writer's
+/// release. So the count cannot pass through zero while a frame is in flight. The shutdown flush raised the
+/// sweep's frames itself before it reads, so by read-after-write coherence its load cannot return a value
+/// older than those raises: a stale read can only be non-zero (it waits longer), never a premature zero.
 #[derive(Clone, Debug, Default)]
-pub struct Unsent(Arc<AtomicUsize>);
+pub struct Unsent(Arc<UnsentInner>);
+
+#[derive(Debug, Default)]
+struct UnsentInner {
+    n:          AtomicUsize,
+    underflows: std::sync::atomic::AtomicU64,
+}
 
 impl Unsent {
     /// Frames counted now.
     pub fn get(&self) -> usize {
-        self.0.load(Ordering::Acquire)
+        self.0.n.load(Ordering::Relaxed)
+    }
+
+    /// Releases that found fewer frames counted than they released — a frame released twice, or one
+    /// released that was never counted. Zero unless the protocol is broken somewhere; the count saturates
+    /// at zero rather than wrapping, so such a bug costs a shutdown its wait, never a wrapped count that
+    /// would hold every later shutdown for its whole bound.
+    pub fn underflows(&self) -> u64 {
+        self.0.underflows.load(Ordering::Relaxed)
     }
 
     fn add(&self, n: usize) {
-        self.0.fetch_add(n, Ordering::AcqRel);
+        self.0.n.fetch_add(n, Ordering::Relaxed);
     }
 
     fn sub(&self, n: usize) {
         if n == 0 { return; }
-        let before = self.0.fetch_sub(n, Ordering::AcqRel);
-        debug_assert!(before >= n, "outbound count lowered below zero ({before} - {n}): a frame was released twice");
+        let before = self.0.n
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| Some(c.saturating_sub(n)))
+            .unwrap_or_else(|c| c);
+        if before < n {
+            self.0.underflows.fetch_add(1, Ordering::Relaxed);
+            #[cfg(feature = "metrics")]
+            metrics::counter!("gossip_outbound_count_underflows_total").increment(1);
+            tracing::warn!(before, released = n, "outbound count released below zero (a frame released twice?); saturated at zero");
+        }
     }
 
     /// Hold `n` frames already counted, releasing them when the guard drops.
-    pub fn held(&self, n: usize) -> Held {
+    pub(crate) fn held(&self, n: usize) -> Held {
         Held { unsent: self.clone(), n }
     }
 }
@@ -271,6 +301,19 @@ mod tests {
         assert_eq!(unsent.get(), 0, "a frame left in a stopped writer's queue is released");
         assert!(!wtx.send_counted(Bytes::from_static(b"d")).await, "a send after the stop fails");
         assert_eq!(unsent.get(), 0, "and is not counted");
+    }
+
+    /// Releasing more than is counted saturates at zero and is counted, rather than wrapping (a wrapped
+    /// count would hold every later shutdown for its whole bound).
+    #[test]
+    fn an_over_release_saturates_at_zero() {
+        let unsent = Unsent::default();
+        unsent.add(1);
+        unsent.sub(3);
+        assert_eq!(unsent.get(), 0, "the count saturated at zero");
+        assert_eq!(unsent.underflows(), 1, "the over-release was counted");
+        unsent.add(2);
+        assert_eq!(unsent.get(), 2, "and counts normally after it");
     }
 
     /// A held frame is released when its guard drops — a `break` or an abort releases it.

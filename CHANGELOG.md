@@ -170,7 +170,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   until a writer has flushed it to its socket or dropped it, and the shutdown waits (bounded, 250 ms) for that
   count to reach zero, so the sweep's tombstones are written before `shutdown()` returns, and a process that exits
   straight after it no longer cuts them off. A frame dropped on its way to a dead or unreachable peer releases its
-  place at once, so it does not hold the shutdown. This was `a_fast_reassert_does_not_undo_the_shutdown_sweep`'s
+  place at once, so it does not hold the shutdown; a frame released twice would saturate the count at zero and is
+  counted (`gossip_outbound_count_underflows_total`), so it cannot hold every later shutdown either. This was `a_fast_reassert_does_not_undo_the_shutdown_sweep`'s
   failure on `main` at 98a311fc (about 1 run in 100 under parallel load, on v2.35.0 as well: it predates this
   release).
   **Upgrade note:** `mycelium_core`'s transport types changed shape: `CoreCtx::gossip_txs` is a

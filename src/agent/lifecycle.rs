@@ -1083,11 +1083,11 @@ impl GossipAgent {
     /// task re-asserts a swept key in between: the sweep runs after `soft_state_gate.close()`.
     async fn flush_outbound_before_shutdown(&self, bound: Duration) {
         let unsent = self.task_ctx.gossip_txs.unsent();
-        let step_ms = 2u64;
-        let mut waited = 0u64;
-        while unsent.get() != 0 && waited < bound.as_millis() as u64 {
-            mycelium_core::sim_seam::sleep_ms("shutdown-flush", step_ms).await;
-            waited += step_ms;
+        // A deadline on the monotonic clock seam, not a count of sleeps: a loaded runtime oversleeps each
+        // step, and counted steps would then wait well past `bound`.
+        let started = mycelium_core::sim_seam::mono_now_ns();
+        while unsent.get() != 0 && mycelium_core::sim_seam::mono_since(started) < bound {
+            mycelium_core::sim_seam::sleep_ms("shutdown-flush", 2).await;
         }
         if unsent.get() != 0 {
             tracing::debug!("shutdown: {} outbound frame(s) not on the wire after {:?}", unsent.get(), bound);

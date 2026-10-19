@@ -41,7 +41,17 @@ The post-signal drain was removed, because nothing awaited it.
 - `frames_dropped_to_a_dead_peer_do_not_hold_shutdown`: failed with the backoff drop's release removed.
 - `an_undeliverable_frame_holds_shutdown_only_for_the_bound`: a frame held in a five-second connect does not hold
   `shutdown()` past the bound.
+- `a_busy_pair_returns_its_outbound_count_to_zero`: failed at `(1212, 1210)` with the shard's release removed.
 - `writer`'s backoff test also asserts the count returns to zero.
+- `outbound::an_over_release_saturates_at_zero`: failed on the wrapping `sub`.
+
+Second review (low items): saturating release with an underflow counter, a deadline on `sim_seam::mono_now_ns` for
+the flush, `Relaxed` ordering (argued on `Unsent`), the strict step checks each test by name. Contention measured with
+`benches/throughput.rs` plus a temporary eight-thread `kv().set` bench: within noise of `main`, so not striped.
+The test pauses were cut to 30 ms when the flush got a real deadline: with counted sleeps a loaded runtime overslept
+the bound, and with the deadline a 100 ms pause under 32 parallel processes reached it (47 failures in 320 runs, each
+a shutdown of 250 ms or more). At 30 ms the four were re-run on the first fix (10/10, 10/10, 9/10 fail) and the
+writer test on the pre-PR writer (10/10 fail), then 0 failures in 320 runs of all ten under the same load.
 
 **Entry points checked:**
 - every writer of `svc/`;

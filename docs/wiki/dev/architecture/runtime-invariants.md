@@ -443,11 +443,13 @@ raw senders are not exposed). A shard worker raises it per hand-off before relea
 only after its socket flush, or when the frame is dropped by any path (`Held` and `CountedRx` release on drop, abort
 included). `flush_outbound_before_shutdown` waits, bounded at 250 ms, for zero. **Rule:** a new consumer of either
 queue keeps the `Held` until it has handed the frame on, and a new way of dropping a frame must release it. A leak does
-not lose frames, but it makes every later shutdown wait its whole bound. Do not go back to reading queue capacity, and
+not lose frames, but it makes every later shutdown wait its whole bound. An over-release saturates at zero and is
+counted (`Unsent::underflows`), never wraps. Do not go back to reading queue capacity, and
 do not deliver after the signal: nothing awaits the writers. Gate: `soft_state_with_a_live_handle_at_shutdown_is_retracted_at_the_peers`, `a_fast_reassert_does_not_undo_the_shutdown_sweep`,
 `a_capability_retracted_at_shutdown_reaches_the_peers`, `a_frame_a_writer_holds_at_shutdown_still_reaches_the_peer`,
 `a_frame_a_writer_holds_at_shutdown_is_written_before_shutdown_returns`, `a_frame_in_a_slow_connect_at_shutdown_still_reaches_the_peer`,
-`a_frame_a_shard_worker_holds_at_shutdown_still_reaches_the_peer`, `frames_dropped_to_a_dead_peer_do_not_hold_shutdown`, `an_undeliverable_frame_holds_shutdown_only_for_the_bound` (a strict CI step)
+`a_frame_a_shard_worker_holds_at_shutdown_still_reaches_the_peer`, `frames_dropped_to_a_dead_peer_do_not_hold_shutdown`, `an_undeliverable_frame_holds_shutdown_only_for_the_bound`, `a_busy_pair_returns_its_outbound_count_to_zero` (a strict
+CI step, by name)
 ([log](../.log/2026-10-16-shutdown-sweep-live-handles.md), [log](../.log/2026-10-19-shutdown-writer-in-hand.md)).
 
 ## `subscribe_log_group` is single-active — do NOT turn it into a load-balanced work queue (#149)

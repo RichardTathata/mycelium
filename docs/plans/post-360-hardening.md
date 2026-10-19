@@ -2042,8 +2042,22 @@ Each regression test was seen failing first:
 - `frames_dropped_to_a_dead_peer_do_not_hold_shutdown` failed with the backoff drop's release removed;
 - `an_undeliverable_frame_holds_shutdown_only_for_the_bound` shows the wait stays bounded.
 
-They run in a strict CI step, with no retry. After the fix, 0 failures in 320 runs of the nine shutdown tests and in
-320 runs of the original test, each at 32 processes in parallel (PR #650).
+They run in a strict CI step, by name, with no retry, beside `a_busy_pair_returns_its_outbound_count_to_zero` (the
+count returns to zero on an idle pair; it failed at `(1212, 1210)` with the shard's release removed). Three of the ten
+are the older probabilistic tests of the same contract, so a residual flake there turns `main` red, deliberately.
+After the fix, 0 failures in 320 runs of the shutdown tests and in 320 runs of the original test, each at 32 processes
+in parallel (PR #650).
+
+The second review's low items, closed in the same PR: an over-release saturates at zero and is counted
+(`Unsent::underflows`, `gossip_outbound_count_underflows_total`) instead of wrapping; the flush stops at a deadline
+on the monotonic seam rather than after a count of sleeps; the counter is `Relaxed` (the argument is on `Unsent`).
+Contention was measured with `benches/throughput.rs` against `main` at 67ef7f90, all within noise: `kv/set` 262/267 ns
+on `main` against 242/267 ns, `signal_fanout/handlers/16` 895/885 ns against 512/872 ns, and a temporary eight-thread
+`kv().set` bench 5.73/5.78/5.91 ms on `main` against 5.72/5.59/5.66 ms. So the counter is not striped.
+The test pauses were cut to 30 ms when the flush got a real deadline: with counted sleeps a loaded runtime overslept
+the bound, and with the deadline a 100 ms pause under 32 parallel processes reached it (47 failures in 320 runs, each
+a shutdown of 250 ms or more). At 30 ms the four were re-run on the first fix (10/10, 10/10, 9/10 fail) and the
+writer test on the pre-PR writer (10/10 fail), then 0 failures in 320 runs of all ten under the same load.
 
 **Open next:**
 - each delivered row's *not built* list, in its §3.5 block and below — for K2: signed tally entries (a forgery under a
