@@ -1795,12 +1795,13 @@ suite's in `ae_contract.rs`.
   another denied naming `fleet_consensus`) and `a_routed_call_claims_a_seat_and_carries_its_route`.
 - *without a quorum the rule decides `Indeterminate` (fails closed) — a consensus round per limited call* —
   `without_a_quorum_the_consensus_scope_is_not_established`; a claim slower than `SEAT_LEASE_MARGIN_MS` is
-  `Indeterminate` too. The round per call (more when seats are contended) is stated in the module doc and §53.
+  `Indeterminate` too. Since 2026-10-19 the margin is derived from a claim's bounds, so only local work past its
+  allowance or a wall-clock step reaches it (`a_claim_that_loses_a_ballot_to_its_timeout_is_admitted`). The round per call (more when seats are contended) is stated in the module doc and §53.
 - *the counter's slots are an owned namespace, decided by the electorate the exclusive verbs use (`exclusive_default`
   under `consensus_require_electorate`), expire with the window* — the seats are decision records under
   `consensus/life/` (an owned namespace the raw KV routes refuse; `ae-seat/` is listed in
   `scripts/kv-namespaces-nonkeys.txt` as a slot name, not a key family), leased for the window plus
-  `SEAT_LEASE_MARGIN_MS` (2 s). Tests `under_a_required_electorate_the_seats_are_decided_in_it`,
+  `SEAT_LEASE_MARGIN_MS` (2 s at merge; about 19 s since 2026-10-19, the claim's bounded duration, §3.6). Tests `under_a_required_electorate_the_seats_are_decided_in_it`,
   `a_seat_is_reclaimed_after_its_window`.
 - *their growth is stated exactly (a seat's records are kept for good by row A's design, so the reference evaluator
   requires a named actor; finding 4)* — the module doc's *Growth* paragraph (at most `count` slots of three to five keys
@@ -1946,17 +1947,29 @@ holds, re-drawn on a collision, and a registration id compared on drop); `emit_s
 interceptor as the other two emitters do, so a co-located reply sent through it is claimed rather than lost; and a SWIM
 probe dropped mid-flight no longer leaves its `seq` pending.
 
-**Known flake, open (K2, found 2026-10-19 while looping the door test):** under 16–32 parallel test processes, about
-1 run in 200 of the fleet-history tests (the door test, `the_consensus_scope_admits_exactly_n_spread_over_gateways`,
-`a_routed_call_claims_a_seat_and_carries_its_route`, `the_gateway_and_the_provider_count_apart`) refuses a call
-`NotEstablished` with *"seat N was decided too late: its lease ends 5999xx ms from now, less than the 600000 ms
-window"*. The lease is stamped when the claim's carry is built, before the prepare phase (`src/consensus.rs`
-`build_carry`). The seat is admitted only if a whole window remains (`seat_admissible`), and the margin for that is
-`SEAT_LEASE_MARGIN_MS` = 2 000 ms (`src/agent/fleet_history.rs`). One prepare phase's timeout is also 2 s
-(`CLAIM_PHASE_TIMEOUT`), so a claim that loses one phase to its timeout and wins the next ballot is always too late.
-Every observed shortfall was 27–60 ms, which fits that. The refusal fails closed (fewer admitted, never more), so it
-is a liveness flake, not a safety defect. Not fixed: the margin against the claim's worst-case duration is a design
-choice for the row's owner.
+**Known flake, closed (K2, found and fixed 2026-10-19): "seat decided too late".** Under 16–32 parallel test
+processes, about 1 fleet-history run in 50 refused a call `NotEstablished`: *"seat N was decided too late: its lease
+ends 5999xx ms from now, less than the 600000 ms window"*. The lease is stamped when the claim's decision envelope is
+built, before the first ballot (`src/consensus.rs` `build_carry`). The call is admitted only if the lease still covers a
+whole window (`seat_admissible`). So the margin `SEAT_LEASE_MARGIN_MS` is exactly the latency a claim is allowed.
+
+The margin was 2 s, the length of one `CLAIM_PHASE_TIMEOUT`. A claim that lost one ballot to its prepare timeout and won
+the next was therefore always refused; every observed shortfall was 27–60 ms.
+
+The margin is now derived from the claim's own bounds: 4 ballots × (2 phases × 2 s + 50 ms jitter) + the 1 s
+convergence poll + 2 s of local work, 19 225 ms in all. Only local work past that allowance, or the wall clock stepping
+forward, still reaches the refusal, which fails closed.
+
+Why it is sound: a seat admits only while its lease covers a whole window, so two admissions on one seat are at least a
+window apart whatever the margin. The count stays at most `count` per window. A longer margin only holds a used seat
+longer past its window: about 19 s rather than 2 s, which admits fewer, never more.
+
+Restamping the lease at commit was rejected. The stamp is inside the envelope the acceptors agree on, and a later ballot
+may have to adopt an earlier ballot's envelope.
+
+Fail-first: `a_claim_that_loses_a_ballot_to_its_timeout_is_admitted`. A hook (`consensus::TEST_SWALLOW_PREPARES`) makes
+the peer leave the first prepare unanswered. The test failed with the CI message (*"lease ends 599974 ms from now"*) and
+passes with the fix.
 
 **Open next:**
 - each delivered row's *not built* list, in its §3.5 block and below — for K2: signed tally entries (a forgery under a
@@ -1965,7 +1978,7 @@ choice for the row's owner.
   at the provider's re-check, an ad's key bound to its writer; for M: the OpenShell backend (skipped for now, above),
   resource limits, limits by address and by path, a limit on the proxy's port by address under Landlock; for K: a
   history beyond 24 hours, 1 024 records per actor or 65 536 actors per point, and a replay of the history input;
-- the K2 seat-lease flake ("decided too late"), above; the `/mcp` door-test flake is closed;
+- (both K2 flakes are closed: the `/mcp` door test's lost reply, #647, and the seat lease's "decided too late", #648;)
 - the private Cedar adapter's re-pin after the next release: it meets K2's `PolicyClause::AllowAtMostAcross` and six
   `fleet_*` cases and R's `PolicyClause::ForbidClassAt` and five `route_*` cases — expressed, or declined by name in
   `declared_limits` (`deprecations.md` §52, §53). Until then a Cedar-backed fleet has neither fleet-wide history limits

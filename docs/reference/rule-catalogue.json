@@ -110,7 +110,7 @@
       ],
       "effects": [
         "the evidence journal record before dispatch; the audit chain reference under `compliance`",
-        "a fleet-consensus permit: a seat decided by consensus after the per-actor gate is released, leased for the rule's window plus two seconds (row K2)",
+        "a fleet-consensus permit: a seat decided by consensus after the per-actor gate is released, leased for the rule's window plus a margin covering the claim's bounded duration (row K2)",
         "a fleet-tally permit: this node's `sys/ae-tally/` entry and heartbeat (row K2)"
       ],
       "guards": [

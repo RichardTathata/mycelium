@@ -68,7 +68,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   spread its calls over N gateways could be admitted up to N times a limit. `Rule::at_most(n, w).scoped(scope,
   counter_id)` now names one of two fleet scopes and an opaque counter id; the per-point count stays the default.
   - **`HistoryScope::FleetConsensus` — exact.** A counter of `n` seats, each a consensus slot (`ae-seat/…`) leased
-    for the window plus two seconds. A permit claims a free seat by an exclusive consensus write *before* the work is
+    for the window plus a margin as long as a claim can take (`SEAT_LEASE_MARGIN_MS`, about 19 s). A permit claims a free seat by an exclusive consensus write *before* the work is
     admitted — after the per-actor history gate is released, so a claim waiting on a quorum holds up no other call —
     and a seat whose remaining lease no longer covers a whole window is refused, so one seat cannot admit twice in a
     window. The fleet admits at most `n` in any window, whichever gateways the calls reach — to within the nodes'
@@ -158,6 +158,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   SMB loopback.
 
 ### Fixed
+
+- **A fleet-consensus seat claim that needed a second ballot is no longer refused "decided too late"** (row K2,
+  unreleased). A seat's lease is stamped before the claim's first ballot, and the call is admitted only if a whole
+  window of the lease remains. That makes the lease margin the latency a claim is allowed. The margin was 2 s, exactly
+  one phase timeout, so a claim that lost one ballot to its timeout was always refused `Indeterminate`. Under load that
+  happened about 1 run in 50. The margin is now derived from the claim's bounds (four ballots each waiting out both
+  phases, the convergence poll, the local work): 19 225 ms. Safety is unchanged: one seat still admits at most once per
+  window. A used seat is now held about 19 s past its window rather than 2 s (`deprecations.md` §53).
 
 - **A confined activation's re-probe no longer withdraws an install whose declared path was replaced legitimately**
   (post-360 row M's follow-up, #641). A write directory rotated or a read file replaced by an atomic rename failed

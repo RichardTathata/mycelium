@@ -14,8 +14,9 @@
 //!   seat stays held until its lease ends, never released early. A slot holds one live decision at a time —
 //!   single-decree agreement, the property `distributed_lock` rests on — so at most `count` seats are live at once and
 //!   the fleet admits at most `count` in any window, whichever gateways the calls reach. Every seat taken: denied. A
-//!   claim that cannot be decided (no quorum, the electorate refused), or that took longer than the margin: the rule
-//!   decides `Indeterminate` — it fails closed. One consensus round per limited call (more when seats are contended).
+//!   claim that cannot be decided (no quorum, the electorate refused), or that took longer than the margin — which is
+//!   derived from the claim's own bounds (every ballot timing out, the convergence poll, its local work), so only
+//!   local work past its allowance or a wall-clock step reaches it: the rule decides `Indeterminate` — it fails closed. One consensus round per limited call (more when seats are contended).
 //! - **[`HistoryScope::FleetTally`] — approximate.** Every node built with `gateway` and `tls` publishes a heartbeat
 //!   (`sys/ae-tally/{node}/hb`, saying whether it enforces), from `start()`, and a last one marked departed at a
 //!   graceful shutdown; an enforcement point that admits under a
@@ -117,16 +118,48 @@ pub(crate) fn establish(
 // ── The consensus counter ────────────────────────────────────────────────────────────────────────
 
 /// How long a seat's claim waits for each phase of a round, and how many ballots it tries.
+/// Each phase of a seat claim's ballot — the promises, then the votes — waits at most this long.
 #[cfg(feature = "consensus")]
-const CLAIM_PHASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const CLAIM_PHASE_TIMEOUT_MS: u64 = 2_000;
+#[cfg(feature = "consensus")]
+const CLAIM_PHASE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(CLAIM_PHASE_TIMEOUT_MS);
+/// A claim's ballots for one seat, at most.
 #[cfg(feature = "consensus")]
 const CLAIM_MAX_BALLOTS: u32 = 4;
-
-/// How much longer than the window a seat is leased (review finding 2): the lease is fixed when the claim is
-/// proposed and the call is admitted only after the round, so the lease must outlast the window measured from
-/// admission. A claim slower than this is refused rather than admitted (`seat_admissible`).
+/// The most a claim sleeps before a ballot retry (the consensus jitter, set here so the bound below holds).
 #[cfg(feature = "consensus")]
-pub(crate) const SEAT_LEASE_MARGIN_MS: u64 = 2_000;
+const CLAIM_RETRY_JITTER_MS: u64 = 50;
+/// How long a committed claim polls for the converged decision record, and how often.
+#[cfg(feature = "consensus")]
+const CLAIM_CONVERGE_BUDGET_MS: u64 = 1_000;
+#[cfg(feature = "consensus")]
+const CLAIM_CONVERGE_STEP_MS: u64 = 25;
+/// What the timeouts above do not bound: the local work of a claim — the acceptor's record and the decision written
+/// and synced before they are answered or read back.
+#[cfg(feature = "consensus")]
+const CLAIM_LOCAL_WORK_MS: u64 = 2_000;
+
+/// **How much longer than the window a seat is leased: the latency a claim is allowed.** The lease is stamped when the
+/// claim's decision envelope is built, before its first ballot, and the call is admitted only if the lease still covers
+/// a whole window from admission (`seat_admissible`) — so a claim is admitted exactly when it took no longer than this
+/// margin. It is therefore derived from the claim's own bounds: every ballot waiting out both phases and its retry
+/// pause, the convergence poll, and the local work no timeout bounds. Until 2026-10-19 it was 2 s, the length of **one**
+/// phase timeout, so a claim that lost one ballot to its timeout and won the next was always refused *decided too late*
+/// (the K2 flake). A claim slower than this, through local work past its allowance or the wall clock stepping forward,
+/// is still refused (`Indeterminate`, failing closed).
+///
+/// The margin is liveness, not safety: a seat admits only while its lease covers a whole window, so two admissions on
+/// one seat are at least a window apart whatever the margin is; a longer margin only keeps a used seat held longer
+/// after its window, which can admit fewer, never more.
+#[cfg(feature = "consensus")]
+pub(crate) const SEAT_LEASE_MARGIN_MS: u64 = CLAIM_MAX_BALLOTS as u64 * (2 * CLAIM_PHASE_TIMEOUT_MS + CLAIM_RETRY_JITTER_MS)
+    + CLAIM_CONVERGE_BUDGET_MS
+    + CLAIM_CONVERGE_STEP_MS
+    + CLAIM_LOCAL_WORK_MS;
+
+// The margin is never shorter than one ballot that waits out both phases (the 2 s margin was one phase).
+#[cfg(feature = "consensus")]
+const _: () = assert!(SEAT_LEASE_MARGIN_MS > 2 * CLAIM_PHASE_TIMEOUT_MS + CLAIM_RETRY_JITTER_MS);
 
 /// Whether a seat whose lease ends at `expires_at_ms` may admit a call at `now_ms` under a `window_ms` limit: only if
 /// its lease still covers a whole window from now — otherwise the seat could reopen, and admit again, less than a
@@ -203,6 +236,7 @@ pub(crate) async fn claim_seat(ctx: &Arc<TaskCtx>, c: &FleetCounter, point: &str
         committed_lease_secs: Some(super::consensus_handle::lease_secs_ceil(lease)),
         phase1_timeout: CLAIM_PHASE_TIMEOUT,
         max_ballots: CLAIM_MAX_BALLOTS,
+        ballot_retry_jitter_ms: CLAIM_RETRY_JITTER_MS,
         ..ConsensusConfig::default()
     };
     let consensus = super::ConsensusHandle { ctx: Arc::clone(ctx) };
@@ -221,8 +255,8 @@ pub(crate) async fn claim_seat(ctx: &Arc<TaskCtx>, c: &FleetCounter, point: &str
         match consensus.exclusive_propose(&slot, value.clone(), cfg.clone()).await {
             ConsensusResult::Committed { .. } => {
                 // The converged record decides whose the seat is, polled through the replay seam.
-                const BUDGET_MS: u64 = 1000;
-                const STEP_MS: u64 = 25;
+                const BUDGET_MS: u64 = CLAIM_CONVERGE_BUDGET_MS;
+                const STEP_MS: u64 = CLAIM_CONVERGE_STEP_MS;
                 let mut waited = 0;
                 let top = loop {
                     if let Some(top) = seat_live(ctx, &slot) {

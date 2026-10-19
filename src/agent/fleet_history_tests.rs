@@ -680,8 +680,43 @@ async fn a_seat_decided_too_late_for_its_window_is_not_admitted() {
     b.shutdown().await;
 }
 
+/// **A claim that loses one ballot to its phase timeout is still admitted.** `b` leaves `a`'s first prepare for a seat
+/// unanswered, so the first ballot waits out its prepare phase (2 s) and the second decides the seat. The seat's lease
+/// is stamped when the claim's decision envelope is built, before the first ballot, and the call is admitted only if
+/// the lease still covers a whole window — so the margin is the latency a claim is allowed. It was 2 s, the length of
+/// one phase timeout, so every claim that needed a second ballot was refused *decided too late* (the K2 flake under
+/// parallel load). The margin now covers a claim's whole bounded duration.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_claim_that_loses_a_ballot_to_its_timeout_is_admitted() {
+    let (p1, p2) = (port(), port());
+    let a = node(p1, &[], 3, HistoryScope::FleetConsensus, |_| {}).await;
+    let b = node(p2, &[p1], 3, HistoryScope::FleetConsensus, |_| {}).await;
+    let _listeners: Vec<_> =
+        [&a, &b].iter().map(|n| n.consensus().start_consensus_listener(ConsensusConfig::default())).collect();
+    ready(&[&a, &b]).await;
+    let left = Arc::new(std::sync::atomic::AtomicU32::new(1));
+    crate::consensus::TEST_SWALLOW_PREPARES
+        .pin()
+        .insert(b.node_id().to_string(), (super::SEAT_SLOT_PREFIX.to_string(), Arc::clone(&left)));
+    let started = std::time::Instant::now();
+    let out = post(&a).await;
+    let took = started.elapsed();
+    crate::consensus::TEST_SWALLOW_PREPARES.pin().remove(&b.node_id().to_string());
+    assert_eq!(left.load(std::sync::atomic::Ordering::SeqCst), 0, "b left the first prepare unanswered");
+    assert!(took >= Duration::from_secs(2), "the first ballot waited out its prepare phase: {took:?}");
+    let e = admitted(&out).unwrap_or_else(|| panic!("a claim decided at its second ballot is admitted: {:?}", refusal(&out)));
+    let seat = &e.history.as_ref().unwrap().seats[0];
+    // The lease still covers a whole window from admission: one seat cannot admit twice within a window.
+    let now = mycelium_core::sim_seam::wall_now_ms();
+    assert!(super::seat_admissible(seat.expires_at_ms, now, TEN_MIN), "{seat:?}");
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
 /// **Finding 12: a seat is reclaimed after its window.** One seat in a one-second window: the first call holds it,
-/// the second is denied, and once the seat's lease has ended a third is admitted on the same seat.
+/// the second is denied, and once the seat's lease has ended a third is admitted on the same seat. The margin is cut to
+/// five seconds (the hook) so the lease ends within the test while a claim may still lose a ballot to its timeout; the
+/// derived margin holds a used seat ~19 s past its window.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn a_seat_is_reclaimed_after_its_window() {
     let (p1, p2) = (port(), port());
@@ -690,15 +725,21 @@ async fn a_seat_is_reclaimed_after_its_window() {
     let _listeners: Vec<_> =
         [&a, &b].iter().map(|n| n.consensus().start_consensus_listener(ConsensusConfig::default())).collect();
     ready(&[&a, &b]).await;
+    for n in [&a, &b] {
+        super::TEST_CLAIM_HOOKS.pin().insert(n.node_id().to_string(), (5_000, 0));
+    }
     let first = post(&a).await;
     let seat = admitted(&first).expect("the first holds the seat").history.as_ref().unwrap().seats[0].clone();
     assert!(matches!(refusal(&post(&b).await), PreflightRefusal::Denied(_)), "the window is full");
     let ctx = Arc::clone(&a.task_ctx);
     let slot = seat.slot.clone();
-    assert!(until(|| super::seat_live(&ctx, &slot).is_none(), Duration::from_secs(10)).await, "the seat's lease ends");
+    assert!(until(|| super::seat_live(&ctx, &slot).is_none(), Duration::from_secs(15)).await, "the seat's lease ends");
     let third = post(&b).await;
     let again = admitted(&third).unwrap_or_else(|| panic!("reclaimed: {:?}", refusal(&third)));
     assert_eq!(again.history.as_ref().unwrap().seats[0].slot, seat.slot, "the same seat, decided afresh");
+    for n in [&a, &b] {
+        super::TEST_CLAIM_HOOKS.pin().remove(&n.node_id().to_string());
+    }
     a.shutdown().await;
     b.shutdown().await;
 }
