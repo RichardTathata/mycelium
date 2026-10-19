@@ -251,11 +251,15 @@ impl SwimState {
     }
 
     /// Register interest in `seq`, returning a receiver that fires when the matching
-    /// acknowledgement arrives. The entry is auto-removed on resolve or on drop-cleanup.
-    fn register(&self, seq: u64) -> oneshot::Receiver<()> {
+    /// acknowledgement arrives, and the guard that removes the entry when dropped — on an
+    /// acknowledgement, a timeout, or the probe's future being dropped mid-flight (the prober's
+    /// task aborted or its runtime shut down, a relay's spawned probe likewise — the prober's
+    /// `select!` does not poll shutdown while a probe runs inside its tick arm). `seq` is drawn from a
+    /// monotonic counter, so the entry the guard removes is its own.
+    fn register(&self, seq: u64) -> (PendingProbe<'_>, oneshot::Receiver<()>) {
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap_or_else(|e| e.into_inner()).insert(seq, tx);
-        rx
+        (PendingProbe { state: self, seq }, rx)
     }
 
     /// Resolve a pending probe (an `Ack`/`PingReqAck` arrived). No-op if unknown/expired.
@@ -265,15 +269,12 @@ impl SwimState {
         }
     }
 
-    fn forget(&self, seq: u64) {
-        self.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&seq);
-    }
 
     /// Direct probe: `Ping` the target and wait up to `timeout` for its `Ack`.
     /// Returns `true` iff the target acknowledged.
     pub async fn probe_direct(&self, target: SocketAddr, timeout: Duration) -> bool {
         let seq = self.next_seq();
-        let rx = self.register(seq);
+        let (_pending, rx) = self.register(seq);
         let ping = SwimDatagram::Ping {
             seq,
             from: self.self_id.clone(),
@@ -281,12 +282,9 @@ impl SwimState {
         }
         .encode();
         if self.socket.send_to(&ping, target).await.is_err() {
-            self.forget(seq);
             return false;
         }
-        let ok = tokio::time::timeout(timeout, rx).await.map(|r| r.is_ok()).unwrap_or(false);
-        self.forget(seq);
-        ok
+        tokio::time::timeout(timeout, rx).await.map(|r| r.is_ok()).unwrap_or(false)
     }
 
     /// Indirect probe: ask each `relay` to probe `target` on our behalf (`PingReq`) and
@@ -302,7 +300,7 @@ impl SwimState {
             return false;
         }
         let seq = self.next_seq();
-        let rx = self.register(seq);
+        let (_pending, rx) = self.register(seq);
         let req = SwimDatagram::PingReq {
             seq,
             from: self.self_id.clone(),
@@ -316,12 +314,21 @@ impl SwimState {
             }
         }
         if !sent {
-            self.forget(seq);
             return false;
         }
-        let ok = tokio::time::timeout(timeout, rx).await.map(|r| r.is_ok()).unwrap_or(false);
-        self.forget(seq);
-        ok
+        tokio::time::timeout(timeout, rx).await.map(|r| r.is_ok()).unwrap_or(false)
+    }
+}
+
+/// A probe's claim on its `seq` in [`SwimState::pending`], removed when dropped (see [`SwimState::register`]).
+struct PendingProbe<'a> {
+    state: &'a SwimState,
+    seq:   u64,
+}
+
+impl Drop for PendingProbe<'_> {
+    fn drop(&mut self) {
+        self.state.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.seq);
     }
 }
 
@@ -579,6 +586,22 @@ mod tests {
             "dead target times out");
         // No pending state should leak after either probe.
         assert!(a.pending.lock().unwrap().is_empty());
+    }
+
+    /// **A probe dropped mid-flight leaves nothing pending.** A probe is dropped mid-flight when the prober's task is
+    /// aborted or its runtime shuts down, and a relay's spawned probe likewise; the entry was removed only after the wait returned, so a
+    /// dropped probe left its `seq` in `pending` for the life of the state.
+    #[tokio::test]
+    async fn a_probe_dropped_mid_flight_leaves_nothing_pending() {
+        let (a, _aid, _ash, _ap) = spawn_node().await;
+        let dead = dead_node().await;
+        let probe = a.probe_direct(probe_addr(&dead), Duration::from_secs(30));
+        assert!(tokio::time::timeout(Duration::from_millis(100), probe).await.is_err(), "the probe was dropped first");
+        let (_r, rid, _rsh, _rp) = spawn_node().await;
+        let relays = [probe_addr(&rid)];
+        let probe = a.probe_indirect(&dead, &relays, Duration::from_secs(30));
+        assert!(tokio::time::timeout(Duration::from_millis(100), probe).await.is_err(), "the probe was dropped first");
+        assert!(a.pending.lock().unwrap().is_empty(), "a dropped probe is no longer pending");
     }
 
     #[tokio::test]

@@ -97,8 +97,8 @@ pub(super) async fn mcp_handler(
                 })).into_response();
             };
 
-            // Where a call's time went, kept for the one answer that cannot say why: a dispatch timeout (the
-            // #642 door-test flake, open — `docs/plans/post-360-hardening.md` §3.6).
+            // Where a call's time went, kept for the one answer that cannot say why: a dispatch timeout (it named
+            // the #642 door-test flake's cause — a reply lost to registration after the emit, `rpc::PendingReply`).
             let started = mycelium_core::sim_seam::mono_instant();
             let tool_req = json!({
                 "jsonrpc": "2.0",

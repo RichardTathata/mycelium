@@ -528,8 +528,9 @@ pub struct SystemStats {
 }
 
 /// The in-flight RPC/bulk correlation map: nonce → (the node the call was sent to, the waiting
-/// oneshot). Only a reply from that node claims the entry.
-pub(crate) type RpcPending = Arc<std::sync::Mutex<std::collections::HashMap<u64, (crate::node_id::NodeId, tokio::sync::oneshot::Sender<crate::signal::Signal>)>>>;
+/// oneshot, the registration id of the [`rpc::PendingReply`] that owns the entry). Only a reply from
+/// that node claims the entry; only its owner removes it.
+pub(crate) type RpcPending = Arc<std::sync::Mutex<std::collections::HashMap<u64, (crate::node_id::NodeId, tokio::sync::oneshot::Sender<crate::signal::Signal>, u64)>>>;
 
 // The old 22-field `TaskCtx` God Object has been split (ROADMAP §v2.0 M1): `CoreCtx`
 // (the Layers I+II infrastructure bundle) and `ReplyInterceptor` now live in the
@@ -1258,7 +1259,7 @@ impl GossipAgent {
                     //
                     // A claim needs the nonce **and** the sender the call was sent to. On nonce
                     // alone, a reply from any node that learned the nonce consumed the oneshot —
-                    // `await_nonce_reply` then dropped it on sender mismatch, so the caller timed
+                    // the waiting call (now `rpc::PendingReply::wait`) then dropped it on sender mismatch, so the caller timed
                     // out although the provider answered. Such a reply is counted and ignored;
                     // the pending call stays pending for the sender it was sent to. `sig.sender` is
                     // emitter-written and relayed, so this stops a stray or mismatched reply, not a
@@ -1273,13 +1274,13 @@ impl GossipAgent {
                         );
                         let mut pending = rp.lock().unwrap_or_else(|e| e.into_inner());
                         match pending.get(&call_nonce) {
-                            Some((expected, _)) if *expected == sig.sender => {
-                                if let Some((_, tx)) = pending.remove(&call_nonce) {
+                            Some((expected, _, _)) if *expected == sig.sender => {
+                                if let Some((_, tx, _)) = pending.remove(&call_nonce) {
                                     let _ = tx.send(sig.clone());
                                 }
                                 return true;
                             }
-                            Some((expected, _)) => {
+                            Some((expected, _, _)) => {
                                 tracing::warn!(
                                     nonce = call_nonce, from = %sig.sender, expected = %expected,
                                     "rpc reply for a pending call from a node it was not sent to; ignored"

@@ -282,32 +282,96 @@ pub enum RpcError {
     ContextTooLarge,
 }
 
-/// Registers a one-shot receiver in `ctx.rpc_pending` and awaits the first
-/// reply signal whose correlation nonce (first 8 bytes of payload, LE) matches
-/// `nonce` **and** whose sender is `target` — the reply interceptor claims on
-/// both, so a reply from any other node leaves the registration in place
-/// (counted in `SystemStats::rpc_reply_sender_mismatches`).
+/// A call's claim on its reply: registered in `ctx.rpc_pending` **before** the request is emitted, and removed when
+/// dropped — on a reply, a timeout, or the caller's future being cancelled.
 ///
-/// Registration happens synchronously in the first poll — before any yield
-/// point — so it is safe to call `emit_signal` immediately before this
-/// without missing a co-located reply.
+/// The reply interceptor claims a `rpc.result` / `bulk.result` on its correlation nonce (first 8 bytes of the
+/// payload, LE) **and** its sender being `target`; a reply from any other node leaves the registration in place
+/// (counted in `SystemStats::rpc_reply_sender_mismatches`). A reply that finds no registration is not stored for a
+/// registration made later: it falls through to the local fan-out (`deliver_locally`, so any `signal_handlers`
+/// subscriber to the result kind still sees it), and a caller that registers afterwards never receives it.
 ///
-/// Returns `Some(payload)` with the 8-byte nonce prefix stripped, or `None`
-/// on timeout.
-pub(crate) async fn await_nonce_reply(
-    ctx:      &TaskCtx,
-    nonce:    u64,
-    target:   &NodeId,
-    deadline: tokio::time::Instant,
-) -> Option<Bytes> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    ctx.rpc_pending.lock().unwrap_or_else(|e| e.into_inner()).insert(nonce, (target.clone(), tx));
-    let result = match tokio::time::timeout_at(deadline, rx).await {
-        Ok(Ok(sig)) if sig.sender == *target => Some(sig.payload.slice(8..)),
-        _ => None,
-    };
-    ctx.rpc_pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&nonce);
-    result
+/// Registering first is the point. Until the #642 door-test flake was traced, the caller emitted and then
+/// registered, on the reasoning that registration happens before the caller's first yield. That holds on one
+/// thread only: a provider on **this** node receives the request synchronously inside `emit_signal`, and on a
+/// multi-threaded runtime its serve task runs on another worker at once, so it could answer before the caller
+/// registered — the reply was not claimed and the caller waited out its whole timeout although the handler ran.
+///
+/// The guard owns its entry and only its entry. Registration draws a nonce no live call holds (re-drawing on a
+/// collision rather than overwriting another call's entry), and the entry carries a process-unique registration id
+/// that `Drop` compares before removing — so a guard whose entry the interceptor already claimed cannot remove a
+/// later call that drew the same nonce.
+pub(crate) struct PendingReply<'a> {
+    ctx:          &'a TaskCtx,
+    nonce:        u64,
+    registration: u64,
+    target:       NodeId,
+    rx:           Option<tokio::sync::oneshot::Receiver<Signal>>,
+}
+
+/// Registration ids for [`PendingReply`]: unique per process, never reused.
+static REGISTRATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+impl<'a> PendingReply<'a> {
+    /// Register for the reply to a call to `target`, with a nonce from `draw` that no live call holds. Put
+    /// [`nonce`](Self::nonce) in the request and emit it after this.
+    pub(crate) fn register(ctx: &'a TaskCtx, target: &NodeId, mut draw: impl FnMut() -> u64) -> Self {
+        let registration = REGISTRATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut pending = ctx.rpc_pending.lock().unwrap_or_else(|e| e.into_inner());
+        let nonce = loop {
+            let nonce = draw();
+            if !pending.contains_key(&nonce) {
+                break nonce;
+            }
+        };
+        pending.insert(nonce, (target.clone(), tx, registration));
+        drop(pending);
+        Self { ctx, nonce, registration, target: target.clone(), rx: Some(rx) }
+    }
+
+    /// The correlation nonce this call's request carries.
+    pub(crate) fn nonce(&self) -> u64 { self.nonce }
+
+    /// Await the reply until `deadline`: `Some(payload)` with the 8-byte nonce prefix stripped, or `None` on timeout.
+    pub(crate) async fn wait(mut self, deadline: tokio::time::Instant) -> Option<Bytes> {
+        let rx = self.rx.take()?;
+        match tokio::time::timeout_at(deadline, rx).await {
+            Ok(Ok(sig)) if sig.sender == self.target => Some(sig.payload.slice(8..)),
+            _ => None,
+        }
+    }
+}
+
+impl Drop for PendingReply<'_> {
+    fn drop(&mut self) {
+        let mut pending = self.ctx.rpc_pending.lock().unwrap_or_else(|e| e.into_inner());
+        if pending.get(&self.nonce).is_some_and(|(_, _, registration)| *registration == self.registration) {
+            pending.remove(&self.nonce);
+        }
+    }
+}
+
+/// Test hook: run between a call's emission and its wait for the reply, per calling node — in `rpc_call_framed` and
+/// `bulk_call_ctx` both, so each path's register-before-emit order has a deterministic regression.
+#[cfg(test)]
+pub(crate) mod after_emit {
+    use crate::node_id::NodeId;
+    use std::sync::Arc;
+
+    pub(crate) type Hook = Arc<dyn Fn() + Send + Sync>;
+    static HOOKS: std::sync::LazyLock<papaya::HashMap<String, Hook>> = std::sync::LazyLock::new(papaya::HashMap::new);
+
+    pub(crate) fn run(node: &NodeId) {
+        let hook = HOOKS.pin().get(&node.to_string()).cloned();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    pub(crate) fn set(node: &NodeId, hook: Hook) { HOOKS.pin().insert(node.to_string(), hook); }
+
+    pub(crate) fn clear(node: &NodeId) { HOOKS.pin().remove(&node.to_string()); }
 }
 
 impl std::fmt::Display for RpcError {
@@ -383,18 +447,21 @@ pub(crate) async fn rpc_call_framed(
     payload: Bytes,
     timeout: Duration,
 ) -> Result<Bytes, RpcError> {
-    let nonce: u64 = fastrand::u64(1..);
+    // Registered before the request leaves: a provider on this node can answer before `emit_signal` returns.
+    let reply = PendingReply::register(ctx, &target, || fastrand::u64(1..));
 
     let mut buf = BytesMut::with_capacity(8 + payload.len());
-    buf.put_u64_le(nonce);
+    buf.put_u64_le(reply.nonce());
     buf.put(payload);
 
     emit_signal(ctx, kind, SignalScope::Individual(target.clone()), buf.freeze());
+    #[cfg(test)]
+    after_emit::run(&ctx.node_id);
 
     let deadline = tokio::time::Instant::now() + timeout;
     #[cfg(feature = "metrics")]
     let rpc_start = std::time::Instant::now();
-    let result = match await_nonce_reply(ctx, nonce, &target, deadline).await {
+    let result = match reply.wait(deadline).await {
         Some(b) => Ok(b),
         None    => Err(RpcError::Timeout),
     };
@@ -430,6 +497,43 @@ mod tests {
     use crate::{GossipAgent, GossipConfig, NodeId};
     use bytes::Bytes;
     use std::{sync::Arc, time::Duration};
+
+    /// **A reply to a call on this node arrives, whenever the provider answers** (the #642 door-test flake).
+    /// `rpc_call_framed` emitted the request and only then registered for its reply. A provider on this node
+    /// receives the request synchronously inside `emit_signal`, and on a multi-threaded runtime its serve task
+    /// runs on another worker at once — so it could answer before the caller had registered, the reply
+    /// interceptor found no pending call and the reply was lost; the caller waited out its whole timeout
+    /// although the handler ran. The hook holds the caller after its emission until the provider has answered,
+    /// which is that interleaving made certain.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_reply_sent_before_the_caller_waits_still_reaches_it() {
+        let port = alloc_port();
+        let id = NodeId::new("127.0.0.1", port).unwrap();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        let agent = Arc::new(GossipAgent::new(id.clone(), cfg));
+        agent.start().await.unwrap();
+
+        let (answered_tx, answered_rx) = std::sync::mpsc::channel::<()>();
+        let answered_rx = std::sync::Mutex::new(answered_rx);
+        after_emit::set(&id, Arc::new(move || {
+            let _ = answered_rx.lock().unwrap().recv_timeout(Duration::from_secs(5));
+        }));
+        let responder = Arc::clone(&agent);
+        let mut rx = responder.service().rpc_rx("self.echo");
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                responder.service().rpc_respond(&req, req.payload());
+                let _ = answered_tx.send(());
+            }
+        });
+
+        let result = agent.service().rpc_call(id.clone(), "self.echo", Bytes::from_static(b"here"), Duration::from_secs(2)).await;
+        after_emit::clear(&id);
+        assert_eq!(result, Ok(Bytes::from_static(b"here")), "the provider answered before the caller waited");
+        assert!(agent.task_ctx.rpc_pending.lock().unwrap().is_empty(), "nothing is left registered");
+        agent.shutdown().await;
+    }
 
     fn alloc_port() -> u16 { crate::test_util::alloc_port() }
 
@@ -484,6 +588,55 @@ mod tests {
         agent_b.shutdown().await;
     }
 
+    /// **A registration owns its entry and only its entry.** Two calls whose draws collide get distinct nonces — the
+    /// second re-draws rather than overwriting the first's entry, which would have stranded the first caller — and a
+    /// guard whose entry the reply interceptor has already claimed does not remove a later call that drew the same
+    /// nonce: `Drop` removed by nonce alone, so the later call's entry went with it and its reply was not claimed.
+    #[test]
+    fn a_registration_removes_only_its_own_entry() {
+        let port = alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        let agent = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
+        let ctx = &agent.task_ctx;
+        let target = NodeId::new("127.0.0.1", 19997).unwrap();
+
+        // A forced collision at registration: the second draw repeats the first nonce.
+        let mut draws = [7u64, 7, 8].into_iter();
+        let mut draw = move || draws.next().expect("no more than three draws");
+        let first = PendingReply::register(ctx, &target, &mut draw);
+        let second = PendingReply::register(ctx, &target, &mut draw);
+        assert_eq!((first.nonce(), second.nonce()), (7, 8), "the colliding draw was re-drawn");
+        assert_eq!(ctx.rpc_pending.lock().unwrap().len(), 2, "neither entry was overwritten");
+        drop(second);
+
+        // The interceptor claims the first call's entry (a reply arrived); a later call draws the freed nonce.
+        assert!(ctx.rpc_pending.lock().unwrap().remove(&7).is_some());
+        let later = PendingReply::register(ctx, &target, || 7);
+        drop(first);
+        assert!(ctx.rpc_pending.lock().unwrap().contains_key(&7), "the claimed guard left the later call's entry");
+        drop(later);
+        assert!(ctx.rpc_pending.lock().unwrap().is_empty(), "each guard removed its own entry");
+    }
+
+    /// A caller whose future is dropped before its reply — a `select!` that took another branch, an outer timeout —
+    /// leaves nothing registered. Until registration became a guard the entry was removed only after the wait
+    /// returned, so a cancelled call left its nonce in `rpc_pending` for the life of the node.
+    #[tokio::test]
+    async fn a_cancelled_call_leaves_nothing_registered() {
+        let port = alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        let agent = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
+        agent.start().await.unwrap();
+        let ghost = NodeId::new("127.0.0.1", 19998).unwrap();
+        let service = agent.service();
+        let call = service.rpc_call(ghost, "noop", Bytes::from_static(b"ping"), Duration::from_secs(30));
+        assert!(tokio::time::timeout(Duration::from_millis(100), call).await.is_err(), "the caller gave up first");
+        assert!(agent.task_ctx.rpc_pending.lock().unwrap().is_empty(), "the cancelled call is no longer registered");
+        agent.shutdown().await;
+    }
+
     #[tokio::test]
     async fn test_rpc_timeout() {
         let port = alloc_port();
@@ -502,6 +655,38 @@ mod tests {
         ).await;
 
         assert_eq!(result, Err(RpcError::Timeout));
+        assert!(agent.task_ctx.rpc_pending.lock().unwrap().is_empty(), "a timed-out call is no longer registered");
+        agent.shutdown().await;
+    }
+
+    /// **A reply emitted with `emit_signal_async` reaches the caller on this node.** The reply interceptor ran in
+    /// `emit_signal` and `emit_signal_ordered` but not in `emit_signal_async` — the fast path was added to the first
+    /// two (fecd36e1) and the third was never given it — so a co-located provider answering through the awaiting
+    /// emitter (`MeshHandle::emit_async`) delivered its `rpc.result` to the fan-out, where no caller listens, and
+    /// the caller waited out its timeout.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reply_emitted_by_the_awaiting_emitter_reaches_a_caller_on_this_node() {
+        let port = alloc_port();
+        let id = NodeId::new("127.0.0.1", port).unwrap();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        let agent = Arc::new(GossipAgent::new(id.clone(), cfg));
+        agent.start().await.unwrap();
+
+        let mut rx = agent.task_ctx.signal_handlers.register(Arc::from("self.async.echo"));
+        let responder = Arc::clone(&agent);
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                // The request's payload is `nonce || body`; echoed whole, it is a well-formed `rpc.result`.
+                let _ = mycelium_core::ops::emit_signal_async(
+                    &responder.task_ctx, Arc::from(signal_kind::RPC_RESULT),
+                    SignalScope::Individual(req.sender.clone()), req.payload.clone(),
+                ).await;
+            }
+        });
+
+        let result = agent.service().rpc_call(id, "self.async.echo", Bytes::from_static(b"async"), Duration::from_secs(2)).await;
+        assert_eq!(result, Ok(Bytes::from_static(b"async")), "the awaiting emitter's reply was claimed");
         agent.shutdown().await;
     }
 

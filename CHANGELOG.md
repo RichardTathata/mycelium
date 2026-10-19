@@ -175,6 +175,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **Upgrade note:** a probe that replaces one of its own declared paths on every run now fails as
   `confinement_changed` (`deprecations.md` §50).
 
+- **A call to a provider on the same node no longer loses its reply.** `rpc_call` emitted the request and only then
+  registered for the reply. A provider on the calling node receives the request inside the emit, and on a
+  multi-threaded runtime its serve task can run on another worker at once; when it answered before the caller had
+  registered, the reply was dropped and the caller waited out its whole timeout although the handler ran. Every
+  request-reply call shares the path: `ServiceHandle::rpc_call` and its variants, `scatter`, `bulk_call`, and the
+  gateway's dispatch from `/mcp`, `/a2a`, `/gateway/rpc/call`, the overlay and the LLM doors. The caller now registers
+  before it emits, and the registration is removed when the call ends, including a cancelled one, which used to leave
+  its entry behind. This was the `/mcp` door-test flake recorded open under #642. No API change.
+  Beside it: a registration removes only its own entry (a colliding nonce is re-drawn, never overwritten); a reply
+  sent through `MeshHandle::emit_async` (`emit_signal_async`) to a caller on the same node is now claimed — that
+  emitter skipped the reply interceptor, so such a reply went to the fan-out and the caller timed out; and a SWIM probe
+  dropped mid-flight (its task aborted or its runtime shut down) no longer leaves its entry pending.
+
 ### Added
 
 - **Inference routing as policy (post-360 plan row R).** The action evaluator can decide where data may go. A routing
