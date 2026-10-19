@@ -9,6 +9,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A fleet history limit is bounded: at most 1 024 seats, a window of at most 24 hours** (post-360 row K2, from the
+  review of the private Cedar adapter). For a `HistoryScope::FleetConsensus` rule the enforcement point read every
+  seat, a slot digest and a KV read each, on every request the rule covered, synchronously under the actor's history
+  gate on an async worker, so a limit of `u32::MAX` pinned a worker for minutes per request; and a fleet window had no
+  horizon. A fleet-scoped limit past `MAX_FLEET_SEATS` (1 024), or over a window of zero or past `MAX_FLEET_WINDOW_MS`
+  (24 hours, the history horizon), is now **not established**, never clamped: the reference evaluator decides
+  `Indeterminate` naming the bound, the enforcement point reads none of the counter's seats or tallies and claims no
+  seat, and `preflight_with_history` turns any evaluator's permit relying on one into *not established*. New:
+  `FleetBoundsError`, `check_fleet_bounds`, `FleetCounter::try_new` and `FleetCounter::check_bounds`, so an adapter can
+  refuse such a policy at load; three contract cases (`fleet_limit_past_the_seat_cap`, `fleet_window_past_the_horizon`,
+  `fleet_limit_at_the_bounds`). **Upgrade note:** a policy whose fleet limit is outside the bounds still builds, and
+  every request its rule covers now decides `Indeterminate` (`deprecations.md` §55). The contract suite counts an
+  adapter's refusal of such a policy at load as a pass on those two cases (`ContractCase::accepts_refusal_at_load`,
+  `Report::refused_at_load` — both structs gained a field; only for an adapter that passed `fleet_limit_at_the_bounds` by building), and a stored tally entry's window is clamped to the horizon
+  when it is aged or collected, so an oversized one no longer lingers.
+
 ## [2.36.0] — 2026-10-19
 
 **Two old defects fixed, two security fixes, and the post-360 plan's rows after the comparison.** A request-reply call to

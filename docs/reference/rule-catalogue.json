@@ -51,7 +51,7 @@
     },
     {
       "id": "ae.preflight",
-      "revision": 4,
+      "revision": 5,
       "subsystem": "mycelium::agent::http",
       "responsibilities": [
         "authority"
@@ -135,10 +135,11 @@
         "a_seat_decided_too_late_for_its_window_is_not_admitted",
         "a_peer_with_no_heartbeat_makes_the_tally_not_established",
         "a_routed_call_claims_a_seat_and_carries_its_route",
+        "a_fleet_counter_past_the_bounds_is_not_established_at_the_enforcement_point",
         "a_confidential_request_to_an_external_destination_is_denied_naming_class_and_locality"
       ],
       "trace": "catalogue_only",
-      "summary": "Permit, deny or indeterminate, recorded before the work runs; a refused mandate denies before policy runs, so a policy engine cannot launder a revocation. A history limit counts at the scope its rule names: this point, a consensus counter (exact; a seat claimed before admission) or the gossiped tally (approximate, and not established when its coverage is not)."
+      "summary": "Permit, deny or indeterminate, recorded before the work runs; a refused mandate denies before policy runs, so a policy engine cannot launder a revocation. A history limit counts at the scope its rule names: this point, a consensus counter (exact; a seat claimed before admission) or the gossiped tally (approximate, and not established when its coverage is not); a fleet limit past 1 024 seats or a 24-hour window is not established."
     },
     {
       "id": "cap.match",

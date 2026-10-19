@@ -45,7 +45,12 @@
 //! acceptors' shrunk floor are ordered against). So each (counter, kind of point, actor) that ever claims holds, on
 //! every member, at most `count` slots of three to five keys (sentinel, top record, its marker, the legacy committed
 //! and lease keys) plus, on every voter, `count` shrunk acceptor entries. The reference evaluator bounds the actors by
-//! the policy: an exact fleet limit must name its actor, never `*`.
+//! the policy: an exact fleet limit must name its actor, never `*`. And every counter is bounded wherever it is used:
+//! at most [`MAX_FLEET_SEATS`](super::action_evaluator::MAX_FLEET_SEATS) seats (each read, a slot digest and a KV read,
+//! on every request the rule covers) and a window of at most
+//! [`MAX_FLEET_WINDOW_MS`](super::action_evaluator::MAX_FLEET_WINDOW_MS), the history horizon — a counter outside them
+//! is not established and nothing of it is read, claimed or published ([`establish`], [`claim_seat`],
+//! [`publish_permit`]).
 //!
 //! **What is not claimed.** The seat's lease is measured on the proposer's wall clock and judged on each reader's,
 //! so the exact bound holds to within the clocks' skew. A seat's release marker is not checked against its owner: any
@@ -107,6 +112,12 @@ pub(crate) fn establish(
     counters
         .iter()
         .map(|c| {
+            // Bounded before anything is read (the Cedar adapter's review): a consensus counter's seats are read one by
+            // one on every request the rule covers, under the actor's gate on an async worker, so a counter past the
+            // seat cap or the history horizon is not established — whichever evaluator named it — and costs nothing.
+            if let Err(out) = c.check_bounds() {
+                return FleetCount::new(c.clone(), FleetState::NotEstablished(format!("the counter is outside the fleet bounds: {out}")));
+            }
             let state = match c.scope {
                 HistoryScope::FleetConsensus => seats_state(ctx, c, point, actor),
                 HistoryScope::FleetTally => tally_state(ctx, c, point, actor, now_ms),
@@ -254,6 +265,10 @@ pub(crate) async fn claim_seat(ctx: &Arc<TaskCtx>, c: &FleetCounter, point: &str
         ballot_retry_jitter_ms: CLAIM_RETRY_JITTER_MS,
         ..ConsensusConfig::default()
     };
+    // Bounded before any proposal: a counter past the seat cap or the history horizon claims nothing.
+    if let Err(out) = c.check_bounds() {
+        return Claim::NotEstablished(format!("the counter is outside the fleet bounds: {out}"));
+    }
     let consensus = super::ConsensusHandle { ctx: Arc::clone(ctx) };
     #[cfg(test)]
     {
@@ -568,6 +583,9 @@ fn tally_nodes(ctx: &TaskCtx) -> (Vec<String>, usize) {
 /// Publish a permit admitted under `c` into this node's tally of `actor`, and keep this node's heartbeat current.
 /// Called under the actor's gate, so two permits of one actor at this point do not lose each other's update.
 pub(crate) fn publish_permit(ctx: &Arc<TaskCtx>, c: &FleetCounter, point: &str, actor: &str, at_ms: u64) {
+    if c.check_bounds().is_err() {
+        return; // never established, so nothing was admitted under it (the seam refuses a permit relying on it)
+    }
     let key = tally_key(&ctx.node_id.to_string(), &c.key, point, actor);
     // The read-modify-write and the withdrawal's read-then-delete take one lock (lock-order row 67, #642's review N7),
     // so an aged entry's withdrawal cannot delete a permit published between its read and its delete.
@@ -613,8 +631,15 @@ pub(crate) static TEST_WITHDRAW_PAUSE_MS: std::sync::LazyLock<papaya::HashMap<St
 /// nothing can be read from it).
 fn aged(value: &[u8], now_ms: u64) -> bool {
     serde_json::from_slice::<TallyEntry>(value)
-        .map(|e| e.t.iter().all(|t| *t <= now_ms.saturating_sub(e.w)))
+        .map(|e| e.t.iter().all(|t| *t <= now_ms.saturating_sub(stored_window(e.w))))
         .unwrap_or(true)
+}
+
+/// A stored entry's window, read back from the store, clamped to the horizon (#653's review, finding 2): an entry
+/// written by an earlier release with a longer window, or forged with `u64::MAX`, would otherwise never age out, and a
+/// departed node's residue never be collected. No counter within the bounds writes a longer one.
+fn stored_window(w: u64) -> u64 {
+    w.min(super::action_evaluator::MAX_FLEET_WINDOW_MS)
 }
 
 /// Withdraw this node's tally entries whose every time has aged out of the window they were kept for (review
@@ -677,7 +702,7 @@ pub(crate) fn collect_residue(ctx: &Arc<TaskCtx>, now_ms: u64) -> usize {
         let longest = keys
             .iter()
             .filter_map(|(_, v)| serde_json::from_slice::<TallyEntry>(v).ok())
-            .map(|e| e.w)
+            .map(|e| stored_window(e.w))
             .max()
             .unwrap_or(0);
         let horizon = longest.saturating_add(bound.max_staleness_ms).saturating_add(ctx.config.max_clock_drift_ms);

@@ -1814,3 +1814,153 @@ async fn without_tls_a_non_peers_absence_is_not_established() {
     a.shutdown().await;
     b.shutdown().await;
 }
+
+/// **A fleet counter past the bounds costs the enforcement point nothing** (the Cedar adapter's review: a limit of
+/// `u32::MAX` read every seat — a slot digest and a KV read each — on every in-scope request, pinning a tokio worker
+/// for minutes). Whatever evaluator names it, `establish` reads no seat and no tally of a counter past the seat cap or
+/// the history horizon, and `claim_seat` proposes none: each is not established, naming the bound. At the gateway an
+/// evaluator that permits on such a counter is refused, not established; at the bounds the same call is admitted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fleet_counter_past_the_bounds_is_not_established_at_the_enforcement_point() {
+    use crate::{ActionEnvelope, ActionEvaluator, Decision, FleetCounter, History};
+    const CAP: u32 = 1_024;
+    const HORIZON: u64 = 24 * 60 * 60 * 1_000;
+    /// The reference policy within the bounds, naming whatever counter it is given — an adapter's mistake.
+    struct Naming(ReferenceEvaluator, std::sync::Mutex<FleetCounter>);
+    impl ActionEvaluator for Naming {
+        fn evaluate(&self, env: &ActionEnvelope) -> Decision {
+            self.0.evaluate(env)
+        }
+        fn mapping(&self, operation: &str, resource: &str) -> crate::ActionMapping {
+            self.0.mapping(operation, resource)
+        }
+        fn history_request(&self) -> Option<crate::HistoryRequest> {
+            self.0.history_request()
+        }
+        // Permits on any count it is given for its own counter's key, ignoring the count's own bounds.
+        fn evaluate_with_history(&self, env: &ActionEnvelope, history: &History) -> Decision {
+            let mut h = history.clone();
+            if let History::View(v) = &mut h {
+                for c in &mut v.fleet {
+                    c.counter.count = 3;
+                    c.counter.window_ms = TEN_MIN;
+                }
+            }
+            self.0.evaluate_with_history(env, &h)
+        }
+        fn fleet_counters(&self, _env: &ActionEnvelope) -> Vec<FleetCounter> {
+            vec![self.1.lock().unwrap().clone()]
+        }
+    }
+    let p1 = port();
+    let mut cfg = GossipConfig { bind_address: "127.0.0.1".parse().unwrap(), bind_port: p1, ..GossipConfig::default() };
+    cfg.bootstrap_peers = Vec::new();
+    let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", p1).unwrap(), cfg));
+    let dir = std::env::temp_dir().join(format!("k2-bounds-{p1}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    a.with_evidence_journal(EvidenceJournal::open(dir.join("evidence.log"), EvidenceProfile::Strict).unwrap());
+    let naming = Arc::new(Naming(
+        posts(3, TEN_MIN, HistoryScope::FleetConsensus),
+        std::sync::Mutex::new(FleetCounter::new(HistoryScope::FleetConsensus, "c-posts", CAP + 1, TEN_MIN)),
+    ));
+    a.with_action_evaluator(Arc::clone(&naming) as Arc<dyn ActionEvaluator>);
+    a.start().await.unwrap();
+    let _listener = a.consensus().start_consensus_listener(ConsensusConfig::default());
+    ready(&[&a]).await;
+    let ctx = Arc::clone(&a.task_ctx);
+    let actor = crate::PRINCIPAL_ANONYMOUS;
+
+    for scope in [HistoryScope::FleetConsensus, HistoryScope::FleetTally] {
+        for (count, window_ms, what) in [(CAP + 1, TEN_MIN, "seats"), (u32::MAX, TEN_MIN, "seats"), (3, HORIZON + 1, "horizon"), (3, 0, "window")] {
+            let c = FleetCounter::new(scope, "c-posts", count, window_ms);
+            let started = std::time::Instant::now();
+            let state = super::establish(&ctx, std::slice::from_ref(&c), "gateway", actor, ctx.hlc.decision_now_ms())[0].state.clone();
+            assert!(started.elapsed() < Duration::from_secs(1), "{scope:?} {count}: read nothing ({:?})", started.elapsed());
+            let FleetState::NotEstablished(why) = &state else { panic!("{scope:?} {count} in {window_ms} ms: {state:?}") };
+            assert!(why.contains(what), "{why}");
+        }
+    }
+    let past = FleetCounter::new(HistoryScope::FleetConsensus, "c-posts", CAP + 1, TEN_MIN);
+    match super::claim_seat(&ctx, &past, "gateway", actor, "attempt-past").await {
+        super::Claim::NotEstablished(why) => assert!(why.contains("seats"), "{why}"),
+        other => panic!("a claim past the cap proposes nothing: {other:?}"),
+    }
+    let late = FleetCounter::new(HistoryScope::FleetConsensus, "c-posts", 3, HORIZON + 1);
+    match super::claim_seat(&ctx, &late, "gateway", actor, "attempt-late").await {
+        super::Claim::NotEstablished(why) => assert!(why.contains("horizon"), "{why}"),
+        other => panic!("a claim past the horizon proposes nothing: {other:?}"),
+    }
+
+    // Through the gateway: the evaluator permits on its own reading; the enforcement point does not.
+    let out = post(&a).await;
+    let r = refusal(&out);
+    assert!(matches!(r, PreflightRefusal::NotEstablished(_)) && said(r).contains("fleet_consensus"), "{r:?}");
+    // At the bounds, the same call is admitted: a seat claimed by consensus on this lone node.
+    *naming.1.lock().unwrap() = FleetCounter::new(HistoryScope::FleetConsensus, "c-posts", CAP, HORIZON);
+    let out = post(&a).await;
+    assert!(admitted(&out).is_some(), "at the cap and the horizon: {:?}", refusal(&out));
+    a.shutdown().await;
+}
+
+/// **An oversized stored window still ages out** (#653's review, finding 2): a tally entry's `w` is read back from the
+/// store — written by an earlier release with a week's window, or forged as `u64::MAX` — so `aged` and the residue
+/// collector clamp it to `MAX_FLEET_WINDOW_MS`. Unclamped, `now - u64::MAX` saturates to zero, the entry is never aged
+/// and a departed node's residue is never collected. An entry whose times are inside the horizon is kept.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_oversized_stored_window_ages_out_and_its_residue_is_collected() {
+    const HORIZON: u64 = 24 * 60 * 60 * 1_000;
+    let p1 = port();
+    let a = node(p1, &[], 3, HistoryScope::FleetTally, |_| {}).await;
+    ready(&[&a]).await;
+    let ctx = Arc::clone(&a.task_ctx);
+    let now = ctx.hlc.decision_now_ms();
+    let entry = |w: u64, t: u64| serde_json::to_vec(&serde_json::json!({"w": w, "t": [t]})).unwrap();
+    for w in [u64::MAX, 7 * HORIZON] {
+        assert!(super::aged(&entry(w, now - HORIZON - 1), now), "w = {w}: a time past the horizon has aged out");
+        assert!(!super::aged(&entry(w, now - HORIZON + 60_000), now), "w = {w}: a time inside the horizon has not");
+    }
+    // This node's own oversized entry is withdrawn by its heartbeat's withdrawal.
+    let own = super::tally_key(&a.node_id().to_string(), "c-old", "gateway", "x");
+    let _ = mycelium_core::ops::kv_set(&ctx, Arc::from(own.as_str()), bytes::Bytes::from(entry(u64::MAX, now - HORIZON - 1)));
+    super::withdraw_aged_entries(&ctx, now);
+    assert!(mycelium_core::ops::kv_get(&ctx, &own).is_none(), "the own oversized entry is withdrawn");
+    // A departed node silent past the clamped horizon (24 h + staleness + drift): its residue is collected.
+    let gone = NodeId::new("127.0.0.1", port()).unwrap().to_string();
+    let silent_since = now - HORIZON - ctx.config.control_max_staleness_ms - ctx.config.max_clock_drift_ms - 60_000;
+    let plant = |key: String, value: Vec<u8>| {
+        let _ = mycelium_core::ops::kv_set(&ctx, Arc::from(key.as_str()), bytes::Bytes::from(value));
+    };
+    plant(super::heartbeat_key(&gone), serde_json::to_vec(&serde_json::json!({"as_of": silent_since, "enforces": true, "departed": true})).unwrap());
+    plant(super::tally_key(&gone, "c-old", "gateway", "x"), entry(u64::MAX, silent_since));
+    super::collect_residue(&ctx, ctx.hlc.decision_now_ms());
+    for key in [super::heartbeat_key(&gone), super::tally_key(&gone, "c-old", "gateway", "x")] {
+        assert!(mycelium_core::ops::kv_get(&ctx, &key).is_none(), "{key} collected");
+    }
+    a.shutdown().await;
+}
+
+/// **`publish_permit` writes nothing for a counter outside the bounds** (#653's review, finding 3): a permit relying on
+/// one is refused at the seam, but the guard is what keeps a direct caller from keeping `count` permit times — up to
+/// `u32::MAX` of them — in a fleet-visible entry. Within the bounds the same call writes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn publish_permit_writes_nothing_for_a_counter_outside_the_bounds() {
+    use crate::FleetCounter;
+    const HORIZON: u64 = 24 * 60 * 60 * 1_000;
+    let p1 = port();
+    let a = node(p1, &[], 3, HistoryScope::FleetTally, |_| {}).await;
+    ready(&[&a]).await;
+    let ctx = Arc::clone(&a.task_ctx);
+    let me = a.node_id().to_string();
+    let now = ctx.hlc.decision_now_ms();
+    for (i, (count, window_ms)) in [(1_025, TEN_MIN), (u32::MAX, TEN_MIN), (3, HORIZON + 1), (3, 0)].into_iter().enumerate() {
+        let key = format!("c-out-{i}");
+        super::publish_permit(&ctx, &FleetCounter::new(HistoryScope::FleetTally, key.as_str(), count, window_ms), "gateway", "x", now);
+        assert!(
+            mycelium_core::ops::kv_get(&ctx, &super::tally_key(&me, &key, "gateway", "x")).is_none(),
+            "{count} in {window_ms} ms: nothing published"
+        );
+    }
+    super::publish_permit(&ctx, &FleetCounter::new(HistoryScope::FleetTally, "c-in", 1_024, HORIZON), "gateway", "x", now);
+    assert!(mycelium_core::ops::kv_get(&ctx, &super::tally_key(&me, "c-in", "gateway", "x")).is_some(), "within the bounds, published");
+    a.shutdown().await;
+}

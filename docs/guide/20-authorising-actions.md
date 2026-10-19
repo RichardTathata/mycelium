@@ -407,6 +407,7 @@ let policy = ReferenceEvaluator::new("rev-posts")
 | Guarantee | the fleet admits at most three in any window, whichever gateways the calls reach — to within the nodes' wall-clock skew | **detection, not prevention**: two gateways can each admit before either's tally reaches the other |
 | Cost | a consensus round per limited call (more while seats are contended) | a gossiped write per permit, and every node's heartbeat |
 | Actor | must be named — the reference evaluator does not establish `*` (see *Growth*) | any, `*` included |
+| Limit and window | at most 1 024 seats, a window of 1 ms to 24 h — outside them, not established (see *Bounds*) | the same |
 
 The evaluator names the counter its deciding rule relies on (`fleet_counters`, a third method with a default), and the
 enforcement point reads its state into the view (`HistoryView::fleet`) before the evaluator decides: for the exact
@@ -520,6 +521,18 @@ the legacy committed and lease keys — and, on every voter, `count` shrunk acce
 reference evaluator does not establish an exact fleet limit over `*`: the actors that can grow it are the ones the
 policy names. An evaluator of your own that names exact counters for open-ended actors lets each new principal add
 that much.
+
+*Bounds.* A fleet limit names at most `MAX_FLEET_SEATS` (1 024) and a window of 1 ms to `MAX_FLEET_WINDOW_MS` (24
+hours — the horizon the enforcement point keeps an actor's own history for). The count is a cost on every request the
+rule covers, not only a limit: for the exact scope the enforcement point reads every seat — a slot digest and a KV read
+each — under the actor's gate on an async worker, and a claim may propose to each in turn; a tally entry keeps up to
+`count` permit times. A limit of `u32::MAX` once pinned a worker for minutes per request. A counter outside the bounds
+is **refused, not clamped**, wherever it comes from: the reference evaluator decides `Indeterminate` naming the bound
+(as it does a wildcard actor at the exact scope); the enforcement point reads none of its seats or tallies and claims
+no seat (`FleetState::NotEstablished`); and the seam turns any evaluator's permit relying on it into *not
+established*. `FleetCounter::try_new` and `check_fleet_bounds` let an adapter refuse such a policy when it loads it,
+which is better than refusing every request it covers. A policy wanting more than 1 024 in a window wants a per-point
+limit or a shorter window.
 
 *On the record.* A fleet decision's evidence names the fleet scope (`history.scope`) and carries each counter with its
 scope and state — seats held, or the sum and its publishers — and an admitted call's seat (`slot`, seat number,
@@ -713,7 +726,7 @@ match preflight(Some(&evaluator), &envelope, now_ms) {
 ```
 
 The difference is not stylistic. An evaluator asked directly answers only the policy question, and
-**five checks are the seam's, not its**:
+**six checks are the seam's, not its**:
 
 | The seam checks | An evaluator called directly would |
 |---|---|
@@ -722,6 +735,7 @@ The difference is not stylistic. An evaluator asked directly answers only the po
 | a `Permit` carrying evaluation errors is downgraded | trust a permit its own adapter could not fully evaluate |
 | an unmapped or ambiguous operation cannot be permitted | name an unreviewed action as a business operation |
 | a panicking adapter is caught | turn an adapter bug into an admission |
+| a permit relying on a fleet counter outside the bounds (`MAX_FLEET_SEATS`, `MAX_FLEET_WINDOW_MS`) is not established | permit on a count no enforcement point read |
 
 In each of those cases a correct evaluator returns **permit** and the seam refuses. It is not being
 overridden; it was never asked that question. Skipping the seam is the *every leg correct, the

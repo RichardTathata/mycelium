@@ -34,6 +34,12 @@
 //! exactly: no silent gaps, and no stale declarations for cases it can now handle. A suite that
 //! skipped what an implementation found hard would certify the opposite of what it claims.
 //!
+//! One exception, by case: a policy that is unsafe to run at all (row K2's out-of-bounds fleet limits) may be
+//! **refused at load** — `build` returning `Err` — and that passes the case
+//! ([`ContractCase::accepts_refusal_at_load`], [`Report::refused_at_load`]): nothing runs, so nothing is admitted.
+//! Only for an adapter that passed [`REFUSAL_AT_LOAD_WITNESS`] (`fleet_limit_at_the_bounds`) by building — one that
+//! expresses the clause and refuses on the bounds; one that cannot express the clause at all declines those cases too.
+//!
 //! # What passing here is worth
 //!
 //! It is evidence that an evaluator obeys the seam's contract on the cases AE0 enumerated. It is
@@ -49,7 +55,7 @@
 use super::action_evaluator::{
     ActionEnvelope, ActionEvaluator, ActionMapping, Decision, DecisionKind, Execution, FleetCount, FleetCounter,
     FleetState, History, HistoryEntry, HistoryScope, HistoryView, PreflightRefusal, ReferenceEvaluator, Rule, Verdict,
-    preflight, preflight_with_history,
+    MAX_FLEET_SEATS, MAX_FLEET_WINDOW_MS, preflight, preflight_with_history,
 };
 use super::route_facts::{ClassSource, DataClass, Destination, Locality};
 use mycelium_core::NodeId;
@@ -128,7 +134,9 @@ pub enum PolicyClause {
     /// `AllowAtMost`, counted **across the fleet** at `scope` (row K2): [`HistoryScope::FleetConsensus`] — an agreed
     /// counter, exact — or [`HistoryScope::FleetTally`] — the gossiped tallies' sum, approximate. The enforcement
     /// point establishes the count for the counter the evaluator names ([`ActionEvaluator::fleet_counters`]); a count
-    /// at another scope never satisfies it, and a count not established decides nothing.
+    /// at another scope never satisfies it, and a count not established decides nothing. A `count` past
+    /// [`MAX_FLEET_SEATS`] or a `window_ms` outside `1..=`[`MAX_FLEET_WINDOW_MS`] is not established — the bounds
+    /// every enforcement point holds a fleet counter to.
     AllowAtMostAcross {
         /// Actor principal, or `*`.
         actor: String,
@@ -294,6 +302,15 @@ pub struct ContractCase {
     /// one. The suite sets `expected_policy_revision` from this rather than from the fixture, so
     /// an evaluator whose revision is derived rather than chosen can still be held to the case.
     pub revision: RevisionBinding,
+    /// Whether an evaluator that **refuses the policy when it loads it** — `build` returns `Err` — passes this case
+    /// rather than declining it. Set only where the policy is unsafe to run and the expected outcome is
+    /// [`Expected::NotEstablished`]: a policy refused at load decides nothing and admits nothing, the safest outcome the
+    /// case can have, so it is not a gap in the adapter's coverage to declare (row K2's bounds: an adapter that rejects
+    /// an out-of-bounds fleet limit at load, as the private Cedar adapter does) — and only from an adapter that passed
+    /// [`REFUSAL_AT_LOAD_WITNESS`] by building, which shows it expresses the clause and refuses only on the bounds; an
+    /// adapter refusing for another reason (it cannot express the clause) declines. Recorded in
+    /// [`Report::refused_at_load`] with the adapter's reason. Everywhere else a refusal at load is a decline.
+    pub accepts_refusal_at_load: bool,
 }
 
 /// Why an evaluator cannot express a clause.
@@ -365,6 +382,9 @@ pub struct Report {
     pub failed: Vec<Failure>,
     /// Cases it could not express, with the reason.
     pub declined: Vec<(&'static str, Unexpressible)>,
+    /// Cases it refused at load where the case accepts that ([`ContractCase::accepts_refusal_at_load`]), with the
+    /// reason — each also in `passed`.
+    pub refused_at_load: Vec<(&'static str, Unexpressible)>,
     /// What the subject declared it would decline, copied here so [`Report::conformant`] can
     /// check the two against each other without the caller re-supplying it.
     pub declared: Vec<&'static str>,
@@ -390,9 +410,10 @@ impl Report {
     /// A one-line summary for a CI log.
     pub fn summary(&self) -> String {
         format!(
-            "{}: {} passed, {} failed, {} declined",
+            "{}: {} passed ({} refused at load), {} failed, {} declined",
             self.evaluator,
             self.passed.len(),
+            self.refused_at_load.len(),
             self.failed.len(),
             self.declined.len()
         )
@@ -420,12 +441,20 @@ pub fn run_cases(subject: &dyn EvaluatorUnderTest, cases: &[ContractCase]) -> Re
         passed: Vec::new(),
         failed: Vec::new(),
         declined: Vec::new(),
+        refused_at_load: Vec::new(),
         declared: Vec::new(),
     };
+    let mut pending_refusals: Vec<(&'static str, Unexpressible)> = Vec::new();
 
     for case in cases {
         let evaluator = match subject.build(&case.policy) {
             Ok(e) => e,
+            // Refused at load where the case accepts it: decided after every case has run, by whether the adapter
+            // expressed the clause at the bounds (`REFUSAL_AT_LOAD_WITNESS`) — so case order does not matter.
+            Err(why) if case.accepts_refusal_at_load => {
+                pending_refusals.push((case.id, why));
+                continue;
+            }
             Err(why) => {
                 report.declined.push((case.id, why));
                 continue;
@@ -500,8 +529,28 @@ pub fn run_cases(subject: &dyn EvaluatorUnderTest, cases: &[ContractCase]) -> Re
         report.passed.push(case.id);
     }
 
+    // A refusal at load earns credit only from an adapter that expresses the clause: one that passed the witness case
+    // by building. An adapter that cannot express `AllowAtMostAcross` at all refuses the out-of-bounds cases for the
+    // wrong reason — a decline, as anywhere else (#653's review, round 2).
+    let expresses = report.passed.contains(&REFUSAL_AT_LOAD_WITNESS)
+        && !pending_refusals.iter().any(|(id, _)| *id == REFUSAL_AT_LOAD_WITNESS);
+    for (id, why) in pending_refusals {
+        if expresses {
+            report.passed.push(id);
+            report.refused_at_load.push((id, why));
+        } else {
+            report.declined.push((id, why));
+        }
+    }
+
     report.with_declared(subject.declared_limits().to_vec())
 }
+
+/// The case an adapter must pass **by building** for a refusal at load to pass an
+/// [`accepts_refusal_at_load`](ContractCase::accepts_refusal_at_load) case: `fleet_limit_at_the_bounds`, a fleet limit
+/// at exactly the bounds. Passing it shows the adapter expresses the clause and refuses only past the bounds. In a run
+/// of chosen cases ([`run_cases`]) that leaves it out, every refusal at load is a decline.
+pub const REFUSAL_AT_LOAD_WITNESS: &str = "fleet_limit_at_the_bounds";
 
 // ── the cases ─────────────────────────────────────────────────────────────────────────────────
 
@@ -570,6 +619,7 @@ pub fn cases() -> Vec<ContractCase> {
             expect: Expected::Admitted,
             must_mention: vec![],
             revision: RevisionBinding::Matching,
+            accepts_refusal_at_load: false,
         },
         ContractCase {
             id: "explicit_prohibition",
@@ -587,6 +637,7 @@ pub fn cases() -> Vec<ContractCase> {
             expect: Expected::Denied,
             must_mention: vec![],
             revision: RevisionBinding::Matching,
+            accepts_refusal_at_load: false,
         },
         ContractCase {
             id: "incomplete_allow_list",
@@ -603,6 +654,7 @@ pub fn cases() -> Vec<ContractCase> {
             expect: Expected::NotEstablished,
             must_mention: vec![],
             revision: RevisionBinding::Matching,
+            accepts_refusal_at_load: false,
         },
         ContractCase {
             id: "impersonation",
@@ -619,6 +671,7 @@ pub fn cases() -> Vec<ContractCase> {
             expect: Expected::NotEstablished,
             must_mention: vec![],
             revision: RevisionBinding::Matching,
+            accepts_refusal_at_load: false,
         },
         ContractCase {
             id: "missing_facts",
@@ -635,6 +688,7 @@ pub fn cases() -> Vec<ContractCase> {
             expect: Expected::NotEstablished,
             must_mention: vec!["mandate".into()],
             revision: RevisionBinding::Matching,
+            accepts_refusal_at_load: false,
         },
         ContractCase {
             id: "unsupported_clause",
@@ -654,6 +708,7 @@ pub fn cases() -> Vec<ContractCase> {
             expect: Expected::NotEstablished,
             must_mention: vec!["odrl:duty".into()],
             revision: RevisionBinding::Matching,
+            accepts_refusal_at_load: false,
         },
         ContractCase {
             id: "unmapped_operation",
@@ -671,6 +726,7 @@ pub fn cases() -> Vec<ContractCase> {
             expect: Expected::NotEstablished,
             must_mention: vec![],
             revision: RevisionBinding::Matching,
+            accepts_refusal_at_load: false,
         },
         ContractCase {
             id: "ambiguous_operation",
@@ -687,6 +743,7 @@ pub fn cases() -> Vec<ContractCase> {
             expect: Expected::NotEstablished,
             must_mention: vec![],
             revision: RevisionBinding::Matching,
+            accepts_refusal_at_load: false,
         },
         ContractCase {
             id: "stale_policy_revision",
@@ -704,6 +761,7 @@ pub fn cases() -> Vec<ContractCase> {
             expect: Expected::NotEstablished,
             must_mention: vec![],
             revision: RevisionBinding::Stale,
+            accepts_refusal_at_load: false,
         },
         ContractCase {
             id: "expired_envelope",
@@ -717,6 +775,7 @@ pub fn cases() -> Vec<ContractCase> {
             expect: Expected::Denied,
             must_mention: vec!["validity".into()],
             revision: RevisionBinding::Matching,
+            accepts_refusal_at_load: false,
         },
         ContractCase {
             id: "arguments_are_evaluated_not_inherited",
@@ -737,6 +796,7 @@ pub fn cases() -> Vec<ContractCase> {
             expect: Expected::Admitted,
             must_mention: vec![],
             revision: RevisionBinding::Matching,
+            accepts_refusal_at_load: false,
         },
         // ── Post-360 row K: policy over history ─────────────────────────────────────────────────
         ContractCase {
@@ -749,6 +809,7 @@ pub fn cases() -> Vec<ContractCase> {
             expect: Expected::Admitted,
             must_mention: vec![],
             revision: RevisionBinding::Matching,
+            accepts_refusal_at_load: false,
         },
         ContractCase {
             id: "history_at_limit",
@@ -761,6 +822,7 @@ pub fn cases() -> Vec<ContractCase> {
             expect: Expected::Denied,
             must_mention: vec![HistoryScope::EnforcementPoint.label().to_string()],
             revision: RevisionBinding::Matching,
+            accepts_refusal_at_load: false,
         },
         ContractCase {
             id: "history_outside_window",
@@ -772,6 +834,7 @@ pub fn cases() -> Vec<ContractCase> {
             expect: Expected::Admitted,
             must_mention: vec![],
             revision: RevisionBinding::Matching,
+            accepts_refusal_at_load: false,
         },
         ContractCase {
             id: "history_unavailable",
@@ -783,6 +846,7 @@ pub fn cases() -> Vec<ContractCase> {
             expect: Expected::NotEstablished,
             must_mention: vec!["history".into()],
             revision: RevisionBinding::Matching,
+            accepts_refusal_at_load: false,
         },
         ContractCase {
             id: "history_incomplete_below_limit",
@@ -795,6 +859,7 @@ pub fn cases() -> Vec<ContractCase> {
             expect: Expected::NotEstablished,
             must_mention: vec!["history".into()],
             revision: RevisionBinding::Matching,
+            accepts_refusal_at_load: false,
         },
         // ── Row R: where data may go ──────────────────────────────────────────────────────────
         ContractCase {
@@ -808,6 +873,7 @@ pub fn cases() -> Vec<ContractCase> {
             expect: Expected::Denied,
             must_mention: vec!["confidential".into(), "external".into()],
             revision: RevisionBinding::Matching,
+            accepts_refusal_at_load: false,
         },
         ContractCase {
             id: "route_class_permitted_elsewhere",
@@ -819,6 +885,7 @@ pub fn cases() -> Vec<ContractCase> {
             expect: Expected::Admitted,
             must_mention: vec![],
             revision: RevisionBinding::Matching,
+            accepts_refusal_at_load: false,
         },
         ContractCase {
             id: "route_other_class_unaffected",
@@ -830,6 +897,7 @@ pub fn cases() -> Vec<ContractCase> {
             expect: Expected::Admitted,
             must_mention: vec![],
             revision: RevisionBinding::Matching,
+            accepts_refusal_at_load: false,
         },
         ContractCase {
             id: "route_locality_unknown",
@@ -842,6 +910,7 @@ pub fn cases() -> Vec<ContractCase> {
             expect: Expected::NotEstablished,
             must_mention: vec!["locality".into()],
             revision: RevisionBinding::Matching,
+            accepts_refusal_at_load: false,
         },
         ContractCase {
             id: "route_class_absent",
@@ -854,6 +923,7 @@ pub fn cases() -> Vec<ContractCase> {
             expect: Expected::NotEstablished,
             must_mention: vec!["class".into()],
             revision: RevisionBinding::Matching,
+            accepts_refusal_at_load: false,
         },
         // ── Post-360 row K2: the fleet scopes ───────────────────────────────────────────────────
         ContractCase {
@@ -867,6 +937,7 @@ pub fn cases() -> Vec<ContractCase> {
             expect: Expected::Admitted,
             must_mention: vec![HistoryScope::FleetConsensus.label().to_string()],
             revision: RevisionBinding::Matching,
+            accepts_refusal_at_load: false,
         },
         ContractCase {
             id: "fleet_consensus_at_limit",
@@ -878,6 +949,7 @@ pub fn cases() -> Vec<ContractCase> {
             expect: Expected::Denied,
             must_mention: vec![HistoryScope::FleetConsensus.label().to_string()],
             revision: RevisionBinding::Matching,
+            accepts_refusal_at_load: false,
         },
         ContractCase {
             id: "fleet_tally_below_limit",
@@ -890,6 +962,7 @@ pub fn cases() -> Vec<ContractCase> {
             expect: Expected::Admitted,
             must_mention: vec![HistoryScope::FleetTally.label().to_string()],
             revision: RevisionBinding::Matching,
+            accepts_refusal_at_load: false,
         },
         ContractCase {
             id: "fleet_tally_at_limit",
@@ -901,6 +974,7 @@ pub fn cases() -> Vec<ContractCase> {
             expect: Expected::Denied,
             must_mention: vec![HistoryScope::FleetTally.label().to_string()],
             revision: RevisionBinding::Matching,
+            accepts_refusal_at_load: false,
         },
         ContractCase {
             id: "fleet_coverage_not_established",
@@ -917,6 +991,7 @@ pub fn cases() -> Vec<ContractCase> {
             expect: Expected::NotEstablished,
             must_mention: vec![HistoryScope::FleetTally.label().to_string()],
             revision: RevisionBinding::Matching,
+            accepts_refusal_at_load: false,
         },
         ContractCase {
             id: "fleet_rule_not_satisfied_by_the_point",
@@ -929,6 +1004,49 @@ pub fn cases() -> Vec<ContractCase> {
             expect: Expected::NotEstablished,
             must_mention: vec![HistoryScope::FleetConsensus.label().to_string()],
             revision: RevisionBinding::Matching,
+            accepts_refusal_at_load: false,
+        },
+        // Row K2's bounds: a fleet counter is a cost on every request its rule covers (each seat read, a tally entry
+        // per permit), so a limit past `MAX_FLEET_SEATS` or a window past `MAX_FLEET_WINDOW_MS` is not a limit. The
+        // counter has room — a lax adapter would permit — and the outcome is not established, at either scope.
+        ContractCase {
+            id: "fleet_limit_past_the_seat_cap",
+            requirement: "a fleet limit naming more seats than MAX_FLEET_SEATS is not established, even with every \
+                          seat free — never a permit, never clamped",
+            policy: fleet_policy_bounded(HistoryScope::FleetConsensus, MAX_FLEET_SEATS + 1, 500),
+            envelope: base("oidc:idp/alice", "tools/call", "tool:post@n1"),
+            history: Some(fleet_history_of(now, HistoryScope::FleetConsensus, FleetState::Seats { held: 0 })),
+            now_ms: now,
+            expect: Expected::NotEstablished,
+            must_mention: vec![HistoryScope::FleetConsensus.label().to_string()],
+            revision: RevisionBinding::Matching,
+            accepts_refusal_at_load: true,
+        },
+        ContractCase {
+            id: "fleet_window_past_the_horizon",
+            requirement: "a fleet limit over a window longer than MAX_FLEET_WINDOW_MS (the history horizon) is not \
+                          established, even with an empty tally",
+            policy: fleet_policy_bounded(HistoryScope::FleetTally, 3, MAX_FLEET_WINDOW_MS + 1),
+            envelope: base("oidc:idp/alice", "tools/call", "tool:post@n1"),
+            history: Some(fleet_history_of(now, HistoryScope::FleetTally, tally(0))),
+            now_ms: now,
+            expect: Expected::NotEstablished,
+            must_mention: vec![HistoryScope::FleetTally.label().to_string()],
+            revision: RevisionBinding::Matching,
+            accepts_refusal_at_load: true,
+        },
+        ContractCase {
+            id: "fleet_limit_at_the_bounds",
+            requirement: "a fleet limit of exactly MAX_FLEET_SEATS over exactly MAX_FLEET_WINDOW_MS is a limit like \
+                          any other: admitted while seats remain",
+            policy: fleet_policy_bounded(HistoryScope::FleetConsensus, MAX_FLEET_SEATS, MAX_FLEET_WINDOW_MS),
+            envelope: base("oidc:idp/alice", "tools/call", "tool:post@n1"),
+            history: Some(fleet_history_of(now, HistoryScope::FleetConsensus, FleetState::Seats { held: 0 })),
+            now_ms: now,
+            expect: Expected::Admitted,
+            must_mention: vec![HistoryScope::FleetConsensus.label().to_string()],
+            revision: RevisionBinding::Matching,
+            accepts_refusal_at_load: false,
         },
     ]
 }
@@ -958,6 +1076,14 @@ fn fleet_policy(scope: HistoryScope) -> PolicyIntent {
     PolicyIntent::new(
         "rev-1",
         vec![PolicyClause::allow_at_most_across("oidc:idp/alice", "tools/call", "tool:post@n1", 3, 500, scope, "c-posts")],
+    )
+}
+
+/// *At most `count` posts in `window_ms`, across the fleet at `scope`* — for the bounds' cases (row K2).
+fn fleet_policy_bounded(scope: HistoryScope, count: u32, window_ms: u64) -> PolicyIntent {
+    PolicyIntent::new(
+        "rev-1",
+        vec![PolicyClause::allow_at_most_across("oidc:idp/alice", "tools/call", "tool:post@n1", count, window_ms, scope, "c-posts")],
     )
 }
 
@@ -1738,6 +1864,87 @@ mod tests {
             !report.conformant(),
             "but a decline it did not declare is a gap, not a pass",
         );
+    }
+
+    /// **An adapter that refuses an out-of-bounds fleet limit at load passes those cases** (#653's review, finding 1):
+    /// refusing a policy whose fleet limit is past the seat cap or the horizon admits nothing, the safest outcome the
+    /// case can have, so it is not a decline to declare. A refusal at load on a case that does not accept one is still
+    /// a decline — here the routing cases — and is conformant only when declared.
+    #[test]
+    fn a_refusal_at_load_passes_an_out_of_bounds_case_and_nothing_else() {
+        struct Strict;
+        impl EvaluatorUnderTest for Strict {
+            fn name(&self) -> &str {
+                "Strict"
+            }
+            fn declared_limits(&self) -> &[&'static str] {
+                &["route_class_forbidden_at_locality", "route_class_permitted_elsewhere", "route_other_class_unaffected",
+                  "route_locality_unknown", "route_class_absent"]
+            }
+            fn build(&self, intent: &PolicyIntent) -> Result<Arc<dyn ActionEvaluator>, Unexpressible> {
+                for c in &intent.clauses {
+                    match c {
+                        PolicyClause::AllowAtMostAcross { count, window_ms, .. }
+                            if crate::agent::action_evaluator::check_fleet_bounds(*count, *window_ms).is_err() =>
+                        {
+                            return Err(Unexpressible { clause: "AllowAtMostAcross".into(), because: "out of bounds".into() });
+                        }
+                        PolicyClause::ForbidClassAt { .. } => {
+                            return Err(Unexpressible { clause: "ForbidClassAt".into(), because: "no class here".into() });
+                        }
+                        _ => {}
+                    }
+                }
+                ReferenceUnderTest.build(intent)
+            }
+        }
+        let report = run(&Strict);
+        for id in ["fleet_limit_past_the_seat_cap", "fleet_window_past_the_horizon"] {
+            assert!(report.passed.contains(&id), "{id}: a refusal at load passes it: {:#?}", report.declined);
+            assert!(!report.declined.iter().any(|(d, _)| *d == id), "{id} is not a decline");
+        }
+        let declined: Vec<&str> = report.declined.iter().map(|(id, _)| *id).collect();
+        assert!(declined.iter().all(|id| id.starts_with("route_")) && declined.len() == 5, "{declined:?}");
+        assert!(report.conformant(), "{}\n{:#?}", report.summary(), report.failed);
+        assert_eq!(report.passed.len() + report.declined.len(), cases().len());
+
+        // An adapter that cannot express `AllowAtMostAcross` at all refuses the two out-of-bounds cases for the wrong
+        // reason: it gets no credit for them. Credit needs `fleet_limit_at_the_bounds` passed by building — the clause
+        // expressed, and refused only on the bounds. Here every fleet case is declined, and declared it is conformant.
+        struct NoFleet;
+        const NO_FLEET: &[&str] = &[
+            "fleet_consensus_below_limit", "fleet_consensus_at_limit", "fleet_tally_below_limit", "fleet_tally_at_limit",
+            "fleet_coverage_not_established", "fleet_rule_not_satisfied_by_the_point", "fleet_limit_past_the_seat_cap",
+            "fleet_window_past_the_horizon", "fleet_limit_at_the_bounds",
+        ];
+        impl EvaluatorUnderTest for NoFleet {
+            fn name(&self) -> &str {
+                "NoFleet"
+            }
+            fn declared_limits(&self) -> &[&'static str] {
+                NO_FLEET
+            }
+            fn build(&self, intent: &PolicyIntent) -> Result<Arc<dyn ActionEvaluator>, Unexpressible> {
+                if intent.clauses.iter().any(|c| matches!(c, PolicyClause::AllowAtMostAcross { .. })) {
+                    return Err(Unexpressible { clause: "AllowAtMostAcross".into(), because: "no fleet scopes".into() });
+                }
+                ReferenceUnderTest.build(intent)
+            }
+        }
+        let report = run(&NoFleet);
+        for id in ["fleet_limit_past_the_seat_cap", "fleet_window_past_the_horizon"] {
+            assert!(!report.passed.contains(&id), "{id}: refused for the wrong reason, no credit");
+            assert!(report.declined.iter().any(|(d, _)| *d == id), "{id}: declined");
+        }
+        assert!(report.refused_at_load.is_empty(), "{:?}", report.refused_at_load);
+        assert!(report.conformant(), "{}\n{:#?}", report.summary(), report.failed);
+        // The verdict does not depend on case order: the witness run last gives the same answer.
+        let mut reversed = cases();
+        reversed.reverse();
+        let r = run_cases(&Strict, &reversed);
+        assert!(r.passed.contains(&"fleet_limit_past_the_seat_cap") && r.passed.contains(&"fleet_window_past_the_horizon"));
+        let r = run_cases(&NoFleet, &reversed);
+        assert!(!r.passed.contains(&"fleet_limit_past_the_seat_cap") && !r.passed.contains(&"fleet_window_past_the_horizon"));
     }
 
     /// The same evaluator, declaring its limit, is conformant — and a **stale** declaration is not.

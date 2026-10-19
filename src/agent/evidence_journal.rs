@@ -195,8 +195,9 @@ pub(crate) struct HistoryIndex {
     truncated_at_open: bool,
 }
 
-/// How far back an actor's history is kept, from its newest record.
-pub(crate) const HORIZON_MS: u64 = 24 * 60 * 60 * 1_000;
+/// How far back an actor's history is kept, from its newest record — 24 hours, and the longest window a fleet-scoped
+/// limit may name ([`MAX_FLEET_WINDOW_MS`](super::action_evaluator::MAX_FLEET_WINDOW_MS)): one horizon for both.
+pub(crate) const HORIZON_MS: u64 = super::action_evaluator::MAX_FLEET_WINDOW_MS;
 /// The most records kept for one actor at one point.
 pub(crate) const PER_ACTOR: usize = 1_024;
 /// The most actors kept at one point.

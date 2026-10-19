@@ -582,10 +582,95 @@ pub struct FleetCounter {
     pub window_ms: u64,
 }
 
+/// **The most seats a fleet counter may hold** — the largest `count` a fleet-scoped limit may name (row K2's bounds).
+///
+/// The enforcement point reads every seat of a [`HistoryScope::FleetConsensus`] counter — a slot digest and a KV read
+/// each — on every request the rule covers, synchronously under the actor's history gate on an async worker, and a
+/// claim may propose to each in turn; a [`HistoryScope::FleetTally`] entry keeps up to `count` permit times. So the
+/// count is a cost per request, and an unbounded one is a denial of service by misconfiguration (a limit of
+/// `u32::MAX` pinned a worker for minutes). 1,024 matches what the evidence journal keeps per actor at a point
+/// (`PER_ACTOR`) and what the private Cedar adapter accepts; a policy wanting more in a window wants a per-point limit
+/// or a shorter window. A counter past it is **refused, not clamped** — the enforcement point reads none of it and a
+/// permit relying on it is not established ([`FleetCounter::check_bounds`]).
+pub const MAX_FLEET_SEATS: u32 = 1_024;
+
+/// **The longest window a fleet-scoped limit may name**, in milliseconds: the history horizon (24 hours), the same
+/// bound the enforcement point's own history keeps an actor's records for. A seat is leased for its window, and a tally
+/// entry kept for it, so a window past the horizon would hold fleet-visible state longer than anything else the history
+/// keeps; a window of zero counts nothing. A counter outside `1..=MAX_FLEET_WINDOW_MS` is refused, not clamped.
+pub const MAX_FLEET_WINDOW_MS: u64 = 24 * 60 * 60 * 1_000;
+
+/// Why a [`FleetCounter`] is outside the bounds every enforcement point holds a fleet-scoped limit to
+/// ([`MAX_FLEET_SEATS`], [`MAX_FLEET_WINDOW_MS`]). Its `Display` names the bound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FleetBoundsError {
+    /// The limit names more seats than [`MAX_FLEET_SEATS`].
+    TooManySeats {
+        /// The limit the counter names.
+        count: u32,
+    },
+    /// The window is zero: it counts nothing.
+    EmptyWindow,
+    /// The window is longer than the history horizon, [`MAX_FLEET_WINDOW_MS`].
+    PastHorizon {
+        /// The window the counter names, in milliseconds.
+        window_ms: u64,
+    },
+}
+
+impl std::fmt::Display for FleetBoundsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooManySeats { count } => {
+                write!(f, "a limit of {count} exceeds the {MAX_FLEET_SEATS} seats a fleet counter may hold")
+            }
+            Self::EmptyWindow => write!(f, "a window of 0 ms counts nothing"),
+            Self::PastHorizon { window_ms } => write!(
+                f,
+                "a window of {window_ms} ms exceeds the history horizon of {MAX_FLEET_WINDOW_MS} ms"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FleetBoundsError {}
+
+/// Whether a fleet-scoped limit of `count` in `window_ms` is within the bounds ([`MAX_FLEET_SEATS`],
+/// [`MAX_FLEET_WINDOW_MS`]).
+pub fn check_fleet_bounds(count: u32, window_ms: u64) -> Result<(), FleetBoundsError> {
+    if count > MAX_FLEET_SEATS {
+        return Err(FleetBoundsError::TooManySeats { count });
+    }
+    if window_ms == 0 {
+        return Err(FleetBoundsError::EmptyWindow);
+    }
+    if window_ms > MAX_FLEET_WINDOW_MS {
+        return Err(FleetBoundsError::PastHorizon { window_ms });
+    }
+    Ok(())
+}
+
 impl FleetCounter {
     /// A counter at `scope`, named `key`, permitting `count` in `window_ms`.
+    ///
+    /// Infallible, so a counter outside the bounds can be built — and is then **refused wherever it is used**: the
+    /// enforcement point reads none of its seats or tallies and claims no seat ([`FleetState::NotEstablished`]), and
+    /// the seam turns a permit relying on it into *not established* ([`preflight_with_history`]). Use
+    /// [`try_new`](Self::try_new) to learn at construction.
     pub fn new(scope: HistoryScope, key: impl Into<String>, count: u32, window_ms: u64) -> Self {
         Self { scope, key: key.into(), count, window_ms }
+    }
+
+    /// [`new`](Self::new), refusing a counter outside the bounds ([`MAX_FLEET_SEATS`], [`MAX_FLEET_WINDOW_MS`]).
+    pub fn try_new(scope: HistoryScope, key: impl Into<String>, count: u32, window_ms: u64) -> Result<Self, FleetBoundsError> {
+        check_fleet_bounds(count, window_ms)?;
+        Ok(Self::new(scope, key, count, window_ms))
+    }
+
+    /// Whether this counter is within the bounds every enforcement point holds it to.
+    pub fn check_bounds(&self) -> Result<(), FleetBoundsError> {
+        check_fleet_bounds(self.count, self.window_ms)
     }
 }
 
@@ -1463,7 +1548,7 @@ pub fn evaluator_facts(
 ///
 /// **Call this rather than `ActionEvaluator::evaluate`.** This is the whole reason it is public:
 /// building an enforcement point of your own — a resource that decides at its own boundary rather
-/// than behind this gateway — means running the same five checks the gateway runs, and an
+/// than behind this gateway — means running the same six checks the gateway runs, and an
 /// evaluator called directly performs **none** of them:
 ///
 /// | The seam checks | Because an adapter that skipped it would |
@@ -1473,6 +1558,7 @@ pub fn evaluator_facts(
 /// | an expired envelope is denied *before* the evaluator runs | let a cached decision outlive its window — the evaluator holds no clock |
 /// | an unmapped or ambiguous operation cannot be permitted | name an unreviewed action as a business operation |
 /// | a panicking evaluator is caught, not trusted | turn an adapter bug into an admission |
+/// | a permit relying on a fleet counter outside [`MAX_FLEET_SEATS`] / [`MAX_FLEET_WINDOW_MS`] is not established | permit on a count no enforcement point read (row K2's bounds) |
 ///
 /// None of those is the evaluator's job, and none of them is optional. Skipping them is the
 /// *"proved leg by leg and nowhere as a whole"* failure one layer out: every piece correct, and the
@@ -1555,6 +1641,28 @@ pub fn preflight_with_history(
             checked,
             ..decision
         }));
+    }
+
+    // Row K2's bounds: a fleet counter past the seat cap or the history horizon was read by no enforcement point
+    // (`fleet_history::establish` refuses it), so a permit relying on it — whatever the evaluator said — relies on a
+    // count nobody established.
+    let unbounded = match history {
+        History::View(v) => v.fleet.iter().find_map(|f| f.counter.check_bounds().err().map(|e| (f.counter.scope, e))),
+        History::Unavailable(_) => None,
+    };
+    if decision.verdict == Verdict::Permit
+        && let Some((scope, out)) = unbounded
+    {
+        // The counter is one the enforcement point was given for this envelope; the permit may come from another rule,
+        // so the reason says what was named, not what the permit relied on — closed either way (#653's review).
+        let reason = format!(
+            "a fleet counter named for this action at scope {} is outside the fleet bounds ({out}), and no enforcement \
+             point reads one, so a permit is not established",
+            scope.label()
+        );
+        let mut errors = decision.errors.clone();
+        errors.push(format!("fleet history not established at scope {}: {out}", scope.label()));
+        return Err(PreflightRefusal::NotEstablished(Decision { verdict: Verdict::Indeterminate, reason, errors, ..decision }));
     }
 
     match decision.verdict {
@@ -2159,6 +2267,17 @@ fn fleet_limit(a: &Rule, limit: HistoryLimit, view: &HistoryView, rev: &str, lim
             )],
         });
     }
+    // A fleet limit is bounded: past the seat cap or the history horizon it is a cost on every request the rule covers,
+    // not a limit (the Cedar adapter's review). Not established, as a wildcard actor is — never clamped.
+    if let Err(out) = check_fleet_bounds(limit.count, limit.window_ms) {
+        return Err(Decision {
+            verdict: Verdict::Indeterminate,
+            checked: vec![limited],
+            reason: format!("a limit at scope {scope} must be within the fleet bounds: {out}"),
+            policy_revision: rev.to_string(),
+            errors: vec![format!("fleet history not established at scope {scope}: {out}")],
+        });
+    }
     let undecided = |why: String| Decision {
         verdict: Verdict::Indeterminate,
         checked: vec![limited.clone()],
@@ -2675,6 +2794,91 @@ mod tests {
             assert_eq!(d.verdict, expect, "{scope:?}: {d:?}");
             if expect == Verdict::Indeterminate {
                 assert!(d.reason.contains("must name its actor"), "{d:?}");
+            }
+        }
+    }
+
+    /// **A fleet limit is bounded** (the Cedar adapter's review, a denial of service by misconfiguration): the
+    /// enforcement point reads every seat of a consensus counter on each in-scope request, so a limit of `u32::MAX`
+    /// would pin a worker for minutes; and a window past the history horizon leases a seat, and keeps a tally entry,
+    /// for longer than anything else here is kept. One seat past the cap, or one millisecond past the horizon, is not
+    /// established at either fleet scope; the boundary values are a limit like any other.
+    #[test]
+    fn a_fleet_limit_past_the_seat_cap_or_the_horizon_is_not_established() {
+        const CAP: u32 = 1_024;
+        const HORIZON: u64 = 24 * 60 * 60 * 1_000;
+        let env = envelope("oidc:idp/alice", "tools/call", "tool:post@n1");
+        for scope in [HistoryScope::FleetConsensus, HistoryScope::FleetTally] {
+            let ev = |count: u32, window_ms: u64| {
+                ReferenceEvaluator::new("rev-1").allow(
+                    Rule::new("oidc:idp/alice", "tools/call", "tool:post@n1")
+                        .requiring_scopes(["mcp:invoke"])
+                        .at_most(count, window_ms)
+                        .scoped(scope, "c-posts"),
+                )
+            };
+            let room = match scope {
+                HistoryScope::FleetConsensus => FleetState::Seats { held: 0 },
+                _ => FleetState::Tally { counted: 0, publishers: vec!["n1".into()], stalest_ms: 0 },
+            };
+            for (count, window_ms, what) in [(CAP + 1, TEN_MIN, "seats"), (u32::MAX, TEN_MIN, "seats"), (3, HORIZON + 1, "horizon")] {
+                let ev = ev(count, window_ms);
+                // As an enforcement point would give it: the counter as named, with room to spare.
+                let mut h = history(2_000_000, Vec::new(), true);
+                if let History::View(v) = &mut h {
+                    v.fleet = vec![FleetCount::new(FleetCounter::new(scope, "c-posts", count, window_ms), room.clone())];
+                }
+                let d = ev.evaluate_with_history(&env, &h);
+                assert_eq!(d.verdict, Verdict::Indeterminate, "{scope:?} {count} in {window_ms} ms: {d:?}");
+                let said = format!("{} {}", d.reason, d.errors.join(" "));
+                assert!(said.contains(scope.label()) && said.contains(what), "{scope:?}: names the scope and the bound: {d:?}");
+                // The seam refuses it too, whatever the evaluator said.
+                let r = preflight_with_history(Some(&(Arc::new(ev) as Arc<dyn ActionEvaluator>)), &env, Some(&h), 30_000);
+                assert!(matches!(r, Err(PreflightRefusal::NotEstablished(_))), "{r:?}");
+            }
+            // The boundary values: the cap and the horizon themselves are limits like any other.
+            let ev = ev(CAP, HORIZON);
+            let mut h = history(2_000_000, Vec::new(), true);
+            if let History::View(v) = &mut h {
+                v.fleet = vec![FleetCount::new(FleetCounter::new(scope, "c-posts", CAP, HORIZON), room.clone())];
+            }
+            let d = ev.evaluate_with_history(&env, &h);
+            assert_eq!(d.verdict, Verdict::Permit, "{scope:?} at the cap and the horizon: {d:?}");
+        }
+    }
+
+    /// **The seam bounds every evaluator's fleet counters**, not only the reference's: an evaluator that permits on a
+    /// counter past the seat cap or the horizon is not established — the enforcement point read no such counter — and
+    /// one at the bounds is admitted.
+    #[test]
+    fn the_seam_refuses_a_permit_on_an_unbounded_fleet_counter() {
+        const CAP: u32 = 1_024;
+        const HORIZON: u64 = 24 * 60 * 60 * 1_000;
+        struct Permissive(FleetCounter);
+        impl ActionEvaluator for Permissive {
+            fn evaluate(&self, _env: &ActionEnvelope) -> Decision {
+                Decision { verdict: Verdict::Permit, checked: vec!["anything".into()], reason: "permissive".into(), policy_revision: "rev-1".into(), errors: Vec::new() }
+            }
+            fn fleet_counters(&self, _env: &ActionEnvelope) -> Vec<FleetCounter> {
+                vec![self.0.clone()]
+            }
+        }
+        let env = envelope("oidc:idp/alice", "tools/call", "tool:post@n1");
+        for scope in [HistoryScope::FleetConsensus, HistoryScope::FleetTally] {
+            for (count, window_ms, ok) in [(CAP + 1, TEN_MIN, false), (3, HORIZON + 1, false), (3, 0, false), (CAP, HORIZON, true), (0, 1, true)] {
+                let counter = FleetCounter::new(scope, "k", count, window_ms);
+                let mut h = history(2_000_000, Vec::new(), true);
+                if let History::View(v) = &mut h {
+                    v.fleet = vec![FleetCount::new(counter.clone(), FleetState::Seats { held: 0 })];
+                }
+                let ev: Arc<dyn ActionEvaluator> = Arc::new(Permissive(counter));
+                let r = preflight_with_history(Some(&ev), &env, Some(&h), 30_000);
+                if ok {
+                    assert!(matches!(r, Ok(Some(_))), "{scope:?} {count} in {window_ms} ms is within the bounds: {r:?}");
+                } else {
+                    let Err(PreflightRefusal::NotEstablished(d)) = &r else { panic!("{scope:?} {count} in {window_ms} ms: {r:?}") };
+                    assert!(d.reason.contains(scope.label()), "names the scope: {d:?}");
+                }
             }
         }
     }

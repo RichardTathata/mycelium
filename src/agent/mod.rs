@@ -192,7 +192,7 @@ pub fn is_protected_kind(cfg: &GossipConfig, kind: &str) -> bool {
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub use action_evaluator::{
     preflight, preflight_with_history, ActionEnvelope, ActionEvaluator, ActionMapping, AeEvidence, AeReference,
-    Decision, DecisionKind, EvidenceState, Execution, FleetCount, FleetCounter, FleetState, History, HistoryEntry,
+    Decision, DecisionKind, EvidenceState, Execution, check_fleet_bounds, FleetBoundsError, FleetCount, FleetCounter, FleetState, MAX_FLEET_SEATS, MAX_FLEET_WINDOW_MS, History, HistoryEntry,
     HistoryInput, HistoryLimit, HistoryRequest, HistoryScope, HistoryView, SeatClaim, FLEET_TALLY_CAVEAT, MandateBinding, MandateState, MappingKind, MappingStatus,
     PreflightRefusal, RecordKind, ReferenceEvaluator, Rule, Verdict, AE_EVIDENCE_SCHEMA, AE_REFERENCE_SCHEMA,
 };
