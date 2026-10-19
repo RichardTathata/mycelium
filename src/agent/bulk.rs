@@ -187,7 +187,9 @@ pub(crate) async fn bulk_call_ctx(
     let http_port = ctx.bulk_transport.http_port();
     if http_port == 0 { return Err(BulkError::NoHttpPort); }
 
-    let nonce: u64 = fastrand::u64(1..);
+    // Registered before the ticket leaves, as `rpc_call_framed` does: a provider on this node can answer first.
+    let reply = PendingReply::register(ctx, &target, || fastrand::u64(1..));
+    let nonce = reply.nonce();
 
     // Stage the payload; _guard removes it on any exit (timeout, cancel, success).
     let _guard = ctx.bulk_transport.stage(nonce, payload);
@@ -200,9 +202,9 @@ pub(crate) async fn bulk_call_ctx(
     buf.put(kind_bytes);
     let ticket = buf.freeze();
 
-    // Registered before the ticket leaves, as `rpc_call_framed` does: a provider on this node can answer first.
-    let reply = PendingReply::register(ctx, nonce, &target);
     emit_signal(ctx, Arc::from(signal_kind::INVOKE_BULK), SignalScope::Individual(target.clone()), ticket);
+    #[cfg(test)]
+    super::rpc::after_emit::run(&ctx.node_id);
 
     let deadline = tokio::time::Instant::now() + timeout;
     match reply.wait(deadline).await {
@@ -337,6 +339,45 @@ mod tests {
         agent.task_ctx.bulk_transport.staging.pin().remove(&nonce);
         assert!(agent.service().bulk_staging_get(nonce).is_none());
 
+        agent.shutdown().await;
+    }
+
+    /// **A bulk reply to a call on this node arrives, whenever the provider answers** — `rpc_call_framed`'s #642
+    /// regression, on `bulk_call_ctx`, which emitted its ticket and only then registered for the `bulk.result`. A
+    /// provider on this node receives the ticket inside `emit_signal`; the hook holds the caller after the emission
+    /// until the provider has answered, so on the old order the reply found no registration and the call timed out.
+    /// The provider here answers without fetching: the order of registration and emission is what is under test.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_bulk_reply_sent_before_the_caller_waits_still_reaches_it() {
+        let port = alloc_port();
+        let id   = NodeId::new("127.0.0.1", port).unwrap();
+        let mut cfg = GossipConfig::default(); cfg.bind_port = port;
+        let agent = Arc::new(GossipAgent::new(id.clone(), cfg));
+        agent.start().await.unwrap();
+        agent.task_ctx.bulk_transport.set_http_port(port); // any non-zero port: nothing fetches
+
+        let (answered_tx, answered_rx) = std::sync::mpsc::channel::<()>();
+        let answered_rx = std::sync::Mutex::new(answered_rx);
+        crate::agent::rpc::after_emit::set(&id, Arc::new(move || {
+            let _ = answered_rx.lock().unwrap().recv_timeout(Duration::from_secs(5));
+        }));
+        let mut rx = agent.task_ctx.signal_handlers.register(Arc::from(signal_kind::INVOKE_BULK));
+        let provider = Arc::clone(&agent);
+        tokio::spawn(async move {
+            while let Some(ticket) = rx.recv().await {
+                let mut reply = BytesMut::with_capacity(12);
+                reply.put_slice(&ticket.payload[..8]);
+                reply.put_slice(b"done");
+                emit_signal(&provider.task_ctx, Arc::from(signal_kind::BULK_RESULT),
+                            SignalScope::Individual(ticket.sender.clone()), reply.freeze());
+                let _ = answered_tx.send(());
+            }
+        });
+
+        let result = agent.service().bulk_call(id.clone(), "self.bulk", Bytes::from_static(b"big"), Duration::from_secs(2)).await;
+        crate::agent::rpc::after_emit::clear(&id);
+        assert_eq!(result, Ok(Bytes::from_static(b"done")), "the provider answered before the caller waited");
+        assert!(agent.task_ctx.rpc_pending.lock().unwrap().is_empty(), "nothing is left registered");
         agent.shutdown().await;
     }
 

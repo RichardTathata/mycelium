@@ -1929,7 +1929,11 @@ path, `bulk_call` included. Seen deterministically by the regression `a_reply_se
 which holds the caller after its emit until the provider has answered. With a 1 ms pause after the emit, the door test
 itself fails with CI's exact message. 800 runs without the pause, in 32 parallel processes, did not reproduce it on
 macOS. Fixed by `PendingReply`: register before the emit, remove on drop (a cancelled call no longer leaves its entry).
-The instrumentation stays.
+The instrumentation stays. #647's review, round 1, closed beside it: `bulk_call` has its own regression on the same
+hook; a timed-out call is shown to leave nothing registered; a guard removes only its own entry (a nonce no live call
+holds, re-drawn on a collision, and a registration id compared on drop); `emit_signal_async` now runs the reply
+interceptor as the other two emitters do, so a co-located reply sent through it is claimed rather than lost; and a SWIM
+probe dropped mid-flight no longer leaves its `seq` pending.
 
 **Known flake, open (K2, found 2026-10-19 while looping the door test):** under 16–32 parallel test processes, about
 1 run in 200 of the fleet-history tests (the door test, `the_consensus_scope_admits_exactly_n_spread_over_gateways`,

@@ -403,12 +403,24 @@ A requester registers its claim on the reply **before** it emits the request: `r
 registration is removed when the guard drops, so a cancelled call leaves nothing in `rpc_pending`. Never reorder
 these on the reasoning that the caller "registers before its first yield". That holds on one thread only.
 `emit_signal` hands a self-addressed request to the local provider's channel synchronously, so on a multi-threaded
-runtime the provider's serve task can answer from another worker before the emit returns. The reply interceptor keeps
-no reply that finds no registration, so the caller then waits out its timeout although the handler ran. This was the
-#642 `/mcp` door-test flake (three CI failures, `to_self=true`, the handler run). The same rule holds wherever a
-reply is collected from a channel: `MeshHandle::request` and consensus's `vote_rx` / `nack_rx` already register
-first. Gate: `agent::rpc::tests::a_reply_sent_before_the_caller_waits_still_reaches_it` (a hook holds the caller
-after its emit until the provider has answered).
+runtime the provider's serve task can answer from another worker before the emit returns. A reply that finds no
+registration is not claimed: it falls through to the local fan-out (`deliver_locally`, so a `signal_handlers`
+subscriber to the result kind still sees it), but nothing stores it for a registration made later, so the caller then
+waits out its timeout although the handler ran. This was the #642 `/mcp` door-test flake (four CI failures — at
+`098f6f3c`, `518283e4`, `2c960486` (main run 39168422948) and #646's run 39181781180 — each `to_self=true`, the
+handler run). The same rule holds wherever a reply is collected from a channel: `MeshHandle::request` and consensus's
+`vote_rx` / `nack_rx` already register first, and a SWIM probe's `pending` entry is a guard too
+(`mycelium-core/src/swim.rs` `PendingProbe`). A guard owns its entry and only its entry: `register` draws a nonce no
+live call holds (re-drawing on a collision, never overwriting), and `Drop` removes the entry only if it still carries
+the guard's registration id, so a guard whose reply was already claimed cannot remove a later call's entry under the
+same nonce. Every local emitter runs the reply interceptor — `emit_signal`, `emit_signal_ordered` and, since #647,
+`emit_signal_async` — so a co-located reply is claimed whichever emitter sends it. Gates (`src/agent/rpc.rs`,
+`src/agent/bulk.rs`, `mycelium-core/src/swim.rs` tests): `a_reply_sent_before_the_caller_waits_still_reaches_it`
+and `a_bulk_reply_sent_before_the_caller_waits_still_reaches_it` (a hook holds the caller after its emit until the
+provider has answered), `test_rpc_timeout` and `a_cancelled_call_leaves_nothing_registered` (removal on timeout and
+on cancellation), `a_registration_removes_only_its_own_entry` (a forced collision),
+`a_reply_emitted_by_the_awaiting_emitter_reaches_a_caller_on_this_node`, and
+`a_probe_dropped_mid_flight_leaves_nothing_pending`.
 
 ## Shutdown retracts through the sweep, not through the tasks (2026-10-16)
 

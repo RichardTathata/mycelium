@@ -17,3 +17,18 @@ late". It fails closed.
 
 Pages: `dev/architecture/runtime-invariants.md` (new section), `dev/architecture/hooks.md` (ReplyInterceptor row),
 `dev/concurrency/lock-order.md` (row 2). Repo: `docs/plans/post-360-hardening.md` §3.6, CHANGELOG, CLAUDE.md.
+
+## [2026-10-19] ingest | #647 review round 1: the reply guard owns its entry; the third emitter; the SWIM probe
+
+Each finding closed with a test seen failing first. `bulk_call_ctx` runs the same after-emit hook as
+`rpc_call_framed` (`rpc::after_emit`, test-only), and its self-dispatch regression timed out on the emit-then-register
+order. `test_rpc_timeout` now asserts `rpc_pending` is empty; it failed with `Drop`'s removal disabled.
+`PendingReply::register` draws a nonce no live call holds and the entry carries a registration id that `Drop` compares
+(`RpcPending`'s value gained the id); a forced-collision test failed on overwrite `(7, 7)` and on removal by nonce
+alone. `emit_signal_async` skipped the reply interceptor — not deliberate: the `rpc_pending` fast path (fecd36e1) was
+added to `emit_signal` only, and `emit_signal_ordered` copied it later — so a co-located `rpc.result` sent through it was
+lost; it now claims as the other two do (test failed with `Err(Timeout)`). A SWIM probe's `pending` entry is a
+`PendingProbe` guard; dropping a probe mid-flight left the entry (test failed on the old code).
+
+Pages: `dev/architecture/runtime-invariants.md` (the section, the occurrence count made four),
+`dev/architecture/hooks.md` (ReplyInterceptor row: citations to `mod.rs:1252-1295`, the emitters, the fall-through).

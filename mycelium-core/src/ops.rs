@@ -150,6 +150,11 @@ pub fn emit_signal_ordered(
 }
 
 /// Like [`emit_signal`] but awaits gossip channel capacity instead of dropping.
+///
+/// The reply interceptor runs here as in [`emit_signal`] and [`emit_signal_ordered`]: a co-located
+/// `rpc.result` / `bulk.result` sent through this emitter reaches the caller waiting on it. It did not
+/// until the #647 review — the interceptor (then the `rpc_pending` fast path) was given to the other two
+/// emitters only, so such a reply went to the fan-out, where no caller listens.
 pub async fn emit_signal_async(
     ctx:     &CoreCtx,
     kind:    Arc<str>,
@@ -159,12 +164,19 @@ pub async fn emit_signal_async(
     let nonce = crate::sim_seam::rng_u64_from(NONCE_STREAM, 1);
     let ts = crate::hlc::physical_ms(ctx.hlc.current()); // C11: dedup TTL, fails closed
     ctx.seen.mark_and_check(nonce, ts);
-    let handler_fill = ctx.signal_handlers.fill_ratio(&kind);
-    let combined = handler_fill.max(crate::framing::gossip_shard_fill(&ctx.gossip_txs));
-    deliver_locally(&ctx.signal_boundary, &ctx.signal_handlers, &Signal {
+    let sig = Signal {
         kind: Arc::clone(&kind), scope: scope.clone(),
         payload: payload.clone(), sender: ctx.node_id.clone(), nonce,
-    }, combined, ctx.decision_sink());
+    };
+    let nonce_claimed = match ctx.reply_interceptor.as_ref() {
+        Some(claim) => claim(&sig),
+        None => false,
+    };
+    if !nonce_claimed {
+        let handler_fill = ctx.signal_handlers.fill_ratio(&kind);
+        let combined = handler_fill.max(crate::framing::gossip_shard_fill(&ctx.gossip_txs));
+        deliver_locally(&ctx.signal_boundary, &ctx.signal_handlers, &sig, combined, ctx.decision_sink());
+    }
     let hint = forward_hint(&scope);
     dispatch_gossip_send(
         &ctx.gossip_txs,
