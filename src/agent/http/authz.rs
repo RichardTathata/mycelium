@@ -1012,13 +1012,18 @@ impl Settling {
         // seat's contenders, so no local gate is needed across the claim. A claim that fails takes the permit back:
         // every seat held is a denial; an undecidable or too-late claim is not established.
         let mut seats = Vec::new();
+        // The decisions behind the seats, with their windows: released a window after this permit is admitted (M1).
+        let mut to_release = Vec::new();
         if let Ok(Some(permit)) = &outcome {
             let mut refused = None;
             for counter in counters.iter().filter(|c| c.scope == ae::HistoryScope::FleetConsensus) {
                 let scope = counter.scope.label();
                 let line = format!("history scope={scope} counter={} limit={} window_ms={}", counter.key, counter.count, counter.window_ms);
                 match super::fleet_history::claim_seat(ctx, counter, &point, &envelope.actor, &envelope.attempt_id).await {
-                    super::fleet_history::Claim::Seat(seat) => seats.push(seat),
+                    super::fleet_history::Claim::Seat(seat, env) => {
+                        to_release.push((seat.slot.clone(), env, counter.window_ms));
+                        seats.push(seat);
+                    }
                     super::fleet_history::Claim::Full => {
                         refused = Some(ae::PreflightRefusal::Denied(
                             ae::Decision::deny(
@@ -1104,7 +1109,13 @@ impl Settling {
         }
 
         match outcome {
-            Ok(_) => Preflight::Proceed(Box::new(evidence)),
+            Ok(_) => {
+                // Admitted: each seat is held for a window from now, then released (the lease is the crash fallback).
+                for (slot, env, window_ms) in to_release {
+                    super::fleet_history::release_after_window(ctx, slot, env, window_ms);
+                }
+                Preflight::Proceed(Box::new(evidence))
+            }
             Err(refusal) => {
                 warn!(actor = %envelope.actor, %operation, %resource,
                       "AE preflight refused: {refusal}");

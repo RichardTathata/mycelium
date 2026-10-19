@@ -401,7 +401,7 @@ let policy = ReferenceEvaluator::new("rev-posts")
 
 | | `FleetConsensus` — exact | `FleetTally` — approximate |
 |---|---|---|
-| What is counted | three *seats*, each a consensus slot leased for the window plus a margin of about 19 s, the longest a claim can take | the permit times every enforcement point publishes for this actor and counter |
+| What is counted | three *seats*, each a consensus slot held a window from its permit's admission, then released by its holder; leased for the window plus a margin of about 19 s (the longest a claim is allowed to take) in case the holder crashes | the permit times every enforcement point publishes for this actor and counter |
 | When a call is admitted | after its permit **claims a seat** by a consensus write whose lease still covers a whole window from admission; every seat held → `Deny` | when the fleet's sum, as this node has heard it, is below the limit |
 | Without a quorum | the claim cannot be decided → `Indeterminate` (closed) | available — no quorum is needed |
 | Guarantee | the fleet admits at most three in any window, whichever gateways the calls reach — to within the nodes' wall-clock skew | **detection, not prevention**: two gateways can each admit before either's tally reaches the other |
@@ -433,13 +433,21 @@ handler returns. No built-in protected kind's consumer depends on arrival order 
 `skill.invoke`, `llm.invoke` each answer per request); an operator-listed kind that does should not be put under an
 exact fleet limit.
 
-*A seat admits once a window.* A seat's lease is fixed when the claim is proposed and the call is admitted after the
-round. The lease is therefore the window **plus a margin as long as a claim can take**: about 19 s, covering four
-ballots that each wait out both 2 s phases, the convergence poll and the claim's local work. A seat whose remaining
-lease is less than a whole window at admission is refused (`Indeterminate`, the seat held until its lease ends).
-Otherwise a slow claim's seat could reopen, and admit again, within one window. The margin decides only how long a
-used seat stays held past its window, which admits fewer, never more. A seat is held for its whole lease even when the call's evidence is then not
-recorded or its dispatch fails, so the exact scope errs towards admitting fewer.
+*A seat admits once a window.* A seat's lease is fixed when the claim is proposed, and the call is admitted after the
+round. So the lease is the window **plus a margin, the longest a claim is allowed to take**: 19 225 ms. That covers
+four ballots that each wait out both 2 s phases, the convergence poll, and a 2 s allowance for the claim's local work.
+That allowance is not a timeout; nothing stops local work that runs past it. A seat whose remaining lease is less than
+a whole window at admission is refused (`Indeterminate`, the seat held until its lease ends). The same is checked on
+the monotonic clock, so a backward wall-clock step cannot admit a slow claim. Otherwise a slow claim's seat could
+reopen, and admit again, within one window.
+
+*A seat is released a window after its permit is admitted.* The holder writes the decision's release marker one window
+after admission, timed on its own monotonic clock. No other node can read the seat free before that marker reaches it,
+so two admissions on one seat are a window apart without assuming the nodes' clocks agree. A saturating actor gets
+close to its limit every window: at a one-second window, about one admission a second per seat, plus the claim's own
+round. The lease ends the seat only if the holder crashes or shuts down first; a used seat then stays held for the
+window plus the margin. A seat is held for its whole window even when the call's evidence is then not recorded or its
+dispatch fails, so the exact scope errs towards admitting fewer.
 
 *Coverage, strictly.* Every node built with the `gateway` **and** `tls` features publishes a heartbeat from
 `start()`, saying whether it enforces (has an evaluator), re-asserted every third of `control_max_staleness_ms`. At a

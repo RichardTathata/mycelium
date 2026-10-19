@@ -10,8 +10,9 @@
 //!   **leased for the rule's window plus `SEAT_LEASE_MARGIN_MS`**. A permit claims a free seat by an exclusive
 //!   consensus write *before* the work is admitted ([`claim_seat`]), **outside** the per-actor history gate, so a
 //!   claim waiting on a quorum holds up no other call; a seat is admitted only if its lease still covers a whole
-//!   window from the moment of admission (`seat_admissible`), so one seat cannot admit twice within a window. The
-//!   seat stays held until its lease ends, never released early. A slot holds one live decision at a time —
+//!   window from the moment of admission (`seat_admissible`, on the wall and the monotonic clock), so one seat cannot
+//!   admit twice within a window. The holder releases the seat a window after admission ([`release_after_window`]);
+//!   the lease ends it only if the holder crashes or shuts down first. A slot holds one live decision at a time —
 //!   single-decree agreement, the property `distributed_lock` rests on — so at most `count` seats are live at once and
 //!   the fleet admits at most `count` in any window, whichever gateways the calls reach. Every seat taken: denied. A
 //!   claim that cannot be decided (no quorum, the electorate refused), or that took longer than the margin — which is
@@ -210,12 +211,19 @@ fn seat_live(ctx: &Arc<TaskCtx>, slot: &str) -> Option<Box<crate::consensus_life
     }
 }
 
+/// The decision that holds a claimed seat, kept to release it ([`release_after_window`]); nothing without consensus.
+#[cfg(feature = "consensus")]
+pub(crate) type SeatDecision = Box<crate::consensus_life::Envelope>;
+#[cfg(not(feature = "consensus"))]
+pub(crate) type SeatDecision = ();
+
 /// What a claim came to.
 #[derive(Debug)]
 #[cfg_attr(not(feature = "consensus"), allow(dead_code))]
 pub(crate) enum Claim {
-    /// This permit holds a seat.
-    Seat(SeatClaim),
+    /// This permit holds a seat, and the decision that holds it — released a window after the permit is admitted
+    /// ([`release_after_window`]).
+    Seat(SeatClaim, SeatDecision),
     /// Every seat is held by a live decision: the window already holds `count` permits fleet-wide.
     Full,
     /// No seat could be decided, and why — the rule decides `Indeterminate`.
@@ -252,6 +260,9 @@ pub(crate) async fn claim_seat(ctx: &Arc<TaskCtx>, c: &FleetCounter, point: &str
         if seat_live(ctx, &slot).is_some() {
             continue; // held, as this node sees it: a proposal would be superseded
         }
+        // Before the proposal, so at or before the lease's stamp: the monotonic time a claim took is never
+        // under-counted (review Q1 — a backward wall-clock step cannot make a slow claim look fast).
+        let claim_started = mycelium_core::sim_seam::mono_instant();
         match consensus.exclusive_propose(&slot, value.clone(), cfg.clone()).await {
             ConsensusResult::Committed { .. } => {
                 // The converged record decides whose the seat is, polled through the replay seam.
@@ -259,8 +270,17 @@ pub(crate) async fn claim_seat(ctx: &Arc<TaskCtx>, c: &FleetCounter, point: &str
                 const STEP_MS: u64 = CLAIM_CONVERGE_STEP_MS;
                 let mut waited = 0;
                 let top = loop {
-                    if let Some(top) = seat_live(ctx, &slot) {
-                        break top;
+                    match crate::consensus_life::read_slot(&ctx.kv_state, &slot, mycelium_core::sim_seam::wall_now_ms()) {
+                        crate::consensus_life::SlotView::Top(top) if !top.ended => break top,
+                        // Our own decision, already ended: its lease lapsed before it was read — the claim was too
+                        // slow, and no amount of polling changes that (review L1; it read as "not observed").
+                        crate::consensus_life::SlotView::Top(top) if top.value.as_ref() == Some(&value) => {
+                            return Claim::NotEstablished(format!(
+                                "seat {seat} was decided too late: its lease had ended by the time its decision was \
+                                 read (the seat stays held until it ends)"
+                            ));
+                        }
+                        _ => {}
                     }
                     if waited >= BUDGET_MS {
                         return Claim::NotEstablished(format!(
@@ -290,7 +310,22 @@ pub(crate) async fn claim_seat(ctx: &Arc<TaskCtx>, c: &FleetCounter, point: &str
                         c.window_ms
                     ));
                 }
-                return Claim::Seat(SeatClaim::new(c.key.clone(), slot, seat, top.env.token, expires));
+                // The same rule on the monotonic clock: the lease's length less the time the claim has taken must
+                // still cover a window. The wall clock alone would admit a slow claim after a backward step (Q1).
+                let lease_ms = match top.env.term {
+                    crate::consensus_life::Term::Lease { ms, .. } => ms,
+                    crate::consensus_life::Term::Permanent => 0,
+                };
+                let took = u64::try_from(mycelium_core::sim_seam::mono_elapsed(&claim_started).as_millis()).unwrap_or(u64::MAX);
+                if !seat_admissible(lease_ms, took, c.window_ms) {
+                    return Claim::NotEstablished(format!(
+                        "seat {seat} was decided too late: the claim took {took} ms of its {lease_ms} ms lease, leaving \
+                         less than the {} ms window (the seat stays held until it ends)",
+                        c.window_ms
+                    ));
+                }
+                let env = Box::new(top.env.clone());
+                return Claim::Seat(SeatClaim::new(c.key.clone(), slot, seat, top.env.token, expires), env);
             }
             ConsensusResult::Superseded { .. } => {} // another attempt took it
             ConsensusResult::Timeout { ballots_tried, .. } => {
@@ -313,6 +348,37 @@ pub(crate) async fn claim_seat(
 ) -> Claim {
     Claim::NotEstablished("this build has no consensus (feature `consensus`), so no seat can be claimed".into())
 }
+
+/// **Release an admitted permit's seat once its window has passed** (review M1): a window after admission, measured
+/// on this node's monotonic clock through the replay seam, the holder writes the decision's release marker
+/// (`consensus::release_envelope`). The lease — the window plus [`SEAT_LEASE_MARGIN_MS`] — stays the fallback for a
+/// holder that crashes or shuts down first; a shutdown before the window has passed releases nothing.
+///
+/// Why a release a window after admission keeps the bound: no node can read the seat free before this marker reaches
+/// it, and the marker is written at least a window after admission in real time — the timer runs on this node's own
+/// monotonic clock, so no agreement between clocks is assumed. A later admission on the same seat is therefore at least
+/// a window after this one, as it was when only the lease ended the seat. It is never early: a permit whose dispatch
+/// then fails still holds its seat for the whole window, which is all "a failed dispatch does not free its seat" ever
+/// promised against the count. Without it a used seat stayed held for the window **plus the margin**, which at a short
+/// window admitted a small fraction of the limit (about 5 % at one second).
+#[cfg(feature = "consensus")]
+pub(crate) fn release_after_window(ctx: &Arc<TaskCtx>, slot: String, env: SeatDecision, window_ms: u64) {
+    let task_ctx = Arc::clone(ctx);
+    let mut shutdown = ctx.shutdown_tx.subscribe();
+    ctx.spawn_task(async move {
+        tokio::select! {
+            _ = mycelium_core::sim_seam::sleep_ms("ae/seat-release", window_ms) => {
+                crate::consensus::release_envelope_try(&task_ctx, &slot, &env);
+            }
+            // Not released at shutdown: the window may not have passed. The lease ends the seat.
+            _ = async { let _ = shutdown.wait_for(|stopping| *stopping).await; } => {}
+        }
+    });
+}
+
+/// Without consensus no seat is ever claimed, so there is nothing to release.
+#[cfg(not(feature = "consensus"))]
+pub(crate) fn release_after_window(_ctx: &Arc<TaskCtx>, _slot: String, _env: SeatDecision, _window_ms: u64) {}
 
 // ── The gossiped tally ───────────────────────────────────────────────────────────────────────────
 

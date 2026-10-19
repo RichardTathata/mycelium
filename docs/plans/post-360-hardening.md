@@ -1801,7 +1801,9 @@ suite's in `ae_contract.rs`.
   under `consensus_require_electorate`), expire with the window* — the seats are decision records under
   `consensus/life/` (an owned namespace the raw KV routes refuse; `ae-seat/` is listed in
   `scripts/kv-namespaces-nonkeys.txt` as a slot name, not a key family), leased for the window plus
-  `SEAT_LEASE_MARGIN_MS` (2 s at merge; about 19 s since 2026-10-19, the claim's bounded duration, §3.6). Tests `under_a_required_electorate_the_seats_are_decided_in_it`,
+  `SEAT_LEASE_MARGIN_MS` (2 s at merge; 19 225 ms since 2026-10-19, the claim's bounded duration, §3.6). Since
+  2026-10-19 the holder also releases a seat one window after admission, so the lease is only the crash fallback
+  (`a_saturating_actor_gets_its_limit_each_short_window`). Tests `under_a_required_electorate_the_seats_are_decided_in_it`,
   `a_seat_is_reclaimed_after_its_window`.
 - *their growth is stated exactly (a seat's records are kept for good by row A's design, so the reference evaluator
   requires a named actor; finding 4)* — the module doc's *Growth* paragraph (at most `count` slots of three to five keys
@@ -1962,7 +1964,19 @@ forward, still reaches the refusal, which fails closed.
 
 Why it is sound: a seat admits only while its lease covers a whole window, so two admissions on one seat are at least a
 window apart whatever the margin. The count stays at most `count` per window. A longer margin only holds a used seat
-longer past its window: about 19 s rather than 2 s, which admits fewer, never more.
+longer past its window, which admits fewer, never more. The review of #648 (M1) found that cost large at short
+windows: about 5 % of the limit at a one-second window. So the holder now releases the seat one window after
+admission, timed on its monotonic clock (`fleet_history::release_after_window`, through
+`consensus::release_envelope`). No node reads the seat free before that marker arrives, so the bound needs no clock
+agreement. The lease remains the fallback if the holder crashes.
+
+The same review added three changes. The admission check is also made on the monotonic clock (Q1, a backward
+wall-clock step). A decision whose lease ended before it was read is refused "too late" at once (L1). A test covers
+two lost ballots (L2). Every `admitted(…).is_some()` assertion in `fleet_history_tests.rs` now prints the refusal.
+The bare one in `the_gateway_and_the_provider_count_apart` failed in #647's CI with no reason given; under load with the
+old margin it failed 2 times in 480 runs, both "decided too late", and 0 times in 480 with the fix. With the release,
+`a_seat_is_reclaimed_after_its_window` reads the seat on the node that posts next, since a released seat is seen free
+only once the marker arrives.
 
 Restamping the lease at commit was rejected. The stamp is inside the envelope the acceptors agree on, and a later ballot
 may have to adopt an earlier ballot's envelope.

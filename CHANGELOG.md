@@ -68,7 +68,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   spread its calls over N gateways could be admitted up to N times a limit. `Rule::at_most(n, w).scoped(scope,
   counter_id)` now names one of two fleet scopes and an opaque counter id; the per-point count stays the default.
   - **`HistoryScope::FleetConsensus` — exact.** A counter of `n` seats, each a consensus slot (`ae-seat/…`) leased
-    for the window plus a margin as long as a claim can take (`SEAT_LEASE_MARGIN_MS`, about 19 s). A permit claims a free seat by an exclusive consensus write *before* the work is
+    for the window plus a margin, the longest a claim is allowed to take (`SEAT_LEASE_MARGIN_MS`, 19 225 ms), and
+    released by its holder a window after its permit is admitted. A permit claims a free seat by an exclusive consensus write *before* the work is
     admitted — after the per-actor history gate is released, so a claim waiting on a quorum holds up no other call —
     and a seat whose remaining lease no longer covers a whole window is refused, so one seat cannot admit twice in a
     window. The fleet admits at most `n` in any window, whichever gateways the calls reach — to within the nodes'
@@ -119,8 +120,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `an_aged_tally_entry_is_withdrawn`, `an_isolated_node_does_not_establish_a_tally`,
     `a_stale_publisher_makes_the_tally_not_established`, `a_peer_with_no_heartbeat_makes_the_tally_not_established`,
     `a_heartbeat_from_the_future_makes_the_tally_not_established`, and the evaluator's unit tests.
-  - **Not built:** a seat released early (a seat is held for its whole lease, even if the call's evidence is not
-    recorded or its dispatch fails); collection of a seat's records (each counter, kind of point and actor that ever
+  - **Not built:** a seat released before its window has passed (a seat is held for its whole window, even if the
+    call's evidence is not recorded or its dispatch fails); collection of a seat's records (each counter, kind of point and actor that ever
     claims keeps up to `count` slots of three to five keys on every member, and `count` shrunk acceptor entries on
     every voter); a tally entry signed by its publisher. As at one node, the gateway's doors count together and the
     provider check apart.
@@ -163,9 +164,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unreleased). A seat's lease is stamped before the claim's first ballot, and the call is admitted only if a whole
   window of the lease remains. That makes the lease margin the latency a claim is allowed. The margin was 2 s, exactly
   one phase timeout, so a claim that lost one ballot to its timeout was always refused `Indeterminate`. Under load that
-  happened about 1 run in 50. The margin is now derived from the claim's bounds (four ballots each waiting out both
-  phases, the convergence poll, the local work): 19 225 ms. Safety is unchanged: one seat still admits at most once per
-  window. A used seat is now held about 19 s past its window rather than 2 s (`deprecations.md` §53).
+  happened about 1 run in 50. The margin is now derived from the claim's bounds: 19 225 ms, the longest a claim is
+  allowed to take. That covers four ballots each waiting out both phases, the convergence poll, and a 2 s allowance for
+  local work, which is an allowance, not a timeout. The admission check is also made on the monotonic clock, so a
+  backward wall-clock step cannot admit a slow claim. A decision whose lease had already ended when it was read is
+  refused "too late" at once, not reported as unobserved after a second of polling.
+
+  So that the longer lease does not throttle short windows, the holder now releases a seat one window after its permit
+  is admitted, timed on its monotonic clock. The lease ends the seat only if the holder crashes or shuts down first.
+  Before, a used seat stayed held for its whole lease; at a one-second window that admitted about a third of the limit
+  with the old margin, and about 5 % with the new one. Safety is unchanged: one seat admits at most once per window,
+  since no node reads the seat free before the holder's release reaches it (`deprecations.md` §53).
 
 - **A confined activation's re-probe no longer withdraws an install whose declared path was replaced legitimately**
   (post-360 row M's follow-up, #641). A write directory rotated or a read file replaced by an atomic rename failed

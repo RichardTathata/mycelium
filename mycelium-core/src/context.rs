@@ -251,11 +251,17 @@ impl CoreCtx {
     /// The guard is released before the future is polled; this is the single
     /// substrate task-spawn entry point used by the typed handles' task helpers
     /// (`advertise`, `watch`, `subscribe_log`, …) and the gossip lifecycle tasks.
+    ///
+    /// Tasks that have already finished are reaped first: a `JoinSet` keeps a finished task's entry until it is
+    /// joined, and nothing joins this set before shutdown, so a caller that spawns one short task per event (row K2's
+    /// seat release, one per admitted permit) would otherwise grow it for the node's life.
     pub fn spawn_task<F>(&self, fut: F)
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
-        self.task_handles.lock().unwrap_or_else(|e| e.into_inner()).spawn(fut);
+        let mut handles = self.task_handles.lock().unwrap_or_else(|e| e.into_inner());
+        while handles.try_join_next().is_some() {}
+        handles.spawn(fut);
     }
 }
 

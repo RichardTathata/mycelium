@@ -21,3 +21,17 @@ Fail-first: `a_claim_that_loses_a_ballot_to_its_timeout_is_admitted`, with the h
 
 Pages: none changed. Repo: plan §3.5 (K2) and §3.6, CHANGELOG, `deprecations.md` §53,
 `docs/guide/20-authorising-actions.md`, `src/lib.rs`'s namespace table, the rule catalogue's K2 effect.
+
+**After the review of #648.** The longer lease cost throughput at short windows: about 5 % of the limit at a
+one-second window (M1). So the holder now releases the seat one window after admission, timed on its monotonic clock
+(`release_after_window`, through `consensus::release_envelope`), and the lease is only the crash fallback. The safety
+argument needs no clock agreement: no node reads the seat free before the holder's marker arrives, and the holder
+writes it at least a window after admission.
+
+Three smaller changes came from the same review:
+- The admission check is also made on the monotonic time since the claim started (Q1, a backward wall-clock step).
+- A decision already ended when read is refused "too late" at once (L1).
+- `spawn_task` reaps finished tasks, so one short task per permit does not grow the node's `JoinSet` for its life.
+
+A general lesson: a lease that is long for safety's sake needs a holder-side release, or it quietly becomes a rate
+limit.

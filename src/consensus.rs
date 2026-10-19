@@ -4979,14 +4979,6 @@ pub(crate) fn acceptor_answers_unrecorded() -> u64 {
 
 // ── Voter task ───────────────────────────────────────────────────────────────
 
-/// Answers a [`Prepare`](ConsensusMsg::Prepare): promise and report, or refuse and say what was
-/// promised. The promise is **on stable storage before the answer leaves** — applied to the store,
-/// then handed to the WAL and fsynced (`persist_acceptor`), the same rung a vote's record and a
-/// commit reach — because a proposer chooses its value on the strength of it, and a restart must
-/// not let this node break it. Until 2.32.0 this said "handed to the WAL" and was not: the record
-/// was applied and gossiped only. A promise that does not reach the WAL is **not answered**, and
-/// the withheld answer is counted (`acceptor_answers_unrecorded`).
-#[cfg(feature = "consensus")]
 /// Test hook, per acceptor node: a slot prefix and how many of its prepares still go unanswered — a promise lost, so
 /// the proposer's prepare phase waits out its timeout and the next ballot decides.
 #[cfg(test)]
@@ -5003,6 +4995,14 @@ fn test_swallow_prepare(node: &NodeId, slot: &str) -> bool {
     })
 }
 
+/// Answers a [`Prepare`](ConsensusMsg::Prepare): promise and report, or refuse and say what was
+/// promised. The promise is **on stable storage before the answer leaves** — applied to the store,
+/// then handed to the WAL and fsynced (`persist_acceptor`), the same rung a vote's record and a
+/// commit reach — because a proposer chooses its value on the strength of it, and a restart must
+/// not let this node break it. Until 2.32.0 this said "handed to the WAL" and was not: the record
+/// was applied and gossiped only. A promise that does not reach the WAL is **not answered**, and
+/// the withheld answer is counted (`acceptor_answers_unrecorded`).
+#[cfg(feature = "consensus")]
 async fn answer_prepare(
     ctx: &ConsensusEngine, slot: Arc<str>, ballot: u64, proposer: NodeId, term: bool, gate: Option<Gate>,
 ) {

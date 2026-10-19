@@ -480,7 +480,8 @@ async fn a_claim_waiting_on_a_quorum_holds_up_no_other_call() {
     let other = call_as(&a, &neighbour, "tool:read", POINT).await;
     let uncovered = call_as(&a, anon, "tool:free", POINT).await;
     let took = started.elapsed();
-    assert!(admitted(&other).is_some() && admitted(&uncovered).is_some(), "both are within their own rules");
+    assert!(admitted(&other).is_some(), "the other actor is within its own rule: {:?}", refusal(&other));
+    assert!(admitted(&uncovered).is_some(), "the uncovered call is within its own rule: {:?}", refusal(&uncovered));
     assert!(took < Duration::from_secs(2), "neither waited on the claim: {took:?}");
     assert!(!claim.is_finished(), "the claim was still waiting on its quorum");
     let out = claim.await.unwrap();
@@ -654,8 +655,8 @@ async fn a_serve_loop_that_ends_answers_its_deferred_checks() {
 
 /// **Finding 2: a seat decided too late for its window does not admit.** A seat's lease is fixed when it is
 /// proposed and the call is admitted after the round; admitting one whose remaining lease is shorter than the window
-/// would let the seat reopen, and admit again, within one window. With the margin cut to half a second, a claim
-/// answered at once is admitted, and one delayed past the margin is not established — its seat stays held.
+/// would let the seat reopen, and admit again, within one window. With a margin of one lost ballot a claim is
+/// admitted; with the margin cut to half a second, one delayed past it is not established — its seat stays held.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn a_seat_decided_too_late_for_its_window_is_not_admitted() {
     let (p1, p2) = (port(), port());
@@ -666,7 +667,9 @@ async fn a_seat_decided_too_late_for_its_window_is_not_admitted() {
         [&a, &b].iter().map(|n| n.consensus().start_consensus_listener(ConsensusConfig::default())).collect();
     ready(&[&a, &b]).await;
     let me = a.node_id().to_string();
-    super::TEST_CLAIM_HOOKS.pin().insert(me.clone(), (500, 0));
+    // The first claim gets a margin of at least one ballot lost to its timeouts, so it is admitted under load too
+    // (review L1: at 500 ms it was exposed to the flake this margin fixes).
+    super::TEST_CLAIM_HOOKS.pin().insert(me.clone(), (4_100, 0));
     let out = post(&a).await;
     assert!(admitted(&out).is_some(), "a claim inside the margin is admitted: {:?}", refusal(&out));
     super::TEST_CLAIM_HOOKS.pin().insert(me.clone(), (500, 800));
@@ -680,6 +683,31 @@ async fn a_seat_decided_too_late_for_its_window_is_not_admitted() {
     b.shutdown().await;
 }
 
+/// A claim at `a` whose first `lost` seat prepares `b` leaves unanswered: each lost one costs a prepare phase (2 s)
+/// before the next ballot. Returns the preflight and how long it took.
+async fn claim_losing_prepares(a: &Arc<GossipAgent>, b: &Arc<GossipAgent>, lost: u32) -> (Preflight, Duration) {
+    let left = Arc::new(std::sync::atomic::AtomicU32::new(lost));
+    crate::consensus::TEST_SWALLOW_PREPARES
+        .pin()
+        .insert(b.node_id().to_string(), (super::SEAT_SLOT_PREFIX.to_string(), Arc::clone(&left)));
+    let started = std::time::Instant::now();
+    let out = post(a).await;
+    let took = started.elapsed();
+    crate::consensus::TEST_SWALLOW_PREPARES.pin().remove(&b.node_id().to_string());
+    assert_eq!(left.load(std::sync::atomic::Ordering::SeqCst), 0, "b left {lost} prepare(s) unanswered");
+    (out, took)
+}
+
+/// A pair of nodes under *at most three posts in ten minutes* at the consensus scope, both voting.
+async fn voting_pair() -> (Arc<GossipAgent>, Arc<GossipAgent>, Vec<crate::ConsensusListenerHandle>) {
+    let (p1, p2) = (port(), port());
+    let a = node(p1, &[], 3, HistoryScope::FleetConsensus, |_| {}).await;
+    let b = node(p2, &[p1], 3, HistoryScope::FleetConsensus, |_| {}).await;
+    let listeners = [&a, &b].iter().map(|n| n.consensus().start_consensus_listener(ConsensusConfig::default())).collect();
+    ready(&[&a, &b]).await;
+    (a, b, listeners)
+}
+
 /// **A claim that loses one ballot to its phase timeout is still admitted.** `b` leaves `a`'s first prepare for a seat
 /// unanswered, so the first ballot waits out its prepare phase (2 s) and the second decides the seat. The seat's lease
 /// is stamped when the claim's decision envelope is built, before the first ballot, and the call is admitted only if
@@ -688,27 +716,106 @@ async fn a_seat_decided_too_late_for_its_window_is_not_admitted() {
 /// parallel load). The margin now covers a claim's whole bounded duration.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn a_claim_that_loses_a_ballot_to_its_timeout_is_admitted() {
-    let (p1, p2) = (port(), port());
-    let a = node(p1, &[], 3, HistoryScope::FleetConsensus, |_| {}).await;
-    let b = node(p2, &[p1], 3, HistoryScope::FleetConsensus, |_| {}).await;
-    let _listeners: Vec<_> =
-        [&a, &b].iter().map(|n| n.consensus().start_consensus_listener(ConsensusConfig::default())).collect();
-    ready(&[&a, &b]).await;
-    let left = Arc::new(std::sync::atomic::AtomicU32::new(1));
-    crate::consensus::TEST_SWALLOW_PREPARES
-        .pin()
-        .insert(b.node_id().to_string(), (super::SEAT_SLOT_PREFIX.to_string(), Arc::clone(&left)));
-    let started = std::time::Instant::now();
-    let out = post(&a).await;
-    let took = started.elapsed();
-    crate::consensus::TEST_SWALLOW_PREPARES.pin().remove(&b.node_id().to_string());
-    assert_eq!(left.load(std::sync::atomic::Ordering::SeqCst), 0, "b left the first prepare unanswered");
+    let (a, b, _listeners) = voting_pair().await;
+    let (out, took) = claim_losing_prepares(&a, &b, 1).await;
     assert!(took >= Duration::from_secs(2), "the first ballot waited out its prepare phase: {took:?}");
     let e = admitted(&out).unwrap_or_else(|| panic!("a claim decided at its second ballot is admitted: {:?}", refusal(&out)));
     let seat = &e.history.as_ref().unwrap().seats[0];
     // The lease still covers a whole window from admission: one seat cannot admit twice within a window.
     let now = mycelium_core::sim_seam::wall_now_ms();
     assert!(super::seat_admissible(seat.expires_at_ms, now, TEN_MIN), "{seat:?}");
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **Review L2: two ballots lost, about four seconds, are still within the margin** — a margin sized for one lost
+/// phase (2.3 s) refuses this claim.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_claim_that_loses_two_ballots_to_their_timeouts_is_admitted() {
+    let (a, b, _listeners) = voting_pair().await;
+    let (out, took) = claim_losing_prepares(&a, &b, 2).await;
+    assert!(took >= Duration::from_secs(4), "two prepare phases waited out: {took:?}");
+    assert!(admitted(&out).is_some(), "decided at the third ballot, admitted: {:?}", refusal(&out));
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **Review L1: a lease that lapsed before its decision was read is "too late" at once**, not polled for a second and
+/// reported as unobserved. A margin of nothing leases the seat for exactly its one-second window; one lost prepare makes
+/// the claim take two seconds, so the decision it reads is already ended.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_lease_that_lapsed_before_its_decision_was_read_is_too_late() {
+    let (p1, p2) = (port(), port());
+    let a = node_with(p1, &[], posts(3, 1_000, HistoryScope::FleetConsensus), |_| {}).await;
+    let b = node_with(p2, &[p1], posts(3, 1_000, HistoryScope::FleetConsensus), |_| {}).await;
+    let _listeners: Vec<_> =
+        [&a, &b].iter().map(|n| n.consensus().start_consensus_listener(ConsensusConfig::default())).collect();
+    ready(&[&a, &b]).await;
+    super::TEST_CLAIM_HOOKS.pin().insert(a.node_id().to_string(), (0, 0));
+    let (out, _) = claim_losing_prepares(&a, &b, 1).await;
+    super::TEST_CLAIM_HOOKS.pin().remove(&a.node_id().to_string());
+    let r = refusal(&out);
+    assert!(said(r).contains("decided too late") && said(r).contains("had ended"), "{r:?}");
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **Review Q1: a backward wall-clock step does not admit a slow claim.** The margin is cut to half a second (a lease of
+/// the window plus one second) and one lost prepare makes the claim take two; while it waits, the wall clock steps back
+/// five seconds, so the wall-clock reading alone says the lease still covers a window. The monotonic reading does not.
+/// One thread, so the thread-local step reaches both nodes.
+#[tokio::test(flavor = "current_thread")]
+async fn a_backward_clock_step_does_not_admit_a_slow_claim() {
+    let (a, b, _listeners) = voting_pair().await;
+    super::TEST_CLAIM_HOOKS.pin().insert(a.node_id().to_string(), (500, 0));
+    let step = tokio::spawn(async {
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+        mycelium_core::sim_seam::step_wall_clock_for_test(-5_000);
+    });
+    let (out, took) = claim_losing_prepares(&a, &b, 1).await;
+    step.await.unwrap();
+    mycelium_core::sim_seam::step_wall_clock_for_test(0);
+    super::TEST_CLAIM_HOOKS.pin().remove(&a.node_id().to_string());
+    assert!(took >= Duration::from_secs(2), "{took:?}");
+    let r = refusal(&out);
+    assert!(said(r).contains("decided too late") && said(r).contains("the claim took"), "{r:?}");
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **Review M1: under a short window a saturating actor gets its limit each window**, not once per window plus the
+/// lease margin. One seat in a one-second window, posted for as fast as the gateways answer, alternating between them:
+/// the holder releases the seat a window after admission, so it is admitted about once a second — and never twice
+/// within a second, measured from before one admitting call to after the next.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_saturating_actor_gets_its_limit_each_short_window() {
+    let (p1, p2) = (port(), port());
+    let a = node_with(p1, &[], posts(1, 1_000, HistoryScope::FleetConsensus), |_| {}).await;
+    let b = node_with(p2, &[p1], posts(1, 1_000, HistoryScope::FleetConsensus), |_| {}).await;
+    let _listeners: Vec<_> =
+        [&a, &b].iter().map(|n| n.consensus().start_consensus_listener(ConsensusConfig::default())).collect();
+    ready(&[&a, &b]).await;
+    let run = std::time::Instant::now();
+    let mut admitted_at: Vec<(std::time::Instant, std::time::Instant)> = Vec::new();
+    let mut i = 0usize;
+    while run.elapsed() < Duration::from_millis(4_500) {
+        let gw = if i.is_multiple_of(2) { &a } else { &b };
+        i += 1;
+        let before = std::time::Instant::now();
+        let out = post(gw).await;
+        let after = std::time::Instant::now();
+        if admitted(&out).is_some() {
+            admitted_at.push((before, after));
+        } else {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+    assert!(admitted_at.len() >= 4, "about one admission a second over 4.5 s, got {}", admitted_at.len());
+    for w in admitted_at.windows(2) {
+        let (before_first, _) = w[0];
+        let (_, after_next) = w[1];
+        assert!(after_next.duration_since(before_first) >= Duration::from_millis(1_000), "two admissions within a window");
+    }
     a.shutdown().await;
     b.shutdown().await;
 }
@@ -731,9 +838,11 @@ async fn a_seat_is_reclaimed_after_its_window() {
     let first = post(&a).await;
     let seat = admitted(&first).expect("the first holds the seat").history.as_ref().unwrap().seats[0].clone();
     assert!(matches!(refusal(&post(&b).await), PreflightRefusal::Denied(_)), "the window is full");
-    let ctx = Arc::clone(&a.task_ctx);
+    // Ended by the holder's release a window after admission — read on `b`, the node that posts next, which sees it
+    // only once the release marker arrives (reading it on `a`, the holder, raced the gossip to `b`).
+    let ctx = Arc::clone(&b.task_ctx);
     let slot = seat.slot.clone();
-    assert!(until(|| super::seat_live(&ctx, &slot).is_none(), Duration::from_secs(15)).await, "the seat's lease ends");
+    assert!(until(|| super::seat_live(&ctx, &slot).is_none(), Duration::from_secs(15)).await, "the seat ends at b");
     let third = post(&b).await;
     let again = admitted(&third).unwrap_or_else(|| panic!("reclaimed: {:?}", refusal(&third)));
     assert_eq!(again.history.as_ref().unwrap().seats[0].slot, seat.slot, "the same seat, decided afresh");
@@ -797,7 +906,8 @@ async fn the_gateway_and_the_provider_count_apart() {
         [&a, &b].iter().map(|n| n.consensus().start_consensus_listener(ConsensusConfig::default())).collect();
     ready(&[&a, &b]).await;
     for _ in 0..3 {
-        assert!(admitted(&post(&a).await).is_some());
+        let out = post(&a).await;
+        assert!(admitted(&out).is_some(), "within the limit, admitted: {:?}", refusal(&out));
     }
     assert!(matches!(refusal(&post(&a).await), PreflightRefusal::Denied(_)), "the gateway's seats are full");
     let at_provider = call_as(&b, crate::PRINCIPAL_ANONYMOUS, "tool:post", "provider").await;
@@ -880,7 +990,8 @@ async fn an_aged_tally_entry_is_withdrawn() {
     let a = node_with(p1, &[], posts(3, 300, HistoryScope::FleetTally), |_| {}).await;
     let b = node_with(p2, &[p1], posts(3, 300, HistoryScope::FleetTally), |_| {}).await;
     ready(&[&a, &b]).await;
-    assert!(admitted(&post(&a).await).is_some());
+    let out = post(&a).await;
+    assert!(admitted(&out).is_some(), "within the limit, admitted: {:?}", refusal(&out));
     let ctx = Arc::clone(&a.task_ctx);
     let prefix = format!("{}{}/c/", super::TALLY_PREFIX, a.node_id());
     assert_eq!(mycelium_core::ops::kv_scan_prefix(&ctx, &prefix).len(), 1, "the permit is published");
@@ -1154,7 +1265,8 @@ async fn a_graceful_leave_keeps_the_tally_established() {
     // A third member, so `a` still hears the fleet once `b` is gone.
     let c = node_tls(p3, &[p1, p2], posts(3, TEN_MIN, HistoryScope::FleetTally), &certs, |_| {}).await;
     ready_tls(&[&a, &b, &c]).await;
-    assert!(admitted(&post(&b).await).is_some(), "b admits one");
+    let out = post(&b).await;
+    assert!(admitted(&out).is_some(), "b admits one: {:?}", refusal(&out));
     let b_id = b.node_id().to_string();
     let actx = Arc::clone(&a.task_ctx);
     let prefix = format!("{}{b_id}/c/", super::TALLY_PREFIX);
@@ -1205,7 +1317,8 @@ async fn a_dead_members_permits_count_and_a_fabricated_id_counts_nothing() {
     assert!(!tally_counted(e).1.contains(&fake), "the fabricated id is not a publisher");
 
     // A member that admits one and goes.
-    assert!(admitted(&post(&c).await).is_some());
+    let out = post(&c).await;
+    assert!(admitted(&out).is_some(), "within the limit, admitted: {:?}", refusal(&out));
     let c_id = c.node_id().to_string();
     let bctx = Arc::clone(&b.task_ctx);
     let prefix = format!("{}{c_id}/c/", super::TALLY_PREFIX);
@@ -1548,7 +1661,8 @@ async fn without_tls_a_non_peers_absence_is_not_established() {
     let a = node(p1, &[], 3, HistoryScope::FleetTally, |_| {}).await;
     let b = node(p2, &[p1], 3, HistoryScope::FleetTally, |_| {}).await;
     ready(&[&a, &b]).await;
-    assert!(admitted(&post(&b).await).is_some(), "established while every enforcing node is a peer");
+    let out = post(&b).await;
+    assert!(admitted(&out).is_some(), "established while every enforcing node is a peer: {:?}", refusal(&out));
     let gone = NodeId::new("127.0.0.1", port()).unwrap().to_string();
     let now = b.task_ctx.hlc.decision_now_ms();
     let hb = serde_json::to_vec(&serde_json::json!({"as_of": now - 1_000, "enforces": true})).unwrap();

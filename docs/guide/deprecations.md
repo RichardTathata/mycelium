@@ -1747,11 +1747,13 @@ scope also needs a consensus listener on the voting nodes and, under `consensus_
 `exclusive_default` electorate. The tally scope needs every member built with `gateway` **and** `tls`, and is not
 established on a node that has heard from fewer than `control_min_peers_heard` peers.
 
-**A used seat is held about 19 s past its window.** A seat's lease is the window plus `SEAT_LEASE_MARGIN_MS`,
-the longest a claim can take (19 225 ms: four ballots each waiting out both 2 s phases, the convergence poll, the
-claim's local work). It was 2 s before this release was cut, which refused every claim that needed a second ballot. An
-actor at its limit sees a seat reopen up to that margin after the window that used it. The bound holds as stated: at
-most `n` per window, never more.
+**A seat is released a window after its permit is admitted; the lease is the crash fallback.** The holder releases
+the seat one window after admission, timed on its monotonic clock, so a saturating actor gets close to `n` per window
+at any window length. The lease is the window plus `SEAT_LEASE_MARGIN_MS`, 19 225 ms. That is the longest a claim is
+allowed to take: four ballots each waiting out both 2 s phases, the convergence poll, and a 2 s allowance for local
+work that is not a timeout. Only when the holder crashes or shuts down first does a used seat stay held for the window
+plus that margin. Before this release was cut the margin was 2 s, which refused every claim that needed a second
+ballot, and nothing released a seat early. The bound holds as stated: at most `n` per window, never more.
 
 **Head-of-line limit.** A serve loop holds at most 64 checks that are settling a seat claim. With 64 waiting — under a
 lost quorum, each for up to 2 s per phase × 4 ballots per seat — the loop stops taking requests, so every request
