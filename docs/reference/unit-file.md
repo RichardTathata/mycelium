@@ -417,7 +417,7 @@ node's own egress allow-list, and attaches `credentials` through the node's egre
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `hosts` | array of strings | empty | Upstreams, each `https://host[:port]` or `http://host[:port]` — one host name or address, no path, query, userinfo or wildcard; matched exactly (case-insensitive), never as a suffix. Empty: the proxy carries nothing (until the list is set live). An entry the node's `egress.allow_hosts` denies refuses the stem's start. |
-| `credentials` | array of strings | empty | Names of the node's [`[[egress_credentials]]`](../operations/crown-jewel.md#credentials-attached-at-egress) bindings this activation's requests may name by placeholder. A name that is not a binding on the node refuses the stem's start; a placeholder naming any other binding is refused at the proxy. |
+| `credentials` | array of strings | empty | Names of the node's [`[[egress_credentials]]`](../operations/crown-jewel.md#credentials-attached-at-egress-post-360-plan-row-l-2350) bindings this activation's requests may name by placeholder. A name that is not a binding on the node refuses the stem's start; a placeholder naming any other binding is refused at the proxy. |
 
 **What the command must do.** Like every confined command it starts with a **cleared environment**
 (`[activation.confine] env`, above); with an egress table it also gets `HTTP_PROXY`, `HTTPS_PROXY`,

@@ -1,7 +1,8 @@
 # Feature pages — one short, checked entry page per feature
 
-**Status:** proposed, rev 0.2. Agreed with the maintainer on 2026-10-19 and not started; work begins after
-v2.36.0 ships. No row below is delivered. Rev 0.2 answers the independent review of PR #649.
+**Status:** in progress, rev 0.3. Agreed with the maintainer on 2026-10-19; work began after v2.36.0 shipped. F1 is
+in progress (the template and two of three pilots, §4); no row is delivered. Rev 0.2 answered the independent review
+of PR #649; rev 0.3 records what the first two pilots taught (§4.1).
 
 ## 1 · The gap
 
@@ -52,9 +53,25 @@ Three mechanisms keep the pages true, each covering a different kind of check.
 
 | Row | Work | Exit |
 |---|---|---|
-| F1 | The template and three pilot pages: the activation egress proxy (rows L and M), fleet-wide history limits (K2) and inference routing (R) | Each pilot page has an independent review against the code, and the template is revised from what the pilots show. |
+| F1 — *in progress: the template ([`docs/features/README.md`](../features/README.md), [`_template.md`](../features/_template.md)) and two of three pilots, [activation egress proxy](../features/activation-egress-proxy.md) and [inference routing](../features/inference-routing.md); K2 waits for PR #653* | The template and three pilot pages: the activation egress proxy (rows L and M), fleet-wide history limits (K2) and inference routing (R) | Each pilot page has an independent review against the code, and the template is revised from what the pilots show. |
 | F2 | The feature registry and the gate (F-G) | The gate fails on an unmapped id, on a page with a missing section, on a dead link or setting, and on an example absent from the index. Each of these is shown failing with a planted fault. |
 | F3 | The remaining pages, an estimated 30 to 40 | The gate is green and every capability-map row lists its pages. The map's maintainer note names the feature pages and the registry. |
 | F4 | The `/doc-coverage` pass (F-S) and the fifth rule (F-P) | The pass has been run once and its findings closed. The policy page, CLAUDE.md and `/adversarial-review` all state the rule, and "four rules" reads "five" wherever it appears. |
 
 **Not in scope:** rewriting the guide chapters or runbooks the pages link to.
+
+### 4.1 · What the first two pilots taught — proposed template revisions
+
+Proposed, not adopted: F1's exit revises the template once the third pilot (K2) and the independent review are in.
+Two of them the pilots could not be written without, so the front page already carries them provisionally (P1, P2).
+
+| # | Found | Proposed revision |
+|---|---|---|
+| P1 | Inference routing has no configuration field or unit-file section: it is turned on in code (`reason_router_classified`, `DataClassPolicy`, `Rule::for_class`/`at_locality`, `ModelProfile::in_domain`). §2's *Turn it on* assumed a setting. | *Turn it on* lists settings **or**, for a feature enabled in code, the API and the test that runs that code (here `guide_20_routing_policy`). The F-G gate's "settings that exist in the reference" check then needs a second form: a named public item that exists in the code. |
+| P2 | Neither pilot has an example in the example index — both are shown end to end only by tests (`mycelium-wasm-host/tests/stem_sighup.rs`; `mycelium-reason/tests/gateway.rs`). | *See it work* allows "no example exists", stated, with the end-to-end test named. The F-G gate accepts that form only when the test is in the `test-coverage` universe, so it cannot name a test CI never runs; F3 may instead add examples. |
+| P3 | `stem.activation_egress` and `stem.activation_confined` are registered by `mycelium-stem`, not the core, so they are not in the guarantee catalogue; there is nothing to link them to but `unit-file.md`'s prose and the code. | Either the guarantee catalogue gains the companion-registered guarantees, or §2 allows linking such an id to the page that states its states. The F-G registry's sources must include companion-registered guarantee ids either way, or these two are invisible to it. |
+| P4 | Several targets have no per-entry anchor: the guarantee catalogue's descriptor table, the what-is-proven ledger's rows, `configuration.md`'s field table, and the plan rows (only §3.3 and §3.5 have anchors). A page can link only to the table and name the row. | Give the catalogues' rows, the ledger's rows and the configuration fields `<a id>` anchors (generated where the page is generated), so a page and the gate can point at one entry. Until then a page names the row beside the table link. |
+| P5 | The two scripts F-G is to share resolution with do not cover the pages: `scripts/check-materials.py` resolves files only, not anchors, and its scope excludes `docs/features/`; `scripts/check-front-doors.py`'s `slugs` resolves heading anchors but not `<a id>` ones, so every glossary link (`00-concepts.md#activation`, `#data-class`, …) reads as dead to it. Checking the pilots' links with a resolver that does both found one dead anchor already in the repository (`unit-file.md` → `crown-jewel.md#credentials-attached-at-egress`; the heading's slug carries its suffix), fixed here. | F-G resolves anchors from headings **and** `<a id>`, and scopes `docs/features/`; the shared resolver gains `<a id>` rather than F-G inheriting either gap. |
+| P6 | Neither pilot has a design record; the plan row (post-360 L, M, R) is the record. | *Go deeper* says "no design record; the plan row is the record" when that is so, instead of leaving the slot empty. |
+| P7 | The glossary has no entry for either feature by name: the egress proxy lives inside `#activation` and `#credential-binding`, and locality shares `#data-class`. | *What it is* may link more than one glossary entry. Whether each feature gets an entry of its own is F3's question, not the template's. |
+| P8 | Section 5 needs to say the headline limit (Landlock's open port; a declared, never detected class) or a reader leaves with the wrong idea, which strains *link, do not copy*. | Allow one short clause per headline limit in sections 2 and 5, with the link to the place that states it in full. The front page's *Link, do not copy* already says so. |
