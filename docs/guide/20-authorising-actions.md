@@ -442,12 +442,16 @@ the monotonic clock, so a backward wall-clock step cannot admit a slow claim. Ot
 reopen, and admit again, within one window.
 
 *A seat is released a window after its permit is admitted.* The holder writes the decision's release marker one window
-after admission, timed on its own monotonic clock. No other node can read the seat free before that marker reaches it,
-so two admissions on one seat are a window apart without assuming the nodes' clocks agree. A saturating actor gets
-close to its limit every window: at a one-second window, about one admission a second per seat, plus the claim's own
-round. The lease ends the seat only if the holder crashes or shuts down first; a used seat then stays held for the
-window plus the margin. A seat is held for its whole window even when the call's evidence is then not recorded or its
-dispatch fails, so the exact scope errs towards admitting fewer.
+after admission, timed on its own monotonic clock. A node reads the seat free either when that marker reaches it or
+when the lease lapses on its own wall clock. The release path needs no clock agreement. The lease path absorbs skew of
+up to about the margin (19 s). So the bound holds, as before, to within the nodes' wall-clock skew. A saturating actor
+gets close to its limit every window: at a one-second window, about one admission a second per seat, plus the claim's
+own round. The lease ends the seat only if the holder crashes or shuts down first; a used seat then stays held for the
+window plus the margin. A seat is held for its whole window even when its dispatch fails. A permit whose evidence is
+not recorded schedules no release, so its seat is held for the whole lease. Both err towards admitting fewer.
+
+*Not claimed:* a seat's release marker is not checked against its owner. Any mesh member can write one, as for a lock,
+because consensus here tolerates crashes, not lies (row A).
 
 *Coverage, strictly.* Every node built with the `gateway` **and** `tls` features publishes a heartbeat from
 `start()`, saying whether it enforces (has an evaluator), re-asserted every third of `control_max_staleness_ms`. At a

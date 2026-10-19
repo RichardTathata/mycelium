@@ -1896,7 +1896,8 @@ suite's in `ae_contract.rs`.
   with `require_identity_proofs = false` a fabricated id's entries can count; the exact bound holds to within the
   nodes' wall-clock skew, and without a declared `exclusive_default` electorate the counter is decided over the peers a
   node currently sees, so a partitioned minority can decide alone; a claim that times out may still hold a seat no call
-  used (fewer admitted, never more); the `/mcp` door test's flake is closed, a reply lost to registration after the emit (§3.6); the private Cedar
+  used (fewer admitted, never more); a seat's release marker is not checked against its owner (any mesh member can
+  write one, as for a lock: consensus here tolerates crashes, not lies, row A); the `/mcp` door test's flake is closed, a reply lost to registration after the emit (§3.6); the private Cedar
   adapter's `fleet_*` / `AllowAtMostAcross` cases, and R's `route_*` / `ForbidClassAt`, wait on its next re-pin after a
   release.
 
@@ -1967,8 +1968,9 @@ window apart whatever the margin. The count stays at most `count` per window. A 
 longer past its window, which admits fewer, never more. The review of #648 (M1) found that cost large at short
 windows: about 5 % of the limit at a one-second window. So the holder now releases the seat one window after
 admission, timed on its monotonic clock (`fleet_history::release_after_window`, through
-`consensus::release_envelope`). No node reads the seat free before that marker arrives, so the bound needs no clock
-agreement. The lease remains the fallback if the holder crashes.
+`consensus::release_envelope`). The release path needs no clock agreement, since the holder writes the marker at least
+a window after admission. A node reading the lease lapse on its own wall clock is covered for skew of up to about the
+margin, so the bound holds, as before, to within the nodes' wall-clock skew. The lease remains the fallback if the holder crashes.
 
 The same review added three changes. The admission check is also made on the monotonic clock (Q1, a backward
 wall-clock step). A decision whose lease ended before it was read is refused "too late" at once (L1). A test covers

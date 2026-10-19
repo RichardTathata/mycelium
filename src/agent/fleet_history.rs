@@ -48,7 +48,8 @@
 //! the policy: an exact fleet limit must name its actor, never `*`.
 //!
 //! **What is not claimed.** The seat's lease is measured on the proposer's wall clock and judged on each reader's,
-//! so the exact bound holds to within the clocks' skew. Without a declared exclusive-default electorate the counter
+//! so the exact bound holds to within the clocks' skew. A seat's release marker is not checked against its owner: any
+//! mesh member can write one, as for a lock, because consensus here tolerates crashes, not lies (row A). Without a declared exclusive-default electorate the counter
 //! is decided in the cluster scope, whose roster is the peers this node currently sees — a partitioned minority that
 //! has declared the rest dead can decide alone; exactness across a partition needs the electorate
 //! (`secure-single-domain` requires `consensus_require_electorate`). A claim that times out, or is refused for its
@@ -354,10 +355,13 @@ pub(crate) async fn claim_seat(
 /// (`consensus::release_envelope`). The lease — the window plus [`SEAT_LEASE_MARGIN_MS`] — stays the fallback for a
 /// holder that crashes or shuts down first; a shutdown before the window has passed releases nothing.
 ///
-/// Why a release a window after admission keeps the bound: no node can read the seat free before this marker reaches
-/// it, and the marker is written at least a window after admission in real time — the timer runs on this node's own
-/// monotonic clock, so no agreement between clocks is assumed. A later admission on the same seat is therefore at least
-/// a window after this one, as it was when only the lease ended the seat. It is never early: a permit whose dispatch
+/// Why a release a window after admission keeps the bound. A node reads the seat free in one of two ways. The first is
+/// this marker reaching it, and the marker is written at least a window after admission in real time: the timer runs on
+/// this node's own monotonic clock, so the release path needs no clock agreement. The second is the lease lapsing on
+/// that node's own wall clock (`read_slot`). The lease is the window plus [`SEAT_LEASE_MARGIN_MS`] from the stamp, so
+/// that path absorbs a skew of up to about the margin (19 s) before it could read a seat free less than a window after
+/// admission. So the guarantee is unchanged: at most `count` per window, to within the nodes' wall-clock skew. It is
+/// never early: a permit whose dispatch
 /// then fails still holds its seat for the whole window, which is all "a failed dispatch does not free its seat" ever
 /// promised against the count. Without it a used seat stayed held for the window **plus the margin**, which at a short
 /// window admitted a small fraction of the limit (about 5 % at one second).
@@ -366,12 +370,13 @@ pub(crate) fn release_after_window(ctx: &Arc<TaskCtx>, slot: String, env: SeatDe
     let task_ctx = Arc::clone(ctx);
     let mut shutdown = ctx.shutdown_tx.subscribe();
     ctx.spawn_task(async move {
-        tokio::select! {
+        // Shutdown first: a stopping node never releases, even when both are ready at once.
+        tokio::select! { biased;
+            // Not released at shutdown: the window may not have passed. The lease ends the seat.
+            _ = async { let _ = shutdown.wait_for(|stopping| *stopping).await; } => {}
             _ = mycelium_core::sim_seam::sleep_ms("ae/seat-release", window_ms) => {
                 crate::consensus::release_envelope_try(&task_ctx, &slot, &env);
             }
-            // Not released at shutdown: the window may not have passed. The lease ends the seat.
-            _ = async { let _ = shutdown.wait_for(|stopping| *stopping).await; } => {}
         }
     });
 }

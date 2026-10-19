@@ -785,6 +785,65 @@ async fn a_backward_clock_step_does_not_admit_a_slow_claim() {
     b.shutdown().await;
 }
 
+/// **The lease is the fallback: a holder shut down within its window leaves the seat to its lease** (#648 round 2). One
+/// seat in a one-second window with a two-second margin, so a lease of three seconds. The holder `a` shuts down right after
+/// admission: its release task stops without releasing, because the window may not have passed. The seat is still live at
+/// `a` after the shutdown and at `b` past the window, and ends at `b` when the lease lapses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_holder_shut_down_within_its_window_leaves_the_seat_to_its_lease() {
+    let (p1, p2) = (port(), port());
+    let a = node_with(p1, &[], posts(1, 1_000, HistoryScope::FleetConsensus), |_| {}).await;
+    let b = node_with(p2, &[p1], posts(1, 1_000, HistoryScope::FleetConsensus), |_| {}).await;
+    let _listeners: Vec<_> =
+        [&a, &b].iter().map(|n| n.consensus().start_consensus_listener(ConsensusConfig::default())).collect();
+    ready(&[&a, &b]).await;
+    super::TEST_CLAIM_HOOKS.pin().insert(a.node_id().to_string(), (2_000, 0));
+    let out = post(&a).await;
+    let admitted_at = std::time::Instant::now();
+    let seat = admitted(&out).unwrap_or_else(|| panic!("admitted: {:?}", refusal(&out))).history.as_ref().unwrap().seats[0].clone();
+    super::TEST_CLAIM_HOOKS.pin().remove(&a.node_id().to_string());
+    a.shutdown().await;
+    assert!(super::seat_live(&a.task_ctx, &seat.slot).is_some(), "a shutdown releases nothing");
+    let (b_ctx, slot) = (Arc::clone(&b.task_ctx), seat.slot.clone());
+    tokio::time::sleep(Duration::from_millis(1_300).saturating_sub(admitted_at.elapsed())).await;
+    assert!(super::seat_live(&b_ctx, &slot).is_some(), "past the window the seat is still held: no release, the lease");
+    assert!(until(|| super::seat_live(&b_ctx, &slot).is_none(), Duration::from_secs(5)).await, "the lease ends it");
+    b.shutdown().await;
+}
+
+/// **A permit whose evidence is not recorded schedules no release** (#648 round 2). `a`'s journal has stalled under the
+/// strict profile, so its permit is refused `NotRecorded` after its seat was claimed. Nothing released the seat: it is
+/// still held past the window, until its lease ends.
+#[cfg(feature = "compliance")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_permit_not_recorded_schedules_no_release() {
+    let (p1, p2) = (port(), port());
+    let cfg = GossipConfig {
+        bind_address: "127.0.0.1".parse().unwrap(),
+        bind_port: p1,
+        ..GossipConfig::default()
+    };
+    let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", p1).unwrap(), cfg));
+    a.with_evidence_journal(EvidenceJournal::stalled(EvidenceProfile::Strict));
+    a.with_action_evaluator(Arc::new(posts(1, 1_000, HistoryScope::FleetConsensus)));
+    a.start().await.unwrap();
+    let b = node_with(p2, &[p1], posts(1, 1_000, HistoryScope::FleetConsensus), |_| {}).await;
+    let _listeners: Vec<_> =
+        [&a, &b].iter().map(|n| n.consensus().start_consensus_listener(ConsensusConfig::default())).collect();
+    ready(&[&a, &b]).await;
+    super::TEST_CLAIM_HOOKS.pin().insert(a.node_id().to_string(), (2_000, 0));
+    let out = post(&a).await;
+    let refused_at = std::time::Instant::now();
+    super::TEST_CLAIM_HOOKS.pin().remove(&a.node_id().to_string());
+    assert!(matches!(refusal(&out), PreflightRefusal::NotRecorded(_)), "{:?}", refusal(&out));
+    let slot = super::seat_slot("c-posts", &super::super::evidence_journal::point_of(POINT), crate::PRINCIPAL_ANONYMOUS, 0);
+    assert!(super::seat_live(&a.task_ctx, &slot).is_some(), "the seat was claimed");
+    tokio::time::sleep(Duration::from_millis(1_300).saturating_sub(refused_at.elapsed())).await;
+    assert!(super::seat_live(&a.task_ctx, &slot).is_some(), "past the window the seat is still held: nothing released it");
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
 /// **Review M1: under a short window a saturating actor gets its limit each window**, not once per window plus the
 /// lease margin. One seat in a one-second window, posted for as fast as the gateways answer, alternating between them:
 /// the holder releases the seat a window after admission, so it is admitted about once a second — and never twice
@@ -812,7 +871,9 @@ async fn a_saturating_actor_gets_its_limit_each_short_window() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
-    assert!(admitted_at.len() >= 4, "about one admission a second over 4.5 s, got {}", admitted_at.len());
+    // About one a second: four or five unloaded, at least three under parallel load (the claim's own round is slower);
+    // without the release the seat is held for the whole lease and only the first is admitted.
+    assert!(admitted_at.len() >= 3, "about one admission a second over 4.5 s, got {}", admitted_at.len());
     for w in admitted_at.windows(2) {
         let (before_first, _) = w[0];
         let (_, after_next) = w[1];

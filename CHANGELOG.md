@@ -123,7 +123,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **Not built:** a seat released before its window has passed (a seat is held for its whole window, even if the
     call's evidence is not recorded or its dispatch fails); collection of a seat's records (each counter, kind of point and actor that ever
     claims keeps up to `count` slots of three to five keys on every member, and `count` shrunk acceptor entries on
-    every voter); a tally entry signed by its publisher. As at one node, the gateway's doors count together and the
+    every voter); a tally entry signed by its publisher; a seat's release marker checked against its owner (any mesh
+    member can write one, as for a lock: consensus here tolerates crashes, not lies, row A). As at one node, the gateway's doors count together and the
     provider check apart.
 
 ### Changed
@@ -174,7 +175,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is admitted, timed on its monotonic clock. The lease ends the seat only if the holder crashes or shuts down first.
   Before, a used seat stayed held for its whole lease; at a one-second window that admitted about a third of the limit
   with the old margin, and about 5 % with the new one. Safety is unchanged: one seat admits at most once per window,
-  since no node reads the seat free before the holder's release reaches it (`deprecations.md` §53).
+  to within the nodes' wall-clock skew. The release path needs no clock agreement, because the holder writes its marker
+  at least a window after admission. A node that instead reads the lease lapse on its own wall clock is covered for
+  skew of up to about the margin (`deprecations.md` §53).
 
 - **A confined activation's re-probe no longer withdraws an install whose declared path was replaced legitimately**
   (post-360 row M's follow-up, #641). A write directory rotated or a read file replaced by an atomic rename failed
