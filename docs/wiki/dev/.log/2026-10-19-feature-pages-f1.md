@@ -21,10 +21,20 @@ Pages: none in the wiki. Repo: `docs/features/` (new), `docs/capabilities.md`, `
 
 The independent review found a stale claim the routing page had copied: the private Cedar adapter has expressed
 `ForbidClassAt` and `AllowAtMostAcross` and passed all twenty-seven contract cases since its v2.36.0 re-pin (private
-#33, `0d654fd`). Corrected everywhere it was stated as current: guide 20, `deprecations.md` §52 and §53, the two
-what-is-proven rows, and the post-360 plan's rows R and K2, §3.5 (dated notes), §3.6 and §5. Corrected on the
+#33, `0d654fd`). Corrected where it was stated as current: guide 20, `deprecations.md` §52 and §53, the two
+what-is-proven rows, and the plan's §3.5 and §5 (dated notes); #653, merged meanwhile, had already corrected the
+plan's rows R and K2 and §3.6, and the rebase kept its wording. Corrected on the
 pages too: both reason doors give the preflight destination and locality (only the class needs the classifying
 door); `guide_20_routing_policy` runs a hand-kept copy; the proxy's port is added to the command's own `connect`
 entries; the credential path's test named. P1 and P2 now carry fixed markers the F2 gate can check
 ("This feature is turned on in code", "No runnable example exists", `example: none`); `docs/README.md` lists
 `features/`.
+
+## [2026-10-20] ingest | Feature pages F1: the third pilot, fleet-wide history limits (K2)
+
+After #653 merged, `docs/features/fleet-history-limits.md` added under the revised template: turned on in code
+(`Rule::at_most(..).scoped(..)`, an evaluator and a journal, `gateway` + `tls`), no runnable example (the live tests
+in `src/agent/fleet_history_tests.rs`, run by CI's `test` job's `--lib` steps), the nine `fleet_*` contract cases,
+the unreleased bounds (§55), K2's *not built* list. Found while writing it, recorded as P9 in the plan's §4.1: guide
+20's K2 snippet has no test, and guide 20 does not say the exact scope needs a consensus listener on the voting nodes.
+Linked from the capability map's *Constrain actions* row; the plan marks all three pilots written.

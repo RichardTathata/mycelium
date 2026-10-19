@@ -1,8 +1,9 @@
 # Feature pages — one short, checked entry page per feature
 
 **Status:** in progress, rev 0.3. Agreed with the maintainer on 2026-10-19; work began after v2.36.0 shipped. F1 is
-in progress (the template and two of three pilots, §4); no row is delivered. Rev 0.2 answered the independent review
-of PR #649; rev 0.3 records what the first two pilots taught (§4.1).
+in progress (the template and all three pilots written, awaiting their independent review, §4); no row is
+delivered. Rev 0.2 answered the independent review
+of PR #649; rev 0.3 records what the pilots taught (§4.1).
 
 ## 1 · The gap
 
@@ -53,16 +54,17 @@ Three mechanisms keep the pages true, each covering a different kind of check.
 
 | Row | Work | Exit |
 |---|---|---|
-| F1 — *in progress: the template ([`docs/features/README.md`](../features/README.md), [`_template.md`](../features/_template.md)) and two of three pilots, [activation egress proxy](../features/activation-egress-proxy.md) and [inference routing](../features/inference-routing.md); K2 waits for PR #653* | The template and three pilot pages: the activation egress proxy (rows L and M), fleet-wide history limits (K2) and inference routing (R) | Each pilot page has an independent review against the code, and the template is revised from what the pilots show. |
+| F1 — *in progress: the template ([`docs/features/README.md`](../features/README.md), [`_template.md`](../features/_template.md)) and the three pilots written — [activation egress proxy](../features/activation-egress-proxy.md), [inference routing](../features/inference-routing.md) and [fleet-wide history limits](../features/fleet-history-limits.md); the independent review of the K2 page and the template revision remain* | The template and three pilot pages: the activation egress proxy (rows L and M), fleet-wide history limits (K2) and inference routing (R) | Each pilot page has an independent review against the code, and the template is revised from what the pilots show. |
 | F2 | The feature registry and the gate (F-G) | The gate fails on an unmapped id, on a page with a missing section, on a dead link or setting, and on an example absent from the index. Each of these is shown failing with a planted fault. |
 | F3 | The remaining pages, an estimated 30 to 40 | The gate is green and every capability-map row lists its pages. The map's maintainer note names the feature pages and the registry. |
 | F4 | The `/doc-coverage` pass (F-S) and the fifth rule (F-P) | The pass has been run once and its findings closed. The policy page, CLAUDE.md and `/adversarial-review` all state the rule, and "four rules" reads "five" wherever it appears. |
 
 **Not in scope:** rewriting the guide chapters or runbooks the pages link to.
 
-### 4.1 · What the first two pilots taught — proposed template revisions
+### 4.1 · What the pilots taught — proposed template revisions
 
-Proposed, not adopted: F1's exit revises the template once the third pilot (K2) and the independent review are in.
+Proposed, not adopted: F1's exit revises the template once the independent review of all three pilots is in. P1–P8
+came from the first two pilots; P9 from the K2 page.
 Two of them the pilots could not be written without, so the front page and the skeleton already carry them provisionally (P1, P2), in the fixed-marker form the independent review of #654 drafted.
 
 | # | Found | Proposed revision |
@@ -75,3 +77,4 @@ Two of them the pilots could not be written without, so the front page and the s
 | P6 | Neither pilot has a design record; the plan row (post-360 L, M, R) is the record. | *Go deeper* says "no design record; the plan row is the record" when that is so, instead of leaving the slot empty. |
 | P7 | The glossary has no entry for either feature by name: the egress proxy lives inside `#activation` and `#credential-binding`, and locality shares `#data-class`. | *What it is* may link more than one glossary entry. Whether each feature gets an entry of its own is F3's question, not the template's. |
 | P8 | Section 5 needs to say the headline limit (Landlock's open port; a declared, never detected class) or a reader leaves with the wrong idea, which strains *link, do not copy*. | Allow one short clause per headline limit in sections 2 and 5, with the link to the place that states it in full. The front page's *Link, do not copy* already says so. |
+| P9 | K2 is turned on in code, but how it counts depends on configuration fields too (`control_max_staleness_ms`, `control_min_peers_heard`, `max_clock_drift_ms`, `tls`, `require_identity_proofs`, `consensus_require_electorate`). Its guide snippet has no test that reads or copies it, so the page names a test that builds the same policy itself. Writing *Turn it on* also showed that guide 20 does not say the exact scope needs a consensus listener on the voting nodes. | P1's form admits configuration rows beside code items, each still linked to its reference. A guide snippet with no test is recorded as such on the page, and the gap goes to the `/doc-coverage` pass (F-S) rather than being fixed on the feature page. |
