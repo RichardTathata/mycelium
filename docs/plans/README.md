@@ -156,6 +156,12 @@ future contributor needs so they don't re-litigate a settled choice — lives he
 
 ## Proposed — not yet started
 
+[`feature-pages.md`](feature-pages.md) — **feature pages** (proposed, rev 0.2; agreed with the maintainer
+2026-10-19, not started; begins after v2.36.0). One short page per feature: what it is, when to use it, the settings
+that turn it on, its example, its guarantees and *not built* items, and links to the guide, runbook, design and
+code. Kept true by a CI gate over a checked-in feature registry, a pass in `/doc-coverage`, and a fifth
+verification-policy rule.
+
 [`boundary-h.md`](boundary-h.md) — **Boundary H, a colluding population of admitted members** (proposed
 2026-09-24, rev 0.1, not adopted). It implements threat model revision 3's §5 Boundary H in four phases:
 - prerequisites: issuer binding, signed mandate grants, and the knowledge layer's own deferred PRs;
