@@ -177,6 +177,12 @@ pub(crate) fn seat_admissible(expires_at_ms: u64, now_ms: u64, window_ms: u64) -
 pub(crate) static TEST_CLAIM_HOOKS: std::sync::LazyLock<papaya::HashMap<String, (u64, u64)>> =
     std::sync::LazyLock::new(papaya::HashMap::new);
 
+/// Test record: per admitting node and seat slot (`{node}|{slot}`; tests share slot names), the monotonic instant of each admission that scheduled its release
+/// ([`release_after_window`]) — the point the window is measured from.
+#[cfg(all(test, feature = "consensus"))]
+pub(crate) static TEST_ADMISSIONS: std::sync::LazyLock<papaya::HashMap<String, Vec<std::time::Instant>>> =
+    std::sync::LazyLock::new(papaya::HashMap::new);
+
 /// Test hook: nodes whose seat claims panic — the case a serve loop must still answer (#642's review, N2).
 #[cfg(all(test, feature = "consensus"))]
 pub(crate) static TEST_PANIC_CLAIM: std::sync::LazyLock<papaya::HashMap<String, ()>> =
@@ -367,6 +373,13 @@ pub(crate) async fn claim_seat(
 /// window admitted a small fraction of the limit (about 5 % at one second).
 #[cfg(feature = "consensus")]
 pub(crate) fn release_after_window(ctx: &Arc<TaskCtx>, slot: String, env: SeatDecision, window_ms: u64) {
+    #[cfg(test)]
+    {
+        // The admission point, per seat, for the tests' spacing oracle. Retry-safe: the update builds a new vector.
+        let at = mycelium_core::sim_seam::mono_instant();
+        let key = format!("{}|{slot}", ctx.node_id);
+        TEST_ADMISSIONS.pin().update_or_insert_with(key, |v| v.iter().copied().chain([at]).collect(), || vec![at]);
+    }
     let task_ctx = Arc::clone(ctx);
     let mut shutdown = ctx.shutdown_tx.subscribe();
     ctx.spawn_task(async move {

@@ -786,7 +786,7 @@ async fn a_backward_clock_step_does_not_admit_a_slow_claim() {
 }
 
 /// **The lease is the fallback: a holder shut down within its window leaves the seat to its lease** (#648 round 2). One
-/// seat in a one-second window with a two-second margin, so a lease of three seconds. The holder `a` shuts down right after
+/// seat in a one-second window with a five-second margin, so a lease of six seconds, its claim losing one prepare. The holder `a` shuts down right after
 /// admission: its release task stops without releasing, because the window may not have passed. The seat is still live at
 /// `a` after the shutdown and at `b` past the window, and ends at `b` when the lease lapses.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
@@ -797,8 +797,10 @@ async fn a_holder_shut_down_within_its_window_leaves_the_seat_to_its_lease() {
     let _listeners: Vec<_> =
         [&a, &b].iter().map(|n| n.consensus().start_consensus_listener(ConsensusConfig::default())).collect();
     ready(&[&a, &b]).await;
-    super::TEST_CLAIM_HOOKS.pin().insert(a.node_id().to_string(), (2_000, 0));
-    let out = post(&a).await;
+    // A margin of one lost ballot (as `a_seat_is_reclaimed_after_its_window`), and one prepare lost, so the claim is
+    // admitted under load too: a 2 s margin failed it "decided too late".
+    super::TEST_CLAIM_HOOKS.pin().insert(a.node_id().to_string(), (5_000, 0));
+    let (out, _) = claim_losing_prepares(&a, &b, 1).await;
     let admitted_at = std::time::Instant::now();
     let seat = admitted(&out).unwrap_or_else(|| panic!("admitted: {:?}", refusal(&out))).history.as_ref().unwrap().seats[0].clone();
     super::TEST_CLAIM_HOOKS.pin().remove(&a.node_id().to_string());
@@ -807,7 +809,7 @@ async fn a_holder_shut_down_within_its_window_leaves_the_seat_to_its_lease() {
     let (b_ctx, slot) = (Arc::clone(&b.task_ctx), seat.slot.clone());
     tokio::time::sleep(Duration::from_millis(1_300).saturating_sub(admitted_at.elapsed())).await;
     assert!(super::seat_live(&b_ctx, &slot).is_some(), "past the window the seat is still held: no release, the lease");
-    assert!(until(|| super::seat_live(&b_ctx, &slot).is_none(), Duration::from_secs(5)).await, "the lease ends it");
+    assert!(until(|| super::seat_live(&b_ctx, &slot).is_none(), Duration::from_secs(8)).await, "the lease ends it");
     b.shutdown().await;
 }
 
@@ -831,8 +833,9 @@ async fn a_permit_not_recorded_schedules_no_release() {
     let _listeners: Vec<_> =
         [&a, &b].iter().map(|n| n.consensus().start_consensus_listener(ConsensusConfig::default())).collect();
     ready(&[&a, &b]).await;
-    super::TEST_CLAIM_HOOKS.pin().insert(a.node_id().to_string(), (2_000, 0));
-    let out = post(&a).await;
+    // A margin of one lost ballot, and one prepare lost: admitted by the seat under load too, then refused by the journal.
+    super::TEST_CLAIM_HOOKS.pin().insert(a.node_id().to_string(), (5_000, 0));
+    let (out, _) = claim_losing_prepares(&a, &b, 1).await;
     let refused_at = std::time::Instant::now();
     super::TEST_CLAIM_HOOKS.pin().remove(&a.node_id().to_string());
     assert!(matches!(refusal(&out), PreflightRefusal::NotRecorded(_)), "{:?}", refusal(&out));
@@ -874,10 +877,23 @@ async fn a_saturating_actor_gets_its_limit_each_short_window() {
     // About one a second: four or five unloaded, at least three under parallel load (the claim's own round is slower);
     // without the release the seat is held for the whole lease and only the first is admitted.
     assert!(admitted_at.len() >= 3, "about one admission a second over 4.5 s, got {}", admitted_at.len());
+    assert!(admitted_at.len() <= 5, "never more than one a window: {} in 4.5 s", admitted_at.len());
     for w in admitted_at.windows(2) {
         let (before_first, _) = w[0];
         let (_, after_next) = w[1];
         assert!(after_next.duration_since(before_first) >= Duration::from_millis(1_000), "two admissions within a window");
+    }
+    // The exact oracle: the admission instants the gateways recorded for the seat, a whole window apart.
+    let slot = super::seat_slot("c-posts", &super::super::evidence_journal::point_of(POINT), crate::PRINCIPAL_ANONYMOUS, 0);
+    let mut at: Vec<std::time::Instant> = [&a, &b]
+        .iter()
+        .flat_map(|n| super::TEST_ADMISSIONS.pin().get(&format!("{}|{slot}", n.node_id())).cloned().unwrap_or_default())
+        .collect();
+    at.sort();
+    assert_eq!(at.len(), admitted_at.len(), "one recorded admission per admitted call");
+    for w in at.windows(2) {
+        let gap = w[1].duration_since(w[0]);
+        assert!(gap >= Duration::from_millis(1_000), "admissions on one seat {gap:?} apart, less than the window");
     }
     a.shutdown().await;
     b.shutdown().await;
