@@ -733,7 +733,7 @@ registered by `mycelium-stem` before `start()`); the per-activation answer is `S
 built: an OpenShell (container) backend, resource limits, and on Linux below Landlock ABI 6 a limit on signals.
 [`.log/2026-10-17-activation-confined.md`](.log/2026-10-17-activation-confined.md).
 
-**The activation egress proxy (after 2.35.0 — rows L and M's *not built* items).** Limits by host and a live list are
+**The activation egress proxy (2.36.0 — rows L and M's *not built* items).** Limits by host and a live list are
 not something either backend can do — Landlock limits ports, Seatbelt `localhost` or any address — so they live in a
 process the stem owns: `[activation.confine.egress]` (`EgressDecl`) makes the stem start a forward proxy per such
 activation on `127.0.0.1` (`mycelium-wasm-host/src/activation_egress.rs`), confine the command to that one port

@@ -70,10 +70,11 @@ the notice.
 | 47 | an exhaustive `Rule { .. }` or `ContractCase { .. }` literal; an evaluator that wraps another and forwards only `evaluate` | 2.35.0 (post-360 row K) | build a `Rule` with `Rule::new` and its builders, and give a `ContractCase` `history: None` (or a history); a wrapping evaluator forwards `history_request` and `evaluate_with_history` | Yes for the literals (a new field); no for a wrapper — it compiles, and its limited rules decide `Indeterminate` |
 | 48 | an exhaustive struct literal of `GossipConfig`, `OpenAiBackend` or `ServeDecl`; a `{:?}` of a `ServeDecl` showing its `api_key`; Z2's `api_key_env` refusal naming the variable | 2.35.0 (post-360 row L) | `..Default::default()` (or the new fields: `egress_credentials`, `credentials`, `credential`); read the section name in the refusal | **Yes** for an exhaustive literal — it will not compile; otherwise no — `Debug` prints `api_key: Some("<redacted>")`, and the refusal names the `[[serve]]` section and the field, not the variable |
 | 49 | a unit file with a key or section the loader does not know — at the top level or in an `[[activation]]` | 2.35.0 (post-360 row M) | correct the spelling, or remove the key | No — behaviour: the file is refused at load, naming the key (`units/declare` answers 400, `wire-check` and a stem refuse it); it was silently dropped |
-| 50 | a trace consumer or alert keyed on `prov.probe`'s `probe_failed` for a confined re-probe; a probe that replaces one of its own declared paths on every run | unreleased (post-360 row M's follow-up, #641; `prov.probe` rule revision 3) | read the three new refusal reasons — `confinement_unavailable`, `confinement_failed` and `confinement_changed` — beside `probe_failed`, which now means only that the probe failed; move a step that replaces a declared path into the activation `command` | No — behaviour: a confined re-probe re-resolves a replaced path, a refused re-resolution is recorded by its own reason, and a probe that replaces its own declared path fails as `confinement_changed` ([§50](#50-provprobe-is-rule-revision-3-a-confined-re-probe-re-resolves-and-three-new-refusal-reasons-unreleased-post-360-plan-row-ms-follow-up-641)) |
-| 51 | an exhaustive `ConfineDecl { .. }` or `Profile { .. }` literal; an exhaustive `match` on `activation_sandbox::Refusal`; a confined command relying on the stem's environment; two `[[activation]]`s for one `ns/name` | after 2.35.0 (post-360 rows L and M, the activation egress proxy, #644) | `..Default::default()` for `ConfineDecl` (or `egress: None`); a `_` arm, or `Refusal::EgressUnavailable`; name a needed variable in `[activation.confine] env`; merge duplicate activations | **Partly** — the literals and the `match` fail to compile; the behaviour changes do not ([§51](#51-an-activation-egress-proxy-confinedecl-and-profile-gained-a-field-refusal-a-variant-after-2350-post-360-plan-rows-l-and-m)) |
-| 52 | an exhaustive `Rule { .. }` literal; an evaluator adapter held to the contract suite that cannot express `PolicyClause::ForbidClassAt`; a `mycelium-reason` caller matching `RouteError` exhaustively or building `Routed`; a client relying on the façade answering `403` at the first refused provider | Unreleased (post-360 row R) — also: an `llm-meta` ad from a gateway client is `403 reserved_namespace`; `GET /gateway/rpc/serve/{kind}` for `llm.invoke`, `mcp.invoke`, `skill.invoke`, `rpc.result` or `bulk.result` is `403 protected_kind`, for a kind the node serves in process `403 served_in_process`, and an in-process registration closes client streams on its kind; a classifying router routes nothing without an evaluator; a catalogue entry providing `llm-meta/…` is never installed; on a classifying router a caller with no bound floor cannot declare below the default class, and the header given twice or to a router that classifies nothing is `400` | `Rule::new` and its builders; decline the five `route_*` cases in `declared_limits` or express them; a `RouteError::Unclassifiable` arm; read `refused` / `data.refused_destinations` | Yes for the literals and the `match`; no for the façade — a refused provider is now passed over for the next, and `403` comes only when every candidate is refused |
-| 53 | an exhaustive `Rule`, `HistoryLimit`, `HistoryView`, `HistoryInput` or `mycelium-core` `KvStore` literal; an evaluator that wraps another and forwards only `evaluate`, `history_request` and `evaluate_with_history`; a fleet-consensus-limited request's position in an `rpc_rx` stream under provider enforcement | unreleased (post-360 row K2) | `Rule::at_most(..)` and `.scoped(scope, counter_id)`; `fleet: Vec::new()` (and `seats: Vec::new()`) in a view or input literal; a wrapper forwards `fleet_counters` too | **Yes** for the literals (a new field); `HistoryScope` was already `#[non_exhaustive]`, so a `_` arm takes the new scopes; no for a wrapper — it compiles, and its fleet-limited rules decide `Indeterminate`; no for the order — behaviour |
+| 50 | a trace consumer or alert keyed on `prov.probe`'s `probe_failed` for a confined re-probe; a probe that replaces one of its own declared paths on every run | 2.36.0 (post-360 row M's follow-up, #641; `prov.probe` rule revision 3) | read the three new refusal reasons — `confinement_unavailable`, `confinement_failed` and `confinement_changed` — beside `probe_failed`, which now means only that the probe failed; move a step that replaces a declared path into the activation `command` | No — behaviour: a confined re-probe re-resolves a replaced path, a refused re-resolution is recorded by its own reason, and a probe that replaces its own declared path fails as `confinement_changed` ([§50](#50-provprobe-is-rule-revision-3-a-confined-re-probe-re-resolves-and-three-new-refusal-reasons-2360-post-360-plan-row-ms-follow-up-641)) |
+| 51 | an exhaustive `ConfineDecl { .. }` literal; an exhaustive `match` on `activation_sandbox::Refusal`; a confined command relying on the stem's environment; two `[[activation]]`s for one `ns/name` | 2.36.0 (post-360 rows L and M, the activation egress proxy, #644) | `..Default::default()` for `ConfineDecl` (or `egress: None, env: Vec::new()`); a `_` arm, or `Refusal::EgressUnavailable`; name a needed variable in `[activation.confine] env`; merge duplicate activations | **Partly** — the literals and the `match` fail to compile; the behaviour changes do not ([§51](#51-an-activation-egress-proxy-confinedecl-gained-two-fields-and-profile-one-refusal-a-variant-2360-post-360-plan-rows-l-and-m)) |
+| 52 | an exhaustive `Rule { .. }` literal; an evaluator adapter held to the contract suite that cannot express `PolicyClause::ForbidClassAt`; a `mycelium-reason` caller matching `RouteError` exhaustively or building `Routed`; a client relying on the façade answering `403` at the first refused provider | 2.36.0 (post-360 row R) — also: an `llm-meta` ad from a gateway client is `403 reserved_namespace`; `GET /gateway/rpc/serve/{kind}` for `llm.invoke`, `mcp.invoke`, `skill.invoke`, `rpc.result` or `bulk.result` is `403 protected_kind`, for a kind the node serves in process `403 served_in_process`, and an in-process registration closes client streams on its kind; a classifying router routes nothing without an evaluator; a catalogue entry providing `llm-meta/…` is never installed; on a classifying router a caller with no bound floor cannot declare below the default class, and the header given twice or to a router that classifies nothing is `400` | `Rule::new` and its builders; decline the five `route_*` cases in `declared_limits` or express them; a `RouteError::Unclassifiable` arm; read `refused` / `data.refused_destinations` | Yes for the literals and the `match`; no for the façade — a refused provider is now passed over for the next, and `403` comes only when every candidate is refused |
+| 53 | an exhaustive `Rule`, `HistoryLimit`, `HistoryView`, `HistoryInput` or `mycelium-core` `KvStore` literal; an evaluator that wraps another and forwards only `evaluate`, `history_request` and `evaluate_with_history`; a fleet-consensus-limited request's position in an `rpc_rx` stream under provider enforcement | 2.36.0 (post-360 row K2; `ae.preflight` is catalogue revision 4) | `Rule::at_most(..)` and `.scoped(scope, counter_id)`; `fleet: Vec::new()` (and `seats: Vec::new()`) in a view or input literal; a wrapper forwards `fleet_counters` too | **Yes** for the literals (a new field); `HistoryScope` was already `#[non_exhaustive]`, so a `_` arm takes the new scopes; no for a wrapper — it compiles, and its fleet-limited rules decide `Indeterminate`; no for the order — behaviour |
+| 54 | `mycelium_core`'s `CoreCtx::gossip_txs`, `WriterEntry::tx`, `writer::get_or_spawn_writer` / `request_state`, `run_peer_writer`, and `framing::dispatch_gossip_send` / `dispatch_gossip_try_send` / `gossip_shard_fill` in their old shapes | 2.36.0 (the shutdown-sweep fix, #650) | `GossipTxs::new(senders, Unsent::default())`; pass `gossip_txs.unsent()`; wrap a shard receiver in `CountedRx::new(rx, unsent)` | **Yes** — every use is a type error; code that only uses `GossipAgent` is unaffected ([§54](#54-mycelium-cores-outbound-path-is-counted-its-channel-types-changed-shape-2360-the-shutdown-sweep-fix)) |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -1597,7 +1598,7 @@ Where it is refused: `NodeCapabilityConfig::from_toml_str` / `load_from_file`, s
 **Migration.** Every unit file in this repository loads unchanged. A file of yours that the loader now refuses held a
 key that was never read: correct its spelling or remove it.
 
-## 50. `prov.probe` is rule revision 3: a confined re-probe re-resolves, and three new refusal reasons (unreleased, post-360 plan row M's follow-up, #641)
+## 50. `prov.probe` is rule revision 3: a confined re-probe re-resolves, and three new refusal reasons (2.36.0, post-360 plan row M's follow-up, #641)
 
 **What changes.** A confined `[[activation]]`'s re-probe used to fail when a declared path was replaced, so the
 install was withdrawn and reinstalled. It now re-resolves the profile, repeating every check, and runs the probe under
@@ -1617,12 +1618,12 @@ Before this change, every re-probe refusal was recorded as `probe_failed`.
 - A probe that replaces one of its own declared paths on every run now fails as `confinement_changed`. Move that step
   into the activation `command`, which may replace them.
 
-## 51. An activation egress proxy: `ConfineDecl` and `Profile` gained a field, `Refusal` a variant (after 2.35.0, post-360 plan rows L and M)
+## 51. An activation egress proxy: `ConfineDecl` gained two fields and `Profile` one, `Refusal` a variant (2.36.0, post-360 plan rows L and M)
 
 **What changes.** An `[activation.confine]` table may name `[activation.confine.egress]` — hosts an activation reaches
 by name through an egress proxy its stem runs for it, and the credential bindings that proxy attaches
 (`docs/reference/unit-file.md` § `[activation.confine.egress]`). Additive for a unit file: one without the table runs
-as before. Three public shapes grew: `mycelium::ConfineDecl` gained `egress: Option<EgressDecl>`;
+as before. Three public shapes grew: `mycelium::ConfineDecl` gained `egress: Option<EgressDecl>` and `env: Vec<String>`;
 `mycelium_wasm_host::activation_sandbox::Profile` gained `env` (it has a crate-private field, so only this crate
 builds one); and `activation_sandbox::Refusal` gained `EgressUnavailable`, recorded as `prov.activation`'s
 `egress_proxy_unavailable` (the rule's revision 3). The refusal for a hostname in `connect` now also points at
@@ -1641,7 +1642,7 @@ for one `ns/name` are refused at load. `stem.activation_egress` reads `not_confi
 `Refusal`. No for the refusal's text, or for the behaviour changes.
 
 **Migration.**
-- A `ConfineDecl` literal: add `..Default::default()` or `egress: None`.
+- A `ConfineDecl` literal: add `..Default::default()` or `egress: None, env: Vec::new()`.
 - A `match` on `Refusal`: add an arm for `EgressUnavailable` (its `reason()` is `egress_proxy_unavailable`) or a `_`.
 - A test matching `connect`'s hostname refusal: match `hostname`; the message now names `[activation.confine.egress]`
   as the way to name a host.
@@ -1651,7 +1652,7 @@ for one `ns/name` are refused at load. `stem.activation_egress` reads `not_confi
 - A binding's `value_file` refused as readable: move it outside the placement root and every confined `read`/`write`
   path.
 
-## 52. The evaluator sees where a routed call would go and what it carries (unreleased, post-360 plan row R)
+## 52. The evaluator sees where a routed call would go and what it carries (2.36.0, post-360 plan row R)
 
 **What changes.** A routing door can tell the gateway's preflight the destination it is deciding on and the request's
 data class (`GossipAgent::gateway_preflight_routed`, `RouteFacts`). `ActionEnvelope` gained `destination` and
@@ -1707,7 +1708,7 @@ is passed over for the next** — before, the façade answered `403` at the firs
 **Not claimed.** The class is declared, never detected; the locality is the provider's declaration, never observed; a
 provider re-checking with its own evaluator sees neither (a class rule there decides not established).
 
-## 53. A history-limited rule may count across the fleet: two new scopes, and five structs gained a field (unreleased, post-360 plan row K2)
+## 53. A history-limited rule may count across the fleet: two new scopes, and five structs gained a field (2.36.0, post-360 plan row K2)
 
 **What changes.** `HistoryScope` gains `FleetConsensus` (exact: a counter of seats agreed by consensus, each permit
 claiming one before it is admitted; `Indeterminate` without a quorum) and `FleetTally` (approximate: the sum of every
@@ -1717,7 +1718,7 @@ policy's own, and what other members see; without `scoped` it counts at the enfo
 reference evaluator does not establish an exact fleet limit over `*`. `ActionEvaluator` gains `fleet_counters`
 (default: none), which names the counter a decision on an envelope would rely on; the enforcement point gives each
 counter's state to the evaluator in `HistoryView::fleet` and, on a permit, claims a seat in every consensus counter
-before admitting it — after releasing the per-actor history gate.
+before admitting it — after releasing the per-actor history gate. `ae.preflight` is catalogue revision 4.
 
 **Behaviour, for every node built with the `gateway` and `tls` features:** it writes a heartbeat under
 `sys/ae-tally/{node}/hb` from `start()` (every third of `control_max_staleness_ms`, at most every ten seconds), whether
@@ -1770,7 +1771,7 @@ them in `declared_limits`, or `Report::conformant` fails — the private compani
 The suite binds a fixture's fleet state to whatever counter the evaluator names, so an adapter's own counter keys are
 held to the same cases.
 
-## 54. `mycelium-core`'s outbound path is counted: its channel types changed shape (unreleased, the shutdown-sweep fix)
+## 54. `mycelium-core`'s outbound path is counted: its channel types changed shape (2.36.0, the shutdown-sweep fix)
 
 **What changes.** A graceful shutdown now waits, bounded at 250 ms, until every frame the node handed to the
 outbound path is flushed to a socket or dropped. To count those frames, the senders are wrapped:

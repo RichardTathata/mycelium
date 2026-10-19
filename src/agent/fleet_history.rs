@@ -436,8 +436,10 @@ fn counted_in(entry: Option<Bytes>, now_ms: u64, window_ms: u64) -> Result<u32, 
 /// The fleet's sum for `c` and `actor`, over this node and every enforcing peer — or why it is not established:
 /// this node's own view of the fleet is not certain enough (the governors' confidence bound,
 /// `control_max_staleness_ms` / `control_min_peers_heard`), or a peer's coverage is unknown — no heartbeat, one older
-/// than `control_max_staleness_ms`, or one dated beyond `max_clock_drift_ms` in this node's future. A publisher
-/// failure detection has declared dead, or that was removed, is no longer a peer and is not consulted.
+/// than `control_max_staleness_ms`, or one dated beyond `max_clock_drift_ms` in this node's future. A publisher that
+/// is no longer a peer — departed, or declared dead by failure detection — still counts until its entries age out
+/// (past the window, the staleness bound and the clock-drift bound), if it is a verified member; one that was removed
+/// is not consulted.
 fn tally_state(ctx: &Arc<TaskCtx>, c: &FleetCounter, point: &str, actor: &str, now_ms: u64) -> FleetState {
     tally_state_counted(ctx, c, point, actor, now_ms).0
 }
@@ -714,12 +716,13 @@ pub(crate) fn reassert_own(ctx: &TaskCtx) {
 /// gate by the shutdown sweep. Its entries are kept: peers go on counting its recent permits until they age out, and
 /// do not wait for it.
 ///
-/// **Nobody else deletes a node's tally keys** (#642's review, round 3, finding 2): a collector cannot tell a node's
-/// old record from one it wrote after returning that has not reached the collector yet, so any delete by another
-/// node could erase a returned node's heartbeat or a permit it published, and would trip its `sys/` tripwire. A node
-/// withdraws its own aged entries (every heartbeat tick, from its next start). What a node that never returns
-/// leaves behind is bounded: its heartbeat and one entry per (counter, actor) it counted in its last window, each
-/// read as aged and counting nothing.
+/// **Nobody else deletes a node's tally keys while they can still count** (#642's review, round 3, finding 2): a
+/// collector cannot tell a node's old record from one it wrote after returning that has not reached the collector
+/// yet, so a plain delete by another node could erase a returned node's heartbeat or a permit it published, and would
+/// trip its `sys/` tripwire. A node withdraws its own aged entries (every heartbeat tick, from its next start). What a
+/// node that never returns leaves behind is collected by any node once its heartbeat is past the horizon
+/// ([`collect_residue`]): each key tombstoned at the stamp of the record held, which loses to anything the owner
+/// wrote later.
 ///
 /// **A forged `departed`** — another member writing this node's heartbeat — makes peers skip the staleness check
 /// for this node until its next real heartbeat overwrites the forgery (one period at most): for that long a node

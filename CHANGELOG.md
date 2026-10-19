@@ -9,60 +9,195 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.36.0] — 2026-10-19
+
+**Two old defects fixed, a security fix, and the post-360 plan's rows after the comparison.** A request-reply call to
+a provider on the calling node could lose its reply and wait out its whole timeout although the handler ran: the
+caller registered for the reply only after emitting the request. That shared path serves `/mcp`, `/a2a`, the raw RPC
+routes, `scatter` and `bulk_call`. A graceful shutdown could also stop before the tombstones of its soft-state sweep
+were on the wire, so a peer kept routing to the stopped node until the key's TTL. Both predate this release; see the
+entries under Fixed. Under Security: `GET /gateway/rpc/serve/{kind}` let a `mesh:serve` client stream `llm.invoke` or
+`mcp.invoke` and answer such requests first, and a confinement profile could be widened for good by a symlink planted
+while it resolved.
+
+The post-360 rows delivered since 2.35.0:
+- **Inference routing as policy (R):** the action evaluator sees where a routed model call would go (the
+  destination and its declared locality) and the request's data class, per candidate, before the router commits.
+  *Confidential only in-domain* is expressible, and `mycelium-reason` 0.10.0 is the first routing door.
+- **History limits across the fleet (K2):** a history-limited rule may count exactly, by consensus seats, or
+  approximately, by a gossiped tally, the policy choosing per rule.
+- **An egress proxy for activation commands (L and M):** a confined `[[activation]]` reaches hosts by name through
+  a proxy its stem runs, with a list that changes live (`SIGHUP`) and credentials attached at the node's gate.
+  Every confined command now starts with a cleared environment.
+- **A confined re-probe re-resolves a replaced path (M's follow-up)** instead of withdrawing the install.
+
+Wire **v12** unchanged (`WIRE_VERSION` 12, `PREV` 11). Companions on their own tags: `mycelium-reason` 0.10.0,
+`mycelium-py` 0.2.12, `mycelium-ts` 0.2.6. Unchanged are `langgraph-checkpoint-mycelium`,
+`strands-session-mycelium` 0.1.0 and `mycelium-guardrails`.
+
+**Check before upgrading** (`docs/guide/deprecations.md` §50–§54):
+- **A client serving `llm.invoke`, `mcp.invoke`, `skill.invoke`, `rpc.result` or `bulk.result` over
+  `GET /gateway/rpc/serve/{kind}`** is refused `403 protected_kind`. A kind the node serves in process is refused
+  `403 served_in_process`, and a client stream is closed (an `evicted` event) when an in-process receiver takes its
+  kind. The SDKs raise `ProtectedKindError` / `ServeEvictedError` (`mycelium-py` 0.2.12, `mycelium-ts` 0.2.6).
+- **A gateway client writing an `llm-meta` ad** (`capability/advertise`, `units/declare`) is refused
+  `403 reserved_namespace`, with or without `locality`. Serve a model with `mycelium_reason::serve_model` on the node.
+- **A classifying router refuses every request while no action evaluator is attached;** attach it, and the journal,
+  before `start()`. The façade's `403` now means every candidate was refused.
+- **A confined activation command starts with a cleared environment.** Name a variable it needs in
+  `[activation.confine] env`. Two `[[activation]]`s for one capability are refused.
+- **A `HistoryScope::FleetTally` rule fails closed** until every member runs this release built with `gateway` and
+  `tls`. Deploy the release fleet-wide before a policy names it.
+- **A probe that replaces one of its own declared paths on every run** now fails as `confinement_changed`; trace
+  consumers read `prov.probe`'s three new refusal reasons (rule revision 3).
+- **An embedder building a `mycelium_core::CoreCtx` or driving the writers directly** meets the counted outbound
+  types (`GossipTxs`, `WriterTx`, `CountedRx`). Code that only uses `GossipAgent` is unaffected.
+- **Struct literals and matches:** `ConfineDecl`, `Rule`, `HistoryLimit`, `HistoryView`, `HistoryInput`,
+  `mycelium-core`'s `KvStore` and `SystemStats` gained fields; `activation_sandbox::Refusal` gained a variant; in
+  `mycelium-reason`, `RouteError` gained `Unclassifiable` and `Routed` two fields. An exhaustive literal or `match`
+  breaks; `..Default::default()` and a `_` arm do not. A wrapping evaluator forwards `fleet_counters` too.
+- **Catalogue revisions:** `ae.preflight` 4, `prov.probe` 3, `prov.activation` 3, `prov.eligible` 2;
+  `stem.activation_confined` revision 2.
+
+### Security
+
+- **A client serve stream could receive, and answer first, every model or tool call its node was sent**
+  (`GET /gateway/rpc/serve/{kind}`; every release from 1.0.0 through 2.35.0, under `mesh:serve` since 2.15.0 and any
+  mesh scope before it). The route registered a receiver for whatever kind it was given. `llm.invoke`, `mcp.invoke`
+  and `skill.invoke` fan out to every receiver on a node, so a client stream for one received each such request, the
+  routed prompts included, beside the node's own provider, and could answer before it. It now refuses those kinds and
+  the reply kinds `rpc.result` and `bulk.result` with `403 protected_kind`, refuses any kind the node serves in
+  process (`403 served_in_process`), and closes a client stream with a terminal `evicted` event when an in-process
+  receiver registers for its kind later (counted, `signal_client_evictions`). An operator-listed protected kind
+  (`protected_rpc_kinds`) stays servable and is checked by provider enforcement. `mycelium-py` 0.2.12 and
+  `mycelium-ts` 0.2.6 raise `ProtectedKindError` for either refusal and `ServeEvictedError` on eviction
+  (`deprecations.md` §52). Found by #643's review.
+
+- **A symlink planted while a confinement profile resolved could widen it for good** (post-360 row M; #641's review,
+  finding 1, present since 2.35.0). There was a window between `prepare`'s symlink check and its `canonicalize`, and
+  another before the Linux pin, which opened without `O_NOFOLLOW`. A confined command still running in that window
+  could swap a declared path, or any component of it below a writable root, for a link to a directory the profile
+  never named. Two further routes existed: an operator symlink pointing into a root's interior, and a placement
+  directory inside a write root. Either way the profile would name and pin the link's target, and every later run
+  would reuse it. Now every path is resolved from `/`, one component at a time from its parent's descriptor. A
+  symlink is followed only before the resolution enters a writable root, recognised by identity rather than spelling.
+  The identity comes from what was opened, Landlock's rule from that descriptor, and every currency check walks the
+  path again. A profile runs only while it is current. On Linux, a symlink on a filesystem that holds a write path and
+  is mounted more than once, such as by a bind mount, is not followed (`unit-file.md` § Mounts). The rule's limit:
+  views of a write path through another filesystem are not detected. These are FUSE `bindfs`, overlayfs, and NFS or
+  SMB loopback.
+
+### Fixed
+
+- **A call to a provider on the same node no longer loses its reply.** `rpc_call` emitted the request and only then
+  registered for the reply. A provider on the calling node receives the request inside the emit, and on a
+  multi-threaded runtime its serve task can run on another worker at once; when it answered before the caller had
+  registered, the reply was dropped and the caller waited out its whole timeout although the handler ran. Every
+  request-reply call shares the path: `ServiceHandle::rpc_call` and its variants, `scatter`, `bulk_call`, and the
+  gateway's dispatch from `/mcp`, `/a2a`, `/gateway/rpc/call`, the overlay and the LLM doors. The caller now registers
+  before it emits, and the registration is removed when the call ends, including a cancelled one, which used to leave
+  its entry behind. This was the `/mcp` door-test flake recorded open under #642 (#647). No API change.
+  Beside it: a registration removes only its own entry (a colliding nonce is re-drawn, never overwritten); a reply
+  sent through `MeshHandle::emit_async` (`emit_signal_async`) to a caller on the same node is now claimed — that
+  emitter skipped the reply interceptor, so such a reply went to the fan-out and the caller timed out; and a SWIM probe
+  dropped mid-flight (its task aborted or its runtime shut down) no longer leaves its entry pending.
+
+- **A graceful shutdown waits until the frames it queued are on the wire.** The shutdown sweeps the node's soft
+  state (`cap/`, `req/`, `svc/`, `tools/`, `gcap/`, `sys/load/`) and then waited until the gossip and writer queues
+  were empty before signalling the tasks to stop. A frame a shard worker or a writer had already dequeued was in no
+  queue, so the wait could end while the sweep's last tombstone was still in a writer's write or connect, or between
+  a shard worker and a writer, and the signal stopped it there. The peer kept the swept key, and kept routing to
+  the stopped node, until the key's TTL. The node now counts every outbound frame from the moment it is enqueued
+  until a writer has flushed it to its socket or dropped it, and the shutdown waits (bounded, 250 ms) for that
+  count to reach zero, so the sweep's tombstones are written before `shutdown()` returns, and a process that exits
+  straight after it no longer cuts them off. A frame dropped on its way to a dead or unreachable peer releases its
+  place at once, so it does not hold the shutdown; a frame released twice would saturate the count at zero and is
+  counted (`gossip_outbound_count_underflows_total`), so it cannot hold every later shutdown either. This was `a_fast_reassert_does_not_undo_the_shutdown_sweep`'s
+  failure on `main` at 98a311fc (about 1 run in 100 under parallel load, on v2.35.0 as well: it predates this
+  release).
+  **Upgrade note:** `mycelium_core`'s transport types changed shape: `CoreCtx::gossip_txs` is a
+  `mycelium_core::outbound::GossipTxs`, `WriterEntry::tx` a `WriterTx`, and `writer::get_or_spawn_writer` and
+  `writer::request_state` take the node's `Unsent` count; `framing::dispatch_gossip_send`,
+  `dispatch_gossip_try_send` and `gossip_shard_fill` take `&GossipTxs`. Code that only uses `GossipAgent` is
+  unaffected (`deprecations.md` §54).
+
+- **A confined activation's re-probe no longer withdraws an install whose declared path was replaced legitimately**
+  (post-360 row M's follow-up, #641). A write directory rotated or a read file replaced by an atomic rename failed
+  the next re-probe, so the install was withdrawn and reinstalled, a flap if the path churned. The re-probe now
+  re-resolves the profile, repeating every check (symlinks, the canonical comparison, existence), and runs the probe
+  under the fresh profile. The install is withdrawn only when re-resolution refuses, and the trace names the refusal
+  (`prov.probe`'s `confinement_failed` / `confinement_unavailable`, rule revision 3). A path that changes while the
+  probe runs makes the verdict untrusted: the probe is re-resolved and run once more, and a change under both runs is
+  `confinement_changed`. A path replaced by a symlink is refused, never followed.
+  - A rotation by flipping an ancestor symlink (`current` → `v2`) is now seen and re-resolved. Before, the old profile
+    stayed current and wedged the install.
+  - The activation's initial probe takes the same check.
+  - A re-probe round runs its entries concurrently, at most eight at once, so one churning entry delays no other.
+
+  **Upgrade note:** a probe that replaces one of its own declared paths on every run now fails as
+  `confinement_changed` (`deprecations.md` §50).
+
+- **A fleet-consensus seat claim that needed a second ballot is no longer refused "decided too late"** (row K2,
+  found before the cut; not in any release). A seat's lease is stamped before the claim's first ballot, and the call is admitted only if a whole
+  window of the lease remains. That makes the lease margin the latency a claim is allowed. The margin was 2 s, exactly
+  one phase timeout, so a claim that lost one ballot to its timeout was always refused `Indeterminate`. Under load that
+  happened about 1 run in 50. The margin is now derived from the claim's bounds: 19 225 ms, the longest a claim is
+  allowed to take. That covers four ballots each waiting out both phases, the convergence poll, and a 2 s allowance for
+  local work, which is an allowance, not a timeout. The admission check is also made on the monotonic clock, so a
+  backward wall-clock step cannot admit a slow claim. A decision whose lease had already ended when it was read is
+  refused "too late" at once, not reported as unobserved after a second of polling.
+
+  So that the longer lease does not throttle short windows, the holder now releases a seat one window after its permit
+  is admitted, timed on its monotonic clock. The lease ends the seat only if the holder crashes or shuts down first.
+  Before, a used seat stayed held for its whole lease; at a one-second window that admitted about a third of the limit
+  with the old margin, and about 5 % with the new one. Safety is unchanged: one seat admits at most once per window,
+  to within the nodes' wall-clock skew. The release path needs no clock agreement, because the holder writes its marker
+  at least a window after admission. A node that instead reads the lease lapse on its own wall clock is covered for
+  skew of up to about the margin (`deprecations.md` §53).
+
 ### Added
 
 - **An egress proxy for activation commands** (post-360 rows L and M — the three items those rows left *not
   built*). An `[activation.confine]` profile may name `[activation.confine.egress]`: `hosts` (`https://host[:port]`
-  or `http://host[:port]`), `credentials` (the node's `[[egress_credentials]]` bindings the command may name) and
-  `env` (variables passed through). The stem starts a forward proxy for that activation on `127.0.0.1` when it
-  starts, confines the command and probe to the proxy's one port, and starts them with a **cleared environment**
-  carrying the proxy's address (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, lower-case forms, `MYCELIUM_EGRESS_PROXY`)
-  and a per-proxy token. The proxy carries requests only to the listed hosts, **by name**, under the node's egress
+  or `http://host[:port]`) and `credentials` (the node's `[[egress_credentials]]` bindings the command may name);
+  variables the command keeps are named in `[activation.confine] env`. The stem starts a forward proxy for that
+  activation on `127.0.0.1` when it starts, confines the command and probe to the proxy's one port, and starts them
+  with the proxy's address (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, lower-case forms, `MYCELIUM_EGRESS_PROXY`) and
+  a per-proxy token. The proxy carries requests only to the listed hosts, **by name**, under the node's egress
   allow-list: an absolute-form `http://` request is sent on over the entry's scheme (TLS for `https://`) through
   the node's egress gate, which attaches a placeholder's value only where its binding authorises; an `https://` URL
   goes through `CONNECT`, a tunnel that carries no credential — the proxy terminates no TLS and mints no CA.
   Redirects go back to the command. The list **changes live**: `Stem::set_activation_egress_hosts`, and
-  `mycelium-stem` re-reads its unit file on `SIGHUP`. A proxy that cannot start refuses its activation by name
-  (`prov.activation`'s `egress_proxy_unavailable`, the rule's revision 3); a credential that is not a binding on
-  the node, an `env` entry passing a binding's `value_env` variable, or a host the node's allow-list denies refuses
-  the stem's start. New guarantee `stem.activation_egress` (`enforced` under Seatbelt; `not_configured` under
-  Landlock, which limits the proxy's port and not its address). New `EgressCredentials::send_once` (the gate's
-  first hop, no redirect followed). `docs/reference/unit-file.md` § `[activation.confine.egress]`.
-  **Not built:** a credential inside a `CONNECT` tunnel; limits by path; addresses rather than names; on Linux, a
-  limit on the proxy's port by address; `credentials` and `env` changing live; a proxy for an unconfined activation.
-
-  **After the PR's first review:** every confined command starts with a cleared environment
-  (`[activation.confine] env` names what passes); a stem refuses to start when a binding's value could reach a
-  confined command (a `value_env` or same-valued `env` entry, a `value_file` under its readable paths); an echoed
-  value is masked in every relayed header and body (`mycelium::Redactor`, across chunk boundaries), an encoded
-  answer refused where a value could hide in it, and a tunnel to a granted binding's host refused; a SIGHUP reload
-  narrows a proxy whose activation the file no longer names to nothing; the proxy caps connections (64), header
-  reads (10 s), idle tunnels (5 min) and buffered bodies (4); `stem.activation_egress` counts a `localhost:<port>`
-  `connect` entry as `not_configured`; two `[[activation]]`s for one `ns/name` are refused. **After its second:**
-  only connections that presented the token count against the cap (a token-less one is closed after 2 s, on its
-  407, or past 16 to admit a newer one), a tunnel counts until it closes, the body cap counts only bodies being
-  buffered, values are masked longest first, every encoding header is read, and a hard-linked `value_file` or an
-  `env` value containing a binding's value refuses the start. **After its third:** the proxy closes at accept every
-  connection another user's process opened, or whose owner the kernel cannot name (`/proc/net/tcp` on Linux,
-  `net.inet.tcp.pcblist_n` on macOS), so another user can neither use the proxy nor crowd it; a symlinked
-  `value_file` is judged by the file it names; an answer with no body is relayed whatever its `Content-Encoding`.
-  **After its fourth:** owners are named in batches, one kernel-table read per batch, at most 64 connections waiting
-  (oldest closed first), and one proxy holds at most 256 sockets, so a flood can neither queue without bound nor take
-  the stem's descriptors; the parsers match addresses and ports (macOS) and only established rows (Linux), and a socket
-  record that is not a TCP stream matches nothing. **After its fifth:** no waiting connection is closed to make room —
-  while 64 wait the proxy accepts nothing more, so newer ones wait in the kernel's listen backlog
-  (`peer_check_evicted` and `peer_check_busy` are gone); every proxy of the stem shares one descriptor budget, a
-  quarter of the soft `RLIMIT_NOFILE` (not raised), counting upstream sockets (`fd_budget`); a kernel-table read is
-  bounded at 2 s (macOS kills `sysctl`), its batch refused and the next served; Linux names a dual-stack client
-  under its IPv4-mapped spelling in `/proc/net/tcp6`, and a client in FIN_WAIT1/2 or CLOSE_WAIT. **After its
-  sixth:** each proxy draws on its share of that budget (at least 8 — an egress activation that would push it lower
-  is refused at start), a quarter of each share is kept for upstream sockets, and a proxy at its share or at 256
-  sockets stops accepting instead of accepting and closing (`open_cap` is gone), so a flood on one proxy leaves the
-  others theirs; no idle upstream connection is kept (the proxy's client and `EgressCredentials::send_once`); and a
-  kernel-table read that has not returned is never doubled. **After its seventh:** on Linux a connection's owner
-  comes from a `sock_diag` query for its exact addresses (`/proc/net/tcp{,6}` only where netlink is unavailable),
-  so the cost does not grow with the host's TCP table; a read that panics after its bound no longer stops later
-  reads.
+  `mycelium-stem` re-reads its unit file on `SIGHUP` (a reload narrows a proxy whose activation the file no longer
+  names to nothing; a file that does not load leaves every list standing). A proxy that cannot start refuses its
+  activation by name (`prov.activation`'s `egress_proxy_unavailable`, the rule's revision 3); a credential that is
+  not a binding on the node, or a host the node's allow-list denies, refuses the stem's start. New guarantee
+  `stem.activation_egress` (`enforced` under Seatbelt; `not_configured` under Landlock, which limits the proxy's
+  port and not its address, and for a `localhost:<port>` `connect` entry). New `EgressCredentials::send_once` (the
+  gate's first hop, no redirect followed). `docs/reference/unit-file.md` § `[activation.confine.egress]`.
+  - **A value cannot reach the command.** Every confined command starts with a cleared environment (`PATH`, `HOME`,
+    `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`, `TMPDIR` and `[activation.confine] env`). A stem refuses
+    to start when a binding's value could reach a confined command: an `env` entry naming a binding's `value_env`,
+    an `env` value containing a binding's value, or a `value_file` the command could read (judged through a
+    symlink, and refused with a second hard link). A value echoed by an upstream is masked in every relayed header
+    and body (`mycelium::Redactor`, longest first, across chunk boundaries); an encoded answer is refused where a
+    value could hide in it (an answer with no body is relayed whatever its `Content-Encoding`); a tunnel to a
+    granted binding's host is refused.
+  - **Only this user's processes reach the proxy.** It closes at accept every connection another user's process
+    opened, or whose owner the kernel cannot name: on Linux by a `sock_diag` query for the connection's exact
+    addresses (`/proc/net/tcp{,6}` only where netlink is unavailable), on macOS from `net.inet.tcp.pcblist_n`, read
+    once per batch of waiting connections and bounded at 2 s (a read past it refuses its batch, fail closed). While
+    64 connections wait to be named the proxy accepts nothing more, so newer ones wait in the kernel's listen
+    backlog. A dual-stack client and a half-closed one are named.
+  - **What one proxy holds.** 64 connections that presented the token (a tunnel for its life; one past it is
+    refused 503); 16 that have not (each closed after 2 s or on its 407, the oldest closed to admit a newer one); at
+    most 256 sockets; header reads bounded at 10 s, idle tunnels at 5 min, buffered bodies at 4. Every proxy of the
+    stem shares one descriptor budget, a quarter of the soft `RLIMIT_NOFILE` (not raised), each drawing on its share
+    (at least 8 — an egress activation that would push it lower is refused at start) with a quarter kept for
+    upstream sockets; a proxy at its share stops accepting, so a flood on one leaves the others theirs. No idle
+    upstream connection is kept.
+  - **Not built:** a credential inside a `CONNECT` tunnel; limits by path; addresses rather than names; on Linux, a
+    limit on the proxy's port by address; `credentials` and `env` changing live; a proxy for an unconfined activation.
 - **A history-limited rule may count across the fleet, the policy choosing per rule** (post-360 plan row K2, decided
   2026-10-17; upgrade note `docs/guide/deprecations.md` §53). Row K counted at one enforcement point, so an actor that
   spread its calls over N gateways could be admitted up to N times a limit. `Rule::at_most(n, w).scoped(scope,
@@ -109,7 +244,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     the client asks for, and answers every request it took when the client goes, on eviction or at shutdown.
   - **Upgrade order:** tally rules fail closed until every member runs this release built with `gateway` and `tls`
     (`docs/guide/deprecations.md` §53).
-  - The AE contract suite gains `PolicyClause::AllowAtMostAcross` and six `fleet_*` cases.
+  - The AE contract suite gains `PolicyClause::AllowAtMostAcross` and six `fleet_*` cases; `ae.preflight` is catalogue
+    revision 4.
   - Tests: `the_consensus_scope_admits_at_most_n_across_three_gateways_under_concurrent_calls`,
     `the_consensus_scope_admits_exactly_n_spread_over_gateways`, `without_a_quorum_the_consensus_scope_is_not_established`,
     `a_claim_waiting_on_a_quorum_holds_up_no_other_call`, `a_provider_claim_does_not_stall_its_tool_loop`,
@@ -127,6 +263,38 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     member can write one, as for a lock: consensus here tolerates crashes, not lies, row A). As at one node, the gateway's doors count together and the
     provider check apart.
 
+- **Inference routing as policy (post-360 plan row R).** The action evaluator can decide where data may go. A routing
+  door hands the gateway's preflight what it established — `GossipAgent::gateway_preflight_routed` with `RouteFacts`:
+  the `Destination` it is deciding on and its `Locality` (`in_domain` · `external` · `unknown`), the request's
+  `DataClass` and who declared it (`ClassSource::{Principal, Declared, Default}`), and the destinations already refused
+  for the call. `ActionEnvelope` gained `destination` and `data_class`; `AeEvidence` gained `route` (absent from a
+  door that does not route, so a record without it serialises as before) and fills `destination`, which no door could
+  state until now. The reference evaluator's `Rule::for_class` and `Rule::at_locality` express *confidential may only
+  reach in-domain models*; a class or locality a door did not establish is **not established**, never in-domain — so
+  `/gateway/llm/call` and `/gateway/llm/stream`, which classify nothing, cannot pass a class rule. The contract suite
+  gains `PolicyClause::ForbidClassAt` and five `route_*` cases; `ae.preflight` is catalogue revision 3 with R (4 after
+  K2). `mycelium-reason` 0.10.0 is the first routing door: it passes each candidate's declared locality and the
+  request's class, and dispatches to the first candidate the policy permits; a classifying router
+  (`reason_router_classified`) refuses every request `403 authority_not_established` while no action evaluator is
+  attached, and holds a caller with no bound floor at the default class. A gateway client cannot set a model's
+  locality: `/gateway/capability/advertise` and `/gateway/units/declare` refuse any `llm-meta` ad from a client, with
+  or without `locality` (`403 reserved_namespace`), and a catalogue entry providing one is never installed
+  (`prov.eligible` revision 2). `GET /gateway/rpc/serve/{kind}` refuses the kinds a node serves itself (under
+  Security). Also: `mycelium-core`'s `SignalHandlers` gained `register_client`, `register_transient` and
+  `client_evictions`, and `SystemStats` gained `signal_client_evictions` (also on `/metrics`; an exhaustive struct
+  literal breaks); `GatewayPreflight::is_inert` is undeprecated (§38 deprecated it as unreferenced; it now has its
+  caller). **Not built:** content inspection (the class is declared, never detected), observing where a provider's
+  backend sends a prompt (the locality is its declaration), any class or destination at the provider's own re-check,
+  and binding an ad's key to the member that wrote it (a fleet member can write another node's `llm-meta` ad). The
+  private Cedar adapter does not yet enforce class or locality (its next re-pin). Upgrade notes: `deprecations.md`
+  §52.
+
+- **`mycelium-py` 0.2.12** and **`mycelium-ts` 0.2.6** (their own tags): `rpc_serve` / `rpcServe` raise
+  `ProtectedKindError`, naming the kind, when the node refuses the stream (`403 protected_kind` or
+  `403 served_in_process`) — before, an SSE content-type error (#643's round-2 review, E) — and the new
+  `ServeEvictedError` (a `ProtectedKindError`) when the node closes the stream because a receiver of its own took the
+  kind, rather than ending the worker's loop silently (round 3).
+
 ### Changed
 
 - **Behaviour:** a confined `[[activation]]` command no longer inherits the stem's environment (2.35.0 passed it
@@ -142,119 +310,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   SIGHUP no longer terminates a stem whose unit file names no `[activation.confine.egress]` (it logs that there is
   nothing to apply); a table added after start is refused by name (a restart starts its proxy).
   `docs/reference/unit-file.md` says to replace the unit file atomically (write, then `rename(2)`).
-
-### Security
-
-- **A symlink planted while a confinement profile resolved could widen it for good** (post-360 row M; #641's review,
-  finding 1, present since 2.35.0). There was a window between `prepare`'s symlink check and its `canonicalize`, and
-  another before the Linux pin, which opened without `O_NOFOLLOW`. A confined command still running in that window
-  could swap a declared path, or any component of it below a writable root, for a link to a directory the profile
-  never named. Two further routes existed: an operator symlink pointing into a root's interior, and a placement
-  directory inside a write root. Either way the profile would name and pin the link's target, and every later run
-  would reuse it. Now every path is resolved from `/`, one component at a time from its parent's descriptor. A
-  symlink is followed only before the resolution enters a writable root, recognised by identity rather than spelling.
-  The identity comes from what was opened, Landlock's rule from that descriptor, and every currency check walks the
-  path again. A profile runs only while it is current. On Linux, a symlink on a filesystem that holds a write path and
-  is mounted more than once, such as by a bind mount, is not followed (`unit-file.md` § Mounts). The rule's limit:
-  views of a write path through another filesystem are not detected. These are FUSE `bindfs`, overlayfs, and NFS or
-  SMB loopback.
-
-### Fixed
-
-- **A graceful shutdown waits until the frames it queued are on the wire.** The shutdown sweeps the node's soft
-  state (`cap/`, `req/`, `svc/`, `tools/`, `gcap/`, `sys/load/`) and then waited until the gossip and writer queues
-  were empty before signalling the tasks to stop. A frame a shard worker or a writer had already dequeued was in no
-  queue, so the wait could end while the sweep's last tombstone was still in a writer's write or connect, or between
-  a shard worker and a writer, and the signal stopped it there. The peer kept the swept key, and kept routing to
-  the stopped node, until the key's TTL. The node now counts every outbound frame from the moment it is enqueued
-  until a writer has flushed it to its socket or dropped it, and the shutdown waits (bounded, 250 ms) for that
-  count to reach zero, so the sweep's tombstones are written before `shutdown()` returns, and a process that exits
-  straight after it no longer cuts them off. A frame dropped on its way to a dead or unreachable peer releases its
-  place at once, so it does not hold the shutdown; a frame released twice would saturate the count at zero and is
-  counted (`gossip_outbound_count_underflows_total`), so it cannot hold every later shutdown either. This was `a_fast_reassert_does_not_undo_the_shutdown_sweep`'s
-  failure on `main` at 98a311fc (about 1 run in 100 under parallel load, on v2.35.0 as well: it predates this
-  release).
-  **Upgrade note:** `mycelium_core`'s transport types changed shape: `CoreCtx::gossip_txs` is a
-  `mycelium_core::outbound::GossipTxs`, `WriterEntry::tx` a `WriterTx`, and `writer::get_or_spawn_writer` and
-  `writer::request_state` take the node's `Unsent` count; `framing::dispatch_gossip_send`,
-  `dispatch_gossip_try_send` and `gossip_shard_fill` take `&GossipTxs`. Code that only uses `GossipAgent` is
-  unaffected (`deprecations.md` §54).
-
-- **A fleet-consensus seat claim that needed a second ballot is no longer refused "decided too late"** (row K2,
-  unreleased). A seat's lease is stamped before the claim's first ballot, and the call is admitted only if a whole
-  window of the lease remains. That makes the lease margin the latency a claim is allowed. The margin was 2 s, exactly
-  one phase timeout, so a claim that lost one ballot to its timeout was always refused `Indeterminate`. Under load that
-  happened about 1 run in 50. The margin is now derived from the claim's bounds: 19 225 ms, the longest a claim is
-  allowed to take. That covers four ballots each waiting out both phases, the convergence poll, and a 2 s allowance for
-  local work, which is an allowance, not a timeout. The admission check is also made on the monotonic clock, so a
-  backward wall-clock step cannot admit a slow claim. A decision whose lease had already ended when it was read is
-  refused "too late" at once, not reported as unobserved after a second of polling.
-
-  So that the longer lease does not throttle short windows, the holder now releases a seat one window after its permit
-  is admitted, timed on its monotonic clock. The lease ends the seat only if the holder crashes or shuts down first.
-  Before, a used seat stayed held for its whole lease; at a one-second window that admitted about a third of the limit
-  with the old margin, and about 5 % with the new one. Safety is unchanged: one seat admits at most once per window,
-  to within the nodes' wall-clock skew. The release path needs no clock agreement, because the holder writes its marker
-  at least a window after admission. A node that instead reads the lease lapse on its own wall clock is covered for
-  skew of up to about the margin (`deprecations.md` §53).
-
-- **A confined activation's re-probe no longer withdraws an install whose declared path was replaced legitimately**
-  (post-360 row M's follow-up, #641). A write directory rotated or a read file replaced by an atomic rename failed
-  the next re-probe, so the install was withdrawn and reinstalled, a flap if the path churned. The re-probe now
-  re-resolves the profile, repeating every check (symlinks, the canonical comparison, existence), and runs the probe
-  under the fresh profile. The install is withdrawn only when re-resolution refuses, and the trace names the refusal
-  (`prov.probe`'s `confinement_failed` / `confinement_unavailable`, rule revision 3). A path that changes while the
-  probe runs makes the verdict untrusted: the probe is re-resolved and run once more, and a change under both runs is
-  `confinement_changed`. A path replaced by a symlink is refused, never followed.
-  - A rotation by flipping an ancestor symlink (`current` → `v2`) is now seen and re-resolved. Before, the old profile
-    stayed current and wedged the install.
-  - The activation's initial probe takes the same check.
-  - A re-probe round runs its entries concurrently, at most eight at once, so one churning entry delays no other.
-
-  **Upgrade note:** a probe that replaces one of its own declared paths on every run now fails as
-  `confinement_changed` (`deprecations.md` §50).
-
-- **A call to a provider on the same node no longer loses its reply.** `rpc_call` emitted the request and only then
-  registered for the reply. A provider on the calling node receives the request inside the emit, and on a
-  multi-threaded runtime its serve task can run on another worker at once; when it answered before the caller had
-  registered, the reply was dropped and the caller waited out its whole timeout although the handler ran. Every
-  request-reply call shares the path: `ServiceHandle::rpc_call` and its variants, `scatter`, `bulk_call`, and the
-  gateway's dispatch from `/mcp`, `/a2a`, `/gateway/rpc/call`, the overlay and the LLM doors. The caller now registers
-  before it emits, and the registration is removed when the call ends, including a cancelled one, which used to leave
-  its entry behind. This was the `/mcp` door-test flake recorded open under #642. No API change.
-  Beside it: a registration removes only its own entry (a colliding nonce is re-drawn, never overwritten); a reply
-  sent through `MeshHandle::emit_async` (`emit_signal_async`) to a caller on the same node is now claimed — that
-  emitter skipped the reply interceptor, so such a reply went to the fan-out and the caller timed out; and a SWIM probe
-  dropped mid-flight (its task aborted or its runtime shut down) no longer leaves its entry pending.
-
-### Added
-
-- **Inference routing as policy (post-360 plan row R).** The action evaluator can decide where data may go. A routing
-  door hands the gateway's preflight what it established — `GossipAgent::gateway_preflight_routed` with `RouteFacts`:
-  the `Destination` it is deciding on and its `Locality` (`in_domain` · `external` · `unknown`), the request's
-  `DataClass` and who declared it (`ClassSource::{Principal, Declared, Default}`), and the destinations already refused
-  for the call. `ActionEnvelope` gained `destination` and `data_class`; `AeEvidence` gained `route` (absent from a
-  door that does not route, so a record without it serialises as before) and fills `destination`, which no door could
-  state until now. The reference evaluator's `Rule::for_class` and `Rule::at_locality` express *confidential may only
-  reach in-domain models*; a class or locality a door did not establish is **not established**, never in-domain — so
-  `/gateway/llm/call` and `/gateway/llm/stream`, which classify nothing, cannot pass a class rule. The contract suite
-  gains `PolicyClause::ForbidClassAt` and five `route_*` cases; `ae.preflight` is catalogue revision 3.
-  `mycelium-reason` 0.10.0 is the first routing door: it passes each candidate's declared locality and the request's
-  class, and dispatches to the first candidate the policy permits. **Not built:** content inspection (the class is
-  declared, never detected), observing where a provider's backend sends a prompt (the locality is its declaration),
-  any class or destination at the provider's own re-check, and binding an ad's key to the member that wrote it (a fleet
-member can write another node's `llm-meta` ad). A gateway client cannot set a model's locality:
-`/gateway/capability/advertise` and `/gateway/units/declare` refuse a `locality` attribute on an `llm-meta` ad
-(`403 reserved_namespace`), a catalogue entry providing one is never installed (`prov.eligible` revision 2), and
-`GET /gateway/rpc/serve/{kind}` refuses `llm.invoke`, `mcp.invoke`, `skill.invoke` and the reply kinds — a serve stream
-for one received every such request its node was sent. The private Cedar adapter does not yet enforce class or
-locality (its next re-pin). Upgrade notes: `deprecations.md` §52.
-
-- **`mycelium-py` 0.2.12** and **`mycelium-ts` 0.2.6** (their own tags): `rpc_serve` / `rpcServe` raise
-  `ProtectedKindError`, naming the kind, when the node refuses the stream (`403 protected_kind` or
-  `403 served_in_process`) — before, an SSE content-type error (#643's round-2 review, E) — and the new
-  `ServeEvictedError` (a `ProtectedKindError`) when the node closes the stream because a receiver of its own took the
-  kind, rather than ending the worker's loop silently (round 3).
+- **Tests:** two K2 test flakes were test races, not defects (#651). `an_abort_after_the_record_keeps_the_permit_counted`
+  now loses one prepare on every run, pinning the lease margin, and asserts the record is a permit before the abort;
+  `an_aged_tally_entry_is_withdrawn` checks the window's exact boundary from the entry's own instants, reading no
+  clock. New: `the_heartbeat_tick_withdraws_an_aged_entry`.
 
 ## [2.35.0] — 2026-10-17
 
