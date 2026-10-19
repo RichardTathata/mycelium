@@ -1062,21 +1062,30 @@ async fn a_restarted_node_keeps_its_heartbeat_fresh_without_permits() {
     b.shutdown().await;
 }
 
-/// **Finding 4: a tally entry is withdrawn once every time in it has aged out.**
+/// **Finding 4: a tally entry is withdrawn once every time in it has aged out** — and not a millisecond before: at the
+/// window's last instant the entry still counts (`counted_in` counts a time `t > now - w`), so it stays; at its end it is
+/// withdrawn. The instants are the entry's own, passed in, so the test reads no clock: it used a 300 ms window and the
+/// node's clock, and under parallel load more than 300 ms could pass between the permit and the check (or the node's
+/// own withdrawal tick could take the entry first), failing "still inside its window" with nothing wrong. The window is
+/// ten minutes so neither the clock nor the tick can reach it while the test runs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn an_aged_tally_entry_is_withdrawn() {
     let (p1, p2) = (port(), port());
-    let a = node_with(p1, &[], posts(3, 300, HistoryScope::FleetTally), |_| {}).await;
-    let b = node_with(p2, &[p1], posts(3, 300, HistoryScope::FleetTally), |_| {}).await;
+    let a = node_with(p1, &[], posts(3, TEN_MIN, HistoryScope::FleetTally), |_| {}).await;
+    let b = node_with(p2, &[p1], posts(3, TEN_MIN, HistoryScope::FleetTally), |_| {}).await;
     ready(&[&a, &b]).await;
     let out = post(&a).await;
     assert!(admitted(&out).is_some(), "within the limit, admitted: {:?}", refusal(&out));
     let ctx = Arc::clone(&a.task_ctx);
     let prefix = format!("{}{}/c/", super::TALLY_PREFIX, a.node_id());
-    assert_eq!(mycelium_core::ops::kv_scan_prefix(&ctx, &prefix).len(), 1, "the permit is published");
-    assert_eq!(super::withdraw_aged_entries(&ctx, ctx.hlc.decision_now_ms()), 0, "still inside its window");
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    assert_eq!(super::withdraw_aged_entries(&ctx, ctx.hlc.decision_now_ms()), 1);
+    let published = mycelium_core::ops::kv_scan_prefix(&ctx, &prefix);
+    assert_eq!(published.len(), 1, "the permit is published");
+    let entry: super::TallyEntry = serde_json::from_slice(&published[0].1).expect("a tally entry");
+    assert_eq!(entry.w, TEN_MIN, "kept for the rule's window");
+    let last = *entry.t.iter().max().expect("the permit's time");
+    assert_eq!(super::withdraw_aged_entries(&ctx, last + entry.w - 1), 0, "still inside its window at its last instant");
+    assert_eq!(mycelium_core::ops::kv_scan_prefix(&ctx, &prefix).len(), 1, "kept");
+    assert_eq!(super::withdraw_aged_entries(&ctx, last + entry.w), 1, "aged out at the window's end");
     assert!(mycelium_core::ops::kv_scan_prefix(&ctx, &prefix).is_empty(), "withdrawn");
     a.shutdown().await;
     b.shutdown().await;
@@ -1550,6 +1559,14 @@ async fn an_abort_after_the_record_keeps_the_permit_counted() {
     let tool = a.mcp().register_mcp_tool("slow", serde_json::json!({"type": "object"}), |_args| async { Ok(serde_json::json!("ran")) });
     tokio::time::sleep(Duration::from_millis(100)).await;
     super::super::http::TEST_RECORD_PAUSE_MS.pin().insert(a_id.to_string(), 2_000);
+    // `b` leaves alice's first seat prepare unanswered, so her claim is decided at its second ballot, two seconds late.
+    // That is the CI flake this test had (main run 39219310547): under load a claim lost a ballot, the 2 s lease margin
+    // refused it "decided too late", the refusal was recorded, and the test — which waited for *any* record of alice's —
+    // went on to find nothing counted. The margin now covers a lost ballot (#648); this pins it here.
+    let lost = Arc::new(std::sync::atomic::AtomicU32::new(1));
+    crate::consensus::TEST_SWALLOW_PREPARES
+        .pin()
+        .insert(b.node_id().to_string(), (super::SEAT_SLOT_PREFIX.to_string(), Arc::clone(&lost)));
     let (from, to) = (Arc::clone(&a), a_id.clone());
     let hers = tokio::spawn(async move { alice_calls(&from, &to, "mcp.invoke", None, slow_call(), Duration::from_secs(40)).await });
     let journal = std::env::temp_dir().join(format!("k2-fleet-{p1}")).join("evidence.log");
@@ -1561,6 +1578,20 @@ async fn an_abort_after_the_record_keeps_the_permit_counted() {
             .any(|e| e.subject == ALICE)
     };
     assert!(until(recorded, Duration::from_secs(10)).await, "alice's decision reached the journal");
+    crate::consensus::TEST_SWALLOW_PREPARES.pin().remove(&b.node_id().to_string());
+    assert_eq!(lost.load(std::sync::atomic::Ordering::SeqCst), 0, "b left alice's first prepare unanswered");
+    // The record must be a permit — a refused claim records a decision too, and this test is about a permit.
+    let decided: Vec<AeEvidence> = super::super::evidence_journal::read_evidence_journal(&journal)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|b| serde_json::from_slice::<AeEvidence>(b).ok())
+        .filter(|e| e.subject == ALICE)
+        .collect();
+    assert!(
+        decided.iter().all(|e| e.decision == crate::DecisionKind::Permit),
+        "alice's call is admitted before the abort: {:?}",
+        decided.iter().map(|e| serde_json::to_string(e).unwrap_or_default()).collect::<Vec<_>>()
+    );
     drop(tool); // the loop ends while the history update is paused
     let _ = hers.await;
     super::super::http::TEST_RECORD_PAUSE_MS.pin().remove(&a_id.to_string());
@@ -1571,7 +1602,15 @@ async fn an_abort_after_the_record_keeps_the_permit_counted() {
     else {
         panic!("a view")
     };
-    assert_eq!(view.entries.len(), 1, "the recorded permit stays counted: {:?}", view.entries);
+    // What alice's records say, so a failure names its cause: a refused claim records a decision too.
+    let records: Vec<String> = super::super::evidence_journal::read_evidence_journal(&journal)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+        .filter(|v| v["subject"] == ALICE)
+        .map(|v| v.to_string().chars().take(600).collect())
+        .collect();
+    assert_eq!(view.entries.len(), 1, "the recorded permit stays counted: {:?}; alice's records: {records:?}", view.entries);
     a.shutdown().await;
     b.shutdown().await;
 }
