@@ -31,6 +31,25 @@ window counters stay at zero; `kv_untagged_signatures_refused` is new; `mesh.sig
 residual is restated, not closed (a signed `SyncEntry` is a wire change). Upgrade note `deprecations.md` §40: upgrade
 from 2.33.x, not 2.32. Record: [`.log/2026-10-13-f2-refusal-unconditional.md`](.log/2026-10-13-f2-refusal-unconditional.md).
 
+## v2.36.0 release — 2026-10-19 (tag `v2.36.0`) — the post-360 rows after the comparison, and two old defects
+
+**#647** a call to a provider on the calling node no longer loses its reply: `rpc_call` registered for the reply only
+after emitting the request, so a provider on another worker could answer first and the reply was dropped — every
+request-reply door shared the path (the `/mcp` door-test flake recorded under #642); `emit_signal_async` now runs the
+reply interceptor, and a dropped SWIM probe leaves no entry pending. **#650** a graceful shutdown waits (bounded,
+250 ms) until every outbound frame is flushed or dropped, so its sweep's tombstones reach the wire
+(`mycelium_core::outbound`, `deprecations.md` §54). **#643** inference routing as policy (R): the evaluator sees each
+candidate's destination, declared locality and the request's data class before the router commits; `mycelium-reason`
+0.10.0 is the first routing door, and its review closed a client serve stream receiving `llm.invoke`/`mcp.invoke`
+(403 `protected_kind`, `served_in_process`; `mycelium-py` 0.2.12, `mycelium-ts` 0.2.6). **#642** history limits
+across the fleet (K2): exact consensus seats or an approximate gossiped tally; **#648** the seat-lease margin derived
+from the claim's bounds (19 225 ms) and seats released a window after admission; **#651** two K2 test races. **#644**
+the activation egress proxy (L and M): hosts by name, a live allow-list, credentials at the node's gate, every
+confined command started with a cleared environment; **#646** its SIGHUP reload tested through the binary, and
+`peer_uid` on macOS CI. **#641** a confined re-probe re-resolves a replaced path, with a symlink race closed. **#645**
+`make check` runs CI's remaining lines; **#649** the feature-pages plan. Wire v12 unchanged. Upgrade notes
+`deprecations.md` §50–§54. Release record: [`.log/2026-10-19-release-v2.36.0.md`](.log/2026-10-19-release-v2.36.0.md).
+
 ## v2.35.0 release — 2026-10-17 (tag `v2.35.0`) — the post-360 comparison rows, and two security fixes
 
 **#631/#632** the follow-ups to E and Q: a gateway caller envelope is served once, at the provider it was signed for

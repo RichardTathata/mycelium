@@ -164,7 +164,7 @@ and your own code via `agent.egress_credentials()` → `EgressCredentials::send(
 follows no redirect). A placeholder request goes out under the egress policy the gate captured at `start()` — the
 node's — not a backend's own `with_egress` policy.
 
-**An `[[activation]]` command** reaches the gate through its stem's **egress proxy** (rows L and M, after 2.35.0):
+**An `[[activation]]` command** reaches the gate through its stem's **egress proxy** (rows L and M, 2.36.0):
 an `[activation.confine.egress]` table names the hosts the command may reach and the bindings it may name
 (`credentials = ["openai"]`); the stem runs a forward proxy on loopback for that activation, confines the command
 to the proxy's port, and starts it with a **cleared environment** (as every confined command now starts). At the
@@ -197,7 +197,7 @@ backend: [`unit-file.md` § `[activation.confine.egress]`](../reference/unit-fil
 | Wiki git mirror push | git's own credential helpers | unchanged — git's process, not an HTTP client of the node's |
 | OIDC | none sent (JWKS and discovery are public) | n/a |
 | Artifact signing keys (`mycelium-artifact`) | `--key` (a file) or `--key-env` (a variable) | unchanged — used to sign locally, never sent |
-| An `[[activation]]` command | inherits the stem's whole environment — unless its profile names `[activation.confine.egress]` | **yes**, with `[activation.confine.egress] credentials = ["<binding>"]`: the stem's egress proxy attaches the value at the bound host and masks it in what comes back; every confined command starts with a cleared environment, and a binding whose value the command could read (a `value_env` or same-valued `env` entry, a `value_file` within its read paths) refuses the stem's start. **Unchanged** for an **unconfined** activation, which inherits the stem's whole environment (a `value_env` variable included — prefer `value_file`) and can read what the stem's user can; and not covered: a value an upstream returns transformed (re-encoded, hashed) rather than as its bytes |
+| An `[[activation]]` command | inherits the stem's whole environment — unless it is confined (`[activation.confine]`): every confined command starts with a cleared environment | **yes**, with `[activation.confine.egress] credentials = ["<binding>"]`: the stem's egress proxy attaches the value at the bound host and masks it in what comes back; every confined command starts with a cleared environment, and a binding whose value the command could read (a `value_env` or same-valued `env` entry, a `value_file` within its read paths) refuses the stem's start. **Unchanged** for an **unconfined** activation, which inherits the stem's whole environment (a `value_env` variable included — prefer `value_file`) and can read what the stem's user can; and not covered: a value an upstream returns transformed (re-encoded, hashed) rather than as its bytes |
 | Gateway tokens, mTLS keys | inbound credentials, not egress | n/a |
 
 **Not covered:** a placeholder in a query string or a request body (sent as written — an opaque name); zeroising the

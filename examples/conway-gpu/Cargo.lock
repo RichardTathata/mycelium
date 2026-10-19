@@ -1129,7 +1129,7 @@ dependencies = [
 
 [[package]]
 name = "mycelium"
-version = "2.35.0"
+version = "2.36.0"
 dependencies = [
  "ahash",
  "async-trait",
@@ -1156,11 +1156,12 @@ dependencies = [
  "tower-service",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
 name = "mycelium-core"
-version = "2.35.0"
+version = "2.36.0"
 dependencies = [
  "ahash",
  "async-trait",

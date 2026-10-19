@@ -335,7 +335,7 @@ the credential on a redirect the binding does not authorise. `[[serve]]`'s `cred
 and `OpenAiBackend` with `.with_credentials(gate)` send through it.
 
 An `[[activation]]` command reaches the gate through an **egress proxy** its stem runs for it (rows L
-and M, after 2.35.0). Its `[activation.confine.egress]` table names the hosts the command may reach —
+and M, 2.36.0). Its `[activation.confine.egress]` table names the hosts the command may reach —
 `https://api.example.com`, by name, the list replaceable while the stem runs — and the bindings it may
 name. The command is confined to the proxy's loopback port and started with a cleared environment (every
 confined command is) that

@@ -6,7 +6,7 @@ All notable changes to this crate. It versions **independently** of the Mycelium
 
 ---
 
-## [0.10.0] — unreleased
+## [0.10.0] — 2026-10-19
 
 **Inference routing as policy** (post-360 hardening row R). The router chose a provider by load and reservation, and
 nothing could say whether a request *may* go there: the gateway's preflight saw `prompt:llm/{model}@{provider}` and
