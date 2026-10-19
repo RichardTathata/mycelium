@@ -178,7 +178,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Beside it: a registration removes only its own entry (a colliding nonce is re-drawn, never overwritten); a reply
   sent through `MeshHandle::emit_async` (`emit_signal_async`) to a caller on the same node is now claimed — that
   emitter skipped the reply interceptor, so such a reply went to the fan-out and the caller timed out; and a SWIM probe
-  dropped mid-flight (the prober stopping on shutdown) no longer leaves its entry pending.
+  dropped mid-flight (its task aborted or its runtime shut down) no longer leaves its entry pending.
 
 ### Added
 

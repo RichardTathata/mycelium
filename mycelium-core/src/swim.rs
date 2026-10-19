@@ -253,7 +253,8 @@ impl SwimState {
     /// Register interest in `seq`, returning a receiver that fires when the matching
     /// acknowledgement arrives, and the guard that removes the entry when dropped — on an
     /// acknowledgement, a timeout, or the probe's future being dropped mid-flight (the prober's
-    /// `select!` on shutdown, a relay task dropped with its runtime). `seq` is drawn from a
+    /// task aborted or its runtime shut down, a relay's spawned probe likewise — the prober's
+    /// `select!` does not poll shutdown while a probe runs inside its tick arm). `seq` is drawn from a
     /// monotonic counter, so the entry the guard removes is its own.
     fn register(&self, seq: u64) -> (PendingProbe<'_>, oneshot::Receiver<()>) {
         let (tx, rx) = oneshot::channel();
@@ -587,8 +588,8 @@ mod tests {
         assert!(a.pending.lock().unwrap().is_empty());
     }
 
-    /// **A probe dropped mid-flight leaves nothing pending.** The prober's `select!` drops a probe on shutdown, and a
-    /// relay's spawned probe is dropped with its runtime; the entry was removed only after the wait returned, so a
+    /// **A probe dropped mid-flight leaves nothing pending.** A probe is dropped mid-flight when the prober's task is
+    /// aborted or its runtime shuts down, and a relay's spawned probe likewise; the entry was removed only after the wait returned, so a
     /// dropped probe left its `seq` in `pending` for the life of the state.
     #[tokio::test]
     async fn a_probe_dropped_mid_flight_leaves_nothing_pending() {
