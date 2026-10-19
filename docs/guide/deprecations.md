@@ -1820,7 +1820,9 @@ adapter held to the contract suite meets three new cases — `fleet_limit_past_t
 builds the first two is settled by the seam's own check, whatever it decides; one that **refuses the policy at load**
 (`build` returns `Err`) passes them too, because those two cases accept a refusal at load
 (`ContractCase::accepts_refusal_at_load`, recorded in `Report::refused_at_load`) — do not list them in
-`declared_limits`. Everywhere else a refusal at load is still a decline. `ContractCase` and `Report` each gained that
+`declared_limits` — provided it passed `fleet_limit_at_the_bounds` by building (`ae_contract::REFUSAL_AT_LOAD_WITNESS`),
+which shows it expresses the clause and refuses only on the bounds. An adapter that cannot express
+`AllowAtMostAcross` at all declines all nine `fleet_*` cases, these two included, and declares them. Everywhere else a refusal at load is still a decline. `ContractCase` and `Report` each gained that
 field, so an exhaustive literal of either — an adopter's own case — needs `accepts_refusal_at_load: false` (or
 `refused_at_load: Vec::new()`). A stored tally entry's window is read clamped to the horizon, so an entry an earlier
 release wrote with a longer window ages out at 24 hours. `ae.preflight` is catalogue revision 5.

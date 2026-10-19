@@ -24,7 +24,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `fleet_limit_at_the_bounds`). **Upgrade note:** a policy whose fleet limit is outside the bounds still builds, and
   every request its rule covers now decides `Indeterminate` (`deprecations.md` §55). The contract suite counts an
   adapter's refusal of such a policy at load as a pass on those two cases (`ContractCase::accepts_refusal_at_load`,
-  `Report::refused_at_load` — both structs gained a field), and a stored tally entry's window is clamped to the horizon
+  `Report::refused_at_load` — both structs gained a field; only for an adapter that passed `fleet_limit_at_the_bounds` by building), and a stored tally entry's window is clamped to the horizon
   when it is aged or collected, so an oversized one no longer lingers.
 
 ## [2.36.0] — 2026-10-19

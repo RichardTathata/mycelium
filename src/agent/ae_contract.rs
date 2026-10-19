@@ -37,6 +37,8 @@
 //! One exception, by case: a policy that is unsafe to run at all (row K2's out-of-bounds fleet limits) may be
 //! **refused at load** — `build` returning `Err` — and that passes the case
 //! ([`ContractCase::accepts_refusal_at_load`], [`Report::refused_at_load`]): nothing runs, so nothing is admitted.
+//! Only for an adapter that passed [`REFUSAL_AT_LOAD_WITNESS`] (`fleet_limit_at_the_bounds`) by building — one that
+//! expresses the clause and refuses on the bounds; one that cannot express the clause at all declines those cases too.
 //!
 //! # What passing here is worth
 //!
@@ -304,7 +306,9 @@ pub struct ContractCase {
     /// rather than declining it. Set only where the policy is unsafe to run and the expected outcome is
     /// [`Expected::NotEstablished`]: a policy refused at load decides nothing and admits nothing, the safest outcome the
     /// case can have, so it is not a gap in the adapter's coverage to declare (row K2's bounds: an adapter that rejects
-    /// an out-of-bounds fleet limit at load, as the private Cedar adapter does). Recorded in
+    /// an out-of-bounds fleet limit at load, as the private Cedar adapter does) — and only from an adapter that passed
+    /// [`REFUSAL_AT_LOAD_WITNESS`] by building, which shows it expresses the clause and refuses only on the bounds; an
+    /// adapter refusing for another reason (it cannot express the clause) declines. Recorded in
     /// [`Report::refused_at_load`] with the adapter's reason. Everywhere else a refusal at load is a decline.
     pub accepts_refusal_at_load: bool,
 }
@@ -440,14 +444,15 @@ pub fn run_cases(subject: &dyn EvaluatorUnderTest, cases: &[ContractCase]) -> Re
         refused_at_load: Vec::new(),
         declared: Vec::new(),
     };
+    let mut pending_refusals: Vec<(&'static str, Unexpressible)> = Vec::new();
 
     for case in cases {
         let evaluator = match subject.build(&case.policy) {
             Ok(e) => e,
-            // Refused at load where the case accepts it: nothing runs, nothing is admitted — a pass, not a decline.
+            // Refused at load where the case accepts it: decided after every case has run, by whether the adapter
+            // expressed the clause at the bounds (`REFUSAL_AT_LOAD_WITNESS`) — so case order does not matter.
             Err(why) if case.accepts_refusal_at_load => {
-                report.passed.push(case.id);
-                report.refused_at_load.push((case.id, why));
+                pending_refusals.push((case.id, why));
                 continue;
             }
             Err(why) => {
@@ -524,8 +529,28 @@ pub fn run_cases(subject: &dyn EvaluatorUnderTest, cases: &[ContractCase]) -> Re
         report.passed.push(case.id);
     }
 
+    // A refusal at load earns credit only from an adapter that expresses the clause: one that passed the witness case
+    // by building. An adapter that cannot express `AllowAtMostAcross` at all refuses the out-of-bounds cases for the
+    // wrong reason — a decline, as anywhere else (#653's review, round 2).
+    let expresses = report.passed.contains(&REFUSAL_AT_LOAD_WITNESS)
+        && !pending_refusals.iter().any(|(id, _)| *id == REFUSAL_AT_LOAD_WITNESS);
+    for (id, why) in pending_refusals {
+        if expresses {
+            report.passed.push(id);
+            report.refused_at_load.push((id, why));
+        } else {
+            report.declined.push((id, why));
+        }
+    }
+
     report.with_declared(subject.declared_limits().to_vec())
 }
+
+/// The case an adapter must pass **by building** for a refusal at load to pass an
+/// [`accepts_refusal_at_load`](ContractCase::accepts_refusal_at_load) case: `fleet_limit_at_the_bounds`, a fleet limit
+/// at exactly the bounds. Passing it shows the adapter expresses the clause and refuses only past the bounds. In a run
+/// of chosen cases ([`run_cases`]) that leaves it out, every refusal at load is a decline.
+pub const REFUSAL_AT_LOAD_WITNESS: &str = "fleet_limit_at_the_bounds";
 
 // ── the cases ─────────────────────────────────────────────────────────────────────────────────
 
@@ -1882,6 +1907,44 @@ mod tests {
         assert!(declined.iter().all(|id| id.starts_with("route_")) && declined.len() == 5, "{declined:?}");
         assert!(report.conformant(), "{}\n{:#?}", report.summary(), report.failed);
         assert_eq!(report.passed.len() + report.declined.len(), cases().len());
+
+        // An adapter that cannot express `AllowAtMostAcross` at all refuses the two out-of-bounds cases for the wrong
+        // reason: it gets no credit for them. Credit needs `fleet_limit_at_the_bounds` passed by building — the clause
+        // expressed, and refused only on the bounds. Here every fleet case is declined, and declared it is conformant.
+        struct NoFleet;
+        const NO_FLEET: &[&str] = &[
+            "fleet_consensus_below_limit", "fleet_consensus_at_limit", "fleet_tally_below_limit", "fleet_tally_at_limit",
+            "fleet_coverage_not_established", "fleet_rule_not_satisfied_by_the_point", "fleet_limit_past_the_seat_cap",
+            "fleet_window_past_the_horizon", "fleet_limit_at_the_bounds",
+        ];
+        impl EvaluatorUnderTest for NoFleet {
+            fn name(&self) -> &str {
+                "NoFleet"
+            }
+            fn declared_limits(&self) -> &[&'static str] {
+                NO_FLEET
+            }
+            fn build(&self, intent: &PolicyIntent) -> Result<Arc<dyn ActionEvaluator>, Unexpressible> {
+                if intent.clauses.iter().any(|c| matches!(c, PolicyClause::AllowAtMostAcross { .. })) {
+                    return Err(Unexpressible { clause: "AllowAtMostAcross".into(), because: "no fleet scopes".into() });
+                }
+                ReferenceUnderTest.build(intent)
+            }
+        }
+        let report = run(&NoFleet);
+        for id in ["fleet_limit_past_the_seat_cap", "fleet_window_past_the_horizon"] {
+            assert!(!report.passed.contains(&id), "{id}: refused for the wrong reason, no credit");
+            assert!(report.declined.iter().any(|(d, _)| *d == id), "{id}: declined");
+        }
+        assert!(report.refused_at_load.is_empty(), "{:?}", report.refused_at_load);
+        assert!(report.conformant(), "{}\n{:#?}", report.summary(), report.failed);
+        // The verdict does not depend on case order: the witness run last gives the same answer.
+        let mut reversed = cases();
+        reversed.reverse();
+        let r = run_cases(&Strict, &reversed);
+        assert!(r.passed.contains(&"fleet_limit_past_the_seat_cap") && r.passed.contains(&"fleet_window_past_the_horizon"));
+        let r = run_cases(&NoFleet, &reversed);
+        assert!(!r.passed.contains(&"fleet_limit_past_the_seat_cap") && !r.passed.contains(&"fleet_window_past_the_horizon"));
     }
 
     /// The same evaluator, declaring its limit, is conformant — and a **stale** declaration is not.
