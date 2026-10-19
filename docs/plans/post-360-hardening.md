@@ -1890,6 +1890,27 @@ suite's in `ae_contract.rs`.
   write a tombstone newer than the record held — `kv_delete_held`; the `/mcp` timeout leaked mesh diagnostics to the
   caller — the warning only; without `[tls]` a non-peer was ignored — `Indeterminate`; the unsigned-entry forgery
   residual — stated. Round 6: clear; merged after the rebase onto #644 (the tally lock renumbered to lock-order row 67).
+- *a fleet limit is bounded (after the release, from the review of the private Cedar adapter: a denial of service by
+  misconfiguration)* — **delivered on `main`, unreleased (`deprecations.md` §55).** `seats_state` read every seat, a slot
+  digest and a KV read each, on every request a rule covered, under the actor's history gate on an async worker, so a
+  limit of `u32::MAX` pinned a worker for minutes; a fleet window had no horizon. Entry points enumerated (`git grep -n
+  "FleetCounter::new\|fleet_counters(\|\.scoped(\|AllowAtMostAcross\|fleet_history::" -- src`): `Rule::at_most` /
+  `Rule::scoped` and `fleet_limit` (the reference evaluator), `FleetCounter::new` (any adapter's `fleet_counters`),
+  `PolicyClause::AllowAtMostAcross` (the contract suite's three builders), and the enforcement point's uses in
+  `http/authz.rs` — `establish`, `publish_permit`, `claim_seat`; no configuration, unit-file or HTTP path builds a
+  policy (an evaluator is attached in code, `with_action_evaluator`). Bounds: `MAX_FLEET_SEATS` = 1 024 (what the
+  history keeps per actor at a point, and what the Cedar adapter accepts) and a window in `1..=MAX_FLEET_WINDOW_MS`, the
+  history horizon (24 h; `evidence_journal::HORIZON_MS` is now defined as it). Refused, not clamped, at each: `fleet_limit`
+  decides `Indeterminate` naming the bound, beside its refusal of `*`; `establish` gives `NotEstablished` before reading
+  anything, `claim_seat` proposes nothing and `publish_permit` writes nothing; and the seam (`preflight_with_history`)
+  turns any evaluator's permit relying on such a counter into *not established* — its sixth check. Typed:
+  `FleetBoundsError`, `check_fleet_bounds`, `FleetCounter::try_new` / `check_bounds`, so an adapter can refuse at load.
+  Tests, each seen failing on the unfixed code first: `a_fleet_limit_past_the_seat_cap_or_the_horizon_is_not_established`
+  (both scopes; the cap and the horizon themselves admitted), `the_seam_refuses_a_permit_on_an_unbounded_fleet_counter`
+  (a permissive evaluator; the bounds admitted), `a_fleet_counter_past_the_bounds_is_not_established_at_the_enforcement_point`
+  (a live node: `establish` and `claim_seat` read and propose nothing, `u32::MAX` included, and a gateway call is refused,
+  then admitted at the bounds); and three contract cases, `fleet_limit_past_the_seat_cap`,
+  `fleet_window_past_the_horizon`, `fleet_limit_at_the_bounds`.
 - **Not built, stated:** tally entries are unsigned, so a forgery under a dead member's namespace is not detected (while
   the owner is alive its `sys/` tripwire counts the foreign write and its next publish overwrites it); without `[tls]` a
   non-peer inside the horizon cannot be verified, so a tally rule reads `Indeterminate` until it leaves the horizon, and
@@ -2068,7 +2089,7 @@ writer test on the pre-PR writer (10/10 fail), then 0 failures in 320 runs of al
   history beyond 24 hours, 1 024 records per actor or 65 536 actors per point, and a replay of the history input;
 - (every recorded K2 flake is closed: the `/mcp` door test's lost reply, #647; the seat lease's "decided too late", #648; the abort and aged-tally tests, test races, #651;)
 - the private Cedar adapter's re-pin onto v2.36.0: it meets K2's `PolicyClause::AllowAtMostAcross` and six
-  `fleet_*` cases and R's `PolicyClause::ForbidClassAt` and five `route_*` cases — expressed, or declined by name in
+  `fleet_*` cases (nine once K2's bounds, §55, are released) and R's `PolicyClause::ForbidClassAt` and five `route_*` cases — expressed, or declined by name in
   `declared_limits` (`deprecations.md` §52, §53). Until then a Cedar-backed fleet has neither fleet-wide history limits
   nor class or locality enforcement.
 

@@ -75,6 +75,7 @@ the notice.
 | 52 | an exhaustive `Rule { .. }` literal; an evaluator adapter held to the contract suite that cannot express `PolicyClause::ForbidClassAt`; a `mycelium-reason` caller matching `RouteError` exhaustively or building `Routed`; a client relying on the façade answering `403` at the first refused provider | 2.36.0 (post-360 row R) — also: an `llm-meta` ad from a gateway client is `403 reserved_namespace`; `GET /gateway/rpc/serve/{kind}` for `llm.invoke`, `mcp.invoke`, `skill.invoke`, `rpc.result` or `bulk.result` is `403 protected_kind`, for a kind the node serves in process `403 served_in_process`, and an in-process registration closes client streams on its kind; a classifying router routes nothing without an evaluator; a catalogue entry providing `llm-meta/…` is never installed; on a classifying router a caller with no bound floor cannot declare below the default class, and the header given twice or to a router that classifies nothing is `400` | `Rule::new` and its builders; decline the five `route_*` cases in `declared_limits` or express them; a `RouteError::Unclassifiable` arm; read `refused` / `data.refused_destinations` | Yes for the literals and the `match`; no for the façade — a refused provider is now passed over for the next, and `403` comes only when every candidate is refused |
 | 53 | an exhaustive `Rule`, `HistoryLimit`, `HistoryView`, `HistoryInput` or `mycelium-core` `KvStore` literal; an evaluator that wraps another and forwards only `evaluate`, `history_request` and `evaluate_with_history`; a fleet-consensus-limited request's position in an `rpc_rx` stream under provider enforcement | 2.36.0 (post-360 row K2; `ae.preflight` is catalogue revision 4) | `Rule::at_most(..)` and `.scoped(scope, counter_id)`; `fleet: Vec::new()` (and `seats: Vec::new()`) in a view or input literal; a wrapper forwards `fleet_counters` too | **Yes** for the literals (a new field); `HistoryScope` was already `#[non_exhaustive]`, so a `_` arm takes the new scopes; no for a wrapper — it compiles, and its fleet-limited rules decide `Indeterminate`; no for the order — behaviour |
 | 54 | `mycelium_core`'s `CoreCtx::gossip_txs`, `WriterEntry::tx`, `writer::get_or_spawn_writer` / `request_state`, `run_peer_writer`, and `framing::dispatch_gossip_send` / `dispatch_gossip_try_send` / `gossip_shard_fill` in their old shapes | 2.36.0 (the shutdown-sweep fix, #650) | `GossipTxs::new(senders, Unsent::default())`; pass `gossip_txs.unsent()`; wrap a shard receiver in `CountedRx::new(rx, unsent)` | **Yes** — every use is a type error; code that only uses `GossipAgent` is unaffected ([§54](#54-mycelium-cores-outbound-path-is-counted-its-channel-types-changed-shape-2360-the-shutdown-sweep-fix)) |
+| 55 | a fleet-scoped limit (`HistoryScope::FleetConsensus` / `FleetTally`) over more than 1 024 seats, or over a window of zero or more than 24 hours | unreleased (row K2's bounds) | a per-point limit, or a fleet limit within `MAX_FLEET_SEATS` / `MAX_FLEET_WINDOW_MS`; check a policy at load with `check_fleet_bounds` or `FleetCounter::try_new` | **No** — it builds, and every request its rule covers decides `Indeterminate` ([§55](#55-a-fleet-limit-is-bounded-at-most-1-024-seats-a-window-of-at-most-24-hours-unreleased-post-360-plan-row-k2s-bounds)) |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -1789,3 +1790,31 @@ its handles is unaffected; this concerns only an embedder building a `CoreCtx` o
 and `request_state` that node's `gossip_txs.unsent()`. A consumer of a gossip shard queue wraps its receiver in
 `CountedRx::new(rx, unsent)` and keeps the `Held` that `recv` returns until it has handed the frame on. A frame read
 from the raw receiver without that wrapper is never released, and every later shutdown waits its whole bound.
+
+## 55. A fleet limit is bounded: at most 1 024 seats, a window of at most 24 hours (unreleased, post-360 plan row K2's bounds)
+
+**What changes.** A fleet-scoped limit (`HistoryScope::FleetConsensus` or `FleetTally`) whose count exceeds
+`MAX_FLEET_SEATS` (1 024), or whose window is zero or exceeds `MAX_FLEET_WINDOW_MS` (24 hours, the history horizon), is
+**not established**, wherever it comes from. The reference evaluator decides `Indeterminate` naming the bound, as it
+already did for an exact limit over a wildcard actor. The enforcement point reads none of such a counter's seats or
+tallies and claims no seat: `establish` gives `FleetState::NotEstablished`, whichever evaluator named the counter. And
+`preflight_with_history` turns a permit relying on one into `PreflightRefusal::NotEstablished` — a sixth check of the
+seam's. Under 2.36.0 a limit of `u32::MAX` read every seat, a slot digest and a KV read each, on every request the rule
+covered, synchronously under the actor's history gate on an async worker: a worker pinned for minutes per request, a
+denial of service by misconfiguration (the review of the private Cedar adapter). Nothing is clamped: a limit past the
+bounds was never a limit the enforcement point could keep.
+
+New public items: `MAX_FLEET_SEATS`, `MAX_FLEET_WINDOW_MS`, `FleetBoundsError` (`#[non_exhaustive]`),
+`check_fleet_bounds`, `FleetCounter::try_new` and `FleetCounter::check_bounds`. `FleetCounter::new`, `Rule::at_most` and
+`Rule::scoped` are unchanged and still accept any value; the refusal is where the counter is used.
+
+**Will the compiler tell me?** No. A policy whose fleet limit is outside the bounds compiles and builds, and every
+request its rule covers then decides `Indeterminate` (`authority_not_established` at the gateway) rather than being
+counted. A per-point limit (`at_most` without `scoped`) is unaffected.
+
+**Migration.** Check every fleet-scoped limit: at most 1 024 in a window of at most 24 hours. A policy wanting more
+wants a per-point limit, or a shorter window. An adapter can refuse such a policy when it loads it with
+`check_fleet_bounds(count, window_ms)` or `FleetCounter::try_new`, rather than refusing every request it covers. An
+adapter held to the contract suite meets three new cases — `fleet_limit_past_the_seat_cap`,
+`fleet_window_past_the_horizon` (both not established) and `fleet_limit_at_the_bounds` (admitted) — which the seam's
+own check settles for the first two whatever the adapter decides. `ae.preflight` is catalogue revision 5.

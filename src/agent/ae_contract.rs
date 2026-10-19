@@ -49,7 +49,7 @@
 use super::action_evaluator::{
     ActionEnvelope, ActionEvaluator, ActionMapping, Decision, DecisionKind, Execution, FleetCount, FleetCounter,
     FleetState, History, HistoryEntry, HistoryScope, HistoryView, PreflightRefusal, ReferenceEvaluator, Rule, Verdict,
-    preflight, preflight_with_history,
+    MAX_FLEET_SEATS, MAX_FLEET_WINDOW_MS, preflight, preflight_with_history,
 };
 use super::route_facts::{ClassSource, DataClass, Destination, Locality};
 use mycelium_core::NodeId;
@@ -128,7 +128,9 @@ pub enum PolicyClause {
     /// `AllowAtMost`, counted **across the fleet** at `scope` (row K2): [`HistoryScope::FleetConsensus`] — an agreed
     /// counter, exact — or [`HistoryScope::FleetTally`] — the gossiped tallies' sum, approximate. The enforcement
     /// point establishes the count for the counter the evaluator names ([`ActionEvaluator::fleet_counters`]); a count
-    /// at another scope never satisfies it, and a count not established decides nothing.
+    /// at another scope never satisfies it, and a count not established decides nothing. A `count` past
+    /// [`MAX_FLEET_SEATS`] or a `window_ms` outside `1..=`[`MAX_FLEET_WINDOW_MS`] is not established — the bounds
+    /// every enforcement point holds a fleet counter to.
     AllowAtMostAcross {
         /// Actor principal, or `*`.
         actor: String,
@@ -930,6 +932,45 @@ pub fn cases() -> Vec<ContractCase> {
             must_mention: vec![HistoryScope::FleetConsensus.label().to_string()],
             revision: RevisionBinding::Matching,
         },
+        // Row K2's bounds: a fleet counter is a cost on every request its rule covers (each seat read, a tally entry
+        // per permit), so a limit past `MAX_FLEET_SEATS` or a window past `MAX_FLEET_WINDOW_MS` is not a limit. The
+        // counter has room — a lax adapter would permit — and the outcome is not established, at either scope.
+        ContractCase {
+            id: "fleet_limit_past_the_seat_cap",
+            requirement: "a fleet limit naming more seats than MAX_FLEET_SEATS is not established, even with every \
+                          seat free — never a permit, never clamped",
+            policy: fleet_policy_bounded(HistoryScope::FleetConsensus, MAX_FLEET_SEATS + 1, 500),
+            envelope: base("oidc:idp/alice", "tools/call", "tool:post@n1"),
+            history: Some(fleet_history_of(now, HistoryScope::FleetConsensus, FleetState::Seats { held: 0 })),
+            now_ms: now,
+            expect: Expected::NotEstablished,
+            must_mention: vec![HistoryScope::FleetConsensus.label().to_string()],
+            revision: RevisionBinding::Matching,
+        },
+        ContractCase {
+            id: "fleet_window_past_the_horizon",
+            requirement: "a fleet limit over a window longer than MAX_FLEET_WINDOW_MS (the history horizon) is not \
+                          established, even with an empty tally",
+            policy: fleet_policy_bounded(HistoryScope::FleetTally, 3, MAX_FLEET_WINDOW_MS + 1),
+            envelope: base("oidc:idp/alice", "tools/call", "tool:post@n1"),
+            history: Some(fleet_history_of(now, HistoryScope::FleetTally, tally(0))),
+            now_ms: now,
+            expect: Expected::NotEstablished,
+            must_mention: vec![HistoryScope::FleetTally.label().to_string()],
+            revision: RevisionBinding::Matching,
+        },
+        ContractCase {
+            id: "fleet_limit_at_the_bounds",
+            requirement: "a fleet limit of exactly MAX_FLEET_SEATS over exactly MAX_FLEET_WINDOW_MS is a limit like \
+                          any other: admitted while seats remain",
+            policy: fleet_policy_bounded(HistoryScope::FleetConsensus, MAX_FLEET_SEATS, MAX_FLEET_WINDOW_MS),
+            envelope: base("oidc:idp/alice", "tools/call", "tool:post@n1"),
+            history: Some(fleet_history_of(now, HistoryScope::FleetConsensus, FleetState::Seats { held: 0 })),
+            now_ms: now,
+            expect: Expected::Admitted,
+            must_mention: vec![HistoryScope::FleetConsensus.label().to_string()],
+            revision: RevisionBinding::Matching,
+        },
     ]
 }
 
@@ -958,6 +999,14 @@ fn fleet_policy(scope: HistoryScope) -> PolicyIntent {
     PolicyIntent::new(
         "rev-1",
         vec![PolicyClause::allow_at_most_across("oidc:idp/alice", "tools/call", "tool:post@n1", 3, 500, scope, "c-posts")],
+    )
+}
+
+/// *At most `count` posts in `window_ms`, across the fleet at `scope`* — for the bounds' cases (row K2).
+fn fleet_policy_bounded(scope: HistoryScope, count: u32, window_ms: u64) -> PolicyIntent {
+    PolicyIntent::new(
+        "rev-1",
+        vec![PolicyClause::allow_at_most_across("oidc:idp/alice", "tools/call", "tool:post@n1", count, window_ms, scope, "c-posts")],
     )
 }
 

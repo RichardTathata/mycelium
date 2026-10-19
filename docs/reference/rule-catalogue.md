@@ -7,7 +7,7 @@ Schema `mycelium.rules/1` · 29 rules.
 | Rule | Responsibilities | Trace | Summary |
 |---|---|---|---|
 | [`a2a.admission`](#a2aadmission) | Admission, Authority | catalogue only | An absent credential is anonymous and a present bearer's scopes are dropped: a bearer does not gate this route, an evaluator does. |
-| [`ae.preflight`](#aepreflight) | Authority | catalogue only | Permit, deny or indeterminate, recorded before the work runs; a refused mandate denies before policy runs, so a policy engine cannot launder a revocation. A history limit counts at the scope its rule names: this point, a consensus counter (exact; a seat claimed before admission) or the gossiped tally (approximate, and not established when its coverage is not). |
+| [`ae.preflight`](#aepreflight) | Authority | catalogue only | Permit, deny or indeterminate, recorded before the work runs; a refused mandate denies before policy runs, so a policy engine cannot launder a revocation. A history limit counts at the scope its rule names: this point, a consensus counter (exact; a seat claimed before admission) or the gossiped tally (approximate, and not established when its coverage is not); a fleet limit past 1 024 seats or a 24-hour window is not established. |
 | [`cap.match`](#capmatch) | Response | catalogue only | The one matching rule, shared by the resolver and the offline check: namespace, name, schema id, typed attribute constraints; opacity skips, it does not unmatch. |
 | [`cons.acceptor_memory`](#consacceptor_memory) | Response | catalogue only | An electorate member must keep its promises across a restart: no `[persistence]` is refused by name at every door, an empty store is warned once its genesis is known, and a peer's copy of this node's own record above its memory withholds the slot until the next start — detection, never prevention, and only of a copy that arrives before the next higher ballot. |
 | [`gateway.auth`](#gatewayauth) | Authority | catalogue only | Deny by default under `compliance`: a route needs its scope; with no credential model the gateway is open — on loopback only, since a non-loopback one refuses to start unless `gateway_allow_unauthenticated` waives it — and a table the build cannot enforce refuses to start. |
@@ -54,9 +54,9 @@ An absent credential is anonymous and a present bearer's scopes are dropped: a b
 
 ## `ae.preflight`
 
-rev 4 · `mycelium::agent::http` · Authority · trace: catalogue only
+rev 5 · `mycelium::agent::http` · Authority · trace: catalogue only
 
-Permit, deny or indeterminate, recorded before the work runs; a refused mandate denies before policy runs, so a policy engine cannot launder a revocation. A history limit counts at the scope its rule names: this point, a consensus counter (exact; a seat claimed before admission) or the gossiped tally (approximate, and not established when its coverage is not).
+Permit, deny or indeterminate, recorded before the work runs; a refused mandate denies before policy runs, so a policy engine cannot launder a revocation. A history limit counts at the scope its rule names: this point, a consensus counter (exact; a seat claimed before admission) or the gossiped tally (approximate, and not established when its coverage is not); a fleet limit past 1 024 seats or a 24-hour window is not established.
 
 - **Trigger:** a gateway dispatch that an evaluator covers
 - **Reads:**
@@ -72,7 +72,7 @@ Permit, deny or indeterminate, recorded before the work runs; a refused mandate 
 - **Effects:** the evidence journal record before dispatch; the audit chain reference under `compliance` · a fleet-consensus permit: a seat decided by consensus after the per-actor gate is released, held a window from admission and then released by its holder, leased for the rule's window plus a margin as the crash fallback (row K2) · a fleet-tally permit: this node's `sys/ae-tally/` entry and heartbeat (row K2)
 - **Guards:** Authority
 - **Depends on:** [`gateway.auth`](#gatewayauth)
-- **Code:** `http::ae_preflight / ae_record; fleet_history::{establish, claim_seat, publish_permit}` · **Docs:** docs/guide/20-authorising-actions.md · **Tests:** `an_expired_envelope_is_denied_before_the_evaluator_runs`, `test_c7_the_bypass_matrix_no_door_runs_revoked_work`, `at_most_three_posts_in_ten_minutes_counted_at_this_gateway`, `the_consensus_scope_admits_at_most_n_across_three_gateways_under_concurrent_calls`, `without_a_quorum_the_consensus_scope_is_not_established`, `the_tally_scope_converges_and_refuses_after_convergence`, `a_stale_publisher_makes_the_tally_not_established`, `a_claim_waiting_on_a_quorum_holds_up_no_other_call`, `a_seat_decided_too_late_for_its_window_is_not_admitted`, `a_peer_with_no_heartbeat_makes_the_tally_not_established`, `a_routed_call_claims_a_seat_and_carries_its_route`, `a_confidential_request_to_an_external_destination_is_denied_naming_class_and_locality`
+- **Code:** `http::ae_preflight / ae_record; fleet_history::{establish, claim_seat, publish_permit}` · **Docs:** docs/guide/20-authorising-actions.md · **Tests:** `an_expired_envelope_is_denied_before_the_evaluator_runs`, `test_c7_the_bypass_matrix_no_door_runs_revoked_work`, `at_most_three_posts_in_ten_minutes_counted_at_this_gateway`, `the_consensus_scope_admits_at_most_n_across_three_gateways_under_concurrent_calls`, `without_a_quorum_the_consensus_scope_is_not_established`, `the_tally_scope_converges_and_refuses_after_convergence`, `a_stale_publisher_makes_the_tally_not_established`, `a_claim_waiting_on_a_quorum_holds_up_no_other_call`, `a_seat_decided_too_late_for_its_window_is_not_admitted`, `a_peer_with_no_heartbeat_makes_the_tally_not_established`, `a_routed_call_claims_a_seat_and_carries_its_route`, `a_fleet_counter_past_the_bounds_is_not_established_at_the_enforcement_point`, `a_confidential_request_to_an_external_destination_is_denied_naming_class_and_locality`
 
 ## `cap.match`
 
