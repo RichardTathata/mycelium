@@ -1882,7 +1882,7 @@ suite's in `ae_contract.rs`.
   with `require_identity_proofs = false` a fabricated id's entries can count; the exact bound holds to within the
   nodes' wall-clock skew, and without a declared `exclusive_default` electorate the counter is decided over the peers a
   node currently sees, so a partitioned minority can decide alone; a claim that times out may still hold a seat no call
-  used (fewer admitted, never more); the `/mcp` door test's flake is open, instrumented (§3.6); the private Cedar
+  used (fewer admitted, never more); the `/mcp` door test's flake is closed, a reply lost to registration after the emit (§3.6); the private Cedar
   adapter's `fleet_*` / `AllowAtMostAcross` cases, and R's `route_*` / `ForbidClassAt`, wait on its next re-pin after a
   release.
 
@@ -1915,17 +1915,32 @@ is delivered in 2.34.0 — #623, §3.5.)
 containers, seccomp and an unprivileged identity, which need Docker) is not built; the native Seatbelt and Landlock
 profiles and the activation egress proxy stand in its place. It stays on M's *not built* list.
 
-**Known flake, open (K2, #642):** `the_mcp_door_counts_into_the_fleet_counter` (`src/agent/fleet_history_tests.rs`; an
-earlier version of this line named it `the_fleet_scopes_hold_at_every_door_that_runs_the_preflight`, a name no test
-carries) — twice in CI (at `098f6f3c` and `518283e4`) a `/mcp` call timed out in the dispatch (30 s) after its
-preflight admitted it. The cause is not known: the explanation tried in review (a shared tool name resolving to
-another test's node; the test now uses a tool name of its own) does not hold, since no other test in that build
-registers the name and `alloc_port` does not reuse ports. Instrumented, not fixed: a dispatch timeout at the MCP
-bridge logs where the time went (`preflight_ms`, `dispatch_ms`, `to_self`, `peers`, `dropped_frames`;
-`src/agent/http/mcp_bridge.rs`) and, since round 5, tells the caller only that it timed out
-(`an_mcp_timeout_tells_the_caller_nothing_about_the_mesh`); the test's failure message carries how many times the
-handler ran, the node's peers, the tool keys it holds and the last timeout's diagnostics — so the next occurrence names
-whether the request reached the provider.
+**Known flake, closed (K2, #642; root-caused 2026-10-19):** `the_mcp_door_counts_into_the_fleet_counter`
+(`src/agent/fleet_history_tests.rs`). Three times in CI (at `098f6f3c`, `518283e4` and `2c960486`) a `/mcp` call
+timed out after 30 s in the dispatch, after its preflight admitted it. The instrumentation named the case: the handler
+ran, the dispatch was to the gateway node itself (`to_self=true`), and no frames were dropped. The cause is in
+`rpc_call_framed` (`src/agent/rpc.rs`), not in the door or #642's seat claim. The caller emitted the request and
+*then* registered for its reply in `rpc_pending`. The comment there said that was safe because registration came
+before the caller's first yield, which holds only on one thread. `emit_signal` delivers a self-addressed request to the
+provider's channel synchronously, so the provider's serve task can run on another worker at once. When it answered
+first, the reply interceptor found no pending call and the reply was dropped. Every request-reply call shared this
+path, `bulk_call` included. Seen deterministically by the regression `a_reply_sent_before_the_caller_waits_still_reaches_it`,
+which holds the caller after its emit until the provider has answered. With a 1 ms pause after the emit, the door test
+itself fails with CI's exact message. 800 runs without the pause, in 32 parallel processes, did not reproduce it on
+macOS. Fixed by `PendingReply`: register before the emit, remove on drop (a cancelled call no longer leaves its entry).
+The instrumentation stays.
+
+**Known flake, open (K2, found 2026-10-19 while looping the door test):** under 16–32 parallel test processes, about
+1 run in 200 of the fleet-history tests (the door test, `the_consensus_scope_admits_exactly_n_spread_over_gateways`,
+`a_routed_call_claims_a_seat_and_carries_its_route`, `the_gateway_and_the_provider_count_apart`) refuses a call
+`NotEstablished` with *"seat N was decided too late: its lease ends 5999xx ms from now, less than the 600000 ms
+window"*. The lease is stamped when the claim's carry is built, before the prepare phase (`src/consensus.rs`
+`build_carry`). The seat is admitted only if a whole window remains (`seat_admissible`), and the margin for that is
+`SEAT_LEASE_MARGIN_MS` = 2 000 ms (`src/agent/fleet_history.rs`). One prepare phase's timeout is also 2 s
+(`CLAIM_PHASE_TIMEOUT`), so a claim that loses one phase to its timeout and wins the next ballot is always too late.
+Every observed shortfall was 27–60 ms, which fits that. The refusal fails closed (fewer admitted, never more), so it
+is a liveness flake, not a safety defect. Not fixed: the margin against the claim's worst-case duration is a design
+choice for the row's owner.
 
 **Open next:**
 - each delivered row's *not built* list, in its §3.5 block and below — for K2: signed tally entries (a forgery under a
@@ -1934,7 +1949,7 @@ whether the request reached the provider.
   at the provider's re-check, an ad's key bound to its writer; for M: the OpenShell backend (skipped for now, above),
   resource limits, limits by address and by path, a limit on the proxy's port by address under Landlock; for K: a
   history beyond 24 hours, 1 024 records per actor or 65 536 actors per point, and a replay of the history input;
-- the K2 `/mcp` door-test flake, above;
+- the K2 seat-lease flake ("decided too late"), above; the `/mcp` door-test flake is closed;
 - the private Cedar adapter's re-pin after the next release: it meets K2's `PolicyClause::AllowAtMostAcross` and six
   `fleet_*` cases and R's `PolicyClause::ForbidClassAt` and five `route_*` cases — expressed, or declined by name in
   `declared_limits` (`deprecations.md` §52, §53). Until then a Cedar-backed fleet has neither fleet-wide history limits

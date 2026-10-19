@@ -386,9 +386,12 @@ async fn the_mcp_door_counts_into_the_fleet_counter() {
     let _listeners: Vec<_> =
         [&a, &b].iter().map(|n| n.consensus().start_consensus_listener(ConsensusConfig::default())).collect();
     ready(&[&a, &b]).await;
-    // An open flake (#642): twice in CI a call here timed out in the dispatch after its preflight admitted it, and
-    // the cause is not known. The tool name is this test's own; the handler counts its runs, and a timeout's
-    // diagnostics (`mcp_bridge`'s warning, kept for tests per gateway node) say where the time went.
+    // A flake (#642), closed: three times in CI a call here timed out in the dispatch although its handler ran. The
+    // dispatch is to this node, and `rpc_call_framed` registered for the reply only after emitting the request, so a
+    // provider answering from another worker first lost its reply (`rpc::PendingReply`; the deterministic regression
+    // is `a_reply_sent_before_the_caller_waits_still_reaches_it`). The instrumentation stays: the tool name is this
+    // test's own, the handler counts its runs, and a timeout's diagnostics (`mcp_bridge`'s warning, kept for tests
+    // per gateway node) say where the time went.
     let tool_name = format!("k2-door-{p1}");
     let ran = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let ran_in = Arc::clone(&ran);

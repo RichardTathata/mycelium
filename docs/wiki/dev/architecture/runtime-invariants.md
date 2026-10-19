@@ -396,6 +396,20 @@ a peer that keeps talking (above), and `sys/quorum/` keys already written, which
 worse than any KV key a peer may write). Gates: `src/resource_bounds_tests.rs`,
 `mycelium-core/src/signal.rs` `bound_tests`, `writer.rs` `a_peer_that_never_reads_*`.
 
+## Register for a reply before emitting the request (2026-10-19)
+
+A requester registers its claim on the reply **before** it emits the request: `rpc::PendingReply::register`, then
+`emit_signal`, then `wait` (`src/agent/rpc.rs` `rpc_call_framed`; `src/agent/bulk.rs` `bulk_call_ctx`). The
+registration is removed when the guard drops, so a cancelled call leaves nothing in `rpc_pending`. Never reorder
+these on the reasoning that the caller "registers before its first yield". That holds on one thread only.
+`emit_signal` hands a self-addressed request to the local provider's channel synchronously, so on a multi-threaded
+runtime the provider's serve task can answer from another worker before the emit returns. The reply interceptor keeps
+no reply that finds no registration, so the caller then waits out its timeout although the handler ran. This was the
+#642 `/mcp` door-test flake (three CI failures, `to_self=true`, the handler run). The same rule holds wherever a
+reply is collected from a channel: `MeshHandle::request` and consensus's `vote_rx` / `nack_rx` already register
+first. Gate: `agent::rpc::tests::a_reply_sent_before_the_caller_waits_still_reaches_it` (a hook holds the caller
+after its emit until the provider has answered).
+
 ## Shutdown retracts through the sweep, not through the tasks (2026-10-16)
 
 A soft-state task tombstones its key when it exits, and it exits on the shutdown signal — which

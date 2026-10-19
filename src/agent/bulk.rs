@@ -51,7 +51,7 @@ use tracing::warn;
 
 use super::TaskCtx;
 use super::emit_signal;
-use super::rpc::await_nonce_reply;
+use super::rpc::PendingReply;
 
 // ── Transport adapter ─────────────────────────────────────────────────────────
 
@@ -200,10 +200,12 @@ pub(crate) async fn bulk_call_ctx(
     buf.put(kind_bytes);
     let ticket = buf.freeze();
 
+    // Registered before the ticket leaves, as `rpc_call_framed` does: a provider on this node can answer first.
+    let reply = PendingReply::register(ctx, nonce, &target);
     emit_signal(ctx, Arc::from(signal_kind::INVOKE_BULK), SignalScope::Individual(target.clone()), ticket);
 
     let deadline = tokio::time::Instant::now() + timeout;
-    match await_nonce_reply(ctx, nonce, &target, deadline).await {
+    match reply.wait(deadline).await {
         Some(b) => Ok(b),
         None    => Err(BulkError::Timeout),
     }
