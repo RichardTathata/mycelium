@@ -458,7 +458,7 @@ name. Every entry is checked first, as at start; a bad list is refused and the o
 meets the new list; the command, its profile and the proxy's port are unchanged, and an open `CONNECT` tunnel is
 not closed. `credentials`, `env` and everything else in the file are read once, at start.
 
-`mycelium-stem` installs its `SIGHUP` handler before anything else starts, whatever the unit file names, so a
+`mycelium-stem` installs its `SIGHUP` handler before the node starts, whatever the unit file names, so a
 `SIGHUP` never terminates it: one that arrives during startup is handled once the stem is up, and a stem with no
 egress table re-reads the file and logs that there is nothing to apply. A table added to an activation that
 started without one is refused by name — its proxy is started only at start, so a new table needs a restart. A

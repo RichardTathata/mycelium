@@ -869,6 +869,12 @@ mod tests {
         let reloaded = stem.reload_egress_hosts(&units_with("renamed", "", Some("hosts = [\"http://127.0.0.1:9\"]\n")));
         assert!(reloaded.iter().any(|(at, r)| at == "data/pack" && r.as_ref().is_ok_and(|h| h.is_empty())), "{reloaded:?}");
         assert!(proxy.hosts().is_empty(), "a renamed activation's old proxy is narrowed");
+        // #646's review, round 2: a table named for an activation that started without a proxy is refused by name
+        // (a table added later needs a restart).
+        assert!(
+            reloaded.iter().any(|(at, r)| at == "data/renamed" && r.as_ref().is_err_and(|e| e.to_string().contains("needs a restart"))),
+            "{reloaded:?}"
+        );
         stem.stop().await;
         a.shutdown().await;
     }

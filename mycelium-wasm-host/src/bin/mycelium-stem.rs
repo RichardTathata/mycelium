@@ -257,7 +257,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             for (at, applied) in applied {
                                 match applied {
                                     Ok(hosts) => tracing::info!(activation = %at, ?hosts, "SIGHUP: egress allow-list applied"),
-                                    Err(e) => tracing::warn!(activation = %at, error = %e, "SIGHUP: egress allow-list refused; the old one stands"),
+                                    Err(e) => tracing::warn!(activation = %at, error = %e, "SIGHUP: egress allow-list not applied"),
                                 }
                             }
                         }

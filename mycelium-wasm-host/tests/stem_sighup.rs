@@ -242,7 +242,7 @@ fn sighup_applies_a_rewritten_egress_allow_list_and_a_file_that_does_not_load_ke
     replace(&units, &unit_file(&head, &format!("[\"http://127.0.0.1:{a}\", \"http://denied.example\"]")));
     sighup(child);
     wait_for("the per-activation refusal's log line", child, &log, 30, || {
-        log_of(&log).lines().any(|l| l.contains("SIGHUP: egress allow-list refused; the old one stands") && l.contains("data/pack"))
+        log_of(&log).lines().any(|l| l.contains("SIGHUP: egress allow-list not applied") && l.contains("data/pack"))
     });
     assert_eq!(proxy.get(b, "still"), 200, "the refused list did not replace the old one: B still served");
     assert!(at_b.lock().unwrap().iter().any(|l| l.starts_with("GET /still")));
