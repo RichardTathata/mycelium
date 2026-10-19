@@ -763,7 +763,9 @@ async fn a_lease_that_lapsed_before_its_decision_was_read_is_too_late() {
 /// **Review Q1: a backward wall-clock step does not admit a slow claim.** The margin is cut to half a second (a lease of
 /// the window plus one second) and one lost prepare makes the claim take two; while it waits, the wall clock steps back
 /// five seconds, so the wall-clock reading alone says the lease still covers a window. The monotonic reading does not.
-/// One thread, so the thread-local step reaches both nodes.
+/// One thread, so the thread-local step reaches both nodes. Not under `sim`, whose wall clock is the kernel's and has no
+/// step hook (as `a_rotation_after_the_clock_steps_back_still_outranks_its_predecessor`).
+#[cfg(not(feature = "sim"))]
 #[tokio::test(flavor = "current_thread")]
 async fn a_backward_clock_step_does_not_admit_a_slow_claim() {
     let (a, b, _listeners) = voting_pair().await;
