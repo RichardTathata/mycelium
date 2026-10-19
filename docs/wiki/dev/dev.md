@@ -98,7 +98,8 @@ what bounds the fleet; no quorum ⇒ `Indeterminate`. **Approximate** = per-poin
 and per-publisher staleness — stale or unknown is *not established* (the strict-eligibility style). Gateway and
 provider count apart fleet-wide, as at one node. The per-actor gate (lock-order row 61) is now held across the claim's
 consensus round — no longer: #642's review (round 1) moved the claim after the gate (finding 1), leased a seat for
-the window + 2 s and refused one whose remaining lease is under a window (finding 2), started every node's heartbeat at
+the window + 2 s (since 2026-10-19: + 19 225 ms, the longest a claim is allowed to take, with the holder releasing the seat
+a window after admission) and refused one whose remaining lease is under a window (finding 2), started every node's heartbeat at
 `start()` and withdrew it in the shutdown sweep (3), tombstoned aged tally entries and kept seats only for named actors
 (4 — row A forbids collecting a top record or sentinel), keyed counters by a declared opaque id (5), and made a peer
 without a heartbeat unknown coverage (6). Round 2: the provider decides whether to defer from the real envelope

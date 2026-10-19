@@ -4979,6 +4979,22 @@ pub(crate) fn acceptor_answers_unrecorded() -> u64 {
 
 // ── Voter task ───────────────────────────────────────────────────────────────
 
+/// Test hook, per acceptor node: a slot prefix and how many of its prepares still go unanswered — a promise lost, so
+/// the proposer's prepare phase waits out its timeout and the next ballot decides.
+#[cfg(test)]
+pub(crate) static TEST_SWALLOW_PREPARES: std::sync::LazyLock<
+    papaya::HashMap<String, (String, Arc<std::sync::atomic::AtomicU32>)>,
+> = std::sync::LazyLock::new(papaya::HashMap::new);
+
+#[cfg(test)]
+fn test_swallow_prepare(node: &NodeId, slot: &str) -> bool {
+    use std::sync::atomic::Ordering;
+    let hook = TEST_SWALLOW_PREPARES.pin().get(&node.to_string()).cloned();
+    hook.is_some_and(|(prefix, left)| {
+        slot.starts_with(prefix.as_str()) && left.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok()
+    })
+}
+
 /// Answers a [`Prepare`](ConsensusMsg::Prepare): promise and report, or refuse and say what was
 /// promised. The promise is **on stable storage before the answer leaves** — applied to the store,
 /// then handed to the WAL and fsynced (`persist_acceptor`), the same rung a vote's record and a
@@ -4992,6 +5008,8 @@ async fn answer_prepare(
 ) {
     // A slot whose forgotten promise was detected is not answered until the next start (`acceptor_guard`).
     if crate::agent::acceptor_guard::withheld(&ctx.task_ctx, &slot) { return; }
+    #[cfg(test)]
+    if test_swallow_prepare(&ctx.task_ctx.node_id, &slot) { return; }
     let floor = ctx.floor(&slot);
     // P2: the promise passes the electorate's gate, which only decides. A gate that refused sends no promise
     // (round 3, finding 5).
