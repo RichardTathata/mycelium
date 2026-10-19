@@ -1916,7 +1916,8 @@ containers, seccomp and an unprivileged identity, which need Docker) is not buil
 profiles and the activation egress proxy stand in its place. It stays on M's *not built* list.
 
 **Known flake, closed (K2, #642; root-caused 2026-10-19):** `the_mcp_door_counts_into_the_fleet_counter`
-(`src/agent/fleet_history_tests.rs`). Three times in CI (at `098f6f3c`, `518283e4` and `2c960486`) a `/mcp` call
+(`src/agent/fleet_history_tests.rs`). Four times in CI (at `098f6f3c`, `518283e4` and `2c960486`, and in #646's run 39181781180, a PR that changes nothing
+under `src/agent/`) a `/mcp` call
 timed out after 30 s in the dispatch, after its preflight admitted it. The instrumentation named the case: the handler
 ran, the dispatch was to the gateway node itself (`to_self=true`), and no frames were dropped. The cause is in
 `rpc_call_framed` (`src/agent/rpc.rs`), not in the door or #642's seat claim. The caller emitted the request and
