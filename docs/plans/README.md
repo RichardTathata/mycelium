@@ -156,6 +156,11 @@ future contributor needs so they don't re-litigate a settled choice — lives he
 
 ## Proposed — not yet started
 
+[`feature-front-doors.md`](feature-front-doors.md) — **feature front doors** (adopted 2026-10-19, rev 0.1,
+not started; begins after v2.36.0). One short page per feature: what it is, when to use it, the setting that
+turns it on, a runnable example, its guarantees and *not built* items, and links to the guide, runbook, design
+and code. Kept true by a CI gate, a front-doors pass in the `docs-analyse` skill, and a PR rule.
+
 [`boundary-h.md`](boundary-h.md) — **Boundary H, a colluding population of admitted members** (proposed
 2026-09-24, rev 0.1, not adopted). It implements threat model revision 3's §5 Boundary H in four phases:
 - prerequisites: issuer binding, signed mandate grants, and the knowledge layer's own deferred PRs;
