@@ -132,6 +132,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `mycelium::ConfineDecl` gained `egress` and `env`, `activation_sandbox::Profile` gained `env` and
   `activation_sandbox::Refusal` gained `EgressUnavailable` (`deprecations.md` §51). A `connect` entry naming a
   hostname is still refused; its message now points at `[activation.confine.egress]`.
+- **Tests:** `mycelium-stem`'s SIGHUP reload is tested through the real binary (`mycelium-wasm-host/tests/stem_sighup.rs`:
+  a host added to a confined activation's egress list is served by the running proxy after `kill -HUP`, and a unit
+  file that does not load leaves every list standing), on Linux and macOS; the stem logs when its SIGHUP handler is
+  installed. CI's macOS wasm-host step now runs the `peer_uid` tests, which its name filter had skipped.
+- **Behaviour:** `mycelium-stem` installs its SIGHUP handler before it starts anything and for every unit file, so a
+  SIGHUP no longer terminates a stem whose unit file names no `[activation.confine.egress]` (it logs that there is
+  nothing to apply); a table added after start is refused by name (a restart starts its proxy).
+  `docs/reference/unit-file.md` says to replace the unit file atomically (write, then `rename(2)`).
 
 ### Security
 

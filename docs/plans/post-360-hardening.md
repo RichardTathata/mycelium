@@ -1451,7 +1451,16 @@ CC8, `docs/capabilities.md`, the crate README). The example units with `[[activa
   (`Stem::reload_egress_hosts`, the unit file re-read and only `hosts` applied), checked before it changes —
   `an_allow_list_change_takes_effect_without_a_restart` (live: one hook, one proxy, one port; an added host reached, a
   bad list refused with the old one standing, a removed host refused again; seen failing first with `set_hosts` a
-  no-op) and `a_misconfigured_activation_egress_refuses_the_start_and_a_reload_applies_hosts`. Why not KV or a gateway
+  no-op) and `a_misconfigured_activation_egress_refuses_the_start_and_a_reload_applies_hosts`; the binary's signal
+  path by `mycelium-wasm-host/tests/stem_sighup.rs` (the real `mycelium-stem`, a confined activation behind its proxy:
+  an unlisted host refused, the unit file rewritten and `kill -HUP` sent, the host served by the same process and
+  proxy; a rewrite that does not load leaves every list standing; seen failing first with the SIGHUP branch a no-op;
+  CI's `wasm-host` job and `wasm-host-macos`, added after v2.36.0's review found the path untested). #646's review
+  closed four lows at the root: the handler is installed before anything slow and for every unit file, so SIGHUP
+  never takes its default and terminates the stem (`a_stem_without_an_egress_table_survives_sighup`, seen failing
+  first: `signal: 1 (SIGHUP)`); the per-activation refusal reached through the binary (a host the node's
+  `egress.allow_hosts` denies; seen failing first with that branch silent); atomic replacement and a vanished table's
+  fail-closed narrowing documented in `unit-file.md`. Why not KV or a gateway
   route: KV is fleet-writable (detection, not prevention — any member could widen a stem's list), and a route would be
   a door, with a scope and an audit, for a node-local concern the unit file already owns. `credentials` and `env` stay
   fixed for the stem's life.
@@ -1567,7 +1576,9 @@ CC8, `docs/capabilities.md`, the crate README). The example units with `[[activa
   `sysctl -b net.inet.tcp.pcblist_n` on macOS (`peer_uid.rs`, no `unsafe`) — and closes a connection another
   user's process opened, or one whose owner cannot be read, before it holds any place
   (`a_connection_another_user_owns_or_no_one_can_name_is_closed_at_accept`, through an injected lookup, failing first
-  with admission skipped: answered 200; `the_kernel_names_this_users_own_loopback_connection` on both platforms;
+  with admission skipped: answered 200; `the_kernel_names_this_users_own_loopback_connection` on both platforms —
+  in CI on macOS only since v2.36.0's review added `peer_uid` to `wasm-host-macos`'s filter, which had skipped it and
+  the `pcblist_n` parser tests;
   `another_users_connection_is_closed_at_accept`, live as user `nobody` under passwordless `sudo` in CI's Linux job).
   Same-user crowding stays, stated: that user is inside the stem's trust boundary. (2) The 2 s half-close grace is
   stated in `unit-file.md`. (3) An answer with no body (a `HEAD`'s, 1xx, 204, 304) is relayed whatever its
