@@ -1987,6 +1987,31 @@ Fail-first: `a_claim_that_loses_a_ballot_to_its_timeout_is_admitted`. A hook (`c
 the peer leave the first prepare unanswered. The test failed with the CI message (*"lease ends 599974 ms from now"*) and
 passes with the fix.
 
+**Two more K2 test flakes, closed (2026-10-19). Neither was a product defect.**
+
+`an_abort_after_the_record_keeps_the_permit_counted` failed once in main run 39219310547, with *"the recorded permit
+stays counted: []"*. The test waited for *any* journal record of alice's before aborting. A seat claim refused under
+load records a decision too, and the old 2 s margin refused every claim that lost a ballot (closed by #648). In that
+case the test went on and found nothing counted, because nothing had been admitted.
+
+That mechanism was seen directly. With the margin set back to 2 s and one prepare left unanswered, alice's record is
+`indeterminate` ("the fleet-wide count at scope fleet_consensus could not be claimed"). Under 32 parallel processes,
+the unmodified test failed 1 in 480 runs with the 2 s margin, and 0 in 480 with the current one. The test now loses one prepare on every run, which pins the
+margin. Before the abort it asserts that alice's record is a permit, so a refused claim names itself instead of
+reading as `[]`.
+
+`an_aged_tally_entry_is_withdrawn` failed 2 in 160 fleet-history runs under 16 parallel processes, with *"still
+inside its window"*. It used a 300 ms window and the node's own clock. A test thread descheduled for more than 300 ms
+between the permit and the check saw the entry already aged. A 400 ms pause inserted there reproduces the failure
+exactly (`left: 1`, `right: 0`).
+
+The product's boundary is consistent: `counted_in` counts a time `t > now - w`, and `aged` withdraws when every
+`t <= now - w`. The test now passes the entry's own instants, so it reads no clock. It checks the exact boundary:
+kept at `t + w - 1`, withdrawn at `t + w`. It uses a ten-minute window so that neither the clock nor the node's
+withdrawal tick can reach the entry while the test runs. With the same 400 ms pause, the new test passes.
+
+After the fix: 0 failures in 160 fleet-history runs (16 × 10), and 0 in 480 for each test alone.
+
 **Open next:**
 - each delivered row's *not built* list, in its §3.5 block and below — for K2: signed tally entries (a forgery under a
   dead member's namespace is not detected), a membership check without `[tls]` (a non-peer inside the horizon reads
@@ -1994,7 +2019,7 @@ passes with the fix.
   at the provider's re-check, an ad's key bound to its writer; for M: the OpenShell backend (skipped for now, above),
   resource limits, limits by address and by path, a limit on the proxy's port by address under Landlock; for K: a
   history beyond 24 hours, 1 024 records per actor or 65 536 actors per point, and a replay of the history input;
-- (both K2 flakes are closed: the `/mcp` door test's lost reply, #647, and the seat lease's "decided too late", #648;)
+- (every recorded K2 flake is closed: the `/mcp` door test's lost reply, #647; the seat lease's "decided too late", #648; the abort and aged-tally tests, test races, this PR;)
 - the private Cedar adapter's re-pin after the next release: it meets K2's `PolicyClause::AllowAtMostAcross` and six
   `fleet_*` cases and R's `PolicyClause::ForbidClassAt` and five `route_*` cases — expressed, or declined by name in
   `declared_limits` (`deprecations.md` §52, §53). Until then a Cedar-backed fleet has neither fleet-wide history limits
