@@ -631,8 +631,15 @@ pub(crate) static TEST_WITHDRAW_PAUSE_MS: std::sync::LazyLock<papaya::HashMap<St
 /// nothing can be read from it).
 fn aged(value: &[u8], now_ms: u64) -> bool {
     serde_json::from_slice::<TallyEntry>(value)
-        .map(|e| e.t.iter().all(|t| *t <= now_ms.saturating_sub(e.w)))
+        .map(|e| e.t.iter().all(|t| *t <= now_ms.saturating_sub(stored_window(e.w))))
         .unwrap_or(true)
+}
+
+/// A stored entry's window, read back from the store, clamped to the horizon (#653's review, finding 2): an entry
+/// written by an earlier release with a longer window, or forged with `u64::MAX`, would otherwise never age out, and a
+/// departed node's residue never be collected. No counter within the bounds writes a longer one.
+fn stored_window(w: u64) -> u64 {
+    w.min(super::action_evaluator::MAX_FLEET_WINDOW_MS)
 }
 
 /// Withdraw this node's tally entries whose every time has aged out of the window they were kept for (review
@@ -695,7 +702,7 @@ pub(crate) fn collect_residue(ctx: &Arc<TaskCtx>, now_ms: u64) -> usize {
         let longest = keys
             .iter()
             .filter_map(|(_, v)| serde_json::from_slice::<TallyEntry>(v).ok())
-            .map(|e| e.w)
+            .map(|e| stored_window(e.w))
             .max()
             .unwrap_or(0);
         let horizon = longest.saturating_add(bound.max_staleness_ms).saturating_add(ctx.config.max_clock_drift_ms);

@@ -1910,7 +1910,14 @@ suite's in `ae_contract.rs`.
   (a permissive evaluator; the bounds admitted), `a_fleet_counter_past_the_bounds_is_not_established_at_the_enforcement_point`
   (a live node: `establish` and `claim_seat` read and propose nothing, `u32::MAX` included, and a gateway call is refused,
   then admitted at the bounds); and three contract cases, `fleet_limit_past_the_seat_cap`,
-  `fleet_window_past_the_horizon`, `fleet_limit_at_the_bounds`.
+  `fleet_window_past_the_horizon`, `fleet_limit_at_the_bounds`. Review round 1 (#653): an adapter that refuses an
+  out-of-bounds policy at load was counted as declining — the suite now lets a case accept a refusal at load
+  (`ContractCase::accepts_refusal_at_load`, `Report::refused_at_load`;
+  `a_refusal_at_load_passes_an_out_of_bounds_case_and_nothing_else`); a stored tally entry's window is clamped to the
+  horizon when it is aged and when residue is collected (`stored_window`;
+  `an_oversized_stored_window_ages_out_and_its_residue_is_collected`); the `publish_permit` guard has its own test
+  (`publish_permit_writes_nothing_for_a_counter_outside_the_bounds`, seen failing with the guard removed); and the
+  seam's refusal names the counter as *named for this action*, since the permit may come from another rule.
 - **Not built, stated:** tally entries are unsigned, so a forgery under a dead member's namespace is not detected (while
   the owner is alive its `sys/` tripwire counts the foreign write and its next publish overwrites it); without `[tls]` a
   non-peer inside the horizon cannot be verified, so a tally rule reads `Indeterminate` until it leaves the horizon, and
@@ -2088,10 +2095,11 @@ writer test on the pre-PR writer (10/10 fail), then 0 failures in 320 runs of al
   resource limits, limits by address and by path, a limit on the proxy's port by address under Landlock; for K: a
   history beyond 24 hours, 1 024 records per actor or 65 536 actors per point, and a replay of the history input;
 - (every recorded K2 flake is closed: the `/mcp` door test's lost reply, #647; the seat lease's "decided too late", #648; the abort and aged-tally tests, test races, #651;)
-- the private Cedar adapter's re-pin onto v2.36.0: it meets K2's `PolicyClause::AllowAtMostAcross` and six
-  `fleet_*` cases (nine once K2's bounds, §55, are released) and R's `PolicyClause::ForbidClassAt` and five `route_*` cases — expressed, or declined by name in
-  `declared_limits` (`deprecations.md` §52, §53). Until then a Cedar-backed fleet has neither fleet-wide history limits
-  nor class or locality enforcement.
+- the private Cedar adapter's re-pin onto v2.36.0 is **done** (private #33, `0d654fd`). Open is the **next** re-pin,
+  after K2's bounds (§55) are released: nine `fleet_*` cases, two of which (`fleet_limit_past_the_seat_cap`,
+  `fleet_window_past_the_horizon`) the adapter passes by refusing the policy at load — which the suite counts as a pass
+  only since #653's round 1 (`ContractCase::accepts_refusal_at_load`); before it, that refusal read as an undeclared
+  decline and the adapter's conformance test would have failed.
 
 **Follow-ups recorded as not built in delivered rows (each in its §3.5 block):**
 - **M:** ~~a declared path replaced legitimately (atomic rename, rotated directory) fails the next re-probe, so the

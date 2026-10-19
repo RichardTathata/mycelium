@@ -1901,3 +1901,66 @@ async fn a_fleet_counter_past_the_bounds_is_not_established_at_the_enforcement_p
     assert!(admitted(&out).is_some(), "at the cap and the horizon: {:?}", refusal(&out));
     a.shutdown().await;
 }
+
+/// **An oversized stored window still ages out** (#653's review, finding 2): a tally entry's `w` is read back from the
+/// store — written by an earlier release with a week's window, or forged as `u64::MAX` — so `aged` and the residue
+/// collector clamp it to `MAX_FLEET_WINDOW_MS`. Unclamped, `now - u64::MAX` saturates to zero, the entry is never aged
+/// and a departed node's residue is never collected. An entry whose times are inside the horizon is kept.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_oversized_stored_window_ages_out_and_its_residue_is_collected() {
+    const HORIZON: u64 = 24 * 60 * 60 * 1_000;
+    let p1 = port();
+    let a = node(p1, &[], 3, HistoryScope::FleetTally, |_| {}).await;
+    ready(&[&a]).await;
+    let ctx = Arc::clone(&a.task_ctx);
+    let now = ctx.hlc.decision_now_ms();
+    let entry = |w: u64, t: u64| serde_json::to_vec(&serde_json::json!({"w": w, "t": [t]})).unwrap();
+    for w in [u64::MAX, 7 * HORIZON] {
+        assert!(super::aged(&entry(w, now - HORIZON - 1), now), "w = {w}: a time past the horizon has aged out");
+        assert!(!super::aged(&entry(w, now - HORIZON + 60_000), now), "w = {w}: a time inside the horizon has not");
+    }
+    // This node's own oversized entry is withdrawn by its heartbeat's withdrawal.
+    let own = super::tally_key(&a.node_id().to_string(), "c-old", "gateway", "x");
+    let _ = mycelium_core::ops::kv_set(&ctx, Arc::from(own.as_str()), bytes::Bytes::from(entry(u64::MAX, now - HORIZON - 1)));
+    super::withdraw_aged_entries(&ctx, now);
+    assert!(mycelium_core::ops::kv_get(&ctx, &own).is_none(), "the own oversized entry is withdrawn");
+    // A departed node silent past the clamped horizon (24 h + staleness + drift): its residue is collected.
+    let gone = NodeId::new("127.0.0.1", port()).unwrap().to_string();
+    let silent_since = now - HORIZON - ctx.config.control_max_staleness_ms - ctx.config.max_clock_drift_ms - 60_000;
+    let plant = |key: String, value: Vec<u8>| {
+        let _ = mycelium_core::ops::kv_set(&ctx, Arc::from(key.as_str()), bytes::Bytes::from(value));
+    };
+    plant(super::heartbeat_key(&gone), serde_json::to_vec(&serde_json::json!({"as_of": silent_since, "enforces": true, "departed": true})).unwrap());
+    plant(super::tally_key(&gone, "c-old", "gateway", "x"), entry(u64::MAX, silent_since));
+    super::collect_residue(&ctx, ctx.hlc.decision_now_ms());
+    for key in [super::heartbeat_key(&gone), super::tally_key(&gone, "c-old", "gateway", "x")] {
+        assert!(mycelium_core::ops::kv_get(&ctx, &key).is_none(), "{key} collected");
+    }
+    a.shutdown().await;
+}
+
+/// **`publish_permit` writes nothing for a counter outside the bounds** (#653's review, finding 3): a permit relying on
+/// one is refused at the seam, but the guard is what keeps a direct caller from keeping `count` permit times — up to
+/// `u32::MAX` of them — in a fleet-visible entry. Within the bounds the same call writes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn publish_permit_writes_nothing_for_a_counter_outside_the_bounds() {
+    use crate::FleetCounter;
+    const HORIZON: u64 = 24 * 60 * 60 * 1_000;
+    let p1 = port();
+    let a = node(p1, &[], 3, HistoryScope::FleetTally, |_| {}).await;
+    ready(&[&a]).await;
+    let ctx = Arc::clone(&a.task_ctx);
+    let me = a.node_id().to_string();
+    let now = ctx.hlc.decision_now_ms();
+    for (i, (count, window_ms)) in [(1_025, TEN_MIN), (u32::MAX, TEN_MIN), (3, HORIZON + 1), (3, 0)].into_iter().enumerate() {
+        let key = format!("c-out-{i}");
+        super::publish_permit(&ctx, &FleetCounter::new(HistoryScope::FleetTally, key.as_str(), count, window_ms), "gateway", "x", now);
+        assert!(
+            mycelium_core::ops::kv_get(&ctx, &super::tally_key(&me, &key, "gateway", "x")).is_none(),
+            "{count} in {window_ms} ms: nothing published"
+        );
+    }
+    super::publish_permit(&ctx, &FleetCounter::new(HistoryScope::FleetTally, "c-in", 1_024, HORIZON), "gateway", "x", now);
+    assert!(mycelium_core::ops::kv_get(&ctx, &super::tally_key(&me, "c-in", "gateway", "x")).is_some(), "within the bounds, published");
+    a.shutdown().await;
+}

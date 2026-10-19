@@ -1653,8 +1653,13 @@ pub fn preflight_with_history(
     if decision.verdict == Verdict::Permit
         && let Some((scope, out)) = unbounded
     {
-        let reason =
-            format!("a permit relying on a fleet counter at scope {} outside the fleet bounds: {out}", scope.label());
+        // The counter is one the enforcement point was given for this envelope; the permit may come from another rule,
+        // so the reason says what was named, not what the permit relied on — closed either way (#653's review).
+        let reason = format!(
+            "a fleet counter named for this action at scope {} is outside the fleet bounds ({out}), and no enforcement \
+             point reads one, so a permit is not established",
+            scope.label()
+        );
         let mut errors = decision.errors.clone();
         errors.push(format!("fleet history not established at scope {}: {out}", scope.label()));
         return Err(PreflightRefusal::NotEstablished(Decision { verdict: Verdict::Indeterminate, reason, errors, ..decision }));
