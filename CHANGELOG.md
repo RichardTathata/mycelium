@@ -11,13 +11,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [2.36.0] — 2026-10-19
 
-**Two old defects fixed, a security fix, and the post-360 plan's rows after the comparison.** A request-reply call to
+**Two old defects fixed, two security fixes, and the post-360 plan's rows after the comparison.** A request-reply call to
 a provider on the calling node could lose its reply and wait out its whole timeout although the handler ran: the
 caller registered for the reply only after emitting the request. That shared path serves `/mcp`, `/a2a`, the raw RPC
 routes, `scatter` and `bulk_call`. A graceful shutdown could also stop before the tombstones of its soft-state sweep
 were on the wire, so a peer kept routing to the stopped node until the key's TTL. Both predate this release; see the
-entries under Fixed. Under Security: `GET /gateway/rpc/serve/{kind}` let a `mesh:serve` client stream `llm.invoke` or
-`mcp.invoke` and answer such requests first, and a confinement profile could be widened for good by a symlink planted
+entries under Fixed. Under Security: `GET /gateway/rpc/serve/{kind}` let a `mesh:serve` client stream `llm.invoke`,
+`mcp.invoke` or `skill.invoke` and answer such requests first, and a confinement profile could be widened for good by a symlink planted
 while it resolved.
 
 The post-360 rows delivered since 2.35.0:
@@ -53,7 +53,7 @@ Wire **v12** unchanged (`WIRE_VERSION` 12, `PREV` 11). Companions on their own t
 - **An embedder building a `mycelium_core::CoreCtx` or driving the writers directly** meets the counted outbound
   types (`GossipTxs`, `WriterTx`, `CountedRx`). Code that only uses `GossipAgent` is unaffected.
 - **Struct literals and matches:** `ConfineDecl`, `Rule`, `HistoryLimit`, `HistoryView`, `HistoryInput`,
-  `mycelium-core`'s `KvStore` and `SystemStats` gained fields; `activation_sandbox::Refusal` gained a variant; in
+  `mycelium-core`'s `KvStore` and `mycelium`'s `SystemStats` gained fields; `activation_sandbox::Refusal` gained a variant; in
   `mycelium-reason`, `RouteError` gained `Unclassifiable` and `Routed` two fields. An exhaustive literal or `match`
   breaks; `..Default::default()` and a `_` arm do not. A wrapping evaluator forwards `fleet_counters` too.
 - **Catalogue revisions:** `ae.preflight` 4, `prov.probe` 3, `prov.activation` 3, `prov.eligible` 2;
@@ -62,8 +62,10 @@ Wire **v12** unchanged (`WIRE_VERSION` 12, `PREV` 11). Companions on their own t
 ### Security
 
 - **A client serve stream could receive, and answer first, every model or tool call its node was sent**
-  (`GET /gateway/rpc/serve/{kind}`; every release from 1.0.0 through 2.35.0, under `mesh:serve` since 2.15.0 and any
-  mesh scope before it). The route registered a receiver for whatever kind it was given. `llm.invoke`, `mcp.invoke`
+  (`GET /gateway/rpc/serve/{kind}`; every release from 1.0.0 through 2.35.0 for `mcp.invoke` and `skill.invoke`, from
+  1.1.0 for `llm.invoke`; reachable with `mesh:serve` since 2.15.0 (and `mesh:read`/`mesh:write` through 2.18.1),
+  `mesh:read` from 1.2.0, the single gateway token in 1.1.0, no credential in 1.0.0, and by any caller wherever the
+  gateway had no credential model). The route registered a receiver for whatever kind it was given. `llm.invoke`, `mcp.invoke`
   and `skill.invoke` fan out to every receiver on a node, so a client stream for one received each such request, the
   routed prompts included, beside the node's own provider, and could answer before it. It now refuses those kinds and
   the reply kinds `rpc.result` and `bulk.result` with `403 protected_kind`, refuses any kind the node serves in
@@ -71,7 +73,10 @@ Wire **v12** unchanged (`WIRE_VERSION` 12, `PREV` 11). Companions on their own t
   receiver registers for its kind later (counted, `signal_client_evictions`). An operator-listed protected kind
   (`protected_rpc_kinds`) stays servable and is checked by provider enforcement. `mycelium-py` 0.2.12 and
   `mycelium-ts` 0.2.6 raise `ProtectedKindError` for either refusal and `ServeEvictedError` on eviction
-  (`deprecations.md` §52). Found by #643's review.
+  (`deprecations.md` §52). Found by #643's review. **Check after upgrading:** `curl -s --max-time 3 -H "Authorization:
+  Bearer $SERVE_TOKEN" http://<gateway>/gateway/rpc/serve/llm.invoke` must answer `403` with `"error":"protected_kind"`
+  — an SSE stream that stays open means the node is not upgraded; refusals are logged. The old route recorded no
+  refusal, so past use cannot be read from the node: list which tokens could open the route on your version (above).
 
 - **A symlink planted while a confinement profile resolved could widen it for good** (post-360 row M; #641's review,
   finding 1, present since 2.35.0). There was a window between `prepare`'s symlink check and its `canonicalize`, and

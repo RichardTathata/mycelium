@@ -2066,8 +2066,8 @@ writer test on the pre-PR writer (10/10 fail), then 0 failures in 320 runs of al
   at the provider's re-check, an ad's key bound to its writer; for M: the OpenShell backend (skipped for now, above),
   resource limits, limits by address and by path, a limit on the proxy's port by address under Landlock; for K: a
   history beyond 24 hours, 1 024 records per actor or 65 536 actors per point, and a replay of the history input;
-- (every recorded K2 flake is closed: the `/mcp` door test's lost reply, #647; the seat lease's "decided too late", #648; the abort and aged-tally tests, test races, this PR;)
-- the private Cedar adapter's re-pin after the next release: it meets K2's `PolicyClause::AllowAtMostAcross` and six
+- (every recorded K2 flake is closed: the `/mcp` door test's lost reply, #647; the seat lease's "decided too late", #648; the abort and aged-tally tests, test races, #651;)
+- the private Cedar adapter's re-pin onto v2.36.0: it meets K2's `PolicyClause::AllowAtMostAcross` and six
   `fleet_*` cases and R's `PolicyClause::ForbidClassAt` and five `route_*` cases — expressed, or declined by name in
   `declared_limits` (`deprecations.md` §52, §53). Until then a Cedar-backed fleet has neither fleet-wide history limits
   nor class or locality enforcement.
