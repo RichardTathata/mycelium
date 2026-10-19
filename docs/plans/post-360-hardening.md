@@ -2012,6 +2012,39 @@ withdrawal tick can reach the entry while the test runs. With the same 400 ms pa
 
 After the fix: 0 failures in 160 fleet-history runs (16 × 10), and 0 in 480 for each test alone.
 
+**Known flake, closed (root-caused 2026-10-19; not K2's):** `a_fast_reassert_does_not_undo_the_shutdown_sweep`
+(`src/lib_tests.rs`, #627/#628) failed on `main` at 98a311fc: B kept A's `svc/` key in one round of five. It is not a
+regression. Under 24–32 parallel test processes it failed 5 times in 496 runs on `main` and 3 times in 464 on v2.35.0,
+keeping `svc/` or `cap/` alike. Nor is it the soft-state gate. A probe on a failing run showed the shutdown flush find
+nothing queued (`saw_queue false`), then the signal stop A's writer to B mid-write with an empty queue. The sweep's
+tombstone was in the writer's hand, where `flush_outbound_before_shutdown`'s queue check cannot see it.
+
+#650's first fix let the writer finish that batch after the signal. Its independent review found three holes:
+- nothing awaited that drain, so a process that exits after `shutdown()` cut the write off;
+- the connect arm still broke with a frame in hand;
+- a frame between a shard worker's dequeue and its hand-off was still invisible.
+
+The fix that landed counts frames instead (`mycelium-core/src/outbound.rs`, `Unsent`):
+- a producer raises the count before it enqueues;
+- a shard worker raises it per writer hand-off before releasing its own copy;
+- a writer lowers it once the frame is flushed to its socket or dropped by any path, including abort.
+
+The flush waits, bounded at 250 ms, for zero, so delivery precedes the signal and `shutdown()`. The post-signal drain
+was removed: it delivered nothing the count does not, and nothing awaited it. The senders are wrapped (`GossipTxs`,
+`WriterTx`), so a send that skips the count does not compile (`deprecations.md` §54).
+
+Each regression test was seen failing first:
+- `a_frame_a_writer_holds_at_shutdown_still_reaches_the_peer` failed 10/10 on the pre-PR writer;
+- `…_is_written_before_shutdown_returns` (A on its own runtime, `shutdown_background()` straight after) failed 10/10
+  on the first fix;
+- `a_frame_in_a_slow_connect_at_shutdown_still_reaches_the_peer` failed 10/10 on the first fix;
+- `a_frame_a_shard_worker_holds_at_shutdown_still_reaches_the_peer` failed 18/20 on the first fix;
+- `frames_dropped_to_a_dead_peer_do_not_hold_shutdown` failed with the backoff drop's release removed;
+- `an_undeliverable_frame_holds_shutdown_only_for_the_bound` shows the wait stays bounded.
+
+They run in a strict CI step, with no retry. After the fix, 0 failures in 320 runs of the nine shutdown tests and in
+320 runs of the original test, each at 32 processes in parallel (PR #650).
+
 **Open next:**
 - each delivered row's *not built* list, in its §3.5 block and below — for K2: signed tally entries (a forgery under a
   dead member's namespace is not detected), a membership check without `[tls]` (a non-peer inside the horizon reads

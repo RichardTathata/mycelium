@@ -9,7 +9,6 @@ use std::sync::{
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    sync::mpsc,
 };
 use tracing::warn;
 
@@ -251,7 +250,7 @@ fn wire_msg_key(msg: &WireMessage) -> &str {
 /// Encodes `msg`, routes to the correct shard, and dispatches via `try_send`.
 /// Returns `false` if the channel is full (increments `dropped`) or closed.
 pub fn dispatch_gossip_try_send(
-    gossip_txs:  &[mpsc::Sender<(Bytes, u64, ForwardHint)>],
+    gossip_txs:  &crate::outbound::GossipTxs,
     msg:         WireMessage,
     sender_hash: u64,
     hint:        ForwardHint,
@@ -260,12 +259,9 @@ pub fn dispatch_gossip_try_send(
     let shard = shard_for_key(wire_msg_key(&msg), gossip_txs.len());
     let buf = crate::codec::wire_to_bytes(&msg);
     // Channel-readiness seam (item 6 PR 3): whether this shard was full is a kernel decision, so a
-    // recorded run replays the drop rather than hoping to provoke it again by timing.
-    let verdict = crate::sim_seam::chan_try_send(
-        &gossip_stream(shard),
-        &gossip_txs[shard],
-        (buf, sender_hash, hint),
-    );
+    // recorded run replays the drop rather than hoping to provoke it again by timing. Counted
+    // (`outbound`), so a graceful shutdown can wait for it to reach the wire.
+    let verdict = gossip_txs.try_send_counted(shard, &gossip_stream(shard), (buf, sender_hash, hint));
     match verdict {
         crate::sim_seam::ChanVerdict::Sent => true,
         crate::sim_seam::ChanVerdict::Full => {
@@ -322,14 +318,14 @@ pub(crate) fn gossip_stream(shard: usize) -> std::borrow::Cow<'static, str> {
 
 /// Like [`dispatch_gossip_try_send`] but awaits channel capacity instead of dropping.
 pub async fn dispatch_gossip_send(
-    gossip_txs:  &[mpsc::Sender<(Bytes, u64, ForwardHint)>],
+    gossip_txs:  &crate::outbound::GossipTxs,
     msg:         WireMessage,
     sender_hash: u64,
     hint:        ForwardHint,
 ) -> bool {
     let shard = shard_for_key(wire_msg_key(&msg), gossip_txs.len());
     let buf = crate::codec::wire_to_bytes(&msg);
-    gossip_txs[shard].send((buf, sender_hash, hint)).await.is_ok()
+    gossip_txs.send_counted(shard, (buf, sender_hash, hint)).await
 }
 
 // Previous-version (v11) frames are decoded by the hand-rolled `crate::codec::decode_wire_v11`: the
@@ -582,11 +578,10 @@ pub fn sync_entry_from(u: &GossipUpdate) -> SyncEntry {
 /// `0.0` = all channels empty. `1.0` = at least one shard fully saturated.
 /// Used by admission-control paths that need to account for gossip backpressure
 /// independently of handler channel fill ratios.
-pub fn gossip_shard_fill(txs: &[mpsc::Sender<(Bytes, u64, ForwardHint)>]) -> f32 {
-    txs.iter()
-        .map(|tx| {
-            let max = tx.max_capacity();
-            if max == 0 { 0.0_f32 } else { 1.0 - tx.capacity() as f32 / max as f32 }
+pub fn gossip_shard_fill(txs: &crate::outbound::GossipTxs) -> f32 {
+    txs.capacities()
+        .map(|(cap, max)| {
+            if max == 0 { 0.0_f32 } else { 1.0 - cap as f32 / max as f32 }
         })
         .fold(0.0_f32, f32::max)
 }

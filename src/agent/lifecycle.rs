@@ -28,6 +28,15 @@ use super::tasks::{
     ListenerContext, run_gossip_shard, run_health_monitor, run_gc_task, run_listener_task, new_listener,
 };
 
+/// **Test-only** hook, per node (`NodeId` as a string), run by graceful shutdown after the gate closes and
+/// the departure heartbeat is written, just before the soft-state sweep — so a test can put the outbound
+/// path in a given state (a writer evicted, say) for the sweep's frames alone.
+#[cfg(test)]
+pub(crate) type BeforeSweepHook = std::sync::Arc<dyn Fn(&GossipAgent) + Send + Sync>;
+#[cfg(test)]
+pub(crate) static TEST_BEFORE_SWEEP: std::sync::LazyLock<papaya::HashMap<String, BeforeSweepHook>> =
+    std::sync::LazyLock::new(papaya::HashMap::new);
+
 impl GossipAgent {
     /// Binds the TCP listener(s) and launches background loops.
     pub async fn start(&self) -> Result<(), GossipError> {
@@ -755,6 +764,7 @@ impl GossipAgent {
             group_aware_forwarding: self.config.group_aware_forwarding,
             epidemic_extra_peers:   self.config.epidemic_extra_peers,
             dropped_frames:             Arc::clone(&self.kv_state.dropped_frames),
+            unsent:                     self.task_ctx.gossip_txs.unsent().clone(),
             individual_flood_fallbacks: Arc::clone(&self.kv_state.individual_flood_fallbacks),
             shutdown_tx:    Arc::clone(&self.shutdown_tx),
             hot:            Arc::clone(&self.task_ctx.hot),
@@ -769,7 +779,7 @@ impl GossipAgent {
         for (shard_idx, gossip_rx) in rxs.into_iter().enumerate() {
             self.spawn_task(run_gossip_shard(
                 shard_idx,
-                gossip_rx,
+                mycelium_core::outbound::CountedRx::new(gossip_rx, self.task_ctx.gossip_txs.unsent().clone()),
                 self.peer_list_tx.subscribe(),
                 Arc::clone(&self.shard_alive[shard_idx]),
                 ctx.clone(),
@@ -833,6 +843,7 @@ impl GossipAgent {
             kv_state:        Arc::clone(&self.kv_state),
             hash_acc:        Arc::clone(&self.kv_state.hash_acc),
             dropped_frames:  Arc::clone(&self.kv_state.dropped_frames),
+            unsent:          self.task_ctx.gossip_txs.unsent().clone(),
             signal_handlers: Arc::clone(&self.task_ctx.signal_handlers),
             interval_secs:           self.config.health_check_interval_secs,
             backoff:                 Duration::from_secs(self.task_ctx.hot.reconnect_backoff_secs(self.config.reconnect_backoff_secs)),
@@ -1055,29 +1066,31 @@ impl GossipAgent {
         });
     }
 
-    /// Wait, at most `bound`, until the gossip shard queues and every peer writer's queue are empty,
-    /// then give the writers one short beat to put the last frames on the wire. Used once, by
-    /// [`Self::shutdown_with_timeout`], before the shutdown signal (#611). Best effort, not a delivery
-    /// guarantee: it reads queue emptiness, so a frame between a shard queue and a writer's queue, or one
-    /// applied on another thread and not yet enqueued, can be missed. What it delivers is what the
-    /// sweep queued — a tombstone a task builds after the signal is not covered. No task re-asserts a
-    /// swept key in between: the sweep runs after `soft_state_gate.close()`.
+    /// Wait, at most `bound`, until every outbound frame this node has handed to the gossip path is on
+    /// the wire or dropped — the node's outbound count (`mycelium_core::outbound`) at zero. Used once,
+    /// by [`Self::shutdown_with_timeout`], after the sweep and before the shutdown signal (#611), so the
+    /// sweep's tombstones are written to their sockets before the signal stops the writers.
+    ///
+    /// The count is raised before a frame is enqueued and lowered only once a writer has flushed it to
+    /// its socket or dropped it, so it cannot read zero while a frame sits in a shard worker's hand, a
+    /// writer's queue, a writer's connect or its write — the places queue emptiness could not see, which
+    /// let the shutdown signal stop a writer holding the sweep's last tombstone (the shutdown-sweep flake,
+    /// 2026-10-19). Delivery happens before `shutdown()` returns, so a process that exits right after it
+    /// does not cut the write off. Bounded: a frame to a peer that is slow to connect or accept holds the
+    /// wait for at most `bound`, and a frame dropped (backoff, a failed connect) releases it at once. The
+    /// count covers frames other tasks send too (pings, anti-entropy replies); while the node is busy the
+    /// wait can run to its bound. What it does not cover: a tombstone a task builds after the signal. No
+    /// task re-asserts a swept key in between: the sweep runs after `soft_state_gate.close()`.
     async fn flush_outbound_before_shutdown(&self, bound: Duration) {
-        tokio::task::yield_now().await;
-        let queued = || {
-            self.task_ctx.gossip_txs.iter().any(|tx| tx.capacity() < tx.max_capacity())
-                || self.peer_writers.pin().iter().any(|(_, w)| w.tx.capacity() < w.tx.max_capacity())
-        };
-        let step_ms = 5u64;
+        let unsent = self.task_ctx.gossip_txs.unsent();
+        let step_ms = 2u64;
         let mut waited = 0u64;
-        let mut saw_queue = false;
-        while queued() && waited < bound.as_millis() as u64 {
-            saw_queue = true;
+        while unsent.get() != 0 && waited < bound.as_millis() as u64 {
             mycelium_core::sim_seam::sleep_ms("shutdown-flush", step_ms).await;
             waited += step_ms;
         }
-        if saw_queue {
-            mycelium_core::sim_seam::sleep_ms("shutdown-flush", 10).await;
+        if unsent.get() != 0 {
+            tracing::debug!("shutdown: {} outbound frame(s) not on the wire after {:?}", unsent.get(), bound);
         }
     }
 
@@ -1104,6 +1117,11 @@ impl GossipAgent {
         // age out — rather than a withdrawal its peers would read as unknown coverage (#642's review, N3).
         #[cfg(all(feature = "gateway", feature = "tls"))]
         super::fleet_history::depart(&self.task_ctx);
+        #[cfg(test)]
+        {
+            let hook = TEST_BEFORE_SWEEP.pin().get(&self.node_id.to_string()).cloned();
+            if let Some(hook) = hook { hook(self); }
+        }
         // Retract our locality advertisement so peers stop using a stale entry
         // for topology-aware fan-out and quorum diversity.
         if !self.config.locality_path.is_empty() {

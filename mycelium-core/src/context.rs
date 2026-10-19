@@ -10,15 +10,13 @@
 //! the substrate is never aware of the layers above it).
 
 use crate::config::GossipConfig;
-use crate::framing::ForwardHint;
 use crate::node_id::NodeId;
 use crate::seen::ShardedSeen;
 use crate::signal::{Boundary, Signal, SignalHandlers};
 use crate::store::KvState;
-use bytes::Bytes;
 use parking_lot::RwLock;
 use std::sync::{atomic::{AtomicU64, AtomicUsize, Ordering}, Arc};
-use tokio::{sync::{mpsc, watch}, task::JoinSet};
+use tokio::{sync::watch, task::JoinSet};
 
 /// Runtime-tunable ("hot") subset of [`GossipConfig`] (WS-C M9). These parameters are
 /// sampled from an atomic cell **on each use** (or each writer / bulk-handler spawn)
@@ -131,7 +129,8 @@ pub struct CoreCtx {
     /// handler calls `observe()` for every incoming timestamp so the local
     /// clock dominates any remote stamp it has seen.
     pub hlc:              Arc<crate::hlc::Hlc>,
-    pub gossip_txs:       Arc<[mpsc::Sender<(Bytes, u64, ForwardHint)>]>,
+    /// The gossip shard queues; every send through them is counted (`outbound`).
+    pub gossip_txs:       crate::outbound::GossipTxs,
     pub kv_state:         Arc<KvState>,
     /// WAL handle for durable KV writes. Unset when persistence is disabled.
     /// Written once by `start()` after replay; read-only afterwards.

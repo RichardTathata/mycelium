@@ -164,8 +164,8 @@ impl GossipAgent {
     /// the tokio runtime. This is normal and resolves on the next call.
     pub fn system_stats(&self) -> SystemStats {
         let running = AgentState::from_u8(self.state.load(Ordering::Relaxed)) == AgentState::Running;
-        let gossip_shard_queue_depths: Vec<usize> = self.task_ctx.gossip_txs.iter()
-            .map(|tx| tx.max_capacity() - tx.capacity())
+        let gossip_shard_queue_depths: Vec<usize> = self.task_ctx.gossip_txs.capacities()
+            .map(|(cap, max)| max - cap)
             .collect();
         let dead_shards = if running {
             self.shard_alive.iter()

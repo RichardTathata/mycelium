@@ -42,6 +42,14 @@ jobs:
       # test runs enable it — never `test-support` — so examples and demo images do not compile it.
       - run: ./scripts/ci-retest.sh --lib --features test-frame-filter
       - run: ./scripts/ci-retest.sh --lib --features tls,metrics,a2a,llm,test-frame-filter
+      # STRICT, no retry: the shutdown-delivery tests (the shutdown-sweep flake, #650). Each holds one place
+      # on the outbound path open with a test pause, so each is deterministic, and a pass on retry would
+      # mean a tombstone lost at shutdown. They also run in the flake tier above, by discovery; this step
+      # re-runs them by name without one, and fails if fewer than nine ran (a renamed test drops out).
+      - run: |
+          set -o pipefail
+          cargo test --lib --features tls,metrics,a2a,llm,test-frame-filter -- at_shutdown shutdown_sweep dead_peer_do_not shutdown_only_for_the_bound 2>&1 | tee shutdown-delivery.log
+          grep -Eq "^test result: ok\. (9|[1-9][0-9]+) passed" shutdown-delivery.log
       # WS1 RBAC + WS2 audit + WS4 OIDC + WS5 rotation. Listed as a gate in
       # testing.md and run by `make check` since v2.1 — but never in CI until
       # 2026-07-21 (wiki-lint finding: local green masked the gap, the exact

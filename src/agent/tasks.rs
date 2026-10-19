@@ -22,7 +22,7 @@ use std::{
 };
 use tokio::{
     net::TcpListener,
-    sync::{mpsc, watch, Semaphore},
+    sync::{watch, Semaphore},
     task::JoinSet,
     time,
 };
@@ -202,15 +202,25 @@ pub(super) struct GossipShardContext {
     pub(super) epidemic_extra_peers:   usize,
     // counters + lifecycle
     pub(super) dropped_frames:             Arc<AtomicU64>,
+    /// The node's outbound count (`mycelium_core::outbound`): each frame this shard hands to a writer is
+    /// counted before its own copy is released.
+    pub(super) unsent:                     mycelium_core::outbound::Unsent,
     pub(super) individual_flood_fallbacks: Arc<AtomicU64>,
     pub(super) shutdown_tx:                Arc<watch::Sender<bool>>,
     pub(super) hot:                        Arc<mycelium_core::context::HotConfig>,
     pub(super) tls:                        Option<Arc<NodeTls>>,
 }
 
+/// **Test-only** pause, per node (`NodeId` as a string), after a shard worker dequeues a frame and before
+/// it hands the frame to any writer — so a test can hold a frame in the shard's hand while the node shuts down.
+/// Blocking, as the real hand-off is: no await sits between the dequeue and the hand-off.
+#[cfg(test)]
+pub(crate) static TEST_SHARD_PAUSE_MS: std::sync::LazyLock<papaya::HashMap<String, u64>> =
+    std::sync::LazyLock::new(papaya::HashMap::new);
+
 pub(super) async fn run_gossip_shard(
     shard_idx:        usize,
-    mut gossip_rx:    mpsc::Receiver<(Bytes, u64, ForwardHint)>,
+    mut gossip_rx:    mycelium_core::outbound::CountedRx<(Bytes, u64, ForwardHint)>,
     mut peer_list_rx: watch::Receiver<Arc<[NodeId]>>,
     alive:            Arc<AtomicBool>,
     ctx:              GossipShardContext,
@@ -218,7 +228,7 @@ pub(super) async fn run_gossip_shard(
     let GossipShardContext {
         self_id, bootstrap_peers, peer_writers, pinned_peers, prefix_index, grp_generation,
         self_locality, peer_localities, backoff, idle_timeout, max_forwarding_peers,
-        group_aware_forwarding, epidemic_extra_peers, dropped_frames,
+        group_aware_forwarding, epidemic_extra_peers, dropped_frames, unsent,
         individual_flood_fallbacks, shutdown_tx, hot, tls,
     } = ctx;
     alive.store(true, Ordering::Relaxed);
@@ -231,7 +241,7 @@ pub(super) async fn run_gossip_shard(
     targets.extend(cached_peer_list.iter().take(remaining).cloned());
     // Sender plus the kernel stream it records on — see `writer_stream`; the name is built once
     // per peer, and dies with the sender it names.
-    let mut sender_cache: AHashMap<NodeId, (mpsc::Sender<Bytes>, Arc<str>)> = AHashMap::new();
+    let mut sender_cache: AHashMap<NodeId, (mycelium_core::outbound::WriterTx, Arc<str>)> = AHashMap::new();
     // Per-group member set cache. Keyed by group name; value is (generation, member set).
     // Invalidated whenever grp_generation advances (any grp/ KV change).
     let mut group_member_cache: AHashMap<Arc<str>, (u64, AHashSet<NodeId>)> = AHashMap::new();
@@ -243,13 +253,13 @@ pub(super) async fn run_gossip_shard(
                 e.clone()
             } else {
                 let Some(t) = get_or_spawn_writer(
-                    peer, &peer_writers, hot.writer_depth(), backoff, &idle_timeout, &shutdown_tx, &dropped_frames, tls.clone(),
+                    peer, &peer_writers, hot.writer_depth(), backoff, &idle_timeout, &shutdown_tx, &dropped_frames, tls.clone(), &unsent,
                 ) else { continue; };
                 let e = (t, writer_stream("forward", peer));
                 sender_cache.insert(peer.clone(), e.clone());
                 e
             };
-            match mycelium_core::sim_seam::chan_try_send(&stream, &tx, $data.clone()) {
+            match tx.try_send_counted(&stream, $data.clone()) {
                 mycelium_core::sim_seam::ChanVerdict::Sent => {}
                 mycelium_core::sim_seam::ChanVerdict::Full => {
                     dropped_frames.fetch_add(1, Ordering::Relaxed);
@@ -259,12 +269,12 @@ pub(super) async fn run_gossip_shard(
                     debug!("Peer writer for {} closed; respawning and retrying", peer);
                     sender_cache.remove(peer);
                     let Some(new_tx) = get_or_spawn_writer(
-                        peer, &peer_writers, hot.writer_depth(), backoff, &idle_timeout, &shutdown_tx, &dropped_frames, tls.clone(),
+                        peer, &peer_writers, hot.writer_depth(), backoff, &idle_timeout, &shutdown_tx, &dropped_frames, tls.clone(), &unsent,
                     ) else { continue; };
                     sender_cache.insert(peer.clone(), (new_tx.clone(), Arc::clone(&stream)));
                     // The retry is a second event on the *same* stream: same peer, same logical
                     // channel, and the trace orders the two.
-                    match mycelium_core::sim_seam::chan_try_send(&stream, &new_tx, $data.clone()) {
+                    match new_tx.try_send_counted(&stream, $data.clone()) {
                         mycelium_core::sim_seam::ChanVerdict::Sent => {}
                         mycelium_core::sim_seam::ChanVerdict::Full => {
                             dropped_frames.fetch_add(1, Ordering::Relaxed);
@@ -282,10 +292,18 @@ pub(super) async fn run_gossip_shard(
     loop {
         tokio::select! { biased;
             result = gossip_rx.recv() => {
-                let (data, sender_hash, hint) = match result {
+                // `_held` keeps this frame counted until its handling ends — after each writer it is
+                // handed to has counted its own copy — so the outbound count never reads zero while
+                // the frame is between this queue and a writer's (`mycelium_core::outbound`).
+                let ((data, sender_hash, hint), _held) = match result {
                     Some(u) => u,
                     None => break,
                 };
+                #[cfg(test)]
+                {
+                    let pause = TEST_SHARD_PAUSE_MS.pin().get(&self_id.to_string()).copied();
+                    if let Some(ms) = pause { std::thread::sleep(std::time::Duration::from_millis(ms)); }
+                }
 
                 if peer_list_rx.has_changed().unwrap_or(false) {
                     cached_peer_list = peer_list_rx.borrow_and_update().clone();
@@ -538,6 +556,8 @@ pub(super) struct HealthMonitorContext {
     pub(super) kv_state:        Arc<crate::store::KvState>,
     pub(super) hash_acc:        Arc<AtomicU64>,
     pub(super) dropped_frames:  Arc<AtomicU64>,
+    /// The node's outbound count, which the pings and state requests this monitor sends raise.
+    pub(super) unsent:          mycelium_core::outbound::Unsent,
     pub(super) signal_handlers: Arc<SignalHandlers>,
     // policy knobs
     pub(super) interval_secs:            u64,
@@ -560,7 +580,7 @@ pub(super) struct HealthMonitorContext {
 pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
     let HealthMonitorContext {
         node_id, bootstrap_peers, peers, peer_writers, peer_list_tx, hlc, kv_state, hash_acc,
-        dropped_frames, signal_handlers, interval_secs, backoff, idle_timeout,
+        dropped_frames, unsent, signal_handlers, interval_secs, backoff, idle_timeout,
         peer_eviction_intervals, ping_peer_sample_size, max_active_connections, gossip_fanout,
         swim_enabled, health_check_max_jitter, signal_window_secs, shutdown_tx, hot,
         health_monitor_alive, tls,
@@ -603,16 +623,16 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
             if *peer == node_id { continue; }
             if let Some(tx) = mycelium_core::writer::get_or_spawn_writer(
                 peer, &peer_writers, hot.writer_depth(), backoff, &idle_timeout,
-                &shutdown_tx, &dropped_frames, tls.clone(),
+                &shutdown_tx, &dropped_frames, tls.clone(), &unsent,
             ) {
-                let _ = mycelium_core::sim_seam::chan_try_send("writer/hello", &tx, hello.clone());
+                let _ = tx.try_send_counted("writer/hello", hello.clone());
             }
         }
         // Send our current Merkle digest so any state restored from WAL/snapshot is not
         // re-pulled; an empty store yields an all-zero digest ⇒ responder full-dumps.
         let digest = crate::store::store_bucket_hashes(&kv_state);
         for peer in &bootstrap_set {
-            request_state(peer, &peer_writers, hot.writer_depth(), backoff, &idle_timeout, &shutdown_tx, &node_id, &hash_acc, &dropped_frames, digest.clone(), tls.clone());
+            request_state(peer, &peer_writers, hot.writer_depth(), backoff, &idle_timeout, &shutdown_tx, &node_id, &hash_acc, &dropped_frames, digest.clone(), tls.clone(), &unsent);
         }
     }
 
@@ -641,7 +661,7 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
     let mut last_peer_set: AHashSet<NodeId> = AHashSet::new();
     // Sender plus its kernel stream, as in the forwarding task — a different stream family, because
     // this is a different task sending on the same channel.
-    let mut ping_sender_cache: AHashMap<NodeId, (mpsc::Sender<Bytes>, Arc<str>)> = AHashMap::new();
+    let mut ping_sender_cache: AHashMap<NodeId, (mycelium_core::outbound::WriterTx, Arc<str>)> = AHashMap::new();
     // SWIM anti-entropy de-churning state. `last_anti_entropy` records when we last fired a
     // StateRequest to each peer, so a churning forwarding set cannot re-trigger a sync storm
     // (each re-add used to re-request state, and the responder spawns a persistent idle-timeout
@@ -708,7 +728,7 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
                             for peer in reconnect_peers {
                                 request_state(peer, &peer_writers, hot.writer_depth(), backoff,
                                     &idle_timeout, &shutdown_tx, &node_id, &hash_acc,
-                                    &dropped_frames, digest.clone(), tls.clone());
+                                    &dropped_frames, digest.clone(), tls.clone(), &unsent);
                             }
                         }
                     }
@@ -819,7 +839,7 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
                         for peer in due_peers {
                             request_state(peer, &peer_writers, hot.writer_depth(), backoff,
                                 &idle_timeout, &shutdown_tx, &node_id, &hash_acc,
-                                &dropped_frames, digest.clone(), tls.clone());
+                                &dropped_frames, digest.clone(), tls.clone(), &unsent);
                             last_anti_entropy.insert(peer.clone(), now);
                         }
                     }
@@ -829,7 +849,7 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
                     for peer in &added {
                         request_state(peer, &peer_writers, hot.writer_depth(), backoff,
                             &idle_timeout, &shutdown_tx, &node_id, &hash_acc,
-                            &dropped_frames, digest.clone(), tls.clone());
+                            &dropped_frames, digest.clone(), tls.clone(), &unsent);
                     }
                 }
                 for peer in &removed {
@@ -847,13 +867,13 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
                             e.clone()
                         } else {
                             let Some(t) = get_or_spawn_writer(
-                                peer, &peer_writers, hot.writer_depth(), backoff, &idle_timeout, &shutdown_tx, &dropped_frames, tls.clone(),
+                                peer, &peer_writers, hot.writer_depth(), backoff, &idle_timeout, &shutdown_tx, &dropped_frames, tls.clone(), &unsent,
                             ) else { continue; };
                             let e = (t, writer_stream("ping", peer));
                             ping_sender_cache.insert(peer.clone(), e.clone());
                             e
                         };
-                        match mycelium_core::sim_seam::chan_try_send(&stream, &tx, ping_data.clone()) {
+                        match tx.try_send_counted(&stream, ping_data.clone()) {
                             mycelium_core::sim_seam::ChanVerdict::Sent => {}
                             mycelium_core::sim_seam::ChanVerdict::Full => {
                                 warn!("Peer writer channel full, dropping ping to {}", peer);
@@ -862,10 +882,10 @@ pub(super) async fn run_health_monitor(ctx: HealthMonitorContext) {
                                 debug!("Peer writer for {} closed; respawning for ping retry", peer);
                                 ping_sender_cache.remove(peer);
                                 let Some(new_tx) = get_or_spawn_writer(
-                                    peer, &peer_writers, hot.writer_depth(), backoff, &idle_timeout, &shutdown_tx, &dropped_frames, tls.clone(),
+                                    peer, &peer_writers, hot.writer_depth(), backoff, &idle_timeout, &shutdown_tx, &dropped_frames, tls.clone(), &unsent,
                                 ) else { continue; };
                                 ping_sender_cache.insert(peer.clone(), (new_tx.clone(), Arc::clone(&stream)));
-                                if mycelium_core::sim_seam::chan_try_send(&stream, &new_tx, ping_data.clone())
+                                if new_tx.try_send_counted(&stream, ping_data.clone())
                                     != mycelium_core::sim_seam::ChanVerdict::Sent
                                 {
                                     debug!("Respawned writer for {} could not accept ping", peer);

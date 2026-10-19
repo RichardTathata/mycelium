@@ -59,12 +59,13 @@ impl GossipAgent {
             &self.shutdown_tx,
             &self.kv_state.dropped_frames,
             self.task_ctx.tls.get().cloned(),
+            self.task_ctx.gossip_txs.unsent(),
         ) {
             let ping = mycelium_core::codec::wire_to_bytes(&crate::framing::WireMessage::Ping {
                 sender: self.node_id.clone(),
                 known_peers: Vec::new(),
             });
-            let _ = mycelium_core::sim_seam::chan_try_send("writer/ping", &tx, ping);
+            let _ = tx.try_send_counted("writer/ping", ping);
         }
     }
 
