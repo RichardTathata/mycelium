@@ -236,7 +236,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::pin!(wait);
         #[cfg(unix)]
         let mut hup = if units.activations.iter().any(|a| a.confine.as_ref().is_some_and(|c| c.egress.is_some())) {
-            Some(tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?)
+            let h = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
+            // Logged once the handler is installed: until then SIGHUP's default (terminate) applies.
+            tracing::info!(units = %units_path, "SIGHUP re-reads the unit file and applies each activation's egress hosts");
+            Some(h)
         } else {
             None
         };

@@ -386,7 +386,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.96.0
       - uses: Swatinem/rust-cache@v2
       # `gateway`: the activation egress proxy's credential case attaches through the node's gate (rows L and M).
-      - run: cargo test -p mycelium-wasm-host --lib --features gateway -- activation confined egress
+      # `peer_uid`: the proxy's accept-time owner check reads the kernel's `pcblist_n` here — its parser tests and
+      # `the_kernel_names_this_users_own_loopback_connection` ran on Linux only until 2026-10-19 (v2.36.0's review).
+      - run: cargo test -p mycelium-wasm-host --lib --features gateway -- activation confined egress peer_uid
+      # Row M's live allow-list through the binary: `mycelium-stem` re-reads its unit file on SIGHUP and the running
+      # proxy serves the newly listed host (the Linux job runs it with every other `tests/` file).
+      - run: cargo test -p mycelium-wasm-host --features stem --test stem_sighup
       # #644's round-4 review: the egress proxy closes another user's connection on macOS too — the kernel's
       # `pcblist_n` read, not the synthetic buffer. Connects as `nobody` through passwordless sudo; guarded, so a
       # runner without it fails rather than skips.
