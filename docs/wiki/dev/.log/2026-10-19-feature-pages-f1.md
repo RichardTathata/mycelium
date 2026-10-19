@@ -16,3 +16,15 @@ heading and `<a id>` anchors. Checking the pilots' links found one dead anchor a
 
 Pages: none in the wiki. Repo: `docs/features/` (new), `docs/capabilities.md`, `docs/plans/feature-pages.md` (rev
 0.3), `docs/reference/unit-file.md` (one anchor).
+
+## [2026-10-19] ingest | #654 review round 1: the Cedar claim, fixed markers, the pilots corrected
+
+The independent review found a stale claim the routing page had copied: the private Cedar adapter has expressed
+`ForbidClassAt` and `AllowAtMostAcross` and passed all twenty-seven contract cases since its v2.36.0 re-pin (private
+#33, `0d654fd`). Corrected everywhere it was stated as current: guide 20, `deprecations.md` §52 and §53, the two
+what-is-proven rows, and the post-360 plan's rows R and K2, §3.5 (dated notes), §3.6 and §5. Corrected on the
+pages too: both reason doors give the preflight destination and locality (only the class needs the classifying
+door); `guide_20_routing_policy` runs a hand-kept copy; the proxy's port is added to the command's own `connect`
+entries; the credential path's test named. P1 and P2 now carry fixed markers the F2 gate can check
+("This feature is turned on in code", "No runnable example exists", `example: none`); `docs/README.md` lists
+`features/`.

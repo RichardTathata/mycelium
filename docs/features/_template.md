@@ -13,13 +13,17 @@
 
 ## Turn it on
 
-<!-- The settings, each linked to ../reference/configuration.md or ../reference/unit-file.md (or the API, for a
-feature enabled in code). Link a configuration or unit file that a test loads. No snippet of the page's own. -->
+<!-- The settings, each linked to ../reference/configuration.md or ../reference/unit-file.md, and a link to a
+configuration or unit file that a test loads. No snippet of the page's own.
+For a feature enabled in code, open with "This feature is turned on in code", then one item per line, its name in
+backticks linked to the file that defines it, and end with the test that runs that code (its name in backticks; a
+test in the test-coverage universe; say so if it runs a hand-kept copy rather than reading the page). -->
 
 ## See it work
 
-<!-- A link to the feature's row in ../../examples/README.md, with its matrix status (✓, ✓ᵖ or ·). If there is
-no example, say so and name the test that runs the feature end to end. -->
+<!-- A link to the feature's row in ../../examples/README.md; the index keeps the run command and the CI status.
+If there is no example, open with "No runnable example exists" and link the test that runs the feature end to
+end. -->
 
 ## What it guarantees, and what it does not
 

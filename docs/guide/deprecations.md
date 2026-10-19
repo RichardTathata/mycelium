@@ -1671,7 +1671,8 @@ is passed over for the next** — before, the façade answered `403` at the firs
 - `Rule`: build it with `Rule::new` and its builders.
 - An evaluator adapter run against `ae_contract::run` meets five new cases (`route_*`) and a new clause,
   `PolicyClause::ForbidClassAt`. One that cannot express it must decline the five and list them in `declared_limits`,
-  or `Report::conformant` fails — **the private companion's Cedar adapter, on its next re-pin**.
+  or `Report::conformant` fails. The private companion's Cedar adapter expresses it and passes the five on its v2.36.0
+  re-pin (private #33, `0d654fd`), none declined.
 - A client of the façade: a `403` now means every candidate was refused; `data.refused_destinations` names each with
   its locality and reason. A `200` may name providers passed over (`refused`). A request carrying
   `x-mycelium-data-class` to a node whose router classifies nothing is now `400` (it was ignored), with or without an
@@ -1701,8 +1702,6 @@ is passed over for the next** — before, the façade answered `403` at the firs
   is held at the default class: a declaration may raise it, not lower it. A deployment that relied on clients
   declaring `public` binds those principals lower (`floor_for(principal, "public")`) or lowers the default
   (`unclassified_as`).
-- **Not yet in the Cedar adapter.** Until the private companion's next re-pin, a Cedar-backed fleet enforces no class
-  or locality rule.
 - A policy written with `for_class` or `at_locality` refuses `llm.invoke` through `/gateway/llm/call` and
   `/gateway/llm/stream` (they establish neither) — by design; route classified calls through the façade.
 
@@ -1768,7 +1767,8 @@ release fleet-wide before a policy names `HistoryScope::FleetTally`.
 
 **An adapter held to the contract suite** (`ae_contract::run`) meets six new cases (`fleet_*`) and a new clause,
 `PolicyClause::AllowAtMostAcross` (with a `counter` id). One that cannot express it must decline the cases and list
-them in `declared_limits`, or `Report::conformant` fails — the private companion's Cedar adapter, on its next re-pin.
+them in `declared_limits`, or `Report::conformant` fails. The private companion's Cedar adapter expresses it and passes
+the six on its v2.36.0 re-pin (private #33, `0d654fd`), none declined.
 The suite binds a fixture's fleet state to whatever counter the evaluator names, so an adapter's own counter keys are
 held to the same cases.
 
