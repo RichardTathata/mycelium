@@ -161,6 +161,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A graceful shutdown waits until the frames it queued are on the wire.** The shutdown sweeps the node's soft
+  state (`cap/`, `req/`, `svc/`, `tools/`, `gcap/`, `sys/load/`) and then waited until the gossip and writer queues
+  were empty before signalling the tasks to stop. A frame a shard worker or a writer had already dequeued was in no
+  queue, so the wait could end while the sweep's last tombstone was still in a writer's write or connect, or between
+  a shard worker and a writer, and the signal stopped it there. The peer kept the swept key, and kept routing to
+  the stopped node, until the key's TTL. The node now counts every outbound frame from the moment it is enqueued
+  until a writer has flushed it to its socket or dropped it, and the shutdown waits (bounded, 250 ms) for that
+  count to reach zero, so the sweep's tombstones are written before `shutdown()` returns, and a process that exits
+  straight after it no longer cuts them off. A frame dropped on its way to a dead or unreachable peer releases its
+  place at once, so it does not hold the shutdown; a frame released twice would saturate the count at zero and is
+  counted (`gossip_outbound_count_underflows_total`), so it cannot hold every later shutdown either. This was `a_fast_reassert_does_not_undo_the_shutdown_sweep`'s
+  failure on `main` at 98a311fc (about 1 run in 100 under parallel load, on v2.35.0 as well: it predates this
+  release).
+  **Upgrade note:** `mycelium_core`'s transport types changed shape: `CoreCtx::gossip_txs` is a
+  `mycelium_core::outbound::GossipTxs`, `WriterEntry::tx` a `WriterTx`, and `writer::get_or_spawn_writer` and
+  `writer::request_state` take the node's `Unsent` count; `framing::dispatch_gossip_send`,
+  `dispatch_gossip_try_send` and `gossip_shard_fill` take `&GossipTxs`. Code that only uses `GossipAgent` is
+  unaffected (`deprecations.md` §54).
+
 - **A fleet-consensus seat claim that needed a second ballot is no longer refused "decided too late"** (row K2,
   unreleased). A seat's lease is stamped before the claim's first ballot, and the call is admitted only if a whole
   window of the lease remains. That makes the lease margin the latency a claim is allowed. The margin was 2 s, exactly

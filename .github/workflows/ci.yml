@@ -42,6 +42,27 @@ jobs:
       # test runs enable it — never `test-support` — so examples and demo images do not compile it.
       - run: ./scripts/ci-retest.sh --lib --features test-frame-filter
       - run: ./scripts/ci-retest.sh --lib --features tls,metrics,a2a,llm,test-frame-filter
+      # STRICT, no retry: the shutdown-delivery tests (the shutdown-sweep flake, #650), by name. They also
+      # run in the flake tier above, by discovery; here a failure is never retried. Seven hold one place on
+      # the outbound path open with a test pause or check the count itself, so they are deterministic. Three
+      # are the older probabilistic tests of the same contract (`a_fast_reassert_…`, `soft_state_with_a_live_
+      # handle_…`, `a_capability_retracted_…`): a residual flake in them turns this step red, deliberately —
+      # a tombstone lost at shutdown is the defect, not noise. Each name must report `ok`, so a renamed or
+      # removed test fails the step instead of dropping out of it.
+      - run: |
+          set -o pipefail
+          names="a_capability_retracted_at_shutdown_reaches_the_peers
+          soft_state_with_a_live_handle_at_shutdown_is_retracted_at_the_peers
+          a_fast_reassert_does_not_undo_the_shutdown_sweep
+          a_frame_a_writer_holds_at_shutdown_still_reaches_the_peer
+          a_frame_a_writer_holds_at_shutdown_is_written_before_shutdown_returns
+          a_frame_in_a_slow_connect_at_shutdown_still_reaches_the_peer
+          a_frame_a_shard_worker_holds_at_shutdown_still_reaches_the_peer
+          frames_dropped_to_a_dead_peer_do_not_hold_shutdown
+          an_undeliverable_frame_holds_shutdown_only_for_the_bound
+          a_busy_pair_returns_its_outbound_count_to_zero"
+          cargo test --lib --features tls,metrics,a2a,llm,test-frame-filter -- --exact $(for n in $names; do echo "lib_tests::$n"; done) 2>&1 | tee shutdown-delivery.log
+          for n in $names; do grep -q "^test lib_tests::$n ... ok$" shutdown-delivery.log || { echo "::error::shutdown-delivery test $n did not pass"; exit 1; }; done
       # WS1 RBAC + WS2 audit + WS4 OIDC + WS5 rotation. Listed as a gate in
       # testing.md and run by `make check` since v2.1 — but never in CI until
       # 2026-07-21 (wiki-lint finding: local green masked the gap, the exact

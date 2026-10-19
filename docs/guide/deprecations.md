@@ -1769,3 +1769,22 @@ release fleet-wide before a policy names `HistoryScope::FleetTally`.
 them in `declared_limits`, or `Report::conformant` fails — the private companion's Cedar adapter, on its next re-pin.
 The suite binds a fixture's fleet state to whatever counter the evaluator names, so an adapter's own counter keys are
 held to the same cases.
+
+## 54. `mycelium-core`'s outbound path is counted: its channel types changed shape (unreleased, the shutdown-sweep fix)
+
+**What changes.** A graceful shutdown now waits, bounded at 250 ms, until every frame the node handed to the
+outbound path is flushed to a socket or dropped. To count those frames, the senders are wrapped:
+`CoreCtx::gossip_txs` is a `mycelium_core::outbound::GossipTxs` (it was `Arc<[mpsc::Sender<…>]>`), and
+`writer::WriterEntry::tx` is a `WriterTx` (it was `mpsc::Sender<Bytes>`). Neither exposes its raw sender. A send goes
+through `try_send_counted` or `send_counted`, so no send can skip the count. `writer::get_or_spawn_writer` and
+`writer::request_state` take the node's `&Unsent` as a last argument and return a `WriterTx`. `run_peer_writer`
+takes a `CountedRx<Bytes>`. `framing::dispatch_gossip_send`, `framing::dispatch_gossip_try_send` and
+`framing::gossip_shard_fill` take `&GossipTxs`.
+
+**Will the compiler tell me?** Yes, for every use: each one is a type error. Code that only uses `GossipAgent` and
+its handles is unaffected; this concerns only an embedder building a `CoreCtx` or driving the writers directly.
+
+**Migration.** Build the queues with `GossipTxs::new(senders, Unsent::default())`, and give `get_or_spawn_writer`
+and `request_state` that node's `gossip_txs.unsent()`. A consumer of a gossip shard queue wraps its receiver in
+`CountedRx::new(rx, unsent)` and keeps the `Held` that `recv` returns until it has handed the frame on. A frame read
+from the raw receiver without that wrapper is never released, and every later shutdown waits its whole bound.

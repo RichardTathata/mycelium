@@ -17,7 +17,7 @@ use std::{
 };
 use tokio::{sync::{mpsc, watch}, task::JoinSet};
 
-mod lifecycle;
+pub(crate) mod lifecycle;
 mod introspect;
 mod topology;
 pub(crate) mod kv_quorum;
@@ -86,7 +86,7 @@ mod demand;
 mod emergent_groups;
 mod wiring;
 pub(crate) mod helpers;
-mod tasks;
+pub(crate) mod tasks;
 mod state_machine;
 mod scatter;
 mod bulk;
@@ -1205,7 +1205,7 @@ impl GossipAgent {
         ];
         let kv_state      = KvState::with_scoped_prefixes(config.max_store_entries, scoped);
         let default_ttl   = config.default_ttl;
-        let gossip_txs: Arc<[mpsc::Sender<(Bytes, u64, ForwardHint)>]> = gossip_txs_vec.into();
+        let gossip_txs = mycelium_core::outbound::GossipTxs::new(gossip_txs_vec, mycelium_core::outbound::Unsent::default());
         // Last time each peer was heard from, in monotonic nanoseconds from the clock seam.
         let peers_arc: Arc<papaya::HashMap<NodeId, std::time::Instant>> = Arc::new(papaya::HashMap::new());
         let config_arc = Arc::new(config.clone());

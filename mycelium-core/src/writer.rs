@@ -22,6 +22,21 @@ use tracing::{debug, warn};
 /// The writer channel a StateRequest goes out on; a full one skips a state sync.
 const STATE_REQ_CHAN: &str = "writer/state-request";
 
+/// **Test-only** pause, per destination peer (`NodeId` as a string), before a writer's connect — so a
+/// test can hold a dequeued frame inside a slow connect while the node shuts down.
+#[cfg(any(test, feature = "test-frame-filter"))]
+#[doc(hidden)]
+pub static TEST_CONNECT_PAUSE_MS: std::sync::LazyLock<papaya::HashMap<String, u64>> =
+    std::sync::LazyLock::new(papaya::HashMap::new);
+
+/// **Test-only** pause, per destination peer (`NodeId` as a string), in each batch a writer writes,
+/// after the queue is drained into the buffer and before the flush — so a test can hold dequeued frames
+/// inside the write while the node shuts down.
+#[cfg(any(test, feature = "test-frame-filter"))]
+#[doc(hidden)]
+pub static TEST_WRITE_PAUSE_MS: std::sync::LazyLock<papaya::HashMap<String, u64>> =
+    std::sync::LazyLock::new(papaya::HashMap::new);
+
 /// The time bounds one peer writer runs under (row B, post-360 hardening): how long it may sit idle,
 /// how long a connect plus TLS handshake may take, and the progress bound its writes and flushes run
 /// under. Built from [`GossipConfig`](crate::config::GossipConfig) by [`WriterTiming::from_config`].
@@ -77,10 +92,15 @@ fn jittered(backoff: Duration) -> Duration {
 /// failures; backs off for `backoff` after each connect failure so a dead peer
 /// doesn't cause a connect storm. Exits on global shutdown, per-peer eviction
 /// signal, or when all senders drop.
+///
+/// Every frame it takes from `rx` stays counted in the node's outbound count
+/// ([`crate::outbound`]) until it is flushed to the socket or dropped — by any path,
+/// a `break` and an abort included — so a graceful shutdown waits for it *before* the
+/// signal rather than racing it (the shutdown-sweep flake, 2026-10-19).
 #[allow(clippy::too_many_arguments)]
 pub async fn run_peer_writer(
     peer: NodeId,
-    mut rx: mpsc::Receiver<Bytes>,
+    mut rx: crate::outbound::CountedRx<Bytes>,
     backoff: Duration,
     timing: WriterTiming,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -106,7 +126,9 @@ pub async fn run_peer_writer(
     loop {
         // biased: data path checked first so a burst of frames drains before shutdown.
         // The idle arm uses pending() when no timeout is configured so it never fires.
-        let data: Bytes = tokio::select! { biased;
+        // `held` keeps the frame (and the batch `write` adds to it) counted until the end of this
+        // iteration — written, or dropped by any `continue`/`break` below.
+        let (data, mut held): (Bytes, crate::outbound::Held) = tokio::select! { biased;
             msg = rx.recv() => match msg {
                 Some(d) => d,
                 None => break, // all senders dropped
@@ -139,6 +161,11 @@ pub async fn run_peer_writer(
         // a peer that accepts TCP and never answers the handshake used to park this task.
         if conn.is_none() {
             let attempt = async {
+                #[cfg(any(test, feature = "test-frame-filter"))]
+                {
+                    let pause = TEST_CONNECT_PAUSE_MS.pin().get(&peer.to_string()).copied();
+                    if let Some(ms) = pause { crate::sim_seam::sleep_ms("writer/test-connect-pause", ms).await; }
+                }
                 let s = TcpStream::connect(peer.to_socket_addr()).await
                     .map_err(|e| format!("Connect to {peer} failed: {e}"))?;
                 let _ = s.set_nodelay(true);
@@ -221,8 +248,15 @@ pub async fn run_peer_writer(
             c.get_mut().arm(Some(stall));
             let mut wrote_any = false;
             wrote_any |= frame_fits(&peer, write_frame(c, &data).await)?;
-            while let Ok(more) = rx.try_recv() {
+            while let Some(more) = rx.try_recv_into(&mut held) {
                 wrote_any |= frame_fits(&peer, write_frame(c, &more).await)?;
+            }
+            // The test pause sits after the queue is drained into the buffer and before the flush: the
+            // frames are in this writer's hand and in no queue, which is what the shutdown flush cannot see.
+            #[cfg(any(test, feature = "test-frame-filter"))]
+            {
+                let pause = TEST_WRITE_PAUSE_MS.pin().get(&peer.to_string()).copied();
+                if let Some(ms) = pause { crate::sim_seam::sleep_ms("writer/test-pause", ms).await; }
             }
             if wrote_any {
                 c.flush().await.map_err(|e| crate::stall::is_stall(&e))?;
@@ -249,6 +283,8 @@ pub async fn run_peer_writer(
             last_fail = Some((crate::sim_seam::mono_now_ns(), jittered(backoff)));
             warn!("Write to {} failed; {} frame(s) will be dropped during backoff", peer, dropped);
         }
+        // Written (or dropped by a failed write): no longer in flight.
+        held.release();
     }
 }
 
@@ -265,7 +301,7 @@ pub async fn run_peer_writer(
 /// channel and their frames will be drained once the task starts.
 #[derive(Clone)]
 pub struct WriterEntry {
-    pub tx:            mpsc::Sender<Bytes>,
+    pub tx:            crate::outbound::WriterTx,
     pub peer_shutdown: Arc<watch::Sender<bool>>,
     /// `None` = spawn in progress (pending sentinel); `Some` = task running or finished.
     pub abort_handle:  Option<tokio::task::AbortHandle>,
@@ -300,7 +336,8 @@ pub fn get_or_spawn_writer(
     shutdown_tx: &Arc<watch::Sender<bool>>,
     dropped_frames: &Arc<AtomicU64>,
     tls: Option<Arc<NodeTls>>,
-) -> Option<mpsc::Sender<Bytes>> {
+    unsent: &crate::outbound::Unsent,
+) -> Option<crate::outbound::WriterTx> {
     // Guard: refuse to spawn during shutdown.
     if *shutdown_tx.borrow() {
         return None;
@@ -317,6 +354,7 @@ pub fn get_or_spawn_writer(
     // Claim the spawn slot by installing a pending sentinel atomically.
     // Creating the channel here is O(1) (no OS resources); the task only runs if we win.
     let (tx, rx) = mpsc::channel(chan_depth);
+    let (tx, rx) = (crate::outbound::WriterTx::new(tx, unsent.clone()), crate::outbound::CountedRx::new(rx, unsent.clone()));
     let (peer_shutdown_tx, peer_shutdown_rx) = watch::channel(false);
     let peer_shutdown = Arc::new(peer_shutdown_tx);
     let dropped = Arc::new(AtomicU64::new(0));
@@ -452,13 +490,14 @@ pub fn request_state(
     dropped_frames: &Arc<AtomicU64>,
     bucket_hashes: Vec<u64>,
     tls: Option<Arc<NodeTls>>,
+    unsent: &crate::outbound::Unsent,
 ) {
     let hash = store_hash_acc(hash_acc);
     let data: Bytes = crate::codec::wire_to_bytes(
         &WireMessage::StateRequest { sender: sender.clone(), store_hash: hash, bucket_hashes },
     );
-    let Some(tx) = get_or_spawn_writer(peer, peer_writers, writer_depth, backoff, timing, shutdown_tx, dropped_frames, tls) else { return; };
-    if crate::sim_seam::chan_try_send(STATE_REQ_CHAN, &tx, data) != crate::sim_seam::ChanVerdict::Sent {
+    let Some(tx) = get_or_spawn_writer(peer, peer_writers, writer_depth, backoff, timing, shutdown_tx, dropped_frames, tls, unsent) else { return; };
+    if tx.try_send_counted(STATE_REQ_CHAN, data) != crate::sim_seam::ChanVerdict::Sent {
         warn!("StateRequest writer for {}: channel full or closed; state sync skipped", peer);
     }
 }
@@ -497,6 +536,7 @@ mod tests {
     /// its `peer_shutdown` so a test can assert whether the entry's task was told to exit.
     fn live_entry() -> (WriterEntry, watch::Receiver<bool>) {
         let (tx, _rx) = mpsc::channel(1);
+        let tx = crate::outbound::WriterTx::new(tx, Default::default());
         let (ps, ps_rx) = watch::channel(false);
         (WriterEntry { tx, peer_shutdown: Arc::new(ps), abort_handle: None, dropped: Arc::new(AtomicU64::new(0)) }, ps_rx)
     }
@@ -504,6 +544,7 @@ mod tests {
     /// A NOT-live entry: the abort handle of a task that has already run to completion.
     async fn finished_entry() -> WriterEntry {
         let (tx, _rx) = mpsc::channel(1);
+        let tx = crate::outbound::WriterTx::new(tx, Default::default());
         let (ps, _ps_rx) = watch::channel(false);
         let jh = tokio::spawn(async {});
         let ah = jh.abort_handle();
@@ -531,6 +572,8 @@ mod tests {
         };
 
         let (tx, rx) = mpsc::channel::<Bytes>(8);
+        let unsent = crate::outbound::Unsent::default();
+        let (tx, rx) = (crate::outbound::WriterTx::new(tx, unsent.clone()), crate::outbound::CountedRx::new(rx, unsent.clone()));
         let (_sd, sd_rx)   = watch::channel(false);
         let (_psd, psd_rx) = watch::channel(false);
         let dropped      = Arc::new(AtomicU64::new(0));
@@ -555,11 +598,11 @@ mod tests {
         }
 
         // Frame 1 provokes the failed connect that arms the backoff.
-        tx.send(Bytes::from_static(b"one")).await.unwrap();
+        assert!(tx.send_counted(Bytes::from_static(b"one")).await);
         assert!(until(|| tx.capacity() == 8).await, "the writer never took the first frame");
 
         // Frame 2 arrives inside the backoff: dropped, with no connect attempted.
-        tx.send(Bytes::from_static(b"two")).await.unwrap();
+        assert!(tx.send_counted(Bytes::from_static(b"two")).await);
         assert!(
             until(|| peer_dropped.load(Ordering::Relaxed) == 1).await,
             "a frame sent inside the reconnect backoff must be dropped"
@@ -567,13 +610,16 @@ mod tests {
 
         // Past the longest the jitter can make the backoff.
         tokio::time::sleep(Duration::from_millis(400)).await;
-        tx.send(Bytes::from_static(b"three")).await.unwrap();
+        assert!(tx.send_counted(Bytes::from_static(b"three")).await);
         assert!(until(|| tx.capacity() == 8).await, "the writer never took the third frame");
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(
             peer_dropped.load(Ordering::Relaxed), 1,
             "once the backoff has elapsed the frame must provoke a fresh connect, not a drop"
         );
+        // Every frame was dropped — a refused connect, the backoff, a refused connect — and each
+        // released its place in the outbound count, so a shutdown has nothing to wait for.
+        assert!(until(|| unsent.get() == 0).await, "frames dropped to a dead peer left {} counted", unsent.get());
 
         handle.abort();
     }
@@ -633,10 +679,10 @@ mod tests {
     }
 
     /// Fill `tx` with ~32 MB, far past any socket buffer, so the writer is parked in a write.
-    async fn flood(tx: &mpsc::Sender<Bytes>) {
+    async fn flood(tx: &crate::outbound::WriterTx) {
         let frame = Bytes::from(vec![7u8; 512 * 1024]);
         for _ in 0..64 {
-            if tx.try_send(frame.clone()).is_err() { break; }
+            if tx.try_send_counted("t", frame.clone()) != crate::sim_seam::ChanVerdict::Sent { break; }
         }
         // Let the writer connect and block in its write.
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -664,7 +710,7 @@ mod tests {
         let sd = Arc::new(sd);
         let timing = WriterTiming { idle: Duration::ZERO, connect: Duration::from_secs(5), stall: crate::stall::StallBound { stall: Duration::from_secs(60), min_rate: 0 }, stalls: None };
         let tx = get_or_spawn_writer(&peer, &writers, 4096, Duration::from_millis(100), &timing,
-                                     &sd, &Arc::new(AtomicU64::new(0)), None).unwrap();
+                                     &sd, &Arc::new(AtomicU64::new(0)), None, &Default::default()).unwrap();
         flood(&tx).await;
         let ah = writers.pin().get(&peer).unwrap().abort_handle.clone().unwrap();
         assert!(!ah.is_finished(), "precondition: the writer is running");
@@ -681,7 +727,7 @@ mod tests {
         let sd = Arc::new(sd);
         let timing = WriterTiming { idle: Duration::ZERO, connect: Duration::from_secs(5), stall: crate::stall::StallBound { stall: Duration::from_secs(60), min_rate: 0 }, stalls: None };
         let tx = get_or_spawn_writer(&peer, &writers, 4096, Duration::from_millis(100), &timing,
-                                     &sd, &Arc::new(AtomicU64::new(0)), None).unwrap();
+                                     &sd, &Arc::new(AtomicU64::new(0)), None, &Default::default()).unwrap();
         flood(&tx).await;
         let ah = writers.pin().get(&peer).unwrap().abort_handle.clone().unwrap();
         let _ = sd.send(true);
@@ -701,7 +747,7 @@ mod tests {
         let stalls = Arc::new(AtomicU64::new(0));
         let timing = WriterTiming { idle: Duration::ZERO, connect: Duration::from_secs(5), stall: crate::stall::StallBound { stall: Duration::from_millis(300), min_rate: 0 }, stalls: Some(Arc::clone(&stalls)) };
         let tx = get_or_spawn_writer(&peer, &writers, 4096, Duration::from_secs(30), &timing,
-                                     &sd, &Arc::new(AtomicU64::new(0)), None).unwrap();
+                                     &sd, &Arc::new(AtomicU64::new(0)), None, &Default::default()).unwrap();
         flood(&tx).await;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         while tx.capacity() < tx.max_capacity() && tokio::time::Instant::now() < deadline {
@@ -748,9 +794,9 @@ mod tests {
         let sd = Arc::new(sd);
         let timing = WriterTiming { idle: Duration::ZERO, connect: Duration::from_secs(5), stall: crate::stall::StallBound { stall: Duration::from_secs(5), min_rate: 0 }, stalls: None };
         let tx = get_or_spawn_writer(&peer, &writers, 16, Duration::from_secs(30), &timing,
-                                     &sd, &Arc::new(AtomicU64::new(0)), None).unwrap();
+                                     &sd, &Arc::new(AtomicU64::new(0)), None, &Default::default()).unwrap();
         let frame_len = 4 * 1024 * 1024;
-        tx.send(Bytes::from(vec![1u8; frame_len])).await.unwrap();
+        assert!(tx.send_counted(Bytes::from(vec![1u8; frame_len])).await);
         let want = (frame_len + 5) as u64;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         while received.load(Ordering::Relaxed) < want && tokio::time::Instant::now() < deadline {

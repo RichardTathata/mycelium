@@ -117,8 +117,8 @@ fn spawn_handler_with(
     let node_id = NodeId::new("127.0.0.1", 0).unwrap();
     let (shutdown_tx, _) = watch::channel(false);
     let shutdown_tx = Arc::new(shutdown_tx);
-    let gossip_txs: Arc<[mpsc::Sender<(Bytes, u64, crate::framing::ForwardHint)>]> =
-        (0..N_GOSSIP_SHARDS).map(|_| gossip_tx.clone()).collect::<Vec<_>>().into();
+    let gossip_txs = mycelium_core::outbound::GossipTxs::new(
+        (0..N_GOSSIP_SHARDS).map(|_| gossip_tx.clone()).collect::<Vec<_>>(), Default::default());
     // Seed the hash accumulator from the store's current state so the
     // anti-entropy fast-path works correctly for pre-populated test stores.
     let initial_hash = store_hash(&store);
@@ -3239,6 +3239,234 @@ async fn a_fast_reassert_does_not_undo_the_shutdown_sweep() {
     assert!(kept_rounds.is_empty(), "B kept A's soft state after A shut down in rounds (round, svc, cap): {kept_rounds:?}");
 }
 
+/// Shutdown-delivery tests (the shutdown-sweep flake, 2026-10-19): a frame the sweep queued must be on
+/// the wire before `shutdown()` returns, wherever it is when the flush starts. Each holds one place on
+/// the outbound path open with a test pause (`before`, undone by `after`) and returns whether B still
+/// holds A's service advert after A's shutdown.
+#[cfg(feature = "tls")]
+async fn advert_kept_after_shutdown_with(tag: &str, before: impl FnOnce(&GossipAgent, &NodeId), after: impl FnOnce(&NodeId)) -> bool {
+    let (a, b, node_a, node_b, cert_dir) = signed_fleet_pair(tag, None).await;
+    let svc_key = format!("svc/held-svc/{node_a}");
+    let _svc = a.mesh().advertise_persistent("held-svc", SignalScope::Cluster, Duration::from_secs(30), || Bytes::from_static(b"up"));
+    let live = || b.kv().get(&svc_key).is_some();
+    poll_until(live, 5_000).await;
+    assert!(live(), "B saw A's service advert before the shutdown");
+    before(&a, &node_b);
+    let t = std::time::Instant::now();
+    a.shutdown().await;
+    eprintln!("{tag}: shutdown took {:?}", t.elapsed());
+    for _ in 0..80 { if !live() { break; } tokio::time::sleep(Duration::from_millis(25)).await; }
+    let kept = live();
+    after(&node_b);
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    kept
+}
+
+/// **A frame a peer writer holds in its write when the node shuts down still reaches the peer** — the
+/// mechanism behind `a_fast_reassert_does_not_undo_the_shutdown_sweep`'s CI failure on 98a311fc (B kept
+/// `svc/` in one round; ~1 % of runs under parallel load, on v2.35.0 too). The flush waited for empty
+/// queues, but a frame the writer has dequeued is in none: the flush saw nothing queued and the signal
+/// stopped the write (a probe on a failing run: `saw_queue false`, then `shutdown mid-write, queued 0`).
+/// Holds each batch A writes to B for 30 ms between the buffer and the socket flush. Seen failing first:
+/// 10/10 on the unfixed writer.
+#[cfg(all(feature = "tls", feature = "test-frame-filter"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_frame_a_writer_holds_at_shutdown_still_reaches_the_peer() {
+    use mycelium_core::writer::TEST_WRITE_PAUSE_MS;
+    let kept = advert_kept_after_shutdown_with("writer-holds-at-shutdown",
+        |_, b| { TEST_WRITE_PAUSE_MS.pin().insert(b.to_string(), 30); },
+        |b| { TEST_WRITE_PAUSE_MS.pin().remove(&b.to_string()); }).await;
+    assert!(!kept, "B still holds A's service advert: the sweep's tombstone was dropped inside A's writer at shutdown");
+}
+
+/// **…and is on the wire before `shutdown()` returns** (#650's review, finding 1). A first fix let the
+/// writer finish its batch *after* the signal, on a detached task nothing awaited; the `mycelium` binary
+/// returns from `main` straight after `shutdown()`, dropping the runtime and the write with it. A runs on
+/// its own runtime here, shut down with `shutdown_background()` the moment `shutdown()` returns. Seen
+/// failing first on that fix (the review: 3/8 unpaused; with the pause, every run).
+#[cfg(all(feature = "tls", feature = "test-frame-filter"))]
+#[test]
+fn a_frame_a_writer_holds_at_shutdown_is_written_before_shutdown_returns() {
+    use crate::config::TlsConfig;
+    use mycelium_core::writer::TEST_WRITE_PAUSE_MS;
+    let rt = |n| tokio::runtime::Builder::new_multi_thread().worker_threads(n).enable_all().build().unwrap();
+    let (rt_a, rt_b) = (rt(2), rt(2));
+    let (port_a, port_b) = (alloc_port(), alloc_port());
+    let (node_a, node_b) = (NodeId::new("127.0.0.1", port_a).unwrap(), NodeId::new("127.0.0.1", port_b).unwrap());
+    let cert_dir = std::env::temp_dir().join(format!("myc-runtime-exit-{port_a}"));
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    let mk = |node: &NodeId, boots: Vec<NodeId>| {
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = node.to_socket_addr().port();
+        cfg.bootstrap_peers = boots;
+        cfg.reconnect_backoff_secs = 1;
+        cfg.health_check_interval_secs = 60;
+        cfg.tls = Some(TlsConfig { auto_cert_dir: cert_dir.clone(), ..TlsConfig::default() });
+        GossipAgent::new(node.clone(), cfg)
+    };
+    let a = mk(&node_a, vec![]);
+    let b = mk(&node_b, vec![node_a.clone()]);
+    rt_a.block_on(a.start()).unwrap();
+    rt_b.block_on(b.start()).unwrap();
+    // As `signed_fleet_pair`: peered, and each holding the other's keys, before anything is sent.
+    let ready = || b.task_ctx.peer_keys.pin().get(&node_a).is_some_and(|k| !k.is_empty())
+        && a.task_ctx.peer_keys.pin().get(&node_b).is_some_and(|k| !k.is_empty())
+        && !a.peers().is_empty() && !b.peers().is_empty();
+    rt_b.block_on(poll_until(ready, 10_000));
+    let svc_key = format!("svc/exit-svc/{node_a}");
+    let live = || b.kv().get(&svc_key).is_some();
+    let _svc = rt_a.block_on(async {
+        a.mesh().advertise_persistent("exit-svc", SignalScope::Cluster, Duration::from_secs(30), || Bytes::from_static(b"up"))
+    });
+    rt_b.block_on(poll_until(live, 10_000));
+    assert!(live(), "B saw A's service advert before the shutdown");
+    TEST_WRITE_PAUSE_MS.pin().insert(node_b.to_string(), 30);
+    rt_a.block_on(a.shutdown());
+    // What a process does when `main` returns: the runtime goes, and every task on it.
+    rt_a.shutdown_background();
+    let gone = rt_b.block_on(async {
+        for _ in 0..80 { if !live() { return true; } tokio::time::sleep(Duration::from_millis(25)).await; }
+        !live()
+    });
+    TEST_WRITE_PAUSE_MS.pin().remove(&node_b.to_string());
+    rt_b.block_on(b.shutdown());
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    assert!(gone, "B still holds A's service advert: the tombstone was not on the wire when shutdown() returned");
+}
+
+/// **A frame a writer holds through a slow connect at shutdown still reaches the peer** (#650's review,
+/// finding 2). A writer with no connection — evicted, idled out or failed — connects on its first frame,
+/// and the connect `select!` broke on the signal with that frame in hand. A's writer to B is evicted
+/// during the shutdown, after the departure heartbeat and just before the sweep (`TEST_BEFORE_SWEEP`), and
+/// its next connect held for 30 ms, so the sweep's tombstone is the frame inside the connect when the
+/// flush looks. Seen failing first on #650's first fix.
+#[cfg(all(feature = "tls", feature = "test-frame-filter"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_frame_in_a_slow_connect_at_shutdown_still_reaches_the_peer() {
+    use crate::agent::lifecycle::TEST_BEFORE_SWEEP;
+    use mycelium_core::writer::TEST_CONNECT_PAUSE_MS;
+    let mut node_a = None;
+    let kept = advert_kept_after_shutdown_with("connect-at-shutdown",
+        |a, b| {
+            node_a = Some(a.node_id.to_string());
+            let b = b.clone();
+            TEST_BEFORE_SWEEP.pin().insert(a.node_id.to_string(), Arc::new(move |a: &GossipAgent| {
+                // Let the departure heartbeat reach the old writer's socket first, so the sweep's frames
+                // are the new writer's first.
+                std::thread::sleep(Duration::from_millis(50));
+                TEST_CONNECT_PAUSE_MS.pin().insert(b.to_string(), 30);
+                let old = a.peer_writers.pin().get(&b).and_then(|e| e.abort_handle.clone());
+                mycelium_core::writer::evict_peer_writer(&a.peer_writers, &b);
+                // Wait for the evicted writer to stop: a frame it took first would be dropped with it (an
+                // eviction stops writing to the peer), and the test is about the connect, not the eviction.
+                for _ in 0..200 {
+                    if old.as_ref().is_none_or(|h| h.is_finished()) { break; }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }));
+        },
+        |b| { TEST_CONNECT_PAUSE_MS.pin().remove(&b.to_string()); }).await;
+    if let Some(n) = node_a { TEST_BEFORE_SWEEP.pin().remove(&n); }
+    assert!(!kept, "B still holds A's service advert: the sweep's tombstone was dropped inside a writer's connect at shutdown");
+}
+
+/// **A frame a shard worker holds at shutdown still reaches the peer** (#650's review, finding 3). A
+/// frame a shard worker has dequeued and not yet handed to a writer was in no queue; the flush could
+/// pass it, the signal stop the idle writer, and the hand-off then find no writer. A's shard workers
+/// hold each frame for 30 ms after the dequeue (blocking, as the hand-off is synchronous). Seen
+/// failing first on #650's first fix.
+#[cfg(feature = "tls")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_frame_a_shard_worker_holds_at_shutdown_still_reaches_the_peer() {
+    use crate::agent::tasks::TEST_SHARD_PAUSE_MS;
+    let mut node_a = None;
+    let kept = advert_kept_after_shutdown_with("shard-holds-at-shutdown",
+        |a, _| { node_a = Some(a.node_id.to_string()); TEST_SHARD_PAUSE_MS.pin().insert(a.node_id.to_string(), 30); },
+        |_| {}).await;
+    if let Some(n) = node_a { TEST_SHARD_PAUSE_MS.pin().remove(&n); }
+    assert!(!kept, "B still holds A's service advert: the sweep's tombstone was dropped between a shard worker and a writer at shutdown");
+}
+
+/// **A frame dropped on its way to a dead peer releases its place in the outbound count** (#650's review).
+/// The shutdown waits for that count to reach zero, bounded; a frame that left the path without lowering
+/// it would make every later shutdown wait the whole bound. B is shut down and A sends to it (the write
+/// fails, a refused connect, then the reconnect backoff drops the rest); A's count returns to zero. Seen
+/// failing with the backoff drop's release removed.
+#[cfg(feature = "tls")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn frames_dropped_to_a_dead_peer_do_not_hold_shutdown() {
+    let (a, b, _node_a, _node_b, cert_dir) = signed_fleet_pair("dead-peer-at-shutdown", None).await;
+    b.shutdown().await;
+    let unsent = || a.task_ctx.gossip_txs.unsent().get();
+    for i in 0..20 {
+        let _ = a.kv().set(format!("dead-peer/{i}"), Bytes::from_static(b"v"));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    for _ in 0..200 { if unsent() == 0 { break; } tokio::time::sleep(Duration::from_millis(25)).await; }
+    let left = unsent();
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    assert_eq!(left, 0, "frames dropped to a dead peer stayed counted");
+}
+
+/// **A frame that cannot reach the wire holds the shutdown only for the flush's bound** (#650's review).
+/// A's writer to B is evicted before the sweep and its next connect held for five seconds, so the sweep's
+/// frames stay counted throughout; `shutdown()` still returns well inside that — the flush gives up at
+/// 250 ms, and the frames are then lost, as before.
+#[cfg(all(feature = "tls", feature = "test-frame-filter"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_undeliverable_frame_holds_shutdown_only_for_the_bound() {
+    use crate::agent::lifecycle::TEST_BEFORE_SWEEP;
+    use mycelium_core::writer::TEST_CONNECT_PAUSE_MS;
+    let (a, b, node_a, node_b, cert_dir) = signed_fleet_pair("undeliverable-at-shutdown", None).await;
+    let _svc = a.mesh().advertise_persistent("stuck-svc", SignalScope::Cluster, Duration::from_secs(30), || Bytes::from_static(b"up"));
+    let svc_key = format!("svc/stuck-svc/{node_a}");
+    poll_until(|| b.kv().get(&svc_key).is_some(), 5_000).await;
+    let nb = node_b.clone();
+    TEST_BEFORE_SWEEP.pin().insert(node_a.to_string(), Arc::new(move |a: &GossipAgent| {
+        TEST_CONNECT_PAUSE_MS.pin().insert(nb.to_string(), 5_000);
+        mycelium_core::writer::evict_peer_writer(&a.peer_writers, &nb);
+    }));
+    let t = std::time::Instant::now();
+    a.shutdown().await;
+    let took = t.elapsed();
+    TEST_BEFORE_SWEEP.pin().remove(&node_a.to_string());
+    TEST_CONNECT_PAUSE_MS.pin().remove(&node_b.to_string());
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    // The flush's bound is 250 ms; the rest of `shutdown()` (the sweep, the task drain) is given a
+    // tolerance, well short of the five-second connect.
+    assert!(took < Duration::from_millis(250 + 750), "a frame held in a five-second connect held the shutdown for {took:?}");
+}
+
+/// **A healthy, busy pair's outbound count returns to zero once it goes quiet** (#650's second review).
+/// Every frame counted on the way out is released once written, so a node that has sent a burst and gone
+/// idle has nothing counted, and its next shutdown does not wait at all. A leak on any common path — a
+/// relay, a hand-off, a write — would leave the count above zero here.
+#[cfg(feature = "tls")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_busy_pair_returns_its_outbound_count_to_zero() {
+    let (a, b, _node_a, _node_b, cert_dir) = signed_fleet_pair("count-at-zero", None).await;
+    for i in 0..300 {
+        let _ = a.kv().set(format!("busy/a/{i}"), Bytes::from(vec![7u8; 256]));
+        let _ = b.kv().set(format!("busy/b/{i}"), Bytes::from(vec![7u8; 256]));
+        let _ = a.mesh().emit("busy.sig", SignalScope::Cluster, Bytes::from_static(b"s"));
+        let _ = b.mesh().emit("busy.sig", SignalScope::Cluster, Bytes::from_static(b"s"));
+        if i % 50 == 0 { tokio::task::yield_now().await; }
+    }
+    let both = || (a.task_ctx.gossip_txs.unsent().get(), b.task_ctx.gossip_txs.unsent().get());
+    poll_until(|| b.kv().get("busy/a/299").is_some() && a.kv().get("busy/b/299").is_some(), 10_000).await;
+    for _ in 0..200 { if both() == (0, 0) { break; } tokio::time::sleep(Duration::from_millis(25)).await; }
+    let left = both();
+    let under = (a.task_ctx.gossip_txs.unsent().underflows(), b.task_ctx.gossip_txs.unsent().underflows());
+    a.shutdown().await;
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    assert_eq!(left, (0, 0), "outbound frames still counted on an idle pair (A, B)");
+    assert_eq!(under, (0, 0), "a frame was released twice (A, B)");
+}
+
 /// **A soft-state payload that panics does not wedge shutdown** (#628's review, finding 1). The soft-state
 /// gate's in-flight count was restored only on a normal return, and `run_kv_persist_task` ran the
 /// caller's `payload_fn` inside the gate — so a panicking payload left the count raised and the next
@@ -3954,8 +4182,8 @@ async fn test_subscribe_notified_via_gossip() {
     sub_rx.borrow_and_update();
     subs.pin().insert(Arc::from("gossip_key"), sub_tx);
 
-    let gossip_txs: Arc<[mpsc::Sender<(Bytes, u64, crate::framing::ForwardHint)>]> =
-        (0..N_GOSSIP_SHARDS).map(|_| gossip_tx.clone()).collect::<Vec<_>>().into();
+    let gossip_txs = mycelium_core::outbound::GossipTxs::new(
+        (0..N_GOSSIP_SHARDS).map(|_| gossip_tx.clone()).collect::<Vec<_>>(), Default::default());
     {
         use crate::signal::{Boundary, SignalHandlers};
         use crate::agent::{TaskCtx, BulkTransport};

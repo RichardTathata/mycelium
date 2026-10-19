@@ -37,6 +37,7 @@ pub mod ops;
 pub mod persistence;
 pub mod rate;
 pub mod receipt;
+pub mod outbound;
 pub mod removal;
 pub mod schema_handle;
 pub mod seen;

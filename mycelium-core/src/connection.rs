@@ -344,7 +344,7 @@ pub async fn handle_connection(
         intern_keys, intern_max_keys, max_peers, writer_timing, peer_list_tx,
     } = ctx;
     let node_id         = task_ctx.node_id.clone();
-    let gossip_txs      = Arc::clone(&task_ctx.gossip_txs);
+    let gossip_txs      = task_ctx.gossip_txs.clone();
     let seen            = Arc::clone(&task_ctx.seen);
     let max_ttl         = task_ctx.default_ttl;
     let hlc             = Arc::clone(&task_ctx.hlc);
@@ -659,14 +659,14 @@ pub async fn handle_connection(
                     });
                     if let Some(tx) = crate::writer::get_or_spawn_writer(
                         &sender, &peer_writers, task_ctx.hot.writer_depth(), backoff,
-                        &writer_timing, &shutdown, &kv_state.dropped_frames, tls.clone(),
+                        &writer_timing, &shutdown, &kv_state.dropped_frames, tls.clone(), gossip_txs.unsent(),
                     ) {
                         // A dropped pong looks to the peer exactly like a dead node, so the drop
                         // is worth replaying rather than re-provoking.
-                        let _ = crate::sim_seam::chan_try_send("writer/pong", &tx, pong);
+                        let _ = tx.try_send_counted("writer/pong", pong);
                     }
                     let bucket_hashes = crate::store::store_bucket_hashes(&kv_state);
-                    request_state(&sender, &peer_writers, task_ctx.hot.writer_depth(), backoff, &writer_timing, &shutdown, &node_id, &kv_state.hash_acc, &kv_state.dropped_frames, bucket_hashes, tls.clone());
+                    request_state(&sender, &peer_writers, task_ctx.hot.writer_depth(), backoff, &writer_timing, &shutdown, &node_id, &kv_state.hash_acc, &kv_state.dropped_frames, bucket_hashes, tls.clone(), gossip_txs.unsent());
                 }
             }
 
@@ -706,9 +706,9 @@ pub async fn handle_connection(
                     let data: Bytes = crate::bounds::hold_slot(crate::codec::wire_to_bytes(
                         &WireMessage::StateResponse { entries: vec![] }), &slot);
                     drop(slot);
-                    if let Some(tx) = get_or_spawn_writer(&sender, &peer_writers, task_ctx.hot.writer_depth(), backoff, &writer_timing, &shutdown, &kv_state.dropped_frames, tls.clone()) {
+                    if let Some(tx) = get_or_spawn_writer(&sender, &peer_writers, task_ctx.hot.writer_depth(), backoff, &writer_timing, &shutdown, &kv_state.dropped_frames, tls.clone(), gossip_txs.unsent()) {
                         tokio::spawn(async move {
-                            if tx.send(data).await.is_err() {
+                            if !tx.send_counted(data).await {
                                 tracing::error!("Fast-path StateResponse writer for {} has exited", sender);
                             }
                         });
@@ -796,10 +796,10 @@ pub async fn handle_connection(
                 // because StateRequest is only sent on first contact; there is
                 // no automatic retry. Wrap in spawn so the connection handler
                 // is not blocked waiting for the writer to drain.
-                if let Some(tx) = get_or_spawn_writer(&sender, &peer_writers, task_ctx.hot.writer_depth(), backoff, &writer_timing, &shutdown, &kv_state.dropped_frames, tls.clone()) {
+                if let Some(tx) = get_or_spawn_writer(&sender, &peer_writers, task_ctx.hot.writer_depth(), backoff, &writer_timing, &shutdown, &kv_state.dropped_frames, tls.clone(), gossip_txs.unsent()) {
                     tokio::spawn(async move {
                         for data in frames {
-                            if tx.send(data).await.is_err() {
+                            if !tx.send_counted(data).await {
                                 error!("StateResponse writer for {} has exited", sender);
                                 break;
                             }
@@ -949,9 +949,9 @@ pub async fn handle_connection(
                     let fwd_data = fwd_buf.freeze();
                     // Channel-readiness seam (item 6 PR 3): the drop is a kernel decision, so a recorded
                     // run replays it instead of needing the timing that caused it.
-                    match crate::sim_seam::chan_try_send(
+                    match gossip_txs.try_send_counted(
+                        shard,
                         &crate::framing::gossip_stream(shard),
-                        &gossip_txs[shard],
                         (fwd_data, sender.id_hash(), hint),
                     ) {
                         crate::sim_seam::ChanVerdict::Sent => {}
@@ -1072,9 +1072,9 @@ pub async fn handle_connection(
                         let data = recv_buf.split().freeze();
                         // Channel-readiness seam (item 6 PR 3): the drop is a kernel decision, so a recorded
                         // run replays it instead of needing the timing that caused it.
-                        match crate::sim_seam::chan_try_send(
+                        match gossip_txs.try_send_counted(
+                        shard,
                         &crate::framing::gossip_stream(shard),
-                        &gossip_txs[shard],
                         (data, update.sender, ForwardHint::All),
                     ) {
                             crate::sim_seam::ChanVerdict::Sent => {}
@@ -1094,9 +1094,9 @@ pub async fn handle_connection(
                         crate::codec::encode_wire(&mut fwd_buf, &WireMessage::Data(fwd_update));
                         // Channel-readiness seam (item 6 PR 3): the drop is a kernel decision, so a recorded
                         // run replays it instead of needing the timing that caused it.
-                        match crate::sim_seam::chan_try_send(
+                        match gossip_txs.try_send_counted(
+                        shard,
                         &crate::framing::gossip_stream(shard),
-                        &gossip_txs[shard],
                         (fwd_buf.freeze(), update.sender, ForwardHint::All),
                     ) {
                             crate::sim_seam::ChanVerdict::Sent => {}
@@ -1252,9 +1252,9 @@ pub async fn handle_connection(
                     crate::codec::encode_wire(&mut fwd_buf, &fwd_msg);
                     // Channel-readiness seam (item 6 PR 3): the drop is a kernel decision, so a recorded
                     // run replays it instead of needing the timing that caused it.
-                    match crate::sim_seam::chan_try_send(
+                    match gossip_txs.try_send_counted(
+                        shard,
                         &crate::framing::gossip_stream(shard),
-                        &gossip_txs[shard],
                         (fwd_buf.freeze(), update.sender, ForwardHint::All),
                     ) {
                         crate::sim_seam::ChanVerdict::Sent => {}
