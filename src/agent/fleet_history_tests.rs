@@ -1091,6 +1091,28 @@ async fn an_aged_tally_entry_is_withdrawn() {
     b.shutdown().await;
 }
 
+/// **The heartbeat tick withdraws aged entries itself** — nothing in the test calls the withdrawal. A 300 ms window and a
+/// tick every 500 ms (a third of a 1.5 s staleness bound): once the permit ages out, a tick takes the entry. Waited for
+/// with a generous deadline (thirty ticks), so the assertion is only that it goes, never when.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn the_heartbeat_tick_withdraws_an_aged_entry() {
+    let (p1, p2) = (port(), port());
+    let tune = |c: &mut GossipConfig| c.control_max_staleness_ms = 1_500;
+    let a = node_with(p1, &[], posts(3, 300, HistoryScope::FleetTally), tune).await;
+    let b = node_with(p2, &[p1], posts(3, 300, HistoryScope::FleetTally), tune).await;
+    ready(&[&a, &b]).await;
+    let out = post(&a).await;
+    assert!(admitted(&out).is_some(), "within the limit, admitted: {:?}", refusal(&out));
+    let ctx = Arc::clone(&a.task_ctx);
+    let prefix = format!("{}{}/c/", super::TALLY_PREFIX, a.node_id());
+    assert!(
+        until(|| mycelium_core::ops::kv_scan_prefix(&ctx, &prefix).is_empty(), Duration::from_secs(15)).await,
+        "the node's own tick withdrew its aged entry"
+    );
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
 /// **Finding 6: a peer with no heartbeat is unknown coverage**, never counted as zero.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn a_peer_with_no_heartbeat_makes_the_tally_not_established() {
