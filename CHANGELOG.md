@@ -16,8 +16,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that reached the collector after the heartbeat had been collected — by anti-entropy from a peer that had not
   collected yet, or a gossiped entry its heartbeat overtook — was therefore never collected: it stayed in the store and
   in the scope roster, and every later collection pass and decision listed its node again. Such an entry is now dated by
-  its own times and collected once every one is past its window plus the staleness and clock-drift bounds; one that
-  cannot be read is kept. Found as an intermittent CI failure of `residue_is_collected_and_a_decision_does_not_read_it`
+  its own times and collected once every one is past its window plus the staleness and clock-drift bounds; a key that
+  cannot be read — an entry, or the heartbeat itself — goes once no entry of the node could still count. An entry
+  dated in the future is kept, as it would count. Found as an intermittent CI failure of `residue_is_collected_and_a_decision_does_not_read_it`
   (the node's own collector tick took a planted heartbeat before its entry was planted); fail-first
   `an_entry_outliving_its_collected_heartbeat_is_collected`.
 - **A fleet history limit is bounded: at most 1 024 seats, a window of at most 24 hours** (post-360 row K2, from the

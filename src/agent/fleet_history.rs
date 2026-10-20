@@ -702,16 +702,30 @@ pub(crate) fn collect_residue(ctx: &Arc<TaskCtx>, now_ms: u64) -> usize {
             .and_then(|(_, v)| serde_json::from_slice::<Heartbeat>(v).ok())
         else {
             // **No heartbeat to date the node by** — collected before these entries reached this node (anti-entropy
-            // from a peer that had not collected yet, or a gossiped entry its heartbeat overtook), or never received.
-            // No decision reads a non-peer without a heartbeat, so these count for nothing; skipping them left them
-            // in the store and the scope roster forever (the residue flake on #654's CI). Each entry is dated by its
-            // own times instead: collected once every one is past its window plus the staleness and clock-drift
-            // bounds, as the heartbeat horizon would have it. One that cannot be read is kept — nothing dates it.
+            // from a peer that had not collected yet, or a gossiped entry its heartbeat overtook), never received, or
+            // one that cannot be read. No decision reads a non-peer without a readable heartbeat, so these count for
+            // nothing; skipping them left them in the store and the scope roster for ever (the residue flake on #654's
+            // CI). Each entry is dated by its own times instead: collected once every one is past its window plus the
+            // staleness and clock-drift bounds, as the heartbeat horizon would have it. A key nothing can be read
+            // from — an entry, or the heartbeat itself — dates nothing, so it goes once no entry of the node could
+            // still count (the adversarial review of #656, finding 2); an entry with a time past that bound keeps
+            // the rest.
+            let dated: Vec<Option<bool>> = keys
+                .iter()
+                .map(|(_, v)| {
+                    serde_json::from_slice::<TallyEntry>(v).ok().map(|e| {
+                        e.t.iter().all(|t| *t <= now_ms.saturating_sub(stored_window(e.w).saturating_add(margin)))
+                    })
+                })
+                .collect();
+            let quiet = dated.iter().all(|d| *d != Some(false));
             let mut any = false;
-            for ((key, value), stamp) in keys.into_iter().zip(stamps) {
-                let past = serde_json::from_slice::<TallyEntry>(&value)
-                    .is_ok_and(|e| e.t.iter().all(|t| *t <= now_ms.saturating_sub(stored_window(e.w).saturating_add(margin))));
-                if let (true, Some(ts)) = (past, stamp) {
+            for (((key, _), stamp), past) in keys.into_iter().zip(stamps).zip(dated) {
+                let collect = match past {
+                    Some(past) => past,
+                    None => quiet, // unreadable: goes with the node's last datable entry
+                };
+                if let (true, Some(ts)) = (collect, stamp) {
                     any |= mycelium_core::ops::kv_delete_held(ctx, key, ts);
                 }
             }

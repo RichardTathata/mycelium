@@ -2098,7 +2098,9 @@ mechanism each time: the node's own collector tick collected an id with one key 
 before its entry — and the test's pass then found that id with one key and no heartbeat, and skipped it. In
 production the same shape arises when an entry arrives by anti-entropy or gossip after the heartbeat's collection.
 The fix dates such an entry by its own times: collected once every one is past its window plus the staleness and
-clock-drift bounds (the heartbeat horizon's margin); an unreadable one is kept. Fail-first:
+clock-drift bounds (the heartbeat horizon's margin); an unreadable key — an entry, or a heartbeat that cannot be read —
+goes once no entry of the node could still count (the PR's adversarial review, finding 2: kept, it held the node's
+roster row for ever). Fail-first:
 `an_entry_outliving_its_collected_heartbeat_is_collected` (plants a heartbeat alone, collects it, then plants its
 entries) failed on the unfixed collector and passes with the fix. Under 32 parallel processes the original test failed
 7 in 6 400 runs before the fix and 0 in 7 680 after; the `agent::fleet_history` module 90 of 90 under 6 (#656).
@@ -2118,6 +2120,13 @@ entries) failed on the unfixed collector and passes with the fix. Under 32 paral
   at the provider's re-check, an ad's key bound to its writer; for M: the OpenShell backend (skipped for now, above),
   resource limits, limits by address and by path, a limit on the proxy's port by address under Landlock; for K: a
   history beyond 24 hours, 1 024 records per actor or 65 536 actors per point, and a replay of the history input;
+- K2, from #656's adversarial review (finding 1, predates #656): a reader skips a **non-peer with entries and no
+  heartbeat** without counting it or calling it unknown (`tally_state_counted`'s non-peer loop), so a reader that
+  receives a crashed member's entries before its heartbeat (a restart without persistence, then anti-entropy) reads
+  that member as zero until the heartbeat arrives — against the row's "a member without one is unknown coverage".
+  Reading such a node as unknown is viable only now that orphaned entries are collected (#656); before, a leaked entry
+  would have kept the tally not established for ever. A fabricated id with entries and no heartbeat would then deny
+  by `Indeterminate` until its entries age out, which the change has to weigh.
 - (every recorded K2 flake is closed: the `/mcp` door test's lost reply, #647; the seat lease's "decided too late", #648; the abort and aged-tally tests, test races, #651; the residue test, a collector leak, #656;)
 - the private Cedar adapter's re-pin onto v2.36.0 is **done** (private #33, `0d654fd`). Open is the **next** re-pin,
   after K2's bounds (§55) are released: nine `fleet_*` cases, two of which (`fleet_limit_past_the_seat_cap`,

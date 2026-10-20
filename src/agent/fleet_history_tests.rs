@@ -1504,7 +1504,8 @@ async fn residue_is_collected_and_a_decision_does_not_read_it() {
 /// reaches it afterwards — anti-entropy from a peer that had not collected yet, or a gossiped entry overtaken by its
 /// heartbeat — has no heartbeat to date it by. It used to be skipped on every pass, and stayed in the store and in the
 /// scope roster forever. It is collected once every time in it is past its window, the staleness bound and the
-/// clock-drift bound; one that could still count, or that cannot be read, is kept.
+/// clock-drift bound; one that could still count is kept, and one that cannot be read (an entry or a heartbeat) goes
+/// once nothing of the node could still count.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_entry_outliving_its_collected_heartbeat_is_collected() {
     let tune = |c: &mut GossipConfig| {
@@ -1538,9 +1539,21 @@ async fn an_entry_outliving_its_collected_heartbeat_is_collected() {
     assert!(mycelium_core::ops::kv_get(&ctx, &fresh).is_some(), "an entry that could still count is kept");
     assert!(mycelium_core::ops::kv_get(&ctx, &garbled).is_some(), "an entry nothing can be read from is kept");
 
-    // Once its last time passes the margin, it goes too.
+    // Once its last time passes the margin, it goes too — and with no entry left that could count, so does the one
+    // nothing can be read from: otherwise it, and the node's row in the scope roster, would stay for ever.
     super::collect_residue(&ctx, now + 3_000);
     assert!(mycelium_core::ops::kv_get(&ctx, &fresh).is_none(), "collected once past the margin");
+    assert!(mycelium_core::ops::kv_get(&ctx, &garbled).is_none(), "an unreadable entry goes with the node's last datable one");
+
+    // A heartbeat that cannot be read dates nothing either: an aged entry beside it is collected, and so is it (the
+    // adversarial review of #656, finding 2).
+    let other = NodeId::new("127.0.0.1", port()).unwrap().to_string();
+    let _ = mycelium_core::ops::kv_set(&ctx, Arc::from(super::heartbeat_key(&other).as_str()), bytes::Bytes::from_static(b"not json"));
+    plant(&super::tally_key(&other, "c-posts", "gateway", "aged"), serde_json::json!({"w": 1_000, "t": [now - 9_000]}));
+    super::collect_residue(&ctx, ctx.hlc.decision_now_ms());
+    for key in [super::heartbeat_key(&other), super::tally_key(&other, "c-posts", "gateway", "aged")] {
+        assert!(mycelium_core::ops::kv_get(&ctx, &key).is_none(), "{key} collected");
+    }
     b.shutdown().await;
 }
 
