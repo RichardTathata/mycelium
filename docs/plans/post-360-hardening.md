@@ -2112,10 +2112,38 @@ persistence, catching up by anti-entropy) under-counted, failing open, against t
 unknown coverage". Now a verified member's entry for the counter, inside the window plus the staleness and drift bounds
 or unreadable, is unknown coverage naming the node; a fabricated id is ignored (`verified_member`, as since round 4);
 without `[tls]` any such node is unknown. The bound is the collector's (`collect_residue` dates the same entry by the
-same margin; the entry's stored window is the counter's, written by `publish_permit`), so a node stops being consulted exactly when its orphaned entry is collected. Fail-first:
+same margin), so a node stops being consulted when its orphaned entry is collected — exactly so when the writer's
+window is the counter's, as `publish_permit` writes it; an entry written under a shorter window for the same counter
+id is collected earlier. Fail-first:
 `a_members_entries_without_its_heartbeat_are_unknown_coverage` failed on the unfixed reader (*"a member's entry without
 its heartbeat is not counted as zero"*), and its fabricated-id half failed with the membership check removed; the
 extended `without_tls_a_non_peers_absence_is_not_established` failed on the unfixed reader. `deprecations.md` §56.
+
+**Closed in #656 (its second review, 2026-10-20; four items, each with a test seen failing first).**
+1. *A forged time held a counter for ever.* Tally keys are unsigned; a time past now + `max_clock_drift_ms`
+   (`t: [u64::MAX]`) never aged — counted as a permit for ever, kept by its owner's `publish_permit`, and, under a
+   heartbeat-less node, `Indeterminate` and a roster row for ever. Now it dates nothing: the reader reads such an entry
+   as unreadable (`counted_in`), the owner drops such times (`publish_permit`) and does not wait for them (`aged`), the
+   collector dates an entry by its honest times so one holding nothing else is collected **at once** — as the owner's
+   own withdrawal takes an unreadable entry; waiting a margin would wait on a time that is not a time. A heartbeat
+   from the future is no heartbeat (reader and collector). `a_forged_future_time_dates_nothing` failed on 13aaf897
+   (*"a forged time is not counted as a permit"*); dropping the collector's future-heartbeat filter fails it
+   (*"and it is collected"*).
+2. *"Exactly" qualified:* the reader's and the collector's bounds agree when the writer's window is the counter's
+   (CHANGELOG, `deprecations.md` §56, guide 20, this section).
+3. *The heartbeat path's root:* `collect_residue` takes each entry by its own times and the heartbeat last — once
+   none of the node's entries here is live and its `as_of` is past `MAX_FLEET_WINDOW_MS` plus both bounds, since a
+   collector cannot see the windows of entries held only elsewhere. Cost: a departed node's heartbeat stays up to
+   24 hours plus the bounds (one key per node). `a_collector_without_a_members_entry_keeps_its_heartbeat` failed on
+   13aaf897 (*"the heartbeat stays"*). Three tests that waited on the old early removal now collect as of a time past
+   every window (`past_every_window`); the returning-node test collects once `a` has been silent past the staleness
+   and drift bounds, the dwell its restart was written against (an immediate restart was not re-admitted as `b`'s peer
+   while the test's hand-removed peer entry left `b`'s old connection standing — a test artefact, measured: 3/3
+   failed without the dwell, passing with it).
+4. *Reader tests that survived mutation:* the extended `without_tls_a_non_peers_absence_is_not_established` now fails
+   with `.unwrap_or(true)` → `false` (*"an unreadable entry without a heartbeat is unknown"*) and with the horizon
+   replaced by `c.window_ms` (*"an entry between the window and the horizon is still pending"*). An unreadable entry
+   is now collected at once (it was kept until nothing else could count), as its owner's `aged` takes it.
 
 **Known flakes, open (seen during the v2.36.0 work, 2026-10-19; not yet investigated):**
 - `overlay_consistent::tests::distributed_lock_grants_single_holder_under_race` — 0 winners (a liveness timeout), never

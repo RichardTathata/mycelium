@@ -1356,6 +1356,12 @@ async fn ready_tls(nodes: &[&Arc<GossipAgent>]) {
     }
 }
 
+/// A span after which no entry of a silent node can count anywhere: the longest window any counter may have, plus the
+/// staleness and clock-drift bounds, plus a second.
+fn past_every_window(ctx: &crate::agent::TaskCtx) -> u64 {
+    crate::MAX_FLEET_WINDOW_MS + ctx.config.control_max_staleness_ms + ctx.config.max_clock_drift_ms + 1_000
+}
+
 fn tally_counted(e: &AeEvidence) -> (u32, Vec<String>) {
     match &e.history.as_ref().unwrap().fleet[0].state {
         FleetState::Tally { counted, publishers, .. } => (*counted, publishers.clone()),
@@ -1489,11 +1495,17 @@ async fn residue_is_collected_and_a_decision_does_not_read_it() {
         plant(super::tally_key(id, "c-posts", "gateway", "x"), serde_json::json!({"w": 1_000, "t": [now - 9_000]}));
     }
     // Collected by this call or by `b`'s own collector tick before it — which one is not the claim; the keys' absence is.
+    // Each entry goes by its own times; a heartbeat is kept until no entry of its node can count anywhere — its `as_of`
+    // past the longest window any counter may have plus both bounds (#656's review, finding 3).
     super::collect_residue(&ctx, ctx.hlc.decision_now_ms());
     for id in &ids {
-        for key in [super::heartbeat_key(id), super::tally_key(id, "c-posts", "gateway", "x")] {
-            assert!(mycelium_core::ops::kv_get(&ctx, &key).is_none(), "{key} collected");
-        }
+        let key = super::tally_key(id, "c-posts", "gateway", "x");
+        assert!(mycelium_core::ops::kv_get(&ctx, &key).is_none(), "{key} collected");
+    }
+    super::collect_residue(&ctx, ctx.hlc.decision_now_ms() + past_every_window(&ctx));
+    for id in &ids {
+        let key = super::heartbeat_key(id);
+        assert!(mycelium_core::ops::kv_get(&ctx, &key).is_none(), "{key} collected");
     }
     a.shutdown().await;
     b.shutdown().await;
@@ -1504,8 +1516,8 @@ async fn residue_is_collected_and_a_decision_does_not_read_it() {
 /// reaches it afterwards — anti-entropy from a peer that had not collected yet, or a gossiped entry overtaken by its
 /// heartbeat — has no heartbeat to date it by. It used to be skipped on every pass, and stayed in the store and in the
 /// scope roster forever. It is collected once every time in it is past its window, the staleness bound and the
-/// clock-drift bound; one that could still count is kept, and one that cannot be read (an entry or a heartbeat) goes
-/// once nothing of the node could still count.
+/// clock-drift bound; one that could still count is kept, one that cannot be read goes at once, and a heartbeat that
+/// cannot be read goes once nothing of the node could still count.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_entry_outliving_its_collected_heartbeat_is_collected() {
     let tune = |c: &mut GossipConfig| {
@@ -1521,7 +1533,7 @@ async fn an_entry_outliving_its_collected_heartbeat_is_collected() {
     let now = ctx.hlc.decision_now_ms();
     // The heartbeat alone, past the horizon: collected.
     plant(&super::heartbeat_key(&gone), serde_json::json!({"as_of": now - 10_000, "enforces": true, "departed": true}));
-    super::collect_residue(&ctx, ctx.hlc.decision_now_ms());
+    super::collect_residue(&ctx, now + past_every_window(&ctx));
     assert!(mycelium_core::ops::kv_get(&ctx, &super::heartbeat_key(&gone)).is_none(), "the heartbeat is collected");
 
     // Its entries arrive afterwards: one aged past window + staleness + drift (1 + 1.5 + 1 s), one still inside it,
@@ -1537,13 +1549,13 @@ async fn an_entry_outliving_its_collected_heartbeat_is_collected() {
     super::collect_residue(&ctx, ctx.hlc.decision_now_ms());
     assert!(mycelium_core::ops::kv_get(&ctx, &aged).is_none(), "an aged entry without a heartbeat is collected");
     assert!(mycelium_core::ops::kv_get(&ctx, &fresh).is_some(), "an entry that could still count is kept");
-    assert!(mycelium_core::ops::kv_get(&ctx, &garbled).is_some(), "an entry nothing can be read from is kept");
+    // An entry nothing can be read from dates nothing and counts nothing: it goes at once, as its owner's own
+    // withdrawal would take it (`aged`) — kept, it and the node's row in the scope roster stayed for ever.
+    assert!(mycelium_core::ops::kv_get(&ctx, &garbled).is_none(), "an unreadable entry is collected");
 
-    // Once its last time passes the margin, it goes too — and with no entry left that could count, so does the one
-    // nothing can be read from: otherwise it, and the node's row in the scope roster, would stay for ever.
+    // Once its last time passes the margin, it goes too.
     super::collect_residue(&ctx, now + 3_000);
     assert!(mycelium_core::ops::kv_get(&ctx, &fresh).is_none(), "collected once past the margin");
-    assert!(mycelium_core::ops::kv_get(&ctx, &garbled).is_none(), "an unreadable entry goes with the node's last datable one");
 
     // A heartbeat that cannot be read dates nothing either: an aged entry beside it is collected, and so is it (the
     // adversarial review of #656, finding 2).
@@ -1589,8 +1601,29 @@ async fn a_returning_nodes_newer_records_survive_a_collector() {
     let bctx = Arc::clone(&b.task_ctx);
     bctx.peers.pin().remove(&a_node);
     let hb = super::heartbeat_key(&a_id);
+    // A heartbeat is kept until no entry of its node could count anywhere (#656's review, finding 3), so `b` collects
+    // as of then — once `a`'s last word has reached it.
+    let departed = |v: &bytes::Bytes| String::from_utf8_lossy(v).contains("departed");
+    assert!(until(|| mycelium_core::ops::kv_get(&bctx, &hb).is_some_and(|v| departed(&v)), Duration::from_secs(10)).await);
     assert!(
-        until(|| bctx.peers.pin().remove(&a_node).is_none() && mycelium_core::ops::kv_get(&bctx, &hb).is_none(), Duration::from_secs(10)).await,
+        until(
+            || {
+                let gone = bctx.peers.pin().remove(&a_node).is_none();
+                // Not before `a` has been silent past the staleness and drift bounds — when the collector acted before
+                // #656, which this test's restart was written against (`b` lets `a`'s old connection go by then).
+                let now = bctx.hlc.decision_now_ms();
+                let silent = mycelium_core::ops::kv_get(&bctx, &hb)
+                    .and_then(|v| serde_json::from_slice::<serde_json::Value>(&v).ok())
+                    .and_then(|v| v["as_of"].as_u64())
+                    .is_none_or(|as_of| now.saturating_sub(as_of) > 1_500 + 500);
+                if silent {
+                    super::collect_residue(&bctx, now + past_every_window(&bctx));
+                }
+                gone && mycelium_core::ops::kv_get(&bctx, &hb).is_none()
+            },
+            Duration::from_secs(10)
+        )
+        .await,
         "b collected a's keys once a was silent past the horizon"
     );
 
@@ -1746,7 +1779,7 @@ async fn a_collectors_tombstone_loses_to_a_newer_write_it_had_not_seen() {
         &silent, 4, Arc::clone(&key), bytes::Bytes::from_static(b"{\"as_of\":1,\"enforces\":true}"), false, newer_ts,
     );
     tokio::time::sleep(Duration::from_millis(20)).await;
-    assert_eq!(super::collect_residue(&ctx, ctx.hlc.decision_now_ms()), 1, "the silent node is collected");
+    assert_eq!(super::collect_residue(&ctx, ctx.hlc.decision_now_ms() + past_every_window(&ctx)), 1, "the silent node is collected");
     assert!(mycelium_core::ops::kv_get(&ctx, &key).is_none());
     mycelium_core::store::apply_and_notify(&ctx.kv_state, &newer);
     assert!(mycelium_core::ops::kv_get(&ctx, &key).is_some(), "the newer heartbeat stands");
@@ -1930,7 +1963,129 @@ async fn without_tls_a_non_peers_absence_is_not_established() {
     assert!(admitted(&out).is_none(), "not established");
     let why = format!("{:?}", refusal(&out));
     assert!(why.contains(&orphan) && !why.contains(&gone), "{why}");
+
+    // Pending until the horizon, not the window: a time past the counter's window but inside the staleness and drift
+    // bounds beyond it is still unknown (#656's second review, item 4) — the collector's own bound.
+    mycelium_core::ops::kv_write_local(&b.task_ctx, Arc::from(key.as_str()), None);
+    let margin = b.task_ctx.config.control_max_staleness_ms + b.task_ctx.config.max_clock_drift_ms;
+    let now = b.task_ctx.hlc.decision_now_ms();
+    let between = serde_json::to_vec(&serde_json::json!({"w": TEN_MIN, "t": [now - TEN_MIN - margin / 2]})).unwrap();
+    let late = NodeId::new("127.0.0.1", port()).unwrap().to_string();
+    let key = super::tally_key(&late, "c-posts", "gateway", crate::PRINCIPAL_ANONYMOUS);
+    let _ = mycelium_core::ops::kv_set(&b.task_ctx, Arc::from(key.as_str()), bytes::Bytes::from(between));
+    let out = post(&b).await;
+    assert!(admitted(&out).is_none(), "an entry between the window and the horizon is still pending");
+    assert!(format!("{:?}", refusal(&out)).contains(&late));
+    mycelium_core::ops::kv_write_local(&b.task_ctx, Arc::from(key.as_str()), None);
+
+    // An entry nothing can be read from, with no heartbeat: unknown, never zero. (The collector removes it at its
+    // next pass, so the decision is read straight after it is planted.)
+    let garbled = NodeId::new("127.0.0.1", port()).unwrap().to_string();
+    let key = super::tally_key(&garbled, "c-posts", "gateway", crate::PRINCIPAL_ANONYMOUS);
+    let _ = mycelium_core::ops::kv_set(&b.task_ctx, Arc::from(key.as_str()), bytes::Bytes::from_static(b"not json"));
+    let counter = crate::FleetCounter::new(HistoryScope::FleetTally, "c-posts", 3, TEN_MIN);
+    let state = super::tally_state_counted(&b.task_ctx, &counter, "gateway", crate::PRINCIPAL_ANONYMOUS, b.task_ctx.hlc.decision_now_ms()).0;
+    assert!(
+        matches!(&state, FleetState::NotEstablished(why) if why.contains(&garbled)),
+        "an unreadable entry without a heartbeat is unknown: {state:?}"
+    );
     a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **A forged time dates nothing** (#656's second review, item 1). Tally entries are unsigned, and a time past this
+/// node's clock plus the drift bound cannot have been written by an honest member. Counted, `t: [u64::MAX]` never
+/// aged: a permit counted for ever, or — with no heartbeat beside it — a counter `Indeterminate` for ever and a scope
+/// roster row that never went. Now a reader treats such an entry as one it cannot read (unknown coverage), the
+/// collector dates an entry by its honest times only — so one holding nothing else is collected at once — and the
+/// counter is decidable again. A heartbeat from the future is no heartbeat: a non-peer's is dated by its entries.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_forged_future_time_dates_nothing() {
+    let (p1, p2, p3) = (port(), port(), port());
+    let certs = std::env::temp_dir().join(format!("k2-tls-future-{p1}"));
+    let _ = std::fs::remove_dir_all(&certs);
+    let a = node_tls(p1, &[], posts(3, TEN_MIN, HistoryScope::FleetTally), &certs, |_| {}).await;
+    let b = node_tls(p2, &[p1], posts(3, TEN_MIN, HistoryScope::FleetTally), &certs, |_| {}).await;
+    let c = node_tls(p3, &[p1, p2], posts(3, TEN_MIN, HistoryScope::FleetTally), &certs, |_| {}).await;
+    ready_tls(&[&a, &b, &c]).await;
+    let bctx = Arc::clone(&b.task_ctx);
+    let c_id = c.node_id().to_string();
+    let hb_key = super::heartbeat_key(&c_id);
+    let departed = |b: &bytes::Bytes| serde_json::from_slice::<serde_json::Value>(b).is_ok_and(|v| v["departed"] == true);
+    c.shutdown().await;
+    assert!(
+        until(|| mycelium_core::ops::kv_get(&bctx, &hb_key).is_some_and(|b| departed(&b)), Duration::from_secs(10)).await,
+        "c's last word reaches b"
+    );
+    bctx.peers.pin().remove(&c_id.parse::<NodeId>().unwrap());
+    let forged_key = super::tally_key(&c_id, "c-posts", "gateway", crate::PRINCIPAL_ANONYMOUS);
+    let forge = || {
+        let v = serde_json::to_vec(&serde_json::json!({"w": TEN_MIN, "t": [u64::MAX]})).unwrap();
+        let _ = mycelium_core::ops::kv_set(&bctx, Arc::from(forged_key.as_str()), bytes::Bytes::from(v));
+    };
+
+    // Under a departed member whose heartbeat stands: not counted as a permit, and collected.
+    forge();
+    let out = post(&b).await;
+    assert!(admitted(&out).is_none(), "a forged time is not counted as a permit");
+    assert!(format!("{:?}", refusal(&out)).contains(&c_id));
+    super::collect_residue(&bctx, bctx.hlc.decision_now_ms());
+    assert!(mycelium_core::ops::kv_get(&bctx, &forged_key).is_none(), "the forged entry is collected");
+    let out = post(&b).await;
+    assert!(admitted(&out).is_some(), "decidable again: {:?}", refusal(&out));
+
+    // With no heartbeat beside it: the same.
+    mycelium_core::ops::kv_write_local(&bctx, Arc::from(hb_key.as_str()), None);
+    forge();
+    let out = post(&b).await;
+    assert!(admitted(&out).is_none(), "unknown while it is held");
+    super::collect_residue(&bctx, bctx.hlc.decision_now_ms());
+    assert!(mycelium_core::ops::kv_get(&bctx, &forged_key).is_none(), "collected without a heartbeat");
+    assert!(!super::tally_nodes(&bctx).0.contains(&c_id), "and the node's roster row goes");
+    let out = post(&b).await;
+    assert!(admitted(&out).is_some(), "decidable again: {:?}", refusal(&out));
+
+    // A heartbeat from the future, under an id with nothing else: no heartbeat, nothing pending, collected.
+    let fake = NodeId::new("127.0.0.1", port()).unwrap().to_string();
+    let v = serde_json::to_vec(&serde_json::json!({"as_of": u64::MAX, "enforces": true})).unwrap();
+    let _ = mycelium_core::ops::kv_set(&bctx, Arc::from(super::heartbeat_key(&fake).as_str()), bytes::Bytes::from(v));
+    let out = post(&b).await;
+    assert!(admitted(&out).is_some(), "a heartbeat from the future holds nothing up: {:?}", refusal(&out));
+    super::collect_residue(&bctx, bctx.hlc.decision_now_ms());
+    assert!(mycelium_core::ops::kv_get(&bctx, &super::heartbeat_key(&fake)).is_none(), "and it is collected");
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
+/// **A collector keeps a heartbeat until no entry of its node can count anywhere** (#656's second review, item 3). A
+/// collector dated a heartbeat by the longest window among the entries *it* held; one that lacked a member's
+/// long-window entry removed the heartbeat early, and the tombstone reached the nodes holding that entry, which then
+/// read it without a heartbeat. Each entry now goes by its own times, and a heartbeat only once its `as_of` is past
+/// the longest window any counter may have plus both bounds — and while none of its node's entries here is live.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_collector_without_a_members_entry_keeps_its_heartbeat() {
+    let b = node(port(), &[], 3, HistoryScope::FleetTally, |c| {
+        c.control_max_staleness_ms = 1_500;
+        c.max_clock_drift_ms = 1_000;
+    })
+    .await;
+    let ctx = Arc::clone(&b.task_ctx);
+    let member = NodeId::new("127.0.0.1", port()).unwrap().to_string();
+    let now = ctx.hlc.decision_now_ms();
+    let hb = super::heartbeat_key(&member);
+    let v = serde_json::to_vec(&serde_json::json!({"as_of": now - 10_000, "enforces": true, "departed": true})).unwrap();
+    let _ = mycelium_core::ops::kv_set(&ctx, Arc::from(hb.as_str()), bytes::Bytes::from(v));
+    // Its short-window entry, aged here; its ten-minute entry is held elsewhere, not here.
+    let short = super::tally_key(&member, "c-short", "gateway", "x");
+    let _ = mycelium_core::ops::kv_set(
+        &ctx, Arc::from(short.as_str()),
+        bytes::Bytes::from(serde_json::to_vec(&serde_json::json!({"w": 1_000, "t": [now - 10_000]})).unwrap()),
+    );
+    super::collect_residue(&ctx, ctx.hlc.decision_now_ms());
+    assert!(mycelium_core::ops::kv_get(&ctx, &short).is_none(), "the aged entry goes by its own times");
+    assert!(mycelium_core::ops::kv_get(&ctx, &hb).is_some(), "the heartbeat stays: an entry elsewhere may still count");
+    super::collect_residue(&ctx, now + past_every_window(&ctx));
+    assert!(mycelium_core::ops::kv_get(&ctx, &hb).is_none(), "collected once nothing of the node can count anywhere");
     b.shutdown().await;
 }
 
@@ -2035,8 +2190,9 @@ async fn an_oversized_stored_window_ages_out_and_its_residue_is_collected() {
     let now = ctx.hlc.decision_now_ms();
     let entry = |w: u64, t: u64| serde_json::to_vec(&serde_json::json!({"w": w, "t": [t]})).unwrap();
     for w in [u64::MAX, 7 * HORIZON] {
-        assert!(super::aged(&entry(w, now - HORIZON - 1), now), "w = {w}: a time past the horizon has aged out");
-        assert!(!super::aged(&entry(w, now - HORIZON + 60_000), now), "w = {w}: a time inside the horizon has not");
+        let drift = ctx.config.max_clock_drift_ms;
+        assert!(super::aged(&entry(w, now - HORIZON - 1), now, drift), "w = {w}: a time past the horizon has aged out");
+        assert!(!super::aged(&entry(w, now - HORIZON + 60_000), now, drift), "w = {w}: a time inside the horizon has not");
     }
     // This node's own oversized entry is withdrawn by its heartbeat's withdrawal.
     let own = super::tally_key(&a.node_id().to_string(), "c-old", "gateway", "x");

@@ -15,10 +15,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   residue collector dated a non-peer's `sys/ae-tally/` keys by its heartbeat, and skipped a node with none. An entry
   that reached the collector after the heartbeat had been collected — by anti-entropy from a peer that had not
   collected yet, or a gossiped entry its heartbeat overtook — was therefore never collected: it stayed in the store and
-  in the scope roster, and every later collection pass and decision listed its node again. Such an entry is now dated by
-  its own times and collected once every one is past its window plus the staleness and clock-drift bounds; a key that
-  cannot be read — an entry, or the heartbeat itself — goes once no entry of the node could still count. An entry
-  dated in the future is kept, as it would count. Found as an intermittent CI failure of `residue_is_collected_and_a_decision_does_not_read_it`
+  in the scope roster, and every later collection pass and decision listed its node again. The collector now takes a
+  non-peer's keys **each by its own times**: an entry once every time is past its window plus the staleness and
+  clock-drift bounds, or at once if it cannot be read or its times are forged (below); the heartbeat **last** — once
+  none of the node's entries it holds is live and its `as_of` is past the longest window any counter may have
+  (`MAX_FLEET_WINDOW_MS`, 24 hours) plus both bounds, because a collector cannot see the windows of entries held only
+  elsewhere (#656's second review, item 3: dated by the entries it held, a collector lacking a member's long-window
+  entry removed the heartbeat early, and the nodes holding that entry then read it without one). A departed node's
+  heartbeat therefore stays up to 24 hours plus the bounds — one key per node. Found as an intermittent CI failure of `residue_is_collected_and_a_decision_does_not_read_it`
   (the node's own collector tick took a planted heartbeat before its entry was planted); fail-first
   `an_entry_outliving_its_collected_heartbeat_is_collected`.
 - **A member's tally entries without its heartbeat are unknown coverage, not zero** (post-360 row K2, #656's
@@ -27,10 +31,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   persistence, catching up by anti-entropy — read its permits as zero and could admit past the limit. Such a verified
   member's entry is now dated by its own times: inside the window plus the staleness and drift bounds, or unreadable,
   the tally is not established and a `FleetTally` rule decides `Indeterminate`, naming the node; the collector removes
-  the entry on the same bound. A fabricated id is still ignored. **Upgrade note:** a tally rule can decide
+  the entry on the same bound (the same when the writer's window is the counter's, as `publish_permit` writes it). A
+  fabricated id is still ignored. **Upgrade note:** a tally rule can decide
   `Indeterminate` where it admitted before, for at most that window (`deprecations.md` §56). Fail-first:
   `a_members_entries_without_its_heartbeat_are_unknown_coverage` and the extended
   `without_tls_a_non_peers_absence_is_not_established`.
+- **A forged tally time dates nothing** (post-360 row K2, #656's second review, item 1). Tally keys are unsigned, and a
+  time past this node's clock plus `max_clock_drift_ms` — `t: [u64::MAX]` — never aged: it counted as a permit for
+  ever, its owner's `publish_permit` kept it, and under a node with no heartbeat it held a counter `Indeterminate` and
+  the node's scope-roster row for ever. Now a reader reads an entry holding such a time as one it cannot read (unknown
+  coverage, naming the node), the owner drops such times when it rewrites the entry and does not wait for them when
+  it withdraws, and the collector dates an entry by its honest times only — so one holding nothing else is collected
+  at once and the counter is decidable again. A heartbeat dated in the future is no heartbeat: a non-peer's is dated
+  by its entries, and the collector removes it once none of them is live. **Upgrade note:** a peer's forged time now
+  makes a tally rule `Indeterminate` until the entry is rewritten or withdrawn, where it was counted
+  (`deprecations.md` §56). Fail-first: `a_forged_future_time_dates_nothing`,
+  `a_collector_without_a_members_entry_keeps_its_heartbeat`.
 - **A fleet history limit is bounded: at most 1 024 seats, a window of at most 24 hours** (post-360 row K2, from the
   review of the private Cedar adapter). For a `HistoryScope::FleetConsensus` rule the enforcement point read every
   seat, a slot digest and a KV read each, on every request the rule covered, synchronously under the actor's history

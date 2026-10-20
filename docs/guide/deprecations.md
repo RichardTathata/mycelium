@@ -76,7 +76,7 @@ the notice.
 | 53 | an exhaustive `Rule`, `HistoryLimit`, `HistoryView`, `HistoryInput` or `mycelium-core` `KvStore` literal; an evaluator that wraps another and forwards only `evaluate`, `history_request` and `evaluate_with_history`; a fleet-consensus-limited request's position in an `rpc_rx` stream under provider enforcement | 2.36.0 (post-360 row K2; `ae.preflight` is catalogue revision 4) | `Rule::at_most(..)` and `.scoped(scope, counter_id)`; `fleet: Vec::new()` (and `seats: Vec::new()`) in a view or input literal; a wrapper forwards `fleet_counters` too | **Yes** for the literals (a new field); `HistoryScope` was already `#[non_exhaustive]`, so a `_` arm takes the new scopes; no for a wrapper — it compiles, and its fleet-limited rules decide `Indeterminate`; no for the order — behaviour |
 | 54 | `mycelium_core`'s `CoreCtx::gossip_txs`, `WriterEntry::tx`, `writer::get_or_spawn_writer` / `request_state`, `run_peer_writer`, and `framing::dispatch_gossip_send` / `dispatch_gossip_try_send` / `gossip_shard_fill` in their old shapes | 2.36.0 (the shutdown-sweep fix, #650) | `GossipTxs::new(senders, Unsent::default())`; pass `gossip_txs.unsent()`; wrap a shard receiver in `CountedRx::new(rx, unsent)` | **Yes** — every use is a type error; code that only uses `GossipAgent` is unaffected ([§54](#54-mycelium-cores-outbound-path-is-counted-its-channel-types-changed-shape-2360-the-shutdown-sweep-fix)) |
 | 55 | a fleet-scoped limit (`HistoryScope::FleetConsensus` / `FleetTally`) over more than 1 024 seats, or over a window of zero or more than 24 hours | unreleased (row K2's bounds) | a per-point limit, or a fleet limit within `MAX_FLEET_SEATS` / `MAX_FLEET_WINDOW_MS`; check a policy at load with `check_fleet_bounds` or `FleetCounter::try_new` | **No** — it builds, and every request its rule covers decides `Indeterminate`; **yes** for a `ContractCase` or `Report` literal (a new field) ([§55](#55-a-fleet-limit-is-bounded-at-most-1-024-seats-a-window-of-at-most-24-hours-unreleased-post-360-plan-row-k2s-bounds)) |
-| 56 | a `FleetTally` rule reading a member's entries this node holds without its heartbeat as zero | unreleased (row K2, #656) | nothing to migrate: such a member is unknown coverage while its entry is inside the window plus the staleness and drift bounds | **No** — a tally rule can decide `Indeterminate` where it admitted before, for at most that window ([§56](#56-a-members-tally-entries-without-its-heartbeat-are-unknown-coverage-not-zero-unreleased-post-360-plan-row-k2)) |
+| 56 | a `FleetTally` rule reading a member's entries this node holds without its heartbeat as zero, or counting a forged (future) time as a permit | unreleased (row K2, #656) | nothing to migrate: such a member is unknown coverage while its entry is inside the window plus the staleness and drift bounds | **No** — a tally rule can decide `Indeterminate` where it admitted before, for at most that window ([§56](#56-a-members-tally-entries-without-its-heartbeat-are-unknown-coverage-not-zero-unreleased-post-360-plan-row-k2)) |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -1838,11 +1838,21 @@ for the counter is dated by its own times: while any time is inside the counter'
 clock-drift bounds, or the entry cannot be read, a **verified member**'s coverage is unknown and a `FleetTally` rule
 decides `Indeterminate` (`authority_not_established` at the gateway), naming the node. A node nobody issued an identity
 for is still ignored; without `[tls]`, where no member can be verified, any such node is unknown — as a non-peer
-inside the horizon already was. The residue collector removes such entries on the same bound, so the window is
-bounded: at most the counter's window plus both bounds after the entry's last permit.
+inside the horizon already was. The residue collector removes such entries on the same bound — the same when the
+writer's window is the counter's, as `publish_permit` writes it — so the window is bounded: at most the counter's
+window plus both bounds after the entry's last permit.
 
-**Will the compiler tell me?** No — no API changed. A tally rule can decide `Indeterminate` where it admitted before,
-for at most that window, while a node's entries and heartbeat are out of step at the reader.
+**Forged times** (#656's second review). A time past this node's clock plus `max_clock_drift_ms` dates nothing: an
+entry holding one is read as one this node cannot read — unknown coverage for a peer or a counted non-peer, where it
+used to count as a permit for ever — and is dropped by its owner when it next rewrites the entry; the collector dates
+a non-peer's entry by its honest times only, so one holding nothing else is collected at once. A heartbeat dated in
+the future is no heartbeat for a non-peer. **The heartbeat goes last:** a collector takes a non-peer's entries each by
+its own times, and its heartbeat only once none of them is live and its `as_of` is past `MAX_FLEET_WINDOW_MS` (24
+hours) plus both bounds, so a departed node's heartbeat stays that long — one key per node.
+
+**Will the compiler tell me?** No — no API changed. A tally rule can decide `Indeterminate` where it admitted before:
+for at most that window, while a node's entries and heartbeat are out of step at the reader; and while a peer's
+entry holds a forged time, until its owner rewrites or withdraws it.
 
 **Migration.** None. A fleet that sees `Indeterminate` naming a node "not a peer: its entry is inside the window and it
 has no heartbeat" is reading a member whose heartbeat has not reached it; it clears when the heartbeat arrives or the

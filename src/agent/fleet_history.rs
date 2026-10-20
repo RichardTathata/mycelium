@@ -436,15 +436,26 @@ struct Heartbeat {
     departed: bool,
 }
 
+/// Whether a time read from a tally key is **forged**: past this node's clock plus the clock-drift bound, which no
+/// member within the bound can have written (#656's second review, item 1). Tally keys are unsigned; such a time dates
+/// nothing — it would never age out of any window.
+fn from_the_future(t: u64, now_ms: u64, drift_ms: u64) -> bool {
+    t > now_ms.saturating_add(drift_ms)
+}
+
 /// Permits in `entry` inside the window ending at `now_ms`: `Ok(0)` when there is none, `Err` when there is one this
-/// node cannot read — never counted as zero (#642's review, N6).
-fn counted_in(entry: Option<Bytes>, now_ms: u64, window_ms: u64) -> Result<u32, ()> {
+/// node cannot read — never counted as zero (#642's review, N6) — or one holding a time from the future, which is read
+/// as one it cannot read (#656's second review, item 1).
+fn counted_in(entry: Option<Bytes>, now_ms: u64, window_ms: u64, drift_ms: u64) -> Result<u32, ()> {
     let from = now_ms.saturating_sub(window_ms);
     match entry {
         None => Ok(0),
-        Some(b) => serde_json::from_slice::<TallyEntry>(&b)
-            .map(|e| e.t.iter().filter(|t| **t > from).count() as u32)
-            .map_err(|_| ()),
+        Some(b) => match serde_json::from_slice::<TallyEntry>(&b) {
+            Ok(e) if !e.t.iter().any(|t| from_the_future(*t, now_ms, drift_ms)) => {
+                Ok(e.t.iter().filter(|t| **t > from).count() as u32)
+            }
+            _ => Err(()),
+        },
     }
 }
 
@@ -483,9 +494,9 @@ pub(crate) fn tally_state_counted(
     let mut unknown = Vec::new();
     let mut counted = 0;
     let mut add = |node: &str, unknown: &mut Vec<String>| {
-        match counted_in(read(&tally_key(node, &c.key, point, actor)), now_ms, c.window_ms) {
+        match counted_in(read(&tally_key(node, &c.key, point, actor)), now_ms, c.window_ms, ctx.config.max_clock_drift_ms) {
             Ok(n) => counted += n,
-            Err(()) => unknown.push(format!("{node} (an entry this node cannot read)")),
+            Err(()) => unknown.push(format!("{node} (an entry this node cannot read, or one dated in the future)")),
         }
     };
     add(&me, &mut unknown);
@@ -527,13 +538,19 @@ pub(crate) fn tally_state_counted(
         if node == me || peers.contains(&node) {
             continue;
         }
-        let Some(hb) = read(&heartbeat_key(&node)).and_then(|b| serde_json::from_slice::<Heartbeat>(&b).ok()) else {
+        let Some(hb) = read(&heartbeat_key(&node))
+            .and_then(|b| serde_json::from_slice::<Heartbeat>(&b).ok())
+            .filter(|hb| !from_the_future(hb.as_of, now_ms, ctx.config.max_clock_drift_ms))
+        else {
             // **Entries without a heartbeat** (#656's adversarial review, finding 1): its heartbeat collected before
             // they reached this node, not arrived yet (this node restarted without persistence and is catching up),
-            // or unreadable. Nothing dates the node, so its entry for this counter is dated by its own times, on the
-            // collector's bound (`collect_residue`): while a time is inside the window plus the staleness and drift
-            // bounds, or the entry cannot be read, a member's count is unknown — never zero. Without `[tls]` no member
-            // can be verified, so any such node is unknown; with it, a node nobody issued an identity for is ignored.
+            // unreadable, or dated in the future (forged — it would never age; #656's second review, item 1). Nothing
+            // dates the node, so its entry for this counter is dated by its own times, on the collector's bound
+            // (`collect_residue`, the same when the writer's window is the counter's): while a time is inside the
+            // window plus the staleness and drift bounds, or the entry cannot be read or holds a forged time, a
+            // member's count is unknown — never zero — and the collector removes such an entry at once. Without
+            // `[tls]` no member can be verified, so any such node is unknown; with it, a node nobody issued an
+            // identity for is ignored.
             let pending = match read(&tally_key(&node, &c.key, point, actor)) {
                 None => false,
                 Some(b) => serde_json::from_slice::<TallyEntry>(&b)
@@ -546,10 +563,6 @@ pub(crate) fn tally_state_counted(
             continue;
         };
         if !hb.enforces || now_ms.saturating_sub(hb.as_of) > horizon {
-            continue;
-        }
-        if hb.as_of > now_ms.saturating_add(ctx.config.max_clock_drift_ms) {
-            unknown.push(format!("{node} (a heartbeat {} ms in the future)", hb.as_of - now_ms));
             continue;
         }
         // Without a `[tls]` identity this node can verify no member, so a non-peer's absence is unknown coverage —
@@ -609,7 +622,8 @@ pub(crate) fn publish_permit(ctx: &Arc<TaskCtx>, c: &FleetCounter, point: &str, 
         .and_then(|b| serde_json::from_slice::<TallyEntry>(&b).ok())
         .unwrap_or_default();
     let from = at_ms.saturating_sub(c.window_ms);
-    entry.t.retain(|t| *t > from);
+    // A forged time (past this node's clock plus the drift bound) is not kept: it would never age out.
+    entry.t.retain(|t| *t > from && !from_the_future(*t, at_ms, ctx.config.max_clock_drift_ms));
     entry.t.push(at_ms);
     entry.t.sort_unstable();
     // The newest `count` are enough: once they are all in a window the sum has reached the limit.
@@ -643,10 +657,15 @@ pub(crate) static TEST_WITHDRAW_PAUSE_MS: std::sync::LazyLock<papaya::HashMap<St
     std::sync::LazyLock::new(papaya::HashMap::new);
 
 /// Whether every time in a tally entry has aged out of the window it was kept for (an unreadable one counts as aged:
-/// nothing can be read from it).
-fn aged(value: &[u8], now_ms: u64) -> bool {
+/// nothing can be read from it). A forged time — past `now_ms` plus the drift bound — dates nothing, so it is not
+/// waited for (#656's second review, item 1).
+fn aged(value: &[u8], now_ms: u64, drift_ms: u64) -> bool {
     serde_json::from_slice::<TallyEntry>(value)
-        .map(|e| e.t.iter().all(|t| *t <= now_ms.saturating_sub(stored_window(e.w))))
+        .map(|e| {
+            e.t.iter()
+                .filter(|t| !from_the_future(**t, now_ms, drift_ms))
+                .all(|t| *t <= now_ms.saturating_sub(stored_window(e.w)))
+        })
         .unwrap_or(true)
 }
 
@@ -665,7 +684,7 @@ pub(crate) fn withdraw_aged_entries(ctx: &Arc<TaskCtx>, now_ms: u64) -> usize {
     let _tally = ctx.ae_tally_lock.lock().unwrap_or_else(|e| e.into_inner());
     let mut withdrawn = 0;
     for (key, value) in mycelium_core::ops::kv_scan_prefix(ctx, &prefix) {
-        if aged(&value, now_ms) {
+        if aged(&value, now_ms, ctx.config.max_clock_drift_ms) {
             #[cfg(test)]
             {
                 let pause = TEST_WITHDRAW_PAUSE_MS.pin().get(&ctx.node_id.to_string()).copied();
@@ -682,12 +701,26 @@ pub(crate) fn withdraw_aged_entries(ctx: &Arc<TaskCtx>, now_ms: u64) -> usize {
     withdrawn
 }
 
-/// **Collect residue** (#642's review, round 4, finding 1): the tally keys of a node that is not a peer and whose
-/// heartbeat is older than the longest window any of its entries was kept for, plus the staleness bound, plus the
-/// clock-drift bound — by then every permit it wrote has aged out of every window, and no reader counts it. An entry
-/// of a non-peer with **no heartbeat** — one that reached this node after its heartbeat was collected — is dated by
-/// its own times against the same bounds, so a collection that ran before all of a node's keys arrived does not leave
-/// the rest behind for ever.
+/// What a collector reads a non-peer's tally key as ([`collect_residue`]).
+enum Held {
+    /// An entry with a time that could still count somewhere: kept.
+    Live,
+    /// An entry none of whose times can count — past its window plus both bounds, forged, or unreadable: collected.
+    Past,
+    /// The node's heartbeat, with its `as_of` when it can be read and is not from the future.
+    Heartbeat(Option<u64>),
+}
+
+/// **Collect residue** (#642's review, round 4, finding 1): the tally keys of a node that is not a peer, **each by its
+/// own times** (#656 and its reviews). An entry goes once every time in it is past the window it was kept for plus the
+/// staleness and clock-drift bounds — by then it counts in no reader's window (exactly so when the writer's window is
+/// the reader's counter's, as `publish_permit` writes it) — or at once if it cannot be read or its times are forged
+/// (from the future), as its owner's own withdrawal would take it. The heartbeat goes **last**: once none of the
+/// node's entries here is live and its `as_of` is past the longest window any counter may have
+/// (`MAX_FLEET_WINDOW_MS`) plus both bounds, since a collector cannot see the windows of entries held only elsewhere;
+/// one that cannot be read or is from the future goes once none of its node's entries here is live. So a collection
+/// that ran before all of a node's keys arrived leaves nothing behind for ever, and none removes a heartbeat while an
+/// entry of its node can still count anywhere.
 ///
 /// **Why a non-owner may delete here.** Each key is tombstoned *at the timestamp of the record this node holds*
 /// (`kv_delete_held`). Under last-writer-wins that removes exactly that record or an older one, and loses to anything
@@ -710,59 +743,59 @@ pub(crate) fn collect_residue(ctx: &Arc<TaskCtx>, now_ms: u64) -> usize {
             let store = ctx.kv_state.store.pin();
             keys.iter().map(|(k, _)| store.get(k.as_ref()).map(|e| e.timestamp)).collect()
         };
-        let margin = bound.max_staleness_ms.saturating_add(ctx.config.max_clock_drift_ms);
-        let Some(hb) = keys
+        let drift = ctx.config.max_clock_drift_ms;
+        let margin = bound.max_staleness_ms.saturating_add(drift);
+        // What each key says, read once. An entry is dated by its own times, past its window plus both bounds; a time
+        // from the future is forged and dates nothing, and an entry nothing can be read from dates nothing either —
+        // both go as the owner's own withdrawal would take them (`aged`). The heartbeat is judged last.
+        let state: Vec<Held> = keys
             .iter()
-            .find(|(k, _)| k.ends_with("/hb"))
-            .and_then(|(_, v)| serde_json::from_slice::<Heartbeat>(v).ok())
-        else {
-            // **No heartbeat to date the node by** — collected before these entries reached this node (anti-entropy
-            // from a peer that had not collected yet, or a gossiped entry its heartbeat overtook), never received, or
-            // one that cannot be read. No decision reads a non-peer without a readable heartbeat, so these count for
-            // nothing; skipping them left them in the store and the scope roster for ever (the residue flake on #654's
-            // CI). Each entry is dated by its own times instead: collected once every one is past its window plus the
-            // staleness and clock-drift bounds, as the heartbeat horizon would have it. A key nothing can be read
-            // from — an entry, or the heartbeat itself — dates nothing, so it goes once no entry of the node could
-            // still count (the adversarial review of #656, finding 2); an entry with a time past that bound keeps
-            // the rest.
-            let dated: Vec<Option<bool>> = keys
-                .iter()
-                .map(|(_, v)| {
-                    serde_json::from_slice::<TallyEntry>(v).ok().map(|e| {
-                        e.t.iter().all(|t| *t <= now_ms.saturating_sub(stored_window(e.w).saturating_add(margin)))
-                    })
-                })
-                .collect();
-            let quiet = dated.iter().all(|d| *d != Some(false));
-            let mut any = false;
-            for (((key, _), stamp), past) in keys.into_iter().zip(stamps).zip(dated) {
-                let collect = match past {
-                    Some(past) => past,
-                    None => quiet, // unreadable: goes with the node's last datable entry
-                };
-                if let (true, Some(ts)) = (collect, stamp) {
-                    any |= mycelium_core::ops::kv_delete_held(ctx, key, ts);
+            .map(|(k, v)| {
+                if k.ends_with("/hb") {
+                    return Held::Heartbeat(
+                        serde_json::from_slice::<Heartbeat>(v)
+                            .ok()
+                            .map(|hb| hb.as_of)
+                            .filter(|as_of| !from_the_future(*as_of, now_ms, drift)),
+                    );
                 }
+                match serde_json::from_slice::<TallyEntry>(v) {
+                    Err(_) => Held::Past,
+                    Ok(e) => {
+                        let horizon = stored_window(e.w).saturating_add(margin);
+                        let live = e
+                            .t
+                            .iter()
+                            .any(|t| !from_the_future(*t, now_ms, drift) && *t > now_ms.saturating_sub(horizon));
+                        if live { Held::Live } else { Held::Past }
+                    }
+                }
+            })
+            .collect();
+        let live = state.iter().any(|s| matches!(s, Held::Live));
+        let mut any = false;
+        for (((key, _), stamp), held) in keys.into_iter().zip(stamps).zip(state) {
+            let collect = match held {
+                Held::Past => true,
+                Held::Live => false,
+                // **The heartbeat goes last** (#656's second review, item 3): only once none of its node's entries
+                // here is live, and its `as_of` is past the longest window *any* counter may have plus both bounds —
+                // an entry this node does not hold may be kept elsewhere for a longer window than any it holds, and
+                // removing the heartbeat early would leave the nodes holding it reading that entry without one. A
+                // node's entry times are at most its last heartbeat's. One that cannot be read, or is dated in the
+                // future, dates nothing: it goes once none of its node's entries here is live.
+                Held::Heartbeat(as_of) => {
+                    !live
+                        && as_of.is_none_or(|as_of| {
+                            now_ms.saturating_sub(as_of) > super::action_evaluator::MAX_FLEET_WINDOW_MS.saturating_add(margin)
+                        })
+                }
+            };
+            if let (true, Some(ts)) = (collect, stamp) {
+                any |= mycelium_core::ops::kv_delete_held(ctx, key, ts);
             }
-            collected += usize::from(any);
-            continue;
-        };
-        let longest = keys
-            .iter()
-            .filter_map(|(_, v)| serde_json::from_slice::<TallyEntry>(v).ok())
-            .map(|e| stored_window(e.w))
-            .max()
-            .unwrap_or(0);
-        let horizon = longest.saturating_add(margin);
-        if now_ms.saturating_sub(hb.as_of) <= horizon {
-            continue;
         }
-        for ((key, _), stamp) in keys.into_iter().zip(stamps) {
-            if let Some(ts) = stamp {
-                let _ = mycelium_core::ops::kv_delete_held(ctx, key, ts);
-            }
-        }
-        collected += 1;
+        collected += usize::from(any);
     }
     collected
 }
@@ -779,7 +812,7 @@ pub(crate) fn reassert_own(ctx: &TaskCtx) {
     }
     let prefix = format!("{TALLY_PREFIX}{}/c/", ctx.node_id);
     for (key, value) in mycelium_core::ops::kv_scan_prefix(ctx, &prefix) {
-        if aged(&value, now) {
+        if aged(&value, now, ctx.config.max_clock_drift_ms) {
             mycelium_core::ops::kv_write_local(ctx, key, None);
         }
     }

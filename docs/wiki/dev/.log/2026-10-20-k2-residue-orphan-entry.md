@@ -6,7 +6,8 @@
   for ever (store and scope roster). The test hit it when the node's own collector tick took a planted heartbeat
   before its entry was planted; production hits it through anti-entropy or gossip order.
 - Fix: an entry with no heartbeat beside it is dated by its own times, collected once every time is past its window
-  + staleness + clock drift; an unreadable one is kept. Fail-first
+  + staleness + clock drift. (An unreadable one was kept here at first; since #656's second review it is collected at
+  once, as its owner's `aged` takes it.) Fail-first
   `an_entry_outliving_its_collected_heartbeat_is_collected`.
 
 Lesson: a collector that keys its decision on one record of a group must still handle the group's other records when

@@ -470,17 +470,21 @@ not removed. A heartbeat and entries written under a node id nobody issued an id
 member's entries this node holds **without its heartbeat** — its heartbeat collected before they arrived, or not yet
 arrived (a node restarted without persistence, catching up by anti-entropy) — are unknown coverage while any of their
 times is inside the counter's window plus both bounds, or while the entry cannot be read: the tally decides
-`Indeterminate`, naming the node, never counting it as zero; the collector removes them on the same bound. A
+`Indeterminate`, naming the node, never counting it as zero; the collector removes them on the same bound. An entry
+holding a time from the future is read as one this node cannot read, wherever it is, and a heartbeat from the future
+is no heartbeat. A
 non-peer whose heartbeat is older than the counter's window plus the staleness bound plus the clock-drift bound is not
 read at all, and a decision lists the nodes it knows of from the store's scope index — its cost grows with nodes, never
-with the entries they hold. **Residue is collected at its own stamp.** Once a non-peer's heartbeat is older than the
-longest window among its entries plus both bounds, any node tombstones its keys *at the timestamp of the record it
-holds*: under last-writer-wins that removes that record and loses to anything the owner wrote after it, so it cannot
-erase a returned node's newer heartbeat or permit, wherever it is. An entry with no heartbeat beside it is dated by its
-own times: tombstoned once each is past its window plus both bounds (a key that cannot be read goes once nothing of the
-node could still count). A returning node re-asserts its own heartbeat and
-withdraws its own aged entries locally before its connections come up, so a collector's tombstone reaches it older than
-what it holds, is not applied, and its `sys/` tripwire does not count it.
+with the entries they hold. **Residue is collected at its own stamp.** A non-peer's keys go each by its own times: an entry once every time is
+past its window plus both bounds (counted in no reader's window, exactly so when the writer's window is the
+counter's), or at once if nothing can be read from it or its times are forged — past this node's clock plus the drift
+bound, which no member within the bound can have written; the heartbeat **last**, once none of its node's entries
+here is live and its `as_of` is past the longest window any counter may have (24 hours) plus both bounds, because a
+collector cannot see the windows of entries held only elsewhere. Any node tombstones such a key *at the timestamp of
+the record it holds*: under last-writer-wins that removes that record and loses to anything the owner wrote after it,
+so it cannot erase a returned node's newer heartbeat or permit, wherever it is. A returning node re-asserts its own
+heartbeat and withdraws its own aged entries locally before its connections come up, so a collector's tombstone
+reaches it older than what it holds, is not applied, and its `sys/` tripwire does not count it.
 
 *What "verified member" rests on.* With `[tls]` and `require_identity_proofs` (the default), a member is one whose
 sealed identity record or certificate this node holds and has not seen revoked or removed. **Without `[tls]`** this
