@@ -13,7 +13,7 @@ The plan that introduced these pages is [`plans/feature-pages.md`](../plans/feat
 Every page has these six sections, in this order, with these headings. Copy
 [`_template.md`](_template.md) to start one.
 
-1. **What it is.** Two or three plain sentences, and a link to the concept's entry in the
+1. **What it is.** Two or three plain sentences, and links to the concept's entries (one or more) in the
    [concepts glossary](../guide/00-concepts.md).
 2. **When to use it, and when not.** One line each.
 3. **Turn it on.** The settings that enable the feature, each linked to its entry in
@@ -28,12 +28,19 @@ Every page has these six sections, in this order, with these headings. Copy
    the page is preferred; a test that runs a hand-kept copy is recorded as such.
 4. **See it work.** A link to the feature's row in the [example index](../../examples/README.md), which holds
    the run command, the prerequisites and the CI status. If there is none, the section opens with the fixed
-   sentence "No runnable example exists" and links the test that runs the feature end to end; the feature
-   registry records `example: none`, and the gate fails if the example index later gains a row for that feature.
+   sentence "No runnable example exists" and links the test that runs the feature end to end: its name in
+   backticks, a `fn <name>` in the linked file, listed by CI's test universe and matched by no entry of
+   `scripts/test-coverage-exceptions.txt`. The feature registry records `example: none`, and the gate fails if the
+   example index later gains a row for that feature.
 5. **What it guarantees, and what it does not.** The guarantee and rule ids, each linked to where it is
    catalogued, the plan rows whose *not built* items apply, and the
-   [what-is-proven](../operations/what-is-proven.md) ledger.
-6. **Go deeper.** The guide chapter, the operations runbook, the design record and the code.
+   [what-is-proven](../operations/what-is-proven.md) ledger. A guarantee id a companion registers (such as
+   `stem.*`) is not in the guarantee catalogue: link it to where its states are described. Until the catalogues, the
+   ledger, the configuration table and the plans have per-entry anchors, link the table and name the row beside the
+   link.
+6. **Go deeper.** The guide chapter, the operations runbook, the design record and the code. Where a slot has
+   nothing, say so: "no design record; the plan row is the record", or no runbook, naming what covers the ground
+   instead.
 
 ## Link, do not copy
 

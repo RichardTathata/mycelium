@@ -49,3 +49,12 @@ and the what-is-proven K2 row names `a_saturating_actor_gets_its_limit_each_shor
 what the F2 gate can check: an item's last path segment as a `fn`/`struct`/`enum`/`trait`/`const` in its linked file,
 a test's `fn` and its place in CI's universe outside the exceptions file, a configuration row `| name |`, and an
 `example: none` that fails once the index gains a row.
+
+## [2026-10-20] ingest | Feature pages F1 delivered
+
+F1 closed (PR #654): three pilots independently reviewed against the code (two rounds and a confirmation), and the
+template revised from them. Plan §4.1 is now *Template revisions (F1)* with a decision per row: P1, P2, P4, P6–P9
+adopted; P3 adopted in its interim form (a companion-registered guarantee id links to where its states are
+described; generating such ids into the catalogue waits for F2's registry); P5 (the gate's anchor resolution and
+its `docs/features/` scope) deferred to F2. The adopted rows are folded into `docs/features/README.md` and
+`_template.md`, and P2's no-example test uses P1's checkable wording. F2, the registry and the gate, is next.
