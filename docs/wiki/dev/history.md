@@ -31,6 +31,10 @@ window counters stay at zero; `kv_untagged_signatures_refused` is new; `mesh.sig
 residual is restated, not closed (a signed `SyncEntry` is a wire change). Upgrade note `deprecations.md` §40: upgrade
 from 2.33.x, not 2.32. Record: [`.log/2026-10-13-f2-refusal-unconditional.md`](.log/2026-10-13-f2-refusal-unconditional.md).
 
+## v2.36.1 release — 2026-10-20 (tag `v2.36.1`) — wasmtime 49.0.4
+
+A **security PATCH** cut from the v2.36.0 tag: `wasmtime` 49.0.4, cranelift 0.136.4, for RUSTSEC-2026-0379 (critical, aarch64 only: Cranelift could compile a large `br_table` to a jump to the wrong target, so a node hosting WASM components on aarch64 was exposed) and RUSTSEC-2026-0378 (medium: a host panic lowering a host-created stream; the host creates none). **Check:** `uname -m` on each node and whether it hosts components (`mycelium_artifact_installs_completed_total`); after upgrading, `cargo audit -f Cargo.lock` reports neither. Wire **v12** unchanged; no API change. Cut from the v2.36.0 tag, not from `main`: main's unreleased #653–#657 add public API and change behaviour, so they wait for a MINOR. Release record: [`.log/2026-10-20-release-v2.36.1.md`](.log/2026-10-20-release-v2.36.1.md).
+
 ## v2.36.0 release — 2026-10-19 (tag `v2.36.0`) — the post-360 rows after the comparison, and two old defects
 
 **#647** a call to a provider on the calling node no longer loses its reply: `rpc_call` registered for the reply only
