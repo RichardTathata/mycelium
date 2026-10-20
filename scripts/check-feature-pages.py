@@ -10,12 +10,14 @@ Reads the checked-in registry, docs/features/registry.toml, and fails on:
   c. a page whose `##` headings are not the six sections, in order;
   d. a link in docs/features/ that does not resolve: the file, and for a Markdown target the anchor, from its
      headings (GitHub's slugs) or an `<a id>` (scripts/check-front-doors.py's resolver, shared; plan P5);
-  e. P1: a code item in *Turn it on* — a link whose text is one backticked name and whose target is a `.rs`
-     file — whose last path segment is not a `fn`, `struct`, `enum`, `trait` or `const` in that file;
+  e. P1: a code item anywhere on a page — a link whose text is one backticked name and whose target is a `.rs`
+     file — whose last path segment is not a `fn`, `struct`, `enum`, `trait`, `const`, `type` or `static` in that
+     file, or whose CamelCase qualifier is not a type there;
   f. P9: a configuration field in a page — a backticked name linked to configuration.md — with no `| name |`
      row in configuration.md's field table;
-  g. P1/P2: a test named in *Turn it on* or *See it work* that is not a `#[test]` `fn` in a `.rs` file the
-     same paragraph or list item links, or that `scripts/test-coverage-exceptions.txt` excepts (pre-push);
+  g. P1/P2: a test named in *Turn it on*'s last item or in *See it work* (a backticked snake_case name in a
+     paragraph or list item that links a `.rs` file) that is not a `#[test]` `fn` in such a file; a page with no
+     example that names no such test; or that `scripts/test-coverage-exceptions.txt` excepts (pre-push);
      with `--executed <dir of CI job logs>`, also one that no job of the run executed (CI's test-coverage
      job, reading the logs `scripts/ci-test-coverage.py --fetch` saved);
   h. P2: an example-index row for a feature recorded `example = "none"`, an `example` not in the index, and a
@@ -109,7 +111,23 @@ def cargo_ids(root):
             for feature in manifest.get('features', {})}
 
 
-TEST_MODULE = re.compile(r'#\[cfg\((?:all\()?test\b[^\]]*\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{')
+TEST_MODULE = re.compile(r'#\[cfg\((?:all\()?test\b[^\]]*\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{')
+
+
+def without_test_modules(text):
+    """The text with every `#[cfg(test)]` module's body removed, by brace matching (each one, wherever it sits)."""
+    out, pos = [], 0
+    for m in TEST_MODULE.finditer(text):
+        if m.start() < pos:
+            continue
+        out.append(text[pos:m.start()])
+        depth, i = 1, m.end()
+        while i < len(text) and depth:
+            depth += {'{': 1, '}': -1}.get(text[i], 0)
+            i += 1
+        pos = i
+    out.append(text[pos:])
+    return ''.join(out)
 DESCRIPTOR = re.compile(r'GuaranteeDescriptor::new\(\s*"([^"]+)"')
 
 
@@ -122,10 +140,7 @@ def companion_guarantee_ids(root):
             rel = path.relative_to(root).as_posix()
             if rel.endswith('_tests.rs') or '/tests/' in rel:
                 continue
-            text = path.read_text()
-            cut = TEST_MODULE.search(text)
-            text = text[:cut.start()] if cut else text
-            out |= {f'companion-guarantee:{i}' for i in DESCRIPTOR.findall(text)}
+            out |= {f'companion-guarantee:{i}' for i in DESCRIPTOR.findall(without_test_modules(path.read_text()))}
     return out
 
 
@@ -216,7 +231,7 @@ def blocks(body):
     return out
 
 
-def defines(text, name, kinds=('fn', 'struct', 'enum', 'trait', 'const')):
+def defines(text, name, kinds=('fn', 'struct', 'enum', 'trait', 'const', 'type', 'static')):
     return re.search(r'(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?(?:(?:async|unsafe|const|extern(?:\s+"[^"]*")?)\s+)*'
                      rf'(?:{"|".join(kinds)})\s+{re.escape(name)}\b', text) is not None
 
@@ -231,22 +246,26 @@ def defines_test(text, name):
     # The attributes and doc comments directly above the fn, and nothing further up.
     for line in reversed(text[:m.start()].splitlines()):
         s = line.strip()
-        if TEST_ATTR.search(s):
+        if s.startswith('#[') and TEST_ATTR.search(s):
             return True
         if not s.startswith(('#[', '//', ')]')) and not s.endswith((',', '(')):
             return False
     return False
 
 
-TEST_NAME = re.compile(r'(?<![\[\w])`((?:[a-z_][a-z0-9_]*::)*[a-z][a-z0-9]*(?:_[a-z0-9]+){3,})`(?!\]\()')
+TEST_NAME = re.compile(r'(?<![\[\w])`((?:[a-z_][a-z0-9_]*::)*[a-z][a-z0-9]*(?:_[a-z0-9]+)+)`(?!\]\()')
 
 
-def named_tests(body):
+def named_tests(body, last_only=False):
     """(test path, [.rs targets in the same block]) for each test a section names: a backticked snake_case name
-    of four or more words, not itself a link's text, in a paragraph or list item that links its file."""
+    (module path allowed), not itself a link's text, in a paragraph or list item that links a `.rs` file. In
+    *Turn it on* only the last paragraph or item counts (P1: the section ends with the test)."""
     out = []
-    for block in blocks(body):
+    candidates = blocks(body)
+    for block in candidates[-1:] if last_only else candidates:
         files = [m.group(2) for m in LINK.finditer(block) if m.group(2).partition('#')[0].endswith('.rs')]
+        if not files:
+            continue
         for m in TEST_NAME.finditer(LINK.sub(lambda x: ' ' * len(x.group(0)), block)):
             out.append((m.group(1), files))
     return out
@@ -270,7 +289,7 @@ def excepted(name, patterns):
 def config_fields(root):
     table = read(root, 'docs/reference/configuration.md')
     m = re.search(r'^## The fields\n(.*?)(?=^## |\Z)', table, re.M | re.S)
-    return set(re.findall(r'(?m)^\| ([A-Za-z0-9_.\[\]]+) \|', m.group(1) if m else ''))
+    return set(re.findall(r'(?m)^\| ([A-Za-z0-9_.\[\]]+) \|', m.group(1) if m else '')) - {'field'}
 
 
 def example_rows(root):
@@ -299,7 +318,8 @@ def links_id(text, i, page):
         want = re.sub(r'[^\w\- ]', '', name.lower()).replace(' ', '-')
         return any(u.partition('#')[0].endswith('reference/unit-file.md') and u.partition('#')[2] == want for _, u in targets)
     if source == 'cargo':
-        return f'`{name.split("/", 1)[1]}`' in text
+        crate, feature = name.split('/', 1)
+        return f'`{feature}`' in text and (crate == 'mycelium' or crate in text)
     if source == 'companion-guarantee':
         return f'`{name}`' in text
     return False
@@ -317,27 +337,34 @@ def check_page(root, feature, rows, fields, patterns, errors, tests_named):
                       + (f' (missing: {missing})' if missing else ''))
     body = dict(secs)
 
-    # (e) code items, (g) tests, in Turn it on
+    # (e) code items, anywhere on the page: the last segment, and a CamelCase qualifier, defined in the linked file
     turn = body.get('Turn it on', '')
-    for m in LINK.finditer(turn):
+    for m in LINK.finditer(text):
         label, url = m.group(1), m.group(2)
         code = re.fullmatch(r'`([A-Za-z_][\w:]*)(?:\(\))?`', label)
         path = url.partition('#')[0]
         if not code or not path.endswith('.rs'):
             continue
         target = (root / rel).parent / path
-        name = code.group(1).split('::')[-1]
-        if target.exists() and not defines(target.read_text(), name):
-            errors.append(f'{rel}: Turn it on names `{code.group(1)}`, but no fn, struct, enum, trait or const '
+        if not target.exists():
+            continue
+        source = target.read_text()
+        segments = code.group(1).split('::')
+        name = segments[-1]
+        if not defines(source, name):
+            errors.append(f'{rel}: names `{code.group(1)}`, but no fn, struct, enum, trait, const, type or static '
                           f'{name} is in {path}')
+        for qualifier in segments[:-1]:
+            if qualifier[:1].isupper() and not defines(source, qualifier, ('struct', 'enum', 'trait', 'type')):
+                errors.append(f'{rel}: names `{code.group(1)}`, but no struct, enum, trait or type {qualifier} is in {path}')
     if turn.lstrip().startswith(IN_CODE):
         if not any(m.group(2).partition('#')[0].endswith('.rs') for m in LINK.finditer(turn)):
             errors.append(f'{rel}: Turn it on says "{IN_CODE}" but links no code item')
-        if not named_tests(turn):
+        if not named_tests(turn, last_only=True):
             errors.append(f'{rel}: Turn it on says "{IN_CODE}" but names no test that runs that code')
 
     for section in ('Turn it on', 'See it work'):
-        for test, files in named_tests(body.get(section, '')):
+        for test, files in named_tests(body.get(section, ''), last_only=section == 'Turn it on'):
             name = test.split('::')[-1]
             found = [f for f in files if (root / rel).parent.joinpath(f.partition('#')[0]).exists()
                      and defines_test(((root / rel).parent / f.partition('#')[0]).read_text(), name) is not None]
@@ -371,10 +398,14 @@ def check_page(root, feature, rows, fields, patterns, errors, tests_named):
         if not see.startswith(NO_EXAMPLE):
             errors.append(f'{rel}: the registry records example = "none", but See it work does not open with '
                           f'"{NO_EXAMPLE}"')
+        if not named_tests(see):
+            errors.append(f'{rel}: See it work has no example and names no test that runs the feature end to end')
     else:
         if example not in rows:
             errors.append(f'{REGISTRY}: feature "{feature["name"]}" records the example `{example}`, which is not a '
                           f'row of the example index\'s capability matrix')
+        elif rows[example].rstrip(' |').split('|')[-2].strip() not in ('✓', '✓ᵖ', '·'):
+            errors.append(f'examples/README.md: the row `{example}` has no CI status (✓, ✓ᵖ or ·)')
         if not any(m.group(2).partition('#')[0].endswith('examples/README.md') for m in LINK.finditer(see)):
             errors.append(f'{rel}: See it work does not link the example index')
 

@@ -52,28 +52,33 @@ states it.
 
 ## The registry and the gate
 
-[`registry.toml`](registry.toml) maps every id that names a feature to its page. The ids come from six
+[`registry.toml`](registry.toml) maps every id its sources name to a page. The ids come from six
 sources: the [concepts glossary](../guide/00-concepts.md)'s `<a id>` entries, the
 [guarantee catalogue](../reference/guarantee-catalogue.md), the [rule catalogue](../reference/rule-catalogue.md),
 the [unit-file](../reference/unit-file.md) sections, the Cargo features of every workspace crate, and the guarantees
 a companion registers in code (such as `stem.*`). Each id maps exactly once: to a feature with a page, to a feature
 whose page is not written yet (`page = "todo"`, the plan's row F3), or to an exclusion that says why it is not a
-reader-facing feature. A feature's page must link every id the registry gives it.
+reader-facing feature. A feature's page must link every id the registry gives it. Completeness is bounded by
+the sources: a feature that no source names, such as a glossary row without an `<a id>`, is not required to have
+an entry until its row gains an anchor.
 
 `scripts/check-feature-pages.py` is the gate. It runs in `make check` (through `scripts/check-positioning.sh`) and
 in CI, and fails on an id the registry does not map, a registry id no source has, a page the registry does not name,
 and on any page whose sections, links, anchors, code items, configuration fields, named tests or example do not
 check out. It recognises the markers above this way:
 
-- **A code item** is a link whose text is one backticked name and whose target is a `.rs` file; its last path
-  segment must be a `fn`, `struct`, `enum`, `trait` or `const` there.
+- **A code item** is a link, anywhere on the page, whose text is one backticked name and whose target is a `.rs`
+  file; its last path segment must be a `fn`, `struct`, `enum`, `trait`, `const`, `type` or `static` there, and a
+  CamelCase qualifier (`Rule::` in `Rule::at_most`) a type there.
 - **A configuration field** is a backticked name linked to `configuration.md`; it must have a `| name |` row in the
   field table.
-- **A test** is a backticked snake_case name of four or more words, not itself a link, in *Turn it on* or
-  *See it work*, in the same paragraph or list item as a link to its `.rs` file. It must be a `#[test]` `fn` there
-  and must not be excepted by `scripts/test-coverage-exceptions.txt`; in CI the `test-coverage` job also checks
-  that some job of the run executed it.
-- **No example:** with `example = "none"`, *See it work* opens with the fixed sentence, and the gate fails if the
+- **A test** is a backticked snake_case name (a module path allowed), not itself a link, in *Turn it on*'s last
+  item or anywhere in *See it work*, in a paragraph or list item that links its `.rs` file. It must be a `#[test]`
+  `fn` there and must not be excepted by `scripts/test-coverage-exceptions.txt`; in CI the `test-coverage` job also
+  checks that some job of the run executed it. So a backticked snake_case name in such a paragraph that is not a
+  test belongs in another paragraph, or in a link.
+- **No example:** with `example = "none"`, *See it work* opens with the fixed sentence and names at least one
+  test, and the gate fails if the
   example index's capability matrix gains a row whose name contains the page's name in snake case or an
   `example_watch` entry, or that links the page.
 

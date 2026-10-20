@@ -20,11 +20,11 @@ CASES = ['baseline',
          # (d) links
          'dead-anchor', 'dead-glossary-anchor', 'dead-link',
          # (e) code items
-         'absent-fn',
+         'absent-fn', 'absent-qualifier', 'early-test-module',
          # (f) configuration fields
          'missing-config-row',
          # (g) tests
-         'absent-test', 'not-a-test', 'excepted-test', 'in-code-without-test', 'test-not-executed',
+         'absent-test', 'short-test-absent', 'not-a-test', 'none-names-no-test', 'excepted-test', 'in-code-without-test', 'test-not-executed',
          'executed-baseline',
          # (h) examples
          'example-for-none-feature', 'example-absent-from-index', 'none-without-sentence',
@@ -113,7 +113,15 @@ case('dead-link')
 mutated(FLEET, [('(../../src/agent/fleet_history.rs)', '(../../src/agent/fleet_histories.rs)')], 'does not resolve')
 
 case('absent-fn')
-mutated(FLEET, [('[`Rule::at_most`]', '[`Rule::at_least`]')], 'no fn, struct, enum, trait or const at_least')
+mutated(FLEET, [('[`Rule::at_most`]', '[`Rule::at_least`]')], 'no fn, struct, enum, trait, const, type or static at_least')
+
+case('absent-qualifier')
+mutated(FLEET, [('[`Rule::scoped`]', '[`NoSuchRule::scoped`]')], 'no struct, enum, trait or type NoSuchRule')
+case('early-test-module')
+mutated('mycelium-wasm-host/src/activation_sandbox.rs',
+        [('\n#[cfg(test)]\n', '\n#[cfg(test)]\nmod early_helpers {}\n\n#[cfg(test)]\n'),
+         ('"stem.activation_confined",', '"stem.planted_after_a_test_module",')],
+        'companion-guarantee:stem.planted_after_a_test_module (companion-guarantee) is not mapped')
 
 case('missing-config-row')
 mutated(FLEET, [('[`control_min_peers_heard`]', '[`control_min_peers_seen`]')],
@@ -123,6 +131,12 @@ case('absent-test')
 mutated(FLEET, [('`the_tally_scope_converges_and_refuses_after_convergence`',
                  '`the_tally_scope_converges_and_never_refuses`')],
         'no fn the_tally_scope_converges_and_never_refuses is in a file')
+case('short-test-absent')
+mutated(FLEET, [('`the_tally_scope_converges_and_refuses_after_convergence`', '`tally_converges`')],
+        'no fn tally_converges is in a file')
+case('none-names-no-test')
+mutated(ROUTING, [('`a_confidential_request_is_routed_to_an_in_domain_model_and_the_external_one_is_passed_over`', 'one test')],
+        'names no test that runs the feature end to end')
 case('not-a-test')
 mutated('src/agent/fleet_history_tests.rs',
         [('#[tokio::test(flavor = "multi_thread", worker_threads = 8)]\nasync fn the_tally_scope',

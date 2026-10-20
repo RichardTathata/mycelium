@@ -61,11 +61,13 @@ def slugs(markdown):
             continue
         if fenced:
             continue
-        out.update(HTML_ANCHOR.findall(line))
+        out.update(HTML_ANCHOR.findall(re.sub(r'`[^`]*`', '', line)))
         m = re.match(r'^#{1,6}\s+(.*?)\s*#*\s*$', line)
         if not m:
             continue
-        text = re.sub(r'<[^>]+>', '', re.sub(r'\[([^\]]*)\]\([^)]*\)', r'\1', m.group(1)))
+        # Inline HTML is dropped outside code spans only: GitHub keeps `Vec<u8>` in a code span as text.
+        parts = re.split(r'(`[^`]*`)', re.sub(r'\[([^\]]*)\]\([^)]*\)', r'\1', m.group(1)))
+        text = ''.join(p if p.startswith('`') else re.sub(r'<[^>]+>', '', p) for p in parts)
         s = re.sub(r'[^\w\- ]', '', text.strip().lower()).replace(' ', '-')
         n = seen.get(s, 0)
         seen[s] = n + 1

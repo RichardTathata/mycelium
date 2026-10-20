@@ -8,7 +8,11 @@ documentation job) fails on an unmapped, doubly mapped or stale id, a page missi
 page missing from disk, and per page on the six sections, links and anchors, code items, configuration rows, named
 tests (a `#[test]` fn in the linked file, not excepted) and the example; CI's `test-coverage` job runs it with
 `--executed` over the fetched logs, so a page cannot name a test no job ran. Mutation suite:
-`scripts/test-check-feature-pages.py`, 26 plants and two baselines, listed in `test-universe`.
+`scripts/test-check-feature-pages.py`, 30 plants and two baselines, listed in `test-universe`. The independent
+review of #655 found the test-name rule too narrow (four-word names only) and too broad (any such name read as a
+test), a page with no example able to name no test, the companion scan cut at the first test module, the slug
+change stripping `<…>` inside code spans, and two narrow registry links; all fixed, and the gate's fixes planted. Its remaining
+findings — completeness bounded by the sources, name-only checks — are stated in plan §4.2.
 
 Decisions: P3 — companion guarantees are a sixth source read from code, not generated into the catalogue (the
 catalogue's generator lives in `mycelium`, which cannot see its dependants, and a per-companion generator would be a

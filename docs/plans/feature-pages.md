@@ -89,13 +89,19 @@ are folded into the [front page](../features/README.md) and the [skeleton](../fe
 | A registry page that does not exist, and a page not in the registry, fail | `check_registry` | `registry-page-missing`, `page-not-in-registry` |
 | A page with a missing section fails (all six, in order, by heading) | `check_page`, `SECTIONS` | `missing-section`, `sections-out-of-order` |
 | A dead link fails, heading slugs and `<a id>` both (P5) | `check_links` with front-doors' `resolve`/`slugs` | `dead-anchor`, `dead-glossary-anchor`, `dead-link` |
-| A dead setting fails: a code item that is not a `fn`/`struct`/`enum`/`trait`/`const` (P1), a configuration field with no row (P9) | `check_page` (`defines`, `config_fields`) | `absent-fn`, `missing-config-row` |
-| A named test is a `#[test]` `fn` in its linked file and not excepted (P1, P2); in CI, executed | `named_tests`, `defines_test`, `excepted`; `check_executed` in the `test-coverage` job | `absent-test`, `not-a-test`, `excepted-test`, `in-code-without-test`, `test-not-executed` (with `executed-baseline`) |
+| A dead setting fails: a code item that is not a `fn`/`struct`/`enum`/`trait`/`const` (P1), a configuration field with no row (P9) | `check_page` (`defines`, `config_fields`); `companion_guarantee_ids` skips each test module by brace matching | `absent-fn`, `absent-qualifier`, `missing-config-row`, `early-test-module` |
+| A named test is a `#[test]` `fn` in its linked file and not excepted (P1, P2); in CI, executed | `named_tests`, `defines_test`, `excepted`; `check_executed` in the `test-coverage` job | `absent-test`, `short-test-absent`, `not-a-test`, `none-names-no-test`, `excepted-test`, `in-code-without-test`, `test-not-executed` (with `executed-baseline`) |
 | An example absent from the index fails; an index row for an `example: none` feature fails (P2) | `check_page`, `check_examples` | `example-absent-from-index`, `example-for-none-feature`, `none-without-sentence` |
 | Every page links the ids the registry gives it | `links_id` | `concept-not-linked`, `guarantee-not-linked` |
 
 **Not built in F2:** per-entry anchors for the catalogues, the ledger and the configuration table (P4, F3's); the
-capability map's maintainer note naming the registry (F3's exit). **A departure from §3's stated exclusions:**
+capability map's maintainer note naming the registry (F3's exit). **Bounded by the sources:** a feature no source
+names is not required — glossary rows without an `<a id>` (federation, receipts, MCP, AgentFacts, the contract net
+among them) and crates without `[features]` (`mycelium-commitment`, `mycelium-agentfacts`); F3 anchors the rows it
+writes pages for. Checked by name only: a Cargo id is linked when the page names the feature in backticks and the
+crate (any crate but `mycelium`); a dotted configuration sub-field has no row of its own; reference-style links and
+links with a title are not resolved; a named test is matched in CI by name suffix, so a same-named test in another
+crate would satisfy it. The independent review of #655 found these; the rest of its findings are fixed and planted. **A departure from §3's stated exclusions:**
 `mycelium/sim` and `mycelium-core/sim` map to the replay page rather than to an exclusion, because `sim` is also
 what makes the node binary record a replay bundle; `mycelium-wasm-host`'s `sim`, which only turns on that crate's
 test seams, is excluded.

@@ -1,5 +1,8 @@
 # The feature registry (docs/plans/feature-pages.md F-G, row F2).
 #
+# Completeness is bounded by the sources: a feature no source names (a glossary row without an `<a id>`, a crate
+# without [features]) is not required here. Anchoring such rows is how they join (row F3).
+#
 # Every id from the six sources maps here exactly once: to a [[feature]] (a page, or page = "todo" for a page
 # row F3 writes) or to an [[exclusion]] with its reason. scripts/check-feature-pages.py fails on an id no entry
 # maps, on an id mapped twice, and on a mapped id no source has. A wrong exclusion hides a feature, so each
@@ -36,7 +39,8 @@ example_watch = ["activation_egress", "egress_proxy"]
 ids = ["unit:[activation.confine.egress]", "rule:prov.activation_egress", "companion-guarantee:stem.activation_egress"]
 links = ["concept:activation", "concept:stem", "concept:credential-binding", "unit:[activation.confine]",
          "rule:prov.activation", "guarantee:egress.credentials", "guarantee:egress.allow_list",
-         "companion-guarantee:stem.activation_confined"]
+         "companion-guarantee:stem.activation_confined", "cargo:mycelium-wasm-host/gateway",
+         "cargo:mycelium-wasm-host/llm"]
 
 [[feature]]
 name = "Fleet-wide history limits"
@@ -105,12 +109,14 @@ page = "todo"
 planned = "http-gateway"
 ids = ["cargo:mycelium/gateway", "guarantee:gw.not_open", "guarantee:gw.exposed_closed", "guarantee:gw.token_tables",
        "rule:gateway.auth"]
+links = ["cargo:mycelium/compliance"]  # the token tables need it
 
 [[feature]]
 name = "Single sign-on at the gateway (OIDC)"
 page = "todo"
 planned = "gateway-sso"
 ids = ["guarantee:gw.oidc"]
+links = ["cargo:mycelium/compliance"]  # `[oidc]` needs it
 
 [[feature]]
 name = "Gateway TLS"
