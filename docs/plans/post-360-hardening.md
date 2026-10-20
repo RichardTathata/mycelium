@@ -2101,7 +2101,7 @@ The fix dates such an entry by its own times: collected once every one is past i
 clock-drift bounds (the heartbeat horizon's margin); an unreadable one is kept. Fail-first:
 `an_entry_outliving_its_collected_heartbeat_is_collected` (plants a heartbeat alone, collects it, then plants its
 entries) failed on the unfixed collector and passes with the fix. Under 32 parallel processes the original test failed
-7 in 6 400 runs before the fix and 0 in 7 680 after.
+7 in 6 400 runs before the fix and 0 in 7 680 after; the `agent::fleet_history` module 90 of 90 under 6 (#656).
 
 **Known flakes, open (seen during the v2.36.0 work, 2026-10-19; not yet investigated):**
 - `overlay_consistent::tests::distributed_lock_grants_single_holder_under_race` — 0 winners (a liveness timeout), never
@@ -2118,7 +2118,7 @@ entries) failed on the unfixed collector and passes with the fix. Under 32 paral
   at the provider's re-check, an ad's key bound to its writer; for M: the OpenShell backend (skipped for now, above),
   resource limits, limits by address and by path, a limit on the proxy's port by address under Landlock; for K: a
   history beyond 24 hours, 1 024 records per actor or 65 536 actors per point, and a replay of the history input;
-- (every recorded K2 flake is closed: the `/mcp` door test's lost reply, #647; the seat lease's "decided too late", #648; the abort and aged-tally tests, test races, #651; the residue test, a collector leak, this PR;)
+- (every recorded K2 flake is closed: the `/mcp` door test's lost reply, #647; the seat lease's "decided too late", #648; the abort and aged-tally tests, test races, #651; the residue test, a collector leak, #656;)
 - the private Cedar adapter's re-pin onto v2.36.0 is **done** (private #33, `0d654fd`). Open is the **next** re-pin,
   after K2's bounds (§55) are released: nine `fleet_*` cases, two of which (`fleet_limit_past_the_seat_cap`,
   `fleet_window_past_the_horizon`) the adapter passes by refusing the policy at load — which the suite counts as a pass
