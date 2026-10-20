@@ -467,19 +467,25 @@ shutdown's best-effort flush; a node whose last word is lost, or that crashes ra
 closed, not open — until failure detection declares it dead; from then its entries still count, as a departed node's
 do, until they age out — but only for a node this node can verify: an identity record it trusts (`trusted_keys`) and
 not removed. A heartbeat and entries written under a node id nobody issued an identity for count for nothing. A
+member's entries this node holds **without its heartbeat** — its heartbeat collected before they arrived, or not yet
+arrived (a node restarted without persistence, catching up by anti-entropy) — are unknown coverage while any of their
+times is inside the counter's window plus both bounds, or while the entry cannot be read: the tally decides
+`Indeterminate`, naming the node, never counting it as zero; the collector removes them on the same bound. A
 non-peer whose heartbeat is older than the counter's window plus the staleness bound plus the clock-drift bound is not
 read at all, and a decision lists the nodes it knows of from the store's scope index — its cost grows with nodes, never
 with the entries they hold. **Residue is collected at its own stamp.** Once a non-peer's heartbeat is older than the
 longest window among its entries plus both bounds, any node tombstones its keys *at the timestamp of the record it
 holds*: under last-writer-wins that removes that record and loses to anything the owner wrote after it, so it cannot
-erase a returned node's newer heartbeat or permit, wherever it is. A returning node re-asserts its own heartbeat and
+erase a returned node's newer heartbeat or permit, wherever it is. An entry with no heartbeat beside it is dated by its
+own times: tombstoned once each is past its window plus both bounds (a key that cannot be read goes once nothing of the
+node could still count). A returning node re-asserts its own heartbeat and
 withdraws its own aged entries locally before its connections come up, so a collector's tombstone reaches it older than
 what it holds, is not applied, and its `sys/` tripwire does not count it.
 
 *What "verified member" rests on.* With `[tls]` and `require_identity_proofs` (the default), a member is one whose
 sealed identity record or certificate this node holds and has not seen revoked or removed. **Without `[tls]`** this
-node can verify nobody, so a non-peer inside the horizon is unknown coverage: the tally decides `Indeterminate`, naming
-it, until its heartbeat passes the horizon — closed, never an under-count of a crashed node's permits. **With
+node can verify nobody, so a non-peer inside the horizon is unknown coverage — by its heartbeat, or, with none, by its
+entry's times: the tally decides `Indeterminate`, naming it, until the horizon passes — closed, never an under-count of a crashed node's permits. **With
 `require_identity_proofs = false`** a bare identity record is accepted, so any member can mint one for a made-up id
 and that id's entries count again: the fabricated-id defence assumes proofs. **Not built — a residual:** tally entries
 are not signed, so a member that writes forged entries under a *real* member's namespace after that member has died

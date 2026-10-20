@@ -111,6 +111,9 @@ signed tallies.
 reaches a collector *after* its node's heartbeat was collected is dated by its own times against the same bounds; before,
 a node with no heartbeat was skipped, and such an entry stayed in the store and the scope roster for ever (found as a
 CI flake of `residue_is_collected_and_a_decision_does_not_read_it`).
+A reader holding a verified member's entries **without its heartbeat** reads it as unknown coverage, not zero, while
+the entry is inside the window plus both bounds — the collector's own bound, so the node stops being consulted when
+its entry is collected (#656's review, finding 1; `deprecations.md` §56).
 **The reader seam shipped the same day** (PR #226): `read_evidence_journal_from(path, cursor, …)`,
 §6.7's outbox shape — batch, ship, advance, with a byte-offset cursor so resuming stays cheap, and
 each entry carrying the same content hash the chain's `AeReference` cites. Needed because moving

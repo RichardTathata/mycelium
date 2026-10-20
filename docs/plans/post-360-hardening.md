@@ -2105,6 +2105,18 @@ roster row for ever). Fail-first:
 entries) failed on the unfixed collector and passes with the fix. Under 32 parallel processes the original test failed
 7 in 6 400 runs before the fix and 0 in 7 680 after; the `agent::fleet_history` module 90 of 90 under 6 (#656).
 
+**Closed in #656 (its adversarial review, finding 1, predating it): a member's entries without its heartbeat read as
+zero.** `tally_state_counted`'s non-peer loop skipped a non-peer it held entries for but no readable heartbeat — neither
+counted nor unknown — so a reader receiving a crashed member's entries before its heartbeat (restarted without
+persistence, catching up by anti-entropy) under-counted, failing open, against the row's "a member without one is
+unknown coverage". Now a verified member's entry for the counter, inside the window plus the staleness and drift bounds
+or unreadable, is unknown coverage naming the node; a fabricated id is ignored (`verified_member`, as since round 4);
+without `[tls]` any such node is unknown. The bound is the collector's (`collect_residue` dates the same entry by the
+same margin; the entry's stored window is the counter's, written by `publish_permit`), so a node stops being consulted exactly when its orphaned entry is collected. Fail-first:
+`a_members_entries_without_its_heartbeat_are_unknown_coverage` failed on the unfixed reader (*"a member's entry without
+its heartbeat is not counted as zero"*), and its fabricated-id half failed with the membership check removed; the
+extended `without_tls_a_non_peers_absence_is_not_established` failed on the unfixed reader. `deprecations.md` §56.
+
 **Known flakes, open (seen during the v2.36.0 work, 2026-10-19; not yet investigated):**
 - `overlay_consistent::tests::distributed_lock_grants_single_holder_under_race` — 0 winners (a liveness timeout), never
   2; failed 4 of 256 runs on `main` under 32-process load.
@@ -2120,13 +2132,6 @@ entries) failed on the unfixed collector and passes with the fix. Under 32 paral
   at the provider's re-check, an ad's key bound to its writer; for M: the OpenShell backend (skipped for now, above),
   resource limits, limits by address and by path, a limit on the proxy's port by address under Landlock; for K: a
   history beyond 24 hours, 1 024 records per actor or 65 536 actors per point, and a replay of the history input;
-- K2, from #656's adversarial review (finding 1, predates #656): a reader skips a **non-peer with entries and no
-  heartbeat** without counting it or calling it unknown (`tally_state_counted`'s non-peer loop), so a reader that
-  receives a crashed member's entries before its heartbeat (a restart without persistence, then anti-entropy) reads
-  that member as zero until the heartbeat arrives — against the row's "a member without one is unknown coverage".
-  Reading such a node as unknown is viable only now that orphaned entries are collected (#656); before, a leaked entry
-  would have kept the tally not established for ever. A fabricated id with entries and no heartbeat would then deny
-  by `Indeterminate` until its entries age out, which the change has to weigh.
 - (every recorded K2 flake is closed: the `/mcp` door test's lost reply, #647; the seat lease's "decided too late", #648; the abort and aged-tally tests, test races, #651; the residue test, a collector leak, #656;)
 - the private Cedar adapter's re-pin onto v2.36.0 is **done** (private #33, `0d654fd`). Open is the **next** re-pin,
   after K2's bounds (§55) are released: nine `fleet_*` cases, two of which (`fleet_limit_past_the_seat_cap`,

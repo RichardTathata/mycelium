@@ -1850,6 +1850,57 @@ async fn a_held_delete_never_writes_a_tombstone_newer_than_the_record() {
     a.shutdown().await;
 }
 
+/// **A member's entries without its heartbeat are unknown coverage, never zero** (#656's adversarial review, finding
+/// 1). A reader can hold a non-peer's entries and not its heartbeat — its heartbeat collected before they arrived, or
+/// not arrived yet (a reader restarted without persistence, catching up by anti-entropy). A verified member's entries
+/// inside their window plus the staleness and drift bounds make the tally not established, naming the node, until the
+/// collector's own bound passes; a fabricated id's change nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_members_entries_without_its_heartbeat_are_unknown_coverage() {
+    let (p1, p2, p3) = (port(), port(), port());
+    let certs = std::env::temp_dir().join(format!("k2-tls-nohb-{p1}"));
+    let _ = std::fs::remove_dir_all(&certs);
+    let a = node_tls(p1, &[], posts(3, TEN_MIN, HistoryScope::FleetTally), &certs, |_| {}).await;
+    let b = node_tls(p2, &[p1], posts(3, TEN_MIN, HistoryScope::FleetTally), &certs, |_| {}).await;
+    let c = node_tls(p3, &[p1, p2], posts(3, TEN_MIN, HistoryScope::FleetTally), &certs, |_| {}).await;
+    ready_tls(&[&a, &b, &c]).await;
+    let bctx = Arc::clone(&b.task_ctx);
+
+    // A fabricated id: an entry inside the window, no heartbeat. It changes nothing.
+    let fake = NodeId::new("127.0.0.1", port()).unwrap().to_string();
+    let now = bctx.hlc.decision_now_ms();
+    let entry = serde_json::to_vec(&serde_json::json!({"w": TEN_MIN, "t": [now - 1]})).unwrap();
+    let key = super::tally_key(&fake, "c-posts", "gateway", crate::PRINCIPAL_ANONYMOUS);
+    let _ = mycelium_core::ops::kv_set(&bctx, Arc::from(key.as_str()), bytes::Bytes::from(entry));
+    let out = post(&b).await;
+    let e = admitted(&out).unwrap_or_else(|| panic!("a fabricated id's entry denies nobody: {:?}", refusal(&out)));
+    assert!(!tally_counted(e).1.contains(&fake), "the fabricated id is not a publisher");
+
+    // A member that admits one and goes; once it is not a peer, `b` loses its heartbeat and keeps its entry.
+    let out = post(&c).await;
+    assert!(admitted(&out).is_some(), "within the limit, admitted: {:?}", refusal(&out));
+    let c_id = c.node_id().to_string();
+    let prefix = format!("{}{c_id}/c/", super::TALLY_PREFIX);
+    assert!(until(|| !mycelium_core::ops::kv_scan_prefix(&bctx, &prefix).is_empty(), Duration::from_secs(10)).await);
+    c.shutdown().await;
+    let hb_key = super::heartbeat_key(&c_id);
+    let departed = |b: &bytes::Bytes| serde_json::from_slice::<serde_json::Value>(b).is_ok_and(|v| v["departed"] == true);
+    assert!(
+        until(|| mycelium_core::ops::kv_get(&bctx, &hb_key).is_some_and(|b| departed(&b)), Duration::from_secs(10)).await,
+        "c's last word reaches b"
+    );
+    bctx.peers.pin().remove(&c_id.parse::<NodeId>().unwrap());
+    mycelium_core::ops::kv_write_local(&bctx, Arc::from(hb_key.as_str()), None);
+    assert!(mycelium_core::ops::kv_get(&bctx, &hb_key).is_none());
+    let out = post(&b).await;
+    assert!(admitted(&out).is_none(), "a member's entry without its heartbeat is not counted as zero");
+    let why = format!("{:?}", refusal(&out));
+    assert!(why.contains(&c_id) && why.contains("no heartbeat"), "{why}");
+    assert!(!why.contains(&fake), "the fabricated id is not named: {why}");
+    a.shutdown().await;
+    b.shutdown().await;
+}
+
 /// **Round 5, finding 4: without `[tls]`, a non-peer's absence is unknown coverage.** No member can be verified, so an
 /// enforcing node that is no longer a peer is neither counted nor ignored: the tally is not established until its
 /// heartbeat passes the horizon — fail closed, never an under-count of a crashed node's permits.
@@ -1869,6 +1920,16 @@ async fn without_tls_a_non_peers_absence_is_not_established() {
     assert!(admitted(&out).is_none(), "not established");
     let why = format!("{:?}", refusal(&out));
     assert!(why.contains(&gone) && why.contains("cannot be verified"), "{why}");
+    // Nor is a non-peer's entry without a heartbeat (#656's review, finding 1): without `[tls]` it is unknown too.
+    mycelium_core::ops::kv_write_local(&b.task_ctx, Arc::from(super::heartbeat_key(&gone).as_str()), None);
+    let orphan = NodeId::new("127.0.0.1", port()).unwrap().to_string();
+    let entry = serde_json::to_vec(&serde_json::json!({"w": TEN_MIN, "t": [now - 1]})).unwrap();
+    let key = super::tally_key(&orphan, "c-posts", "gateway", crate::PRINCIPAL_ANONYMOUS);
+    let _ = mycelium_core::ops::kv_set(&b.task_ctx, Arc::from(key.as_str()), bytes::Bytes::from(entry));
+    let out = post(&b).await;
+    assert!(admitted(&out).is_none(), "not established");
+    let why = format!("{:?}", refusal(&out));
+    assert!(why.contains(&orphan) && !why.contains(&gone), "{why}");
     a.shutdown().await;
     b.shutdown().await;
 }

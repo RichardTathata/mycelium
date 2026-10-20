@@ -528,6 +528,21 @@ pub(crate) fn tally_state_counted(
             continue;
         }
         let Some(hb) = read(&heartbeat_key(&node)).and_then(|b| serde_json::from_slice::<Heartbeat>(&b).ok()) else {
+            // **Entries without a heartbeat** (#656's adversarial review, finding 1): its heartbeat collected before
+            // they reached this node, not arrived yet (this node restarted without persistence and is catching up),
+            // or unreadable. Nothing dates the node, so its entry for this counter is dated by its own times, on the
+            // collector's bound (`collect_residue`): while a time is inside the window plus the staleness and drift
+            // bounds, or the entry cannot be read, a member's count is unknown — never zero. Without `[tls]` no member
+            // can be verified, so any such node is unknown; with it, a node nobody issued an identity for is ignored.
+            let pending = match read(&tally_key(&node, &c.key, point, actor)) {
+                None => false,
+                Some(b) => serde_json::from_slice::<TallyEntry>(&b)
+                    .map(|e| e.t.iter().any(|t| *t > now_ms.saturating_sub(horizon)))
+                    .unwrap_or(true),
+            };
+            if pending && (ctx.tls.get().is_none() || verified_member(ctx, &node)) {
+                unknown.push(format!("{node} (not a peer: its entry is inside the window and it has no heartbeat)"));
+            }
             continue;
         };
         if !hb.enforces || now_ms.saturating_sub(hb.as_of) > horizon {

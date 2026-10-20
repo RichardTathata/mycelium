@@ -21,6 +21,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dated in the future is kept, as it would count. Found as an intermittent CI failure of `residue_is_collected_and_a_decision_does_not_read_it`
   (the node's own collector tick took a planted heartbeat before its entry was planted); fail-first
   `an_entry_outliving_its_collected_heartbeat_is_collected`.
+- **A member's tally entries without its heartbeat are unknown coverage, not zero** (post-360 row K2, #656's
+  adversarial review, finding 1). A reader skipped a non-peer it held entries for but no heartbeat, neither counting it
+  nor calling it unknown, so a reader that received a crashed member's entries before its heartbeat — restarted without
+  persistence, catching up by anti-entropy — read its permits as zero and could admit past the limit. Such a verified
+  member's entry is now dated by its own times: inside the window plus the staleness and drift bounds, or unreadable,
+  the tally is not established and a `FleetTally` rule decides `Indeterminate`, naming the node; the collector removes
+  the entry on the same bound. A fabricated id is still ignored. **Upgrade note:** a tally rule can decide
+  `Indeterminate` where it admitted before, for at most that window (`deprecations.md` §56). Fail-first:
+  `a_members_entries_without_its_heartbeat_are_unknown_coverage` and the extended
+  `without_tls_a_non_peers_absence_is_not_established`.
 - **A fleet history limit is bounded: at most 1 024 seats, a window of at most 24 hours** (post-360 row K2, from the
   review of the private Cedar adapter). For a `HistoryScope::FleetConsensus` rule the enforcement point read every
   seat, a slot digest and a KV read each, on every request the rule covered, synchronously under the actor's history
