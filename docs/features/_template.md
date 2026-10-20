@@ -15,15 +15,18 @@
 
 <!-- The settings, each linked to ../reference/configuration.md or ../reference/unit-file.md, and a link to a
 configuration or unit file that a test loads. No snippet of the page's own.
-For a feature enabled in code, open with "This feature is turned on in code", then one item per line, its name in
-backticks linked to the file that defines it, and end with the test that runs that code (its name in backticks; a
-test in the test-coverage universe; say so if it runs a hand-kept copy rather than reading the page). -->
+For a feature enabled in code, open with "This feature is turned on in code", then one item per line: its name in
+backticks linked to the file that defines it, the last path segment a fn, struct, enum, trait or const there. A
+configuration field is its own line, `name` in backticks linked to ../reference/configuration.md#the-fields. End
+with the test that runs that code: its name in backticks, a `fn <name>` in the linked file, listed by CI's test
+universe and matched by no entry of scripts/test-coverage-exceptions.txt; say so if it runs a hand-kept copy
+rather than reading the page. -->
 
 ## See it work
 
 <!-- A link to the feature's row in ../../examples/README.md; the index keeps the run command and the CI status.
 If there is no example, open with "No runnable example exists" and link the test that runs the feature end to
-end. -->
+end; the registry records `example: none`. -->
 
 ## What it guarantees, and what it does not
 

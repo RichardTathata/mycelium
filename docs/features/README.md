@@ -20,13 +20,16 @@ Every page has these six sections, in this order, with these headings. Copy
    [`configuration.md`](../reference/configuration.md) or [`unit-file.md`](../reference/unit-file.md), and a link
    to a configuration or unit file that a test loads. For a feature enabled in code, the section opens with the
    fixed sentence "This feature is turned on in code", then lists one item per line: the item's name in
-   backticks, linked to the file that defines it. It ends with the test that runs that code, its name in backticks
-   and in the `test-coverage` universe. A test that reads the page is preferred; a test that runs a hand-kept copy
-   is recorded as such.
+   backticks, linked to the file that defines it, whose last path segment is a `fn`, `struct`, `enum`, `trait` or
+   `const` in the linked file. A configuration field the feature reads is its own line, `name` in backticks linked
+   to [`configuration.md#the-fields`](../reference/configuration.md#the-fields). The section ends with the test that
+   runs that code: its name in backticks, a `fn <name>` in the linked file (checked pre-push), listed by CI's test
+   universe and matched by no entry of `scripts/test-coverage-exceptions.txt` (checked in CI). A test that reads
+   the page is preferred; a test that runs a hand-kept copy is recorded as such.
 4. **See it work.** A link to the feature's row in the [example index](../../examples/README.md), which holds
    the run command, the prerequisites and the CI status. If there is none, the section opens with the fixed
    sentence "No runnable example exists" and links the test that runs the feature end to end; the feature
-   registry records `example: none`.
+   registry records `example: none`, and the gate fails if the example index later gains a row for that feature.
 5. **What it guarantees, and what it does not.** The guarantee and rule ids, each linked to where it is
    catalogued, the plan rows whose *not built* items apply, and the
    [what-is-proven](../operations/what-is-proven.md) ledger.

@@ -38,3 +38,14 @@ in `src/agent/fleet_history_tests.rs`, run by CI's `test` job's `--lib` steps), 
 the unreleased bounds (§55), K2's *not built* list. Found while writing it, recorded as P9 in the plan's §4.1: guide
 20's K2 snippet has no test, and guide 20 does not say the exact scope needs a consensus listener on the voting nodes.
 Linked from the capability map's *Constrain actions* row; the plan marks all three pilots written.
+
+## [2026-10-20] ingest | #654 review round 2: guide 20 says a seat needs a listener; checkable markers
+
+Guide 20 now says a node votes on a seat only while it runs a consensus listener (the `mycelium` binary starts one),
+so a fleet whose voters run none decides every exact rule `Indeterminate`; and that only the reference rules treat a
+declared and a bound class alike (Cedar reads `context.route.class_source`). The K2 page lists each configuration
+field on its own line (`consensus_electorate` added; the electorate itself declared at `/gateway/govern/electorate`),
+and the what-is-proven K2 row names `a_saturating_actor_gets_its_limit_each_short_window`. P1, P2 and P9 now state
+what the F2 gate can check: an item's last path segment as a `fn`/`struct`/`enum`/`trait`/`const` in its linked file,
+a test's `fn` and its place in CI's universe outside the exceptions file, a configuration row `| name |`, and an
+`example: none` that fails once the index gains a row.

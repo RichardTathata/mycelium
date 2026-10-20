@@ -2,13 +2,13 @@
 
 ## What it is
 
-A confined [activation](../guide/00-concepts.md#activation) command can reach other hosts by name, and only
-those, through an egress proxy its [stem](../guide/00-concepts.md#stem) runs for it on loopback. The profile adds
-the proxy's port to the command's own `connect` entries, and under Landlock that port is open on any address; the
-command starts with a cleared environment. The proxy sends a request on only to
-a host on the activation's list, which can be replaced while the stem runs, and attaches a
-[credential binding](../guide/00-concepts.md#credential-binding)'s value at the proxy, so the secret never
-enters the command.
+A confined [activation](../guide/00-concepts.md#activation) command can reach hosts by name through an egress
+proxy its [stem](../guide/00-concepts.md#stem) runs for it on loopback — only the listed hosts, plus whatever its own
+`connect` entries name directly — and it starts with a cleared environment. The profile adds the proxy's port to the
+command's own `connect` entries, and under Landlock that port is open on any address. The activation's list of hosts
+can be replaced while the stem runs, and the proxy attaches a
+[credential binding](../guide/00-concepts.md#credential-binding)'s value itself, so the secret never enters
+the command.
 
 ## When to use it, and when not
 

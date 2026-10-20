@@ -11,9 +11,9 @@ the count stays per enforcement point, so an actor spread over N gateways can be
 ## When to use it, and when not
 
 - **Use it when** a limit must hold for an actor however many gateways or providers its calls reach.
-- **Not when** a per-point limit is enough, the limit is above 1 024 in a window or the window is longer than 24
-  hours (not established), or the exact scope cannot get a quorum and the tally cannot verify every member (both
-  fail closed).
+- **Not when** a per-point limit is enough; the limit is above 1 024 in a window or the window is longer than 24
+  hours (not established); or the exact scope cannot reach a quorum, or the tally's coverage cannot be established —
+  a member without a fresh heartbeat, including any member not built with `gateway` and `tls` (both fail closed).
 
 ## Turn it on
 
@@ -23,18 +23,30 @@ This feature is turned on in code.
 - [`Rule::scoped`](../../src/agent/action_evaluator.rs): the fleet scope, `HistoryScope::FleetConsensus` or
   `HistoryScope::FleetTally`, and an opaque counter id.
 - [`with_action_evaluator`](../../src/agent/mod.rs): attach the evaluator, and an evidence journal with
-  `with_evidence_journal`, in a build with features `gateway` and `tls`; without a journal every history view is
+  `with_evidence_journal`, in a build with features `gateway` and `tls` (and `consensus`, a default, for the exact scope); without a journal every history view is
   unavailable.
-- [`start_consensus_listener`](../../src/agent/consensus_handle.rs): for `FleetConsensus`, seats are decided by
-  consensus, so the voting nodes run a consensus listener (the tests start one on every node; guide 20 does not
-  say so).
-- Settings the count reads, each a row of [configuration.md § The fields](../reference/configuration.md#the-fields):
-  `control_max_staleness_ms`, `control_min_peers_heard` and `max_clock_drift_ms` (the tally's coverage), `tls` and
-  `require_identity_proofs` (which members the tally can verify), and `consensus_require_electorate` (where seats
-  are decided).
+- [`start_consensus_listener`](../../src/agent/consensus_handle.rs): a `FleetConsensus` seat is decided by a quorum
+  of the electorate, or of the cluster when none is declared, and a node votes only while it runs a consensus
+  listener. The proposer counts its own vote; the `mycelium` binary starts a listener, an embedding application
+  starts its own ([guide 04 § API](../guide/04-consensus.md#api)).
+- [`control_max_staleness_ms`](../reference/configuration.md#the-fields): how fresh a peer's heartbeat must be for
+  the tally's coverage.
+- [`control_min_peers_heard`](../reference/configuration.md#the-fields): how many peers this node must have heard
+  from before a tally is established.
+- [`max_clock_drift_ms`](../reference/configuration.md#the-fields): a heartbeat dated further ahead than this is
+  unknown coverage.
+- [`tls`](../reference/configuration.md#the-fields): without it this node can verify no member, so a non-peer inside
+  the horizon makes the tally `Indeterminate`.
+- [`require_identity_proofs`](../reference/configuration.md#the-fields): with it off, a fabricated node id's tally
+  entries can count.
+- [`consensus_require_electorate`](../reference/configuration.md#the-fields): a seat outside a declared electorate is
+  refused.
+- [`consensus_electorate`](../reference/configuration.md#the-fields): must agree with the fleet's `exclusive_default`
+  electorate, or every claim is refused. The electorate itself is declared at `/gateway/govern/electorate`, not in
+  configuration.
 - `a_saturating_actor_gets_its_limit_each_short_window`, in
   [`src/agent/fleet_history_tests.rs`](../../src/agent/fleet_history_tests.rs): builds its policy with
-  `at_most(..).scoped(..)` and attaches it as above. It does not read guide 20's snippet; that snippet has no test.
+  `at_most(..).scoped(..)` and attaches it as above. It is not a copy of guide 20's snippet, which has no test.
 
 ## See it work
 
@@ -55,8 +67,8 @@ has no row for this feature. The end-to-end runs are tests in
   [`ae_contract.rs`](../../src/agent/ae_contract.rs), which a replacement evaluator must pass or decline
   ([guide 20 § Checking your evaluator against the contract](../guide/20-authorising-actions.md#checking-your-evaluator-against-the-contract)).
 - **Bounds:** at most `MAX_FLEET_SEATS` (1 024) and a window of at most `MAX_FLEET_WINDOW_MS` (24 hours), in
-  [`action_evaluator.rs`](../../src/agent/action_evaluator.rs); outside them the rule is refused, not clamped. Not yet
-  released ([deprecations §55](../guide/deprecations.md#55-a-fleet-limit-is-bounded-at-most-1-024-seats-a-window-of-at-most-24-hours-unreleased-post-360-plan-row-k2s-bounds)).
+  [`action_evaluator.rs`](../../src/agent/action_evaluator.rs); outside them the rule is refused, not clamped
+  ([deprecations §55](../guide/deprecations.md#55-a-fleet-limit-is-bounded-at-most-1-024-seats-a-window-of-at-most-24-hours-unreleased-post-360-plan-row-k2s-bounds)).
 - **Not built:** row K2 of the [post-360 plan](../plans/post-360-hardening.md#33--the-batch) and its *Not built,
   stated* list in [§3.5](../plans/post-360-hardening.md#35--delivered-rows-2320-onward--each-promise-beside-its-evidence):
   tally entries are unsigned, so a forgery under a dead member's namespace is not detected; without `[tls]` a
