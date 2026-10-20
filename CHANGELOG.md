@@ -11,14 +11,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
-- **Dependency: `wasmtime` / `wasmtime-wasi` 49.0.3 → 49.0.4**, with the cranelift family 0.136.3 → 0.136.4
+- **Check whether you are affected:** run `uname -m` on each node. A node is exposed to RUSTSEC-2026-0379 only if it
+  reports `aarch64` or `arm64` and it hosts WASM components — it runs `mycelium-stem`, or a binary that links
+  `mycelium-wasm-host`; on such a node a non-zero `mycelium_artifact_installs_completed_total` means it has installed
+  components. After upgrading, `grep -A1 '^name = "wasmtime"$' Cargo.lock` in the build shows `49.0.4`, and
+  `cargo audit -f Cargo.lock` no longer reports RUSTSEC-2026-0378 or -0379.
+  **Dependency: `wasmtime` / `wasmtime-wasi` 49.0.3 → 49.0.4**, with the cranelift family 0.136.3 → 0.136.4
   (RUSTSEC-2026-0378, -0379, published 2026-10-19). **RUSTSEC-2026-0379** (critical, CVSS 9.9): on **aarch64**,
   Cranelift could compile a large Wasm `br_table` to a jump to the wrong target, so a guest component's control flow
   is not the one it was validated for. The WASM host compiles with Cranelift (wasmtime's default; it selects no other
   strategy), so a node that hosts WASM components on aarch64 — Apple silicon, Graviton, Ampere — is exposed; on
   x86_64 it is not. **RUSTSEC-2026-0378** (medium, 5.7): a host panic lowering a host-created component-model stream
-  into a guest that expects a different payload type; `mycelium-wasm-host/src` creates no component-model stream of its
-  own. **Affected releases:** every release that ships the WASM host — v2.0.0 through v2.36.0 for -0379 (wasmtime
+  into a guest that expects a different payload type; the host's WIT (`wit/host.wit`) declares no stream or
+  future and it links WASI p2 only, so no host-created stream reaches a guest. **Affected releases:** every release that ships the WASM host — v2.0.0 through v2.36.0 for -0379 (wasmtime
   45.0.3 to 49.0.3; v2.34.0–v2.36.0 on 49.0.3), and v2.4.0 through v2.36.0 for -0378 (wasmtime 46.0.2 onwards; 45.x is
   unaffected). A node built without `mycelium-wasm-host` does not link wasmtime and is not exposed. A lockfile change
   only (`Cargo.lock`; the two other tracked lockfiles hold no wasmtime), no API change; the minimum Rust version
