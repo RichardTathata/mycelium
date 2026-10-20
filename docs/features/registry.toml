@@ -1,23 +1,25 @@
 # The feature registry (docs/plans/feature-pages.md F-G, row F2).
 #
-# Completeness is bounded by the sources: a feature no source names (a glossary row without an `<a id>`, a crate
-# without [features]) is not required here. Anchoring such rows is how they join (row F3).
-#
-# Every id from the six sources maps here exactly once: to a [[feature]] (a page, or page = "todo" for a page
+# Every id from the seven sources maps here exactly once: to a [[feature]] (a page, or page = "todo" for a page
 # row F3 writes) or to an [[exclusion]] with its reason. scripts/check-feature-pages.py fails on an id no entry
 # maps, on an id mapped twice, and on a mapped id no source has. A wrong exclusion hides a feature, so each
 # says why the ids it holds are not a reader-facing feature.
 #
-# Ids are `<source>:<id>`:
-#   concept:<anchor>              an `<a id>` entry of docs/guide/00-concepts.md
+# Ids are `<source>:<id>` (seven sources):
+#   concept:<anchor>              a quick-reference row of docs/guide/00-concepts.md, by its `<a id>` (a row
+#                                 without one fails the gate)
 #   guarantee:<id>                docs/reference/guarantee-catalogue.json (the core's guarantees)
 #   rule:<id>                     docs/reference/rule-catalogue.json
-#   unit:<section>                a section heading of docs/reference/unit-file.md
-#   cargo:<crate>/<feature>       a Cargo [features] key of any workspace crate
+#   unit:<key>                    a unit-file key, read from NodeCapabilityConfig in src/capability_config.rs (and
+#                                 its confine/egress sub-tables); each must have a heading in docs/reference/unit-file.md
+#   cargo:<crate>/<feature>       a Cargo feature of any workspace crate, implicit ones (an optional dependency no
+#                                 feature names as dep:) included
 #   companion-guarantee:<id>      a guarantee a crate registers in code (`GuaranteeDescriptor::new("<id>"`,
 #                                 outside tests) that is not in the catalogue — plan P3, decided in F2
+#   crate:<name>                  a workspace crate (a page names it in backticks or links its directory)
 #
-# A [[feature]] holds:
+# A [[feature]] holds these keys, and an [[exclusion]] `reason` and `ids`; any other key is refused, so a typo
+# cannot drop a check. One page belongs to one feature.
 #   name      the feature, as a reader would name it
 #   page      its page in docs/features/, or "todo" (F3); a "todo" entry names its `planned` page
 #   example   with a page: the example's name in the example index's capability matrix, or "none" (P2) —
@@ -67,7 +69,7 @@ name = "Authorising actions (the action evaluator)"
 page = "todo"
 planned = "action-authorisation"
 ids = ["rule:ae.preflight", "guarantee:ae.authorised_at_seam", "guarantee:ae.recorded_before_dispatch",
-       "concept:enforcement-point"]
+       "concept:enforcement-point", "concept:indeterminate", "concept:action-envelope", "concept:evaluator", "concept:policy-revision"]
 
 [[feature]]
 name = "Evidence journal"
@@ -86,7 +88,7 @@ name = "Mandates and authority drain"
 page = "todo"
 planned = "mandates"
 ids = ["concept:mandate", "concept:continuation", "guarantee:authz.execution_authority",
-       "guarantee:authz.durable_epochs"]
+       "guarantee:authz.durable_epochs", "concept:strict-eligibility"]
 
 [[feature]]
 name = "Audit trail and audit export"
@@ -99,7 +101,7 @@ name = "Guardrails"
 page = "todo"
 planned = "guardrails"
 ids = ["cargo:mycelium-guardrails/compliance", "cargo:mycelium-guardrails/gateway",
-       "cargo:mycelium-guardrails/metrics-export"]
+       "cargo:mycelium-guardrails/metrics-export", "crate:mycelium-guardrails"]
 
 # The gateway and its callers
 
@@ -134,7 +136,7 @@ ids = ["concept:gateway-caller", "guarantee:gw.caller_profile"]
 name = "A2A interoperability"
 page = "todo"
 planned = "a2a"
-ids = ["cargo:mycelium/a2a", "guarantee:a2a.admission", "rule:a2a.admission"]
+ids = ["cargo:mycelium/a2a", "guarantee:a2a.admission", "rule:a2a.admission", "concept:a2a-agent-card"]
 
 # Identity, transport and egress
 
@@ -154,7 +156,7 @@ ids = ["guarantee:id.proofs_required", "guarantee:id.ca_key_off_node", "guarante
 name = "Egress allow-list"
 page = "todo"
 planned = "egress-allow-list"
-ids = ["guarantee:egress.allow_list"]
+ids = ["guarantee:egress.allow_list", "concept:egress-allow-list"]
 
 [[feature]]
 name = "Credentials attached at egress"
@@ -183,17 +185,17 @@ planned = "data-at-rest-encryption"
 ids = ["guarantee:at_rest.cipher"]
 
 [[feature]]
-name = "Consensus and electorates"
+name = "Consensus, electorates, locks and leadership"
 page = "todo"
 planned = "consensus-electorates"
-ids = ["cargo:mycelium/consensus", "guarantee:cons.safety_profile", "rule:cons.acceptor_memory"]
+ids = ["cargo:mycelium/consensus", "guarantee:cons.safety_profile", "rule:cons.acceptor_memory", "concept:consensus"]
 
 [[feature]]
 name = "Destination commit (exactly-once effects)"
 page = "todo"
 planned = "destination-commit"
 ids = ["concept:destination-commit", "cargo:mycelium-effects/tuple-space", "cargo:mycelium-effects/envelope",
-       "cargo:mycelium-effects/metrics"]
+       "cargo:mycelium-effects/metrics", "crate:mycelium-effects"]
 
 [[feature]]
 name = "Replay bundles"
@@ -201,7 +203,7 @@ page = "todo"
 planned = "replay"
 # `sim` is listed among the plan's build features; it is mapped here because it is also what makes the node
 # binary record a replay bundle (v2.16.0), which a reader turns on.
-ids = ["concept:bundle", "cargo:mycelium/sim", "cargo:mycelium-core/sim"]
+ids = ["concept:bundle", "cargo:mycelium/sim", "cargo:mycelium-core/sim", "concept:seam", "crate:mycelium-sim"]
 
 # Layers I and II
 
@@ -215,25 +217,25 @@ ids = ["rule:kv.propagation", "rule:kv.expiry"]
 name = "Signal mesh: admission, forwarding, suppression"
 page = "todo"
 planned = "signal-mesh"
-ids = ["rule:signal.admission", "rule:signal.forwarding", "rule:signal.suppression"]
+ids = ["rule:signal.admission", "rule:signal.forwarding", "rule:signal.suppression", "concept:signal", "concept:boundary"]
 
 [[feature]]
 name = "Capability discovery"
 page = "todo"
 planned = "capability-discovery"
-ids = ["rule:cap.match"]
+ids = ["rule:cap.match", "concept:capability"]
 
 [[feature]]
-name = "Governed group membership"
+name = "Groups and governed membership"
 page = "todo"
 planned = "governed-membership"
-ids = ["unit:[[group]]", "rule:membership.governed"]
+ids = ["unit:[[group]]", "rule:membership.governed", "concept:group"]
 
 [[feature]]
 name = "Adaptive stability (governors and profiles)"
 page = "todo"
 planned = "adaptive-stability"
-ids = ["concept:governor"]
+ids = ["concept:governor", "concept:allocated-right"]
 
 [[feature]]
 name = "Metrics and tracing"
@@ -254,7 +256,7 @@ ids = ["concept:stem", "cargo:mycelium-wasm-host/stem"]
 name = "Demand-driven provisioning"
 page = "todo"
 planned = "demand-provisioning"
-ids = ["concept:provisioner", "concept:self-election", "concept:runtime-kind", "unit:[hosts]",
+ids = ["concept:provisioner", "concept:self-election", "concept:runtime-kind", "unit:[hosts]", "concept:requirement", "concept:demand",
        "rule:prov.demand_response", "rule:prov.self_election", "rule:prov.install", "rule:prov.advertise",
        "rule:prov.withdraw", "rule:prov.health_pass", "rule:prov.eligible", "rule:prov.rights_admission"]
 
@@ -268,7 +270,7 @@ ids = ["concept:catalogue", "rule:prov.provenance"]
 name = "Artifact library and publishing"
 page = "todo"
 planned = "artifact-library"
-ids = ["concept:library", "cargo:mycelium-wasm-host/object_store", "cargo:mycelium-wasm-host/gateway"]
+ids = ["concept:library", "cargo:mycelium-wasm-host/object_store", "cargo:mycelium-wasm-host/gateway", "concept:artifact"]
 
 [[feature]]
 name = "Presence bands (floors and ceilings)"
@@ -304,7 +306,7 @@ ids = ["unit:[[serve]]", "concept:serve", "cargo:mycelium-wasm-host/llm"]
 name = "Hosted WASM components"
 page = "todo"
 planned = "hosted-components"
-ids = ["rule:host.emit_admission"]
+ids = ["rule:host.emit_admission", "crate:mycelium-wasm-host"]
 
 [[feature]]
 name = "Unit files and wire-check"
@@ -328,32 +330,101 @@ name = "The reason router"
 page = "todo"
 planned = "reason-router"
 ids = ["cargo:mycelium-reason/llm", "cargo:mycelium-reason/gateway", "cargo:mycelium-reason/compliance",
-       "cargo:mycelium-reason/ollama"]
+       "cargo:mycelium-reason/ollama", "crate:mycelium-reason"]
 
 [[feature]]
 name = "Knowledge layer"
 page = "todo"
 planned = "knowledge-layer"
-ids = ["cargo:mycelium-reason/knowledge"]
+ids = ["cargo:mycelium-reason/knowledge", "concept:assessment"]
 
 [[feature]]
 name = "Tuple space"
 page = "todo"
 planned = "tuple-space"
-ids = ["cargo:mycelium-tuple-space/gateway"]
+ids = ["cargo:mycelium-tuple-space/gateway", "crate:mycelium-tuple-space"]
 
 [[feature]]
 name = "Blackboard"
 page = "todo"
 planned = "blackboard"
-ids = ["cargo:mycelium-blackboard/gateway"]
+ids = ["cargo:mycelium-blackboard/gateway", "crate:mycelium-blackboard"]
 
 [[feature]]
 name = "Wiki substrate (git store, mirror, curator)"
 page = "todo"
 planned = "wiki-substrate"
 ids = ["cargo:mycelium-wiki/control-plane", "cargo:mycelium-wiki/gateway", "cargo:mycelium-wiki/llm",
-       "cargo:mycelium-wiki/git-mirror", "cargo:mycelium-wiki/git-store", "cargo:mycelium-wiki/execution-authority"]
+       "cargo:mycelium-wiki/git-mirror", "cargo:mycelium-wiki/git-store", "cargo:mycelium-wiki/execution-authority", "crate:mycelium-wiki"]
+
+
+# Added in F2's second round: glossary rows anchored, and the crates as a source
+
+[[feature]]
+name = "Federated domains"
+page = "todo"
+planned = "federation"
+ids = ["concept:domain"]
+
+[[feature]]
+name = "AgentFacts (public discovery across domains)"
+page = "todo"
+planned = "agentfacts"
+ids = ["concept:agentfacts", "crate:mycelium-agentfacts"]
+
+[[feature]]
+name = "The contract net (commitments)"
+page = "todo"
+planned = "contract-net"
+ids = ["concept:award", "crate:mycelium-commitment"]
+
+[[feature]]
+name = "Durability receipts"
+page = "todo"
+planned = "durability-receipts"
+ids = ["concept:receipt", "concept:operation-id", "concept:delivery-unknown", "concept:buffered"]
+
+[[feature]]
+name = "Skills"
+page = "todo"
+planned = "skills"
+ids = ["concept:skill"]
+
+[[feature]]
+name = "MCP tools"
+page = "todo"
+planned = "mcp-tools"
+ids = ["concept:mcp-tool"]
+
+[[feature]]
+name = "The mailbox (durable, ordered delivery)"
+page = "todo"
+planned = "mailbox"
+ids = ["concept:mailbox"]
+
+[[feature]]
+name = "Opacity and stigmergic routing"
+page = "todo"
+planned = "opacity"
+ids = ["concept:opacity"]
+
+[[feature]]
+name = "Intents (evaporating desired state)"
+page = "todo"
+planned = "intents"
+ids = ["concept:intent"]
+
+[[feature]]
+name = "Guarantee report and profiles"
+page = "todo"
+planned = "guarantee-report"
+ids = ["concept:guarantee-report"]
+
+[[feature]]
+name = "Rule catalogue and decision trace"
+page = "todo"
+planned = "rule-catalogue-and-decision-trace"
+ids = ["concept:rule-catalogue", "concept:decision-trace"]
 
 # ------------------------------------------------------------------------------------------- exclusions
 
@@ -378,7 +449,8 @@ ids = ["cargo:mycelium-coop-examples/wasm", "cargo:mycelium-coop-examples/metric
 
 [[exclusion]]
 reason = "A disambiguation entry of the glossary (\"Things called …\"): it separates several meanings of one word, each of which belongs to its own feature."
-ids = ["concept:claim", "concept:scope", "concept:journal", "concept:catalogue-meanings", "concept:admission"]
+ids = ["concept:claim", "concept:scope", "concept:journal", "concept:catalogue-meanings", "concept:admission",
+       "concept:profile-meanings"]
 
 [[exclusion]]
 reason = "Declaration vocabulary every unit file uses (the plan's stated exclusion): who the unit is and what it offers and needs. Covered by the unit-file reference and the unit files and wire-check page, and, at runtime, by capability discovery."
@@ -387,3 +459,16 @@ ids = ["unit:principal", "unit:[[capability]]", "unit:[[requirement]]"]
 [[exclusion]]
 reason = "An external prerequisite, not a feature: a node cannot verify its own clock, so the guarantee report reads it not_verifiable_here and never counts it; the threat model states what depends on it."
 ids = ["guarantee:clock.sync"]
+
+[[exclusion]]
+reason = "A definition of a design claim (what \"no control plane\" means here), not something a reader turns on; philosophy.md and the guarantee report state it."
+ids = ["concept:no-control-plane"]
+
+[[exclusion]]
+reason = "The substrate's own crates: every feature they carry is mapped by its own ids (concepts, catalogues, unit-file keys, Cargo features), so the crate as a whole is not one feature."
+ids = ["crate:mycelium", "crate:mycelium-core"]
+
+[[exclusion]]
+reason = "A test or example crate, not a library a reader adopts: the gateway-free and tls-free test builds, the loom model-check spike, and the co-op examples (routed by the example index)."
+ids = ["crate:mycelium-gateway-free-tests", "crate:mycelium-tls-free-tests", "crate:loom-spike",
+       "crate:mycelium-coop-examples"]

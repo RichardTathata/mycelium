@@ -17,9 +17,11 @@ matrix; the operations door keeps its own operator journey. `scripts/check-front
 the five-step path*. HTML decks have reading mode, keyboard navigation and mobile layout; structural
 checks do not replace browser or screen-reader review. **Feature pages (2026-10-20, plan
 [`feature-pages.md`](../../plans/feature-pages.md) row F2).** [`docs/features/registry.toml`](../../features/registry.toml)
-maps every id of six sources — the glossary's `<a id>` anchors, the guarantee and rule catalogues, the unit-file
-sections, every workspace crate's Cargo features, and the guarantees a companion registers in code — to a feature
-page, to `todo` (row F3), or to an exclusion with its reason. `scripts/check-feature-pages.py` (run by
+maps every id of seven sources — the glossary's quick-reference rows (each must carry an `<a id>`), the guarantee
+and rule catalogues, the unit file's keys (read from `NodeCapabilityConfig`, checked against the headings), every
+workspace crate's Cargo features (implicit ones included), the guarantees a companion registers in code, and the
+workspace crates — to a feature page, to `todo` (row F3), or to an exclusion with its reason; unknown registry keys
+are refused. `scripts/check-feature-pages.py` (run by
 `check-positioning.sh`) fails on an unmapped or stale id and checks each page's six sections, links and anchors
 (the front-doors resolver, which now reads `<a id>` too), code items, configuration rows, named tests and
 example; its mutation suite is `scripts/test-check-feature-pages.py`, and CI's `test-coverage` job runs it with
