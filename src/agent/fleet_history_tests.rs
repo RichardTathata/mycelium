@@ -1499,6 +1499,51 @@ async fn residue_is_collected_and_a_decision_does_not_read_it() {
     b.shutdown().await;
 }
 
+/// **An entry whose heartbeat was collected before it is still collected** (the residue flake on #654's CI). A
+/// collector removes a departed node's heartbeat and the entries it holds at that moment; an entry of that node that
+/// reaches it afterwards — anti-entropy from a peer that had not collected yet, or a gossiped entry overtaken by its
+/// heartbeat — has no heartbeat to date it by. It used to be skipped on every pass, and stayed in the store and in the
+/// scope roster forever. It is collected once every time in it is past its window, the staleness bound and the
+/// clock-drift bound; one that could still count, or that cannot be read, is kept.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_entry_outliving_its_collected_heartbeat_is_collected() {
+    let tune = |c: &mut GossipConfig| {
+        c.control_max_staleness_ms = 1_500;
+        c.max_clock_drift_ms = 1_000;
+    };
+    let b = node(port(), &[], 3, HistoryScope::FleetTally, tune).await;
+    let ctx = Arc::clone(&b.task_ctx);
+    let plant = |key: &str, value: serde_json::Value| {
+        let _ = mycelium_core::ops::kv_set(&ctx, Arc::from(key), bytes::Bytes::from(serde_json::to_vec(&value).unwrap()));
+    };
+    let gone = NodeId::new("127.0.0.1", port()).unwrap().to_string();
+    let now = ctx.hlc.decision_now_ms();
+    // The heartbeat alone, past the horizon: collected.
+    plant(&super::heartbeat_key(&gone), serde_json::json!({"as_of": now - 10_000, "enforces": true, "departed": true}));
+    super::collect_residue(&ctx, ctx.hlc.decision_now_ms());
+    assert!(mycelium_core::ops::kv_get(&ctx, &super::heartbeat_key(&gone)).is_none(), "the heartbeat is collected");
+
+    // Its entries arrive afterwards: one aged past window + staleness + drift (1 + 1.5 + 1 s), one still inside it,
+    // one unreadable.
+    let (aged, fresh, garbled) = (
+        super::tally_key(&gone, "c-posts", "gateway", "aged"),
+        super::tally_key(&gone, "c-posts", "gateway", "fresh"),
+        super::tally_key(&gone, "c-posts", "gateway", "garbled"),
+    );
+    plant(&aged, serde_json::json!({"w": 1_000, "t": [now - 9_000]}));
+    plant(&fresh, serde_json::json!({"w": 1_000, "t": [now - 1_000]}));
+    let _ = mycelium_core::ops::kv_set(&ctx, Arc::from(garbled.as_str()), bytes::Bytes::from_static(b"not json"));
+    super::collect_residue(&ctx, ctx.hlc.decision_now_ms());
+    assert!(mycelium_core::ops::kv_get(&ctx, &aged).is_none(), "an aged entry without a heartbeat is collected");
+    assert!(mycelium_core::ops::kv_get(&ctx, &fresh).is_some(), "an entry that could still count is kept");
+    assert!(mycelium_core::ops::kv_get(&ctx, &garbled).is_some(), "an entry nothing can be read from is kept");
+
+    // Once its last time passes the margin, it goes too.
+    super::collect_residue(&ctx, now + 3_000);
+    assert!(mycelium_core::ops::kv_get(&ctx, &fresh).is_none(), "collected once past the margin");
+    b.shutdown().await;
+}
+
 /// **Round 4, finding 1: a returning node's newer records survive a collector that held its old ones**, and its
 /// `sys/` tripwire counts nothing. `a` departs; `b`, a peer no longer, collects `a`'s keys at their own stamps; `a`
 /// returns under `[persistence]` — re-asserting its keys before its connections come up — and its heartbeat is current

@@ -2089,6 +2089,20 @@ the bound, and with the deadline a 100 ms pause under 32 parallel processes reac
 a shutdown of 250 ms or more). At 30 ms the four were re-run on the first fix (10/10, 10/10, 9/10 fail) and the
 writer test on the pre-PR writer (10/10 fail), then 0 failures in 320 runs of all ten under the same load.
 
+**Known flake, closed (K2, 2026-10-20): a product leak, not a test race.** `residue_is_collected_and_a_decision_does_not_read_it`
+failed on #654's CI (run 39352060488) with *"sys/ae-tally/…/c/…/… collected"*: one departed id's tally entry survived
+the collection pass, its heartbeat gone. `collect_residue` dated a non-peer by its heartbeat and skipped a node with
+none (`let Some(hb) = … else { continue }`), so an entry that reached the collector after its node's heartbeat was
+collected was never collected: in the store and the scope roster for ever. A probe on failing runs showed the
+mechanism each time: the node's own collector tick collected an id with one key — the heartbeat, planted a moment
+before its entry — and the test's pass then found that id with one key and no heartbeat, and skipped it. In
+production the same shape arises when an entry arrives by anti-entropy or gossip after the heartbeat's collection.
+The fix dates such an entry by its own times: collected once every one is past its window plus the staleness and
+clock-drift bounds (the heartbeat horizon's margin); an unreadable one is kept. Fail-first:
+`an_entry_outliving_its_collected_heartbeat_is_collected` (plants a heartbeat alone, collects it, then plants its
+entries) failed on the unfixed collector and passes with the fix. Under 32 parallel processes the original test failed
+7 in 6 400 runs before the fix and 0 in 7 680 after.
+
 **Known flakes, open (seen during the v2.36.0 work, 2026-10-19; not yet investigated):**
 - `overlay_consistent::tests::distributed_lock_grants_single_holder_under_race` — 0 winners (a liveness timeout), never
   2; failed 4 of 256 runs on `main` under 32-process load.
@@ -2104,7 +2118,7 @@ writer test on the pre-PR writer (10/10 fail), then 0 failures in 320 runs of al
   at the provider's re-check, an ad's key bound to its writer; for M: the OpenShell backend (skipped for now, above),
   resource limits, limits by address and by path, a limit on the proxy's port by address under Landlock; for K: a
   history beyond 24 hours, 1 024 records per actor or 65 536 actors per point, and a replay of the history input;
-- (every recorded K2 flake is closed: the `/mcp` door test's lost reply, #647; the seat lease's "decided too late", #648; the abort and aged-tally tests, test races, #651;)
+- (every recorded K2 flake is closed: the `/mcp` door test's lost reply, #647; the seat lease's "decided too late", #648; the abort and aged-tally tests, test races, #651; the residue test, a collector leak, this PR;)
 - the private Cedar adapter's re-pin onto v2.36.0 is **done** (private #33, `0d654fd`). Open is the **next** re-pin,
   after K2's bounds (§55) are released: nine `fleet_*` cases, two of which (`fleet_limit_past_the_seat_cap`,
   `fleet_window_past_the_horizon`) the adapter passes by refusing the policy at load — which the suite counts as a pass

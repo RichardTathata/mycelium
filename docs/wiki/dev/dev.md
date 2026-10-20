@@ -106,6 +106,11 @@ without a heartbeat unknown coverage (6). Round 2: the provider decides whether 
 (`ae_decide` / `Settling`, `provider_enforcement::check` → `Checked`), bounded and always answered; a graceful leave is a departed heartbeat
 (entries kept to age out); tally writes under one leaf lock (row 67). Not built: early seat release, seat collection,
 signed tallies.
+**Residue** (round 4): a non-peer's tally keys past its heartbeat's horizon are tombstoned at the stamps held
+(`collect_residue`, `kv_delete_held`), so a newer write by a returning owner wins. Since 2026-10-20 an entry that
+reaches a collector *after* its node's heartbeat was collected is dated by its own times against the same bounds; before,
+a node with no heartbeat was skipped, and such an entry stayed in the store and the scope roster for ever (found as a
+CI flake of `residue_is_collected_and_a_decision_does_not_read_it`).
 **The reader seam shipped the same day** (PR #226): `read_evidence_journal_from(path, cursor, …)`,
 §6.7's outbox shape — batch, ship, advance, with a byte-offset cursor so resuming stays cheap, and
 each entry carrying the same content hash the chain's `AeReference` cites. Needed because moving

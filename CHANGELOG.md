@@ -11,6 +11,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A departed node's tally entry that outlives its collected heartbeat is collected** (post-360 row K2). The
+  residue collector dated a non-peer's `sys/ae-tally/` keys by its heartbeat, and skipped a node with none. An entry
+  that reached the collector after the heartbeat had been collected — by anti-entropy from a peer that had not
+  collected yet, or a gossiped entry its heartbeat overtook — was therefore never collected: it stayed in the store and
+  in the scope roster, and every later collection pass and decision listed its node again. Such an entry is now dated by
+  its own times and collected once every one is past its window plus the staleness and clock-drift bounds; one that
+  cannot be read is kept. Found as an intermittent CI failure of `residue_is_collected_and_a_decision_does_not_read_it`
+  (the node's own collector tick took a planted heartbeat before its entry was planted); fail-first
+  `an_entry_outliving_its_collected_heartbeat_is_collected`.
 - **A fleet history limit is bounded: at most 1 024 seats, a window of at most 24 hours** (post-360 row K2, from the
   review of the private Cedar adapter). For a `HistoryScope::FleetConsensus` rule the enforcement point read every
   seat, a slot digest and a KV read each, on every request the rule covered, synchronously under the actor's history

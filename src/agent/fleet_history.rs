@@ -669,7 +669,10 @@ pub(crate) fn withdraw_aged_entries(ctx: &Arc<TaskCtx>, now_ms: u64) -> usize {
 
 /// **Collect residue** (#642's review, round 4, finding 1): the tally keys of a node that is not a peer and whose
 /// heartbeat is older than the longest window any of its entries was kept for, plus the staleness bound, plus the
-/// clock-drift bound — by then every permit it wrote has aged out of every window, and no reader counts it.
+/// clock-drift bound — by then every permit it wrote has aged out of every window, and no reader counts it. An entry
+/// of a non-peer with **no heartbeat** — one that reached this node after its heartbeat was collected — is dated by
+/// its own times against the same bounds, so a collection that ran before all of a node's keys arrived does not leave
+/// the rest behind for ever.
 ///
 /// **Why a non-owner may delete here.** Each key is tombstoned *at the timestamp of the record this node holds*
 /// (`kv_delete_held`). Under last-writer-wins that removes exactly that record or an older one, and loses to anything
@@ -692,11 +695,27 @@ pub(crate) fn collect_residue(ctx: &Arc<TaskCtx>, now_ms: u64) -> usize {
             let store = ctx.kv_state.store.pin();
             keys.iter().map(|(k, _)| store.get(k.as_ref()).map(|e| e.timestamp)).collect()
         };
+        let margin = bound.max_staleness_ms.saturating_add(ctx.config.max_clock_drift_ms);
         let Some(hb) = keys
             .iter()
             .find(|(k, _)| k.ends_with("/hb"))
             .and_then(|(_, v)| serde_json::from_slice::<Heartbeat>(v).ok())
         else {
+            // **No heartbeat to date the node by** — collected before these entries reached this node (anti-entropy
+            // from a peer that had not collected yet, or a gossiped entry its heartbeat overtook), or never received.
+            // No decision reads a non-peer without a heartbeat, so these count for nothing; skipping them left them
+            // in the store and the scope roster forever (the residue flake on #654's CI). Each entry is dated by its
+            // own times instead: collected once every one is past its window plus the staleness and clock-drift
+            // bounds, as the heartbeat horizon would have it. One that cannot be read is kept — nothing dates it.
+            let mut any = false;
+            for ((key, value), stamp) in keys.into_iter().zip(stamps) {
+                let past = serde_json::from_slice::<TallyEntry>(&value)
+                    .is_ok_and(|e| e.t.iter().all(|t| *t <= now_ms.saturating_sub(stored_window(e.w).saturating_add(margin))));
+                if let (true, Some(ts)) = (past, stamp) {
+                    any |= mycelium_core::ops::kv_delete_held(ctx, key, ts);
+                }
+            }
+            collected += usize::from(any);
             continue;
         };
         let longest = keys
@@ -705,7 +724,7 @@ pub(crate) fn collect_residue(ctx: &Arc<TaskCtx>, now_ms: u64) -> usize {
             .map(|e| stored_window(e.w))
             .max()
             .unwrap_or(0);
-        let horizon = longest.saturating_add(bound.max_staleness_ms).saturating_add(ctx.config.max_clock_drift_ms);
+        let horizon = longest.saturating_add(margin);
         if now_ms.saturating_sub(hb.as_of) <= horizon {
             continue;
         }
