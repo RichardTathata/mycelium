@@ -2090,6 +2090,83 @@ the bound, and with the deadline a 100 ms pause under 32 parallel processes reac
 a shutdown of 250 ms or more). At 30 ms the four were re-run on the first fix (10/10, 10/10, 9/10 fail) and the
 writer test on the pre-PR writer (10/10 fail), then 0 failures in 320 runs of all ten under the same load.
 
+**Known flake, closed (K2, 2026-10-20): a product leak, not a test race.** `residue_is_collected_and_a_decision_does_not_read_it`
+failed on #654's CI (run 39352060488) with *"sys/ae-tally/…/c/…/… collected"*: one departed id's tally entry survived
+the collection pass, its heartbeat gone. `collect_residue` dated a non-peer by its heartbeat and skipped a node with
+none (`let Some(hb) = … else { continue }`), so an entry that reached the collector after its node's heartbeat was
+collected was never collected: in the store and the scope roster for ever. A probe on failing runs showed the
+mechanism each time: the node's own collector tick collected an id with one key — the heartbeat, planted a moment
+before its entry — and the test's pass then found that id with one key and no heartbeat, and skipped it. In
+production the same shape arises when an entry arrives by anti-entropy or gossip after the heartbeat's collection.
+The fix dates such an entry by its own times: collected once every one is past its window plus the staleness and
+clock-drift bounds (the heartbeat horizon's margin); an unreadable key — an entry, or a heartbeat that cannot be read —
+goes once no entry of the node could still count (the PR's adversarial review, finding 2: kept, it held the node's
+roster row for ever). Fail-first:
+`an_entry_outliving_its_collected_heartbeat_is_collected` (plants a heartbeat alone, collects it, then plants its
+entries) failed on the unfixed collector and passes with the fix. Under 32 parallel processes the original test failed
+7 in 6 400 runs before the fix and 0 in 7 680 after; the `agent::fleet_history` module 90 of 90 under 6 (#656).
+
+**Closed in #656 (its adversarial review, finding 1, predating it): a member's entries without its heartbeat read as
+zero.** `tally_state_counted`'s non-peer loop skipped a non-peer it held entries for but no readable heartbeat — neither
+counted nor unknown — so a reader receiving a crashed member's entries before its heartbeat (restarted without
+persistence, catching up by anti-entropy) under-counted, failing open, against the row's "a member without one is
+unknown coverage". Now a verified member's entry for the counter, inside the window plus the staleness and drift bounds
+or unreadable, is unknown coverage naming the node; a fabricated id is ignored (`verified_member`, as since round 4);
+without `[tls]` any such node is unknown. The bound is the collector's (`collect_residue` dates the same entry by the
+same margin), so a node stops being consulted when its orphaned entry is collected — exactly so when the writer's
+window is the counter's, as `publish_permit` writes it; an entry written under a shorter window for the same counter
+id is collected earlier. Fail-first:
+`a_members_entries_without_its_heartbeat_are_unknown_coverage` failed on the unfixed reader (*"a member's entry without
+its heartbeat is not counted as zero"*), and its fabricated-id half failed with the membership check removed; the
+extended `without_tls_a_non_peers_absence_is_not_established` failed on the unfixed reader. `deprecations.md` §56.
+
+**Closed in #656 (its second review, 2026-10-20; four items, each with a test seen failing first).**
+1. *A forged time held a counter for ever.* Tally keys are unsigned; a time past now + `max_clock_drift_ms`
+   (`t: [u64::MAX]`) never aged — counted as a permit for ever, kept by its owner's `publish_permit`, and, under a
+   heartbeat-less node, `Indeterminate` and a roster row for ever. Now it dates nothing: the reader reads such an entry
+   as unreadable (`counted_in`), the owner drops such times (`publish_permit`) and does not wait for them (`aged`), the
+   collector dates an entry by its honest times so one holding nothing else is collected **at once** — as the owner's
+   own withdrawal takes an unreadable entry; waiting a margin would wait on a time that is not a time. A heartbeat
+   from the future is no heartbeat (reader and collector). `a_forged_future_time_dates_nothing` failed on 13aaf897
+   (*"a forged time is not counted as a permit"*); dropping the collector's future-heartbeat filter fails it
+   (*"and it is collected"*).
+2. *"Exactly" qualified:* the reader's and the collector's bounds agree when the writer's window is the counter's
+   (CHANGELOG, `deprecations.md` §56, guide 20, this section).
+3. *The heartbeat path's root:* `collect_residue` takes each entry by its own times and the heartbeat last — once
+   none of the node's entries here is live and its `as_of` is past `MAX_FLEET_WINDOW_MS` plus both bounds, since a
+   collector cannot see the windows of entries held only elsewhere. Cost: a departed node's heartbeat stays up to
+   24 hours plus the bounds (one key per node). `a_collector_without_a_members_entry_keeps_its_heartbeat` failed on
+   13aaf897 (*"the heartbeat stays"*). Three tests that waited on the old early removal now collect as of a time past
+   every window (`past_every_window`); the returning-node test collects once `a` has been silent past the staleness
+   and drift bounds, the dwell its restart was written against (an immediate restart was not re-admitted as `b`'s peer
+   while the test's hand-removed peer entry left `b`'s old connection standing — a test artefact, measured: 3/3
+   failed without the dwell, passing with it).
+4. *Reader tests that survived mutation:* the extended `without_tls_a_non_peers_absence_is_not_established` now fails
+   with `.unwrap_or(true)` → `false` (*"an unreadable entry without a heartbeat is unknown"*) and with the horizon
+   replaced by `c.window_ms` (*"an entry between the window and the horizon is still pending"*). (This round also
+   collected an unreadable entry at once; round 2 reverted that — it fails closed, below.)
+
+**Closed in #656 (its second review, round 2, 2026-10-20; each with a test seen failing first or a mutation it kills).**
+1. *A forged time in a live member's entry:* the owner's `withdraw_aged_entries`, under the tally lock, rewrites its
+   own entries without forged times and withdraws one with nothing honest left. A forged `t: [now, u64::MAX]` in a live
+   peer's entry now holds its counter `Indeterminate` for one tick (a third of `control_max_staleness_ms`) plus
+   propagation, not up to its window. `a_forged_time_in_a_live_members_entry_is_scrubbed_by_its_owner` failed on
+   e3b69e0b (*"the owner scrubs the forged time"*). Not closed, stated: forged times inside the window (honest-looking)
+   inflate a count — the unsigned-entries limit (K2's *not built*).
+2. *Unreadable entries fail closed again:* kept until their node's heartbeat goes (or, with none, until nothing of the
+   node is live) — a count that cannot be read is not zero, and an older collector must not erase a newer node's
+   entries in a format it does not know. `an_entry_outliving_its_collected_heartbeat_is_collected` failed on e3b69e0b
+   (*"an unreadable entry is kept while its node has a live one"*); it now also shows one kept beside a current
+   heartbeat and going with it.
+3. *The linger's cost:* a departed node's heartbeat stays up to 24 hours plus the bounds — one key per node, and about
+   one extra KV read per tally decision for each node id that departed in that time (read, found past the counter's
+   horizon, skipped). Bounded by the departures in a day.
+4. *Mutations killed:* `publish_permit` keeping forged times (*"the forged time is dropped by the publish"*), `aged`
+   waiting on them (*"a forged time does not keep an entry from ageing"*), the reader's future-heartbeat filter with a
+   **verified** non-peer (*"a member with a heartbeat from the future is not counted on it"*), and `!live` in the
+   heartbeat rule (*"a heartbeat is kept while an entry of its node is live"* — a collector holding an entry newer than
+   its heartbeat; the comment at the rule says when `!live` is implied and when it is not).
+
 **Known flakes, open (seen during the v2.36.0 work, 2026-10-19; not yet investigated):**
 - `overlay_consistent::tests::distributed_lock_grants_single_holder_under_race` — 0 winners (a liveness timeout), never
   2; failed 4 of 256 runs on `main` under 32-process load.
@@ -2097,6 +2174,10 @@ writer test on the pre-PR writer (10/10 fail), then 0 failures in 320 runs of al
   on rerun.
 - `a_seat_decided_too_late_for_its_window_is_not_admitted` — failed once, under machine load.
 - `lock_lifecycle_tests::row02` — failed once, under machine load.
+- `a_saturating_actor_gets_its_limit_each_short_window` (K2, `FleetConsensus` seats) — *"about one admission a second
+  over 4.5 s, got 2"*, once in 60 `agent::fleet_history` module runs at 6 parallel processes (2026-10-20, during #656);
+  0 in 240 alone at 16 processes, on #656's branch and on `main` at 23fd7bfe alike. A throughput floor under CPU
+  contention, on a path #656 does not touch.
 
 **Open next:**
 - each delivered row's *not built* list, in its §3.5 block and below — for K2: signed tally entries (a forgery under a
@@ -2105,7 +2186,7 @@ writer test on the pre-PR writer (10/10 fail), then 0 failures in 320 runs of al
   at the provider's re-check, an ad's key bound to its writer; for M: the OpenShell backend (skipped for now, above),
   resource limits, limits by address and by path, a limit on the proxy's port by address under Landlock; for K: a
   history beyond 24 hours, 1 024 records per actor or 65 536 actors per point, and a replay of the history input;
-- (every recorded K2 flake is closed: the `/mcp` door test's lost reply, #647; the seat lease's "decided too late", #648; the abort and aged-tally tests, test races, #651;)
+- (every recorded K2 flake is closed: the `/mcp` door test's lost reply, #647; the seat lease's "decided too late", #648; the abort and aged-tally tests, test races, #651; the residue test, a collector leak, #656;)
 - the private Cedar adapter's re-pin onto v2.36.0 is **done** (private #33, `0d654fd`). Open is the **next** re-pin,
   after K2's bounds (§55) are released: nine `fleet_*` cases, two of which (`fleet_limit_past_the_seat_cap`,
   `fleet_window_past_the_horizon`) the adapter passes by refusing the policy at load — which the suite counts as a pass
