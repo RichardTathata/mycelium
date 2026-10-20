@@ -83,25 +83,38 @@ are folded into the [front page](../features/README.md) and the [skeleton](../fe
 
 ### 4.2 · F2's exit, on evidence
 
-Two rounds: the gate as first built, then the independent review of #655, which found that the invariant — every
+Three rounds: the gate as first built, then the independent review of #655, which found that the invariant — every
 feature has an id the registry must map — did not hold (a glossary row without an anchor, a crate without features
 and a unit-file key without a heading were each invisible), that a typo in a registry key dropped a check, and that
-seven branches survived being disabled. Each is fixed at the root and planted below: each plant for a new check was
-run against the first-round gate and not caught by it, and with each of the seven branches disabled in turn the
-suite fails at that branch's plant.
+seven branches survived being disabled; then its second pass, which found more escapes of the same invariant (a
+companion guarantee built through a type alias or a qualified path, a unit-file field that is not plain `pub`, a
+bold glossary row read as a group header) and four more branches no plant reached (the integration-test target,
+`todo` without `planned`, the registry's type checks, an unknown top-level key). Each is fixed at the root and
+planted below: each plant for a new check was run against the gate before it and not caught by it, and a mutation
+pass — every `if` forced false, every `errors.append` removed, every `continue` and boolean `return` inverted, one
+at a time, 165 mutants — is killed by the suite except the sixteen stated under the table.
 
 | Promise | Delivered by | Shown failing (plant in `scripts/test-check-feature-pages.py`) |
 |---|---|---|
 | Every id of every source maps to a page or an exclusion with a reason; the gate fails on an unmapped id | `check_registry` over `source_ids` (seven sources); `docs/features/registry.toml` | `unmapped-concept`, `unmapped-cargo-feature`, `implicit-cargo-feature`, `unmapped-crate`, `unmapped-companion-guarantee`; also `stale-registry-id`, `stale-link`, `mapped-twice`, `exclusion-without-reason`, `feature-without-page` |
-| A source cannot hold a feature the registry does not see | `concept_ids` (every quick-reference row anchored), `unit_ids` (keys from `NodeCapabilityConfig` and its confine/egress tables, checked against the headings both ways), `companion_guarantee_ids` (a non-literal id or an aliased descriptor refused; test modules skipped by a brace match that skips strings, chars and comments) | `glossary-row-without-anchor`, `unit-key-without-heading`, `unit-heading-without-key`, `unit-subtable-gone`, `non-literal-guarantee-id`, `aliased-descriptor`, `early-test-module`, `brace-in-string` |
-| The registry says what it means | `check_shape`: a key outside the known set, or a value of the wrong type, is refused | `unknown-registry-key` |
+| A source cannot hold a feature the registry does not see | `concept_ids` (every quick-reference row anchored; `is_group_header` admits only a four-cell row with a bold label, empty kind and demo cells, and an empty or wholly italic one-line cell), `unit_ids` (keys from `NodeCapabilityConfig`'s fields of any visibility and its confine/egress tables, checked against the headings both ways), `companion_guarantee_ids` (a non-literal id, an import alias, a type alias, a qualified-path call and a struct literal refused — the defining file's literals excepted; test modules skipped by a brace match that skips strings, chars and comments) | `glossary-row-without-anchor`, `parser-guard-glossary`, `glossary-bold-row-short`, `glossary-bold-row-with-text`, `unit-key-without-heading`, `restricted-unit-field`, `private-unit-field`, `parser-guard-unit-code`, `unit-heading-without-key`, `unit-subtable-gone`, `non-literal-guarantee-id`, `aliased-descriptor`, `type-alias-descriptor`, `qualified-path-descriptor`, `descriptor-struct-literal`, `early-test-module`, `brace-in-string`; and what it must not read, each a positive case: `fenced-unit-heading`, `descriptor-in-test-file`, `nested-test-module` |
+| The registry says what it means | `check_shape`: a key outside the known set, at the top or in an entry, or a value of the wrong type, is refused; `check_registry`: a `todo` page names its `planned` one | `unknown-registry-key`, `unknown-top-level-key`, `list-key-not-a-list`, `name-not-a-string`, `todo-without-planned` |
 | A registry page that does not exist, a page not in the registry, two features on one page and a subdirectory fail | `check_registry` | `registry-page-missing`, `page-not-in-registry`, `two-features-one-page`, `subdirectory` |
 | A page with a missing section fails (all six, in order, by heading) | `check_page`, `SECTIONS` | `missing-section`, `sections-out-of-order` |
-| A dead link fails, heading slugs and `<a id>` both (P5); a link the resolver cannot read is refused | `check_links` with front-doors' `resolve`/`slugs`; `UNREADABLE_LINKS` | `dead-anchor`, `dead-glossary-anchor`, `dead-link`, `reference-style-link`, `titled-link`, `a-href` |
-| A dead setting fails: a code item that is not defined in its file (P1), a configuration field with no row (P9) | `check_page` (`defines`, `config_fields`) | `absent-fn`, `absent-qualifier`, `in-code-without-item`, `missing-config-row`, `parser-guard-fields` |
-| A named test is a `#[test]` `fn` in its linked file and not excepted (P1, P2); in CI, executed in that file's target | `named_tests`, `defines_test`, `excepted`; `check_executed` (`executed_in`) in the `test-coverage` job | `absent-test`, `short-test-absent`, `not-a-test`, `none-names-no-test`, `test-without-file`, `excepted-test`, `in-code-without-test`, `test-not-executed`, `test-in-wrong-target` (with `executed-baseline`) |
+| A dead link fails, heading slugs and `<a id>` both (P5); a link the resolver cannot read is refused | `check_links` with front-doors' `resolve`/`slugs`; `UNREADABLE_LINKS` | `dead-anchor`, `dead-glossary-anchor`, `dead-link`, `reference-style-link`, `titled-link`, `a-href`; `fenced-page-heading` and `external-link` pass |
+| A dead setting fails: a code item that is not defined in its file (P1), a configuration field with no row (P9) | `check_page` (`defines`, `config_fields`) | `absent-fn`, `absent-qualifier`, `dead-code-item-link`, `in-code-without-item`, `missing-config-row`, `parser-guard-fields` |
+| A named test is a `#[test]` `fn` in its linked file and not excepted (P1, P2); in CI, executed in that file's target | `named_tests`, `defines_test`, `excepted`; `check_executed` (`executed_in`) in the `test-coverage` job | `absent-test`, `absent-test-in-first-paragraph`, `short-test-absent`, `not-a-test`, `none-names-no-test`, `test-without-file`, `excepted-test`, `in-code-without-test`, `turn-on-name-without-file` (passes), `test-not-executed`, `script-key-not-a-run`, `test-in-wrong-target` (a `src/` test), `integration-test-in-wrong-binary` (a `tests/<stem>.rs` test) (with `executed-baseline`) |
 | An example absent from the index or without a CI status fails; an index row for an `example: none` feature fails (P2) | `check_page`, `check_examples` | `example-absent-from-index`, `example-missing`, `example-row-without-status`, `see-without-index-link`, `example-for-none-feature`, `none-without-sentence`, `parser-guard-matrix`; the example branch's positive case is `example-baseline`, a planted page with a real example |
-| Every page links the ids the registry gives it | `links_id` | `concept-not-linked`, `guarantee-not-linked` |
+| Every page links the ids the registry gives it | `links_id` | `concept-not-linked`, `guarantee-not-linked`, `crate-not-linked` (with `crate-linked`) |
+
+**The mutation pass's survivors (16 of 165), each for a stated reason.** The empty-log guard of `check_executed`
+(a fetch that saved nothing; planting it needs an empty CI download, and the job fails on it anyway); the
+`__main__` block's four branches (the CLI, run by `make check` and CI, not by the suite); six that cannot be
+reached from what the gate is given — `defines_test` walking off the top of a file, `links_id`'s unknown source
+(the sources are fixed), `executed_in` on a key that is not `rust …`, has fewer than three parts, or names a file
+outside `src/` and `tests/` (the coverage scan produces none of these for a named test); and five equivalent
+mutants — the `continue` after a fence line or after an error already appended, and the external-URL skip, which
+`resolve` also passes.
 
 **Not built in F2:** per-entry anchors for the catalogues, the ledger and the configuration table (P4, F3's); the
 capability map's maintainer note naming the registry (F3's exit). **What a page's prose claims is not checked** by
@@ -110,10 +123,14 @@ F-S `/doc-coverage` pass (F4). **Still name-level:** a Cargo id is linked when t
 backticks and the crate (any crate but `mycelium`); a dotted configuration sub-field has no row of its own; a
 `src/` test is matched in CI by its crate and name, not its module path, because `#[path]` makes the module differ
 from the file (`fleet_history_tests.rs` runs as `fleet_history::tests`); a nested unit-file table other than
-`[activation.confine]` and `[activation.confine.egress]` is a row of its parent's table, not a source id. **Not
-added: a stem-side Rust test** that every registered id appears in the registry. With a non-literal id and an
-aliased descriptor refused, the gate reads every registration from the same literal such a test would, so the test
-would add a wasmtime build and no case the gate misses. **A departure from §3's stated exclusions:**
+`[activation.confine]` and `[activation.confine.egress]` is a row of its parent's table, not a source id — those two
+are a hand list (`UNIT_SUBTABLES`), so a nested table added in code is not a source id until it is added there;
+deriving them from the structs' table-typed fields would make every nested struct (a probe, a schema) a heading
+the unit-file reference does not have, so it waits on F3 deciding which nested tables a page names. **Not
+added: a stem-side Rust test** that every registered id appears in the registry. With a non-literal id, an
+import or type alias, a qualified-path call and a struct literal refused, the gate reads every registration from
+the same literal such a test would. The one case left is a descriptor built inside a `macro_rules!` expansion
+whose id is a macro argument, which no crate does; the test would catch it, at the cost of a wasmtime build. **A departure from §3's stated exclusions:**
 `mycelium/sim` and `mycelium-core/sim` map to the replay page rather than to an exclusion, because `sim` is also
 what makes the node binary record a replay bundle; `mycelium-wasm-host`'s `sim`, which only turns on that crate's
 test seams, is excluded.

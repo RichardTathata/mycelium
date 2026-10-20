@@ -11,12 +11,19 @@ from unittest.mock import patch
 # Verification policy rule 3: each case prints `@@case@@ <suite>::<case>` as it starts; --list names them all.
 SUITE = 'scripts/test-check-feature-pages.py'
 CASES = ['baseline', 'example-baseline',
+         # text the gate must not read as a source or a fault (each a positive baseline)
+         'fenced-unit-heading', 'fenced-page-heading', 'external-link', 'descriptor-in-test-file',
+         'nested-test-module', 'turn-on-name-without-file', 'crate-linked',
          # (a) the sources and the registry
-         'unmapped-concept', 'glossary-row-without-anchor', 'unmapped-cargo-feature', 'implicit-cargo-feature',
+         'unmapped-concept', 'glossary-row-without-anchor', 'parser-guard-glossary', 'glossary-bold-row-short', 'glossary-bold-row-with-text',
+         'unmapped-cargo-feature', 'implicit-cargo-feature',
          'unmapped-crate', 'unmapped-companion-guarantee', 'non-literal-guarantee-id', 'aliased-descriptor',
-         'early-test-module', 'brace-in-string', 'unit-key-without-heading', 'unit-heading-without-key',
+         'type-alias-descriptor', 'qualified-path-descriptor', 'descriptor-struct-literal',
+         'early-test-module', 'brace-in-string', 'unit-key-without-heading', 'restricted-unit-field',
+         'private-unit-field', 'parser-guard-unit-code', 'unit-heading-without-key',
          'unit-subtable-gone', 'stale-registry-id', 'stale-link', 'mapped-twice', 'exclusion-without-reason',
-         'unknown-registry-key', 'feature-without-page',
+         'unknown-registry-key', 'unknown-top-level-key', 'list-key-not-a-list', 'name-not-a-string',
+         'feature-without-page', 'todo-without-planned',
          # (b) pages and the registry
          'page-not-in-registry', 'registry-page-missing', 'two-features-one-page', 'subdirectory',
          # (c) sections
@@ -24,17 +31,18 @@ CASES = ['baseline', 'example-baseline',
          # (d) links
          'dead-anchor', 'dead-glossary-anchor', 'dead-link', 'reference-style-link', 'titled-link', 'a-href',
          # (e) code items
-         'absent-fn', 'absent-qualifier', 'in-code-without-item',
+         'absent-fn', 'absent-qualifier', 'dead-code-item-link', 'in-code-without-item',
          # (f) configuration fields
          'missing-config-row', 'parser-guard-fields',
          # (g) tests
-         'absent-test', 'short-test-absent', 'not-a-test', 'none-names-no-test', 'test-without-file',
-         'excepted-test', 'in-code-without-test', 'test-not-executed', 'test-in-wrong-target', 'executed-baseline',
+         'absent-test', 'absent-test-in-first-paragraph', 'short-test-absent', 'not-a-test', 'none-names-no-test', 'test-without-file',
+         'excepted-test', 'in-code-without-test', 'test-not-executed', 'script-key-not-a-run', 'test-in-wrong-target', 'integration-test-in-wrong-binary',
+         'executed-baseline',
          # (h) examples
          'example-for-none-feature', 'example-absent-from-index', 'example-missing', 'example-row-without-status',
          'see-without-index-link', 'none-without-sentence', 'parser-guard-matrix',
          # (i) the page links its ids
-         'concept-not-linked', 'guarantee-not-linked']
+         'concept-not-linked', 'guarantee-not-linked', 'crate-not-linked']
 if sys.argv[1:] == ['--list']:
     for c in CASES:
         print(f'@@case-list@@ {SUITE}::{c}')
@@ -123,6 +131,11 @@ def fails(expected, edits=None, pages=None, dirs=()):
     assert any(expected in error for error in errors), (expected, errors)
 
 
+def passes(edits=None, pages=None):
+    errors = run(edits, pages)
+    assert errors == [], errors
+
+
 def with_example(page_edits=(), reg_edits=(), other=None):
     """Edits that plant the example page (with its own replacements) and its registry entry."""
     page = EXAMPLE_PAGE
@@ -140,6 +153,30 @@ case('example-baseline')
 edits, pages = with_example()
 assert run(edits, pages) == [], run(edits, pages)
 
+# Text the gate must not read: a heading inside a code fence, an external link, a descriptor in a test file.
+case('fenced-unit-heading')
+passes({'docs/reference/unit-file.md': [('\n## `[[serve]]`\n', '\n```toml\n## `[[planted]]`\n```\n\n## `[[serve]]`\n')]})
+case('fenced-page-heading')
+passes({FLEET: [('\n## Go deeper\n', '\n```text\n## Not a section\n```\n\n## Go deeper\n')]})
+case('external-link')
+passes({FLEET: [('\n## Go deeper\n', '\nSee also [a specification](https://example.org/spec).\n\n## Go deeper\n')]})
+case('descriptor-in-test-file')
+passes({'src/agent/fleet_history_tests.rs': [('#[tokio::test(flavor = "multi_thread", worker_threads = 8)]\nasync fn the_tally_scope',
+                                              'fn planted() { let _ = GuaranteeDescriptor::new(PLANTED_ID, 1); }\n\n'
+                                              '#[tokio::test(flavor = "multi_thread", worker_threads = 8)]\nasync fn the_tally_scope')]})
+case('nested-test-module')
+passes({'mycelium-wasm-host/src/rules.rs': [('\n];\n', '\n];\n\n#[cfg(test)]\nmod outer {\n    #[cfg(test)]\n    mod inner {}\n'
+                                                 '    fn planted() { let _ = GuaranteeDescriptor::new(PLANTED_ID, 1); }\n}\n')]})
+case('turn-on-name-without-file')
+edits, pages = with_example([('- [`tls`](../reference/configuration.md#the-fields).\n',
+                              '- [`tls`](../reference/configuration.md#the-fields).\n- Then set `planted_setting_name` as well.\n')])
+passes(edits, pages)
+case('crate-linked')
+edits, pages = with_example([('A page the mutation suite plants', 'A page about `mycelium-commitment` the mutation suite plants')],
+                            [('ids = ["concept:award", "crate:mycelium-commitment"]', 'ids = ["concept:award"]'),
+                             ('example = "hello_mesh"\nids = []', 'example = "hello_mesh"\nids = ["crate:mycelium-commitment"]')])
+passes(edits, pages)
+
 # (a)
 case('unmapped-concept')
 fails('concept:planted-term (concept) is not mapped',
@@ -147,6 +184,15 @@ fails('concept:planted-term (concept) is not mapped',
 case('glossary-row-without-anchor')
 fails('the glossary row "Planted term" has no <a id>',
       {'docs/guide/00-concepts.md': [('| <a id="seam"></a>', '| Planted term | native | a row | x |\n| <a id="seam"></a>')]})
+case('parser-guard-glossary')
+fails('no "## Glossary quick-reference" table',
+      {'docs/guide/00-concepts.md': [('\n## Glossary quick-reference\n', '\n## Glossary quick reference\n')]})
+case('glossary-bold-row-short')
+fails('the glossary row "**Mailbox**" has no <a id>',
+      {'docs/guide/00-concepts.md': [('| <a id="seam"></a>', '| **Mailbox** | |\n| <a id="seam"></a>')]})
+case('glossary-bold-row-with-text')
+fails('the glossary row "**Mailbox**" has no <a id>',
+      {'docs/guide/00-concepts.md': [('| <a id="seam"></a>', '| **Mailbox** | | durable, HLC-ordered delivery | |\n| <a id="seam"></a>')]})
 case('unmapped-cargo-feature')
 fails('cargo:mycelium-wasm-host/planted (cargo) is not mapped',
       {'mycelium-wasm-host/Cargo.toml': [('\nstem = [', '\nplanted = []\nstem = [')]})
@@ -166,6 +212,16 @@ case('aliased-descriptor')
 fails('imports GuaranteeDescriptor as Gd',
       {'mycelium-wasm-host/src/activation_egress.rs': [('use mycelium::{ConfineBackend, GuaranteeDescriptor,',
                                                         'use mycelium::{ConfineBackend, GuaranteeDescriptor as Gd, GuaranteeDescriptor,')]})
+case('type-alias-descriptor')
+fails('a type alias for GuaranteeDescriptor',
+      {'mycelium-wasm-host/src/rules.rs': [('\n];\n', '\n];\n\ntype Planted = mycelium::GuaranteeDescriptor;\n')]})
+case('qualified-path-descriptor')
+fails('a qualified path (<GuaranteeDescriptor>::…)',
+      {'mycelium-wasm-host/src/rules.rs': [('\n];\n', '\n];\n\nfn planted() { let _ = <mycelium::GuaranteeDescriptor>::new("stem.planted", 1); }\n')]})
+case('descriptor-struct-literal')
+fails('a GuaranteeDescriptor struct literal',
+      {'mycelium-wasm-host/src/rules.rs': [('\n];\n', '\n];\n\nfn planted(d: mycelium::GuaranteeDescriptor) -> mycelium::GuaranteeDescriptor '
+                                                        '{ mycelium::GuaranteeDescriptor { revision: 2, ..d } }\n')]})
 case('early-test-module')
 fails('companion-guarantee:stem.planted_after_a_test_module (companion-guarantee) is not mapped',
       {'mycelium-wasm-host/src/activation_sandbox.rs': [
@@ -179,6 +235,17 @@ case('unit-key-without-heading')
 fails('the unit-file key `[[planted]]` (src/capability_config.rs) has no section heading',
       {'src/capability_config.rs': [('    #[serde(default, rename = "serve")]\n',
                                      '    #[serde(default, rename = "planted")]\n    pub planteds: Vec<ServeDecl>,\n    #[serde(default, rename = "serve")]\n')]})
+case('restricted-unit-field')
+fails('the unit-file key `[[budget]]` (src/capability_config.rs) has no section heading',
+      {'src/capability_config.rs': [('    #[serde(default, rename = "serve")]\n',
+                                     '    #[serde(default, rename = "budget")]\n    pub(crate) budgets: Vec<ServeDecl>,\n    #[serde(default, rename = "serve")]\n')]})
+case('private-unit-field')
+fails('the unit-file key `planted_limit` (src/capability_config.rs) has no section heading',
+      {'src/capability_config.rs': [('    #[serde(default, rename = "serve")]\n',
+                                     '    #[serde(default)]\n    planted_limit: Option<u64>,\n    #[serde(default, rename = "serve")]\n')]})
+case('parser-guard-unit-code')
+fails('no `pub struct NodeCapabilityConfig` with fields',
+      {'src/capability_config.rs': [('pub struct NodeCapabilityConfig {', 'pub struct NodeCapabilityConfigV2 {')]})
 case('unit-heading-without-key')
 fails('the section `[[planted]]` names no key of NodeCapabilityConfig',
       {'docs/reference/unit-file.md': [('\n## `[[serve]]`\n', '\n## `[[planted]]`\n\n## `[[serve]]`\n')]})
@@ -199,6 +266,17 @@ fails('an exclusion has no reason', {REG: [('reason = "An external prerequisite'
 case('unknown-registry-key')
 fails('has an unknown key `link`',
       {REG: [('links = ["rule:ae.preflight"', 'link = ["rule:ae.preflight"')]})
+case('unknown-top-level-key')
+fails('unknown top-level key `planted`', {REG: [('# The feature registry', 'planted = 1\n# The feature registry')]})
+case('list-key-not-a-list')
+fails('feature "Evidence journal": `links` must be a list of strings',
+      {REG: [('name = "Evidence journal"\npage = "todo"\n', 'name = "Evidence journal"\npage = "todo"\nlinks = "concept:planted"\n')]})
+case('name-not-a-string')
+fails('`name` must be a string',
+      {REG: [('name = "Evidence journal"\n', 'name = 1\n')]})
+case('todo-without-planned')
+fails('feature "Authorising actions (the action evaluator)" is "todo" but names no `planned` page',
+      {REG: [('page = "todo"\nplanned = "action-authorisation"\n', 'page = "todo"\n')]})
 case('feature-without-page')
 fails('feature "Evidence journal" names no page',
       {REG: [('name = "Evidence journal"\npage = "todo"\n', 'name = "Evidence journal"\n')]})
@@ -243,6 +321,9 @@ case('absent-fn')
 fails('no fn, struct, enum, trait, const, type or static at_least', {FLEET: [('[`Rule::at_most`]', '[`Rule::at_least`]')]})
 case('absent-qualifier')
 fails('no struct, enum, trait or type NoSuchRule', {FLEET: [('[`Rule::scoped`]', '[`NoSuchRule::scoped`]')]})
+case('dead-code-item-link')
+fails('does not resolve', {FLEET: [('[`Rule::at_most`](../../src/agent/action_evaluator.rs)',
+                                     '[`Rule::at_most`](../../src/agent/action_evaluators.rs)')]})
 case('in-code-without-item')
 edits, pages = with_example([('## Turn it on\n\n', '## Turn it on\n\nThis feature is turned on in code.\n\n')])
 fails('says "This feature is turned on in code" but links no code item', edits, pages)
@@ -258,6 +339,9 @@ fails('no field rows found under "## The fields"', {'docs/reference/configuratio
 case('absent-test')
 fails('no fn the_tally_scope_converges_and_never_refuses is in a file',
       {FLEET: [('`the_tally_scope_converges_and_refuses_after_convergence`', '`the_tally_scope_converges_and_never_refuses`')]})
+case('absent-test-in-first-paragraph')
+fails('no fn planted_absent_test is in a file',
+      {FLEET: [('\n## See it work\n\n', '\n## See it work\n\n`planted_absent_test`, in [its file](../../src/agent/fleet_history_tests.rs).\n\n')]})
 case('short-test-absent')
 fails('no fn tally_converges is in a file', {FLEET: [('`the_tally_scope_converges_and_refuses_after_convergence`', '`tally_converges`')]})
 case('none-names-no-test')
@@ -302,10 +386,22 @@ with tempfile.TemporaryDirectory() as logs:
     log.write_text(log_for([(t, files[0], True) for _, t, files in named[1:]]))
     errors = module.check_executed(ROOT, logs)
     assert any(f'`{named[0][1]}`' in e and 'which no job of this run executed' in e for e in errors), errors
+    case('script-key-not-a-run')
+    crate, within = module.crate_of(ROOT, named[0][2][0])
+    log.write_text(log_for([(t, files[0], True) for _, t, files in named[1:]])
+                   + f'@@case@@ {within}::{crate}::{named[0][1]}\n')
+    errors = module.check_executed(ROOT, logs)
+    assert any(f'`{named[0][1]}`' in e and 'which no job of this run executed' in e for e in errors), errors
     case('test-in-wrong-target')
     log.write_text(log_for([(t, files[0], i != 0) for i, (_, t, files) in enumerate(named)]))
     errors = module.check_executed(ROOT, logs)
     assert any(f'`{named[0][1]}`' in e for e in errors), errors
+    case('integration-test-in-wrong-binary')
+    integration = [i for i, (_, _, files) in enumerate(named) if module.crate_of(ROOT, files[0])[1].startswith('tests/')]
+    assert integration, named
+    log.write_text(log_for([(t, files[0], i != integration[0]) for i, (_, t, files) in enumerate(named)]))
+    errors = module.check_executed(ROOT, logs)
+    assert any(f'`{named[integration[0]][1]}`' in e for e in errors), errors
     case('executed-baseline')
     log.write_text(log_for([(t, files[0], True) for _, t, files in named]))
     assert module.check_executed(ROOT, logs) == [], module.check_executed(ROOT, logs)
@@ -336,8 +432,16 @@ fails('no capability matrix rows found', {'examples/README.md': [('\n## The capa
 # (i)
 case('concept-not-linked')
 fails('does not link concept:history-scope', {FLEET: [('[history scope](../guide/00-concepts.md#history-scope)', 'history scope')]})
+case('crate-not-linked')
+edits, pages = with_example(reg_edits=[('ids = ["concept:award", "crate:mycelium-commitment"]', 'ids = ["concept:award"]'),
+                                       ('example = "hello_mesh"\nids = []', 'example = "hello_mesh"\nids = ["crate:mycelium-commitment"]')])
+fails('does not link crate:mycelium-commitment', edits, pages)
 case('guarantee-not-linked')
 fails('does not link guarantee:ae.authorised_at_seam',
       {ROUTING: [('[`ae.authorised_at_seam` and `ae.recorded_before_dispatch`]', '[`ae.recorded_before_dispatch`]')]})
 
-print(f'test-check-feature-pages: {len(CASES) - 3} negative mutations rejected; three positive baselines passed')
+POSITIVE = {'baseline', 'example-baseline', 'executed-baseline', 'fenced-unit-heading', 'fenced-page-heading',
+            'external-link', 'descriptor-in-test-file', 'nested-test-module', 'turn-on-name-without-file',
+            'crate-linked'}
+print(f'test-check-feature-pages: {len(CASES) - len(POSITIVE)} negative mutations rejected; '
+      f'{len(POSITIVE)} positive baselines passed')

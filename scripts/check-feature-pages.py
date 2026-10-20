@@ -7,7 +7,8 @@ Reads the checked-in registry, docs/features/registry.toml, and fails on:
      exclusion with a reason — a registry id that no source has (so the registry cannot rot), a registry key
      outside the known set (a typo would drop a check), and a source that cannot say what it names: a glossary
      quick-reference row with no `<a id>`, a unit-file key with no heading (or a heading with no key), a
-     companion guarantee whose id is not a string literal or whose descriptor type is imported under another name;
+     companion guarantee whose id is not a string literal or whose descriptor is named or built another way (an
+     import alias, a type alias, a qualified path, a struct literal);
   b. a registry entry naming a page that does not exist, two entries naming one page, a page in docs/features/
      the registry does not name, and a subdirectory of docs/features/;
   c. a page whose `##` headings are not the six sections, in order;
@@ -97,6 +98,14 @@ def page_exists(root, page):
 
 # ---------------------------------------------------------------------------------------------- the sources
 
+def is_group_header(cells):
+    """A group's header row, and nothing else: four cells, a bold label, the kind and demo cells empty, and the
+    one-line cell empty or wholly italic (a pointer, not a definition). A bold term with any text of its own — a
+    definition, a demo, a kind — or with the wrong number of cells is a term, and needs an `<a id>`."""
+    return (len(cells) == 4 and re.fullmatch(r'\*\*[^*]+\*\*', cells[0]) is not None and not cells[1]
+            and not cells[3] and (not cells[2] or re.fullmatch(r'\*[^*].*[^*]\*', cells[2]) is not None))
+
+
 def concept_ids(root, errors):
     """Each quick-reference row's `<a id>`; a row without one is an error (a term no registry entry can name)."""
     text = read(root, GLOSSARY)
@@ -109,8 +118,10 @@ def concept_ids(root, errors):
         if not line.startswith('| ') or re.match(r'^\|[-:| ]+\|$', line):
             continue
         cells = [c.strip() for c in line.strip('|').split('|')]
-        if cells[0] == 'Term' or (re.fullmatch(r'\*\*[^*]+\*\*', cells[0]) and not cells[1]):
-            continue  # the header, and a group's header row
+        if cells[0] == 'Term':
+            continue  # the table's header
+        if is_group_header(cells):
+            continue
         a = re.match(r'<a id="([^"]+)"></a>', cells[0])
         if a:
             out.add(f'concept:{a.group(1)}')
@@ -124,7 +135,8 @@ def catalogue_ids(root, rel, key, prefix):
 
 
 def struct_fields(code, name):
-    """[(serialized key, type)] for `pub struct <name>`'s fields, a serde `rename` honoured."""
+    """[(serialized key, type)] for `pub struct <name>`'s fields — public, `pub(…)` and private alike, since serde
+    reads them all — a serde `rename` honoured."""
     m = re.search(rf'\bpub struct {name}\s*\{{', code)
     if not m:
         return None
@@ -135,7 +147,7 @@ def struct_fields(code, name):
         r = re.search(r'#\[serde\([^\]]*\brename\s*=\s*"([^"]+)"', s)
         if r:
             rename = r.group(1)
-        f = re.match(r'pub\s+(\w+)\s*:\s*(.+?),?\s*(?://.*)?$', s)
+        f = re.match(r'(?:pub(?:\([^)]*\))?\s+)?(\w+)\s*:\s*(?!:)(.+?),?\s*(?://.*)?$', s)
         if f:
             out.append((rename or f.group(1), f.group(2).rstrip(',')))
             rename = None
@@ -245,15 +257,26 @@ def without_test_modules(text):
     return ''.join(out)
 
 
-DESCRIPTOR_CALL = re.compile(r'GuaranteeDescriptor::new\(\s*')
+DESCRIPTOR_CALL = re.compile(r'\bGuaranteeDescriptor\s*::\s*new\s*\(\s*')
 DESCRIPTOR_ALIAS = re.compile(r'\bGuaranteeDescriptor\s+as\s+(\w+)')
+# Every other way to name or build a descriptor, which the literal scan above would not read: a type alias, a
+# qualified path (`<GuaranteeDescriptor>::new`, `<… as …>::`), and a struct literal (its fields are public). The
+# defining file is exempt from the last: its literals are `new` itself and the core catalogue's `g(…)`.
+DESCRIPTOR_ESCAPES = [
+    (re.compile(r'\btype\s+(\w+)[^=;]*=[^;]*\bGuaranteeDescriptor\b'), 'a type alias for GuaranteeDescriptor'),
+    (re.compile(r'(?<![\w>])<\s*(?:\w+::)*GuaranteeDescriptor\b[^<>;{}()]*>\s*::'),
+     'a qualified path (<GuaranteeDescriptor>::…)'),
+    (re.compile(r'(?<![\w:])(?:\w+::)*GuaranteeDescriptor\s*\{'), 'a GuaranteeDescriptor struct literal'),
+]
+NOT_A_LITERAL = re.compile(r'(?:->|\bstruct|\bimpl(?:<[^>]*>)?|\bfor)\s*$')  # a return type, the definition, an impl
+DESCRIPTOR_HOME = 'src/agent/guarantee.rs'
 
 
 def companion_guarantee_ids(root, errors):
     """Every guarantee a crate registers in code, outside test modules and test files. The core's own are
     built by `g(…)` in src/agent/guarantee.rs and are the catalogue; this finds the rest, whatever crate. A
     registration the scan cannot read — an id that is not a string literal, a descriptor imported under another
-    name — is refused, so a guarantee cannot be invisible to the registry."""
+    name, a type alias, a qualified-path call or a struct literal — is refused, so a guarantee cannot be invisible to the registry."""
     out = set()
     for _, member, _ in workspace_crates(root):
         for path in sorted((root / member).glob('src/**/*.rs')):
@@ -264,6 +287,15 @@ def companion_guarantee_ids(root, errors):
             for alias in DESCRIPTOR_ALIAS.findall(text):
                 errors.append(f'{rel}: imports GuaranteeDescriptor as {alias}: the registry reads '
                               f'`GuaranteeDescriptor::new("<id>"`; use the name')
+            for pattern, what in DESCRIPTOR_ESCAPES:
+                if rel == DESCRIPTOR_HOME and 'literal' in what:
+                    continue
+                for m in pattern.finditer(text):
+                    if 'literal' in what and NOT_A_LITERAL.search(text[max(0, m.start() - 80):m.start()]):
+                        continue
+                    line = text.count('\n', 0, m.start()) + 1
+                    errors.append(f'{rel}: {what} near line {line} of the scanned text: the registry reads '
+                                  f'`GuaranteeDescriptor::new("<id>"`; build the descriptor that way')
             for m in DESCRIPTOR_CALL.finditer(text):
                 lit = re.match(r'"([^"\\]+)"\s*,', text[m.end():])
                 if lit:
