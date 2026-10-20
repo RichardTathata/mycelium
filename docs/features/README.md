@@ -26,6 +26,7 @@ Every page has these six sections, in this order, with these headings. Copy
    runs that code: its name in backticks, a `fn <name>` in the linked file (checked pre-push), listed by CI's test
    universe and matched by no entry of `scripts/test-coverage-exceptions.txt` (checked in CI). A test that reads
    the page is preferred; a test that runs a hand-kept copy is recorded as such.
+   A guide snippet that no test runs is recorded as such, and the gap goes to the `/doc-coverage` pass.
 4. **See it work.** A link to the feature's row in the [example index](../../examples/README.md), which holds
    the run command, the prerequisites and the CI status. If there is none, the section opens with the fixed
    sentence "No runnable example exists" and links the test that runs the feature end to end: its name in

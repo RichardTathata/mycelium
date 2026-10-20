@@ -9,7 +9,7 @@
 ## When to use it, and when not
 
 - **Use it when** <!-- one line -->
-- **Not when** <!-- one line -->
+- **Not when** <!-- one line; a headline limit in a short clause, linked to where it is stated in full -->
 
 ## Turn it on
 
@@ -20,7 +20,8 @@ backticks linked to the file that defines it, the last path segment a fn, struct
 configuration field is its own line, `name` in backticks linked to ../reference/configuration.md#the-fields. End
 with the test that runs that code: its name in backticks, a `fn <name>` in the linked file, listed by CI's test
 universe and matched by no entry of scripts/test-coverage-exceptions.txt; say so if it runs a hand-kept copy
-rather than reading the page. -->
+rather than reading the page. A guide snippet that no test runs is recorded as such; the gap goes to the
+/doc-coverage pass. -->
 
 ## See it work
 
