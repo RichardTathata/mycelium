@@ -2142,8 +2142,29 @@ extended `without_tls_a_non_peers_absence_is_not_established` failed on the unfi
    failed without the dwell, passing with it).
 4. *Reader tests that survived mutation:* the extended `without_tls_a_non_peers_absence_is_not_established` now fails
    with `.unwrap_or(true)` → `false` (*"an unreadable entry without a heartbeat is unknown"*) and with the horizon
-   replaced by `c.window_ms` (*"an entry between the window and the horizon is still pending"*). An unreadable entry
-   is now collected at once (it was kept until nothing else could count), as its owner's `aged` takes it.
+   replaced by `c.window_ms` (*"an entry between the window and the horizon is still pending"*). (This round also
+   collected an unreadable entry at once; round 2 reverted that — it fails closed, below.)
+
+**Closed in #656 (its second review, round 2, 2026-10-20; each with a test seen failing first or a mutation it kills).**
+1. *A forged time in a live member's entry:* the owner's `withdraw_aged_entries`, under the tally lock, rewrites its
+   own entries without forged times and withdraws one with nothing honest left. A forged `t: [now, u64::MAX]` in a live
+   peer's entry now holds its counter `Indeterminate` for one tick (a third of `control_max_staleness_ms`) plus
+   propagation, not up to its window. `a_forged_time_in_a_live_members_entry_is_scrubbed_by_its_owner` failed on
+   e3b69e0b (*"the owner scrubs the forged time"*). Not closed, stated: forged times inside the window (honest-looking)
+   inflate a count — the unsigned-entries limit (K2's *not built*).
+2. *Unreadable entries fail closed again:* kept until their node's heartbeat goes (or, with none, until nothing of the
+   node is live) — a count that cannot be read is not zero, and an older collector must not erase a newer node's
+   entries in a format it does not know. `an_entry_outliving_its_collected_heartbeat_is_collected` failed on e3b69e0b
+   (*"an unreadable entry is kept while its node has a live one"*); it now also shows one kept beside a current
+   heartbeat and going with it.
+3. *The linger's cost:* a departed node's heartbeat stays up to 24 hours plus the bounds — one key per node, and about
+   one extra KV read per tally decision for each node id that departed in that time (read, found past the counter's
+   horizon, skipped). Bounded by the departures in a day.
+4. *Mutations killed:* `publish_permit` keeping forged times (*"the forged time is dropped by the publish"*), `aged`
+   waiting on them (*"a forged time does not keep an entry from ageing"*), the reader's future-heartbeat filter with a
+   **verified** non-peer (*"a member with a heartbeat from the future is not counted on it"*), and `!live` in the
+   heartbeat rule (*"a heartbeat is kept while an entry of its node is live"* — a collector holding an entry newer than
+   its heartbeat; the comment at the rule says when `!live` is implied and when it is not).
 
 **Known flakes, open (seen during the v2.36.0 work, 2026-10-19; not yet investigated):**
 - `overlay_consistent::tests::distributed_lock_grants_single_holder_under_race` — 0 winners (a liveness timeout), never

@@ -477,8 +477,9 @@ non-peer whose heartbeat is older than the counter's window plus the staleness b
 read at all, and a decision lists the nodes it knows of from the store's scope index — its cost grows with nodes, never
 with the entries they hold. **Residue is collected at its own stamp.** A non-peer's keys go each by its own times: an entry once every time is
 past its window plus both bounds (counted in no reader's window, exactly so when the writer's window is the
-counter's), or at once if nothing can be read from it or its times are forged — past this node's clock plus the drift
-bound, which no member within the bound can have written; the heartbeat **last**, once none of its node's entries
+counter's), or at once if its only times are forged — past this node's clock plus the drift bound, which no member
+within the bound can have written (an owner scrubs such times from its own entries every heartbeat tick); one nothing
+can be read from with the heartbeat, since a count that cannot be read is not zero; the heartbeat **last**, once none of its node's entries
 here is live and its `as_of` is past the longest window any counter may have (24 hours) plus both bounds, because a
 collector cannot see the windows of entries held only elsewhere. Any node tombstones such a key *at the timestamp of
 the record it holds*: under last-writer-wins that removes that record and loses to anything the owner wrote after it,

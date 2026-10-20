@@ -17,12 +17,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   collected yet, or a gossiped entry its heartbeat overtook — was therefore never collected: it stayed in the store and
   in the scope roster, and every later collection pass and decision listed its node again. The collector now takes a
   non-peer's keys **each by its own times**: an entry once every time is past its window plus the staleness and
-  clock-drift bounds, or at once if it cannot be read or its times are forged (below); the heartbeat **last** — once
+  clock-drift bounds, or at once if its only times are forged (below); one that cannot be read with the heartbeat (a
+  count that cannot be read is not zero — an older collector must not erase a newer node's entries during a format
+  change); the heartbeat **last** — once
   none of the node's entries it holds is live and its `as_of` is past the longest window any counter may have
   (`MAX_FLEET_WINDOW_MS`, 24 hours) plus both bounds, because a collector cannot see the windows of entries held only
   elsewhere (#656's second review, item 3: dated by the entries it held, a collector lacking a member's long-window
   entry removed the heartbeat early, and the nodes holding that entry then read it without one). A departed node's
-  heartbeat therefore stays up to 24 hours plus the bounds — one key per node. Found as an intermittent CI failure of `residue_is_collected_and_a_decision_does_not_read_it`
+  heartbeat therefore stays up to 24 hours plus the bounds — one key per node, and about one extra KV read per decision
+  for each node id that departed in that time. Found as an intermittent CI failure of `residue_is_collected_and_a_decision_does_not_read_it`
   (the node's own collector tick took a planted heartbeat before its entry was planted); fail-first
   `an_entry_outliving_its_collected_heartbeat_is_collected`.
 - **A member's tally entries without its heartbeat are unknown coverage, not zero** (post-360 row K2, #656's
@@ -40,13 +43,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   time past this node's clock plus `max_clock_drift_ms` — `t: [u64::MAX]` — never aged: it counted as a permit for
   ever, its owner's `publish_permit` kept it, and under a node with no heartbeat it held a counter `Indeterminate` and
   the node's scope-roster row for ever. Now a reader reads an entry holding such a time as one it cannot read (unknown
-  coverage, naming the node), the owner drops such times when it rewrites the entry and does not wait for them when
-  it withdraws, and the collector dates an entry by its honest times only — so one holding nothing else is collected
-  at once and the counter is decidable again. A heartbeat dated in the future is no heartbeat: a non-peer's is dated
+  coverage, naming the node); the owner, under its tally lock, rewrites its own entries without such times on every
+  withdrawal tick — withdrawing one with nothing honest left — drops them when it publishes, and does not wait for
+  them when it withdraws; and the collector dates an entry by its honest times only, so one holding nothing else is
+  collected at once and the counter is decidable again. **The bound:** a forged time written into a live member's
+  entry holds that counter `Indeterminate` for one heartbeat tick (a third of `control_max_staleness_ms`) plus its
+  propagation, not its window (#656's second review, round 2). **Not closed:** honest-looking forged times — inside
+  the window — still inflate a count; tally entries are unsigned (the stated K2 limit). A heartbeat dated in the future is no heartbeat: a non-peer's is dated
   by its entries, and the collector removes it once none of them is live. **Upgrade note:** a peer's forged time now
   makes a tally rule `Indeterminate` until the entry is rewritten or withdrawn, where it was counted
   (`deprecations.md` §56). Fail-first: `a_forged_future_time_dates_nothing`,
-  `a_collector_without_a_members_entry_keeps_its_heartbeat`.
+  `a_collector_without_a_members_entry_keeps_its_heartbeat`, `a_forged_time_in_a_live_members_entry_is_scrubbed_by_its_owner`.
 - **A fleet history limit is bounded: at most 1 024 seats, a window of at most 24 hours** (post-360 row K2, from the
   review of the private Cedar adapter). For a `HistoryScope::FleetConsensus` rule the enforcement point read every
   seat, a slot digest and a KV read each, on every request the rule covered, synchronously under the actor's history

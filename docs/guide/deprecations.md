@@ -1844,15 +1844,22 @@ window plus both bounds after the entry's last permit.
 
 **Forged times** (#656's second review). A time past this node's clock plus `max_clock_drift_ms` dates nothing: an
 entry holding one is read as one this node cannot read — unknown coverage for a peer or a counted non-peer, where it
-used to count as a permit for ever — and is dropped by its owner when it next rewrites the entry; the collector dates
-a non-peer's entry by its honest times only, so one holding nothing else is collected at once. A heartbeat dated in
-the future is no heartbeat for a non-peer. **The heartbeat goes last:** a collector takes a non-peer's entries each by
-its own times, and its heartbeat only once none of them is live and its `as_of` is past `MAX_FLEET_WINDOW_MS` (24
-hours) plus both bounds, so a departed node's heartbeat stays that long — one key per node.
+used to count as a permit for ever. Its owner rewrites its own entries without such times on every withdrawal tick,
+under the tally lock, and withdraws one with nothing honest left; so a forged time written into a live member's entry
+holds that counter `Indeterminate` for one tick (a third of `control_max_staleness_ms`) plus its propagation. The
+collector dates a non-peer's entry by its honest times only, so one holding nothing else is collected at once. A
+heartbeat dated in the future is no heartbeat for a non-peer. **Not closed:** forged times that look honest — inside
+the window — inflate a count; tally entries are unsigned. **Unreadable entries** go with their node's heartbeat (or,
+with none, once nothing of the node is live), never at once: a count that cannot be read is not zero, and an older
+collector must not erase a newer node's entries during a format change. **The heartbeat goes last:** a collector
+takes a non-peer's entries each by its own times, and its heartbeat only once none of them is live and its `as_of` is
+past `MAX_FLEET_WINDOW_MS` (24 hours) plus both bounds, so a departed node's heartbeat stays that long. **The cost,
+bounded:** one key per departed node, and about one extra KV read per tally decision for each node id that departed in
+the last 24 hours plus the bounds (the decision reads its heartbeat and skips it as past the counter's horizon).
 
 **Will the compiler tell me?** No — no API changed. A tally rule can decide `Indeterminate` where it admitted before:
-for at most that window, while a node's entries and heartbeat are out of step at the reader; and while a peer's
-entry holds a forged time, until its owner rewrites or withdraws it.
+for at most that window, while a node's entries and heartbeat are out of step at the reader; and for about one
+heartbeat tick, while a live member's entry holds a forged time, until its owner scrubs it.
 
 **Migration.** None. A fleet that sees `Indeterminate` naming a node "not a peer: its entry is inside the window and it
 has no heartbeat" is reading a member whose heartbeat has not reached it; it clears when the heartbeat arrives or the
