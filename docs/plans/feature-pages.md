@@ -118,5 +118,6 @@ would add a wasmtime build and no case the gate misses. **A departure from §3's
 what makes the node binary record a replay bundle; `mycelium-wasm-host`'s `sim`, which only turns on that crate's
 test seams, is excluded.
 
-**A link to re-point at release.** The K2 page links `deprecations.md` §55 by its heading's anchor, which carries
-*unreleased*; the release that renames the heading must re-point that link in `docs/features/fleet-history-limits.md`.
+**Links to re-point at release.** The K2 page links `deprecations.md` §55 and §56 by their headings' anchors, which
+carry *unreleased*; the release that renames the headings must re-point those links in
+`docs/features/fleet-history-limits.md` (the gate fails on the stale anchor until it does).
