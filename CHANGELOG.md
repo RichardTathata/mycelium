@@ -70,6 +70,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Report::refused_at_load` — both structs gained a field; only for an adapter that passed `fleet_limit_at_the_bounds` by building), and a stored tally entry's window is clamped to the horizon
   when it is aged or collected, so an oversized one no longer lingers.
 
+### Changed
+
+- **Tests:** the activation egress proxy's flood test was a test race, not a cap violation (CI run 39392016584,
+  macOS: *"A holds no more than its share: 8"*). `a_flood_on_one_proxy_leaves_every_other_proxy_its_share` read the
+  whole budget's count straight after both commands were answered, when a socket the proxy has answered but not yet
+  closed — B's connection, or an upstream socket whose relay task has not ended — is still a descriptor held, so the
+  count can be 8 for a moment with A at 6 of its 8. The test now samples A's own count for the whole run (never past
+  its share), holds the whole budget to 7 at a moment with nothing in flight (the flood settled), and waits out the
+  closing sockets before the final check. Seen failing first with CI's exact message by holding an answered socket
+  open 300 ms before close; the new test passes with that delay and fails with A's accept limit raised by one.
+
 ## [2.36.0] — 2026-10-19
 
 **Two old defects fixed, two security fixes, and the post-360 plan's rows after the comparison.** A request-reply call to

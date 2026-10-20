@@ -491,6 +491,12 @@ async fn keepalive_upstream() -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
 /// still reaches its upstream. Seen failing first on round 5's single shared pool: A's flood took all 16
 /// descriptors and B's command's connection was accepted and closed (`fd_budget`); and with the share or the
 /// reserve planted out.
+///
+/// What it measures, and when (the 2026-10-20 flake, CI run 39392016584: `used` read 8): A's own count is sampled
+/// for the whole test and never exceeds its share; the whole budget is held to 7 only at a moment with nothing in
+/// flight (the flood settled, before either command). Read straight after the commands, `used` may still count a
+/// socket the proxy has answered but not yet closed — B's connection, or an upstream socket whose relay task has
+/// not ended — which is a descriptor really held, so it is waited out rather than asserted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_flood_on_one_proxy_leaves_every_other_proxy_its_share() {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -512,6 +518,20 @@ async fn a_flood_on_one_proxy_leaves_every_other_proxy_its_share() {
     let hosts = vec![format!("http://127.0.0.1:{u}")];
     let a = start_with_budget(hosts.clone(), limits, Some(slow), Arc::clone(&budget));
     let b = start_with_budget(hosts, limits, Some(fast), Arc::clone(&budget));
+    // A's share is 8 (16 over two proxies); its accepted sockets may use 6 of it, its upstream reserve the other 2.
+    let (a_share, a_accept) = (budget.share(), budget.share() - (budget.share() / 4).max(1));
+    assert_eq!((a_share, a_accept), (8, 6));
+    // A's count, sampled for the whole test: the most it ever held.
+    let a_max = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let sampler = {
+        let (share, a_max) = (Arc::clone(&a.inner.share), Arc::clone(&a_max));
+        tokio::spawn(async move {
+            loop {
+                a_max.fetch_max(share.held.load(Ordering::Acquire), Ordering::AcqRel);
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+    };
     // A's command connects and is admitted before the flood.
     let mut cmd_a = tokio::net::TcpStream::connect(("127.0.0.1", a.port())).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -521,6 +541,11 @@ async fn a_flood_on_one_proxy_leaves_every_other_proxy_its_share() {
     }
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     assert_eq!(a.counts().refused, 0, "nothing was accepted only to be closed: {:?}", a.counts());
+    // Nothing in flight: A holds its command and the flood up to its accept limit; B's accept loop one descriptor
+    // for its next connection.
+    let a_held = a.inner.share.held.load(Ordering::Acquire);
+    assert!(a_held <= a_accept, "A's accepted sockets stay within its share less the reserve: {a_held}");
+    assert!(budget.used() <= a_accept + 1, "the flood holds no more than A's accept limit: {} (A {a_held})", budget.used());
     // B's command: accepted, admitted, forwarded.
     let get = format!("GET http://127.0.0.1:{u}/ HTTP/1.1\r\nHost: x\r\n\r\n");
     let via_b = raw(b.port(), &token_header(&b), &get).await;
@@ -531,8 +556,19 @@ async fn a_flood_on_one_proxy_leaves_every_other_proxy_its_share() {
     let _ = tokio::time::timeout(std::time::Duration::from_secs(8), cmd_a.read_to_end(&mut answer)).await;
     let answer = String::from_utf8_lossy(&answer).to_string();
     assert!(answer.starts_with("HTTP/1.1 200"), "A's admitted command reaches its upstream: {answer:?} {:?}", a.counts());
-    // A's share is 8, less its upstream reserve of 2; B's accept loop holds one more for its next connection.
-    assert!(budget.used() <= 7, "A holds no more than its share: {}", budget.used());
+    sampler.abort();
+    let a_most = a_max.load(Ordering::Acquire).max(a.inner.share.held.load(Ordering::Acquire));
+    assert!(a_most <= a_share, "A never holds more than its share: {a_most}");
+    // Once both commands' sockets are closed, the flood again holds no more than A's accept limit, and B one.
+    let mut used = budget.used();
+    for _ in 0..100 {
+        if used <= a_accept + 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        used = budget.used();
+    }
+    assert!(used <= a_accept + 1, "A holds no more than its share once the commands are done: {used}");
     drop(flood);
 }
 
