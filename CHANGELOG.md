@@ -9,26 +9,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Security
-
-- **Check whether you are affected:** run `uname -m` on each node. A node is exposed to RUSTSEC-2026-0379 only if it
-  reports `aarch64` or `arm64` and it hosts WASM components — it runs `mycelium-stem`, or a binary that links
-  `mycelium-wasm-host`; on such a node a non-zero `mycelium_artifact_installs_completed_total` means it has installed
-  components. After upgrading, `grep -A1 '^name = "wasmtime"$' Cargo.lock` in the build shows `49.0.4`, and
-  `cargo audit -f Cargo.lock` no longer reports RUSTSEC-2026-0378 or -0379.
-  **Dependency: `wasmtime` / `wasmtime-wasi` 49.0.3 → 49.0.4**, with the cranelift family 0.136.3 → 0.136.4
-  (RUSTSEC-2026-0378, -0379, published 2026-10-19). **RUSTSEC-2026-0379** (critical, CVSS 9.9): on **aarch64**,
-  Cranelift could compile a large Wasm `br_table` to a jump to the wrong target, so a guest component's control flow
-  is not the one it was validated for. The WASM host compiles with Cranelift (wasmtime's default; it selects no other
-  strategy), so a node that hosts WASM components on aarch64 — Apple silicon, Graviton, Ampere — is exposed; on
-  x86_64 it is not. **RUSTSEC-2026-0378** (medium, 5.7): a host panic lowering a host-created component-model stream
-  into a guest that expects a different payload type; the host's WIT (`wit/host.wit`) declares no stream or
-  future and it links WASI p2 only, so no host-created stream reaches a guest. **Affected releases:** every release that ships the WASM host — v2.0.0 through v2.36.0 for -0379 (wasmtime
-  45.0.3 to 49.0.3; v2.34.0–v2.36.0 on 49.0.3), and v2.4.0 through v2.36.0 for -0378 (wasmtime 46.0.2 onwards; 45.x is
-  unaffected). A node built without `mycelium-wasm-host` does not link wasmtime and is not exposed. A lockfile change
-  only (`Cargo.lock`; the two other tracked lockfiles hold no wasmtime), no API change; the minimum Rust version
-  wasmtime 49 requires (1.96.0) is unchanged.
-
 ### Fixed
 
 - **A departed node's tally entry that outlives its collected heartbeat is collected** (post-360 row K2). The
@@ -100,6 +80,31 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   its share), holds the whole budget to 7 at a moment with nothing in flight (the flood settled), and waits out the
   closing sockets before the final check. Seen failing first with CI's exact message by holding an answered socket
   open 300 ms before close; the new test passes with that delay and fails with A's accept limit raised by one.
+
+## [2.36.1] — 2026-10-20
+
+A **security PATCH**, cut from the v2.36.0 tag: `wasmtime` 49.0.4 for RUSTSEC-2026-0378 and -0379. Wire v12
+unchanged; no API change (`PREV = 11`; a rolling upgrade from 2.36.0 holds). Nothing else from `main` is in this release.
+
+### Security
+
+- **Check whether you are affected:** run `uname -m` on each node. A node is exposed to RUSTSEC-2026-0379 only if it
+  reports `aarch64` or `arm64` and it hosts WASM components — it runs `mycelium-stem`, or a binary that links
+  `mycelium-wasm-host`; on such a node a non-zero `mycelium_artifact_installs_completed_total` means it has installed
+  components. After upgrading, `grep -A1 '^name = "wasmtime"$' Cargo.lock` in the build shows `49.0.4`, and
+  `cargo audit -f Cargo.lock` no longer reports RUSTSEC-2026-0378 or -0379.
+  **Dependency: `wasmtime` / `wasmtime-wasi` 49.0.3 → 49.0.4**, with the cranelift family 0.136.3 → 0.136.4
+  (RUSTSEC-2026-0378, -0379, published 2026-10-19). **RUSTSEC-2026-0379** (critical, CVSS 9.9): on **aarch64**,
+  Cranelift could compile a large Wasm `br_table` to a jump to the wrong target, so a guest component's control flow
+  is not the one it was validated for. The WASM host compiles with Cranelift (wasmtime's default; it selects no other
+  strategy), so a node that hosts WASM components on aarch64 — Apple silicon, Graviton, Ampere — is exposed; on
+  x86_64 it is not. **RUSTSEC-2026-0378** (medium, 5.7): a host panic lowering a host-created component-model stream
+  into a guest that expects a different payload type; the host's WIT (`wit/host.wit`) declares no stream or
+  future and it links WASI p2 only, so no host-created stream reaches a guest. **Affected releases:** every release that ships the WASM host — v2.0.0 through v2.36.0 for -0379 (wasmtime
+  45.0.3 to 49.0.3; v2.34.0–v2.36.0 on 49.0.3), and v2.4.0 through v2.36.0 for -0378 (wasmtime 46.0.2 onwards; 45.x is
+  unaffected). A node built without `mycelium-wasm-host` does not link wasmtime and is not exposed. A lockfile change
+  only (`Cargo.lock`; the two other tracked lockfiles hold no wasmtime), no API change; the minimum Rust version
+  wasmtime 49 requires (1.96.0) is unchanged.
 
 ## [2.36.0] — 2026-10-19
 
