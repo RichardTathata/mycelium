@@ -1,0 +1,60 @@
+## [2026-10-19] ingest | Feature pages F1: the template and two pilots
+
+`docs/features/` started (plan `docs/plans/feature-pages.md`, row F1, in progress): the front page
+`docs/features/README.md` (what a feature page is, the six sections, link-don't-copy, the list of pages), the
+skeleton `_template.md`, and two pilots — `activation-egress-proxy.md` (post-360 rows L and M) and
+`inference-routing.md` (row R). The third pilot, K2's fleet-wide history limits, waits for PR #653. The capability
+map's *Acquire and adapt*, *Constrain actions* and *Run tools and reasoning* rows link the pages; its maintainer note
+is F3's.
+
+What the pilots taught, recorded as proposed revisions in the plan's §4.1: a feature turned on in code has no
+setting to link; neither pilot has an example in the index (each is shown end to end by a test); the `stem.*`
+guarantees are registered by the stem and absent from the guarantee catalogue; catalogue, ledger, configuration
+and plan rows have no per-entry anchors; and neither script the F2 gate is to share resolution with resolves both
+heading and `<a id>` anchors. Checking the pilots' links found one dead anchor already in the repository
+(`unit-file.md` → `crown-jewel.md#credentials-attached-at-egress`), fixed.
+
+Pages: none in the wiki. Repo: `docs/features/` (new), `docs/capabilities.md`, `docs/plans/feature-pages.md` (rev
+0.3), `docs/reference/unit-file.md` (one anchor).
+
+## [2026-10-19] ingest | #654 review round 1: the Cedar claim, fixed markers, the pilots corrected
+
+The independent review found a stale claim the routing page had copied: the private Cedar adapter has expressed
+`ForbidClassAt` and `AllowAtMostAcross` and passed all twenty-seven contract cases since its v2.36.0 re-pin (private
+#33, `0d654fd`). Corrected where it was stated as current: guide 20, `deprecations.md` §52 and §53, the two
+what-is-proven rows, and the plan's §3.5 and §5 (dated notes); #653, merged meanwhile, had already corrected the
+plan's rows R and K2 and §3.6, and the rebase kept its wording. Corrected on the
+pages too: both reason doors give the preflight destination and locality (only the class needs the classifying
+door); `guide_20_routing_policy` runs a hand-kept copy; the proxy's port is added to the command's own `connect`
+entries; the credential path's test named. P1 and P2 now carry fixed markers the F2 gate can check
+("This feature is turned on in code", "No runnable example exists", `example: none`); `docs/README.md` lists
+`features/`.
+
+## [2026-10-20] ingest | Feature pages F1: the third pilot, fleet-wide history limits (K2)
+
+After #653 merged, `docs/features/fleet-history-limits.md` added under the revised template: turned on in code
+(`Rule::at_most(..).scoped(..)`, an evaluator and a journal, `gateway` + `tls`), no runnable example (the live tests
+in `src/agent/fleet_history_tests.rs`, run by CI's `test` job's `--lib` steps), the nine `fleet_*` contract cases,
+the unreleased bounds (§55), K2's *not built* list. Found while writing it, recorded as P9 in the plan's §4.1: guide
+20's K2 snippet has no test, and guide 20 does not say the exact scope needs a consensus listener on the voting nodes.
+Linked from the capability map's *Constrain actions* row; the plan marks all three pilots written.
+
+## [2026-10-20] ingest | #654 review round 2: guide 20 says a seat needs a listener; checkable markers
+
+Guide 20 now says a node votes on a seat only while it runs a consensus listener (the `mycelium` binary starts one),
+so a fleet whose voters run none decides every exact rule `Indeterminate`; and that only the reference rules treat a
+declared and a bound class alike (Cedar reads `context.route.class_source`). The K2 page lists each configuration
+field on its own line (`consensus_electorate` added; the electorate itself declared at `/gateway/govern/electorate`),
+and the what-is-proven K2 row names `a_saturating_actor_gets_its_limit_each_short_window`. P1, P2 and P9 now state
+what the F2 gate can check: an item's last path segment as a `fn`/`struct`/`enum`/`trait`/`const` in its linked file,
+a test's `fn` and its place in CI's universe outside the exceptions file, a configuration row `| name |`, and an
+`example: none` that fails once the index gains a row.
+
+## [2026-10-20] ingest | Feature pages F1 delivered
+
+F1 closed (PR #654): three pilots independently reviewed against the code (two rounds and a confirmation), and the
+template revised from them. Plan §4.1 is now *Template revisions (F1)* with a decision per row: P1, P2, P4, P6–P9
+adopted; P3 adopted in its interim form (a companion-registered guarantee id links to where its states are
+described; generating such ids into the catalogue waits for F2's registry); P5 (the gate's anchor resolution and
+its `docs/features/` scope) deferred to F2. The adopted rows are folded into `docs/features/README.md` and
+`_template.md`, and P2's no-example test uses P1's checkable wording. F2, the registry and the gate, is next.

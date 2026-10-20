@@ -499,7 +499,9 @@ tallies converge*, and its coverage (`publishers=[…] stalest_ms=…`).
 electorate group when one is declared, the cluster otherwise. Under `consensus_require_electorate` (required by
 `secure-single-domain`) a seat outside an electorate is refused, so the rule is not established until one is declared.
 Without a declared electorate the cluster's roster is the peers a node currently sees, and a partitioned minority that
-has declared the rest dead can decide a seat alone — exactness across a partition needs the electorate.
+has declared the rest dead can decide a seat alone — exactness across a partition needs the electorate. A node votes
+on a seat only while it runs a consensus listener (`start_consensus_listener`; the `mycelium` binary starts one); a
+fleet whose voters run none has no quorum, and every exact rule decides `Indeterminate`.
 
 *Where the counts live, and who sees them.* Seats are decision records under `consensus/life/` (slot
 `ae-seat/{counter}/{actor}/{n}`); tallies are `sys/ae-tally/{node}/c/{counter}/{actor}` and a heartbeat
@@ -665,10 +667,10 @@ the `route_*` cases).
   the refusals only in the evidence.
 - **Floors are exact principals.** `floor_for` keys are the gateway's principal strings (`token:{issuer}/{name}`,
   `oidc:{issuer}/{subject}`); a key that matches no principal binds nothing, silently — its caller gets the default.
-- **A Cedar-backed fleet enforces no class or locality yet.** The private companion's Cedar adapter has not been
-  given `ForbidClassAt` or the `route_*` cases; until its next re-pin, a gateway running it decides as though no class
-  or locality rule were written. `ClassSource` is on the record,
-  but the reference rules do not distinguish a declared class from a principal-bound one.
+- **Under the reference rules, a declared class and a bound one decide alike.** `ClassSource` is on the record, but
+  the reference rules do not distinguish a declared class from a principal-bound one. Cedar policies can read
+  `context.route.class_source`. (The private companion's Cedar adapter expresses `ForbidClassAt` and passes the five
+  `route_*` cases since its re-pin onto v2.36.0, private #33.)
 - **The refusal names the candidates.** `refused_destinations` and `refused` give the client each candidate's provider
   address and declared locality.
 - **No control of what a permitted model does with the data** — exfiltration through a permitted model, or through

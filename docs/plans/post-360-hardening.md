@@ -1697,6 +1697,7 @@ mycelium-*/src` (who calls an OpenAI-compatible endpoint), and `ae_preflight(`'s
   the independent `TableEvaluator`. **The private companion's Cedar adapter: *not built here; at the next re-pin*** — it
   must express the clause or decline the five cases in `declared_limits` (`deprecations.md` §52); the private
   repository is not touched here, and **until that re-pin a Cedar-backed fleet has no class or locality enforcement**.
+  *(Met 2026-10-19 at the v2.36.0 re-pin, private #33 `0d654fd`: the clause expressed, all twenty-seven cases pass.)*
 - *per candidate, before the router commits: routed to a permitted model when one exists, refused naming every
   candidate and why when none does* — `call_inner` (`mycelium-reason/src/route.rs`): a refused candidate is passed over
   without counting as an attempt; all refused → `RouteError::Refused` with `data.refused_destinations` and
@@ -2358,8 +2359,8 @@ built: an authenticated anti-entropy entry (a wire change).
   detection, not prevention — concurrent calls at different gateways can exceed the limit before the tallies converge,
   stated on every such decision with its freshness and coverage, and unknown coverage is not established. Per-point
   stays the default. The private repository's Cedar adapter meets the contract suite's new clause
-  (`PolicyClause::AllowAtMostAcross`) and six `fleet_*` cases on its next re-pin — expressed, or declined in
-  `declared_limits`.
+  (`PolicyClause::AllowAtMostAcross`) and six `fleet_*` cases, expressed, at its v2.36.0 re-pin (private #33,
+  2026-10-19).
 
 ## 6 · Recorded limits that stay limits
 
