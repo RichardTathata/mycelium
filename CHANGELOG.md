@@ -92,7 +92,9 @@ unchanged; no API change (`PREV = 11`; a rolling upgrade from 2.36.0 holds). Not
   reports `aarch64` or `arm64` and it hosts WASM components — it runs `mycelium-stem`, or a binary that links
   `mycelium-wasm-host`; on such a node a non-zero `mycelium_artifact_installs_completed_total` means it has installed
   components. After upgrading, `grep -A1 '^name = "wasmtime"$' Cargo.lock` in the build shows `49.0.4`, and
-  `cargo audit -f Cargo.lock` no longer reports RUSTSEC-2026-0378 or -0379.
+  `cargo audit -f Cargo.lock` no longer reports RUSTSEC-2026-0378 or -0379. A build that depends on `mycelium` by git tag resolves
+  wasmtime in its own `Cargo.lock`: run `cargo update -p wasmtime -p wasmtime-wasi -p wiggle` there. Moving the tag
+  alone leaves 49.0.3 locked, and that update alone fixes a v2.36.0 build too.
   **Dependency: `wasmtime` / `wasmtime-wasi` 49.0.3 → 49.0.4**, with the cranelift family 0.136.3 → 0.136.4
   (RUSTSEC-2026-0378, -0379, published 2026-10-19). **RUSTSEC-2026-0379** (critical, CVSS 9.9): on **aarch64**,
   Cranelift could compile a large Wasm `br_table` to a jump to the wrong target, so a guest component's control flow
