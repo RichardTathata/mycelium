@@ -2152,6 +2152,10 @@ extended `without_tls_a_non_peers_absence_is_not_established` failed on the unfi
   on rerun.
 - `a_seat_decided_too_late_for_its_window_is_not_admitted` — failed once, under machine load.
 - `lock_lifecycle_tests::row02` — failed once, under machine load.
+- `a_saturating_actor_gets_its_limit_each_short_window` (K2, `FleetConsensus` seats) — *"about one admission a second
+  over 4.5 s, got 2"*, once in 60 `agent::fleet_history` module runs at 6 parallel processes (2026-10-20, during #656);
+  0 in 240 alone at 16 processes, on #656's branch and on `main` at 23fd7bfe alike. A throughput floor under CPU
+  contention, on a path #656 does not touch.
 
 **Open next:**
 - each delivered row's *not built* list, in its §3.5 block and below — for K2: signed tally entries (a forgery under a
