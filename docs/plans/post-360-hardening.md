@@ -2167,6 +2167,32 @@ extended `without_tls_a_non_peers_absence_is_not_established` failed on the unfi
    heartbeat rule (*"a heartbeat is kept while an entry of its node is live"* — a collector holding an entry newer than
    its heartbeat; the comment at the rule says when `!live` is implied and when it is not).
 
+**Known flake, closed (row M's egress proxy, #644 round 6; 2026-10-20): a test race, not a cap violation.**
+`a_flood_on_one_proxy_leaves_every_other_proxy_its_share` (`mycelium-wasm-host/src/activation_egress_tests.rs`)
+failed once in CI's macOS confinement job (run 39392016584 on `3a7d5042`): *"A holds no more than its share: 8"*. The
+assertion read `FdBudget::used()` — the whole budget, A's and B's — straight after both commands were answered. A
+socket is counted until it is closed: B's served connection holds its `OpenSlot` until its connection task ends,
+after hyper has sent the answer and the FIN, and an upstream `BudgetSlot` is dropped by the body-relay task after its
+last chunk. So the client can see its answer while one of those is still held — a descriptor really open, correctly
+counted. Probed: in 200 runs at 16–20 parallel processes (120 of them beside CPU load), one sample read `used=8 a_held=6 b_held=2 b_open=1` (B's
+connection not yet closed) and none had A past 6. A cannot over-take: `Share::try_take` checks `held < limit` and
+`used < cap` each in one `fetch_update` (`mycelium-wasm-host/src/activation_egress.rs:352-361`), and the test's two
+proxies join before any connection. Seen deterministically by holding an answered connection open 300 ms before
+close: the old assertion fails with CI's exact message at `:535`. The test now samples A's `held` for the whole run
+(at most its share, 8), asserts A's accepted sockets at most 6 and the whole budget at most 7 at the one moment with
+nothing in flight (the flood settled, before either command), and waits up to 5 s for the closing sockets before the
+same bound at the end, and for A to hold only accepted sockets (its command's upstream slot given back — #657's
+review, Q1: a leaked upstream slot left `used` at 7). It passes with the 300 ms hold, fails with A's accept limit
+raised by one, the reserve removed or the upstream slot leaked, and passed 200 of 200 under load (macOS) and 10 of 10 in a `rust:1.96` container.
+
+**Found beside it, open (not the flake's cause): a proxy that joins after another has taken its share gets less than
+its own.** A share is the budget over the proxies joined *now*, and descriptors already held are not given back when
+it shrinks. With a budget of 16, a lone proxy may hold 12 accepted sockets; a second that joins then has a share of 8
+but finds only 4 descriptors in the budget, and none for its upstream reserve (probed: `a=12 b_accept=4
+b_upstream=0`). Bounded in time — the flood's sockets are released at their pre-auth and peer-read deadlines — but
+a later activation's command can be refused `fd_budget` meanwhile. Not built: holding back, per joined proxy, the
+descriptors its share needs.
+
 **Known flakes, open (seen during the v2.36.0 work, 2026-10-19; not yet investigated):**
 - `overlay_consistent::tests::distributed_lock_grants_single_holder_under_race` — 0 winners (a liveness timeout), never
   2; failed 4 of 256 runs on `main` under 32-process load.
@@ -2186,6 +2212,8 @@ extended `without_tls_a_non_peers_absence_is_not_established` failed on the unfi
   at the provider's re-check, an ad's key bound to its writer; for M: the OpenShell backend (skipped for now, above),
   resource limits, limits by address and by path, a limit on the proxy's port by address under Landlock; for K: a
   history beyond 24 hours, 1 024 records per actor or 65 536 actors per point, and a replay of the history input;
+- the egress descriptor budget's late joiner (above): a proxy that starts after another has taken its pre-join share
+  is held below its own share until the earlier proxy's sockets close;
 - (every recorded K2 flake is closed: the `/mcp` door test's lost reply, #647; the seat lease's "decided too late", #648; the abort and aged-tally tests, test races, #651; the residue test, a collector leak, #656;)
 - the private Cedar adapter's re-pin onto v2.36.0 is **done** (private #33, `0d654fd`). Open is the **next** re-pin,
   after K2's bounds (§55) are released: nine `fleet_*` cases, two of which (`fleet_limit_past_the_seat_cap`,
