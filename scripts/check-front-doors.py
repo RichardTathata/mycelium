@@ -47,17 +47,26 @@ def block(text, name):
     return text[text.index(start) + len(start):text.index(end)]
 
 
+HTML_ANCHOR = re.compile(r'<a\s+(?:id|name)="([^"]+)"')
+
+
 def slugs(markdown):
-    """GitHub's heading anchors for a Markdown file (code fences skipped, duplicates numbered)."""
+    """The anchors a Markdown file has: GitHub's heading slugs (code fences skipped, duplicates numbered,
+    a heading's link reduced to its text and inline HTML dropped, as GitHub renders it) and every
+    `<a id="…">` / `<a name="…">` outside a fence (the concepts glossary's entries; feature-pages plan P5)."""
     seen, out, fenced = {}, set(), False
     for line in markdown.splitlines():
         if line.lstrip().startswith('```'):
             fenced = not fenced
             continue
-        m = None if fenced else re.match(r'^#{1,6}\s+(.*?)\s*#*\s*$', line)
+        if fenced:
+            continue
+        out.update(HTML_ANCHOR.findall(line))
+        m = re.match(r'^#{1,6}\s+(.*?)\s*#*\s*$', line)
         if not m:
             continue
-        s = re.sub(r'[^\w\- ]', '', m.group(1).strip().lower()).replace(' ', '-')
+        text = re.sub(r'<[^>]+>', '', re.sub(r'\[([^\]]*)\]\([^)]*\)', r'\1', m.group(1)))
+        s = re.sub(r'[^\w\- ]', '', text.strip().lower()).replace(' ', '-')
         n = seen.get(s, 0)
         seen[s] = n + 1
         out.add(s if n == 0 else f'{s}-{n}')

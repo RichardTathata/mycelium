@@ -24,9 +24,9 @@ the command.
 - In the unit file, give the `[[activation]]` an [`[activation.confine]`](../reference/unit-file.md#activationconfine)
   table and, inside it, [`[activation.confine.egress]`](../reference/unit-file.md#activationconfineegress) with
   `hosts` and, for credentials, `credentials`.
-- On the node, declare each binding in `egress_credentials`, and keep each host permitted by `egress`
-  (`allow_hosts`): both are rows of [configuration.md § The fields](../reference/configuration.md#the-fields); a
-  binding's fields are in
+- On the node, declare each binding in
+  [`egress_credentials`](../reference/configuration.md#the-fields), and keep each host permitted by
+  [`egress`](../reference/configuration.md#the-fields) (`allow_hosts`); a binding's fields are in
   [crown-jewel.md § Credentials attached at egress](../operations/crown-jewel.md#credentials-attached-at-egress-post-360-plan-row-l-2350).
   A stem built without feature `gateway` or `llm` has no egress gate and refuses a `credentials` entry at start.
 - To change the list live, send `mycelium-stem` a `SIGHUP` after replacing its unit file, or call

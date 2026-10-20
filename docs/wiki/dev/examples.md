@@ -15,7 +15,15 @@ matrix; the operations door keeps its own operator journey. `scripts/check-front
 `check-positioning.sh`) holds the structure and link targets, with anchors resolved; its mutation suite is
 `scripts/test-check-front-doors.py` — rule in [`positioning.md`](../../positioning.md) § *The routes and
 the five-step path*. HTML decks have reading mode, keyboard navigation and mobile layout; structural
-checks do not replace browser or screen-reader review.
+checks do not replace browser or screen-reader review. **Feature pages (2026-10-20, plan
+[`feature-pages.md`](../../plans/feature-pages.md) row F2).** [`docs/features/registry.toml`](../../features/registry.toml)
+maps every id of six sources — the glossary's `<a id>` anchors, the guarantee and rule catalogues, the unit-file
+sections, every workspace crate's Cargo features, and the guarantees a companion registers in code — to a feature
+page, to `todo` (row F3), or to an exclusion with its reason. `scripts/check-feature-pages.py` (run by
+`check-positioning.sh`) fails on an unmapped or stale id and checks each page's six sections, links and anchors
+(the front-doors resolver, which now reads `<a id>` too), code items, configuration rows, named tests and
+example; its mutation suite is `scripts/test-check-feature-pages.py`, and CI's `test-coverage` job runs it with
+`--executed` so a page cannot name a test no job ran. A wiki page is not a source; the registry is.
 
 
 **Teaching the current surfaces.** [The developer tutorial sequence](../../guide/tutorials/README.md)

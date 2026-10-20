@@ -8,6 +8,9 @@
 #    scripts/check-front-doors.py (structure and link targets, not prose; docs/positioning.md
 #    § The routes and the five-step path).
 # 3. No live artifact links the repository's pre-move account.
+# 4. The feature pages (docs/plans/feature-pages.md F-G): scripts/check-feature-pages.py — every id of
+#    its six sources mapped by docs/features/registry.toml, and each page's sections, links, settings,
+#    tests and example. Its mutation suite is scripts/test-check-feature-pages.py.
 set -u
 cd "$(dirname "$0")/.."
 fail=0
@@ -69,6 +72,9 @@ if [ -n "$hits" ]; then
 fi
 
 python3 scripts/check-materials.py || fail=1
+
+# ── 4. the feature pages ────────────────────────────────────────────────────────
+python3 scripts/check-feature-pages.py || fail=1
 
 [ "$fail" = 0 ] && say "check-positioning: ok"
 exit $fail
