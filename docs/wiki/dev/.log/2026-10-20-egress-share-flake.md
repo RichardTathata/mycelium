@@ -9,7 +9,8 @@ budget only at a moment with nothing in flight, and waits out closing sockets at
 
 Lesson: a count of held resources is true at every instant, so a test must read it at a moment the test controls —
 "the client has its answer" is not "the server has closed". Assert the per-owner bound continuously and the global
-bound only at a quiescent point, rather than polling the assertion green.
+bound only at a quiescent point; where a close must be waited out, wait for it and re-assert the same bound,
+rather than reading the count at an instant the test does not control.
 
 Found beside it, open: a share shrinks when a proxy joins, but descriptors already held are not returned, so a
 late-joining proxy can find less than its share (budget 16: a lone proxy holding 12 leaves the second 4, and none for

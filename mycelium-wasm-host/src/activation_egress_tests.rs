@@ -558,17 +558,25 @@ async fn a_flood_on_one_proxy_leaves_every_other_proxy_its_share() {
     assert!(answer.starts_with("HTTP/1.1 200"), "A's admitted command reaches its upstream: {answer:?} {:?}", a.counts());
     sampler.abort();
     let a_most = a_max.load(Ordering::Acquire).max(a.inner.share.held.load(Ordering::Acquire));
-    assert!(a_most <= a_share, "A never holds more than its share: {a_most}");
-    // Once both commands' sockets are closed, the flood again holds no more than A's accept limit, and B one.
-    let mut used = budget.used();
+    // Its accepted sockets and the one upstream socket its command needed: within its share.
+    assert!(a_most <= a_accept + 1 && a_most <= a_share, "A never holds more than its share: {a_most}");
+    // Once both commands' sockets are closed, the flood again holds no more than A's accept limit, and B one; and
+    // every descriptor A still holds is an accepted socket (its command's upstream one was given back).
+    let settled = || {
+        let (used, held, open) = (budget.used(), a.inner.share.held.load(Ordering::Acquire), a.inner.open.load(Ordering::Acquire));
+        (used, held, open, used <= a_accept + 1 && held == open)
+    };
+    let mut now = settled();
     for _ in 0..100 {
-        if used <= a_accept + 1 {
+        if now.3 {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        used = budget.used();
+        now = settled();
     }
+    let (used, held, open, _) = now;
     assert!(used <= a_accept + 1, "A holds no more than its share once the commands are done: {used}");
+    assert_eq!(held, open, "A holds only its accepted sockets once its command is done (no upstream slot kept)");
     drop(flood);
 }
 

@@ -2181,8 +2181,9 @@ proxies join before any connection. Seen deterministically by holding an answere
 close: the old assertion fails with CI's exact message at `:535`. The test now samples A's `held` for the whole run
 (at most its share, 8), asserts A's accepted sockets at most 6 and the whole budget at most 7 at the one moment with
 nothing in flight (the flood settled, before either command), and waits up to 5 s for the closing sockets before the
-same bound at the end. It passes with the 300 ms hold, fails with A's accept limit raised by one or the reserve
-removed, and passed 200 of 200 under load (macOS) and 10 of 10 in a `rust:1.96` container.
+same bound at the end, and for A to hold only accepted sockets (its command's upstream slot given back — #657's
+review, Q1: a leaked upstream slot left `used` at 7). It passes with the 300 ms hold, fails with A's accept limit
+raised by one, the reserve removed or the upstream slot leaked, and passed 200 of 200 under load (macOS) and 10 of 10 in a `rust:1.96` container.
 
 **Found beside it, open (not the flake's cause): a proxy that joins after another has taken its share gets less than
 its own.** A share is the budget over the proxies joined *now*, and descriptors already held are not given back when
