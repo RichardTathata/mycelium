@@ -9,6 +9,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **`rustls-webpki` 0.103.16, `webpki-roots` 1.0.10, `webpki-root-certs` 1.0.10** for three advisories published
+  2026-10-19/20: RUSTSEC-2026-0382 (`rustls-webpki`: certificate verification may accept distrusted intermediates),
+  RUSTSEC-2026-0381 and -0383 (the bundled root stores allowed trust in distrusted emSign intermediates). The
+  verifier sits under every `rustls` session a node makes — the mesh's mTLS, gateway TLS and the outbound clients;
+  the bundled root stores are consulted only by the outbound clients (egress, OIDC, object stores, audit sinks),
+  never by the fleet-CA path, which verifies against the operator's anchor. All three tracked lockfiles updated
+  (`Cargo.lock`, `fuzz/Cargo.lock`, `examples/conway-gpu/Cargo.lock`); `cargo audit -f` reports none of the three.
+  Wire v12 unchanged; no API change.
+
 ### Fixed
 
 - **A departed node's tally entry that outlives its collected heartbeat is collected** (post-360 row K2). The
