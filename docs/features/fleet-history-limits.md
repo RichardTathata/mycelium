@@ -68,7 +68,7 @@ has no row for this feature. The end-to-end runs are tests in
   ([guide 20 § Checking your evaluator against the contract](../guide/20-authorising-actions.md#checking-your-evaluator-against-the-contract)).
 - **Bounds:** at most `MAX_FLEET_SEATS` (1 024) and a window of at most `MAX_FLEET_WINDOW_MS` (24 hours), in
   [`action_evaluator.rs`](../../src/agent/action_evaluator.rs); outside them the rule is refused, not clamped
-  ([deprecations §55](../guide/deprecations.md#55-a-fleet-limit-is-bounded-at-most-1-024-seats-a-window-of-at-most-24-hours-unreleased-post-360-plan-row-k2s-bounds)).
+  ([deprecations §55](../guide/deprecations.md#55-a-fleet-limit-is-bounded-at-most-1-024-seats-a-window-of-at-most-24-hours-2370-post-360-plan-row-k2s-bounds)).
 - **Not built:** row K2 of the [post-360 plan](../plans/post-360-hardening.md#33--the-batch) and its *Not built,
   stated* list in [§3.5](../plans/post-360-hardening.md#35--delivered-rows-2320-onward--each-promise-beside-its-evidence):
   tally entries are unsigned, so a forgery under a dead member's namespace is not detected; without `[tls]` a
@@ -88,7 +88,7 @@ has no row for this feature. The end-to-end runs are tests in
   decision record of the [lock lifecycle](../design/lock-lifecycle.md). Upgrade notes:
   [deprecations §53](../guide/deprecations.md#53-a-history-limited-rule-may-count-across-the-fleet-two-new-scopes-and-five-structs-gained-a-field-2360-post-360-plan-row-k2)
   and §55 (above), and
-  [§56](../guide/deprecations.md#56-a-members-tally-entries-without-its-heartbeat-are-unknown-coverage-not-zero-unreleased-post-360-plan-row-k2)
+  [§56](../guide/deprecations.md#56-a-members-tally-entries-without-its-heartbeat-are-unknown-coverage-not-zero-2370-post-360-plan-row-k2)
   (a member's tally entries without its heartbeat are unknown coverage). Maintainer notes: [wiki dev § V3 runtime authorisation and evidence](../wiki/dev/dev.md#v3-runtime-authorisation-and-evidence-the-ae-slice).
 - **Code:** [`src/agent/fleet_history.rs`](../../src/agent/fleet_history.rs) (`establish`, `claim_seat`,
   `publish_permit`), [`src/agent/action_evaluator.rs`](../../src/agent/action_evaluator.rs) (`HistoryScope`,

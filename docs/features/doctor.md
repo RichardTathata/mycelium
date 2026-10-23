@@ -54,7 +54,7 @@ has no row for this feature. The end-to-end runs are tests in [`src/doctor.rs`](
   `read-only` is its mode bits, not an access check.
 - **Changed with it:** `GossipConfig::validate()` no longer creates `persistence.base_path` as its early check; it
   reads the nearest existing ancestor instead, and `start()` creates the node's directory as before
-  ([deprecations § 57](../guide/deprecations.md#57-validate-no-longer-creates-the-persistence-base-path-unreleased-adopter-surface-x1)).
+  ([deprecations § 57](../guide/deprecations.md#57-validate-no-longer-creates-the-persistence-base-path-2370-adopter-surface-x1)).
 - The plan row is [`adopter-surface.md`](../plans/adopter-surface.md) X1.
 
 ## Go deeper

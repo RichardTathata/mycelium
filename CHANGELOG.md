@@ -9,6 +9,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.37.0] — 2026-10-23
+
 ### Added
 
 - **`mycelium declare`** (`docs/plans/adopter-surface.md`, row X10): `mycelium declare [project-dir] [--gateway <url>]

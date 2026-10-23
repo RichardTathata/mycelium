@@ -75,8 +75,8 @@ the notice.
 | 52 | an exhaustive `Rule { .. }` literal; an evaluator adapter held to the contract suite that cannot express `PolicyClause::ForbidClassAt`; a `mycelium-reason` caller matching `RouteError` exhaustively or building `Routed`; a client relying on the façade answering `403` at the first refused provider | 2.36.0 (post-360 row R) — also: an `llm-meta` ad from a gateway client is `403 reserved_namespace`; `GET /gateway/rpc/serve/{kind}` for `llm.invoke`, `mcp.invoke`, `skill.invoke`, `rpc.result` or `bulk.result` is `403 protected_kind`, for a kind the node serves in process `403 served_in_process`, and an in-process registration closes client streams on its kind; a classifying router routes nothing without an evaluator; a catalogue entry providing `llm-meta/…` is never installed; on a classifying router a caller with no bound floor cannot declare below the default class, and the header given twice or to a router that classifies nothing is `400` | `Rule::new` and its builders; decline the five `route_*` cases in `declared_limits` or express them; a `RouteError::Unclassifiable` arm; read `refused` / `data.refused_destinations` | Yes for the literals and the `match`; no for the façade — a refused provider is now passed over for the next, and `403` comes only when every candidate is refused |
 | 53 | an exhaustive `Rule`, `HistoryLimit`, `HistoryView`, `HistoryInput` or `mycelium-core` `KvStore` literal; an evaluator that wraps another and forwards only `evaluate`, `history_request` and `evaluate_with_history`; a fleet-consensus-limited request's position in an `rpc_rx` stream under provider enforcement | 2.36.0 (post-360 row K2; `ae.preflight` is catalogue revision 4) | `Rule::at_most(..)` and `.scoped(scope, counter_id)`; `fleet: Vec::new()` (and `seats: Vec::new()`) in a view or input literal; a wrapper forwards `fleet_counters` too | **Yes** for the literals (a new field); `HistoryScope` was already `#[non_exhaustive]`, so a `_` arm takes the new scopes; no for a wrapper — it compiles, and its fleet-limited rules decide `Indeterminate`; no for the order — behaviour |
 | 54 | `mycelium_core`'s `CoreCtx::gossip_txs`, `WriterEntry::tx`, `writer::get_or_spawn_writer` / `request_state`, `run_peer_writer`, and `framing::dispatch_gossip_send` / `dispatch_gossip_try_send` / `gossip_shard_fill` in their old shapes | 2.36.0 (the shutdown-sweep fix, #650) | `GossipTxs::new(senders, Unsent::default())`; pass `gossip_txs.unsent()`; wrap a shard receiver in `CountedRx::new(rx, unsent)` | **Yes** — every use is a type error; code that only uses `GossipAgent` is unaffected ([§54](#54-mycelium-cores-outbound-path-is-counted-its-channel-types-changed-shape-2360-the-shutdown-sweep-fix)) |
-| 55 | a fleet-scoped limit (`HistoryScope::FleetConsensus` / `FleetTally`) over more than 1 024 seats, or over a window of zero or more than 24 hours | unreleased (row K2's bounds) | a per-point limit, or a fleet limit within `MAX_FLEET_SEATS` / `MAX_FLEET_WINDOW_MS`; check a policy at load with `check_fleet_bounds` or `FleetCounter::try_new` | **No** — it builds, and every request its rule covers decides `Indeterminate`; **yes** for a `ContractCase` or `Report` literal (a new field) ([§55](#55-a-fleet-limit-is-bounded-at-most-1-024-seats-a-window-of-at-most-24-hours-unreleased-post-360-plan-row-k2s-bounds)) |
-| 56 | a `FleetTally` rule reading a member's entries this node holds without its heartbeat as zero, or counting a forged (future) time as a permit | unreleased (row K2, #656) | nothing to migrate: such a member is unknown coverage while its entry is inside the window plus the staleness and drift bounds | **No** — a tally rule can decide `Indeterminate` where it admitted before, for at most that window ([§56](#56-a-members-tally-entries-without-its-heartbeat-are-unknown-coverage-not-zero-unreleased-post-360-plan-row-k2)) |
+| 55 | a fleet-scoped limit (`HistoryScope::FleetConsensus` / `FleetTally`) over more than 1 024 seats, or over a window of zero or more than 24 hours | 2.37.0 (row K2's bounds) | a per-point limit, or a fleet limit within `MAX_FLEET_SEATS` / `MAX_FLEET_WINDOW_MS`; check a policy at load with `check_fleet_bounds` or `FleetCounter::try_new` | **No** — it builds, and every request its rule covers decides `Indeterminate`; **yes** for a `ContractCase` or `Report` literal (a new field) ([§55](#55-a-fleet-limit-is-bounded-at-most-1-024-seats-a-window-of-at-most-24-hours-2370-post-360-plan-row-k2s-bounds)) |
+| 56 | a `FleetTally` rule reading a member's entries this node holds without its heartbeat as zero, or counting a forged (future) time as a permit | 2.37.0 (row K2, #656) | nothing to migrate: such a member is unknown coverage while its entry is inside the window plus the staleness and drift bounds | **No** — a tally rule can decide `Indeterminate` where it admitted before, for at most that window ([§56](#56-a-members-tally-entries-without-its-heartbeat-are-unknown-coverage-not-zero-2370-post-360-plan-row-k2)) |
 
 **Entry 10 is the loud kind**, and deliberately so: a signature change, caught by the compiler, not
 a behaviour change to discover at runtime. You cannot authorise a federated call without saying
@@ -1792,7 +1792,7 @@ and `request_state` that node's `gossip_txs.unsent()`. A consumer of a gossip sh
 `CountedRx::new(rx, unsent)` and keeps the `Held` that `recv` returns until it has handed the frame on. A frame read
 from the raw receiver without that wrapper is never released, and every later shutdown waits its whole bound.
 
-## 55. A fleet limit is bounded: at most 1 024 seats, a window of at most 24 hours (unreleased, post-360 plan row K2's bounds)
+## 55. A fleet limit is bounded: at most 1 024 seats, a window of at most 24 hours (2.37.0, post-360 plan row K2's bounds)
 
 **What changes.** A fleet-scoped limit (`HistoryScope::FleetConsensus` or `FleetTally`) whose count exceeds
 `MAX_FLEET_SEATS` (1 024), or whose window is zero or exceeds `MAX_FLEET_WINDOW_MS` (24 hours, the history horizon), is
@@ -1828,7 +1828,7 @@ field, so an exhaustive literal of either — an adopter's own case — needs `a
 `refused_at_load: Vec::new()`). A stored tally entry's window is read clamped to the horizon, so an entry an earlier
 release wrote with a longer window ages out at 24 hours. `ae.preflight` is catalogue revision 5.
 
-## 56. A member's tally entries without its heartbeat are unknown coverage, not zero (unreleased, post-360 plan row K2)
+## 56. A member's tally entries without its heartbeat are unknown coverage, not zero (2.37.0, post-360 plan row K2)
 
 **What changes.** Under 2.36.0 a reader skipped a non-peer that it held tally entries for but no readable heartbeat:
 the node was neither counted nor called unknown, so its permits counted as zero. That happens when a node's heartbeat
@@ -1865,7 +1865,7 @@ heartbeat tick, while a live member's entry holds a forged time, until its owner
 has no heartbeat" is reading a member whose heartbeat has not reached it; it clears when the heartbeat arrives or the
 entry ages past the bound.
 
-## 57. `validate()` no longer creates the persistence base path (unreleased, adopter-surface X1)
+## 57. `validate()` no longer creates the persistence base path (2.37.0, adopter-surface X1)
 
 **What changed.** `GossipConfig::validate()`'s early check of `persistence.base_path` used to probe by
 `create_dir_all`, so a validator wrote to disk: loading a configuration (`load_from_file`, the binary's `-c`) created
