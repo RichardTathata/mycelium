@@ -12,13 +12,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Security
 
 - **`rustls-webpki` 0.103.16, `webpki-roots` 1.0.10, `webpki-root-certs` 1.0.10** for three advisories published
-  2026-10-19/20: RUSTSEC-2026-0382 (`rustls-webpki`: certificate verification may accept distrusted intermediates),
-  RUSTSEC-2026-0381 and -0383 (the bundled root stores allowed trust in distrusted emSign intermediates). The
-  verifier sits under every `rustls` session a node makes — the mesh's mTLS, gateway TLS and the outbound clients;
-  the bundled root stores are consulted only by the outbound clients (egress, OIDC, object stores, audit sinks),
-  never by the fleet-CA path, which verifies against the operator's anchor. All three tracked lockfiles updated
-  (`Cargo.lock`, `fuzz/Cargo.lock`, `examples/conway-gpu/Cargo.lock`); `cargo audit -f` reports none of the three.
-  Wire v12 unchanged; no API change.
+  2026-10-19/20: RUSTSEC-2026-0382 (`rustls-webpki`: certificate verification may accept distrusted intermediates
+  when the configured anchors allow such a path), RUSTSEC-2026-0381 and -0383 (the bundled root stores allowed trust
+  in distrusted emSign intermediates). **Where it matters:** `rustls-webpki` verifies the mesh's mTLS in both
+  directions, against the operator's CA alone (`RootCertStore::empty()` plus the fleet anchor), so an emSign
+  intermediate cannot chain there; gateway TLS is server-only and verifies nothing; the federation client verifies by
+  SPKI pin. The node's `reqwest` 0.12 clients (egress, OIDC, LLM, A2A, MCP) use native-tls and the OS trust store,
+  the object-store client the platform verifier, so **neither bundled root store is consulted by a shipped build**
+  (`webpki-root-certs` is compiled only on wasm32) — 0381 and 0383 are defence in depth here. All three tracked
+  lockfiles updated (`Cargo.lock`, `fuzz/Cargo.lock`, `examples/conway-gpu/Cargo.lock`); `cargo audit -f` reports none
+  of the three. Wire v12 unchanged; no API change.
 
 ### Fixed
 
