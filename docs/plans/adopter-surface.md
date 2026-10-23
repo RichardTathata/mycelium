@@ -591,7 +591,8 @@ replays); `wire-check`'s exit codes.
 
 **Exit:** editing a unit file under the watch changes the overlay the fleet reports within one declare, shown in CI
 with the scaffold; a unit edit that `wire-check` refuses leaves the previous declaration in place, shown by a plant;
-the watch adds no sim-seam baseline entry outside the seam.
+the watch adds no sim-seam baseline entry outside the seam *(X10's PR: **not built** — the seam is not built, the
+watch's seven file and timer sites are in the baseline, in the open, with the inventory row that says why)*.
 
 **Not built, stated:** it declares; it does not build or restart the program. A change to `src/` is `cargo run`.
 *(X10's PR)* It applies to a node with a gateway: the Python scaffold's node has one, the Rust scaffold's nodes do
@@ -951,5 +952,5 @@ declarations, not code); a second template before X7; any change to the wire; an
 | X7 | | | |
 | X8 | | | |
 | X9 | | | |
-| X10 | a watch over `units/` and `skills/` that re-runs `wire-check` and re-declares on a clean check; a finding leaves the last good declaration; skill text written through the route that owns `prompts/`; no restart; shown in CI with the scaffold | `src/declare.rs` (`Watch::tick`, `heartbeat`, `retract`, `run`) and its four tests (`a_unit_edit_is_redeclared_and_the_old_handle_retracted`, `a_unit_wire_check_refuses_keeps_the_previous_declaration`, `a_refused_token_is_an_error_naming_the_route`, `a_skill_file_becomes_a_prompt_template`), written against a `todo!()` tick and seen failing first; the CI step in `Scaffold` (declare, watch, an edit reaching the fleet, a refused unit leaving it, Ctrl-C retracting). **Not built, by the row's own text:** the *Input*-class seam for the filesystem event source — the watch polls on a timer and is outside every recording, stated in the inventory. | X10's PR review |
+| X10 | a watch over `units/` and `skills/` that re-runs `wire-check` and re-declares on a clean check; a finding leaves the last good declaration; skill text written through the route that owns `prompts/`; no restart; shown in CI with the scaffold | `src/declare.rs` (`Watch::tick`, `heartbeat`, `retract`, `run`) and its four tests (`a_unit_edit_is_redeclared_and_the_old_handle_retracted`, `a_unit_wire_check_refuses_keeps_the_previous_declaration`, `a_refused_token_is_an_error_naming_the_route`, `a_skill_file_becomes_a_prompt_template`), written against a `todo!()` tick and seen failing first, plus three from #667's review (a gateway-rejected unit put back and not retried, a lost handle declared again, a removed unit retracted; the skill test gained the removed-file case); the CI step in `Scaffold` (declare, watch, an edit reaching the fleet, a refused unit leaving it, Ctrl-C retracting). **Not built, by the row's own text:** the *Input*-class seam for the filesystem event source — the watch polls on a timer and is outside every recording, stated in the inventory and in the Exit. **Found by the review and fixed:** the exit test asserted before the node's async writes landed; a node restart left the watch blind; the once mode sent a lease it never heartbeated; a poll longer than a third of the lease lost the declaration; the `cli`-only binary did not build; a gateway refusal stormed and lost the previous declaration. | #667's review, 2026-10-23 |
 | X11 | | | |

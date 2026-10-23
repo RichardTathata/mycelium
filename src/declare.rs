@@ -31,8 +31,10 @@ pub struct WatchConfig {
     pub project: PathBuf,
     /// The advert's refresh interval, sent as `interval_secs`.
     pub interval_secs: u64,
-    /// The lease the declaration lives under; `heartbeat()` must be called within every window.
-    pub lease_secs: u64,
+    /// The lease the declaration lives under, when watching: `heartbeat()` must be called within every window, and
+    /// a watch that dies is retracted by the node when the lease lapses. `None` — the once mode — binds the
+    /// declaration to the node's lifetime, as the SDKs' `declare_units` does without a lease (#667's review, D3).
+    pub lease_secs: Option<u64>,
 }
 
 /// What one tick did.
@@ -42,15 +44,36 @@ pub enum Tick {
     Unchanged,
     /// `wire-check` found errors; the previous declaration stands. `report` is its text.
     Refused { errors: usize, report: String },
+    /// The gateway refused a unit the check passed (a reserved namespace, a stem-only section, a governed group);
+    /// that unit's previous declaration was put back, the others stand, and the tick is not retried until a file
+    /// changes (#667's review, D6).
+    Rejected { unit: String, error: String },
     /// Declared: how many units and skills, and what the node said it does not enforce.
     Declared { units: usize, skills: usize, not_enforced: Vec<String>, warnings: Vec<String> },
+}
+
+/// A gateway's refusal: `status` is `(code, insufficient_scope)` when the gateway answered at all.
+struct GatewayError {
+    status: Option<(u16, bool)>,
+    text: String,
+}
+
+impl GatewayError {
+    /// The watch itself is refused — nothing it sends would be accepted — as opposed to one unit's content.
+    fn refuses_the_watch(&self) -> bool {
+        matches!(self.status, None | Some((401, _)) | Some((403, true)))
+    }
 }
 
 /// A watch over one project against one gateway. Holds the handles of its declarations.
 pub struct Watch {
     cfg: WatchConfig,
     client: reqwest::Client,
-    handles: BTreeMap<String, String>,
+    /// Per unit name: the handle the gateway gave, and the text it was given — kept so a refused re-declaration
+    /// can put the previous one back.
+    handles: BTreeMap<String, (String, String)>,
+    /// The skills declared, `(ns, name)`, so a removed file's template is deleted.
+    skills: Vec<(String, String)>,
     seen: BTreeMap<PathBuf, (u128, u64)>,
     ticked: bool,
 }
@@ -98,12 +121,28 @@ fn fingerprint(paths: impl Iterator<Item = PathBuf>) -> BTreeMap<PathBuf, (u128,
 
 impl Watch {
     pub fn new(cfg: WatchConfig) -> Self {
-        Self { cfg, client: reqwest::Client::new(), handles: BTreeMap::new(), seen: BTreeMap::new(), ticked: false }
+        Self { cfg, client: reqwest::Client::new(), handles: BTreeMap::new(), skills: Vec::new(), seen: BTreeMap::new(), ticked: false }
     }
 
     /// The handles this watch currently holds, by unit name.
-    pub fn handles(&self) -> &BTreeMap<String, String> {
-        &self.handles
+    pub fn handles(&self) -> BTreeMap<String, String> {
+        self.handles.iter().map(|(k, (h, _))| (k.clone(), h.clone())).collect()
+    }
+
+    async fn declare_unit(&self, toml: &str) -> Result<(String, Vec<String>), GatewayError> {
+        let mut body = serde_json::json!({ "toml": toml, "interval_secs": self.cfg.interval_secs });
+        if let Some(lease) = self.cfg.lease_secs {
+            body["lease_secs"] = serde_json::json!(lease);
+        }
+        let reply = self.send_typed("/gateway/units/declare", self.request(reqwest::Method::POST, "/gateway/units/declare").json(&body)).await?;
+        let handle = reply["handle_id"].as_str().ok_or_else(|| GatewayError { status: None, text: "units/declare answered without a handle_id".to_string() })?.to_string();
+        let not_enforced = reply["not_enforced"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(str::to_string)).collect();
+        Ok((handle, not_enforced))
+    }
+
+    async fn drop_handle(&self, handle: &str) {
+        let route = format!("/gateway/capability/{handle}");
+        let _ = self.send(&route, self.request(reqwest::Method::DELETE, &route)).await;
     }
 
     fn request(&self, method: reqwest::Method, route: &str) -> reqwest::RequestBuilder {
@@ -115,11 +154,17 @@ impl Watch {
     }
 
     async fn send(&self, route: &str, req: reqwest::RequestBuilder) -> Result<serde_json::Value, String> {
-        let resp = req.send().await.map_err(|e| format!("{route}: {e}"))?;
+        self.send_typed(route, req).await.map_err(|e| e.text)
+    }
+
+    /// A refusal with its status kept, so a caller can tell the watch being refused (no credential, no scope)
+    /// from one unit's content being refused (a reserved namespace, a stem-only section).
+    async fn send_typed(&self, route: &str, req: reqwest::RequestBuilder) -> Result<serde_json::Value, GatewayError> {
+        let resp = req.send().await.map_err(|e| GatewayError { status: None, text: format!("{route}: {e}") })?;
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(format!("{route}: {status} {body}"));
+            return Err(GatewayError { status: Some((status.as_u16(), body.contains("insufficient scope"))), text: format!("{route}: {status} {body}") });
         }
         Ok(serde_json::from_str(&body).unwrap_or(serde_json::Value::Null))
     }
@@ -152,21 +197,41 @@ impl Watch {
             let errors = text.lines().filter(|l| l.starts_with("error")).count().max(1);
             return Ok(Tick::Refused { errors, report: text });
         }
-        // Declare: retract the previous handle of each unit first, so a renamed capability does not linger.
-        let mut not_enforced = Vec::new();
+        // Declare. A unit's previous handle is retracted first, so a renamed capability does not linger: one KV key
+        // per `ns/name` means the other order would tombstone the new advert. Between the two a reader sees no
+        // provider for a moment; that window is inherent and the page says so (#667's review, Q9). If the gateway
+        // refuses the new text, the previous text is declared again, so a refused edit still changes nothing.
+        let mut not_enforced: Vec<String> = Vec::new();
         for (name, path, _) in &parsed {
-            if let Some(old) = self.handles.remove(name) {
-                let _ = self.send(&format!("/gateway/capability/{old}"), self.request(reqwest::Method::DELETE, &format!("/gateway/capability/{old}"))).await;
-            }
             let toml = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-            let body = serde_json::json!({ "toml": toml, "interval_secs": self.cfg.interval_secs, "lease_secs": self.cfg.lease_secs });
-            let reply = self.send("/gateway/units/declare", self.request(reqwest::Method::POST, "/gateway/units/declare").json(&body)).await?;
-            if let Some(h) = reply["handle_id"].as_str() {
-                self.handles.insert(name.clone(), h.to_string());
+            let previous = self.handles.remove(name);
+            if let Some((old, _)) = &previous {
+                self.drop_handle(old).await;
             }
-            for s in reply["not_enforced"].as_array().into_iter().flatten().filter_map(|v| v.as_str()) {
-                if !not_enforced.iter().any(|x| x == s) {
-                    not_enforced.push(s.to_string());
+            match self.declare_unit(&toml).await {
+                Ok((handle, ne)) => {
+                    self.handles.insert(name.clone(), (handle, toml));
+                    for s in ne {
+                        if !not_enforced.contains(&s) {
+                            not_enforced.push(s);
+                        }
+                    }
+                }
+                Err(error) => {
+                    // Put the previous declaration back either way. A watch the gateway refuses outright (no
+                    // credential, no scope) is an error; one unit's content refused is a rejection, remembered
+                    // with this tree so it is not retried every poll.
+                    if let Some((_, old_toml)) = previous
+                        && let Ok((handle, _)) = self.declare_unit(&old_toml).await
+                    {
+                        self.handles.insert(name.clone(), (handle, old_toml));
+                    }
+                    if error.refuses_the_watch() {
+                        return Err(error.text);
+                    }
+                    self.seen = now;
+                    self.ticked = true;
+                    return Ok(Tick::Rejected { unit: name.clone(), error: error.text });
                 }
             }
         }
@@ -174,11 +239,13 @@ impl Watch {
         let present: Vec<&String> = parsed.iter().map(|(n, _, _)| n).collect();
         let gone: Vec<String> = self.handles.keys().filter(|k| !present.contains(k)).cloned().collect();
         for name in gone {
-            if let Some(old) = self.handles.remove(&name) {
-                let _ = self.send(&format!("/gateway/capability/{old}"), self.request(reqwest::Method::DELETE, &format!("/gateway/capability/{old}"))).await;
+            if let Some((old, _)) = self.handles.remove(&name) {
+                self.drop_handle(&old).await;
             }
         }
+        // Skills: write each file's template; delete the template of a file that is gone.
         let mut warnings = Vec::new();
+        let mut declared_skills = Vec::with_capacity(skills.len());
         for (ns, name, path) in &skills {
             let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
             if !text.contains("{{input}}") {
@@ -187,26 +254,45 @@ impl Watch {
             let template = serde_json::json!({ "system": "", "user_template": text, "max_tokens": 256, "temperature": 0.0, "metadata": {} });
             let route = format!("/gateway/prompts/{ns}/{name}");
             self.send(&route, self.request(reqwest::Method::PUT, &route).json(&template)).await?;
+            declared_skills.push((ns.clone(), name.clone()));
+        }
+        for (ns, name) in std::mem::replace(&mut self.skills, declared_skills) {
+            if !skills.iter().any(|(n, m, _)| *n == ns && *m == name) {
+                let route = format!("/gateway/prompts/{ns}/{name}");
+                let _ = self.send(&route, self.request(reqwest::Method::DELETE, &route)).await;
+            }
         }
         self.seen = now;
         self.ticked = true;
         Ok(Tick::Declared { units: parsed.len(), skills: skills.len(), not_enforced, warnings })
     }
 
-    /// Keep every declaration alive: one heartbeat per handle. Call within every `lease_secs` window.
-    pub async fn heartbeat(&self) -> Result<(), String> {
-        for h in self.handles.values() {
+    /// Keep every declaration alive: one heartbeat per handle. Call within every `lease_secs` window. A handle
+    /// the node no longer knows — it restarted, or the lease lapsed — is forgotten here and the next `tick`
+    /// declares again whether or not a file changed (#667's review, D2): the route's own contract says a 404 is
+    /// *re-advertise*.
+    pub async fn heartbeat(&mut self) -> Result<(), String> {
+        let mut lost = Vec::new();
+        for (name, (h, _)) in &self.handles {
             let route = format!("/gateway/capability/{h}/heartbeat");
-            self.send(&route, self.request(reqwest::Method::POST, &route)).await?;
+            if let Err(e) = self.send(&route, self.request(reqwest::Method::POST, &route)).await {
+                lost.push((name.clone(), e));
+            }
         }
-        Ok(())
+        if lost.is_empty() {
+            return Ok(());
+        }
+        for (name, _) in &lost {
+            self.handles.remove(name);
+        }
+        self.ticked = false;
+        Err(lost.into_iter().map(|(n, e)| format!("{n}: {e}")).collect::<Vec<_>>().join("; "))
     }
 
     /// Retract every declaration this watch holds.
     pub async fn retract(&mut self) {
-        for (_, h) in std::mem::take(&mut self.handles) {
-            let route = format!("/gateway/capability/{h}");
-            let _ = self.send(&route, self.request(reqwest::Method::DELETE, &route)).await;
+        for (_, (h, _)) in std::mem::take(&mut self.handles) {
+            self.drop_handle(&h).await;
         }
     }
 }
@@ -215,8 +301,12 @@ impl Watch {
 /// the first declaration was refused by `wire-check` or by the gateway.
 pub async fn run(cfg: WatchConfig, watch: bool, poll: Duration) -> i32 {
     let mut w = Watch::new(cfg.clone());
-    let beat_every = Duration::from_secs((cfg.lease_secs / 3).max(1));
+    // Beat within every lease window whatever the poll (#667's review, D4): the sleep is the shorter of the poll
+    // and the time to the next beat. One `ctrl_c` future for the whole run, so a signal during a tick is kept.
+    let beat_every = cfg.lease_secs.map(|l| Duration::from_secs((l / 3).max(1)));
     let mut last_beat = crate::sim_seam::mono_instant();
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
     let mut first = true;
     loop {
         let code = match w.tick().await {
@@ -224,6 +314,10 @@ pub async fn run(cfg: WatchConfig, watch: bool, poll: Duration) -> i32 {
             Ok(Tick::Refused { errors, report }) => {
                 println!("{report}");
                 println!("refused: wire-check found {errors} error(s); {}", if w.handles().is_empty() { "this run declared nothing" } else { "the previous declaration stands" });
+                1
+            }
+            Ok(Tick::Rejected { unit, error }) => {
+                println!("rejected: the gateway refused unit `{unit}` — {error}; its previous declaration was put back, the others stand");
                 1
             }
             Ok(Tick::Declared { units, skills, not_enforced, warnings }) => {
@@ -249,17 +343,21 @@ pub async fn run(cfg: WatchConfig, watch: bool, poll: Duration) -> i32 {
             return code;
         }
         first = false;
+        let until_beat = beat_every.map(|every| every.saturating_sub(crate::sim_seam::mono_elapsed(&last_beat)));
+        let wait = until_beat.map_or(poll, |u| u.min(poll));
         tokio::select! {
-            _ = tokio::time::sleep(poll) => {}
-            _ = tokio::signal::ctrl_c() => {
+            _ = tokio::time::sleep(wait) => {}
+            _ = &mut ctrl_c => {
                 println!("retracting {} declaration(s)", w.handles().len());
                 w.retract().await;
                 return 0;
             }
         }
-        if crate::sim_seam::mono_elapsed(&last_beat) >= beat_every {
+        if let Some(every) = beat_every
+            && crate::sim_seam::mono_elapsed(&last_beat) >= every
+        {
             if let Err(e) = w.heartbeat().await {
-                println!("heartbeat: {e}");
+                println!("heartbeat lost a declaration, declaring again at the next tick: {e}");
             }
             last_beat = crate::sim_seam::mono_instant();
         }
@@ -308,12 +406,25 @@ mod tests {
     }
 
     fn cfg(base: &str, dir: &Path) -> WatchConfig {
-        WatchConfig { gateway: base.to_string(), token: Some("s3cret".into()), project: dir.to_path_buf(), interval_secs: 30, lease_secs: 90 }
+        WatchConfig { gateway: base.to_string(), token: Some("s3cret".into()), project: dir.to_path_buf(), interval_secs: 30, lease_secs: Some(90) }
     }
 
     async fn providers(base: &str, name: &str) -> Vec<serde_json::Value> {
         let r = reqwest::Client::new().get(format!("{base}/gateway/capability/resolve?ns=demo&name={name}")).bearer_auth("s3cret").send().await.unwrap();
         r.json::<serde_json::Value>().await.unwrap()["providers"].as_array().cloned().unwrap_or_default()
+    }
+
+    /// The gateway answers a declare or a retract before the advert's write or the tombstone lands (the persist
+    /// task's first tick), so a reader polls to a deadline, as the HTTP tests do (#667's review, D1).
+    async fn wait_for(base: &str, name: &str, want: impl Fn(&[serde_json::Value]) -> bool) -> Vec<serde_json::Value> {
+        let deadline = crate::sim_seam::mono_instant() + Duration::from_secs(5);
+        loop {
+            let p = providers(base, name).await;
+            if want(&p) || crate::sim_seam::mono_instant() >= deadline {
+                return p;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     /// The row's exit: a unit edit under the watch changes what the fleet reports within one declare, and a renamed
@@ -326,15 +437,17 @@ mod tests {
         let mut w = Watch::new(cfg(&base, &dir));
         let t = w.tick().await.unwrap();
         assert!(matches!(t, Tick::Declared { units: 1, skills: 0, .. }), "{t:?}");
-        assert_eq!(providers(&base, "thing").await[0]["attributes"]["v"], "1");
+        let p = wait_for(&base, "thing", |p| !p.is_empty()).await;
+        assert_eq!(p[0]["attributes"]["v"], "1", "{p:?}");
         assert_eq!(w.tick().await.unwrap(), Tick::Unchanged, "nothing changed");
         unit(&dir, "other", "2");
         let t = w.tick().await.unwrap();
         assert!(matches!(t, Tick::Declared { units: 1, .. }), "{t:?}");
-        assert_eq!(providers(&base, "other").await[0]["attributes"]["v"], "2");
-        assert!(providers(&base, "thing").await.is_empty(), "the renamed capability's old advert is retracted");
+        let p = wait_for(&base, "other", |p| !p.is_empty()).await;
+        assert_eq!(p[0]["attributes"]["v"], "2", "{p:?}");
+        assert!(wait_for(&base, "thing", |p| p.is_empty()).await.is_empty(), "the renamed capability's old advert is retracted");
         w.retract().await;
-        assert!(providers(&base, "other").await.is_empty(), "retract removes the declaration");
+        assert!(wait_for(&base, "other", |p| p.is_empty()).await.is_empty(), "retract removes the declaration");
         agent.shutdown().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -351,8 +464,73 @@ mod tests {
         std::fs::write(dir.join("units/b.toml"), "principal = \"b\"\n\n[[requirement]]\nns = \"nobody\"\nname = \"offers\"\n").unwrap();
         let t = w.tick().await.unwrap();
         assert!(matches!(t, Tick::Refused { .. }), "{t:?}");
-        assert_eq!(providers(&base, "thing").await.len(), 1, "the previous declaration stands");
+        assert_eq!(wait_for(&base, "thing", |p| !p.is_empty()).await.len(), 1, "the previous declaration stands");
         assert_eq!(w.handles().len(), 1);
+        agent.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A unit the check passes but the gateway refuses (a reserved namespace) is rejected once — not retried every
+    /// poll — and its previous declaration is put back, so a refused edit still changes nothing (#667's review, D6).
+    #[tokio::test]
+    async fn a_unit_the_gateway_refuses_is_rejected_once_and_its_previous_declaration_put_back() {
+        let (agent, base) = gateway_node().await;
+        let dir = project("rejected");
+        unit(&dir, "thing", "1");
+        let mut w = Watch::new(cfg(&base, &dir));
+        assert!(matches!(w.tick().await.unwrap(), Tick::Declared { .. }));
+        wait_for(&base, "thing", |p| !p.is_empty()).await;
+        // The same unit, now also offering a capability in a namespace the gateway reserves.
+        std::fs::write(
+            dir.join("units/a.toml"),
+            "principal = \"a\"\n\n[[capability]]\nns = \"demo\"\nname = \"thing\"\nttl_secs = 30\n  [capability.attrs]\n  v = \"1\"\n\n[[capability]]\nns = \"llm-meta\"\nname = \"x\"\nttl_secs = 30\n",
+        )
+        .unwrap();
+        let t = w.tick().await.unwrap();
+        assert!(matches!(&t, Tick::Rejected { unit, .. } if unit == "a"), "{t:?}");
+        assert_eq!(wait_for(&base, "thing", |p| !p.is_empty()).await.len(), 1, "the previous declaration was put back");
+        assert_eq!(w.handles().len(), 1, "and its handle is held");
+        assert_eq!(w.tick().await.unwrap(), Tick::Unchanged, "the refusal is not retried while nothing changed");
+        agent.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A handle the node no longer knows — here retracted behind the watch's back, as a restart or a lapsed lease
+    /// would — fails the heartbeat, and the next tick declares again although no file changed (#667's review, D2).
+    #[tokio::test]
+    async fn a_lost_handle_is_declared_again_at_the_next_tick() {
+        let (agent, base) = gateway_node().await;
+        let dir = project("lost");
+        unit(&dir, "thing", "1");
+        let mut w = Watch::new(cfg(&base, &dir));
+        assert!(matches!(w.tick().await.unwrap(), Tick::Declared { .. }));
+        wait_for(&base, "thing", |p| !p.is_empty()).await;
+        assert!(w.heartbeat().await.is_ok(), "a live handle beats");
+        let handle = w.handles().values().next().unwrap().clone();
+        reqwest::Client::new().delete(format!("{base}/gateway/capability/{handle}")).bearer_auth("s3cret").send().await.unwrap();
+        wait_for(&base, "thing", |p| p.is_empty()).await;
+        let err = w.heartbeat().await.expect_err("a lost handle fails the heartbeat");
+        assert!(err.contains("404"), "{err}");
+        assert!(w.handles().is_empty(), "the lost handle is forgotten");
+        assert!(matches!(w.tick().await.unwrap(), Tick::Declared { .. }), "declared again with no file changed");
+        assert_eq!(wait_for(&base, "thing", |p| !p.is_empty()).await.len(), 1);
+        agent.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A unit removed from the directory is retracted at the next tick.
+    #[tokio::test]
+    async fn a_unit_removed_from_the_directory_is_retracted() {
+        let (agent, base) = gateway_node().await;
+        let dir = project("removed");
+        unit(&dir, "thing", "1");
+        let mut w = Watch::new(cfg(&base, &dir));
+        assert!(matches!(w.tick().await.unwrap(), Tick::Declared { units: 1, .. }));
+        wait_for(&base, "thing", |p| !p.is_empty()).await;
+        std::fs::remove_file(dir.join("units/a.toml")).unwrap();
+        assert!(matches!(w.tick().await.unwrap(), Tick::Declared { units: 0, .. }));
+        assert!(wait_for(&base, "thing", |p| p.is_empty()).await.is_empty(), "retracted");
+        assert!(w.handles().is_empty());
         agent.shutdown().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -392,6 +570,10 @@ mod tests {
         std::fs::write(dir.join("skills/demo/greeting.md"), "No placeholder here at all.").unwrap();
         let t = w.tick().await.unwrap();
         assert!(matches!(&t, Tick::Declared { warnings, .. } if warnings.len() == 1), "{t:?}");
+        // A removed skill file deletes its template (#667's review, Q7).
+        std::fs::remove_file(dir.join("skills/demo/greeting.md")).unwrap();
+        assert!(matches!(w.tick().await.unwrap(), Tick::Declared { skills: 0, .. }));
+        assert!(agent.llm().get_prompt("demo", "greeting").is_none(), "the template is deleted with the file");
         agent.shutdown().await;
         let _ = std::fs::remove_dir_all(&dir);
     }

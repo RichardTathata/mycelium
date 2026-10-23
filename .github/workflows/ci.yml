@@ -643,6 +643,7 @@ jobs:
           set -euo pipefail
           BIN="$PWD/target/debug/mycelium"
           cd "$RUNNER_TEMP/governed-call-py"
+          trap 'echo "--- watch.log"; cat watch.log 2>/dev/null || true; echo "--- node.log"; tail -40 data/node.log 2>/dev/null || true' ERR
           "$BIN" -c node.toml > data/node.log 2>&1 &
           NODE=$!
           for _ in $(seq 1 60); do curl -sf http://127.0.0.1:8300/health > /dev/null && break; sleep 0.5; done

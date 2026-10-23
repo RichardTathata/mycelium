@@ -36,14 +36,25 @@ No runnable example exists: the [example index's capability matrix](../../exampl
 has no row for this feature. The CI job `Scaffold` runs it against the Python scaffold's node: declare, watch, an
 edit reaching the fleet, a refused unit leaving the previous declaration, Ctrl-C retracting. The tests are in
 [`src/declare.rs`](../../src/declare.rs): `a_unit_edit_is_redeclared_and_the_old_handle_retracted`,
-`a_unit_wire_check_refuses_keeps_the_previous_declaration`, `a_refused_token_is_an_error_naming_the_route` and
-`a_skill_file_becomes_a_prompt_template`.
+`a_unit_wire_check_refuses_keeps_the_previous_declaration`,
+`a_unit_the_gateway_refuses_is_rejected_once_and_its_previous_declaration_put_back`,
+`a_lost_handle_is_declared_again_at_the_next_tick`, `a_unit_removed_from_the_directory_is_retracted`,
+`a_refused_token_is_an_error_naming_the_route` and `a_skill_file_becomes_a_prompt_template`.
 
 ## What it guarantees, and what it does not
 
-- The declaration the fleet holds is the last one `wire-check` passed; a refused edit changes nothing.
-- A declaration lives under a lease the watch heartbeats; if the watch dies, the node retracts it when the lease
-  lapses, as for any SDK agent ([units/declare](../reference/unit-file.md#who-reads-which-section)).
+- The declaration the fleet holds is the last one `wire-check` passed and the gateway accepted; a refused edit
+  changes nothing — a unit the gateway refuses after the check passed (a reserved namespace, a stem-only section)
+  has its previous text declared again, and the refusal is printed once, not retried every poll.
+- Under `--watch` a declaration lives under a lease the watch heartbeats within; if the watch dies, the node
+  retracts it when the lease lapses, as for any SDK agent ([units/declare](../reference/unit-file.md#who-reads-which-section)).
+  A handle the node no longer knows — after a node restart, or a lapsed lease — fails the heartbeat and is declared
+  again at the next tick whether or not a file changed. Once, without `--watch`, no lease is sent: the declaration
+  lives until the node stops or it is retracted, as an SDK agent's does.
+- A good edit briefly shows no provider: a unit's previous handle is retracted before the new text is declared (one
+  KV key per `ns/name`, so the other order would tombstone the new advert), and the window between the two is a
+  reader's moment of absence. Inherent, and stated here rather than hidden.
+- A removed unit file is retracted; a removed skill file's template is deleted.
 - It declares; it does not enforce. A unit's mandate and rule come back `not_enforced` from a node that attaches no
   evaluator, and the tick prints them.
 - **Not built:** the plan's *Input*-class seam for a filesystem event source — the watch polls modification time and

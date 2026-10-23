@@ -32,7 +32,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some("init") => std::process::exit(init_cli(std::env::args().skip(2).collect())),
         // `mycelium declare [project-dir] [--watch]` — the project's units and skills, declared to a gateway once or
         // kept current as the files change (docs/plans/adopter-surface.md, X10). Starts no node.
+        #[cfg(feature = "gateway")]
         Some("declare") => std::process::exit(declare_cli(std::env::args().skip(2).collect())),
+        #[cfg(not(feature = "gateway"))]
+        Some("declare") => { eprintln!("declare talks to a gateway, which only a build with the `gateway` feature has"); std::process::exit(2) }
         Some("rules") => std::process::exit(rules_cli(std::env::args().skip(2).collect())),
         Some("explain") => std::process::exit(explain_cli(std::env::args().skip(2).collect())),
         // `mycelium tls issue` — a node certificate signed where the CA key is, so the node never
@@ -318,7 +321,10 @@ fn wire_check_cli(args: Vec<String>) -> i32 {
 /// `mycelium declare [project-dir] [--gateway <url>] [--token <bearer>] [--watch] [--poll-ms <n>]
 /// [--interval-secs <n>] [--lease-secs <n>]`: declare the project's `units/*.toml` (and `skills/<ns>/<name>.md`) to
 /// a gateway, once (exit 0, or 1 when wire-check or the gateway refused) or kept current under `--watch` until
-/// Ctrl-C (which retracts). The token defaults to `MYCELIUM_GATEWAY_TOKEN`.
+/// Ctrl-C (which retracts). The token defaults to `MYCELIUM_GATEWAY_TOKEN`. Once, no lease is sent and the
+/// declaration lives until the node stops or it is retracted; under `--watch` a lease (default 90 s) is sent and
+/// heartbeated, so a watch that dies is retracted by the node, and the poll must be shorter than a third of it.
+#[cfg(feature = "gateway")]
 fn declare_cli(args: Vec<String>) -> i32 {
     const USAGE: &str = "Usage: mycelium declare [project-dir] [--gateway <url>] [--token <bearer>] [--watch] [--poll-ms <n>] [--interval-secs <n>] [--lease-secs <n>]";
     let mut project = std::path::PathBuf::from(".");
@@ -345,7 +351,11 @@ fn declare_cli(args: Vec<String>) -> i32 {
             _ => { eprintln!("{USAGE}"); return 2; }
         }
     }
-    let cfg = mycelium::declare::WatchConfig { gateway, token, project, interval_secs, lease_secs };
+    if watch && poll_ms >= lease_secs * 1000 / 3 {
+        eprintln!("--poll-ms {poll_ms} is not shorter than a third of --lease-secs {lease_secs}: the declaration would lapse between heartbeats\n{USAGE}");
+        return 2;
+    }
+    let cfg = mycelium::declare::WatchConfig { gateway, token, project, interval_secs, lease_secs: watch.then_some(lease_secs) };
     let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(rt) => rt,
         Err(e) => { eprintln!("declare: {e}"); return 2; }
