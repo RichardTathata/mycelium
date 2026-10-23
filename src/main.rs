@@ -4,9 +4,11 @@ use mycelium::error::GossipError;
 use std::{error::Error, sync::Arc};
 
 fn main() -> Result<(), Box<dyn Error>> {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .init();
+    // `mycelium doctor` prints its report on stdout — JSON when asked — so its log lines go to stderr;
+    // the node keeps its logs on stdout as before (#665's review, D1).
+    let doctor = std::env::args().nth(1).as_deref() == Some("doctor");
+    let logs = tracing_subscriber::fmt().with_max_level(tracing::Level::INFO);
+    if doctor { logs.with_writer(std::io::stderr).init(); } else { logs.init(); }
 
     // `mycelium wire-check <units-dir> …` — the offline check over a directory of unit files
     // (docs/plans/design-time-tooling.md §4). A pure function over declarations; it starts no
@@ -307,13 +309,12 @@ fn wire_check_cli(args: Vec<String>) -> i32 {
     report.exit_code()
 }
 
-/// `mycelium rules [--format md|json]` — the rule catalogue this binary registers
-/// (`mycelium::rules::RULES`), generated from the descriptors. The fleet's whole catalogue, with the
-/// stem host's provisioning rules, is the checked-in `docs/reference/rule-catalogue.md`.
 /// `mycelium doctor`: exit 0 when `start()` would start (and, with `--units`, `wire-check` finds no
-/// error), 1 when it would refuse or the units do not bind, 2 on a usage error. The report is the
-/// library's `doctor::run`, printed as text or JSON; `--units` then runs the same `wire-check` the
-/// `wire-check` subcommand runs, so the two never disagree.
+/// error), 1 when it would refuse or the units do not bind, 2 on a usage error or a file wire-check
+/// cannot read (its own 2). The report is the library's `doctor::run`, printed as text or JSON;
+/// `--units` then runs the same `wire-check` the `wire-check` subcommand runs, so the two never
+/// disagree. `--format json` with `--units` is refused: the JSON on stdout is one document, and
+/// wire-check has its own `--format json` (#665's review, D1).
 fn doctor_cli(args: Vec<String>) -> i32 {
     const USAGE: &str = "Usage: mycelium doctor [config.toml] [--units <dir> [--library <dir>] [--schemas <dir>]] [--format text|json]";
     let mut config: Option<std::path::PathBuf> = None;
@@ -334,6 +335,14 @@ fn doctor_cli(args: Vec<String>) -> i32 {
         }
     }
     if format != "text" && format != "json" { eprintln!("{USAGE}"); return 2; }
+    // Usage is settled before anything runs (#665's review, D6): a flag that needs `--units` without it,
+    // and the JSON form with `--units`, are refused here rather than after a printed report.
+    let units_dir = units.chunks(2).find(|p| p[0] == "--units").map(|p| p[1].clone());
+    if !units.is_empty() && units_dir.is_none() { eprintln!("--library/--schemas need --units\n{USAGE}"); return 2; }
+    if format == "json" && units_dir.is_some() {
+        eprintln!("--format json with --units is not supported: the JSON on stdout is one document; run `mycelium wire-check <dir> --format json` separately\n{USAGE}");
+        return 2;
+    }
     // `GossipAgent::new` is built inside a runtime context, as the node binary builds it.
     let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(rt) => rt,
@@ -349,30 +358,22 @@ fn doctor_cli(args: Vec<String>) -> i32 {
         print!("{}", report.render());
     }
     let mut code = if report.refusal.is_some() { 1 } else { 0 };
-    if !units.is_empty() {
-        // `--units <dir> [--library ..] [--schemas ..]`: the directory is wire-check's positional argument.
-        let mut wc: Vec<String> = Vec::new();
-        let mut pairs = units.chunks(2);
-        let mut dir: Option<String> = None;
-        for pair in &mut pairs {
-            match pair[0].as_str() {
-                "--units" => dir = Some(pair[1].clone()),
-                flag => { wc.push(flag.to_string()); wc.push(pair[1].clone()); }
-            }
+    if let Some(dir) = units_dir {
+        // `--units <dir> [--library ..] [--schemas ..]`: the directory is wire-check's positional argument;
+        // its exit code is kept (1: a finding; 2: a file it could not read), never flattened to 1.
+        let mut wc: Vec<String> = vec![dir];
+        for pair in units.chunks(2) {
+            if pair[0] != "--units" { wc.push(pair[0].clone()); wc.push(pair[1].clone()); }
         }
-        match dir {
-            Some(d) => {
-                wc.insert(0, d);
-                println!();
-                let wc_code = wire_check_cli(wc);
-                if wc_code != 0 { code = code.max(1); }
-            }
-            None => { eprintln!("--library/--schemas need --units\n{USAGE}"); return 2; }
-        }
+        println!();
+        code = code.max(wire_check_cli(wc));
     }
     code
 }
 
+/// `mycelium rules [--format md|json]` — the rule catalogue this binary registers
+/// (`mycelium::rules::RULES`), generated from the descriptors. The fleet's whole catalogue, with the
+/// stem host's provisioning rules, is the checked-in `docs/reference/rule-catalogue.md`.
 fn rules_cli(args: Vec<String>) -> i32 {
     use mycelium::rule::Catalogue;
     const USAGE: &str = "Usage: mycelium rules [--format md|json]";

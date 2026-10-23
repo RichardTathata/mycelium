@@ -6,8 +6,10 @@
 and whether it would refuse, from a configuration file and the environment alone. It runs the node's own preflight and
 profile check and takes the same [guarantee report](../guide/00-concepts.md#guarantee-report) over a node that is built and
 never started, so it binds no port, creates no directory and attaches nothing. It also prints the effective
-configuration — every field after defaults, file and environment, with its source named — and shows a secret as
-`set` or `unset`, never its value.
+configuration — every field as loaded, after defaults, file and environment, with its source named; a tuning
+field at its auto value prints that value, the node derives the running one — and shows a secret as `set` or
+`unset`, never its value. `--format json` is one document on stdout, schema `mycelium.doctor/1`, with the logs
+on stderr.
 
 ## When to use it, and when not
 
@@ -38,8 +40,9 @@ No runnable example exists: the [example index's capability matrix](../../exampl
 has no row for this feature. The end-to-end runs are tests in [`src/doctor.rs`](../../src/doctor.rs):
 `doctor_names_the_refusal_start_would_give` (the same words as `start()`),
 `a_table_this_build_cannot_enforce_is_a_refusal_naming_the_feature` (a token table in a build without `compliance`),
-`a_missing_persistence_directory_is_reported_and_not_created`, `the_effective_configuration_names_each_fields_source`
-and `a_secret_is_shown_as_set_and_never_its_value`. The command itself is documented in
+`a_missing_persistence_directory_is_reported_and_not_created`, `the_effective_configuration_names_each_fields_source`,
+`a_secret_is_shown_as_set_and_never_its_value`, `a_credential_bindings_source_names_are_redacted` and
+`every_top_level_field_is_in_the_configuration_reference_table`. The command itself is documented in
 [diagnostics § Before you start](../operations/diagnostics.md#before-you-start-mycelium-doctor).
 
 ## What it guarantees, and what it does not
@@ -47,7 +50,8 @@ and `a_secret_is_shown_as_set_and_never_its_value`. The command itself is docume
 - `doctor` adds no guarantee of its own; it reports the ones in the [guarantee catalogue](../reference/guarantee-catalogue.md)
   as the node would resolve them, with `started` reading false.
 - It says what this build and this configuration would do; it cannot say `enforced` for a guarantee the catalogue
-  marks `not_verifiable_here`, and it cannot see an attachment made in code.
+  marks `not_verifiable_here`, and it cannot see an attachment made in code. The persistence directory's
+  `read-only` is its mode bits, not an access check.
 - **Changed with it:** `GossipConfig::validate()` no longer creates `persistence.base_path` as its early check; it
   reads the nearest existing ancestor instead, and `start()` creates the node's directory as before
   ([deprecations § 57](../guide/deprecations.md#57-validate-no-longer-creates-the-persistence-base-path-unreleased-adopter-surface-x1)).

@@ -14,8 +14,11 @@
 //!
 //! **The effective configuration.** Every field after defaults, the file and the environment, with
 //! its source named — `default`, `file` or `env` — in the configuration's own key order (the JSON
-//! form's, alphabetical), nested tables flattened to dotted keys. A secret (`gateway_auth_token`, a
-//! `token` in either table) is shown as `set` or `unset`, never as its value, in the text and the JSON.
+//! form's, alphabetical), nested tables flattened to dotted keys. It is the configuration as loaded:
+//! a tuning field left at its auto value prints that value, and the node derives the running one at
+//! construction. A secret — `gateway_auth_token`, a `token` in either table, and a credential binding's
+//! `value_env`, `value_file` and `username`, which post-360 row L keeps out of every `Debug` — is shown as
+//! `set` or `unset`, never as its value, in the text and the JSON.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -38,16 +41,18 @@ pub enum Source {
     Env,
 }
 
-/// One effective field: its dotted key, its rendered value (a secret reads `set` or `unset`), its source.
+/// One effective field: its dotted key, its value as the JSON form carries it (a secret reads `"set"` or
+/// `"unset"`, an absent `Option` is `null`), its source.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Field {
     pub key: String,
-    pub value: String,
+    pub value: serde_json::Value,
     pub source: Source,
 }
 
-/// Why `start()` would refuse, in its words: the stage that refused (`load`, `environment`, `validate`,
-/// `node`, `preflight`, `profile`), the field it named, and the reason as `start()` would print it.
+/// Why `start()` would refuse, in its words: the stage that refused (`load`, `environment`, `node`,
+/// `preflight` — which begins with `validate()`, as `start()` does — or `profile`), the field it named,
+/// and the reason as `start()` would print it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Refusal {
     pub stage: &'static str,
@@ -61,14 +66,17 @@ pub struct Persistence {
     pub base_path: PathBuf,
     pub exists: bool,
     pub is_dir: bool,
-    /// From the directory's permission bits when it exists; absent when it does not.
-    pub writable: Option<bool>,
+    /// The read-only bit of the path's mode when it exists; absent when it does not. The mode, not an
+    /// access check: a directory another user owns can read writable here and refuse this one.
+    pub mode_readonly: Option<bool>,
 }
 
 /// The report. `report` and `confinement` are present whenever a node could be built from the
 /// configuration, even when `preflight` refused — a reader sees what the node would have said.
 #[derive(Debug, Serialize)]
 pub struct Doctor {
+    /// The JSON form's schema id; a field added later keeps the id, a field removed or renamed bumps it.
+    pub schema: &'static str,
     pub config_path: Option<PathBuf>,
     pub effective: Vec<Field>,
     pub refusal: Option<Refusal>,
@@ -82,6 +90,7 @@ pub struct Doctor {
 /// registers with the runtime as the binary's does, though nothing is started.
 pub fn run(config_path: Option<&Path>) -> Doctor {
     let mut d = Doctor {
+        schema: SCHEMA,
         config_path: config_path.map(Path::to_path_buf),
         effective: Vec::new(),
         refusal: None,
@@ -113,10 +122,9 @@ pub fn run(config_path: Option<&Path>) -> Doctor {
         return d;
     }
     d.effective = effective_fields(&defaults, &file_layer, &cfg);
-    if let Err(e) = cfg.validate() {
-        d.refusal = Some(refusal("validate", &e));
-        return d;
-    }
+    // `validate()` is not called here: `preflight()` begins with it, as `start()` does, so calling it
+    // twice printed its warnings twice (#665's review, D3). A configuration that fails it is refused
+    // at the `preflight` stage, naming its field.
     d.persistence = cfg.persistence.as_ref().map(|p| inspect_persistence(&p.base_path));
     let node = match NodeId::new(&cfg.bind_address, cfg.bind_port) {
         Ok(n) => n,
@@ -167,16 +175,29 @@ pub fn effective_fields(defaults: &GossipConfig, file: &GossipConfig, env: &Goss
             } else {
                 Source::Default
             };
-            Field { key: key.clone(), value: render_value(key, value), source }
+            Field { key: key.clone(), value: redacted(key, value), source }
         })
         .collect()
 }
 
+/// The JSON form's schema id.
+pub const SCHEMA: &str = "mycelium.doctor/1";
+
+/// A key whose value is never shown: the gateway token, a `token` in either table, and a credential
+/// binding's `value_env`, `value_file` and `username` — the names row L's `Debug` keeps out of every
+/// print, kept out of this one too (#665's review, D5) — plus the generic spellings of a secret.
 fn is_secret(key: &str) -> bool {
-    key == "gateway_auth_token" || key.rsplit('.').next() == Some("token")
+    if key == "gateway_auth_token" {
+        return true;
+    }
+    matches!(
+        key.rsplit('.').next().map(|s| s.trim_end_matches(|c: char| c == ']' || c.is_ascii_digit() || c == '[')),
+        Some("token" | "value_env" | "value_file" | "username" | "password" | "secret" | "api_key" | "api_key_env")
+    )
 }
 
-fn render_value(key: &str, v: &serde_json::Value) -> String {
+/// The value the JSON form carries: a secret collapses to `"set"`/`"unset"`; everything else is itself.
+fn redacted(key: &str, v: &serde_json::Value) -> serde_json::Value {
     if is_secret(key) {
         return match v {
             serde_json::Value::Null => "unset".into(),
@@ -184,8 +205,15 @@ fn render_value(key: &str, v: &serde_json::Value) -> String {
             _ => "set".into(),
         };
     }
+    v.clone()
+}
+
+/// The text form of a value: a string quoted, an absent `Option` as `unset`, a secret as its marker bare.
+fn render_value(key: &str, v: &serde_json::Value) -> String {
     match v {
         serde_json::Value::Null => "unset".into(),
+        serde_json::Value::String(s) if is_secret(key) => s.clone(),
+        serde_json::Value::String(s) => format!("{s:?}"),
         other => other.to_string(),
     }
 }
@@ -223,7 +251,7 @@ fn inspect_persistence(base: &Path) -> Persistence {
         base_path: base.to_path_buf(),
         exists: meta.is_some(),
         is_dir: meta.as_ref().is_some_and(|m| m.is_dir()),
-        writable: meta.map(|m| !m.permissions().readonly()),
+        mode_readonly: meta.map(|m| m.permissions().readonly()),
     }
 }
 
@@ -288,13 +316,13 @@ impl Doctor {
                 "persistence: {} — {}{}",
                 p.base_path.display(),
                 if !p.exists { "absent (doctor creates nothing; start() would)" } else if !p.is_dir { "exists and is not a directory (start() would refuse)" } else { "exists" },
-                match p.writable { Some(true) => "", Some(false) => ", read-only", None => "" }
+                match p.mode_readonly { Some(true) => ", read-only by its mode bits", _ => "" }
             );
         }
         let _ = writeln!(s, "effective configuration ({} fields):", self.effective.len());
         for f in &self.effective {
             let src = match f.source { Source::Default => "default", Source::File => "file", Source::Env => "env" };
-            let _ = writeln!(s, "  {} = {}   # {src}", f.key, f.value);
+            let _ = writeln!(s, "  {} = {}   # {src}", f.key, render_value(&f.key, &f.value));
         }
         s
     }
@@ -353,9 +381,11 @@ mod tests {
         let path = write_cfg("persist", &format!("bind_port = {port}\n[persistence]\nbase_path = \"{}\"\n", dir.display()));
         let d = run(Some(&path));
         let p = d.persistence.clone().expect("persistence configured");
-        assert!(!p.exists && !p.is_dir && p.writable.is_none(), "{p:?}");
+        assert!(!p.exists && !p.is_dir && p.mode_readonly.is_none(), "{p:?}");
         assert!(!dir.exists(), "doctor creates nothing");
-        assert!(d.refusal.is_none(), "{:?}", d.refusal);
+        if std::env::var_os("GOSSIP_PROFILE").is_none() {
+            assert!(d.refusal.is_none(), "{:?}", d.refusal);
+        }
         assert!(d.render().contains("absent (doctor creates nothing"));
     }
 
@@ -374,7 +404,24 @@ mod tests {
         assert_eq!(src("bind_port"), Source::File);
         assert_eq!(src("http_port"), Source::Env);
         assert_eq!(src("bind_address"), Source::Default);
-        assert_eq!(fields.iter().find(|f| f.key == "bind_port").unwrap().value, "7001");
+        assert_eq!(fields.iter().find(|f| f.key == "bind_port").unwrap().value, serde_json::json!(7001));
+        assert_eq!(fields.iter().find(|f| f.key == "bind_address").unwrap().value, serde_json::json!("127.0.0.1"), "a string is a JSON string, not a quoted string");
+    }
+
+    /// Row L's names stay out of the print: a credential binding's `value_env`, `value_file` and
+    /// `username` read `set`, in both forms (#665's review, D5).
+    #[test]
+    fn a_credential_bindings_source_names_are_redacted() {
+        let defaults = GossipConfig::default();
+        let with: GossipConfig = toml::from_str(
+            "[[egress_credentials]]\nname = \"openai\"\nhost = \"api.openai.com\"\nform = \"bearer\"\nvalue_env = \"MY_SECRET_VAR\"\n",
+        )
+        .expect("parses");
+        let fields = effective_fields(&defaults, &with, &with);
+        let f = fields.iter().find(|f| f.key == "egress_credentials[0].value_env").expect("the field");
+        assert_eq!(f.value, serde_json::json!("set"));
+        assert!(!serde_json::to_string(&fields).unwrap().contains("MY_SECRET_VAR"));
+        assert!(!fields.iter().map(|f| render_value(&f.key, &f.value)).collect::<String>().contains("MY_SECRET_VAR"));
     }
 
     /// A secret is shown as `set`, never its value — in the text and in the JSON form.
@@ -388,8 +435,12 @@ mod tests {
         assert!(!text.contains("hunter2"), "{text}");
         let json = serde_json::to_string(&d).expect("json");
         assert!(!json.contains("hunter2"), "the JSON form redacts too");
-        let bare = run(None);
-        assert!(bare.render().contains("gateway_auth_token = unset"), "{}", bare.render());
+        // `run(None)` reads the live environment (the node binary's own path); a shell that exports a
+        // token is not a failure of this test.
+        if std::env::var_os("GOSSIP_GATEWAY_AUTH_TOKEN").is_none() {
+            let bare = run(None);
+            assert!(bare.render().contains("gateway_auth_token = unset"), "{}", bare.render());
+        }
     }
 
     /// Every top-level field the configuration serialises has a row in `configuration.md` § The

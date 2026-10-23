@@ -21,12 +21,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **What it cannot see:** an attachment made in code, and unreadable persisted state (R7's refusal stays with
   `start()`). Feature page `docs/features/doctor.md`.
 
-### Changed
-
-- **`GossipConfig::validate()` creates nothing.** Its early check of `persistence.base_path` probed by `create_dir_all`,
-  so loading a configuration created the data directory; it now reads the nearest existing ancestor and warns, and
-  `start()` creates the node's directory as before (`deprecations.md` §57). Found by `doctor`'s own test.
-
 - **The node is published** (`docs/plans/adopter-surface.md`, row X0): a `Release` workflow on every `v*` tag builds
   `mycelium`, `mycelium-stem` and `mycelium-artifact` for Linux x86_64, Linux aarch64 and macOS aarch64, smokes each
   Linux tarball in a clean bookworm container with no Rust toolchain, attaches the tarballs and `SHA256SUMS` to the
@@ -38,6 +32,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   workflow, the Dockerfile or the three binaries' sources, and by `workflow_dispatch` once merged. **Not built, stated:** no
   signing of the binaries (the sums are integrity, not provenance), no Windows build, no package-manager formula.
   Wire v12 unchanged; no API change.
+
+### Changed
+
+- **`GossipConfig::validate()` creates nothing.** Its early check of `persistence.base_path` probed by `create_dir_all`,
+  so loading a configuration created the data directory; it now reads the nearest existing ancestor and warns, and
+  `start()` creates the node's directory as before (`deprecations.md` §57). Found by `doctor`'s own test.
 
 ### Security
 

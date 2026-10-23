@@ -1790,7 +1790,14 @@ fn persistence_base_path_problem(base: &std::path::Path) -> Option<&'static str>
             Ok(m) if !m.is_dir() => return Some("the nearest existing path is not a directory"),
             Ok(m) if m.permissions().readonly() => return Some("the nearest existing directory is read-only"),
             Ok(_) => return None,
-            Err(_) => cur = p.parent(),
+            Err(_) => {
+                // A relative path's last parent is `""`, which is the current directory (#665's review, D2).
+                let next = p.parent().map(|q| if q.as_os_str().is_empty() { std::path::Path::new(".") } else { q });
+                if next == Some(p) {
+                    return Some("no ancestor of the path exists");
+                }
+                cur = next;
+            }
         }
     }
     Some("no ancestor of the path exists")
@@ -3557,6 +3564,8 @@ mod validate_persistence_tests {
         fs::write(&file, b"x").unwrap();
         assert_eq!(persistence_base_path_problem(&file.join("under")), Some("the nearest existing path is not a directory"));
         assert_eq!(persistence_base_path_problem(&dir), None);
+        // A relative path that does not exist yet resolves against the current directory, which does.
+        assert_eq!(persistence_base_path_problem(std::path::Path::new("mycelium-validate-relative-absent/under")), None);
         let _ = fs::remove_file(&file);
     }
 }
