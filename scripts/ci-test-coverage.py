@@ -44,6 +44,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 ANSI = re.compile(r"(?:\x1b|\^\[)\[[0-9;]*[A-Za-z]")  # the raw byte, or `gh run view`'s caret rendering
 STAMP = re.compile(r"^﻿?\d{4}-\d\d-\d\dT[\d:.]+Z ?")
@@ -217,36 +218,56 @@ def exceptions(root: str) -> list[tuple[str, str]]:
 
 
 def fetch(dest: str):
+    """Fetch every finished job's log into `dest`. The jobs listing and the log blob are eventually consistent:
+    read seconds after a needed job finishes, the listing can still say `in_progress` and the log endpoint can
+    answer 404, although the job is in this job's `needs` and has therefore completed (three CI failures read that
+    way, 2026-10-20 and 2026-10-23). So a job listed as unfinished is re-listed and a log that is not there yet is
+    re-fetched, each for a bounded time, and only then is it a failure — by name, as before."""
     repo, run = os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_RUN_ID"]
+    wait_s = float(os.environ.get("CI_TEST_COVERAGE_WAIT_S", "120"))
+    poll_s = float(os.environ.get("CI_TEST_COVERAGE_POLL_S", "10"))
     os.makedirs(dest, exist_ok=True)
-    rows = subprocess.run(
-        ["gh", "api", "--paginate", f"repos/{repo}/actions/runs/{run}/jobs?per_page=100",
-         "--jq", '.jobs[] | "\\(.id)\\t\\(.status)\\t\\(.name)"'],
-        capture_output=True, text=True, check=True).stdout.splitlines()
-    # The coverage job itself, and the fuzz job (push only, no libtest output, ~25 min), are not waited for.
-    unfinished = []
-    for row in rows:
-        jid, status, name = row.split("\t", 2)
-        if name.startswith("Test coverage") or name.startswith("Fuzz"):
-            continue
-        if status != "completed":
-            unfinished.append(name)
-            continue
+    deadline = time.monotonic() + wait_s
+
+    def listing() -> tuple[list[tuple[str, str]], list[str]]:
+        rows = subprocess.run(
+            ["gh", "api", "--paginate", f"repos/{repo}/actions/runs/{run}/jobs?per_page=100",
+             "--jq", '.jobs[] | "\\(.id)\\t\\(.status)\\t\\(.name)"'],
+            capture_output=True, text=True, check=True).stdout.splitlines()
+        finished, unfinished = [], []
+        for row in rows:
+            jid, status, name = row.split("\t", 2)
+            # The coverage job itself, and the fuzz job (push only, no libtest output, ~25 min), are not waited for.
+            if name.startswith("Test coverage") or name.startswith("Fuzz"):
+                continue
+            (finished if status == "completed" else unfinished).append((jid, name) if status == "completed" else name)
+        return finished, unfinished
+
+    finished, unfinished = listing()
+    while unfinished and time.monotonic() < deadline:
+        time.sleep(poll_s)
+        finished, unfinished = listing()
+    for jid, name in finished:
         # The jobs-log endpoint answers with a redirect to the log blob. `gh api` does not follow it (the
         # first CI run fetched empty bodies, and this script failed on that, as it should), and
         # `gh run view --log` refuses while the run is in progress — which it always is, from inside it.
         # curl follows the redirect and drops the token on the cross-host hop.
-        log = subprocess.run(
-            ["curl", "-sSfL", "--retry", "3", "-H", f"Authorization: Bearer {os.environ['GH_TOKEN']}",
-             "-H", "Accept: application/vnd.github+json",
-             f"https://api.github.com/repos/{repo}/actions/jobs/{jid}/logs"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace")
-        if log.returncode != 0 or not log.stdout.strip():
-            sys.exit(f"ci-test-coverage: could not fetch the log of job {name!r} ({jid}): {log.stderr.strip()[:300]}")
+        while True:
+            log = subprocess.run(
+                ["curl", "-sSfL", "--retry", "3", "-H", f"Authorization: Bearer {os.environ['GH_TOKEN']}",
+                 "-H", "Accept: application/vnd.github+json",
+                 f"https://api.github.com/repos/{repo}/actions/jobs/{jid}/logs"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace")
+            if log.returncode == 0 and log.stdout.strip():
+                break
+            if time.monotonic() >= deadline:
+                sys.exit(f"ci-test-coverage: could not fetch the log of job {name!r} ({jid}) within {wait_s:g} s: "
+                         f"{log.stderr.strip()[:300]}")
+            time.sleep(poll_s)
         open(os.path.join(dest, f"{jid}.log"), "w", encoding="utf-8").write(log.stdout)
     if unfinished:
-        sys.exit("ci-test-coverage: these jobs had not finished, so their tests cannot be observed — add them to "
-                 "the test-coverage job's `needs`: " + ", ".join(unfinished))
+        sys.exit(f"ci-test-coverage: these jobs had not finished after {wait_s:g} s, so their tests cannot be observed "
+                 "— add them to the test-coverage job's `needs`: " + ", ".join(unfinished))
 
 
 def main() -> int:

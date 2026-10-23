@@ -9,7 +9,7 @@ import tempfile
 
 SUITE = "scripts/test-ci-test-coverage.py"
 CASES = ["log-formats", "script-cases", "scripts-only-mode", "named-blocks", "exceptions-scope",
-         "run-group-echo", "list-script-cases"]
+         "run-group-echo", "list-script-cases", "fetch-waits-for-the-listing", "fetch-retries-the-log", "fetch-gives-up"]
 if sys.argv[1:] == ["--list"]:
     for c in CASES:
         print(f"@@case-list@@ {SUITE}::{c}")
@@ -202,6 +202,77 @@ def exceptions_scope() -> list[str]:
     return failures
 
 
+GH_STUB = """#!/usr/bin/env python3
+# A stub `gh api …/jobs`: the jobs listing as the API answers it just after the needed jobs finish — eventually
+# consistent. Job 1 is reported in_progress for the first LAG calls, then completed. STATE counts the calls.
+import os, sys
+state = os.environ["STUB_STATE"]; lag = int(os.environ["STUB_LISTING_LAG"])
+n = int(open(state).read() or 0) + 1 if os.path.exists(state) else 1
+open(state, "w").write(str(n))
+first = "in_progress" if n <= lag else "completed"
+print(f"1\\t{first}\\tTest")
+for jid, name in ((2, "Embedded"), (3, "TypeScript SDK"), (4, "Scripts")):
+    print(f"{jid}\\tcompleted\\t{name}")
+print("9\\tin_progress\\tTest coverage (observed)")
+"""
+CURL_STUB = """#!/usr/bin/env python3
+# A stub `curl …/jobs/{id}/logs`: the first LAG fetches of job 1 answer 404 (the log blob not yet there), then
+# the body. Other jobs answer at once. Bodies come from STUB_LOGS/<id>.
+import os, sys
+jid = sys.argv[-1].rsplit("/", 2)[-2]
+state = os.environ["STUB_STATE"] + ".curl." + jid; lag = int(os.environ["STUB_LOG_LAG"])
+n = int(open(state).read() or 0) + 1 if os.path.exists(state) else 1
+open(state, "w").write(str(n))
+if jid == "1" and n <= lag:
+    sys.stderr.write("curl: (22) The requested URL returned error: 404\\n"); sys.exit(22)
+sys.stdout.write(open(os.path.join(os.environ["STUB_LOGS"], jid)).read())
+"""
+
+
+def run_fetch(listing_lag: int, log_lag: int, wait_s: str) -> tuple[int, str, int]:
+    """ci-test-coverage.py --fetch against stub gh/curl: (exit, output, number of listings asked for)."""
+    with tempfile.TemporaryDirectory() as d:
+        bin_dir, logs, dest = os.path.join(d, "bin"), os.path.join(d, "bodies"), os.path.join(d, "dest")
+        os.mkdir(bin_dir); os.mkdir(logs)
+        for name, text in (("gh", GH_STUB), ("curl", CURL_STUB)):
+            p = os.path.join(bin_dir, name)
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(text)
+            os.chmod(p, 0o755)
+        for jid, body in zip("1234", (FULL_RUN, FULL_RUST, FULL_TS, FULL_SCRIPTS)):
+            with open(os.path.join(logs, jid), "w", encoding="utf-8") as f:
+                f.write(body)
+        exc = os.path.join(d, "exceptions.txt"); open(exc, "w").close()
+        state = os.path.join(d, "state")
+        env = {**os.environ, "PATH": bin_dir + os.pathsep + os.environ["PATH"], "GITHUB_REPOSITORY": "o/r",
+               "GITHUB_RUN_ID": "1", "GH_TOKEN": "t", "STUB_STATE": state, "STUB_LOGS": logs,
+               "STUB_LISTING_LAG": str(listing_lag), "STUB_LOG_LAG": str(log_lag),
+               "CI_TEST_COVERAGE_EXCEPTIONS": exc, "CI_TEST_COVERAGE_WAIT_S": wait_s, "CI_TEST_COVERAGE_POLL_S": "0.05"}
+        r = subprocess.run([sys.executable, os.path.join(HERE, "ci-test-coverage.py"), "--fetch", dest],
+                           capture_output=True, text=True, env=env)
+        listings = int(open(state).read()) if os.path.exists(state) else 0
+    return r.returncode, r.stdout + r.stderr, listings
+
+
+def fetch_cases(which: str) -> list[str]:
+    failures = []
+    if which == "listing":
+        code, out, listings = run_fetch(listing_lag=2, log_lag=0, wait_s="5")
+        if code != 0 or listings < 3:
+            failures.append(f"a job the API still lists as in_progress just after it finished should be waited for "
+                            f"(bounded): exit {code}, {listings} listing(s): {out[-400:]}")
+    elif which == "log":
+        code, out, _ = run_fetch(listing_lag=0, log_lag=2, wait_s="5")
+        if code != 0:
+            failures.append(f"a 404 on a finished job's log should be retried (bounded): exit {code}: {out[-400:]}")
+    else:
+        code, out, listings = run_fetch(listing_lag=10_000, log_lag=0, wait_s="0.3")
+        if code == 0 or "had not finished" not in out or listings > 60:
+            failures.append(f"a job that never completes within the wait must still fail by name: exit {code}, "
+                            f"{listings} listing(s): {out[-400:]}")
+    return failures
+
+
 def run_group_echo() -> list[str]:
     """L2: GitHub echoes a `run:` block's source between `##[group]Run …` and `##[endgroup]`. A marker written
     literally in that source is not a run of the case, and a universe mark there opens no block."""
@@ -307,6 +378,12 @@ def main() -> int:
     failures += run_group_echo()
     case("list-script-cases")
     failures += list_script_cases()
+    case("fetch-waits-for-the-listing")
+    failures += fetch_cases("listing")
+    case("fetch-retries-the-log")
+    failures += fetch_cases("log")
+    case("fetch-gives-up")
+    failures += fetch_cases("give-up")
     for f in failures:
         print("FAIL", f)
     if not failures:
