@@ -28,4 +28,4 @@ Pages: `dev/examples.md` (the feature-pages paragraph). Repo: `docs/features/reg
 `docs/features/README.md` (the registry and the gate), `docs/plans/feature-pages.md` (rev 0.5, §4.2),
 `scripts/check-front-doors.py`, `scripts/check-positioning.sh`, `Makefile`, `.github/workflows/ci.yml`.
 
-*Superseded in part the same day and on 2026-10-23: seven sources, 91 suite cases — see the two review logs.*
+*Superseded in part the same day and on 2026-10-23: seven sources, 93 suite cases — see the two review logs.*

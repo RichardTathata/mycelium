@@ -19,7 +19,7 @@ CASES = ['baseline', 'example-baseline',
          'glossary-bold-row-short', 'glossary-bold-row-with-text', 'glossary-bold-row-italic-no-link',
          'unmapped-cargo-feature', 'implicit-cargo-feature',
          'unmapped-crate', 'unmapped-companion-guarantee', 'non-literal-guarantee-id', 'aliased-descriptor',
-         'type-alias-descriptor', 'qualified-path-descriptor', 'descriptor-struct-literal', 'impl-for-descriptor', 'descriptor-fn-item',
+         'type-alias-descriptor', 'qualified-path-descriptor', 'descriptor-struct-literal', 'impl-for-descriptor', 'inherent-impl-descriptor', 'descriptor-fn-item', 'char-literal-before-comment',
          'early-test-module', 'brace-in-string', 'unit-key-without-heading', 'restricted-unit-field',
          'private-unit-field', 'parser-guard-unit-code', 'unit-heading-without-key',
          'unit-subtable-gone', 'stale-registry-id', 'stale-link', 'mapped-twice', 'exclusion-without-reason',
@@ -245,6 +245,14 @@ fails('an impl block on GuaranteeDescriptor',
 case('descriptor-fn-item')
 fails('GuaranteeDescriptor::new named without a call',
       {'mycelium-wasm-host/src/rules.rs': [('\n];\n', '\n];\n\nfn planted() { let f = mycelium::GuaranteeDescriptor::new; let _ = f("stem.hidden_via_fnptr", 1); }\n')]})
+case('inherent-impl-descriptor')
+fails('an inherent impl on GuaranteeDescriptor',
+      {'mycelium-wasm-host/src/rules.rs': [('\n];\n', '\n];\n\nimpl mycelium::GuaranteeDescriptor { pub fn hidden() -> Self { Self::new("stem.hidden_inherent", 1) } }\n')]})
+case('char-literal-before-comment')
+fails('companion-guarantee:stem.hidden_after_char (companion-guarantee) is not mapped',
+      {'mycelium-wasm-host/src/rules.rs': [('\n];\n', '\n];\n\nconst Q: char = \'"\'; const OPEN: &str = "x/*y";\n'
+                                             'fn planted() -> mycelium::GuaranteeDescriptor { mycelium::GuaranteeDescriptor::new("stem.hidden_after_char", 1) }\n'
+                                             'const CLOSE: &str = "*/";\n')]})
 case('early-test-module')
 fails('companion-guarantee:stem.planted_after_a_test_module (companion-guarantee) is not mapped',
       {'mycelium-wasm-host/src/activation_sandbox.rs': [

@@ -253,12 +253,13 @@ RUST_TOKEN = re.compile(r'//[^\n]*|/\*.*?\*/|r(#*)".*?"\1|b?"(?:\\.|[^"\\])*"|b?
 TEST_MODULE = re.compile(r'#\[cfg\((?:all\()?test\b[^\]]*\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{')
 
 
-COMMENT = re.compile(r'//[^\n]*|/\*.*?\*/|r(#*)".*?"\1|b?"(?:\\.|[^"\\])*"', re.S)
+COMMENT = re.compile(r'//[^\n]*|/\*.*?\*/|r(#*)".*?"\1|b?"(?:\\.|[^"\\])*"|b?\'(?:\\.|[^\'\\])\'', re.S)
 
 
 def without_comments(text):
     """The text with every comment blanked (newlines kept, so line numbers hold) and string literals left alone,
-    so a doc comment that mentions `GuaranteeDescriptor::new("…"` is neither a registration nor a refusal."""
+    so a doc comment that mentions `GuaranteeDescriptor::new("…"` is neither a registration nor a refusal. Char
+    literals are tokens too, or a `'"'` opens a pseudo-string and a later `/*` inside a string blanks real code."""
     return COMMENT.sub(lambda m: re.sub(r'[^\n]', ' ', m.group(0)) if m.group(0).startswith('/') else m.group(0), text)
 
 
@@ -287,7 +288,8 @@ DESCRIPTOR_ALIAS = re.compile(r'\bGuaranteeDescriptor\s+as\s+(\w+)')
 # Every other way to name or build a descriptor, which the literal scan above would not read: a type alias, a
 # qualified path (`<GuaranteeDescriptor>::new`, `<… as …>::`), a struct literal (only possible inside `mycelium`,
 # where `applies` and `resolve` are `pub(crate)`; refused anyway), an `impl … for GuaranteeDescriptor` block (a
-# local trait on the foreign type, inside which `Self::new("<id>"` names no descriptor), and `new` named as a
+# local trait on the foreign type, inside which `Self::new("<id>"` names no descriptor), an inherent `impl` (only
+# `mycelium` can write one: a core guarantee registered outside `core_guarantees()`), and `new` named as a
 # function item without its call (`let f = GuaranteeDescriptor::new; f("<id>", …)`). The defining file is exempt
 # from the struct-literal and impl checks: its literals are `new` itself and the core catalogue's `g(…)`, and its
 # `impl Debug for` is the type's own.
@@ -297,9 +299,10 @@ DESCRIPTOR_ESCAPES = [
      'a qualified path (<GuaranteeDescriptor>::…)'),
     (re.compile(r'(?<![\w:])(?:\w+::)*GuaranteeDescriptor\s*\{'), 'a GuaranteeDescriptor struct literal'),
     (re.compile(r'\bimpl\b[^{;]*?\bfor\s+(?:\w+::)*GuaranteeDescriptor\b'), 'an impl block on GuaranteeDescriptor'),
+    (re.compile(r'\bimpl\s+(?:\w+::)*GuaranteeDescriptor\s*\{'), 'an inherent impl on GuaranteeDescriptor'),
     (re.compile(r'\bGuaranteeDescriptor\s*::\s*new\b(?!\s*\()'), 'GuaranteeDescriptor::new named without a call'),
 ]
-HOME_EXEMPT = ('literal', 'impl block')
+HOME_EXEMPT = ('literal', 'impl')  # the type's own `impl` and `impl Debug for`
 NOT_A_LITERAL = re.compile(r'(?:->|\bstruct|\bimpl(?:<[^>]*>)?|\bfor)\s*$')  # a return type, the definition, an impl
 DESCRIPTOR_HOME = 'src/agent/guarantee.rs'
 
