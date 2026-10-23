@@ -8,7 +8,10 @@ BIN = os.environ.get("MYCELIUM_BIN", "mycelium")   # the published binary, on PA
 PORT = 8300                                         # http_port in node.toml
 os.makedirs("data", exist_ok=True)
 log = open("data/node.log", "w")
-node = subprocess.Popen([BIN, "-c", "node.toml"], stdout=log, stderr=subprocess.STDOUT)
+try:
+    node = subprocess.Popen([BIN, "-c", "node.toml"], stdout=log, stderr=subprocess.STDOUT)
+except FileNotFoundError:
+    sys.exit(f"no `{BIN}` found: put the published mycelium binary on PATH, or set MYCELIUM_BIN to its path")
 try:
     for _ in range(120):                            # the gateway answers /health once it listens
         try:
@@ -38,5 +41,8 @@ try:
     print("next: `mycelium doctor node.toml` — what start() enforced here, and what it did not")
 finally:
     node.terminate()
-    node.wait(timeout=10)
+    try:
+        node.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        node.kill()
     log.close()

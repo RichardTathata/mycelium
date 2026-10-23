@@ -1,7 +1,7 @@
 # governed-call
 
 Two nodes, one governed call. Node A serves a tool under a policy that is enforced **at the provider** — not at a
-gateway in front of it — and records every decision in a signed evidence journal. Node B, a member of the same
+gateway in front of it — and records every decision in an evidence journal (node-local, append-only, fsynced). Node B, a member of the same
 fleet, calls the tool directly: once inside the remit (permitted, the tool runs) and once outside it (refused, the
 tool never runs). Then B's prompt skill answers from the text in `skills/greeting.md`.
 
@@ -9,8 +9,10 @@ tool never runs). Then B's prompt skill answers from the text in `skills/greetin
 cargo run
 ```
 
-What you will see: `ledger=petty-cash: PERMITTED`, `ledger=capital: REFUSED — denied`, the skill's echoed answer,
-and the evidence records — one decision and one execution per call — printed from `data/evidence.log`.
+What you will see: `ledger=petty-cash: PERMITTED`, `ledger=capital: REFUSED — "action_denied" (…the capital ledger
+is outside the remit)`, the skill's echoed answer, and the evidence records — one `decided` record per call, each
+carrying its execution outcome (`attempted` or `none`) — printed from `data/evidence.log`. A second run appends to
+the journal and overwrites the trace.
 
 ## The layout
 
@@ -21,7 +23,7 @@ and the evidence records — one decision and one execution per call — printed
 | `skills/greeting.md` | the prompt skill's text — edit it, run again, and the answer changes |
 | `src/policy.rs` | the policy, an `ActionEvaluator`: permit one ledger, deny another, refuse the rest as undecided |
 | `src/main.rs` | the program |
-| `data/` | written by a run: `tls/` (the fleet CA and both node certificates), `evidence.log`, `decisions.jsonl` |
+| `data/` | written by a run: `tls/` (the fleet CA and both node certificates, reused on the next run), `evidence.log`, `decisions.jsonl` |
 
 ## Read what the fleet decided
 
@@ -31,7 +33,9 @@ mycelium explain data/decisions.jsonl # the node's own decisions (admission, mem
 mycelium doctor node.toml             # what start() would say about this configuration, and why
 ```
 
-The authority decisions — permit, deny — are in `data/evidence.log`, one JSON record per line, printed by the run.
+The authority decisions — permit, deny — are in `data/evidence.log`, a length-prefixed journal (not lines: read it
+with `mycelium::read_evidence_journal`, as the run does when it prints them).
+A busy port fails the run with the address in the error: change `bind_port` in `node.toml` (B uses the next one).
 
 ## What this does and does not show
 

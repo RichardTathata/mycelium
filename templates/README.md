@@ -7,7 +7,7 @@ differ — a template that drifts from the API fails CI before it fails a user (
 
 | Template | Language | What it shows |
 |---|---|---|
-| `governed-call` | Rust | two in-process nodes; a member's direct call to a provider's tool, permitted and refused by a policy enforced at the provider and recorded in a signed evidence journal; a prompt skill whose text is a file |
+| `governed-call` | Rust | two in-process nodes; a member's direct call to a provider's tool, permitted and refused by a policy enforced at the provider and recorded in an evidence journal; a prompt skill whose text is a file |
 | `governed-call-py` | Python | the published `mycelium` node under a named-token table; an SDK agent declares a unit, writes a key, and a second agent is refused by the gateway's own scope rule |
 
 The layout every template follows: `node.toml` (the node's configuration, which `mycelium doctor` reads),

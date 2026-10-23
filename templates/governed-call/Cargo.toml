@@ -5,8 +5,8 @@ edition = "2024"
 publish = false
 
 # The fleet substrate, pinned to the release this scaffold came from (`mycelium init` wrote the tag). The
-# supported path is this git tag, never a registry package of the same name. `tls` is on because enforcement at
-# the provider and the signed evidence journal both need the node identity; `llm` for the prompt skill.
+# supported path is this git tag, never a registry package of the same name. `tls` is on because provider-side
+# enforcement is built with it, and it is what makes a calling member's identity authentic; `llm` for the skill.
 [dependencies]
 mycelium = { git = "https://github.com/RichardTathata/mycelium", tag = "{{MYCELIUM_TAG}}", features = ["tls", "llm"] }
 tokio = { version = "1", features = ["full"] }

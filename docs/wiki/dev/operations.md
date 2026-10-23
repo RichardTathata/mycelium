@@ -145,8 +145,9 @@ directory and the list equal), pinned to the binary's release tag, into a new or
 the provider under `with_provider_enforcement`, an `ActionEvaluator` of twenty lines, an `EvidenceJournal`, a
 `DecisionSink` written to `data/decisions.jsonl`; a prompt skill on the member node, since an `llm.invoke` under
 provider enforcement must name a resource) and `governed-call-py` (the published node with named tokens; `declare_from`,
-`set`, a 403 `insufficient_scope`). CI's `Scaffold` job builds the Rust scaffold against the checkout through
-`--config 'patch."https://github.com/RichardTathata/mycelium".mycelium.path=…'`. Found: `ReferenceEvaluator` declares no
+`set`, a 403 `insufficient_scope`). CI's `Scaffold` job builds the Rust scaffold against the checkout by rewriting its
+dependency to a path (a `[patch]` of a git source still fetches the pinned tag, which a version-bump commit lacks —
+#666's review). Found: `ReferenceEvaluator` declares no
 security-relevant arguments, so a `requires_values` rule cannot see its value through the seam. Entry page
 `docs/features/init.md`; log `.log/2026-10-23-init.md`.
 

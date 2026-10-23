@@ -1,7 +1,7 @@
 //! governed-call: two nodes, one governed call — permitted, refused, and recorded.
 //!
-//! Node A serves a tool under a policy enforced *at the provider*, with a signed evidence journal and a decision
-//! trace. Node B, a member of the same fleet, calls the tool directly — no gateway between them — once in remit and
+//! Node A serves a tool under a policy enforced *at the provider*, with an evidence journal (node-local, fsynced)
+//! and a decision trace. Node B, a member of the same fleet, calls the tool directly — no gateway between them — once in remit and
 //! once out of it, then calls a prompt skill whose text is `skills/greeting.md`. Everything the fleet decided is in
 //! `data/`: `mycelium explain data/decisions.jsonl` · `mycelium doctor node.toml`.
 mod policy;
@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Node B, a member: it joins by reachability, serves the prompt skill, and calls A's tool directly.
     let mut cfg_b = cfg_a.clone();
-    cfg_b.bind_port += 1;
+    cfg_b.bind_port = cfg_a.bind_port.checked_add(1).ok_or("bind_port + 1 must fit in a port: lower bind_port in node.toml")?;
     cfg_b.bootstrap_peers = vec![a.node_id().clone()];
     let b = node(&cfg_b)?;
     b.start().await?;
@@ -53,12 +53,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(e) => println!("ledger={ledger}: REFUSED — {} ({})", e["data"]["reason"], e["message"]),
         }
     }
-    let answer = loop {
-        match a.llm().call_prompt_skill("demo", "greeting", "the new joiner", Default::default(), Duration::from_secs(5)).await {
-            Err(PromptSkillError::NoProvider { .. }) => tokio::time::sleep(Duration::from_millis(100)).await,
-            other => break other?,
-        }
-    };
+    let mut answer = Err(PromptSkillError::NoProvider { ns: "demo".into(), name: "greeting".into() });
+    for _ in 0..100 {   // B's advert reaches A by gossip; a bounded wait, so a fleet that never converges fails
+        answer = a.llm().call_prompt_skill("demo", "greeting", "the new joiner", Default::default(), Duration::from_secs(5)).await;
+        if !matches!(answer, Err(PromptSkillError::NoProvider { .. })) { break }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let answer = answer?;
     println!("skill demo/greeting answered: {answer}");
 
     std::fs::write("data/decisions.jsonl", trace.to_jsonl())?;

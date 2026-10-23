@@ -4,11 +4,11 @@ The published `mycelium` node, run from Python with no Rust toolchain. An SDK ag
 key, and a second agent — holding a token without `kv:write` — is refused by the gateway's own scope rule.
 
 ```sh
-pip install mycelium-py            # or: pip install -e <checkout>/mycelium-py
-python main.py                     # MYCELIUM_BIN=/path/to/mycelium if it is not on PATH
+pip install -e <checkout>/mycelium-py   # the SDK is installed from a checkout; it is not on PyPI
+python main.py                          # MYCELIUM_BIN=/path/to/mycelium if the published node is not on PATH
 ```
 
-What you will see: the declaration accepted with `not_enforced: ['mandate', 'rule']`, `alice set demo/greeting:
+What you will see: the declaration accepted with `not_enforced: ['[[mandate]]', '[[rule]]']`, `alice set demo/greeting:
 PERMITTED`, and `reader set demo/greeting: REFUSED 403 — insufficient scope (the route needs kv:write)`.
 
 ## The layout

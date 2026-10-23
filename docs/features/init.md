@@ -5,7 +5,7 @@
 `mycelium init <dir> --template <name>` writes a [scaffold](../guide/00-concepts.md#init): a project of its own,
 copied from a template the binary embeds, pinned to the release the binary came from. Two templates ship:
 `governed-call`, in Rust — two in-process nodes, a member's direct call to a provider's tool permitted and refused
-by a policy enforced at the provider and recorded in a signed evidence journal, and a prompt skill whose text is a
+by a policy enforced at the provider and recorded in an evidence journal, and a prompt skill whose text is a
 file — and `governed-call-py`, in Python — the [published node](../guide/00-concepts.md#published-node) under a
 named-token table, an SDK agent that declares a unit and writes a key, and a second agent refused by the gateway's
 own scope rule. The templates' source of truth is the `templates/` directory, which CI builds and runs as projects;
@@ -42,8 +42,9 @@ both on every change. The tests are in [`src/init.rs`](../../src/init.rs): `ever
 
 - `init` adds no guarantee of its own. What a scaffolded fleet enforces is what its configuration and its program
   attach; `mycelium doctor node.toml` in either scaffold says which guarantees that is.
-- The Rust template's refusal is a policy decision recorded as evidence; the Python template's is the gateway's
-  scope rule (`gateway.auth` in the [rule catalogue](../reference/rule-catalogue.md)), counted, not recorded.
+- The Rust template's refusal is a policy decision recorded as evidence (node-local, append-only, fsynced — not
+  signed; only a reference to it enters the signed audit chain, which a node with no gateway does not run); the Python
+  template's is the gateway's scope rule (`gateway.auth` in the [rule catalogue](../reference/rule-catalogue.md)), counted, not recorded.
 - Both templates run the development posture: the Rust one shares one CA whose key is on both nodes
   (`id.ca_key_off_node` unmet), the Python one a gateway on loopback. Neither downloads a model: the skill answers
   through the echo backend.

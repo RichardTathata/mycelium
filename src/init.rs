@@ -34,7 +34,7 @@ pub const TEMPLATES: &[Template] = &[
     Template {
         name: "governed-call",
         about: "Rust: two in-process nodes; a member's direct call to a provider's tool, permitted and refused by a \
-                policy enforced at the provider and recorded in a signed evidence journal; a prompt skill from a file",
+                policy enforced at the provider and recorded in an evidence journal; a prompt skill from a file",
         files: &[
             file!("governed-call", "Cargo.toml"),
             file!("governed-call", ".gitignore"),
@@ -68,6 +68,16 @@ pub fn template(name: &str) -> Option<&'static Template> {
 /// Write `template` under `dest`, which must not exist or must be an empty directory — a scaffold never
 /// overwrites. Returns every path written. The placeholder is replaced in every file.
 pub fn write(template: &Template, dest: &Path) -> Result<Vec<PathBuf>, String> {
+    // An empty path is the current directory, which is never empty while this runs (#666's review, D2); a
+    // destination that *is* the current directory is refused by the same rule, by comparing canonical paths.
+    if dest.as_os_str().is_empty() {
+        return Err("init needs a directory to write into (an empty path would mean the current directory)".into());
+    }
+    if let (Ok(here), Ok(there)) = (std::env::current_dir(), std::fs::canonicalize(dest))
+        && here == there
+    {
+        return Err(format!("{} is the current directory; init writes only into a new or empty directory", dest.display()));
+    }
     match std::fs::read_dir(dest) {
         Ok(mut entries) => {
             if entries.next().is_some() {
@@ -95,18 +105,31 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
+    /// The template's files as checked in: what its own `.gitignore` names (a run's `target/`, `data/`) and
+    /// the desktop's droppings (`.DS_Store`) are not template files, so a `cargo run` inside the directory does
+    /// not fail this test (#666's review, D8).
     fn on_disk(template: &str) -> BTreeSet<(String, String)> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("templates").join(template);
+        let ignored: Vec<String> = std::fs::read_to_string(root.join(".gitignore"))
+            .unwrap_or_default()
+            .lines()
+            .map(|l| l.trim().trim_start_matches('/').trim_end_matches('/').to_string())
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .collect();
         let mut out = BTreeSet::new();
         let mut stack = vec![root.clone()];
         while let Some(dir) = stack.pop() {
             for entry in std::fs::read_dir(&dir).expect("the template directory") {
                 let path = entry.expect("entry").path();
+                let rel = path.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
+                let top = rel.split('/').next().unwrap_or("").to_string();
+                if ignored.contains(&top) || top == ".DS_Store" {
+                    continue;
+                }
                 if path.is_dir() {
                     stack.push(path);
                 } else {
-                    let rel = path.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
-                    out.insert((rel, std::fs::read_to_string(&path).expect("utf-8")));
+                    out.insert((rel, std::fs::read_to_string(&path).expect("a template file is UTF-8 text")));
                 }
             }
         }
@@ -138,6 +161,17 @@ mod tests {
             assert!(!std::fs::read_to_string(path).unwrap().contains(TAG_PLACEHOLDER), "{}", path.display());
         }
         let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    /// `init ""` and `init .` would write into the current directory, over whatever is there (#666's review, D2).
+    #[test]
+    fn init_refuses_an_empty_path_and_the_current_directory() {
+        let t = template("governed-call-py").unwrap();
+        let err = write(t, Path::new("")).expect_err("an empty path is refused");
+        assert!(err.contains("current directory"), "{err}");
+        let err = write(t, Path::new(".")).expect_err("the current directory is refused");
+        assert!(err.contains("current directory"), "{err}");
+        assert!(!Path::new("main.py").exists(), "nothing was written into the current directory");
     }
 
     #[test]
