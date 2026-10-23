@@ -87,6 +87,21 @@ policy permits. The design rule that keeps it closed: a class or locality the do
 about it and is reported *not established* — so a door that classifies nothing (`/gateway/llm/call`) cannot pass a class
 rule, and an undeclared locality is never in-domain. Declared, not detected: the class is the client's or the operator's
 statement, the locality the provider's.
+**Causal records (adopter-surface X4, 2026-10-23, first PR):** two fields a request carries into every record and no
+record mints — `params._meta.correlation` (one key segment, the run) and `params._meta.parent` (the content hash of
+the record the work depends on, the hash `journal_sha256` cites) — read by `ae_decide` beside `operation_id` and
+`mandate` (`agent/causal.rs`), onto `ActionEnvelope::{correlation, parent}` and every `AeEvidence` the point writes;
+`/mcp` forwards the two keys inside the `tools/call` payload and `provider_enforcement::check` reads them there.
+The rule that keeps it honest: **the application payload and only there** — the caller envelope's signature digests
+the payload, so a header or an envelope field could be re-pointed under a signature that still verifies; both are
+counted (`causal_misplaced`) and never read, and a malformed value is `PreflightRefusal::Malformed` before policy,
+never corrected. The reader (`closure.rs`): a record's identity is the sha256 of its bytes as written (a journal
+frame's body, a trace line); `Corpus::chain` marks captured / reconstructed (by `operation_id`) / unattributable,
+`Corpus::closure` follows parents breadth-first, visits each record once (a hostile cycle terminates — fuzz target
+`closure_corpus`), names holes with the sinks' drop counts, stops at `gateway:federation/call`, and says first when
+fewer journals were given than the records name nodes. Authoritative over the journal, best-effort over the trace.
+Not yet: the door registry and the member-side doors (a direct call carries the bytes unaltered; a skill call's
+payload is text, so the provider's `/a2a` record is a root), the SDK verbs, the reason trace join.
 **Fleet-wide history scopes (post-360 row K2, 2026-10-17):** a rule may name `HistoryScope::FleetConsensus` or
 `FleetTally` (`Rule::at_most(..).scoped(..)`, the policy choosing per rule; per-point stays the default). The evaluator
 names the counter its deciding rule relies on (`fleet_counters`), the point reads it into `HistoryView::fleet`

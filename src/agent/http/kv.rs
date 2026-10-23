@@ -34,9 +34,11 @@ pub(super) async fn gw_kv_get(
 /// unchanged.
 pub(super) async fn gw_kv_set(
     State(ctx): State<Arc<HttpCtx>>,
+    headers: axum::http::HeaderMap,
     Json(body):  Json<serde_json::Value>,
 ) -> impl IntoResponse {
     use base64::Engine as _;
+    super::mcp_bridge::note_misplaced_causal_headers(&ctx.agent_ctx, &headers, "kv");
 
     let key = match body["key"].as_str() {
         Some(k) => Arc::from(k),
@@ -66,16 +68,26 @@ pub(super) async fn gw_kv_set(
                            Json(json!({"error":"missing 'value_b64' (use \"\" for an empty value, or DELETE to tombstone)"}))).into_response(),
     };
 
+    // X4: the write's causal fields, `correlation` and `parent` at the body's top level (this route has no `_meta`),
+    // validated by the one rule and echoed on the receipt; malformed is 400, never corrected.
+    let causal = match crate::agent::causal::causal_fields(&json!({ "_meta": { "correlation": body.get("correlation"), "parent": body.get("parent") } })) {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string().replace("_meta.", "")}))).into_response(),
+    };
+
     let tc = Arc::clone(&ctx.agent_ctx);
     let op = mycelium_core::receipt::OperationId::generate(&tc.node_id);
     let attempt = mycelium_core::receipt::AttemptId::fresh(&op);
     match mycelium_core::ops::kv_set_with_receipt(&tc, op, attempt, key, value, None).await {
         Ok(r) => {
+            let r = r.with_causal(causal.correlation, causal.parent);
             let mut body = json!({
                 "ok": true,
                 "operation_id": r.operation_id.to_string(),
                 "local_durability": r.local_durability.tag(),
             });
+            if let Some(c) = &r.correlation { body["correlation"] = json!(c); }
+            if let Some(p) = &r.parent { body["parent"] = json!(p); }
             if let Some(reason) = r.local_durability.failure_reason() {
                 body["local_durability_error"] = json!(reason);
             }

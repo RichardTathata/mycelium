@@ -210,6 +210,8 @@ pub(super) async fn stats_handler(State(ctx): State<Arc<HttpCtx>>) -> impl IntoR
         body["caller_envelopes_without_id"] = json!(r.without_id.load(std::sync::atomic::Ordering::Relaxed));
         body["caller_envelopes_replayed"] = json!(r.replayed.load(std::sync::atomic::Ordering::Relaxed));
     }
+    // Adopter-surface X4: a `correlation` or `parent` carried as a header or in the caller envelope — never read.
+    body["causal_fields_misplaced"] = json!(ctx.agent_ctx.misplaced_causal_counts());
     // Post-360 plan rows F and F2 (`deprecations.md` §35, §40), per node: unsigned KV `Data` frames and
     // bare (pre-2.33) KV signatures a TLS node refused, and signed frames refused because their signer
     // was not their sender. Frames, not peers. `kv_untagged_signatures` and `kv_unsigned_frames_accepted`

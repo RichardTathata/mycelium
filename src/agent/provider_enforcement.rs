@@ -221,7 +221,9 @@ pub(crate) enum Checked {
 /// [`Checked::Waiting`] for the serve loop to settle beside itself ([`DeferredChecks`]); otherwise the whole check
 /// runs here. Nothing is decided twice and no second envelope is built. Every serve loop on this node — `rpc_rx`,
 /// the MCP tool loop, the bridged MCP loop and the `rpc/serve` stream — settles a `Waiting` check that way.
-pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest) -> Checked {
+/// `already_verified`: the receive boundary ran `gateway_caller::verify_received` on this request first, so its
+/// counting is done; `false` where this check is the request's first verification (the native MCP loop).
+pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest, already_verified: bool) -> Checked {
     let enforcing = ctx.provider_enforcement.load(Ordering::Acquire);
     let budget = ctx.cohort_budget.get();
     if !enforcing && budget.is_none() {
@@ -245,6 +247,9 @@ pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest) -> Checked {
             return Checked::Done(Err(ProviderRefusal::local("caller_context_refused", format!("caller context refused: {e}"))))
         }
     };
+    if !already_verified && caller.as_ref().is_some_and(|c| c.misplaced_causal) {
+        ctx.note_misplaced_causal("caller_envelope");
+    }
     let (principal, scopes, mandate, claim) = match caller {
         Some(c) => (c.principal, c.scopes, c.mandate, c.resource),
         None => (gateway_caller::node_principal(req.sender()), Vec::new(), None, None),
@@ -259,10 +264,21 @@ pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest) -> Checked {
         Err(refusal) => return Checked::Done(Err(refusal)),
     };
     let resolved = ResolvedPrincipal { principal: principal.clone(), scopes };
-    let params = match &mandate {
-        Some(m) => json!({ "_meta": { "mandate": m } }),
-        None => Value::Null,
-    };
+    // The preflight's `_meta`: the mandate from the envelope (C2), and — X4 — the causal fields from the application
+    // payload, where a `tools/call` carries them under `params._meta`. A skill's payload is its text and another
+    // kind's is opaque, so those carry none here: the gateway's own record for the call carries them.
+    let mut meta = serde_json::Map::new();
+    if let Some(m) = &mandate {
+        meta.insert("mandate".into(), m.clone());
+    }
+    if kind == crate::signal::signal_kind::MCP_INVOKE && let Ok(call) = serde_json::from_slice::<Value>(&payload) {
+        for key in ["correlation", "parent"] {
+            if let Some(v) = call["params"]["_meta"].get(key) {
+                meta.insert(key.into(), v.clone());
+            }
+        }
+    }
+    let params = if meta.is_empty() { Value::Null } else { json!({ "_meta": meta }) };
     let decided =
         super::http::ae_decide(ctx, Some(&resolved), &operation, &resource, &arguments, &params, ENFORCEMENT_POINT_PROVIDER, None).await;
     let call = AdmittedCall { principal, mandate, operation, resource, arguments };

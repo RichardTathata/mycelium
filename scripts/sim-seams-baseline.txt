@@ -58,6 +58,7 @@
 1 src/bin/skillrunner/main.rs
 2 src/bin/skillrunner/runner.rs
 2 src/capability_config.rs
+2 src/closure.rs
 5 src/consensus.rs
 7 src/declare.rs
 2 src/doctor.rs

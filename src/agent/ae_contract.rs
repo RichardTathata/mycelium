@@ -498,6 +498,8 @@ pub fn run_cases(subject: &dyn EvaluatorUnderTest, cases: &[ContractCase]) -> Re
             Err(PreflightRefusal::Denied(d)) => (Expected::Denied, Some(d.clone())),
             Err(PreflightRefusal::NotEstablished(d)) => (Expected::NotEstablished, Some(d.clone())),
             Err(PreflightRefusal::NotRecorded(d)) => (Expected::NotRecorded, Some(d.clone())),
+            // Produced only at a door, from the request's own params (X4); the seam over an envelope never does.
+            Err(PreflightRefusal::Malformed(d)) => (Expected::NotEstablished, Some(d.clone())),
         };
 
         if actual != case.expect {
@@ -1217,6 +1219,8 @@ pub fn outcome_of(
         Err(PreflightRefusal::Denied(d)) => (Expected::Denied, Some(d)),
         Err(PreflightRefusal::NotEstablished(d)) => (Expected::NotEstablished, Some(d)),
         Err(PreflightRefusal::NotRecorded(d)) => (Expected::NotRecorded, Some(d)),
+        // Produced only at a door, from the request's own params (X4); the seam over an envelope never does.
+        Err(PreflightRefusal::Malformed(d)) => (Expected::NotEstablished, Some(d)),
     }
 }
 

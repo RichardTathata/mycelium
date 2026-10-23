@@ -11,9 +11,12 @@ use super::*;
 pub(super) async fn mcp_handler(
     State(ctx): State<Arc<HttpCtx>>,
     caller: Option<Extension<ResolvedPrincipal>>,
+    headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
     let caller = caller.map(|Extension(c)| c);
+    // X4: a causal field carried as a header is never read — counted, and the record's field stays empty.
+    note_misplaced_causal_headers(&ctx.agent_ctx, &headers, "mcp");
     let req: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v)  => v,
         Err(_) => {
@@ -100,12 +103,18 @@ pub(super) async fn mcp_handler(
             // Where a call's time went, kept for the one answer that cannot say why: a dispatch timeout (it named
             // the #642 door-test flake's cause — a reply lost to registration after the emit, `rpc::PendingReply`).
             let started = mycelium_core::sim_seam::mono_instant();
-            let tool_req = json!({
+            let mut tool_req = json!({
                 "jsonrpc": "2.0",
                 "id": req["id"],
                 "method": "tools/call",
                 "params": {"name": name, "arguments": arguments},
             });
+            // X4: the two causal fields travel to the provider inside the application payload — the part the caller
+            // envelope's signature digests — and nothing else of `_meta` does (the mandate rides in the envelope, C2).
+            // A malformed field is refused by the preflight below before this payload is sent.
+            if let Ok(causal) = crate::agent::causal::causal_fields(&req["params"]) && let Some(meta) = causal.meta() {
+                tool_req["params"]["_meta"] = serde_json::Value::Object(meta);
+            }
 
             // AE slice: the evaluator preflight, between the auth layer and the dispatch. Inert
             // unless an evaluator is attached (`with_action_evaluator`); with one, a call whose
@@ -209,6 +218,14 @@ pub(super) async fn mcp_handler(
             "jsonrpc": "2.0", "id": id,
             "error": {"code": -32601, "message": format!("method not found: {method}")},
         })).into_response(),
+    }
+}
+
+/// X4: a `correlation` or `parent` carried as a header (`x-mycelium-correlation`, `x-mycelium-parent`) is outside the
+/// signed payload and is never read; it is counted against the door so the misplacement is visible.
+pub(crate) fn note_misplaced_causal_headers(ctx: &crate::agent::TaskCtx, headers: &axum::http::HeaderMap, door: &'static str) {
+    if crate::agent::causal::MISPLACED_HEADERS.iter().any(|h| headers.contains_key(*h)) {
+        ctx.note_misplaced_causal(door);
     }
 }
 

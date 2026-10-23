@@ -200,7 +200,7 @@ impl RpcRequestRx {
                     // anything. Inert unless provider enforcement is on.
                     #[cfg(all(feature = "gateway", feature = "tls"))]
                     {
-                        match super::provider_enforcement::check(&self.ctx, &req).await {
+                        match super::provider_enforcement::check(&self.ctx, &req, true).await {
                             super::provider_enforcement::Checked::Done(checked) => match self.admit_checked(req, checked) {
                                 Some(req) => return Some(req),
                                 None => continue,

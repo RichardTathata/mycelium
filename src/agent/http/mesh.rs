@@ -325,7 +325,7 @@ async fn serve_stream_loop(
             }
         };
         #[cfg(all(feature = "gateway", feature = "tls"))]
-        match super::provider_enforcement::check(&agent_ctx, &req).await {
+        match super::provider_enforcement::check(&agent_ctx, &req, true).await {
             super::provider_enforcement::Checked::Done(Ok(admission)) => ready.push_back((req, caller, admission)),
             super::provider_enforcement::Checked::Done(Err(refusal)) => refuse_served(&agent_ctx, &req, &refusal),
             super::provider_enforcement::Checked::Waiting(waiting) => pending.spawn(waiting, (req, caller)),

@@ -86,9 +86,11 @@ pub(super) async fn gw_federation_connect(
 pub(super) async fn gw_federation_call(
     State(ctx): State<Arc<HttpCtx>>,
     caller: Option<Extension<ResolvedPrincipal>>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
     let caller = caller.map(|Extension(c)| c);
+    super::mcp_bridge::note_misplaced_causal_headers(&ctx.agent_ctx, &headers, "federation");
     let (Some(domain), Some(export)) = (body["domain"].as_str(), body["export"].as_str()) else {
         return (StatusCode::BAD_REQUEST, Json(json!({"error":"missing domain or export"}))).into_response();
     };

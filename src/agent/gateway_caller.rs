@@ -180,6 +180,10 @@ pub struct GatewayCaller {
     pub issued_at_ms: u64,
     /// How the context was attested.
     pub attestation: CallerAttestation,
+    /// A `correlation` or `parent` sat in the envelope beside `m` — outside every signature, never read
+    /// (adopter-surface X4). Set by [`verify`] after the signature held, counted once per request by the receive
+    /// boundary ([`verify_received`]) or by the provider check when it is the first to verify.
+    pub(crate) misplaced_causal: bool,
     /// The mandate the caller presented (`params._meta.mandate` at the gateway, or a member's own
     /// grant on a direct call), **carried, not verified** (closure plan C2). It is not covered by the
     /// gateway's signature and needs not be: the grant is signed by its establishing authority and the
@@ -685,6 +689,11 @@ struct Envelope {
     /// `sig`; a provider that keeps a replay window requires this one whenever `n` is present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sn: Option<String>,
+    /// Fields this version does not define, kept so a verifier can see them: a `correlation` or `parent` placed here
+    /// (adopter-surface X4) sits outside every signature and is never read — counted, and the record's field stays
+    /// empty. Never produced by this crate; absent on the wire when empty, so the envelope's bytes are unchanged.
+    #[serde(default, flatten, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    x: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 /// Build the framed payload: magic ‖ len ‖ envelope ‖ application payload. Signs under a `tls`
@@ -740,6 +749,7 @@ pub(crate) fn frame_with_context_at(
         n: Some(id),
         o: Some(to),
         sn,
+        x: Default::default(),
     };
     let env_bytes = serde_json::to_vec(&env).ok()?;
     if env_bytes.len() > MAX_ENVELOPE_BYTES {
@@ -1075,6 +1085,7 @@ pub(crate) fn verify(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<GatewayCa
     }
 
     Ok(Some(GatewayCaller {
+        misplaced_causal: env.x.contains_key("correlation") || env.x.contains_key("parent"),
         principal: env.p,
         via,
         scopes: env.s,
@@ -1098,6 +1109,10 @@ pub(crate) fn verify_received(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<
     })?;
     if let Some(c) = &verified {
         ctx.caller_replay.admit(c, ctx.hlc.decision_now_ms(), ctx.config.max_clock_drift_ms)?;
+        // X4: counted here, once per request, after the envelope verified — a forged one moves nothing.
+        if c.misplaced_causal {
+            ctx.note_misplaced_causal("caller_envelope");
+        }
     }
     Ok(verified)
 }
@@ -1631,6 +1646,7 @@ mod tests {
         let g1 = NodeId::new("127.0.0.1", 9001).unwrap();
         let g2 = NodeId::new("127.0.0.1", 9002).unwrap();
         let mk = |via: &NodeId, p: String| GatewayCaller {
+            misplaced_causal: false,
             principal: p, via: via.clone(), scopes: vec![], issued_at_ms: 0,
             attestation: CallerAttestation::UnauthenticatedMesh, mandate: None, resource: None, envelope_id: None,
         };
@@ -1674,7 +1690,7 @@ mod tests {
         let unsigned = serde_json::to_vec(&Envelope {
             v: 1, p: "oidc:idp/mallory".into(), via: a.node_id().to_string(), s: vec![], t: 0, k: None, sig: None,
             m: None,
-            r: None, n: None, o: None, sn: None,
+            r: None, n: None, o: None, sn: None, x: Default::default(),
         }).unwrap();
         let req = request_from(a.node_id(), "k", raw_frame(&unsigned, b""));
         assert_eq!(verify(&a.task_ctx, &req), Err(CallerError::Unsigned));
@@ -1690,7 +1706,7 @@ mod tests {
                 k: Some(base64::engine::general_purpose::STANDARD.encode(rogue.verifying_key().to_bytes())),
                 sig: Some(base64::engine::general_purpose::STANDARD.encode(sig)),
                 m: None,
-                r: None, n: None, o: None, sn: None,
+                r: None, n: None, o: None, sn: None, x: Default::default(),
             }).unwrap();
             let req = request_from(a.node_id(), "k", raw_frame(&forged, b"payload"));
             assert_eq!(verify(&a.task_ctx, &req), Err(CallerError::UnknownSigner));
@@ -1765,7 +1781,7 @@ mod tests {
         let env = serde_json::to_vec(&Envelope {
             v: 1, p: "oidc:idp/admin".into(), via: a.node_id().to_string(), s: vec![], t: 0, k: None, sig: None,
             m: None,
-            r: None, n: None, o: None, sn: None,
+            r: None, n: None, o: None, sn: None, x: Default::default(),
         }).unwrap();
         let bytes = raw_frame(&env, br#"{"prompt":"review/echo","input":"unverified call","context":{}}"#);
         let req = request_from(a.node_id(), "llm.invoke", bytes.clone());
@@ -1859,6 +1875,41 @@ mod tests {
         a.shutdown().await;
     }
 
+    /// **A causal field in the envelope is never read; one in the payload is under the signature** (adopter-surface
+    /// X4). A `parent` added to the envelope beside `m` verifies — the field is unknown to the envelope and sits
+    /// outside every signature — and is counted at the door, so the record built from this call carries no parent
+    /// from it. A `parent` inside the application payload is covered by the digest the signature binds, so altering
+    /// it after signing is refused as any altered byte is. Seen failing first: the counter did not exist.
+    #[cfg(feature = "tls")]
+    #[tokio::test]
+    async fn a_parent_in_the_envelope_is_counted_not_read_and_one_in_the_payload_is_signed() {
+        let a = agent(true);
+        a.start().await.unwrap();
+        let hash = crate::causal::content_hash(b"a decision");
+        let app = Bytes::from(serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "greet", "arguments": {}, "_meta": {"parent": hash}}}).to_string());
+        let framed = frame_with_context(&a.task_ctx, a.node_id(), "oidc:idp/alice", &[], app.clone()).unwrap();
+        let receive = |f: Bytes| verify_received(&a.task_ctx, &request_from(a.node_id(), "k", f)).map(|_| ()).map_err(|e| e.code());
+        // In the envelope, beside `m`: verifies, counted, never read (the envelope's own fields are unchanged).
+        let in_envelope = reframe(&framed, |v| { v["parent"] = serde_json::json!(hash); v["correlation"] = serde_json::json!("run-1"); });
+        assert_eq!(receive(in_envelope.clone()), Ok(()), "an unknown envelope field is not a refusal");
+        assert_eq!(a.task_ctx.misplaced_causal_counts().get("caller_envelope").copied(), Some(1), "counted against the envelope door, by name");
+        // A second verification of the same request (the provider check after the receive boundary) counts nothing more.
+        assert!(verify(&a.task_ctx, &request_from(a.node_id(), "k", in_envelope)).is_ok());
+        assert_eq!(a.task_ctx.misplaced_causal_counts().get("caller_envelope").copied(), Some(1), "once per request, not per verification");
+        // In the payload, altered after signing: refused by the digest the signature covers.
+        let Frame::Framed { envelope, .. } = split_frame(&framed) else { panic!("framed") };
+        let altered_app = Bytes::from(app.iter().map(|&b| if b == b'a' { b'b' } else { b }).collect::<Vec<u8>>());
+        assert_ne!(altered_app, app);
+        let altered = raw_frame(&envelope, &altered_app);
+        assert_eq!(receive(altered), Err("bad_signature"), "a parent altered after signing verified");
+        // A forged envelope moves nothing: the count follows a signature that held.
+        let forged = reframe(&framed, |v| { v["parent"] = serde_json::json!(hash); v["sig"] = serde_json::json!("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="); v.as_object_mut().unwrap().remove("sn"); v.as_object_mut().unwrap().remove("n"); v.as_object_mut().unwrap().remove("o"); });
+        assert!(receive(forged).is_err(), "a forged envelope is refused");
+        assert_eq!(a.task_ctx.misplaced_causal_counts().get("caller_envelope").copied(), Some(1), "an altered payload or a forgery is not a misplacement");
+        a.shutdown().await;
+    }
+
     /// **A window left empty is swept** (post-360 row E's review, finding 4): a gateway that sent a
     /// burst and left kept its window at every provider for good. Every [`REPLAY_SWEEP_EVERY`]
     /// admissions the windows empty at the freshness bound are dropped; a live gateway's is kept.
@@ -1867,6 +1918,7 @@ mod tests {
         let w = ReplayWindows::default();
         let (gone, live) = (NodeId::new("127.0.0.1", 9611).unwrap(), NodeId::new("127.0.0.1", 9612).unwrap());
         let caller = |via: &NodeId, t: u64, id: u64| GatewayCaller {
+            misplaced_causal: false,
             principal: "p".into(), via: via.clone(), scopes: vec![], issued_at_ms: t,
             attestation: CallerAttestation::Signed { signer: [1u8; 32] }, mandate: None, resource: None, envelope_id: Some(id),
         };
@@ -1889,6 +1941,7 @@ mod tests {
         let w = ReplayWindows::default();
         let via = NodeId::new("127.0.0.1", 9601).unwrap();
         let caller = |t: u64, id: u64| GatewayCaller {
+            misplaced_causal: false,
             principal: "oidc:idp/alice".into(), via: via.clone(), scopes: vec![], issued_at_ms: t,
             attestation: CallerAttestation::Signed { signer: [1u8; 32] }, mandate: None, resource: None, envelope_id: Some(id),
         };

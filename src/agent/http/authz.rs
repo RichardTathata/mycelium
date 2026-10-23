@@ -761,6 +761,17 @@ pub(crate) async fn ae_decide(
     route: Option<&crate::agent::route_facts::RouteFacts>,
 ) -> Decided {
     use super::action_evaluator as ae;
+    // Adopter-surface X4: the request's causal fields, read from its own payload (`params._meta`, beside
+    // `operation_id` and `mandate`) and nowhere else. Checked before the evaluator question so a malformed field is
+    // refused at every door, an inert gateway's included — never corrected, never dropped.
+    let causal = match crate::agent::causal::causal_fields(params) {
+        Ok(c) => c,
+        Err(e) => {
+            #[cfg(feature = "metrics")]
+            metrics::counter!("mycelium_ae_preflight_refusals_total", "reason" => "request_malformed").increment(1);
+            return Decided::Done(Preflight::Refuse(ae::PreflightRefusal::Malformed(ae::Decision::indeterminate(e.to_string(), ""))));
+        }
+    };
     let Some(evaluator) = ctx.action_evaluator.get() else { return Decided::Done(Preflight::Inert) };
 
     // Both evaluator questions asked behind the unwind boundary (AE0 §3): a panicking adapter
@@ -851,6 +862,9 @@ pub(crate) async fn ae_decide(
         // Row R: established by the routing door, never read from the request body.
         destination: route.map(|r| r.destination.clone()),
         data_class: route.and_then(|r| r.data_class.clone()),
+        // X4: from the request's own payload, above.
+        correlation: causal.correlation,
+        parent: causal.parent,
     };
 
     // Decide, then record, *then* dispatch. Both outcomes are sealed: a permit with no record of

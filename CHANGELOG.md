@@ -11,6 +11,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **One id, and one parent, through the records** (`docs/plans/adopter-surface.md` X4, first PR; `docs/features/causal-records.md`):
+  a request's `params._meta.correlation` (one key segment, the run's id) and `params._meta.parent` (the content hash
+  of the record the work depends on — the hash `journal_sha256` cites) enter the `ActionEnvelope` at every door the
+  preflight runs and ride on every evidence record it produces, decision and execution, at the gateway and at the
+  provider (`/mcp` forwards the two keys inside the `tools/call` payload; the provider reads them there); the
+  `DecisionRecord` (`correlation`, `parent_hash`) and the `WriteReceipt` (`with_causal`; `POST /gateway/kv` reads
+  `correlation`/`parent` and echoes them) carry them where their producer has them. **The placement is the
+  application payload and only there:** a header (`x-mycelium-correlation`, `x-mycelium-parent`) or a field in the
+  caller envelope is never read and is counted once per request by door (`GET /stats` `causal_fields_misplaced`, a
+  map); a malformed value is refused before policy (`PreflightRefusal::Malformed`, `request_malformed`, `-32602`),
+  never corrected, with or without an evaluator attached. `AeEvidence` gained `node`, the enforcing node.
+  `mycelium explain --correlation <id> <files…>` renders one run as one chain across evidence journals and decision
+  traces, each line *captured*, *reconstructed* (joined by `operation_id`) or *unattributable*;
+  `mycelium explain --closure <hash> <files…> [--fleet <n>]` the dependency closure of one record — authoritative
+  over the journal, best-effort over the trace, every hole named with the sinks' drop counts and never filled, a
+  federation edge a boundary, fewer journals than nodes said first. The trace comparison ignores the fields. A fuzz
+  target (`closure_corpus`) asserts the reader terminates, prints its root and visits each record once whatever a
+  hostile file puts in `parent`. **Not built in
+  this PR, by the row's own list:** the door registry and the member-side doors it names, the SDKs' verbs, the reason
+  trace's `run_id` join, the three-node closure with plants on each side (`deprecations.md` §58).
+
 - **The `one-hour` job** (`docs/plans/adopter-surface.md` § 1.1): `.github/workflows/one-hour.yml` runs when a Release
   workflow run for a tag push completes successfully (not on `release: published`, which a Release created with the
   workflow's own token never fires), and by hand against any tag, in `python:3.12-slim-bookworm` with no Rust

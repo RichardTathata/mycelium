@@ -82,6 +82,14 @@ example_watch = ["init", "scaffold", "governed_call"]
 ids = ["concept:init"]
 
 [[feature]]
+name = "Causal records"
+page = "causal-records.md"
+example = "none"
+example_watch = ["causal_records", "causal_closure", "correlation_chain"]
+ids = ["concept:causal-records"]
+links = ["guarantee:ae.recorded_before_dispatch"]
+
+[[feature]]
 name = "Declare"
 page = "declare.md"
 example = "none"

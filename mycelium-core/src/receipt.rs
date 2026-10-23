@@ -331,6 +331,11 @@ pub struct WriteReceipt {
     /// Was the update handed to the gossip fan-out? Propagation is not a rung: it establishes
     /// nothing about any peer's state. `false` means anti-entropy will carry it later.
     pub queued_for_gossip: bool,
+    /// The run this write belongs to, carried from the caller beside `operation_id` and minted by no receipt
+    /// (adopter-surface X4). A receipt is handed back, not journaled: a reader joins it by `operation_id`.
+    pub correlation: Option<String>,
+    /// The content hash of the record this write depends on (X4). `None`: a root.
+    pub parent: Option<String>,
 }
 
 impl WriteReceipt {
@@ -353,7 +358,16 @@ impl WriteReceipt {
             local_durability: LocalDurability::NotConfigured,
             replica_sync: ReplicaSync::default(),
             queued_for_gossip: false,
+            correlation: None,
+            parent: None,
         }
+    }
+
+    /// The causal fields the caller carried (X4): the run's id and the parent record's hash, carried as given.
+    pub fn with_causal(mut self, correlation: Option<String>, parent: Option<String>) -> Self {
+        self.correlation = correlation;
+        self.parent = parent;
+        self
     }
 
     /// Set the local-sync rung.

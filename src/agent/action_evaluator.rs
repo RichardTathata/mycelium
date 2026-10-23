@@ -153,6 +153,11 @@ pub struct ActionEnvelope {
     /// (post-360 row R). `None` from a door that does not classify, which a rule about class reads
     /// as *not established*.
     pub data_class: Option<DataClass>,
+    /// The run this action belongs to, carried from `params._meta.correlation` and minted by no record
+    /// (adopter-surface X4; [`crate::agent::causal`]). `None`: the caller named no run.
+    pub correlation: Option<String>,
+    /// The content hash of the record this action depends on, from `params._meta.parent` (X4). `None`: a root.
+    pub parent: Option<String>,
 }
 
 /// The mandate an action claims, and the enforcement point's finding about it (AE1).
@@ -261,6 +266,8 @@ impl ActionEnvelope {
                 mandate: None,
                 destination: None,
                 data_class: None,
+                correlation: None,
+                parent: None,
             },
         }
     }
@@ -297,6 +304,12 @@ impl ActionEnvelopeBuilder {
     /// The declared security-relevant argument values.
     pub fn selected_arguments(mut self, args: serde_json::Map<String, serde_json::Value>) -> Self {
         self.inner.selected_arguments = args;
+        self
+    }
+    /// The causal fields the request carried (X4): the run's `correlation` and the `parent` record's hash.
+    pub fn causal(mut self, fields: super::causal::CausalFields) -> Self {
+        self.inner.correlation = fields.correlation;
+        self.inner.parent = fields.parent;
         self
     }
     /// The reviewed catalogue mapping.
@@ -1144,6 +1157,19 @@ pub struct AeEvidence {
     /// so a record without it serialises exactly as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route: Option<RouteFacts>,
+    /// The run this record belongs to — the envelope's `correlation`, carried, never minted (adopter-surface X4).
+    /// `mycelium explain --correlation <id>` renders every record that carries one id, across journals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation: Option<String>,
+    /// The content hash of the record this action depends on — the envelope's `parent` (X4); the same hash
+    /// [`AeReference::journal_sha256`] cites. Absent on a root. `mycelium explain --closure <hash>` follows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// The node that enforced — the envelope's `via`, as it names itself (adopter-surface X4, #671's review): a
+    /// chain across two nodes' journals is told apart by node, and a closure can say how many nodes its records
+    /// name against how many journals it was given. Absent on a record written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
 }
 
 impl AeEvidence {
@@ -1223,6 +1249,10 @@ impl AeEvidence {
             history: None,
             // Set by a routing enforcement point (`with_route`).
             route: None,
+            // Carried from the envelope, which read them from the request's own payload (X4).
+            correlation: envelope.correlation.clone(),
+            parent: envelope.parent.clone(),
+            node: Some(envelope.via.to_string()),
         }
     }
 
@@ -1458,6 +1488,10 @@ pub enum PreflightRefusal {
     /// enforcement without attribution is not governance, it is an unlogged gate. Refusing is
     /// therefore the honest failure mode, and it is visible rather than silent.
     NotRecorded(Decision),
+    /// The request's own causal fields are malformed — a `correlation` that is not one key segment, a `parent`
+    /// that is not a content hash (adopter-surface X4; [`crate::agent::causal`]). Refused before any policy
+    /// question, and never corrected: a silently emptied parent would read as a root.
+    Malformed(Decision),
 }
 
 impl PreflightRefusal {
@@ -1466,7 +1500,8 @@ impl PreflightRefusal {
         match self {
             PreflightRefusal::Denied(d)
             | PreflightRefusal::NotEstablished(d)
-            | PreflightRefusal::NotRecorded(d) => d,
+            | PreflightRefusal::NotRecorded(d)
+            | PreflightRefusal::Malformed(d) => d,
         }
     }
 
@@ -1476,6 +1511,7 @@ impl PreflightRefusal {
             PreflightRefusal::Denied(_) => "action_denied",
             PreflightRefusal::NotEstablished(_) => "authority_not_established",
             PreflightRefusal::NotRecorded(_) => "evidence_not_recorded",
+            PreflightRefusal::Malformed(_) => "request_malformed",
         }
     }
 
@@ -1506,6 +1542,8 @@ impl PreflightRefusal {
             PreflightRefusal::Denied(_) => -32030,
             PreflightRefusal::NotEstablished(_) => -32031,
             PreflightRefusal::NotRecorded(_) => -32032,
+            // JSON-RPC's own *invalid params*: the fault is the request's shape, not authority.
+            PreflightRefusal::Malformed(_) => -32602,
         }
     }
 }
@@ -1523,6 +1561,7 @@ impl std::fmt::Display for PreflightRefusal {
                 "the decision under policy {} could not be recorded, so the action was refused",
                 d.policy_revision
             ),
+            PreflightRefusal::Malformed(_) => write!(f, "request malformed: {}", d.reason),
         }
     }
 }
@@ -2564,6 +2603,28 @@ mod tests {
             .build()
     }
 
+
+    /// X4: the envelope's causal fields are on the decision record and its execution record, absent from the
+    /// serialised form when unset, and a record written before the fields existed still parses.
+    #[test]
+    fn the_causal_fields_reach_the_evidence_and_an_old_record_parses_without_them() {
+        let hash = "cd".repeat(32);
+        let env = ActionEnvelope::builder("oidc:idp/alice", node(), "tools/call", "tool:post@n1")
+            .identities("op-1", "op-1/1")
+            .mapping(ActionMapping::mapped("cat", "1"))
+            .causal(crate::causal::CausalFields { correlation: Some("run-1".into()), parent: Some(hash.clone()) })
+            .build();
+        let d = Decision::permit("ok", "rev-1");
+        let decided = AeEvidence::for_decision(&env, &d, Execution::Attempted, "gateway");
+        assert_eq!((decided.correlation.as_deref(), decided.parent.as_deref()), (Some("run-1"), Some(hash.as_str())));
+        let executed = decided.as_execution(Execution::Completed);
+        assert_eq!((executed.correlation.as_deref(), executed.parent.as_deref()), (Some("run-1"), Some(hash.as_str())));
+        let bare = AeEvidence::for_decision(&envelope("oidc:idp/alice", "tools/call", "tool:post@n1"), &d, Execution::None, "gateway");
+        let text = serde_json::to_string(&bare).unwrap();
+        assert!(!text.contains("correlation") && !text.contains("\"parent\""), "{text}");
+        let old: AeEvidence = serde_json::from_str(&text).unwrap();
+        assert!(old.correlation.is_none() && old.parent.is_none());
+    }
 
     // ── Row K: policy over history ──────────────────────────────────────────────────────────────
 

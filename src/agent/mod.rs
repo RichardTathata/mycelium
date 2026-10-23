@@ -63,6 +63,8 @@ pub(crate) mod provider_enforcement;
 /// replacement evaluator is held to the same bar as the reference one. Same gate as the seam.
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub mod ae_contract;
+/// The two causal fields a request carries into every record its work produces (adopter-surface X4).
+pub mod causal;
 /// The node-local fsynced journal — the *mechanism* (item 4 PR 3a): the AE evidence journal and
 /// the rights ledger (`control::ledger`) are both thin profiles over it, because a second journal
 /// beside the first is how guarantees drift. Ungated since the ledger landed (item 4 PR 3): it now
@@ -825,6 +827,10 @@ pub(crate) struct TaskCtx {
     /// Post-360 row E: each gateway's recent caller-envelope ids, checked once per received request
     /// (`gateway_caller::verify_received`), so a captured envelope is not served twice.
     pub(crate) caller_replay: gateway_caller::ReplayWindows,
+    /// A `correlation` or `parent` carried where it is never read — a header at an HTTP door, or a field in the caller
+    /// envelope (adopter-surface X4): counted **by door**, the record's field left empty. `GET /stats`
+    /// `causal_fields_misplaced` is the map; lock-free (papaya), no lock-order row.
+    pub(crate) causal_misplaced: papaya::HashMap<&'static str, std::sync::atomic::AtomicU64>,
     /// Whether `/a2a` is mounted (`with_a2a`), so `start()` can say what that exposes.
     #[cfg(feature = "a2a")]
     pub(crate) a2a_mounted: AtomicBool,
@@ -869,6 +875,21 @@ pub(crate) struct TaskCtx {
     /// `seal_and_write` mirrors each sealed record here (bounded, drop-on-full).
     #[cfg(feature = "compliance")]
     pub(crate) audit_sink_tx: std::sync::OnceLock<tokio::sync::mpsc::Sender<audit::SignedAuditRecord>>,
+}
+
+impl TaskCtx {
+    /// X4: a causal field carried where it is never read — counted against the door that saw it, once per request.
+    pub(crate) fn note_misplaced_causal(&self, door: &'static str) {
+        self.causal_misplaced.pin().get_or_insert_with(door, Default::default).fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        metrics::counter!("mycelium_causal_fields_misplaced_total", "door" => door).increment(1);
+    }
+
+    /// The per-door counts, for `/stats` and tests (a gateway-free build has no reader of it).
+    #[cfg(any(feature = "gateway", test))]
+    pub(crate) fn misplaced_causal_counts(&self) -> std::collections::BTreeMap<&'static str, u64> {
+        self.causal_misplaced.pin().iter().map(|(k, v)| (*k, v.load(std::sync::atomic::Ordering::Relaxed))).collect()
+    }
 }
 
 impl std::ops::Deref for TaskCtx {
@@ -1390,6 +1411,7 @@ impl GossipAgent {
             #[cfg(feature = "tls")]
             identity_ledger: Arc::new(revocation::IdentityLedger::default()),
             caller_replay: Default::default(),
+            causal_misplaced: papaya::HashMap::new(),
             #[cfg(feature = "a2a")]
             a2a_mounted: AtomicBool::new(false),
             #[cfg(feature = "a2a")]
