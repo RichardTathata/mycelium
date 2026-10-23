@@ -31,6 +31,28 @@ window counters stay at zero; `kv_untagged_signatures_refused` is new; `mesh.sig
 residual is restated, not closed (a signed `SyncEntry` is a wire change). Upgrade note `deprecations.md` §40: upgrade
 from 2.33.x, not 2.32. Record: [`.log/2026-10-13-f2-refusal-unconditional.md`](.log/2026-10-13-f2-refusal-unconditional.md).
 
+## v2.37.0 release — 2026-10-23 (tag `v2.37.0`) — the adopter surface's first track
+
+A **MINOR** cut on `release/v2.37.0`, tagged on the maintainer's word. The plan `docs/plans/adopter-surface.md`
+(agreed 2026-10-23, #663) delivered its first track in one day, each row through an independent adversarial review:
+**#664 X0** the node published — `.github/workflows/release.yml` on every `v*` tag builds `mycelium`, `mycelium-stem`
+and `mycelium-artifact` for Linux x86_64, Linux aarch64 and macOS aarch64, smokes each Linux tarball in a clean
+container, attaches them with `SHA256SUMS` to the Release (created from the tag's message if § 8 has not run) and
+pushes `ghcr.io/richardtathata/mycelium` (this tag is the first to run it); `docker/Dockerfile.node`; `--version` on
+the three binaries. **#665 X1** `mycelium doctor` — `start()`'s refusal chain extracted to `preflight()` and the profile
+check to `profile_check()`, both called by `start()`, run over a node built and never started; the effective
+configuration with each field's source; secrets `set`/`unset`; found and fixed: `validate()` created
+`persistence.base_path` (`deprecations.md` §57). **#666 X2** `mycelium init` — `templates/governed-call` (Rust: two
+nodes, a member's direct call to a provider's tool permitted and refused at the provider, recorded in an evidence
+journal, a skill from a file) and `templates/governed-call-py` (the published node under named tokens, a declared
+unit, a write refused by scope), embedded by the binary and run by CI's `Scaffold` job; found: no configuration
+attaches an evaluator, `ReferenceEvaluator` declares no security-relevant arguments, a cargo patch of a git source
+still fetches its tag. **#667 X10** `mycelium declare [--watch]` — units through the declare route (the old handle
+retracted first, a gateway content refusal rejected once with the previous text put back), skills through the prompts
+route, heartbeats on their own timer, a lost handle re-declared, once mode without a lease; the plan's filesystem seam
+*not built* (a poll). Also in the release: #653 and #656 (K2's bounds and the tally residue), #657, #661 (webpki).
+Wire **v12** unchanged. Log: `.log/2026-10-23-release-v2.37.0.md`.
+
 ## v2.36.1 release — 2026-10-20 (tag `v2.36.1`) — wasmtime 49.0.4
 
 A **security PATCH** cut from the v2.36.0 tag: `wasmtime` 49.0.4, cranelift 0.136.4, for RUSTSEC-2026-0379 (critical, aarch64 only: Cranelift could compile a large `br_table` to a jump to the wrong target, so a node hosting WASM components on aarch64 was exposed) and RUSTSEC-2026-0378 (medium: a host panic lowering a host-created stream; the host creates none). **Check:** `uname -m` on each node and whether it hosts components (`mycelium_artifact_installs_completed_total`); after upgrading, `cargo audit -f Cargo.lock` reports neither. Wire **v12** unchanged; no API change. Cut from the v2.36.0 tag, not from `main`: main's unreleased #653–#657 add public API and change behaviour, so they wait for a MINOR. Release record: [`.log/2026-10-20-release-v2.36.1.md`](.log/2026-10-20-release-v2.36.1.md).
