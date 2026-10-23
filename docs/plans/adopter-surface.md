@@ -86,7 +86,10 @@ toolchain, from `curl` of the release artefact to the last `doctor`, and records
 summary. *(rev 0.8)* Neither template needs a model: the governed call runs against `EchoBackend` (`src/agent/llm.rs`, the CI job's
 *mock LLM*), so the hour is not spent downloading one; a demo that wants a real model says so and is outside the clock. Steps 4 and 5 are run as
 the shipped examples on the published binary (X9's live form), not built by the developer. The job grows as rows land:
-with X0–X2 it measures steps 1–3 and 6; with X3 and X9 it measures all six. The number the documentation prints is the
+with X0–X2 it measures steps 1–3 and 6; with X3 and X9 it measures all six. *(2026-10-23)* The job exists:
+`.github/workflows/one-hour.yml`, on every published Release and by dispatch against a tag, in a `python:3.12-slim`
+container, against the published artefacts only; it prints the per-step seconds and the total to the job summary and
+fails past 3 600 s. Its first measurement, on `v2.37.0`, is recorded below once run. The number the documentation prints is the
 job's **measured** time on the most recent release, rounded up to the next ten minutes, never the aspiration — if the
 measurement comes in above an hour, the page says what it measured. *Two hours* was the earlier estimate for a
 developer building the path by hand with their own agent; one hour is the target for running it from the scaffold.

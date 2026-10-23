@@ -9,6 +9,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **The `one-hour` job** (`docs/plans/adopter-surface.md` § 1.1): `.github/workflows/one-hour.yml` runs on every
+  published Release, and by hand against any tag, in a plain Python container with no Rust toolchain, against the
+  published artefacts only: it downloads and verifies the node, scaffolds the Python template and installs the SDK
+  from the same tag, runs the refused call, and runs `doctor`, timing each step and the total into the job summary,
+  and fails past 3 600 s. Steps 4 and 5 of the claim (a grant across a restart, a recovery without a second effect)
+  are printed as *not yet measured* until X3 and X9 extend it. The number the documentation prints is this job's
+  measured time on the most recent release, rounded up to the next ten minutes.
+
 ### Fixed
 
 - **The Release workflow reads the annotated tag's message, not its commit's.** `actions/checkout` resolves a tag ref
