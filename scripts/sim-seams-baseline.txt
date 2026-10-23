@@ -59,6 +59,7 @@
 2 src/bin/skillrunner/runner.rs
 2 src/capability_config.rs
 5 src/consensus.rs
+7 src/declare.rs
 2 src/doctor.rs
 1 src/federation/catalog.rs
 4 src/init.rs

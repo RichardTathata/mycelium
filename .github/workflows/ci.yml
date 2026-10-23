@@ -621,7 +621,7 @@ jobs:
           "$BIN" explain data/decisions.jsonl --catalogue "$REPO/docs/reference/rule-catalogue.json" | tee explain.log
           grep -q 'signal.admission' explain.log
           "$BIN" doctor node.toml | tee doctor.log; grep -q 'start(): would start' doctor.log
-          printf 'Say hello to {{input}} in a pirate voice.\n' > skills/greeting.md
+          printf 'Say hello to {{input}} in a pirate voice.\n' > skills/demo/greeting.md
           CARGO_TARGET_DIR="$REPO/target" cargo run | tee run2.log
           grep -q 'answered: echo: Say hello to the new joiner in a pirate voice' run2.log
       - name: Python template — init, run against the node built here, doctor
@@ -638,6 +638,32 @@ jobs:
           grep -q 'reader set demo/greeting: REFUSED 403 — insufficient scope' run.log
           grep -q 'the route needs kv:write' run.log
           "$BIN" doctor node.toml | tee doctor.log; grep -q 'start(): would start' doctor.log
+      - name: declare — a unit edit under the watch reaches the fleet, a refused one does not (X10)
+        run: |
+          set -euo pipefail
+          BIN="$PWD/target/debug/mycelium"
+          cd "$RUNNER_TEMP/governed-call-py"
+          "$BIN" -c node.toml > data/node.log 2>&1 &
+          NODE=$!
+          for _ in $(seq 1 60); do curl -sf http://127.0.0.1:8300/health > /dev/null && break; sleep 0.5; done
+          resolve() { curl -sf -H 'Authorization: Bearer alice-token' 'http://127.0.0.1:8300/gateway/capability/resolve?ns=purchase&name=place'; }
+          "$BIN" declare . --token alice-token | tee declare.log
+          grep -q 'declared 1 unit(s)' declare.log
+          resolve | grep -q '"ledger":"petty-cash"'
+          "$BIN" declare . --token alice-token --watch --poll-ms 200 > watch.log 2>&1 &
+          WATCH=$!
+          sleep 1
+          sed -i 's/ledger = "petty-cash"/ledger = "petty-cash-edited"/' units/purchaser.toml
+          for _ in $(seq 1 40); do resolve | grep -q '"ledger":"petty-cash-edited"' && break; sleep 0.25; done
+          resolve | grep -q '"ledger":"petty-cash-edited"'
+          printf 'principal = "b"\n[[requirement]]\nns = "nobody"\nname = "offers"\n' > units/b.toml
+          sleep 1
+          grep -q 'refused: wire-check found' watch.log
+          resolve | grep -q '"ledger":"petty-cash-edited"'   # the previous declaration stands
+          kill -INT "$WATCH"; wait "$WATCH" || true
+          cat watch.log
+          grep -q 'retracting' watch.log
+          kill "$NODE"; wait "$NODE" || true
 
   python-sdk:
     # The repo's first Python CI job: mycelium-py (call_typed) + the LangGraph

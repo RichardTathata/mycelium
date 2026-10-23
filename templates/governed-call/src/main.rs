@@ -2,7 +2,7 @@
 //!
 //! Node A serves a tool under a policy enforced *at the provider*, with an evidence journal (node-local, fsynced)
 //! and a decision trace. Node B, a member of the same fleet, calls the tool directly — no gateway between them — once in remit and
-//! once out of it, then calls a prompt skill whose text is `skills/greeting.md`. Everything the fleet decided is in
+//! once out of it, then calls a prompt skill whose text is `skills/demo/greeting.md`. Everything the fleet decided is in
 //! `data/`: `mycelium explain data/decisions.jsonl` · `mycelium doctor node.toml`.
 mod policy;
 use mycelium::decision::{DecisionSink, SinkConfig};
@@ -39,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     cfg_b.bootstrap_peers = vec![a.node_id().clone()];
     let b = node(&cfg_b)?;
     b.start().await?;
-    let skill = PromptTemplate { system: String::new(), user_template: std::fs::read_to_string("skills/greeting.md")?, max_tokens: 64, temperature: 0.0, metadata: Default::default() };
+    let skill = PromptTemplate { system: String::new(), user_template: std::fs::read_to_string("skills/demo/greeting.md")?, max_tokens: 64, temperature: 0.0, metadata: Default::default() };
     let _skill = b.llm().register_prompt_skill("demo", "greeting", skill, Arc::new(EchoBackend)).await?;
     while b.connected_peers().is_empty() { tokio::time::sleep(Duration::from_millis(50)).await }
 

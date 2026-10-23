@@ -594,6 +594,9 @@ with the scaffold; a unit edit that `wire-check` refuses leaves the previous dec
 the watch adds no sim-seam baseline entry outside the seam.
 
 **Not built, stated:** it declares; it does not build or restart the program. A change to `src/` is `cargo run`.
+*(X10's PR)* It applies to a node with a gateway: the Python scaffold's node has one, the Rust scaffold's nodes do
+not (their program declares in-process through `run_capability_probes`). The seam for a filesystem event source is not
+built; the watch polls modification times and sizes and runs no node, so there is nothing to replay.
 
 ### X11 · The documentation and examples pass *(rev 0.7)*
 
@@ -948,5 +951,5 @@ declarations, not code); a second template before X7; any change to the wire; an
 | X7 | | | |
 | X8 | | | |
 | X9 | | | |
-| X10 | | | |
+| X10 | a watch over `units/` and `skills/` that re-runs `wire-check` and re-declares on a clean check; a finding leaves the last good declaration; skill text written through the route that owns `prompts/`; no restart; shown in CI with the scaffold | `src/declare.rs` (`Watch::tick`, `heartbeat`, `retract`, `run`) and its four tests (`a_unit_edit_is_redeclared_and_the_old_handle_retracted`, `a_unit_wire_check_refuses_keeps_the_previous_declaration`, `a_refused_token_is_an_error_naming_the_route`, `a_skill_file_becomes_a_prompt_template`), written against a `todo!()` tick and seen failing first; the CI step in `Scaffold` (declare, watch, an edit reaching the fleet, a refused unit leaving it, Ctrl-C retracting). **Not built, by the row's own text:** the *Input*-class seam for the filesystem event source — the watch polls on a timer and is outside every recording, stated in the inventory. | X10's PR review |
 | X11 | | | |

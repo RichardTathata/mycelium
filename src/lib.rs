@@ -241,6 +241,9 @@ pub mod wire_check;
 pub mod doctor;
 /// `mycelium init` — a scaffold that CI builds and runs (docs/plans/adopter-surface.md, X2).
 pub mod init;
+/// `mycelium declare` — a project's declaration sent to a gateway, once or kept current (adopter-surface X10).
+#[cfg(feature = "gateway")]
+pub mod declare;
 /// Stop signals for a long-running node: SIGINT or SIGTERM, installed before the bind, a second one exits.
 pub mod shutdown;
 pub mod mesh_manifest;

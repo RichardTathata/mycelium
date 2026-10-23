@@ -137,6 +137,16 @@ equal to the tag, `wire-check` over the fixtures), and creates the Release from 
 RELEASING § 8 has not. The sums are integrity, not provenance: nothing signs a binary (`what-is-proven.md`, third
 table). Entry page: `docs/features/published-node.md`; log `.log/2026-10-23-published-node.md`.
 
+## `mycelium declare` (adopter-surface X10, 2026-10-23)
+
+`src/declare.rs` (feature `gateway`): one `tick` fingerprints `units/*.toml` and `skills/<ns>/<name>.md` (mtime, size),
+runs `wire_check::check` over the units (a refusal keeps the previous declaration), then per unit `DELETE
+/gateway/capability/{old handle}` and `POST /gateway/units/declare` (`interval_secs`, `lease_secs`; the response's
+`not_enforced` collected), retracts units gone from the directory, and `PUT /gateway/prompts/{ns}/{name}` per skill
+(a `PromptTemplate` with the file as `user_template`; a missing `{{input}}` is a warning). `heartbeat()` posts per
+handle; `run` polls on `tokio::time::sleep`, beats every `lease/3`, retracts on Ctrl-C. A poll, not a seam: admitted in
+the replay inventory. Entry page `docs/features/declare.md`; log `.log/2026-10-23-declare.md`.
+
 ## `mycelium init` (adopter-surface X2, 2026-10-23)
 
 A scaffold from a template the binary embeds (`src/init.rs`, `include_str!` over `templates/<name>/*`; a test holds the

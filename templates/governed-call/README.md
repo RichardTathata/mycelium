@@ -3,7 +3,7 @@
 Two nodes, one governed call. Node A serves a tool under a policy that is enforced **at the provider** — not at a
 gateway in front of it — and records every decision in an evidence journal (node-local, append-only, fsynced). Node B, a member of the same
 fleet, calls the tool directly: once inside the remit (permitted, the tool runs) and once outside it (refused, the
-tool never runs). Then B's prompt skill answers from the text in `skills/greeting.md`.
+tool never runs). Then B's prompt skill answers from the text in `skills/demo/greeting.md`.
 
 ```sh
 cargo run
@@ -20,7 +20,7 @@ the journal and overwrites the trace.
 |---|---|
 | `node.toml` | node A's configuration; node B derives its own from it (`bind_port + 1`) |
 | `units/purchaser.toml` | the unit file: the capability A advertises, and the mandate and rule that say who may call it |
-| `skills/greeting.md` | the prompt skill's text — edit it, run again, and the answer changes |
+| `skills/demo/greeting.md` | the prompt skill's text (`skills/<ns>/<name>.md`, the layout `mycelium declare` reads) — edit it, run again, and the answer changes |
 | `src/policy.rs` | the policy, an `ActionEvaluator`: permit one ledger, deny another, refuse the rest as undecided |
 | `src/main.rs` | the program |
 | `data/` | written by a run: `tls/` (the fleet CA and both node certificates, reused on the next run), `evidence.log`, `decisions.jsonl` |
