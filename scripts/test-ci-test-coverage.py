@@ -9,7 +9,8 @@ import tempfile
 
 SUITE = "scripts/test-ci-test-coverage.py"
 CASES = ["log-formats", "script-cases", "scripts-only-mode", "named-blocks", "exceptions-scope",
-         "run-group-echo", "list-script-cases", "fetch-waits-for-the-listing", "fetch-retries-the-log", "fetch-gives-up"]
+         "run-group-echo", "list-script-cases", "fetch-waits-for-the-listing", "fetch-retries-the-log", "fetch-gives-up",
+         "fetch-skips-a-cancelled-job", "fetch-refuses-a-bad-wait"]
 if sys.argv[1:] == ["--list"]:
     for c in CASES:
         print(f"@@case-list@@ {SUITE}::{c}")
@@ -210,10 +211,13 @@ state = os.environ["STUB_STATE"]; lag = int(os.environ["STUB_LISTING_LAG"])
 n = int(open(state).read() or 0) + 1 if os.path.exists(state) else 1
 open(state, "w").write(str(n))
 first = "in_progress" if n <= lag else "completed"
-print(f"1\\t{first}\\tTest")
+print(f"1\\t{first}\\t{'' if first != 'completed' else 'success'}\\tTest")
 for jid, name in ((2, "Embedded"), (3, "TypeScript SDK"), (4, "Scripts")):
-    print(f"{jid}\\tcompleted\\t{name}")
-print("9\\tin_progress\\tTest coverage (observed)")
+    print(f"{jid}\\tcompleted\\tsuccess\\t{name}")
+if os.environ.get("STUB_CANCELLED"):
+    # a job cancelled in the runner queue: completed, no steps, and no log — ever
+    print("5\\tcompleted\\tcancelled\\tWASM host confinement (macOS Seatbelt)")
+print("9\\tin_progress\\t\\tTest coverage (observed)")
 """
 CURL_STUB = """#!/usr/bin/env python3
 # A stub `curl …/jobs/{id}/logs`: the first LAG fetches of job 1 answer 404 (the log blob not yet there), then
@@ -223,13 +227,14 @@ jid = sys.argv[-1].rsplit("/", 2)[-2]
 state = os.environ["STUB_STATE"] + ".curl." + jid; lag = int(os.environ["STUB_LOG_LAG"])
 n = int(open(state).read() or 0) + 1 if os.path.exists(state) else 1
 open(state, "w").write(str(n))
-if jid == "1" and n <= lag:
+if (jid == "1" and n <= lag) or jid == "5":
     sys.stderr.write("curl: (22) The requested URL returned error: 404\\n"); sys.exit(22)
 sys.stdout.write(open(os.path.join(os.environ["STUB_LOGS"], jid)).read())
 """
 
 
-def run_fetch(listing_lag: int, log_lag: int, wait_s: str) -> tuple[int, str, int]:
+def run_fetch(listing_lag: int, log_lag: int, wait_s: str, poll_s: str = "0.05", cancelled: bool = False,
+              ) -> tuple[int, str, int]:
     """ci-test-coverage.py --fetch against stub gh/curl: (exit, output, number of listings asked for)."""
     with tempfile.TemporaryDirectory() as d:
         bin_dir, logs, dest = os.path.join(d, "bin"), os.path.join(d, "bodies"), os.path.join(d, "dest")
@@ -247,7 +252,8 @@ def run_fetch(listing_lag: int, log_lag: int, wait_s: str) -> tuple[int, str, in
         env = {**os.environ, "PATH": bin_dir + os.pathsep + os.environ["PATH"], "GITHUB_REPOSITORY": "o/r",
                "GITHUB_RUN_ID": "1", "GH_TOKEN": "t", "STUB_STATE": state, "STUB_LOGS": logs,
                "STUB_LISTING_LAG": str(listing_lag), "STUB_LOG_LAG": str(log_lag),
-               "CI_TEST_COVERAGE_EXCEPTIONS": exc, "CI_TEST_COVERAGE_WAIT_S": wait_s, "CI_TEST_COVERAGE_POLL_S": "0.05"}
+               "CI_TEST_COVERAGE_EXCEPTIONS": exc, "CI_TEST_COVERAGE_WAIT_S": wait_s, "CI_TEST_COVERAGE_POLL_S": poll_s,
+               **({"STUB_CANCELLED": "1"} if cancelled else {})}
         r = subprocess.run([sys.executable, os.path.join(HERE, "ci-test-coverage.py"), "--fetch", dest],
                            capture_output=True, text=True, env=env)
         listings = int(open(state).read()) if os.path.exists(state) else 0
@@ -265,11 +271,24 @@ def fetch_cases(which: str) -> list[str]:
         code, out, _ = run_fetch(listing_lag=0, log_lag=2, wait_s="5")
         if code != 0:
             failures.append(f"a 404 on a finished job's log should be retried (bounded): exit {code}: {out[-400:]}")
+    elif which == "give-up":
+        # 0.5 s of wait polled every 0.1 s is at most 6 listings (the first, then one per poll); a loop that
+        # forgot to sleep lists ~12 times in that window (one stub spawn is ~40 ms), so the bound pins the poll.
+        code, out, listings = run_fetch(listing_lag=10_000, log_lag=0, wait_s="0.5", poll_s="0.1")
+        if code == 0 or "had not finished" not in out or listings > 8:
+            failures.append(f"a job that never completes within the wait must still fail by name, polled, not spun: "
+                            f"exit {code}, {listings} listing(s): {out[-400:]}")
+    elif which == "cancelled":
+        # a job cancelled in the runner queue is `completed` with no log, for ever: it is not fetched, and the run
+        # is judged on the logs that exist (its tests, if any were listed, then read as not executed)
+        code, out, _ = run_fetch(listing_lag=0, log_lag=0, wait_s="1", cancelled=True)
+        if code != 0:
+            failures.append(f"a completed job with conclusion cancelled has no log and must not be waited for: "
+                            f"exit {code}: {out[-400:]}")
     else:
-        code, out, listings = run_fetch(listing_lag=10_000, log_lag=0, wait_s="0.3")
-        if code == 0 or "had not finished" not in out or listings > 60:
-            failures.append(f"a job that never completes within the wait must still fail by name: exit {code}, "
-                            f"{listings} listing(s): {out[-400:]}")
+        code, out, _ = run_fetch(listing_lag=0, log_lag=0, wait_s="abc")
+        if code == 0 or "CI_TEST_COVERAGE_WAIT_S" not in out or "Traceback" in out:
+            failures.append(f"a wait that is not a non-negative number must be refused by name: exit {code}: {out[-400:]}")
     return failures
 
 
@@ -384,6 +403,10 @@ def main() -> int:
     failures += fetch_cases("log")
     case("fetch-gives-up")
     failures += fetch_cases("give-up")
+    case("fetch-skips-a-cancelled-job")
+    failures += fetch_cases("cancelled")
+    case("fetch-refuses-a-bad-wait")
+    failures += fetch_cases("bad-wait")
     for f in failures:
         print("FAIL", f)
     if not failures:

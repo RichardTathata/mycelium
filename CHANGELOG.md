@@ -26,14 +26,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- **The `test-coverage` CI jobs no longer fail on the API's lag** (`scripts/ci-test-coverage.py --fetch`). Read seconds
-  after a needed job finishes, the jobs listing could still say `in_progress` and the log endpoint could answer 404,
-  although the job is in the coverage job's `needs` and had completed — three CI failures read that way (2026-10-20
-  and 2026-10-23, two of them blocking a merge until a whole-workflow re-run). A job listed as unfinished is now
-  re-listed and a log that is not there yet re-fetched, each within one bounded wait (`CI_TEST_COVERAGE_WAIT_S`,
-  120 s; polled every `CI_TEST_COVERAGE_POLL_S`, 10 s), and only then is it the same failure by name. Three suite
-  cases drive the fetch through stub `gh` and `curl`: the listing lag and the log 404 fail the unchanged script and
-  pass the fixed one; a job that never completes still fails within the wait.
+- **The `test-coverage` CI jobs no longer fail on the API's lag, or on a job that never ran**
+  (`scripts/ci-test-coverage.py --fetch`). Read seconds after a needed job finishes, the jobs listing could still say
+  `in_progress` although the job is in the coverage job's `needs` and had completed — two CI failures read that way
+  (19 s and 23 s after completion, 2026-10-20 and 2026-10-23, one of them blocking a merge until a whole-workflow
+  re-run). A job listed as unfinished is now re-listed, and a log that is not there yet re-fetched, each within one
+  bounded wait (`CI_TEST_COVERAGE_WAIT_S`, 120 s; polled every `CI_TEST_COVERAGE_POLL_S`, 10 s; a value that is not
+  a number of seconds is refused by name), and only then is it the same failure by name. A third failure
+  (2026-10-20) was a macOS job cancelled in the runner queue, outside `needs`, whose log never exists: a job that
+  completed `cancelled` or `skipped` is no longer fetched, and `wasm-host-macos` is in `needs`. Five suite cases
+  drive the fetch through stub `gh` and `curl`: the listing lag, the log 404, the cancelled job and the bad setting
+  each fail the unchanged script and pass the fixed one; a job that never completes still fails within the wait,
+  polled rather than spun.
 
 - **A departed node's tally entry that outlives its collected heartbeat is collected** (post-360 row K2). The
   residue collector dated a non-peer's `sys/ae-tally/` keys by its heartbeat, and skipped a node with none. An entry
