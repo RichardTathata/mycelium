@@ -87,7 +87,9 @@ has no row for this feature. The end-to-end runs are tests in
 - **Design:** no design record of its own; row K2 of the post-360 plan (above) is the record, and a seat is a
   decision record of the [lock lifecycle](../design/lock-lifecycle.md). Upgrade notes:
   [deprecations §53](../guide/deprecations.md#53-a-history-limited-rule-may-count-across-the-fleet-two-new-scopes-and-five-structs-gained-a-field-2360-post-360-plan-row-k2)
-  and §55 (above). Maintainer notes: [wiki dev § V3 runtime authorisation and evidence](../wiki/dev/dev.md#v3-runtime-authorisation-and-evidence-the-ae-slice).
+  and §55 (above), and
+  [§56](../guide/deprecations.md#56-a-members-tally-entries-without-its-heartbeat-are-unknown-coverage-not-zero-unreleased-post-360-plan-row-k2)
+  (a member's tally entries without its heartbeat are unknown coverage). Maintainer notes: [wiki dev § V3 runtime authorisation and evidence](../wiki/dev/dev.md#v3-runtime-authorisation-and-evidence-the-ae-slice).
 - **Code:** [`src/agent/fleet_history.rs`](../../src/agent/fleet_history.rs) (`establish`, `claim_seat`,
   `publish_permit`), [`src/agent/action_evaluator.rs`](../../src/agent/action_evaluator.rs) (`HistoryScope`,
   `FleetCounter`, `check_fleet_bounds`).

@@ -27,6 +27,7 @@ jobs:
       - run: ./scripts/check-positioning.sh
       - run: python3 scripts/test-check-materials.py
       - run: python3 scripts/test-check-front-doors.py
+      - run: python3 scripts/test-check-feature-pages.py
 
   test:
     name: Test
@@ -998,6 +999,7 @@ jobs:
           echo "@@test-universe@@ begin scripts"
           python3 scripts/test-check-materials.py --list
           python3 scripts/test-check-front-doors.py --list
+          python3 scripts/test-check-feature-pages.py --list
           python3 scripts/test-ci-test-coverage.py --list
           ./scripts/with-pyyaml.sh scripts/test-check-test-inventory.py --list
           bash scripts/test-ci-retest.sh --list
@@ -1084,4 +1086,9 @@ jobs:
       - run: python3 scripts/ci-test-coverage.py --fetch "$RUNNER_TEMP/job-logs"
         env:
           GH_TOKEN: ${{ github.token }}
+      # The feature pages' half of rule 3 (docs/plans/feature-pages.md P1, P2): every test a feature page names
+      # as running the feature executed in this run, read from the logs the step above fetched. Runs when that
+      # step fails too, so a missing test is reported beside the coverage finding.
+      - if: success() || failure()
+        run: python3 scripts/check-feature-pages.py --executed "$RUNNER_TEMP/job-logs"
 
