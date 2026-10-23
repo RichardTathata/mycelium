@@ -9,6 +9,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **The `one-hour` job** (`docs/plans/adopter-surface.md` § 1.1): `.github/workflows/one-hour.yml` runs when a Release
+  workflow run for a tag push completes successfully (not on `release: published`, which a Release created with the
+  workflow's own token never fires), and by hand against any tag, in `python:3.12-slim-bookworm` with no Rust
+  toolchain, against the published artefacts only: it downloads and verifies the node, scaffolds the Python template
+  and installs the SDK from the same tag (its version checked against the tag's `pyproject.toml`), runs the declared
+  unit, the permitted write and the refused write, and runs `doctor`, timing each step and the total from the first
+  `curl` to the last `doctor` into the job summary (the container's own setup on its own row, outside the clock), and
+  fails past 3 600 s. A red run prints no number. Steps 4 and 5 of the claim, and the records half of step 3, are
+  printed as *not yet measured* until X3, X4 and X9 extend it. The number the documentation prints is this job's
+  measured time on the most recent release, rounded up to the next ten minutes.
+
 ### Fixed
 
 - **The Release workflow reads the annotated tag's message, not its commit's.** `actions/checkout` resolves a tag ref

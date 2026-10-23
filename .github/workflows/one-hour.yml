@@ -1,0 +1,155 @@
+# The plan's one claim, measured (docs/plans/adopter-surface.md § 1.1): *one hour to a governed fleet*, from a machine
+# with no Rust toolchain. This job is the only thing allowed to put a number on that sentence. It runs in a plain
+# Python container against a published release — never against a checkout's build — and times each step the plan
+# lists, printing the seconds per step and the total to the job summary. The number the documentation prints is this
+# job's measured time on the most recent release, rounded up to the next ten minutes, never the aspiration.
+#
+# Today it measures steps 1, 2, 3 and 6 of the six; steps 4 (a grant that holds across a restart, X3) and 5 (a lost
+# acknowledgement recovered without a second effect, X9) are printed as *not yet measured* until those rows land and
+# extend this job. The Rust scaffold is not timed here — it needs a toolchain — and is run by CI's `Scaffold` job.
+#
+# Triggers: the completion of a successful Release workflow run for a tag push — not `release: published`, which a
+# Release created with the workflow's own GITHUB_TOKEN never fires (#670's review) — and by hand against any tag.
+name: One hour
+
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The release tag to measure, e.g. v2.37.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  one-hour:
+    name: One hour to a governed fleet (Python path, no toolchain)
+    # A Release run from a pull request is a dry run with nothing published: only a tag push's success counts.
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    # Pinned to a named Debian release so the measured base is the same across releases; bash, because a job
+    # container's default `sh` is dash, whose `set -o pipefail` depends on the Debian release (#670's review).
+    container: python:3.12-slim-bookworm
+    defaults:
+      run:
+        shell: bash
+    env:
+      # On workflow_run for a tag push, head_branch is the tag's name.
+      TAG: ${{ inputs.tag || github.event.workflow_run.head_branch }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: The tools a slim container lacks (before the clock), and the tag
+        run: |
+          set -euo pipefail
+          s=$(date +%s)
+          apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends curl ca-certificates libssl3 >/dev/null
+          echo "$(( $(date +%s) - s ))" > /tmp/setup_seconds
+          if ! echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::notice::$TAG is not a release tag (vX.Y.Z); nothing to measure"; echo skip > /tmp/skip; exit 0
+          fi
+          date +%s > /tmp/t0
+          echo "measuring $TAG on $(uname -m), $(python3 --version), $(bash --version | head -1); rustc: $(command -v rustc || echo none)"
+          echo "step,seconds" > /tmp/steps.csv
+
+      - name: "1 · The published node: download, verify the sum, run it"
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          [ -f /tmp/skip ] && exit 0
+          t=$(date +%s)
+          base="https://github.com/$REPO/releases/download/$TAG"
+          ver="${TAG#v}"
+          # A bounded retry: a Release's assets follow its creation by a moment (the release's latency, not the adopter's).
+          curl -fsSLO --retry 5 --retry-delay 5 --retry-all-errors "$base/mycelium-$ver-linux-x86_64.tar.gz"
+          curl -fsSLO --retry 5 --retry-delay 5 --retry-all-errors "$base/SHA256SUMS"
+          sha256sum --ignore-missing -c SHA256SUMS
+          tar -xzf "mycelium-$ver-linux-x86_64.tar.gz"
+          install -m 0755 "mycelium-$ver-linux-x86_64/mycelium" /usr/local/bin/mycelium
+          got=$(mycelium --version)
+          [ "$got" = "mycelium $ver" ] || { echo "::error::mycelium --version printed [$got]"; exit 1; }
+          echo "1-download-verify-run,$(( $(date +%s) - t ))" >> /tmp/steps.csv
+
+      - name: "2 · A scaffold in your own language: the Python template, and its SDK from the same tag"
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          [ -f /tmp/skip ] && exit 0
+          t=$(date +%s)
+          mycelium init "$HOME/governed-call-py" --template governed-call-py
+          test -s "$HOME/governed-call-py/main.py" && test -s "$HOME/governed-call-py/node.toml"
+          pip install -q "https://github.com/$REPO/archive/refs/tags/$TAG.tar.gz#subdirectory=mycelium-py"
+          # The SDK installed is the tag's: its version equals the tag's pyproject.
+          want=$(curl -fsSL "https://raw.githubusercontent.com/$REPO/$TAG/mycelium-py/pyproject.toml" | sed -n 's/^version *= *"\([^"]*\)".*/\1/p' | head -1)
+          got=$(pip show mycelium-py | sed -n 's/^Version: //p')
+          [ -n "$want" ] && [ "$got" = "$want" ] || { echo "::error::mycelium-py $got installed, the tag declares $want"; exit 1; }
+          echo "mycelium-py $got"
+          echo "2-scaffold-and-sdk,$(( $(date +%s) - t ))" >> /tmp/steps.csv
+
+      - name: "3 · A declared unit, a permitted write, and a write the gateway refuses by name"
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          [ -f /tmp/skip ] && exit 0
+          t=$(date +%s)
+          cd "$HOME/governed-call-py"
+          MYCELIUM_BIN=mycelium python3 main.py | tee run.log
+          grep -q "alice declared \`purchaser\`" run.log
+          grep -q 'not enforced by this node' run.log
+          grep -q 'alice set demo/greeting: PERMITTED' run.log
+          grep -q 'reader set demo/greeting: REFUSED 403 — insufficient scope' run.log
+          grep -q 'the route needs kv:write' run.log
+          echo "3-refused-call,$(( $(date +%s) - t ))" >> /tmp/steps.csv
+
+      - name: "6 · A readiness report naming what the fleet enforces"
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          [ -f /tmp/skip ] && exit 0
+          t=$(date +%s)
+          cd "$HOME/governed-call-py"
+          mycelium doctor node.toml | tee doctor.log
+          grep -q 'start(): would start' doctor.log
+          grep -q 'guarantees: enforced' doctor.log
+          # doctor lists only what is NOT enforced; the token table is, so its id must not appear as unmet.
+          if grep -q 'gw.token_tables:' doctor.log; then echo '::error::gw.token_tables is listed as unmet'; exit 1; fi
+          echo "6-doctor,$(( $(date +%s) - t ))" >> /tmp/steps.csv
+
+      - name: The measurement — a number only when every step ran
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          if [ -f /tmp/skip ]; then echo "## One hour — $TAG is not a release tag; not measured" | tee -a "$GITHUB_STEP_SUMMARY"; exit 0; fi
+          rows=$( [ -f /tmp/steps.csv ] && tail -n +2 /tmp/steps.csv | wc -l | tr -d ' ' || echo 0 )
+          if [ "$JOB_STATUS" != "success" ] || [ "$rows" != 4 ]; then
+            {
+              echo "## One hour to a governed fleet — $TAG: **not measured**"
+              echo
+              echo "A step failed (job status: $JOB_STATUS; $rows of 4 steps completed). A red run prints no number."
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          total=$(( $(date +%s) - $(cat /tmp/t0) ))
+          setup=$(cat /tmp/setup_seconds)
+          {
+            echo "## One hour to a governed fleet — $TAG, Python path, no toolchain, $(cat /etc/debian_version | sed 's/^/Debian /')"
+            echo
+            echo "| step | seconds |"
+            echo "|---|---|"
+            tail -n +2 /tmp/steps.csv | awk -F, '{printf "| %s | %s |\n", $1, $2}'
+            echo "| 4 · a grant that holds across a restart | not yet measured (plan X3) |"
+            echo "| 5 · a lost acknowledgement recovered without a second effect | not yet measured (plan X9) |"
+            echo "| **total, from the first curl to the last doctor** | **$total** |"
+            echo "| the container's own setup (apt), before the clock | $setup |"
+            echo
+            units=$(( (total + 599) / 600 ))
+            mins=$(( units * 10 ))
+            echo "Measured: **$total s** for steps 1, 2, 3 and 6 (one node from the published binary; the refusal is the gateway's scope rule — steps 4 and 5 and the records half of step 3 wait on X3, X4 and X9); printed as **${mins} minutes** (rounded up to the next ten). The claim's bound is 3600 s."
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$total" -le 3600 ] || { echo "::error::$total s exceeds the hour the claim allows"; exit 1; }

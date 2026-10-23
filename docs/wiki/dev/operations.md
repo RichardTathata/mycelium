@@ -147,6 +147,16 @@ runs `wire_check::check` over the units (a refusal keeps the previous declaratio
 handle; `run` polls on `tokio::time::sleep`, beats every `lease/3`, retracts on Ctrl-C. A poll, not a seam: admitted in
 the replay inventory. Entry page `docs/features/declare.md`; log `.log/2026-10-23-declare.md`.
 
+## The `one-hour` job (adopter-surface § 1.1, 2026-10-23)
+
+`.github/workflows/one-hour.yml`: the only place a number may be put on *one hour to a governed fleet*. Trigger:
+`workflow_run` on the Release workflow's completion for a tag push (a Release created with `GITHUB_TOKEN` fires no
+`release` event — #670's review), and dispatch. `python:3.12-slim-bookworm`, `shell: bash` (a job container's `sh` is
+dash, whose `pipefail` depends on the Debian release), no toolchain, the published artefacts only. Steps 1/2/3/6 timed
+from the first `curl`; apt on its own row outside the clock; the SDK's version checked against the tag's
+`pyproject.toml`; a red run prints no number; 3 600 s is the bound. Steps 4 and 5 and the records half of 3 are
+printed as not yet measured (X3, X4, X9). Log `.log/2026-10-23-one-hour.md`.
+
 ## `mycelium init` (adopter-surface X2, 2026-10-23)
 
 A scaffold from a template the binary embeds (`src/init.rs`, `include_str!` over `templates/<name>/*`; a test holds the
