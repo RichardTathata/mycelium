@@ -67,6 +67,13 @@ example = "none"
 example_watch = ["published_node", "release_artefact"]
 ids = ["concept:published-node"]
 
+[[feature]]
+name = "Doctor"
+page = "doctor.md"
+example = "none"
+example_watch = ["doctor", "readiness_report"]
+ids = ["concept:doctor"]
+
 # ------------------------------------------------------------------------------- pages to write (row F3)
 
 # Authority and evidence

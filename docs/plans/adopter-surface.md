@@ -184,9 +184,11 @@ a persistence directory.
 - a persistence directory that does not exist is reported, not created (R7's refusal stays with `start()`);
 - a planted fault in each of the four: shown failing.
 
-*(rev 0.4)* **It prints the effective configuration**: every field after defaults, the file, the env overrides and the
-profile, each with its source named (`default` · `file` · `env GOSSIP_…` · `profile`), in the field order of
-[`configuration.md`](../reference/configuration.md). This is the "what will actually run" view: the unit files are
+*(rev 0.4)* **It prints the effective configuration**: every field after defaults, the file and the env overrides,
+each with its source named (`default` · `file` · `env`), *(X1's PR)* in the configuration's own key order — a profile
+requires fields, it sets none, so it is not a source; and the binary cannot read `configuration.md` at run time, so
+the order is the serialised form's (alphabetical) and a test holds every top-level field to a row in
+[`configuration.md`](../reference/configuration.md)'s table instead. This is the "what will actually run" view: the unit files are
 already shown by `wire-check`'s overlay; the configuration had no such view. Secrets are printed as `set` or `unset`,
 never as values. Exit: a test sets one field three ways and reads the source column; a token is shown as `set`.
 
@@ -927,7 +929,7 @@ declarations, not code); a second template before X7; any change to the wire; an
 | Row | Promise | Evidence | Reviewer |
 |---|---|---|---|
 | X0 | binaries for three platforms, sums, the Release created from the tag, the image by version and `latest`; a clean-container smoke; a dry run | `.github/workflows/release.yml`, `docker/Dockerfile.node`; `version_tests::version_line_names_the_crate_version` (`src/main.rs`); dry run 39934199532 on #664 (the bundle verified by the review). **Not built, by the exit's own bullets:** `mycelium doctor` in the clean container waits on X1; the `one-hour` job's first step waits on X2, which creates the job; the Release creation and the image push are exercised only by the first tag after merge. The Doors' anchor promise is withdrawn (above). | #664's review, 2026-10-23 |
-| X1 | | | |
+| X1 | the same refusal as `start()`, in its words; `not_in_build` naming the feature; a persistence directory reported, not created; the effective configuration with sources; secrets as set/unset | `src/doctor.rs` and its five tests (`doctor_names_the_refusal_start_would_give` runs both and compares the strings); `preflight`/`profile_check` in `src/agent/lifecycle.rs`, called by `start()`; `validate_does_not_create_the_persistence_base_path` in `mycelium-core/src/config.rs` — **found by the row:** `validate()` created the directory, fixed (`deprecations.md` §57). The field order is the serialised form's, with a doc-table test, not `configuration.md`'s (above). | X1's PR review |
 | X2 | | | |
 | X3 | | | |
 | X4 | | | |

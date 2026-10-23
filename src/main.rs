@@ -21,6 +21,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         // `mycelium --version`: the crate's version and nothing more, the line the release workflow's
         // clean-container smoke compares against the tag (docs/plans/adopter-surface.md, X0).
         Some("-V" | "--version") => { println!("{}", version_line()); std::process::exit(0) }
+        // `mycelium doctor [config.toml] [--units <dir>] [--format text|json]` — what `start()` would print
+        // and whether it would refuse, from the configuration and the environment alone; no port, no disk
+        // (docs/plans/adopter-surface.md, X1).
+        Some("doctor") => std::process::exit(doctor_cli(std::env::args().skip(2).collect())),
         Some("rules") => std::process::exit(rules_cli(std::env::args().skip(2).collect())),
         Some("explain") => std::process::exit(explain_cli(std::env::args().skip(2).collect())),
         // `mycelium tls issue` — a node certificate signed where the CA key is, so the node never
@@ -306,6 +310,69 @@ fn wire_check_cli(args: Vec<String>) -> i32 {
 /// `mycelium rules [--format md|json]` — the rule catalogue this binary registers
 /// (`mycelium::rules::RULES`), generated from the descriptors. The fleet's whole catalogue, with the
 /// stem host's provisioning rules, is the checked-in `docs/reference/rule-catalogue.md`.
+/// `mycelium doctor`: exit 0 when `start()` would start (and, with `--units`, `wire-check` finds no
+/// error), 1 when it would refuse or the units do not bind, 2 on a usage error. The report is the
+/// library's `doctor::run`, printed as text or JSON; `--units` then runs the same `wire-check` the
+/// `wire-check` subcommand runs, so the two never disagree.
+fn doctor_cli(args: Vec<String>) -> i32 {
+    const USAGE: &str = "Usage: mycelium doctor [config.toml] [--units <dir> [--library <dir>] [--schemas <dir>]] [--format text|json]";
+    let mut config: Option<std::path::PathBuf> = None;
+    let mut units: Vec<String> = Vec::new();
+    let mut format = "text".to_string();
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "-h" | "--help" => { eprintln!("{USAGE}"); return 0; }
+            "--format" => match it.next() { Some(f) => format = f, None => { eprintln!("{USAGE}"); return 2; } },
+            "--units" | "--library" | "--schemas" => match it.next() {
+                Some(v) => { units.push(a.clone()); units.push(v); }
+                None => { eprintln!("{USAGE}"); return 2; }
+            },
+            _ if a.starts_with('-') => { eprintln!("unknown option `{a}`\n{USAGE}"); return 2; }
+            _ if config.is_none() => config = Some(std::path::PathBuf::from(a)),
+            _ => { eprintln!("{USAGE}"); return 2; }
+        }
+    }
+    if format != "text" && format != "json" { eprintln!("{USAGE}"); return 2; }
+    // `GossipAgent::new` is built inside a runtime context, as the node binary builds it.
+    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => { eprintln!("doctor: {e}"); return 2; }
+    };
+    let report = rt.block_on(async { mycelium::doctor::run(config.as_deref()) });
+    if format == "json" {
+        match serde_json::to_string_pretty(&report) {
+            Ok(s) => println!("{s}"),
+            Err(e) => { eprintln!("doctor: {e}"); return 2; }
+        }
+    } else {
+        print!("{}", report.render());
+    }
+    let mut code = if report.refusal.is_some() { 1 } else { 0 };
+    if !units.is_empty() {
+        // `--units <dir> [--library ..] [--schemas ..]`: the directory is wire-check's positional argument.
+        let mut wc: Vec<String> = Vec::new();
+        let mut pairs = units.chunks(2);
+        let mut dir: Option<String> = None;
+        for pair in &mut pairs {
+            match pair[0].as_str() {
+                "--units" => dir = Some(pair[1].clone()),
+                flag => { wc.push(flag.to_string()); wc.push(pair[1].clone()); }
+            }
+        }
+        match dir {
+            Some(d) => {
+                wc.insert(0, d);
+                println!();
+                let wc_code = wire_check_cli(wc);
+                if wc_code != 0 { code = code.max(1); }
+            }
+            None => { eprintln!("--library/--schemas need --units\n{USAGE}"); return 2; }
+        }
+    }
+    code
+}
+
 fn rules_cli(args: Vec<String>) -> i32 {
     use mycelium::rule::Catalogue;
     const USAGE: &str = "Usage: mycelium rules [--format md|json]";
@@ -405,7 +472,7 @@ fn tls_cli(args: Vec<String>) -> i32 {
 
 fn print_usage() {
     eprintln!(
-        "Usage: mycelium [OPTIONS]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed] [--no-authority]\n       mycelium rules [--format md|json]\n       mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>]\n       mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir>\n\
+        "Usage: mycelium [OPTIONS]\n       mycelium doctor [config.toml] [--units <dir>] [--format text|json]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed] [--no-authority]\n       mycelium rules [--format md|json]\n       mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>]\n       mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir>\n\
          \n\
          Options:\n\
          -c, --config <file>      Load configuration from a TOML file\n\

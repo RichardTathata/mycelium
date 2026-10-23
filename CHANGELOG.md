@@ -11,6 +11,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`mycelium doctor`** (`docs/plans/adopter-surface.md`, row X1): the readiness report without a node — what `start()`
+  would print and whether it would refuse, from a configuration file and the `GOSSIP_*` environment alone, by running
+  `start()`'s own preflight chain and profile check (extracted as `preflight()` and `profile_check()` in
+  `src/agent/lifecycle.rs`, which `start()` now calls) and the guarantee and confinement reports over a node that is
+  built and never started: no port, no directory, no attachment. Plus the effective configuration, every field with
+  its source (`default` · `file` · `env`), secrets as `set`/`unset`; `--format json`; `--units <dir>` then runs
+  `wire-check`. Exit 1 when `start()` would refuse. Library: `mycelium::doctor::{run, Doctor, effective_fields}`.
+  **What it cannot see:** an attachment made in code, and unreadable persisted state (R7's refusal stays with
+  `start()`). Feature page `docs/features/doctor.md`.
+
+### Changed
+
+- **`GossipConfig::validate()` creates nothing.** Its early check of `persistence.base_path` probed by `create_dir_all`,
+  so loading a configuration created the data directory; it now reads the nearest existing ancestor and warns, and
+  `start()` creates the node's directory as before (`deprecations.md` §57). Found by `doctor`'s own test.
+
 - **The node is published** (`docs/plans/adopter-surface.md`, row X0): a `Release` workflow on every `v*` tag builds
   `mycelium`, `mycelium-stem` and `mycelium-artifact` for Linux x86_64, Linux aarch64 and macOS aarch64, smokes each
   Linux tarball in a clean bookworm container with no Rust toolchain, attaches the tarballs and `SHA256SUMS` to the

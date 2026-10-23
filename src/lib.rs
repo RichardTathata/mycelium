@@ -237,6 +237,8 @@
 pub mod capability;
 pub mod capability_config;
 pub mod wire_check;
+/// `mycelium doctor` — the readiness report without a node (docs/plans/adopter-surface.md, X1).
+pub mod doctor;
 /// Stop signals for a long-running node: SIGINT or SIGTERM, installed before the bind, a second one exits.
 pub mod shutdown;
 pub mod mesh_manifest;
