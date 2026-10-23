@@ -19,7 +19,7 @@ CASES = ['baseline', 'example-baseline',
          'glossary-bold-row-short', 'glossary-bold-row-with-text', 'glossary-bold-row-italic-no-link',
          'unmapped-cargo-feature', 'implicit-cargo-feature',
          'unmapped-crate', 'unmapped-companion-guarantee', 'non-literal-guarantee-id', 'aliased-descriptor',
-         'type-alias-descriptor', 'qualified-path-descriptor', 'descriptor-struct-literal', 'impl-for-descriptor', 'inherent-impl-descriptor', 'descriptor-fn-item', 'char-literal-before-comment',
+         'type-alias-descriptor', 'qualified-path-descriptor', 'descriptor-struct-literal', 'impl-for-descriptor', 'inherent-impl-descriptor', 'inherent-impl-lifetime', 'inherent-impl-where', 'descriptor-fn-item', 'char-literal-before-comment',
          'early-test-module', 'brace-in-string', 'unit-key-without-heading', 'restricted-unit-field',
          'private-unit-field', 'parser-guard-unit-code', 'unit-heading-without-key',
          'unit-subtable-gone', 'stale-registry-id', 'stale-link', 'mapped-twice', 'exclusion-without-reason',
@@ -248,6 +248,12 @@ fails('GuaranteeDescriptor::new named without a call',
 case('inherent-impl-descriptor')
 fails('an inherent impl on GuaranteeDescriptor',
       {'mycelium-wasm-host/src/rules.rs': [('\n];\n', '\n];\n\nimpl mycelium::GuaranteeDescriptor { pub fn hidden() -> Self { Self::new("stem.hidden_inherent", 1) } }\n')]})
+case('inherent-impl-lifetime')
+fails('an inherent impl on GuaranteeDescriptor',
+      {'mycelium-wasm-host/src/rules.rs': [('\n];\n', '\n];\n\nimpl<\'a> mycelium::GuaranteeDescriptor { pub fn hidden_lt() -> Self { Self::new("stem.hidden_lifetime", 1) } }\n')]})
+case('inherent-impl-where')
+fails('an inherent impl on GuaranteeDescriptor',
+      {'mycelium-wasm-host/src/rules.rs': [('\n];\n', '\n];\n\nimpl mycelium::GuaranteeDescriptor where Self: Sized { pub fn hidden_where() -> Self { Self::new("stem.hidden_where", 1) } }\n')]})
 case('char-literal-before-comment')
 fails('companion-guarantee:stem.hidden_after_char (companion-guarantee) is not mapped',
       {'mycelium-wasm-host/src/rules.rs': [('\n];\n', '\n];\n\nconst Q: char = \'"\'; const OPEN: &str = "x/*y";\n'

@@ -14,11 +14,11 @@ edges, each one step from a plant the suite already had:
 Also: a group header's italic pointer must carry a `(#…)` link, so a bold term with an italic definition is a term;
 a glob workspace member is expanded as cargo expands it (it was a traceback); a `todo` feature's `planned` page may
 not be an existing feature's page; `check-positioning.sh` says seven sources. The scan's `src/`-only scope is now
-stated (plan §4.2) rather than implied. Suite: 93 cases, 81 plants and 12 baselines; each round-3 plant was run
+stated (plan §4.2) rather than implied. Suite: 95 cases, 83 plants and 12 baselines; each round-3 plant was run
 against the second-round gate first — seven escapes and one crash (recorded on the PR). The confirmation pass on the fix found two more: the comment
 blanking had no char-literal token, so a `'"'` opened a pseudo-string and a later `/*` inside a string blanked a
-registration (a regression of the fix itself, caught before merge), and an inherent `impl GuaranteeDescriptor` block;
-both refused, both planted. The stem-side Rust test
+registration (a regression of the fix itself, caught before merge), and an inherent `impl GuaranteeDescriptor` block
+(with its `impl<'a>` and `where` spellings, found by the pass after); both refused, both planted. The stem-side Rust test
 stays not built, with the argument for it recorded: the "same literal" claim was narrowed twice before it held.
 
 **Lesson for the gate family:** a parser that keys on a leading `| ` reads a hand-formatted table; the plant it

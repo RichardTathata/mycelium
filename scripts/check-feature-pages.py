@@ -299,7 +299,7 @@ DESCRIPTOR_ESCAPES = [
      'a qualified path (<GuaranteeDescriptor>::…)'),
     (re.compile(r'(?<![\w:])(?:\w+::)*GuaranteeDescriptor\s*\{'), 'a GuaranteeDescriptor struct literal'),
     (re.compile(r'\bimpl\b[^{;]*?\bfor\s+(?:\w+::)*GuaranteeDescriptor\b'), 'an impl block on GuaranteeDescriptor'),
-    (re.compile(r'\bimpl\s+(?:\w+::)*GuaranteeDescriptor\s*\{'), 'an inherent impl on GuaranteeDescriptor'),
+    (re.compile(r'\bimpl(?:\s*<[^>]*>)?\s+(?:\w+::)*GuaranteeDescriptor\b[^{;]*\{'), 'an inherent impl on GuaranteeDescriptor'),
     (re.compile(r'\bGuaranteeDescriptor\s*::\s*new\b(?!\s*\()'), 'GuaranteeDescriptor::new named without a call'),
 ]
 HOME_EXEMPT = ('literal', 'impl')  # the type's own `impl` and `impl Debug for`
