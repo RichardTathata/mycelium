@@ -194,6 +194,8 @@ check:
 	./scripts/test-ci-retest.sh                                 # the flake tier fails a crash, and a retry that ran nothing
 	./scripts/check-kv-namespaces.sh                            # no foreign state in the gossip medium (D7); every KV prefix has a lib.rs row or a declared non-key
 	./scripts/check-kv-namespaces.sh --self-test                # …and planted rowless prefixes fail it, by name
+	python3 scripts/check-causal-doors.py                       # every door that starts governed work has a registry row and its test (adopter-surface X4)
+	python3 scripts/check-causal-doors.py --self-test           # …and a planted unregistered door fails it, by name
 	./scripts/check-wiki-mutation-fence.sh                      # every wiki mutation path stays inside the mandate boundary
 	./scripts/check-signed-dispatch.sh                          # every KV write site signs under [tls] (row F) — no bare Data frame
 	./scripts/check-signed-dispatch.sh --self-test              # …and a planted bare dispatch fails it, by name

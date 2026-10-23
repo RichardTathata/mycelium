@@ -1878,7 +1878,13 @@ provider inside the `tools/call` request it sends (`params._meta`); only the pro
 there — a tool handler, in-process or bridged, still receives its `arguments` and never sees `_meta`. A caller envelope
 carrying an unknown `correlation` or `parent` field is admitted as before and counted once per request, after its
 signature held (`GET /stats` `causal_fields_misplaced`, a map by door). `AeEvidence` also gained `node`, the enforcing
-node as it names itself, absent on older records. `PreflightRefusal` gained the variant (the enum is `#[non_exhaustive]`; a `_` arm must
+node as it names itself, absent on older records. **The provider's
+`parent` is the gateway's decision** (the second PR): `/mcp` forwards the content hash of its own decision record as
+the `parent` of the `tools/call` it sends, whatever `parent` the caller gave — the caller's stays on the gateway's
+record — so a provider's record under enforcement cites the gateway's decision; a provider that reads `parent` as the
+caller's own value reads the gateway's instead. The SDKs' A2A `send` and `set` verbs gained `correlation`/`parent`
+options and `KvReceipt` two fields (`mycelium-py` 0.2.13, `mycelium-ts` 0.2.7); `mycelium-reason` 0.11.0 puts a
+traced run's `run_id` on the route's records as `correlation`. `PreflightRefusal` gained the variant (the enum is `#[non_exhaustive]`; a `_` arm must
 already fail closed); `ActionEnvelope`, `AeEvidence`, `DecisionRecord` and `WriteReceipt` gained two optional fields
 (all four are `#[non_exhaustive]`, built through their builders); the evidence record's serialised form is unchanged
 when neither is set.

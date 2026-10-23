@@ -70,19 +70,31 @@ its chain back with `mycelium explain --correlation`. The tests: in
 - A closure stops at a federation edge: the partner's journals are private and trust does not compose; the edge's
   record is the leaf, printed as a boundary.
 - Comparison of two traces ignores the fields: two recordings of one run do not diverge on an id alone.
+- **The provider's parent is the gateway's decision.** `/mcp` forwards, as the `parent` of the `tools/call` it
+  sends, the content hash of its own decision record; the caller's parent stays on the gateway's record. So the
+  provider's record cites the gateway's, and a closure read from the two journals chains them
+  (`tests/causal_closure.rs`: three nodes, every dependent record named and no independent one, shown by a plant on
+  each side; a saturated decision sink on the provider shows a cited dropped hash as a hole with the sink's counts,
+  the journal-side closure unchanged).
+- **The door registry** — [`scripts/causal-doors.txt`](../../scripts/causal-doors.txt), gated by
+  [`check-causal-doors.py`](../../scripts/check-causal-doors.py) in `make check` and CI — lists every door that
+  starts governed work and how the fields travel through it: `record+fwd` (`/mcp`), `record` (`/a2a` on either
+  generation's `_meta`, the LLM doors, the federation call, the provider check, the public `preflight`), `bytes` (a
+  member's `rpc_call`, `bulk_call`, `scatter_gather`: the application bytes pass unaltered and the provider reads an
+  `mcp.invoke` payload), `refused` (`/gateway/rpc/call`, `scatter`: protected kinds), `none` (signal, mailbox, shard
+  and overlay emits: no record is written for them). Each row names the test that shows it, or states the gap: the
+  LLM stream door, the federation call, the routed public door, `bulk_call` and `scatter_gather` are listed untested.
+  A door the scanner finds without a row fails the gate; a planted one fails its self-test by name.
 - The replay bundle carries `decisions.jsonl` as bytes, so the two fields ride through it by construction; the
-  comparison ignores them. `POST /gateway/kv` echoes the fields on its receipt; the SDKs' `set` and A2A verbs carry
-  them from their next release.
-- **Not built in this release** (the plan row is [`adopter-surface.md`](../plans/adopter-surface.md) X4): the
-  scaffold's chain shows the gateway's decision and execution records and the provider's decision — the provider
-  writes no execution record and no receipt is journaled, so "executed, with the receipt's rung" is not yet read off
-  the chain; the
-  **door registry** and the member-side doors it lists (signal and wired emits, `bulk_call`, scatter, mailbox, shard
-  and overlay emits, the tuple-space `take`, the blackboard, the stem's activation command) — a member's direct call
-  carries the fields only as bytes it does not alter, so the provider reads them from an `mcp.invoke` payload and from
-  nothing else; a skill call's payload is its text and carries none, so the provider's record of an `/a2a` call is a
-  root; the SDKs' verbs do not yet name the keys; the reason trace's `run_id` is not yet joined; the X2 scaffold's
-  chain is read in CI, not asserted across three nodes with plants on each side.
+  comparison ignores them. `POST /gateway/kv` echoes the fields on its receipt, and the SDKs carry them:
+  `mycelium-py` 0.2.13 (`A2aClient.send`/`send_subscribe` and `set` take `correlation=`/`parent=`, `KvReceipt`
+  echoes them) and `mycelium-ts` 0.2.7 (`SendOptions`, `set(key, value, { correlation, parent })`). A traced reason
+  run's `run_id` is its `correlation` (`mycelium-reason` 0.11.0).
+- **Not built** (the plan row is [`adopter-surface.md`](../plans/adopter-surface.md) X4): the provider writes no
+  execution record and no receipt is journaled, so "executed, with the receipt's rung" is not read off a chain; a
+  skill call's payload is its text and carries none, so the provider's record of an `/a2a` call is a root; the
+  stem's activation command does not yet take the install decision's hash as its parent; the tuple-space `take` and
+  the blackboard write no record and are outside the registry's scan.
 
 ## Go deeper
 

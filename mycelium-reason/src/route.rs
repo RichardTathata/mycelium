@@ -685,7 +685,13 @@ impl InferenceRouter {
         // Row R: one operation id for the whole call, so every candidate's evidence record — the refused ones and
         // the one dispatched — joins on it (each attempt still gets its own attempt id).
         #[cfg(feature = "gateway")]
-        let call_params = serde_json::json!({ "_meta": { "operation_id": call_operation_id(self.agent.node_id()) } });
+        // X4: a traced run's `run_id` is its `correlation` — the same value, carried onto every evidence record the
+        // preflight writes for this route, so `mycelium explain --correlation <run_id>` joins the trace and the journal.
+        let mut meta = serde_json::json!({ "operation_id": call_operation_id(self.agent.node_id()) });
+        if let Some(t) = trace {
+            meta["correlation"] = serde_json::Value::String(t.run_id().to_string());
+        }
+        let call_params = serde_json::json!({ "_meta": meta });
         // Row R: the destinations the policy refused for this call, in the order they were tried.
         #[cfg(feature = "gateway")]
         let mut refused: Vec<(NodeId, mycelium::RefusedDestination, mycelium::GatewayRefusal)> = Vec::new();

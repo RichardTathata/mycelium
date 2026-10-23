@@ -43,6 +43,19 @@ def port():
         server.shutdown()
 
 
+def test_set_carries_the_causal_fields_and_the_receipt_echoes_them(port):
+    # Adopter-surface X4: `correlation` and `parent` at the body's top level, echoed by the gateway.
+    h = "cd" * 32
+    _Stub.reply = {"ok": True, "operation_id": "op-1", "local_durability": "on_disk", "correlation": "run-1", "parent": h}
+    with MyceliumAgent("127.0.0.1", port) as agent:
+        r = agent.set("k", b"v", correlation="run-1", parent=h)
+    assert (r.correlation, r.parent) == ("run-1", h)
+    _Stub.reply = {"ok": True, "operation_id": "op-2", "local_durability": "on_disk"}
+    with MyceliumAgent("127.0.0.1", port) as agent:
+        r = agent.set("k", b"v")
+    assert (r.correlation, r.parent) == (None, None)
+
+
 @pytest.mark.parametrize("reply,operation_id,durability,error", [
     ({"ok": True, "operation_id": "op-7f3a", "local_durability": "on_disk"}, "op-7f3a", "on_disk", None),
     ({"ok": True, "operation_id": "op-7f3b", "local_durability": "failed",

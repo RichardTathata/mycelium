@@ -111,10 +111,10 @@ pub(super) async fn mcp_handler(
             });
             // X4: the two causal fields travel to the provider inside the application payload — the part the caller
             // envelope's signature digests — and nothing else of `_meta` does (the mandate rides in the envelope, C2).
-            // A malformed field is refused by the preflight below before this payload is sent.
-            if let Ok(causal) = crate::agent::causal::causal_fields(&req["params"]) && let Some(meta) = causal.meta() {
-                tool_req["params"]["_meta"] = serde_json::Value::Object(meta);
-            }
+            // A malformed field is refused by the preflight below before this payload is sent. The `parent` the
+            // provider receives is **this gateway's decision record** (its content hash, below), never the caller's:
+            // the provider's work depends on this decision, and this decision's record carries the caller's parent.
+            let caller_causal = crate::agent::causal::causal_fields(&req["params"]).unwrap_or_default();
 
             // AE slice: the evaluator preflight, between the auth layer and the dispatch. Inert
             // unless an evaluator is attached (`with_action_evaluator`); with one, a call whose
@@ -139,6 +139,19 @@ pub(super) async fn mcp_handler(
                     "error": {"code": refusal.json_rpc_code(), "message": refusal.to_string(),
                               "data": refusal.error_data()},
                 })).into_response();
+            }
+            // X4: what travels — the caller's correlation, and as parent this decision's hash where the journal
+            // established one (an inert gateway, or a lenient one that lost the record, forwards the caller's parent).
+            {
+                #[cfg_attr(not(all(feature = "gateway", feature = "tls")), allow(unused_mut))]
+                let mut forwarded = caller_causal.clone();
+                #[cfg(all(feature = "gateway", feature = "tls"))]
+                if let Preflight::Proceed { journal_sha256: Some(h), .. } = &preflight {
+                    forwarded.parent = Some(h.clone());
+                }
+                if let Some(meta) = forwarded.meta() {
+                    tool_req["params"]["_meta"] = serde_json::Value::Object(meta);
+                }
             }
 
             // Item 7: the call carries the auth layer's caller context (never anything the

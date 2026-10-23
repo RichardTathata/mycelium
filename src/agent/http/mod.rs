@@ -594,3 +594,6 @@ mod ae_seam_tests;
 /// a header.
 #[cfg(all(test, feature = "tls"))]
 mod causal_tests;
+/// X4's door registry rows: a member's direct call, the raw door, `/a2a`, the LLM door.
+#[cfg(all(test, feature = "tls"))]
+mod causal_door_tests;

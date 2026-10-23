@@ -209,6 +209,8 @@ jobs:
       # The static forbidden-call check (item 6 PR 3, D12). Runs in the same job as clippy
       # because it is the same kind of claim: the seams cannot erode while PR 4-7 are built.
       - run: ./scripts/check-sim-seams.sh
+      - run: python3 scripts/check-causal-doors.py
+      - run: python3 scripts/check-causal-doors.py --self-test
       # …and the check recognises every timer-alias spelling (planted files; #602's re-review).
       - run: ./scripts/test-check-sim-seams.sh
       # Verification policy rule 3, checked positively: every test requirement in the repository — each

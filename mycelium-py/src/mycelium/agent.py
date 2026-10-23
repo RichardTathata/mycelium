@@ -341,6 +341,9 @@ class KvReceipt:
     operation_id: Optional[str]
     local_durability: Optional[str] = None
     local_durability_error: Optional[str] = None
+    #: The causal fields the write carried, echoed by the gateway (adopter-surface X4); ``None`` when none was sent.
+    correlation: Optional[str] = None
+    parent: Optional[str] = None
 
     @property
     def on_disk(self) -> bool:
@@ -792,8 +795,19 @@ class MyceliumAgent:
                 return None
             return base64.b64decode(data.get("value_b64", ""))
 
-    def set(self, key: str, value: bytes) -> KvReceipt:
+    def set(
+        self,
+        key: str,
+        value: bytes,
+        *,
+        correlation: Optional[str] = None,
+        parent: Optional[str] = None,
+    ) -> KvReceipt:
         """Write a KV entry and return its receipt.
+
+        ``correlation`` (the run's id, one key segment) and ``parent`` (the content hash of the record this
+        write depends on) ride at the body's top level and come back on the receipt (adopter-surface X4); a
+        malformed value is refused with 400.
 
         The write is gossiped to all peers. Existing values are overwritten
         when the local HLC timestamp is strictly greater (LWW semantics).
@@ -803,10 +817,14 @@ class MyceliumAgent:
         Raises :class:`ProtectedKeyError` for a key in a namespace the substrate or a companion owns
         (the gateway's ``403 protected_key``; its message names the route to use).
         """
-        body = {
+        body: Dict[str, Any] = {
             "key":       key,
             "value_b64": base64.b64encode(value).decode(),
         }
+        if correlation is not None:
+            body["correlation"] = correlation
+        if parent is not None:
+            body["parent"] = parent
         with self._pool.sync() as c:
             resp = c.post("/gateway/kv", json=body)
             _raise_if_protected(resp, key=key)
@@ -821,6 +839,8 @@ class MyceliumAgent:
             operation_id=data.get("operation_id"),
             local_durability=data.get("local_durability"),
             local_durability_error=data.get("local_durability_error"),
+            correlation=data.get("correlation"),
+            parent=data.get("parent"),
         )
 
     def delete(self, key: str) -> None:

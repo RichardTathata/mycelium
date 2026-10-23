@@ -25,6 +25,15 @@ test("the mandate request bytes match the golden vector", () => {
   );
 });
 
+test("the causal fields travel in _meta beside the mandate, and are absent otherwise", () => {
+  // Adopter-surface X4: the run's id and the parent record's hash ride under params._meta, never a header.
+  const h = "ab".repeat(32);
+  expect(taskParams("t", "depot/dispatch", "go", { correlation: "run-1", parent: h })._meta).toEqual({ correlation: "run-1", parent: h });
+  expect(taskParams("t", "depot/dispatch", "go", { mandate: { grant: {} as never, possession: "x" }, correlation: "run-1" })._meta)
+    .toEqual({ mandate: { grant: {}, possession: "x" }, correlation: "run-1" });
+  expect(taskParams("t", "depot/dispatch", "go")._meta).toBeUndefined();
+});
+
 test("a presented mandate travels in _meta, and is absent otherwise", () => {
   const mandate = { grant: { mandate: {}, signature: [] }, possession: "c2ln" };
   expect(taskParams("t", "depot/dispatch", "go", { mandate })._meta).toEqual({ mandate });

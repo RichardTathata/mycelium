@@ -485,8 +485,10 @@ pub(crate) enum Preflight {
     /// No evaluator is attached. The seam is inert and the gateway behaves as it always did.
     Inert,
     /// Permitted. The caller dispatches, then reports the outcome with
-    /// [`ae_record_execution`].
-    Proceed(Box<super::action_evaluator::AeEvidence>),
+    /// [`ae_record_execution`]. `journal_sha256` is the decision record's content hash when the journal
+    /// established it — what a door forwards as the `parent` of the work it starts (adopter-surface X4), so
+    /// the provider's record cites this decision and a closure can be computed across the two journals.
+    Proceed { evidence: Box<super::action_evaluator::AeEvidence>, journal_sha256: Option<String> },
     /// Refused. Nothing is dispatched.
     Refuse(super::action_evaluator::PreflightRefusal),
 }
@@ -1109,7 +1111,9 @@ impl Settling {
         // rather than being taken back from under a record that exists. The retractions below are the only ones.
         provisional.armed = false;
         let recorded = ae_record(ctx, &evidence).await;
-        if let Err(e) = recorded {
+        let journal_sha256 = match recorded {
+            Ok(hash) => hash,
+            Err(e) => {
             // Not recorded, so not done: a permit counted into the history is taken back.
             if admitted && let Some(index) = history_index {
                 index.retract(&point, &envelope.actor, &envelope.attempt_id);
@@ -1120,7 +1124,8 @@ impl Settling {
             metrics::counter!("mycelium_ae_preflight_refusals_total", "reason" => "evidence_not_recorded")
                 .increment(1);
             return Preflight::Refuse(ae::PreflightRefusal::NotRecorded(decision));
-        }
+            }
+        };
 
         match outcome {
             Ok(_) => {
@@ -1128,7 +1133,7 @@ impl Settling {
                 for (slot, env, window_ms) in to_release {
                     super::fleet_history::release_after_window(ctx, slot, env, window_ms);
                 }
-                Preflight::Proceed(Box::new(evidence))
+                Preflight::Proceed { evidence: Box::new(evidence), journal_sha256 }
             }
             Err(refusal) => {
                 warn!(actor = %envelope.actor, %operation, %resource,
@@ -1194,7 +1199,7 @@ pub(crate) async fn ae_record_execution(
     preflight: &Preflight,
     execution: super::action_evaluator::Execution,
 ) {
-    let Preflight::Proceed(decided) = preflight else { return };
+    let Preflight::Proceed { evidence: decided, .. } = preflight else { return };
     if let Err(e) = ae_record(ctx, &decided.as_execution(execution)).await {
         // The effect has happened. The evidence for it has not.
         warn!(
@@ -1215,12 +1220,13 @@ pub(crate) async fn ae_record_execution(
 ///
 /// `Err` means *refuse the dispatch*. Which failures refuse is the operator's
 /// [`EvidenceProfile`](super::evidence_journal::EvidenceProfile): the strict profile gates the
-/// effect on durable evidence, the lenient one proceeds and the reference record says it did.
+/// effect on durable evidence, the lenient one proceeds and the reference record says it did. `Ok` carries
+/// the record's content hash when the journal established it (X4: the `parent` of the work this decision starts).
 #[cfg(all(feature = "gateway", feature = "tls"))]
 pub(super) async fn ae_record(
     ctx: &Arc<TaskCtx>,
     evidence: &super::action_evaluator::AeEvidence,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     use super::action_evaluator::{AeReference, EvidenceState};
     use super::evidence_journal::{EvidenceProfile, JournalError};
 
@@ -1268,10 +1274,10 @@ pub(super) async fn ae_record(
         },
     };
 
-    ae_seal_reference(ctx, &AeReference::for_evidence(evidence, journal_sha256, state));
+    ae_seal_reference(ctx, &AeReference::for_evidence(evidence, journal_sha256.clone(), state));
     match refuse {
         Some(why) => Err(why),
-        None => Ok(()),
+        None => Ok(journal_sha256),
     }
 }
 

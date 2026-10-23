@@ -95,7 +95,7 @@ async fn post(a: &Arc<GossipAgent>) -> Preflight {
 
 fn admitted(p: &Preflight) -> Option<&AeEvidence> {
     match p {
-        Preflight::Proceed(e) => Some(e),
+        Preflight::Proceed { evidence: e, .. } => Some(e),
         _ => None,
     }
 }
@@ -103,7 +103,7 @@ fn admitted(p: &Preflight) -> Option<&AeEvidence> {
 fn refusal(p: &Preflight) -> &PreflightRefusal {
     match p {
         Preflight::Refuse(r) => r,
-        Preflight::Proceed(_) => panic!("admitted, expected a refusal"),
+        Preflight::Proceed { .. } => panic!("admitted, expected a refusal"),
         Preflight::Inert => panic!("inert, expected a refusal"),
     }
 }

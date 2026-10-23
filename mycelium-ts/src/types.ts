@@ -87,6 +87,15 @@ export interface KvReceipt {
   operationId: string | null;
   localDurability: LocalDurability | null;
   localDurabilityError: string | null;
+  /** The causal fields the write carried, echoed by the gateway (adopter-surface X4); `null` when none was sent. */
+  correlation: string | null;
+  parent: string | null;
+}
+
+/** The causal fields a write may carry (adopter-surface X4): the run's id and the parent record's hash. */
+export interface CausalOptions {
+  correlation?: string;
+  parent?: string;
 }
 
 /**

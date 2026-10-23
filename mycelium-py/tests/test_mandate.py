@@ -27,6 +27,17 @@ def test_mandate_request_bytes_golden_vector():
     )
 
 
+def test_the_causal_fields_travel_in_meta_beside_the_mandate_and_are_absent_otherwise():
+    # Adopter-surface X4: the run's id and the parent record's hash ride under params._meta — the application
+    # payload, never a header — and nothing is sent when neither is given.
+    h = "ab" * 32
+    p = _task_params("t", "depot/dispatch", "go", None, correlation="run-1", parent=h)
+    assert p["_meta"] == {"correlation": "run-1", "parent": h}
+    p = _task_params("t", "depot/dispatch", "go", {"grant": 1}, correlation="run-1")
+    assert p["_meta"] == {"mandate": {"grant": 1}, "correlation": "run-1"}
+    assert "_meta" not in _task_params("t", "depot/dispatch", "go", None)
+
+
 def test_a_presented_mandate_travels_in_meta_and_is_absent_otherwise():
     mandate = {"grant": {"mandate": {}, "signature": []}, "possession": "c2ln"}
     assert _task_params("t", "depot/dispatch", "go", mandate)["_meta"] == {"mandate": mandate}
