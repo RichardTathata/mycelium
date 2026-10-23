@@ -1206,6 +1206,26 @@ async fn a_confidential_request_is_routed_to_an_in_domain_model_and_the_external
     assert_eq!(permit.operation_id, denial.operation_id, "one call, one operation id across its candidates");
     assert!(permit.operation_id.starts_with("reason:"), "{}", permit.operation_id);
 
+    // X4 (0.11.0): a traced run's `run_id` is its `correlation`. A route under a run id writes records that carry
+    // it — the permit and the refused destination alike — and a route without one carries none.
+    let r = http
+        .post(format!("http://127.0.0.1:{http_port}/gateway/reason/route"))
+        .header(mycelium_reason::DATA_CLASS_HEADER, "confidential")
+        .json(&serde_json::json!({ "model": "fable-mini", "input": "x", "run_id": "run-reason" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    let records: Vec<mycelium::AeEvidence> = mycelium::read_evidence_journal(&dir.path().join("evidence.journal"))
+        .unwrap()
+        .iter()
+        .filter_map(|b| serde_json::from_slice(b).ok())
+        .collect();
+    let under_run: Vec<&mycelium::AeEvidence> = records.iter().filter(|r| r.correlation.as_deref() == Some("run-reason")).collect();
+    assert!(under_run.len() >= 2, "the refusal and the permit carry the run id: {}", under_run.len());
+    assert!(under_run.iter().any(|r| r.decision == mycelium::DecisionKind::Deny) && under_run.iter().any(|r| r.decision == mycelium::DecisionKind::Permit));
+    assert!(records.iter().filter(|r| r.correlation.is_none()).count() >= 2, "the earlier, untraced routes carry none");
+
     a.shutdown_with_timeout(Duration::from_secs(5)).await;
     b.shutdown_with_timeout(Duration::from_secs(5)).await;
 }

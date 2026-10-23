@@ -165,6 +165,9 @@ class PromptSkillClient:
         input: str,
         context: Optional[dict[str, str]] = None,
         timeout_ms: int = 30_000,
+        *,
+        correlation: Optional[str] = None,
+        parent: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         Invoke a prompt skill via the gateway.
@@ -184,6 +187,9 @@ class PromptSkillClient:
         :param input:      The ``{{input}}`` value rendered into the template.
         :param context:    Optional extra ``{{variable}}`` substitutions.
         :param timeout_ms: RPC timeout in milliseconds.
+        :param correlation: The run this call belongs to (one key segment), sent as the body's
+                           ``_meta.correlation`` and carried onto the gateway's evidence records (X4).
+        :param parent:     The content hash of the record this call depends on, as ``_meta.parent``.
         """
         body: dict[str, Any] = {
             "ns": ns,
@@ -192,6 +198,9 @@ class PromptSkillClient:
             "context": context or {},
             "timeout_ms": timeout_ms,
         }
+        meta = {k: v for k, v in (("correlation", correlation), ("parent", parent)) if v is not None}
+        if meta:
+            body["_meta"] = meta
         async with self._pool.asy(timeout=timeout_ms / 1000.0 + 5.0) as c:
             resp = await c.post("/gateway/llm/call", json=body)
         resp.raise_for_status()

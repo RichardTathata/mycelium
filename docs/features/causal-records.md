@@ -70,19 +70,40 @@ its chain back with `mycelium explain --correlation`. The tests: in
 - A closure stops at a federation edge: the partner's journals are private and trust does not compose; the edge's
   record is the leaf, printed as a boundary.
 - Comparison of two traces ignores the fields: two recordings of one run do not diverge on an id alone.
+- **The provider's parent is the gateway's decision** — where the gateway's journal established one. `/mcp`
+  forwards, as the `parent` of the `tools/call` it sends, the content hash of its own decision record; the caller's
+  parent stays on the gateway's record. Under an inert gateway, a gateway with no journal, or a lenient journal that
+  lost the record, it forwards the caller's parent instead — a continuation past a hole, by design — and the
+  provider's record cannot tell which it holds; the gateway's own record, where there is one, says. The gateway's
+  **execution** record keeps the caller's parent (it is a statement about the same attempt), so it is a sibling of the
+  decision, not in its closure: it joins by `operation_id` and `correlation`. So the provider's record cites the
+  gateway's, and a closure read from the two journals chains them
+  (`tests/causal_closure.rs`: three nodes, every dependent record named and no independent one, shown by a plant on
+  each side; the provider's decision sink saturated by three more records, a hash standing for a dropped decision
+  cited as a parent and shown as a hole with the sink's counts, the journal-side closure unchanged — no producer can
+  know a dropped record's hash, since the sink assigns the sequence number a kept line carries, so a hole is what a
+  dropped decision leaves and the reader can never name which one).
+- **The door registry** — [`scripts/causal-doors.txt`](../../scripts/causal-doors.txt), gated by
+  [`check-causal-doors.py`](../../scripts/check-causal-doors.py) in `make check` and CI — lists every door that
+  starts governed work and how the fields travel through it: `record+fwd` (`/mcp`), `record` (`/a2a` on either
+  generation's `_meta`, the LLM doors, the federation call, the provider check, the public `preflight`), `bytes` (a
+  member's `rpc_call`, `bulk_call`, `scatter_gather`: the application bytes pass unaltered and the provider reads an
+  `mcp.invoke` payload), `refused` (`/gateway/rpc/call`, `scatter`: protected kinds), `none` (signal, mailbox, shard
+  and overlay emits: no record is written for them). Each row names the test that shows it, or states the gap: the
+  LLM stream door, the federation call, the routed public door, `bulk_call` and `scatter_gather` are listed untested.
+  A door the scanner finds without a row fails the gate; a planted one fails its self-test by name.
 - The replay bundle carries `decisions.jsonl` as bytes, so the two fields ride through it by construction; the
-  comparison ignores them. `POST /gateway/kv` echoes the fields on its receipt; the SDKs' `set` and A2A verbs carry
-  them from their next release.
-- **Not built in this release** (the plan row is [`adopter-surface.md`](../plans/adopter-surface.md) X4): the
-  scaffold's chain shows the gateway's decision and execution records and the provider's decision — the provider
-  writes no execution record and no receipt is journaled, so "executed, with the receipt's rung" is not yet read off
-  the chain; the
-  **door registry** and the member-side doors it lists (signal and wired emits, `bulk_call`, scatter, mailbox, shard
-  and overlay emits, the tuple-space `take`, the blackboard, the stem's activation command) — a member's direct call
-  carries the fields only as bytes it does not alter, so the provider reads them from an `mcp.invoke` payload and from
-  nothing else; a skill call's payload is its text and carries none, so the provider's record of an `/a2a` call is a
-  root; the SDKs' verbs do not yet name the keys; the reason trace's `run_id` is not yet joined; the X2 scaffold's
-  chain is read in CI, not asserted across three nodes with plants on each side.
+  comparison ignores them. `POST /gateway/kv` echoes the fields on its receipt, and the SDKs carry them on every
+  verb that starts governed work: `mycelium-py` 0.2.13 (`A2aClient.send`/`send_subscribe`, `PromptSkillClient.call`,
+  `Federation.call` and `set` take `correlation=`/`parent=`; `KvReceipt` echoes them) and `mycelium-ts` 0.2.7
+  (`SendOptions`, the prompt-skill `call`'s last argument, the federation `call`'s options,
+  `set(key, value, { correlation, parent })`). `rpc_call` carries bytes the caller shapes. A traced reason run's
+  `run_id` is its `correlation` (`mycelium-reason` 0.11.0).
+- **Not built** (the plan row is [`adopter-surface.md`](../plans/adopter-surface.md) X4): the provider writes no
+  execution record and no receipt is journaled, so "executed, with the receipt's rung" is not read off a chain; a
+  skill call's payload is its text and carries none, so the provider's record of an `/a2a` call is a root; the
+  stem's activation command does not yet take the install decision's hash as its parent; the tuple-space `take` and
+  the blackboard write no record and are outside the registry's scan.
 
 ## Go deeper
 

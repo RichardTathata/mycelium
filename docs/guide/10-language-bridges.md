@@ -263,6 +263,10 @@ What the node refuses, and what it only records (`gw_units_declare`, `src/agent/
   `[[serve]]`. Those belong to a stem (`mycelium-stem`); an SDK agent hosts nothing.
 - **403 `governed_group`** — a `[[group]]` whose name is under a live membership intent (2.29.0): its
   definition decides whom the governor can elect, so this route does not redefine it. Nothing is declared.
+- **The causal fields** — every SDK verb that starts governed work (`A2aClient.send`, the prompt-skill `call`, the
+  federation `call`, `set`) takes `correlation` and `parent`, sent in the body's `_meta` and carried onto the
+  gateway's evidence records ([causal records](../features/causal-records.md)); `mycelium-py` 0.2.13,
+  `mycelium-ts` 0.2.7.
 - **Accepted, not enforced** — `[[lane]]`, `[[mandate]]` and `[[rule]]` are taken as declarations
   and named in `not_enforced`. They inform `wire-check`; the node does not act on them.
 - A `[[capability]]`'s `probe_url` is not run on this path: the capability is advertised as

@@ -81,15 +81,25 @@ async fn the_causal_fields_ride_in_the_payload_to_the_gateway_s_and_the_provider
     tokio::time::sleep(Duration::from_millis(100)).await;
     let recs = records(&journal);
     let at = |point: &str| recs.iter().filter(|r| r.enforcement_point == point).collect::<Vec<_>>();
-    // The gateway writes the decision and the execution record; the provider's check writes its decision (it does not
-    // watch the tool run, so it writes no execution record — today's shape, not this row's).
-    for (point, least) in [("gateway:mcp/tools/call", 2), ("provider", 1)] {
-        let here = at(point);
-        assert!(here.len() >= least, "{point}: at least {least} record(s), got {}", here.len());
-        for r in &here {
-            assert_eq!(r.correlation.as_deref(), Some("run-x4"), "{point} {:?}", r.kind);
-            assert_eq!(r.parent.as_deref(), Some(parent.as_str()), "{point} {:?}", r.kind);
-        }
+    // The gateway writes the decision and the execution record, each carrying the caller's parent; the provider's
+    // check writes its decision (it does not watch the tool run, so no execution record — today's shape, not this
+    // row's), whose parent is **the gateway's decision record** — its content hash, forwarded by `/mcp` — because the
+    // provider's work depends on that decision, and that decision's record carries the caller's parent.
+    let gateway = at("gateway:mcp/tools/call");
+    assert!(gateway.len() >= 2, "a decision and an execution record at the gateway, got {}", gateway.len());
+    for r in &gateway {
+        assert_eq!(r.correlation.as_deref(), Some("run-x4"), "{:?}", r.kind);
+        assert_eq!(r.parent.as_deref(), Some(parent.as_str()), "{:?}", r.kind);
+    }
+    let gateway_decided_hash = crate::read_evidence_journal(&journal).unwrap().iter()
+        .find(|b| { let v: serde_json::Value = serde_json::from_slice(b).unwrap(); v["enforcement_point"] == "gateway:mcp/tools/call" && v["kind"] == "decided" })
+        .map(|b| crate::causal::content_hash(b))
+        .expect("the gateway's decision record");
+    let provider = at("provider");
+    assert!(!provider.is_empty(), "the provider's check wrote its decision");
+    for r in &provider {
+        assert_eq!(r.correlation.as_deref(), Some("run-x4"), "{:?}", r.kind);
+        assert_eq!(r.parent.as_deref(), Some(gateway_decided_hash.as_str()), "the provider's parent is the gateway's decision, not the caller's parent: {:?}", r.kind);
     }
     assert!(recs.iter().all(|r| r.parent.as_deref() != Some(misplaced.as_str()) && r.correlation.as_deref() != Some("run-header")),
         "a field carried as a header was read");

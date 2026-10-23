@@ -2200,6 +2200,10 @@ descriptors its share needs.
   on rerun.
 - `a_seat_decided_too_late_for_its_window_is_not_admitted` — failed once, under machine load.
 - `lock_lifecycle_tests::row02` — failed once, under machine load.
+- `lock_lifecycle_api_tests::row18_a_release_cannot_address_a_newer_decision` — *"A's release ended the newer
+  leader: left None, right Some([67])"*, once on PR #672's first CI run (run 40033968663, the 187-second Test job),
+  on a branch that touches no consensus code; green on every recent `main` run (2026-10-23). The read of
+  `leader/r18` after A's stale release found no value yet — C's decision not yet in A's view under load.
 - `a_saturating_actor_gets_its_limit_each_short_window` (K2, `FleetConsensus` seats) — *"about one admission a second
   over 4.5 s, got 2"*, once in 60 `agent::fleet_history` module runs at 6 parallel processes (2026-10-20, during #656);
   0 in 240 alone at 16 processes, on #656's branch and on `main` at 23fd7bfe alike. A throughput floor under CPU

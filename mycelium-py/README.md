@@ -209,6 +209,19 @@ request = mandate_request_bytes("skill.invoke", "skill:depot/dispatch", argument
 client.send("depot/dispatch", message, mandate={"grant": grant, "possession": base64_signature})
 ```
 
+### The causal fields (0.2.13)
+
+Every verb that starts governed work takes `correlation=` (the run's id, one key segment) and `parent=` (the content
+hash of the record this call depends on): `A2aClient.send`/`send_subscribe`, `PromptSkillClient.call`,
+`Federation.call` and `MyceliumAgent.set`, whose `KvReceipt` echoes them. They ride in the request body's `_meta`
+(the application payload, never a header) and onto every evidence record the gateway writes for the call;
+`mycelium explain --correlation <id> <evidence.log>` reads the run back as one chain. A malformed value is refused
+(`request_malformed`, `400` on `set`). Substrate X4, `docs/features/causal-records.md`.
+
+```python
+client.send("depot/dispatch", message, correlation="run-7", parent=decision_hash)
+```
+
 ### RPC
 
 #### `rpc_call(target, method, payload, *, timeout_secs) → bytes`

@@ -15,6 +15,16 @@ export interface PresentedMandate {
 /** Options for {@link A2aClient.send} and {@link A2aClient.stream}. */
 export interface SendOptions {
   mandate?: PresentedMandate;
+  /**
+   * The run this call belongs to — one key segment, sent as `params._meta.correlation` and carried onto every
+   * evidence record the gateway writes for it (adopter-surface X4).
+   */
+  correlation?: string;
+  /**
+   * The content hash (64 lowercase hex) of the record this call depends on, sent as `params._meta.parent`. The
+   * gateway refuses a malformed value (`request_malformed`).
+   */
+  parent?: string;
 }
 
 function canonicalJson(value: unknown): string {
@@ -62,7 +72,11 @@ export function taskParams(taskId: string, skillId: string, message: string, opt
     skillId,
     message: { role: "user", parts: [{ type: "text", text: message }] },
   };
-  if (opts?.mandate) params._meta = { mandate: opts.mandate };
+  const meta: Record<string, unknown> = {};
+  if (opts?.mandate) meta.mandate = opts.mandate;
+  if (opts?.correlation !== undefined) meta.correlation = opts.correlation;
+  if (opts?.parent !== undefined) meta.parent = opts.parent;
+  if (Object.keys(meta).length > 0) params._meta = meta;
   return params;
 }
 /**

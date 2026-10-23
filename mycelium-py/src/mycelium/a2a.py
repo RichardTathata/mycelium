@@ -145,15 +145,31 @@ def mandate_request_bytes(operation: str, resource: str, digest: bytes) -> bytes
     return bytes(out)
 
 
-def _task_params(task_id: str, skill_id: str, message: str, mandate: Optional[Dict]) -> Dict:
+def _task_params(
+    task_id: str,
+    skill_id: str,
+    message: str,
+    mandate: Optional[Dict],
+    correlation: Optional[str] = None,
+    parent: Optional[str] = None,
+) -> Dict:
     params: Dict = {
         "id":       task_id,
         "skillId":  skill_id,
         "message":  {"role": "user", "parts": [{"type": "text", "text": message}]},
     }
+    meta: Dict = {}
     if mandate is not None:
         # {"grant": <SignedMandateGrant>, "possession": <base64>} — see mandate_request_bytes.
-        params["_meta"] = {"mandate": mandate}
+        meta["mandate"] = mandate
+    # The causal fields (adopter-surface X4): the run's id and the parent record's hash, in the application
+    # payload — the gateway reads them nowhere else and refuses a malformed one (``request_malformed``).
+    if correlation is not None:
+        meta["correlation"] = correlation
+    if parent is not None:
+        meta["parent"] = parent
+    if meta:
+        params["_meta"] = meta
     return params
 
 
@@ -216,6 +232,8 @@ class A2aClient:
         timeout_secs: Optional[float] = None,
         task_id: Optional[str] = None,
         mandate: Optional[Dict] = None,
+        correlation: Optional[str] = None,
+        parent: Optional[str] = None,
     ) -> str:
         """Send a ``tasks/send`` request and return the reply text.
 
@@ -233,6 +251,12 @@ class A2aClient:
             Optional presented mandate, ``{"grant": ..., "possession": ...}``, sent as
             ``params._meta.mandate``. A gateway with an execution authority establishes it for this
             call (Boundary H A1); see :func:`mandate_request_bytes` for what the holder signs.
+        correlation:
+            The run this call belongs to — one key segment, sent as ``params._meta.correlation`` and
+            carried onto every evidence record the gateway writes for it (adopter-surface X4).
+        parent:
+            The content hash (64 lowercase hex) of the record this call depends on, sent as
+            ``params._meta.parent``. The gateway refuses a malformed value (``request_malformed``).
 
         Returns
         -------
@@ -250,7 +274,7 @@ class A2aClient:
             "jsonrpc": "2.0",
             "id":      1,
             "method":  "tasks/send",
-            "params":  _task_params(tid, skill_id, message, mandate),
+            "params":  _task_params(tid, skill_id, message, mandate, correlation, parent),
         }
         with self._pool.sync(timeout=timeout + 5.0) as c:  # network headroom
             resp = c.post("/a2a", json=payload)
@@ -271,6 +295,8 @@ class A2aClient:
         timeout_secs: Optional[float] = None,
         task_id: Optional[str] = None,
         mandate: Optional[Dict] = None,
+        correlation: Optional[str] = None,
+        parent: Optional[str] = None,
     ) -> Iterator[Dict]:
         """Send a ``tasks/sendSubscribe`` request and yield SSE status events.
 
@@ -301,7 +327,7 @@ class A2aClient:
             "jsonrpc": "2.0",
             "id":      1,
             "method":  "tasks/sendSubscribe",
-            "params":  _task_params(tid, skill_id, message, mandate),
+            "params":  _task_params(tid, skill_id, message, mandate, correlation, parent),
         }
         with httpx.stream(
             "POST",

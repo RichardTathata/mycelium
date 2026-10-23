@@ -12,6 +12,7 @@ export {
   CommitResult,
   DemandStatus,
   KvReceipt,
+  CausalOptions,
   LocalDurability,
   LockGuard,
   LogEntry,

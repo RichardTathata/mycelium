@@ -6,6 +6,16 @@ All notable changes to this crate. It versions **independently** of the Mycelium
 
 ---
 
+## [0.11.0] — unreleased
+
+**A traced run's `run_id` is its `correlation`** (adopter-surface X4, the substrate's causal records). When a route
+or chat-completion call carries a `run_id`, the router's preflight params carry `_meta.correlation` with the same
+value, so every evidence record the gateway writes for the route — the decision, each candidate refused, the
+execution — carries the run's id, and `mycelium explain --correlation <run_id> <evidence.log>` joins the journal to
+the trace the façade records under `reason/{run_id}/{node}`. A call without a `run_id` carries no correlation, as
+before. The `run_id` rule is unchanged: one bounded segment, refused by name at every door. Requires `mycelium` ≥ the
+release that carries X4 (`ActionEnvelope::correlation`).
+
 ## [0.10.0] — 2026-10-19
 
 **Inference routing as policy** (post-360 hardening row R). The router chose a provider by load and reservation, and

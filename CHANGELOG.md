@@ -28,9 +28,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   over the journal, best-effort over the trace, every hole named with the sinks' drop counts and never filled, a
   federation edge a boundary, fewer journals than nodes said first. The trace comparison ignores the fields. A fuzz
   target (`closure_corpus`) asserts the reader terminates, prints its root and visits each record once whatever a
-  hostile file puts in `parent`. **Not built in
-  this PR, by the row's own list:** the door registry and the member-side doors it names, the SDKs' verbs, the reason
-  trace's `run_id` join, the three-node closure with plants on each side (`deprecations.md` §58).
+  hostile file puts in `parent`. **The second PR:** the provider's `parent` is the gateway's decision — `/mcp`
+  forwards its own decision record's hash as the `parent` of the `tools/call` it sends (`Preflight::Proceed` carries
+  `journal_sha256`), so the provider's record cites the gateway's and `tests/causal_closure.rs` reads a closure across
+  three nodes' journals, every dependent record and no independent one, with a saturated sink's hole named; the
+  **door registry** `scripts/causal-doors.txt` and its gate `scripts/check-causal-doors.py` (in `make check` and CI,
+  a planted door caught by name), every door's row naming how the fields travel and its test or its gap; a member's
+  direct call, `/a2a` on both generations and the LLM door shown; `mycelium-py` 0.2.13 and `mycelium-ts` 0.2.7 carry
+  the fields on the A2A `send` verbs, the prompt-skill and federation `call`s and `set`, and echo them on
+  `KvReceipt`; the forwarded `parent` falls back to the caller's where the gateway established no record (stated); `mycelium-reason` 0.11.0 puts a traced
+  run's `run_id` on the route's records as `correlation`. **Not built, stated on the feature page:** an execution
+  record at the provider, the stem activation's parent, the tuple-space and blackboard doors (`deprecations.md` §58).
 
 - **The `one-hour` job** (`docs/plans/adopter-surface.md` § 1.1): `.github/workflows/one-hour.yml` runs when a Release
   workflow run for a tag push completes successfully (not on `release: published`, which a Release created with the

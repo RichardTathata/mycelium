@@ -6,6 +6,7 @@ import { authHeaders, baseUrl, resolveToken, type AuthOptions } from "./auth";
 import { pathSegment, wholeSeconds } from "./wire";
 import {
   KvReceipt,
+  CausalOptions,
   CapabilityHandle,
   UnitHandle,
   DemandStatus,
@@ -452,17 +453,25 @@ export class MyceliumAgent {
    * Writes a key and queues it for gossip; resolves to the write's receipt — rung 1 always, rung 2
    * as `localDurability` (every field `null` on a pre-v2.16.0 gateway).
    */
-  async set(key: string, value: Buffer | Uint8Array): Promise<KvReceipt> {
-    const data = (await this._post("/gateway/kv", { key, value_b64: b64(value) }, { key })) as {
+  async set(key: string, value: Buffer | Uint8Array, opts?: CausalOptions): Promise<KvReceipt> {
+    const body: Record<string, unknown> = { key, value_b64: b64(value) };
+    // X4: the causal fields at the body's top level (this route has no `_meta`); echoed on the receipt.
+    if (opts?.correlation !== undefined) body.correlation = opts.correlation;
+    if (opts?.parent !== undefined) body.parent = opts.parent;
+    const data = (await this._post("/gateway/kv", body, { key })) as {
       operation_id?: string;
       local_durability?: string;
       local_durability_error?: string;
+      correlation?: string;
+      parent?: string;
     } | null;
     return {
       operationId: typeof data?.operation_id === "string" ? data.operation_id : null,
       localDurability: typeof data?.local_durability === "string" ? data.local_durability : null,
       localDurabilityError:
         typeof data?.local_durability_error === "string" ? data.local_durability_error : null,
+      correlation: typeof data?.correlation === "string" ? data.correlation : null,
+      parent: typeof data?.parent === "string" ? data.parent : null,
     };
   }
 
