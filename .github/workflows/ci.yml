@@ -1075,9 +1075,9 @@ jobs:
     name: Test coverage (observed)
     runs-on: ubuntu-latest
     if: always()
-    needs: [test, embedded, wasm-host, agentfacts, blackboard, effects, commitment, wiki, reason, guardrails,
-            python-sdk, sdk-ts, loom, demo-smoke, afn-smoke, coop-smoke, conway-gpu, documentation, clippy, audit,
-            test-universe, a2a-sdk, strands-fleet]
+    needs: [test, embedded, wasm-host, wasm-host-macos, agentfacts, blackboard, effects, commitment, wiki, reason,
+            guardrails, python-sdk, sdk-ts, loom, demo-smoke, afn-smoke, coop-smoke, conway-gpu, documentation, clippy,
+            audit, test-universe, a2a-sdk, strands-fleet]
     permissions:
       actions: read
       contents: read
