@@ -45,6 +45,7 @@ llm/                  # mycelium-reason route.rs: the `{ns}/{name}` prompt id in
 # ── schema and record-format tags
 mycelium.decision/    # decision.rs RECORD_SCHEMA: the decision-trace record schema id
 mycelium.rules/       # rule.rs: the rule-catalogue schema id
+mycelium.doctor/      # doctor.rs SCHEMA: the doctor report's JSON schema id (adopter-surface X1)
 mycelium.ae/          # agent/action_evaluator.rs: the evidence / reference record schema ids
 mycelium.guarantees/  # agent/guarantee.rs: the guarantee-report schema id
 mycelium.federation/  # federation*.rs: the descriptor / policy / call / catalogue signing-domain tags

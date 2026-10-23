@@ -137,6 +137,18 @@ equal to the tag, `wire-check` over the fixtures), and creates the Release from 
 RELEASING § 8 has not. The sums are integrity, not provenance: nothing signs a binary (`what-is-proven.md`, third
 table). Entry page: `docs/features/published-node.md`; log `.log/2026-10-23-published-node.md`.
 
+## `mycelium doctor` (adopter-surface X1, 2026-10-23)
+
+The readiness report without a node (`src/doctor.rs`): `start()`'s refusal chain and profile check, extracted to
+`GossipAgent::preflight()` and `profile_check()` in `lifecycle.rs` and called by `start()` itself, run over a node
+built and never started, plus `guarantee_report()` and `confinement_report()`. The effective configuration is the
+diff of three serialised layers (defaults, the file parsed without the environment, the environment applied), each
+flattened key attributed `env` / `file` / `default`; secrets (`gateway_auth_token`, any `token`) rendered `set`/`unset`.
+**Found by it:** `GossipConfig::validate()` probed `persistence.base_path` with `create_dir_all`, so a validator wrote to
+disk; now read-only (`persistence_base_path_problem`, `deprecations.md` §57), `start()`'s R7 refusal unchanged. Limits:
+an attachment made in code is not in its view; unreadable persisted state is `start()`'s. Entry page
+`docs/features/doctor.md`; runbook `operations/diagnostics.md` § Before you start; log `.log/2026-10-23-doctor.md`.
+
 ## Framing discipline
 
 Mycelium is a **library, not a platform** — no daemon, no control plane; a cluster is

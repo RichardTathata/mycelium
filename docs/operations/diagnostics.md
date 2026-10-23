@@ -37,6 +37,29 @@ can act on:
   "caveat": null }
 ```
 
+## Before you start: `mycelium doctor`
+
+`mycelium doctor [config.toml] [--units <dir>] [--format text|json]` says what `start()` would say, before any node
+runs: the configuration loaded as the binary loads it (the file, then `GOSSIP_*` overrides), `validate()`, the same
+preflight chain `start()` runs (the tables this build cannot enforce, the OIDC issuer against the egress list, the
+credential bindings, an audit sink without `[tls]`, the gateway's exposure), the guarantee report, and the profile
+check — in `start()`'s words, because it is `start()`'s code (`src/agent/lifecycle.rs` `preflight`, `profile_check`).
+It binds no port, creates no directory and attaches nothing. Exit 0 means `start()` would start (and, with `--units`,
+`wire-check` found no error); 1 means it would refuse, naming the stage and the field; 2 is a usage error, or a file
+`wire-check` could not read. `--format json` prints one document on stdout (schema `mycelium.doctor/1`; the log lines
+go to stderr) and is refused together with `--units`, whose `wire-check` has its own `--format json`.
+
+It also prints the **effective configuration**: every field with its source — `default`, `file` or `env` — so a value
+that came from an environment override is seen as such. A secret (`gateway_auth_token`, a `token` in either table)
+prints as `set` or `unset`, never as its value, in the text and the JSON form.
+
+What it cannot see, stated: an attachment made in code (an evaluator, an evidence journal, an audit sink) — it reads
+what the `mycelium` binary reads, which attaches none, so an embedder reads its own `guarantee_report()` after
+attaching; and unreadable persisted state, which only opening the directory finds, so that refusal stays with
+`start()` (R7). The persistence directory is reported as found — absent, present, read-only by its mode bits (not an
+access check) — and never created.
+Feature page: [`docs/features/doctor.md`](../features/doctor.md).
+
 ## Read the `caveat` first (RT1/RT2)
 
 A diagnosis is **one node's best-effort estimate, not fleet ground truth**. The `caveat` field is

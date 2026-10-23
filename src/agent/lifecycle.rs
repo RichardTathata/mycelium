@@ -37,9 +37,15 @@ pub(crate) type BeforeSweepHook = std::sync::Arc<dyn Fn(&GossipAgent) + Send + S
 pub(crate) static TEST_BEFORE_SWEEP: std::sync::LazyLock<papaya::HashMap<String, BeforeSweepHook>> =
     std::sync::LazyLock::new(papaya::HashMap::new);
 
+
 impl GossipAgent {
-    /// Binds the TCP listener(s) and launches background loops.
-    pub async fn start(&self) -> Result<(), GossipError> {
+    /// Everything `start()` refuses or warns about before it binds a port or touches disk, in the order
+    /// `start()` does it: `validate()`, the tables a build cannot enforce (v2.18.1's class), the OIDC
+    /// issuer against the egress list, the credential bindings read into the gate, an audit sink without
+    /// `[tls]`, the gateway's exposure (post-360 row P1), the retired `kv_require_signed_frames`. One
+    /// function so that `mycelium doctor` (docs/plans/adopter-surface.md, X1) says what `start()` would
+    /// say, in the same words, by calling it — not by copying it.
+    pub(crate) fn preflight(&self) -> Result<(), GossipError> {
         self.config.validate()?;
         // A token table this build cannot enforce fails closed. Named and scoped tokens are
         // honoured only under `compliance` (`gateway_auth`'s `have_scoped`); without it they were
@@ -212,17 +218,30 @@ impl GossipAgent {
                  is signed; remove it from the configuration (docs/guide/deprecations.md §40)"
             );
         }
+        Ok(())
+    }
+
+    /// Plan G5: under a profile, a required guarantee that is not enforced on this node refuses the
+    /// start, by name, with what is missing and where to read. `dev` requires nothing. Shared with
+    /// `mycelium doctor`, which runs it over a report taken before any start.
+    pub(crate) fn profile_check(&self, report: &super::guarantee::GuaranteeReport) -> Result<(), GossipError> {
+        let (profile, _) = super::guarantee::selected_profile(&self.config);
+        super::guarantee::check(report, profile)
+            .map_err(|refusal| GossipError::InvalidField { field: "profile", reason: refusal.to_string() })
+    }
+
+    /// Binds the TCP listener(s) and launches background loops.
+    pub async fn start(&self) -> Result<(), GossipError> {
+        self.preflight()?;
         // The lifecycle boundary (plan G13): every attachment is in and the configuration is what it
         // is. Resolve every registered guarantee against this node and say so, once, before traffic.
         self.task_ctx.started.store(true, std::sync::atomic::Ordering::Release);
         let report = super::guarantee::report(&self.task_ctx);
         super::guarantee::log_report(&report);
-        // Plan G5: under a profile, a required guarantee that is not enforced on this node refuses the
-        // start, by name, with what is missing and where to read. `dev` requires nothing.
-        let (profile, _) = super::guarantee::selected_profile(&self.config);
-        if let Err(refusal) = super::guarantee::check(&report, profile) {
+        // Plan G5 (`profile_check`, shared with `mycelium doctor`): a refusal here un-marks the boundary.
+        if let Err(e) = self.profile_check(&report) {
             self.task_ctx.started.store(false, std::sync::atomic::Ordering::Release);
-            return Err(GossipError::InvalidField { field: "profile", reason: refusal.to_string() });
+            return Err(e);
         }
         let bind_ip: IpAddr = self.config.bind_address.parse().map_err(|e| {
             GossipError::InvalidField {

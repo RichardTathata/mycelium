@@ -1864,3 +1864,20 @@ heartbeat tick, while a live member's entry holds a forged time, until its owner
 **Migration.** None. A fleet that sees `Indeterminate` naming a node "not a peer: its entry is inside the window and it
 has no heartbeat" is reading a member whose heartbeat has not reached it; it clears when the heartbeat arrives or the
 entry ages past the bound.
+
+## 57. `validate()` no longer creates the persistence base path (unreleased, adopter-surface X1)
+
+**What changed.** `GossipConfig::validate()`'s early check of `persistence.base_path` used to probe by
+`create_dir_all`, so a validator wrote to disk: loading a configuration (`load_from_file`, the binary's `-c`) created
+the data directory before the node id was known. It now reads only — the nearest existing ancestor of `base_path` must
+be a writable directory, or a warning names the problem — and creates nothing. `start()` creates the node's own
+directory under it and refuses by name if it cannot (R7, 2.24.0), exactly as before.
+
+**Why.** `mycelium doctor` runs `validate()` and must touch no disk (`docs/features/doctor.md`); and a validator with a
+side effect is a validator that lies about what it checked.
+
+**Migration.** An embedder that relied on `validate()` or `load_from_file` having created `persistence.base_path` —
+say, to write its own files beside the node's before `start()` — creates it itself, or writes after `start()`. A
+configuration that validated before validates now; the warning's wording changed from *is not writable* to the problem
+found (*no ancestor of the path exists*, *the nearest existing path is not a directory*, *the nearest existing
+directory is read-only*).

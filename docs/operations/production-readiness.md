@@ -15,6 +15,11 @@ this page is the index + the gate.
 > the project proves in CI, what it has demonstrated with a bound, and what it has not yet shown —
 > read it first, so a go-live decision rests on the third table and not on the README.
 
+> **First, `mycelium doctor <config.toml>`** ([diagnostics § Before you start](diagnostics.md#before-you-start-mycelium-doctor)):
+> it names every guarantee the configured profile would refuse on, in `start()`'s words, without starting a node, and
+> prints each field with its source. The items below that a node can answer for itself are what it reports; the
+> `not_verifiable_here` ones (the network, the clock, a counterparty) stay a human's.
+
 ## 1 · Identity & transport security
 
 - ☐ **mTLS on** — build with `--features tls`; every node has an Ed25519 identity and peer connections

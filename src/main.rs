@@ -4,9 +4,11 @@ use mycelium::error::GossipError;
 use std::{error::Error, sync::Arc};
 
 fn main() -> Result<(), Box<dyn Error>> {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .init();
+    // `mycelium doctor` prints its report on stdout — JSON when asked — so its log lines go to stderr;
+    // the node keeps its logs on stdout as before (#665's review, D1).
+    let doctor = std::env::args().nth(1).as_deref() == Some("doctor");
+    let logs = tracing_subscriber::fmt().with_max_level(tracing::Level::INFO);
+    if doctor { logs.with_writer(std::io::stderr).init(); } else { logs.init(); }
 
     // `mycelium wire-check <units-dir> …` — the offline check over a directory of unit files
     // (docs/plans/design-time-tooling.md §4). A pure function over declarations; it starts no
@@ -21,6 +23,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         // `mycelium --version`: the crate's version and nothing more, the line the release workflow's
         // clean-container smoke compares against the tag (docs/plans/adopter-surface.md, X0).
         Some("-V" | "--version") => { println!("{}", version_line()); std::process::exit(0) }
+        // `mycelium doctor [config.toml] [--units <dir>] [--format text|json]` — what `start()` would print
+        // and whether it would refuse, from the configuration and the environment alone; no port, no disk
+        // (docs/plans/adopter-surface.md, X1).
+        Some("doctor") => std::process::exit(doctor_cli(std::env::args().skip(2).collect())),
         Some("rules") => std::process::exit(rules_cli(std::env::args().skip(2).collect())),
         Some("explain") => std::process::exit(explain_cli(std::env::args().skip(2).collect())),
         // `mycelium tls issue` — a node certificate signed where the CA key is, so the node never
@@ -303,6 +309,68 @@ fn wire_check_cli(args: Vec<String>) -> i32 {
     report.exit_code()
 }
 
+/// `mycelium doctor`: exit 0 when `start()` would start (and, with `--units`, `wire-check` finds no
+/// error), 1 when it would refuse or the units do not bind, 2 on a usage error or a file wire-check
+/// cannot read (its own 2). The report is the library's `doctor::run`, printed as text or JSON;
+/// `--units` then runs the same `wire-check` the `wire-check` subcommand runs, so the two never
+/// disagree. `--format json` with `--units` is refused: the JSON on stdout is one document, and
+/// wire-check has its own `--format json` (#665's review, D1).
+fn doctor_cli(args: Vec<String>) -> i32 {
+    const USAGE: &str = "Usage: mycelium doctor [config.toml] [--units <dir> [--library <dir>] [--schemas <dir>]] [--format text|json]";
+    let mut config: Option<std::path::PathBuf> = None;
+    let mut units: Vec<String> = Vec::new();
+    let mut format = "text".to_string();
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "-h" | "--help" => { eprintln!("{USAGE}"); return 0; }
+            "--format" => match it.next() { Some(f) => format = f, None => { eprintln!("{USAGE}"); return 2; } },
+            "--units" | "--library" | "--schemas" => match it.next() {
+                Some(v) => { units.push(a.clone()); units.push(v); }
+                None => { eprintln!("{USAGE}"); return 2; }
+            },
+            _ if a.starts_with('-') => { eprintln!("unknown option `{a}`\n{USAGE}"); return 2; }
+            _ if config.is_none() => config = Some(std::path::PathBuf::from(a)),
+            _ => { eprintln!("{USAGE}"); return 2; }
+        }
+    }
+    if format != "text" && format != "json" { eprintln!("{USAGE}"); return 2; }
+    // Usage is settled before anything runs (#665's review, D6): a flag that needs `--units` without it,
+    // and the JSON form with `--units`, are refused here rather than after a printed report.
+    let units_dir = units.chunks(2).find(|p| p[0] == "--units").map(|p| p[1].clone());
+    if !units.is_empty() && units_dir.is_none() { eprintln!("--library/--schemas need --units\n{USAGE}"); return 2; }
+    if format == "json" && units_dir.is_some() {
+        eprintln!("--format json with --units is not supported: the JSON on stdout is one document; run `mycelium wire-check <dir> --format json` separately\n{USAGE}");
+        return 2;
+    }
+    // `GossipAgent::new` is built inside a runtime context, as the node binary builds it.
+    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => { eprintln!("doctor: {e}"); return 2; }
+    };
+    let report = rt.block_on(async { mycelium::doctor::run(config.as_deref()) });
+    if format == "json" {
+        match serde_json::to_string_pretty(&report) {
+            Ok(s) => println!("{s}"),
+            Err(e) => { eprintln!("doctor: {e}"); return 2; }
+        }
+    } else {
+        print!("{}", report.render());
+    }
+    let mut code = if report.refusal.is_some() { 1 } else { 0 };
+    if let Some(dir) = units_dir {
+        // `--units <dir> [--library ..] [--schemas ..]`: the directory is wire-check's positional argument;
+        // its exit code is kept (1: a finding; 2: a file it could not read), never flattened to 1.
+        let mut wc: Vec<String> = vec![dir];
+        for pair in units.chunks(2) {
+            if pair[0] != "--units" { wc.push(pair[0].clone()); wc.push(pair[1].clone()); }
+        }
+        println!();
+        code = code.max(wire_check_cli(wc));
+    }
+    code
+}
+
 /// `mycelium rules [--format md|json]` — the rule catalogue this binary registers
 /// (`mycelium::rules::RULES`), generated from the descriptors. The fleet's whole catalogue, with the
 /// stem host's provisioning rules, is the checked-in `docs/reference/rule-catalogue.md`.
@@ -405,7 +473,7 @@ fn tls_cli(args: Vec<String>) -> i32 {
 
 fn print_usage() {
     eprintln!(
-        "Usage: mycelium [OPTIONS]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed] [--no-authority]\n       mycelium rules [--format md|json]\n       mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>]\n       mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir>\n\
+        "Usage: mycelium [OPTIONS]\n       mycelium doctor [config.toml] [--units <dir>] [--format text|json]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed] [--no-authority]\n       mycelium rules [--format md|json]\n       mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>]\n       mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir>\n\
          \n\
          Options:\n\
          -c, --config <file>      Load configuration from a TOML file\n\

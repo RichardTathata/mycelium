@@ -1779,6 +1779,30 @@ impl Default for GossipConfig {
     }
 }
 
+
+/// Why `persistence.base_path` could not be used, read without creating anything: the nearest existing
+/// ancestor (the path itself, else its parents) must be a directory that is not read-only. `None` means
+/// `start()`'s `create_dir_all` has a fair chance; it still refuses by name if it fails (R7).
+fn persistence_base_path_problem(base: &std::path::Path) -> Option<&'static str> {
+    let mut cur = Some(base);
+    while let Some(p) = cur {
+        match fs::metadata(p) {
+            Ok(m) if !m.is_dir() => return Some("the nearest existing path is not a directory"),
+            Ok(m) if m.permissions().readonly() => return Some("the nearest existing directory is read-only"),
+            Ok(_) => return None,
+            Err(_) => {
+                // A relative path's last parent is `""`, which is the current directory (#665's review, D2).
+                let next = p.parent().map(|q| if q.as_os_str().is_empty() { std::path::Path::new(".") } else { q });
+                if next == Some(p) {
+                    return Some("no ancestor of the path exists");
+                }
+                cur = next;
+            }
+        }
+    }
+    Some("no ancestor of the path exists")
+}
+
 impl GossipConfig {
     /// `kv_require_signed_frames` set, where it can change nothing. Since post-360 row F2 that is
     /// everywhere: a TLS node refuses an unsigned frame whatever it says, and without `[tls]` nothing is
@@ -2201,17 +2225,21 @@ impl GossipConfig {
                     reason: "cannot be zero".into(),
                 });
             }
-            // Writability check: warn early. We don't hard-fail here because validate() is also
-            // called in load_from_file before the node_id is known, so we can only check the base
-            // path itself; `start()` refuses if the node's directory cannot be created (R7).
+            // An early warning that creates nothing. This used to probe by `create_dir_all`, so a
+            // validator wrote to disk: `load_from_file` created the data directory before the node id
+            // was known, and `mycelium doctor` — which must touch no disk (adopter-surface X1) — would
+            // have too. It now reads only: the nearest existing ancestor of `base_path` must be a
+            // writable directory. `start()` creates the node's own directory and refuses by name if
+            // it cannot (R7); that refusal is unchanged.
             if !p.base_path.as_os_str().is_empty()
-                && let Err(e) = fs::create_dir_all(&p.base_path) {
-                    tracing::warn!(
-                        path = %p.base_path.display(),
-                        error = %e,
-                        "persistence.base_path is not writable; start() will refuse unless it becomes writable",
-                    );
-                }
+                && let Some(problem) = persistence_base_path_problem(&p.base_path)
+            {
+                tracing::warn!(
+                    path = %p.base_path.display(),
+                    problem,
+                    "persistence.base_path: start() will refuse unless this changes",
+                );
+            }
         }
         Ok(())
     }
@@ -3515,5 +3543,29 @@ mod config_fuzz {
             cfg.gossip_fanout              = fanout;
             let _ = cfg.validate(); // must return, never panic
         }
+    }
+}
+
+#[cfg(test)]
+mod validate_persistence_tests {
+    use super::*;
+
+    /// `validate()` reads; it never creates (adopter-surface X1). Before this test the validator probed
+    /// with `create_dir_all`, so loading a configuration created its data directory.
+    #[test]
+    fn validate_does_not_create_the_persistence_base_path() {
+        let dir = std::env::temp_dir().join(format!("mycelium-validate-absent-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let cfg: GossipConfig = toml::from_str(&format!("[persistence]\nbase_path = \"{}\"\n", dir.display())).expect("parses");
+        cfg.validate().expect("an absent, creatable path is not a validation error");
+        assert!(!dir.exists(), "validate() created the persistence base path");
+        // The read-only check reads the nearest existing ancestor; a file in the way is named.
+        let file = std::env::temp_dir().join(format!("mycelium-validate-file-{}", std::process::id()));
+        fs::write(&file, b"x").unwrap();
+        assert_eq!(persistence_base_path_problem(&file.join("under")), Some("the nearest existing path is not a directory"));
+        assert_eq!(persistence_base_path_problem(&dir), None);
+        // A relative path that does not exist yet resolves against the current directory, which does.
+        assert_eq!(persistence_base_path_problem(std::path::Path::new("mycelium-validate-relative-absent/under")), None);
+        let _ = fs::remove_file(&file);
     }
 }

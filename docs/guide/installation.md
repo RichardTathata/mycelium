@@ -58,6 +58,10 @@ Inside a container the node binds every address for gossip (the image sets `GOSS
 the gateway, the configuration file sets `http_addr` and a credential — the run command with ports and a mounted
 file is in [deployment § Get the node](../operations/deployment.md#get-the-node).
 
+Before starting a node from a configuration, `mycelium doctor node.toml` says whether `start()` would refuse and why,
+and prints the effective configuration with each field's source
+([diagnostics § Before you start](../operations/diagnostics.md#before-you-start-mycelium-doctor)).
+
 The published node is built with `cli,tls,compliance,a2a,llm,metrics`, so a configuration that names `[tls]`, a token
 table, `[oidc]` or `[gateway_tls]` starts (a build without the feature refuses it by name, v2.18.1). The stem is built
 with `stem,gateway,llm,object_store`. Building from source stays the path for any other feature set.
