@@ -13,17 +13,18 @@ SUITE = 'scripts/test-check-feature-pages.py'
 CASES = ['baseline', 'example-baseline',
          # text the gate must not read as a source or a fault (each a positive baseline)
          'fenced-unit-heading', 'fenced-page-heading', 'external-link', 'descriptor-in-test-file',
-         'nested-test-module', 'turn-on-name-without-file', 'crate-linked',
+         'nested-test-module', 'turn-on-name-without-file', 'crate-linked', 'glob-workspace-member', 'descriptor-in-comment',
          # (a) the sources and the registry
-         'unmapped-concept', 'glossary-row-without-anchor', 'parser-guard-glossary', 'glossary-bold-row-short', 'glossary-bold-row-with-text',
+         'unmapped-concept', 'glossary-row-without-anchor', 'glossary-row-tight', 'glossary-row-indented', 'parser-guard-glossary',
+         'glossary-bold-row-short', 'glossary-bold-row-with-text', 'glossary-bold-row-italic-no-link',
          'unmapped-cargo-feature', 'implicit-cargo-feature',
          'unmapped-crate', 'unmapped-companion-guarantee', 'non-literal-guarantee-id', 'aliased-descriptor',
-         'type-alias-descriptor', 'qualified-path-descriptor', 'descriptor-struct-literal',
+         'type-alias-descriptor', 'qualified-path-descriptor', 'descriptor-struct-literal', 'impl-for-descriptor', 'descriptor-fn-item',
          'early-test-module', 'brace-in-string', 'unit-key-without-heading', 'restricted-unit-field',
          'private-unit-field', 'parser-guard-unit-code', 'unit-heading-without-key',
          'unit-subtable-gone', 'stale-registry-id', 'stale-link', 'mapped-twice', 'exclusion-without-reason',
          'unknown-registry-key', 'unknown-top-level-key', 'list-key-not-a-list', 'name-not-a-string',
-         'feature-without-page', 'todo-without-planned',
+         'feature-without-page', 'todo-without-planned', 'planned-names-existing-page',
          # (b) pages and the registry
          'page-not-in-registry', 'registry-page-missing', 'two-features-one-page', 'subdirectory',
          # (c) sections
@@ -39,7 +40,7 @@ CASES = ['baseline', 'example-baseline',
          'excepted-test', 'in-code-without-test', 'test-not-executed', 'script-key-not-a-run', 'test-in-wrong-target', 'integration-test-in-wrong-binary',
          'executed-baseline',
          # (h) examples
-         'example-for-none-feature', 'example-absent-from-index', 'example-missing', 'example-row-without-status',
+         'example-for-none-feature', 'example-row-tight', 'example-absent-from-index', 'example-missing', 'example-row-without-status',
          'see-without-index-link', 'none-without-sentence', 'parser-guard-matrix',
          # (i) the page links its ids
          'concept-not-linked', 'guarantee-not-linked', 'crate-not-linked']
@@ -178,12 +179,24 @@ edits, pages = with_example([('A page the mutation suite plants', 'A page about 
 passes(edits, pages)
 
 # (a)
+case('glob-workspace-member')
+passes({'Cargo.toml': [('members = ["mycelium-core", ', 'members = ["mycelium-cor*", ')]})
+case('descriptor-in-comment')
+passes({'mycelium-wasm-host/src/rules.rs': [('\n];\n', '\n];\n\n/// Built by `mycelium::GuaranteeDescriptor::new`; a comment is not a registration:\n'
+                                             '/// `GuaranteeDescriptor::new("stem.commented", 1)` and `GuaranteeDescriptor { .. }` and `GuaranteeDescriptor as Gd`.\n'
+                                             '// impl Mk for GuaranteeDescriptor\nfn planted() {}\n')]})
 case('unmapped-concept')
 fails('concept:planted-term (concept) is not mapped',
       {'docs/guide/00-concepts.md': [('<a id="lane"></a>', '<a id="planted-term"></a>')]})
 case('glossary-row-without-anchor')
 fails('the glossary row "Planted term" has no <a id>',
       {'docs/guide/00-concepts.md': [('| <a id="seam"></a>', '| Planted term | native | a row | x |\n| <a id="seam"></a>')]})
+case('glossary-row-tight')
+fails('the glossary row "Planted tight" has no <a id>',
+      {'docs/guide/00-concepts.md': [('| <a id="seam"></a>', '|Planted tight| native | a row | x |\n| <a id="seam"></a>')]})
+case('glossary-row-indented')
+fails('the glossary row "Planted indented" has no <a id>',
+      {'docs/guide/00-concepts.md': [('| <a id="seam"></a>', ' | Planted indented | native | a row | x |\n| <a id="seam"></a>')]})
 case('parser-guard-glossary')
 fails('no "## Glossary quick-reference" table',
       {'docs/guide/00-concepts.md': [('\n## Glossary quick-reference\n', '\n## Glossary quick reference\n')]})
@@ -193,6 +206,9 @@ fails('the glossary row "**Mailbox**" has no <a id>',
 case('glossary-bold-row-with-text')
 fails('the glossary row "**Mailbox**" has no <a id>',
       {'docs/guide/00-concepts.md': [('| <a id="seam"></a>', '| **Mailbox** | | durable, HLC-ordered delivery | |\n| <a id="seam"></a>')]})
+case('glossary-bold-row-italic-no-link')
+fails('the glossary row "**Mailbox**" has no <a id>',
+      {'docs/guide/00-concepts.md': [('| <a id="seam"></a>', '| **Mailbox** | | *durable, HLC-ordered delivery* | |\n| <a id="seam"></a>')]})
 case('unmapped-cargo-feature')
 fails('cargo:mycelium-wasm-host/planted (cargo) is not mapped',
       {'mycelium-wasm-host/Cargo.toml': [('\nstem = [', '\nplanted = []\nstem = [')]})
@@ -222,6 +238,13 @@ case('descriptor-struct-literal')
 fails('a GuaranteeDescriptor struct literal',
       {'mycelium-wasm-host/src/rules.rs': [('\n];\n', '\n];\n\nfn planted(d: mycelium::GuaranteeDescriptor) -> mycelium::GuaranteeDescriptor '
                                                         '{ mycelium::GuaranteeDescriptor { revision: 2, ..d } }\n')]})
+case('impl-for-descriptor')
+fails('an impl block on GuaranteeDescriptor',
+      {'mycelium-wasm-host/src/rules.rs': [('\n];\n', '\n];\n\ntrait Mk { fn mk() -> Self; }\nimpl Mk for mycelium::GuaranteeDescriptor '
+                                                        '{ fn mk() -> Self { Self::new("stem.hidden_via_self", 1) } }\n')]})
+case('descriptor-fn-item')
+fails('GuaranteeDescriptor::new named without a call',
+      {'mycelium-wasm-host/src/rules.rs': [('\n];\n', '\n];\n\nfn planted() { let f = mycelium::GuaranteeDescriptor::new; let _ = f("stem.hidden_via_fnptr", 1); }\n')]})
 case('early-test-module')
 fails('companion-guarantee:stem.planted_after_a_test_module (companion-guarantee) is not mapped',
       {'mycelium-wasm-host/src/activation_sandbox.rs': [
@@ -277,6 +300,9 @@ fails('`name` must be a string',
 case('todo-without-planned')
 fails('feature "Authorising actions (the action evaluator)" is "todo" but names no `planned` page',
       {REG: [('page = "todo"\nplanned = "action-authorisation"\n', 'page = "todo"\n')]})
+case('planned-names-existing-page')
+fails('names `planned` page "inference-routing", which is already the page of "Inference routing as policy"',
+      {REG: [('planned = "action-authorisation"\n', 'planned = "inference-routing"\n')]})
 case('feature-without-page')
 fails('feature "Evidence journal" names no page',
       {REG: [('name = "Evidence journal"\npage = "todo"\n', 'name = "Evidence journal"\n')]})
@@ -411,6 +437,10 @@ case('example-for-none-feature')
 fails('has a row `fleet_history_limits` for "Fleet-wide history limits"',
       {'examples/README.md': [('\n| [`hello_mesh`](../docs/guide/01-gossip-kv.md#the-example) · [src](hello_mesh.rs) | ●',
                                '\n| [`fleet_history_limits`](../docs/features/fleet-history-limits.md) · [src](hello_mesh.rs) | ● | · | · | · | Intro | CLI | · | · | · | · | · |\n| [`hello_mesh`](../docs/guide/01-gossip-kv.md#the-example) · [src](hello_mesh.rs) | ●')]})
+case('example-row-tight')
+fails('has a row `fleet_history_limits` for "Fleet-wide history limits"',
+      {'examples/README.md': [('\n| [`hello_mesh`](../docs/guide/01-gossip-kv.md#the-example) · [src](hello_mesh.rs) | ●',
+                               '\n|[`fleet_history_limits`](../docs/features/fleet-history-limits.md) · [src](hello_mesh.rs) | ● | · | · | · | Intro | CLI | · | · | · | · | · |\n| [`hello_mesh`](../docs/guide/01-gossip-kv.md#the-example) · [src](hello_mesh.rs) | ●')]})
 case('example-absent-from-index')
 fails('records the example `routing_demo`, which is not a row',
       {REG: [('page = "inference-routing.md"\nexample = "none"', 'page = "inference-routing.md"\nexample = "routing_demo"')]})
@@ -441,6 +471,7 @@ fails('does not link guarantee:ae.authorised_at_seam',
       {ROUTING: [('[`ae.authorised_at_seam` and `ae.recorded_before_dispatch`]', '[`ae.recorded_before_dispatch`]')]})
 
 POSITIVE = {'baseline', 'example-baseline', 'executed-baseline', 'fenced-unit-heading', 'fenced-page-heading',
+            'glob-workspace-member', 'descriptor-in-comment',
             'external-link', 'descriptor-in-test-file', 'nested-test-module', 'turn-on-name-without-file',
             'crate-linked'}
 print(f'test-check-feature-pages: {len(CASES) - len(POSITIVE)} negative mutations rejected; '

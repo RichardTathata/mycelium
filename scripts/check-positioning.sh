@@ -9,7 +9,7 @@
 #    § The routes and the five-step path).
 # 3. No live artifact links the repository's pre-move account.
 # 4. The feature pages (docs/plans/feature-pages.md F-G): scripts/check-feature-pages.py — every id of
-#    its six sources mapped by docs/features/registry.toml, and each page's sections, links, settings,
+#    its seven sources mapped by docs/features/registry.toml, and each page's sections, links, settings,
 #    tests and example. Its mutation suite is scripts/test-check-feature-pages.py.
 set -u
 cd "$(dirname "$0")/.."

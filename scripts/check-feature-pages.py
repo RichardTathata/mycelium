@@ -100,10 +100,21 @@ def page_exists(root, page):
 
 def is_group_header(cells):
     """A group's header row, and nothing else: four cells, a bold label, the kind and demo cells empty, and the
-    one-line cell empty or wholly italic (a pointer, not a definition). A bold term with any text of its own — a
-    definition, a demo, a kind — or with the wrong number of cells is a term, and needs an `<a id>`."""
+    one-line cell empty or wholly italic *and carrying a `(#…)` link* (a pointer to the longer form, not a
+    definition). A bold term with any text of its own — a definition in italics, a demo, a kind — or with the
+    wrong number of cells is a term, and needs an `<a id>`."""
     return (len(cells) == 4 and re.fullmatch(r'\*\*[^*]+\*\*', cells[0]) is not None and not cells[1]
-            and not cells[3] and (not cells[2] or re.fullmatch(r'\*[^*].*[^*]\*', cells[2]) is not None))
+            and not cells[3] and (not cells[2] or re.fullmatch(r'\*[^*]*\(#[^)]+\)[^*]*\*', cells[2]) is not None))
+
+
+def table_cells(line):
+    """The cells of a Markdown table row, or None for a line that is not one: the separator, prose, a blank. A row
+    is any line whose stripped text starts with `|` — `|Term|` and an indented row render as rows too, so the
+    parser must read them, or a term written that way is invisible."""
+    s = line.strip()
+    if not s.startswith('|') or re.fullmatch(r'\|[-:| ]+\|', s):
+        return None
+    return [c.strip() for c in s.strip('|').split('|')]
 
 
 def concept_ids(root, errors):
@@ -115,9 +126,9 @@ def concept_ids(root, errors):
         return set()
     out = set()
     for line in m.group(1).splitlines():
-        if not line.startswith('| ') or re.match(r'^\|[-:| ]+\|$', line):
+        cells = table_cells(line)
+        if cells is None:
             continue
-        cells = [c.strip() for c in line.strip('|').split('|')]
         if cells[0] == 'Term':
             continue  # the table's header
         if is_group_header(cells):
@@ -205,7 +216,12 @@ def workspace_crates(root):
     """[(package name, member dir, manifest)] for the root crate and every workspace member."""
     top = tomllib.loads(read(root, 'Cargo.toml'))
     out = []
-    for member in ['.'] + top.get('workspace', {}).get('members', []):
+    members = ['.']
+    for member in top.get('workspace', {}).get('members', []):
+        # cargo expands a glob member; so does the gate, or a `crates/*` entry is a traceback instead of a source
+        members += sorted(p.parent.relative_to(root).as_posix() for p in root.glob(f'{member}/Cargo.toml')) \
+            if any(ch in member for ch in '*?[') else [member]
+    for member in members:
         manifest = tomllib.loads(read(root, f'{member}/Cargo.toml' if member != '.' else 'Cargo.toml'))
         out.append((manifest['package']['name'], member, manifest))
     return out
@@ -237,6 +253,15 @@ RUST_TOKEN = re.compile(r'//[^\n]*|/\*.*?\*/|r(#*)".*?"\1|b?"(?:\\.|[^"\\])*"|b?
 TEST_MODULE = re.compile(r'#\[cfg\((?:all\()?test\b[^\]]*\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{')
 
 
+COMMENT = re.compile(r'//[^\n]*|/\*.*?\*/|r(#*)".*?"\1|b?"(?:\\.|[^"\\])*"', re.S)
+
+
+def without_comments(text):
+    """The text with every comment blanked (newlines kept, so line numbers hold) and string literals left alone,
+    so a doc comment that mentions `GuaranteeDescriptor::new("…"` is neither a registration nor a refusal."""
+    return COMMENT.sub(lambda m: re.sub(r'[^\n]', ' ', m.group(0)) if m.group(0).startswith('/') else m.group(0), text)
+
+
 def without_test_modules(text):
     """The text with every `#[cfg(test)]` module's body removed, by brace matching that skips comments and string
     and char literals (so a `"{"` cannot swallow the rest of a file)."""
@@ -260,35 +285,44 @@ def without_test_modules(text):
 DESCRIPTOR_CALL = re.compile(r'\bGuaranteeDescriptor\s*::\s*new\s*\(\s*')
 DESCRIPTOR_ALIAS = re.compile(r'\bGuaranteeDescriptor\s+as\s+(\w+)')
 # Every other way to name or build a descriptor, which the literal scan above would not read: a type alias, a
-# qualified path (`<GuaranteeDescriptor>::new`, `<… as …>::`), and a struct literal (its fields are public). The
-# defining file is exempt from the last: its literals are `new` itself and the core catalogue's `g(…)`.
+# qualified path (`<GuaranteeDescriptor>::new`, `<… as …>::`), a struct literal (only possible inside `mycelium`,
+# where `applies` and `resolve` are `pub(crate)`; refused anyway), an `impl … for GuaranteeDescriptor` block (a
+# local trait on the foreign type, inside which `Self::new("<id>"` names no descriptor), and `new` named as a
+# function item without its call (`let f = GuaranteeDescriptor::new; f("<id>", …)`). The defining file is exempt
+# from the struct-literal and impl checks: its literals are `new` itself and the core catalogue's `g(…)`, and its
+# `impl Debug for` is the type's own.
 DESCRIPTOR_ESCAPES = [
     (re.compile(r'\btype\s+(\w+)[^=;]*=[^;]*\bGuaranteeDescriptor\b'), 'a type alias for GuaranteeDescriptor'),
     (re.compile(r'(?<![\w>])<\s*(?:\w+::)*GuaranteeDescriptor\b[^<>;{}()]*>\s*::'),
      'a qualified path (<GuaranteeDescriptor>::…)'),
     (re.compile(r'(?<![\w:])(?:\w+::)*GuaranteeDescriptor\s*\{'), 'a GuaranteeDescriptor struct literal'),
+    (re.compile(r'\bimpl\b[^{;]*?\bfor\s+(?:\w+::)*GuaranteeDescriptor\b'), 'an impl block on GuaranteeDescriptor'),
+    (re.compile(r'\bGuaranteeDescriptor\s*::\s*new\b(?!\s*\()'), 'GuaranteeDescriptor::new named without a call'),
 ]
+HOME_EXEMPT = ('literal', 'impl block')
 NOT_A_LITERAL = re.compile(r'(?:->|\bstruct|\bimpl(?:<[^>]*>)?|\bfor)\s*$')  # a return type, the definition, an impl
 DESCRIPTOR_HOME = 'src/agent/guarantee.rs'
 
 
 def companion_guarantee_ids(root, errors):
-    """Every guarantee a crate registers in code, outside test modules and test files. The core's own are
-    built by `g(…)` in src/agent/guarantee.rs and are the catalogue; this finds the rest, whatever crate. A
-    registration the scan cannot read — an id that is not a string literal, a descriptor imported under another
-    name, a type alias, a qualified-path call or a struct literal — is refused, so a guarantee cannot be invisible to the registry."""
+    """Every guarantee a crate registers in code under `src/`, outside comments, test modules and test files (an
+    `examples/`, `benches/` or `build.rs` descriptor is not a shipped surface; plan §4.2). The core's own are built
+    by `g(…)` in src/agent/guarantee.rs and are the catalogue; this finds the rest, whatever crate. A registration
+    the scan cannot read — an id that is not a string literal, a descriptor imported under another name, a type
+    alias, a qualified-path call, a struct literal, an `impl … for GuaranteeDescriptor` block or `new` named without
+    its call — is refused, so a guarantee cannot be invisible to the registry."""
     out = set()
     for _, member, _ in workspace_crates(root):
         for path in sorted((root / member).glob('src/**/*.rs')):
             rel = path.relative_to(root).as_posix()
             if rel.endswith('_tests.rs') or '/tests/' in rel:
                 continue
-            text = without_test_modules(path.read_text())
+            text = without_test_modules(without_comments(path.read_text()))
             for alias in DESCRIPTOR_ALIAS.findall(text):
                 errors.append(f'{rel}: imports GuaranteeDescriptor as {alias}: the registry reads '
                               f'`GuaranteeDescriptor::new("<id>"`; use the name')
             for pattern, what in DESCRIPTOR_ESCAPES:
-                if rel == DESCRIPTOR_HOME and 'literal' in what:
+                if rel == DESCRIPTOR_HOME and any(w in what for w in HOME_EXEMPT):
                     continue
                 for m in pattern.finditer(text):
                     if 'literal' in what and NOT_A_LITERAL.search(text[max(0, m.start() - 80):m.start()]):
@@ -367,6 +401,12 @@ def check_registry(root, reg, ids, errors):
                 if i in owner:
                     errors.append(f'{REGISTRY}: {i} is mapped twice ({owner[i]}; {kind} "{label}")')
                 owner[i] = f'{kind} "{label}"'
+    taken = {Path(f['page']).stem: f['name'] for f in real_pages(reg)}
+    for f in reg.get('feature', []):
+        planned = f.get('planned', '')
+        if f.get('page') == 'todo' and Path(planned).stem in taken:
+            errors.append(f'{REGISTRY}: feature "{f.get("name")}" names `planned` page "{planned}", which is already '
+                          f'the page of "{taken[Path(planned).stem]}": one feature per page')
     known = set().union(*ids.values())
     for source, found in ids.items():
         for i in sorted(found - owner.keys()):
@@ -493,8 +533,9 @@ def example_rows(root):
     m = re.search(r'^## The capability matrix\n(.*?)(?=^## |\Z)', text, re.M | re.S)
     rows = {}
     for line in (m.group(1) if m else '').splitlines():
-        if line.startswith('| ['):
-            name = re.match(r'^\| \[`([^`]+)`\]', line)
+        cells = table_cells(line)
+        if cells:
+            name = re.match(r'^\[`([^`]+)`\]', cells[0])
             if name:
                 rows[name.group(1)] = line
     return rows
