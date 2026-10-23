@@ -58,6 +58,12 @@ Inside a container the node binds every address for gossip (the image sets `GOSS
 the gateway, the configuration file sets `http_addr` and a credential — the run command with ports and a mounted
 file is in [deployment § Get the node](../operations/deployment.md#get-the-node).
 
+A first fleet in one command: `mycelium init <dir>` writes the `governed-call` template (Rust; two nodes, one call
+permitted and one refused by a policy enforced at the provider, with the evidence printed), and
+`mycelium init <dir> --template governed-call-py` the Python one against the published node — each a project of its
+own, pinned to this binary's release, with a README that says what it shows and what it does not
+([feature page](../features/init.md)).
+
 Before starting a node from a configuration, `mycelium doctor node.toml` says whether `start()` would refuse and why,
 and prints the effective configuration with each field's source
 ([diagnostics § Before you start](../operations/diagnostics.md#before-you-start-mycelium-doctor)).

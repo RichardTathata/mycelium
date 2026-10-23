@@ -1,0 +1,16 @@
+# governed-call — node A's configuration. `mycelium doctor node.toml` says what start() would do with it.
+#
+# `dev` requires nothing. Under `profile = "secure-single-domain"` start() would refuse until, among others,
+# `egress.allow_hosts` is set, `[persistence]` is configured, a gateway has a token table and `http_addr` on
+# loopback, and `consensus_require_electorate` is on; `mycelium doctor node.toml` names each unmet one.
+profile = "dev"
+bind_address = "127.0.0.1"
+bind_port = 7946            # node B runs on bind_port + 1 and bootstraps to this node
+
+# The node identity: provider-side enforcement is built with `tls`, and it is what makes a calling member's identity
+# authentic rather than asserted. Both nodes share
+# this directory: the CA is minted once and each node's certificate and key are stored under its own id — the
+# development posture, in which the CA key is on every node (`id.ca_key_off_node` reads unmet; `mycelium tls
+# issue` is the production path).
+[tls]
+auto_cert_dir = "data/tls"

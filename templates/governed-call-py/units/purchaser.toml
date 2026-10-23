@@ -1,0 +1,22 @@
+# The purchaser, as an SDK agent declares it (POST /gateway/units/declare). The node advertises the capability on
+# the agent's behalf. The mandate and the rule are accepted and reported back as `not_enforced`: the published node
+# attaches no policy evaluator, so they are the declaration `wire-check` draws, not a check this node makes.
+principal = "purchaser"
+
+[[capability]]
+ns       = "purchase"
+name     = "place"
+ttl_secs = 30
+  [capability.attrs]
+  ledger = "petty-cash"
+
+[[mandate]]
+holder     = "purchaser"
+scope      = "petty-cash"
+operations = ["tools/call:tool:purchase.place"]
+
+[[rule]]
+actor           = "*"
+operation       = "tools/call"
+resource        = "tool:purchase.place"
+requires_values = { ledger = "petty-cash" }

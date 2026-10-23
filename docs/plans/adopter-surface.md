@@ -235,9 +235,17 @@ the published node (X0) rather than embedding it, declares its unit through `dec
 and denied calls through `mycelium-py`, and reads the same trace. It needs only the one adapter row it uses, so it does
 not wait on X7's table; X7 fills the row in when it lands. The comparison's audience is the SDK audience, and a plan
 that sequenced their template last would have answered the wrong developer first. The TypeScript template follows
-X7. *(rev 0.8)* Both templates attach an evidence journal and an evaluator, because without them a node enforces and
-records nothing (2.6.0's warning) and X4's closure has nothing to read; both run against `EchoBackend`, so no model is
-downloaded on the path the hour measures.
+X7. *(rev 0.8)* The Rust template attaches an evidence journal and an evaluator, because without them a node enforces
+and records nothing (2.6.0's warning) and X4's closure has nothing to read; both run against `EchoBackend`, so no model
+is downloaded on the path the hour measures. *(X2's PR)* **The Python template cannot attach either:** the published
+node binary attaches nothing before `start()` and there is no configuration that attaches an evaluator, so its unit
+file's mandate and rule come back `not_enforced` (the node says so) and its refusal is the gateway's own scope rule
+(`gateway.auth`), counted, not recorded. The per-call policy from Python waits on a node that can attach a policy from
+configuration — recorded as a question for X3, whose grant would need the same door. Two more things the row found:
+the reference evaluator declares no security-relevant arguments, so a `requires_values` rule cannot see the value it
+tests through the seam (the Rust template's policy is a twenty-line `ActionEvaluator` of its own, which is also the
+clearer teaching); and a prompt-skill call under provider enforcement is refused for naming no resource, so the
+template's skill lives on the member node and the provider calls it.
 
 **Exit:**
 - CI job: `mycelium init`, `cargo run` in the result, assert the permitted call's receipt and the denied call's
@@ -246,7 +254,9 @@ downloaded on the path the hour measures.
 - the template's `main.rs` is under 80 lines, and the Python template's `main.py` under 60, each counted by the test;
 - *(rev 0.8)* the Python template runs in CI against the node it is built with: on a pull request, the local build;
   on a release branch and on `main` after a tag, the published image from X0 — a template that needs an API landing in
-  the same release cannot pass against the previous tag, and the job says which target it ran;
+  the same release cannot pass against the previous tag, and the job says which target it ran *(X2's PR: the job
+  prints its target and runs the local build on every event; the published-image half is **not built** — it waits on
+  X0's first tag, and is a one-step addition to the job then)*;
 - editing a file under `skills/` and restarting changes the skill's answer, shown by the CI job.
 
 **Not built, stated:** the TypeScript template (after X7). No `mycelium dev` watcher: the project is `cargo run`, and
@@ -930,7 +940,7 @@ declarations, not code); a second template before X7; any change to the wire; an
 |---|---|---|---|
 | X0 | binaries for three platforms, sums, the Release created from the tag, the image by version and `latest`; a clean-container smoke; a dry run | `.github/workflows/release.yml`, `docker/Dockerfile.node`; `version_tests::version_line_names_the_crate_version` (`src/main.rs`); dry run 39934199532 on #664 (the bundle verified by the review). **Not built, by the exit's own bullets:** `mycelium doctor` in the clean container waits on X1; the `one-hour` job's first step waits on X2, which creates the job; the Release creation and the image push are exercised only by the first tag after merge. The Doors' anchor promise is withdrawn (above). | #664's review, 2026-10-23 |
 | X1 | the same refusal as `start()`, in its words; `not_in_build` naming the feature; a persistence directory reported, not created; the effective configuration with sources; secrets as set/unset; a planted fault in each of the four shown failing | `src/doctor.rs` and its seven tests (`doctor_names_the_refusal_start_would_give` runs both and compares the strings); `preflight`/`profile_check` in `src/agent/lifecycle.rs`, called by `start()`; `validate_does_not_create_the_persistence_base_path` in `mycelium-core/src/config.rs` — **found by the row:** `validate()` created the directory, fixed (`deprecations.md` §57). **Plants, each run in the PR and restored:** a trailing character on doctor's refusal text fails the comparison; the token-table refusal removed from `preflight` fails the `not_in_build` test; `create_dir_all` restored in `validate()` fails both persistence tests; `Env` and `File` swapped fails the sources test. The profile and token tests are pins of a new feature and cannot fail against `main`; the persistence and validate tests did. The field order is the serialised form's, with a doc-table test, not `configuration.md`'s (above). | #665's review, 2026-10-23 |
-| X2 | | | |
+| X2 | `init` writes a project CI builds and runs; a Rust and a Python template; `init` refuses a non-empty directory; the tag is the binary's version; `main.rs` under 80 lines and `main.py` under 60; a skill edit changes the answer; the Python template runs against the node it is built with | `src/init.rs` and its four tests (`every_template_file_on_disk_is_embedded` holds the directory and the embedded list equal; `init_writes_the_binarys_own_tag_and_no_placeholder`; `init_refuses_a_directory_that_is_not_empty`; `the_programs_stay_short`); `templates/governed-call` (72 lines of `main.rs`) and `templates/governed-call-py` (42 of `main.py`); CI job `Scaffold` (init, wire-check, run with the permitted and refused call asserted, explain, doctor, the skill edited and re-run, the pin checked; the Python run against the node built in the job, the target printed). **Not built:** the published-image run on a release branch (waits on X0's first tag). **Deviations, above:** the Python template's refusal is the gateway's scope rule; the policy is a custom evaluator, not `ReferenceEvaluator`; the skill is served by the member node. **Found by the review:** a `[patch]` of a git source still fetches the pinned tag, so the job rewrites the dependency to a path instead; `init ""` wrote into the current directory, refused now. | #666's review, 2026-10-23 |
 | X3 | | | |
 | X4 | | | |
 | X5 | | | |

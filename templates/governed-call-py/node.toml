@@ -1,0 +1,19 @@
+# governed-call-py — the published node's configuration. `mycelium doctor node.toml` says what start() would do.
+#
+# The gateway on loopback with a named-token table: each client presents its token, and a route a token's scopes do
+# not cover answers 403 `insufficient_scope` — the gateway's own rule (`gateway.auth`). `dev` requires nothing; under
+# `secure-single-domain` start() would refuse until, among others, [tls], egress.allow_hosts and [persistence] are set.
+profile = "dev"
+bind_address = "127.0.0.1"
+bind_port = 7950
+http_port = 8300            # the gateway; http_addr stays 127.0.0.1, so only this host reaches it
+
+[[gateway_named_tokens]]
+name   = "alice"
+token  = "alice-token"
+scopes = ["kv:read", "kv:write", "cap:write"]   # cap:write: she may declare a unit
+
+[[gateway_named_tokens]]
+name   = "reader"
+token  = "reader-token"
+scopes = ["kv:read"]                             # no kv:write: a write of hers is refused

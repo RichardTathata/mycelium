@@ -578,6 +578,67 @@ jobs:
       # reconstructed by a neutral observer node (honest framing — provable-stopping, not global).
       - run: ./mycelium-guardrails/ci_smoke.sh
 
+  scaffold:
+    # X2 (docs/plans/adopter-surface.md): `mycelium init` writes a template the binary embeds from `templates/`;
+    # this job is the proof that each template builds and runs as a project of its own. The Rust scaffold is
+    # built against this checkout by rewriting its dependency to a path — a `[patch]` would still fetch the
+    # pinned tag, which does not exist yet on a version-bump commit (#666's review) — so a template that needs an
+    # API landing in the same release passes, and the tag it pins is what a user gets. The Python scaffold runs
+    # the node built here in place of the published binary; the job prints the target it ran against.
+    name: Scaffold (mycelium init, both templates)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: cargo build --bin mycelium --features cli,tls,compliance,llm
+      - name: The tag init writes is this binary's version
+        run: |
+          set -euo pipefail
+          ./target/debug/mycelium init "$RUNNER_TEMP/pin-check" --template governed-call
+          want="tag = \"v$(sed -n 's/^version *= *"\(.*\)".*/\1/p' Cargo.toml | head -1)\""
+          grep -q "$want" "$RUNNER_TEMP/pin-check/Cargo.toml" || { echo "Cargo.toml does not pin $want"; cat "$RUNNER_TEMP/pin-check/Cargo.toml"; exit 1; }
+          if ./target/debug/mycelium init "$RUNNER_TEMP/pin-check" --template governed-call; then echo "init overwrote a non-empty directory"; exit 1; fi
+      - name: Rust template — init, wire-check, run, explain, doctor, and an edited skill
+        run: |
+          set -euo pipefail
+          BIN="$PWD/target/debug/mycelium"; REPO="$PWD"
+          "$BIN" init "$RUNNER_TEMP/governed-call" --template governed-call
+          cd "$RUNNER_TEMP/governed-call"
+          echo "target: this checkout at $GITHUB_SHA (the scaffold pins $(grep -o 'tag = "[^"]*"' Cargo.toml))"
+          sed -i "s|^mycelium = { git = .*|mycelium = { path = \"$REPO\", features = [\"tls\", \"llm\"] }|" Cargo.toml
+          grep -q "path = \"$REPO\"" Cargo.toml
+          "$BIN" wire-check units/
+          CARGO_TARGET_DIR="$REPO/target" cargo run | tee run.log
+          grep -q 'ledger=petty-cash: PERMITTED' run.log
+          grep -q 'ledger=capital: REFUSED' run.log
+          grep -q 'answered: echo: Greet the new joiner warmly' run.log
+          grep -q '^evidence: ' run.log
+          test -s data/evidence.log
+          "$BIN" explain data/decisions.jsonl --catalogue "$REPO/docs/reference/rule-catalogue.json" | tee explain.log
+          grep -q 'signal.admission' explain.log
+          "$BIN" doctor node.toml | tee doctor.log; grep -q 'start(): would start' doctor.log
+          printf 'Say hello to {{input}} in a pirate voice.\n' > skills/greeting.md
+          CARGO_TARGET_DIR="$REPO/target" cargo run | tee run2.log
+          grep -q 'answered: echo: Say hello to the new joiner in a pirate voice' run2.log
+      - name: Python template — init, run against the node built here, doctor
+        run: |
+          set -euo pipefail
+          BIN="$PWD/target/debug/mycelium"
+          pip install -q -e mycelium-py
+          "$BIN" init "$RUNNER_TEMP/governed-call-py" --template governed-call-py
+          cd "$RUNNER_TEMP/governed-call-py"
+          echo "target: the node built in this job at $GITHUB_SHA (not the published image; see the plan's X2 row)"
+          MYCELIUM_BIN="$BIN" python main.py | tee run.log
+          grep -q 'not enforced by this node' run.log
+          grep -q 'alice set demo/greeting: PERMITTED' run.log
+          grep -q 'reader set demo/greeting: REFUSED 403 — insufficient scope' run.log
+          grep -q 'the route needs kv:write' run.log
+          "$BIN" doctor node.toml | tee doctor.log; grep -q 'start(): would start' doctor.log
+
   python-sdk:
     # The repo's first Python CI job: mycelium-py (call_typed) + the LangGraph
     # checkpointer, run as real integration tests against a two-node reason mesh
@@ -1075,7 +1136,7 @@ jobs:
     name: Test coverage (observed)
     runs-on: ubuntu-latest
     if: always()
-    needs: [test, embedded, wasm-host, wasm-host-macos, agentfacts, blackboard, effects, commitment, wiki, reason,
+    needs: [test, embedded, wasm-host, wasm-host-macos, agentfacts, blackboard, effects, commitment, wiki, reason, scaffold,
             guardrails, python-sdk, sdk-ts, loom, demo-smoke, afn-smoke, coop-smoke, conway-gpu, documentation, clippy,
             audit, test-universe, a2a-sdk, strands-fleet]
     permissions:
