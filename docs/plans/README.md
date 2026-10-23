@@ -166,6 +166,25 @@ that turn it on, its example, its guarantees and *not built* items, and links to
 code. Kept true by a CI gate over a checked-in feature registry, a pass in `/doc-coverage`, and a fifth
 verification-policy rule.
 
+[`adopter-surface.md`](adopter-surface.md) — **the adopter surface** (agreed with the maintainer 2026-10-23, rev 0.11, not started;
+sequenced after feature-pages F2). From a comparison against Eve, the OpenAI Agents SDK, LangGraph, Mastra and
+Temporal, checked against the code: twelve rows for what is missing — the node published as a binary and an image, `mycelium
+doctor` and `init` (Rust and Python templates), a default-deny
+**grant** beside the veto-based approval, one correlation id through the decision trace, evidence journal, receipts and
+reason trace, an external side-effect contract in `mycelium-effects` (a reconciliation probe before any retry),
+`mycelium test --faults` over an adopter's declaration, the adapter contract table, a per-unit `runtime` key, a
+declaration watch loop, a closing documentation-and-examples pass through the existing gates and audits with a
+first-hour tutorial that is the timing job in prose, and
+selective recovery as the plan's exit (a parent hash carried through every record, declared effect classes, the
+dependency closure read offline from node-local journals; D33's rule that compensation is a new promise, built), and a
+second wave sketched to decided questions (a context selector, declared recurring work, an observing dashboard, span
+export, the causal exposure policy, an Eve agent directory run unchanged as a pinned demonstration, and the multi-fleet weaknesses turned into rows — a
+`secure-multi-domain` profile with a `fed.*` guarantee family, a two-domain scaffold, a scale run on a runner the
+workflow provisions, the pilot kit; D14–D18, D24–D27). Its one claim, *one hour to a governed fleet*, is printed only as a CI job
+measures it on a tagged release (§1.1, D19). What
+the comparison proposed that already ships is tabled in its §1; a task lifecycle, a context selector, schedules and a
+dashboard are deferred in §6 with the question each must answer first.
+
 [`boundary-h.md`](boundary-h.md) — **Boundary H, a colluding population of admitted members** (proposed
 2026-09-24, rev 0.1, not adopted). It implements threat model revision 3's §5 Boundary H in four phases:
 - prerequisites: issuer binding, signed mandate grants, and the knowledge layer's own deferred PRs;
