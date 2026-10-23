@@ -241,6 +241,11 @@ pub mod wire_check;
 pub mod doctor;
 /// `mycelium init` — a scaffold that CI builds and runs (docs/plans/adopter-surface.md, X2).
 pub mod init;
+/// `mycelium explain --correlation` / `--closure` — one run's records as a chain, and one record's dependency
+/// closure, across evidence journals and decision traces (adopter-surface X4).
+pub mod closure;
+/// The two causal fields a request carries into every record its work produces (adopter-surface X4).
+pub use agent::causal;
 /// `mycelium declare` — a project's declaration sent to a gateway, once or kept current (adopter-surface X10).
 #[cfg(feature = "gateway")]
 pub mod declare;
@@ -568,6 +573,12 @@ pub mod fuzz_internals {
 
     /// The caller-context **envelope**, one layer past the frame: the JSON, the `via` node id and
     /// the two base64 credential fields, all read before the signature is checked.
+    /// The closure reader (adopter-surface X4): a trace's text as a corpus, every chain and closure rendered; the
+    /// invariant is termination with each record visited once, under a cycle of parents too.
+    pub fn closure_corpus_render(data: &[u8]) -> bool {
+        crate::closure::fuzz_corpus_render(data)
+    }
+
     pub fn caller_envelope_decode(data: &[u8]) -> bool {
         crate::agent::gateway_caller::fuzz_envelope_decode(&bytes::Bytes::copy_from_slice(data))
     }

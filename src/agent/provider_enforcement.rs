@@ -259,10 +259,21 @@ pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest) -> Checked {
         Err(refusal) => return Checked::Done(Err(refusal)),
     };
     let resolved = ResolvedPrincipal { principal: principal.clone(), scopes };
-    let params = match &mandate {
-        Some(m) => json!({ "_meta": { "mandate": m } }),
-        None => Value::Null,
-    };
+    // The preflight's `_meta`: the mandate from the envelope (C2), and — X4 — the causal fields from the application
+    // payload, where a `tools/call` carries them under `params._meta`. A skill's payload is its text and another
+    // kind's is opaque, so those carry none here: the gateway's own record for the call carries them.
+    let mut meta = serde_json::Map::new();
+    if let Some(m) = &mandate {
+        meta.insert("mandate".into(), m.clone());
+    }
+    if kind == crate::signal::signal_kind::MCP_INVOKE && let Ok(call) = serde_json::from_slice::<Value>(&payload) {
+        for key in ["correlation", "parent"] {
+            if let Some(v) = call["params"]["_meta"].get(key) {
+                meta.insert(key.into(), v.clone());
+            }
+        }
+    }
+    let params = if meta.is_empty() { Value::Null } else { json!({ "_meta": meta }) };
     let decided =
         super::http::ae_decide(ctx, Some(&resolved), &operation, &resource, &arguments, &params, ENFORCEMENT_POINT_PROVIDER, None).await;
     let call = AdmittedCall { principal, mandate, operation, resource, arguments };

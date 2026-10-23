@@ -496,18 +496,56 @@ fn rules_cli(args: Vec<String>) -> i32 {
 /// decision trace (a stem's `--trace-dir`, or a bundle's `decisions.jsonl`) rendered as what each
 /// target went through: the round, the rule, how it ended and why, what it read and caused; with a
 /// catalogue, each rule used summarised. Exits 2 when a file does not load.
+///
+/// `mycelium explain --correlation <id> <files…>` renders one run's records as one chain across evidence journals
+/// and decision traces; `--closure <hash> <files…> [--fleet <n>]` the dependency closure of one record
+/// (adopter-surface X4, `mycelium::closure`).
 fn explain_cli(args: Vec<String>) -> i32 {
-    const USAGE: &str = "Usage: mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>]";
+    const USAGE: &str = "Usage: mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>]
+       mycelium explain --correlation <id> <evidence.log|decisions.jsonl>…
+       mycelium explain --closure <sha256> <evidence.log|decisions.jsonl>… [--fleet <nodes>]";
     let (mut file, mut catalogue, mut target): (Option<String>, Option<String>, Option<String>) = (None, None, None);
+    let (mut correlation, mut closure, mut fleet): (Option<String>, Option<String>, Option<String>) = (None, None, None);
+    let mut files: Vec<String> = Vec::new();
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--catalogue" => catalogue = it.next(),
             "--target" => target = it.next(),
+            "--correlation" => correlation = it.next(),
+            "--closure" => closure = it.next(),
+            "--fleet" => fleet = it.next(),
             "-h" | "--help" => { eprintln!("{USAGE}"); return 0; }
+            _ if correlation.is_some() || closure.is_some() => files.push(a),
             _ if file.is_none() => file = Some(a),
             _ => { eprintln!("{USAGE}"); return 2; }
         }
+    }
+    if correlation.is_some() || closure.is_some() {
+        if (correlation.is_some() && closure.is_some()) || files.is_empty() || file.is_some() || catalogue.is_some() || target.is_some() {
+            eprintln!("{USAGE}");
+            return 2;
+        }
+        let fleet = match fleet.map(|f| f.parse::<usize>()) {
+            None => None,
+            Some(Ok(n)) if n > 0 => Some(n),
+            Some(_) => { eprintln!("--fleet takes a positive count of nodes"); return 2; }
+        };
+        if let Some(h) = &closure && let Err(e) = mycelium::causal::validate_parent(h) {
+            eprintln!("--closure: {}", e.to_string().replace("_meta.parent", "the hash"));
+            return 2;
+        }
+        let paths: Vec<std::path::PathBuf> = files.iter().map(std::path::PathBuf::from).collect();
+        let corpus = match mycelium::closure::Corpus::load(&paths) {
+            Ok(c) => c,
+            Err(e) => { eprintln!("{e}"); return 2; }
+        };
+        match (correlation, closure) {
+            (Some(id), _) => print!("{}", corpus.chain(&id)),
+            (_, Some(h)) => print!("{}", corpus.closure(&h, fleet)),
+            _ => unreachable!(),
+        }
+        return 0;
     }
     let Some(file) = file else { eprintln!("{USAGE}"); return 2; };
     let jsonl = match std::fs::read_to_string(&file) {
@@ -564,7 +602,7 @@ fn tls_cli(args: Vec<String>) -> i32 {
 
 fn print_usage() {
     eprintln!(
-        "Usage: mycelium [OPTIONS]\n       mycelium init <dir> [--template <name>] | --list\n       mycelium declare [project-dir] [--gateway <url>] [--token <bearer>] [--watch]\n       mycelium doctor [config.toml] [--units <dir>] [--format text|json]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed] [--no-authority]\n       mycelium rules [--format md|json]\n       mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>]\n       mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir>\n\
+        "Usage: mycelium [OPTIONS]\n       mycelium init <dir> [--template <name>] | --list\n       mycelium declare [project-dir] [--gateway <url>] [--token <bearer>] [--watch]\n       mycelium doctor [config.toml] [--units <dir>] [--format text|json]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed] [--no-authority]\n       mycelium rules [--format md|json]\n       mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>]\n       mycelium explain --correlation <id> <files…> | --closure <sha256> <files…> [--fleet <n>]\n       mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir>\n\
          \n\
          Options:\n\
          -c, --config <file>      Load configuration from a TOML file\n\

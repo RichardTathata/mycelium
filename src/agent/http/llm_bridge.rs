@@ -122,10 +122,12 @@ pub(super) fn default_timeout_ms() -> u64 { 30_000 }
 pub(super) async fn gw_llm_call(
     State(ctx): State<Arc<HttpCtx>>,
     caller: Option<Extension<ResolvedPrincipal>>,
+    headers: axum::http::HeaderMap,
     axum::Json(body): axum::Json<LlmCallBody>,
 ) -> impl IntoResponse {
     use crate::capability::CapFilter;
     let caller = caller.map(|Extension(c)| c);
+    super::mcp_bridge::note_misplaced_causal_headers(&ctx.agent_ctx, &headers, "llm");
     use crate::signal::signal_kind;
 
     if let Some(refused) = refuse_prompt_name(&body.ns, &body.name) { return refused; }
@@ -236,10 +238,12 @@ pub(super) struct LlmStreamBody {
 pub(super) async fn gw_llm_stream(
     State(ctx): State<Arc<HttpCtx>>,
     caller: Option<Extension<ResolvedPrincipal>>,
+    headers: axum::http::HeaderMap,
     axum::Json(body): axum::Json<LlmStreamBody>,
 ) -> impl IntoResponse {
     use axum::response::sse::Event;
     let caller = caller.map(|Extension(c)| c);
+    super::mcp_bridge::note_misplaced_causal_headers(&ctx.agent_ctx, &headers, "llm");
     use crate::capability::CapFilter;
     use futures_util::stream;
 

@@ -114,3 +114,10 @@ path             = "fuzz_targets/fixint_decode.rs"
 test             = false
 doc              = false
 bench            = false
+
+[[bin]]
+name             = "closure_corpus"
+path             = "fuzz_targets/closure_corpus.rs"
+test             = false
+doc              = false
+bench            = false

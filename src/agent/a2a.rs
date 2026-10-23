@@ -1213,8 +1213,11 @@ pub(crate) async fn a2a_jsonrpc_full(
     // malformed request be answered as JSON-RPC `-32700` rather than as a bare 400 — a JSON-RPC
     // endpoint that replies in a different protocol when it dislikes the input is its own small
     // dishonesty.
+    headers:      axum::http::HeaderMap,
     raw:          axum::body::Bytes,
 ) -> axum::response::Response {
+    // X4: a causal field carried as a header is never read — counted against this door.
+    super::http::note_misplaced_causal_headers(&state.task_ctx, &headers, "a2a");
     let body: Value = match serde_json::from_slice(&raw) {
         Ok(v) => v,
         Err(e) => {

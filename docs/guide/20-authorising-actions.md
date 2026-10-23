@@ -832,6 +832,39 @@ An edge with no provider is skipped here; it is already reported as unwired. The
 default and `--no-authority` turns it off. An error makes the check exit 1. The whole
 declare-check-deploy loop is [the capability lifecycle](../operations/capability-lifecycle.md).
 
+## One id and one parent through the records
+
+A run is several calls, and a call often acts on a decision an earlier record holds. Two fields let the records say
+so, and the reader compute it (adopter-surface X4, [the feature page](../features/causal-records.md)):
+
+- `correlation` — one key segment the caller chooses, grouping the records of one run. The same rule a reason
+  trace's `run_id` obeys: non-empty, at most 128 bytes, no `/`, no whitespace.
+- `parent` — the content hash of the record this work depends on: 64 lowercase hex characters, the SHA-256 an
+  `AeReference`'s `journal_sha256` cites, or the hash of a decision trace's line.
+
+Both go under `params._meta`, beside `operation_id` and `mandate` — in the **application payload and nowhere
+else**. The caller envelope's signature covers a digest of that payload, so a field placed outside it (a header, a
+field in the envelope) could be re-pointed under a signature that still verifies; such a field is never read, and
+`GET /stats` `causal_fields_misplaced` counts it by door. A field that is present and malformed is refused before any
+policy question (`request_malformed`, JSON-RPC `-32602`), never corrected: a silently emptied parent would read as a
+root.
+
+At every door `ae_decide` runs, the fields enter the envelope and every record it produces — the decision and its
+execution record, at the gateway and at the provider (which reads them from the `tools/call` payload `/mcp`
+forwards). A `DecisionRecord` and a `WriteReceipt` carry them where their producer has them. Then:
+
+```text
+mycelium explain --correlation run-1 data/evidence.log data/decisions.jsonl
+mycelium explain --closure <sha256> node-a/evidence.log node-b/evidence.log --fleet 3
+```
+
+The first renders one run as one chain; the second, every record whose parent chain reaches the hash. Each line is
+marked **captured** (the record carries the field), **reconstructed** (joined by `operation_id` to a record of the
+same attempt that does) or **unattributable** (no id the reader can use). A parent no file holds is a **hole**,
+named with the sink counters of every trace given and never filled; a closure over fewer journals than the fleet has
+nodes says so in its first line; a federation edge is a boundary. The journal is authoritative — it never drops a
+record; the decision trace is best-effort, its sink drops and counts.
+
 ## What this does not establish
 
 - **Not hard prevention.** Only a check inside the resource's own effect boundary, with the epoch

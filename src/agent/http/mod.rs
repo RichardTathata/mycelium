@@ -125,6 +125,8 @@ mod llm_bridge;
 mod mcp_bridge;
 #[cfg(all(test, feature = "tls", feature = "consensus"))]
 pub(crate) use mcp_bridge::{TEST_DISPATCH_TIMEOUT_MS, TEST_LAST_TIMEOUT};
+#[cfg(feature = "a2a")]
+pub(crate) use mcp_bridge::note_misplaced_causal_headers;
 mod mesh;
 mod node;
 mod overlay;
@@ -588,3 +590,7 @@ mod gateway_caller_tests;
 /// dispatch and a permit does not.
 #[cfg(all(test, feature = "tls", feature = "compliance"))]
 mod ae_seam_tests;
+/// Adopter-surface X4 at the live doors: the causal fields in the payload, refused when malformed, never read from
+/// a header.
+#[cfg(all(test, feature = "tls"))]
+mod causal_tests;

@@ -157,6 +157,15 @@ pub struct DecisionRecord {
     pub trigger: String,
     /// The `seq` of the record this one followed from, when the decision point knows it.
     pub parent_seq: Option<u64>,
+    /// The id that groups the records of one run, carried from the envelope that started the work and minted by no
+    /// record (adopter-surface X4). One key segment. Absent on a decision no run started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation: Option<String>,
+    /// The content hash (lowercase hex SHA-256) of the record this decision depends on, across nodes and files —
+    /// the hash an evidence record's `journal_sha256` cites, or the hash of a trace line. `parent_seq` is the chain
+    /// within one sink; this is the chain across the fleet. Absent on a root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
     pub inputs: Vec<InputSnapshot>,
     pub view: ViewStatus,
     pub outcome: OutcomeKind,
@@ -185,6 +194,8 @@ impl DecisionRecord {
             target: None,
             trigger: trigger.into(),
             parent_seq: None,
+            correlation: None,
+            parent: None,
             inputs: Vec::new(),
             view: ViewStatus::Unknown,
             outcome,
@@ -202,6 +213,10 @@ impl DecisionRecord {
     pub fn at(mut self, at_ms: u64) -> Self { self.at_ms = Some(at_ms); self }
     pub fn target(mut self, target: impl Into<String>) -> Self { self.target = Some(target.into()); self }
     pub fn parent(mut self, seq: u64) -> Self { self.parent_seq = Some(seq); self.completeness.parent_unknown = false; self }
+    /// The run this decision belongs to (X4): the `correlation` the work's envelope carried, never one minted here.
+    pub fn correlation(mut self, id: impl Into<String>) -> Self { self.correlation = Some(id.into()); self }
+    /// The record this decision depends on, by content hash (X4) — across sinks and nodes, unlike `parent_seq`.
+    pub fn parent_hash(mut self, hex: impl Into<String>) -> Self { self.parent = Some(hex.into()); self }
     /// A decision with no parent by nature (a tick, a first trigger) — distinct from one not kept.
     pub fn no_parent(mut self) -> Self { self.completeness.parent_unknown = false; self }
     pub fn input(mut self, input: InputSnapshot) -> Self { self.inputs.push(input); self }
@@ -210,6 +225,11 @@ impl DecisionRecord {
     pub fn effect(mut self, effect: impl Into<String>) -> Self { self.effect = Some(effect.into()); self.completeness.effect_unreferenced = false; self }
     /// A decision with no effect by nature (a refusal, no action) — distinct from one unreferenced.
     pub fn no_effect(mut self) -> Self { self.completeness.effect_unreferenced = false; self }
+
+    /// This record as one JSON line (no newline) — the form a sink writes and a reader hashes (X4).
+    pub fn to_string_line(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
 
     /// The sink's byte estimate for this record: its text plus the fixed overheads.
     pub fn approx_bytes(&self) -> usize {
@@ -679,6 +699,19 @@ mod tests {
         assert!(cmp.reproduces(), "an unattributable divergence is reported, not counted");
         let cmp = compare(&[c], &[]);
         assert_eq!(cmp.divergences[0].right, None);
+    }
+
+    /// X4: the causal fields ride in the record's line when set and are absent otherwise, and the comparison
+    /// ignores them — two recordings of one run must not diverge on an id alone.
+    #[test]
+    fn the_causal_fields_are_in_the_line_and_outside_the_canonical_tuple() {
+        let bare = rec("under_fill");
+        assert!(!bare.to_string_line().contains("correlation"), "absent when unset");
+        let tagged = rec("under_fill").correlation("run-1").parent_hash("ab".repeat(32));
+        let line = tagged.to_string_line();
+        assert!(line.contains("\"correlation\":\"run-1\"") && line.contains(&format!("\"parent\":\"{}\"", "ab".repeat(32))), "{line}");
+        assert_eq!(canonical(&bare), canonical(&tagged));
+        assert!(compare(&[bare], &[tagged]).reproduces(), "an id alone is not a divergence");
     }
 
     /// The coverage manifest lists every rule with its trace policy.

@@ -620,6 +620,13 @@ jobs:
           test -s data/evidence.log
           "$BIN" explain data/decisions.jsonl --catalogue "$REPO/docs/reference/rule-catalogue.json" | tee explain.log
           grep -q 'signal.admission' explain.log
+          # X4: the run's records as one chain from the id the scaffold's call carries — the permitted call and the
+          # refused one, decided at the provider, each captured; the reader says what the files are.
+          "$BIN" explain --correlation run-1 data/evidence.log data/decisions.jsonl | tee chain.log
+          grep -q 'journal: ' chain.log && grep -q 'trace: ' chain.log
+          grep -q '\[captured\] journal decided' chain.log
+          grep -q 'correlation=run-1' chain.log
+          n=$(grep -c '^\[captured\]' chain.log); [ "$n" -ge 2 ] || { echo "expected at least two captured records, got $n"; exit 1; }
           "$BIN" doctor node.toml | tee doctor.log; grep -q 'start(): would start' doctor.log
           printf 'Say hello to {{input}} in a pirate voice.\n' > skills/demo/greeting.md
           CARGO_TARGET_DIR="$REPO/target" cargo run | tee run2.log
@@ -1022,6 +1029,7 @@ jobs:
       - run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu federation_objects -- -max_total_time=120
       - run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu trust_bundle -- -max_total_time=120
       - run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu replay_trace -- -max_total_time=120
+      - run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu closure_corpus -- -max_total_time=120
       - run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu caller_envelope -- -max_total_time=120
       - run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu replay_bundle -- -max_total_time=120
       - run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu fixint_decode -- -max_total_time=120

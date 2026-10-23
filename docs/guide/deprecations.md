@@ -1865,6 +1865,30 @@ heartbeat tick, while a live member's entry holds a forged time, until its owner
 has no heartbeat" is reading a member whose heartbeat has not reached it; it clears when the heartbeat arrives or the
 entry ages past the bound.
 
+## 58. The causal fields: a malformed `_meta.correlation` or `_meta.parent` is refused at every door; a tool's `params` may carry `_meta` (unreleased, adopter-surface X4)
+
+**What changed.** Every door the AE preflight runs — `/mcp`, `/a2a`, the LLM doors, the federation call, the provider
+check — now reads two keys under the request's `params._meta`: `correlation` (one key segment, at most 128 bytes) and
+`parent` (a 64-character lowercase hex content hash), and refuses a request whose value is present and malformed:
+`PreflightRefusal::Malformed`, reason `request_malformed`, JSON-RPC `-32602`. `POST /gateway/kv` reads the same two
+keys at the body's top level and answers `400`. Before, any value under `_meta` other than `operation_id` and
+`mandate` was ignored. `/mcp` now forwards those two keys to the provider inside the `tools/call` request it sends
+(`params._meta`), so a tool handler receives `_meta` beside `name` and `arguments` when the caller sent it; a caller
+envelope carrying an unknown `correlation` or `parent` field is admitted as before and counted (`GET /stats`
+`causal_fields_misplaced`). `PreflightRefusal` gained the variant (the enum is `#[non_exhaustive]`; a `_` arm must
+already fail closed); `ActionEnvelope`, `AeEvidence`, `DecisionRecord` and `WriteReceipt` gained two optional fields
+(all four are `#[non_exhaustive]`, built through their builders); the evidence record's serialised form is unchanged
+when neither is set.
+
+**Why.** A record that cites the record it depends on, by hash, is what lets a reader compute the closure of a
+decision across nodes without a coordinator; a field placed outside the signed payload could be re-pointed under a
+signature that still verifies (2.12.0's lesson), so it is refused by placement; and a malformed value corrected or
+dropped would leave a record that reads as a root.
+
+**Migration.** A caller that put other data under `_meta.correlation` or `_meta.parent` renames it. A tool handler
+that validates its `params` strictly admits `_meta`. An evaluator matching `PreflightRefusal` by name adds the arm or
+keeps its `_`. Nothing else changes for a caller that sends neither key.
+
 ## 57. `validate()` no longer creates the persistence base path (2.37.0, adopter-surface X1)
 
 **What changed.** `GossipConfig::validate()`'s early check of `persistence.base_path` used to probe by

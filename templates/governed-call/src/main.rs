@@ -43,8 +43,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _skill = b.llm().register_prompt_skill("demo", "greeting", skill, Arc::new(EchoBackend)).await?;
     while b.connected_peers().is_empty() { tokio::time::sleep(Duration::from_millis(50)).await }
 
+    // `_meta.correlation` names the run; every record this call produces carries it: `mycelium explain --correlation run-1 data/evidence.log`.
     let call = |ledger: &str| serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": {"name": "purchase.place", "arguments": {"ledger": ledger, "amount_pence": 1200}}}).to_string().into_bytes();
+        "params": {"name": "purchase.place", "arguments": {"ledger": ledger, "amount_pence": 1200}, "_meta": {"correlation": "run-1"}}}).to_string().into_bytes();
     for ledger in ["petty-cash", "capital"] {
         let raw = b.service().rpc_call(a.node_id().clone(), "mcp.invoke", call(ledger), Duration::from_secs(5)).await?;
         let reply: serde_json::Value = serde_json::from_slice(&raw)?;

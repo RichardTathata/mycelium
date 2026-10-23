@@ -271,6 +271,7 @@ fn spawn_handler_with(
         #[cfg(feature = "tls")]
         identity_ledger: Arc::new(crate::agent::revocation::IdentityLedger::default()),
         caller_replay: Default::default(),
+        causal_misplaced: Default::default(),
         #[cfg(feature = "a2a")]
         a2a_mounted: std::sync::atomic::AtomicBool::new(false),
         #[cfg(feature = "a2a")]
@@ -4335,6 +4336,7 @@ async fn test_subscribe_notified_via_gossip() {
         #[cfg(feature = "tls")]
         identity_ledger: Arc::new(crate::agent::revocation::IdentityLedger::default()),
         caller_replay: Default::default(),
+        causal_misplaced: Default::default(),
         #[cfg(feature = "a2a")]
         a2a_mounted: std::sync::atomic::AtomicBool::new(false),
         #[cfg(feature = "a2a")]
@@ -6952,6 +6954,7 @@ fn mini_fuzz_decoders_survive_adversarial_bytes() {
         let _ = crate::fuzz_internals::federation_objects_parse(&buf);
         let _ = crate::fuzz_internals::trust_bundle_parse(&buf);
         let _ = crate::fuzz_internals::fixint_decode(&buf);
+        let _ = crate::fuzz_internals::closure_corpus_render(&buf);
         #[cfg(feature = "tls")]
         {
             let _ = crate::fuzz_internals::presented_call_parse(&buf);
@@ -7007,8 +7010,18 @@ fn mini_fuzz_decoders_survive_adversarial_bytes() {
         )]))
         .expect("a bundle serialises");
 
+        // X4: two trace lines, the second's parent the first's hash — the closure reader's join and its cycle guard
+        // are reached only by a parseable record with a parent.
+        let closure_seed = {
+            let first = r#"{"schema":"mycelium.decision/1","rule":"signal.admission","rule_revision":2,"node":"n1","seq":1,"trigger":"frame","outcome":"Permitted","reason":"under_fill","correlation":"run-1"}"#;
+            let mut second: serde_json::Value = serde_json::from_str(first).unwrap();
+            second["seq"] = serde_json::json!(2);
+            second["parent"] = serde_json::json!(crate::causal::content_hash(first.as_bytes()));
+            format!("{first}\n{second}\n")
+        };
         let mut rows: Vec<(&str, bool)> = vec![
             ("caller_frame_classify", crate::fuzz_internals::caller_frame_classify(&frame_seed)),
+            ("closure_corpus_render", crate::fuzz_internals::closure_corpus_render(closure_seed.as_bytes())),
             ("caller_envelope_decode", crate::fuzz_internals::caller_envelope_decode(&frame_seed)),
             ("federation_objects_parse", crate::fuzz_internals::federation_objects_parse(policy_seed)),
             ("trust_bundle_parse", crate::fuzz_internals::trust_bundle_parse(&bundle_seed)),
