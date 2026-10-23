@@ -11,6 +11,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`mycelium init`** (`docs/plans/adopter-surface.md`, row X2): `mycelium init <dir> [--template <name>]` writes a
+  scaffold from a template the binary embeds at compile time from `templates/`, pinned to the binary's release tag,
+  into a new or empty directory only. Two templates: `governed-call` (Rust — two in-process nodes; a member's direct
+  call to a provider's tool, permitted and refused by an `ActionEvaluator` enforced at the provider and recorded in a
+  signed evidence journal; a decision trace; a prompt skill whose text is `skills/greeting.md`, answered by the echo
+  backend) and `governed-call-py` (Python — the published node under a named-token table; an SDK agent declares a
+  unit and writes a key, a second agent is refused `403 insufficient scope` by the gateway's own rule; its mandate
+  and rule come back `not_enforced`, since the published node attaches no evaluator). `templates/` is the source of
+  truth and CI's `Scaffold` job builds and runs both as projects, the Rust one against the checkout through a cargo
+  patch; a test holds the directory and the embedded list equal. **Not built, stated:** a TypeScript template; a
+  policy a node attaches from configuration, so the Python template's per-call policy waits on that.
+
 - **`mycelium doctor`** (`docs/plans/adopter-surface.md`, row X1): the readiness report without a node — what `start()`
   would print and whether it would refuse, from a configuration file and the `GOSSIP_*` environment alone, by running
   `start()`'s own preflight chain and profile check (extracted as `preflight()` and `profile_check()` in

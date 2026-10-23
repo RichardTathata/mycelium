@@ -578,6 +578,61 @@ jobs:
       # reconstructed by a neutral observer node (honest framing — provable-stopping, not global).
       - run: ./mycelium-guardrails/ci_smoke.sh
 
+  scaffold:
+    # X2 (docs/plans/adopter-surface.md): `mycelium init` writes a template the binary embeds from `templates/`;
+    # this job is the proof that each template builds and runs as a project of its own. On a pull request the
+    # Rust scaffold builds against this checkout through a cargo patch — a template that needs an API landing in
+    # the same release cannot pass against the previous tag; the tag it pins is what a user gets. The Python
+    # scaffold runs the node built here in place of the published binary, for the same reason.
+    name: Scaffold (mycelium init, both templates)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: cargo build --bin mycelium --features cli,tls,compliance,llm
+      - name: The tag init writes is this binary's version
+        run: |
+          set -euo pipefail
+          ./target/debug/mycelium init "$RUNNER_TEMP/pin-check" --template governed-call
+          want="tag = \"v$(sed -n 's/^version *= *"\(.*\)".*/\1/p' Cargo.toml | head -1)\""
+          grep -q "$want" "$RUNNER_TEMP/pin-check/Cargo.toml" || { echo "Cargo.toml does not pin $want"; cat "$RUNNER_TEMP/pin-check/Cargo.toml"; exit 1; }
+          if ./target/debug/mycelium init "$RUNNER_TEMP/pin-check" --template governed-call; then echo "init overwrote a non-empty directory"; exit 1; fi
+      - name: Rust template — init, wire-check, run, explain, doctor, and an edited skill
+        run: |
+          set -euo pipefail
+          BIN="$PWD/target/debug/mycelium"; REPO="$PWD"
+          PATCH="patch.\"https://github.com/RichardTathata/mycelium\".mycelium.path=\"$REPO\""
+          "$BIN" init "$RUNNER_TEMP/governed-call" --template governed-call
+          cd "$RUNNER_TEMP/governed-call"
+          "$BIN" wire-check units/
+          CARGO_TARGET_DIR="$REPO/target" cargo run --config "$PATCH" | tee run.log
+          grep -q 'ledger=petty-cash: PERMITTED' run.log
+          grep -q 'ledger=capital: REFUSED' run.log
+          grep -q 'answered: echo: Greet the new joiner warmly' run.log
+          grep -q '^evidence: ' run.log
+          test -s data/evidence.log
+          "$BIN" explain data/decisions.jsonl --catalogue "$REPO/docs/reference/rule-catalogue.json" > explain.log; head -5 explain.log
+          "$BIN" doctor node.toml | tee doctor.log; grep -q 'start(): would start' doctor.log
+          printf 'Say hello to {{input}} in a pirate voice.\n' > skills/greeting.md
+          CARGO_TARGET_DIR="$REPO/target" cargo run --config "$PATCH" | grep -q 'answered: echo: Say hello to the new joiner in a pirate voice'
+      - name: Python template — init, run against the node built here, doctor
+        run: |
+          set -euo pipefail
+          BIN="$PWD/target/debug/mycelium"
+          pip install -q -e mycelium-py
+          "$BIN" init "$RUNNER_TEMP/governed-call-py" --template governed-call-py
+          cd "$RUNNER_TEMP/governed-call-py"
+          MYCELIUM_BIN="$BIN" python main.py | tee run.log
+          grep -q 'not enforced by this node' run.log
+          grep -q 'alice set demo/greeting: PERMITTED' run.log
+          grep -q 'reader set demo/greeting: REFUSED 403 — insufficient scope' run.log
+          grep -q 'the route needs kv:write' run.log
+          "$BIN" doctor node.toml | tee doctor.log; grep -q 'start(): would start' doctor.log
+
   python-sdk:
     # The repo's first Python CI job: mycelium-py (call_typed) + the LangGraph
     # checkpointer, run as real integration tests against a two-node reason mesh

@@ -137,6 +137,19 @@ equal to the tag, `wire-check` over the fixtures), and creates the Release from 
 RELEASING § 8 has not. The sums are integrity, not provenance: nothing signs a binary (`what-is-proven.md`, third
 table). Entry page: `docs/features/published-node.md`; log `.log/2026-10-23-published-node.md`.
 
+## `mycelium init` (adopter-surface X2, 2026-10-23)
+
+A scaffold from a template the binary embeds (`src/init.rs`, `include_str!` over `templates/<name>/*`; a test holds the
+directory and the list equal), pinned to the binary's release tag, into a new or empty directory only. `governed-call`
+(Rust: two nodes sharing one `auto_cert_dir`, so one CA and per-node certificates; a member's direct `mcp.invoke` to
+the provider under `with_provider_enforcement`, an `ActionEvaluator` of twenty lines, an `EvidenceJournal`, a
+`DecisionSink` written to `data/decisions.jsonl`; a prompt skill on the member node, since an `llm.invoke` under
+provider enforcement must name a resource) and `governed-call-py` (the published node with named tokens; `declare_from`,
+`set`, a 403 `insufficient_scope`). CI's `Scaffold` job builds the Rust scaffold against the checkout through
+`--config 'patch."https://github.com/RichardTathata/mycelium".mycelium.path=…'`. Found: `ReferenceEvaluator` declares no
+security-relevant arguments, so a `requires_values` rule cannot see its value through the seam. Entry page
+`docs/features/init.md`; log `.log/2026-10-23-init.md`.
+
 ## `mycelium doctor` (adopter-surface X1, 2026-10-23)
 
 The readiness report without a node (`src/doctor.rs`): `start()`'s refusal chain and profile check, extracted to

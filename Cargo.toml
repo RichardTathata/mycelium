@@ -67,7 +67,7 @@ test-frame-filter = ["mycelium-core/test-frame-filter"]
 members = ["mycelium-core", "mycelium-sim", "mycelium-tuple-space", "mycelium-blackboard", "mycelium-wiki", "mycelium-wasm-host", "mycelium-agentfacts", "mycelium-reason", "mycelium-guardrails", "mycelium-effects", "mycelium-commitment", "examples/coop", "loom-spike", "mycelium-gateway-free-tests", "mycelium-tls-free-tests"]
 # `fuzz/` is its own cargo-fuzz crate; the wasm guest fixture is a wasm32 cdylib
 # built out-of-band (its prebuilt .wasm is committed as a test fixture).
-exclude = ["fuzz", "mycelium-wasm-host/tests/fixtures/echo-component", "examples/conway-gpu"]
+exclude = ["fuzz", "mycelium-wasm-host/tests/fixtures/echo-component", "examples/conway-gpu", "templates"]
 
 [dependencies]
 # Layers I+II substrate (ROADMAP §v2.0 M1). This crate (the full substrate) adds

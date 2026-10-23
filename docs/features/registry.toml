@@ -74,6 +74,13 @@ example = "none"
 example_watch = ["doctor", "readiness_report"]
 ids = ["concept:doctor"]
 
+[[feature]]
+name = "Init"
+page = "init.md"
+example = "none"
+example_watch = ["init", "scaffold", "governed_call"]
+ids = ["concept:init"]
+
 # ------------------------------------------------------------------------------- pages to write (row F3)
 
 # Authority and evidence

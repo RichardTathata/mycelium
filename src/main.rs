@@ -27,6 +27,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         // and whether it would refuse, from the configuration and the environment alone; no port, no disk
         // (docs/plans/adopter-surface.md, X1).
         Some("doctor") => std::process::exit(doctor_cli(std::env::args().skip(2).collect())),
+        // `mycelium init <dir> [--template <name>]` — a scaffold, written from the templates this binary embeds
+        // (docs/plans/adopter-surface.md, X2). Pure over files; starts no node.
+        Some("init") => std::process::exit(init_cli(std::env::args().skip(2).collect())),
         Some("rules") => std::process::exit(rules_cli(std::env::args().skip(2).collect())),
         Some("explain") => std::process::exit(explain_cli(std::env::args().skip(2).collect())),
         // `mycelium tls issue` — a node certificate signed where the CA key is, so the node never
@@ -309,6 +312,43 @@ fn wire_check_cli(args: Vec<String>) -> i32 {
     report.exit_code()
 }
 
+/// `mycelium init <dir> [--template <name>]`: write a template into a new or empty directory; `--list` names
+/// the templates. Exit 0 when written, 1 when refused (the directory is not empty, the name is unknown), 2 on
+/// a usage error.
+fn init_cli(args: Vec<String>) -> i32 {
+    const USAGE: &str = "Usage: mycelium init <dir> [--template <name>]\n       mycelium init --list";
+    let mut dest: Option<std::path::PathBuf> = None;
+    let mut name = "governed-call".to_string();
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "-h" | "--help" => { eprintln!("{USAGE}"); return 0; }
+            "--list" => {
+                for t in mycelium::init::TEMPLATES { println!("{:<18} {}", t.name, t.about); }
+                return 0;
+            }
+            "--template" => match it.next() { Some(n) => name = n, None => { eprintln!("{USAGE}"); return 2; } },
+            _ if a.starts_with('-') => { eprintln!("unknown option `{a}`\n{USAGE}"); return 2; }
+            _ if dest.is_none() => dest = Some(std::path::PathBuf::from(a)),
+            _ => { eprintln!("{USAGE}"); return 2; }
+        }
+    }
+    let Some(dest) = dest else { eprintln!("{USAGE}"); return 2; };
+    let Some(template) = mycelium::init::template(&name) else {
+        eprintln!("no template named `{name}`; `mycelium init --list` names them");
+        return 1;
+    };
+    match mycelium::init::write(template, &dest) {
+        Ok(written) => {
+            println!("wrote {} ({} files, pinned to {}):", dest.display(), written.len(), mycelium::init::tag());
+            for p in &written { println!("  {}", p.strip_prefix(&dest).unwrap_or(p).display()); }
+            println!("next: see {}/README.md", dest.display());
+            0
+        }
+        Err(e) => { eprintln!("init: {e}"); 1 }
+    }
+}
+
 /// `mycelium doctor`: exit 0 when `start()` would start (and, with `--units`, `wire-check` finds no
 /// error), 1 when it would refuse or the units do not bind, 2 on a usage error or a file wire-check
 /// cannot read (its own 2). The report is the library's `doctor::run`, printed as text or JSON;
@@ -473,7 +513,7 @@ fn tls_cli(args: Vec<String>) -> i32 {
 
 fn print_usage() {
     eprintln!(
-        "Usage: mycelium [OPTIONS]\n       mycelium doctor [config.toml] [--units <dir>] [--format text|json]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed] [--no-authority]\n       mycelium rules [--format md|json]\n       mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>]\n       mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir>\n\
+        "Usage: mycelium [OPTIONS]\n       mycelium init <dir> [--template <name>] | --list\n       mycelium doctor [config.toml] [--units <dir>] [--format text|json]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed] [--no-authority]\n       mycelium rules [--format md|json]\n       mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>]\n       mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir>\n\
          \n\
          Options:\n\
          -c, --config <file>      Load configuration from a TOML file\n\

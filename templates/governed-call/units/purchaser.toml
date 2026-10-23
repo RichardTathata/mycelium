@@ -1,0 +1,22 @@
+# The purchaser: offers the purchase tool, and says in the fleet's own vocabulary who may call it. The node
+# advertises the capability; the mandate and the rule are the authority overlay `mycelium wire-check units/`
+# draws — the policy the program attaches (src/policy.rs) is what enforces it.
+principal = "purchaser"
+
+[[capability]]
+ns       = "purchase"
+name     = "place"
+ttl_secs = 30
+  [capability.attrs]
+  ledger = "petty-cash"
+
+[[mandate]]
+holder     = "purchaser"
+scope      = "petty-cash"
+operations = ["tools/call:tool:purchase.place"]
+
+[[rule]]
+actor           = "*"
+operation       = "tools/call"
+resource        = "tool:purchase.place"
+requires_values = { ledger = "petty-cash" }

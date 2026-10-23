@@ -1,0 +1,16 @@
+[package]
+name = "governed-call"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# The fleet substrate, pinned to the release this scaffold came from (`mycelium init` wrote the tag). The
+# supported path is this git tag, never a registry package of the same name. `tls` is on because enforcement at
+# the provider and the signed evidence journal both need the node identity; `llm` for the prompt skill.
+[dependencies]
+mycelium = { git = "https://github.com/RichardTathata/mycelium", tag = "{{MYCELIUM_TAG}}", features = ["tls", "llm"] }
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+
+# This directory is a project of its own — inside the repository that embeds it and outside it alike.
+[workspace]
