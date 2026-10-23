@@ -5,6 +5,16 @@
 > Audience: **DevOps**. The developer-side "how do I embed it" is in the
 > [cookbook](../guide/cookbook.md).
 
+## Get the node
+
+Every `v*` tag publishes `mycelium`, `mycelium-stem` and `mycelium-artifact` for Linux x86_64, Linux aarch64 and
+macOS aarch64, with `SHA256SUMS`, and the image `ghcr.io/richardtathata/mycelium` (tagged by version and `latest`,
+`linux/amd64` and `linux/arm64`). The download block and the feature sets are in
+[installation.md § The published node](../guide/installation.md#the-published-node); the image runs as a non-root
+user with `/var/lib/mycelium` as its working directory (mount persistence there) and exposes the default gossip port;
+expose the gateway port your configuration sets. Linux binaries need glibc 2.36+ and `libssl3`. The sums are
+integrity, not provenance — nothing signs the binaries yet ([what-is-proven](what-is-proven.md)).
+
 ## The minimum
 
 ```rust

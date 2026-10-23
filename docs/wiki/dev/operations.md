@@ -125,6 +125,18 @@ consensus-free node still *forwards* PROPOSE/VOTE/COMMIT) · `tls` · `metrics` 
 test-only, and `sim` — the replay seams, `mycelium_core::sim_seam` routed through `mycelium-sim` — is for recording
 and replay, never a shipped build; all three deliberately not listed above.)
 
+## The published node (adopter-surface X0, 2026-10-23)
+
+Every `v*` tag publishes the three binaries for Linux x86_64, Linux aarch64 and macOS aarch64 with `SHA256SUMS`, and
+the multi-arch image `ghcr.io/richardtathata/mycelium` (`.github/workflows/release.yml`; the image is
+`docker/Dockerfile.node` — `docker/Dockerfile` is the demo). The published node is the full feature set
+(`cli,tls,compliance,a2a,llm,metrics`) because a configuration naming a table the build lacks refuses to start; the
+stem is `stem,gateway,llm,object_store`. Linux binaries are bookworm-built (glibc 2.36, `libssl3`). The workflow refuses
+a tag whose version differs from `Cargo.toml`'s, smokes each Linux tarball in a clean container (`mycelium --version`
+equal to the tag, `wire-check` over the fixtures), and creates the Release from the annotated tag's message if
+RELEASING § 8 has not. The sums are integrity, not provenance: nothing signs a binary (`what-is-proven.md`, third
+table). Entry page: `docs/features/published-node.md`; log `.log/2026-10-23-published-node.md`.
+
 ## Framing discipline
 
 Mycelium is a **library, not a platform** — no daemon, no control plane; a cluster is

@@ -73,6 +73,8 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(cmd) = args.first() else { usage() };
     let code = match cmd.as_str() {
+        // One line, the crate's version: what the release workflow's smoke runs (adopter-surface X0).
+        "-V" | "--version" => { println!("mycelium-artifact {}", env!("CARGO_PKG_VERSION")); 0 }
         "publish" => publish(&args[1..]),
         "list" => list(&args[1..]),
         "verify" => verify(&args[1..]),

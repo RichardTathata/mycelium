@@ -1,0 +1,62 @@
+# syntax=docker/dockerfile:1.7
+# The published node (docs/plans/adopter-surface.md, row X0).
+#
+# Three stages, one build:
+#   builder  — compiles `mycelium` (the node) and `mycelium-stem` + `mycelium-artifact` (the stem) in release
+#              profile, inside bookworm so the binaries link against glibc 2.36 and libssl3 and run on any
+#              distribution at least that new;
+#   export   — a scratch image holding only the three binaries, for `--output type=local` (the release
+#              workflow's tarballs come from here, so the tarball and the image carry the same bytes);
+#   runtime  — debian:bookworm-slim with ca-certificates and libssl3, the three binaries on PATH, a non-root
+#              user, `mycelium` as the entrypoint.
+#
+# Built by .github/workflows/release.yml, natively on an amd64 and an arm64 runner (no QEMU), the two runtime
+# images merged into one multi-arch manifest. The feature sets are the full ones: a config that names `[tls]`,
+# a token table, `[oidc]` or `[gateway_tls]` refuses to start in a build without the feature (v2.18.1), so a
+# published node must carry them all. `--locked` refuses a Cargo.lock that does not match the manifests.
+#
+#   docker buildx build -f docker/Dockerfile.node --target export  --output type=local,dest=dist .
+#   docker buildx build -f docker/Dockerfile.node --target runtime -t mycelium:dev .
+
+ARG NODE_FEATURES=cli,tls,compliance,a2a,llm,metrics
+ARG STEM_FEATURES=stem,gateway,llm,object_store
+
+FROM rust:1.96-slim-bookworm AS builder
+ARG NODE_FEATURES
+ARG STEM_FEATURES
+ARG TARGETARCH
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=node-release-target-${TARGETARCH},target=/build/target \
+    cargo build --release --locked --bin mycelium --features "$NODE_FEATURES" && \
+    cargo build --release --locked -p mycelium-wasm-host --bin mycelium-stem --bin mycelium-artifact --features "$STEM_FEATURES" && \
+    mkdir -p /out && \
+    cp target/release/mycelium target/release/mycelium-stem target/release/mycelium-artifact /out/
+
+FROM scratch AS export
+COPY --from=builder /out/ /
+
+FROM debian:bookworm-slim AS runtime
+ARG VERSION=dev
+ARG REVISION=unknown
+LABEL org.opencontainers.image.title="mycelium" \
+      org.opencontainers.image.description="A fleet that grows the capabilities it lacks, under rules it can show it kept — the node and the stem." \
+      org.opencontainers.image.source="https://github.com/RichardTathata/mycelium" \
+      org.opencontainers.image.documentation="https://github.com/RichardTathata/mycelium/blob/main/docs/operations/deployment.md" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}" \
+      org.opencontainers.image.licenses="Apache-2.0"
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates libssl3 && \
+    rm -rf /var/lib/apt/lists/* && \
+    groupadd --system --gid 65532 mycelium && \
+    useradd --system --uid 65532 --gid 65532 --home-dir /var/lib/mycelium --create-home --shell /usr/sbin/nologin mycelium
+COPY --from=builder /out/ /usr/local/bin/
+USER mycelium
+WORKDIR /var/lib/mycelium
+# The gossip port, `GossipConfig::default().bind_port`. The gateway listens only where `http_port` is set, on
+# the port the configuration names; expose that one in the run command.
+EXPOSE 8080
+ENTRYPOINT ["mycelium"]

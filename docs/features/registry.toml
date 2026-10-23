@@ -60,6 +60,13 @@ example_watch = ["routing_policy", "data_class"]
 ids = ["concept:data-class"]
 links = ["rule:ae.preflight", "guarantee:ae.authorised_at_seam", "guarantee:ae.recorded_before_dispatch"]
 
+[[feature]]
+name = "Published node"
+page = "published-node.md"
+example = "none"
+example_watch = ["published_node", "release_artefact"]
+ids = ["concept:published-node"]
+
 # ------------------------------------------------------------------------------- pages to write (row F3)
 
 # Authority and evidence

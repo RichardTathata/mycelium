@@ -79,6 +79,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--manifest-source" => manifest_source = Some(val()),
 
             "--stage-dir" => stage_dir = Some(val()),
+            // One line, the crate's version: what the release workflow's smoke runs (adopter-surface X0).
+            "-V" | "--version" => { println!("mycelium-stem {}", env!("CARGO_PKG_VERSION")); std::process::exit(0) }
             _ => usage(),
         }
     }

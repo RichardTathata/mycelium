@@ -646,6 +646,7 @@ a lost port fails instead). The suites in `tests/live/` need a plain node; the r
 that skips everything):
 
 ```sh
+# A published node needs no toolchain: docs/guide/installation.md § The published node. From source:
 cargo build --bin mycelium
 GOSSIP_HTTP_PORT=9312 ./target/debug/mycelium --port 9302 &
 # wait until the node has published its caller-context marker (the gateway is then dispatching)

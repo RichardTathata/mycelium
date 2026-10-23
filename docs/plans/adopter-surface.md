@@ -131,8 +131,11 @@ enumeration, written now so the review has it.
 
 **What:** a release workflow, triggered by the tag the runbook already pushes (`RELEASING.md` §7–§8), that builds the
 `mycelium` and `mycelium-stem` binaries for Linux x86_64 and aarch64 and macOS aarch64, attaches them with SHA-256
-sums to the GitHub Release the runbook's §8 creates, and pushes a container image to `ghcr.io` from the existing
-`docker/Dockerfile`, tagged by version and `latest`. Today nothing publishes either: the workflows build and test, and
+sums to the GitHub Release the runbook's §8 creates, and pushes a container image to `ghcr.io`, tagged by version and
+`latest`. *(X0's PR)* The existing `docker/Dockerfile` builds the three-node demo example, not the node, so the image
+has its own `docker/Dockerfile.node`: a bookworm builder (so the Linux binaries link glibc 2.36 and `libssl3` and run
+on anything at least that new), an `export` stage the tarballs come from, and a non-root runtime stage — the tarball
+and the image carry the same bytes. Today nothing publishes either: the workflows build and test, and
 the Python SDK's README sends the reader to `cargo build --bin mycelium`. A Python or TypeScript developer needs a
 Rust toolchain before the first line of their own code, which is the largest first-hour cost the comparison found.
 
@@ -144,8 +147,9 @@ is audited as the lockfile is); the version anchors (`scripts/check-positioning.
 `installation.md` and both SDK READMEs (the toolchain instruction becomes the fallback, not the path).
 
 **Exit:**
-- a tag on a throwaway branch produces the artefacts and the image in a dry run, and the SHA-256 sums match a local
-  build of the same commit on one platform (reproducibility is **not** claimed; the sums are integrity);
+- a `workflow_dispatch` dry run on the branch produces the three tarballs and `SHA256SUMS` as a workflow artifact,
+  and the smoke passes on every platform (*(X0's PR)* the earlier wording asked the sums to match a local build, which
+  is reproducibility, which the same sentence disclaimed; the sums are integrity — they match the files they ship with);
 - a clean container with no Rust toolchain downloads the binary, runs `mycelium --help` and `mycelium doctor` on the
   scaffold's config;
 - the `one-hour` job's first step is this download, timed.
@@ -917,7 +921,7 @@ declarations, not code); a second template before X7; any change to the wire; an
 
 | Row | Promise | Evidence | Reviewer |
 |---|---|---|---|
-| X0 | | | |
+| X0 | binaries for three platforms, sums, the Release created from the tag, the image by version and `latest`; a clean-container smoke; a dry run | `.github/workflows/release.yml`, `docker/Dockerfile.node`; `version_tests::version_line_names_the_crate_version` (`src/main.rs`); the dry run's run id in the PR | #664's review |
 | X1 | | | |
 | X2 | | | |
 | X3 | | | |

@@ -1,0 +1,254 @@
+# Publish the node (docs/plans/adopter-surface.md, row X0).
+#
+# On a `v*` tag — the one RELEASING.md § 7 pushes — this builds `mycelium`, `mycelium-stem` and `mycelium-artifact`
+# for Linux x86_64, Linux aarch64 and macOS aarch64, each natively on its own runner; smokes every Linux tarball in
+# a clean bookworm container with no Rust toolchain (`mycelium --version` must print the tag's version, and
+# `wire-check` must run over the repository's unit fixtures); attaches the tarballs and `SHA256SUMS` to the GitHub
+# Release of that tag, creating the Release from the annotated tag's message when § 8 has not yet (so the Releases
+# page cannot silently fall behind the tags again, as it did after v2.4.4); and pushes a multi-arch image to
+# ghcr.io, tagged by version and `latest`.
+#
+# `workflow_dispatch` is the dry run the plan's exit asks for: the same build and smoke on any ref, the bundle
+# uploaded as a workflow artifact, no Release touched and no image pushed. The sums are integrity, not
+# provenance: nothing here signs a binary (stated on the feature page and in what-is-proven.md).
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and smoke everything, upload the bundle as a workflow artifact; create no Release, push no image."
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  # ghcr.io refuses an uppercase path; this is the repository's owner and name, lowercased.
+  IMAGE: ghcr.io/richardtathata/mycelium
+  NODE_FEATURES: cli,tls,compliance,a2a,llm,metrics
+  STEM_FEATURES: stem,gateway,llm,object_store
+
+jobs:
+  version:
+    name: The version, and whether this is a dry run
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      dry_run: ${{ steps.v.outputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        shell: bash
+        run: |
+          set -euo pipefail
+          crate=$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -1)
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME#v}"
+            # RELEASING.md § 4 bumps the manifests before § 7 tags; a tag that disagrees with Cargo.toml is a
+            # release cut out of order, refused by name rather than published under the wrong number.
+            if [[ "$tag" != "$crate" ]]; then
+              echo "::error::tag v$tag does not match Cargo.toml version $crate (RELEASING.md § 4 before § 7)"
+              exit 1
+            fi
+            echo "version=$tag" >> "$GITHUB_OUTPUT"
+            echo "dry_run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=$crate" >> "$GITHUB_OUTPUT"
+            # A dispatch is a dry run unless asked otherwise; and it can never publish from a non-tag ref.
+            echo "dry_run=true" >> "$GITHUB_OUTPUT"
+            if [[ "${{ inputs.dry_run }}" == "false" ]]; then
+              echo "::warning::dry_run=false on a workflow_dispatch is ignored: only a v* tag push publishes"
+            fi
+          fi
+
+  linux:
+    name: Linux ${{ matrix.target }}
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, target: x86_64,  runner: ubuntu-latest }
+          - { arch: arm64, target: aarch64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      # The binaries, out of the `export` stage: the same bytes the runtime image carries.
+      - name: Build the binaries (bookworm, glibc 2.36)
+        run: |
+          set -euo pipefail
+          docker buildx build -f docker/Dockerfile.node --target export \
+            --build-arg NODE_FEATURES="$NODE_FEATURES" --build-arg STEM_FEATURES="$STEM_FEATURES" \
+            --output type=local,dest=dist .
+          ls -l dist
+
+      - name: Smoke in a clean container (no toolchain)
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/dist:/dist:ro" -v "$PWD/tests/fixtures/units:/units:ro" \
+            -e EXPECTED="mycelium $VERSION" \
+            debian:bookworm-slim sh -euc '
+              apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends libssl3 ca-certificates >/dev/null
+              got=$(/dist/mycelium --version)
+              [ "$got" = "$EXPECTED" ] || { echo "mycelium --version printed [$got], expected [$EXPECTED]"; exit 1; }
+              /dist/mycelium-stem --version
+              /dist/mycelium-artifact --version
+              /dist/mycelium wire-check /units/coop --library /units/artifacts
+            '
+
+      - name: Tarball
+        run: |
+          set -euo pipefail
+          name="mycelium-${VERSION}-linux-${{ matrix.target }}"
+          mkdir -p "out/$name"
+          cp dist/mycelium dist/mycelium-stem dist/mycelium-artifact "out/$name/"
+          tar -C out -czf "$name.tar.gz" "$name"
+          ls -l "$name.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball-linux-${{ matrix.target }}
+          path: mycelium-${{ env.VERSION }}-linux-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+      # The per-arch runtime image, pushed by digest only; the manifest that names a tag is made once in
+      # `publish` from both digests. Skipped on a dry run.
+      - if: needs.version.outputs.dry_run == 'false'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - if: needs.version.outputs.dry_run == 'false'
+        name: Push the ${{ matrix.arch }} image by digest
+        run: |
+          set -euo pipefail
+          docker buildx build -f docker/Dockerfile.node --target runtime \
+            --platform linux/${{ matrix.arch }} \
+            --build-arg NODE_FEATURES="$NODE_FEATURES" --build-arg STEM_FEATURES="$STEM_FEATURES" \
+            --build-arg VERSION="$VERSION" --build-arg REVISION="$GITHUB_SHA" \
+            --output "type=image,name=$IMAGE,push-by-digest=true,name-canonical=true,push=true" \
+            --metadata-file metadata.json .
+          digest=$(python3 -c 'import json,sys; print(json.load(open("metadata.json"))["containerimage.digest"])')
+          echo "$digest" > "digest-${{ matrix.arch }}"
+          echo "pushed $IMAGE@$digest"
+      - if: needs.version.outputs.dry_run == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: digest-${{ matrix.arch }}
+          if-no-files-found: error
+
+  macos:
+    name: macOS aarch64
+    needs: version
+    runs-on: macos-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the binaries
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --bin mycelium --features "$NODE_FEATURES"
+          cargo build --release --locked -p mycelium-wasm-host --bin mycelium-stem --bin mycelium-artifact --features "$STEM_FEATURES"
+      - name: Smoke
+        run: |
+          set -euo pipefail
+          got=$(./target/release/mycelium --version)
+          [ "$got" = "mycelium $VERSION" ] || { echo "mycelium --version printed [$got], expected [mycelium $VERSION]"; exit 1; }
+          ./target/release/mycelium-stem --version
+          ./target/release/mycelium-artifact --version
+          ./target/release/mycelium wire-check tests/fixtures/units/coop --library tests/fixtures/units/artifacts
+      - name: Tarball
+        run: |
+          set -euo pipefail
+          name="mycelium-${VERSION}-macos-aarch64"
+          mkdir -p "out/$name"
+          cp target/release/mycelium target/release/mycelium-stem target/release/mycelium-artifact "out/$name/"
+          tar -C out -czf "$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball-macos-aarch64
+          path: mycelium-${{ env.VERSION }}-macos-aarch64.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: ${{ needs.version.outputs.dry_run == 'true' && 'Bundle (dry run)' || 'Release and image' }}
+    needs: [version, linux, macos]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      DRY_RUN: ${{ needs.version.outputs.dry_run }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the annotated tag's message is the Release body
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tarball-*
+          path: bundle
+          merge-multiple: true
+      - name: Sums
+        run: |
+          set -euo pipefail
+          cd bundle
+          sha256sum mycelium-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+          # Each tarball unpacks to one directory named after itself, with the three binaries and nothing else.
+          for t in mycelium-*.tar.gz; do
+            tar -tzf "$t" | grep -vE "^${t%.tar.gz}/(mycelium|mycelium-stem|mycelium-artifact)?$" && { echo "unexpected entry in $t"; exit 1; } || true
+          done
+
+      - if: env.DRY_RUN == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-bundle-${{ env.VERSION }}
+          path: bundle/
+          if-no-files-found: error
+
+      - if: env.DRY_RUN == 'false'
+        name: The Release — created from the tag's message if § 8 has not run, then the assets attached
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            title=$(git tag -l --format='%(contents:subject)' "$tag")
+            git tag -l --format='%(contents:body)' "$tag" > notes.md
+            gh release create "$tag" --title "$title" --notes-file notes.md --verify-tag --latest
+            echo "created the Release for $tag from the annotated tag"
+          fi
+          gh release upload "$tag" bundle/mycelium-*.tar.gz bundle/SHA256SUMS --clobber
+          gh release view "$tag" --json assets --jq '.assets[].name'
+
+      - if: env.DRY_RUN == 'false'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          path: digests
+          merge-multiple: true
+      - if: env.DRY_RUN == 'false'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - if: env.DRY_RUN == 'false'
+        name: The multi-arch manifest, tagged by version and latest
+        run: |
+          set -euo pipefail
+          amd64=$(cat digests/digest-amd64); arm64=$(cat digests/digest-arm64)
+          docker buildx imagetools create -t "$IMAGE:$VERSION" -t "$IMAGE:latest" "$IMAGE@$amd64" "$IMAGE@$arm64"
+          docker buildx imagetools inspect "$IMAGE:$VERSION"

@@ -612,7 +612,8 @@ response shape against the gateway's handlers with a mocked `fetch`. The live su
 runs in CI against one:
 
 ```sh
-# Start a node: gossip on 9301, gateway on 9311
+# Start a node: gossip on 9301, gateway on 9311 (a published binary needs no toolchain:
+# docs/guide/installation.md § The published node — `mycelium --port 9301` with the same env)
 GOSSIP_HTTP_PORT=9311 cargo run --bin mycelium -- --port 9301
 
 cd mycelium-ts
