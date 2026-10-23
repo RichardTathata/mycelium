@@ -11,7 +11,7 @@ http_port = 8300            # the gateway; http_addr stays 127.0.0.1, so only th
 [[gateway_named_tokens]]
 name   = "alice"
 token  = "alice-token"
-scopes = ["kv:read", "kv:write", "cap:write"]   # cap:write: she may declare a unit
+scopes = ["kv:read", "kv:write", "cap:read", "cap:write"]   # cap:write: she may declare a unit; cap:read: and resolve one
 
 [[gateway_named_tokens]]
 name   = "reader"

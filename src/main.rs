@@ -30,6 +30,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         // `mycelium init <dir> [--template <name>]` — a scaffold, written from the templates this binary embeds
         // (docs/plans/adopter-surface.md, X2). Pure over files; starts no node.
         Some("init") => std::process::exit(init_cli(std::env::args().skip(2).collect())),
+        // `mycelium declare [project-dir] [--watch]` — the project's units and skills, declared to a gateway once or
+        // kept current as the files change (docs/plans/adopter-surface.md, X10). Starts no node.
+        #[cfg(feature = "gateway")]
+        Some("declare") => std::process::exit(declare_cli(std::env::args().skip(2).collect())),
+        #[cfg(not(feature = "gateway"))]
+        Some("declare") => { eprintln!("declare talks to a gateway, which only a build with the `gateway` feature has"); std::process::exit(2) }
         Some("rules") => std::process::exit(rules_cli(std::env::args().skip(2).collect())),
         Some("explain") => std::process::exit(explain_cli(std::env::args().skip(2).collect())),
         // `mycelium tls issue` — a node certificate signed where the CA key is, so the node never
@@ -312,6 +318,51 @@ fn wire_check_cli(args: Vec<String>) -> i32 {
     report.exit_code()
 }
 
+/// `mycelium declare [project-dir] [--gateway <url>] [--token <bearer>] [--watch] [--poll-ms <n>]
+/// [--interval-secs <n>] [--lease-secs <n>]`: declare the project's `units/*.toml` (and `skills/<ns>/<name>.md`) to
+/// a gateway, once (exit 0, or 1 when wire-check or the gateway refused) or kept current under `--watch` until
+/// Ctrl-C (which retracts). The token defaults to `MYCELIUM_GATEWAY_TOKEN`. Once, no lease is sent and the
+/// declaration lives until the node stops or it is retracted; under `--watch` a lease (default 90 s) is sent and
+/// heartbeated, so a watch that dies is retracted by the node, and the poll must be shorter than a third of it.
+#[cfg(feature = "gateway")]
+fn declare_cli(args: Vec<String>) -> i32 {
+    const USAGE: &str = "Usage: mycelium declare [project-dir] [--gateway <url>] [--token <bearer>] [--watch] [--poll-ms <n>] [--interval-secs <n>] [--lease-secs <n>]";
+    let mut project = std::path::PathBuf::from(".");
+    let mut gateway = "http://127.0.0.1:8300".to_string();
+    let mut token = std::env::var("MYCELIUM_GATEWAY_TOKEN").ok();
+    let (mut watch, mut poll_ms, mut interval_secs, mut lease_secs) = (false, 500u64, 30u64, 90u64);
+    let mut it = args.into_iter();
+    let mut seen_dir = false;
+    while let Some(a) = it.next() {
+        let mut value = |flag: &str| it.next().ok_or_else(|| { eprintln!("{flag} needs a value\n{USAGE}"); 2 });
+        match a.as_str() {
+            "-h" | "--help" => { eprintln!("{USAGE}"); return 0; }
+            "--watch" => watch = true,
+            "--gateway" => match value("--gateway") { Ok(v) => gateway = v, Err(c) => return c },
+            "--token" => match value("--token") { Ok(v) => token = Some(v), Err(c) => return c },
+            "--poll-ms" | "--interval-secs" | "--lease-secs" => {
+                let v = match value(&a) { Ok(v) => v, Err(c) => return c };
+                let Ok(n) = v.parse::<u64>() else { eprintln!("{a}: not a number: {v}\n{USAGE}"); return 2; };
+                if n == 0 { eprintln!("{a}: must be at least 1\n{USAGE}"); return 2; }
+                match a.as_str() { "--poll-ms" => poll_ms = n, "--interval-secs" => interval_secs = n, _ => lease_secs = n }
+            }
+            _ if a.starts_with('-') => { eprintln!("unknown option `{a}`\n{USAGE}"); return 2; }
+            _ if !seen_dir => { project = std::path::PathBuf::from(a); seen_dir = true; }
+            _ => { eprintln!("{USAGE}"); return 2; }
+        }
+    }
+    if watch && poll_ms >= lease_secs * 1000 / 3 {
+        eprintln!("--poll-ms {poll_ms} is not shorter than a third of --lease-secs {lease_secs}: the declaration would lapse between heartbeats\n{USAGE}");
+        return 2;
+    }
+    let cfg = mycelium::declare::WatchConfig { gateway, token, project, interval_secs, lease_secs: watch.then_some(lease_secs) };
+    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => { eprintln!("declare: {e}"); return 2; }
+    };
+    rt.block_on(mycelium::declare::run(cfg, watch, std::time::Duration::from_millis(poll_ms)))
+}
+
 /// `mycelium init <dir> [--template <name>]`: write a template into a new or empty directory; `--list` names
 /// the templates. Exit 0 when written, 1 when refused (the directory is not empty, the name is unknown), 2 on
 /// a usage error.
@@ -513,7 +564,7 @@ fn tls_cli(args: Vec<String>) -> i32 {
 
 fn print_usage() {
     eprintln!(
-        "Usage: mycelium [OPTIONS]\n       mycelium init <dir> [--template <name>] | --list\n       mycelium doctor [config.toml] [--units <dir>] [--format text|json]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed] [--no-authority]\n       mycelium rules [--format md|json]\n       mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>]\n       mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir>\n\
+        "Usage: mycelium [OPTIONS]\n       mycelium init <dir> [--template <name>] | --list\n       mycelium declare [project-dir] [--gateway <url>] [--token <bearer>] [--watch]\n       mycelium doctor [config.toml] [--units <dir>] [--format text|json]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed] [--no-authority]\n       mycelium rules [--format md|json]\n       mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>]\n       mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir>\n\
          \n\
          Options:\n\
          -c, --config <file>      Load configuration from a TOML file\n\

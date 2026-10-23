@@ -81,6 +81,13 @@ example = "none"
 example_watch = ["init", "scaffold", "governed_call"]
 ids = ["concept:init"]
 
+[[feature]]
+name = "Declare"
+page = "declare.md"
+example = "none"
+example_watch = ["declare_watch", "declaration_watch"]
+ids = ["concept:declaration-watch"]
+
 # ------------------------------------------------------------------------------- pages to write (row F3)
 
 # Authority and evidence

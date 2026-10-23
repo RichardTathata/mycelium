@@ -11,5 +11,5 @@ differ — a template that drifts from the API fails CI before it fails a user (
 | `governed-call-py` | Python | the published `mycelium` node under a named-token table; an SDK agent declares a unit, writes a key, and a second agent is refused by the gateway's own scope rule |
 
 The layout every template follows: `node.toml` (the node's configuration, which `mycelium doctor` reads),
-`units/*.toml` (unit files `wire-check` reads and the node declares), `skills/*.md` (prompt-skill text, one file
-per skill, where a template has one), and the program (`src/main.rs` or `main.py`).
+`units/*.toml` (unit files `wire-check` reads and the node declares), `skills/<ns>/<name>.md` (prompt-skill text, one
+file per skill, where a template has one — the layout `mycelium declare` reads too), and the program (`src/main.rs` or `main.py`).

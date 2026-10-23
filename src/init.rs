@@ -41,7 +41,7 @@ pub const TEMPLATES: &[Template] = &[
             file!("governed-call", "README.md"),
             file!("governed-call", "node.toml"),
             file!("governed-call", "units/purchaser.toml"),
-            file!("governed-call", "skills/greeting.md"),
+            file!("governed-call", "skills/demo/greeting.md"),
             file!("governed-call", "src/main.rs"),
             file!("governed-call", "src/policy.rs"),
         ],

@@ -11,6 +11,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`mycelium declare`** (`docs/plans/adopter-surface.md`, row X10): `mycelium declare [project-dir] [--gateway <url>]
+  [--token <bearer>] [--watch]` declares a project's `units/*.toml` to a gateway through `POST /gateway/units/declare`
+  and writes its `skills/<ns>/<name>.md` as prompt templates through `PUT /gateway/prompts/{ns}/{name}` — once, or
+  under `--watch` again whenever a file changes, polled by modification time and size. Each tick runs the same
+  `wire_check::check` the subcommand runs first; with an error the previous declaration stands and the tick says so.
+  A unit's previous handle is retracted before it is re-declared, so a renamed capability does not linger (a good
+  edit briefly shows no provider, stated on the page); a unit the gateway refuses after the check passed has its
+  previous text put back and is rejected once; a unit or skill file removed is retracted or deleted; under `--watch`
+  every handle is heartbeated within its lease on its own timer, a handle the node lost (a restart) is declared again
+  at the next tick, and Ctrl-C retracts; once, no lease is sent and the declaration lives until the node stops. Library:
+  `mycelium::declare::{Watch, WatchConfig, Tick, run}` (feature `gateway`). The Rust template's skill moved to
+  `skills/demo/greeting.md`, the layout the watch reads. **Not built, stated:** the plan's *Input*-class seam for a
+  filesystem event source — a poll needs none, and a watched session is not something this tool records.
+
 - **`mycelium init`** (`docs/plans/adopter-surface.md`, row X2): `mycelium init <dir> [--template <name>]` writes a
   scaffold from a template the binary embeds at compile time from `templates/`, pinned to the binary's release tag,
   into a new or empty directory only. Two templates: `governed-call` (Rust — two in-process nodes; a member's direct
