@@ -209,7 +209,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # the annotated tag's message is the Release body
+          fetch-depth: 0
+      # The annotated tag's message is the Release body. `actions/checkout` fetches every tag object and then runs a
+      # targeted `+<sha>:refs/tags/<tag>` fetch that overwrites the local tag ref with the *commit*, so
+      # `%(contents:body)` read the squash commit's message on v2.37.0's first run (repaired by hand from the local
+      # tag; #669's review reproduced the mechanism). Fetch the tag object itself — `--force`, or git refuses to
+      # clobber the ref — and refuse a tag that is not annotated: RELEASING § 7 makes every release tag one. On a dry
+      # run the version is Cargo.toml's, which may have no tag yet (§ 4 bumps before § 7 tags); then the step says so
+      # and proves nothing, rather than failing a dry run for a reason unrelated to the change. A tag re-pointed on the
+      # remote mid-run would be read here while the assets are the original commit's; the second push queues its own
+      # run, which re-uploads with --clobber.
+      - name: The tag object, not its commit
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          if ! git fetch --force origin "refs/tags/$tag:refs/tags/$tag" 2>/dev/null; then
+            if [ "$DRY_RUN" = "true" ]; then echo "no tag $tag on the remote yet (a dry run; nothing to read)"; exit 0; fi
+            echo "::error::tag $tag is not on the remote"; exit 1
+          fi
+          kind=$(git cat-file -t "$tag")
+          [ "$kind" = "tag" ] || { echo "::error::$tag is a $kind, not an annotated tag; RELEASING § 7 uses git tag -a (delete it, re-create it with -a, force-push it)"; exit 1; }
+          echo "tag $tag: $(git tag -l --format='%(contents:subject)' "$tag")"
       - uses: actions/download-artifact@v4
         with:
           pattern: tarball-*

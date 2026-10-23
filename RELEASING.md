@@ -148,6 +148,10 @@ git tag -a vNEW -m "vNEW — YYYY-MM-DD ..."      # annotated; summarize the hig
 git push origin main && git push origin vNEW
 ```
 
+The tag must be **annotated** (`-a`): the Release workflow fetches the tag object and refuses a lightweight one after
+every build has run. If that happens, `git tag -d vNEW && git tag -a vNEW -m "…" && git push --force origin vNEW`
+re-triggers the workflow on the corrected ref.
+
 **Pushing the tag starts `.github/workflows/release.yml`** (adopter-surface X0). It refuses a tag whose version differs
 from `Cargo.toml`'s (step 4 before step 7), builds the three binaries for Linux x86_64 and aarch64 and macOS aarch64,
 smokes each Linux tarball in a clean container with no toolchain (`mycelium --version` must print the tag's version),
@@ -182,9 +186,15 @@ release was cut, and re-summarising it later produces a second account that can 
 first. Since X0 the workflow creates the Release itself when this step has not, from the same tag message, so
 running this step after the workflow answers *release already exists*; then this step is only the check that the
 assets are attached: `gh release view vNEW --json assets --jq '.assets[].name'` must list three tarballs and
-`SHA256SUMS`. **Once, after the first tag that publishes an image:** a package first created by a workflow's token is
-private, whatever the repository's visibility — open the package's settings on GitHub, set it public, then
-`docker pull ghcr.io/richardtathata/mycelium:NEW` from a logged-out shell. `--verify-tag` refuses if the tag is not on the remote, which catches the "tagged but never
+`SHA256SUMS`. **The image's visibility:** a package created by a workflow's `GITHUB_TOKEN` inherits the visibility and
+permissions model of the repository the workflow runs in (GitHub's *Publishing and installing a package with GitHub
+Actions*), so the package created on v2.37.0's push is public, as this repository is; the image's
+`org.opencontainers.image.source` label links it to the repository but, per the same documentation, carries
+permissions and not visibility. The once-feared "private until an owner opens it" did not apply. Check it rather than assume it: from a logged-out shell,
+`docker manifest inspect ghcr.io/richardtathata/mycelium:NEW` must list `linux/amd64` and `linux/arm64`; if it is
+denied, open the package's settings on GitHub and set it public. **Also check the Release's title and body are the
+tag's:** `gh release view vNEW --json name --jq .name` must print the tag's subject, not the squash commit's — the
+first run got the commit's because the checkout peeled the tag, since fixed by fetching the tag object. `--verify-tag` refuses if the tag is not on the remote, which catches the "tagged but never
 pushed" mistake.
 
 > **`--notes-from-tag` is silently incompatible with `--repo`.** Together they print a usage error
