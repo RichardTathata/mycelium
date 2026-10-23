@@ -413,6 +413,7 @@ fn print_usage() {
              --host <ip>          Bind IP address (default: 127.0.0.1)\n\
          -r, --peers <list>       Comma-separated bootstrap peers (IP:port,...)\n\
          -i, --interactive        Start an interactive REPL\n\
+         -V, --version            Print `mycelium <version>` and exit\n\
          -h, --help               Show this message\n\
          \n\
          Profiles (the config's `profile`, or GOSSIP_PROFILE): `dev` is the default and requires nothing,\n\
@@ -573,6 +574,18 @@ mod version_tests {
     /// of order (RELEASING.md § 4 before § 7) is caught by the string and not by a reader.
     #[test]
     fn version_line_names_the_crate_version() {
-        assert_eq!(super::version_line(), format!("mycelium {}", env!("CARGO_PKG_VERSION")));
+        // Read from the manifest, not from the same `env!` the function uses, so a function that printed another
+        // crate's version, a prefix, or a build-time string would fail here.
+        let manifest = include_str!("../Cargo.toml");
+        let declared = manifest
+            .lines()
+            .find_map(|l| l.strip_prefix("version").and_then(|r| r.trim_start().strip_prefix('=')))
+            .map(|r| r.trim().trim_matches('"').to_string())
+            .expect("Cargo.toml declares a version");
+        let line = super::version_line();
+        assert_eq!(line, format!("mycelium {declared}"));
+        let v = line.strip_prefix("mycelium ").expect("the crate name, a space, the version");
+        assert_eq!(v.split('.').count(), 3, "three dotted components: {v}");
+        assert!(v.split('.').all(|c| !c.is_empty() && c.chars().all(|ch| ch.is_ascii_digit() || ch == '-' || ch.is_ascii_alphanumeric())), "{v}");
     }
 }

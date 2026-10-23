@@ -144,6 +144,10 @@ They compose naturally; the full comparison and when-to-use guide is in
 cargo build --release
 ```
 
+A published node needs no toolchain: every `v*` tag ships `mycelium`, `mycelium-stem` and `mycelium-artifact` for
+Linux x86_64, Linux aarch64 and macOS aarch64, with `SHA256SUMS`, and the image `ghcr.io/richardtathata/mycelium` —
+[installation § The published node](docs/guide/installation.md#the-published-node).
+
 The fuzz harness (`fuzz/` — wire + capability decoders) needs nightly:
 `cargo +nightly fuzz run wire_decode -- -max_total_time=60`.
 

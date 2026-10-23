@@ -142,13 +142,18 @@ Rust toolchain before the first line of their own code, which is the largest fir
 **Why first:** every later row's scaffold, demo and timing starts from this artefact.
 
 **Doors:** `RELEASING.md` §8 (the release body stays the annotated tag; the artefacts are attached to it, so the step
-that silently stopped after v2.4.4 cannot stop again without the workflow failing); the `cargo audit` gate (the image
-is audited as the lockfile is); the version anchors (`scripts/check-positioning.sh` learns the image tag); the
-`installation.md` and both SDK READMEs (the toolchain instruction becomes the fallback, not the path).
+that silently stopped after v2.4.4 cannot stop again without the workflow failing); the `cargo audit` gate (*(X0's
+PR)* the Rust side of the image is audited as the lockfile is, through `--locked`; the Debian runtime layer —
+`libssl3`, `ca-certificates` — is **not** audited by anything here, stated); the version anchors (*(X0's PR)* the
+artefacts need no new anchor: the download block reads `MYCELIUM_RELEASE_TAG`, already in `RELEASING.md` §6's list,
+and `check-positioning.sh` learns nothing — the earlier promise is withdrawn, not built); `installation.md`,
+`README.md` §§ Build and Run, both SDK READMEs, the wasm host's README and `capability-lifecycle.md` (the published
+artefact becomes the path, the toolchain the fallback).
 
 **Exit:**
-- a `workflow_dispatch` dry run on the branch produces the three tarballs and `SHA256SUMS` as a workflow artifact,
-  and the smoke passes on every platform (*(X0's PR)* the earlier wording asked the sums to match a local build, which
+- a dry run — on the pull request itself, since GitHub resolves `workflow_dispatch` only on the default branch, and
+  by dispatch once merged — produces the three tarballs and `SHA256SUMS` as a workflow artifact, and the smoke passes
+  on every platform (*(X0's PR)* the earlier wording asked the sums to match a local build, which
   is reproducibility, which the same sentence disclaimed; the sums are integrity — they match the files they ship with);
 - a clean container with no Rust toolchain downloads the binary, runs `mycelium --help` and `mycelium doctor` on the
   scaffold's config;
@@ -921,7 +926,7 @@ declarations, not code); a second template before X7; any change to the wire; an
 
 | Row | Promise | Evidence | Reviewer |
 |---|---|---|---|
-| X0 | binaries for three platforms, sums, the Release created from the tag, the image by version and `latest`; a clean-container smoke; a dry run | `.github/workflows/release.yml`, `docker/Dockerfile.node`; `version_tests::version_line_names_the_crate_version` (`src/main.rs`); the dry run's run id in the PR | #664's review |
+| X0 | binaries for three platforms, sums, the Release created from the tag, the image by version and `latest`; a clean-container smoke; a dry run | `.github/workflows/release.yml`, `docker/Dockerfile.node`; `version_tests::version_line_names_the_crate_version` (`src/main.rs`); dry run 39934199532 on #664 (the bundle verified by the review). **Not built, by the exit's own bullets:** `mycelium doctor` in the clean container waits on X1; the `one-hour` job's first step waits on X2, which creates the job; the Release creation and the image push are exercised only by the first tag after merge. The Doors' anchor promise is withdrawn (above). | #664's review, 2026-10-23 |
 | X1 | | | |
 | X2 | | | |
 | X3 | | | |

@@ -17,8 +17,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tag's GitHub Release (creating it from the annotated tag's message if step 8 of the runbook has not), and pushes a
   multi-arch image to `ghcr.io/richardtathata/mycelium`, tagged by version and `latest`. The published node carries
   `cli,tls,compliance,a2a,llm,metrics`; the stem `stem,gateway,llm,object_store`. `mycelium --version`,
-  `mycelium-stem --version` and `mycelium-artifact --version` print one line each. A `workflow_dispatch` run is the dry
-  run: the same build and smoke, the bundle as a workflow artifact, no Release and no image. **Not built, stated:** no
+  `mycelium-stem --version` and `mycelium-artifact --version` print one line each. The dry run — the same build and
+  smoke, the bundle as a workflow artifact, no Release and no image — runs on every pull request that touches the
+  workflow, the Dockerfile or the three binaries' sources, and by `workflow_dispatch` once merged. **Not built, stated:** no
   signing of the binaries (the sums are integrity, not provenance), no Windows build, no package-manager formula.
   Wire v12 unchanged; no API change.
 

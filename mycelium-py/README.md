@@ -646,9 +646,9 @@ a lost port fails instead). The suites in `tests/live/` need a plain node; the r
 that skips everything):
 
 ```sh
-# A published node needs no toolchain: docs/guide/installation.md § The published node. From source:
-cargo build --bin mycelium
-GOSSIP_HTTP_PORT=9312 ./target/debug/mycelium --port 9302 &
+# The node: the published binary (docs/guide/installation.md § The published node — no toolchain), or from source
+# with `cargo build --bin mycelium` and `./target/debug/mycelium` in its place.
+GOSSIP_HTTP_PORT=9312 mycelium --port 9302 &
 # wait until the node has published its caller-context marker (the gateway is then dispatching)
 until curl -sf "http://127.0.0.1:9312/gateway/kv/keys?prefix=sys/caller-context/" | grep -q caller-context; do sleep 1; done
 

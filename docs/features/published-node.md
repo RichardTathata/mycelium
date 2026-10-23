@@ -25,13 +25,16 @@ This feature is turned on in code.
   smoke compares to the tag.
 - The workflow itself is [`.github/workflows/release.yml`](../../.github/workflows/release.yml) and the image is
   [`docker/Dockerfile.node`](../../docker/Dockerfile.node); a `workflow_dispatch` run is the dry run.
-- `version_line_names_the_crate_version`, in [`src/main.rs`](../../src/main.rs): the line equals the crate's
-  version, so a tag cut out of order is caught by the string.
+- `version_line_names_the_crate_version`, in [`src/main.rs`](../../src/main.rs): the line is `mycelium ` and the
+  version `Cargo.toml` declares, read from the manifest by the test. A tag cut out of order is caught earlier, by the
+  workflow's version job comparing the tag to `Cargo.toml`; the smoke's own value is that the binary loads and runs
+  in a container with no toolchain.
 
 ## See it work
 
 No runnable example exists: the [example index's capability matrix](../../examples/README.md#the-capability-matrix)
-has no row for this feature. The end-to-end run is the workflow itself on a tag, and its dry run on any branch; the
+has no row for this feature. The end-to-end run is the workflow itself on a tag, and its dry run on a pull request that touches the publishing
+path (or by dispatch after merge); the
 test that runs the code is in [`src/main.rs`](../../src/main.rs): `version_line_names_the_crate_version`. The
 download block a reader copies is [installation § The published node](../guide/installation.md#the-published-node).
 

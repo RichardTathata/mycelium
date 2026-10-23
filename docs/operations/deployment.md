@@ -12,8 +12,20 @@ macOS aarch64, with `SHA256SUMS`, and the image `ghcr.io/richardtathata/mycelium
 `linux/amd64` and `linux/arm64`). The download block and the feature sets are in
 [installation.md § The published node](../guide/installation.md#the-published-node); the image runs as a non-root
 user with `/var/lib/mycelium` as its working directory (mount persistence there) and exposes the default gossip port;
-expose the gateway port your configuration sets. Linux binaries need glibc 2.36+ and `libssl3`. The sums are
-integrity, not provenance — nothing signs the binaries yet ([what-is-proven](what-is-proven.md)).
+publish the gateway port your configuration sets. The image sets `GOSSIP_BIND_ADDRESS=0.0.0.0` so a node run
+without a file is reachable from outside the container (loopback inside a container reaches nothing); a configuration
+file sets `bind_address` itself, and the gateway binds loopback unless the file sets `http_addr` — off loopback it
+refuses to start without a credential unless `gateway_allow_unauthenticated` (2.32.0). A first run, with a file:
+
+```sh
+docker run --rm -p 8080:8080/tcp -p 8080:8080/udp -p 8300:8300 \
+  -v "$PWD/node.toml:/etc/mycelium/node.toml:ro" -v mycelium-data:/var/lib/mycelium \
+  ghcr.io/richardtathata/mycelium:2.36.1 -c /etc/mycelium/node.toml   # the image tag has no v
+```
+
+where `node.toml` sets `bind_address = "0.0.0.0"`, `http_port = 8300`, `http_addr = "0.0.0.0"` and a token table.
+Linux binaries need glibc 2.36+ and `libssl3`. The sums are integrity, not provenance — nothing signs the binaries
+yet ([what-is-proven](what-is-proven.md)).
 
 ## The minimum
 

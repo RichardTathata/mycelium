@@ -26,6 +26,7 @@ fn usage() -> ! {
          \n\
          Options:\n\
              --units <file>             the unit file to declare from (required)\n\
+         -V, --version                  print `mycelium-stem <version>` and exit\n\
          -c, --config <file>            GossipConfig TOML (default: env overrides on defaults)\n\
          -p, --port <port>              bind port\n\
              --host <ip>                bind address\n\

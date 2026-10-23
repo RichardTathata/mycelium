@@ -41,7 +41,8 @@ Every `v*` tag publishes the node ([feature page](../features/published-node.md)
 and `libssl3`; the macOS binary is arm64. The sums are integrity, not provenance: nothing signs the binaries yet.
 
 ```sh
-MYCELIUM_RELEASE_TAG="v2.36.1"   # the same anchor as above; the first tag with artefacts is the one after X0 merges
+# MYCELIUM_RELEASE_TAG as set in § Pin the source (one assignment per page, so the release step moves one line);
+# the first tag with artefacts is the first one cut after X0 merged.
 arch="linux-x86_64"               # or linux-aarch64, macos-aarch64
 base="https://github.com/RichardTathata/mycelium/releases/download/$MYCELIUM_RELEASE_TAG"
 curl -fsSLO "$base/mycelium-${MYCELIUM_RELEASE_TAG#v}-$arch.tar.gz" && curl -fsSLO "$base/SHA256SUMS"
@@ -50,8 +51,12 @@ sha256sum --ignore-missing -c SHA256SUMS && tar -xzf "mycelium-${MYCELIUM_RELEAS
 ```
 
 ```sh
-docker run --rm "ghcr.io/richardtathata/mycelium:${MYCELIUM_RELEASE_TAG#v}" --version
+docker run --rm "ghcr.io/richardtathata/mycelium:${MYCELIUM_RELEASE_TAG#v}" --version   # the image tag has no v
 ```
+
+Inside a container the node binds every address for gossip (the image sets `GOSSIP_BIND_ADDRESS=0.0.0.0`); to reach
+the gateway, the configuration file sets `http_addr` and a credential — the run command with ports and a mounted
+file is in [deployment § Get the node](../operations/deployment.md#get-the-node).
 
 The published node is built with `cli,tls,compliance,a2a,llm,metrics`, so a configuration that names `[tls]`, a token
 table, `[oidc]` or `[gateway_tls]` starts (a build without the feature refuses it by name, v2.18.1). The stem is built

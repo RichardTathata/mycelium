@@ -110,13 +110,13 @@ jobs:
           set -euo pipefail
           docker run --rm \
             -v "$PWD/dist:/dist:ro" -v "$PWD/tests/fixtures/units:/units:ro" \
-            -e EXPECTED="mycelium $VERSION" \
+            -e EXPECTED="mycelium $VERSION" -e VERSION="$VERSION" \
             debian:bookworm-slim sh -euc '
               apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends libssl3 ca-certificates >/dev/null
               got=$(/dist/mycelium --version)
               [ "$got" = "$EXPECTED" ] || { echo "mycelium --version printed [$got], expected [$EXPECTED]"; exit 1; }
-              /dist/mycelium-stem --version
-              /dist/mycelium-artifact --version
+              got=$(/dist/mycelium-stem --version);     [ "$got" = "mycelium-stem $VERSION" ]     || { echo "mycelium-stem --version printed [$got]"; exit 1; }
+              got=$(/dist/mycelium-artifact --version); [ "$got" = "mycelium-artifact $VERSION" ] || { echo "mycelium-artifact --version printed [$got]"; exit 1; }
               /dist/mycelium wire-check /units/coop --library /units/artifacts
             '
 
@@ -182,8 +182,8 @@ jobs:
           set -euo pipefail
           got=$(./target/release/mycelium --version)
           [ "$got" = "mycelium $VERSION" ] || { echo "mycelium --version printed [$got], expected [mycelium $VERSION]"; exit 1; }
-          ./target/release/mycelium-stem --version
-          ./target/release/mycelium-artifact --version
+          got=$(./target/release/mycelium-stem --version);     [ "$got" = "mycelium-stem $VERSION" ]     || { echo "mycelium-stem --version printed [$got]"; exit 1; }
+          got=$(./target/release/mycelium-artifact --version); [ "$got" = "mycelium-artifact $VERSION" ] || { echo "mycelium-artifact --version printed [$got]"; exit 1; }
           ./target/release/mycelium wire-check tests/fixtures/units/coop --library tests/fixtures/units/artifacts
       - name: Tarball
         run: |

@@ -56,7 +56,14 @@ RUN apt-get update && \
 COPY --from=builder /out/ /usr/local/bin/
 USER mycelium
 WORKDIR /var/lib/mycelium
-# The gossip port, `GossipConfig::default().bind_port`. The gateway listens only where `http_port` is set, on
-# the port the configuration names; expose that one in the run command.
-EXPOSE 8080
+# `GossipConfig::default()` binds loopback, which inside a container reaches nothing: a port mapping would
+# deliver to nobody (found by #664's review). The container's network namespace is its own, so the gossip
+# listener binds every address here. This applies to a node run without a configuration file; a file sets
+# `bind_address` itself. The gateway stays on loopback unless the configuration sets `http_addr`, and off
+# loopback it refuses to start without a credential unless `gateway_allow_unauthenticated` (2.32.0).
+ENV GOSSIP_BIND_ADDRESS=0.0.0.0
+# The gossip port, `GossipConfig::default().bind_port`: TCP for the mesh and UDP for the SWIM failure detector
+# (`docker run -P` publishes only what is declared). The gateway listens only where `http_port` is set, on the
+# port the configuration names; publish that one in the run command.
+EXPOSE 8080/tcp 8080/udp
 ENTRYPOINT ["mycelium"]

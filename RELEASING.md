@@ -152,9 +152,15 @@ git push origin main && git push origin vNEW
 from `Cargo.toml`'s (step 4 before step 7), builds the three binaries for Linux x86_64 and aarch64 and macOS aarch64,
 smokes each Linux tarball in a clean container with no toolchain (`mycelium --version` must print the tag's version),
 attaches the tarballs and `SHA256SUMS` to the tag's Release — **creating the Release from the annotated tag's message
-if step 8 has not run yet** — and pushes `ghcr.io/richardtathata/mycelium:vNEW` and `:latest`. Watch it:
-`gh run watch "$(gh run list --workflow release.yml --limit 1 --json databaseId --jq '.[0].databaseId')"`. A red run
-means no artefacts and no image for this tag; fix and re-run the workflow on the same tag (it uploads with `--clobber`).
+if step 8 has not run yet** — and pushes `ghcr.io/richardtathata/mycelium:NEW` (the image tag has no `v`) and
+`:latest`. Watch it:
+`gh run watch "$(gh run list --workflow release.yml --event push --limit 1 --json databaseId --jq '.[0].databaseId')"`
+(`--event push`: the workflow also dry-runs on pull requests, and `--limit 1` without it returns one of those). A red
+run means no artefacts and no image for this tag; fix and **re-run all jobs** on the same tag (it uploads with
+`--clobber`; a *re-run failed jobs* after one Linux arch failed leaves the other arch's untagged image in ghcr and a
+Release with no assets until the full re-run). Note that `--latest`, on the Release and on the image tag, is
+unconditional: a patch cut from an older line after a newer MINOR relabels both — cut such a patch knowing that, or
+re-point `latest` by hand afterwards.
 
 ## 8. Publish the GitHub Release
 
@@ -176,7 +182,9 @@ release was cut, and re-summarising it later produces a second account that can 
 first. Since X0 the workflow creates the Release itself when this step has not, from the same tag message, so
 running this step after the workflow answers *release already exists*; then this step is only the check that the
 assets are attached: `gh release view vNEW --json assets --jq '.assets[].name'` must list three tarballs and
-`SHA256SUMS`. `--verify-tag` refuses if the tag is not on the remote, which catches the "tagged but never
+`SHA256SUMS`. **Once, after the first tag that publishes an image:** a package first created by a workflow's token is
+private, whatever the repository's visibility — open the package's settings on GitHub, set it public, then
+`docker pull ghcr.io/richardtathata/mycelium:NEW` from a logged-out shell. `--verify-tag` refuses if the tag is not on the remote, which catches the "tagged but never
 pushed" mistake.
 
 > **`--notes-from-tag` is silently incompatible with `--repo`.** Together they print a usage error
