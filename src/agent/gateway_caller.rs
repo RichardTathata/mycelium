@@ -180,6 +180,10 @@ pub struct GatewayCaller {
     pub issued_at_ms: u64,
     /// How the context was attested.
     pub attestation: CallerAttestation,
+    /// A `correlation` or `parent` sat in the envelope beside `m` — outside every signature, never read
+    /// (adopter-surface X4). Set by [`verify`] after the signature held, counted once per request by the receive
+    /// boundary ([`verify_received`]) or by the provider check when it is the first to verify.
+    pub(crate) misplaced_causal: bool,
     /// The mandate the caller presented (`params._meta.mandate` at the gateway, or a member's own
     /// grant on a direct call), **carried, not verified** (closure plan C2). It is not covered by the
     /// gateway's signature and needs not be: the grant is signed by its establishing authority and the
@@ -998,12 +1002,6 @@ pub(crate) fn verify(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<GatewayCa
     };
     let env: Envelope =
         serde_json::from_slice(&env_bytes).map_err(|e| CallerError::Malformed(e.to_string()))?;
-    // X4: a causal field in the envelope is never read (the application payload is its only place); counted by door.
-    if env.x.contains_key("correlation") || env.x.contains_key("parent") {
-        ctx.causal_misplaced.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        #[cfg(feature = "metrics")]
-        metrics::counter!("mycelium_causal_fields_misplaced_total", "door" => "caller_envelope", "placement" => "envelope").increment(1);
-    }
     if env.v != CALLER_CONTEXT_VERSION {
         return Err(CallerError::Malformed(format!("unsupported envelope version {}", env.v)));
     }
@@ -1087,6 +1085,7 @@ pub(crate) fn verify(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<GatewayCa
     }
 
     Ok(Some(GatewayCaller {
+        misplaced_causal: env.x.contains_key("correlation") || env.x.contains_key("parent"),
         principal: env.p,
         via,
         scopes: env.s,
@@ -1110,6 +1109,10 @@ pub(crate) fn verify_received(ctx: &TaskCtx, req: &RpcRequest) -> Result<Option<
     })?;
     if let Some(c) = &verified {
         ctx.caller_replay.admit(c, ctx.hlc.decision_now_ms(), ctx.config.max_clock_drift_ms)?;
+        // X4: counted here, once per request, after the envelope verified — a forged one moves nothing.
+        if c.misplaced_causal {
+            ctx.note_misplaced_causal("caller_envelope");
+        }
     }
     Ok(verified)
 }
@@ -1643,6 +1646,7 @@ mod tests {
         let g1 = NodeId::new("127.0.0.1", 9001).unwrap();
         let g2 = NodeId::new("127.0.0.1", 9002).unwrap();
         let mk = |via: &NodeId, p: String| GatewayCaller {
+            misplaced_causal: false,
             principal: p, via: via.clone(), scopes: vec![], issued_at_ms: 0,
             attestation: CallerAttestation::UnauthenticatedMesh, mandate: None, resource: None, envelope_id: None,
         };
@@ -1888,15 +1892,21 @@ mod tests {
         let receive = |f: Bytes| verify_received(&a.task_ctx, &request_from(a.node_id(), "k", f)).map(|_| ()).map_err(|e| e.code());
         // In the envelope, beside `m`: verifies, counted, never read (the envelope's own fields are unchanged).
         let in_envelope = reframe(&framed, |v| { v["parent"] = serde_json::json!(hash); v["correlation"] = serde_json::json!("run-1"); });
-        assert_eq!(receive(in_envelope), Ok(()), "an unknown envelope field is not a refusal");
-        assert_eq!(a.task_ctx.causal_misplaced.load(std::sync::atomic::Ordering::Relaxed), 1, "counted against the envelope door");
+        assert_eq!(receive(in_envelope.clone()), Ok(()), "an unknown envelope field is not a refusal");
+        assert_eq!(a.task_ctx.misplaced_causal_counts().get("caller_envelope").copied(), Some(1), "counted against the envelope door, by name");
+        // A second verification of the same request (the provider check after the receive boundary) counts nothing more.
+        assert!(verify(&a.task_ctx, &request_from(a.node_id(), "k", in_envelope)).is_ok());
+        assert_eq!(a.task_ctx.misplaced_causal_counts().get("caller_envelope").copied(), Some(1), "once per request, not per verification");
         // In the payload, altered after signing: refused by the digest the signature covers.
         let Frame::Framed { envelope, .. } = split_frame(&framed) else { panic!("framed") };
         let altered_app = Bytes::from(app.iter().map(|&b| if b == b'a' { b'b' } else { b }).collect::<Vec<u8>>());
         assert_ne!(altered_app, app);
         let altered = raw_frame(&envelope, &altered_app);
         assert_eq!(receive(altered), Err("bad_signature"), "a parent altered after signing verified");
-        assert_eq!(a.task_ctx.causal_misplaced.load(std::sync::atomic::Ordering::Relaxed), 1, "an altered payload is not a misplacement");
+        // A forged envelope moves nothing: the count follows a signature that held.
+        let forged = reframe(&framed, |v| { v["parent"] = serde_json::json!(hash); v["sig"] = serde_json::json!("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="); v.as_object_mut().unwrap().remove("sn"); v.as_object_mut().unwrap().remove("n"); v.as_object_mut().unwrap().remove("o"); });
+        assert!(receive(forged).is_err(), "a forged envelope is refused");
+        assert_eq!(a.task_ctx.misplaced_causal_counts().get("caller_envelope").copied(), Some(1), "an altered payload or a forgery is not a misplacement");
         a.shutdown().await;
     }
 
@@ -1908,6 +1918,7 @@ mod tests {
         let w = ReplayWindows::default();
         let (gone, live) = (NodeId::new("127.0.0.1", 9611).unwrap(), NodeId::new("127.0.0.1", 9612).unwrap());
         let caller = |via: &NodeId, t: u64, id: u64| GatewayCaller {
+            misplaced_causal: false,
             principal: "p".into(), via: via.clone(), scopes: vec![], issued_at_ms: t,
             attestation: CallerAttestation::Signed { signer: [1u8; 32] }, mandate: None, resource: None, envelope_id: Some(id),
         };
@@ -1930,6 +1941,7 @@ mod tests {
         let w = ReplayWindows::default();
         let via = NodeId::new("127.0.0.1", 9601).unwrap();
         let caller = |t: u64, id: u64| GatewayCaller {
+            misplaced_causal: false,
             principal: "oidc:idp/alice".into(), via: via.clone(), scopes: vec![], issued_at_ms: t,
             attestation: CallerAttestation::Signed { signer: [1u8; 32] }, mandate: None, resource: None, envelope_id: Some(id),
         };

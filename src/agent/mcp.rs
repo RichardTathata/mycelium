@@ -189,7 +189,7 @@ where
         // C4: the admission (a cohort-budget slot, if a budget is attached) is held across the
         // handler, so the call counts as in flight until it returns.
         #[cfg(all(feature = "gateway", feature = "tls"))]
-        match super::provider_enforcement::check(&ctx, &req).await {
+        match super::provider_enforcement::check(&ctx, &req, false).await {
             super::provider_enforcement::Checked::Done(Ok(admission)) => {
                 serve_mcp_call(&ctx, &req, &rpc_req, call, admission, &handler).await
             }
@@ -413,7 +413,7 @@ pub(super) async fn run_mcp_client_task(
 
         // Closure plan C3: the bridged external server is protected at this node's boundary.
         #[cfg(all(feature = "gateway", feature = "tls"))]
-        match super::provider_enforcement::check(&ctx, &req).await {
+        match super::provider_enforcement::check(&ctx, &req, true).await {
             super::provider_enforcement::Checked::Done(Ok(_admission)) => {
                 forward_bridged(&ctx, &http_client, &server_url, &req, &rpc_req).await
             }

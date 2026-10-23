@@ -221,7 +221,9 @@ pub(crate) enum Checked {
 /// [`Checked::Waiting`] for the serve loop to settle beside itself ([`DeferredChecks`]); otherwise the whole check
 /// runs here. Nothing is decided twice and no second envelope is built. Every serve loop on this node — `rpc_rx`,
 /// the MCP tool loop, the bridged MCP loop and the `rpc/serve` stream — settles a `Waiting` check that way.
-pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest) -> Checked {
+/// `already_verified`: the receive boundary ran `gateway_caller::verify_received` on this request first, so its
+/// counting is done; `false` where this check is the request's first verification (the native MCP loop).
+pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest, already_verified: bool) -> Checked {
     let enforcing = ctx.provider_enforcement.load(Ordering::Acquire);
     let budget = ctx.cohort_budget.get();
     if !enforcing && budget.is_none() {
@@ -245,6 +247,9 @@ pub(crate) async fn check(ctx: &Arc<TaskCtx>, req: &RpcRequest) -> Checked {
             return Checked::Done(Err(ProviderRefusal::local("caller_context_refused", format!("caller context refused: {e}"))))
         }
     };
+    if !already_verified && caller.as_ref().is_some_and(|c| c.misplaced_causal) {
+        ctx.note_misplaced_causal("caller_envelope");
+    }
     let (principal, scopes, mandate, claim) = match caller {
         Some(c) => (c.principal, c.scopes, c.mandate, c.resource),
         None => (gateway_caller::node_principal(req.sender()), Vec::new(), None, None),

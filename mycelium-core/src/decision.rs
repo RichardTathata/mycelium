@@ -239,6 +239,8 @@ impl DecisionRecord {
             + self.profile.as_ref().map_or(0, |p| p.name.len())
             + self.target.as_ref().map_or(0, String::len)
             + self.effect.as_ref().map_or(0, String::len)
+            + self.correlation.as_ref().map_or(0, String::len)
+            + self.parent.as_ref().map_or(0, String::len)
             + self.inputs.iter().map(|i| INPUT_OVERHEAD_BYTES + i.source.len() + i.value.len()).sum::<usize>()
     }
 }

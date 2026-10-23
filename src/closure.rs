@@ -67,6 +67,8 @@ pub struct Record {
     pub index: usize,
     /// The content hash of its bytes as written.
     pub hash: String,
+    /// `true` when an earlier file already held this record (the same bytes): listed once, counted here.
+    pub duplicate: bool,
     /// `decided` / `execution` / `correction` for evidence; the rule id for a decision.
     pub kind: String,
     pub correlation: Option<String>,
@@ -74,7 +76,7 @@ pub struct Record {
     pub operation_id: Option<String>,
     pub attempt_id: Option<String>,
     pub at_ms: Option<u64>,
-    /// The node that wrote it: an evidence record's `via` (the enforcement point's node), a decision's `node`.
+    /// The node that wrote it: an evidence record's `node` (the enforcing node, as it names itself), a decision's `node`.
     pub node: Option<String>,
     /// The enforcement point, for evidence.
     pub enforcement_point: Option<String>,
@@ -90,6 +92,8 @@ pub struct FileInfo {
     pub records: usize,
     /// Lines that did not parse (a trace) or frames that were not evidence JSON (a journal) — counted, never skipped silently.
     pub unparsed: usize,
+    /// Records an earlier file already held, byte for byte: a copied journal counts as no journal of its own.
+    pub duplicates: usize,
     /// The sink's counters from `decisions.stats.json` beside a trace, when present: records dropped, by reason.
     pub dropped: Option<BTreeMap<String, u64>>,
 }
@@ -110,14 +114,14 @@ impl Corpus {
         for p in paths {
             let bytes = std::fs::read(p)?;
             let given = p.display().to_string();
-            if looks_like_jsonl(&bytes) {
-                let text = String::from_utf8_lossy(&bytes);
-                let stats = sibling_stats(p);
-                corpus.add_trace(&given, &text, stats);
-            } else {
+            if looks_like_journal(&bytes) {
                 // The journal mechanism is in every build (the rights ledger uses it); the evidence profile is not.
                 let frames = crate::agent::journal::read_journal(p)?;
                 corpus.add_journal(&given, &frames);
+            } else {
+                let text = String::from_utf8_lossy(&bytes);
+                let stats = sibling_stats(p);
+                corpus.add_trace(&given, &text, stats);
             }
         }
         Ok(corpus)
@@ -125,7 +129,7 @@ impl Corpus {
 
     /// A trace from its text (one record per line); `dropped` is the sink's counters when known.
     pub fn add_trace(&mut self, file: &str, text: &str, dropped: Option<BTreeMap<String, u64>>) {
-        let (mut n, mut unparsed) = (0usize, 0usize);
+        let (mut n, mut unparsed, mut duplicates) = (0usize, 0usize, 0usize);
         for line in text.lines() {
             if line.trim().is_empty() {
                 continue;
@@ -133,38 +137,38 @@ impl Corpus {
             match serde_json::from_str::<Value>(line) {
                 Ok(v) if v.is_object() => {
                     let hash = content_hash(line.as_bytes());
-                    self.push(record_of(SourceKind::Trace, file, n, hash, &v));
-                    n += 1;
+                    if self.push(record_of(SourceKind::Trace, file, n, hash, &v)) { n += 1 } else { duplicates += 1 }
                 }
                 _ => unparsed += 1,
             }
         }
-        self.files.push(FileInfo { path: file.into(), kind: SourceKind::Trace, records: n, unparsed, dropped });
+        self.files.push(FileInfo { path: file.into(), kind: SourceKind::Trace, records: n, unparsed, duplicates, dropped });
     }
 
     /// A journal from its frames (each the exact bytes one append wrote).
     pub fn add_journal(&mut self, file: &str, frames: &[Vec<u8>]) {
-        let (mut n, mut unparsed) = (0usize, 0usize);
+        let (mut n, mut unparsed, mut duplicates) = (0usize, 0usize, 0usize);
         for frame in frames {
             match serde_json::from_slice::<Value>(frame) {
                 Ok(v) if v.is_object() => {
                     let hash = content_hash(frame);
-                    self.push(record_of(SourceKind::Journal, file, n, hash, &v));
-                    n += 1;
+                    if self.push(record_of(SourceKind::Journal, file, n, hash, &v)) { n += 1 } else { duplicates += 1 }
                 }
                 _ => unparsed += 1,
             }
         }
-        self.files.push(FileInfo { path: file.into(), kind: SourceKind::Journal, records: n, unparsed, dropped: None });
+        self.files.push(FileInfo { path: file.into(), kind: SourceKind::Journal, records: n, unparsed, duplicates, dropped: None });
     }
 
-    fn push(&mut self, r: Record) {
-        // Two files holding one record (a journal and its copy) are one record: the first wins, the second is skipped.
+    /// Keep a record unless an earlier file already held the same bytes: a journal and its copy are one journal, and
+    /// the copy is counted as duplicates, never as a second node's journal.
+    fn push(&mut self, r: Record) -> bool {
         if self.by_hash.contains_key(&r.hash) {
-            return;
+            return false;
         }
         self.by_hash.insert(r.hash.clone(), self.records.len());
         self.records.push(r);
+        true
     }
 
     /// The record with this hash, if any file holds it.
@@ -172,8 +176,9 @@ impl Corpus {
         self.by_hash.get(hash).map(|&i| &self.records[i])
     }
 
+    /// Journals that contributed at least one record of their own: a copy of another file is not one.
     fn journals(&self) -> usize {
-        self.files.iter().filter(|f| f.kind == SourceKind::Journal).count()
+        self.files.iter().filter(|f| f.kind == SourceKind::Journal && f.records > 0).count()
     }
 
     fn traces(&self) -> usize {
@@ -195,9 +200,14 @@ impl Corpus {
             (0..self.records.len()).filter(|&i| self.records[i].correlation.as_deref() == Some(correlation)).collect();
         let ops: HashSet<&str> = captured.iter().filter_map(|&i| self.records[i].operation_id.as_deref()).collect();
         let mut rows: Vec<(usize, &'static str)> = captured.iter().map(|&i| (i, "captured")).collect();
+        let mut other_correlation = 0usize;
         for (i, r) in self.records.iter().enumerate() {
-            if r.correlation.is_none() && r.operation_id.as_deref().is_some_and(|o| ops.contains(o)) {
-                rows.push((i, "reconstructed"));
+            if r.operation_id.as_deref().is_some_and(|o| ops.contains(o)) {
+                match &r.correlation {
+                    None => rows.push((i, "reconstructed")),
+                    Some(c) if c != correlation => other_correlation += 1,
+                    _ => {}
+                }
             }
         }
         if rows.is_empty() {
@@ -217,6 +227,9 @@ impl Corpus {
             rows.iter().filter(|(_, m)| *m == "captured").count(),
             rows.iter().filter(|(_, m)| *m == "reconstructed").count(),
         ));
+        if other_correlation > 0 {
+            out.push_str(&format!("{other_correlation} record(s) of these operations carry a different correlation and are not in this chain.\n"));
+        }
         self.foot(&mut out);
         out
     }
@@ -245,37 +258,8 @@ impl Corpus {
             self.foot(&mut out);
             return out;
         };
-        // Children by parent hash.
-        let mut children: HashMap<&str, Vec<usize>> = HashMap::new();
-        for (i, r) in self.records.iter().enumerate() {
-            if let Some(p) = &r.parent {
-                children.entry(p.as_str()).or_default().push(i);
-            }
-        }
-        let mut seen: HashSet<String> = HashSet::new();
-        let mut order: Vec<(usize, usize)> = Vec::new(); // (depth, index)
-        let mut queue: VecDeque<(usize, usize)> = VecDeque::new();
-        let root_i = self.by_hash[hash];
-        seen.insert(hash.to_string());
-        queue.push_back((0, root_i));
-        let mut boundaries = 0usize;
-        while let Some((depth, i)) = queue.pop_front() {
-            order.push((depth, i));
-            let r = &self.records[i];
-            if r.enforcement_point.as_deref() == Some(FEDERATION_EDGE) {
-                boundaries += 1;
-                continue;
-            }
-            if let Some(kids) = children.get(r.hash.as_str()) {
-                let mut kids = kids.clone();
-                self.sort_indices(&mut kids);
-                for k in kids {
-                    if seen.insert(self.records[k].hash.clone()) {
-                        queue.push_back((depth + 1, k));
-                    }
-                }
-            }
-        }
+        let order = self.visit(hash);
+        let boundaries = order.iter().filter(|(_, i)| self.records[*i].enforcement_point.as_deref() == Some(FEDERATION_EDGE)).count();
         let root_parent = root.parent.clone();
         for (depth, i) in &order {
             let r = &self.records[*i];
@@ -291,10 +275,11 @@ impl Corpus {
             out.push_str(&self.hole_reason());
             out.push('\n');
         }
-        // Holes: a parent cited by a record in the closure's files that no file holds, beneath this root's tree.
+        // Holes: every parent cited anywhere in the files given that no file holds — the root's own, printed above,
+        // excepted. Over all the files, not the root's tree: a hole outside the tree may be where the tree continues.
         let mut holes: BTreeMap<String, usize> = BTreeMap::new();
         for r in &self.records {
-            if let Some(p) = &r.parent && self.get(p).is_none() && p != hash {
+            if let Some(p) = &r.parent && self.get(p).is_none() && p != hash && Some(p) != root_parent.as_ref() {
                 *holes.entry(p.clone()).or_default() += 1;
             }
         }
@@ -309,6 +294,46 @@ impl Corpus {
         }
         self.foot(&mut out);
         out
+    }
+
+    /// The closure's members in render order, as `(depth, index)`: the root, then breadth-first every record whose
+    /// `parent` names a member, each once; a federation edge is not expanded.
+    fn visit(&self, hash: &str) -> Vec<(usize, usize)> {
+        let mut children: HashMap<&str, Vec<usize>> = HashMap::new();
+        for (i, r) in self.records.iter().enumerate() {
+            if let Some(p) = &r.parent {
+                children.entry(p.as_str()).or_default().push(i);
+            }
+        }
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut order: Vec<(usize, usize)> = Vec::new();
+        let mut queue: VecDeque<(usize, usize)> = VecDeque::new();
+        let Some(&root_i) = self.by_hash.get(hash) else { return order };
+        seen.insert(hash.to_string());
+        queue.push_back((0, root_i));
+        while let Some((depth, i)) = queue.pop_front() {
+            order.push((depth, i));
+            let r = &self.records[i];
+            if r.enforcement_point.as_deref() == Some(FEDERATION_EDGE) {
+                continue;
+            }
+            if let Some(kids) = children.get(r.hash.as_str()) {
+                let mut kids = kids.clone();
+                self.sort_indices(&mut kids);
+                for k in kids {
+                    if seen.insert(self.records[k].hash.clone()) {
+                        queue.push_back((depth + 1, k));
+                    }
+                }
+            }
+        }
+        order
+    }
+
+    /// The hashes of a closure's members, the root first — what [`closure`](Self::closure) renders, for a caller
+    /// that wants the set rather than the text (the fuzz hook asserts each appears once).
+    pub fn closure_members(&self, hash: &str) -> Vec<String> {
+        self.visit(hash).into_iter().map(|(_, i)| self.records[i].hash.clone()).collect()
     }
 
     fn cited_by(&self, hash: &str, out: &mut String) {
@@ -340,7 +365,8 @@ impl Corpus {
                 None if f.kind == SourceKind::Trace => "; sink counters not given".to_string(),
                 None => String::new(),
             };
-            out.push_str(&format!("  {}: {} record(s), {} unparsed{d} ({})\n", f.kind.word(), f.records, f.unparsed, f.path));
+            let dup = if f.duplicates > 0 { format!(", {} duplicate(s) of an earlier file's records", f.duplicates) } else { String::new() };
+            out.push_str(&format!("  {}: {} record(s), {} unparsed{dup}{d} ({})\n", f.kind.word(), f.records, f.unparsed, f.path));
         }
     }
 
@@ -376,19 +402,28 @@ impl Corpus {
         let corr = r.correlation.as_deref().map(|c| format!(" correlation={c}")).unwrap_or_default();
         let op = r.operation_id.as_deref().map(|o| format!(" op={o}")).unwrap_or_default();
         let node = r.node.as_deref().map(|n| format!(" @{n}")).unwrap_or_default();
-        format!("[{mark}] {} {} {short} {at}{node}{corr}{op}{parent} — {}", r.source.word(), r.kind, r.summary)
+        let point = r.enforcement_point.as_deref().map(|p| format!(" point={p}")).unwrap_or_default();
+        format!("[{mark}] {} {} {short} {at}{node}{point}{corr}{op}{parent} — {}", r.source.word(), r.kind, r.summary)
     }
 }
 
-/// A trace is text whose first non-blank line is a JSON object; a journal is length-prefixed frames.
-fn looks_like_jsonl(bytes: &[u8]) -> bool {
-    let first = bytes.iter().position(|b| !b.is_ascii_whitespace()).unwrap_or(0);
-    bytes.get(first) == Some(&b'{')
-        && std::str::from_utf8(bytes).ok().and_then(|s| s.lines().find(|l| !l.trim().is_empty()).map(|l| serde_json::from_str::<Value>(l).is_ok())).unwrap_or(false)
+/// A journal is length-prefixed frames: the file's first four bytes are a little-endian length that fits the file,
+/// and that frame's body is a JSON object. Tried first — a text file is read as a journal only if it is one, so a
+/// trace line that happens to spell a length cannot pass (an empty file is neither; it reads as an empty trace).
+fn looks_like_journal(bytes: &[u8]) -> bool {
+    if bytes.len() < 4 {
+        return false;
+    }
+    let len = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+    len > 0 && bytes.len() >= 4 + len && serde_json::from_slice::<Value>(&bytes[4..4 + len]).is_ok_and(|v| v.is_object())
 }
 
-/// `decisions.stats.json` beside a trace, as the dropped counters it holds.
+/// `decisions.stats.json` beside a trace **named `decisions.jsonl`** (the stem's and the bundle's convention) — a
+/// trace under another name in a shared directory is given no counters rather than another trace's.
 fn sibling_stats(trace: &Path) -> Option<BTreeMap<String, u64>> {
+    if trace.file_name()?.to_str()? != "decisions.jsonl" {
+        return None;
+    }
     let p = trace.parent()?.join("decisions.stats.json");
     let v: Value = serde_json::from_slice(&std::fs::read(p).ok()?).ok()?;
     let mut m = BTreeMap::new();
@@ -407,7 +442,8 @@ fn str_of(v: &Value, k: &str) -> Option<String> {
 /// One record from its JSON, whichever schema wrote it.
 fn record_of(source: SourceKind, file: &str, index: usize, hash: String, v: &Value) -> Record {
     let schema = str_of(v, "schema").unwrap_or_default();
-    let evidence = schema.starts_with("mycelium.ae-evidence") || v.get("enforcement_point").is_some();
+    // `mycelium.ae/evidence/1` is what `AeEvidence` writes; a record with an enforcement point is one regardless.
+    let evidence = schema.starts_with("mycelium.ae/evidence") || v.get("enforcement_point").is_some();
     let (kind, node, summary, enforcement_point) = if evidence {
         let kind = str_of(v, "kind").unwrap_or_else(|| "decided".into());
         let decision = v.get("decision").map(|d| d.as_str().map(str::to_owned).unwrap_or_else(|| d.to_string())).unwrap_or_default();
@@ -419,7 +455,7 @@ fn record_of(source: SourceKind, file: &str, index: usize, hash: String, v: &Val
             str_of(v, "resource").unwrap_or_default(),
             str_of(v, "policy_revision").unwrap_or_default()
         );
-        (kind, str_of(v, "via"), summary, str_of(v, "enforcement_point"))
+        (kind, str_of(v, "node"), summary, str_of(v, "enforcement_point"))
     } else {
         let rule = str_of(v, "rule").unwrap_or_else(|| "?".into());
         let summary = format!(
@@ -436,6 +472,7 @@ fn record_of(source: SourceKind, file: &str, index: usize, hash: String, v: &Val
         file: file.into(),
         index,
         hash,
+        duplicate: false,
         kind,
         correlation: str_of(v, "correlation"),
         parent: str_of(v, "parent"),
@@ -457,9 +494,13 @@ pub fn fuzz_corpus_render(data: &[u8]) -> bool {
     let mut c = Corpus::default();
     c.add_trace("fuzz", text, None);
     for r in c.records.clone() {
+        let members = c.closure_members(&r.hash);
+        assert_eq!(members.first(), Some(&r.hash), "a closure begins with its root");
+        let distinct: HashSet<&String> = members.iter().collect();
+        assert_eq!(distinct.len(), members.len(), "a closure visits each record once");
         let out = c.closure(&r.hash, None);
-        let own = out.matches(&r.hash[..12.min(r.hash.len())]).count();
-        assert!(own >= 1, "a closure must print its own root");
+        let rendered = out.lines().filter(|l| l.trim_start().starts_with("[captured")).count();
+        assert_eq!(rendered, members.len(), "every member is rendered once, and nothing else is");
         if let Some(id) = &r.correlation {
             let _ = c.chain(id);
         }
@@ -473,10 +514,12 @@ mod tests {
     use serde_json::json;
 
     fn evidence(at: u64, op: &str, kind: &str, correlation: Option<&str>, parent: Option<&str>, point: &str) -> String {
+        // The shape `AeEvidence` writes (`mycelium.ae/evidence/1`, `node`); `a_real_evidence_record_is_attributed_to_its_node`
+        // below holds this helper to the product's own serialisation.
         let mut v = json!({
-            "schema": "mycelium.ae-evidence/1", "kind": kind, "at_ms": at, "subject": "oidc:idp/alice", "operation": "tools/call",
+            "schema": "mycelium.ae/evidence/1", "kind": kind, "at_ms": at, "subject": "oidc:idp/alice", "operation": "tools/call",
             "resource": "tool:post@n1", "decision": "permit", "execution": "attempted", "policy_revision": "rev-1",
-            "enforcement_point": point, "operation_id": op, "attempt_id": format!("{op}/1"), "via": "127.0.0.1:7001"
+            "enforcement_point": point, "operation_id": op, "attempt_id": format!("{op}/1"), "node": "127.0.0.1:7001"
         });
         if let Some(c) = correlation { v["correlation"] = json!(c); }
         if let Some(p) = parent { v["parent"] = json!(p); }
@@ -498,7 +541,7 @@ mod tests {
         let mut c = Corpus::default();
         let decided = evidence(10, "op-1", "decided", Some("run-7"), None, "gateway:mcp/tools/call");
         let executed = evidence(10, "op-1", "execution", None, None, "gateway:mcp/tools/call");
-        let stranger = json!({"schema": "mycelium.ae-evidence/1", "kind": "decided", "subject": "x", "enforcement_point": "p"}).to_string();
+        let stranger = json!({"schema": "mycelium.ae/evidence/1", "kind": "decided", "subject": "x", "enforcement_point": "p"}).to_string();
         c.add_journal("a.log", &[decided.clone().into_bytes(), executed.into_bytes(), stranger.into_bytes()]);
         let h = content_hash(decided.as_bytes());
         c.add_trace("d.jsonl", &format!("{}\n{}\n", decision(1, Some("run-7"), Some(&h)), decision(2, None, None)), None);
@@ -563,7 +606,47 @@ mod tests {
         assert!(out.contains("a trace without decisions.stats.json beside it reports none, which is not zero"), "{out}");
     }
 
-    /// A journal file and a trace file are told apart by content, and a trace's sibling counters are read.
+    /// A real evidence record — serialised by `AeEvidence` itself, not hand-written — is attributed to the node that
+    /// enforced it, so a chain across two nodes' journals is told apart by node and the fleet line counts them.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    #[test]
+    fn a_real_evidence_record_is_attributed_to_its_node() {
+        use crate::agent::action_evaluator::{ActionEnvelope, ActionMapping, AeEvidence, Decision, Execution};
+        let via = crate::NodeId::new("127.0.0.1", 7101).unwrap();
+        let env = ActionEnvelope::builder("oidc:idp/alice", via, "tools/call", "tool:post@n1")
+            .identities("op-1", "op-1/1")
+            .mapping(ActionMapping::mapped("cat", "1"))
+            .causal(crate::causal::CausalFields { correlation: Some("run-1".into()), parent: None })
+            .build();
+        let line = serde_json::to_vec(&AeEvidence::for_decision(&env, &Decision::permit("ok", "rev-1"), Execution::Attempted, "gateway:mcp/tools/call")).unwrap();
+        let mut c = Corpus::default();
+        c.add_journal("n1.log", &[line]);
+        assert_eq!(c.records[0].node.as_deref(), Some("127.0.0.1:7101"));
+        assert_eq!(c.records[0].kind, "decided");
+        let out = c.chain("run-1");
+        assert!(out.contains("@127.0.0.1:7101 point=gateway:mcp/tools/call correlation=run-1"), "{out}");
+        assert!(c.closure(&c.records[0].hash.clone(), None).contains("the records name 1 node(s)"), "a journal-writing node is counted");
+    }
+
+    /// A copy of a journal is one journal: its records are counted as duplicates, it adds no node, and the fleet
+    /// line is not satisfied by it. A record of the chain's operation under another correlation is reported.
+    #[test]
+    fn a_copied_journal_is_counted_as_duplicates_not_as_a_second_journal() {
+        let mut c = Corpus::default();
+        let one = evidence(1, "op-1", "decided", Some("run-1"), None, "gateway:mcp/tools/call");
+        let again = evidence(2, "op-1", "execution", Some("run-2"), None, "gateway:mcp/tools/call");
+        c.add_journal("n1.log", &[one.clone().into_bytes(), again.into_bytes()]);
+        c.add_journal("n1-copy.log", &[one.clone().into_bytes()]);
+        assert_eq!((c.files[1].records, c.files[1].duplicates), (0, 1));
+        let out = c.closure(&content_hash(one.as_bytes()), Some(2));
+        assert!(out.contains("INCOMPLETE: 1 journal(s) given for a fleet of 2 nodes"), "{out}");
+        assert!(out.contains("1 duplicate(s) of an earlier file's records"), "{out}");
+        let chain = c.chain("run-1");
+        assert!(chain.contains("1 record(s) of these operations carry a different correlation"), "{chain}");
+    }
+
+    /// A journal file and a trace file are told apart by the journal's own frame, and a trace's sibling counters are
+    /// read only beside a `decisions.jsonl`.
     #[test]
     fn files_are_sniffed_and_sibling_stats_read() {
         let dir = std::env::temp_dir().join(format!("closure-sniff-{}", std::process::id()));
@@ -575,6 +658,19 @@ mod tests {
         assert_eq!((c.files[0].kind, c.files[0].records, c.files[0].unparsed), (SourceKind::Trace, 1, 1));
         assert_eq!(c.files[0].dropped.as_ref().unwrap().values().sum::<u64>(), 3);
         assert!(Corpus::load(&[dir.join("missing")]).is_err());
+        // A trace under another name in the same directory borrows no counters; a journal frame is read as a journal.
+        std::fs::write(dir.join("other.jsonl"), format!("{}\n", decision(2, None, None))).unwrap();
+        let o = Corpus::load(&[dir.join("other.jsonl")]).unwrap();
+        assert!(o.files[0].dropped.is_none());
+        let body = evidence(1, "op-1", "decided", None, None, "p");
+        let mut frame = (body.len() as u32).to_le_bytes().to_vec();
+        frame.extend_from_slice(body.as_bytes());
+        std::fs::write(dir.join("evidence.log"), &frame).unwrap();
+        let j = Corpus::load(&[dir.join("evidence.log")]).unwrap();
+        assert_eq!((j.files[0].kind, j.files[0].records), (SourceKind::Journal, 1));
+        std::fs::write(dir.join("empty"), b"").unwrap();
+        let e = Corpus::load(&[dir.join("empty")]).unwrap();
+        assert_eq!((e.files[0].kind, e.files[0].records), (SourceKind::Trace, 0));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

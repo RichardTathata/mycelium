@@ -93,7 +93,7 @@ async fn the_causal_fields_ride_in_the_payload_to_the_gateway_s_and_the_provider
     }
     assert!(recs.iter().all(|r| r.parent.as_deref() != Some(misplaced.as_str()) && r.correlation.as_deref() != Some("run-header")),
         "a field carried as a header was read");
-    assert_eq!(a.task_ctx.causal_misplaced.load(Ordering::Relaxed), 1, "the header is counted against the door");
+    assert_eq!(a.task_ctx.misplaced_causal_counts().get("mcp").copied(), Some(1), "the header is counted against the door, by name");
     // The same call with nothing under `_meta`: both records are roots, no field invented.
     let body = call(http_port, serde_json::json!({"name": "greet", "arguments": {}}), &[]).await;
     assert!(body.get("error").is_none(), "{body}");
@@ -125,5 +125,59 @@ async fn a_malformed_causal_field_is_refused_before_policy_and_never_corrected()
     assert_eq!(ran.load(Ordering::SeqCst), 0, "the tool ran on a malformed request");
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(records(&journal).is_empty(), "a refusal before policy writes no decision");
+    a.shutdown().await;
+}
+
+/// **An inert gateway refuses a malformed field too** (#671's review, finding 9): the fields are checked before the
+/// evaluator question, so a node with no evaluator and no journal still answers `-32602` — and, having no journal,
+/// records nothing of it.
+#[tokio::test]
+async fn an_inert_gateway_refuses_a_malformed_field_before_the_evaluator_question() {
+    let http_port = alloc_port();
+    let gossip_port = alloc_port();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = gossip_port;
+    cfg.http_port = Some(http_port);
+    let a = Arc::new(GossipAgent::new(NodeId::new("127.0.0.1", gossip_port).unwrap(), cfg));
+    a.start().await.unwrap();
+    let ran = Arc::new(AtomicUsize::new(0));
+    let ran2 = Arc::clone(&ran);
+    let handle = a.mcp().register_mcp_tool("greet", serde_json::json!({"type": "object"}), move |_| {
+        let ran = Arc::clone(&ran2);
+        async move { ran.fetch_add(1, Ordering::SeqCst); Ok(serde_json::json!("hi")) }
+    });
+    std::mem::forget(handle);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let body = call(http_port, serde_json::json!({"name": "greet", "arguments": {}, "_meta": {"parent": "nope"}}), &[]).await;
+    assert_eq!(body["error"]["data"]["reason"], "request_malformed", "{body}");
+    assert_eq!(ran.load(Ordering::SeqCst), 0);
+    let body = call(http_port, serde_json::json!({"name": "greet", "arguments": {}, "_meta": {"correlation": "run-1"}}), &[]).await;
+    assert!(body.get("error").is_none(), "a well-formed field passes an inert gateway: {body}");
+    a.shutdown().await;
+}
+
+/// **`POST /gateway/kv` reads the two keys at the body's top level and echoes them on the receipt**; a malformed one
+/// is `400`; a header there is counted against the `kv` door. The SDKs' `set` carries them from their next release.
+#[tokio::test]
+async fn the_kv_route_echoes_the_causal_fields_and_refuses_a_malformed_one() {
+    let http_port = alloc_port();
+    let (a, _journal, _ran) = node(http_port).await;
+    let parent = crate::causal::content_hash(b"a decision");
+    let post = |body: serde_json::Value, header: bool| async move {
+        let mut req = reqwest::Client::new().post(format!("http://127.0.0.1:{http_port}/gateway/kv")).json(&body);
+        if header { req = req.header("x-mycelium-correlation", "run-header"); }
+        let resp = req.send().await.expect("kv set");
+        (resp.status().as_u16(), resp.json::<serde_json::Value>().await.unwrap())
+    };
+    let (status, body) = post(serde_json::json!({"key": "demo/x", "value_b64": "", "correlation": "run-kv", "parent": parent}), true).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!((body["correlation"].as_str(), body["parent"].as_str()), (Some("run-kv"), Some(parent.as_str())), "{body}");
+    let (status, body) = post(serde_json::json!({"key": "demo/x", "value_b64": ""}), false).await;
+    assert_eq!(status, 200);
+    assert!(body.get("correlation").is_none() && body.get("parent").is_none(), "nothing invented: {body}");
+    let (status, body) = post(serde_json::json!({"key": "demo/x", "value_b64": "", "parent": "nope"}), false).await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body["error"].as_str().unwrap().starts_with("parent is not a content hash"), "{body}");
+    assert_eq!(a.task_ctx.misplaced_causal_counts().get("kv").copied(), Some(1));
     a.shutdown().await;
 }

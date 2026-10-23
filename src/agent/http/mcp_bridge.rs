@@ -225,11 +225,7 @@ pub(super) async fn mcp_handler(
 /// signed payload and is never read; it is counted against the door so the misplacement is visible.
 pub(crate) fn note_misplaced_causal_headers(ctx: &crate::agent::TaskCtx, headers: &axum::http::HeaderMap, door: &'static str) {
     if crate::agent::causal::MISPLACED_HEADERS.iter().any(|h| headers.contains_key(*h)) {
-        ctx.causal_misplaced.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        #[cfg(feature = "metrics")]
-        metrics::counter!("mycelium_causal_fields_misplaced_total", "door" => door, "placement" => "header").increment(1);
-        #[cfg(not(feature = "metrics"))]
-        let _ = door;
+        ctx.note_misplaced_causal(door);
     }
 }
 

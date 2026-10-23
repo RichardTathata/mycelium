@@ -55,10 +55,13 @@ its chain back with `mycelium explain --correlation`. The tests: in
 
 ## What it guarantees, and what it does not
 
-- A field in the payload reaches every record the decision produces at that point, unchanged; a field carried as a
-  header or in the caller envelope is never read, and `GET /stats` `causal_fields_misplaced` counts it by door. A
-  `parent` in the payload is covered by the digest the caller envelope's signature binds, so altering it after signing
-  is refused as any altered byte is. The record that carries the fields is the one
+- A field in the payload reaches every record the decision produces at that point, unchanged, and the record names
+  the node that enforced (`node`). A field carried as a header is never read and is counted once per request against
+  the door that saw it — `/mcp`, `/a2a`, the two LLM doors, the federation call and `POST /gateway/kv` — and one in
+  the caller envelope against `caller_envelope`, after its signature held (`GET /stats` `causal_fields_misplaced`, a
+  map by door). A `parent` in the payload is covered by the digest the caller envelope's signature binds, so altering
+  it after signing is refused as any altered byte is. `POST /gateway/rpc/call` runs no preflight and reads no `_meta`:
+  it carries the bytes to the provider unaltered, and refuses the protected kinds. The record that carries the fields is the one
   [`ae.recorded_before_dispatch`](../reference/guarantee-catalogue.md) requires before the dispatch runs.
 - The closure is **authoritative over the evidence journal and best-effort over the decision trace**: the journal
   never drops a record; the sink does, counted, and the reader prints those counts beside any hole. A hole is named —
@@ -67,7 +70,13 @@ its chain back with `mycelium explain --correlation`. The tests: in
 - A closure stops at a federation edge: the partner's journals are private and trust does not compose; the edge's
   record is the leaf, printed as a boundary.
 - Comparison of two traces ignores the fields: two recordings of one run do not diverge on an id alone.
+- The replay bundle carries `decisions.jsonl` as bytes, so the two fields ride through it by construction; the
+  comparison ignores them. `POST /gateway/kv` echoes the fields on its receipt; the SDKs' `set` and A2A verbs carry
+  them from their next release.
 - **Not built in this release** (the plan row is [`adopter-surface.md`](../plans/adopter-surface.md) X4): the
+  scaffold's chain shows the gateway's decision and execution records and the provider's decision — the provider
+  writes no execution record and no receipt is journaled, so "executed, with the receipt's rung" is not yet read off
+  the chain; the
   **door registry** and the member-side doors it lists (signal and wired emits, `bulk_call`, scatter, mailbox, shard
   and overlay emits, the tuple-space `take`, the blackboard, the stem's activation command) — a member's direct call
   carries the fields only as bytes it does not alter, so the provider reads them from an `mcp.invoke` payload and from

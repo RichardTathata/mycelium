@@ -1872,10 +1872,13 @@ check — now reads two keys under the request's `params._meta`: `correlation` (
 `parent` (a 64-character lowercase hex content hash), and refuses a request whose value is present and malformed:
 `PreflightRefusal::Malformed`, reason `request_malformed`, JSON-RPC `-32602`. `POST /gateway/kv` reads the same two
 keys at the body's top level and answers `400`. Before, any value under `_meta` other than `operation_id` and
-`mandate` was ignored. `/mcp` now forwards those two keys to the provider inside the `tools/call` request it sends
-(`params._meta`), so a tool handler receives `_meta` beside `name` and `arguments` when the caller sent it; a caller
-envelope carrying an unknown `correlation` or `parent` field is admitted as before and counted (`GET /stats`
-`causal_fields_misplaced`). `PreflightRefusal` gained the variant (the enum is `#[non_exhaustive]`; a `_` arm must
+`mandate` was ignored — **with or without an evaluator attached**: the check runs before the evaluator question, so an
+inert gateway refuses the malformed request too, and records nothing of it. `/mcp` now forwards those two keys to the
+provider inside the `tools/call` request it sends (`params._meta`); only the provider's enforcement check reads them
+there — a tool handler, in-process or bridged, still receives its `arguments` and never sees `_meta`. A caller envelope
+carrying an unknown `correlation` or `parent` field is admitted as before and counted once per request, after its
+signature held (`GET /stats` `causal_fields_misplaced`, a map by door). `AeEvidence` also gained `node`, the enforcing
+node as it names itself, absent on older records. `PreflightRefusal` gained the variant (the enum is `#[non_exhaustive]`; a `_` arm must
 already fail closed); `ActionEnvelope`, `AeEvidence`, `DecisionRecord` and `WriteReceipt` gained two optional fields
 (all four are `#[non_exhaustive]`, built through their builders); the evidence record's serialised form is unchanged
 when neither is set.
@@ -1885,9 +1888,10 @@ decision across nodes without a coordinator; a field placed outside the signed p
 signature that still verifies (2.12.0's lesson), so it is refused by placement; and a malformed value corrected or
 dropped would leave a record that reads as a root.
 
-**Migration.** A caller that put other data under `_meta.correlation` or `_meta.parent` renames it. A tool handler
-that validates its `params` strictly admits `_meta`. An evaluator matching `PreflightRefusal` by name adds the arm or
-keeps its `_`. Nothing else changes for a caller that sends neither key.
+**Migration.** A caller that put other data under `_meta.correlation` or `_meta.parent` renames it. An evaluator
+matching `PreflightRefusal` by name adds the arm or keeps its `_`. A reader of `/stats` that took
+`causal_fields_misplaced` as a number (it was never released as one) reads the map. Nothing else changes for a caller
+that sends neither key.
 
 ## 57. `validate()` no longer creates the persistence base path (2.37.0, adopter-surface X1)
 

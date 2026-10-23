@@ -845,7 +845,7 @@ so, and the reader compute it (adopter-surface X4, [the feature page](../feature
 Both go under `params._meta`, beside `operation_id` and `mandate` — in the **application payload and nowhere
 else**. The caller envelope's signature covers a digest of that payload, so a field placed outside it (a header, a
 field in the envelope) could be re-pointed under a signature that still verifies; such a field is never read, and
-`GET /stats` `causal_fields_misplaced` counts it by door. A field that is present and malformed is refused before any
+`GET /stats` `causal_fields_misplaced` counts it once per request, by door. A field that is present and malformed is refused before any
 policy question (`request_malformed`, JSON-RPC `-32602`), never corrected: a silently emptied parent would read as a
 root.
 

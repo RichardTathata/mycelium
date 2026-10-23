@@ -828,8 +828,9 @@ pub(crate) struct TaskCtx {
     /// (`gateway_caller::verify_received`), so a captured envelope is not served twice.
     pub(crate) caller_replay: gateway_caller::ReplayWindows,
     /// A `correlation` or `parent` carried where it is never read — a header at an HTTP door, or a field in the caller
-    /// envelope (adopter-surface X4): counted by door, the record's field left empty. `GET /stats` `causal_fields_misplaced`.
-    pub(crate) causal_misplaced: std::sync::atomic::AtomicU64,
+    /// envelope (adopter-surface X4): counted **by door**, the record's field left empty. `GET /stats`
+    /// `causal_fields_misplaced` is the map; lock-free (papaya), no lock-order row.
+    pub(crate) causal_misplaced: papaya::HashMap<&'static str, std::sync::atomic::AtomicU64>,
     /// Whether `/a2a` is mounted (`with_a2a`), so `start()` can say what that exposes.
     #[cfg(feature = "a2a")]
     pub(crate) a2a_mounted: AtomicBool,
@@ -874,6 +875,21 @@ pub(crate) struct TaskCtx {
     /// `seal_and_write` mirrors each sealed record here (bounded, drop-on-full).
     #[cfg(feature = "compliance")]
     pub(crate) audit_sink_tx: std::sync::OnceLock<tokio::sync::mpsc::Sender<audit::SignedAuditRecord>>,
+}
+
+impl TaskCtx {
+    /// X4: a causal field carried where it is never read — counted against the door that saw it, once per request.
+    pub(crate) fn note_misplaced_causal(&self, door: &'static str) {
+        self.causal_misplaced.pin().get_or_insert_with(door, Default::default).fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        metrics::counter!("mycelium_causal_fields_misplaced_total", "door" => door).increment(1);
+    }
+
+    /// The per-door counts, for `/stats` and tests (a gateway-free build has no reader of it).
+    #[cfg(any(feature = "gateway", test))]
+    pub(crate) fn misplaced_causal_counts(&self) -> std::collections::BTreeMap<&'static str, u64> {
+        self.causal_misplaced.pin().iter().map(|(k, v)| (*k, v.load(std::sync::atomic::Ordering::Relaxed))).collect()
+    }
 }
 
 impl std::ops::Deref for TaskCtx {
@@ -1395,7 +1411,7 @@ impl GossipAgent {
             #[cfg(feature = "tls")]
             identity_ledger: Arc::new(revocation::IdentityLedger::default()),
             caller_replay: Default::default(),
-            causal_misplaced: std::sync::atomic::AtomicU64::new(0),
+            causal_misplaced: papaya::HashMap::new(),
             #[cfg(feature = "a2a")]
             a2a_mounted: AtomicBool::new(false),
             #[cfg(feature = "a2a")]

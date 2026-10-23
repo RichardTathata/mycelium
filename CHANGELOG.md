@@ -19,8 +19,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `DecisionRecord` (`correlation`, `parent_hash`) and the `WriteReceipt` (`with_causal`; `POST /gateway/kv` reads
   `correlation`/`parent` and echoes them) carry them where their producer has them. **The placement is the
   application payload and only there:** a header (`x-mycelium-correlation`, `x-mycelium-parent`) or a field in the
-  caller envelope is never read and is counted by door (`GET /stats` `causal_fields_misplaced`); a malformed value is
-  refused before policy (`PreflightRefusal::Malformed`, `request_malformed`, `-32602`), never corrected.
+  caller envelope is never read and is counted once per request by door (`GET /stats` `causal_fields_misplaced`, a
+  map); a malformed value is refused before policy (`PreflightRefusal::Malformed`, `request_malformed`, `-32602`),
+  never corrected, with or without an evaluator attached. `AeEvidence` gained `node`, the enforcing node.
   `mycelium explain --correlation <id> <files…>` renders one run as one chain across evidence journals and decision
   traces, each line *captured*, *reconstructed* (joined by `operation_id`) or *unattributable*;
   `mycelium explain --closure <hash> <files…> [--fleet <n>]` the dependency closure of one record — authoritative

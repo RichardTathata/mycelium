@@ -1165,6 +1165,11 @@ pub struct AeEvidence {
     /// [`AeReference::journal_sha256`] cites. Absent on a root. `mycelium explain --closure <hash>` follows it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// The node that enforced — the envelope's `via`, as it names itself (adopter-surface X4, #671's review): a
+    /// chain across two nodes' journals is told apart by node, and a closure can say how many nodes its records
+    /// name against how many journals it was given. Absent on a record written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
 }
 
 impl AeEvidence {
@@ -1247,6 +1252,7 @@ impl AeEvidence {
             // Carried from the envelope, which read them from the request's own payload (X4).
             correlation: envelope.correlation.clone(),
             parent: envelope.parent.clone(),
+            node: Some(envelope.via.to_string()),
         }
     }
 

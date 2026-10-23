@@ -8,11 +8,14 @@
 //!   evidence record's `journal_sha256` cites and a trace line's hash under `mycelium explain --closure`.
 //!
 //! **Placement: the application payload, and only there.** For a request with JSON params, the two keys sit under
-//! `params._meta` beside `operation_id` and `mandate`; for `/mcp` and `/a2a` that is the request body. Never a
-//! header, never the caller envelope: the gateway caller's signature covers a digest of the application payload
+//! `params._meta` beside `operation_id` and `mandate`: `/mcp`'s `params._meta`; `/a2a`'s `params._meta` on the
+//! legacy `tasks/send` and `params.metadata._meta` on the current generation's `message/send` (the same place the
+//! mandate is read from, `a2a.rs`); the LLM doors' body `_meta`; the federation call's body `_meta`; `POST
+//! /gateway/kv`'s top-level `correlation`/`parent`. Never a header, never the caller envelope: the gateway caller's signature covers a digest of the application payload
 //! (`gateway_caller::signed_fields`), so a field placed outside it could be re-pointed under a signature that still
-//! verifies — v2.12.0's lesson. A field carried as a header or in the envelope is never read, and a counter names the
-//! door (`GET /stats` `causal_fields_misplaced`).
+//! verifies — v2.12.0's lesson. A field carried as a header or in the envelope is never read, and it is counted once per
+//! request against the door that saw it (`GET /stats` `causal_fields_misplaced`, a map by door: `mcp`, `a2a`, `llm`,
+//! `federation`, `kv`, `caller_envelope`).
 //!
 //! A value that is present and malformed is refused at the door (`PreflightRefusal::Malformed`, `request_malformed`),
 //! never corrected or dropped: a record with a silently emptied parent would read as a root.

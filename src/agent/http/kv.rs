@@ -34,9 +34,11 @@ pub(super) async fn gw_kv_get(
 /// unchanged.
 pub(super) async fn gw_kv_set(
     State(ctx): State<Arc<HttpCtx>>,
+    headers: axum::http::HeaderMap,
     Json(body):  Json<serde_json::Value>,
 ) -> impl IntoResponse {
     use base64::Engine as _;
+    super::mcp_bridge::note_misplaced_causal_headers(&ctx.agent_ctx, &headers, "kv");
 
     let key = match body["key"].as_str() {
         Some(k) => Arc::from(k),
