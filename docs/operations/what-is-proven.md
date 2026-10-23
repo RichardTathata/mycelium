@@ -89,6 +89,7 @@ the deployment, multi-machine recovery or NovusLens consumer-rendering gaps belo
 
 | Gap | State on 2026-10-20 | What would show it |
 |---|---|---|
+| **Binary provenance** | the Release workflow (adopter-surface X0) attaches `SHA256SUMS` to every tag's tarballs and pushes the image by digest: integrity of the download, not provenance of the build; nothing signs a binary or the image, and reproducible builds are not claimed | a Sigstore or GPG signature on each tarball and the image, verified by the clean-container smoke before the assets are attached |
 | **A named third-party production deployment** | none. NovusLens is a design partner that consumes the evidence records; the council-minutes corpus is envelope-qualified, not live | a customer pilot run to the `customer-pilot.md` bar, named with consent |
 | **V1 — the nightly scale runner** | the hosted job (`scale-nightly.yml`) has never had a runner registered and queues silently; the local launchd runner's last four rows (2026-09-25/26) failed with exit 2 on the environment (Docker/VM), not on the substrate; last green 2026-09-24 | a registered runner and a window of green nightlies, recorded in `results.csv` |
 | **Performance under load** | only the micro-benchmarks above; no end-to-end throughput or latency figure for a cluster under sustained load, and the benches are not run in CI | a load run on a real network with the numbers in `tuning.md`, and a bench job with a stored baseline |

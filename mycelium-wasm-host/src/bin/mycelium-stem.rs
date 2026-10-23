@@ -26,6 +26,7 @@ fn usage() -> ! {
          \n\
          Options:\n\
              --units <file>             the unit file to declare from (required)\n\
+         -V, --version                  print `mycelium-stem <version>` and exit\n\
          -c, --config <file>            GossipConfig TOML (default: env overrides on defaults)\n\
          -p, --port <port>              bind port\n\
              --host <ip>                bind address\n\
@@ -79,6 +80,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--manifest-source" => manifest_source = Some(val()),
 
             "--stage-dir" => stage_dir = Some(val()),
+            // One line, the crate's version: what the release workflow's smoke runs (adopter-surface X0).
+            "-V" | "--version" => { println!("mycelium-stem {}", env!("CARGO_PKG_VERSION")); std::process::exit(0) }
             _ => usage(),
         }
     }

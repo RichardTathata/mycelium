@@ -100,4 +100,5 @@ suite is `scripts/test-check-feature-pages.py`.
 |---|---|---|
 | [Activation egress proxy](activation-egress-proxy.md) | An activation command reaches hosts by name through a proxy its stem runs, with credentials attached at the proxy | Acquire and adapt capabilities |
 | [Fleet-wide history limits](fleet-history-limits.md) | A history-limited rule counts an actor's calls across the fleet, exactly by consensus seats or approximately by a gossiped tally | Constrain actions |
+| [Published node](published-node.md) | Every `v*` tag publishes the three binaries for three platforms with sums, and a multi-arch image; a developer starts a node without a toolchain | Discover participants and signal (the first step) |
 | [Inference routing as policy](inference-routing.md) | The action evaluator decides each routed model call on its destination, locality and data class | Constrain actions; Run tools and reasoning |

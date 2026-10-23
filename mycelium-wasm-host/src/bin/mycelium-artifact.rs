@@ -32,6 +32,7 @@ fn usage() -> ! {
          \x20 mycelium-artifact list    <library-dir|url>\n\
          \x20 mycelium-artifact verify  <library-dir|url> [--trusted ed25519:<hex>]... [--reviewer ed25519:<hex>]... [--descriptions <dir>]\n\
          \x20 mycelium-artifact accept  <library-dir|url> <ns/name | artifact-hex> (--key <seed-file> | --key-env <VAR>)\n\
+         \x20 mycelium-artifact --version\n\
          \n\
          A library is a directory or, with the object_store feature, a store URL (s3://, gs://, az://, https://, file://)\n\
          whose credentials come from the environment. A signing key is a 32-byte Ed25519 seed as 64 hex characters.\n\
@@ -73,6 +74,8 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(cmd) = args.first() else { usage() };
     let code = match cmd.as_str() {
+        // One line, the crate's version: what the release workflow's smoke runs (adopter-surface X0).
+        "-V" | "--version" => { println!("mycelium-artifact {}", env!("CARGO_PKG_VERSION")); 0 }
         "publish" => publish(&args[1..]),
         "list" => list(&args[1..]),
         "verify" => verify(&args[1..]),

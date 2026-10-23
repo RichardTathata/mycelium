@@ -18,6 +18,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     // decision trace rendered as an explanation (docs/plans/guarantees-and-rule-catalogue.md I6).
     // Both are pure over files; neither starts a node.
     match std::env::args().nth(1).as_deref() {
+        // `mycelium --version`: the crate's version and nothing more, the line the release workflow's
+        // clean-container smoke compares against the tag (docs/plans/adopter-surface.md, X0).
+        Some("-V" | "--version") => { println!("{}", version_line()); std::process::exit(0) }
         Some("rules") => std::process::exit(rules_cli(std::env::args().skip(2).collect())),
         Some("explain") => std::process::exit(explain_cli(std::env::args().skip(2).collect())),
         // `mycelium tls issue` — a node certificate signed where the CA key is, so the node never
@@ -113,6 +116,10 @@ fn parse_args() -> Result<GossipConfig, GossipError> {
             "-i" | "--interactive" => {} // handled in main
             "-h" | "--help" => {
                 print_usage();
+                std::process::exit(0);
+            }
+            "-V" | "--version" => {
+                println!("{}", version_line());
                 std::process::exit(0);
             }
             _ => return Err(GossipError::InvalidField { field: "argument", reason: format!("unknown argument: {arg}") }),
@@ -406,6 +413,7 @@ fn print_usage() {
              --host <ip>          Bind IP address (default: 127.0.0.1)\n\
          -r, --peers <list>       Comma-separated bootstrap peers (IP:port,...)\n\
          -i, --interactive        Start an interactive REPL\n\
+         -V, --version            Print `mycelium <version>` and exit\n\
          -h, --help               Show this message\n\
          \n\
          Profiles (the config's `profile`, or GOSSIP_PROFILE): `dev` is the default and requires nothing,\n\
@@ -553,3 +561,31 @@ mod record {
     }
 }
 
+
+/// `mycelium --version`: `mycelium <crate version>`, one line, so a script can compare it to a tag.
+fn version_line() -> String {
+    format!("mycelium {}", env!("CARGO_PKG_VERSION"))
+}
+
+#[cfg(test)]
+mod version_tests {
+    /// `mycelium --version` is what the release workflow's clean-container smoke compares against the tag
+    /// (`.github/workflows/release.yml`): the line is the crate's version, nothing more, so a tag cut out
+    /// of order (RELEASING.md § 4 before § 7) is caught by the string and not by a reader.
+    #[test]
+    fn version_line_names_the_crate_version() {
+        // Read from the manifest, not from the same `env!` the function uses, so a function that printed another
+        // crate's version, a prefix, or a build-time string would fail here.
+        let manifest = include_str!("../Cargo.toml");
+        let declared = manifest
+            .lines()
+            .find_map(|l| l.strip_prefix("version").and_then(|r| r.trim_start().strip_prefix('=')))
+            .map(|r| r.trim().trim_matches('"').to_string())
+            .expect("Cargo.toml declares a version");
+        let line = super::version_line();
+        assert_eq!(line, format!("mycelium {declared}"));
+        let v = line.strip_prefix("mycelium ").expect("the crate name, a space, the version");
+        assert_eq!(v.split('.').count(), 3, "three dotted components: {v}");
+        assert!(v.split('.').all(|c| !c.is_empty() && c.chars().all(|ch| ch.is_ascii_digit() || ch == '-' || ch.is_ascii_alphanumeric())), "{v}");
+    }
+}

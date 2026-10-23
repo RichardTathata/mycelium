@@ -58,6 +58,8 @@ landed.
 | `object_store` | `ObjectStoreFetcher`: a library in `s3://`, `gs://`, `az://`, `https://` or `file://` for `mycelium-artifact` and the librarian API |
 
 ```bash
+# or the published `mycelium-stem` (built with stem,gateway,llm,object_store; in every release tarball and in the
+# image ghcr.io/richardtathata/mycelium — docs/guide/installation.md § The published node)
 cargo build -p mycelium-wasm-host --features stem,gateway,llm --bin mycelium-stem
 mycelium-stem --units examples/units/model_deploy/model-host.toml --library /lib \
               --host 172.40.0.42 -p 57000 -r 172.40.0.40:57000

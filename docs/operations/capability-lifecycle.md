@@ -123,6 +123,9 @@ reports lanes, mandates and rules as `not_enforced`.
 
 ### Running a stem
 
+The published `mycelium-stem` (every release tarball and the image, built with `stem,gateway,llm,object_store`;
+[installation § The published node](../guide/installation.md#the-published-node)) needs no toolchain. From source:
+
 ```sh
 cargo build -p mycelium-wasm-host --features stem,gateway,llm --bin mycelium-stem
 ```

@@ -7,6 +7,7 @@ choices over the same substrate, not different architecture layers.
 |---|---|---|---|
 | Rust embed | Your application containing `GossipAgent` | [Integrator contract](building-on-mycelium.md), then `cargo run --example hello_mesh` from a source checkout | [Deployment](../operations/deployment.md) |
 | Python or TypeScript | Your application plus a Rust node exposing the HTTP gateway | [Language bridges](10-language-bridges.md), [Python SDK](../../mycelium-py/README.md), [TypeScript SDK](../../mycelium-ts/README.md) | [Gateway TLS](../operations/gateway-tls.md) (the SDKs reach it with `scheme="https"` / `{ scheme: "https" }` — [bridges § TLS](10-language-bridges.md#reaching-a-gateway-over-tls)), [readiness](../operations/production-readiness.md) |
+| Published binary or image | The released `mycelium` node (and `mycelium-stem`), downloaded or pulled — no Rust toolchain | [The download block below](#the-published-node), then an SDK README | [Deployment](../operations/deployment.md#get-the-node) |
 | Generic stem host | `mycelium-stem`, unit declarations and configured artifact/runtime dependencies | [Wasm host](../../mycelium-wasm-host/README.md), [co-op examples](../../examples/coop/README.md) | [Capability lifecycle](../operations/capability-lifecycle.md) |
 
 ## Pin the source
@@ -31,6 +32,35 @@ The tag you choose is a known baseline, not a claim that it is the latest releas
 are documented in their READMEs; use them from the same selected checkout and verify the target
 node's endpoint support. Companion releases have independent version lines; review their dependency
 pins rather than assuming every tag is interchangeable.
+
+## The published node
+
+Every `v*` tag publishes the node ([feature page](../features/published-node.md)): three binaries per platform
+(`mycelium`, `mycelium-stem`, `mycelium-artifact`) for Linux x86_64, Linux aarch64 and macOS aarch64, with a
+`SHA256SUMS`, and a multi-arch image. The Linux binaries are built on Debian bookworm and need glibc 2.36 or newer
+and `libssl3`; the macOS binary is arm64. The sums are integrity, not provenance: nothing signs the binaries yet.
+
+```sh
+# MYCELIUM_RELEASE_TAG as set in § Pin the source (one assignment per page, so the release step moves one line);
+# the first tag with artefacts is the first one cut after X0 merged.
+arch="linux-x86_64"               # or linux-aarch64, macos-aarch64
+base="https://github.com/RichardTathata/mycelium/releases/download/$MYCELIUM_RELEASE_TAG"
+curl -fsSLO "$base/mycelium-${MYCELIUM_RELEASE_TAG#v}-$arch.tar.gz" && curl -fsSLO "$base/SHA256SUMS"
+sha256sum --ignore-missing -c SHA256SUMS && tar -xzf "mycelium-${MYCELIUM_RELEASE_TAG#v}-$arch.tar.gz"
+"./mycelium-${MYCELIUM_RELEASE_TAG#v}-$arch/mycelium" --version
+```
+
+```sh
+docker run --rm "ghcr.io/richardtathata/mycelium:${MYCELIUM_RELEASE_TAG#v}" --version   # the image tag has no v
+```
+
+Inside a container the node binds every address for gossip (the image sets `GOSSIP_BIND_ADDRESS=0.0.0.0`); to reach
+the gateway, the configuration file sets `http_addr` and a credential — the run command with ports and a mounted
+file is in [deployment § Get the node](../operations/deployment.md#get-the-node).
+
+The published node is built with `cli,tls,compliance,a2a,llm,metrics`, so a configuration that names `[tls]`, a token
+table, `[oidc]` or `[gateway_tls]` starts (a build without the feature refuses it by name, v2.18.1). The stem is built
+with `stem,gateway,llm,object_store`. Building from source stays the path for any other feature set.
 
 ## What to configure explicitly
 
