@@ -166,7 +166,7 @@ that turn it on, its example, its guarantees and *not built* items, and links to
 code. Kept true by a CI gate over a checked-in feature registry, a pass in `/doc-coverage`, and a fifth
 verification-policy rule.
 
-[`adopter-surface.md`](adopter-surface.md) — **the adopter surface** (agreed with the maintainer 2026-10-23, rev 0.10, not started;
+[`adopter-surface.md`](adopter-surface.md) — **the adopter surface** (agreed with the maintainer 2026-10-23, rev 0.11, not started;
 sequenced after feature-pages F2). From a comparison against Eve, the OpenAI Agents SDK, LangGraph, Mastra and
 Temporal, checked against the code: twelve rows for what is missing — the node published as a binary and an image, `mycelium
 doctor` and `init` (Rust and Python templates), a default-deny

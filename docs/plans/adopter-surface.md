@@ -1,6 +1,10 @@
 # The adopter surface — a first run, one trace, a grant, and a side effect that can be retried
 
-**Status:** agreed with the maintainer on 2026-10-23, rev 0.10, written 2026-10-23. Not started; X0 is first. Rev 0.2 folds in a second discussion of the
+**Status:** agreed with the maintainer on 2026-10-23, rev 0.11, written 2026-10-23. Not started; X0 is first. Rev 0.11
+answers PR #663's independent adversarial review: two premises corrected (X4's fields ride in the signed application
+payload, never in the caller envelope; a replayed run re-executes an external call unless the destination sits behind an
+`Input`-class seam, so X5 and X9 put theirs behind one), the front-door gate described as structural, the companion
+limits sections as they are, and the smaller corrections, each marked *(rev 0.11)*. Rev 0.2 folds in a second discussion of the
 same day on recovery as the management of an accumulating causal history (§1's last four rows, X4's parent hash, X5's
 effect classes, X9 and D9–D10). Rev 0.3 answers a consistency check against the philosophy's litmus tests and the hot
 invariants: five corrections, each marked *(rev 0.3)* where it lands — the closure is authoritative over the journal and
@@ -42,7 +46,7 @@ plan builds only the remainder.
 | an interactive approval | mandates bound to the action, expiring, re-verified at the provider ([guide 21](../guide/21-mandates.md), 2.15.0); the evaluator's `Indeterminate` fails closed; a live policy-revision check | **a positive grant.** The shipped `require_approval_for` (`src/agent/state_machine.rs:122`) is veto-based: it emits `AGENT_APPROVE`, waits up to 30 s for `AGENT_VETO`, and **silence is approval** |
 | a unified run trace | the decision trace (`DecisionRecord`, `mycelium-core/src/decision.rs`), `mycelium explain`, the evidence journal (`AeEvidence`), receipts with a stable `operation_id`, replay bundles, the reason trace keyed by `run_id` (`mycelium-reason/src/trace.rs`) | one id carried through all of them; `DecisionRecord::parent_seq` is unused ([guarantees plan](guarantees-and-rule-catalogue.md) I5) |
 | evals and fault injection | the replay scenarios, the bypass matrix (C7), `examples/authority_drain`, revocation at every verifier (row Q), the two-mesh federation suite with the link cut; the guarantee report refuses a generic badge | a one-command run against an adopter's own declaration |
-| an integration registry | companions register guarantees through the one registry (`GossipAgent::register_guarantee`); every companion README has a *what this does not establish* section | a table of what each runtime adapter carries: sessions, cancellation, tracing, identity, grants, provider-side enforcement |
+| an integration registry | companions register guarantees through the one registry (`GossipAgent::register_guarantee`); *(rev 0.11)* three companion READMEs carry a limits section under three names (`mycelium-commitment` *What it does not do (yet)*, `langgraph-checkpoint-mycelium` *Honest limits*, `strands-session-mycelium` *Claims*), the other seven have none | a table of what each runtime adapter carries: sessions, cancellation, tracing, identity, grants, provider-side enforcement; one limits section under one name in every companion README (X7) |
 | a readiness scorecard and dashboard | `guarantee_report()`, `GET /gateway/guarantees`, the start-time log block, `ConfinementReport`, the profiles; three visualisation examples | a dashboard (deferred, §6) |
 | Temporal's side-effect contract | `operation_id`, `AlreadyCurrent`, `Conflict`, `DeliveryUnknown` ([contracts-receipts](../design/contracts-receipts.md)); `mycelium-effects` as rung 4 (`EffectDestination`, `apply_composed`) | the same contract for an **external** mutation: a dedup scope, a reconciliation probe for the unknown outcome, retry only where declared safe |
 | LangGraph's task lifecycle | A2A task states (`src/agent/a2a.rs`), the commitment companion, leased leadership, locks, the tuple space | a task API; **deferred** (§6): it belongs in a companion on tuple-space claims, never in the substrate |
@@ -57,7 +61,7 @@ is a new promise. The evidence journal already corrects a record by citing its c
 
 | Capability | What the repository has | What it lacks |
 |---|---|---|
-| replay separated from recovery | the kernel drives choices through the seams and never a destination, so a replay cannot repeat a side effect | nothing |
+| replay separated from recovery | the kernel calls no destination; the seams replay a filesystem write by design (`mycelium-core/src/sim_seam.rs`, *Why the effect is not suppressed in replay*) | *(rev 0.11)* an `Input`-class seam (`ChoiceKind::Input`) in front of an external destination — no production code uses one today, so a replayed run re-executes an LLM, MCP or HTTP call it made; X5 puts its destination and its probe behind one, and X9's recording is asserted in replay |
 | honest uncertainty about an effect | `DeliveryUnknown`, `Indeterminate`, and an unrecognised `Execution` read as *we did not look* | nothing |
 | causal links between records | `DecisionRecord::parent_seq` within a node; the install token across install, activation and probe; a correction's hash | a parent carried from one agent's decision into another agent's record (X4) |
 | an effect's recovery contract declared before execution | the tuple-space discipline (single-owner claim, idempotent ack, requeue after a deadline); the composed effect's legs | the destination's class: idempotent, compensatable, or irreversible (X5) |
@@ -79,8 +83,8 @@ hosted runtime will not win the first ten minutes, and the rows that follow are 
 
 **The claim is measured, or it is not made.** A CI job (`one-hour`) runs the whole path from a clean container with no
 toolchain, from `curl` of the release artefact to the last `doctor`, and records wall-clock time per step in the job
-summary. *(rev 0.8)* Neither template needs a model: the governed call runs against the mock backend, so the hour is
-not spent downloading one; a demo that wants a real model says so and is outside the clock. Steps 4 and 5 are run as
+summary. *(rev 0.8)* Neither template needs a model: the governed call runs against `EchoBackend` (`src/agent/llm.rs`, the CI job's
+*mock LLM*), so the hour is not spent downloading one; a demo that wants a real model says so and is outside the clock. Steps 4 and 5 are run as
 the shipped examples on the published binary (X9's live form), not built by the developer. The job grows as rows land:
 with X0–X2 it measures steps 1–3 and 6; with X3 and X9 it measures all six. The number the documentation prints is the
 job's **measured** time on the most recent release, rounded up to the next ten minutes, never the aspiration — if the
@@ -103,8 +107,10 @@ tagged release, and `/publication-lint` reads it like any other claim on the per
    `the_trace_changes_no_decision_and_says_what_the_round_decided` stay green on every row that touches the trace.
 5. **The verification policy, all five rules.** Each row enumerates its doors before fixing (rule 1), closes on
    quoted evidence (rule 2), is collected by discovery (rule 3), is reviewed adversarially (rule 4), and lands its
-   feature page and registry entry (rule 5, from F4). Every generated file that a row documents is run in CI
-   (`check-front-doors` already fails a doc instruction that fails as written).
+   feature page and registry entry (rule 5 — written by F4; *(rev 0.11)* a row that lands before F4 follows the
+   feature-pages template under F2's gate, which exists, and rule 7 below holds the reviewer to the same check
+   regardless). Every generated file that a row documents is run in CI **by a job that executes it**; the front-door
+   gate (`scripts/check-front-doors.py`) checks structure and link targets, never prose, and is not that job.
 6. **Fail-first.** Every regression test is seen failing on the unfixed code and the commit says so.
 7. **Every row lands its documentation with its code, and the plan ends with a pass over the whole surface.** A row
    is not closed until its feature page (rule 5), its glossary entries, its example-index row and its guide or runbook
@@ -211,7 +217,7 @@ question for X10, not for the template.
 
 **Doors:** `init`'s target directory (refuse a non-empty one by name); the template's `Cargo.toml` version against
 the workspace version (a check in `scripts/`, so a release bump cannot leave the template behind); the copied
-README's commands (`check-front-doors`); the generated unit file through `wire-check` (zero findings).
+README's commands (run by X2's CI job; the front-door gate checks only that its links resolve); the generated unit file through `wire-check` (zero findings).
 
 *(rev 0.6)* **Two templates ship together: `governed-call` in Rust and `governed-call-py`.** The Python one starts
 the published node (X0) rather than embedding it, declares its unit through `declare_from`, makes the same permitted
@@ -219,8 +225,8 @@ and denied calls through `mycelium-py`, and reads the same trace. It needs only 
 not wait on X7's table; X7 fills the row in when it lands. The comparison's audience is the SDK audience, and a plan
 that sequenced their template last would have answered the wrong developer first. The TypeScript template follows
 X7. *(rev 0.8)* Both templates attach an evidence journal and an evaluator, because without them a node enforces and
-records nothing (2.6.0's warning) and X4's closure has nothing to read; both run against the mock LLM backend, so no
-model is downloaded on the path the hour measures.
+records nothing (2.6.0's warning) and X4's closure has nothing to read; both run against `EchoBackend`, so no model is
+downloaded on the path the hour measures.
 
 **Exit:**
 - CI job: `mycelium init`, `cargo run` in the result, assert the permitted call's receipt and the denied call's
@@ -244,7 +250,10 @@ the deployed policy revision, with an expiry. It is verified where the action is
 never the boundary: the agent's state machine checks it before `Invoking`, the gateway's preflight checks it, and a
 provider with `with_provider_enforcement()` checks it again.
 
-The veto mode stays as it is, documented as *veto, not grant*, and `strength_report()` labels each.
+The veto mode stays as it is, documented as *veto, not grant*, and `strength_report()` labels each. *(rev 0.11)*
+`PolicyViolation::ApprovalTimedOut` (`src/agent/state_machine.rs:144`) has no producer — `await_approval` returns `Ok`
+on silence — so the enum reads as if a timeout refused; X3 retires it with a `deprecations.md` entry, or documents it as
+unreachable, and the grant's own refusal is `GrantNotPresented`.
 
 *(rev 0.3)* **The expiry check reads `Hlc::decision_now_ms()`**, never `hlc.current()`. Three expiry checks once read the
 HLC and never consulted the wall clock, so on a quiet or partitioned node a mandate never expired (2.15.0); the grant is
@@ -316,8 +325,12 @@ minted by none of them:
   header.** The gateway caller's signature covers a digest of the application payload
   (`signed_fields`, `src/agent/gateway_caller.rs`); a header sits outside that digest, so an intermediary could re-point
   causal attribution under a signature that still verifies — v2.12.0's lesson, *authenticating the caller is not
-  authenticating the call*. Over the mesh the two fields ride in the RPC caller context beside a carried mandate, under
-  the same size limit (`ContextTooLarge`), so no frame changes and the wire stays v12.
+  authenticating the call*. *(rev 0.11)* **The placement is the application payload at every door, and only there**:
+  for an RPC, two reserved keys in the request's JSON params — the same place `presented_mandate` reads a presented
+  mandate from (`src/agent/gateway_caller.rs:638`); for `/mcp` and `/a2a`, the request body. **Never the caller
+  envelope.** Its optional fields `m` and `r` sit *outside* `signed_fields` (`:671-676` against `:930-947`), so a field
+  added beside them would be exactly the unsigned header this rule forbids; the envelope is not extended and its v2
+  signature is unchanged. No frame changes; wire v12.
 - `parent: Option<Sha256>`, the content hash of the record this work depends on, the same hash `AeReference::journal_sha256`
   cites and a correction uses. A caller that acts on a decision passes that decision's hash to whatever it starts. A
   record with no parent is a root, and the reader says so.
@@ -354,8 +367,9 @@ id alone).
 - a closure over a three-node run, read from the evidence journals, names every dependent record and no independent
   one, shown by a plant on each side; the same run with a saturated decision sink shows the hole named and counted,
   with the journal-side closure unchanged;
-- a parent carried as a header is refused at every gateway door, and a parent inside the body is covered by the caller
-  signature, shown by a plant that alters the body after signing and is refused as the body digest already refuses it;
+- *(rev 0.11)* a parent carried as a header, or placed in the caller envelope beside `m`, is never read: the record's
+  parent stays empty and a counter names the door, shown by a plant on each; a parent inside the body is covered by the
+  payload digest, shown by a plant that alters that key after signing and is refused as the digest already refuses it;
 - the door registry complete, and a planted door that drops the parent caught by its test;
 - the two trace-equivalence tests unchanged and green; the replay corpus replays byte-identically with the fields absent;
 - a fuzz target for the join's reader, registered and asserted reachable;
@@ -368,13 +382,13 @@ id alone).
   consequence. A fleet without journals has no closures. The templates attach one; the feature page says so first.
 - **A closure stops at a federation edge.** A partner domain's journals are private and trust does not compose, so the
   edge's own record is the leaf; the reader prints the edge as a boundary, never as the end of the chain.
-- **Retention and erasure make holes, not errors.** The journal has no retention of its own (the exporter's cursor is
-  the retention point, `operations/audit.md` §5), so a record the operator pruned, and a record crypto-shredded under
+- **Retention and erasure make holes, not errors.** The journal's retention is the exporter's cursor (`operations/audit.md` §10), so a record the operator pruned, and a record crypto-shredded under
   `SubjectKeyRegistry`, are each a named hole with the reason.
 
-**Payload compatibility, so a reviewer need not ask:** the caller envelope is serde with defaulted optional fields
-(`#[serde(default, skip_serializing_if = …)]`, `src/agent/gateway_caller.rs`), so an older reader ignores the two new
-fields and a newer one reads them when present. No frame changes, no rolling-upgrade window, wire v12.
+**Payload compatibility, so a reviewer need not ask** *(rev 0.11)*: the two keys live in the request's JSON params,
+which every handler reads as `serde_json::Value` and from which it takes the keys it knows, so an older handler ignores
+them and a newer one reads them when present; the compatibility is the handlers' and the SDKs', not the envelope's. The
+envelope and its signature are untouched. No frame changes, no rolling-upgrade window, wire v12.
 
 **Not built, stated:** no clock is added; `at_ms` stays absent on the decision trace. Ordering across nodes is by HLC
 where a record has one and by file order where it has none, and the output says which. The closure is as complete as
@@ -408,6 +422,10 @@ Y5 later reads. **A probe is egress.** It goes through the same egress allow-lis
 it probes (rows L and M), and its answer is a captured record with the effect's hash as its parent, so the closure
 shows what was asked and what was answered.
 
+*(rev 0.11)* **Behind an `Input`-class seam.** The apply path and the probe go through `ChoiceKind::Input`
+(`mycelium-core/src/sim_seam.rs`), so a recording of a run that reached the destination replays without reaching it
+again; no production code uses that seam today, and this is its first use, added to the seam baseline in the open.
+
 The reference destinations: the existing sqlite one, extended, and a mock HTTP destination whose test harness injects
 lost responses so the unknown path is the one exercised.
 
@@ -425,7 +443,9 @@ the evidence record's `Execution` enum (a new variant is `#[non_exhaustive]`-saf
 - a probe past its budget marks the record unresolved and escalated, and a further probe is refused; a probe to a host
   the egress list denies is refused by the gate, not by the destination;
 - the composed legs are still enforced on the external path (the `composed.rs` tests pass against the new
-  destination).
+  destination);
+- *(rev 0.11)* a recorded run that reached the destination once is replayed, and the destination is reached zero
+  times in replay, shown by the mock's counter.
 
 **Not built, stated:** no real payment or cloud provider. The mock stands where S3Mock stands for the object store,
 and `what-is-proven.md` gets the line.
@@ -480,8 +500,12 @@ links the test that shows it. The companion-registered guarantees are the genera
 hand-written and gated: the F2 gate gains a check that every adapter has a row and every *carried* cell names a
 test CI ran (the `--executed` mode).
 
+*(rev 0.11)* **One limits section under one name.** Three companion READMEs carry one under three names and seven
+carry none (§1); X7 gives every companion a *What this does not establish* section, and the table's *not carried*
+cells cite it.
+
 **Exit:** the table exists, is gated, and every *carried* cell's test is in the coverage universe; a planted cell
-naming a test that did not run fails the gate.
+naming a test that did not run fails the gate; every companion README has the section, checked by `check-materials.py`.
 
 **Not built, stated:** the table records; it does not make an adapter carry anything.
 
@@ -513,7 +537,8 @@ beside it. One node crashes and restarts from its WAL. The fleet then:
 The same run under a partition (the membership governor under a cut, in-process) and under two concurrent retries.
 
 *(rev 0.8)* **Two forms, one set of assertions.** The CI form runs under the replay seams (`sim`), deterministic, with
-the plants, and is the recording in the corpus. The live form runs on the published binary with no seams, as an
+the plants, and is the recording in the corpus — *(rev 0.11)* replayed in CI as well as recorded, with the assertions
+made on the replay and the destination reached zero times during it. The live form runs on the published binary with no seams, as an
 example the `one-hour` job executes (§1.1 step 5), with the same assertions and a bounded wait where the CI form has
 a seam tick. The live form is what a developer runs in their hour; the CI form is what the repository proves.
 
@@ -539,8 +564,9 @@ declaration. No dev server, no restart of the node: the loop is over data the no
 SIGHUP re-read of its egress allow-list (2.36.0) is the precedent for a live re-read of a declaration file.
 
 **Doors:** the `units/declare` route and its scopes; the `prompts/` write path (the raw KV routes refuse it since
-2.27.0, so the write goes through the route that owns it); the filesystem watch (through the seam, so a recording of a
-watched session replays); `wire-check`'s exit codes.
+2.27.0, so the write goes through the route that owns it); the filesystem watch (*(rev 0.11)* a new `Input`-class seam for the
+event source — none exists for one today — added to the seam baseline in the open, so a recording of a watched session
+replays); `wire-check`'s exit codes.
 
 **Exit:** editing a unit file under the watch changes the overlay the fleet reports within one declare, shown in CI
 with the scaffold; a unit edit that `wire-check` refuses leaves the previous declaration in place, shown by a plant;
@@ -567,8 +593,8 @@ the fixes that run finds. In order:
    that runs but no longer demonstrates its feature is the failure this step looks for by reading, since no script
    can.
 4. **A tutorial: `docs/guide/tutorials/07-the-first-hour.md`.** The `one-hour` job in prose, step for step, with the
-   same commands, so a reader and the job walk one path; `check-front-doors`' rule that a doc instruction must not fail
-   as written applies, and the job is the proof that it does not.
+   same commands, so a reader and the job walk one path; *(rev 0.11)* a test diffs its fenced blocks against the workflow's steps,
+   and the job's run is the proof that they do not fail as written (the front-door gate checks only that links resolve).
 5. **The guide and the runbooks.** Guide 20 gains the grant; guide 18 the effect classes and the probe; guide 19 the
    closure reader; guide 05 skills as files; `operations/diagnostics.md` gains `doctor` and `test --faults`;
    `operations/deployment.md` starts from the published artefact; `production-readiness.md` cites `doctor` for each
@@ -758,7 +784,7 @@ preview; the loader pins one version and says which) and declares it as a unit o
 Eve's own tiny example, the weather assistant with one tool, run unchanged: a grant that holds across a restart on its
 tool, and a denial proved from the records. It is a comparison sharper than any table, and it is **a demonstration,
 not a compatibility promise**: Eve's runtime is Eve's product, and the loader follows one pinned version, not the
-preview as it moves. A companion in the style of the others, with the *what this does not establish* section first.
+preview as it moves. A companion with the limits section X7 establishes, first.
 
 How each folder of an Eve agent lands, and the two that do not:
 
@@ -789,8 +815,8 @@ gateway Eve names.
 ### Y7 · `secure-multi-domain` — the profile, and the guarantee family it needs *(rev 0.10, D25)*
 
 **What:** a federation guarantee family in the catalogue, `fed.*`, resolved by the same report as the rest, and a
-second profile, `secure-multi-domain`, that requires `secure-single-domain`'s fifteen and the federation ones on
-top. Today the catalogue mentions federation only inside `egress.allow_list`'s description; a node federating with a
+second profile, `secure-multi-domain`, that requires `secure-single-domain`'s twenty (rev 5, `production-readiness.md` §2) and the federation ones on
+top. Today the catalogue mentions federation only inside the two egress guarantees' descriptions; a node federating with a
 partner reports nothing about the edge it opened.
 
 **The first question, answered:** which of the federation guarantees resolve on this node, and which only at the
