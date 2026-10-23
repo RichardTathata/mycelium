@@ -182,9 +182,13 @@ release was cut, and re-summarising it later produces a second account that can 
 first. Since X0 the workflow creates the Release itself when this step has not, from the same tag message, so
 running this step after the workflow answers *release already exists*; then this step is only the check that the
 assets are attached: `gh release view vNEW --json assets --jq '.assets[].name'` must list three tarballs and
-`SHA256SUMS`. **Once, after the first tag that publishes an image:** a package first created by a workflow's token is
-private, whatever the repository's visibility — open the package's settings on GitHub, set it public, then
-`docker pull ghcr.io/richardtathata/mycelium:NEW` from a logged-out shell. `--verify-tag` refuses if the tag is not on the remote, which catches the "tagged but never
+`SHA256SUMS`. **The image's visibility:** the image carries `org.opencontainers.image.source` naming this repository,
+so the package GitHub created on the first push (v2.37.0) inherited the repository's public visibility — the
+once-feared "private until an owner opens it" did not apply. Check it rather than assume it: from a logged-out shell,
+`docker manifest inspect ghcr.io/richardtathata/mycelium:NEW` must list `linux/amd64` and `linux/arm64`; if it is
+denied, open the package's settings on GitHub and set it public. **Also check the Release's title and body are the
+tag's:** `gh release view vNEW --json name --jq .name` must print the tag's subject, not the squash commit's — the
+first run got the commit's because the checkout peeled the tag, since fixed by fetching the tag object. `--verify-tag` refuses if the tag is not on the remote, which catches the "tagged but never
 pushed" mistake.
 
 > **`--notes-from-tag` is silently incompatible with `--repo`.** Together they print a usage error

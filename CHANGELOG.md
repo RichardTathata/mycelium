@@ -9,6 +9,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Release workflow reads the annotated tag's message, not its commit's.** `actions/checkout` resolves a tag ref
+  to the commit it points at, so the first real run (v2.37.0) titled the Release with the squash commit's subject and
+  used its message as the body; repaired by hand from the local tag. The publish job now fetches the tag object and
+  refuses a tag that is not annotated. `RELEASING.md` § 8 records that the `ghcr.io` package inherited the
+  repository's visibility through the image's source label, so the "open it once" step is a check, not an action.
+
 ## [2.37.0] — 2026-10-23
 
 ### Added

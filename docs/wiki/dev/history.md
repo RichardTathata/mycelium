@@ -38,7 +38,8 @@ A **MINOR** cut on `release/v2.37.0`, tagged on the maintainer's word. The plan 
 **#664 X0** the node published — `.github/workflows/release.yml` on every `v*` tag builds `mycelium`, `mycelium-stem`
 and `mycelium-artifact` for Linux x86_64, Linux aarch64 and macOS aarch64, smokes each Linux tarball in a clean
 container, attaches them with `SHA256SUMS` to the Release (created from the tag's message if § 8 has not run) and
-pushes `ghcr.io/richardtathata/mycelium` (this tag is the first to run it); `docker/Dockerfile.node`; `--version` on
+pushes `ghcr.io/richardtathata/mycelium` (this tag is the first to run it — green; the Release's title and body came
+out as the squash commit's because the checkout peeled the tag, repaired by hand and fixed in the workflow after); `docker/Dockerfile.node`; `--version` on
 the three binaries. **#665 X1** `mycelium doctor` — `start()`'s refusal chain extracted to `preflight()` and the profile
 check to `profile_check()`, both called by `start()`, run over a node built and never started; the effective
 configuration with each field's source; secrets `set`/`unset`; found and fixed: `validate()` created

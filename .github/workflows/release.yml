@@ -209,7 +209,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # the annotated tag's message is the Release body
+          fetch-depth: 0
+      # The annotated tag's message is the Release body. `actions/checkout` resolves a tag ref to the commit it
+      # points at, so `%(contents:body)` would read the *commit's* message — which is what v2.37.0's Release got on
+      # the first run (repaired by hand from the local tag). Fetch the tag object itself and refuse a tag that is not
+      # annotated: RELEASING § 7 makes every release tag one.
+      - name: The tag object, not its commit
+        run: |
+          set -euo pipefail
+          tag="v${{ needs.version.outputs.version }}"
+          git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
+          kind=$(git cat-file -t "$tag")
+          [ "$kind" = "tag" ] || { echo "::error::$tag is a $kind, not an annotated tag; RELEASING § 7 uses git tag -a"; exit 1; }
+          echo "tag $tag: $(git tag -l --format='%(contents:subject)' "$tag")"
       - uses: actions/download-artifact@v4
         with:
           pattern: tarball-*
