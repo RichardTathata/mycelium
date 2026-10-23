@@ -114,7 +114,17 @@ pub(super) async fn mcp_handler(
             // A malformed field is refused by the preflight below before this payload is sent. The `parent` the
             // provider receives is **this gateway's decision record** (its content hash, below), never the caller's:
             // the provider's work depends on this decision, and this decision's record carries the caller's parent.
-            let caller_causal = crate::agent::causal::causal_fields(&req["params"]).unwrap_or_default();
+            let caller_causal = match crate::agent::causal::causal_fields(&req["params"]) {
+                Ok(c) => c,
+                // Refused here in every build (the preflight, where compiled in, would refuse the same way): never
+                // corrected, never dropped (#672's review, finding 8).
+                Err(e) => {
+                    return Json(json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "error": {"code": -32602, "message": format!("request malformed: {e}"), "data": {"reason": "request_malformed"}},
+                    })).into_response();
+                }
+            };
 
             // AE slice: the evaluator preflight, between the auth layer and the dispatch. Inert
             // unless an evaluator is attached (`with_action_evaluator`); with one, a call whose

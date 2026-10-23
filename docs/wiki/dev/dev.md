@@ -100,8 +100,13 @@ frame's body, a trace line); `Corpus::chain` marks captured / reconstructed (by 
 `Corpus::closure` follows parents breadth-first, visits each record once (a hostile cycle terminates — fuzz target
 `closure_corpus`), names holes with the sinks' drop counts, stops at `gateway:federation/call`, and says first when
 fewer journals were given than the records name nodes. Authoritative over the journal, best-effort over the trace.
-Not yet: the door registry and the member-side doors (a direct call carries the bytes unaltered; a skill call's
-payload is text, so the provider's `/a2a` record is a root), the SDK verbs, the reason trace join.
+The second PR (#672): `Preflight::Proceed { journal_sha256 }` and `/mcp` forwarding its own decision's hash as the
+provider's `parent` (the caller's where no record was established — two meanings, told apart by the gateway's record);
+the door registry `scripts/causal-doors.txt` with its gate `check-causal-doors.py` (`make check`, CI; the scan ends
+only at a `#[cfg(test)] mod`, and the self-test plants a door after an inner cfg(test) item); the direct-call, `/a2a`
+and LLM doors shown; the SDK verbs (A2A send, prompt-skill call, federation call, set) and the reason `run_id` join;
+`tests/causal_closure.rs` over three nodes. Still not: an execution record at the provider, the stem activation's
+parent, the tuple-space and blackboard doors.
 **Fleet-wide history scopes (post-360 row K2, 2026-10-17):** a rule may name `HistoryScope::FleetConsensus` or
 `FleetTally` (`Rule::at_most(..).scoped(..)`, the policy choosing per rule; per-point stays the default). The evaluator
 names the counter its deciding rule relies on (`fleet_counters`), the point reads it into `HistoryView::fleet`

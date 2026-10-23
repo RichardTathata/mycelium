@@ -35,7 +35,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **door registry** `scripts/causal-doors.txt` and its gate `scripts/check-causal-doors.py` (in `make check` and CI,
   a planted door caught by name), every door's row naming how the fields travel and its test or its gap; a member's
   direct call, `/a2a` on both generations and the LLM door shown; `mycelium-py` 0.2.13 and `mycelium-ts` 0.2.7 carry
-  the fields on the A2A `send` verbs and `set`, and echo them on `KvReceipt`; `mycelium-reason` 0.11.0 puts a traced
+  the fields on the A2A `send` verbs, the prompt-skill and federation `call`s and `set`, and echo them on
+  `KvReceipt`; the forwarded `parent` falls back to the caller's where the gateway established no record (stated); `mycelium-reason` 0.11.0 puts a traced
   run's `run_id` on the route's records as `correlation`. **Not built, stated on the feature page:** an execution
   record at the provider, the stem activation's parent, the tuple-space and blackboard doors (`deprecations.md` §58).
 

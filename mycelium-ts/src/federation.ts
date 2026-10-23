@@ -207,14 +207,15 @@ export class Federation {
     domain: string,
     exportName: string,
     text = "",
-    opts: { repeatable?: boolean } = {},
+    opts: { repeatable?: boolean; correlation?: string; parent?: string } = {},
   ): Promise<string> {
-    const data = await this.post("/gateway/federation/call", {
-      domain,
-      export: exportName,
-      text,
-      repeatable: opts.repeatable ?? false,
-    });
+    // `correlation` and `parent` (X4) ride in the body's `_meta`, onto the gateway's evidence record for the call.
+    const body: Record<string, unknown> = { domain, export: exportName, text, repeatable: opts.repeatable ?? false };
+    const meta: Record<string, string> = {};
+    if (opts.correlation !== undefined) meta.correlation = opts.correlation;
+    if (opts.parent !== undefined) meta.parent = opts.parent;
+    if (Object.keys(meta).length > 0) body._meta = meta;
+    const data = await this.post("/gateway/federation/call", body);
     return (data["reply"] ?? "") as string;
   }
 }

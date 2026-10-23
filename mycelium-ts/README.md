@@ -461,6 +461,16 @@ protected kind — is thrown, never reported as `"timeout"`.
   `sseStream`) bounds only the events parsed from a single network read (`maxPending`, default 1024,
   when you call `sseStream` yourself).
 
+### The causal fields (0.2.7)
+
+Every verb that starts governed work takes `correlation` (the run's id, one key segment) and `parent` (the content hash
+of the record this call depends on): `A2aClient.send`/`stream` (`SendOptions`), `PromptSkillClient.call`'s last
+argument, `Federation.call`'s options and `set(key, value, { correlation, parent })`, whose `KvReceipt` echoes them.
+They ride in the request body's `_meta` — the application payload, never a header — and onto every evidence record
+the gateway writes for the call; `mycelium explain --correlation <id> <evidence.log>` reads the run back as one
+chain. A malformed value is refused (`request_malformed`; `400` on `set`). Substrate X4,
+`docs/features/causal-records.md`.
+
 ### A serve stream refused or closed (0.2.6)
 
 `rpcServe(kind)` throws `ProtectedKindError` (naming the kind) when the node refuses the stream: `403 protected_kind`

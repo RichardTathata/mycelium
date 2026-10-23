@@ -6,13 +6,19 @@
 # Columns, `|`-separated:  door  |  carries  |  test
 #   door     <file>::<symbol> — the file and the handler, verb or function the scanner finds (see the script's SCAN)
 #   carries  record      the door runs the preflight and writes a record carrying the fields it read from the payload
-#            record+fwd  …and forwards them to the provider inside the application payload (parent = its own decision)
+#            record+fwd  …and forwards them to the provider inside the application payload: the caller's correlation,
+#                        and as parent its own decision record's hash where the journal established one — under an
+#                        inert gateway, no journal, or a lenient journal that lost the record, the caller's parent
+#                        instead (a continuation past a hole, by design; the provider's record cannot tell which)
 #            bytes       the door passes application bytes it does not alter; the provider reads them if its kind's
 #                        payload is JSON (`mcp.invoke`); no record is written at this door
 #            none        no record is written at or beyond this door; nothing reads the fields (stated, not a defect)
-#            refused     the door refuses protected kinds, so no governed work starts here
-#   test     the `fn` that shows it, in src/ or tests/; `-` with the reason after a `#` when there is none (a gap the
-#            registry states rather than hides)
+#            refused     the door refuses protected kinds, so no governed work starts here; a kind that is not
+#                        protected passes as bytes and writes no record anywhere
+#   test     the `#[test]`/`#[tokio::test]` fn that shows it, in src/ or tests/; `-` with the reason after a `#` when
+#            there is none (a gap the registry states rather than hides). The gate checks the door exists, the row
+#            exists and the test exists; it does not check that `carries` is what the code does — that is the test's
+#            job, and a row whose test is `-` is a claim no test holds.
 #
 # ── the preflight doors (scanned: calls of ae_preflight / ae_preflight_routed / ae_decide)
 src/agent/http/mcp_bridge.rs::mcp_handler            | record+fwd | the_causal_fields_ride_in_the_payload_to_the_gateway_s_and_the_provider_s_records
@@ -22,7 +28,7 @@ src/agent/http/llm_bridge.rs::gw_llm_call            | record     | the_llm_door
 src/agent/http/llm_bridge.rs::llm_stream_event       | record     | -  # the stream door's preflight; no test exercises it with the fields
 src/agent/http/federation_routes.rs::gw_federation_call | record  | -  # a federated call's body `_meta` reaches the preflight; the two-domain harness has no causal case yet
 src/agent/http/authz.rs::gateway_preflight           | record     | the_causal_fields_reach_the_evidence_and_an_old_record_parses_without_them
-src/agent/http/authz.rs::gateway_preflight_routed    | record     | -  # the routed public door; `mycelium-reason` is its caller (the run_id join, 0.11.0), untested here
+src/agent/http/authz.rs::gateway_preflight_routed    | record     | -  # the routed public door; its caller is `mycelium-reason`, whose gateway test `a_confidential_request_is_routed_to_an_in_domain_model_and_the_external_one_is_passed_over` (mycelium-reason/tests/gateway.rs) exercises it with the fields (run_id → correlation); outside this crate's scan
 src/agent/provider_enforcement.rs::check             | record     | the_causal_fields_ride_in_the_payload_to_the_gateway_s_and_the_provider_s_records
 # ── the raw doors (scanned: the handlers and verbs named)
 src/agent/http/mesh.rs::gw_rpc_call                  | refused    | a_members_direct_call_carries_the_fields_in_its_own_bytes_and_the_gateway_s_raw_door_refuses_the_kind
@@ -31,6 +37,6 @@ src/agent/service_handle.rs::bulk_call               | bytes      | -  # the bul
 src/agent/service_handle.rs::scatter_gather          | bytes      | -  # fan-out of rpc_call; no test with the fields
 src/agent/http/mesh.rs::gw_scatter                   | refused    | -  # refuses protected kinds as gw_rpc_call does; no causal test
 src/agent/http/signals.rs::gw_signal_emit            | none       | -  # a signal is not governed work; no record is written for it
-src/agent/http/mesh.rs::gw_mailbox_deliver           | none       | -
-src/agent/http/mesh.rs::gw_shard_emit                | none       | -
-src/agent/http/overlay.rs::gw_overlay_emit_reliable  | none       | -
+src/agent/http/mesh.rs::gw_mailbox_deliver           | none       | -  # a mailbox message is not governed work; no record is written for it
+src/agent/http/mesh.rs::gw_shard_emit                | none       | -  # a shard emit is not governed work; no record is written for it
+src/agent/http/overlay.rs::gw_overlay_emit_reliable  | none       | -  # an overlay emit is not governed work; no record is written for it

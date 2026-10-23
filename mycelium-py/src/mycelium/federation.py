@@ -46,7 +46,7 @@ have already made it.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Optional, Dict
 
 import httpx
 
@@ -185,8 +185,13 @@ class Federation:
         *,
         repeatable: bool = False,
         timeout: Optional[float] = None,
+        correlation: Optional[str] = None,
+        parent: Optional[str] = None,
     ) -> str:
         """Invoke one of a partner's exports and return its first text artifact.
+
+        ``correlation`` (the run's id) and ``parent`` (the record this call depends on, by content hash) ride
+        in the body's ``_meta`` and onto the gateway's evidence record for the call (X4).
 
         ``repeatable`` is a statement about **your** effect, and it is the only thing that
         decides whether a silent gateway may be retried elsewhere. It defaults to ``False``
@@ -195,7 +200,10 @@ class Federation:
         Raises :class:`DeliveryUnknown` when nobody can say whether it ran, and
         :class:`FederationError` otherwise — check ``nothing_was_sent`` before retrying.
         """
-        body = {"domain": domain, "export": export, "text": text, "repeatable": repeatable}
+        body: Dict[str, Any] = {"domain": domain, "export": export, "text": text, "repeatable": repeatable}
+        meta = {k: v for k, v in (("correlation", correlation), ("parent", parent)) if v is not None}
+        if meta:
+            body["_meta"] = meta
         with self._pool.sync(timeout) as c:
             r = c.post("/gateway/federation/call", json=body)
         if r.status_code != 200:

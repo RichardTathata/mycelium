@@ -853,7 +853,9 @@ At every door `ae_decide` runs, the fields enter the envelope and every record i
 execution record, at the gateway and at the provider, which reads them from the `tools/call` payload `/mcp`
 forwards. What `/mcp` forwards as `parent` is **its own decision record's hash**, not the caller's: the provider's
 work depends on that decision, and the decision's record carries the caller's parent — so a closure read from both
-journals chains caller → gateway → provider. A `DecisionRecord` and a `WriteReceipt` carry the fields where their
+journals chains caller → gateway → provider. Where no record was established (an inert gateway, no journal, a lenient
+journal that lost it) the caller's parent goes through unchanged, and only the gateway's record, where one exists,
+says which the provider received. A `DecisionRecord` and a `WriteReceipt` carry the fields where their
 producer has them, and the SDKs' A2A `send` and `set` verbs take them as options. Which door carries what is the
 [door registry](../../scripts/causal-doors.txt), gated in CI. Then:
 

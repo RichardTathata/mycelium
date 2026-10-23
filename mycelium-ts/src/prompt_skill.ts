@@ -191,6 +191,8 @@ export class PromptSkillClient {
    * @param input      The `{{input}}` value rendered into the template.
    * @param context    Optional extra `{{variable}}` substitutions.
    * @param timeoutMs  RPC timeout in milliseconds.
+   * @param causal     The run's `correlation` and the `parent` record's hash, sent as the body's `_meta` and
+   *                   carried onto the gateway's evidence records (X4).
    */
   async call(
     ns: string,
@@ -198,10 +200,16 @@ export class PromptSkillClient {
     input: string,
     context: Record<string, string> = {},
     timeoutMs: number = this.defaultTimeoutMs,
+    causal?: { correlation?: string; parent?: string },
   ): Promise<CallResult> {
+    const body: Record<string, unknown> = { ns, name, input, context, timeout_ms: timeoutMs };
+    const meta: Record<string, string> = {};
+    if (causal?.correlation !== undefined) meta.correlation = causal.correlation;
+    if (causal?.parent !== undefined) meta.parent = causal.parent;
+    if (Object.keys(meta).length > 0) body._meta = meta;
     const resp = await this.fetch("/gateway/llm/call", {
       method: "POST",
-      body: JSON.stringify({ ns, name, input, context, timeout_ms: timeoutMs }),
+      body: JSON.stringify(body),
       headers: { "Content-Type": "application/json" },
     });
     const data = (await resp.json()) as {

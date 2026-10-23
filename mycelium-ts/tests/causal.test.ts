@@ -35,3 +35,22 @@ test("set sends neither field when none is given, and the receipt says so", asyn
   expect(r.correlation).toBeNull();
   expect(r.parent).toBeNull();
 });
+
+import { PromptSkillClient } from "../src/prompt_skill";
+import { Federation } from "../src/federation";
+
+test("the prompt-skill call carries the fields in the body's _meta, and nothing otherwise", async () => {
+  stub({ output: "ok", provider: "127.0.0.1:1" });
+  const client = new PromptSkillClient("127.0.0.1", 1);
+  await client.call("demo", "greeting", "x", {}, 1000, { correlation: "run-1", parent: h });
+  expect(lastBody._meta).toEqual({ correlation: "run-1", parent: h });
+  await client.call("demo", "greeting", "x");
+  expect("_meta" in lastBody).toBe(false);
+});
+
+test("the federation call carries the fields in the body's _meta", async () => {
+  stub({ reply: "ok" });
+  const fed = new Federation("http://127.0.0.1:1", {}, 1000);
+  await fed.call("partner.example", "depot.read", "x", { correlation: "run-1", parent: h });
+  expect(lastBody._meta).toEqual({ correlation: "run-1", parent: h });
+});

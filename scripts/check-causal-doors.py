@@ -22,6 +22,7 @@ SCAN = {
     "src/agent/service_handle.rs": ["rpc_call", "bulk_call", "scatter_gather"],
 }
 TEST_MODULE = re.compile(r"#\[cfg\((all\()?test\b")
+TEST_ATTR = re.compile(r"#\[(tokio::)?test[\]\(]")
 
 
 def enclosing_fn(lines, i):
@@ -60,8 +61,12 @@ def doors_in_tree(root):
             lines = open(path, encoding="utf-8").read().split("\n")
             in_tests = rel == "src/agent/http/authz.rs"  # the seam's own wrappers are not doors
             for i, line in enumerate(lines):
+                # A `#[cfg(test)]` gate ends the scan only when it gates a `mod` (a test module ends a file); an inner
+                # cfg(test) statement or static inside production code does not (#672's review, finding 1).
                 if TEST_MODULE.search(line):
-                    in_tests = True  # everything after the test module's gate is test code (modules end the file)
+                    nxt = next((l for l in lines[i + 1:] if l.strip()), "")
+                    if re.match(r"\s*(pub(\([^)]*\))?\s+)?mod\s+", nxt):
+                        in_tests = True
                 if in_tests:
                     break
                 if PREFLIGHT.search(line) and not re.match(r"\s*(pub(\([^)]*\))?\s+)?(async\s+)?fn\s+(ae_preflight|ae_decide)", line) and not line.strip().startswith("//"):
@@ -91,12 +96,18 @@ def registry_rows(path):
 
 
 def fns_in_tree(root):
+    """Test functions only: a `fn` with `#[test]` or `#[tokio::test]` in the three lines above it (so a row cannot
+    name a helper and pass)."""
     names = set()
     for top in ("src", "tests"):
         for dirpath, _, files in os.walk(os.path.join(root, top)):
             for f in files:
-                if f.endswith(".rs"):
-                    for m in re.finditer(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)", open(os.path.join(dirpath, f), encoding="utf-8").read()):
+                if not f.endswith(".rs"):
+                    continue
+                lines = open(os.path.join(dirpath, f), encoding="utf-8").read().split("\n")
+                for i, line in enumerate(lines):
+                    m = re.search(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)", line)
+                    if m and any(TEST_ATTR.search(l) for l in lines[max(0, i - 3):i]):
                         names.add(m.group(1))
     return names
 
@@ -112,8 +123,14 @@ def check(root, registry):
         failures.append(f"row without a door: {door} (registry line {rows[door][2]}) — the code no longer has it")
     for door, (carries, test, n) in sorted(rows.items()):
         if test != "-" and test not in fns:
-            failures.append(f"row {door} (line {n}) names test `{test}`, which is no `fn` under src/ or tests/")
+            failures.append(f"row {door} (line {n}) names test `{test}`, which is no `#[test]`/`#[tokio::test]` fn under src/ or tests/")
+        if test == "-" and "#" not in raw_line(registry, n):
+            failures.append(f"row {door} (line {n}) is untested without a stated reason (`-  # why`)")
     return found, rows, failures
+
+
+def raw_line(path, n):
+    return open(path, encoding="utf-8").read().split("\n")[n - 1]
 
 
 def main():
@@ -122,13 +139,18 @@ def main():
         try:
             shutil.copytree(os.path.join(ROOT, "src"), os.path.join(tmp, "src"))
             os.makedirs(os.path.join(tmp, "tests"))
+            # Plant 1: a new file with an unregistered preflight call.
             with open(os.path.join(tmp, "src", "agent", "http", "planted_door.rs"), "w") as f:
                 f.write("pub(super) async fn gw_planted() {\n    let p = ae_preflight(&ctx, None, \"x\", \"y\", &a, &b, \"planted\").await;\n}\n")
+            # Plant 2: a second /mcp door appended to the existing door file, *after* its inner `#[cfg(test)]` item —
+            # the place a new handler naturally goes, and the place the first scanner never looked (#672's review).
+            with open(os.path.join(tmp, "src", "agent", "http", "mcp_bridge.rs"), "a") as f:
+                f.write("\npub(super) async fn gw_planted_after() {\n    let p = ae_preflight(&ctx, None, \"x\", \"y\", &a, &b, \"planted\").await;\n}\n")
             _, _, failures = check(tmp, REGISTRY)
-            planted = [x for x in failures if "planted_door.rs::gw_planted" in x]
-            if not planted:
-                sys.exit("check-causal-doors --self-test: a planted unregistered door was NOT caught")
-            print("check-causal-doors --self-test: a planted unregistered door is caught by name")
+            for want in ("planted_door.rs::gw_planted", "mcp_bridge.rs::gw_planted_after"):
+                if not any(want in x for x in failures):
+                    sys.exit(f"check-causal-doors --self-test: the planted door {want} was NOT caught")
+            print("check-causal-doors --self-test: a planted new-file door and a planted door appended after an inner cfg(test) are both caught by name")
             return 0
         finally:
             shutil.rmtree(tmp, ignore_errors=True)

@@ -1882,7 +1882,9 @@ node as it names itself, absent on older records. **The provider's
 `parent` is the gateway's decision** (the second PR): `/mcp` forwards the content hash of its own decision record as
 the `parent` of the `tools/call` it sends, whatever `parent` the caller gave — the caller's stays on the gateway's
 record — so a provider's record under enforcement cites the gateway's decision; a provider that reads `parent` as the
-caller's own value reads the gateway's instead. The SDKs' A2A `send` and `set` verbs gained `correlation`/`parent`
+caller's own value reads the gateway's instead. Where the gateway's journal established no record — an inert gateway,
+no journal attached, a lenient journal that lost it — the caller's parent is forwarded unchanged, so the provider's
+`parent` has two possible meanings and the gateway's record, where one exists, is what tells them apart. The SDKs' A2A `send`, prompt-skill `call`, federation `call` and `set` verbs gained `correlation`/`parent`
 options and `KvReceipt` two fields (`mycelium-py` 0.2.13, `mycelium-ts` 0.2.7); `mycelium-reason` 0.11.0 puts a
 traced run's `run_id` on the route's records as `correlation`. `PreflightRefusal` gained the variant (the enum is `#[non_exhaustive]`; a `_` arm must
 already fail closed); `ActionEnvelope`, `AeEvidence`, `DecisionRecord` and `WriteReceipt` gained two optional fields

@@ -144,11 +144,12 @@ async fn a_closure_over_three_nodes_names_every_dependent_record_and_no_independ
     assert!(out.contains("3 journal(s) given for a fleet of 3 nodes"), "{out}");
     assert!(out.contains("@127.0.0.1:") && out.contains("point=provider"), "{out}");
 
-    // The saturated sink: B's sink holds one record, so decisions past it are dropped and counted — saturated here
-    // by B's own decision points writing into it (three admission-shaped records, as a busy node would). A hole that
-    // cites a dropped record is named with the counts, and the journal-side closure is unchanged. The dropped
-    // record's line is what the sink would have held: its hash is taken as a parent by a further call through A, and
-    // the closure of that hash is a hole.
+    // The saturated sink: B's sink holds one record, so decisions past it are dropped and counted. B's own decision
+    // points write too few to fill it in this run, so the **test** saturates it with three admission-shaped records —
+    // a plant of saturation, stated as such. A hash standing for a dropped decision (no producer can know a dropped
+    // record's hash: the sink assigns the `seq` a kept line carries, so a record it dropped was never written) is
+    // then cited as a parent by a further call through A; the closure of that hash is a hole, named with the sink's
+    // counts, and the journal-side closure is unchanged.
     let mut dropped_line = String::new();
     for i in 0..3u64 {
         let rec = DecisionRecord::new("signal.admission", 2, format!("frame {i}"), OutcomeKind::Refusal, "shed")
