@@ -8,14 +8,24 @@
 # page cannot silently fall behind the tags again, as it did after v2.4.4); and pushes a multi-arch image to
 # ghcr.io, tagged by version and `latest`.
 #
-# `workflow_dispatch` is the dry run the plan's exit asks for: the same build and smoke on any ref, the bundle
-# uploaded as a workflow artifact, no Release touched and no image pushed. The sums are integrity, not
-# provenance: nothing here signs a binary (stated on the feature page and in what-is-proven.md).
+# The dry run the plan's exit asks for runs two ways, and publishes nothing either way: on every pull request that
+# touches this workflow, the Dockerfile or the three binaries' sources (so a change to the publishing path proves
+# itself before it merges — GitHub resolves `workflow_dispatch` only on the default branch, so a branch cannot be
+# dispatched), and by `workflow_dispatch` once merged. A dry run builds and smokes everything and uploads the bundle
+# as a workflow artifact; no Release is touched and no image pushed. The sums are integrity, not provenance: nothing
+# here signs a binary (stated on the feature page and in what-is-proven.md).
 name: Release
 
 on:
   push:
     tags: ['v*']
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - 'docker/Dockerfile.node'
+      - 'src/main.rs'
+      - 'mycelium-wasm-host/src/bin/mycelium-stem.rs'
+      - 'mycelium-wasm-host/src/bin/mycelium-artifact.rs'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -26,6 +36,10 @@ on:
 permissions:
   contents: write
   packages: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # ghcr.io refuses an uppercase path; this is the repository's owner and name, lowercased.
@@ -59,9 +73,9 @@ jobs:
             echo "dry_run=false" >> "$GITHUB_OUTPUT"
           else
             echo "version=$crate" >> "$GITHUB_OUTPUT"
-            # A dispatch is a dry run unless asked otherwise; and it can never publish from a non-tag ref.
+            # A pull request or a dispatch is a dry run: nothing publishes from a non-tag ref.
             echo "dry_run=true" >> "$GITHUB_OUTPUT"
-            if [[ "${{ inputs.dry_run }}" == "false" ]]; then
+            if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.dry_run }}" == "false" ]]; then
               echo "::warning::dry_run=false on a workflow_dispatch is ignored: only a v* tag push publishes"
             fi
           fi
