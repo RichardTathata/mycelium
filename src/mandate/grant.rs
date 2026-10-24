@@ -41,6 +41,55 @@ use crate::knowledge::issuer::{
 };
 use crate::knowledge::IssuerId;
 
+/// A **grant** (adopter-surface X3) is a mandate a supervisor issues for one call: its scope is
+/// `grant:{request}` — one scope per grant, so the one-appointment-per-scope rule of
+/// [`GrantVerifier::check`] never makes two grants conflict — its holder is the agent, its `established_by` the
+/// issuing node, and its binding rides **inside the signed operations** as `bound:args:{sha256 hex}` and
+/// `bound:policy:{revision}` beside the one operation it permits. A reader that does not know the convention sees
+/// two operations no call can name; a reader that does ([`Mandate::grant_binding`]) refuses a call whose arguments
+/// or policy revision differ ([`crate::mandate::MandateRefusal::BoundToOtherArguments`], `BoundToOtherPolicy`).
+/// The `Mandate` type and its canonical bytes are unchanged, so every existing mandate and signature stands.
+pub const GRANT_SCOPE_PREFIX: &str = "grant:";
+const BOUND_ARGS: &str = "bound:args:";
+const BOUND_POLICY: &str = "bound:policy:";
+
+/// What a grant is bound to, read from its signed operations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GrantBinding {
+    /// Lowercase hex SHA-256 of the canonical arguments the supervisor approved.
+    pub arguments_digest: String,
+    /// The policy revision the approval was given under, when the issuer knew one.
+    pub policy_revision: Option<String>,
+}
+
+impl Mandate {
+    /// Is this mandate a grant (scope `grant:…`)?
+    pub fn is_grant(&self) -> bool {
+        self.scope.starts_with(GRANT_SCOPE_PREFIX)
+    }
+
+    /// A grant's binding, when its signed operations carry one. `None` for a mandate that is not a grant, or a
+    /// grant with no `bound:args:` entry — which the gateway refuses to issue, so a grant without a binding is one
+    /// something else produced.
+    pub fn grant_binding(&self) -> Option<GrantBinding> {
+        if !self.is_grant() {
+            return None;
+        }
+        let arguments_digest = self.operations.iter().find_map(|o| o.strip_prefix(BOUND_ARGS))?.to_string();
+        let policy_revision = self.operations.iter().find_map(|o| o.strip_prefix(BOUND_POLICY)).map(str::to_string);
+        Some(GrantBinding { arguments_digest, policy_revision })
+    }
+
+    /// The operations of a grant: the one call it permits, and its binding as signed entries.
+    pub fn grant_operations(permitted: impl Into<String>, arguments_digest_hex: &str, policy_revision: Option<&str>) -> Vec<String> {
+        let mut ops = vec![permitted.into(), format!("{BOUND_ARGS}{arguments_digest_hex}")];
+        if let Some(r) = policy_revision {
+            ops.push(format!("{BOUND_POLICY}{r}"));
+        }
+        ops
+    }
+}
+
 impl Mandate {
     /// The exact bytes an establishing authority signs to grant this mandate. Tagged, so a grant
     /// signature can never authenticate a knowledge record, a head or a cohort declaration.
@@ -114,6 +163,14 @@ impl EntitlementTable {
     /// Is `authority` entitled for `scope`?
     pub fn is_entitled(&self, scope: &str, authority: &PrincipalId) -> bool {
         self.scopes.get(scope).is_some_and(|a| a.contains(authority))
+            // A grant's scope is its own (`grant:{request}`); the authority entitled for every grant is entitled
+            // under the prefix (adopter-surface X3).
+            || (scope.starts_with(GRANT_SCOPE_PREFIX) && self.scopes.get(GRANT_SCOPE_PREFIX).is_some_and(|a| a.contains(authority)))
+    }
+
+    /// Entitle `authority` to issue grants (every scope under `grant:`) — the issuing gateway node, as a rule.
+    pub fn entitle_grants(&mut self, authority: PrincipalId) {
+        self.entitle(GRANT_SCOPE_PREFIX, authority);
     }
 }
 
@@ -198,17 +255,21 @@ impl GrantVerifier {
             return GrantVerdict::OutOfWindow;
         }
 
-        let digest = m.digest();
-        let entry = self.highest.entry(m.scope.clone()).or_insert((m.epoch, BTreeSet::new()));
-        if m.epoch > entry.0 {
-            *entry = (m.epoch, BTreeSet::new());
-        }
-        if m.epoch < entry.0 {
-            return GrantVerdict::Superseded { held: entry.0 };
-        }
-        entry.1.insert(digest);
-        if entry.1.len() > 1 {
-            return GrantVerdict::ConflictingAppointments;
+        // A grant's scope is its own, one appointment by construction: the per-scope epoch and conflict bookkeeping
+        // would only grow with every grant issued, so it is not kept for them (adopter-surface X3).
+        if !m.is_grant() {
+            let digest = m.digest();
+            let entry = self.highest.entry(m.scope.clone()).or_insert((m.epoch, BTreeSet::new()));
+            if m.epoch > entry.0 {
+                *entry = (m.epoch, BTreeSet::new());
+            }
+            if m.epoch < entry.0 {
+                return GrantVerdict::Superseded { held: entry.0 };
+            }
+            entry.1.insert(digest);
+            if entry.1.len() > 1 {
+                return GrantVerdict::ConflictingAppointments;
+            }
         }
 
         let Some(proof) = possession else { return GrantVerdict::WrongHolder };
@@ -393,5 +454,55 @@ pub(crate) mod tests {
             GrantVerdict::Unverifiable(UnverifiableReason::BadSignature),
             "a key the reader does not hold for the authority does not verify"
         );
+    }
+
+    /// X3: a grant's binding rides in its signed operations and reads back; a mandate that is not a grant has none;
+    /// the entitlement for every grant is under the prefix; the verifier keeps no per-scope epoch for grants, so two
+    /// grants at epoch 1 in their own scopes are both valid where two appointments in one scope would conflict.
+    #[test]
+    fn a_grant_binds_in_its_signed_operations_and_two_grants_never_conflict() {
+        let ops = Mandate::grant_operations("tools/call:tool:deploy", &"ab".repeat(32), Some("rev-9"));
+        assert_eq!(ops.len(), 3);
+        let mk = |scope: &str, term: &str| Mandate {
+            holder: PrincipalId::new("token:gw/agent-1").unwrap(),
+            established_by: PrincipalId::new("operator:acme").unwrap(),
+            purpose: "grant issued by oidc:idp/alice for request r1".into(),
+            scope: scope.into(),
+            operations: ops.clone(),
+            epoch: 1,
+            term: TermId::new(term).unwrap(),
+            valid_from_ms: 0,
+            valid_until_ms: 10_000,
+        };
+        let g = mk("grant:r1", "r1");
+        assert!(g.is_grant());
+        let b = g.grant_binding().unwrap();
+        assert_eq!((b.arguments_digest.as_str(), b.policy_revision.as_deref()), ("ab".repeat(32).as_str(), Some("rev-9")));
+        assert!(g.permits("tools/call:tool:deploy") && !g.permits("bound:args:x"));
+        let plain = mk("depot", "t1");
+        assert!(!plain.is_grant() && plain.grant_binding().is_none());
+
+        let mut t = EntitlementTable::new();
+        let issuer = PrincipalId::new("operator:acme").unwrap();
+        t.entitle_grants(issuer.clone());
+        assert!(t.is_entitled("grant:r1", &issuer) && t.is_entitled("grant:anything", &issuer));
+        assert!(!t.is_entitled("depot", &issuer), "the grant entitlement is for grants only");
+
+        // The verifier: two grants in their own scopes, one epoch, both valid; two appointments in one scope conflict.
+        let authority = SigningKey::from_bytes(&[7u8; 32]);
+        let holder = SigningKey::from_bytes(&[8u8; 32]);
+        let mut ext = TrustedExternalIssuers::new();
+        ext.trust(IssuerId::new("operator:acme").unwrap(), authority.verifying_key().to_bytes()).unwrap();
+        ext.trust(IssuerId::new("token:gw/agent-1").unwrap(), holder.verifying_key().to_bytes()).unwrap();
+        let members: HashMap<NodeId, MemberKeys> = HashMap::new();
+        let mut v = GrantVerifier::new(t);
+        let sign = |m: &Mandate| SignedMandateGrant { mandate: m.clone(), signature: crate::tls::sign_bytes(&authority, &m.canonical_bytes()).to_vec() };
+        let proof = |m: &Mandate| crate::tls::sign_bytes(&holder, &possession_message(m, b"req")).to_vec();
+        let g1 = mk("grant:r1", "r1");
+        let g2 = mk("grant:r2", "r2");
+        assert_eq!(v.check(&sign(&g1), b"req", Some(&proof(&g1)), 5_000, &members, &ext), GrantVerdict::Valid);
+        assert_eq!(v.check(&sign(&g2), b"req", Some(&proof(&g2)), 5_000, &members, &ext), GrantVerdict::Valid, "a second grant is its own appointment");
+        assert!(v.highest.is_empty(), "no per-scope epoch is kept for grants");
+        assert_eq!(v.check(&sign(&g1), b"req", Some(&proof(&g1)), 10_001, &members, &ext), GrantVerdict::OutOfWindow, "a grant expires");
     }
 }

@@ -130,6 +130,10 @@
 //! | `agent/{node}/policy`              | Layer V serialised AgentPolicy (readable by monitors/supervisors) |
 //! | `agent/{node}/task/{id}/turn`      | Layer V turn counter for `max_turns` enforcement              |
 //! | `agent/{node}/task/{id}/calls`     | Layer V tool-call counter for `tool_budget` enforcement       |
+//! | `grant/{agent}/{request}`          | adopter-surface X3 — a grant request the agent's state machine wrote (tool, arguments digest and rendering, policy revision, expiry); route-owned: the raw KV routes refuse the prefix |
+//! | `grant/{agent}/{request}/issued`   | the signed grant (`SignedMandateGrant`, scope `grant:{request}`) written by `POST /gateway/grants/{agent}/{request}` (`grant:issue`) |
+//! | `grant/{agent}/{request}/refused`  | a supervisor's refusal, with the issuer and reason |
+//! | `grant/{agent}/{request}/checkpoint` | the issuing node's first revocation checkpoint for the grant's scope (nothing revoked), so a verifier's standing is known; a revocation is the next checkpoint naming the term |
 //! | `agent/{node}/provision/{item}/error` | Last provisioning failure — written by the **application** provisioning handler, not the substrate |
 //! | `sys/identity/{node}`              | mTLS — 32-byte Ed25519 verifying key history (current‖retained); written at startup by TLS-enabled nodes |
 //! | `sys/identity-proof/{node}`        | identity-auth Phase 2 — `signer_key(32)‖sig(64)` authenticating the identity entry; peers accept a key only if the proof chains to a trusted key (`tls`) |

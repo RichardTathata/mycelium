@@ -178,6 +178,7 @@ impl Mandate {
 ///
 /// **`Superseded` is not `Conflict`** and never becomes one. See the module docs: a retry loop that
 /// consumed this would launder a revocation.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MandateRefusal {
     /// The resource has installed a **later** epoch. Terminal for this attempt: refreshing,
@@ -207,6 +208,18 @@ pub enum MandateRefusal {
         /// The mandate's scope.
         mandate: String,
     },
+    /// A **grant** (adopter-surface X3) is bound to one argument digest, and this call's arguments digest to
+    /// another: the supervisor approved different arguments.
+    BoundToOtherArguments {
+        bound: String,
+        presented: String,
+    },
+    /// A grant is bound to the policy revision it was approved under, and the call was decided under another:
+    /// the approval predates a policy change.
+    BoundToOtherPolicy {
+        bound: String,
+        decided: String,
+    },
 }
 
 impl std::fmt::Display for MandateRefusal {
@@ -223,6 +236,10 @@ impl std::fmt::Display for MandateRefusal {
                 write!(f, "outside the mandate's window (now {now_ms}, valid until {valid_until_ms})"),
             Self::WrongScope { resource, mandate } =>
                 write!(f, "mandate is for scope {mandate:?}, resource is {resource:?}"),
+            Self::BoundToOtherArguments { bound, presented } =>
+                write!(f, "the grant is bound to arguments {bound}, this call's are {presented}"),
+            Self::BoundToOtherPolicy { bound, decided } =>
+                write!(f, "the grant is bound to policy revision {bound:?}, the call was decided under {decided:?}"),
         }
     }
 }

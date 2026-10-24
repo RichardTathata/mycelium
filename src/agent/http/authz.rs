@@ -283,6 +283,9 @@ pub(super) fn required_scope(method: &axum::http::Method, matched_path: &str) ->
         "/gateway/capability/resolve"     => "cap:read",
         // Q2: an SDK agent's unit file — capabilities, requirements, groups — under one handle.
         "/gateway/units/declare"          => "cap:write",
+        // Adopter-surface X3: the supervisor's door.
+        "/gateway/grants/pending"         => "grant:read",
+        "/gateway/grants/{agent}/{request}" => "grant:issue",
         "/gateway/shard/{ns}/{name}"      => "cap:read",
         // Layer II mesh messaging
         "/gateway/signal/emit"     => "mesh:write",
@@ -1074,6 +1077,21 @@ impl Settling {
                 outcome = Err(refusal);
             }
         }
+        // Adopter-surface X3: a grant binds the policy revision it was approved under. The decision's revision is
+        // known only now; a permit decided under another revision is refused — the approval predates a policy change.
+        let outcome = match outcome {
+            Ok(Some(d)) => match envelope.mandate.as_ref().and_then(|b| b.bound_policy_revision.as_deref()) {
+                Some(bound) if bound != d.policy_revision => Err(ae::PreflightRefusal::NotEstablished(
+                    ae::Decision::indeterminate(
+                        crate::mandate::MandateRefusal::BoundToOtherPolicy { bound: bound.to_string(), decided: d.policy_revision.clone() }.to_string(),
+                        d.policy_revision.clone(),
+                    )
+                    .checking(["grant bound to its policy revision"]),
+                )),
+                _ => Ok(Some(d)),
+            },
+            other => other,
+        };
         let (decision, execution) = match &outcome {
             Ok(Some(d)) => (d.clone(), ae::Execution::Attempted),
             // No evaluator — unreachable here, one was fetched above. Nothing decided, nothing to
@@ -1347,6 +1365,7 @@ pub(crate) const OWNED_KV_PREFIXES: &[&str] = &[
     "sys/", "consensus/", "grp/", "audit/", "cap/", "req/", "cap-group/", "gcap/", "mailbox/", "tools/",
     "agent/", "svc/", "log/", "clog/", "lock/", "prompts/", "skills/", "installable/", "comp/", "wiki/", "tuple/",
     "facts/", "mandate/", "knowledge/", "rights/", "cn/",
+"grant/",  // adopter-surface X3: grant requests and answers (POST /gateway/grants/{agent}/{request})
 ];
 
 /// Namespaces the table assigns to an application writing through the gateway's KV routes — the LangGraph
@@ -1413,6 +1432,8 @@ pub(super) fn refuse_protected_key(key: &str) -> Option<axum::response::Response
         "catalogue lines are published through POST /gateway/artifacts/publish (artifact:publish, signature-checked) where mycelium-wasm-host's routes are merged, or by a librarian"
     } else if key.starts_with("lock/") {
         "locks are taken through /gateway/overlay/lock/acquire (consensus:write)"
+    } else if key.starts_with("grant/") {
+        "grant requests are written by the agent's state machine and answered through POST /gateway/grants/{agent}/{request} (grant:issue)"
     } else {
         "this namespace is written by the substrate or the companion that owns it, not through the KV routes \
          (src/lib.rs § KV namespace ownership); the KV routes write application keys"

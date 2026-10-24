@@ -123,6 +123,9 @@ mod kv;
 #[cfg(feature = "llm")]
 mod llm_bridge;
 mod mcp_bridge;
+/// The supervisor's door for grants (adopter-surface X3): a grant is signed by the node's identity and decided by the preflight.
+#[cfg(feature = "tls")]
+mod grants;
 #[cfg(all(test, feature = "tls", feature = "consensus"))]
 pub(crate) use mcp_bridge::{TEST_DISPATCH_TIMEOUT_MS, TEST_LAST_TIMEOUT};
 #[cfg(feature = "a2a")]
@@ -346,6 +349,11 @@ pub(super) async fn run_http_server(
         // ── Legible Emergence Phase 4: the fleet narrative (why / diagnose) ────
         .route("/diagnose",                       get(gw_diagnose))
         .route("/guarantees",                     get(gw_guarantees));
+    // ── Grants: approval that is default-deny (adopter-surface X3); the node signs, the preflight decides ──
+    #[cfg(feature = "tls")]
+    let gateway = gateway
+        .route("/grants/pending",           get(grants::gw_grants_pending))
+        .route("/grants/{agent}/{request}", post(grants::gw_grant_decide));
 
     // ── Consensus + the consistency/lock/election overlays built on it ────────
     // (v2 M2 feature gate). The ordered-log and reliable-delivery overlays above
@@ -597,3 +605,6 @@ mod causal_tests;
 /// X4's door registry rows: a member's direct call, the raw door, `/a2a`, the LLM door.
 #[cfg(all(test, feature = "tls"))]
 mod causal_door_tests;
+/// Adopter-surface X3 at the live doors: silence refuses, an issued grant binds the call, issuing is policy.
+#[cfg(all(test, feature = "tls", feature = "compliance"))]
+mod grant_tests;

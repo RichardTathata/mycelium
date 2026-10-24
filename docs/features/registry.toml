@@ -82,6 +82,14 @@ example_watch = ["init", "scaffold", "governed_call"]
 ids = ["concept:init"]
 
 [[feature]]
+name = "Grants"
+page = "grants.md"
+example = "none"
+example_watch = ["grant", "grants", "default_deny_approval"]
+ids = ["concept:grant"]
+links = ["concept:mandate"]
+
+[[feature]]
 name = "Causal records"
 page = "causal-records.md"
 example = "none"

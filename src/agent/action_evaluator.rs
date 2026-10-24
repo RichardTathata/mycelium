@@ -178,6 +178,12 @@ pub struct MandateBinding {
     pub epoch: u64,
     /// What the enforcement point established.
     pub state: MandateState,
+    /// The mandate's content digest (lowercase hex of [`crate::mandate::Mandate::digest`]) — the grant's hash on
+    /// the record (adopter-surface X3). `None` on a binding built before the field existed.
+    pub digest: Option<String>,
+    /// A grant's bound policy revision, read from its signed operations: the preflight refuses a decision made
+    /// under another (X3). `None` for a mandate that is not a grant or binds no revision.
+    pub bound_policy_revision: Option<String>,
 }
 
 impl MandateBinding {
@@ -188,7 +194,14 @@ impl MandateBinding {
         scope: impl Into<String>,
         epoch: u64,
     ) -> Self {
-        Self { holder, term, scope: scope.into(), epoch, state: MandateState::Established }
+        Self { holder, term, scope: scope.into(), epoch, state: MandateState::Established, digest: None, bound_policy_revision: None }
+    }
+
+    /// The mandate's digest and, for a grant, its bound policy revision (X3).
+    pub fn with_facts(mut self, digest: Option<String>, bound_policy_revision: Option<String>) -> Self {
+        self.digest = digest;
+        self.bound_policy_revision = bound_policy_revision;
+        self
     }
 
     /// A binding the enforcement point checked and the fence refused.
@@ -199,7 +212,7 @@ impl MandateBinding {
         epoch: u64,
         refusal: MandateRefusal,
     ) -> Self {
-        Self { holder, term, scope: scope.into(), epoch, state: MandateState::Refused(refusal) }
+        Self { holder, term, scope: scope.into(), epoch, state: MandateState::Refused(refusal), digest: None, bound_policy_revision: None }
     }
 
     /// A binding the enforcement point could **not** check — authority not established.
@@ -210,7 +223,7 @@ impl MandateBinding {
         epoch: u64,
         why: impl Into<String>,
     ) -> Self {
-        Self { holder, term, scope: scope.into(), epoch, state: MandateState::Unknown(why.into()) }
+        Self { holder, term, scope: scope.into(), epoch, state: MandateState::Unknown(why.into()), digest: None, bound_policy_revision: None }
     }
 }
 
@@ -1170,6 +1183,10 @@ pub struct AeEvidence {
     /// name against how many journals it was given. Absent on a record written before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<String>,
+    /// The digest of the mandate this decision was established under — a grant's hash (adopter-surface X3), or
+    /// any mandate's. Absent when no mandate was established or the finding predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mandate_digest: Option<String>,
 }
 
 impl AeEvidence {
@@ -1253,6 +1270,7 @@ impl AeEvidence {
             correlation: envelope.correlation.clone(),
             parent: envelope.parent.clone(),
             node: Some(envelope.via.to_string()),
+            mandate_digest: envelope.mandate.as_ref().filter(|b| b.state == MandateState::Established).and_then(|b| b.digest.clone()),
         }
     }
 
@@ -1886,6 +1904,12 @@ impl Rule {
 
     /// Require a live mandate covering `scope`. A missing or uncheckable mandate is *not
     /// established* (`Indeterminate`); a **refused** one denies before this rule is reached.
+    /// The rule applies only under a **grant** (adopter-surface X3): a mandate in the `grant:` family — one scope per
+    /// grant — issued through `POST /gateway/grants/{agent}/{request}`. Shorthand for `requiring_mandate("grant:*")`.
+    pub fn requiring_grant(self) -> Self {
+        self.requiring_mandate(format!("{}*", crate::mandate::grant::GRANT_SCOPE_PREFIX))
+    }
+
     pub fn requiring_mandate(mut self, scope: impl Into<String>) -> Self {
         self.requires_mandate = Some(scope.into());
         self
@@ -1922,7 +1946,11 @@ impl Rule {
         // never reaches here — see `evaluate`.)
         let mandate_scope_matches = match (&self.requires_mandate, &env.mandate) {
             (None, _) => true,
-            (Some(want), Some(b)) => &b.scope == want,
+            // A trailing `*` names a scope family: `grant:*` is every grant, each in its own scope (adopter-surface X3).
+            (Some(want), Some(b)) => match want.strip_suffix('*') {
+                Some(prefix) => b.scope.starts_with(prefix),
+                None => &b.scope == want,
+            },
             (Some(_), None) => true, // no binding at all ⇒ let `unestablished` report it
         };
         mandate_scope_matches
@@ -3018,6 +3046,8 @@ mod tests {
                 scope:  "depot-ops".to_string(),
                 epoch,
                 state,
+                digest: None,
+                bound_policy_revision: None,
             })
             .build()
     }

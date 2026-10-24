@@ -6,6 +6,14 @@ All notable changes to this crate. It versions **independently** of the Mycelium
 
 ---
 
+## [1.1.0] — unreleased
+
+**The grant clause** (adopter-surface X3, additive). `Policy::require_grant_for(tools)` lists the tools that need a
+**grant** — approval that is default-deny — before the agent's `Invoking` transition commits; it maps to
+`AgentPolicy::require_grant_for`. `strength_report()` labels it Tier B at the transition and says the same grant is
+verified again at the gateway and at a provider under enforcement (Tier C there); the existing
+`require_approval_for` clause's detail now says what it is: *veto, not grant — an absent supervisor approves*.
+
 ## [1.0.0] — 2026-07-26
 
 **API-stability commitment.** The guardrails surface is now stable — no breaking change without a

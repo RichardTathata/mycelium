@@ -107,6 +107,13 @@ only at a `#[cfg(test)] mod`, and the self-test plants a door after an inner cfg
 and LLM doors shown; the SDK verbs (A2A send, prompt-skill call, federation call, set) and the reason `run_id` join;
 `tests/causal_closure.rs` over three nodes. Still not: an execution record at the provider, the stem activation's
 parent, the tuple-space and blackboard doors.
+**Grants (adopter-surface X3, 2026-10-24, first PR):** approval that is default-deny beside the veto mode. A grant is a
+mandate in its own scope `grant:{request}` — the appointment model's one-holder-per-scope-and-epoch rule is why — with
+its binding (`bound:args:`, `bound:policy:`) inside the signed operations; `assess` takes a grant path (digest check,
+no resource gate, revocation standing kept) and the preflight refuses a decision under another policy revision. The
+agent asks through `AgentStateMachine::transition_invoking`, which writes `grant/{agent}/{request}`, waits on the
+wall clock and verifies with the node's own authority; the supervisor answers through `POST /gateway/grants/…`, an
+action the evaluator decides with the issuer as actor. `ApprovalTimedOut` was never produced and is deprecated.
 **Fleet-wide history scopes (post-360 row K2, 2026-10-17):** a rule may name `HistoryScope::FleetConsensus` or
 `FleetTally` (`Rule::at_most(..).scoped(..)`, the policy choosing per rule; per-point stays the default). The evaluator
 names the counter its deciding rule relies on (`fleet_counters`), the point reads it into `HistoryView::fleet`

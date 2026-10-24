@@ -1865,6 +1865,29 @@ heartbeat tick, while a live member's entry holds a forged time, until its owner
 has no heartbeat" is reading a member whose heartbeat has not reached it; it clears when the heartbeat arrives or the
 entry ages past the bound.
 
+## 59. `PolicyViolation::ApprovalTimedOut` was never produced; the grant mode's refusals are `GrantNotPresented` and `GrantRefused`; `MandateRefusal` is `#[non_exhaustive]` (unreleased, adopter-surface X3)
+
+**What changed.** `AgentPolicy` gained `require_grant_for` and `grant_window`, and `AgentStateMachine` gained
+`transition_invoking(tool, arguments)`: a tool listed there is invoked only under a **grant** — a scoped mandate a
+supervisor issues for one call through `POST /gateway/grants/{agent}/{request}` (`grant:issue`; `GET
+/gateway/grants/pending` under `grant:read`) — and silence refuses with `PolicyViolation::GrantNotPresented`, a
+supervisor's refusal with `GrantRefused`. A plain `transition` to `Invoking` on a grant-required tool is refused the
+same way. `PolicyViolation::ApprovalTimedOut` is `#[deprecated]`: `await_approval` has always returned `Ok` on
+silence, so the variant was never produced and read as if a timeout refused. `MandateRefusal` gained
+`BoundToOtherArguments` and `BoundToOtherPolicy` and is now `#[non_exhaustive]`; `MandateBinding` gained `digest` and
+`bound_policy_revision`; `AeEvidence` gained `mandate_digest`; `Rule::requiring_grant()` and a trailing `*` in
+`requiring_mandate` name a scope family. The KV namespace `grant/` is route-owned: the raw KV routes refuse it 403
+`protected_key`. New scopes `grant:read`, `grant:issue`. `mycelium-guardrails` 1.1.0: `Policy::require_grant_for`,
+and `require_approval_for`'s strength label now says *veto, not grant*.
+
+**Why.** The veto mode's silence-approves is the opposite of what an approval gate is taken to mean; an enum variant
+that reads as a timeout refusal and is never produced misleads a `match`. A grant that is a mandate inherits every
+door the bypass matrix enumerated rather than needing the matrix re-run for a new signal.
+
+**Migration.** A `match` on `PolicyViolation` adds arms for `GrantNotPresented` and `GrantRefused` (the enum is not
+`#[non_exhaustive]`; the deprecated arm compiles with a warning). An exhaustive `match` on `MandateRefusal` outside
+this crate adds a `_` arm that fails closed. Nothing changes for an agent whose policy lists no grant-required tool.
+
 ## 58. The causal fields: a malformed `_meta.correlation` or `_meta.parent` is refused at every door; a tool's `params` may carry `_meta` (unreleased, adopter-surface X4)
 
 **What changed.** Every door the AE preflight runs — `/mcp`, `/a2a`, the LLM doors, the federation call, the provider

@@ -123,7 +123,28 @@ pub struct AgentPolicy {
     /// committed. Emits [`AGENT_APPROVE`](signal_kind::AGENT_APPROVE); blocks
     /// up to 30 s for [`AGENT_VETO`](signal_kind::AGENT_VETO).
     /// Silence within the window = approved; veto = [`PolicyViolation::ApprovalVetoed`].
+    ///
+    /// This is **veto, not grant**: an absent supervisor approves. For approval that is default-deny, see
+    /// [`require_grant_for`](Self::require_grant_for).
     pub require_approval_for: Vec<String>,
+
+    /// Tools that require a **grant** before `Invoking` is committed (adopter-surface X3) — approval that is
+    /// default-deny. A grant is a scoped mandate a supervisor issues for one call, bound to the tool, the
+    /// arguments' digest, this agent's identity and the policy revision, with an expiry
+    /// ([`crate::mandate::grant::GRANT_SCOPE_PREFIX`]). The agent asks through
+    /// [`AgentStateMachine::transition_invoking`], which writes the request under `grant/{agent}/{request}` and
+    /// waits [`grant_window`](Self::grant_window) for `…/issued`; silence or a refusal is
+    /// [`PolicyViolation::GrantNotPresented`] / [`PolicyViolation::GrantRefused`], never a proceed. A plain
+    /// [`transition`](AgentStateMachine::transition) to `Invoking` on a tool listed here is refused: it carries no
+    /// arguments to bind. The grant is verified here, again by the gateway's preflight, and again by a provider with
+    /// `with_provider_enforcement()`, so a client's button is never the boundary.
+    #[serde(default)]
+    pub require_grant_for: Vec<String>,
+
+    /// How long [`transition_invoking`](AgentStateMachine::transition_invoking) waits for a grant before refusing.
+    /// Default 30 s. Read on the wall clock (`Hlc::decision_now_ms`), never on the HLC alone.
+    #[serde(default)]
+    pub grant_window: Option<Duration>,
 
     /// Blocks `Idle → Planning` until every filter resolves to ≥ 1 capability
     /// provider. Checked synchronously inside `transition(Planning)` via a
@@ -141,8 +162,17 @@ pub enum PolicyViolation {
     ToolBudgetExceeded,
     ToolNotAllowed(String),
     ToolDenied(String),
+    /// Never produced: `await_approval` returns `Ok` on silence — the veto mode approves an absent supervisor.
+    /// Kept so a `match` on the 2.x line compiles; the grant mode's refusal on silence is
+    /// [`GrantNotPresented`](Self::GrantNotPresented) (`deprecations.md` §59).
+    #[deprecated(since = "2.38.0", note = "never produced: the veto mode approves on silence; the grant mode refuses with GrantNotPresented")]
     ApprovalTimedOut(String),
     ApprovalVetoed(String),
+    /// A tool in `require_grant_for` was invoked and no grant was presented within the window — or `transition`
+    /// was called with no arguments to bind (adopter-surface X3). Default-deny: silence refuses.
+    GrantNotPresented(String),
+    /// A supervisor refused the request, or the grant issued did not verify here (the reason is in the string).
+    GrantRefused(String),
 }
 
 impl std::fmt::Display for PolicyViolation {
@@ -153,8 +183,11 @@ impl std::fmt::Display for PolicyViolation {
             PolicyViolation::ToolBudgetExceeded           => write!(f, "tool budget exceeded"),
             PolicyViolation::ToolNotAllowed(t)            => write!(f, "tool not in allow-list: {t}"),
             PolicyViolation::ToolDenied(t)                => write!(f, "tool is denied: {t}"),
+            #[allow(deprecated)]
             PolicyViolation::ApprovalTimedOut(t)          => write!(f, "approval timed out for: {t}"),
             PolicyViolation::ApprovalVetoed(t)            => write!(f, "approval vetoed for: {t}"),
+            PolicyViolation::GrantNotPresented(t)         => write!(f, "no grant presented for: {t}"),
+            PolicyViolation::GrantRefused(why)            => write!(f, "grant refused: {why}"),
         }
     }
 }
@@ -256,6 +289,13 @@ impl AgentStateMachine {
         let from_snapshot = self.current.lock().clone();
         self.check_sync_guards(&from_snapshot, &to)?;
 
+        // Adopter-surface X3: a tool that requires a grant cannot be invoked without the arguments to bind it to;
+        // the door for it is `transition_invoking`. Default-deny.
+        if let ExecutionState::Invoking { tool } = &to
+            && self.policy.read().require_grant_for.contains(tool)
+        {
+            return Err(PolicyViolation::GrantNotPresented(format!("{tool}: a grant-required tool is invoked through transition_invoking, with its arguments")));
+        }
         // Async guard: supervisor approval. The approval concerns the *tool*,
         // not the state, so it is requested once — not per commit retry.
         let needs_approval = if let ExecutionState::Invoking { tool } = &to {
@@ -303,10 +343,14 @@ impl AgentStateMachine {
         }
 
         self.write_kv_and_signal(&from, &to);
+        self.arm_state_timeout(&to);
+        Ok(())
+    }
 
-        // Cancel any prior timeout; arm a new one if policy specifies one for this state.
+    /// Cancel any prior timeout; arm a new one if policy specifies one for this state.
+    fn arm_state_timeout(&self, to: &ExecutionState) {
         if let Some(h) = self.timeout_handle.lock().take() { h.abort(); }
-        if let Some(dur) = self.policy.read().state_timeouts.get(&to).copied() {
+        if let Some(dur) = self.policy.read().state_timeouts.get(to).copied() {
             let weak = Weak::clone(&self.weak_self);
             let state_snap = to.clone();
             let h = tokio::spawn(async move {
@@ -319,8 +363,6 @@ impl AgentStateMachine {
             });
             *self.timeout_handle.lock() = Some(h);
         }
-
-        Ok(())
     }
 
     /// Returns a `watch::Receiver` whose value is the current snapshot of all
@@ -424,6 +466,192 @@ impl AgentStateMachine {
         }
 
         Ok(())
+    }
+
+    /// `→ Invoking { tool }` with the call's arguments (adopter-surface X3). For a tool in
+    /// [`AgentPolicy::require_grant_for`]: writes the grant request under `grant/{agent}/{request}` — the agent's
+    /// principal (`node:{self}`), the tool, the arguments' digest and a bounded rendering of them, the deployed policy
+    /// revision when known, and the expiry — then waits [`AgentPolicy::grant_window`] for `…/issued`. A grant that
+    /// arrives is verified by this node's execution authority (holder, signature, binding, window, revocation) with
+    /// a possession proof signed by this node's identity key; it is returned so the caller can present it on the
+    /// call (`_meta.mandate`), where the gateway and the provider verify it again. Silence refuses
+    /// `GrantNotPresented`; a supervisor's refusal or a grant that does not verify refuses `GrantRefused`. A pending
+    /// request for the same tool and digest, not yet expired, is waited on rather than asked again (a restart does
+    /// not ask twice). For any other tool this is [`transition`](Self::transition), and `Ok(None)`.
+    ///
+    /// The window is read on the wall clock (`Hlc::decision_now_ms`), so a quiet node's grant expires; the wait
+    /// itself sleeps on the timer seam and takes no lock.
+    pub async fn transition_invoking(
+        &self,
+        tool: &str,
+        arguments: &serde_json::Value,
+    ) -> Result<Option<serde_json::Value>, PolicyViolation> {
+        if !self.policy.read().require_grant_for.contains(&tool.to_string()) {
+            self.transition(ExecutionState::Invoking { tool: tool.to_string() }).await?;
+            return Ok(None);
+        }
+        let presented = self.await_grant(tool, arguments).await?;
+        // The guards that do not concern the grant run as for any invocation; the grant gate above is passed by
+        // taking the grant-required path, so the plain transition's refusal is bypassed here deliberately.
+        self.commit_invoking_granted(tool).await?;
+        Ok(Some(presented))
+    }
+
+    /// [`transition`](Self::transition) to `Invoking { tool }` for a tool whose grant was just verified: the same
+    /// guards and commit, minus the grant gate.
+    async fn commit_invoking_granted(&self, tool: &str) -> Result<(), PolicyViolation> {
+        let to = ExecutionState::Invoking { tool: tool.to_string() };
+        let from_snapshot = self.current.lock().clone();
+        self.check_sync_guards(&from_snapshot, &to)?;
+        let (max_turns, tool_budget) = {
+            let p = self.policy.read();
+            (p.max_turns, p.tool_budget)
+        };
+        let from = loop {
+            let expected = self.current.lock().clone();
+            self.check_sync_guards(&expected, &to)?;
+            match self.try_commit(&expected, &to, max_turns, tool_budget)? {
+                Some(from) => break from,
+                None => continue,
+            }
+        };
+        self.write_counter_kv("calls", self.call_count.load(Ordering::Relaxed));
+        self.write_kv_and_signal(&from, &to);
+        self.arm_state_timeout(&to);
+        Ok(())
+    }
+
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    /// The grant request's key under the route-owned `grant/` namespace: `grant/{agent principal}/{request}`.
+    fn grant_key(&self, request: &str) -> String {
+        format!("grant/{}/{request}", super::gateway_caller::node_principal(&self.ctx.node_id))
+    }
+
+    /// Without the gateway and TLS features there is no authority to verify a grant and no identity to prove
+    /// possession: the grant mode stays default-deny and refuses at once, by name.
+    #[cfg(not(all(feature = "gateway", feature = "tls")))]
+    async fn await_grant(&self, tool: &str, _arguments: &serde_json::Value) -> Result<serde_json::Value, PolicyViolation> {
+        Err(PolicyViolation::GrantNotPresented(format!("{tool}: a grant needs the `gateway` and `tls` features (an execution authority and this node's identity); this build has neither")))
+    }
+
+    /// Write, wait, verify (see [`transition_invoking`](Self::transition_invoking)). Returns the presented grant as
+    /// the JSON `_meta.mandate` carries.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    async fn await_grant(&self, tool: &str, arguments: &serde_json::Value) -> Result<serde_json::Value, PolicyViolation> {
+        use super::gateway_authority::{arguments_digest, possession_request, PresentedMandate};
+        use crate::mandate::grant::{possession_message, SignedMandateGrant};
+        let window_ms = self.policy.read().grant_window.unwrap_or(Duration::from_secs(30)).as_millis() as u64;
+        let agent = super::gateway_caller::node_principal(&self.ctx.node_id);
+        let digest = arguments_digest(arguments);
+        let digest_hex = super::action_evaluator::hex32(&digest);
+        let now_ms = self.ctx.hlc.decision_now_ms();
+        let prefix = format!("grant/{agent}/");
+        // A pending request for the same tool and digest is waited on, not asked again (a restart does not ask twice).
+        let existing = crate::store::scan_kv_prefix(&self.ctx.kv_state, &prefix).into_iter().find_map(|(key, bytes)| {
+            let rest = key.strip_prefix(prefix.as_str())?;
+            if rest.contains('/') { return None; }
+            let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+            (v["tool"] == tool && v["arguments_digest"] == digest_hex.as_str() && v["expires_at_ms"].as_u64()? > now_ms).then(|| rest.to_string())
+        });
+        let (request, expires_at_ms) = match existing {
+            Some(r) => {
+                let v: serde_json::Value = serde_json::from_slice(&mycelium_core::ops::kv_get(&self.ctx, &self.grant_key(&r)).unwrap_or_default()).unwrap_or_default();
+                (r, v["expires_at_ms"].as_u64().unwrap_or(now_ms + window_ms))
+            }
+            None => {
+                let request = format!("{:016x}", self.ctx.hlc.tick());
+                let expires_at_ms = now_ms + window_ms;
+                let rendering = render_arguments(arguments);
+                let record = serde_json::json!({
+                    "schema": "mycelium.grant-request/1",
+                    "request": request,
+                    "agent": agent,
+                    "node": self.ctx.node_id.to_string(),
+                    "tool": tool,
+                    "operation": "tools/call",
+                    "resource": format!("tool:{tool}@{}", self.ctx.node_id),
+                    "arguments_digest": digest_hex,
+                    "arguments": rendering,
+                    "policy_revision": self.ctx.deployed_policy_revision.load_full().map(|r| (*r).clone()),
+                    "requested_at_ms": now_ms,
+                    "expires_at_ms": expires_at_ms,
+                });
+                self.write_kv(&self.grant_key(&request), record.to_string().into_bytes());
+                #[cfg(feature = "metrics")]
+                metrics::counter!("mycelium_grants_requested_total").increment(1);
+                (request, expires_at_ms)
+            }
+        };
+        let issued_key: Arc<str> = format!("{}/issued", self.grant_key(&request)).into();
+        let refused_key: Arc<str> = format!("{}/refused", self.grant_key(&request)).into();
+        let mut rx = mycelium_core::kv_handle::KvHandle::from_core(Arc::clone(&self.ctx.core)).subscribe_prefix(format!("{}/", self.grant_key(&request)));
+        loop {
+            if let Some(bytes) = mycelium_core::ops::kv_get(&self.ctx, &refused_key) {
+                let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+                return Err(PolicyViolation::GrantRefused(format!("{tool}: refused by {} — {}", v["issuer"].as_str().unwrap_or("?"), v["reason"].as_str().unwrap_or("no reason given"))));
+            }
+            if let Some(bytes) = mycelium_core::ops::kv_get(&self.ctx, &issued_key) {
+                let grant: SignedMandateGrant = serde_json::from_slice(&bytes)
+                    .map_err(|e| PolicyViolation::GrantRefused(format!("{tool}: the issued grant does not parse: {e}")))?;
+                // Possession: this node signs the request it is about to make with its identity key.
+                let Some(tls) = self.ctx.tls.get() else {
+                    return Err(PolicyViolation::GrantRefused(format!("{tool}: a grant needs this node's identity ([tls]) to prove possession")));
+                };
+                let resource = format!("tool:{tool}@{}", self.ctx.node_id);
+                let request_bytes = possession_request("tools/call", &resource, &digest);
+                let proof = mycelium_core::tls::sign_bytes(&tls.signing_key(), &possession_message(&grant.mandate, &request_bytes));
+                let presented = PresentedMandate { grant, possession: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, proof) };
+                // Verified here, by this node's own authority, before the transition commits.
+                let Some(authority) = self.ctx.execution_authority.get() else {
+                    return Err(PolicyViolation::GrantRefused(format!("{tool}: no execution authority is attached to verify the grant")));
+                };
+                let now = self.ctx.hlc.decision_now_ms();
+                let assessment = authority.assess(&agent, "tools/call", &resource, &digest, Some(&presented), now, &super::gateway_member_keys(&self.ctx));
+                return match assessment.binding.map(|b| b.state) {
+                    Some(super::action_evaluator::MandateState::Established) => {
+                        #[cfg(feature = "metrics")]
+                        metrics::counter!("mycelium_grants_verified_total").increment(1);
+                        serde_json::to_value(&presented).map_err(|e| PolicyViolation::GrantRefused(format!("{tool}: the grant does not serialise: {e}")))
+                    }
+                    Some(super::action_evaluator::MandateState::Refused(r)) => Err(PolicyViolation::GrantRefused(format!("{tool}: {r}"))),
+                    Some(super::action_evaluator::MandateState::Unknown(why)) => Err(PolicyViolation::GrantRefused(format!("{tool}: not established — {why}"))),
+                    None => Err(PolicyViolation::GrantRefused(format!("{tool}: the grant was not established"))),
+                };
+            }
+            let now = self.ctx.hlc.decision_now_ms();
+            if now >= expires_at_ms {
+                #[cfg(feature = "metrics")]
+                metrics::counter!("mycelium_grants_expired_total").increment(1);
+                return Err(PolicyViolation::GrantNotPresented(format!("{tool}: no grant within {window_ms} ms (request {request})")));
+            }
+            // Wake on a write under the request, or on the timer seam at the expiry — whichever first.
+            let remaining = expires_at_ms - now;
+            tokio::select! {
+                changed = rx.changed() => { if changed.is_err() { return Err(PolicyViolation::GrantNotPresented(format!("{tool}: the request's watch closed"))); } }
+                _ = mycelium_core::sim_seam::sleep_ms("agent/grant-wait", remaining.min(1_000)) => {}
+            }
+        }
+    }
+
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    /// One KV write from the state machine, gossiped (the shape `write_kv_and_signal` uses for the state key).
+    fn write_kv(&self, key: &str, value: Vec<u8>) {
+        let update = make_gossip_update(
+            &self.ctx.node_id,
+            self.ctx.default_ttl,
+            Arc::from(key),
+            Bytes::from(value),
+            false,
+            &self.ctx.hlc,
+        );
+        apply_and_notify(&self.ctx.kv_state, &update);
+        dispatch_gossip_try_send(
+            &self.ctx.gossip_txs,
+            crate::framing::local_kv_wire_msg(&self.ctx, update),
+            self.ctx.node_id.id_hash(),
+            ForwardHint::All,
+            &self.ctx.kv_state.dropped_frames,
+        );
     }
 
     /// Emits `AGENT_APPROVE` and waits up to 30 s for a matching `AGENT_VETO`.
@@ -562,6 +790,20 @@ impl Drop for AgentStateMachine {
     }
 }
 
+#[cfg(all(feature = "gateway", feature = "tls"))]
+/// A human reads arguments, not a digest: the request record carries the arguments as JSON when they fit the cap,
+/// else a summary naming the size (the digest is beside it either way). Bounded well under the KV write cap.
+/// Not yet applied: the data-class policy that would withhold a classified rendering (stated in the plan row).
+pub(crate) fn render_arguments(arguments: &serde_json::Value) -> serde_json::Value {
+    const CAP: usize = 16 * 1024;
+    let text = arguments.to_string();
+    if text.len() <= CAP {
+        arguments.clone()
+    } else {
+        serde_json::json!({ "withheld": "over the rendering cap", "bytes": text.len(), "cap": CAP })
+    }
+}
+
 /// Snapshot all `agent/{node}/state` entries from the local KV store.
 fn scan_agent_states(kv: &crate::store::KvState) -> Vec<(NodeId, ExecutionState)> {
     let guard = kv.store.pin();
@@ -602,6 +844,23 @@ mod tests {
         for s in &cases {
             assert_eq!(*s, ExecutionState::from_kv_str(&s.to_kv_str()), "roundtrip failed for {s:?}");
         }
+    }
+
+    /// X3: a grant-required tool is default-deny — a plain transition carries no arguments to bind, so it is refused
+    /// at once, and the state does not move. (The full loop — the request written, a grant issued and verified, the
+    /// call bound — is `http::grant_tests`.)
+    #[tokio::test]
+    async fn a_plain_transition_to_a_grant_required_tool_is_refused() {
+        let agent = crate::lib_tests::make_agent_for_sm_tests();
+        let policy = AgentPolicy { require_grant_for: vec!["deploy".into()], ..Default::default() };
+        let sm = agent.agent_state_machine(policy);
+        sm.transition(ExecutionState::Planning).await.unwrap();
+        let err = sm.transition(ExecutionState::Invoking { tool: "deploy".into() }).await.unwrap_err();
+        assert!(matches!(err, PolicyViolation::GrantNotPresented(_)), "{err}");
+        assert_eq!(sm.state(), ExecutionState::Planning);
+        // Another tool is unaffected, and the grant-free path of `transition_invoking` is the plain transition.
+        assert!(sm.transition_invoking("other", &serde_json::json!({})).await.unwrap().is_none());
+        assert_eq!(sm.state(), ExecutionState::Invoking { tool: "other".into() });
     }
 
     #[tokio::test]

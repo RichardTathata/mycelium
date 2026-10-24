@@ -68,6 +68,7 @@ pub struct Policy {
     tool_budget: Option<usize>,
     max_turns: Option<usize>,
     require_approval_for: Vec<String>,
+    require_grant_for: Vec<String>,
     required_capabilities: Vec<CapFilter>,
     // Tier C — the provider-side hard gate.
     authorized_callers: Vec<Arc<str>>,
@@ -118,9 +119,17 @@ impl Policy {
         self
     }
 
-    /// Tier B. Tools that require a supervisor approval signal before `Invoking` is committed.
+    /// Tier B — and **veto, not grant**: an absent supervisor approves. Tools that require a supervisor approval
+    /// signal before `Invoking` is committed.
     pub fn require_approval_for<S: Into<String>>(mut self, tools: impl IntoIterator<Item = S>) -> Self {
         self.require_approval_for = tools.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Tools that require a **grant** before `Invoking` — approval that is default-deny (adopter-surface X3). Tier B
+    /// at the agent's transition; Tier C at a provider under enforcement, which verifies the same grant again.
+    pub fn require_grant_for<S: Into<String>>(mut self, tools: impl IntoIterator<Item = S>) -> Self {
+        self.require_grant_for = tools.into_iter().map(Into::into).collect();
         self
     }
 
@@ -202,7 +211,14 @@ impl Policy {
             out.push(Clause {
                 name: "require_approval_for",
                 tier: Strength::SelfImposedTransition,
-                detail: format!("supervisor approval required for: {}", self.require_approval_for.join(", ")),
+                detail: format!("veto, not grant — an absent supervisor approves: {}", self.require_approval_for.join(", ")),
+            });
+        }
+        if !self.require_grant_for.is_empty() {
+            out.push(Clause {
+                name: "require_grant_for",
+                tier: Strength::SelfImposedTransition,
+                detail: format!("grant, default-deny — silence refuses; verified again at the gateway and at a provider under enforcement (Tier C there): {}", self.require_grant_for.join(", ")),
             });
         }
         if !self.required_capabilities.is_empty() {
@@ -241,6 +257,7 @@ impl Policy {
             tool_budget: self.tool_budget,
             max_turns: self.max_turns,
             require_approval_for: self.require_approval_for.clone(),
+            require_grant_for: self.require_grant_for.clone(),
             required_capabilities: self.required_capabilities.clone(),
             ..AgentPolicy::default()
         }

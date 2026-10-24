@@ -93,6 +93,9 @@ pub fn possession_request(operation: &str, resource: &str, arguments_digest: &[u
     out
 }
 
+use crate::mandate::authority::RevocationStanding;
+use super::action_evaluator::hex32;
+
 struct AuthorityState {
     gate: ExecutionGate,
     verifier: GrantVerifier,
@@ -383,6 +386,16 @@ impl ExecutionAuthority {
             return unknown("the possession proof is not base64".into());
         };
         let request = possession_request(operation, resource, arguments_digest);
+        // Adopter-surface X3: a grant's arguments binding is checked first, so a grant presented for other arguments
+        // is refused **by name** rather than as a possession mismatch (the proof covers this call's digest, which the
+        // bound one is not). Refusing on an as-yet-unverified binding is fail-closed: nothing is granted by it.
+        let grant_binding = m.grant_binding();
+        if let Some(b) = &grant_binding {
+            let presented = hex32(arguments_digest);
+            if b.arguments_digest != presented {
+                return refused(MandateRefusal::BoundToOtherArguments { bound: b.arguments_digest.clone(), presented });
+            }
+        }
 
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let st = &mut *st;
@@ -397,10 +410,35 @@ impl ExecutionAuthority {
             other => return unknown(format!("grant not established: {other:?}")),
         }
 
+        let digest_hex = hex32(&m.digest());
+        // Adopter-surface X3: a grant is one appointment for one call. Its scope is its own, so the resource gate's
+        // epoch rule does not apply to it; what does: the binding its issuer signed (the arguments digest, the policy
+        // revision — the latter checked by the preflight once the decision's revision is known), the window, and the
+        // revocation standing of its term under the gate's freshness rule.
+        if let Some(binding) = grant_binding {
+            if !m.permits(&mandate_operation(operation, resource)) {
+                return refused(MandateRefusal::NotEnumerated { operation: mandate_operation(operation, resource) });
+            }
+            return match st.revocations.standing(&m.established_by, &m.scope, &m.term, &st.gate.freshness(), st.gate.clock(), now_ms) {
+                RevocationStanding::NotRevoked => Assessment {
+                    binding: Some(
+                        MandateBinding::established(m.holder.clone(), m.term.clone(), m.scope.clone(), m.epoch)
+                            .with_facts(Some(digest_hex), binding.policy_revision),
+                    ),
+                    valid_until_ms: Some(m.valid_until_ms),
+                },
+                RevocationStanding::Revoked => unknown("the grant is revoked".into()),
+                RevocationStanding::Unknown => unknown("revocation standing unknown: no fresh checkpoint".into()),
+            };
+        }
+
         let work = AuthorizedWork::new(mandate_operation(operation, resource), Some(m.clone()), u64::MAX);
         match st.gate.check(&work, &st.revocations, now_ms) {
             Ok(()) => Assessment {
-                binding: Some(MandateBinding::established(m.holder.clone(), m.term.clone(), m.scope.clone(), m.epoch)),
+                binding: Some(
+                    MandateBinding::established(m.holder.clone(), m.term.clone(), m.scope.clone(), m.epoch)
+                        .with_facts(Some(digest_hex), None),
+                ),
                 valid_until_ms: Some(m.valid_until_ms),
             },
             Err(ExecutionDenial::Refused(r)) => refused(r),
@@ -595,5 +633,82 @@ pub(crate) mod tests {
                 "abababababababababababababababababababababababababababababababab"
             )
         );
+    }
+
+    /// X3: a grant is one appointment for one call. Its binding is read from its signed operations: the matching
+    /// digest is established (with the grant's digest and bound revision on the finding), another digest is refused
+    /// by name, a revoked term is not established, and the window is read on the clock the caller passes — a grant
+    /// past its `valid_until_ms` is out of window however still the HLC stayed. The resource gate's epoch rule does
+    /// not apply: two grants at epoch 1 are both established.
+    #[test]
+    fn a_grant_is_bound_to_its_arguments_and_expires_on_the_wall_clock() {
+        use crate::mandate::grant::GRANT_SCOPE_PREFIX;
+        let (authority_key, holder) = keys();
+        let mut t = EntitlementTable::new();
+        t.entitle("depot", PrincipalId::new("operator:acme").unwrap());
+        t.entitle_grants(PrincipalId::new("operator:acme").unwrap());
+        let gate = ExecutionGate::strict(
+            ResourceAuthority::new("depot", 1),
+            ResourceTier::Serialised,
+            ClockModel { skew_ms: 100 },
+            FreshnessPolicy { freshness_ms: 60_000, interval_ms: 20_000, delivery_ms: 5_000 },
+        )
+        .unwrap();
+        let a = ExecutionAuthority::new(gate, GrantVerifier::new(t), external(&authority_key, &holder));
+        let members: HashMap<NodeId, MemberKeys> = HashMap::new();
+        let digest = [9u8; 32];
+        let grant = |request: &str| {
+            let m = Mandate {
+                holder: PrincipalId::new(CALLER).unwrap(),
+                established_by: PrincipalId::new("operator:acme").unwrap(),
+                purpose: format!("grant issued by oidc:idp/alice for request {request}"),
+                scope: format!("{GRANT_SCOPE_PREFIX}{request}"),
+                operations: Mandate::grant_operations(mandate_operation(OP, RES), &super::super::action_evaluator::hex32(&digest), Some("rev-7")),
+                epoch: 1,
+                term: TermId::new(request).unwrap(),
+                valid_from_ms: 1_000,
+                valid_until_ms: 20_000,
+            };
+            let signature = crate::tls::sign_bytes(&authority_key, &m.canonical_bytes()).to_vec();
+            let possession = crate::tls::sign_bytes(&holder, &possession_message(&m, &possession_request(OP, RES, &digest)));
+            PresentedMandate { grant: SignedMandateGrant { mandate: m, signature }, possession: base64::engine::general_purpose::STANDARD.encode(possession) }
+        };
+        // A fresh checkpoint from the issuing authority, so revocation standing is known.
+        let checkpoint = |seq: u64, revoked: &[&str], at: u64, scope: &str| {
+            let c = RevocationCheckpoint {
+                authority: PrincipalId::new("operator:acme").unwrap(),
+                scope: scope.into(),
+                seq,
+                issued_at_ms: at,
+                revoked: revoked.iter().map(|t| TermId::new(t).unwrap()).collect(),
+            };
+            crate::mandate::authority::SignedRevocationCheckpoint { signature: crate::tls::sign_bytes(&authority_key, &c.canonical_bytes()).to_vec(), checkpoint: c }
+        };
+        let _ = a.offer_checkpoint(&checkpoint(1, &[], 5_000, "grant:r1"), 5_000, &members);
+        let _ = a.offer_checkpoint(&checkpoint(1, &[], 5_000, "grant:r2"), 5_000, &members);
+
+        let g1 = grant("r1");
+        let found = a.assess(CALLER, OP, RES, &digest, Some(&g1), 5_000, &members);
+        let b = found.binding.expect("a finding");
+        assert_eq!(b.state, MandateState::Established, "{b:?}");
+        assert_eq!(b.digest.as_deref(), Some(super::super::action_evaluator::hex32(&g1.grant.mandate.digest()).as_str()));
+        assert_eq!(b.bound_policy_revision.as_deref(), Some("rev-7"));
+        // A second grant at the same epoch, its own appointment.
+        let g2 = grant("r2");
+        assert_eq!(a.assess(CALLER, OP, RES, &digest, Some(&g2), 5_000, &members).binding.unwrap().state, MandateState::Established);
+        // Other arguments: refused by name, before anything else.
+        let other = [10u8; 32];
+        let possession = crate::tls::sign_bytes(&holder, &possession_message(&g1.grant.mandate, &possession_request(OP, RES, &other)));
+        let g1_other = PresentedMandate { grant: g1.grant.clone(), possession: base64::engine::general_purpose::STANDARD.encode(possession) };
+        assert!(matches!(a.assess(CALLER, OP, RES, &other, Some(&g1_other), 5_000, &members).binding.unwrap().state,
+            MandateState::Refused(MandateRefusal::BoundToOtherArguments { .. })));
+        // Past the window on the clock passed in (the HLC is not consulted here at all).
+        assert!(matches!(a.assess(CALLER, OP, RES, &digest, Some(&g1), 20_001, &members).binding.unwrap().state,
+            MandateState::Refused(MandateRefusal::OutOfWindow { .. })));
+        // Revoked: not established, by name.
+        let _ = a.offer_checkpoint(&checkpoint(2, &["r1"], 6_000, "grant:r1"), 6_000, &members);
+        assert!(matches!(a.assess(CALLER, OP, RES, &digest, Some(&g1), 6_000, &members).binding.unwrap().state,
+            MandateState::Unknown(ref why) if why.contains("revoked")));
+        assert_eq!(a.assess(CALLER, OP, RES, &digest, Some(&g2), 6_000, &members).binding.unwrap().state, MandateState::Established, "the other grant stands");
     }
 }
