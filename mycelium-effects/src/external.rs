@@ -1110,7 +1110,9 @@ impl<D: ExternalDestination> Reconciler<D> {
         Ok(())
     }
     #[cfg(not(feature = "envelope"))]
-    async fn evidence(&self, _ext: &ExternalEffect, _note: Note<'_>) -> Result<(), ExternalRefusal> {
+    async fn evidence(&self, _ext: &ExternalEffect, note: Note<'_>) -> Result<(), ExternalRefusal> {
+        // No journal in this build: the note is read and nothing is written.
+        let Note { operation: _, reason: _, execution: _, parent: _, now_ms: _, permit: _ } = note;
         Ok(())
     }
 }
