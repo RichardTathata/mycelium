@@ -38,7 +38,8 @@ CASES = ['baseline', 'example-baseline',
          # (g) tests
          'absent-test', 'absent-test-in-first-paragraph', 'short-test-absent', 'not-a-test', 'none-names-no-test', 'test-without-file',
          'excepted-test', 'in-code-without-test', 'test-not-executed', 'script-key-not-a-run', 'test-in-wrong-target', 'integration-test-in-wrong-binary',
-         'executed-baseline',
+         'executed-baseline', 'adapter-test-not-executed', 'adapter-executed-baseline',
+         'adapter-row-missing', 'adapter-carried-without-test', 'adapter-test-not-in-file', 'adapter-cell-vocabulary',
          # (h) examples
          'example-for-none-feature', 'example-row-tight', 'example-absent-from-index', 'example-missing', 'example-row-without-status',
          'see-without-index-link', 'none-without-sentence', 'parser-guard-matrix',
@@ -400,14 +401,37 @@ fails('which scripts/test-coverage-exceptions.txt excepts',
 case('in-code-without-test')
 fails('names no test that runs that code', {ROUTING: [('- `guide_20_routing_policy`, in', '- The test guide_20_routing_policy, in')]})
 
+# (j) the adapter contract: a row per adapter, a test per carried cell, in the file it links, in the vocabulary.
+CONTRACT = module.ADAPTER_PAGE
+case('adapter-row-missing')
+fails('no row for adapter `MCP door`', {CONTRACT: [('| **MCP door** |', '| **MCP-door** |')]})
+case('adapter-carried-without-test')
+fails('a carried cell must name its test and link its file', {CONTRACT: [('carried — `a_receipt_names_its_rung_and_nothing_above_it`', 'carried — the receipt')]})
+case('adapter-test-not-in-file')
+fails('names the test `a_receipt_names_its_rung_and_nothing_below_it`, which is not in', {CONTRACT: [('`a_receipt_names_its_rung_and_nothing_above_it`', '`a_receipt_names_its_rung_and_nothing_below_it`')]})
+case('adapter-cell-vocabulary')
+fails('a cell reads carried, not carried or not applicable', {CONTRACT: [('| not applicable — a tool call keeps no session |', '| n/a — a tool call keeps no session |')]})
+
 named = module.named_test_list(ROOT)
 assert len(named) >= 5, named
+adapter_named = [n for n in named if n[0] == CONTRACT]
+assert adapter_named, 'the contract page contributes no tests to the executed mode'
+assert any(f[0].endswith('.py') for _, _, f in adapter_named) and any(f[0].endswith('.ts') for _, _, f in adapter_named), adapter_named
 
 
 def log_for(entries):
-    """A CI log in libtest's form for (test, repository file, right target?) entries."""
+    """A CI log for (test, repository file, right target?) entries: libtest's form for a Rust file, pytest's `-v`
+    line for a Python file, jest's `--verbose` block for a TypeScript file."""
     lines = []
     for test, file, right in entries:
+        if file.endswith('.py'):
+            lines.append(f'{file if right else "other/" + file}::{test} PASSED')
+            continue
+        if file.endswith('.ts'):
+            short = file.split('/', 1)[1] if right else 'other.test.ts'
+            lines.append(f'PASS {short}')
+            lines.append(f'  ✓ {test} (3 ms)')
+            continue
         crate, within = module.crate_of(ROOT, file)
         if within.startswith('tests/'):
             stem = Path(within).stem
@@ -443,6 +467,17 @@ with tempfile.TemporaryDirectory() as logs:
     errors = module.check_executed(ROOT, logs)
     assert any(f'`{named[integration[0]][1]}`' in e for e in errors), errors
     case('executed-baseline')
+    log.write_text(log_for([(t, files[0], True) for _, t, files in named]))
+    assert module.check_executed(ROOT, logs) == [], module.check_executed(ROOT, logs)
+    # (j), the CI half: a carried cell whose test no job executed — the Python one, the TypeScript one, a Rust one —
+    # fails; every one executed in its own file passes.
+    case('adapter-test-not-executed')
+    for drop in [next(n for n in adapter_named if n[2][0].endswith('.py')), next(n for n in adapter_named if n[2][0].endswith('.ts')),
+                 next(n for n in adapter_named if n[2][0].endswith('.rs'))]:
+        log.write_text(log_for([(t, files[0], True) for _, t, files in named if (t, files) != (drop[1], drop[2])]))
+        errors = module.check_executed(ROOT, logs)
+        assert any(f'`{drop[1]}`' in e and 'which no job of this run executed' in e for e in errors), (drop, errors)
+    case('adapter-executed-baseline')
     log.write_text(log_for([(t, files[0], True) for _, t, files in named]))
     assert module.check_executed(ROOT, logs) == [], module.check_executed(ROOT, logs)
 

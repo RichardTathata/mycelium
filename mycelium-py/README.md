@@ -716,3 +716,19 @@ All methods talk to the embedded HTTP gateway on the Rust node:
 | `federation().catalog` | `GET /gateway/federation/catalog/{domain}` | last observation, no network |
 | `federation().connect` | `POST /gateway/federation/connect` | `federation:invoke` |
 | `federation().call` | `POST /gateway/federation/call` | `federation:invoke` |
+
+## What this does not establish
+
+The SDK is a client of one gateway; it carries what the doors it calls carry, and nothing it does not send
+([the adapter contract](../docs/reference/adapter-contract.md)):
+
+- **No cancel verb.** Ending a stream closes the client's side; the node is not told, and a dropped stream is not
+  resumed (no resume point at the gateway).
+- **No grant verb and no pending-grants stream** (adopter-surface X3's second PR): a call the policy holds for
+  approval is refused to this client, not parked.
+- **Identity is the bearer's.** The principal the gateway resolves is the token's; this SDK signs nothing, and
+  computes a mandate's request bytes without being able to prove possession of a key it does not hold.
+- **A receipt names the gateway node's rung and nothing above it** — never replication, never a peer's state.
+- **Raw emissions carry no principal** (`emit`, shard emit, mailbox deliver) and cannot reach a protected kind.
+- **No session.** The SDK keeps nothing between calls; the LangGraph checkpointer and the Strands store are the
+  session adapters.

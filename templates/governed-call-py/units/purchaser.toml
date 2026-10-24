@@ -2,6 +2,7 @@
 # the agent's behalf. The mandate and the rule are accepted and reported back as `not_enforced`: the published node
 # attaches no policy evaluator, so they are the declaration `wire-check` draws, not a check this node makes.
 principal = "purchaser"
+runtime   = "python"   # mycelium-py loads this unit: `mycelium wire-check units/` says what that runtime carries
 
 [[capability]]
 ns       = "purchase"

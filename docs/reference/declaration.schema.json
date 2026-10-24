@@ -72,7 +72,11 @@
         "requires",
         "groups",
         "hosts_kinds",
-        "presence"
+        "presence",
+        "runtime",
+        "adapter",
+        "carries",
+        "not_carried"
       ],
       "additionalProperties": false,
       "properties": {
@@ -112,6 +116,34 @@
               "blob"
             ]
           }
+        },
+        "runtime": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The unit's `runtime` key (adopter-surface X8): the SDK an agent will load it with, or null for a native unit."
+        },
+        "adapter": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The adapter contract's row the runtime names (`native` without a key); null for an unknown runtime, which is also a finding."
+        },
+        "carries": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The properties that adapter carries, as docs/reference/adapter-contract.md names them."
+        },
+        "not_carried": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The properties that adapter could carry and does not."
         },
         "presence": {
           "type": "array",

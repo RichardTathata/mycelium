@@ -42,6 +42,12 @@ application that embeds the library can run the `[[capability]]` probe loop with
 |---|---|---|---|
 | `principal` | string | absent | The issuer-qualified principal this unit presents at a gateway. It is the key that joins a declaration to what the fleet later reports. Not an address. Refused when present and empty. |
 
+## `runtime`
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `runtime` | string | absent | The SDK an agent will load this unit with: `python` (`mycelium-py`), `typescript` (`mycelium-ts`), `strands` (`strands-session-mycelium`) or `langgraph` (`langgraph-checkpoint-mycelium`) — a row of [the adapter contract](adapter-contract.md). Absent, the unit is native: a Rust embedding. `wire-check` prints, per unit, which properties that runtime carries and which it does not, and an unknown value is the finding `unknown runtime`. A declaration of what will run the unit, not an instruction to any node: the gateway's `units/declare` accepts and ignores it. Refused when present and empty (adopter-surface X8). |
+
 ## `[[capability]]`
 
 One block per capability the unit advertises.

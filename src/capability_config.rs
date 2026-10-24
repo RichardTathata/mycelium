@@ -185,6 +185,12 @@ pub struct NodeCapabilityConfig {
     /// reports (plan D9). Not an address.
     #[serde(default)]
     pub principal:    Option<String>,
+    /// The runtime an SDK agent will load this unit with (adopter-surface X8): `python`, `typescript`,
+    /// `strands` or `langgraph` — a row of the adapter contract (`adapter_contract::ADAPTERS`), so `wire-check`
+    /// can say which properties this unit's runtime carries. Absent, the unit is native: a Rust embedding. Not an
+    /// instruction to any node; a declaration of what will run the unit.
+    #[serde(default)]
+    pub runtime:      Option<String>,
     /// All capability probe entries declared for this node.
     #[serde(default, rename = "capability")]
     pub capabilities: Vec<CapabilityProbeEntry>,
@@ -978,6 +984,13 @@ impl NodeCapabilityConfig {
             && p.trim().is_empty()
         {
             return Err(invalid("principal", "must not be empty when present"));
+        }
+        // An unknown runtime is `wire-check`'s finding, by name, so a declaration directory reports every unit's
+        // standing in one run; the loader refuses only the empty value, as it does for `principal`.
+        if let Some(r) = &self.runtime
+            && r.trim().is_empty()
+        {
+            return Err(invalid("runtime", "must not be empty when present"));
         }
         for (i, r) in self.requirements.iter().enumerate() {
             r.to_filter().map_err(|e| invalid("requirement", format!("[{i}] {}/{}: {e}", r.ns, r.name)))?;

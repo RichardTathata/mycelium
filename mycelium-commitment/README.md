@@ -71,7 +71,7 @@ refused as `Superseded { installed, presented }` **before any write**; a passing
 linearizably. A deployment without mandates uses `commit_award_linearizable` — a check not called, never one
 faked.
 
-## What it does not do (yet)
+## What this does not establish
 
 Replaying an award under `mycelium-sim` **does** work since the scheduler seam (v2.9.0):
 `a_whole_node_recording_of_a_linearizable_award_replays_under_the_scheduler_seam` asserts the replay
@@ -79,3 +79,7 @@ succeeds and that only the disarmed plant diverges (an earlier version of this l
 A mandate revoked
 *during* the award's round is not caught by the check, which runs before it. Participants are named, not
 authenticated, here: authority lives in the gateway's caller context and in mandates, not in this crate.
+
+Also stated for the adapter contract ([the table](../docs/reference/adapter-contract.md)): this crate is not a
+runtime adapter — an offer or an award is a signed record over the KV, and it carries no session, no cancellation
+and no causal fields of its own.

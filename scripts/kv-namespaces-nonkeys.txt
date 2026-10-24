@@ -71,3 +71,10 @@ mycelium.closure/1    # closure.rs: the schema tag printed at the head of an exp
 
 # ── remainders matched after a known prefix is stripped
 end/                  # consensus_life.rs collectable: a release marker's remainder under consensus/life/{slot}/ (the key has a row)
+
+# ── repository paths with an anchor: the adapter contract's limits-section links (adopter-surface X7), not KV
+mycelium-py/README.md               # adapter_contract.rs: the SDK README's *What this does not establish* section
+mycelium-ts/README.md               # adapter_contract.rs: the SDK README's limits section
+langgraph-checkpoint-mycelium/README.md  # adapter_contract.rs: the checkpointer README's limits section
+strands-session-mycelium/README.md  # adapter_contract.rs: the Strands store README's limits section
+docs/features/adapter-contract.md   # adapter_contract.rs: the doors' limits section on the feature page

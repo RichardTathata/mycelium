@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 # Verification policy rule 3: each case prints `@@case@@ <suite>::<case>` as it starts; --list names them all.
 SUITE = 'scripts/test-check-materials.py'
-CASES = ['baseline', 'missing-resource', 'missing-reader-route', 'missing-accessibility', 'stale-claim']
+CASES = ['baseline', 'missing-resource', 'missing-reader-route', 'missing-accessibility', 'stale-claim', 'missing-limits-section']
 if sys.argv[1:] == ['--list']:
     for c in CASES:
         print(f'@@case-list@@ {SUITE}::{c}')
@@ -46,4 +46,6 @@ case('missing-accessibility')
 mutated('docs/publications/customer-pitch.html', 'aria-label="Next slide"', 'title="Next slide"', 'missing accessibility support')
 case('stale-claim')
 mutated('README.md', '# Mycelium', '# Mycelium\n\nEvery action runs under explicit authority and leaves a record you can replay.', 'stale claim')
-print('test-check-materials: four negative mutations rejected; positive baseline passed')
+case('missing-limits-section')
+mutated('mycelium-py/README.md', '## What this does not establish', '## Limits', 'missing the limits section')
+print('test-check-materials: five negative mutations rejected; positive baseline passed')

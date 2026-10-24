@@ -11,6 +11,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The adapter contract, and a unit's `runtime`** (`docs/plans/adopter-surface.md` X7 and X8;
+  `docs/features/adapter-contract.md`): `docs/reference/adapter-contract.md` — one row per runtime adapter (the native
+  Rust embedding, `mycelium-py`, `mycelium-ts`, `langgraph-checkpoint-mycelium`, `strands-session-mycelium`,
+  `mycelium-reason`, the A2A door, the MCP door) and one column per property (session persistence, cancellation,
+  tracing, identity propagation, grants, provider-side enforcement, receipts); a cell is *carried* and names the test
+  CI runs that shows it, *not carried* with the reason, or *not applicable*. Generated from
+  `mycelium::adapter_contract::ADAPTERS` (regenerate with `UPDATE_ADAPTER_CONTRACT=1 cargo test --lib
+  adapter_contract`) and gated: `scripts/check-feature-pages.py` requires a row per adapter, a test per carried cell
+  in the file it links (a Rust `fn`, a pytest `def`, a jest title), and in CI's `--executed` mode every such test
+  executed in the run. Every companion README carries its limits under one name, **What this does not establish**
+  (`check-materials.py` requires it); the three that had one under another name are renamed, the four that had none
+  have one. The unit file gains an optional `runtime` key (`python` · `typescript` · `strands` · `langgraph`);
+  `wire-check` prints, per unit, what that runtime carries and does not (the native embedding for a unit without
+  one), an unknown value is the finding `unknown runtime`, and the declaration document's units carry `runtime`,
+  `adapter`, `carries` and `not_carried` (schema `mycelium.design/declaration/1`, fields added). The Python
+  scaffold's unit declares `runtime = "python"`. **Not built, stated:** the table records; it does not make an
+  adapter carry anything, and no cell is measured at runtime.
 - **`mycelium test --faults`** (`docs/plans/adopter-surface.md` X6; `docs/features/test-faults.md`): a fleet of
   in-process nodes built from a declaration directory and a configuration — one node per unit file, three at least,
   each the configuration's with loopback addresses, free ports, persistence and TLS material under a temporary

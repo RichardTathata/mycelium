@@ -71,3 +71,14 @@ cargo clippy -p mycelium-agentfacts --all-targets -- -D warnings
 ```
 
 [`signed_agent_facts`]: src/lib.rs
+
+## What this does not establish
+
+- **Truth of a fact.** A field is verifiable against the owning node's key and identity; that it is *true* is the
+  owner's claim, and `evaluations`/`telemetry` provenance (when added) cites the audit trail's `content_hash` —
+  self-attested-with-audit, never a third party's attestation.
+- **A revoked signer, retroactively.** A field signed before its key was revoked verified then; the revocation
+  stops it verifying now (post-360 row Q), and says nothing about whether it was true.
+- **Cross-domain convergence.** The CRDT board converges within a domain by gossip; the edge endpoint serves one
+  domain's quilt, and a federated reader pulls it as a document, not as a merge.
+- **Schema-registry runtime migrations** (WS-F): not built.

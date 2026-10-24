@@ -671,3 +671,18 @@ MYCELIUM_LIVE_REQUIRED=1 MYCELIUM_TEST_HOST=127.0.0.1 MYCELIUM_TEST_PORT=9311 np
 | `federation().call` | `POST /gateway/federation/call` | `federation:invoke` |
 | `declareUnits` | `POST /gateway/units/declare` | `cap:write` — a unit file's capabilities, requirements and groups under one handle (plan Q2) |
 | `artifacts().publish` | `POST /gateway/artifacts/publish` | `artifact:publish` — one already-signed catalogue line (plan A3) |
+
+## What this does not establish
+
+The SDK is a client of one gateway; it carries what the doors it calls carry, and nothing it does not send
+([the adapter contract](../docs/reference/adapter-contract.md)):
+
+- **No cancel verb.** Ending an `sseStream` generator closes the client's side; the node is not told, and a dropped
+  stream is not resumed.
+- **No grant verb and no pending-grants stream** (adopter-surface X3's second PR): a call the policy holds for
+  approval is refused to this client, not parked.
+- **Identity is the bearer's.** The principal the gateway resolves is the token's; this SDK signs nothing.
+- **A receipt names the gateway node's rung and nothing above it** — never replication, never a peer's state.
+- **64-bit values are exact and the shapes match the gateway's** (0.2.0); what the gateway does not return — a
+  provider's own record, a peer's durability — this SDK cannot show.
+- **No session.** The SDK keeps nothing between calls.

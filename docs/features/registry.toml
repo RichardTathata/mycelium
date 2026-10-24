@@ -105,6 +105,14 @@ example_watch = ["declare_watch", "declaration_watch"]
 ids = ["concept:declaration-watch"]
 
 [[feature]]
+name = "The adapter contract"
+page = "adapter-contract.md"
+example = "none"
+example_watch = ["adapter_contract", "runtime_key"]
+ids = ["concept:adapter-contract", "unit:runtime"]
+links = ["concept:unit-file", "concept:causal-records", "concept:grant"]
+
+[[feature]]
 name = "Fault classes against a declaration"
 page = "test-faults.md"
 example = "none"

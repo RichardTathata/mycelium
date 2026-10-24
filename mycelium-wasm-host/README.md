@@ -221,3 +221,15 @@ cargo clippy -p mycelium-wasm-host --all-targets -- -D warnings
 ```
 
 [`wit/host.wit`]: wit/host.wit
+
+## What this does not establish
+
+- **A component's behaviour.** The host bounds a guest by fuel, memory and wall-clock deadline and confines an
+  activation command where the profile applies; what the guest or the command *does* inside those bounds is the
+  publisher's and the operator's.
+- **A real object store.** The S3 path is proved against S3Mock and the GCS path against nothing: a real bucket is a
+  credential, not a commit (`docs/operations/what-is-proven.md`).
+- **An activation on every platform.** Confinement applies under Seatbelt or Landlock + seccomp and is refused by name
+  elsewhere; the egress proxy limits hosts by name, not by address or path.
+- **A cross-process placement race.** The provisioner's single-owner claim is per fleet by consensus where an
+  electorate is declared, and advisory where one is not.

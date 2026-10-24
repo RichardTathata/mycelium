@@ -86,7 +86,7 @@ A saver pointed at node **B**'s gateway resumes a thread checkpointed via node
 gateway's local-then-mesh path (`reason/blob-cache` providers, hash-verified).
 No coordinator, no shared database — the mesh *is* the checkpoint store.
 
-## Honest limits (v1)
+## What this does not establish
 
 - **≤ 8 MiB per blob** — the single-frame mesh-fetch ceiling; chunked transfer is
   the named follow-up in `mycelium-reason`.
@@ -174,3 +174,9 @@ not competing examples):
 | **this package** (state backend) | LangGraph **on** Mycelium | a LangGraph graph should *survive node loss and hand off across the fleet* |
 | `mycelium-reason` (Tier-3 wedges) | substrate-native | you want capability-routed inference, fleet-reasoning traces, artifact-aware resume |
 | `mycelium.call_typed` (typed output) | through-the-mesh calls | you want schema-validated output from a *mesh-routed* prompt skill (use Instructor / Pydantic AI when talking to a provider directly) |
+
+What the adapter contract adds to the list above ([the table](../docs/reference/adapter-contract.md)): checkpoint
+rows carry **no correlation id or parent hash**, so a LangGraph run is not joined to the fleet's causal records
+through this saver; the saver posts to `/gateway/kv` and reads nothing of the **receipt** the route returns, so
+`put()` acknowledges the HTTP status only; and the saver makes no governed call, so grants and provider-side
+enforcement belong to the doors the graph's tools go through.
