@@ -60,6 +60,41 @@ attaching; and unreadable persisted state, which only opening the directory find
 access check) — and never created.
 Feature page: [`docs/features/doctor.md`](../features/doctor.md).
 
+## Before the fleet carries anything: `mycelium test --faults`
+
+`mycelium test --faults [<class>,…] <units-dir> [--config <node.toml>] [--against <units-dir>] [--format text|json]`
+builds a fleet of in-process nodes from a declaration directory and a configuration — one node per unit file, three
+at least — and runs the fault classes the repository already proves against *that* fleet (`src/faults.rs`,
+adopter-surface X6):
+
+| Class | What it does to the fleet | What must hold |
+|---|---|---|
+| `revoke` | one node rotates its identity on compromise; a holder of the old key sends a signed write, offers the old certificate at a peer's handshake and publishes a sealed identity record chained through the old key; the declaration's first `[[mandate]]` is granted, then revoked by a checkpoint | the write refused, the handshake refused naming the revocation, no key merged; the mandate established, then not established |
+| `restart` | a write requiring sync on every node; every node stopped and restarted over its own directory; a record that does not decode appended to one WAL | rung 2 on every receipt; every write replayed; the start refused by name (or the files moved aside under `on_unreadable = "quarantine"`) |
+| `partition` | the node offering something — a member of a governed group where there is one — has its runtime dropped (no departure, sockets closed); later it comes back under the same identity | evicted from every survivor's membership; its offers gone after 3 × `ttl_secs`; each declared `[[group]]`, governed to a band of one, re-filled by an eligible survivor (a survivor's own join decision after the cut); back, a peer again with its offers resolving |
+| `replay` | each unit's node, alone, recorded under the kernel then replayed with the clock paused (the schedule between nodes is outside the seams, inventory §3.1.1) | the recording consumed to its end, the decisions identical; else the first divergence, where the seam raised it. **The `sim` build only** (`cargo build --bin mycelium --features cli,sim`); any other reads `not_in_build` naming `sim` |
+| `policy-diff` | the declaration's call set decided under its `[[rule]]`s and recorded under one correlation id; each record re-decided under `--against`'s `[[rule]]`s; records from `--decisions` journals re-decided from what they carry | no call the declared revision refused is permitted by the proposed one; a record a proposed rule reads values for, which no evidence record carries, is *unattributable* |
+
+Every class lists the guarantee and rule ids it exercised, each with its resolution on the fleet's node, and the
+ones it could not exercise and why, in the guarantee report's words (`enforced`, `not_configured`, `not_in_build`,
+`not_applicable`, `not_verifiable_here`). A class that cannot run here says so and fails the run only when it was asked
+for by name. Exit 0 when every class that ran passed; 1 when a check did not hold, a named class could not run, a
+class's fleet could not be built or started (`refused`, with the node's own words, asked or not), or `wire-check`
+refused the declaration (its findings printed first, the same words); 2 on a usage error or a file that does not
+load.
+
+What the fleet is, stated: the configuration's nodes with loopback addresses and free ports, persistence and TLS
+material under a temporary directory the run removes (nothing of the adopter's is written), no gateway port, every node
+bootstrapping to every other, a one-second health check and governor cooldown, and **the declared profile not
+applied** — the fleet runs under `dev` and the report names the profile declared: a profile needs a gateway and code
+attachments the fleet has not, and `mycelium doctor` is what checks a profile. `--config` replaces the environment
+(`GOSSIP_*`), as `-c` does. `--keep` leaves the run's directory (its journals and persistence) in place and the
+report names it; `--decisions <evidence.log>` hands `policy-diff` records written elsewhere. **It runs no
+activation**: a `[[activation]]` is counted and reported `not_applicable`. An attachment made in code is not in its view, as it is not
+in `doctor`'s. The scaffold's own configuration has no `[persistence]`, so `restart` reads `not_configured` against it
+until one is added; CI runs the classes against the scaffold with one.
+Feature page: [`docs/features/test-faults.md`](../features/test-faults.md).
+
 ## Read the `caveat` first (RT1/RT2)
 
 A diagnosis is **one node's best-effort estimate, not fleet ground truth**. The `caveat` field is

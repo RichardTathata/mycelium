@@ -484,7 +484,7 @@
     },
     {
       "id": "membership.governed",
-      "revision": 1,
+      "revision": 2,
       "subsystem": "mycelium::membership_governor",
       "responsibilities": [
         "response"
@@ -492,7 +492,7 @@
       "trigger": "the governor tick",
       "inputs": [
         {
-          "source": "the governed group's roster and floor (`grp/`, `sys/`)",
+          "source": "the governed group's roster and floor (`grp/`, `sys/`), less the members this node has evicted (its peer table) — revision 2, adopter-surface X6",
           "scope": "the group as this node sees it",
           "freshness": "as gossiped; the confidence bound applies"
         },

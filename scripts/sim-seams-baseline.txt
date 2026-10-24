@@ -62,7 +62,8 @@
 5 src/consensus.rs
 7 src/declare.rs
 2 src/doctor.rs
+8 src/faults.rs
 1 src/federation/catalog.rs
 4 src/init.rs
-6 src/main.rs
+9 src/main.rs
 1 src/mesh_manifest.rs

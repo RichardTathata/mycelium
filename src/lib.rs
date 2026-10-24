@@ -134,6 +134,7 @@
 //! | `grant/{agent}/{request}/issued`   | the signed grant (`SignedMandateGrant`, scope `grant:{request}`) written by `POST /gateway/grants/{agent}/{request}` (`grant:issue`) |
 //! | `grant/{agent}/{request}/refused`  | a supervisor's refusal, with the issuer and reason |
 //! | `grant/{agent}/{request}/checkpoint` | the issuing node's first revocation checkpoint for the grant's scope (nothing revoked), so a verifier's standing is known; a revocation is the next checkpoint naming the term |
+//! | `faults/{class}/…`                 | adopter-surface X6 — the writes `mycelium test --faults` makes on the in-process fleet it builds for one run (a synced write per node, the revoke class's plant and forged write, a replay marker); never written on an adopter's node |
 //! | `agent/{node}/provision/{item}/error` | Last provisioning failure — written by the **application** provisioning handler, not the substrate |
 //! | `sys/identity/{node}`              | mTLS — 32-byte Ed25519 verifying key history (current‖retained); written at startup by TLS-enabled nodes |
 //! | `sys/identity-proof/{node}`        | identity-auth Phase 2 — `signer_key(32)‖sig(64)` authenticating the identity entry; peers accept a key only if the proof chains to a trusted key (`tls`) |
@@ -253,6 +254,8 @@ pub use agent::causal;
 /// `mycelium declare` — a project's declaration sent to a gateway, once or kept current (adopter-surface X10).
 #[cfg(feature = "gateway")]
 pub mod declare;
+/// `mycelium test --faults` — the existing proofs against an adopter's declaration (adopter-surface X6).
+pub mod faults;
 /// Stop signals for a long-running node: SIGINT or SIGTERM, installed before the bind, a second one exits.
 pub mod shutdown;
 pub mod mesh_manifest;

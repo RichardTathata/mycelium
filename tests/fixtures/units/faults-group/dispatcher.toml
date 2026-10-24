@@ -1,0 +1,8 @@
+# The dispatcher defines the governed group; the class governs it to a band of one.
+principal = "dispatcher"
+
+[[group]]
+name = "pool"
+  [group.filter]
+  ns   = "svc"
+  name = "worker"

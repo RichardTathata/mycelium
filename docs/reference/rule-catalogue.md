@@ -181,13 +181,13 @@ Every update converges by last-writer-wins on the HLC; propagation is unconditio
 
 ## `membership.governed`
 
-rev 1 · `mycelium::membership_governor` · Response · trace: instrumented
+rev 2 · `mycelium::membership_governor` · Response · trace: instrumented
 
 This node rolls to join or leave a governed group against the intent's band — after spacing and settling, and (under an enforcing profile) only on a confident view.
 
 - **Trigger:** the governor tick
 - **Reads:**
-  - the governed group's roster and floor (`grp/`, `sys/`) — scope: the group as this node sees it; freshness: as gossiped; the confidence bound applies
+  - the governed group's roster and floor (`grp/`, `sys/`), less the members this node has evicted (its peer table) — revision 2, adopter-surface X6 — scope: the group as this node sees it; freshness: as gossiped; the confidence bound applies
   - `ViewConfidence (peers heard, staleness)` — scope: this node; freshness: computed at the tick
 - **Outcomes:**
   - Action: `join`, `leave`

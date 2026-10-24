@@ -1,14 +1,17 @@
 use mycelium::{GossipAgent, NodeId};
 use mycelium::config::GossipConfig;
 use mycelium::error::GossipError;
+use std::path::PathBuf;
 use std::{error::Error, sync::Arc};
 
 fn main() -> Result<(), Box<dyn Error>> {
     // `mycelium doctor` prints its report on stdout — JSON when asked — so its log lines go to stderr;
-    // the node keeps its logs on stdout as before (#665's review, D1).
-    let doctor = std::env::args().nth(1).as_deref() == Some("doctor");
-    let logs = tracing_subscriber::fmt().with_max_level(tracing::Level::INFO);
-    if doctor { logs.with_writer(std::io::stderr).init(); } else { logs.init(); }
+    // the node keeps its logs on stdout as before (#665's review, D1). `mycelium test` likewise, and at
+    // WARN: its fleet's nodes would otherwise print every start-up block over the report.
+    let command = std::env::args().nth(1);
+    let (doctor, test) = (command.as_deref() == Some("doctor"), command.as_deref() == Some("test"));
+    let logs = tracing_subscriber::fmt().with_max_level(if test { tracing::Level::WARN } else { tracing::Level::INFO });
+    if doctor || test { logs.with_writer(std::io::stderr).init(); } else { logs.init(); }
 
     // `mycelium wire-check <units-dir> …` — the offline check over a directory of unit files
     // (docs/plans/design-time-tooling.md §4). A pure function over declarations; it starts no
@@ -37,6 +40,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         #[cfg(not(feature = "gateway"))]
         Some("declare") => { eprintln!("declare talks to a gateway, which only a build with the `gateway` feature has"); std::process::exit(2) }
         Some("rules") => std::process::exit(rules_cli(std::env::args().skip(2).collect())),
+        Some("test") => std::process::exit(test_cli(std::env::args().skip(2).collect())),
         Some("explain") => std::process::exit(explain_cli(std::env::args().skip(2).collect())),
         // `mycelium tls issue` — a node certificate signed where the CA key is, so the node never
         // holds it (`id.ca_key_off_node`). Runs on the issuer's host, starts no node.
@@ -300,13 +304,7 @@ fn wire_check_cli(args: Vec<String>) -> i32 {
         opts.known_schemas = Some(ids);
     }
     if opts.revision.is_none() {
-        opts.revision = std::process::Command::new("git")
-            .args(["-C", &dir, "rev-parse", "HEAD"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .filter(|s| !s.is_empty());
+        opts.revision = git_revision(&dir);
     }
 
     let report = check(&units, &artifacts, &opts);
@@ -462,6 +460,144 @@ fn doctor_cli(args: Vec<String>) -> i32 {
     code
 }
 
+/// `mycelium test --faults [<class>[,<class>…]] <units-dir> [--config <node.toml>] [--against <units-dir>]
+/// [--library <dir>] [--schemas <dir>] [--format text|json]` — the existing proofs against an adopter's
+/// declaration (adopter-surface X6, `mycelium::faults`). `--faults` alone runs every class; a class list
+/// (`revoke`, `restart`, `partition`, `replay`, `policy-diff`) runs those and fails the run if one of them
+/// cannot run here (`not_in_build`, `not_configured`, `not_applicable`). Exit 0 when every class that ran
+/// passed; 1 when a check did not hold, a named class could not run, a class's fleet refused to build or
+/// start (`refused`, asked or not), or `wire-check` refused the declaration (its findings printed, the same
+/// words); 2 on a usage error or a file that does not load.
+fn test_cli(args: Vec<String>) -> i32 {
+    use mycelium::faults::{self, Class, Options, Refused};
+    use mycelium::wire_check::{ArtifactDescription, CheckOptions};
+    const USAGE: &str = "Usage: mycelium test --faults [<class>[,<class>…]] <units-dir> [--config <node.toml>] [--against <units-dir>] [--decisions <evidence.log>]… [--library <dir>] [--schemas <dir>] [--seed <n>] [--keep] [--format text|json]\n\
+       classes: revoke · restart · partition · replay (needs a binary built with --features cli,sim) · policy-diff (needs --against)\n\
+       a units directory named like a class is written ./<name>; --config replaces the environment (GOSSIP_*) as -c does; --keep leaves the run's directory in place";
+    let (mut faults, mut dir, mut config, mut against, mut library, mut schemas) = (false, None::<String>, None::<PathBuf>, None::<String>, None::<String>, None::<String>);
+    let (mut classes, mut format, mut seed, mut keep, mut decisions) = (Vec::<Class>::new(), "text".to_string(), 0x5eed_u64, false, Vec::<PathBuf>::new());
+    let mut it = args.into_iter().peekable();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "-h" | "--help" => { eprintln!("{USAGE}"); return 0; }
+            "--faults" => {
+                faults = true;
+                // A class list follows when a comma-separated token is a class name; a list with a stranger in it
+                // is refused naming it (#675's review); a token that is no class is the directory.
+                if let Some(next) = it.peek().filter(|n| !n.starts_with('-')) {
+                    match Class::parse_list(next) {
+                        Ok(Some(list)) => { classes.extend(list); it.next(); }
+                        Ok(None) => {}
+                        Err(e) => { eprintln!("test: {e}\n{USAGE}"); return 2; }
+                    }
+                }
+            }
+            "--keep" => keep = true,
+            "--decisions" => match it.next() { Some(v) => decisions.push(PathBuf::from(v)), None => { eprintln!("{USAGE}"); return 2; } },
+            "--config" => match it.next() { Some(v) => config = Some(PathBuf::from(v)), None => { eprintln!("{USAGE}"); return 2; } },
+            "--against" => match it.next() { Some(v) => against = Some(v), None => { eprintln!("{USAGE}"); return 2; } },
+            "--library" => match it.next() { Some(v) => library = Some(v), None => { eprintln!("{USAGE}"); return 2; } },
+            "--schemas" => match it.next() { Some(v) => schemas = Some(v), None => { eprintln!("{USAGE}"); return 2; } },
+            "--format" => match it.next() { Some(v) => format = v, None => { eprintln!("{USAGE}"); return 2; } },
+            "--seed" => match it.next().and_then(|v| v.parse().ok()) { Some(v) => seed = v, None => { eprintln!("--seed takes a number\n{USAGE}"); return 2; } },
+            _ if a.starts_with('-') => { eprintln!("unknown option `{a}`\n{USAGE}"); return 2; }
+            _ if dir.is_none() => dir = Some(a),
+            _ => { eprintln!("{USAGE}"); return 2; }
+        }
+    }
+    if !faults { eprintln!("test runs fault classes only: pass --faults\n{USAGE}"); return 2; }
+    let Some(dir) = dir else { eprintln!("a units directory is required\n{USAGE}"); return 2; };
+    if format != "text" && format != "json" { eprintln!("{USAGE}"); return 2; }
+    let units = match faults::load_units(std::path::Path::new(&dir)) {
+        Ok(u) => u,
+        Err(e) => { eprintln!("test: {e}"); return 2; }
+    };
+    let against = match against {
+        None => None,
+        Some(d) => match faults::load_units(std::path::Path::new(&d)) {
+            Ok(u) => Some(u),
+            Err(e) => { eprintln!("test: --against {e}"); return 2; }
+        },
+    };
+    let mut artifacts = Vec::new();
+    if let Some(lib) = &library {
+        let files = match std::fs::read_dir(lib) {
+            Ok(d) => d.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == "toml")).collect::<Vec<_>>(),
+            Err(e) => { eprintln!("test: {lib}: {e}"); return 2; }
+        };
+        for path in files {
+            let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| ArtifactDescription::from_toml_str(&t).map_err(|e| e.to_string())) {
+                Ok(a) => artifacts.push((name, a)),
+                Err(e) => { eprintln!("test: {}: {e}", path.display()); return 2; }
+            }
+        }
+    }
+    let mut check_opts = CheckOptions { revision: git_revision(&dir), ..CheckOptions::default() };
+    if let Some(dir) = &schemas {
+        match schema_ids(std::path::Path::new(dir)) {
+            Ok(ids) => check_opts.known_schemas = Some(ids),
+            Err(e) => { eprintln!("test: {e}"); return 2; }
+        }
+    }
+    // Every node is built inside a runtime context of its own; the command itself needs none.
+    let report = match faults::run(&units, &artifacts, &check_opts, &Options { classes, config, against, seed, keep, decisions }) {
+        Ok(r) => r,
+        Err(Refused::WireCheck(r)) => {
+            let r = *r;
+            eprintln!("test: wire-check refused the declaration; nothing ran");
+            if format == "json" { println!("{}", r.render_json()) } else { print!("{}", r.render_text()) }
+            return 1;
+        }
+        Err(Refused::Config { path, reason }) => {
+            eprintln!("test: the configuration {}: {reason}", path.map(|p| p.display().to_string()).unwrap_or_else(|| "(defaults and the environment)".into()));
+            return 2;
+        }
+    };
+    if format == "json" {
+        match serde_json::to_string_pretty(&report) {
+            Ok(s) => println!("{s}"),
+            Err(e) => { eprintln!("test: {e}"); return 2; }
+        }
+    } else {
+        print!("{}", report.render());
+    }
+    report.exit_code()
+}
+
+/// The revision `wire-check` stamps on its document when none is given: `git rev-parse HEAD` in the units directory,
+/// or none. `test` stamps the same, so its refusal prints the same report, word for word.
+fn git_revision(dir: &str) -> Option<String> {
+    std::process::Command::new("git")
+        .args(["-C", dir, "rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Guide 12's rule for a schema directory: each `.json` file's path relative to the directory, without the
+/// extension — the same ids `wire-check --schemas` reads.
+fn schema_ids(root: &std::path::Path) -> Result<std::collections::BTreeSet<String>, String> {
+    fn walk(root: &std::path::Path, dir: &std::path::Path, out: &mut std::collections::BTreeSet<String>) -> Result<(), String> {
+        for entry in std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+            let path = entry.map_err(|e| format!("{}: {e}", dir.display()))?.path();
+            if path.is_dir() {
+                walk(root, &path, out)?;
+            } else if path.extension().is_some_and(|x| x == "json")
+                && let Ok(rel) = path.strip_prefix(root)
+            {
+                out.insert(rel.with_extension("").components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect::<Vec<_>>().join("/"));
+            }
+        }
+        Ok(())
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    walk(root, root, &mut ids)?;
+    Ok(ids)
+}
+
 /// `mycelium rules [--format md|json]` — the rule catalogue this binary registers
 /// (`mycelium::rules::RULES`), generated from the descriptors. The fleet's whole catalogue, with the
 /// stem host's provisioning rules, is the checked-in `docs/reference/rule-catalogue.md`.
@@ -602,7 +738,7 @@ fn tls_cli(args: Vec<String>) -> i32 {
 
 fn print_usage() {
     eprintln!(
-        "Usage: mycelium [OPTIONS]\n       mycelium init <dir> [--template <name>] | --list\n       mycelium declare [project-dir] [--gateway <url>] [--token <bearer>] [--watch]\n       mycelium doctor [config.toml] [--units <dir>] [--format text|json]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed] [--no-authority]\n       mycelium rules [--format md|json]\n       mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>]\n       mycelium explain --correlation <id> <files…> | --closure <sha256> <files…> [--fleet <n>]\n       mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir>\n\
+        "Usage: mycelium [OPTIONS]\n       mycelium init <dir> [--template <name>] | --list\n       mycelium declare [project-dir] [--gateway <url>] [--token <bearer>] [--watch]\n       mycelium doctor [config.toml] [--units <dir>] [--format text|json]\n       mycelium wire-check <units-dir> [--library <dir>] [--schemas <dir>] [--format text|json|dot] [--strict-deployed] [--no-authority]\n       mycelium rules [--format md|json]\n       mycelium test --faults [<class>,…] <units-dir> [--config <node.toml>] [--against <units-dir>] [--format text|json]\n       mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>]\n       mycelium explain --correlation <id> <files…> | --closure <sha256> <files…> [--fleet <n>]\n       mycelium tls issue --ca-dir <dir> --node <ip:port> --out <dir>\n\
          \n\
          Options:\n\
          -c, --config <file>      Load configuration from a TOML file\n\

@@ -182,6 +182,7 @@ check:
 	cargo clippy -p mycelium-gateway-free-tests --all-targets -- -D warnings  # the gateway-free test crate (R8)
 	cargo clippy -p mycelium-tls-free-tests --all-targets -- -D warnings      # the tls-free test crate
 	cargo check --bin mycelium --features cli,sim                            # the node binary's recording path
+	cargo clippy --lib --features sim -- -D warnings                         # the `sim` arm of the library (the Effects job's `--features sim` clippy builds it; adopter-surface X6)
 	cargo check --all-targets --no-default-features                          # an example missing required-features
 	./scripts/check-hlc-current.sh                                           # every Hlc::current() read classified
 	./scripts/check-sim-seams.sh                                # no new nondeterminism outside the seams

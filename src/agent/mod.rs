@@ -44,6 +44,10 @@ mod overlay_consistent;
 mod overlay_reliable;
 pub(crate) mod rpc;
 pub(crate) mod gateway_caller;
+/// The probes `mycelium test --faults` drives against a built fleet (adopter-surface X6). Its `revoke` class
+/// rotates a node on compromise, which `compliance` provides, so the probes exist under the same gate.
+#[cfg(all(feature = "tls", feature = "compliance"))]
+pub(crate) mod fault_probes;
 pub(crate) mod guarantee;
 /// The AE evaluator seam lives exactly where it is enforced: a gateway that can attest (`tls`
 /// carries both the caller attestation and `sha2` for the argument digest). In any other build it
