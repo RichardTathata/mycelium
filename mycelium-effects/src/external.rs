@@ -25,6 +25,23 @@
 //! recorded with the compensated record's hash as its parent (X4), so the closure reader shows both.
 //! And it is not a real provider: the reference destinations are the SQLite one and an HTTP shape whose
 //! test harness loses responses; `docs/operations/what-is-proven.md` says so.
+//!
+//! **A found record binds what may be presented under its operation.** The ledger remembers the dedup
+//! scope, the class and the content hash it was prepared with; a later apply, retry or compensation under
+//! the same operation with other content is a [`Conflict`](EffectRefusal::Conflict), with another class or
+//! scope a [`DeclarationMismatch`](ExternalRefusal::DeclarationMismatch) — the destination is reached with
+//! one declaration per operation, or not at all. A record found `Prepared` — a send whose answer no one
+//! has, after a crash or a concurrent applier — is treated as *unknown*, so it is probed, never re-sent.
+//!
+//! **The composition's check-then-act window.** `check_composition` runs before the record is prepared
+//! and the destination reached; a process that pauses between them after an epoch is superseded acts late
+//! by the pause — the same window every resource in this tree has (`authority-at-execution.md`), narrowed
+//! and stated, not eliminated; a destination that can take the authority inside its own transaction
+//! should. **The reconciler decides no policy:** an uncomposed effect's execution record carries an
+//! *indeterminate* decision (no evaluator saw it); a composed one the destination's own permit (the
+//! composition held); a compensation the evaluator's decision from its permit. **The calls block:** `send`,
+//! `observe` and the ledger's SQLite are synchronous inside these `async fn`s, on the caller's executor —
+//! a destination with a long wait belongs on a blocking thread of the caller's choosing.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -220,7 +237,9 @@ pub struct LedgerRecord {
     pub state: EffectState,
     pub probes: u32,
     pub retries: u32,
-    /// When the first unknown answer came, if one did (the budget's age runs from here).
+    /// When the first unknown answer came, if one did. The budget's age runs from here, and it is **never
+    /// reset** — a record that fails, is re-applied and goes unknown again counts its age and its probes from
+    /// the first episode; the conservative reading of one operation's history.
     pub first_unknown_at_ms: Option<u64>,
     pub prepared_at_ms: u64,
     /// The hash of the prepared record (`mycelium.effects/prepared/1`), fixed before execution — a
@@ -259,6 +278,8 @@ pub enum ExternalRefusal {
     NoCompensation { class: &'static str },
     /// No evaluator permit was presented for the compensation, or the evaluator refused it.
     CompensationNotPermitted(String),
+    /// The record was prepared under another declaration — scope or class — than this effect presents.
+    DeclarationMismatch { what: &'static str, recorded: String, presented: String },
     /// The ledger holds no record for this operation.
     NotRecorded,
     /// The ledger itself failed; the move was not made.
@@ -280,6 +301,7 @@ impl ExternalRefusal {
             Self::State { .. } => "wrong_state",
             Self::NoCompensation { .. } => "no_compensation",
             Self::CompensationNotPermitted(_) => "compensation_not_permitted",
+            Self::DeclarationMismatch { .. } => "declaration_mismatch",
             Self::NotRecorded => "not_recorded",
             Self::Ledger(_) => "ledger",
         }
@@ -300,6 +322,7 @@ impl fmt::Display for ExternalRefusal {
             Self::State { state, needed } => write!(f, "the record is {state}; this move needs {needed}"),
             Self::NoCompensation { class } => write!(f, "the class {class} declares no compensation"),
             Self::CompensationNotPermitted(why) => write!(f, "the compensation is not permitted: {why}"),
+            Self::DeclarationMismatch { what, recorded, presented } => write!(f, "the record was prepared with {what} {recorded:?}; this effect presents {presented:?}"),
             Self::NotRecorded => f.write_str("the ledger holds no record for this operation"),
             Self::Ledger(e) => write!(f, "the ledger failed: {e}"),
         }
@@ -360,6 +383,11 @@ impl CompensationPermit {
     pub fn policy_revision(&self) -> &str {
         &self.decision.policy_revision
     }
+
+    /// The envelope the evaluator decided — what the permit is *for*.
+    pub fn envelope(&self) -> &mycelium::ActionEnvelope {
+        &self.envelope
+    }
 }
 
 // ── The ledger ────────────────────────────────────────────────────────────────────────────────
@@ -371,7 +399,7 @@ struct Ledger {
 impl Ledger {
     fn open(path: &Path) -> Result<Self, ExternalRefusal> {
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent).map_err(|e| ExternalRefusal::Ledger(format!("create {}: {e}", parent.display())))?;
         }
         let conn = Connection::open(path).map_err(ledger)?;
         conn.execute_batch(
@@ -405,10 +433,44 @@ impl Ledger {
     }
 
     /// Write the prepared record unless one exists; return the record as it now stands and whether
-    /// this call wrote it.
+    /// this call wrote it. Under the one `IMMEDIATE` transaction: a record found **`Prepared`** is a send
+    /// whose answer no one has (a crash between the write and the send, or a concurrent applier that is
+    /// sending now) and becomes `Unknown` here, so the caller probes and never re-sends; a record found
+    /// **`Failed`** left nothing at the destination and is re-prepared under this effect's declaration.
     fn prepare(&self, ext: &ExternalEffect, scope: &str, now_ms: u64, record_hash: &str) -> Result<(LedgerRecord, bool), ExternalRefusal> {
         let mut conn = self.connect()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(ledger)?;
+        let op = ext.effect.operation_id.as_str();
+        if let Some(existing) = Self::read(&tx, op)? {
+            match existing.state {
+                EffectState::Prepared => {
+                    tx.execute(
+                        "UPDATE external_effects SET state = 'unknown', first_unknown_at_ms = COALESCE(first_unknown_at_ms, ?2) WHERE operation_id = ?1",
+                        params![op, now_ms as i64],
+                    )
+                    .map_err(ledger)?;
+                }
+                EffectState::Failed => {
+                    tx.execute(
+                        "UPDATE external_effects SET dedup_scope = ?2, class = ?3, compensation = ?4, content_hash = ?5, attempt_id = ?6,
+                                state = 'prepared', prepared_at_ms = ?7, max_probes = ?8, max_age_ms = ?9, record_hash = ?10
+                         WHERE operation_id = ?1",
+                        params![
+                            op, scope, ext.class.tag(), ext.class.compensation(), ext.effect.content_hash as i64, ext.effect.attempt_id.as_str(),
+                            now_ms as i64, ext.probe_budget.max_probes as i64, ext.probe_budget.max_age_ms as i64, record_hash,
+                        ],
+                    )
+                    .map_err(ledger)?;
+                    let record = Self::read(&tx, op)?.ok_or(ExternalRefusal::NotRecorded)?;
+                    tx.commit().map_err(ledger)?;
+                    return Ok((record, true));
+                }
+                _ => {}
+            }
+            let record = Self::read(&tx, op)?.ok_or(ExternalRefusal::NotRecorded)?;
+            tx.commit().map_err(ledger)?;
+            return Ok((record, false));
+        }
         let inserted = tx
             .execute(
                 "INSERT OR IGNORE INTO external_effects
@@ -495,6 +557,20 @@ impl Ledger {
         Ok(())
     }
 
+    /// Link a compensation in flight to the record it compensates; the state changes only when it commits.
+    fn link_compensation(&self, op: &OperationId, by: &OperationId) -> Result<(), ExternalRefusal> {
+        let conn = self.connect()?;
+        conn.execute("UPDATE external_effects SET compensated_by = ?2 WHERE operation_id = ?1", params![op.as_str(), by.as_str()]).map_err(ledger)?;
+        Ok(())
+    }
+
+    /// A compensation committed (now, or later by probe or retry): the record it was linked to is compensated.
+    fn complete_compensation(&self, by: &OperationId) -> Result<(), ExternalRefusal> {
+        let conn = self.connect()?;
+        conn.execute("UPDATE external_effects SET state = 'compensated' WHERE compensated_by = ?1 AND state = 'committed'", params![by.as_str()]).map_err(ledger)?;
+        Ok(())
+    }
+
     fn set_compensated(&self, op: &OperationId, by: &OperationId) -> Result<(), ExternalRefusal> {
         let conn = self.connect()?;
         conn.execute(
@@ -514,17 +590,22 @@ fn ledger(e: impl fmt::Display) -> ExternalRefusal {
 /// destination is reached, so a compensation can name its parent even with no journal attached.
 pub fn prepared_record_hash(ext: &ExternalEffect, scope: &str) -> String {
     use sha2::{Digest, Sha256};
-    let canonical = format!(
-        "mycelium.effects/prepared/1\n{scope}\n{}\n{}\n{:016x}\n{}\n{}\n{}\n{}\n",
-        ext.effect.operation_id,
-        ext.effect.attempt_id,
-        ext.effect.content_hash,
+    // Each field length-prefixed, so a field holding the separator cannot collide with another declaration.
+    let fields: [&str; 7] = [
+        scope,
+        ext.effect.operation_id.as_str(),
+        ext.effect.attempt_id.as_str(),
+        &format!("{:016x}", ext.effect.content_hash),
         ext.class.tag(),
         ext.class.compensation().unwrap_or("-"),
-        ext.probe_budget.max_probes,
-        ext.probe_budget.max_age_ms,
-    );
-    hex(&Sha256::digest(canonical.as_bytes()))
+        &format!("{}/{}", ext.probe_budget.max_probes, ext.probe_budget.max_age_ms),
+    ];
+    let mut canonical = b"mycelium.effects/prepared/1\n".to_vec();
+    for f in fields {
+        canonical.extend_from_slice(&(f.len() as u64).to_be_bytes());
+        canonical.extend_from_slice(f.as_bytes());
+    }
+    hex(&Sha256::digest(&canonical))
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -660,6 +741,47 @@ impl<D: ExternalDestination> Reconciler<D> {
         mycelium::sim_seam::wall_now_ms()
     }
 
+    /// The composed legs, when the effect carries a composition: refused without an authority to check
+    /// against, then attribution, then authority (`check_composition`). Counted as the destination counts.
+    fn check_composed(&self, ext: &ExternalEffect, authority: Option<&ResourceAuthority>, now_ms: u64) -> Result<(), ExternalRefusal> {
+        let Some(composition) = &ext.composition else { return Ok(()) };
+        let Some(authority) = authority else {
+            let r = EffectRefusal::Unauthorised {
+                leg: crate::CompositionLeg::Authority,
+                reason: "a composed effect needs the resource authority to check it against; none was given".into(),
+            };
+            self.counts.record(&r);
+            return Err(ExternalRefusal::Effect(r));
+        };
+        if let Err(r) = check_composition(composition, authority, now_ms) {
+            self.counts.record(&r);
+            return Err(ExternalRefusal::Effect(r));
+        }
+        Ok(())
+    }
+
+    /// A found record binds what may be presented under its operation: this destination's scope, the
+    /// recorded class, the recorded content.
+    fn bind(&self, record: &LedgerRecord, ext: &ExternalEffect) -> Result<(), ExternalRefusal> {
+        let scope = self.destination.dedup_scope();
+        if record.dedup_scope != scope {
+            return Err(self.refuse(ExternalRefusal::DeclarationMismatch { what: "dedup scope", recorded: record.dedup_scope.clone(), presented: scope.to_string() }));
+        }
+        if record.content_hash != ext.effect.content_hash {
+            let r = EffectRefusal::Conflict { operation_id: ext.effect.operation_id.clone(), committed_hash: record.content_hash, presented_hash: ext.effect.content_hash };
+            self.counts.record(&r);
+            return Err(ExternalRefusal::Effect(r));
+        }
+        if record.class != ext.class {
+            return Err(self.refuse(ExternalRefusal::DeclarationMismatch {
+                what: "class",
+                recorded: format!("{}{}", record.class.tag(), record.class.compensation().map(|c| format!(" compensated by {c}")).unwrap_or_default()),
+                presented: format!("{}{}", ext.class.tag(), ext.class.compensation().map(|c| format!(" compensated by {c}")).unwrap_or_default()),
+            }));
+        }
+        Ok(())
+    }
+
     /// Send `ext` through the `Input` seam: made for real in a recording or a live run, **not made** in a
     /// replay, which returns the recorded answer.
     fn send_through_seam(&self, seam: &str, ext: &ExternalEffect) -> Result<DestinationCommit, EffectRefusal> {
@@ -672,42 +794,30 @@ impl<D: ExternalDestination> Reconciler<D> {
     /// Apply `ext` once. The record is prepared (on disk) before the destination is reached; the
     /// composition, when carried, is checked against `authority` first, and refused without one.
     ///
-    /// A second apply of an operation already in the ledger does not reach the destination: a committed
-    /// record answers `Replayed` from the ledger; an unknown one is refused `RetryWithoutProbe`; a failed one
-    /// starts clean; the rest are refused by state.
+    /// A second apply of an operation already in the ledger does not reach the destination: the effect must
+    /// match the record (scope, class, content — [`bind`](Self::bind)); a committed record answers `Replayed`
+    /// from the ledger; an unknown one — a found `Prepared` record included — is refused `RetryWithoutProbe`;
+    /// a failed one starts clean; the rest are refused by state.
     pub async fn apply(&self, ext: &ExternalEffect, authority: Option<&ResourceAuthority>) -> Result<DestinationCommit, ExternalRefusal> {
         self.gate_egress()?;
         let now_ms = Self::now_ms();
-        if let Some(composition) = &ext.composition {
-            let Some(authority) = authority else {
-                let r = EffectRefusal::Unauthorised {
-                    leg: crate::CompositionLeg::Authority,
-                    reason: "a composed effect needs the resource authority to check it against; none was given".into(),
-                };
-                self.counts.record(&r);
-                return Err(ExternalRefusal::Effect(r));
-            };
-            if let Err(r) = check_composition(composition, authority, now_ms) {
-                self.counts.record(&r);
-                return Err(ExternalRefusal::Effect(r));
-            }
-        }
+        self.check_composed(ext, authority, now_ms)?;
         let scope = self.destination.dedup_scope().to_string();
         let record_hash = prepared_record_hash(ext, &scope);
         let (record, fresh) = self.ledger.prepare(ext, &scope, now_ms, &record_hash)?;
         if !fresh {
+            self.bind(&record, ext)?;
             match record.state {
                 EffectState::Committed => return Ok(DestinationCommit::new(self.destination.identity(), DedupOutcome::Replayed)),
-                EffectState::Unknown => return Err(self.refuse(ExternalRefusal::RetryWithoutProbe)),
+                EffectState::Unknown | EffectState::Prepared => return Err(self.refuse(ExternalRefusal::RetryWithoutProbe)),
                 EffectState::Unresolved => return Err(self.refuse(ExternalRefusal::Unresolved)),
-                EffectState::Failed | EffectState::Prepared => {}
                 state => return Err(self.refuse(ExternalRefusal::State { state, needed: "a record not yet sent, or one that failed" })),
             }
         }
-        self.send_and_settle("effects/apply", ext, None).await
+        self.send_and_settle("effects/apply", ext, None, None).await
     }
 
-    async fn send_and_settle(&self, seam: &str, ext: &ExternalEffect, parent: Option<String>) -> Result<DestinationCommit, ExternalRefusal> {
+    async fn send_and_settle(&self, seam: &str, ext: &ExternalEffect, parent: Option<String>, permit: Option<&CompensationPermit>) -> Result<DestinationCommit, ExternalRefusal> {
         let op = &ext.effect.operation_id;
         let answer = self.send_through_seam(seam, ext);
         let now_ms = Self::now_ms();
@@ -720,27 +830,31 @@ impl<D: ExternalDestination> Reconciler<D> {
         match &answer {
             Ok(commit) => {
                 self.ledger.set_state(op, EffectState::Committed, None)?;
+                // A compensation that commits — now, or a retry of one — compensates what it was linked to.
+                self.ledger.complete_compensation(op)?;
                 self.counts.record_commit();
                 let reason = format!("committed at {}: {}", commit.destination, dedup_tag(commit.dedup));
-                self.evidence(ext, operation, &reason, Exec::Completed, parent, now_ms).await?;
+                self.evidence(ext, Note { operation, reason: &reason, execution: Exec::Completed, parent, now_ms, permit }).await?;
             }
             Err(EffectRefusal::DeliveryUnknown) => {
                 self.ledger.set_state(op, EffectState::Unknown, Some(now_ms))?;
                 self.counts.record(&EffectRefusal::DeliveryUnknown);
-                self.evidence(ext, operation, "the destination did not answer; the effect's fate is unknown", Exec::Attempted, parent, now_ms).await?;
+                self.evidence(ext, Note { operation, reason: "the destination did not answer; the effect's fate is unknown", execution: Exec::Attempted, parent, now_ms, permit }).await?;
             }
             Err(e) => {
                 self.ledger.set_state(op, EffectState::Failed, None)?;
                 self.counts.record(e);
-                self.evidence(ext, operation, &e.to_string(), Exec::Failed, parent, now_ms).await?;
+                self.evidence(ext, Note { operation, reason: &e.to_string(), execution: Exec::Failed, parent, now_ms, permit }).await?;
             }
         }
         answer.map_err(ExternalRefusal::Effect)
     }
 
     /// Ask the destination what became of `op`. Only an `Unknown` record is probed; an irreversible class
-    /// is refused and stays unknown; past the budget the record is marked `Unresolved` and escalated.
-    /// `Done` settles the record as committed; `NotDone` opens one retry where the class allows.
+    /// is refused and stays unknown; the probe is counted before it is made, and when the budget is spent —
+    /// found spent before the probe, or spent by this probe's `Unknown` answer — the record is marked
+    /// `Unresolved` and escalated at once. `Done` settles the record as committed; `NotDone` opens one retry
+    /// where the class allows.
     pub async fn probe(&self, op: &OperationId) -> Result<ProbeAnswer, ExternalRefusal> {
         let record = self.ledger.get(op)?.ok_or(ExternalRefusal::NotRecorded)?;
         match record.state {
@@ -754,63 +868,84 @@ impl<D: ExternalDestination> Reconciler<D> {
         let now_ms = Self::now_ms();
         let age_ms = now_ms.saturating_sub(record.first_unknown_at_ms.unwrap_or(now_ms));
         let budget = self.budget_of(op)?;
+        let ext = self.ext_of(&record);
+        let parent = Some(record.evidence_hash.clone().unwrap_or(record.record_hash.clone()));
         if record.probes >= budget.max_probes || age_ms >= budget.max_age_ms {
-            self.ledger.set_state(op, EffectState::Unresolved, None)?;
-            let ext = self.ext_of(&record);
-            self.evidence(&ext, "effect.probe", &format!("unresolved after {} probes and {age_ms} ms: escalated", record.probes), Exec::Unresolved, Some(record.evidence_hash.clone().unwrap_or(record.record_hash.clone())), now_ms).await?;
+            self.escalate(op, &ext, record.probes, age_ms, parent, now_ms).await?;
             return Err(self.refuse(ExternalRefusal::ProbeBudgetExhausted { probes: record.probes, age_ms }));
         }
         self.gate_egress()?;
-        let key = self.key(op);
-        let request = format!("{key} probe {}", record.probes + 1);
-        let answer = ProbeAnswer::parse(&mycelium::sim_seam::input("effects/probe", &request, || self.destination.observe(&key).tag().to_string()));
+        // Counted before it is made: a process that dies between the probe and its answer has still spent one.
         self.ledger.bump(op, "probes")?;
-        let ext = self.ext_of(&record);
-        let parent = Some(record.evidence_hash.clone().unwrap_or(record.record_hash.clone()));
+        let probes = record.probes + 1;
+        let key = self.key(op);
+        let request = format!("{key} probe {probes}");
+        let answer = ProbeAnswer::parse(&mycelium::sim_seam::input("effects/probe", &request, || self.destination.observe(&key).tag().to_string()));
         match answer {
             ProbeAnswer::Done => {
                 self.ledger.set_state(op, EffectState::Committed, None)?;
+                self.ledger.complete_compensation(op)?;
                 self.counts.record_commit();
-                self.evidence(&ext, "effect.probe", "the destination reports the effect done: settled by probe", Exec::Completed, parent, now_ms).await?;
+                self.evidence(&ext, Note { operation: "effect.probe", reason: "the destination reports the effect done: settled by probe", execution: Exec::Completed, parent, now_ms, permit: None }).await?;
             }
             ProbeAnswer::NotDone => {
                 self.ledger.set_state(op, EffectState::NotDone, None)?;
-                self.evidence(&ext, "effect.probe", "the destination reports the effect not done", Exec::None, parent, now_ms).await?;
+                // Not `None`: this point dispatched the effect; what it has is the destination's word that
+                // nothing landed (AE0 §5 reads `none` only from an explicit blocked attestation).
+                self.evidence(&ext, Note { operation: "effect.probe", reason: "the destination reports the effect not done", execution: Exec::Unknown, parent, now_ms, permit: None }).await?;
             }
             ProbeAnswer::Unknown => {
-                self.evidence(&ext, "effect.probe", "the destination could not say", Exec::Unknown, parent, now_ms).await?;
+                self.evidence(&ext, Note { operation: "effect.probe", reason: "the destination could not say", execution: Exec::Unknown, parent: parent.clone(), now_ms, permit: None }).await?;
+                if probes >= budget.max_probes || age_ms >= budget.max_age_ms {
+                    self.escalate(op, &ext, probes, age_ms, parent, now_ms).await?;
+                    self.counts.record_external(&ExternalRefusal::ProbeBudgetExhausted { probes, age_ms });
+                }
             }
         }
         Ok(answer)
     }
 
-    /// Retry `ext` once, after a probe answered `NotDone`, where the class is idempotent. Refused by name
-    /// otherwise: without a probe, a second time, or against a destination not declared idempotent.
-    pub async fn retry(&self, ext: &ExternalEffect) -> Result<DestinationCommit, ExternalRefusal> {
+    async fn escalate(&self, op: &OperationId, ext: &ExternalEffect, probes: u32, age_ms: u64, parent: Option<String>, now_ms: u64) -> Result<(), ExternalRefusal> {
+        self.ledger.set_state(op, EffectState::Unresolved, None)?;
+        self.evidence(ext, Note { operation: "effect.probe", reason: &format!("unresolved after {probes} probes and {age_ms} ms: escalated"), execution: Exec::Unresolved, parent, now_ms, permit: None }).await
+    }
+
+    /// Retry `ext` once, after a probe answered `NotDone`, where the class is idempotent. The effect must
+    /// match the record ([`bind`](Self::bind)) and, when composed, hold against `authority` now. Refused by
+    /// name otherwise: without a probe, a second time, or against a destination not declared idempotent.
+    pub async fn retry(&self, ext: &ExternalEffect, authority: Option<&ResourceAuthority>) -> Result<DestinationCommit, ExternalRefusal> {
         let op = &ext.effect.operation_id;
         let record = self.ledger.get(op)?.ok_or(ExternalRefusal::NotRecorded)?;
+        self.bind(&record, ext)?;
         if !matches!(record.class, EffectClass::Idempotent { .. }) {
             return Err(self.refuse(ExternalRefusal::RetryNotIdempotent { class: record.class.tag() }));
         }
         match record.state {
             EffectState::NotDone => {}
-            EffectState::Unknown => return Err(self.refuse(ExternalRefusal::RetryWithoutProbe)),
+            EffectState::Unknown | EffectState::Prepared => return Err(self.refuse(ExternalRefusal::RetryWithoutProbe)),
             EffectState::Unresolved => return Err(self.refuse(ExternalRefusal::Unresolved)),
             state => return Err(self.refuse(ExternalRefusal::State { state, needed: "a probe that answered not done" })),
         }
         if record.retries >= 1 {
             return Err(self.refuse(ExternalRefusal::SecondRetry));
         }
+        let now_ms = Self::now_ms();
+        self.check_composed(ext, authority, now_ms)?;
         self.gate_egress()?;
         self.ledger.bump(op, "retries")?;
         let parent = Some(record.evidence_hash.clone().unwrap_or(record.record_hash.clone()));
-        self.send_and_settle("effects/retry", ext, parent).await
+        self.send_and_settle("effects/retry", ext, parent, None).await
     }
 
     /// Commit `compensation` for the committed effect `op`, under `permit`. A compensation is a new effect
     /// in the same scope under its own operation id, recorded with the compensated record's hash as its
-    /// parent; the compensated record becomes `Compensated`. Refused by name when the class declares no
-    /// compensation, when no permit is presented, or when `op` is not committed.
+    /// parent; the compensated record becomes `Compensated` when it commits — now, or later by probe or
+    /// retry if its answer is lost (the link is kept meanwhile, and a second compensation refused).
+    ///
+    /// The permit must be **for this compensation**: the class's declared operation, at this destination,
+    /// naming this record as its parent, inside its validity, and — when the compensation is composed — for
+    /// its principal. Refused by name when the class declares no compensation, when no permit is presented
+    /// or it is for something else, or when `op` is not committed.
     pub async fn compensate(
         &self,
         op: &OperationId,
@@ -818,31 +953,67 @@ impl<D: ExternalDestination> Reconciler<D> {
         permit: Option<&CompensationPermit>,
     ) -> Result<DestinationCommit, ExternalRefusal> {
         let record = self.ledger.get(op)?.ok_or(ExternalRefusal::NotRecorded)?;
-        if record.class.compensation().is_none() {
+        let Some(declared) = record.class.compensation() else {
             return Err(self.refuse(ExternalRefusal::NoCompensation { class: record.class.tag() }));
-        }
+        };
         let Some(permit) = permit else {
             return Err(self.refuse(ExternalRefusal::CompensationNotPermitted("no evaluator permit was presented".into())));
         };
         if record.state != EffectState::Committed {
             return Err(self.refuse(ExternalRefusal::State { state: record.state, needed: "a committed effect" }));
         }
+        if record.compensated_by.is_some() {
+            return Err(self.refuse(ExternalRefusal::State { state: record.state, needed: "an effect whose compensation is not already in flight" }));
+        }
         if compensation.effect.operation_id == *op {
             return Err(self.refuse(ExternalRefusal::State { state: record.state, needed: "a compensation under its own operation id" }));
         }
-        self.gate_egress()?;
-        let parent = record.evidence_hash.clone().unwrap_or(record.record_hash.clone());
         let now_ms = Self::now_ms();
-        self.record_permit(permit, now_ms).await?;
+        let parent = record.evidence_hash.clone().unwrap_or(record.record_hash.clone());
+        self.bind_permit(permit, declared, &parent, compensation, now_ms)?;
+        self.gate_egress()?;
+        self.record_permit(permit).await?;
         let scope = self.destination.dedup_scope().to_string();
         let record_hash = prepared_record_hash(compensation, &scope);
         let (existing, fresh) = self.ledger.prepare(compensation, &scope, now_ms, &record_hash)?;
-        if !fresh && existing.state != EffectState::Failed && existing.state != EffectState::Prepared {
+        if !fresh {
+            self.bind(&existing, compensation)?;
             return Err(self.refuse(ExternalRefusal::State { state: existing.state, needed: "a compensation not yet sent" }));
         }
-        let commit = self.send_and_settle("effects/compensate", compensation, Some(parent)).await?;
+        self.ledger.link_compensation(op, &compensation.effect.operation_id)?;
+        let commit = self.send_and_settle("effects/compensate", compensation, Some(parent), Some(permit)).await?;
         self.ledger.set_compensated(op, &compensation.effect.operation_id)?;
         Ok(commit)
+    }
+
+    /// The permit is for this compensation, or it is not a permit for it.
+    #[cfg(feature = "envelope")]
+    fn bind_permit(&self, permit: &CompensationPermit, declared: &str, parent: &str, compensation: &ExternalEffect, now_ms: u64) -> Result<(), ExternalRefusal> {
+        let env = &permit.envelope;
+        let resource = format!("destination:{}", self.destination.identity());
+        let mismatch = |why: String| ExternalRefusal::CompensationNotPermitted(why);
+        if env.operation != declared {
+            return Err(self.refuse(mismatch(format!("the permit is for {:?}, the class declares {declared:?}", env.operation))));
+        }
+        if env.resource != resource {
+            return Err(self.refuse(mismatch(format!("the permit is for {:?}, this destination is {resource:?}", env.resource))));
+        }
+        if env.parent.as_deref() != Some(parent) {
+            return Err(self.refuse(mismatch("the permit does not name this record as its parent".into())));
+        }
+        if now_ms < env.issued_at_ms || env.is_expired(now_ms) {
+            return Err(self.refuse(mismatch("the permit is outside its validity".into())));
+        }
+        if let Some(c) = &compensation.composition
+            && c.principal.as_str() != env.actor
+        {
+            return Err(self.refuse(mismatch(format!("the permit is for {:?}, the compensation is attributed to {:?}", env.actor, c.principal.as_str()))));
+        }
+        Ok(())
+    }
+    #[cfg(not(feature = "envelope"))]
+    fn bind_permit(&self, permit: &CompensationPermit, _declared: &str, _parent: &str, _compensation: &ExternalEffect, _now_ms: u64) -> Result<(), ExternalRefusal> {
+        match permit._never {}
     }
 
     fn budget_of(&self, op: &OperationId) -> Result<ProbeBudget, ExternalRefusal> {
@@ -870,8 +1041,9 @@ impl<D: ExternalDestination> Reconciler<D> {
         }
     }
 
+    /// The permit's decision, recorded as the evaluator made it (enforcement point `destination`).
     #[cfg(feature = "envelope")]
-    async fn record_permit(&self, permit: &CompensationPermit, _now_ms: u64) -> Result<(), ExternalRefusal> {
+    async fn record_permit(&self, permit: &CompensationPermit) -> Result<(), ExternalRefusal> {
         let Some((journal, _)) = &self.evidence else { return Ok(()) };
         let mut ev = mycelium::AeEvidence::for_decision(&permit.envelope, &permit.decision, mycelium::Execution::Attempted, "destination");
         ev.destination = Some(self.destination.identity().to_string());
@@ -880,25 +1052,53 @@ impl<D: ExternalDestination> Reconciler<D> {
         Ok(())
     }
     #[cfg(not(feature = "envelope"))]
-    async fn record_permit(&self, _permit: &CompensationPermit, _now_ms: u64) -> Result<(), ExternalRefusal> {
-        Ok(())
+    async fn record_permit(&self, permit: &CompensationPermit) -> Result<(), ExternalRefusal> {
+        match permit._never {}
     }
 
     /// Write the execution record for `ext` when a journal is attached, and remember its hash on the
-    /// ledger. Without a journal the ledger's own record hash stands, and nothing is written.
+    /// ledger. The decision on the record is honest about who decided: a compensation carries the
+    /// evaluator's (from its permit); a composed effect the destination's own permit (the composition held);
+    /// an uncomposed effect an *indeterminate* decision — no policy saw it, and this record states the
+    /// destination's answer, not an authorisation. The receipt's rung (`effect_durability`) is written where
+    /// it is true — a local destination's commit is on this node's disk; a remote destination's commit is the
+    /// destination's claim, which the local rung cannot name, and the record carries it as `destination`
+    /// and the dedup outcome in `reason`. Without a journal the ledger's own record hash stands.
     #[cfg(feature = "envelope")]
-    async fn evidence(&self, ext: &ExternalEffect, operation: &str, reason: &str, execution: Exec, parent: Option<String>, now_ms: u64) -> Result<(), ExternalRefusal> {
+    async fn evidence(&self, ext: &ExternalEffect, note: Note<'_>) -> Result<(), ExternalRefusal> {
         let Some((journal, via)) = &self.evidence else { return Ok(()) };
-        let actor = ext.composition.as_ref().map(|c| c.principal.as_str().to_string()).unwrap_or_else(|| format!("destination:{}", self.destination.identity()));
+        let Note { operation, reason, execution, parent, now_ms, permit } = note;
         let resource = format!("destination:{}", self.destination.identity());
-        let envelope = mycelium::ActionEnvelope::builder(actor, via.clone(), operation, &resource)
-            .identities(ext.effect.operation_id.to_string(), ext.effect.attempt_id.to_string())
-            .validity(now_ms, now_ms.saturating_add(60_000))
-            .causal(mycelium::causal::CausalFields { correlation: None, parent })
-            .build();
-        let decision = mycelium::Decision::permit(reason, "-");
+        let (envelope, decision) = match permit {
+            Some(p) => {
+                let mut d = p.decision.clone();
+                d.reason = reason.to_string();
+                (p.envelope.clone(), d)
+            }
+            None => {
+                let actor = ext.composition.as_ref().map(|c| c.principal.as_str().to_string()).unwrap_or_else(|| format!("destination:{}", self.destination.identity()));
+                let envelope = mycelium::ActionEnvelope::builder(actor, via.clone(), operation, &resource)
+                    .identities(ext.effect.operation_id.to_string(), ext.effect.attempt_id.to_string())
+                    .validity(now_ms, now_ms.saturating_add(60_000))
+                    .causal(mycelium::causal::CausalFields { correlation: None, parent })
+                    .build();
+                let decision = if ext.composition.is_some() {
+                    let mut d = mycelium::Decision::permit(format!("the composition held at the destination; {reason}"), "-");
+                    d.checked = vec!["composition:attribution".into(), "composition:authority".into()];
+                    d
+                } else {
+                    mycelium::Decision::indeterminate(format!("no policy decided this effect at the destination; {reason}"), "-")
+                };
+                (envelope, decision)
+            }
+        };
         let mut ev = mycelium::AeEvidence::for_decision(&envelope, &decision, execution.into(), "destination").as_execution(execution.into());
         ev.destination = Some(self.destination.identity().to_string());
+        ev.operation_id = ext.effect.operation_id.to_string();
+        ev.attempt_id = ext.effect.attempt_id.to_string();
+        if execution == Exec::Completed && self.destination.host().is_none() {
+            ev = ev.with_effect_durability(mycelium::LocalDurability::OnDisk);
+        }
         if let Some(c) = &ext.composition
             && let Some(d) = &c.origin_domain
         {
@@ -910,9 +1110,19 @@ impl<D: ExternalDestination> Reconciler<D> {
         Ok(())
     }
     #[cfg(not(feature = "envelope"))]
-    async fn evidence(&self, _ext: &ExternalEffect, _operation: &str, _reason: &str, _execution: Exec, _parent: Option<String>, _now_ms: u64) -> Result<(), ExternalRefusal> {
+    async fn evidence(&self, _ext: &ExternalEffect, _note: Note<'_>) -> Result<(), ExternalRefusal> {
         Ok(())
     }
+}
+
+/// What one evidence record says — the arguments `evidence` takes, bundled.
+struct Note<'a> {
+    operation: &'a str,
+    reason: &'a str,
+    execution: Exec,
+    parent: Option<String>,
+    now_ms: u64,
+    permit: Option<&'a CompensationPermit>,
 }
 
 /// The execution states this module writes, named here so the no-`envelope` build has them too.
@@ -922,7 +1132,6 @@ enum Exec {
     Attempted,
     Failed,
     Unknown,
-    None,
     Unresolved,
 }
 
@@ -934,7 +1143,6 @@ impl From<Exec> for mycelium::Execution {
             Exec::Attempted => Self::Attempted,
             Exec::Failed => Self::Failed,
             Exec::Unknown => Self::Unknown,
-            Exec::None => Self::None,
             Exec::Unresolved => Self::Unresolved,
         }
     }

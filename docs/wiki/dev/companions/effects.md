@@ -71,10 +71,18 @@ compensatable · irreversible) and a `ProbeBudget` are declared on the `External
 prepared record, which the `Reconciler` writes to its own SQLite ledger (`external_effects`) before the
 destination is reached. Key facts:
 
+- **A found record binds.** `Ledger::prepare` under one `IMMEDIATE` transaction turns a found `Prepared` row into
+  `Unknown` (a crash or a concurrent sender — probed, never re-sent) and re-prepares a `Failed` one; `bind`
+  compares dedup scope, content hash and class before any move (`DeclarationMismatch`, `Conflict`); a
+  compensation's permit is bound to it (`bind_permit`: operation, resource, parent, validity, principal), and
+  a lost compensation keeps `compensated_by` as a link that `complete_compensation` closes when it settles.
 - **The rules are the class's.** A lost answer → `Unknown`; a probe (`ExternalDestination::observe`:
   `Done` · `NotDone` · `Unknown`) before any retry; at most one retry, only when idempotent; irreversible is
-  neither probed nor retried; past the budget (count or age) the record is `Unresolved` and escalated
-  (`Execution::Unresolved`). Each forbidden move is an `ExternalRefusal` by name, counted in
+  neither probed nor retried; the probe is counted before it is made and the budget (count or age) is checked
+  before and after it, so the record is `Unresolved` and escalated the moment it is spent
+  (`Execution::Unresolved`). The record's decision is honest: indeterminate for an uncomposed effect, the
+  destination's own permit for a composed one, the evaluator's for a compensation; `effect_durability` only for
+  a local destination's commit. Each forbidden move is an `ExternalRefusal` by name, counted in
   `RefusalCounts::record_external` (`RefusalSnapshot::external`).
 - **A compensation is an effect.** `compensate` needs a `CompensationPermit` (the evaluator's preflight,
   `envelope` feature; without the feature none exists — fail closed) and records the new effect with the

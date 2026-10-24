@@ -92,6 +92,28 @@ async fn a_compensation_needs_the_evaluators_permit_and_names_the_record_it_comp
     );
     let permit = CompensationPermit::decide(&permitting, "token:gw/clerk", via.clone(), "payments", "refund", &paid_hash, now_ms).expect("permitted");
     assert_eq!(permit.policy_revision(), "rev-1");
+    // A permit for something else does not permit this compensation (#674's review, D4): another operation,
+    // another destination, another parent — each refused by name, nothing sent. Seen failing first under a
+    // plant that skipped the binding.
+    let wide: Arc<dyn ActionEvaluator> = Arc::new(
+        ReferenceEvaluator::new("rev-1")
+            .map_action("weigh", "*")
+            .map_action("refund", "*")
+            .allow(Rule::new("token:gw/clerk", "weigh", "destination:payments"))
+            .allow(Rule::new("token:gw/clerk", "refund", "destination:invoices"))
+            .allow(Rule::new("token:gw/clerk", "refund", "destination:payments")),
+    );
+    let reached = mock.reached();
+    for (op, dest, parent, why) in [
+        ("weigh", "payments", paid_hash.as_str(), "another operation"),
+        ("refund", "invoices", paid_hash.as_str(), "another destination"),
+        ("refund", "payments", "0000000000000000000000000000000000000000000000000000000000000000", "another parent"),
+    ] {
+        let wrong = CompensationPermit::decide(&wide, "token:gw/clerk", via.clone(), dest, op, parent, now_ms).expect("the evaluator permits it, for what it is");
+        assert!(matches!(r.compensate(&paid.effect.operation_id, &refund, Some(&wrong)).await, Err(ExternalRefusal::CompensationNotPermitted(_))), "{why}");
+    }
+    assert_eq!(mock.reached(), reached, "nothing left for a permit that is not for this compensation");
+    assert_eq!(r.counts().external.compensation_not_permitted, 4);
     let commit = r.compensate(&paid.effect.operation_id, &refund, Some(&permit)).await.expect("compensated");
     assert_eq!(commit.dedup, DedupOutcome::Fresh);
     assert_eq!(mock.applied(), 2, "the compensation is an effect of its own at the destination");
@@ -100,9 +122,13 @@ async fn a_compensation_needs_the_evaluators_permit_and_names_the_record_it_comp
     let journal_records = records(&journal_path);
     let decision = journal_records.iter().find(|(ev, _)| ev.kind == RecordKind::Decided && ev.operation == "refund").expect("the permit's decision is recorded");
     assert_eq!(decision.0.parent.as_deref(), Some(paid_hash.as_str()), "the decision names what it compensates");
-    let execution = journal_records.iter().find(|(ev, _)| ev.kind == RecordKind::Execution && ev.operation == "effect.compensate").expect("the compensation's execution record");
+    let execution = journal_records.iter().find(|(ev, _)| ev.kind == RecordKind::Execution && ev.operation == "refund" && ev.operation_id == "refund-20").expect("the compensation's execution record, under the permit's own envelope");
     assert_eq!(execution.0.parent.as_deref(), Some(paid_hash.as_str()), "the compensation's record names the compensated record's hash");
     assert_eq!(execution.0.execution, Execution::Completed);
+    assert_eq!((execution.0.decision, execution.0.policy_revision.as_str()), (mycelium::DecisionKind::Permit, "rev-1"), "the evaluator's decision, not a fabricated one (#674's review, Q1)");
+    let apply = journal_records.iter().find(|(ev, _)| ev.operation_id == "pay-20" && ev.operation == "effect.apply").unwrap();
+    assert_eq!(apply.0.decision, mycelium::DecisionKind::Indeterminate, "an uncomposed effect: no policy decided it, and the record says so");
+    assert!(apply.0.effect_durability.is_none(), "a remote destination's commit is not this node's rung");
     // The closure reader follows the parent: the compensated record and its compensation are one closure.
     let corpus = mycelium::closure::Corpus::load(std::slice::from_ref(&journal_path)).unwrap();
     let members = corpus.closure_members(&paid_hash);
@@ -110,6 +136,21 @@ async fn a_compensation_needs_the_evaluators_permit_and_names_the_record_it_comp
 
     // A second compensation of the same record is refused by state.
     assert!(matches!(r.compensate(&paid.effect.operation_id, &refund, Some(&permit)).await, Err(ExternalRefusal::State { state: EffectState::Compensated, .. })));
+
+    // A compensation whose answer is lost does not strand the record it compensates (#674's review, D5): the
+    // link is kept, a second compensation is refused meanwhile, and when a probe settles the compensation the
+    // original becomes `Compensated`.
+    let paid2 = external("pay-22", "22", EffectClass::Compensatable { compensation: "refund".into() });
+    assert_eq!(r.apply(&paid2, None).await.unwrap().dedup, DedupOutcome::Fresh);
+    let paid2_hash = r.record(&paid2.effect.operation_id).unwrap().unwrap().evidence_hash.unwrap();
+    let permit2 = CompensationPermit::decide(&permitting, "token:gw/clerk", via.clone(), "payments", "refund", &paid2_hash, now_ms).unwrap();
+    let lost_refund = external("refund-22", "lose:-22", EffectClass::Idempotent { compensation: None });
+    assert!(matches!(r.compensate(&paid2.effect.operation_id, &lost_refund, Some(&permit2)).await, Err(ExternalRefusal::Effect(EffectRefusal::DeliveryUnknown))));
+    let linked = r.record(&paid2.effect.operation_id).unwrap().unwrap();
+    assert_eq!((linked.state, linked.compensated_by.as_deref()), (EffectState::Committed, Some("refund-22")), "linked, not yet compensated");
+    assert!(matches!(r.compensate(&paid2.effect.operation_id, &lost_refund, Some(&permit2)).await, Err(ExternalRefusal::State { .. })), "a second compensation while one is in flight is refused");
+    assert_eq!(r.probe(&lost_refund.effect.operation_id).await, Ok(mycelium_effects::ProbeAnswer::Done));
+    assert_eq!(r.record(&paid2.effect.operation_id).unwrap().unwrap().state, EffectState::Compensated, "the probe that settled the compensation compensated the original");
     // An unknown effect on a lost answer is recorded `Attempted`, and an unresolved one `Unresolved`.
     let mut lost = external("pay-21", "lose:21", EffectClass::Idempotent { compensation: None });
     lost.probe_budget = ProbeBudget { max_probes: 0, max_age_ms: 60_000 };

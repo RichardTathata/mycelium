@@ -62,7 +62,10 @@ demonstration is `a_recorded_run_reaches_the_destination_once_and_its_replay_zer
 ## What it guarantees, and what it does not
 
 - **The class is declared before execution and recorded on the prepared record**, which is on disk before the
-  destination is reached (`prepared_record_hash`, `mycelium.effects/prepared/1`).
+  destination is reached (`prepared_record_hash`, `mycelium.effects/prepared/1`). **A found record binds what may be
+  presented under its operation:** other content is a `Conflict`, another class or dedup scope a
+  `DeclarationMismatch`, at the apply, the retry and the compensation alike; a record found `Prepared` — a send whose
+  answer no one has, after a crash or beside a concurrent applier — is *unknown*, probed and never re-sent.
 - **A lost answer is `DeliveryUnknown` and the record `Unknown`**; a retry without a probe, a second retry, and a
   retry against a destination not declared idempotent are each refused by name and counted
   (`RefusalSnapshot::external`; with the crate's `metrics` feature, `mycelium_effects_refusals_total{kind="external",
@@ -71,19 +74,35 @@ demonstration is `a_recorded_run_reaches_the_destination_once_and_its_replay_zer
   the same key, so the destination sees one effect.
 - **An irreversible, unobservable effect is neither probed nor retried**; its record stays `Unknown` and its
   evidence is kept.
-- **The probe budget bounds the unknown loop**: past its count or its age the record is `Unresolved` and escalated,
-  recorded as `Execution::Unresolved`, and nothing further is attempted without a new authorisation.
+- **The probe budget bounds the unknown loop**: a probe is counted before it is made, and the moment the budget is
+  spent — by this probe's `Unknown` answer, or found spent before it — the record is `Unresolved` and escalated,
+  recorded as `Execution::Unresolved`; nothing further is attempted without a new authorisation. **Not built:** the
+  re-authorisation itself (no API or route grants one; the record is read and the escalation is a human's).
 - **A probe is egress**: the destination's host is checked against the same hostname allow-list as the effect, and a
-  denied host is refused by the gate before the destination is reached. **Not covered:** credential binding at egress
-  (post-360 rows L and M) — the reference HTTP destination attaches none; a real adapter attaches its own.
-- **A compensation is an effect of its own**: refused without the evaluator's permit, and when recorded its evidence
-  record's `parent` is the compensated record's hash, so `mycelium explain --closure` shows both
+  denied host is refused by the gate before the destination is reached. **The host is the destination's declaration**
+  (`ExternalDestination::host`; `None` is *local* and ungated) — an adapter that misdeclares is not caught here.
+  **Not covered:** credential binding at egress (post-360 rows L and M) — the reference HTTP destination attaches none;
+  a real adapter attaches its own.
+- **A compensation is an effect of its own**: refused without the evaluator's permit, and refused under a permit that is
+  not *for it* (the class's declared operation, at this destination, naming this record as its parent, inside its
+  validity, for its principal); its evidence record carries the evaluator's decision and names the compensated record's
+  hash as `parent`, so `mycelium explain --closure` shows both; a compensation whose answer is lost keeps its link, and
+  the probe or retry that settles it compensates the original
   ([causal records](../guide/00-concepts.md#causal-records); the [feature page](causal-records.md)).
 - **The composed legs are enforced on the external path** as `apply_composed` enforces them: attribution, then
   authority; a composed effect with no authority to check against is refused, never sent. **Decided in the PR:** no
   new composition leg — reconciliation is a *state of the record*, not a leg of the composed guarantee.
 - **A recorded run replays without reaching the destination**: the apply and the probe are `Input`-class choices
-  (`ChoiceKind::Input`, first production use), written down by a recording kernel and returned by a replaying one.
+  (`ChoiceKind::Input`, first production use), written down by a recording kernel and returned by a replaying one. The
+  seam gate does not scan the companion; the inventory's §2.4 row is the record.
+- **The evidence record's decision is honest about who decided:** an uncomposed effect's is *indeterminate* (no policy
+  saw it), a composed one the destination's own permit (the composition held), a compensation the evaluator's from its
+  permit. **The receipt's rung is written where it is true:** a local destination's commit carries
+  `effect_durability: on_disk`; a remote destination's commit is the destination's claim, which the local rung cannot
+  name — the record carries `destination` and the dedup outcome instead.
+- **The reconciler is a parallel path**, not pluggable through `EffectDestination`, `Counting<D>` or the tuple-space
+  consumer: `tests/composed.rs` is unchanged and green against the SQLite destination; the external path has its own
+  composition test.
 - **Not built, stated** ([`adopter-surface.md`](../plans/adopter-surface.md) X5): a real provider (the mock stands
   where S3Mock stands for the object store); credential binding on the reference HTTP destination; a probe that is
   itself authorised by the evaluator (the probe is gated by egress and budget, not by policy); the exposure policy that

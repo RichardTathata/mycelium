@@ -39,6 +39,7 @@ pub struct ExternalRefusalCounts {
     wrong_state:                AtomicU64,
     no_compensation:            AtomicU64,
     compensation_not_permitted: AtomicU64,
+    declaration_mismatch:       AtomicU64,
     other:                      AtomicU64,
 }
 
@@ -55,6 +56,7 @@ pub struct ExternalRefusalSnapshot {
     pub wrong_state:                u64,
     pub no_compensation:            u64,
     pub compensation_not_permitted: u64,
+    pub declaration_mismatch:       u64,
     /// `not_recorded` and `ledger` — the reconciler's own, not the contract's.
     pub other:                      u64,
 }
@@ -63,7 +65,8 @@ impl ExternalRefusalSnapshot {
     /// Every contract refusal.
     pub fn total(&self) -> u64 {
         self.egress_denied + self.retry_without_probe + self.second_retry + self.retry_not_idempotent + self.probe_budget_exhausted
-            + self.unresolved + self.irreversible_unobservable + self.wrong_state + self.no_compensation + self.compensation_not_permitted + self.other
+            + self.unresolved + self.irreversible_unobservable + self.wrong_state + self.no_compensation + self.compensation_not_permitted
+            + self.declaration_mismatch + self.other
     }
 }
 
@@ -122,6 +125,7 @@ impl RefusalCounts {
             ExternalRefusal::State { .. } => &x.wrong_state,
             ExternalRefusal::NoCompensation { .. } => &x.no_compensation,
             ExternalRefusal::CompensationNotPermitted(_) => &x.compensation_not_permitted,
+            ExternalRefusal::DeclarationMismatch { .. } => &x.declaration_mismatch,
             // `NotRecorded`, `Ledger`, and any variant added later: counted, never silently dropped.
             _ => &x.other,
         };
@@ -155,6 +159,7 @@ impl RefusalCounts {
                 wrong_state:                self.external.wrong_state.load(Ordering::Relaxed),
                 no_compensation:            self.external.no_compensation.load(Ordering::Relaxed),
                 compensation_not_permitted: self.external.compensation_not_permitted.load(Ordering::Relaxed),
+                declaration_mismatch:       self.external.declaration_mismatch.load(Ordering::Relaxed),
                 other:                      self.external.other.load(Ordering::Relaxed),
             },
         }

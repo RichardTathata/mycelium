@@ -20,8 +20,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   most one retry and only against a destination declared idempotent, never probes or retries an irreversible
   effect, marks a record past its budget `Unresolved` and escalated (`Execution::Unresolved`), gates the effect and
   every probe on the egress allow-list, enforces the composed legs on the external path, and commits a compensation
-  only under a `CompensationPermit` (the evaluator's, `envelope` feature) as a new effect whose evidence record's
-  `parent` is the compensated record's hash — every forbidden move refused by name (`ExternalRefusal`) and counted
+  only under a `CompensationPermit` (the evaluator's, `envelope` feature; bound to the compensation it is for —
+  operation, destination, parent, validity, principal) as a new effect whose evidence record's
+  `parent` is the compensated record's hash (a lost compensation keeps its link and is completed by the probe
+  that settles it); a found record binds what may be presented under its operation (other content a `Conflict`,
+  another class or scope a `DeclarationMismatch`), and a record found `Prepared` is unknown, never re-sent — every forbidden move refused by name (`ExternalRefusal`) and counted
   (`RefusalSnapshot::external`, `mycelium_effects_refusals_total{kind="external"}`). The apply and the probe are the
   first production use of the replay kernel's `Input` seam (`mycelium::sim_seam::input`): a recorded run that
   reached the destination replays reaching it zero times (`tests/external_replay.rs`, under the crate's new `sim`

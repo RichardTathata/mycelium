@@ -47,10 +47,13 @@ impl HttpDestination {
         let mut stream = TcpStream::connect_timeout(&addr, self.timeout).map_err(|e| EffectRefusal::Failed(format!("connect: {e}")))?;
         stream.set_read_timeout(Some(self.timeout)).map_err(|e| EffectRefusal::Failed(e.to_string()))?;
         stream.set_write_timeout(Some(self.timeout)).map_err(|e| EffectRefusal::Failed(e.to_string()))?;
-        // Written: from here the destination may act, so a failure to read an answer is *unknown*.
+        // A write that fails leaves the destination without a complete request, so nothing acts on it: *failed*,
+        // not unknown. (A late `EPIPE` after a fully written small request is the residual: the kernel reported
+        // the write done, the peer closed after reading it; the next read answers *unknown*, as it should.)
         if let Err(e) = stream.write_all(head.as_bytes()).and_then(|_| stream.write_all(body)) {
             return Err(EffectRefusal::Failed(format!("write: {e}")));
         }
+        // Written: from here the destination may act, so a failure to read an answer is *unknown*.
         let mut raw = Vec::new();
         if stream.read_to_end(&mut raw).is_err() && raw.is_empty() {
             return Err(EffectRefusal::DeliveryUnknown);
@@ -62,6 +65,16 @@ impl HttpDestination {
         let status: u16 = head.split_whitespace().nth(1).and_then(|s| s.parse().ok()).ok_or(EffectRefusal::DeliveryUnknown)?;
         Ok((status, body.trim().as_bytes().to_vec()))
     }
+}
+
+/// A key goes into a header and a request line: a control character or a space in it would be header
+/// injection or a broken request, so it is refused before anything is written.
+fn key_is_wire_safe(key: &IdempotencyKey) -> Result<(), EffectRefusal> {
+    let text = key.to_string();
+    if text.chars().any(|c| c.is_control() || c == ' ') {
+        return Err(EffectRefusal::Failed(format!("the idempotency key {text:?} carries a control character or a space; refused before the request")));
+    }
+    Ok(())
 }
 
 impl ExternalDestination for HttpDestination {
@@ -76,6 +89,7 @@ impl ExternalDestination for HttpDestination {
     }
 
     fn send(&self, key: &IdempotencyKey, effect: &Effect) -> Result<DestinationCommit, EffectRefusal> {
+        key_is_wire_safe(key)?;
         let head = format!(
             "POST {}/effects HTTP/1.1\r\nHost: {}\r\nIdempotency-Key: {key}\r\nContent-Hash: {:016x}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             self.prefix,
@@ -99,6 +113,9 @@ impl ExternalDestination for HttpDestination {
     }
 
     fn observe(&self, key: &IdempotencyKey) -> ProbeAnswer {
+        if key_is_wire_safe(key).is_err() {
+            return ProbeAnswer::Unknown;
+        }
         let head = format!("GET {}/effects/{key} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n", self.prefix, self.host);
         match self.request(&head, b"") {
             Ok((200, body)) => match body.as_slice() {

@@ -360,8 +360,9 @@ an absent section.
   `conflict` is a retry that changed its content.
 - **Beyond the fleet (adopter-surface X5).** `Reconciler` owns a **second SQLite file, the ledger**
   (`external_effects`): the prepared record — operation, dedup scope, declared class, content hash, probe
-  budget, its hash — before the destination is reached, then the state (`unknown`, `not_done`, `committed`,
-  `failed`, `unresolved`, `compensated`), probes and retries. Back it up with the dedup file: an `unresolved`
+  budget, its hash — before the destination is reached (`prepared`), then the state (`unknown`, `not_done`,
+  `committed`, `failed`, `unresolved`, `compensated`), probes and retries. A found record binds what may be
+  presented under its operation (content, class, scope), and a record found `prepared` is unknown, never re-sent. Back it up with the dedup file: an `unresolved`
   row is an escalation a human owes an answer, and the ledger is where it is. The egress allow-list it is opened
   with gates the effect **and every probe**; a probe to an unlisted host never leaves. With an evidence journal
   attached (`with_evidence`, `envelope` feature) every settled outcome, probe and compensation is an execution

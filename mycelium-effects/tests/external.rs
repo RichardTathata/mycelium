@@ -55,7 +55,7 @@ async fn a_lost_response_is_unknown_and_a_retry_without_a_probe_is_refused() {
     assert_eq!(record.state, EffectState::Unknown);
     assert!(record.first_unknown_at_ms.is_some());
     assert_eq!(record.class, ext.class, "the class was recorded on the prepared record");
-    assert_eq!(r.retry(&ext).await, Err(ExternalRefusal::RetryWithoutProbe));
+    assert_eq!(r.retry(&ext, None).await, Err(ExternalRefusal::RetryWithoutProbe));
     assert_eq!(r.apply(&ext, None).await, Err(ExternalRefusal::RetryWithoutProbe), "a second apply is a retry too");
     assert_eq!(r.counts().external.retry_without_probe, 2);
     assert_eq!(r.counts().delivery_unknown, 1);
@@ -75,7 +75,7 @@ async fn a_probe_answering_done_settles_the_record_without_a_second_effect() {
     assert_eq!(record.probes, 1);
     assert_eq!(mock.applied(), 1, "one effect at the destination");
     // Settled: a retry is refused by state, and a re-apply answers from the ledger without a send.
-    assert!(matches!(r.retry(&ext).await, Err(ExternalRefusal::State { state: EffectState::Committed, .. })));
+    assert!(matches!(r.retry(&ext, None).await, Err(ExternalRefusal::State { state: EffectState::Committed, .. })));
     let reached = mock.reached();
     let again = r.apply(&ext, None).await.unwrap();
     assert_eq!(again.dedup, DedupOutcome::Replayed);
@@ -97,21 +97,21 @@ async fn a_probe_answering_not_done_permits_one_retry_and_the_destination_sees_o
     // The retry: the same key, a payload the destination answers.
     let mut retry = idempotent(op, "9");
     retry.effect.content_hash = first.effect.content_hash; // the same logical content under the key
-    let commit = r.retry(&retry).await.expect("one retry after not-done");
+    let commit = r.retry(&retry, None).await.expect("one retry after not-done");
     assert_eq!(commit.dedup, DedupOutcome::Fresh);
     assert_eq!(mock.applied(), 1, "the destination saw one effect");
     assert_eq!(r.record(&first.effect.operation_id).unwrap().unwrap().retries, 1);
     // A second retry, whatever happened, is refused.
-    assert!(matches!(r.retry(&retry).await, Err(ExternalRefusal::State { state: EffectState::Committed, .. })));
+    assert!(matches!(r.retry(&retry, None).await, Err(ExternalRefusal::State { state: EffectState::Committed, .. })));
     // And on a record probed not-done twice, the second retry is refused by count: arrange one.
     let second = idempotent("pay-3b", "vanish:1");
     assert!(matches!(r.apply(&second, None).await, Err(ExternalRefusal::Effect(EffectRefusal::DeliveryUnknown))));
     assert_eq!(r.probe(&second.effect.operation_id).await, Ok(ProbeAnswer::NotDone));
     let mut lost_retry = idempotent("pay-3b", "vanish:1");
     lost_retry.effect.content_hash = second.effect.content_hash;
-    assert!(matches!(r.retry(&lost_retry).await, Err(ExternalRefusal::Effect(EffectRefusal::DeliveryUnknown))), "the retry's answer was lost too");
+    assert!(matches!(r.retry(&lost_retry, None).await, Err(ExternalRefusal::Effect(EffectRefusal::DeliveryUnknown))), "the retry's answer was lost too");
     assert_eq!(r.probe(&second.effect.operation_id).await, Ok(ProbeAnswer::NotDone));
-    assert_eq!(r.retry(&lost_retry).await, Err(ExternalRefusal::SecondRetry));
+    assert_eq!(r.retry(&lost_retry, None).await, Err(ExternalRefusal::SecondRetry));
     assert_eq!(r.counts().external.second_retry, 1);
 }
 
@@ -123,7 +123,7 @@ async fn a_non_idempotent_destination_is_never_retried_whatever_the_probe_says()
     let ext = external("pay-4", "vanish:3", EffectClass::Compensatable { compensation: "refund".into() });
     assert!(matches!(r.apply(&ext, None).await, Err(ExternalRefusal::Effect(EffectRefusal::DeliveryUnknown))));
     assert_eq!(r.probe(&ext.effect.operation_id).await, Ok(ProbeAnswer::NotDone), "the probe says not done");
-    assert_eq!(r.retry(&ext).await, Err(ExternalRefusal::RetryNotIdempotent { class: "compensatable" }));
+    assert_eq!(r.retry(&ext, None).await, Err(ExternalRefusal::RetryNotIdempotent { class: "compensatable" }));
     assert_eq!(mock.applied(), 0);
     assert_eq!(mock.reached(), 2, "the apply and the probe; no retry left");
     assert_eq!(r.counts().external.retry_not_idempotent, 1);
@@ -138,7 +138,7 @@ async fn an_irreversible_unobservable_effect_stays_unknown() {
     let ext = external("launch-1", "lose:go", EffectClass::Irreversible);
     assert!(matches!(r.apply(&ext, None).await, Err(ExternalRefusal::Effect(EffectRefusal::DeliveryUnknown))));
     assert_eq!(r.probe(&ext.effect.operation_id).await, Err(ExternalRefusal::IrreversibleUnobservable));
-    assert_eq!(r.retry(&ext).await, Err(ExternalRefusal::RetryNotIdempotent { class: "irreversible" }));
+    assert_eq!(r.retry(&ext, None).await, Err(ExternalRefusal::RetryNotIdempotent { class: "irreversible" }));
     let record = r.record(&ext.effect.operation_id).unwrap().unwrap();
     assert_eq!(record.state, EffectState::Unknown, "the uncertainty is kept");
     assert_eq!(record.probes, 0);
@@ -158,15 +158,17 @@ async fn a_probe_past_its_budget_is_unresolved_and_egress_gates_a_probe() {
     assert!(matches!(r.apply(&ext, None).await, Err(ExternalRefusal::Effect(EffectRefusal::DeliveryUnknown))));
     mock.state.probes_silent.store(true, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(r.probe(&ext.effect.operation_id).await, Ok(ProbeAnswer::Unknown));
+    assert_eq!(r.record(&ext.effect.operation_id).unwrap().unwrap().state, EffectState::Unknown, "one probe left in the budget");
     assert_eq!(r.probe(&ext.effect.operation_id).await, Ok(ProbeAnswer::Unknown));
-    let reached = mock.reached();
-    assert!(matches!(r.probe(&ext.effect.operation_id).await, Err(ExternalRefusal::ProbeBudgetExhausted { probes: 2, .. })));
+    // The budget was spent by that answer: escalated at once, not at the next call (#674's review, Q5).
     let record = r.record(&ext.effect.operation_id).unwrap().unwrap();
     assert_eq!(record.state, EffectState::Unresolved);
-    assert_eq!(r.probe(&ext.effect.operation_id).await, Err(ExternalRefusal::Unresolved));
-    assert_eq!(r.retry(&ext).await, Err(ExternalRefusal::Unresolved));
-    assert_eq!(mock.reached(), reached, "past the budget the destination is not asked again");
+    assert_eq!(record.probes, 2);
     assert_eq!(r.counts().external.probe_budget_exhausted, 1);
+    let reached = mock.reached();
+    assert_eq!(r.probe(&ext.effect.operation_id).await, Err(ExternalRefusal::Unresolved));
+    assert_eq!(r.retry(&ext, None).await, Err(ExternalRefusal::Unresolved));
+    assert_eq!(mock.reached(), reached, "past the budget the destination is not asked again");
     assert_eq!(r.counts().external.unresolved, 2);
 
     // The age bound: a budget of zero age is exhausted at the first probe.
@@ -270,4 +272,122 @@ async fn the_sqlite_destination_answers_probes_from_its_dedup_row() {
     assert_eq!(dest.observe(&IdempotencyKey { scope: "ledger".into(), operation_id: ext.effect.operation_id.clone() }), ProbeAnswer::Done);
     assert_eq!(dest.observe(&IdempotencyKey { scope: "ledger".into(), operation_id: OperationId::new("row-never") }), ProbeAnswer::NotDone);
     assert_eq!(dest.host(), None);
+}
+
+/// A destination whose `send` dies mid-call — the process that prepared the record never wrote its answer.
+struct Dying;
+impl mycelium_effects::ExternalDestination for Dying {
+    fn identity(&self) -> &str { "payments" }
+    fn dedup_scope(&self) -> &str { "payments" }
+    fn host(&self) -> Option<&str> { None }
+    fn send(&self, _: &mycelium_effects::IdempotencyKey, _: &Effect) -> Result<mycelium_effects::DestinationCommit, EffectRefusal> { panic!("the process died between the prepared record and the answer") }
+    fn observe(&self, _: &mycelium_effects::IdempotencyKey) -> ProbeAnswer { ProbeAnswer::Unknown }
+}
+
+/// **A record found `Prepared` is a send whose answer no one has: it is never re-sent** (#674's review, D1). The
+/// first applier died between the ledger write and the answer; the next apply on the same ledger — for an
+/// irreversible class — is refused `RetryWithoutProbe`, the record is now `Unknown`, and the destination was
+/// reached zero times by it. Seen failing first under a plant that re-sent a found `Prepared` record.
+#[tokio::test]
+async fn a_record_found_prepared_is_unknown_and_never_re_sent() {
+    let mock = MockHttp::start();
+    let shared = ledger_path("prepared");
+    let ext = external("launch-2", "go", EffectClass::Irreversible);
+    let dying = Reconciler::open(&shared, Arc::new(Dying), EgressPolicy::default()).unwrap();
+    let ext2 = ext.clone();
+    let died = tokio::spawn(async move { dying.apply(&ext2, None).await }).await;
+    assert!(died.is_err(), "the first applier panicked mid-send");
+    let r = Reconciler::open(&shared, destination(&mock), EgressPolicy::default()).unwrap();
+    assert_eq!(r.record(&ext.effect.operation_id).unwrap().unwrap().state, EffectState::Prepared, "the record it left behind");
+    assert_eq!(r.apply(&ext, None).await, Err(ExternalRefusal::RetryWithoutProbe));
+    let record = r.record(&ext.effect.operation_id).unwrap().unwrap();
+    assert_eq!(record.state, EffectState::Unknown);
+    assert!(record.first_unknown_at_ms.is_some());
+    assert_eq!(mock.reached(), 0, "an irreversible effect in flight is not sent again");
+    assert_eq!(r.probe(&ext.effect.operation_id).await, Err(ExternalRefusal::IrreversibleUnobservable));
+    // The same for an idempotent class: unknown, so probe first — and the probe may then settle it.
+    let idem = idempotent("pay-40", "40");
+    let shared2 = ledger_path("prepared-idem");
+    let dying = Reconciler::open(&shared2, Arc::new(Dying), EgressPolicy::default()).unwrap();
+    let idem2 = idem.clone();
+    let _ = tokio::spawn(async move { dying.apply(&idem2, None).await }).await;
+    let r = Reconciler::open(&shared2, destination(&mock), EgressPolicy::default()).unwrap();
+    assert_eq!(r.apply(&idem, None).await, Err(ExternalRefusal::RetryWithoutProbe));
+    assert_eq!(r.probe(&idem.effect.operation_id).await, Ok(ProbeAnswer::NotDone));
+    assert_eq!(r.retry(&idem, None).await.unwrap().dedup, DedupOutcome::Fresh);
+    assert_eq!(mock.applied(), 1);
+}
+
+/// **A found record binds what may be presented under its operation** (#674's review, D2–D3, Q4): other
+/// content is a `Conflict`, another class or scope a `DeclarationMismatch`, at the apply, the retry and the
+/// ledger alike — and nothing with a mismatch reaches the destination. Seen failing first under a plant that
+/// skipped the content check.
+#[tokio::test]
+async fn a_found_record_binds_content_class_and_scope() {
+    let mock = MockHttp::start();
+    let shared = ledger_path("bind");
+    let r = Reconciler::open(&shared, destination(&mock), EgressPolicy::default()).unwrap();
+    let first = idempotent("pay-50", "50");
+    assert_eq!(r.apply(&first, None).await.unwrap().dedup, DedupOutcome::Fresh);
+    // Other content under the committed operation: a conflict from the ledger, the destination not asked.
+    let reached = mock.reached();
+    let changed = idempotent("pay-50", "51");
+    assert!(matches!(r.apply(&changed, None).await, Err(ExternalRefusal::Effect(EffectRefusal::Conflict { committed_hash, presented_hash, .. })) if committed_hash == first.effect.content_hash && presented_hash == changed.effect.content_hash));
+    // Another class, same content: a declaration mismatch.
+    let reclassed = external("pay-50", "50", EffectClass::Compensatable { compensation: "refund".into() });
+    assert!(matches!(r.apply(&reclassed, None).await, Err(ExternalRefusal::DeclarationMismatch { what: "class", .. })));
+    assert_eq!(mock.reached(), reached);
+    assert_eq!(r.counts().conflict, 1);
+    assert_eq!(r.counts().external.declaration_mismatch, 1);
+    // The retry path binds too: a not-done record retried with other content is a conflict, not a send.
+    let lost = idempotent("pay-51", "vanish:51");
+    assert!(matches!(r.apply(&lost, None).await, Err(ExternalRefusal::Effect(EffectRefusal::DeliveryUnknown))));
+    assert_eq!(r.probe(&lost.effect.operation_id).await, Ok(ProbeAnswer::NotDone));
+    let reached = mock.reached();
+    let other = idempotent("pay-51", "52");
+    assert!(matches!(r.retry(&other, None).await, Err(ExternalRefusal::Effect(EffectRefusal::Conflict { .. }))));
+    assert_eq!(mock.reached(), reached, "a retry with other content never leaves");
+    // Another destination sharing the ledger: its scope is not the record's — refused, not answered from the ledger.
+    let other_dest = Arc::new(HttpDestination::new("invoices", "127.0.0.1", mock.port, "", Duration::from_millis(700)));
+    let shared_other = Reconciler::open(&shared, other_dest, EgressPolicy::default()).unwrap();
+    assert!(matches!(shared_other.apply(&first, None).await, Err(ExternalRefusal::DeclarationMismatch { what: "dedup scope", .. })));
+    assert_eq!(mock.reached(), reached);
+}
+
+/// **The composed legs are enforced on the retry too** (#674's review, D3): a composed effect whose probe
+/// answered not done is retried only against an authority that still accepts it; without one it is refused,
+/// never sent.
+#[tokio::test]
+async fn a_retry_of_a_composed_effect_is_checked_again() {
+    use mycelium_effects::{CompositionLeg, Composition, Mandate, PrincipalId, ResourceAuthority, TermId};
+    let mock = MockHttp::start();
+    let r = reconciler("composed-retry", &mock);
+    let principal = |s: &str| PrincipalId::new(s).unwrap();
+    let mandate = Mandate {
+        holder: principal("node:a"),
+        established_by: principal("coop-board"),
+        purpose: "pay the growers".into(),
+        scope: "depot/payments".into(),
+        operations: vec!["pay".into()],
+        epoch: 1,
+        term: TermId::new("term-1").unwrap(),
+        valid_from_ms: 0,
+        valid_until_ms: u64::MAX,
+    };
+    let authority = ResourceAuthority::new("depot/payments", 1);
+    let ext = ExternalEffect {
+        composition: Some(Composition { principal: principal("node:a"), operation: "pay".into(), mandate, origin_domain: None }),
+        ..idempotent("pay-60", "vanish:60")
+    };
+    assert!(matches!(r.apply(&ext, Some(&authority)).await, Err(ExternalRefusal::Effect(EffectRefusal::DeliveryUnknown))));
+    assert_eq!(r.probe(&ext.effect.operation_id).await, Ok(ProbeAnswer::NotDone));
+    let reached = mock.reached();
+    assert!(matches!(r.retry(&ext, None).await, Err(ExternalRefusal::Effect(EffectRefusal::Unauthorised { leg: CompositionLeg::Authority, .. }))), "no authority to check against: refused");
+    assert_eq!(mock.reached(), reached);
+    assert_eq!(r.record(&ext.effect.operation_id).unwrap().unwrap().retries, 0, "a refused retry is not a retry");
+    // The retry: the same key and content hash (the destination answers this payload), the authority still accepting.
+    let mut again = ExternalEffect { effect: Effect::new(ext.effect.operation_id.clone(), AttemptId::of(&ext.effect.operation_id, 2), b"60".to_vec()), ..ext.clone() };
+    again.effect.content_hash = ext.effect.content_hash;
+    assert_eq!(r.retry(&again, Some(&authority)).await.unwrap().dedup, DedupOutcome::Fresh);
+    assert_eq!(mock.applied(), 1);
 }
