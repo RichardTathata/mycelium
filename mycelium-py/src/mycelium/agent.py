@@ -619,6 +619,51 @@ class MyceliumAgent:
             not_enforced=list(data.get("not_enforced", [])),
         )
 
+    # ── Grants (adopter-surface X3's door, the supervisor's side) ───────────────
+
+    def grants_pending(self) -> list:
+        """``GET /gateway/grants/pending`` (``grant:read``): the agents' open grant requests on this node, oldest
+        first — each a dict with ``key`` (``grant/{agent}/{request}``), ``agent``, ``request``, ``tool``,
+        ``arguments_digest`` and the rendering a human approves, ``policy_revision``, ``requested_at_ms`` and
+        ``expires_at_ms``. A request answered or expired is not listed.
+        """
+        with self._pool.sync() as c:
+            resp = c.get("/gateway/grants/pending")
+            resp.raise_for_status()
+            data = resp.json()
+        return list(data.get("pending", [])) if isinstance(data, dict) else []
+
+    def grant_decide(
+        self,
+        agent: str,
+        request: str,
+        decision: str,
+        *,
+        ttl_secs: Optional[int] = None,
+        reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """``POST /gateway/grants/{agent}/{request}`` (``grant:issue``): answer a pending request.
+
+        ``decision`` is ``"issue"`` or ``"refuse"``; ``ttl_secs`` bounds an issued grant (default 300, at most
+        3 600); ``reason`` is shown to the agent on a refusal. Issuing is itself an action the node's evaluator
+        decides (D22), so a supervisor the policy does not permit is answered 403 — raised by ``raise_for_status``
+        as an :class:`httpx.HTTPStatusError`, as is 409 ``not_this_node`` for an agent on another node, 409
+        ``already_answered``, 410 ``expired`` and 404 ``unknown_request``. Returns the route's answer: the record's
+        ``key``, the write's ``operation_id`` and ``local_durability``.
+        """
+        if decision not in ("issue", "refuse"):
+            raise ValueError('decision must be "issue" or "refuse"')
+        body: Dict[str, Any] = {"decision": decision}
+        if ttl_secs is not None:
+            body["ttl_secs"] = ttl_secs
+        if reason is not None:
+            body["reason"] = reason
+        with self._pool.sync() as c:
+            resp = c.post(f"/gateway/grants/{path_segment(agent)}/{path_segment(request)}", json=body)
+            resp.raise_for_status()
+            data = resp.json()
+        return data if isinstance(data, dict) else {}
+
     def declare_from(self, path: str, **kwargs: Any) -> "UnitHandle":
         """:meth:`declare_units` over the unit file at ``path``."""
         with open(path, encoding="utf-8") as f:

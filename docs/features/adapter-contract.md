@@ -36,7 +36,7 @@ This feature is turned on in code.
 
 No runnable example exists: the [example index's capability matrix](../../examples/README.md#the-capability-matrix)
 has no row for this feature. The Python scaffold's unit declares `runtime = "python"`, and CI's `Scaffold` job runs
-`wire-check` over it. The tests are in [`src/adapter_contract.rs`](../../src/adapter_contract.rs):
+`wire-check` over it in the Python template step, asserting the unit's carried line. The tests are in [`src/adapter_contract.rs`](../../src/adapter_contract.rs):
 `the_checked_in_adapter_contract_is_current` and `every_carried_cell_names_a_test_that_exists` (every carried cell's
 test is a `fn`, a `def` or a jest title in the file it links; every runtime named once; every guarantee id the
 catalogue's); and in [`src/wire_check.rs`](../../src/wire_check.rs):
@@ -60,8 +60,15 @@ holds every companion README to its limits section.
   the SDKs' grant verbs and pending-grants stream, the A2A `input-required` state (X3's second PR); the
   checkpointer's and the Strands store's tracing fields; cancellation that reaches the node from an SDK.
 - **What the doors do not establish** (the limits section the door rows cite): a task accepted at `/a2a` lives in
-  that node and is lost with it; `tools/call` has no cancel; a tool result and a task result are not receipts;
-  provider-side enforcement needs an evaluator attached at the provider, and fails closed without one.
+  that node and is lost with it, **by design** — the work it tracks is not durable either, and durable work is the
+  tuple space's and the commitment net's; `tasks/cancel` ends a task's record and stops no work, and `tools/call`
+  has no cancel — no adapter carries cancellation today, and running work stops only when its authority lapses; a
+  tool result and a task result are not receipts; provider-side enforcement needs an evaluator attached at the
+  provider, and fails closed without one.
+- **Upgrade note:** a unit carrying `runtime` is refused by every reader older than this release — a 2.37.0
+  gateway answers `400 invalid unit file`, a 2.37.0 stem or `wire-check` refuses the directory (unknown keys are
+  refused by name since 2.35.0) — so declare it only once every gateway and stem reading the directory runs this
+  release ([deprecations § 61](../guide/deprecations.md#61-a-units-runtime-key-is-refused-by-readers-before-this-release-unreleased-adopter-surface-x8)).
 - The `runtime` key is a declaration of what will run the unit, read by `wire-check` only; the gateway accepts and
   ignores it, and no engine is selected by it (D4: a directory of unit files is the fleet file).
 - **Not built, stated:** the table does not make an adapter carry anything; no cell is measured at runtime — the

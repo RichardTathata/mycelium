@@ -1,3 +1,3 @@
-from .saver import IncompleteCheckpoint, MyceliumCheckpointSaver
+from .saver import IncompleteCheckpoint, MyceliumCheckpointSaver, WriteNotOnDisk, WriteReceipt
 
-__all__ = ["IncompleteCheckpoint", "MyceliumCheckpointSaver"]
+__all__ = ["IncompleteCheckpoint", "MyceliumCheckpointSaver", "WriteNotOnDisk", "WriteReceipt"]

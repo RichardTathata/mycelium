@@ -66,6 +66,12 @@ async fn client_timer_periods_are_bounded_at_both_routes() {
     assert_eq!(post_status(&client, &adv, serde_json::json!({"ns": "plan", "name": "c", "interval_secs": 30.0})).await, 200,
         "a whole number written as a float");
     assert_eq!(post_status(&client, &units, serde_json::json!({"toml": unit, "interval_secs": 1, "lease_secs": 1})).await, 200);
+    // Adopter-surface X8: a unit's `runtime` is read by wire-check and accepted, not read, here — the declaration says
+    // what will run the unit, the node does nothing with it; with a stem section the file is still refused (422).
+    let with_runtime = "principal = \"p\"\nruntime = \"python\"\n[[capability]]\nns = \"plan\"\nname = \"route\"\nttl_secs = 30\n";
+    assert_eq!(post_status(&client, &units, serde_json::json!({"toml": with_runtime})).await, 200, "a runtime key is accepted and ignored");
+    let hosting = "principal = \"p\"\nruntime = \"python\"\n[hosts]\nkinds = [\"blob\"]\ntrusted_publishers = [\"ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\"]\nplacement_root = \"/var/lib/mycelium/artifacts\"\n";
+    assert_eq!(post_status(&client, &units, serde_json::json!({"toml": hosting})).await, 422, "a stem section is a stem's, whatever the runtime");
     agent.shutdown().await;
 }
 

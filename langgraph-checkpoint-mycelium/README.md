@@ -177,6 +177,16 @@ not competing examples):
 
 What the adapter contract adds to the list above ([the table](../docs/reference/adapter-contract.md)): checkpoint
 rows carry **no correlation id or parent hash**, so a LangGraph run is not joined to the fleet's causal records
-through this saver; the saver posts to `/gateway/kv` and reads nothing of the **receipt** the route returns, so
-`put()` acknowledges the HTTP status only; and the saver makes no governed call, so grants and provider-side
-enforcement belong to the doors the graph's tools go through.
+through this saver; a **receipt names the gateway node's rung and nothing above it** (below) — never replication;
+and the saver makes no governed call, so grants and provider-side enforcement belong to the doors the graph's tools
+go through.
+
+## What a write's receipt names (0.3.4)
+
+Every row and blob-index write returns the route's receipt, kept as `saver.last_receipt` (a `WriteReceipt`: the
+`key`, the `operation_id`, `local_durability` — `"on_disk"` · `"buffered"` · `"not_configured"` · `"failed"` with
+`local_durability_error`) and handed to `on_receipt(receipt)` as each lands. `require_on_disk=True` raises
+`WriteNotOnDisk` for a write the gateway node did not report `"on_disk"`; the row is applied there all the same, so
+on a node without `[persistence]`, which reports `"not_configured"`, it fails every write — set it only against
+nodes that persist. A gateway older than v2.16.0 answers a bare `{"ok": true}` and every field reads `None`. The
+receipt is the Strands store's wording and the substrate's ([contracts and receipts](../docs/design/contracts-receipts.md)).

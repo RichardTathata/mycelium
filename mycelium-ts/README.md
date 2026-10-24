@@ -461,6 +461,16 @@ protected kind — is thrown, never reported as `"timeout"`.
   `sseStream`) bounds only the events parsed from a single network read (`maxPending`, default 1024,
   when you call `sseStream` yourself).
 
+### The supervisor's grants, and a task's lifecycle (0.2.7)
+
+`grantsPending()` reads `GET /gateway/grants/pending` (`grant:read`) and `grantDecide(agent, request, "issue" |
+"refuse", { ttlSecs, reason })` posts the answer to `POST /gateway/grants/{agent}/{request}` (`grant:issue`);
+issuing is itself an action the node's evaluator decides, so a refusal is the route's 403, and 409 `not_this_node`
+names an agent on another node. A grant a caller holds already rides as a presented mandate in `_meta.mandate`.
+`A2aClient.getTask(id)` and `cancel(id)` are `tasks/get` and `tasks/cancel`: the task as the node holds it, readable
+and cancellable by the identity that created it; a cancel ends the task's record and stops no work — a task runs
+inside its request — and a terminal task throws (adopter-surface X7, the adapter contract).
+
 ### The causal fields (0.2.7)
 
 Every verb that starts governed work takes `correlation` (the run's id, one key segment) and `parent` (the content hash
@@ -677,10 +687,11 @@ MYCELIUM_LIVE_REQUIRED=1 MYCELIUM_TEST_HOST=127.0.0.1 MYCELIUM_TEST_PORT=9311 np
 The SDK is a client of one gateway; it carries what the doors it calls carry, and nothing it does not send
 ([the adapter contract](../docs/reference/adapter-contract.md)):
 
-- **No cancel verb.** Ending an `sseStream` generator closes the client's side; the node is not told, and a dropped
-  stream is not resumed.
-- **No grant verb and no pending-grants stream** (adopter-surface X3's second PR): a call the policy holds for
-  approval is refused to this client, not parked.
+- **No cancellation of running work.** `A2aClient.cancel` reaches `tasks/cancel`, which ends a task's record and
+  stops nothing (a task runs inside its request); `tools/call` has no cancel; ending an `sseStream` generator closes
+  the client's side only, and a dropped stream is not resumed.
+- **No pending-grants stream.** A grant rides as a presented mandate, and `grantsPending` / `grantDecide` are the
+  supervisor's verbs; a supervisor polls, nothing pushes (adopter-surface X3's second PR).
 - **Identity is the bearer's.** The principal the gateway resolves is the token's; this SDK signs nothing.
 - **A receipt names the gateway node's rung and nothing above it** — never replication, never a peer's state.
 - **64-bit values are exact and the shapes match the gateway's** (0.2.0); what the gateway does not return — a

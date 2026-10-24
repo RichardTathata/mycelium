@@ -659,6 +659,9 @@ jobs:
           "$BIN" init "$RUNNER_TEMP/governed-call-py" --template governed-call-py
           cd "$RUNNER_TEMP/governed-call-py"
           echo "target: the node built in this job at $GITHUB_SHA (not the published image; see the plan's X2 row)"
+          # X8: the unit declares its runtime; wire-check says what that runtime carries (the adapter contract's row).
+          "$BIN" wire-check units/ | tee wire.log
+          grep -q 'unit purchaser (runtime python, mycelium-py): carries tracing, identity propagation, grants, provider-side enforcement, receipts' wire.log
           MYCELIUM_BIN="$BIN" python main.py | tee run.log
           grep -q 'not enforced by this node' run.log
           grep -q 'alice set demo/greeting: PERMITTED' run.log

@@ -21,6 +21,7 @@ TOML needs one key per line. `ns = "a"; name = "b"` is not valid TOML.
 | Section | `mycelium wire-check` | Stem (`mycelium-stem --units`) | SDK agent (`POST /gateway/units/declare`) |
 |---|---|---|---|
 | `principal` | carried per unit in the JSON, the join key | validated, not otherwise used | echoed back in the response |
+| `runtime` | the adapter contract's row: `carries` / `not_carried` per unit, `unknown runtime` and `runtime with a stem section` by name | accepted, not read | accepted, not read |
 | `[[capability]]` | an offer | advertised (always-alive: a stem does not run `probe_url`) | advertised |
 | `[[requirement]]` | matched against offers | declared | declared |
 | `[[group]]` | checked for members | defined | defined |

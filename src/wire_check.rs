@@ -43,7 +43,10 @@ use crate::capability::{CapConstraint, CapFilter, CapValue, Capability};
 use crate::capability_config::{CapDecl, LaneRole, NodeCapabilityConfig};
 use crate::error::GossipError;
 
-/// The JSON document's schema id. Bump it when the shape changes; a consumer pins it.
+/// The JSON document's schema id; a consumer pins it. A field **added** keeps the id — the schema declares it
+/// optional, and a consumer holding the pinned schema validates a newer document because it never required the
+/// field (X8's `runtime`, `adapter`, `carries`, `not_carried`, 2026-10-24); a field removed or renamed, or a
+/// field made required, bumps it.
 pub const DECLARATION_SCHEMA: &str = "mycelium.design/declaration/1";
 
 /// A unit: a name (the file's stem) and what it declares.
@@ -954,6 +957,27 @@ pub fn check(units: &[Unit], artifacts: &[(String, ArtifactDescription)], opts: 
     // X8: a runtime the adapter contract does not name is a finding by name — the declaration says an SDK will run
     // the unit, and the table cannot say what that SDK carries.
     for u in units {
+        // A unit an SDK loads goes through `units/declare`, which refuses the four stem sections (422); saying so
+        // here keeps the declaration from describing something no runtime can run (#676's review, finding 8).
+        if u.config.runtime.is_some() {
+            let stem: Vec<&str> = [
+                (u.config.hosts.is_some(), "[hosts]"),
+                (!u.config.presence.is_empty(), "[[presence]]"),
+                (!u.config.activations.is_empty(), "[[activation]]"),
+                (!u.config.serves.is_empty(), "[[serve]]"),
+            ].into_iter().filter(|(present, _)| *present).map(|(_, name)| name).collect();
+            if !stem.is_empty() {
+                findings.push(Finding {
+                    severity: Severity::Error,
+                    kind:     "runtime with a stem section".into(),
+                    unit:     Some(u.name.clone()),
+                    message:  format!(
+                        "a unit with `runtime` is loaded by an SDK agent through POST /gateway/units/declare, which refuses {} (422): the hosting sections are a stem's",
+                        stem.join(", ")
+                    ),
+                });
+            }
+        }
         if let Some(r) = &u.config.runtime
             && crate::adapter_contract::for_runtime(r).is_none()
         {
@@ -1042,6 +1066,12 @@ mod tests {
         assert!(f.message.contains("\"cobol\"") && f.message.contains("`strands`"), "{}", f.message);
         assert!(r.render_text().contains("unit legacy (runtime cobol): not a row of the adapter contract"));
         assert!(NodeCapabilityConfig::from_toml_str("runtime = \"\"\n").is_err(), "an empty runtime is refused by the loader, as an empty principal is");
+
+        // A runtime unit with a stem section describes what no SDK can declare: a finding by name (#676's review).
+        let hosting = Unit { name: "hoster".into(), config: NodeCapabilityConfig::from_toml_str("principal = \"hoster\"\nruntime = \"python\"\n[hosts]\nkinds = [\"blob\"]\ntrusted_publishers = [\"ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\"]\nplacement_root = \"/var/lib/mycelium/artifacts\"\n").unwrap() };
+        let r = check(std::slice::from_ref(&hosting), &[], &CheckOptions::default());
+        let f = r.findings.iter().find(|f| f.kind == "runtime with a stem section").expect("the finding");
+        assert!(f.message.contains("[hosts]") && f.message.contains("422"), "{}", f.message);
     }
     use super::*;
 

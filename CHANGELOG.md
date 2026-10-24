@@ -21,13 +21,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   adapter_contract`) and gated: `scripts/check-feature-pages.py` requires a row per adapter, a test per carried cell
   in the file it links (a Rust `fn`, a pytest `def`, a jest title), and in CI's `--executed` mode every such test
   executed in the run. Every companion README carries its limits under one name, **What this does not establish**
-  (`check-materials.py` requires it); the three that had one under another name are renamed, the four that had none
-  have one. The unit file gains an optional `runtime` key (`python` · `typescript` · `strands` · `langgraph`);
-  `wire-check` prints, per unit, what that runtime carries and does not (the native embedding for a unit without
-  one), an unknown value is the finding `unknown runtime`, and the declaration document's units carry `runtime`,
-  `adapter`, `carries` and `not_carried` (schema `mycelium.design/declaration/1`, fields added). The Python
-  scaffold's unit declares `runtime = "python"`. **Not built, stated:** the table records; it does not make an
-  adapter carry anything, and no cell is measured at runtime.
+  (`check-materials.py` requires it); the two that had one under another name are renamed, five have one that had
+  none (the Strands README's *Claims* section stays, and gains a limits section before it). The unit file gains an
+  optional `runtime` key (`python` · `typescript` · `strands` · `langgraph`); `wire-check` prints, per unit, what
+  that runtime carries and does not (the native embedding for a unit without one), an unknown value is the finding
+  `unknown runtime`, a runtime unit with a stem section the finding `runtime with a stem section` (the declare
+  route refuses those 422), and the declaration document's units carry `runtime`, `adapter`, `carries` and
+  `not_carried` as **optional** fields of schema `mycelium.design/declaration/1` — a field added keeps the id, a
+  pinned consumer never required it; a field removed, renamed or made required bumps it (the policy, now stated in
+  `wire_check.rs` and `capability-lifecycle.md`). The Python scaffold's unit declares `runtime = "python"`.
+  **Upgrade note:** a reader older than this release refuses a unit carrying `runtime` (`deprecations.md` §61).
+  **Three cells the first table showed as gaps are closed in the adapters** (#676's cells): the LangGraph
+  checkpointer reads the receipt every write returns (`WriteReceipt` on `last_receipt` and `on_receipt`;
+  `require_on_disk` raises `WriteNotOnDisk` for a write the gateway node did not establish; `langgraph-checkpoint-mycelium`
+  0.3.4); the Strands store's bearer is shown to ride every request it makes (`test_the_bearer_rides_every_request_the_store_makes`);
+  both SDKs gain the supervisor's grant verbs — `grants_pending()` / `grantsPending()` over
+  `GET /gateway/grants/pending` and `grant_decide()` / `grantDecide()` over `POST /gateway/grants/{agent}/{request}`
+  — and the A2A task verbs `get_task` / `getTask` and `cancel` (`tasks/get`, `tasks/cancel`); the grants cell was
+  mis-cut, since a grant is a mandate and already rides in `_meta.mandate`. **Cancellation is carried by no adapter**,
+  and the table now says so: `tasks/cancel` ends a task's record and stops no work (a task runs inside its request),
+  `tools/call` has no cancel, a dropped future tells no provider; running work stops only when its authority lapses
+  (`authority_drain`). The A2A door's session cell reads *not carried, by design*: a task lives in the node that
+  accepted it, and the work it tracks is not durable either — durable work is the tuple space's and the commitment
+  net's. **Not built, stated:** the table records; it does not make an adapter carry anything, and no cell is
+  measured at runtime.
 - **`mycelium test --faults`** (`docs/plans/adopter-surface.md` X6; `docs/features/test-faults.md`): a fleet of
   in-process nodes built from a declaration directory and a configuration — one node per unit file, three at least,
   each the configuration's with loopback addresses, free ports, persistence and TLS material under a temporary

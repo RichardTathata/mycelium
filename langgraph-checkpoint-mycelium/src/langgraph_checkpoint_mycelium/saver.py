@@ -52,6 +52,8 @@ from typing import Any
 from urllib.parse import quote, unquote
 
 import httpx
+from dataclasses import dataclass
+from typing import Callable
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
     WRITES_IDX_MAP,
@@ -107,6 +109,41 @@ class IncompleteCheckpoint(Exception):
             f"checkpoint {checkpoint_id} of thread {thread_id!r} (ns {checkpoint_ns!r}) is incomplete: "
             f"{len(missing)} referenced blob(s) not fetchable ({why}); "
             + ("retry" if self.retriable else "retrying will not fix this")
+        )
+
+
+@dataclass(frozen=True)
+class WriteReceipt:
+    """What ``POST /gateway/kv`` answered for one row or blob-index write: rung 1 (applied on the gateway node)
+    always, rung 2 as ``local_durability`` — ``"on_disk"`` · ``"buffered"`` · ``"not_configured"`` · ``"failed"``
+    (with ``local_durability_error``) — and nothing above it: never replication, never a peer's state
+    (``docs/design/contracts-receipts.md``). Every field is ``None`` on a gateway that predates v2.16.0, which
+    answered a bare ``{"ok": true}``. The saver keeps the latest on :attr:`MyceliumCheckpointSaver.last_receipt`
+    and hands every one to ``on_receipt`` (adopter-surface X7).
+    """
+
+    key: str
+    operation_id: str | None
+    local_durability: str | None = None
+    local_durability_error: str | None = None
+
+    @property
+    def on_disk(self) -> bool:
+        """The one state that establishes durability on the gateway node."""
+        return self.local_durability == "on_disk"
+
+
+class WriteNotOnDisk(Exception):
+    """Raised under ``require_on_disk=True`` when a write's receipt did not say ``"on_disk"``: the row **was**
+    applied on the gateway node, and that node did not establish it on its own disk (``buffered``: it may yet;
+    ``not_configured``: it never will; ``failed``: its WAL append failed, logged there)."""
+
+    def __init__(self, receipt: WriteReceipt) -> None:
+        self.receipt = receipt
+        super().__init__(
+            f"{receipt.key}: the gateway node reports local_durability {receipt.local_durability!r}"
+            + (f" ({receipt.local_durability_error})" if receipt.local_durability_error else "")
+            + "; the row is applied there and not established on its disk"
         )
 
 
@@ -269,6 +306,8 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
         token: str | None = None,
         scheme: str = "http",
         ca_file: str | None = None,
+        require_on_disk: bool = False,
+        on_receipt: "Callable[[WriteReceipt], None] | None" = None,
     ) -> None:
         super().__init__(serde=serde)
         self._base = _base_url(host, port, scheme)
@@ -276,6 +315,13 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
         headers = _auth_headers(token)
         self._client  = httpx.Client(base_url=self._base, timeout=timeout, verify=verify, headers=headers)
         self._aclient = httpx.AsyncClient(base_url=self._base, timeout=timeout, verify=verify, headers=headers)
+        #: Refuse (``WriteNotOnDisk``) a write the gateway node did not report ``"on_disk"``; the row is applied
+        #: there all the same. Set it only against nodes that persist: one without ``[persistence]`` reports
+        #: ``"not_configured"`` on every write.
+        self._require_on_disk = require_on_disk
+        self._on_receipt = on_receipt
+        #: The receipt of the latest row or blob-index write, or ``None`` before the first.
+        self.last_receipt: WriteReceipt | None = None
 
     # ── Lifecycle ────────────────────────────────────────────────────────────
 
@@ -311,10 +357,34 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
             return None
         return base64.b64decode(data.get("value_b64", ""))
 
-    def _kv_set(self, key: str, value: bytes) -> None:
+    def _kv_set(self, key: str, value: bytes) -> WriteReceipt:
         import base64
         body = {"key": key, "value_b64": base64.b64encode(value).decode()}
-        self._client.post("/gateway/kv", json=body).raise_for_status()
+        resp = self._client.post("/gateway/kv", json=body)
+        resp.raise_for_status()
+        return self._receipt(key, resp)
+
+    def _receipt(self, key: str, resp: httpx.Response) -> WriteReceipt:
+        """Read the route's receipt — what the write established, as the gateway node says — keep it, hand it on,
+        and refuse it under ``require_on_disk`` when it names no disk."""
+        try:
+            data = resp.json()
+        except ValueError:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        receipt = WriteReceipt(
+            key=key,
+            operation_id=data.get("operation_id"),
+            local_durability=data.get("local_durability"),
+            local_durability_error=data.get("local_durability_error"),
+        )
+        self.last_receipt = receipt
+        if self._on_receipt is not None:
+            self._on_receipt(receipt)
+        if self._require_on_disk and not receipt.on_disk:
+            raise WriteNotOnDisk(receipt)
+        return receipt
 
     def _kv_del(self, key: str) -> None:
         self._client.delete("/gateway/kv", params={"key": key}).raise_for_status()
@@ -364,10 +434,12 @@ class MyceliumCheckpointSaver(BaseCheckpointSaver[int]):
             return None
         return base64.b64decode(data.get("value_b64", ""))
 
-    async def _akv_set(self, key: str, value: bytes) -> None:
+    async def _akv_set(self, key: str, value: bytes) -> WriteReceipt:
         import base64
         body = {"key": key, "value_b64": base64.b64encode(value).decode()}
-        (await self._aclient.post("/gateway/kv", json=body)).raise_for_status()
+        resp = await self._aclient.post("/gateway/kv", json=body)
+        resp.raise_for_status()
+        return self._receipt(key, resp)
 
     async def _akv_del(self, key: str) -> None:
         (await self._aclient.delete("/gateway/kv", params={"key": key})).raise_for_status()

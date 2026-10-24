@@ -425,7 +425,11 @@ def log_for(entries):
     lines = []
     for test, file, right in entries:
         if file.endswith('.py'):
-            lines.append(f'{file if right else "other/" + file}::{test} PASSED')
+            # pytest's real form: the nodeid under the *first* package's rootdir of a multi-package run, which is why
+            # `check_executed` must canonicalise against the tracked files (#676's review, findings 1 and 4) — a
+            # repository-relative path here would pass a gate the real logs fail.
+            mangled = f'langgraph-checkpoint-mycelium/{Path(file).name}'
+            lines.append(f'{mangled if right else "other/" + Path(file).name}::{test}[p0] PASSED')
             continue
         if file.endswith('.ts'):
             short = file.split('/', 1)[1] if right else 'other.test.ts'
@@ -446,26 +450,29 @@ def log_for(entries):
 
 with tempfile.TemporaryDirectory() as logs:
     log = Path(logs) / '1.log'
+    # One test may be named by two pages (a feature page and the adapter contract both cite the same `fn`), so a
+    # planted log omits or misplaces *every* entry of the chosen test, not the entry at one index.
+    same = lambda a, b: (a[1], a[2]) == (b[1], b[2])
     case('test-not-executed')
-    log.write_text(log_for([(t, files[0], True) for _, t, files in named[1:]]))
+    log.write_text(log_for([(t, files[0], True) for n in named if not same(n, named[0]) for _, t, files in [n]]))
     errors = module.check_executed(ROOT, logs)
     assert any(f'`{named[0][1]}`' in e and 'which no job of this run executed' in e for e in errors), errors
     case('script-key-not-a-run')
     crate, within = module.crate_of(ROOT, named[0][2][0])
-    log.write_text(log_for([(t, files[0], True) for _, t, files in named[1:]])
+    log.write_text(log_for([(t, files[0], True) for n in named if not same(n, named[0]) for _, t, files in [n]])
                    + f'@@case@@ {within}::{crate}::{named[0][1]}\n')
     errors = module.check_executed(ROOT, logs)
     assert any(f'`{named[0][1]}`' in e and 'which no job of this run executed' in e for e in errors), errors
     case('test-in-wrong-target')
-    log.write_text(log_for([(t, files[0], i != 0) for i, (_, t, files) in enumerate(named)]))
+    log.write_text(log_for([(t, files[0], not same(n, named[0])) for n in named for _, t, files in [n]]))
     errors = module.check_executed(ROOT, logs)
     assert any(f'`{named[0][1]}`' in e for e in errors), errors
     case('integration-test-in-wrong-binary')
-    integration = [i for i, (_, _, files) in enumerate(named) if module.crate_of(ROOT, files[0])[1].startswith('tests/')]
+    integration = [n for n in named if module.crate_of(ROOT, n[2][0])[1].startswith('tests/')]
     assert integration, named
-    log.write_text(log_for([(t, files[0], i != integration[0]) for i, (_, t, files) in enumerate(named)]))
+    log.write_text(log_for([(t, files[0], not same(n, integration[0])) for n in named for _, t, files in [n]]))
     errors = module.check_executed(ROOT, logs)
-    assert any(f'`{named[integration[0]][1]}`' in e for e in errors), errors
+    assert any(f'`{integration[0][1]}`' in e for e in errors), errors
     case('executed-baseline')
     log.write_text(log_for([(t, files[0], True) for _, t, files in named]))
     assert module.check_executed(ROOT, logs) == [], module.check_executed(ROOT, logs)
@@ -474,7 +481,7 @@ with tempfile.TemporaryDirectory() as logs:
     case('adapter-test-not-executed')
     for drop in [next(n for n in adapter_named if n[2][0].endswith('.py')), next(n for n in adapter_named if n[2][0].endswith('.ts')),
                  next(n for n in adapter_named if n[2][0].endswith('.rs'))]:
-        log.write_text(log_for([(t, files[0], True) for _, t, files in named if (t, files) != (drop[1], drop[2])]))
+        log.write_text(log_for([(t, files[0], True) for n in named if not same(n, drop) for _, t, files in [n]]))
         errors = module.check_executed(ROOT, logs)
         assert any(f'`{drop[1]}`' in e and 'which no job of this run executed' in e for e in errors), (drop, errors)
     case('adapter-executed-baseline')

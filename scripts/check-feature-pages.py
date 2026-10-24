@@ -872,6 +872,13 @@ def executed_in(key, test, crate, within):
 def check_executed(root, logs):
     """(g), CI half: every named test executed in this run, in its file's target."""
     coverage = _load('ci_test_coverage', 'ci-test-coverage.py')
+    # pytest names a test relative to its rootdir, which differs between invocations and can even borrow another
+    # package's directory as the prefix (the SDK's tests ran as `langgraph-checkpoint-mycelium/test_kv_receipt.py::…`
+    # in #676's first CI run); the scanner canonicalises such names against the tracked `.py` files, which it learns
+    # here as `ci-test-coverage.py`'s own main does.
+    import subprocess
+    coverage.TRACKED[:] = [f for f in subprocess.run(['git', '-C', str(root), 'ls-files', '--cached', '--others', '--exclude-standard', '*.py'],
+                                                      capture_output=True, text=True).stdout.splitlines() if f]
     executed, universe = set(), set()
     for f in sorted(glob.glob(str(Path(logs) / '*'))):
         coverage.scan(Path(f).read_text(encoding='utf-8', errors='replace'), executed, universe)

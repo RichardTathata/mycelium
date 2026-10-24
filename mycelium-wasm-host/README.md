@@ -231,5 +231,6 @@ cargo clippy -p mycelium-wasm-host --all-targets -- -D warnings
   credential, not a commit (`docs/operations/what-is-proven.md`).
 - **An activation on every platform.** Confinement applies under Seatbelt or Landlock + seccomp and is refused by name
   elsewhere; the egress proxy limits hosts by name, not by address or path.
-- **A cross-process placement race.** The provisioner's single-owner claim is per fleet by consensus where an
-  electorate is declared, and advisory where one is not.
+- **Exactly one placement per artifact across stems.** Placement is probabilistic self-election under a presence
+  band (`self_elect_p`), serialised within one stem by its own semaphore; two stems can place the same artifact, and
+  the band, not a lock, is what converges the count. No consensus runs in this crate.

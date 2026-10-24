@@ -82,7 +82,8 @@ Flags (`mycelium wire-check <units-dir> --help`):
 
 Exit codes: **0** no errors, **1** at least one error, **2** a usage error or a file that does not
 load. The JSON output's schema is [`docs/reference/declaration.schema.json`](../reference/declaration.schema.json)
-(`$id` `mycelium.design/declaration/1`); a change to its shape is a new schema version. Put the check
+(`$id` `mycelium.design/declaration/1`); a field removed, renamed or made required is a new schema version, a
+field added is optional and keeps it (the four unit fields adopter-surface X8 added, 2026-10-24). Put the check
 in CI beside the schema gate (guide 12): a red check stops a merge.
 
 What it cannot say, on its own `--help`: whether a provider is alive, which one is chosen, whether a
