@@ -67,6 +67,7 @@ pressure/             # mycelium-tuple-space http.rs: the tail of sys/tuple/{nod
 stage/                # mycelium-tuple-space http.rs: the tail of sys/tuple/{node}/{ns}/stage/{stage}/{metric}
 provision/            # agent/http/authz.rs: the tail of agent/{node}/provision/{item}/error
 mycelium.closure/1    # closure.rs: the schema tag printed at the head of an explain --correlation / --closure rendering (X4), not a key
+mycelium.effects/prepared/1    # mycelium-effects external.rs: the domain tag of the prepared record's hash (X5), a canonical-string prefix, not a key
 
 # ── remainders matched after a known prefix is stripped
 end/                  # consensus_life.rs collectable: a release marker's remainder under consensus/life/{slot}/ (the key has a row)

@@ -304,6 +304,37 @@ the effect is the double-delivery the crate exists to prevent. `cargo run -p myc
 --example destination_commit` shows the ladder end to end. Operator's side: [companions.md
 § mycelium-effects](../operations/companions.md). Design: [`exactly-once-effect.md`](../design/exactly-once-effect.md).
 
+## Beyond the fleet: the side-effect contract
+
+Rung 4 assumes a destination that commits its dedup row *with* the effect. A payment provider, a cloud API or a
+ticket system does not — a lost answer there cannot be resolved by a retry that reads the row, because there is
+no row to read. `mycelium-effects`' `Reconciler` (adopter-surface X5; [feature page](../features/side-effects.md))
+is the contract for that case, and its first rule is that the destination's **class is declared before the
+effect is sent** and recorded on the prepared record, so what may be done about a lost answer was decided before
+there was one:
+
+| Class | On `DeliveryUnknown` | On a wrong outcome |
+|---|---|---|
+| idempotent under the key | probe, then at most one retry | a compensation, if one is also declared |
+| compensatable | probe; never retry | the named compensating effect — a new record whose parent is the compensated one's hash |
+| irreversible, unobservable | the uncertainty is kept | preserve the evidence; escalate |
+
+The reconciler keeps a ledger (a SQLite file of its own — the record is on disk before the destination is
+reached) and refuses by name, counted (`RefusalSnapshot::external`), every move the class forbids: a retry
+without a probe, a second retry, a retry against a destination that did not declare itself idempotent, a probe
+or a retry on an irreversible effect, a compensation without the evaluator's permit (`CompensationPermit`, under
+the `envelope` feature — a compensation is an action, decided like any other). A **probe budget** — a count and
+an age — bounds how long *unknown* may go on; past it the record is **unresolved and escalated**
+(`Execution::Unresolved` in the evidence journal) and nothing further is attempted without a new authorisation.
+A probe is egress: the destination's host passes the same allow-list as the effect, and a denied host is refused
+by the gate, not by the destination. And both the apply and the probe go through the replay kernel's `Input`
+seam, so a recording of a run that reached the destination replays **without reaching it again** — the
+destination's own counter shows zero (`mycelium-effects/tests/external_replay.rs`).
+
+Two reference destinations: the SQLite one (local; its probe is the dedup row) and `HttpDestination`, an HTTP
+shape whose test harness loses responses on demand — not a real provider, which
+[what-is-proven.md](../operations/what-is-proven.md) says plainly.
+
 ## Where to go next
 
 | You want | Read |
