@@ -687,7 +687,8 @@ jobs:
           grep -q 'exercised:.*persist.unreadable_refused enforced' faults.log
           grep -q 'exercised:.*mesh.signed_writes enforced' faults.log
           grep -q 'exercised:.*membership.governed instrumented' faults.log
-          grep -q 'not exercised:.*id.revocation_authority not_configured' faults.log
+          grep -q 'exercised:.*id.revocation_authority not_configured' faults.log   # driven by the class; resolved not_configured under the development posture (the CA key on the node)
+          grep -q 'not exercised:.*ae.preflight not_run (not_configured: --against' faults.log
           # Asked for by name, a class this build lacks fails the run.
           if "$BIN" test --faults replay units --config faults.toml; then echo "replay without sim passed"; exit 1; fi
           # The planted policy regression: the rule's requires_values dropped in the proposed revision.
