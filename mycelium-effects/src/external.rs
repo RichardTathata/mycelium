@@ -1110,14 +1110,14 @@ impl<D: ExternalDestination> Reconciler<D> {
         Ok(())
     }
     #[cfg(not(feature = "envelope"))]
-    async fn evidence(&self, _ext: &ExternalEffect, note: Note<'_>) -> Result<(), ExternalRefusal> {
-        // No journal in this build: the note is read and nothing is written.
-        let Note { operation: _, reason: _, execution: _, parent: _, now_ms: _, permit: _ } = note;
+    async fn evidence(&self, _ext: &ExternalEffect, _note: Note<'_>) -> Result<(), ExternalRefusal> {
         Ok(())
     }
 }
 
-/// What one evidence record says — the arguments `evidence` takes, bundled.
+/// What one evidence record says — the arguments `evidence` takes, bundled. Read only where a journal can be
+/// attached; the no-`envelope` build takes the note and writes nothing.
+#[cfg_attr(not(feature = "envelope"), allow(dead_code))]
 struct Note<'a> {
     operation: &'a str,
     reason: &'a str,
