@@ -42,17 +42,36 @@
 //! One reference destination, one vocabulary. The `tuple-space` feature adds the consumer that
 //! composes the two ([`tuple_consumer`]): effect first, acknowledgement second, so the pipeline's
 //! receipt never stands in for the destination's.
+//!
+//! ## Beyond the fleet: the side-effect contract
+//!
+//! A destination outside the fleet gives no transaction to commit a dedup row in. [`external`]
+//! (adopter-surface X5) is the contract for that case: the destination's class — idempotent,
+//! compensatable, or irreversible — **declared before execution** and recorded on the prepared
+//! record; on `DeliveryUnknown` a reconciliation probe before any retry, at most one retry, never
+//! against a destination that did not declare itself idempotent, and a probe budget past which the
+//! record is unresolved and escalated; a compensation as a new, authorised effect whose record names
+//! the one it compensates; every forbidden move refused by name and counted; the apply and the probe
+//! behind the replay kernel's `Input` seam. [`http`] is the reference HTTP shape.
 
 #![deny(unsafe_code)]
 
 pub mod counting;
+pub mod external;
+pub mod http;
 pub mod sqlite;
 #[cfg(feature = "tuple-space")]
 pub mod tuple_consumer;
 
 pub use mycelium::{AttemptId, DedupOutcome, DestinationCommit, OperationId, content_hash};
 pub use sqlite::SqliteDestination;
-pub use counting::{Counting, RefusalCounts, RefusalSnapshot};
+pub use counting::{Counting, ExternalRefusalCounts, ExternalRefusalSnapshot, RefusalCounts, RefusalSnapshot};
+pub use external::{
+    CompensationPermit, EffectClass, EffectState, ExternalDestination, ExternalEffect, ExternalRefusal, IdempotencyKey,
+    LedgerRecord, ProbeAnswer, ProbeBudget, Reconciler,
+};
+pub use http::HttpDestination;
+pub use mycelium::EgressPolicy;
 
 use std::sync::Arc;
 use std::time::Duration;

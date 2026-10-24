@@ -138,6 +138,35 @@ impl EffectDestination for SqliteDestination {
     }
 }
 
+/// The SQLite destination as an **external** one (adopter-surface X5): local, so no host for the egress
+/// gate; its probe is the dedup row — a key with a row is `Done`, without one `NotDone`, and a database
+/// that cannot be read answers `Unknown`.
+impl crate::external::ExternalDestination for SqliteDestination {
+    fn identity(&self) -> &str {
+        &self.identity
+    }
+    fn dedup_scope(&self) -> &str {
+        &self.identity
+    }
+    fn host(&self) -> Option<&str> {
+        None
+    }
+    fn send(&self, _key: &crate::external::IdempotencyKey, effect: &Effect) -> Result<DestinationCommit, EffectRefusal> {
+        self.apply(effect)
+    }
+    fn observe(&self, key: &crate::external::IdempotencyKey) -> crate::external::ProbeAnswer {
+        let Ok(conn) = self.connect() else { return crate::external::ProbeAnswer::Unknown };
+        match conn
+            .query_row("SELECT 1 FROM effects_dedup WHERE operation_id = ?1", params![key.operation_id.as_str()], |_| Ok(()))
+            .optional()
+        {
+            Ok(Some(())) => crate::external::ProbeAnswer::Done,
+            Ok(None) => crate::external::ProbeAnswer::NotDone,
+            Err(_) => crate::external::ProbeAnswer::Unknown,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

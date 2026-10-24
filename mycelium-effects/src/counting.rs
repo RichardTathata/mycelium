@@ -9,6 +9,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use crate::external::ExternalRefusal;
 use crate::{ComposedEffect, CompositionLeg, DestinationCommit, Effect, EffectDestination, EffectRefusal, ResourceAuthority};
 
 /// The counts, by refusal kind and composition leg, plus commits. Atomics, so a shared destination
@@ -21,6 +22,52 @@ pub struct RefusalCounts {
     delivery_unknown:         AtomicU64,
     unauthorised_attribution: AtomicU64,
     unauthorised_authority:   AtomicU64,
+    external:                 ExternalRefusalCounts,
+}
+
+/// The side-effect contract's refusals (adopter-surface X5), by reason — each a move the record's class
+/// or state forbade, refused before the destination was reached.
+#[derive(Debug, Default)]
+pub struct ExternalRefusalCounts {
+    egress_denied:              AtomicU64,
+    retry_without_probe:        AtomicU64,
+    second_retry:               AtomicU64,
+    retry_not_idempotent:       AtomicU64,
+    probe_budget_exhausted:     AtomicU64,
+    unresolved:                 AtomicU64,
+    irreversible_unobservable:  AtomicU64,
+    wrong_state:                AtomicU64,
+    no_compensation:            AtomicU64,
+    compensation_not_permitted: AtomicU64,
+    declaration_mismatch:       AtomicU64,
+    other:                      AtomicU64,
+}
+
+/// A point-in-time copy of [`ExternalRefusalCounts`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ExternalRefusalSnapshot {
+    pub egress_denied:              u64,
+    pub retry_without_probe:        u64,
+    pub second_retry:               u64,
+    pub retry_not_idempotent:       u64,
+    pub probe_budget_exhausted:     u64,
+    pub unresolved:                 u64,
+    pub irreversible_unobservable:  u64,
+    pub wrong_state:                u64,
+    pub no_compensation:            u64,
+    pub compensation_not_permitted: u64,
+    pub declaration_mismatch:       u64,
+    /// `not_recorded` and `ledger` — the reconciler's own, not the contract's.
+    pub other:                      u64,
+}
+
+impl ExternalRefusalSnapshot {
+    /// Every contract refusal.
+    pub fn total(&self) -> u64 {
+        self.egress_denied + self.retry_without_probe + self.second_retry + self.retry_not_idempotent + self.probe_budget_exhausted
+            + self.unresolved + self.irreversible_unobservable + self.wrong_state + self.no_compensation + self.compensation_not_permitted
+            + self.declaration_mismatch + self.other
+    }
 }
 
 /// A point-in-time copy of [`RefusalCounts`].
@@ -32,12 +79,14 @@ pub struct RefusalSnapshot {
     pub delivery_unknown:         u64,
     pub unauthorised_attribution: u64,
     pub unauthorised_authority:   u64,
+    /// The side-effect contract's refusals (X5).
+    pub external:                 ExternalRefusalSnapshot,
 }
 
 impl RefusalSnapshot {
-    /// Every refusal, whatever its kind.
+    /// Every refusal, whatever its kind — the destination's and the contract's.
     pub fn refusals(&self) -> u64 {
-        self.conflict + self.failed + self.delivery_unknown + self.unauthorised_attribution + self.unauthorised_authority
+        self.conflict + self.failed + self.delivery_unknown + self.unauthorised_attribution + self.unauthorised_authority + self.external.total()
     }
 }
 
@@ -60,6 +109,31 @@ impl RefusalCounts {
         let _ = (kind, leg);
     }
 
+    /// Count one refusal of the side-effect contract (X5). `Effect(_)` is counted by [`record`](Self::record)
+    /// at the point it was answered, not here.
+    pub fn record_external(&self, refusal: &ExternalRefusal) {
+        let x = &self.external;
+        let slot = match refusal {
+            ExternalRefusal::Effect(_) => return,
+            ExternalRefusal::EgressDenied { .. } => &x.egress_denied,
+            ExternalRefusal::RetryWithoutProbe => &x.retry_without_probe,
+            ExternalRefusal::SecondRetry => &x.second_retry,
+            ExternalRefusal::RetryNotIdempotent { .. } => &x.retry_not_idempotent,
+            ExternalRefusal::ProbeBudgetExhausted { .. } => &x.probe_budget_exhausted,
+            ExternalRefusal::Unresolved => &x.unresolved,
+            ExternalRefusal::IrreversibleUnobservable => &x.irreversible_unobservable,
+            ExternalRefusal::State { .. } => &x.wrong_state,
+            ExternalRefusal::NoCompensation { .. } => &x.no_compensation,
+            ExternalRefusal::CompensationNotPermitted(_) => &x.compensation_not_permitted,
+            ExternalRefusal::DeclarationMismatch { .. } => &x.declaration_mismatch,
+            // `NotRecorded`, `Ledger`, and any variant added later: counted, never silently dropped.
+            _ => &x.other,
+        };
+        slot.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        metrics::counter!("mycelium_effects_refusals_total", "kind" => "external", "leg" => refusal.reason()).increment(1);
+    }
+
     /// Count one commit (fresh or replayed — both are *the effect is at the destination*).
     pub fn record_commit(&self) {
         self.commits.fetch_add(1, Ordering::Relaxed);
@@ -74,6 +148,20 @@ impl RefusalCounts {
             delivery_unknown:         self.delivery_unknown.load(Ordering::Relaxed),
             unauthorised_attribution: self.unauthorised_attribution.load(Ordering::Relaxed),
             unauthorised_authority:   self.unauthorised_authority.load(Ordering::Relaxed),
+            external: ExternalRefusalSnapshot {
+                egress_denied:              self.external.egress_denied.load(Ordering::Relaxed),
+                retry_without_probe:        self.external.retry_without_probe.load(Ordering::Relaxed),
+                second_retry:               self.external.second_retry.load(Ordering::Relaxed),
+                retry_not_idempotent:       self.external.retry_not_idempotent.load(Ordering::Relaxed),
+                probe_budget_exhausted:     self.external.probe_budget_exhausted.load(Ordering::Relaxed),
+                unresolved:                 self.external.unresolved.load(Ordering::Relaxed),
+                irreversible_unobservable:  self.external.irreversible_unobservable.load(Ordering::Relaxed),
+                wrong_state:                self.external.wrong_state.load(Ordering::Relaxed),
+                no_compensation:            self.external.no_compensation.load(Ordering::Relaxed),
+                compensation_not_permitted: self.external.compensation_not_permitted.load(Ordering::Relaxed),
+                declaration_mismatch:       self.external.declaration_mismatch.load(Ordering::Relaxed),
+                other:                      self.external.other.load(Ordering::Relaxed),
+            },
         }
     }
 }

@@ -1865,6 +1865,24 @@ heartbeat tick, while a live member's entry holds a forged time, until its owner
 has no heartbeat" is reading a member whose heartbeat has not reached it; it clears when the heartbeat arrives or the
 entry ages past the bound.
 
+## 60. `Execution` gained `Unresolved`; `RefusalSnapshot` gained `external`; `mycelium-effects` gained features `sim` and the `external` module (unreleased, adopter-surface X5)
+
+**What changed.** `mycelium::Execution` (`#[non_exhaustive]` since 2.11.0) gained `Unresolved` — an effect whose
+fate was asked for within its declared probe budget and not established: escalated. `mycelium_effects::RefusalSnapshot`
+gained the field `external: ExternalRefusalSnapshot`, the side-effect contract's refusals by reason.
+`mycelium-effects` gained the module `external` (`Reconciler`, `ExternalEffect`, `EffectClass`, `ProbeBudget`,
+`ExternalDestination`, `ExternalRefusal`, `CompensationPermit`), the module `http` (`HttpDestination`), the
+re-export `EgressPolicy`, a `sha2` dependency and the Cargo feature `sim` (forwards `mycelium/sim`; off in every
+shipped build). `mycelium::sim_seam::input` is new in both builds.
+
+**Who is affected.** A `match` on `Execution` already needs a `_` arm (2.11.0's note), and that arm **must fail
+safe**: `Unresolved` is *we looked and could not tell*, never *nothing ran*. An exhaustive struct literal of
+`RefusalSnapshot` breaks; `RefusalSnapshot::default()` and `.snapshot()` are unaffected. `refusals()` now includes the
+contract's refusals.
+
+**Migration.** Add the field, or build the snapshot from the counter. A consumer that summarises `Execution` treats
+`Unresolved` as it treats `Unknown`, with the record's `reason` naming the budget.
+
 ## 59. `PolicyViolation::ApprovalTimedOut` was never produced; the grant mode's refusals are `GrantNotPresented` and `GrantRefused`; `MandateRefusal` is `#[non_exhaustive]` (unreleased, adopter-surface X3)
 
 **What changed.** `AgentPolicy` gained `require_grant_for` and `grant_window`, and `AgentStateMachine` gained

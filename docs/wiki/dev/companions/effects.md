@@ -63,6 +63,47 @@ the example with its own message — *"a rolled-back attempt left no dedup row"*
 `Fresh` was expected. It was written to close the [onboarding checklist](onboarding-checklist.md)'s
 sharpest finding: this crate had no runnable demonstration anywhere.
 
+## Beyond the fleet: the side-effect contract (adopter-surface X5, 2026-10-24)
+
+`src/external.rs` — a destination the fleet does not own gives no transaction to commit a dedup row in, so
+the contract moves the decision **before** the effect: the destination's class (`EffectClass`: idempotent ·
+compensatable · irreversible) and a `ProbeBudget` are declared on the `ExternalEffect` and recorded on the
+prepared record, which the `Reconciler` writes to its own SQLite ledger (`external_effects`) before the
+destination is reached. Key facts:
+
+- **A found record binds.** `Ledger::prepare` under one `IMMEDIATE` transaction turns a found `Prepared` row into
+  `Unknown` (a crash or a concurrent sender — probed, never re-sent) and re-prepares a `Failed` one; `bind`
+  compares dedup scope, content hash and class before any move (`DeclarationMismatch`, `Conflict`); a
+  compensation's permit is bound to it (`bind_permit`: operation, resource, parent, validity, principal), and
+  a lost compensation keeps `compensated_by` as a link that `complete_compensation` closes when it settles.
+- **The rules are the class's.** A lost answer → `Unknown`; a probe (`ExternalDestination::observe`:
+  `Done` · `NotDone` · `Unknown`) before any retry; at most one retry, only when idempotent; irreversible is
+  neither probed nor retried; the probe is counted before it is made and the budget (count or age) is checked
+  before and after it, so the record is `Unresolved` and escalated the moment it is spent
+  (`Execution::Unresolved`). The record's decision is honest: indeterminate for an uncomposed effect, the
+  destination's own permit for a composed one, the evaluator's for a compensation; `effect_durability` only for
+  a local destination's commit. Each forbidden move is an `ExternalRefusal` by name, counted in
+  `RefusalCounts::record_external` (`RefusalSnapshot::external`).
+- **A compensation is an effect.** `compensate` needs a `CompensationPermit` (the evaluator's preflight,
+  `envelope` feature; without the feature none exists — fail closed) and records the new effect with the
+  compensated record's hash as `parent`, so `closure::Corpus` shows both. The compensated record becomes
+  `Compensated`.
+- **A probe is egress.** `gate_egress` runs before every send and probe on `ExternalDestination::host`;
+  `None` is local.
+- **Replay does not reach the destination.** `send_through_seam` and `probe` go through
+  `mycelium::sim_seam::input` — `ChoiceKind::Input`'s first production use, the one seam whose effect is
+  suppressed in replay (the inventory §2.4 row). Inside the seam's closure nothing may call another seam:
+  the kernel's `RefCell` is borrowed for the call, so the destination's `send` uses only its own timeouts.
+- **Evidence.** With `with_evidence(journal, node)` every settled outcome, probe and compensation is an
+  `AeEvidence` execution record at enforcement point `destination`, the ledger keeping the journal's hash
+  (`evidence_hash`) as the record's identity; without a journal the ledger's `record_hash`
+  (`mycelium.effects/prepared/1`) stands.
+- **Reference destinations:** `SqliteDestination` (local; probe = the dedup row) and `HttpDestination`
+  (`src/http.rs`, std TCP, no redirect followed, mock-grade); the test harness is `tests/mock_http/`.
+- **Decided:** no new `CompositionLeg`; reconciliation is a state of the record.
+- Tests: `tests/external.rs` (nine exits), `tests/external_evidence.rs` (`envelope`), `tests/external_replay.rs`
+  (`sim`, the zero-reach replay). Feature page: `docs/features/side-effects.md`.
+
 ## What this crate is not
 
 Not the tuple space's `complete` — the pipeline's own receipt proves the item was acknowledged and

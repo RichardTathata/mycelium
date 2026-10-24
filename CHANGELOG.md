@@ -11,6 +11,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The external side-effect contract** (`docs/plans/adopter-surface.md` X5; `docs/features/side-effects.md`):
+  `mycelium-effects::external` — an `ExternalEffect` carries its destination's **declared class** (`EffectClass`:
+  idempotent under the key · compensatable by a named effect · irreversible) and a `ProbeBudget`, recorded on the
+  prepared record (`prepared_record_hash`, on the reconciler's own SQLite ledger before the destination is reached);
+  the `Reconciler` applies it through an `ExternalDestination` (`send` and `observe`, the reconciliation probe),
+  maps a lost answer to `DeliveryUnknown` and the record to `Unknown`, requires a probe before any retry, makes at
+  most one retry and only against a destination declared idempotent, never probes or retries an irreversible
+  effect, marks a record past its budget `Unresolved` and escalated (`Execution::Unresolved`), gates the effect and
+  every probe on the egress allow-list, enforces the composed legs on the external path, and commits a compensation
+  only under a `CompensationPermit` (the evaluator's, `envelope` feature; bound to the compensation it is for —
+  operation, destination, parent, validity, principal) as a new effect whose evidence record's
+  `parent` is the compensated record's hash (a lost compensation keeps its link and is completed by the probe
+  that settles it); a found record binds what may be presented under its operation (other content a `Conflict`,
+  another class or scope a `DeclarationMismatch`), and a record found `Prepared` is unknown, never re-sent — every forbidden move refused by name (`ExternalRefusal`) and counted
+  (`RefusalSnapshot::external`, `mycelium_effects_refusals_total{kind="external"}`). The apply and the probe are the
+  first production use of the replay kernel's `Input` seam (`mycelium::sim_seam::input`): a recorded run that
+  reached the destination replays reaching it zero times (`tests/external_replay.rs`, under the crate's new `sim`
+  feature). Reference destinations: the SQLite one (local, its probe the dedup row) and `HttpDestination`, a
+  mock-grade HTTP shape whose test harness loses responses. **Not built, stated on the page:** a real provider,
+  credential binding on the reference HTTP destination, a policy-authorised probe, the exposure policy over the
+  unresolved age, an operator route over the ledger (`deprecations.md` §60).
+
 - **Grants — approval that is default-deny** (`docs/plans/adopter-surface.md` X3, first PR; `docs/features/grants.md`):
   `AgentPolicy::require_grant_for` and `grant_window`; `AgentStateMachine::transition_invoking(tool, arguments)`
   writes the request under `grant/{agent}/{request}` (tool, arguments digest and a bounded rendering, policy revision,

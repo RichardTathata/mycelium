@@ -837,6 +837,37 @@ pub fn rng_f32(stream: &str) -> f32 {
     ((draw >> 40) as f32) / ((1u64 << 24) as f32)
 }
 
+// ── External inputs ──────────────────────────────────────────────────────────────────────────
+//
+// `ChoiceKind::Input` is the kernel's class for *what the world answered*: a destination's reply, a
+// probe's answer, an LLM's completion. In a recording the call is made and its answer written down;
+// in a replay the call is **not made** and the recorded answer returned — the one seam whose effect
+// is suppressed in replay, because the effect is someone else's (an external side effect re-executed
+// by a replay is the defect adopter-surface X5 closes). First production use: `mycelium-effects`'
+// reconciler, its apply and probe.
+
+/// An external input, made for real: no kernel in this build.
+#[cfg(not(feature = "sim"))]
+#[inline]
+pub fn input(_seam: &str, _request: &str, observed: impl FnOnce() -> String) -> String {
+    observed()
+}
+
+/// An external input through the kernel: recorded when recording, **not made** when replaying.
+///
+/// `seam` names the door (`effects/apply`, `effects/probe`), `request` what was asked (so a replay
+/// that asks something else is a divergence, not a silent substitution), and `observed` makes the
+/// call and renders its answer. With no kernel installed the call is made, as every seam falls back.
+#[cfg(feature = "sim")]
+#[inline]
+pub fn input(seam: &str, request: &str, observed: impl FnOnce() -> String) -> String {
+    let observed = std::cell::Cell::new(Some(observed));
+    installed::with_seams(
+        || (observed.take().expect("the fallback runs once"))(),
+        |s| s.input(seam, request, || (observed.take().expect("the recording runs once"))()),
+    )
+}
+
 /// An index below `n` — the shape every "pick one" and every shuffle step uses.
 #[cfg(not(feature = "sim"))]
 #[inline]

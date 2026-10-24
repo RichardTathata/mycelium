@@ -472,6 +472,10 @@ jobs:
       # The gateway-side composition constructor (composed-effect.md §9) needs the attesting build.
       - run: cargo test -p mycelium-effects --features tuple-space,envelope --test '*'
       - run: cargo clippy -p mycelium-effects --features tuple-space,envelope,metrics --all-targets -- -D warnings
+      # The side-effect contract behind the replay kernel's `Input` seam (adopter-surface X5): a recorded run
+      # reaches the mock destination once, its replay zero times. Needs the crate's `sim` feature.
+      - run: cargo test -p mycelium-effects --features sim --test external_replay
+      - run: cargo clippy -p mycelium-effects --features sim --all-targets -- -D warnings
       # The example is the crate's decisive demonstration (guide 18 § Rung 4); the catalogue said it
       # ran in CI and it did not (2026-09-27).
       - run: scripts/example-case.sh cargo run -p mycelium-effects --example destination_commit

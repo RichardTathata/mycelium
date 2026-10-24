@@ -1015,6 +1015,11 @@ pub enum Execution {
     Unknown,
     /// Refused before dispatch: nothing ran, and this point can say so.
     None,
+    /// Dispatched, its fate asked for within a declared probe budget, and **not established** within it:
+    /// escalated, no further probe or retry without a new authorisation (adopter-surface X5, the external
+    /// side-effect contract). A reader treats it as [`Unknown`](Self::Unknown) with a reason — *we looked,
+    /// as often and as long as the destination allowed, and could not tell*.
+    Unresolved,
 }
 
 /// Which of AE0 §5's records this is.

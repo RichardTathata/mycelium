@@ -242,6 +242,14 @@ ids = ["concept:destination-commit", "cargo:mycelium-effects/tuple-space", "carg
        "cargo:mycelium-effects/metrics", "crate:mycelium-effects"]
 
 [[feature]]
+name = "The side-effect contract"
+page = "side-effects.md"
+example = "none"
+example_watch = ["side_effect", "side_effects", "external_effect", "reconciler"]
+ids = ["concept:side-effect-contract", "cargo:mycelium-effects/sim"]
+links = ["concept:destination-commit", "concept:causal-records"]
+
+[[feature]]
 name = "Replay bundles"
 page = "todo"
 planned = "replay"

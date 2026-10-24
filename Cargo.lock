@@ -2584,9 +2584,11 @@ dependencies = [
  "bytes",
  "metrics",
  "mycelium",
+ "mycelium-sim",
  "mycelium-tuple-space",
  "rusqlite",
  "serde_json",
+ "sha2",
  "tokio",
  "tracing",
 ]
