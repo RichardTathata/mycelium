@@ -11,6 +11,31 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`mycelium test --faults`** (`docs/plans/adopter-surface.md` X6; `docs/features/test-faults.md`): a fleet of
+  in-process nodes built from a declaration directory and a configuration — one node per unit file, three at least,
+  each the configuration's with loopback addresses, free ports, persistence and TLS material under a temporary
+  directory, no gateway port, every node bootstrapping to every other — and the fault classes the repository already
+  proves run against it: `revoke` (a node rotates its identity on compromise; a write signed by the old key, the old
+  certificate at a peer's handshake and an identity record chained through the old key are each refused; the
+  declaration's first `[[mandate]]` is established at an execution authority and not established once a checkpoint
+  revokes its term), `restart` (a write requiring sync on every node acknowledged at rung 2, replayed after every node
+  restarts over its own directory; a WAL record that does not decode refused at start by name, or moved aside under
+  `quarantine`), `partition` (a node's runtime dropped: evicted from every survivor, its offers gone after their
+  evaporation window, each declared `[[group]]` governed to a band of one re-filled by an eligible survivor, the node
+  back under its identity), `replay` (each unit's node recorded alone under the kernel and replayed with the clock paused, the
+  decisions compared, the first divergence reported — the `sim` build only, `not_in_build` naming `sim` elsewhere;
+  the schedule between nodes is outside the seams, so a fleet recorded together diverges at its first cross-node
+  channel choice, stated) and
+  `policy-diff` (the declaration's call set decided under its `[[rule]]`s and recorded at the command's own
+  enforcement point, each record re-decided under `--against`'s `[[rule]]`s, every call the proposed revision permits
+  and the declared one refused listed; a record not joinable to its inputs *unattributable*). The report lists per
+  class the guarantee and rule ids exercised, each with its resolution on the fleet's node, and the ones it could not
+  exercise and why, in the guarantee report's vocabulary; a class that cannot run fails the run only when asked for by
+  name; a declaration `wire-check` refuses is refused with the same findings; **no activation is ever run** (D23).
+  Library: `mycelium::faults::{run, Class, Options, Report}`. `mycelium test` logs at WARN to stderr so the report is
+  the output. **Not built, stated:** a two-sided partition (the Docker suites'), a load class, the verifiers an
+  in-process fleet cannot reach from outside the node (consensus, caller envelopes, knowledge records), a
+  provider-side run of the call set.
 - **The external side-effect contract** (`docs/plans/adopter-surface.md` X5; `docs/features/side-effects.md`):
   `mycelium-effects::external` — an `ExternalEffect` carries its destination's **declared class** (`EffectClass`:
   idempotent under the key · compensatable by a named effect · irreversible) and a `ProbeBudget`, recorded on the
@@ -95,6 +120,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   measured time on the most recent release, rounded up to the next ten minutes.
 
 ### Fixed
+
+- **A governed group's member that went dark no longer holds the floor** (found by `mycelium test --faults
+  partition` against the co-op fixture, adopter-surface X6). A member's `grp/{group}/{node}` entry is written once at
+  join and withdrawn only by a graceful shutdown, so after a crash every survivor's governor still counted it and
+  none rolled to fill the floor. `converge` now counts a member only if it is this node or in its peer table
+  (`membership.governed` revision 2 in the rule catalogue). A convergence target, never a guarantee: a peer evicted
+  here and alive elsewhere is re-counted when it is heard again. The stale entry itself stays in the KV until the
+  node returns, and the fleet snapshot's group size still counts it — stated on the feature page.
 
 - **The Release workflow reads the annotated tag's message, not its commit's.** `actions/checkout` resolves a tag ref
   to the commit it points at, so the first real run (v2.37.0) titled the Release with the squash commit's subject and

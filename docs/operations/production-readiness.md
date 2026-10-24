@@ -19,6 +19,12 @@ this page is the index + the gate.
 > it names every guarantee the configured profile would refuse on, in `start()`'s words, without starting a node, and
 > prints each field with its source. The items below that a node can answer for itself are what it reports; the
 > `not_verifiable_here` ones (the network, the clock, a counterparty) stay a human's.
+>
+> **Then `mycelium test --faults <units-dir> --config <config.toml>`** ([diagnostics § Before the fleet carries
+> anything](diagnostics.md#before-the-fleet-carries-anything-mycelium-test---faults)): a fleet built from your
+> declaration and configuration, in process, under the faults the substrate claims to handle — a revoked key, a
+> restart, a node gone dark, a recorded run replayed, a widened policy — each guarantee and rule id reported with its
+> resolution on that fleet, and the classes this build or configuration cannot run named as such.
 
 ## 1 · Identity & transport security
 

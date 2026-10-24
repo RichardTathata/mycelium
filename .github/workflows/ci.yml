@@ -283,8 +283,17 @@ jobs:
       - run: cargo clippy -p mycelium-tls-free-tests --all-targets -- -D warnings
       - run: cargo test -p mycelium-tls-free-tests
       # The node binary's recorded-run path (`GOSSIP_RECORD_BUNDLE_DIR`) exists only under `sim`;
-      # nothing else builds the bin with it, so this is the line that keeps it compiling.
-      - run: cargo check --bin mycelium --features cli,sim
+      # nothing else builds the bin with it, so this is the line that keeps it compiling — and, since
+      # adopter-surface X6, the binary `test --faults replay` needs: the co-op fixture's fleet recorded under the
+      # kernel and replayed decision for decision (the other half of the exit, the build without `sim`, is the
+      # `Scaffold` job's `not_in_build`).
+      - run: cargo build --bin mycelium --features cli,sim
+      - run: |
+          set -euo pipefail
+          ./target/debug/mycelium test --faults replay tests/fixtures/units/coop --library tests/fixtures/units/artifacts | tee replay.log
+          grep -q '^replay: passed' replay.log
+          grep -q 'decides decision for decision' replay.log
+      - run: cargo test --features sim,test-util --test faults_replay
       # The claims `what-is-proven.md` rests on these two for: a recording carries its decisions into the
       # bundle and explains (the comparison's recording half), and the traced provisioner makes no extra
       # draw under the replay seams (draw-count equivalence) — hand-run only until doc-coverage run 19.
@@ -651,6 +660,43 @@ jobs:
           grep -q 'reader set demo/greeting: REFUSED 403 — insufficient scope' run.log
           grep -q 'the route needs kv:write' run.log
           "$BIN" doctor node.toml | tee doctor.log; grep -q 'start(): would start' doctor.log
+      - name: test --faults — the fault classes against the scaffold's declaration (X6)
+        # The classes this build has (`cli,tls,compliance,llm`, no `sim`) against X2's scaffold, with a copy of its
+        # configuration that adds `[persistence]` (the template has none — its two nodes share one directory — so
+        # against the template itself `restart` reads not_configured, which the page says). The exits of the plan
+        # row: every class the build has passes and names the ids it exercised; `replay` reads `not_in_build` naming
+        # `sim` and fails the run only when asked for by name; a widened `[[rule]]` is reported by `policy-diff`; a
+        # declaration `wire-check` refuses is refused by `test` with the same text, byte for byte.
+        run: |
+          set -euo pipefail
+          BIN="$PWD/target/debug/mycelium"; REPO="$PWD"
+          cd "$RUNNER_TEMP/governed-call"
+          { cat node.toml; printf '\n[persistence]\nbase_path = "data/faults-persist"\n'; } > faults.toml
+          "$BIN" test --faults units --config faults.toml | tee faults.log
+          grep -q '^revoke: passed' faults.log
+          grep -q '^restart: passed' faults.log
+          grep -q '^partition: passed' faults.log
+          grep -q '^replay: not_in_build — sim' faults.log
+          grep -q '^policy-diff: not_configured' faults.log
+          grep -q 'activation: not_applicable — 0 command(s) declared, 0 run' faults.log
+          grep -q 'exercised:.*persist.unreadable_refused enforced' faults.log
+          grep -q 'exercised:.*mesh.signed_writes enforced' faults.log
+          grep -q 'exercised:.*membership.governed instrumented' faults.log
+          grep -q 'not exercised:.*id.revocation_authority not_configured' faults.log
+          # Asked for by name, a class this build lacks fails the run.
+          if "$BIN" test --faults replay units --config faults.toml; then echo "replay without sim passed"; exit 1; fi
+          # The planted policy regression: the rule's requires_values dropped in the proposed revision.
+          cp -r units units-wide && sed -i '/requires_values/d' units-wide/purchaser.toml
+          if "$BIN" test --faults policy-diff units --config faults.toml --against units-wide | tee diff.log; then echo "the widened rule was not reported"; exit 1; fi
+          grep -q 'permits and the declared one refused' diff.log
+          grep -q 'tools/call tool:purchase.place' diff.log
+          "$BIN" test --faults policy-diff units --config faults.toml --against units | tee same.log
+          grep -q '^policy-diff: passed' same.log
+          # A declaration wire-check refuses is refused by test, with the same findings.
+          "$BIN" wire-check "$REPO/tests/fixtures/units/unwired" > wc.txt || true
+          if "$BIN" test --faults "$REPO/tests/fixtures/units/unwired" > tf.txt 2> tf.err; then echo "test ran an unwired declaration"; exit 1; fi
+          diff wc.txt tf.txt
+          grep -q 'wire-check refused the declaration; nothing ran' tf.err
       - name: declare — a unit edit under the watch reaches the fleet, a refused one does not (X10)
         run: |
           set -euo pipefail

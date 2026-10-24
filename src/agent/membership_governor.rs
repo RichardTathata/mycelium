@@ -133,6 +133,13 @@ fn resolve_eligible(kv_state: &crate::store::KvState, filter: &CapFilter) -> Has
     set
 }
 
+/// The members of `members` this node can count: itself, and every node in its peer table. A node it has evicted
+/// is dark and holds no floor (adopter-surface X6; `membership.governed` revision 2).
+fn live_members(ctx: &TaskCtx, members: HashSet<NodeId>) -> HashSet<NodeId> {
+    let peers = ctx.peers.pin();
+    members.into_iter().filter(|m| *m == ctx.node_id || peers.contains_key(m)).collect()
+}
+
 /// Current live members of `group` (`grp/{group}/{node}`, tombstones excluded).
 pub(super) fn group_members(kv_state: &crate::store::KvState, group: &str) -> HashSet<NodeId> {
     let prefix = crate::signal::grp_prefix(group);
@@ -222,7 +229,13 @@ fn converge(ctx: &Arc<TaskCtx>, kv: &KvHandle, spec: &ControlSpec, groups: &mut 
         else { continue };
 
         let eligible = resolve_eligible(&ctx.kv_state, &def.filter);
-        let members = group_members(&ctx.kv_state, group);
+        // A member whose node this node has evicted is dark: its `grp/` entry still says member (nothing
+        // re-asserts or withdraws it — a crash sends no departure), its node says nothing. Counted, it held the
+        // floor with a node that was gone, and no survivor ever rolled to fill it (adopter-surface X6, found by
+        // `mycelium test --faults partition` against the co-op fixture). The count is this node's: a member it
+        // has not heard from is not one it can count on, which is the convergence target the ADR promises, never a
+        // guarantee — a peer evicted here and alive elsewhere is re-counted when it is heard again.
+        let members = live_members(ctx, group_members(&ctx.kv_state, group));
         let n = members.len();
         let am_member = members.contains(me);
 
@@ -237,13 +250,13 @@ fn converge(ctx: &Arc<TaskCtx>, kv: &KvHandle, spec: &ControlSpec, groups: &mut 
         // only when a sink is attached, never under a lock, never a draw or a clock of their own.
         let trace = |outcome: OutcomeKind, reason: &str, view: ViewStatus, extra: Option<InputSnapshot>| {
             if let Some(sink) = ctx.decision_sink() {
-                let mut r = DecisionRecord::new("membership.governed", 1, "governor tick", outcome, reason)
+                let mut r = DecisionRecord::new("membership.governed", 2, "governor tick", outcome, reason)
                     .node(me.to_string(), 0)
                     .target(group.to_string())
                     .view(view)
                     .no_parent()
                     .no_effect()
-                    .input(InputSnapshot::new("group members and the intent's band (`grp/`, `sys/govern/membership/` as gossiped)",
+                    .input(InputSnapshot::new("group members this node has not evicted, and the intent's band (`grp/`, `sys/govern/membership/` as gossiped; the peer table)",
                         format!("n={n} min={} max={:?} member={am_member}", intent.min, intent.max), Provenance::Gossiped));
                 if let Some(e) = extra { r = r.input(e); }
                 let _ = sink.record(r);
