@@ -9,7 +9,19 @@
       "requires": [],
       "groups": [],
       "hosts_kinds": [],
-      "presence": []
+      "presence": [],
+      "runtime": null,
+      "adapter": "native",
+      "carries": [
+        "tracing",
+        "identity propagation",
+        "grants",
+        "provider-side enforcement",
+        "receipts"
+      ],
+      "not_carried": [
+        "cancellation"
+      ]
     },
     {
       "name": "depot-a",
@@ -25,6 +37,18 @@
       ],
       "presence": [
         "route/optimize 1..2"
+      ],
+      "runtime": null,
+      "adapter": "native",
+      "carries": [
+        "tracing",
+        "identity propagation",
+        "grants",
+        "provider-side enforcement",
+        "receipts"
+      ],
+      "not_carried": [
+        "cancellation"
       ]
     },
     {
@@ -38,7 +62,19 @@
       "hosts_kinds": [
         "wasm-component"
       ],
-      "presence": []
+      "presence": [],
+      "runtime": null,
+      "adapter": "native",
+      "carries": [
+        "tracing",
+        "identity propagation",
+        "grants",
+        "provider-side enforcement",
+        "receipts"
+      ],
+      "not_carried": [
+        "cancellation"
+      ]
     },
     {
       "name": "dispatcher",
@@ -52,7 +88,19 @@
         "depots"
       ],
       "hosts_kinds": [],
-      "presence": []
+      "presence": [],
+      "runtime": null,
+      "adapter": "native",
+      "carries": [
+        "tracing",
+        "identity propagation",
+        "grants",
+        "provider-side enforcement",
+        "receipts"
+      ],
+      "not_carried": [
+        "cancellation"
+      ]
     },
     {
       "name": "rush-worker",
@@ -63,7 +111,19 @@
       "requires": [],
       "groups": [],
       "hosts_kinds": [],
-      "presence": []
+      "presence": [],
+      "runtime": null,
+      "adapter": "native",
+      "carries": [
+        "tracing",
+        "identity propagation",
+        "grants",
+        "provider-side enforcement",
+        "receipts"
+      ],
+      "not_carried": [
+        "cancellation"
+      ]
     },
     {
       "name": "seeder",
@@ -72,7 +132,19 @@
       "requires": [],
       "groups": [],
       "hosts_kinds": [],
-      "presence": []
+      "presence": [],
+      "runtime": null,
+      "adapter": "native",
+      "carries": [
+        "tracing",
+        "identity propagation",
+        "grants",
+        "provider-side enforcement",
+        "receipts"
+      ],
+      "not_carried": [
+        "cancellation"
+      ]
     },
     {
       "name": "worker",
@@ -84,7 +156,19 @@
       ],
       "groups": [],
       "hosts_kinds": [],
-      "presence": []
+      "presence": [],
+      "runtime": null,
+      "adapter": "native",
+      "carries": [
+        "tracing",
+        "identity propagation",
+        "grants",
+        "provider-side enforcement",
+        "receipts"
+      ],
+      "not_carried": [
+        "cancellation"
+      ]
     }
   ],
   "artifacts": [

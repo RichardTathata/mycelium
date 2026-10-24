@@ -86,7 +86,7 @@ A saver pointed at node **B**'s gateway resumes a thread checkpointed via node
 gateway's local-then-mesh path (`reason/blob-cache` providers, hash-verified).
 No coordinator, no shared database — the mesh *is* the checkpoint store.
 
-## Honest limits (v1)
+## What this does not establish
 
 - **≤ 8 MiB per blob** — the single-frame mesh-fetch ceiling; chunked transfer is
   the named follow-up in `mycelium-reason`.
@@ -174,3 +174,19 @@ not competing examples):
 | **this package** (state backend) | LangGraph **on** Mycelium | a LangGraph graph should *survive node loss and hand off across the fleet* |
 | `mycelium-reason` (Tier-3 wedges) | substrate-native | you want capability-routed inference, fleet-reasoning traces, artifact-aware resume |
 | `mycelium.call_typed` (typed output) | through-the-mesh calls | you want schema-validated output from a *mesh-routed* prompt skill (use Instructor / Pydantic AI when talking to a provider directly) |
+
+What the adapter contract adds to the list above ([the table](../docs/reference/adapter-contract.md)): checkpoint
+rows carry **no correlation id or parent hash**, so a LangGraph run is not joined to the fleet's causal records
+through this saver; a **receipt names the gateway node's rung and nothing above it** (below) — never replication;
+and the saver makes no governed call, so grants and provider-side enforcement belong to the doors the graph's tools
+go through.
+
+## What a write's receipt names (0.3.4)
+
+Every row and blob-index write returns the route's receipt, kept as `saver.last_receipt` (a `WriteReceipt`: the
+`key`, the `operation_id`, `local_durability` — `"on_disk"` · `"buffered"` · `"not_configured"` · `"failed"` with
+`local_durability_error`) and handed to `on_receipt(receipt)` as each lands. `require_on_disk=True` raises
+`WriteNotOnDisk` for a write the gateway node did not report `"on_disk"`; the row is applied there all the same, so
+on a node without `[persistence]`, which reports `"not_configured"`, it fails every write — set it only against
+nodes that persist. A gateway older than v2.16.0 answers a bare `{"ok": true}` and every field reads `None`. The
+receipt is the Strands store's wording and the substrate's ([contracts and receipts](../docs/design/contracts-receipts.md)).

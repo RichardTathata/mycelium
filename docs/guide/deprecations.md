@@ -1865,6 +1865,17 @@ heartbeat tick, while a live member's entry holds a forged time, until its owner
 has no heartbeat" is reading a member whose heartbeat has not reached it; it clears when the heartbeat arrives or the
 entry ages past the bound.
 
+## 61. A unit's `runtime` key is refused by readers before this release (unreleased, adopter-surface X8)
+
+The unit file gained an optional `runtime` key (`python` · `typescript` · `strands` · `langgraph`), read by
+`wire-check` to say what that runtime carries ([the adapter contract](../reference/adapter-contract.md)) and
+accepted, not read, by `POST /gateway/units/declare` and the stem. Every reader refuses an unknown key by name
+(§49, 2.35.0), so a unit carrying `runtime` is refused by a gateway, a stem or a `wire-check` older than this
+release: the gateway answers `400 invalid unit file`, the others refuse the directory. **Migration:** declare
+`runtime` only once every gateway and stem that reads the directory runs this release; the Python scaffold ships
+it because the scaffold pins the release it came from. Nothing else changed shape; a unit without the key is read
+as before.
+
 ## 60. `Execution` gained `Unresolved`; `RefusalSnapshot` gained `external`; `mycelium-effects` gained features `sim` and the `external` module (unreleased, adopter-surface X5)
 
 **What changed.** `mycelium::Execution` (`#[non_exhaustive]` since 2.11.0) gained `Unresolved` — an effect whose

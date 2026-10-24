@@ -43,7 +43,10 @@ use crate::capability::{CapConstraint, CapFilter, CapValue, Capability};
 use crate::capability_config::{CapDecl, LaneRole, NodeCapabilityConfig};
 use crate::error::GossipError;
 
-/// The JSON document's schema id. Bump it when the shape changes; a consumer pins it.
+/// The JSON document's schema id; a consumer pins it. A field **added** keeps the id — the schema declares it
+/// optional, and a consumer holding the pinned schema validates a newer document because it never required the
+/// field (X8's `runtime`, `adapter`, `carries`, `not_carried`, 2026-10-24); a field removed or renamed, or a
+/// field made required, bumps it.
 pub const DECLARATION_SCHEMA: &str = "mycelium.design/declaration/1";
 
 /// A unit: a name (the file's stem) and what it declares.
@@ -233,6 +236,19 @@ pub struct UnitSummary {
     pub groups:      Vec<String>,
     pub hosts_kinds: Vec<String>,
     pub presence:    Vec<String>,
+    /// The unit's `runtime` key (adopter-surface X8), or `null` for a native unit.
+    #[serde(default)]
+    pub runtime:     Option<String>,
+    /// The adapter contract's row this unit's runtime names (`native` without a key), or `null` for an unknown
+    /// runtime — which is also a finding.
+    #[serde(default)]
+    pub adapter:     Option<String>,
+    /// The properties that adapter carries, as the contract names them.
+    #[serde(default)]
+    pub carries:     Vec<String>,
+    /// The properties that adapter could carry and does not.
+    #[serde(default)]
+    pub not_carried: Vec<String>,
 }
 
 /// The whole answer: the versioned document the JSON renders, and what text and DOT draw from.
@@ -292,6 +308,20 @@ impl Report {
                     e.name,
                     by.join(", ")
                 ));
+            }
+        }
+        // X8: what each unit's runtime carries, from the adapter contract — the overlay's answer to what a fleet
+        // of mixed runtimes enforces where.
+        for u in &self.units {
+            let runtime = u.runtime.as_deref().unwrap_or("native");
+            match &u.adapter {
+                Some(adapter) => out.push_str(&format!(
+                    "  unit {} (runtime {runtime}, {adapter}): carries {}; not carried: {}\n",
+                    u.name,
+                    if u.carries.is_empty() { "nothing".to_string() } else { u.carries.join(", ") },
+                    if u.not_carried.is_empty() { "nothing".to_string() } else { u.not_carried.join(", ") },
+                )),
+                None => out.push_str(&format!("  unit {} (runtime {runtime}): not a row of the adapter contract\n", u.name)),
             }
         }
         for l in &self.lanes {
@@ -888,9 +918,19 @@ pub fn check(units: &[Unit], artifacts: &[(String, ArtifactDescription)], opts: 
 
     let unit_summaries = units
         .iter()
-        .map(|u| UnitSummary {
+        .map(|u| {
+            // X8: the adapter contract's row this unit's runtime names; none for an unknown runtime.
+            let adapter = match &u.config.runtime {
+                None => Some(crate::adapter_contract::native()),
+                Some(r) => crate::adapter_contract::for_runtime(r),
+            };
+            UnitSummary {
             name:        u.name.clone(),
             principal:   u.config.principal.clone(),
+            runtime:     u.config.runtime.clone(),
+            adapter:     adapter.map(|a| a.name.to_string()),
+            carries:     adapter.map(|a| a.carried().iter().map(|p| p.name().to_string()).collect()).unwrap_or_default(),
+            not_carried: adapter.map(|a| a.not_carried().iter().map(|p| p.name().to_string()).collect()).unwrap_or_default(),
             offers:      u.config.capabilities.iter().map(|c| format!("{}/{}", c.ns, c.name))
                 .chain(u.config.serves.iter().map(|s| format!("{}/{}", s.ns, s.name)))
                 .collect(),
@@ -911,8 +951,47 @@ pub fn check(units: &[Unit], artifacts: &[(String, ArtifactDescription)], opts: 
                     )
                 })
                 .collect(),
-        })
+        }})
         .collect();
+
+    // X8: a runtime the adapter contract does not name is a finding by name — the declaration says an SDK will run
+    // the unit, and the table cannot say what that SDK carries.
+    for u in units {
+        // A unit an SDK loads goes through `units/declare`, which refuses the four stem sections (422); saying so
+        // here keeps the declaration from describing something no runtime can run (#676's review, finding 8).
+        if u.config.runtime.is_some() {
+            let stem: Vec<&str> = [
+                (u.config.hosts.is_some(), "[hosts]"),
+                (!u.config.presence.is_empty(), "[[presence]]"),
+                (!u.config.activations.is_empty(), "[[activation]]"),
+                (!u.config.serves.is_empty(), "[[serve]]"),
+            ].into_iter().filter(|(present, _)| *present).map(|(_, name)| name).collect();
+            if !stem.is_empty() {
+                findings.push(Finding {
+                    severity: Severity::Error,
+                    kind:     "runtime with a stem section".into(),
+                    unit:     Some(u.name.clone()),
+                    message:  format!(
+                        "a unit with `runtime` is loaded by an SDK agent through POST /gateway/units/declare, which refuses {} (422): the hosting sections are a stem's",
+                        stem.join(", ")
+                    ),
+                });
+            }
+        }
+        if let Some(r) = &u.config.runtime
+            && crate::adapter_contract::for_runtime(r).is_none()
+        {
+            findings.push(Finding {
+                severity: Severity::Error,
+                kind:     "unknown runtime".into(),
+                unit:     Some(u.name.clone()),
+                message:  format!(
+                    "runtime {r:?} is not a row of the adapter contract (docs/reference/adapter-contract.md); the runtimes are {}",
+                    crate::adapter_contract::runtimes().iter().map(|r| format!("`{r}`")).collect::<Vec<_>>().join(", ")
+                ),
+            });
+        }
+    }
 
     Report {
         schema:    DECLARATION_SCHEMA.into(),
@@ -961,6 +1040,39 @@ fn presence_disjoint(a: &crate::capability_config::PresenceDecl, b: &crate::capa
 
 #[cfg(test)]
 mod tests {
+
+    /// X8: a directory mixing a native unit and a Strands unit says, per unit, what each runtime carries — from the
+    /// adapter contract's rows — and an unknown runtime is a finding by name.
+    #[test]
+    fn a_units_runtime_names_what_it_carries_and_an_unknown_one_is_a_finding() {
+        let native = Unit { name: "worker".into(), config: NodeCapabilityConfig::from_toml_str("principal = \"worker\"\n[[capability]]\nns = \"svc\"\nname = \"worker\"\nttl_secs = 5\n").unwrap() };
+        let strands = Unit { name: "planner".into(), config: NodeCapabilityConfig::from_toml_str("principal = \"planner\"\nruntime = \"strands\"\n").unwrap() };
+        let r = check(&[native.clone(), strands.clone()], &[], &CheckOptions::default());
+        assert_eq!(r.exit_code(), 0, "{}", r.render_text());
+        let worker = r.units.iter().find(|u| u.name == "worker").unwrap();
+        assert_eq!(worker.adapter.as_deref(), Some("native"));
+        assert!(worker.carries.iter().any(|p| p == "tracing") && worker.not_carried.iter().any(|p| p == "cancellation"), "{worker:?}");
+        let planner = r.units.iter().find(|u| u.name == "planner").unwrap();
+        assert_eq!((planner.runtime.as_deref(), planner.adapter.as_deref()), (Some("strands"), Some("strands-session-mycelium")));
+        assert!(planner.carries.iter().any(|p| p == "session persistence") && planner.not_carried.iter().any(|p| p == "tracing"), "{planner:?}");
+        let text = r.render_text();
+        assert!(text.contains("unit worker (runtime native, native): carries ") && text.contains("unit planner (runtime strands, strands-session-mycelium): carries session persistence"), "{text}");
+
+        let cobol = Unit { name: "legacy".into(), config: NodeCapabilityConfig::from_toml_str("principal = \"legacy\"\nruntime = \"cobol\"\n").unwrap() };
+        let r = check(&[native, strands, cobol], &[], &CheckOptions::default());
+        assert_eq!(r.exit_code(), 1);
+        let f = r.findings.iter().find(|f| f.kind == "unknown runtime").expect("the finding by name");
+        assert_eq!(f.unit.as_deref(), Some("legacy"));
+        assert!(f.message.contains("\"cobol\"") && f.message.contains("`strands`"), "{}", f.message);
+        assert!(r.render_text().contains("unit legacy (runtime cobol): not a row of the adapter contract"));
+        assert!(NodeCapabilityConfig::from_toml_str("runtime = \"\"\n").is_err(), "an empty runtime is refused by the loader, as an empty principal is");
+
+        // A runtime unit with a stem section describes what no SDK can declare: a finding by name (#676's review).
+        let hosting = Unit { name: "hoster".into(), config: NodeCapabilityConfig::from_toml_str("principal = \"hoster\"\nruntime = \"python\"\n[hosts]\nkinds = [\"blob\"]\ntrusted_publishers = [\"ed25519:2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\"]\nplacement_root = \"/var/lib/mycelium/artifacts\"\n").unwrap() };
+        let r = check(std::slice::from_ref(&hosting), &[], &CheckOptions::default());
+        let f = r.findings.iter().find(|f| f.kind == "runtime with a stem section").expect("the finding");
+        assert!(f.message.contains("[hosts]") && f.message.contains("422"), "{}", f.message);
+    }
     use super::*;
 
     fn unit(name: &str, toml: &str) -> Unit {

@@ -209,6 +209,17 @@ request = mandate_request_bytes("skill.invoke", "skill:depot/dispatch", argument
 client.send("depot/dispatch", message, mandate={"grant": grant, "possession": base64_signature})
 ```
 
+### The supervisor's grants, and a task's lifecycle (0.2.13)
+
+`grants_pending()` reads `GET /gateway/grants/pending` (`grant:read`) — the agents' open requests on this node,
+oldest first — and `grant_decide(agent, request, "issue" | "refuse", ttl_secs=…, reason=…)` posts the answer to
+`POST /gateway/grants/{agent}/{request}` (`grant:issue`); issuing is itself an action the node's evaluator decides,
+so a refusal is the route's 403, and 409 `not_this_node` names an agent on another node. A grant a caller holds
+already rides as a presented mandate in `_meta.mandate`. `A2aClient.get_task(id)` and `cancel(id)` are `tasks/get`
+and `tasks/cancel`: the task as the node holds it, readable and cancellable by the identity that created it; a
+cancel ends the task's record and stops no work — a task runs inside its request — and a terminal task raises
+`A2aError` (adopter-surface X7, the adapter contract).
+
 ### The causal fields (0.2.13)
 
 Every verb that starts governed work takes `correlation=` (the run's id, one key segment) and `parent=` (the content
@@ -716,3 +727,20 @@ All methods talk to the embedded HTTP gateway on the Rust node:
 | `federation().catalog` | `GET /gateway/federation/catalog/{domain}` | last observation, no network |
 | `federation().connect` | `POST /gateway/federation/connect` | `federation:invoke` |
 | `federation().call` | `POST /gateway/federation/call` | `federation:invoke` |
+
+## What this does not establish
+
+The SDK is a client of one gateway; it carries what the doors it calls carry, and nothing it does not send
+([the adapter contract](../docs/reference/adapter-contract.md)):
+
+- **No cancellation of running work.** `A2aClient.cancel` reaches `tasks/cancel`, which ends a task's record and
+  stops nothing (a task runs inside its request); `tools/call` has no cancel; ending a stream closes the client's
+  side only, and a dropped stream is not resumed (no resume point at the gateway).
+- **No pending-grants stream.** A grant rides as a presented mandate, and `grants_pending` / `grant_decide` are the
+  supervisor's verbs; a supervisor polls, nothing pushes (adopter-surface X3's second PR).
+- **Identity is the bearer's.** The principal the gateway resolves is the token's; this SDK signs nothing, and
+  computes a mandate's request bytes without being able to prove possession of a key it does not hold.
+- **A receipt names the gateway node's rung and nothing above it** — never replication, never a peer's state.
+- **Raw emissions carry no principal** (`emit`, shard emit, mailbox deliver) and cannot reach a protected kind.
+- **No session.** The SDK keeps nothing between calls; the LangGraph checkpointer and the Strands store are the
+  session adapters.

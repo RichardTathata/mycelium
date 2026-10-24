@@ -301,6 +301,45 @@ export class A2aClient {
     return extractText(body.result ?? { id: taskId, status: { state: "failed" } });
   }
 
+  // ── Task lifecycle ──────────────────────────────────────────────────────
+
+  /**
+   * `tasks/get`: the task as the node holds it. Readable only by the identity that created it; another bearer is
+   * answered with a JSON-RPC error. A task lives in the node that accepted it: after that node restarts, or at
+   * another node, the id is unknown.
+   */
+  async getTask(taskId: string): Promise<Task> {
+    return this.taskCall("tasks/get", taskId);
+  }
+
+  /**
+   * `tasks/cancel`: ask the node to cancel a task this bearer created, and return the task as it stands
+   * (`status.state` is `"canceled"` when the node took the cancel). A task already `completed` or `failed` is
+   * answered with a JSON-RPC error: a terminal task is not re-opened. This is the one cancel this SDK carries:
+   * `tools/call` has none, and ending a stream closes only the client's side (adopter-surface X7).
+   */
+  async cancel(taskId: string): Promise<Task> {
+    return this.taskCall("tasks/cancel", taskId);
+  }
+
+  private async taskCall(method: "tasks/get" | "tasks/cancel", taskId: string): Promise<Task> {
+    const resp = await fetch(`${this.baseUrl}/a2a`, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json", ...this.auth },
+      body:    JSON.stringify({ jsonrpc: "2.0", id: 1, method, params: { id: taskId } }),
+      signal:  AbortSignal.timeout(this.timeoutMs + 5_000),
+    });
+    if (!resp.ok) throw new Error(`/a2a responded ${resp.status}`);
+    const body = (await resp.json()) as {
+      result?: Task;
+      error?: { code: number; message: string; data?: Record<string, unknown> };
+    };
+    if (body.error) {
+      raiseForError(body.error);
+    }
+    return body.result ?? { id: taskId, status: { state: "failed" } };
+  }
+
   // ── SSE streaming ────────────────────────────────────────────────────────
 
   /**

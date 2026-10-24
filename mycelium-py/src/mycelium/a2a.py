@@ -285,6 +285,38 @@ class A2aClient:
         task = body.get("result", {})
         return _extract_text(task)
 
+    # ── Task lifecycle ────────────────────────────────────────────────────────
+
+    def get_task(self, task_id: str, *, timeout_secs: Optional[float] = None) -> Dict:
+        """``tasks/get``: the task as the node holds it — ``id``, ``status.state``, ``artifacts``.
+
+        Readable only by the identity that created it (the gateway's ownership rule); another caller's bearer is
+        answered with a JSON-RPC error, raised as :class:`A2aError`. A task lives in the node that accepted it:
+        after that node restarts, or at another node, the id is unknown.
+        """
+        return self._task_call("tasks/get", task_id, timeout_secs)
+
+    def cancel(self, task_id: str, *, timeout_secs: Optional[float] = None) -> Dict:
+        """``tasks/cancel``: ask the node to cancel a task this bearer created, and return the task as it stands.
+
+        A task already ``completed`` or ``failed`` is answered with a JSON-RPC error (raised as :class:`A2aError`):
+        a terminal task is not re-opened. The returned task's ``status.state`` is ``"canceled"`` when the node took
+        the cancel. This is the one cancel this SDK carries: ``tools/call`` has none, and ending a stream closes
+        only the client's side (adopter-surface X7).
+        """
+        return self._task_call("tasks/cancel", task_id, timeout_secs)
+
+    def _task_call(self, method: str, task_id: str, timeout_secs: Optional[float]) -> Dict:
+        timeout = timeout_secs or self._timeout
+        payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": {"id": task_id}}
+        with self._pool.sync(timeout=timeout + 5.0) as c:
+            resp = c.post("/a2a", json=payload)
+        resp.raise_for_status()
+        body = resp.json()
+        if "error" in body:
+            _raise_for_error(body["error"])
+        return body.get("result", {})
+
     # ── SSE streaming ─────────────────────────────────────────────────────────
 
     def stream(

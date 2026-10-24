@@ -21,6 +21,7 @@ TOML needs one key per line. `ns = "a"; name = "b"` is not valid TOML.
 | Section | `mycelium wire-check` | Stem (`mycelium-stem --units`) | SDK agent (`POST /gateway/units/declare`) |
 |---|---|---|---|
 | `principal` | carried per unit in the JSON, the join key | validated, not otherwise used | echoed back in the response |
+| `runtime` | the adapter contract's row: `carries` / `not_carried` per unit, `unknown runtime` and `runtime with a stem section` by name | accepted, not read | accepted, not read |
 | `[[capability]]` | an offer | advertised (always-alive: a stem does not run `probe_url`) | advertised |
 | `[[requirement]]` | matched against offers | declared | declared |
 | `[[group]]` | checked for members | defined | defined |
@@ -41,6 +42,12 @@ application that embeds the library can run the `[[capability]]` probe loop with
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `principal` | string | absent | The issuer-qualified principal this unit presents at a gateway. It is the key that joins a declaration to what the fleet later reports. Not an address. Refused when present and empty. |
+
+## `runtime`
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `runtime` | string | absent | The SDK an agent will load this unit with: `python` (`mycelium-py`), `typescript` (`mycelium-ts`), `strands` (`strands-session-mycelium`) or `langgraph` (`langgraph-checkpoint-mycelium`) — a row of [the adapter contract](adapter-contract.md). Absent, the unit is native: a Rust embedding. `wire-check` prints, per unit, which properties that runtime carries and which it does not, and an unknown value is the finding `unknown runtime`. A declaration of what will run the unit, not an instruction to any node: the gateway's `units/declare` accepts and ignores it. Refused when present and empty (adopter-surface X8). |
 
 ## `[[capability]]`
 

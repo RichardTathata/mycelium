@@ -88,6 +88,20 @@ first message it could not write. A message that can never be written (one past 
 holds every later message back and says so in each error; the session as stored is still resumable
 from before it.
 
+## What this does not establish
+
+- **Replication.** A receipt names the gateway node's own application and disk; nothing here waits for a peer, and
+  a session saved through node A is readable through node B only once its rows have gossiped there (above).
+- **Tracing.** Session rows carry no correlation id or parent hash; a run that spans the fleet is not joined to the
+  session through this store ([the adapter contract](../docs/reference/adapter-contract.md)).
+- **The caller's identity at the gateway** is the bearer's: it rides every request the store makes
+  (`test_the_bearer_rides_every_request_the_store_makes`), and the gateway resolves and records its principal; the
+  store signs nothing of its own.
+- **Cancellation, grants, provider-side enforcement.** A session store makes no governed call; those belong to the
+  door the agent's calls go through.
+- **A claim is this node's view.** Claims stop a node writing over what it has not seen; they do not make two nodes
+  agree on what a session is — the claims section below says exactly what they establish.
+
 ## Claims: nothing is written over what this node has not seen
 
 What a node reads is its own view, and a view can be behind: none of a record may have arrived, or

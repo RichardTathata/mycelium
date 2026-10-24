@@ -33,10 +33,21 @@ def links(text):
     return [next(value for value in match.groups() if value).strip('<>') for match in LINK.finditer(text)]
 
 
+LIMITS_HEADING = '## What this does not establish'
+
+
+def companion_readme(path):
+    """A companion's README: a crate or package of the workspace that ships to an adopter (adopter-surface X7:
+    every one carries its limits under one name)."""
+    return (path.endswith('/README.md') and path.count('/') == 1
+            and (path.startswith('mycelium-') or path.endswith('-mycelium/README.md')))
+
+
 def scoped(path):
     return (path in ('README.md', 'docs/README.md', 'docs/capabilities.md', 'docs/positioning.md')
             or path.startswith(('docs/guide/', 'docs/operations/', 'examples/'))
             or (path.startswith('mycelium') and path.endswith('/README.md'))
+            or companion_readme(path)
             or path in ('docs/publications/README.md', 'docs/publications/research-guide.md',
                         'docs/publications/customer-pitch.html', 'docs/publications/presentation.html'))
 
@@ -62,6 +73,10 @@ def check(root):
         for phrase in STALE:
             if phrase in text:
                 errors.append(f'{name}: stale claim: {phrase}')
+        # X7: one limits section under one name in every companion README, so the adapter contract's *not carried*
+        # cells have one place to cite and a reader finds the limits where the claims are.
+        if companion_readme(name) and not re.search(rf'(?m)^{re.escape(LIMITS_HEADING)}\s*$', text):
+            errors.append(f'{name}: missing the limits section `{LIMITS_HEADING}` (adopter-surface X7)')
     for name, required in ROUTES.items():
         path = root / name
         if not path.exists():

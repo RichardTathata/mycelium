@@ -218,6 +218,22 @@ measures; the stale `grp/` entry stays in the KV until the node returns, so the 
 counts it. Entry page `docs/features/test-faults.md`; runbook
 `operations/diagnostics.md` § Before the fleet carries anything; log `.log/2026-10-24-x6-test-faults.md`.
 
+## The adapter contract and a unit's `runtime` (adopter-surface X7 and X8, 2026-10-24)
+
+`src/adapter_contract.rs`: `ADAPTERS` — eight rows (the native embedding first, then `mycelium-py`, `mycelium-ts`,
+`langgraph-checkpoint-mycelium`, `strands-session-mycelium`, `mycelium-reason`, the A2A door, the MCP door), seven
+`Cell`s each (`Carried { test, file, note }` · `NotCarried { why }` · `NotApplicable { why }`), the guarantee ids a
+door resolves, the limits-section link — rendered to `docs/reference/adapter-contract.md` by
+`the_checked_in_adapter_contract_is_current` (`UPDATE_ADAPTER_CONTRACT=1`). The gate `check-feature-pages.py` (j)
+reads the page's rows against the Rust `name:` list and feeds every carried cell's test into the `--executed` mode,
+which now matches `python <file>::<test>[param]` and `typescript <file>::<title>` keys beside `rust`.
+`check-materials.py` requires `## What this does not establish` in every companion README (`companion_readme`:
+`mycelium-*/README.md` and `*-mycelium/README.md`). X8: `NodeCapabilityConfig::runtime`, read by `wire-check` into
+`UnitSummary::{runtime, adapter, carries, not_carried}` and the finding `unknown runtime`; the gateway ignores it.
+**Cells worth knowing:** the checkpointer discards the receipt `/gateway/kv` returns (`raise_for_status()` only);
+the Strands store's bearer has no principal test; neither SDK cancels or carries a grant; an A2A task is lost with
+its node. Entry page `docs/features/adapter-contract.md`; log `.log/2026-10-24-x7-adapter-contract.md`.
+
 ## Framing discipline
 
 Mycelium is a **library, not a platform** — no daemon, no control plane; a cluster is

@@ -137,6 +137,28 @@ export class SupersededError extends Error {
 /** The key or stream a write names, for the refusal that names it back. */
 type Subject = { key?: string; stream?: string };
 
+/** One open grant request, as `GET /gateway/grants/pending` lists it (adopter-surface X3). */
+export interface PendingGrant {
+  key: string;
+  agent: string;
+  request: string;
+  tool: string;
+  arguments_digest: string;
+  policy_revision?: string | null;
+  requested_at_ms: number;
+  expires_at_ms: number;
+  [field: string]: unknown;
+}
+
+/** The answer to a grant decision: the record written and its receipt's rung. */
+export interface GrantAnswer {
+  ok: boolean;
+  key: string;
+  operation_id: string;
+  local_durability: string;
+  [field: string]: unknown;
+}
+
 export class MyceliumAgent {
   private readonly base: string;
   private readonly timeout: number;
@@ -363,6 +385,41 @@ export class MyceliumAgent {
       data.declared,
       data.not_enforced,
     );
+  }
+
+  // ── Grants (adopter-surface X3's door, the supervisor's side) ────────────
+
+  /**
+   * `GET /gateway/grants/pending` (`grant:read`): the agents' open grant requests on this node, oldest first —
+   * each with its `key` (`grant/{agent}/{request}`), `agent`, `request`, `tool`, `arguments_digest` and the
+   * rendering a human approves, `policy_revision`, `requested_at_ms`, `expires_at_ms`. A request answered or
+   * expired is not listed.
+   */
+  async grantsPending(): Promise<PendingGrant[]> {
+    const data = (await this._get("/gateway/grants/pending")) as { pending?: PendingGrant[] };
+    return data.pending ?? [];
+  }
+
+  /**
+   * `POST /gateway/grants/{agent}/{request}` (`grant:issue`): answer a pending request. `decision` is `"issue"` or
+   * `"refuse"`; `ttlSecs` bounds an issued grant (default 300, at most 3 600); `reason` is shown to the agent on a
+   * refusal. Issuing is itself an action the node's evaluator decides (D22), so a supervisor the policy does not
+   * permit is answered 403; 409 `not_this_node` for an agent on another node, 409 `already_answered`, 410 `expired`
+   * and 404 `unknown_request` surface as thrown errors. Returns the route's answer: the record's `key`, the write's
+   * `operation_id` and `local_durability`.
+   */
+  async grantDecide(
+    agent: string,
+    request: string,
+    decision: "issue" | "refuse",
+    options: { ttlSecs?: number; reason?: string } = {},
+  ): Promise<GrantAnswer> {
+    if (decision !== "issue" && decision !== "refuse") throw new Error('decision must be "issue" or "refuse"');
+    return (await this._post(`/gateway/grants/${pathSegment(agent)}/${pathSegment(request)}`, {
+      decision,
+      ...(options.ttlSecs !== undefined ? { ttl_secs: options.ttlSecs } : {}),
+      ...(options.reason !== undefined ? { reason: options.reason } : {}),
+    })) as GrantAnswer;
   }
 
   /**

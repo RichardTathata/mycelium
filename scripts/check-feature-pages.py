@@ -28,7 +28,12 @@ Reads the checked-in registry, docs/features/registry.toml, and fails on:
      `scripts/ci-test-coverage.py --fetch` saved;
   h. P2: an example-index row for a feature recorded `example = "none"`, an `example` not in the index or with no
      CI status, and a page whose *See it work* does not match what the registry records;
-  i. a page that does not link every id its registry entry lists.
+  i. a page that does not link every id its registry entry lists;
+  j. the adapter contract (adopter-surface X7): docs/reference/adapter-contract.md has a row for every adapter
+     `src/adapter_contract.rs` declares, every row has one cell per property reading carried / not carried / not
+     applicable, every *carried* cell names a test that exists in the file it links (a Rust `fn`, a pytest `def`, a
+     jest title), and in `--executed` mode every such test executed in the run — a Rust test in its file's target, a
+     pytest test in its file, a jest title in its file.
 
 The seven sources: the concepts glossary's quick-reference rows, by their `<a id>` (docs/guide/00-concepts.md);
 the guarantee and rule catalogues (docs/reference/*-catalogue.json); the unit file's keys, read from
@@ -66,6 +71,12 @@ NO_EXAMPLE = 'No runnable example exists'
 EXCEPTIONS = 'scripts/test-coverage-exceptions.txt'
 # The unit file's nested tables, as a path of field names from a top-level key; each step is checked in the code.
 UNIT_SUBTABLES = [('activation', 'confine'), ('activation', 'confine', 'egress')]
+ADAPTER_CODE = 'src/adapter_contract.rs'
+ADAPTER_PAGE = 'docs/reference/adapter-contract.md'
+ADAPTER_PROPERTIES = ['session persistence', 'cancellation', 'tracing', 'identity propagation', 'grants',
+                      'provider-side enforcement', 'receipts']
+ADAPTER_ROW = re.compile(r'^\| \*\*(.+?)\*\* \|')
+CARRIED_CELL = re.compile(r'^carried — (?:`([^`]+)`|"([^"]+)") \(\[[^\]]+\]\(\.\./\.\./([^)]+)\)\)')
 
 
 def _load(name, file):
@@ -729,6 +740,7 @@ def pages_checked(root, reg, errors):
     for feature in real_pages(reg):
         if page_exists(root, feature['page']):
             check_page(root, feature, rows, fields, patterns, errors, tests)
+    check_adapter_contract(root, errors, tests)
     return rows, tests
 
 
@@ -745,6 +757,70 @@ def check(root):
     rows, _ = pages_checked(root, reg, errors)
     check_examples(reg, rows, errors)
     return errors
+
+
+def adapter_names(root):
+    """The adapters `src/adapter_contract.rs` declares, by `name:` inside `pub const ADAPTERS`."""
+    code = read(root, ADAPTER_CODE)
+    m = re.search(r'pub const ADAPTERS: &\[Adapter\] = &\[(.*?)\n\];', code, re.S)
+    return re.findall(r'\bname: "([^"]+)"', m.group(1)) if m else []
+
+
+def adapter_rows(root):
+    """{adapter: [cell text per property]} from the contract page's table."""
+    rows = {}
+    for line in read(root, ADAPTER_PAGE).splitlines():
+        m = ADAPTER_ROW.match(line)
+        if not m:
+            continue
+        cells = [c.strip() for c in line.strip().strip('|').split(' | ')]
+        rows[m.group(1)] = cells[2:]
+    return rows
+
+
+def test_is_in(root, test, file):
+    text = read(root, file)
+    if file.endswith('.rs'):
+        return f'fn {test}(' in text
+    if file.endswith('.py'):
+        return f'def {test}(' in text
+    return f'"{test}"' in text
+
+
+def check_adapter_contract(root, errors, tests):
+    """(j): the contract page against the code; the carried cells' tests go to `tests` for the executed mode."""
+    names = adapter_names(root)
+    if not names:
+        errors.append(f'{ADAPTER_CODE}: no `pub const ADAPTERS` with `name:` fields (the parser or the code changed)')
+        return
+    try:
+        rows = adapter_rows(root)
+    except FileNotFoundError:
+        errors.append(f'{ADAPTER_PAGE}: missing (regenerate with UPDATE_ADAPTER_CONTRACT=1 cargo test --lib adapter_contract)')
+        return
+    for name in names:
+        if name not in rows:
+            errors.append(f'{ADAPTER_PAGE}: no row for adapter `{name}` (declared in {ADAPTER_CODE})')
+    for name, cells in rows.items():
+        if name not in names:
+            errors.append(f'{ADAPTER_PAGE}: row `{name}` names no adapter {ADAPTER_CODE} declares')
+        if len(cells) != len(ADAPTER_PROPERTIES):
+            errors.append(f'{ADAPTER_PAGE}: row `{name}` has {len(cells)} property cells, not {len(ADAPTER_PROPERTIES)}')
+        for prop, cell in zip(ADAPTER_PROPERTIES, cells):
+            if cell.startswith('carried'):
+                m = CARRIED_CELL.match(cell)
+                if not m:
+                    errors.append(f'{ADAPTER_PAGE}: `{name}` / {prop}: a carried cell must name its test and link its file')
+                    continue
+                test, file = m.group(1) or m.group(2), m.group(3)
+                if not (root / file).is_file():
+                    errors.append(f'{ADAPTER_PAGE}: `{name}` / {prop}: names the test `{test}` in {file}, which does not exist')
+                elif not test_is_in(root, test, file):
+                    errors.append(f'{ADAPTER_PAGE}: `{name}` / {prop}: names the test `{test}`, which is not in {file}')
+                else:
+                    tests.append((ADAPTER_PAGE, test, [file]))
+            elif not cell.startswith(('not carried', 'not applicable')):
+                errors.append(f'{ADAPTER_PAGE}: `{name}` / {prop}: a cell reads carried, not carried or not applicable, not {cell[:30]!r}')
 
 
 def named_test_list(root):
@@ -768,6 +844,15 @@ def executed_in(key, test, crate, within):
     its own binary `<stem>`; a `src/` file is the crate's library or binaries, under the crate's name. A module
     path is not derived from the file: `#[path]` attributes make it differ (fleet_history_tests.rs runs as
     `fleet_history::tests`)."""
+    if key.startswith('python '):
+        # `python <file>::<test>` or `::Class::test`, with a `[param]` suffix; the file is repository-relative once
+        # canonicalised, and `within` is the full path for a file under no Cargo.toml of its own.
+        path, _, rest = key[7:].partition('::')
+        leaf = rest.split('::')[-1].split('[', 1)[0]
+        return path == within and leaf == test
+    if key.startswith('typescript '):
+        file, _, title = key[11:].partition('::')
+        return title.strip() == test and within.endswith(file)
     if not key.startswith('rust '):
         return False
     parts = key[5:].split('::', 2)
@@ -787,6 +872,13 @@ def executed_in(key, test, crate, within):
 def check_executed(root, logs):
     """(g), CI half: every named test executed in this run, in its file's target."""
     coverage = _load('ci_test_coverage', 'ci-test-coverage.py')
+    # pytest names a test relative to its rootdir, which differs between invocations and can even borrow another
+    # package's directory as the prefix (the SDK's tests ran as `langgraph-checkpoint-mycelium/test_kv_receipt.py::…`
+    # in #676's first CI run); the scanner canonicalises such names against the tracked `.py` files, which it learns
+    # here as `ci-test-coverage.py`'s own main does.
+    import subprocess
+    coverage.TRACKED[:] = [f for f in subprocess.run(['git', '-C', str(root), 'ls-files', '--cached', '--others', '--exclude-standard', '*.py'],
+                                                      capture_output=True, text=True).stdout.splitlines() if f]
     executed, universe = set(), set()
     for f in sorted(glob.glob(str(Path(logs) / '*'))):
         coverage.scan(Path(f).read_text(encoding='utf-8', errors='replace'), executed, universe)
