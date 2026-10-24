@@ -104,7 +104,7 @@ async fn a_compensation_needs_the_evaluators_permit_and_names_the_record_it_comp
     assert_eq!(execution.0.parent.as_deref(), Some(paid_hash.as_str()), "the compensation's record names the compensated record's hash");
     assert_eq!(execution.0.execution, Execution::Completed);
     // The closure reader follows the parent: the compensated record and its compensation are one closure.
-    let corpus = mycelium::closure::Corpus::load(&[journal_path.clone()]).unwrap();
+    let corpus = mycelium::closure::Corpus::load(std::slice::from_ref(&journal_path)).unwrap();
     let members = corpus.closure_members(&paid_hash);
     assert!(members.iter().any(|m| m == &execution.1), "the compensation is in the compensated record's closure: {members:?}");
 
