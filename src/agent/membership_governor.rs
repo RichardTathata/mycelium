@@ -134,9 +134,14 @@ fn resolve_eligible(kv_state: &crate::store::KvState, filter: &CapFilter) -> Has
 }
 
 /// The members of `members` this node can count: itself, and every node in its peer table. A node it has evicted
-/// is dark and holds no floor (adopter-surface X6; `membership.governed` revision 2).
+/// is dark and holds no floor (adopter-surface X6; `membership.governed` revision 2). With **no** peer at all the
+/// table says nothing about anyone — a node restarting over persisted `grp/` entries, or isolated — so the roster
+/// is read as written rather than as a fleet of one (#675's review, finding 8: the old reading, not an over-fill).
 fn live_members(ctx: &TaskCtx, members: HashSet<NodeId>) -> HashSet<NodeId> {
     let peers = ctx.peers.pin();
+    if peers.is_empty() {
+        return members;
+    }
     members.into_iter().filter(|m| *m == ctx.node_id || peers.contains_key(m)).collect()
 }
 

@@ -76,6 +76,24 @@ impl Class {
     pub fn parse(s: &str) -> Option<Class> {
         Class::ALL.iter().copied().find(|c| c.name() == s)
     }
+
+    /// A comma-separated class list. `Ok(None)` when no token is a class name (the token is something else, a
+    /// directory); `Err` naming the token when some are and one is not, and for the partition this command does not
+    /// run — a two-sided one is the Docker suites' job (D6), and says so when asked.
+    pub fn parse_list(s: &str) -> Result<Option<Vec<Class>>, String> {
+        let tokens: Vec<&str> = s.split(',').collect();
+        if let Some(t) = tokens.iter().find(|t| matches!(**t, "two-sided" | "two-sided-partition" | "cross-process" | "cross-process-partition" | "docker")) {
+            return Err(format!("`{t}`: a two-sided partition is not a class here — it needs two processes and a network to cut, which is the Docker suites' job (tests/integration; D6); `partition` is one node gone dark"));
+        }
+        let parsed: Vec<Option<Class>> = tokens.iter().map(|t| Class::parse(t)).collect();
+        if parsed.iter().all(|c| c.is_none()) {
+            return Ok(None);
+        }
+        if let Some(i) = parsed.iter().position(|c| c.is_none()) {
+            return Err(format!("`{}` is not a class (revoke · restart · partition · replay · policy-diff)", tokens[i]));
+        }
+        Ok(Some(parsed.into_iter().flatten().collect()))
+    }
 }
 
 /// How a class ended.
@@ -142,7 +160,11 @@ pub struct FleetFacts {
     pub units: Vec<String>,
     pub tls: bool,
     pub persistence: bool,
-    pub profile: Option<String>,
+    /// The profile the fleet ran under: always `dev`.
+    pub profile: &'static str,
+    /// The profile the configuration declared, when it declared one; not applied to the fleet (its requirements
+    /// include a gateway and code attachments the fleet has not; `doctor` checks the profile).
+    pub profile_declared: Option<String>,
     /// Always `false`: the classes drive the nodes in process; no gateway port is bound.
     pub gateway_started: bool,
 }
@@ -165,6 +187,8 @@ pub struct Report {
     pub wire_check: WireCheckSummary,
     pub activations: Activations,
     pub classes: Vec<ClassReport>,
+    /// The run's directory, when `--keep` kept it.
+    pub kept: Option<PathBuf>,
 }
 
 /// What `wire-check` said about the declaration before anything ran.
@@ -194,6 +218,12 @@ pub struct Options {
     pub against: Option<Vec<Unit>>,
     /// The kernel seed for `replay`.
     pub seed: u64,
+    /// Keep the run's directory (its journals and persistence) instead of removing it; the report names it.
+    pub keep: bool,
+    /// Evidence journals written elsewhere, whose decided records `policy-diff` re-decides under the proposed
+    /// revision — without the argument values the records do not carry, so a record a proposed rule reads values
+    /// for is *unattributable*.
+    pub decisions: Vec<PathBuf>,
 }
 
 impl Report {
@@ -218,7 +248,10 @@ impl Report {
             f.nodes,
             if f.tls { "on" } else { "off" },
             if f.persistence { "on" } else { "off" },
-            f.profile.as_deref().unwrap_or("dev (default)"),
+            match &f.profile_declared {
+                Some(d) if d != "dev" => format!("{} (declared `{d}`, not applied: a test fleet has no gateway and no code attachment; `mycelium doctor` checks the profile)", f.profile),
+                _ => f.profile.to_string(),
+            },
             self.config_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "defaults and the environment".into()),
         ));
         s.push_str(&format!("wire-check: {} error(s), {} warning(s)\n", self.wire_check.errors, self.wire_check.warnings));
@@ -226,6 +259,9 @@ impl Report {
             "activation: {} — {} command(s) declared, {} run ({})\n",
             self.activations.state, self.activations.declared, self.activations.run, self.activations.because
         ));
+        if let Some(k) = &self.kept {
+            s.push_str(&format!("kept: {} (journals under <class>/, persistence under <class>/persist/)\n", k.display()));
+        }
         for c in &self.classes {
             s.push('\n');
             let state = match &c.state {
@@ -311,16 +347,20 @@ pub fn run(units: &[Unit], artifacts: &[(String, ArtifactDescription)], check_op
             Class::Restart => restart::run(&mut rep, &base, units, &class_dir),
             Class::Partition => partition::run(&mut rep, &base, units, &class_dir),
             Class::Replay => replay::run(&mut rep, &base, units, &class_dir, opts.seed),
-            Class::PolicyDiff => policy_diff::run(&mut rep, &base, units, &checked, opts.against.as_deref(), &class_dir),
+            Class::PolicyDiff => policy_diff::run(&mut rep, &base, units, &checked, opts.against.as_deref(), &opts.decisions, &class_dir),
         }
         if matches!(rep.state, ClassState::Passed) && rep.checks.iter().any(|k| k.ok == Some(false)) {
             rep.state = ClassState::Failed;
         }
         rep.elapsed_ms = crate::sim_seam::mono_elapsed(&started).as_millis() as u64;
-        let _ = std::fs::remove_dir_all(&class_dir);
+        if !opts.keep {
+            let _ = std::fs::remove_dir_all(&class_dir);
+        }
         classes.push(rep);
     }
-    let _ = std::fs::remove_dir_all(&dir);
+    if !opts.keep {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     Ok(Report {
         schema: SCHEMA,
         config_path: opts.config.clone(),
@@ -329,7 +369,8 @@ pub fn run(units: &[Unit], artifacts: &[(String, ArtifactDescription)], check_op
             units: units.iter().map(|u| u.name.clone()).collect(),
             tls: base.tls.is_some(),
             persistence: base.persistence.is_some(),
-            profile: base.profile.clone(),
+            profile: "dev",
+            profile_declared: base.profile.clone(),
             gateway_started: false,
         },
         wire_check: WireCheckSummary {
@@ -343,6 +384,7 @@ pub fn run(units: &[Unit], artifacts: &[(String, ArtifactDescription)], check_op
             because: "test --faults runs no activation: a test command is not a command runner (D23)",
         },
         classes,
+        kept: opts.keep.then_some(dir),
     })
 }
 
@@ -359,12 +401,21 @@ fn scratch_dir() -> PathBuf {
 /// from the pid, each candidate bind-verified. A port read from `bind(0)` and released would be the OS's to give
 /// again to the next `bind(0)` — two runs in one process (the tests run classes in parallel) collided on exactly
 /// that. The same scheme as `test_util::alloc_port`, which is test-only by design.
+/// In a test build the one cursor is `test_util::alloc_port`'s: a second cursor over the same range with the same
+/// seed hands out the same sequence to a test running beside this one (#675's review, finding 2).
+#[cfg(any(test, feature = "test-util"))]
+fn free_ports(n: usize) -> Result<Vec<u16>, String> {
+    Ok((0..n).map(|_| crate::test_util::alloc_port()).collect())
+}
+
+/// The production allocator: a cursor of this process's own, seeded apart from `alloc_port`'s.
+#[cfg(not(any(test, feature = "test-util")))]
 fn free_ports(n: usize) -> Result<Vec<u16>, String> {
     use std::sync::atomic::{AtomicU32, Ordering};
     const LO: u32 = 16_000;
     const SPAN: u32 = 16_000;
     static NEXT: AtomicU32 = AtomicU32::new(0);
-    let seed = (std::process::id().wrapping_mul(2_654_435_761) % SPAN) + 1;
+    let seed = (std::process::id().wrapping_mul(2_246_822_519).wrapping_add(7_919) % SPAN) + 1;
     let _ = NEXT.compare_exchange(0, seed, Ordering::Relaxed, Ordering::Relaxed);
     let mut out = Vec::with_capacity(n);
     for _ in 0..SPAN {
@@ -387,6 +438,10 @@ fn free_ports(n: usize) -> Result<Vec<u16>, String> {
 fn fleet_config(base: &GossipConfig, dir: &Path, index: usize, ids: &[NodeId]) -> GossipConfig {
     let mut cfg = base.clone();
     cfg.bind_address = "127.0.0.1".into();
+    // The declared profile is not applied: its requirements include a gateway and code attachments this fleet does
+    // not have, and the command clears the certificate paths it would need — `doctor` checks the profile, this
+    // checks the fleet under it (#675's review, finding 4). Reported as declared and not applied.
+    cfg.profile = None;
     cfg.bind_port = ids[index].to_socket_addr().port();
     cfg.bootstrap_peers = ids.iter().enumerate().filter(|(i, _)| *i != index).map(|(_, id)| id.clone()).collect();
     cfg.http_port = None;
@@ -543,14 +598,16 @@ impl<'u> Fleet<'u> {
         }
     }
 
-    /// The cut: the runtime dropped with the node on it — no sweep, no departure, the sockets closed.
+    /// The cut: the runtime dropped with the node on it — no sweep, no departure, the sockets closed. The
+    /// runtime goes first: a retraction handle dropped while it runs would wake the re-assert task to tombstone
+    /// the offer, and a node that withdraws its offers on the way out is not dark (#675's review, finding 7).
     fn cut(&mut self, i: usize) {
         let node = &mut self.nodes[i];
-        node.held.clear();
         let agent = node.agent.take();
         if let Some(rt) = node.rt.take() {
             drop(rt);
         }
+        node.held.clear();
         drop(agent);
     }
 
@@ -587,22 +644,39 @@ impl Drop for Fleet<'_> {
     }
 }
 
-/// Resolve `ids` against the report: those `enforced` (or any rule) go to `exercised`, the rest to
-/// `not_exercised` with the state and what it names.
-fn resolve_ids(rep: &mut ClassReport, report: Option<&crate::agent::guarantee::GuaranteeReport>, guarantees: &[&str], rules: &[&str]) {
+/// A guarantee's resolution on the fleet's node, in the report's words. With no started node (a class that did
+/// not run), the configuration is resolved over a node built and never started, as `doctor` does — never
+/// `unknown` (#675's review, finding 6).
+fn resolution_of(report: Option<&crate::agent::guarantee::GuaranteeReport>, id: &str) -> (String, Option<String>) {
     use crate::agent::guarantee::Resolution;
+    match report.and_then(|r| r.entries.iter().find(|e| e.id == id)).map(|e| &e.resolution) {
+        None => ("not_verifiable_here".to_string(), Some("no node could be built from this configuration to resolve it".to_string())),
+        Some(Resolution::Enforced) => ("enforced".to_string(), None),
+        Some(Resolution::NotConfigured { missing }) => ("not_configured".to_string(), Some(missing.to_string())),
+        Some(Resolution::NotInBuild { feature }) => ("not_in_build".to_string(), Some(feature.to_string())),
+        Some(Resolution::NotApplicable { because }) => ("not_applicable".to_string(), Some(because.to_string())),
+        Some(Resolution::NotVerifiableHere { evidence }) => ("not_verifiable_here".to_string(), Some(evidence.to_string())),
+    }
+}
+
+/// The guarantee report of a node built from `base` and never started — what a class that could not run resolves
+/// its ids against (the same view `mycelium doctor` reports).
+fn unstarted_report(base: &GossipConfig) -> Option<crate::agent::guarantee::GuaranteeReport> {
+    let port = free_ports(1).ok()?[0];
+    let id = NodeId::new("127.0.0.1", port).ok()?;
+    let cfg = fleet_config(base, &std::env::temp_dir(), 0, std::slice::from_ref(&id));
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()?;
+    Some(rt.block_on(async move { GossipAgent::new(id, cfg).guarantee_report() }))
+}
+
+/// The ids a class **drove** — its checks ran against them — each with its resolution on the fleet's node
+/// (`exercised`), and a rule's trace policy. A guarantee the node resolves other than `enforced` is still listed as
+/// exercised when the class drove the code behind it: the state says what the node enforces, the list says what
+/// the class did.
+fn exercised(rep: &mut ClassReport, report: Option<&crate::agent::guarantee::GuaranteeReport>, guarantees: &[&str], rules: &[&str]) {
     for id in guarantees {
-        let entry = report.and_then(|r| r.entries.iter().find(|e| e.id == *id));
-        let (state, detail) = match entry.map(|e| &e.resolution) {
-            None => ("unknown".to_string(), Some("no node could report it".to_string())),
-            Some(Resolution::Enforced) => ("enforced".to_string(), None),
-            Some(Resolution::NotConfigured { missing }) => ("not_configured".to_string(), Some(missing.to_string())),
-            Some(Resolution::NotInBuild { feature }) => ("not_in_build".to_string(), Some(feature.to_string())),
-            Some(Resolution::NotApplicable { because }) => ("not_applicable".to_string(), Some(because.to_string())),
-            Some(Resolution::NotVerifiableHere { evidence }) => ("not_verifiable_here".to_string(), Some(evidence.to_string())),
-        };
-        let ex = Exercised { id: id.to_string(), kind: "guarantee", state, detail };
-        if ex.state == "enforced" { rep.exercised.push(ex) } else { rep.not_exercised.push(ex) }
+        let (state, detail) = resolution_of(report, id);
+        rep.exercised.push(Exercised { id: id.to_string(), kind: "guarantee", state, detail });
     }
     for id in rules {
         let trace = crate::rules::RULES.iter().find(|r| r.id == *id).map(|r| match r.trace {
@@ -610,7 +684,30 @@ fn resolve_ids(rep: &mut ClassReport, report: Option<&crate::agent::guarantee::G
             crate::rule::TracePolicy::Partial(_) => "partial",
             _ => "catalogue_only",
         });
-        rep.exercised.push(Exercised { id: id.to_string(), kind: "rule", state: trace.unwrap_or("unknown").to_string(), detail: None });
+        rep.exercised.push(Exercised { id: id.to_string(), kind: "rule", state: trace.unwrap_or("catalogue_only").to_string(), detail: None });
+    }
+}
+
+/// The ids a class names but **could not drive** here, with why — the class state that stopped it, or the check
+/// that did not run — each with its resolution on a node built from the configuration.
+fn not_exercised(rep: &mut ClassReport, report: Option<&crate::agent::guarantee::GuaranteeReport>, guarantees: &[&str], rules: &[&str], why: &str) {
+    for id in guarantees {
+        let (state, _) = resolution_of(report, id);
+        rep.not_exercised.push(Exercised { id: id.to_string(), kind: "guarantee", state, detail: Some(why.to_string()) });
+    }
+    for id in rules {
+        rep.not_exercised.push(Exercised { id: id.to_string(), kind: "rule", state: "not_run".to_string(), detail: Some(why.to_string()) });
+    }
+}
+
+/// The reason a class that did not run gives for every id it names.
+fn class_reason(state: &ClassState) -> String {
+    match state {
+        ClassState::Passed | ClassState::Failed => "the class ran".to_string(),
+        ClassState::NotInBuild { feature } => format!("not_in_build: {feature}"),
+        ClassState::NotConfigured { missing } => format!("not_configured: {missing}"),
+        ClassState::NotApplicable { because } => format!("not_applicable: {because}"),
+        ClassState::Refused { reason } => format!("refused: {reason}"),
     }
 }
 
@@ -629,7 +726,8 @@ mod restart {
     pub(super) fn run(rep: &mut ClassReport, base: &GossipConfig, units: &[Unit], dir: &Path) {
         let Some(pcfg) = base.persistence.as_ref() else {
             rep.state = ClassState::NotConfigured { missing: "[persistence]".into() };
-            resolve_ids(rep, None, GUARANTEES, &[]);
+            let why = class_reason(&rep.state);
+            not_exercised(rep, unstarted_report(base).as_ref(), GUARANTEES, &["kv.propagation"], &why);
             return;
         };
         let mut fleet = match Fleet::plan(base, units, dir, units.len().max(3)) {
@@ -640,7 +738,7 @@ mod restart {
             rep.state = ClassState::Refused { reason };
             return;
         }
-        resolve_ids(rep, fleet.guarantees().as_ref(), GUARANTEES, &["kv.propagation"]);
+        exercised(rep, fleet.guarantees().as_ref(), GUARANTEES, &["kv.propagation"]);
         let n = fleet.len();
 
         // One synced write per node: the receipt must name rung 2.
@@ -735,7 +833,7 @@ mod partition {
             rep.state = ClassState::Refused { reason };
             return;
         }
-        resolve_ids(rep, fleet.guarantees().as_ref(), GUARANTEES, RULES);
+        exercised(rep, fleet.guarantees().as_ref(), GUARANTEES, RULES);
         let n = fleet.len();
         let t = crate::sim_seam::mono_instant();
         let converged = fleet.converge(Duration::from_secs(30));
@@ -795,9 +893,14 @@ mod partition {
         let visible = fleet.wait(observer, Duration::from_secs(20), || offers.iter().all(|(f, _)| fleet.agent(observer).capabilities().resolve(f).iter().any(|(id, _)| *id == victim_id)));
         check(rep, &t, "the victim's offers resolve at a peer before the cut", Some(visible || offers.is_empty()), format!("node {victim} ({victim_id}), {} offer(s), observer node {observer}", offers.len()));
 
-        // The cut.
+        // The cut — and, in the same instant, the re-fill baseline: a survivor's join decisions so far and the seats
+        // survivors hold. Sampled later (after the evaporation wait, up to 3 × ttl_secs) the survivor's re-fill is
+        // already inside the baseline and the check demands a second join that never comes (#675's review,
+        // finding 3: the co-op fixture's `depots` group failed exactly so).
         let eviction = Duration::from_secs(fleet.nodes[observer].cfg.health_check_interval_secs.saturating_mul(fleet.nodes[observer].cfg.peer_eviction_intervals).max(1));
+        let joins = |fleet: &Fleet<'_>, group: &str| (0..n).filter(|i| *i != victim).map(|i| fleet.nodes[i].sink.snapshot().iter().filter(|r| r.rule == "membership.governed" && r.reason == "join" && r.target.as_deref() == Some(group)).count()).sum::<usize>();
         fleet.cut(victim);
+        let baseline: Vec<(String, usize, usize)> = victim_groups.iter().map(|g| (g.clone(), joins(&fleet, g), member_count(&fleet, g))).collect();
         let t = crate::sim_seam::mono_instant();
         let evicted = fleet.wait(observer, eviction.saturating_mul(3) + Duration::from_secs(5), || (0..n).filter(|i| *i != victim).all(|i| !fleet.agent(i).peers().contains(&victim_id)));
         check(rep, &t, "a node that goes dark is evicted from every survivor's membership", Some(evicted), format!("eviction window {} s", eviction.as_secs()));
@@ -809,7 +912,8 @@ mod partition {
             check(rep, &t, "the dark node's offers leave the view after their evaporation window", Some(gone), format!("3 × ttl_secs {longest_ttl} = {} s", 3 * longest_ttl));
         }
 
-        for group in &victim_groups {
+        for (group, before, survivors_at_cut) in &baseline {
+            let (before, survivors_at_cut) = (*before, *survivors_at_cut);
             let t = crate::sim_seam::mono_instant();
             let eligible_survivor = (0..n).any(|i| i != victim && groups.iter().any(|(_, g, f)| g == group && units.get(i).is_some_and(|u| u.config.capabilities.iter().any(|c| f.matches(&c.build_capability_public())))));
             if !eligible_survivor {
@@ -818,11 +922,14 @@ mod partition {
             }
             // A survivor's own join decision after the cut is required, not just a member among survivors: a seat a
             // second member already held would otherwise read as a re-fill.
-            let joins = |fleet: &Fleet<'_>| (0..n).filter(|i| *i != victim).map(|i| fleet.nodes[i].sink.snapshot().iter().filter(|r| r.rule == "membership.governed" && r.reason == "join" && r.target.as_deref() == Some(group)).count()).sum::<usize>();
-            let before = joins(&fleet);
-            let survivors_at_cut = member_count(&fleet, group);
-            let refilled = fleet.wait(observer, Duration::from_secs(3 * longest_ttl.max(10) + 15), || member_count(&fleet, group) >= 1 && joins(&fleet) > before);
-            check(rep, &t, &format!("the governed group `{group}` is re-filled by a survivor after its member goes dark"), Some(refilled), format!("{survivors_at_cut} survivor(s) held a seat at the cut; {} live member(s) among survivors now; {} join decision(s) recorded by survivors after the cut", member_count(&fleet, group), joins(&fleet).saturating_sub(before)));
+            if survivors_at_cut >= 1 {
+                // The band moved between the settled read and the cut (two nodes can swap the seat): a survivor
+                // holds it, so the floor stands and nothing need roll. Said as it is; the re-fill is not exercised.
+                check(rep, &t, &format!("the governed group `{group}` is re-filled by a survivor after its member goes dark"), Some(true), format!("{survivors_at_cut} survivor(s) held a seat at the cut: the floor held through it, and no re-fill was needed (not exercised this run)"));
+                continue;
+            }
+            let refilled = fleet.wait(observer, Duration::from_secs(3 * longest_ttl.max(10) + 15), || member_count(&fleet, group) >= 1 && joins(&fleet, group) > before);
+            check(rep, &t, &format!("the governed group `{group}` is re-filled by a survivor after its member goes dark"), Some(refilled), format!("no survivor held a seat at the cut; {} live member(s) among survivors now; {} join decision(s) recorded by survivors after the cut", member_count(&fleet, group), joins(&fleet, group).saturating_sub(before)));
         }
 
         // The heal: the node back under the same identity.
@@ -834,7 +941,7 @@ mod partition {
                 check(rep, &t, "the node back under its identity is a peer again and its offers resolve", Some(back), format!("{} offer(s)", offers.len()));
             }
         }
-        rep.notes.push("the cut is the node's runtime dropped: no departure is sent, its sockets close; the dark side is not observed (a two-sided partition is the Docker suites' job, D6)".into());
+        rep.notes.push("the cut is the node's runtime dropped: no departure is sent, its sockets close; the dark side is not observed — a two-sided partition is not a class here (`--faults two-sided` says so): it is the Docker suites' job (D6)".into());
         if groups.is_empty() {
             rep.notes.push("the declaration defines no [[group]]: the governor half observed nothing to govern".into());
         }
@@ -847,11 +954,16 @@ mod revoke {
     use super::*;
 
     const GUARANTEES: &[&str] = &["id.revocation_authority", "mesh.signed_writes", "mesh.tls", "authz.execution_authority", "authz.durable_epochs"];
+    #[cfg(all(feature = "tls", feature = "compliance"))]
+    const KEY_GUARANTEES: &[&str] = &["id.revocation_authority", "mesh.signed_writes", "mesh.tls"];
+    #[cfg(all(feature = "tls", feature = "compliance"))]
+    const MANDATE_GUARANTEES: &[&str] = &["authz.execution_authority", "authz.durable_epochs"];
 
     #[cfg(not(all(feature = "tls", feature = "compliance")))]
     pub(super) fn run(rep: &mut ClassReport, _base: &GossipConfig, _units: &[Unit], _dir: &Path) {
         rep.state = ClassState::NotInBuild { feature: if cfg!(feature = "tls") { "compliance" } else { "tls" } };
-        resolve_ids(rep, None, GUARANTEES, &[]);
+        let why = class_reason(&rep.state);
+        not_exercised(rep, unstarted_report(_base).as_ref(), GUARANTEES, &[], &why);
         rep.notes.push("the key half rotates a node's identity on compromise, which the `compliance` feature provides".into());
     }
 
@@ -860,7 +972,8 @@ mod revoke {
         use crate::agent::fault_probes as probe;
         if base.tls.is_none() {
             rep.state = ClassState::NotConfigured { missing: "[tls]".into() };
-            resolve_ids(rep, None, GUARANTEES, &[]);
+            let why = class_reason(&rep.state);
+            not_exercised(rep, unstarted_report(base).as_ref(), GUARANTEES, &[], &why);
             return;
         }
         // Three nodes: C (node 0, the first unit's) is compromised and rotates; A (node 1) is the holder of
@@ -875,7 +988,10 @@ mod revoke {
                 return;
             }
         }
-        resolve_ids(rep, fleet.guarantees().as_ref(), GUARANTEES, &[]);
+        // The key half's ids are driven by every run; the mandate half's are listed by `mandate_half`, which
+        // knows whether it ran.
+        exercised(rep, fleet.guarantees().as_ref(), KEY_GUARANTEES, &[]);
+        rep.notes.push("three nodes of the fleet (nodes 0, 1 and 2): the compromised node, the holder of its old key, the verifying peer".into());
         let (c, a, b) = (0usize, 1usize, 2usize);
         let (nc, nb) = (fleet.nodes[c].id.clone(), fleet.nodes[b].id.clone());
 
@@ -949,9 +1065,10 @@ mod revoke {
     }
 
     #[cfg(all(feature = "tls", feature = "compliance", not(feature = "gateway")))]
-    fn mandate_half(rep: &mut ClassReport, _fleet: &Fleet<'_>, _units: &[Unit]) {
+    fn mandate_half(rep: &mut ClassReport, fleet: &Fleet<'_>, _units: &[Unit]) {
         let t = crate::sim_seam::mono_instant();
         check(rep, &t, "a mandate: established at the execution authority, then refused once revoked", None, "the execution authority is built with `gateway`; not in this build");
+        not_exercised(rep, fleet.guarantees().as_ref(), MANDATE_GUARANTEES, &[], "not_in_build: gateway");
     }
 
     #[cfg(all(feature = "tls", feature = "compliance", feature = "gateway"))]
@@ -967,8 +1084,10 @@ mod revoke {
         let t = crate::sim_seam::mono_instant();
         let Some((unit, decl)) = units.iter().find_map(|u| u.config.mandates.first().map(|m| (u, m))) else {
             check(rep, &t, "a mandate: established at the execution authority, then refused once revoked", None, "the declaration has no [[mandate]]");
+            not_exercised(rep, fleet.guarantees().as_ref(), MANDATE_GUARANTEES, &[], "the declaration has no [[mandate]]");
             return;
         };
+        exercised(rep, fleet.guarantees().as_ref(), MANDATE_GUARANTEES, &[]);
         let holder_name = format!("token:test-faults/{}", decl.holder);
         let authority_name = decl.established_by.clone().unwrap_or_else(|| "operator:test-faults".into());
         let (Some(holder), Some(authority_id)) = (PrincipalId::new(&holder_name), PrincipalId::new(&authority_name)) else {
@@ -1056,9 +1175,10 @@ mod policy_diff {
     const RULES: &[&str] = &["ae.preflight"];
 
     #[cfg(not(all(feature = "gateway", feature = "tls")))]
-    pub(super) fn run(rep: &mut ClassReport, _base: &GossipConfig, _units: &[Unit], _checked: &wire_check::Report, _against: Option<&[Unit]>, _dir: &Path) {
+    pub(super) fn run(rep: &mut ClassReport, _base: &GossipConfig, _units: &[Unit], _checked: &wire_check::Report, _against: Option<&[Unit]>, _decisions: &[PathBuf], _dir: &Path) {
         rep.state = ClassState::NotInBuild { feature: if cfg!(feature = "gateway") { "tls" } else { "gateway" } };
-        resolve_ids(rep, None, GUARANTEES, RULES);
+        let why = class_reason(&rep.state);
+        not_exercised(rep, unstarted_report(_base).as_ref(), GUARANTEES, RULES, &why);
     }
 
     /// The journal, opened on the node's runtime and handed back out of the start closure.
@@ -1075,11 +1195,12 @@ mod policy_diff {
     }
 
     #[cfg(all(feature = "gateway", feature = "tls"))]
-    pub(super) fn run(rep: &mut ClassReport, base: &GossipConfig, units: &[Unit], checked: &wire_check::Report, against: Option<&[Unit]>, dir: &Path) {
+    pub(super) fn run(rep: &mut ClassReport, base: &GossipConfig, units: &[Unit], checked: &wire_check::Report, against: Option<&[Unit]>, decisions: &[PathBuf], dir: &Path) {
         use crate::{preflight, ActionEnvelope, ActionEvaluator, Execution, PreflightRefusal, ReferenceEvaluator, Verdict};
         let Some(against) = against else {
             rep.state = ClassState::NotConfigured { missing: "--against <units-dir> (the second revision)".into() };
-            resolve_ids(rep, None, GUARANTEES, RULES);
+            let why = class_reason(&rep.state);
+            not_exercised(rep, unstarted_report(base).as_ref(), GUARANTEES, RULES, &why);
             return;
         };
         let build = |units: &[Unit], revision: &str| -> Result<Arc<dyn ActionEvaluator>, String> {
@@ -1120,7 +1241,7 @@ mod policy_diff {
             Some(Err(reason)) => { rep.state = ClassState::Refused { reason }; return; }
             None => { rep.state = ClassState::Refused { reason: "the journal was not opened".into() }; return; }
         };
-        resolve_ids(rep, fleet.guarantees().as_ref(), GUARANTEES, RULES);
+        exercised(rep, fleet.guarantees().as_ref(), GUARANTEES, RULES);
         let via = fleet.nodes[0].id.clone();
 
         // The call set: every call a [[rule]] names (as written, and without the values it requires) and every
@@ -1149,9 +1270,12 @@ mod policy_diff {
         calls.sort_by(|a, b| (&a.0, &a.1, &a.2, serde_json::Value::Object(a.3.clone()).to_string()).cmp(&(&b.0, &b.1, &b.2, serde_json::Value::Object(b.3.clone()).to_string())));
         calls.dedup();
 
-        // Decided at the seam, recorded before anything could dispatch (nothing dispatches here).
+        // Decided at the seam, recorded before anything could dispatch (nothing dispatches here). Every record
+        // carries one correlation id, so the run reads back as one chain: `mycelium explain --correlation <id>
+        // <journal>` over the kept journal (`--keep`).
         let t = crate::sim_seam::mono_instant();
         let now = crate::sim_seam::wall_now_ms();
+        let correlation = format!("test-faults-{now}");
         let mut recorded: Vec<Recorded> = Vec::new();
         let mut appended = 0usize;
         for (i, (actor, op, res, values)) in calls.iter().enumerate() {
@@ -1161,6 +1285,7 @@ mod policy_diff {
                 .validity(now, now + 60_000)
                 .identities(operation_id.clone(), format!("{operation_id}-1"))
                 .selected_arguments(values.clone())
+                .causal(crate::causal::CausalFields { correlation: Some(correlation.clone()), parent: None })
                 .build();
             let decision = match preflight(Some(&eval_a), &env, now) {
                 Ok(Some(d)) => d,
@@ -1213,6 +1338,51 @@ mod policy_diff {
                 _ => unchanged += 1,
             }
         }
+        // Records written elsewhere (`--decisions`): decided records re-decided from what they carry — subject,
+        // operation, resource — and no argument values. A record a proposed rule reads values for is
+        // *unattributable*: the record does not carry what the rule reads, and is never reported as unchanged.
+        let needs_values = |actor: &str, op: &str, res: &str| {
+            against.iter().flat_map(|u| u.config.rules.iter()).any(|r| {
+                let any = |pat: &str, v: &str| pat == "*" || pat == v;
+                !r.requires_values.is_empty() && any(&r.actor, actor) && any(&r.operation, op) && any(&r.resource, res)
+            })
+        };
+        let mut external = 0usize;
+        for path in decisions {
+            let frames = match crate::read_evidence_journal(path) {
+                Ok(f) => f,
+                Err(e) => { rep.notes.push(format!("--decisions {}: {e}", path.display())); continue; }
+            };
+            for frame in &frames {
+                let Ok(record) = serde_json::from_slice::<crate::AeEvidence>(frame) else { unattributable += 1; continue; };
+                if record.kind != crate::RecordKind::Decided {
+                    continue;
+                }
+                external += 1;
+                let resource = record.resource.split('@').next().unwrap_or(&record.resource).to_string();
+                if needs_values(&record.subject, &record.operation, &resource) {
+                    unattributable += 1;
+                    continue;
+                }
+                let env_b = ActionEnvelope::builder(record.subject.clone(), via.clone(), record.operation.clone(), resource.clone())
+                    .mapping(eval_b.mapping(&record.operation, &resource))
+                    .validity(now, now + 60_000)
+                    .identities(record.operation_id.clone(), format!("{}-diff", record.attempt_id))
+                    .build();
+                let verdict_b = match preflight(Some(&eval_b), &env_b, now) {
+                    Ok(Some(d)) => d.verdict,
+                    Ok(None) => Verdict::Indeterminate,
+                    Err(PreflightRefusal::Denied(d)) | Err(PreflightRefusal::NotEstablished(d)) | Err(PreflightRefusal::NotRecorded(d)) => d.verdict,
+                    Err(_) => Verdict::Indeterminate,
+                };
+                match (record.decision, verdict_b) {
+                    (crate::DecisionKind::Permit, Verdict::Permit) => unchanged += 1,
+                    (crate::DecisionKind::Permit, _) => refused_now += 1,
+                    (_, Verdict::Permit) => permitted_now.push(format!("{} {} {} — recorded ({}): {:?}; proposed: permit", record.subject, record.operation, resource, path.display(), record.decision)),
+                    _ => unchanged += 1,
+                }
+            }
+        }
         let regression = !permitted_now.is_empty();
         check(
             rep,
@@ -1222,12 +1392,13 @@ mod policy_diff {
             if regression {
                 format!("{} call(s) the proposed revision permits and the declared one refused: {}", permitted_now.len(), permitted_now.join(" | "))
             } else {
-                format!("{} record(s) compared: {unchanged} unchanged, {refused_now} refused now, 0 permitted now, {unattributable} unattributable", frames.len())
+                format!("{} record(s) compared ({external} from --decisions): {unchanged} unchanged, {refused_now} refused now, 0 permitted now, {unattributable} unattributable", frames.len() + external)
             },
         );
         if unattributable > 0 {
-            rep.notes.push(format!("{unattributable} record(s) could not be joined to a call with its inputs and are reported unattributable, never as unchanged"));
+            rep.notes.push(format!("{unattributable} record(s) do not carry the inputs a proposed rule reads (argument values) or could not be joined to a call, and are reported unattributable, never as unchanged"));
         }
+        rep.notes.push(format!("correlation {correlation}: every record of this run carries it; with --keep the journal is {} and `mycelium explain --correlation {correlation} <journal>` renders the run as one chain", journal_path.display()));
         rep.notes.push("the decisions are this command's own enforcement point's, over the declaration's call set, under evaluators built from each revision's [[rule]]s; a rule's resource matches the call's resource as written (no provider suffix)".into());
     }
 }
@@ -1243,7 +1414,8 @@ mod replay {
     #[cfg(not(feature = "sim"))]
     pub(super) fn run(rep: &mut ClassReport, _base: &GossipConfig, _units: &[Unit], _dir: &Path, _seed: u64) {
         rep.state = ClassState::NotInBuild { feature: "sim" };
-        resolve_ids(rep, None, GUARANTEES, RULES);
+        let why = class_reason(&rep.state);
+        not_exercised(rep, unstarted_report(_base).as_ref(), GUARANTEES, RULES, &why);
         rep.notes.push("the seams are off in every shipped build; build the binary with `cargo build --bin mycelium --features cli,sim` to record and replay".into());
     }
 
@@ -1264,11 +1436,12 @@ mod replay {
             rep.state = ClassState::Refused { reason: format!("{}: {e}", dir.display()) };
             return;
         }
-        resolve_ids(rep, None, GUARANTEES, RULES);
-        for i in 0..count {
+        exercised(rep, unstarted_report(base).as_ref(), GUARANTEES, RULES);
+        for (i, port) in ports.iter().enumerate() {
             let name = units.get(i).map(|u| u.name.as_str()).unwrap_or("node");
+            let once = Once { base, unit: units.get(i), dir, index: i, port: *port, seed };
             let t = crate::sim_seam::mono_instant();
-            let recorded = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_once(base, units.get(i), dir, i, ports[i], Kernel::recording(), seed, false))) {
+            let recorded = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_once(&once, Kernel::recording(), false))) {
                 Ok(Ok(r)) => r,
                 Ok(Err(reason)) => { check(rep, &t, &format!("unit `{name}`: its node's run is recorded under the kernel"), Some(false), reason); continue; }
                 Err(p) => {
@@ -1280,14 +1453,25 @@ mod replay {
             check(rep, &t, &format!("unit `{name}`: its node's run is recorded under the kernel"), Some(!recorded.trace.is_empty()), format!("{} choice(s), {} decision(s)", recorded.trace.len(), recorded.decisions.len()));
 
             let t = crate::sim_seam::mono_instant();
-            let replayed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_once(base, units.get(i), dir, i, ports[i], Kernel::replaying(recorded.trace.clone()), seed, true)));
+            let replayed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_once(&once, Kernel::replaying(recorded.trace.clone()), true)));
             let name_check = format!("unit `{name}`: the replay consumes the whole recording and decides decision for decision");
             match replayed {
                 Ok(Ok(r)) => {
                     let cmp = crate::decision::compare(&recorded.decisions, &r.decisions);
-                    let ok = r.exhausted && cmp.reproduces();
+                    // Decision for decision: the kernel refused no request and the decisions reproduce. A recording
+                    // may end a choice or two after the replay's run did — a choice the recorded run made while
+                    // shutting down, on a wall-time race the paused clock does not have; the kernel would have
+                    // refused a *swapped* request, so an unmade tail is not a path the replay took differently. It
+                    // is named, with the first choice not reached.
+                    let ok = cmp.reproduces();
+                    let tail = if r.exhausted {
+                        String::new()
+                    } else {
+                        let first = recorded.trace.entries().get(r.position).map(|c| c.to_line()).unwrap_or_default();
+                        format!("; {} recorded choice(s) at the end not reached by the replay's run (shutdown), the first: `{first}`", recorded.trace.len().saturating_sub(r.position))
+                    };
                     check(rep, &t, &name_check, Some(ok), format!(
-                        "{} of {} choice(s) consumed; {} decision(s) compared, {} divergence(s), {} unattributable",
+                        "{} of {} choice(s) consumed; {} decision(s) compared, {} divergence(s), {} unattributable{tail}",
                         r.position, recorded.trace.len(), cmp.compared, cmp.divergences.len(), cmp.unattributable
                     ));
                     if let Some(d) = cmp.divergences.first() {
@@ -1319,11 +1503,23 @@ mod replay {
         p.downcast_ref::<String>().cloned().or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_else(|| "a panic without a message".into())
     }
 
+    /// One node's run, as both the recording and the replay take it.
+    #[cfg(feature = "sim")]
+    struct Once<'a> {
+        base: &'a GossipConfig,
+        unit: Option<&'a Unit>,
+        dir: &'a Path,
+        index: usize,
+        port: u16,
+        seed: u64,
+    }
+
     /// One run of one node under the kernel: start, apply its unit, let the governor tick, one write, shut down.
     /// The same sequence records and replays.
     #[cfg(feature = "sim")]
-    fn run_once(base: &GossipConfig, unit: Option<&Unit>, dir: &Path, index: usize, port: u16, kernel: mycelium_sim::Kernel, seed: u64, replaying: bool) -> Result<Run, String> {
+    fn run_once(once: &Once<'_>, kernel: mycelium_sim::Kernel, replaying: bool) -> Result<Run, String> {
         use crate::sim_seam::{install, take, SimContext};
+        let Once { base, unit, dir, index, port, seed } = *once;
         let wall_ms = crate::sim_seam::wall_now_ms();
         install(SimContext { kernel, sources: mycelium_sim::Sources::seeded(seed, wall_ms), node: format!("node-{index}"), offsets: Default::default() });
         let sink = Arc::new(crate::decision::DecisionSink::default());
@@ -1425,10 +1621,11 @@ mod tests {
         let report = |asked: Vec<Class>| Report {
             schema: SCHEMA,
             config_path: None,
-            fleet: FleetFacts { nodes: 3, units: units.iter().map(|u| u.name.clone()).collect(), tls: false, persistence: false, profile: None, gateway_started: false },
+            fleet: FleetFacts { nodes: 3, units: units.iter().map(|u| u.name.clone()).collect(), tls: false, persistence: false, profile: "dev", profile_declared: None, gateway_started: false },
             wire_check: WireCheckSummary { errors: 0, warnings: 0 },
             activations: Activations { declared: 0, run: 0, state: "not_applicable", because: "" },
             classes: vec![mk(asked)],
+            kept: None,
         };
         assert_eq!(report(vec![]).exit_code(), 0, "not asked: stated, not failed");
         assert_eq!(report(vec![Class::Restart]).exit_code(), 1, "asked by name: the run fails");
@@ -1470,7 +1667,7 @@ mod tests {
         std::fs::create_dir_all(dir).unwrap();
         let path = dir.join("node.toml");
         std::fs::write(&path, toml::to_string(cfg).unwrap()).unwrap();
-        let opts = Options { classes: vec![class], config: Some(path), against, seed: 7 };
+        let opts = Options { classes: vec![class], config: Some(path), against, seed: 7, ..Default::default() };
         let report = run(units, &[], &CheckOptions::default(), &opts).expect("the run");
         assert_eq!(report.classes.len(), 1, "{}", report.render());
         report.classes.into_iter().next().unwrap()
@@ -1547,7 +1744,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Class names parse exactly and nothing else does.
+    /// Class names parse exactly and nothing else does; a list with a stranger in it is refused naming it; the
+    /// partition this command does not run is answered by name.
     #[test]
     fn class_names_round_trip() {
         for c in Class::ALL {
@@ -1555,5 +1753,70 @@ mod tests {
         }
         assert_eq!(Class::parse("replays"), None);
         assert_eq!(Class::parse(""), None);
+        assert_eq!(Class::parse_list("revoke,restart"), Ok(Some(vec![Class::Revoke, Class::Restart])));
+        assert_eq!(Class::parse_list("units"), Ok(None), "not a class list: a directory");
+        assert!(Class::parse_list("revoke,bogus").unwrap_err().contains("`bogus` is not a class"));
+        assert!(Class::parse_list("two-sided").unwrap_err().contains("Docker suites"));
+    }
+
+    /// A configuration under the secure profile is tested under `dev`, the declared profile reported and not
+    /// applied: the fleet has no gateway and no code attachment, so the profile's own refusal would say nothing
+    /// about the fleet (#675's review, finding 4).
+    #[test]
+    fn the_declared_profile_is_reported_and_not_applied() {
+        let dir = scratch("profile");
+        let mut cfg = persisted(&dir);
+        cfg.profile = Some("secure-single-domain".into());
+        let units = vec![unit("p", "principal = \"p\"\n")];
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("node.toml");
+        std::fs::write(&path, toml::to_string(&cfg).unwrap()).unwrap();
+        let report = run(&units, &[], &CheckOptions::default(), &Options { classes: vec![Class::Restart], config: Some(path), ..Default::default() }).expect("the run");
+        assert_eq!(report.fleet.profile_declared.as_deref(), Some("secure-single-domain"));
+        assert_eq!(report.fleet.profile, "dev");
+        assert!(all_held(&report.classes[0]), "{}", report.render());
+        assert!(report.render().contains("declared `secure-single-domain`, not applied"), "{}", report.render());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A journal written elsewhere, re-decided under the proposed revision: a record a proposed rule reads values
+    /// for is unattributable (the record carries none); one no rule reads values for is decided from what it
+    /// carries, and a permit the recorded decision refused is reported.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    #[test]
+    fn a_decisions_file_without_inputs_is_unattributable_where_a_rule_needs_them() {
+        use crate::{ActionEnvelope, Decision, Execution, AeEvidence};
+        let dir = scratch("decisions");
+        std::fs::create_dir_all(&dir).unwrap();
+        let via = NodeId::new("127.0.0.1", 7000).unwrap();
+        let rec = |actor: &str, res: &str, decision: Decision| {
+            let env = ActionEnvelope::builder(actor, via.clone(), "tools/call", res).identities(format!("ext-{actor}-{res}"), "a1").build();
+            serde_json::to_vec(&AeEvidence::for_decision(&env, &decision, Execution::None, "elsewhere")).unwrap()
+        };
+        let frames = [
+            rec("purchaser", "tool:purchase.place@127.0.0.1:7000", Decision::deny("refused there", "r0")),
+            rec("stranger", "tool:other.thing@127.0.0.1:7000", Decision::deny("refused there", "r0")),
+        ];
+        let journal = dir.join("elsewhere.log");
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let j = crate::EvidenceJournal::open(&journal, crate::EvidenceProfile::Strict).unwrap();
+            for f in &frames { j.append(f.clone()).await.unwrap(); }
+        });
+        drop(rt);
+        let declared = "principal = \"purchaser\"\n[[capability]]\nns = \"purchase\"\nname = \"place\"\nttl_secs = 5\n[[rule]]\nactor = \"*\"\noperation = \"tools/call\"\nresource = \"tool:purchase.place\"\nrequires_values = { ledger = \"petty-cash\" }\n";
+        // The proposed revision keeps the valued rule and adds a bare allowance for the other tool: the first record
+        // is unattributable (values the record lacks), the second is permitted now where it was refused.
+        let proposed = format!("{declared}[[rule]]\nactor = \"*\"\noperation = \"tools/call\"\nresource = \"tool:other.thing\"\n");
+        let units = vec![unit("purchaser", declared)];
+        std::fs::write(dir.join("node.toml"), toml::to_string(&GossipConfig::default()).unwrap()).unwrap();
+        let opts = Options { classes: vec![Class::PolicyDiff], config: Some(dir.join("node.toml")), against: Some(vec![unit("purchaser", &proposed)]), decisions: vec![journal], ..Default::default() };
+        let report = run(&units, &[], &CheckOptions::default(), &opts).expect("the run");
+        let c = &report.classes[0];
+        let diff = c.checks.iter().find(|k| k.name.starts_with("no call the declared revision refused")).expect("the diff check");
+        assert_eq!(diff.ok, Some(false), "{}", report.render());
+        assert!(diff.detail.contains("stranger tools/call tool:other.thing") && diff.detail.contains("proposed: permit"), "{}", diff.detail);
+        assert!(c.notes.iter().any(|n| n.starts_with("1 record(s) do not carry the inputs")), "{:?}", c.notes);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

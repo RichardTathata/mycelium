@@ -304,13 +304,7 @@ fn wire_check_cli(args: Vec<String>) -> i32 {
         opts.known_schemas = Some(ids);
     }
     if opts.revision.is_none() {
-        opts.revision = std::process::Command::new("git")
-            .args(["-C", &dir, "rev-parse", "HEAD"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .filter(|s| !s.is_empty());
+        opts.revision = git_revision(&dir);
     }
 
     let report = check(&units, &artifacts, &opts);
@@ -471,30 +465,35 @@ fn doctor_cli(args: Vec<String>) -> i32 {
 /// declaration (adopter-surface X6, `mycelium::faults`). `--faults` alone runs every class; a class list
 /// (`revoke`, `restart`, `partition`, `replay`, `policy-diff`) runs those and fails the run if one of them
 /// cannot run here (`not_in_build`, `not_configured`, `not_applicable`). Exit 0 when every class that ran
-/// passed; 1 when a check did not hold, a named class could not run, or `wire-check` refused the
-/// declaration (its findings printed, the same words); 2 on a usage error or a file that does not load.
+/// passed; 1 when a check did not hold, a named class could not run, a class's fleet refused to build or
+/// start (`refused`, asked or not), or `wire-check` refused the declaration (its findings printed, the same
+/// words); 2 on a usage error or a file that does not load.
 fn test_cli(args: Vec<String>) -> i32 {
     use mycelium::faults::{self, Class, Options, Refused};
     use mycelium::wire_check::{ArtifactDescription, CheckOptions};
-    const USAGE: &str = "Usage: mycelium test --faults [<class>[,<class>…]] <units-dir> [--config <node.toml>] [--against <units-dir>] [--library <dir>] [--schemas <dir>] [--seed <n>] [--format text|json]\n\
-       classes: revoke · restart · partition · replay (needs a binary built with --features cli,sim) · policy-diff (needs --against)";
+    const USAGE: &str = "Usage: mycelium test --faults [<class>[,<class>…]] <units-dir> [--config <node.toml>] [--against <units-dir>] [--decisions <evidence.log>]… [--library <dir>] [--schemas <dir>] [--seed <n>] [--keep] [--format text|json]\n\
+       classes: revoke · restart · partition · replay (needs a binary built with --features cli,sim) · policy-diff (needs --against)\n\
+       a units directory named like a class is written ./<name>; --config replaces the environment (GOSSIP_*) as -c does; --keep leaves the run's directory in place";
     let (mut faults, mut dir, mut config, mut against, mut library, mut schemas) = (false, None::<String>, None::<PathBuf>, None::<String>, None::<String>, None::<String>);
-    let (mut classes, mut format, mut seed) = (Vec::<Class>::new(), "text".to_string(), 0x5eed_u64);
+    let (mut classes, mut format, mut seed, mut keep, mut decisions) = (Vec::<Class>::new(), "text".to_string(), 0x5eed_u64, false, Vec::<PathBuf>::new());
     let mut it = args.into_iter().peekable();
     while let Some(a) = it.next() {
         match a.as_str() {
             "-h" | "--help" => { eprintln!("{USAGE}"); return 0; }
             "--faults" => {
                 faults = true;
-                // A class list follows only when every comma-separated token is a class name; otherwise the
-                // next token is the directory.
-                if let Some(next) = it.peek()
-                    && !next.starts_with('-')
-                    && next.split(',').all(|c| Class::parse(c).is_some())
-                {
-                    classes.extend(it.next().unwrap_or_default().split(',').filter_map(Class::parse));
+                // A class list follows when a comma-separated token is a class name; a list with a stranger in it
+                // is refused naming it (#675's review); a token that is no class is the directory.
+                if let Some(next) = it.peek().filter(|n| !n.starts_with('-')) {
+                    match Class::parse_list(next) {
+                        Ok(Some(list)) => { classes.extend(list); it.next(); }
+                        Ok(None) => {}
+                        Err(e) => { eprintln!("test: {e}\n{USAGE}"); return 2; }
+                    }
                 }
             }
+            "--keep" => keep = true,
+            "--decisions" => match it.next() { Some(v) => decisions.push(PathBuf::from(v)), None => { eprintln!("{USAGE}"); return 2; } },
             "--config" => match it.next() { Some(v) => config = Some(PathBuf::from(v)), None => { eprintln!("{USAGE}"); return 2; } },
             "--against" => match it.next() { Some(v) => against = Some(v), None => { eprintln!("{USAGE}"); return 2; } },
             "--library" => match it.next() { Some(v) => library = Some(v), None => { eprintln!("{USAGE}"); return 2; } },
@@ -534,7 +533,7 @@ fn test_cli(args: Vec<String>) -> i32 {
             }
         }
     }
-    let mut check_opts = CheckOptions::default();
+    let mut check_opts = CheckOptions { revision: git_revision(&dir), ..CheckOptions::default() };
     if let Some(dir) = &schemas {
         match schema_ids(std::path::Path::new(dir)) {
             Ok(ids) => check_opts.known_schemas = Some(ids),
@@ -542,7 +541,7 @@ fn test_cli(args: Vec<String>) -> i32 {
         }
     }
     // Every node is built inside a runtime context of its own; the command itself needs none.
-    let report = match faults::run(&units, &artifacts, &check_opts, &Options { classes, config, against, seed }) {
+    let report = match faults::run(&units, &artifacts, &check_opts, &Options { classes, config, against, seed, keep, decisions }) {
         Ok(r) => r,
         Err(Refused::WireCheck(r)) => {
             let r = *r;
@@ -564,6 +563,18 @@ fn test_cli(args: Vec<String>) -> i32 {
         print!("{}", report.render());
     }
     report.exit_code()
+}
+
+/// The revision `wire-check` stamps on its document when none is given: `git rev-parse HEAD` in the units directory,
+/// or none. `test` stamps the same, so its refusal prints the same report, word for word.
+fn git_revision(dir: &str) -> Option<String> {
+    std::process::Command::new("git")
+        .args(["-C", dir, "rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Guide 12's rule for a schema directory: each `.json` file's path relative to the directory, without the

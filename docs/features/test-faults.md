@@ -65,24 +65,48 @@ job `embedded` builds the `sim` binary and runs `replay` against the co-op fixtu
 - **It never runs an activation.** A unit's `[[activation]]` commands are counted and reported `not_applicable`;
   none is started, confined or not (D23).
 - The fleet is the configuration's with stated rewrites, not the deployment: loopback, free ports, temporary
-  directories, no gateway, every node bootstrapping to every other, a one-second health check. A `[[group]]` is
-  governed to a band of one (floor one, ceiling one), so a cut member is a deficit a survivor must fill. A cut is the node's runtime dropped: no departure is sent, its sockets close, the dark
-  side is not observed.
+  directories, no gateway, every node bootstrapping to every other, a one-second health check, and **the declared
+  profile not applied** — the fleet runs under `dev` and the report says which profile was declared: a profile's
+  requirements include a gateway and code attachments the fleet has not, and `mycelium doctor` is what checks a
+  profile. `--config` replaces the environment (`GOSSIP_*`), as `-c` does for the node. A `[[group]]` is governed
+  to a band of one (floor one, ceiling one), settled before the cut, so a cut member is a deficit a survivor must
+  fill; when the band moved between the settled read and the cut and a survivor already held the seat, the check
+  says so and passes without exercising the re-fill. A cut is the node's runtime dropped: no departure is sent,
+  its sockets close, the dark side is not observed. A class whose fleet cannot be built or started reads `refused`
+  with the node's own words and fails the run, asked or not.
 - `policy-diff` decides the declaration's call set — every `[[rule]]` as written and without the values it
   requires, every wired edge's two call shapes — at this command's own enforcement point under evaluators built from
-  each revision's `[[rule]]`s, records each decision, and re-decides the recorded calls under the proposed revision.
-  A record it cannot join to a call with its inputs is reported *unattributable*, never as unchanged. A rule's
+  each revision's `[[rule]]`s, records each decision under one correlation id (the report names it; with `--keep`
+  the journal stays and `mycelium explain --correlation <id> <journal>` renders the run as one chain), and
+  re-decides the recorded calls under the proposed revision. An evidence record carries no argument values, so a
+  journal written elsewhere (`--decisions <evidence.log>`) is re-decided from what its records carry — subject,
+  operation, resource — and a record a proposed rule reads values for is reported *unattributable*, never as
+  unchanged. The decisions are this command's, not a provider's: no gateway or provider door is driven. A rule's
   resource matches the call's as written, without a provider suffix.
 - `replay` is the `sim` build's: each unit's node is recorded and replayed **alone** on a current-thread runtime
-  under one kernel, as the node binary records; a divergence is reported where the seam raised it. The schedule
+  under one kernel, as the node binary records; a divergence is reported where the seam raised it. The check holds
+  when the kernel refused no request and the decisions reproduce; a recording may end a choice or two after the
+  replay's run did (a choice the recorded run made while shutting down, on a wall-time race the paused clock does
+  not have), which the report names with the first choice not reached rather than counting as a divergence. The schedule
   between nodes — frame arrival — is outside the seams (the inventory's §3.1.1), so a fleet recorded together
   diverges at its first cross-node channel choice; stated, not hidden.
 - **Found by it, and fixed:** a governed member that went dark held the floor — its group entry is written once
   and withdrawn only by a graceful shutdown, so no survivor rolled to re-fill; the governor now counts a member only
-  if it is this node or in its peer table ([`membership.governed`](../reference/rule-catalogue.md) revision 2). The
-  stale entry stays in the KV until the node returns, so a fleet snapshot's group size still counts it. **Found and
-  stated:** a dark node's offers leave the view only after 3 × their `ttl_secs` — the class reports the time.
-- **Not built, stated:** a two-sided partition (the Docker suites', D6); a load class (V1 on the
+  if it is this node or in its peer table ([`membership.governed`](../reference/rule-catalogue.md) revision 2), and
+  with no peer at all reads the roster as written (a node restarting over persisted entries, or isolated, is not a
+  fleet of one). The stale entry stays in the KV until the node returns: the fleet snapshot's group size, the
+  `/gateway/mesh/group` members and the group-conflict diagnosis (`group_status`, the P-series detectors) still
+  count it, so they can report an over-ceiling conflict for the state the governor is deliberately producing until
+  then. **Found and stated:** a dark node's offers leave the view only after 3 × their `ttl_secs` — the class
+  reports the time. **Found by `replay`, not fixed:** a node with `[persistence]` diverges on replay between the
+  WAL write of its first entry and the governor's jitter draw (two seams whose order the schedule decides) — the
+  class reports it as its first divergence; the single-node proof on the [proof page](../operations/what-is-proven.md)
+  is over a node without persistence.
+- `revoke` runs on three nodes of the fleet (the compromised node, the holder of its old key, the verifying peer),
+  whatever the fleet's size; `restart` replays the fleet's own WAL, not the regression floor's golden fixtures under
+  `tests/fixtures/persistence/`, which CI replays on their own; `partition`'s cut is a dropped runtime on wall time,
+  not a seam.
+- **Not built, stated:** a two-sided partition (the Docker suites', D6 — `--faults two-sided` says so); a load class (V1 on the
   [proof page](../operations/what-is-proven.md)); the verifiers an in-process fleet cannot reach from outside the
   node (consensus, caller envelopes, knowledge records — the suite's); a provider-side run of the call set. The plan
   row is [`adopter-surface.md`](../plans/adopter-surface.md) X6.

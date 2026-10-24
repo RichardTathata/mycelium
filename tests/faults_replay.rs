@@ -12,7 +12,7 @@ fn the_replay_class_replays_the_fleet_decision_for_decision() {
         name: "p".into(),
         config: mycelium::NodeCapabilityConfig::from_toml_str("principal = \"p\"\n[[capability]]\nns = \"demo\"\nname = \"thing\"\nttl_secs = 5\n").unwrap(),
     }];
-    let opts = Options { classes: vec![Class::Replay], config: None, against: None, seed: 11 };
+    let opts = Options { classes: vec![Class::Replay], seed: 11, ..Default::default() };
     let report = run(&units, &[], &CheckOptions::default(), &opts).expect("the run");
     let c = &report.classes[0];
     assert_eq!(c.state, ClassState::Passed, "{}", report.render());

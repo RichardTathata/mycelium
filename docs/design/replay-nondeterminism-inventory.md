@@ -320,6 +320,19 @@ state (`first`, a deferral, the deadline) moves only **after** the check-in, so 
 a `select!` wins when two *different* events are ready (row 142) — the arbiter orders *timer* choices
 by the recording and nothing else.
 
+### 3.1.3 A persisted node, found diverging (2026-10-24, adopter-surface X6)
+
+`mycelium test --faults replay` records one node at a time, two governor periods, and replays it (`src/faults.rs`,
+the `replay` class). Without `[persistence]` the scaffold's node and all seven co-op units replay to the end,
+decision for decision. **With `[persistence]` the replay departs at seq ~37–39**: the recording took the kv-persist
+writer's first `fs wal.bin write_all` where the replay takes the governor's `rng jitter draw` (or the class's own
+`timer faults/settle`) — two seams whose relative order the runtime's schedule decides, and the arbiter of §3.1.2
+orders *timer* choices only; the WAL writer's first write is not a timer and sits outside it. Found by the class
+against the scaffold's configuration plus `[persistence]` (#675's review, finding 9); recorded on
+`docs/operations/what-is-proven.md`'s third table, not fixed. What would fix it: the writer's first write taken
+through the scheduler seam's arbiter (a *storage* choice ordered against the timer grid), then the class green in
+CI against a persisted configuration.
+
 ## 4. Sleeps whose duration is a correctness assumption
 
 These are the sites where a fixed `sleep` stands in for a missing structural wait. The kernel's exploration mode

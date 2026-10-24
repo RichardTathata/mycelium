@@ -73,19 +73,24 @@ adopter-surface X6):
 | `restart` | a write requiring sync on every node; every node stopped and restarted over its own directory; a record that does not decode appended to one WAL | rung 2 on every receipt; every write replayed; the start refused by name (or the files moved aside under `on_unreadable = "quarantine"`) |
 | `partition` | the node offering something — a member of a governed group where there is one — has its runtime dropped (no departure, sockets closed); later it comes back under the same identity | evicted from every survivor's membership; its offers gone after 3 × `ttl_secs`; each declared `[[group]]`, governed to a band of one, re-filled by an eligible survivor (a survivor's own join decision after the cut); back, a peer again with its offers resolving |
 | `replay` | each unit's node, alone, recorded under the kernel then replayed with the clock paused (the schedule between nodes is outside the seams, inventory §3.1.1) | the recording consumed to its end, the decisions identical; else the first divergence, where the seam raised it. **The `sim` build only** (`cargo build --bin mycelium --features cli,sim`); any other reads `not_in_build` naming `sim` |
-| `policy-diff` | the declaration's call set decided under its `[[rule]]`s and recorded; each record re-decided under `--against`'s `[[rule]]`s | no call the declared revision refused is permitted by the proposed one; a record that cannot be joined to its inputs is *unattributable* |
+| `policy-diff` | the declaration's call set decided under its `[[rule]]`s and recorded under one correlation id; each record re-decided under `--against`'s `[[rule]]`s; records from `--decisions` journals re-decided from what they carry | no call the declared revision refused is permitted by the proposed one; a record a proposed rule reads values for, which no evidence record carries, is *unattributable* |
 
 Every class lists the guarantee and rule ids it exercised, each with its resolution on the fleet's node, and the
 ones it could not exercise and why, in the guarantee report's words (`enforced`, `not_configured`, `not_in_build`,
 `not_applicable`, `not_verifiable_here`). A class that cannot run here says so and fails the run only when it was asked
-for by name. Exit 0 when every class that ran passed; 1 when a check did not hold, a named class could not run, or
-`wire-check` refused the declaration (its findings printed first, the same words); 2 on a usage error or a file that
-does not load.
+for by name. Exit 0 when every class that ran passed; 1 when a check did not hold, a named class could not run, a
+class's fleet could not be built or started (`refused`, with the node's own words, asked or not), or `wire-check`
+refused the declaration (its findings printed first, the same words); 2 on a usage error or a file that does not
+load.
 
 What the fleet is, stated: the configuration's nodes with loopback addresses and free ports, persistence and TLS
 material under a temporary directory the run removes (nothing of the adopter's is written), no gateway port, every node
-bootstrapping to every other, a one-second health check and governor cooldown. **It runs no activation**: a
-`[[activation]]` is counted and reported `not_applicable`. An attachment made in code is not in its view, as it is not
+bootstrapping to every other, a one-second health check and governor cooldown, and **the declared profile not
+applied** — the fleet runs under `dev` and the report names the profile declared: a profile needs a gateway and code
+attachments the fleet has not, and `mycelium doctor` is what checks a profile. `--config` replaces the environment
+(`GOSSIP_*`), as `-c` does. `--keep` leaves the run's directory (its journals and persistence) in place and the
+report names it; `--decisions <evidence.log>` hands `policy-diff` records written elsewhere. **It runs no
+activation**: a `[[activation]]` is counted and reported `not_applicable`. An attachment made in code is not in its view, as it is not
 in `doctor`'s. The scaffold's own configuration has no `[persistence]`, so `restart` reads `not_configured` against it
 until one is added; CI runs the classes against the scaffold with one.
 Feature page: [`docs/features/test-faults.md`](../features/test-faults.md).

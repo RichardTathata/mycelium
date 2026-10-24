@@ -292,7 +292,12 @@ jobs:
           set -euo pipefail
           ./target/debug/mycelium test --faults replay tests/fixtures/units/coop --library tests/fixtures/units/artifacts | tee replay.log
           grep -q '^replay: passed' replay.log
-          grep -q 'decides decision for decision' replay.log
+          grep -q '✓ unit `dispatcher`: the replay consumes the whole recording and decides decision for decision' replay.log
+          # The partition class against a declaration with a governed group (#675's review, finding 3): the dark
+          # worker evicted, its offer gone after 3 × ttl_secs, the seat re-filled by the other worker's own join.
+          ./target/debug/mycelium test --faults partition tests/fixtures/units/faults-group | tee partition.log
+          grep -q '^partition: passed' partition.log
+          grep -q '✓ the governed group `pool` is re-filled by a survivor after its member goes dark — no survivor held a seat at the cut' partition.log
       - run: cargo test --features sim,test-util --test faults_replay
       # The claims `what-is-proven.md` rests on these two for: a recording carries its decisions into the
       # bundle and explains (the comparison's recording half), and the traced provisioner makes no extra

@@ -204,7 +204,14 @@ the floor — `grp/{group}/{node}` is written once at join and withdrawn only by
 crash every survivor's `group_members` still counted it and no one rolled (the co-op fixture's `depots`: 0 live
 members, 0 joins after 105 s); `converge` now counts a member only if it is this node or in `ctx.peers`
 (`live_members`, `membership.governed` revision 2 — a convergence target, never a guarantee: a peer evicted here and
-alive elsewhere is re-counted when heard). **Found and stated:** the eviction loop removes a dark peer in
+alive elsewhere is re-counted when heard; with an empty peer table the roster is read as written, #675's review).
+The eleven other readers of `grp/` (`emergent.rs`'s `group_status`/`GroupConflict`/`membership_snapshot`, the fleet
+snapshot, consensus, signal scoping, `/gateway/mesh/group`) still count the dark member until its entry is rewritten
+— stated, not changed. **#675's review** also found: the `faults/` row unclassified for the raw KV routes; the port
+allocator sharing `alloc_port`'s seed (a test build now uses `alloc_port` itself); the re-fill baseline sampled after
+the evaporation wait; the secure profile refused by the command's own rewrite (not applied now, reported); `unknown`
+in the report (a node built and never started resolves every id); the cut dropping handles before the runtime; and,
+by `replay`, a persisted node diverging between its first WAL write and the jitter draw — recorded, not fixed. **Found and stated:** the eviction loop removes a dark peer in
 `health × peer_eviction_intervals`, but its `cap/` advertisement leaves `resolve` only after `3 × ttl_secs`
 (`CapEntry::is_fresh`) and nothing tombstones it — a scaffold's 30 s `ttl_secs` is a 90 s blind spot the report now
 measures; the stale `grp/` entry stays in the KV until the node returns, so the fleet snapshot's group size still

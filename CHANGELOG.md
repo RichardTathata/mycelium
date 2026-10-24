@@ -32,8 +32,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   class the guarantee and rule ids exercised, each with its resolution on the fleet's node, and the ones it could not
   exercise and why, in the guarantee report's vocabulary; a class that cannot run fails the run only when asked for by
   name; a declaration `wire-check` refuses is refused with the same findings; **no activation is ever run** (D23).
-  Library: `mycelium::faults::{run, Class, Options, Report}`. `mycelium test` logs at WARN to stderr so the report is
-  the output. **Not built, stated:** a two-sided partition (the Docker suites'), a load class, the verifiers an
+  The declared profile is not applied to the test fleet (it needs a gateway and code attachments the fleet has not)
+  and is reported as declared; `--keep` leaves the run's directory; `--decisions <evidence.log>` hands `policy-diff`
+  records written elsewhere, re-decided from what they carry. Library: `mycelium::faults::{run, Class, Options,
+  Report}`. `mycelium test` logs at WARN to stderr so the report is the output. **Not built, stated:** a two-sided partition (the Docker suites'), a load class, the verifiers an
   in-process fleet cannot reach from outside the node (consensus, caller envelopes, knowledge records), a
   provider-side run of the call set.
 - **The external side-effect contract** (`docs/plans/adopter-surface.md` X5; `docs/features/side-effects.md`):
@@ -125,9 +127,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   partition` against the co-op fixture, adopter-surface X6). A member's `grp/{group}/{node}` entry is written once at
   join and withdrawn only by a graceful shutdown, so after a crash every survivor's governor still counted it and
   none rolled to fill the floor. `converge` now counts a member only if it is this node or in its peer table
-  (`membership.governed` revision 2 in the rule catalogue). A convergence target, never a guarantee: a peer evicted
-  here and alive elsewhere is re-counted when it is heard again. The stale entry itself stays in the KV until the
-  node returns, and the fleet snapshot's group size still counts it — stated on the feature page.
+  (`membership.governed` revision 2 in the rule catalogue); with no peer at all it reads the roster as written, so a
+  node restarting over persisted entries or isolated is not a fleet of one. A convergence target, never a guarantee:
+  a peer evicted here and alive elsewhere is re-counted when it is heard again. The stale entry itself stays in the
+  KV until the node returns: the fleet snapshot's group size, `/gateway/mesh/group` and the group-conflict diagnosis
+  still count it, and may report an over-ceiling conflict for the state the governor is producing — stated on the
+  feature page.
 
 - **The Release workflow reads the annotated tag's message, not its commit's.** `actions/checkout` resolves a tag ref
   to the commit it points at, so the first real run (v2.37.0) titled the Release with the squash commit's subject and
