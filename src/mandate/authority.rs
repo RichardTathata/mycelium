@@ -310,6 +310,19 @@ impl RevocationView {
         }
         RevocationStanding::NotRevoked
     }
+
+    /// Where a **grant's** term stands (adopter-surface X3). A grant is one appointment for one call, bounded by its
+    /// own window; its issuer publishes one checkpoint for the grant's scope at issue and the next one only to
+    /// revoke, so freshness does not apply: a revocation seen is `Revoked`, a scope with a checkpoint is
+    /// `NotRevoked`, and a scope this view has never heard of is `Unknown` — a grant whose issuer's checkpoint has
+    /// not reached this verifier is not established. Revocation reaches a verifier when its checkpoint does.
+    pub fn grant_standing(&self, authority: &PrincipalId, scope: &str, term: &TermId) -> RevocationStanding {
+        let key = (authority.clone(), scope.to_string());
+        if self.revoked.get(&key).is_some_and(|r| r.contains(term)) {
+            return RevocationStanding::Revoked;
+        }
+        if self.newest.contains_key(&key) { RevocationStanding::NotRevoked } else { RevocationStanding::Unknown }
+    }
 }
 
 // ── work, continuation and drain bounds ─────────────────────────────────────────────────────

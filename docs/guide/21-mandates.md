@@ -361,6 +361,34 @@ restart, and the `FsStore` path each write nothing, beside a plant where the sam
 commit is not caught locally; `GitStore::late_writes()` counts it, and prevention for published
 writes belongs to the remote's pre-receive hook.
 
+## A grant is a mandate for one call
+
+The veto mode of the agent's policy (`require_approval_for`) asks a supervisor and proceeds on silence: an absent
+supervisor approves. A **grant** is the other mode, default-deny (adopter-surface X3, [the feature
+page](../features/grants.md)). For a tool in `AgentPolicy::require_grant_for`, the agent asks through
+`transition_invoking(tool, arguments)`: a request record goes under `grant/{agent}/{request}` — the tool, the
+arguments' digest and a rendering a human reads, the policy revision, the expiry — and the agent waits
+`grant_window` (30 s by default, on the wall clock) for `…/issued`. Silence refuses `GrantNotPresented`; a supervisor's
+refusal `GrantRefused`.
+
+What is issued is a mandate, so it inherits every door this chapter describes: its holder is the agent's principal,
+its scope is its own — `grant:{request}`, so grants never conflict with each other or with a resource authority's
+appointments — and its binding rides **inside its signed operations** as `bound:args:{digest}` and
+`bound:policy:{revision}` beside the one operation it permits. The issuing node signs it; the supervisor is the actor
+of the decision to issue (`grant.issue`, decided by the same evaluator as every other action, so `grant:issue` is a
+scope and not an approval). The agent verifies it with its own execution authority and a possession proof signed by
+its identity before `Invoking` commits, then presents it on the call (`_meta.mandate`), where the gateway's preflight
+verifies it again and refuses other arguments (`BoundToOtherArguments`) or a decision under another policy revision
+(`BoundToOtherPolicy`), and a provider under enforcement verifies it a third time. Revocation is a mandate's: a
+checkpoint from the issuer naming the term. The decision record carries the grant's hash (`mandate_digest`).
+
+```text
+GET  /gateway/grants/pending                      grant:read   — the open requests, oldest first
+POST /gateway/grants/{agent}/{request}            grant:issue  — {"decision": "issue"|"refuse", "ttl_secs", "reason"}
+```
+
+The raw KV routes refuse the `grant/` namespace: an answer is written through the door that decides it.
+
 ## What this does not establish
 
 - **Not a second fence.** One resource-side fence exists, in the wiki's git store. Another resource

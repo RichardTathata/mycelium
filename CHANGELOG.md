@@ -11,6 +11,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Grants — approval that is default-deny** (`docs/plans/adopter-surface.md` X3, first PR; `docs/features/grants.md`):
+  `AgentPolicy::require_grant_for` and `grant_window`; `AgentStateMachine::transition_invoking(tool, arguments)`
+  writes the request under `grant/{agent}/{request}` (tool, arguments digest and a bounded rendering, policy revision,
+  expiry), waits on the wall clock for `…/issued`, verifies the grant with the node's execution authority under a
+  possession proof signed by the node's identity, commits `Invoking` and returns the grant for the call's
+  `_meta.mandate`; silence is `GrantNotPresented`, a refusal `GrantRefused`, and a plain `transition` to a
+  grant-required tool is refused. A grant is a scoped mandate in its own scope (`grant:{request}`,
+  `Mandate::grant_operations`, `EntitlementTable::entitle_grants`) with its binding in its signed operations; the
+  authority refuses other arguments (`MandateRefusal::BoundToOtherArguments`) and the preflight a decision under
+  another policy revision (`BoundToOtherPolicy`); the evidence record carries the grant's hash (`mandate_digest`).
+  The supervisor's door: `GET /gateway/grants/pending` (`grant:read`), `POST /gateway/grants/{agent}/{request}`
+  (`grant:issue`) — issuing is an action the evaluator decides with the issuer as the actor (`grant.issue`), a
+  gateway with no evaluator issues nothing, and the answer's write returns its receipt's rung. `Rule::requiring_grant()`.
+  `mycelium-guardrails` 1.1.0 labels the grant clause and says the veto clause is *veto, not grant*. A grant's
+  standing is its issuer's checkpoint, not the gate's freshness (`RevocationView::grant_standing`); the request a
+  grant answered is consumed by the commit it admitted; refusing is evaluated like issuing (`grant.refuse`); a grant
+  is issued only for an agent on the issuing node (`409 not_this_node`). **Not built in this PR, stated on the page:**
+  single use at the doors, the SDK verbs and an SSE stream, the restart re-wait, grants across nodes, a revocation
+  route, the A2A `input-required` state, the data-class policy over the rendering, the bypass-matrix row and the drain
+  bound (`deprecations.md` §59).
+
 - **One id, and one parent, through the records** (`docs/plans/adopter-surface.md` X4, first PR; `docs/features/causal-records.md`):
   a request's `params._meta.correlation` (one key segment, the run's id) and `params._meta.parent` (the content hash
   of the record the work depends on — the hash `journal_sha256` cites) enter the `ActionEnvelope` at every door the
