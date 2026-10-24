@@ -929,6 +929,21 @@ pub(crate) async fn ae_decide(
             ),
         };
         let outcome = ae::preflight_with_history(Some(evaluator), &envelope, history.as_ref(), history_now);
+        // Adopter-surface X3: a grant binds the policy revision it was approved under; a permit decided under another
+        // is refused **here, before it is admitted into the history or claims a seat** (#673's review, finding 2).
+        let outcome = match outcome {
+            Ok(Some(d)) => match envelope.mandate.as_ref().and_then(|b| b.bound_policy_revision.as_deref()) {
+                Some(bound) if bound != d.policy_revision => Err(ae::PreflightRefusal::NotEstablished(
+                    ae::Decision::indeterminate(
+                        crate::mandate::MandateRefusal::BoundToOtherPolicy { bound: bound.to_string(), decided: d.policy_revision.clone() }.to_string(),
+                        d.policy_revision.clone(),
+                    )
+                    .checking(["grant bound to its policy revision"]),
+                )),
+                _ => Ok(Some(d)),
+            },
+            other => other,
+        };
         let (Ok(Some(_)), Some(index), Some(version)) = (&outcome, history_index, version) else {
             break (outcome, history, false);
         };
@@ -1077,21 +1092,6 @@ impl Settling {
                 outcome = Err(refusal);
             }
         }
-        // Adopter-surface X3: a grant binds the policy revision it was approved under. The decision's revision is
-        // known only now; a permit decided under another revision is refused — the approval predates a policy change.
-        let outcome = match outcome {
-            Ok(Some(d)) => match envelope.mandate.as_ref().and_then(|b| b.bound_policy_revision.as_deref()) {
-                Some(bound) if bound != d.policy_revision => Err(ae::PreflightRefusal::NotEstablished(
-                    ae::Decision::indeterminate(
-                        crate::mandate::MandateRefusal::BoundToOtherPolicy { bound: bound.to_string(), decided: d.policy_revision.clone() }.to_string(),
-                        d.policy_revision.clone(),
-                    )
-                    .checking(["grant bound to its policy revision"]),
-                )),
-                _ => Ok(Some(d)),
-            },
-            other => other,
-        };
         let (decision, execution) = match &outcome {
             Ok(Some(d)) => (d.clone(), ae::Execution::Attempted),
             // No evaluator — unreachable here, one was fetched above. Nothing decided, nothing to
@@ -1365,7 +1365,7 @@ pub(crate) const OWNED_KV_PREFIXES: &[&str] = &[
     "sys/", "consensus/", "grp/", "audit/", "cap/", "req/", "cap-group/", "gcap/", "mailbox/", "tools/",
     "agent/", "svc/", "log/", "clog/", "lock/", "prompts/", "skills/", "installable/", "comp/", "wiki/", "tuple/",
     "facts/", "mandate/", "knowledge/", "rights/", "cn/",
-"grant/",  // adopter-surface X3: grant requests and answers (POST /gateway/grants/{agent}/{request})
+    "grant/",  // adopter-surface X3: grant requests and answers (POST /gateway/grants/{agent}/{request})
 ];
 
 /// Namespaces the table assigns to an application writing through the gateway's KV routes — the LangGraph

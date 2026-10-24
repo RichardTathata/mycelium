@@ -1270,7 +1270,8 @@ impl AeEvidence {
             correlation: envelope.correlation.clone(),
             parent: envelope.parent.clone(),
             node: Some(envelope.via.to_string()),
-            mandate_digest: envelope.mandate.as_ref().filter(|b| b.state == MandateState::Established).and_then(|b| b.digest.clone()),
+            // Established or refused: a refused grant's hash is what a denial is reconstructed from.
+            mandate_digest: envelope.mandate.as_ref().and_then(|b| b.digest.clone()),
         }
     }
 
@@ -1910,6 +1911,8 @@ impl Rule {
         self.requiring_mandate(format!("{}*", crate::mandate::grant::GRANT_SCOPE_PREFIX))
     }
 
+    /// The rule applies only under a mandate of `scope`. A trailing `*` names a scope family (`grant:*`, every
+    /// grant, each in its own scope — adopter-surface X3); without it the scope matches exactly.
     pub fn requiring_mandate(mut self, scope: impl Into<String>) -> Self {
         self.requires_mandate = Some(scope.into());
         self

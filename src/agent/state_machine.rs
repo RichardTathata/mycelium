@@ -490,10 +490,23 @@ impl AgentStateMachine {
             self.transition(ExecutionState::Invoking { tool: tool.to_string() }).await?;
             return Ok(None);
         }
-        let presented = self.await_grant(tool, arguments).await?;
+        // The agent's own guards first — a tool that is denied, over budget or out of turn asks no one (#673's review,
+        // finding 5); the commit re-validates them against the state as it then is.
+        let to = ExecutionState::Invoking { tool: tool.to_string() };
+        let snapshot = self.current.lock().clone();
+        self.check_sync_guards(&snapshot, &to)?;
+        let (presented, request) = self.await_grant(tool, arguments).await?;
+        // A tool in both modes passes both: the grant, then the veto window (#673's review).
+        if self.policy.read().require_approval_for.contains(&tool.to_string()) {
+            self.await_approval(tool).await?;
+        }
         // The guards that do not concern the grant run as for any invocation; the grant gate above is passed by
         // taking the grant-required path, so the plain transition's refusal is bypassed here deliberately.
         self.commit_invoking_granted(tool).await?;
+        // One grant, one commit at this agent: the request is marked consumed, so the same tool and arguments ask
+        // again rather than re-reading this grant (#673's review, finding 3). At the doors a grant is not yet
+        // single-use — stated on the feature page.
+        self.consume_grant(&request);
         Ok(Some(presented))
     }
 
@@ -530,14 +543,14 @@ impl AgentStateMachine {
     /// Without the gateway and TLS features there is no authority to verify a grant and no identity to prove
     /// possession: the grant mode stays default-deny and refuses at once, by name.
     #[cfg(not(all(feature = "gateway", feature = "tls")))]
-    async fn await_grant(&self, tool: &str, _arguments: &serde_json::Value) -> Result<serde_json::Value, PolicyViolation> {
+    async fn await_grant(&self, tool: &str, _arguments: &serde_json::Value) -> Result<(serde_json::Value, String), PolicyViolation> {
         Err(PolicyViolation::GrantNotPresented(format!("{tool}: a grant needs the `gateway` and `tls` features (an execution authority and this node's identity); this build has neither")))
     }
 
     /// Write, wait, verify (see [`transition_invoking`](Self::transition_invoking)). Returns the presented grant as
     /// the JSON `_meta.mandate` carries.
     #[cfg(all(feature = "gateway", feature = "tls"))]
-    async fn await_grant(&self, tool: &str, arguments: &serde_json::Value) -> Result<serde_json::Value, PolicyViolation> {
+    async fn await_grant(&self, tool: &str, arguments: &serde_json::Value) -> Result<(serde_json::Value, String), PolicyViolation> {
         use super::gateway_authority::{arguments_digest, possession_request, PresentedMandate};
         use crate::mandate::grant::{possession_message, SignedMandateGrant};
         let window_ms = self.policy.read().grant_window.unwrap_or(Duration::from_secs(30)).as_millis() as u64;
@@ -546,11 +559,14 @@ impl AgentStateMachine {
         let digest_hex = super::action_evaluator::hex32(&digest);
         let now_ms = self.ctx.hlc.decision_now_ms();
         let prefix = format!("grant/{agent}/");
-        // A pending request for the same tool and digest is waited on, not asked again (a restart does not ask twice).
-        let existing = crate::store::scan_kv_prefix(&self.ctx.kv_state, &prefix).into_iter().find_map(|(key, bytes)| {
+        // A pending request for the same tool and digest is waited on, not asked again (a restart does not ask twice)
+        // — unless its grant was already consumed here, in which case this is a new call and a new request.
+        let entries = crate::store::scan_kv_prefix(&self.ctx.kv_state, &prefix);
+        let consumed: std::collections::HashSet<String> = entries.iter().filter_map(|(k, _)| k.strip_suffix("/consumed").and_then(|k| k.strip_prefix(prefix.as_str())).map(str::to_string)).collect();
+        let existing = entries.iter().find_map(|(key, bytes)| {
             let rest = key.strip_prefix(prefix.as_str())?;
-            if rest.contains('/') { return None; }
-            let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+            if rest.contains('/') || consumed.contains(rest) { return None; }
+            let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
             (v["tool"] == tool && v["arguments_digest"] == digest_hex.as_str() && v["expires_at_ms"].as_u64()? > now_ms).then(|| rest.to_string())
         });
         let (request, expires_at_ms) = match existing {
@@ -578,7 +594,10 @@ impl AgentStateMachine {
                 });
                 self.write_kv(&self.grant_key(&request), record.to_string().into_bytes());
                 #[cfg(feature = "metrics")]
-                metrics::counter!("mycelium_grants_requested_total").increment(1);
+                {
+                    metrics::counter!("mycelium_grants_requested_total").increment(1);
+                    metrics::gauge!("mycelium_grants_pending").set(pending_grants(&self.ctx, now_ms) as f64);
+                }
                 (request, expires_at_ms)
             }
         };
@@ -611,7 +630,9 @@ impl AgentStateMachine {
                     Some(super::action_evaluator::MandateState::Established) => {
                         #[cfg(feature = "metrics")]
                         metrics::counter!("mycelium_grants_verified_total").increment(1);
-                        serde_json::to_value(&presented).map_err(|e| PolicyViolation::GrantRefused(format!("{tool}: the grant does not serialise: {e}")))
+                        serde_json::to_value(&presented)
+                            .map(|v| (v, request.clone()))
+                            .map_err(|e| PolicyViolation::GrantRefused(format!("{tool}: the grant does not serialise: {e}")))
                     }
                     Some(super::action_evaluator::MandateState::Refused(r)) => Err(PolicyViolation::GrantRefused(format!("{tool}: {r}"))),
                     Some(super::action_evaluator::MandateState::Unknown(why)) => Err(PolicyViolation::GrantRefused(format!("{tool}: not established — {why}"))),
@@ -633,8 +654,18 @@ impl AgentStateMachine {
         }
     }
 
+    /// The grant's request is consumed by the commit it admitted (X3): a marker beside it, so a later call with the
+    /// same tool and arguments asks again.
     #[cfg(all(feature = "gateway", feature = "tls"))]
-    /// One KV write from the state machine, gossiped (the shape `write_kv_and_signal` uses for the state key).
+    fn consume_grant(&self, request: &str) {
+        self.write_kv(&format!("{}/consumed", self.grant_key(request)), b"1".to_vec());
+    }
+    #[cfg(not(all(feature = "gateway", feature = "tls")))]
+    fn consume_grant(&self, _request: &str) {}
+
+    /// One KV write from the state machine: applied, **appended to the WAL** when the node persists (the request must
+    /// survive this node's restart — #673's review, finding 4), then gossiped.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
     fn write_kv(&self, key: &str, value: Vec<u8>) {
         let update = make_gossip_update(
             &self.ctx.node_id,
@@ -644,7 +675,10 @@ impl AgentStateMachine {
             false,
             &self.ctx.hlc,
         );
-        apply_and_notify(&self.ctx.kv_state, &update);
+        apply_and_notify(&self.ctx.kv_state, &update); // apply, then persist (persistence.rs invariant 1)
+        if let Some(wal) = self.ctx.wal.get() {
+            wal.append_try(crate::framing::sync_entry_from(&update));
+        }
         dispatch_gossip_try_send(
             &self.ctx.gossip_txs,
             crate::framing::local_kv_wire_msg(&self.ctx, update),
@@ -788,6 +822,20 @@ impl Drop for AgentStateMachine {
             h.abort();
         }
     }
+}
+
+#[cfg(all(feature = "gateway", feature = "tls"))]
+/// Open grant requests at this node — the gauge `mycelium_grants_pending` (X3).
+#[cfg(all(feature = "gateway", feature = "tls", feature = "metrics"))]
+pub(crate) fn pending_grants(ctx: &TaskCtx, now_ms: u64) -> usize {
+    let entries = crate::store::scan_kv_prefix(&ctx.kv_state, "grant/");
+    let answered: std::collections::HashSet<String> = entries.iter().filter_map(|(k, _)| {
+        k.strip_suffix("/issued").or_else(|| k.strip_suffix("/refused")).map(str::to_string)
+    }).collect();
+    entries.iter().filter(|(k, v)| {
+        k.matches('/').count() == 2 && !answered.contains(k.as_ref())
+            && serde_json::from_slice::<serde_json::Value>(v).ok().and_then(|r| r["expires_at_ms"].as_u64()).is_some_and(|e| e > now_ms)
+    }).count()
 }
 
 #[cfg(all(feature = "gateway", feature = "tls"))]

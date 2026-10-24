@@ -64,7 +64,7 @@ guarantee**, and an honest policy must say which clause compiles to which. Six b
 
 4. **`AgentPolicy` already exists — but at transition-strength and self-imposed only.** Layer-V
    `AgentPolicy` (`state_machine.rs`, **always compiled**) already carries `allowed_tools` /
-   `denied_tools` / `tool_budget` / `max_turns` / `required_capabilities` / `require_approval_for` /
+   `denied_tools` / `tool_budget` / `max_turns` / `required_capabilities` / `require_approval_for` / `require_grant_for` (1.1.0) /
    `state_timeouts`, atomically enforced. **Two caveats a guardrail must own:** (a) it guards the state
    **transition** (`→ Invoking{tool}`), *not the effect* — a side-effect not preceded by a policed
    transition bypasses it (convention-strength); (b) it is **self-imposed** — `set_policy` is local,

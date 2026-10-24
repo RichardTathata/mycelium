@@ -53,8 +53,10 @@ async fn node(http_port: u16) -> (Arc<GossipAgent>, std::path::PathBuf, Arc<Atom
             .map_action("grant.issue", "*")
             // The agent (this node) may call the tool only under a grant.
             .allow(Rule::new(&node_principal, "tools/call", &tool).requiring_grant())
-            // Only the supervisor may grant it.
-            .allow(Rule::new(SUPERVISOR, "grant.issue", &tool)),
+            // Only the supervisor may grant — or refuse — it.
+            .map_action("grant.refuse", "*")
+            .allow(Rule::new(SUPERVISOR, "grant.issue", &tool))
+            .allow(Rule::new(SUPERVISOR, "grant.refuse", &tool)),
     ));
     let mut entitlements = EntitlementTable::new();
     entitlements.entitle_grants(PrincipalId::new(&node_principal).unwrap());
@@ -203,9 +205,11 @@ async fn an_issued_grant_lets_the_call_run_and_binds_it_to_its_arguments() {
     a.shutdown().await;
 }
 
-/// **Issuing is an action the evaluator decides; the namespace is route-owned.** A bystander holding `grant:issue`
-/// is refused by policy (403, `action_denied`) and nothing is issued; a refusal by the supervisor reaches the agent
-/// as `GrantRefused` with the reason; the raw KV route refuses a write under `grant/` (403 `protected_key`).
+/// **Issuing — and refusing — is an action the evaluator decides; the namespace is route-owned.** A bystander
+/// holding `grant:issue` is refused by policy (403, `authority_not_established`: no allowance names them) for issuing
+/// and for refusing, and nothing is written; a refusal by the supervisor reaches the agent as `GrantRefused` with the
+/// reason; the raw KV route refuses a write under `grant/` (403 `protected_key`); an agent on another node is
+/// refused `not_this_node` until the second PR carries grants across nodes.
 #[tokio::test]
 async fn issuing_is_an_action_the_evaluator_decides_and_the_namespace_is_route_owned() {
     let http_port = alloc_port();
@@ -226,6 +230,11 @@ async fn issuing_is_an_action_the_evaluator_decides_and_the_namespace_is_route_o
     // approver the policy never named — never a permit.
     assert_eq!(body["error"], "authority_not_established", "{body}");
     assert!(mycelium_core::ops::kv_get(&a.task_ctx, &format!("grant/{agent_principal}/{request}/issued")).is_none(), "nothing issued");
+    let (status, body) = supervisor(http_port, "bob-secret", reqwest::Method::POST, &format!("/gateway/grants/{agent_principal}/{request}"), Some(serde_json::json!({"decision": "refuse", "reason": "no"}))).await;
+    assert_eq!(status, 403, "a bystander cannot refuse either: {body}");
+    assert!(mycelium_core::ops::kv_get(&a.task_ctx, &format!("grant/{agent_principal}/{request}/refused")).is_none(), "nothing refused");
+    let (status, body) = supervisor(http_port, "alice-secret", reqwest::Method::POST, &format!("/gateway/grants/node:127.0.0.1:1/{request}"), Some(serde_json::json!({"decision": "issue"}))).await;
+    assert_eq!((status, body["error"].as_str()), (409, Some("not_this_node")), "{body}");
     // The raw KV route cannot forge an answer.
     let (status, body) = supervisor(http_port, "bob-secret", reqwest::Method::POST, "/gateway/kv", Some(serde_json::json!({"key": format!("grant/{agent_principal}/{request}/issued"), "value_b64": ""}))).await;
     assert_eq!(status, 403, "{body}");
@@ -238,4 +247,125 @@ async fn issuing_is_an_action_the_evaluator_decides_and_the_namespace_is_route_o
     assert_eq!(sm.state(), ExecutionState::Planning);
     assert_eq!(ran.load(Ordering::SeqCst), 0);
     a.shutdown().await;
+}
+
+/// An evaluator that decides `tools/call` under another policy revision than the one it issues grants under — the
+/// shape of a policy change between approval and call.
+struct TwoRevisions(ReferenceEvaluator);
+
+impl crate::ActionEvaluator for TwoRevisions {
+    fn evaluate(&self, envelope: &crate::ActionEnvelope) -> crate::Decision {
+        let mut d = self.0.evaluate(envelope);
+        if envelope.operation == "tools/call" {
+            d.policy_revision = "rev-call".into();
+        }
+        d
+    }
+    fn security_relevant_arguments(&self) -> Vec<String> {
+        self.0.security_relevant_arguments()
+    }
+    fn mapping(&self, operation: &str, resource: &str) -> crate::ActionMapping {
+        self.0.mapping(operation, resource)
+    }
+}
+
+/// **A grant is bound to the policy revision it was approved under, and consumed by the commit it admitted.** The
+/// evaluator issues under `rev-grant` and decides the call under `rev-call`: the agent's own verification does not
+/// read the policy, so the transition commits; the provider's preflight refuses the call `BoundToOtherPolicy` —
+/// **before** it is admitted into the actor's history — and the tool does not run. Then a second `transition_invoking`
+/// for the same tool and arguments finds the first request consumed and asks again rather than re-reading its grant.
+#[tokio::test]
+async fn a_grant_is_bound_to_its_policy_revision_and_consumed_by_its_commit() {
+    let http_port = alloc_port();
+    let gossip_port = alloc_port();
+    let id = NodeId::new("127.0.0.1", gossip_port).unwrap();
+    let dir = std::env::temp_dir().join(format!("x3-grant-rev-{gossip_port}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut cfg = GossipConfig::default();
+    cfg.bind_port = gossip_port;
+    cfg.http_port = Some(http_port);
+    cfg.tls = Some(TlsConfig { auto_cert_dir: dir.join("tls"), ..Default::default() });
+    cfg.gateway_identity_issuer = Some("gw".into());
+    cfg.gateway_named_tokens = vec![GatewayNamedToken { name: "alice".into(), token: "alice-secret".into(), scopes: vec!["grant:read".into(), "grant:issue".into()] }];
+    let a = Arc::new(GossipAgent::new(id.clone(), cfg));
+    let tool = format!("tool:deploy@{id}");
+    let node_principal = crate::agent::gateway_caller::node_principal(&id);
+    let journal = dir.join("evidence.log");
+    a.with_evidence_journal(EvidenceJournal::open(journal.clone(), EvidenceProfile::Strict).unwrap());
+    a.with_action_evaluator(Arc::new(TwoRevisions(
+        ReferenceEvaluator::new("rev-grant")
+            .with_catalogue("cat-grant", "1")
+            .map_action("tools/call", "*")
+            .map_action("grant.issue", "*")
+            .allow(Rule::new(&node_principal, "tools/call", &tool).requiring_grant())
+            .allow(Rule::new(SUPERVISOR, "grant.issue", &tool)),
+    )));
+    let mut entitlements = EntitlementTable::new();
+    entitlements.entitle_grants(PrincipalId::new(&node_principal).unwrap());
+    let gate = ExecutionGate::strict(ResourceAuthority::new("unused", 1), ResourceTier::Serialised, ClockModel { skew_ms: 500 },
+        FreshnessPolicy { freshness_ms: 120_000, interval_ms: 30_000, delivery_ms: 10_000 }).unwrap();
+    a.with_execution_authority(Arc::new(ExecutionAuthority::new(gate, GrantVerifier::new(entitlements), TrustedExternalIssuers::new())));
+    a.with_provider_enforcement();
+    a.start().await.unwrap();
+    let ran = Arc::new(AtomicUsize::new(0));
+    let ran2 = Arc::clone(&ran);
+    let handle = a.mcp().register_mcp_tool("deploy", serde_json::json!({"type": "object"}), move |_| {
+        let ran = Arc::clone(&ran2);
+        async move { ran.fetch_add(1, Ordering::SeqCst); Ok(serde_json::json!("deployed")) }
+    });
+    std::mem::forget(handle);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let sm = a.agent_state_machine(policy(10_000));
+    sm.transition(ExecutionState::Planning).await.unwrap();
+    let args = serde_json::json!({"env": "prod"});
+    let agent_principal = node_principal.clone();
+    let (sm2, args2) = (Arc::clone(&sm), args.clone());
+    let waiting = tokio::spawn(async move { sm2.transition_invoking("deploy", &args2).await });
+    let first_request = issue_pending(Arc::clone(&a), http_port, agent_principal.clone()).await;
+    let mandate_json = waiting.await.unwrap().expect("verified at the agent").expect("a grant");
+    let presented: crate::agent::gateway_authority::PresentedMandate = serde_json::from_value(mandate_json.clone()).unwrap();
+    assert_eq!(presented.grant.mandate.grant_binding().unwrap().policy_revision.as_deref(), Some("rev-grant"));
+    // The call: the provider decides under rev-call — refused by name, before admission, and the tool does not run.
+    let resource = format!("tool:deploy@{id}");
+    let payload = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "deploy", "arguments": args}}).to_string();
+    let reply = a.service().rpc_call_with_mandate(id.clone(), "mcp.invoke", payload.into_bytes(), &mandate_json, &resource, Duration::from_secs(5)).await.unwrap();
+    let reply: serde_json::Value = serde_json::from_slice(&reply).unwrap();
+    assert!(reply["error"]["message"].as_str().unwrap_or("").contains("bound to policy revision \"rev-grant\""), "{reply}");
+    assert_eq!(ran.load(Ordering::SeqCst), 0, "the tool did not run");
+    assert!(until(|| records(&journal).iter().any(|r| r.enforcement_point == "provider"), Duration::from_secs(5)).await);
+    let provider: Vec<_> = records(&journal).into_iter().filter(|r| r.enforcement_point == "provider").collect();
+    assert!(provider.iter().all(|r| r.decision != crate::agent::action_evaluator::DecisionKind::Permit), "no permit was recorded for a call bound to another revision: {provider:?}");
+    assert!(provider.iter().any(|r| r.mandate_digest.is_some()), "the refused grant's hash is on its record");
+    // Consumed: the same tool and arguments ask again — a second request, not the first grant re-read.
+    assert!(mycelium_core::ops::kv_get(&a.task_ctx, &format!("grant/{agent_principal}/{first_request}/consumed")).is_some(), "the first request is marked consumed");
+    sm.transition(ExecutionState::Reflecting).await.unwrap();
+    sm.transition(ExecutionState::Planning).await.unwrap();
+    let (sm3, args3) = (Arc::clone(&sm), args.clone());
+    let waiting = tokio::spawn(async move { sm3.transition_invoking("deploy", &args3).await });
+    let second_request = issue_pending(Arc::clone(&a), http_port, agent_principal.clone()).await;
+    assert_ne!(second_request, first_request, "a new request, not the consumed one");
+    waiting.await.unwrap().expect("the second grant verified").expect("a grant");
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Wait for a fresh (unanswered, unconsumed) request under the agent, issue it as the supervisor, return its id.
+async fn issue_pending(a: Arc<GossipAgent>, http_port: u16, agent_principal: String) -> String {
+    let prefix = format!("grant/{agent_principal}/");
+    let fresh = |a: &GossipAgent| -> Option<String> {
+        let entries = crate::store::scan_kv_prefix(&a.task_ctx.kv_state, &prefix);
+        entries.iter().find_map(|(k, _)| {
+            let rest = k.strip_prefix(prefix.as_str())?;
+            if rest.contains('/') { return None; }
+            let answered = entries.iter().any(|(s, _)| s.as_ref() == format!("{k}/issued") || s.as_ref() == format!("{k}/consumed") || s.as_ref() == format!("{k}/refused"));
+            (!answered).then(|| rest.to_string())
+        })
+    };
+    assert!(until(|| fresh(&a).is_some(), Duration::from_secs(5)).await, "a fresh request is written");
+    let request = fresh(&a).unwrap();
+    let (status, body) = supervisor(http_port, "alice-secret", reqwest::Method::POST, &format!("/gateway/grants/{agent_principal}/{request}"), Some(serde_json::json!({"decision": "issue"}))).await;
+    assert_eq!(status, 200, "{body}");
+    request
 }

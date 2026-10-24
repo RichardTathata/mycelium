@@ -45,9 +45,17 @@ fn pending(ctx: &TaskCtx, now_ms: u64) -> Vec<serde_json::Value> {
 pub(super) async fn gw_grants_pending(State(ctx): State<Arc<HttpCtx>>) -> impl IntoResponse {
     let now_ms = ctx.agent_ctx.hlc.decision_now_ms();
     let rows = pending(&ctx.agent_ctx, now_ms);
-    #[cfg(feature = "metrics")]
-    metrics::gauge!("mycelium_grants_pending").set(rows.len() as f64);
+    set_pending_gauge(&ctx.agent_ctx, now_ms);
     Json(json!({ "ok": true, "pending": rows, "now_ms": now_ms }))
+}
+
+/// The gauge moves when a request is written (the state machine) and when one is answered (here), not only when
+/// someone polls (#673's review, finding 9).
+fn set_pending_gauge(ctx: &TaskCtx, now_ms: u64) {
+    #[cfg(feature = "metrics")]
+    metrics::gauge!("mycelium_grants_pending").set(super::super::state_machine::pending_grants(ctx, now_ms) as f64);
+    #[cfg(not(feature = "metrics"))]
+    let _ = (ctx, now_ms);
 }
 
 #[derive(serde::Deserialize)]
@@ -74,6 +82,11 @@ pub(super) async fn gw_grant_decide(
     if agent.contains('/') || request.contains('/') || agent.is_empty() || request.is_empty() {
         return refused(StatusCode::BAD_REQUEST, "bad_request", "agent and request are each one key segment");
     }
+    // Until the second PR carries a grant and its checkpoint to another node's authority, a grant is issued only for an
+    // agent on this node: a grant signed here is one this node's verifier is entitled to, and no other's is.
+    if agent != gateway_caller::node_principal(&ctx.agent_ctx.node_id) {
+        return refused(StatusCode::CONFLICT, "not_this_node", format!("{agent} is not this node's agent; a grant is issued at the node the agent runs on (the second PR carries grants across nodes)"));
+    }
     let key = format!("grant/{agent}/{request}");
     let Some(bytes) = mycelium_core::ops::kv_get(&ctx.agent_ctx, &key) else {
         return refused(StatusCode::NOT_FOUND, "unknown_request", format!("no grant request at {key}"));
@@ -95,30 +108,38 @@ pub(super) async fn gw_grant_decide(
         return refused(StatusCode::CONFLICT, "unreadable_request", format!("{key} lacks tool, arguments_digest or resource"));
     };
 
-    match body.decision.as_str() {
-        "refuse" => {
+    // Issuing — and refusing, which stops an agent's work just as surely — is an action: the evaluator decides with
+    // the issuer as the actor (`grant.issue` / `grant.refuse` on the request's resource). The arguments the policy
+    // may need are the request's own facts.
+    let operation = match body.decision.as_str() {
+        "issue" => "grant.issue",
+        "refuse" => "grant.refuse",
+        other => return refused(StatusCode::BAD_REQUEST, "bad_request", format!("decision must be \"issue\" or \"refuse\", not {other:?}")),
+    };
+    let arguments = json!({ "tool": tool, "agent": agent, "arguments_digest": digest, "request": request });
+    let preflight = ae_preflight(&ctx.agent_ctx, caller.as_ref(), operation, resource, &arguments, &json!({}), ENFORCEMENT_POINT_GRANT_ISSUE).await;
+    let policy_revision: Option<String> = match &preflight {
+        Preflight::Refuse(r) => {
+            return (StatusCode::FORBIDDEN, Json(json!({ "ok": false, "error": r.reason(), "detail": r.to_string(), "data": r.error_data() }))).into_response();
+        }
+        Preflight::Proceed { evidence, .. } => Some(evidence.policy_revision.clone()),
+        // No evaluator: nothing decides who may grant or refuse, so no one may — a grant is authority, and authority
+        // that no policy established is not granted by holding a scope.
+        Preflight::Inert => {
+            return refused(StatusCode::FORBIDDEN, "no_evaluator", "no action evaluator is attached: nothing can decide who may grant, so no answer is written");
+        }
+    };
+    match operation {
+        "grant.refuse" => {
             let record = json!({ "schema": "mycelium.grant-refusal/1", "request": request, "issuer": issuer, "reason": body.reason.unwrap_or_default(), "at_ms": now_ms });
-            let receipt = write_record(&ctx.agent_ctx, format!("{key}/refused"), record.to_string().into_bytes()).await;
+            let (ok, receipt) = write_record(&ctx.agent_ctx, format!("{key}/refused"), record.to_string().into_bytes()).await;
+            ae_record_execution(&ctx.agent_ctx, &preflight, if ok { super::action_evaluator::Execution::Completed } else { super::action_evaluator::Execution::Failed }).await;
             #[cfg(feature = "metrics")]
             metrics::counter!("mycelium_grants_refused_total").increment(1);
+            set_pending_gauge(&ctx.agent_ctx, now_ms);
             receipt
         }
-        "issue" => {
-            // Issuing is an action: the evaluator decides with the issuer as the actor. The arguments the policy may
-            // need are the request's own facts.
-            let arguments = json!({ "tool": tool, "agent": agent, "arguments_digest": digest, "request": request });
-            let preflight = ae_preflight(&ctx.agent_ctx, caller.as_ref(), "grant.issue", resource, &arguments, &json!({}), ENFORCEMENT_POINT_GRANT_ISSUE).await;
-            let policy_revision: Option<String> = match &preflight {
-                Preflight::Refuse(r) => {
-                    return (StatusCode::FORBIDDEN, Json(json!({ "ok": false, "error": r.reason(), "detail": r.to_string(), "data": r.error_data() }))).into_response();
-                }
-                Preflight::Proceed { evidence, .. } => Some(evidence.policy_revision.clone()),
-                // No evaluator: nothing decides who may grant, so no one may — a grant is authority, and authority
-                // that no policy established is not granted by holding a scope.
-                Preflight::Inert => {
-                    return refused(StatusCode::FORBIDDEN, "no_evaluator", "no action evaluator is attached: nothing can decide who may grant, so no grant is issued");
-                }
-            };
+        _ => {
             let Some(tls) = ctx.agent_ctx.tls.get() else {
                 return refused(StatusCode::FORBIDDEN, "no_identity", "issuing a grant needs this node's identity ([tls]) to sign it");
             };
@@ -165,18 +186,19 @@ pub(super) async fn gw_grant_decide(
                 Ok(b) => b,
                 Err(e) => return refused(StatusCode::INTERNAL_SERVER_ERROR, "serialise", e.to_string()),
             };
-            let receipt = write_record(&ctx.agent_ctx, format!("{key}/issued"), bytes).await;
-            ae_record_execution(&ctx.agent_ctx, &preflight, super::action_evaluator::Execution::Completed).await;
+            let (ok, receipt) = write_record(&ctx.agent_ctx, format!("{key}/issued"), bytes).await;
+            // The execution record says what the write did (#673's review, finding 8).
+            ae_record_execution(&ctx.agent_ctx, &preflight, if ok { super::action_evaluator::Execution::Completed } else { super::action_evaluator::Execution::Failed }).await;
             #[cfg(feature = "metrics")]
             metrics::counter!("mycelium_grants_issued_total").increment(1);
+            set_pending_gauge(&ctx.agent_ctx, now_ms);
             receipt
         }
-        other => refused(StatusCode::BAD_REQUEST, "bad_request", format!("decision must be \"issue\" or \"refuse\", not {other:?}")),
     }
 }
 
-/// One owned-namespace write with its receipt — the shape `POST /gateway/kv` answers with.
-async fn write_record(tc: &Arc<TaskCtx>, key: String, value: Vec<u8>) -> axum::response::Response {
+/// One owned-namespace write with its receipt — the shape `POST /gateway/kv` answers with — and whether it was made.
+async fn write_record(tc: &Arc<TaskCtx>, key: String, value: Vec<u8>) -> (bool, axum::response::Response) {
     let op = mycelium_core::receipt::OperationId::generate(&tc.node_id);
     let attempt = mycelium_core::receipt::AttemptId::fresh(&op);
     match mycelium_core::ops::kv_set_with_receipt(tc, op, attempt, Arc::from(key.as_str()), Bytes::from(value), None).await {
@@ -185,9 +207,9 @@ async fn write_record(tc: &Arc<TaskCtx>, key: String, value: Vec<u8>) -> axum::r
             if let Some(reason) = r.local_durability.failure_reason() {
                 body["local_durability_error"] = json!(reason);
             }
-            Json(body).into_response()
+            (true, Json(body).into_response())
         }
-        Err(e) => refused(StatusCode::INTERNAL_SERVER_ERROR, "write_failed", e.to_string()),
+        Err(e) => (false, refused(StatusCode::INTERNAL_SERVER_ERROR, "write_failed", e.to_string())),
     }
 }
 

@@ -24,10 +24,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The supervisor's door: `GET /gateway/grants/pending` (`grant:read`), `POST /gateway/grants/{agent}/{request}`
   (`grant:issue`) — issuing is an action the evaluator decides with the issuer as the actor (`grant.issue`), a
   gateway with no evaluator issues nothing, and the answer's write returns its receipt's rung. `Rule::requiring_grant()`.
-  `mycelium-guardrails` 1.1.0 labels the grant clause and says the veto clause is *veto, not grant*. **Not built in
-  this PR, stated on the page:** the SDK verbs and an SSE stream, the restart re-wait, revocation across nodes, the
-  A2A `input-required` state, the data-class policy over the rendering, the bypass-matrix row and the drain bound
-  (`deprecations.md` §59).
+  `mycelium-guardrails` 1.1.0 labels the grant clause and says the veto clause is *veto, not grant*. A grant's
+  standing is its issuer's checkpoint, not the gate's freshness (`RevocationView::grant_standing`); the request a
+  grant answered is consumed by the commit it admitted; refusing is evaluated like issuing (`grant.refuse`); a grant
+  is issued only for an agent on the issuing node (`409 not_this_node`). **Not built in this PR, stated on the page:**
+  single use at the doors, the SDK verbs and an SSE stream, the restart re-wait, grants across nodes, a revocation
+  route, the A2A `input-required` state, the data-class policy over the rendering, the bypass-matrix row and the drain
+  bound (`deprecations.md` §59).
 
 - **One id, and one parent, through the records** (`docs/plans/adopter-surface.md` X4, first PR; `docs/features/causal-records.md`):
   a request's `params._meta.correlation` (one key segment, the run's id) and `params._meta.parent` (the content hash

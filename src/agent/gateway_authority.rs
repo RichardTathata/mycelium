@@ -374,8 +374,12 @@ impl ExecutionAuthority {
             binding: Some(MandateBinding::unknown(m.holder.clone(), m.term.clone(), m.scope.clone(), m.epoch, why)),
             valid_until_ms: Some(m.valid_until_ms),
         };
+        let digest_hex = hex32(&m.digest());
         let refused = |r: MandateRefusal| Assessment {
-            binding: Some(MandateBinding::refused(m.holder.clone(), m.term.clone(), m.scope.clone(), m.epoch, r)),
+            binding: Some(
+                MandateBinding::refused(m.holder.clone(), m.term.clone(), m.scope.clone(), m.epoch, r)
+                    .with_facts(Some(digest_hex.clone()), m.grant_binding().and_then(|b| b.policy_revision)),
+            ),
             valid_until_ms: Some(m.valid_until_ms),
         };
 
@@ -410,7 +414,6 @@ impl ExecutionAuthority {
             other => return unknown(format!("grant not established: {other:?}")),
         }
 
-        let digest_hex = hex32(&m.digest());
         // Adopter-surface X3: a grant is one appointment for one call. Its scope is its own, so the resource gate's
         // epoch rule does not apply to it; what does: the binding its issuer signed (the arguments digest, the policy
         // revision — the latter checked by the preflight once the decision's revision is known), the window, and the
@@ -419,7 +422,9 @@ impl ExecutionAuthority {
             if !m.permits(&mandate_operation(operation, resource)) {
                 return refused(MandateRefusal::NotEnumerated { operation: mandate_operation(operation, resource) });
             }
-            return match st.revocations.standing(&m.established_by, &m.scope, &m.term, &st.gate.freshness(), st.gate.clock(), now_ms) {
+            // A grant's standing is its issuer's checkpoint for the grant's scope, not the gate's freshness: the
+            // grant's own window bounds its life (#673's review, finding 1).
+            return match st.revocations.grant_standing(&m.established_by, &m.scope, &m.term) {
                 RevocationStanding::NotRevoked => Assessment {
                     binding: Some(
                         MandateBinding::established(m.holder.clone(), m.term.clone(), m.scope.clone(), m.epoch)
@@ -428,7 +433,7 @@ impl ExecutionAuthority {
                     valid_until_ms: Some(m.valid_until_ms),
                 },
                 RevocationStanding::Revoked => unknown("the grant is revoked".into()),
-                RevocationStanding::Unknown => unknown("revocation standing unknown: no fresh checkpoint".into()),
+                RevocationStanding::Unknown => unknown("the grant's issuer's checkpoint has not reached this verifier".into()),
             };
         }
 

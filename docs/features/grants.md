@@ -53,8 +53,9 @@ has no row for this feature. The tests: in [`src/mandate/grant.rs`](../../src/ma
 `a_grant_is_bound_to_its_arguments_and_expires_on_the_wall_clock`; in
 [`src/agent/http/grant_tests.rs`](../../src/agent/http/grant_tests.rs), the loop through the doors —
 `silence_refuses_and_a_plain_transition_to_a_grant_tool_is_refused`,
-`an_issued_grant_lets_the_call_run_and_binds_it_to_its_arguments` and
-`issuing_is_an_action_the_evaluator_decides_and_the_namespace_is_route_owned`.
+`an_issued_grant_lets_the_call_run_and_binds_it_to_its_arguments`,
+`issuing_is_an_action_the_evaluator_decides_and_the_namespace_is_route_owned` and
+`a_grant_is_bound_to_its_policy_revision_and_consumed_by_its_commit`.
 
 ## What it guarantees, and what it does not
 
@@ -64,24 +65,33 @@ has no row for this feature. The tests: in [`src/mandate/grant.rs`](../../src/ma
   gateway and the provider; a decision under another policy revision is refused (`BoundToOtherPolicy`); a grant past
   its window is out of window on the wall clock, however still the node's HLC stayed.
 - A grant is one appointment in its own scope, so grants never conflict with each other or with the resource
-  authority's appointments. Its revocation standing must be *known* to be established, so the issuing node publishes
-  the grant's first checkpoint (nothing revoked) to its own authority at issue and writes it beside the grant
-  (`…/checkpoint`); it is revoked as any mandate is, by the next checkpoint naming its term, and is then not
-  established at every verifier that has it.
+  authority's appointments. Its standing is its issuer's checkpoint for the grant's scope, not the gate's freshness
+  policy: the issuing node publishes the grant's first checkpoint (nothing revoked) at issue and writes it beside the
+  grant (`…/checkpoint`); a grant whose issuer's checkpoint has not reached a verifier is not established there; it is
+  revoked by the next checkpoint naming its term, and revocation reaches a verifier when that checkpoint does. Between
+  checkpoints a grant stands for its window — that is why the window is short (default 300 s, at most 3 600 s).
+- **One grant, one commit at the agent:** the request a grant answered is marked consumed by the commit it admitted,
+  so the same tool and arguments ask again. **At the doors a grant is not yet single-use:** the gateway and the
+  provider accept the same grant for identical calls until its window ends (the second PR).
+- Refusing is an action the evaluator decides too (`grant.refuse`), recorded like issuing; the record of either says
+  what the write did. A grant is issued only for an agent on the issuing node (`409 not_this_node` otherwise): carrying
+  a grant and its checkpoint to another node's verifier is the second PR's.
+- The agent's own guards (budget, turn, allow and deny lists) run before it asks a supervisor; a tool in both modes
+  passes the grant, then the veto window.
 - The record of the decision carries the grant's hash (`mandate_digest` on the evidence record).
-- The pending request is a KV record under a route-owned namespace (`grant/`): the raw KV routes refuse it, a
-  supervisor on another node sees it by gossip, and an agent that asks again for the same tool and digest while the
-  request stands waits on it rather than asking twice.
+- The pending request is a KV record under a route-owned namespace (`grant/`), appended to the node's WAL where the
+  node persists: the raw KV routes refuse it, a supervisor on another node sees it by gossip, and an agent that asks
+  again for the same tool and digest while the request stands and is unconsumed waits on it rather than asking twice.
 - **Veto, not grant:** `require_approval_for` approves on silence and is labelled so in `strength_report()`; its
   `ApprovalTimedOut` variant was never produced and is deprecated (`deprecations.md` §59).
 - **Not built, by the plan row** ([`adopter-surface.md`](../plans/adopter-surface.md) X3): the SDKs' grant verbs and an
-  SSE stream of new requests; the agent restarted while waiting re-reading its request (the record is durable in a
-  persisted KV; the re-wait after a restart is not shown by a test); revocation reaching the agent's node (a checkpoint
-  is offered to the node that holds the authority; carrying it across nodes is the adopter's today, as for every
-  mandate); the A2A `input-required` state for a task waiting on a grant; the data-class policy over the request's
-  argument rendering (rendered when under 16 KiB, else summarised with its size); the bypass matrix row and the
-  `authority_drain` bound for a revoked grant stopping admitted work; a `prove_denials` reconstruction. An operator
-  UI is the adopter's.
+  SSE stream of new requests; the re-wait after a restart (the record is on the WAL; the test is not written);
+  issuing for, and revoking at, an agent on another node; single use at the doors; a revocation route and its
+  counter; the A2A `input-required` state; the data-class policy over the request's argument rendering (rendered when
+  under 16 KiB, else summarised with its size); the bypass matrix row and the `authority_drain` bound for a revoked
+  grant stopping admitted work; a `prove_denials` reconstruction. An operator UI is the adopter's.
+- Metrics: `mycelium_grants_requested_total`, `_verified_total`, `_expired_total`, `_issued_total`, `_refused_total`
+  and the gauge `mycelium_grants_pending` (moved on every request and answer, not only when polled).
 
 ## Go deeper
 
