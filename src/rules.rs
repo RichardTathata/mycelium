@@ -73,9 +73,9 @@ pub static RULES: &[RuleDescriptor] = &[
         summary: "The one matching rule, shared by the resolver and the offline check: namespace, name, schema id, typed attribute constraints; opacity skips, it does not unmatch.",
     },
     RuleDescriptor {
-        id: "membership.governed", revision: 1, subsystem: "mycelium::membership_governor", responsibilities: &[Response],
+        id: "membership.governed", revision: 2, subsystem: "mycelium::membership_governor", responsibilities: &[Response],
         trigger: "the governor tick",
-        inputs: &[Input { source: "the governed group's roster and floor (`grp/`, `sys/`)", scope: "the group as this node sees it", freshness: "as gossiped; the confidence bound applies" }, Input { source: "ViewConfidence (peers heard, staleness)", scope: "this node", freshness: "computed at the tick" }],
+        inputs: &[Input { source: "the governed group's roster and floor (`grp/`, `sys/`), less the members this node has evicted (its peer table) — revision 2, adopter-surface X6", scope: "the group as this node sees it", freshness: "as gossiped; the confidence bound applies" }, Input { source: "ViewConfidence (peers heard, staleness)", scope: "this node", freshness: "computed at the tick" }],
         outcomes: &[Outcome { kind: Action, reasons: &["join", "leave"] }, Outcome { kind: Deferral, reasons: &["view_not_confident", "settling", "spacing"] }, Outcome { kind: NoAction, reasons: &["hold"] }],
         effects: &["this node joins or leaves the group (`grp/`); the control ledger"],
         guards: &[Guard::Settling, Guard::Cooldown], may_trigger: &["prov.presence_floor"], may_inhibit: &[], depends_on: &["kv.propagation"],

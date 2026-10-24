@@ -1,0 +1,7 @@
+# A worker: eligible for `pool`. A 2 s ttl keeps the evaporation window (3 × ttl) short.
+principal = "worker-b"
+
+[[capability]]
+ns       = "svc"
+name     = "worker"
+ttl_secs = 2

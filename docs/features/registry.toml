@@ -104,6 +104,15 @@ example = "none"
 example_watch = ["declare_watch", "declaration_watch"]
 ids = ["concept:declaration-watch"]
 
+[[feature]]
+name = "Fault classes against a declaration"
+page = "test-faults.md"
+example = "none"
+example_watch = ["test_faults", "fault_classes"]
+ids = ["concept:test-faults"]
+links = ["concept:doctor", "concept:unit-file", "rule:membership.governed", "guarantee:persist.unreadable_refused",
+         "guarantee:id.revocation_authority", "cargo:mycelium/sim"]
+
 # ------------------------------------------------------------------------------- pages to write (row F3)
 
 # Authority and evidence

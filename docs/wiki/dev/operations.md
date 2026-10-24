@@ -183,6 +183,41 @@ disk; now read-only (`persistence_base_path_problem`, `deprecations.md` §57), `
 an attachment made in code is not in its view; unreadable persisted state is `start()`'s. Entry page
 `docs/features/doctor.md`; runbook `operations/diagnostics.md` § Before you start; log `.log/2026-10-23-doctor.md`.
 
+## `mycelium test --faults` (adopter-surface X6, 2026-10-24)
+
+The existing proofs against an adopter's declaration (`src/faults.rs`; the verifier probes that need agent internals
+in `src/agent/fault_probes.rs`). `wire-check` first, then one fleet per class — `Fleet`: one node per unit, three at
+least, each on a one-worker runtime of its own so a node is *cut* by dropping its runtime (no sweep, no departure,
+sockets closed), the configuration rewritten to loopback, free ports, a per-node persistence directory (one owner per
+directory, and the revocation journal sits at the base path), TLS material under the run's directory, no `http_port`,
+a one-second health check, all-to-all bootstrap (a node back after a cut must find the survivors itself: they evicted
+it and stopped dialling). `replay` records each unit's node alone on a current-thread runtime under one kernel, as
+`main.rs`'s `record` does; a divergence is the seam's panic, caught and reported, the kernel taken down after. A
+fleet recorded together on one kernel diverged at seq 14 — `writer/forward` to one peer recorded, to the other
+replayed — because frame arrival between nodes is outside the seams (inventory §3.1.1); stated on the page. `revoke` lifts row Q's three
+in-process verifiers from `lib_tests.rs` (the KV arm, the handshake, identity chaining) and adds the mandate half
+through `ExecutionAuthority` (a revoked term reads `MandateState::Unknown("the appointment is revoked")`, not a
+refusal). `policy-diff` decides the declaration's call set at the command's own enforcement point (`preflight` + an
+`AeEvidence` per call into a journal under the run's directory) and re-decides each journal record under the
+proposed revision; a `[[rule]]`'s resource is matched as written (no `@provider` suffix). **Found by it, fixed:** a governed member that went dark held
+the floor — `grp/{group}/{node}` is written once at join and withdrawn only by the graceful sweep (#627), so after a
+crash every survivor's `group_members` still counted it and no one rolled (the co-op fixture's `depots`: 0 live
+members, 0 joins after 105 s); `converge` now counts a member only if it is this node or in `ctx.peers`
+(`live_members`, `membership.governed` revision 2 — a convergence target, never a guarantee: a peer evicted here and
+alive elsewhere is re-counted when heard; with an empty peer table the roster is read as written, #675's review).
+The eleven other readers of `grp/` (`emergent.rs`'s `group_status`/`GroupConflict`/`membership_snapshot`, the fleet
+snapshot, consensus, signal scoping, `/gateway/mesh/group`) still count the dark member until its entry is rewritten
+— stated, not changed. **#675's review** also found: the `faults/` row unclassified for the raw KV routes; the port
+allocator sharing `alloc_port`'s seed (a test build now uses `alloc_port` itself); the re-fill baseline sampled after
+the evaporation wait; the secure profile refused by the command's own rewrite (not applied now, reported); `unknown`
+in the report (a node built and never started resolves every id); the cut dropping handles before the runtime; and,
+by `replay`, a persisted node diverging between its first WAL write and the jitter draw — recorded, not fixed. **Found and stated:** the eviction loop removes a dark peer in
+`health × peer_eviction_intervals`, but its `cap/` advertisement leaves `resolve` only after `3 × ttl_secs`
+(`CapEntry::is_fresh`) and nothing tombstones it — a scaffold's 30 s `ttl_secs` is a 90 s blind spot the report now
+measures; the stale `grp/` entry stays in the KV until the node returns, so the fleet snapshot's group size still
+counts it. Entry page `docs/features/test-faults.md`; runbook
+`operations/diagnostics.md` § Before the fleet carries anything; log `.log/2026-10-24-x6-test-faults.md`.
+
 ## Framing discipline
 
 Mycelium is a **library, not a platform** — no daemon, no control plane; a cluster is
