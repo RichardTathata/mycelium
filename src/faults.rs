@@ -59,10 +59,14 @@ pub enum Class {
     /// Selective recovery (adopter-surface X9): a lost acknowledgement, the closure of its record across the
     /// fleet's journals, each member recovered by its declared class.
     Recovery,
+    /// A grant that is default-deny and holds across a restart (adopter-surface X3): the declaration's first
+    /// grant-required `[[rule]]` driven on its own fleet — silence refuses, the declared issuer's grant admits one
+    /// call, the grant replays from the WAL.
+    Grant,
 }
 
 impl Class {
-    pub const ALL: [Class; 6] = [Class::Revoke, Class::Restart, Class::Partition, Class::Replay, Class::PolicyDiff, Class::Recovery];
+    pub const ALL: [Class; 7] = [Class::Revoke, Class::Restart, Class::Partition, Class::Replay, Class::PolicyDiff, Class::Recovery, Class::Grant];
 
     /// The class's name as the command line and the report spell it.
     pub fn name(self) -> &'static str {
@@ -73,6 +77,7 @@ impl Class {
             Class::Replay => "replay",
             Class::PolicyDiff => "policy-diff",
             Class::Recovery => "recovery",
+            Class::Grant => "grant",
         }
     }
 
@@ -94,7 +99,7 @@ impl Class {
             return Ok(None);
         }
         if let Some(i) = parsed.iter().position(|c| c.is_none()) {
-            return Err(format!("`{}` is not a class (revoke · restart · partition · replay · policy-diff · recovery)", tokens[i]));
+            return Err(format!("`{}` is not a class (revoke · restart · partition · replay · policy-diff · recovery · grant)", tokens[i]));
         }
         Ok(Some(parsed.into_iter().flatten().collect()))
     }
@@ -353,6 +358,7 @@ pub fn run(units: &[Unit], artifacts: &[(String, ArtifactDescription)], check_op
             Class::Replay => replay::run(&mut rep, &base, units, &class_dir, opts.seed),
             Class::PolicyDiff => policy_diff::run(&mut rep, &base, units, &checked, opts.against.as_deref(), &opts.decisions, &class_dir),
             Class::Recovery => recovery::run(&mut rep, &base, units, &class_dir),
+            Class::Grant => grant::run(&mut rep, &base, units, &class_dir),
         }
         if matches!(rep.state, ClassState::Passed) && rep.checks.iter().any(|k| k.ok == Some(false)) {
             rep.state = ClassState::Failed;
@@ -585,6 +591,16 @@ impl<'u> Fleet<'u> {
     /// Run `f` on node `i`'s runtime.
     fn on<F: std::future::Future>(&self, i: usize, f: F) -> F::Output {
         self.nodes[i].rt.as_ref().expect("a started node").block_on(f)
+    }
+
+    /// Spawn `f` on node `i`'s runtime and hand back its handle (the `grant` class's waiting call).
+    #[cfg(all(feature = "gateway", feature = "tls", feature = "compliance"))]
+    fn spawn<F>(&self, i: usize, f: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.nodes[i].rt.as_ref().expect("a started node").spawn(f)
     }
 
     /// Poll `ok` on node `i`'s runtime for up to `timeout`.
@@ -824,6 +840,10 @@ mod restart {
 // ──────────────────────────────────────────────────────────────────────────────────── recovery ──
 
 mod recovery;
+
+// ─────────────────────────────────────────────────────────────────────────────────────── grant ──
+
+mod grant;
 #[cfg(feature = "sim")]
 pub use recovery::{Seamed, SeamedOutcome};
 
@@ -1252,11 +1272,12 @@ mod policy_diff {
         let opened: Opened = Arc::new(std::sync::Mutex::new(None));
         let (ev, slot, path) = (Arc::clone(&eval_a), Arc::clone(&opened), journal_path.clone());
         if let Err(reason) = fleet.start_with(0, move |a| {
-            a.with_action_evaluator(ev);
+            // The journal before the evaluator (#680's review, finding 6: the other order warns of unrecorded decisions).
             let j = crate::EvidenceJournal::open(&path, crate::EvidenceProfile::Strict).map_err(|e| format!("opening {}: {e}", path.display()));
             if let Ok(j) = &j {
                 a.with_evidence_journal(Arc::clone(j));
             }
+            a.with_action_evaluator(ev);
             *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(j);
         }) {
             rep.state = ClassState::Refused { reason };
@@ -1779,6 +1800,89 @@ mod tests {
         assert!(c.exercised.iter().any(|e| e.id == "persist.sync_mode"), "{:?}", c.exercised);
         assert!(c.notes.iter().any(|n| n.contains("record_permit")), "{:?}", c.notes);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The grant class against a declaration whose purchaser may call one tool only under the treasurer's grant, on
+    /// a fleet with TLS and persistence (adopter-surface X3, fourth PR): default-deny, the declared issuer's grant and
+    /// a stranger's refusal, the restart over the WAL, the binding to the arguments, the record. Seen failing first:
+    /// with #678's exemption of a grant's checkpoint from the revocation view's start rule removed, check 3 reads the
+    /// grant issued before the restart as not established after it.
+    #[cfg(all(feature = "gateway", feature = "tls", feature = "compliance"))]
+    #[test]
+    fn the_grant_class_refuses_on_silence_issues_by_the_declared_rule_and_holds_across_a_restart() {
+        let dir = scratch("grant");
+        let mut cfg = persisted(&dir);
+        cfg.tls = Some(crate::config::TlsConfig { auto_cert_dir: dir.join("tls"), ..crate::config::TlsConfig::default() });
+        let units = vec![unit("purchaser", concat!(
+            "principal = \"purchaser\"\n[[capability]]\nns = \"purchase\"\nname = \"place\"\nttl_secs = 5\n",
+            "[[rule]]\nactor = \"purchaser\"\noperation = \"tools/call\"\nresource = \"tool:purchase.approve\"\nrequires_grant = true\n",
+            "[[rule]]\nactor = \"treasurer\"\noperation = \"grant.issue\"\nresource = \"tool:purchase.approve\"\n",
+        ))];
+        let c = run_class(Class::Grant, &units, &cfg, &dir, None);
+        assert!(all_held(&c), "{c:?}");
+        assert_eq!(c.checks.len(), 5, "{c:?}");
+        assert!(c.checks[0].name.starts_with("a grant-required tool is default-deny"), "{}", c.checks[0].name);
+        assert!(c.checks[1].detail.contains("test-faults-stranger's issue refused by the evaluator") && c.checks[1].detail.contains("treasurer's issue: written"), "{}", c.checks[1].detail);
+        assert!(c.checks[2].detail.contains("back from the WAL") && c.checks[2].detail.contains("did not ask twice"), "{}", c.checks[2].detail);
+        assert!(c.checks[4].detail.contains("2 permitted for treasurer, 1 refused for test-faults-stranger"), "{}", c.checks[4].detail);
+        assert!(c.exercised.iter().any(|e| e.id == "mesh.tls" && e.state == "enforced"), "{:?}", c.exercised);
+        assert!(c.exercised.iter().any(|e| e.id == "persist.configured" && e.state == "enforced"), "{:?}", c.exercised);
+        assert!(c.notes.iter().any(|n| n.contains("decide_grant") && n.contains("treasurer")), "{:?}", c.notes);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A declaration that admits anyone (`*`) to issue, through a `*` operation: the stranger's half is stated, not
+    /// run, and the class passes (#680's review, finding 1 — the stranger's grant was written and the issuer's
+    /// refused `already_answered`; seen failing first).
+    #[cfg(all(feature = "gateway", feature = "tls", feature = "compliance"))]
+    #[test]
+    fn the_grant_class_states_an_issuer_rule_that_admits_anyone() {
+        let dir = scratch("grant-anyone");
+        let mut cfg = persisted(&dir);
+        cfg.tls = Some(crate::config::TlsConfig { auto_cert_dir: dir.join("tls"), ..crate::config::TlsConfig::default() });
+        let units = vec![unit("purchaser", concat!(
+            "principal = \"purchaser\"\n",
+            "[[rule]]\nactor = \"purchaser\"\noperation = \"tools/call\"\nresource = \"tool:purchase.approve\"\nrequires_grant = true\n",
+            "[[rule]]\nactor = \"*\"\noperation = \"*\"\nresource = \"*\"\n",
+        ))];
+        let c = run_class(Class::Grant, &units, &cfg, &dir, None);
+        assert!(all_held(&c), "{c:?}");
+        assert!(c.checks[1].detail.contains("admits anyone (`*`) to grant.issue") && c.checks[1].detail.contains("test-faults-supervisor's issue: written"), "{}", c.checks[1].detail);
+        assert!(c.checks[4].detail.contains("2 permitted for test-faults-supervisor") && c.checks[4].detail.contains("anyone may issue here"), "{}", c.checks[4].detail);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `grant` without a grant-required rule is `not_applicable`; without an issuer rule too; without `[tls]` or
+    /// `[persistence]` it is `not_configured` naming the table; a build without the features names the one it lacks.
+    #[test]
+    fn the_grant_class_needs_a_grant_rule_tls_and_persistence_and_says_so() {
+        let plain = vec![unit("p", "principal = \"p\"\n")];
+        let r = run(&plain, &[], &CheckOptions::default(), &Options { classes: vec![Class::Grant], ..Default::default() }).expect("the run");
+        assert_eq!(r.classes.len(), 1);
+        assert_eq!(r.exit_code(), 1, "asked by name");
+        assert!(r.classes[0].not_exercised.iter().any(|e| e.id == "mesh.tls"), "{:?}", r.classes[0].not_exercised);
+        #[cfg(all(feature = "gateway", feature = "tls", feature = "compliance"))]
+        {
+            assert_eq!(r.classes[0].state, ClassState::NotApplicable { because: "no [[rule]] has requires_grant = true: nothing in the declaration waits for a grant".into() });
+            let unissuable = vec![unit("p", "principal = \"p\"\n[[rule]]\nactor = \"p\"\noperation = \"tools/call\"\nresource = \"tool:x\"\nrequires_grant = true\n")];
+            let r = run(&unissuable, &[], &CheckOptions::default(), &Options { classes: vec![Class::Grant], ..Default::default() }).expect("the run");
+            assert!(matches!(&r.classes[0].state, ClassState::NotApplicable { because } if because.contains("no [[rule]] admits anyone to grant.issue on tool:x")), "{:?}", r.classes[0].state);
+            let issuable = vec![unit("p", "principal = \"p\"\n[[rule]]\nactor = \"p\"\noperation = \"tools/call\"\nresource = \"tool:x\"\nrequires_grant = true\n[[rule]]\nactor = \"q\"\noperation = \"grant.issue\"\nresource = \"*\"\n")];
+            let r = run(&issuable, &[], &CheckOptions::default(), &Options { classes: vec![Class::Grant], ..Default::default() }).expect("the run");
+            assert!(matches!(&r.classes[0].state, ClassState::NotConfigured { missing } if missing.starts_with("[tls]")), "{:?}", r.classes[0].state);
+            let dir = scratch("grant-no-persist");
+            let mut cfg = GossipConfig::default();
+            cfg.tls = Some(crate::config::TlsConfig { auto_cert_dir: dir.join("tls"), ..crate::config::TlsConfig::default() });
+            let c = run_class(Class::Grant, &issuable, &cfg, &dir, None);
+            assert_eq!(c.state, ClassState::NotConfigured { missing: "[persistence]".into() }, "{c:?}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        #[cfg(all(feature = "gateway", feature = "tls", not(feature = "compliance")))]
+        assert_eq!(r.classes[0].state, ClassState::NotInBuild { feature: "compliance" });
+        #[cfg(all(feature = "gateway", not(feature = "tls")))]
+        assert_eq!(r.classes[0].state, ClassState::NotInBuild { feature: "tls" });
+        #[cfg(not(feature = "gateway"))]
+        assert_eq!(r.classes[0].state, ClassState::NotInBuild { feature: "gateway" });
     }
 
     /// `recovery` without `[persistence]`: `not_configured`, naming the table; the ids it would drive listed as not

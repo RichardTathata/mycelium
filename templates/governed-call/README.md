@@ -19,7 +19,7 @@ the journal and overwrites the trace.
 | Path | What it is |
 |---|---|
 | `node.toml` | node A's configuration; node B derives its own from it (`bind_port + 1`) |
-| `units/purchaser.toml` | the unit file: the capability A advertises, and the mandate and rule that say who may call it |
+| `units/purchaser.toml` | the unit file: the capability A advertises, the mandate and rule that say who may call it, and a tool that waits for the treasurer's grant |
 | `skills/demo/greeting.md` | the prompt skill's text (`skills/<ns>/<name>.md`, the layout `mycelium declare` reads) — edit it, run again, and the answer changes |
 | `src/policy.rs` | the policy, an `ActionEvaluator`: permit one ledger, deny another, refuse the rest as undecided |
 | `src/main.rs` | the program |
@@ -31,7 +31,7 @@ the journal and overwrites the trace.
 mycelium wire-check units/            # the declaration: what would bind, and the authority overlay
 mycelium explain data/decisions.jsonl # the node's own decisions (admission, membership), in the catalogue's words
 mycelium doctor node.toml             # what start() would say about this configuration, and why
-mycelium test --faults units/ --config node.toml   # this declaration's fleet under a revoked key, a restart, a node gone dark
+mycelium test --faults units/ --config node.toml   # this declaration's fleet under a revoked key and a node gone dark; add [persistence] to node.toml for the restart and grant classes
 ```
 
 The authority decisions — permit, deny — are in `data/evidence.log`, a length-prefixed journal (not lines: read it

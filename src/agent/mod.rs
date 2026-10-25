@@ -83,6 +83,9 @@ pub(crate) mod fleet_history;
 pub(crate) mod federation_http;
 #[cfg(feature = "gateway")]
 mod http;
+/// The supervisor's grant decisions without the route (adopter-surface X3, fourth PR: the `grant` fault class).
+#[cfg(all(feature = "gateway", feature = "tls", feature = "compliance"))]
+pub(crate) use http::{decide_grant, GrantDecision, GrantRefusal};
 mod mcp;
 pub(crate) mod opacity;
 #[cfg(feature = "consensus")]

@@ -169,9 +169,11 @@ A reference-evaluator rule, as written. `"*"` means any.
 | `requires_scopes` | array of strings | empty | Scopes the actor must hold for the rule to apply. |
 | `requires_facts` | array of strings | empty | Facts the rule needs that the reference evaluator cannot establish (e.g. `budget`); such a rule decides *indeterminate*. |
 | `requires_mandate` | string | absent | The scope a live mandate must cover for the rule to apply. |
+| `requires_grant` | boolean | `false` | The rule applies only under a [grant](../guide/00-concepts.md#grant) — a mandate in the `grant:` family a supervisor issues for one call (`Rule::requiring_grant`). One of this and `requires_mandate`, never both (refused at load). **Who holds a grant is the agent's node** (`node:<id>`), so at a door the actor that presents one is the node's principal, not the unit's; `mycelium test --faults grant` reads the first such rule as a selector — its resource names the tool the agent's policy requires a grant for, its actor the agent's unit — and admits it also with the node as actor and the resource at `tool:<name>@<node>`. A rule with it and no rule admitting anyone to `grant.issue` on its resource (`*` for either, a `@<node>` suffix not matched) is `wire-check`'s warning `unissuable grant`. |
 | `requires_values` | table | empty | Argument values the rule tests by name; the reference evaluator compares for equality. |
 
-`actor`, `operation` and `resource` are refused when empty.
+`actor`, `operation` and `resource` are refused when empty. A key the rule does not have is refused by name, as a
+`[[mandate]]`'s is (§65): a misspelt requirement would otherwise admit without one.
 
 ```toml
 # examples/units/a2a_skill_authority/gateway.toml
@@ -180,6 +182,20 @@ actor            = "client"
 operation        = "skill.invoke"
 resource         = "skill:depot/dispatch"
 requires_mandate = "depot-remit"
+```
+
+```toml
+# templates/governed-call-py/units/purchaser.toml — a tool that waits for a grant, and who may issue one
+[[rule]]
+actor          = "purchaser"
+operation      = "tools/call"
+resource       = "tool:purchase.approve"
+requires_grant = true
+
+[[rule]]
+actor     = "treasurer"
+operation = "grant.issue"
+resource  = "tool:purchase.approve"
 ```
 
 ## `[hosts]`

@@ -126,6 +126,8 @@ mod mcp_bridge;
 /// The supervisor's door for grants (adopter-surface X3): a grant is signed by the node's identity and decided by the preflight.
 #[cfg(feature = "tls")]
 mod grants;
+#[cfg(all(feature = "tls", feature = "compliance"))]
+pub(crate) use grants::{decide_grant, GrantDecision, GrantRefusal};
 #[cfg(all(test, feature = "tls", feature = "consensus"))]
 pub(crate) use mcp_bridge::{TEST_DISPATCH_TIMEOUT_MS, TEST_LAST_TIMEOUT};
 #[cfg(feature = "a2a")]

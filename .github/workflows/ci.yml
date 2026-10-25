@@ -695,6 +695,11 @@ jobs:
           grep -q '^recovery: passed' faults.log
           grep -q '✓ the restarted node finds its lost-acknowledgement record unknown in its own ledger, probes before any retry, and the destination holds one effect' faults.log
           grep -q '✓ the destination saw each effect once' faults.log
+          # Adopter-surface X3: the scaffold's grant-required tool on its own fleet — default-deny, the declared
+          # issuer's grant admitting one call, and the grant holding across a restart over the WAL.
+          grep -q '^grant: passed' faults.log
+          grep -q '✓ a grant-required tool is default-deny' faults.log
+          grep -q '✓ the grant holds across a restart' faults.log
           grep -q 'activation: not_applicable — 0 command(s) declared, 0 run' faults.log
           grep -q 'exercised:.*persist.unreadable_refused enforced' faults.log
           grep -q 'exercised:.*mesh.signed_writes enforced' faults.log

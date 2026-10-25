@@ -11,6 +11,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Grants, the fourth PR — the `grant` fault class and the one-hour job's step 4** (`docs/plans/adopter-surface.md`
+  X3; `docs/features/grants.md`, `docs/features/test-faults.md`): `mycelium test --faults grant` drives a declaration's
+  first `[[rule]]` with **`requires_grant = true`** on its own fleet — the tool's agent node with an evaluator built
+  from every declared rule, a journal and an execution authority: a plain transition refused, silence refused within
+  the window, a principal no rule names refused the issue by the evaluator, the declared issuer's grant admitting the
+  call once, the request and the grant **replayed from the WAL across a restart** with the agent re-waiting and not
+  asking twice, other arguments asking again, and the decisions on the record. It needs `[tls]`, `[persistence]` and a
+  `compliance` build, and says which it lacks. The issue and revoke routes' decisions are callable functions now
+  (`decide_grant`, `revoke_grant`), which the class uses — the fleet has no gateway port. Both scaffolds declare a
+  grant-required tool and its issuer; the `Scaffold` CI job and the **one-hour job's step 4** run the class, so the
+  job measures all six steps from the first release carrying it. `wire-check` warns `unissuable grant`; a `[[rule]]`
+  or `[[mandate]]` with an unknown key is refused by name (`deprecations.md` §65). **Still not built:** retention of
+  `grant/` records, a per-issuer entitlement, a per-call class for the rendering, the gateway and provider doors on the
+  declaration's fleet (the door tests' job).
 - **Grants, the third PR** (`docs/plans/adopter-surface.md` X3; `docs/features/grants.md`): the surfaces. `GET
   /gateway/grants/stream` (`grant:read`) — the open requests as they come, `grant_request` once each (the standing ones
   first) and `grant_answered` when one is issued, refused or revoked; the SDKs' `grants_stream` / `grantsStream`. A
