@@ -235,6 +235,17 @@ which now matches `python <file>::<test>[param]` and `typescript <file>::<title>
 the Strands store's bearer has no principal test; neither SDK cancels or carries a grant; an A2A task is lost with
 its node. Entry page `docs/features/adapter-contract.md`; log `.log/2026-10-24-x7-adapter-contract.md`.
 
+## Grants, the third PR (adopter-surface X3, 2026-10-25)
+
+The surfaces. `gw_grants_stream` (`src/agent/http/grants.rs`): one task per client, woken by `subscribe_prefix("grant/")`,
+reporting `pending()` records not yet reported and answers (`…/issued|refused|revoked`) of requests it reported; it keeps
+two sets per connection. A2A: `Step::InputRequired(&str)` in `src/agent/a2a.rs`, emitted by a watcher task spawned beside
+`working` on `grant/{serving node}/` — new open request → `input-required` with the id; answered → `working`; aborted
+with `working` before every terminal event. The watcher reads the serving node's prefix, not the task's: a request the
+node's agent writes for another reason is reported too (stated). Rendering: `render_arguments_under` in
+`state_machine.rs`; `AgentPolicy` derives `Default`, so `grant_renderable_classes` defaults to empty — a classified
+argument set is withheld unless listed, unclassified ones render. `SendRequest` is `Clone` now (the watcher holds one).
+
 ## Grants, the second PR (adopter-surface X3, 2026-10-25)
 
 The enforcement remainder of X3. What to know: a grant's holder is the **agent's node** (`node:{id}`), so the door

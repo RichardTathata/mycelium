@@ -151,6 +151,14 @@ export interface PendingGrant {
 }
 
 /** The answer to a grant decision: the record written and its receipt's rung. */
+/** One event of `grantsStream`: a request record (`event: "grant_request"`) or an answer (`event: "grant_answered"`). */
+export interface GrantEvent {
+  event: "grant_request" | "grant_answered";
+  request?: string;
+  key?: string;
+  [field: string]: unknown;
+}
+
 export interface GrantAnswer {
   ok: boolean;
   key: string;
@@ -420,6 +428,20 @@ export class MyceliumAgent {
       ...(options.ttlSecs !== undefined ? { ttl_secs: options.ttlSecs } : {}),
       ...(options.reason !== undefined ? { reason: options.reason } : {}),
     })) as GrantAnswer;
+  }
+
+  /**
+   * `GET /gateway/grants/stream` (`grant:read`): the open grant requests as they come. Each event is a
+   * `grant_request` (a request record, with its `key`) or a `grant_answered` (`request`, `outcome` issued · refused ·
+   * revoked, `issuer`, `reason`); the `event` field names which. On connect the requests standing now come first,
+   * then each new one as it lands; a request is reported once. Return from the loop to stop.
+   */
+  async *grantsStream(): AsyncGenerator<GrantEvent> {
+    const url = this._sseUrl("/gateway/grants/stream");
+    yield* sseStream<GrantEvent>({ url, headers: this.auth }, (data, event) => {
+      const raw = parseLossless(data) as Record<string, unknown>;
+      return { ...raw, event: (typeof event === "string" && event) || "grant_request" } as GrantEvent;
+    });
   }
 
   /**

@@ -8,6 +8,7 @@ import { MyceliumAgent } from "../src/agent";
 type Call = { url: string; method: string; body: unknown; auth: string | undefined };
 const calls: Call[] = [];
 let status = 200;
+let sse = "";
 const pending = [{ key: "grant/node:127.0.0.1:7946/r1", agent: "node:127.0.0.1:7946", request: "r1", tool: "purchase.place",
   arguments_digest: "ab".repeat(32), policy_revision: "rev-1", requested_at_ms: 1, expires_at_ms: 2 }];
 
@@ -19,6 +20,9 @@ beforeAll(() => {
     calls.push({ url, method: init?.method ?? "GET", body: init?.body ? JSON.parse(String(init.body)) : undefined, auth: headers.get("authorization") ?? undefined });
     if (status !== 200) {
       return new Response(JSON.stringify({ ok: false, error: "not_this_node", detail: "another node's agent" }), { status, headers: { "content-type": "application/json" } });
+    }
+    if (url.endsWith("/gateway/grants/stream")) {
+      return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
     }
     const body = url.endsWith("/gateway/grants/pending")
       ? { ok: true, pending, now_ms: 1 }
@@ -48,6 +52,20 @@ test("grantDecide posts the decision and returns the record's receipt", async ()
     ["POST", "grants/node%3A127.0.0.1%3A7946/r2", { decision: "refuse", reason: "not today" }],
   ]);
   expect(calls.every((c) => c.auth === "Bearer super")).toBe(true);
+});
+
+test("grantsStream yields the requests and answers it is sent, naming each", async () => {
+  sse = 'event: grant_request\ndata: {"request":"r1","agent":"node:127.0.0.1:7946","tool":"deploy","key":"grant/node:127.0.0.1:7946/r1"}\n\n' +
+        'event: grant_answered\ndata: {"request":"r1","outcome":"issued","issuer":"token:gw/alice"}\n\n';
+  const agent = new MyceliumAgent("127.0.0.1", 8300, 5, { token: "super" });
+  const got: unknown[] = [];
+  for await (const ev of agent.grantsStream()) got.push(ev);
+  expect(got).toEqual([
+    { event: "grant_request", request: "r1", agent: "node:127.0.0.1:7946", tool: "deploy", key: "grant/node:127.0.0.1:7946/r1" },
+    { event: "grant_answered", request: "r1", outcome: "issued", issuer: "token:gw/alice" },
+  ]);
+  expect(calls[0].url).toMatch(/\/gateway\/grants\/stream$/);
+  expect(calls[0].auth).toBe("Bearer super");
 });
 
 test("grantRevoke posts to the revoke route under the bearer", async () => {

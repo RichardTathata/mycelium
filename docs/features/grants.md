@@ -39,8 +39,20 @@ This feature is turned on in code.
   `grant.revoke` on `tool:{tool}@{agent node}`, the caller as the actor): a client holding `grant:issue` is not thereby
   an approver of everything, and a gateway with no evaluator answers nothing. A grant is issued for an agent on this
   node or on a fleet member this node holds the key of; the agent's node decides whether that issuer may
-  ([`entitle_grants_from_fleet`](../../src/mandate/grant.rs)). The SDKs' verbs are `grants_pending` / `grant_decide`
-  (`grantsPending` / `grantDecide`), and `grant_revoke` (`grantRevoke`) for the revoke route.
+  ([`entitle_grants_from_fleet`](../../src/mandate/grant.rs)). [`gw_grants_stream`](../../src/agent/http/grants.rs) —
+  `GET /gateway/grants/stream` (`grant:read`): the open requests as they come, `grant_request` once each (the standing
+  ones first, as a backlog) and `grant_answered` when one this stream reported is issued, refused or revoked. The SDKs'
+  verbs are `grants_pending` / `grant_decide` / `grant_revoke` and `grants_stream` (`grantsPending` / `grantDecide` /
+  `grantRevoke` / `grantsStream`).
+- [`AgentPolicy`](../../src/agent/state_machine.rs) — its `grant_arguments_class` and `grant_renderable_classes`: the
+  rendering under the data-class policy. The arguments' class by name, in the operator's vocabulary (as row R's `DataClass` names it), and
+  the classes whose arguments may be rendered into the gossiped request; a class not listed is **withheld** — the record
+  says so, with the class and the size, never as empty — while the grant still binds the digest
+  ([`render_arguments_under`](../../src/agent/state_machine.rs)). The default list is empty, so a classified argument
+  set is withheld unless its class is listed; unclassified arguments are rendered under the 16 KiB cap as before.
+- The A2A door: a streamed task whose serving agent is waiting for a grant reports **`input-required`** with the
+  pending request's id in the status message and nothing else, then `working` once it is answered — the
+  `InputRequired` step of [`Step`](../../src/agent/a2a.rs) (the design question, decided: yes).
 - [`claim_grant_use`](../../src/agent/gateway_authority.rs) and [`feed_grant_checkpoint`](../../src/agent/gateway_authority.rs)
   — a grant admits **one call at each door** (the gateway's and the provider's preflight each claim their use, the
   marker `…/used/{door}` on the WAL), and a grant's checkpoints travel in the KV beside it, fed to every node's
@@ -71,7 +83,10 @@ has no row for this feature. The tests: in [`src/mandate/grant.rs`](../../src/ma
 `a_grant_is_bound_to_its_policy_revision_and_consumed_by_its_commit`, and the second PR's —
 `a_grant_admits_one_call_at_each_door`, `a_revoked_grant_is_refused_at_every_door_and_stops_admitted_work`,
 `a_grant_is_issued_at_one_node_for_an_agent_on_another_and_revoked_there` and
-`a_restarted_agent_re_waits_on_its_pending_request_and_an_expired_one_asks_again`.
+`a_restarted_agent_re_waits_on_its_pending_request_and_an_expired_one_asks_again`; the third PR's —
+`the_grants_stream_reports_a_request_once_and_then_its_answer`,
+`a_streamed_a2a_task_waiting_for_a_grant_reports_input_required_with_the_request_id` and
+`a_request_withholds_arguments_of_a_class_the_policy_does_not_render`.
 
 ## What it guarantees, and what it does not
 
@@ -132,10 +147,14 @@ has no row for this feature. The tests: in [`src/mandate/grant.rs`](../../src/ma
   again for the same tool and digest while the request stands and is unconsumed waits on it rather than asking twice.
 - **Veto, not grant:** `require_approval_for` approves on silence and is labelled so in `strength_report()`; its
   `ApprovalTimedOut` variant was never produced and is deprecated (`deprecations.md` §59).
-- **Not built, by the plan row** ([`adopter-surface.md`](../plans/adopter-surface.md) X3, after the second PR): an SSE
-  stream of new requests (the SDKs poll `grants_pending`); the A2A `input-required` state; the data-class policy over
-  the request's argument rendering (rendered when under 16 KiB, else summarised with its size); the one-hour job's
-  step 4 on the published binary. **The doors a node-held grant reaches:** a grant's holder is the agent's node, so
+- **The stream** reports each request once and its answer once, by anyone at any node (the records gossip); it is
+  woken by writes under `grant/`, and a late supervisor gets the standing requests as a backlog. **`input-required`**
+  is reported on the streaming send only (`tasks/sendSubscribe`, `message/stream`, `SendStreamingMessage`): a unary
+  send answers at the end. The watcher reads the serving node's requests (`grant/{node}/`), so a task served by a
+  node whose agent asks for a grant for another reason would report that too — the status is a request id, not an
+  attribution. **Not built, by the plan row** ([`adopter-surface.md`](../plans/adopter-surface.md) X3, after the third
+  PR): the one-hour job's step 4 on the published binary (a `grant` fault class, the fourth PR); retention of `grant/`
+  records; a per-issuer entitlement finer than `entitle_grants_from_fleet`. **The doors a node-held grant reaches:** a grant's holder is the agent's node, so
   it is presented on the node's own call (a member's direct call, the provider's door) — a bearer client presenting a
   node's grant at `/mcp` is refused as not the holder's. **The gateway's claim (`used/gateway`) is code with no
   reachable caller today:** only a `node:` principal can hold a grant, so no client presents one at `/mcp`; the claim

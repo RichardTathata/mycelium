@@ -127,6 +127,14 @@ pub struct AgentPolicy {
     /// This is **veto, not grant**: an absent supervisor approves. For approval that is default-deny, see
     /// [`require_grant_for`](Self::require_grant_for).
     pub require_approval_for: Vec<String>,
+    /// Adopter-surface X3 (third PR): the data class of the arguments a grant request renders for a human — the
+    /// class's name in the operator's vocabulary (`public`, `confidential`, …), as row R's `DataClass` names it.
+    /// `None` is unclassified.
+    pub grant_arguments_class: Option<String>,
+    /// The classes whose arguments **may be rendered** into the gossiped request record. Arguments of a class not
+    /// listed are withheld — the record says so and carries the class and the size — while the grant still binds
+    /// their digest. Unclassified arguments are rendered. Default: `public` and `internal`.
+    pub grant_renderable_classes: Vec<String>,
 
     /// Tools that require a **grant** before `Invoking` is committed (adopter-surface X3) — approval that is
     /// default-deny. A grant is a scoped mandate a supervisor issues for one call, bound to the tool, the
@@ -577,7 +585,11 @@ impl AgentStateMachine {
             None => {
                 let request = format!("{:016x}", self.ctx.hlc.tick());
                 let expires_at_ms = now_ms + window_ms;
-                let rendering = render_arguments(arguments);
+                let (class, renderable) = {
+                    let p = self.policy.read();
+                    (p.grant_arguments_class.clone(), p.grant_renderable_classes.clone())
+                };
+                let rendering = render_arguments_under(arguments, class.as_deref(), &renderable);
                 let record = serde_json::json!({
                     "schema": "mycelium.grant-request/1",
                     "request": request,
@@ -588,6 +600,7 @@ impl AgentStateMachine {
                     "resource": format!("tool:{tool}@{}", self.ctx.node_id),
                     "arguments_digest": digest_hex,
                     "arguments": rendering,
+                    "arguments_class": class,
                     "policy_revision": self.ctx.deployed_policy_revision.load_full().map(|r| (*r).clone()),
                     "requested_at_ms": now_ms,
                     "expires_at_ms": expires_at_ms,
@@ -844,6 +857,22 @@ pub(crate) fn render_arguments(arguments: &serde_json::Value) -> serde_json::Val
         arguments.clone()
     } else {
         serde_json::json!({ "withheld": "over the rendering cap", "bytes": text.len(), "cap": CAP })
+    }
+}
+
+/// [`render_arguments`] under the data-class policy (adopter-surface X3, third PR): arguments of a class the policy
+/// does not list as renderable are **withheld** — shown as withheld with the class and the size, never as empty —
+/// and the request record carries the digest beside it, which is what the grant binds. Unclassified arguments are
+/// rendered under the cap.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) fn render_arguments_under(arguments: &serde_json::Value, class: Option<&str>, renderable: &[String]) -> serde_json::Value {
+    match class {
+        Some(c) if !renderable.iter().any(|r| r == c) => serde_json::json!({
+            "withheld": format!("data class {c}: not rendered into the gossiped request (the policy renders {})", if renderable.is_empty() { "no class".to_string() } else { renderable.join(", ") }),
+            "class": c,
+            "bytes": arguments.to_string().len(),
+        }),
+        _ => render_arguments(arguments),
     }
 }
 

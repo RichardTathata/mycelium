@@ -386,6 +386,7 @@ checkpoint from the issuer naming the term. The decision record carries the gran
 GET  /gateway/grants/pending                      grant:read   — the open requests, oldest first
 POST /gateway/grants/{agent}/{request}            grant:issue  — {"decision": "issue"|"refuse", "ttl_secs", "reason"}
 POST /gateway/grants/{agent}/{request}/revoke     grant:issue  — {"reason"}, at the node that issued
+GET  /gateway/grants/stream                       grant:read   — SSE: grant_request once each, grant_answered on issue · refuse · revoke
 ```
 
 The raw KV routes refuse the `grant/` namespace: an answer is written through the door that decides it.
@@ -397,7 +398,11 @@ grant's scope naming the term; its sweep judges work running under a grant by th
 and stops it within the drain bound; the checkpoint travels in the KV beside the grant, and every node's authority is
 fed it before it assesses. **Across nodes:** a supervisor at any gateway issues for an agent on a member node the
 gateway holds the key of; the agent's node's entitlement table decides whether a member may issue
-(`EntitlementTable::entitle_grants_from_fleet`). A restarted agent re-waits on its pending request, on the WAL.
+(`EntitlementTable::entitle_grants_from_fleet`). A restarted agent re-waits on its pending request, on the WAL. The
+third PR (2026-10-25) added the stream, the A2A `input-required` status for a streamed task whose agent is waiting (the
+request's id and nothing else), and the rendering under the data-class policy: `AgentPolicy::grant_arguments_class`
+names the arguments' class and `grant_renderable_classes` the classes a request may render — a class not listed is
+withheld, with the class and the size, while the grant still binds the digest.
 
 ## What this does not establish
 

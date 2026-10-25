@@ -221,6 +221,7 @@ fn render_send_result(task: &Task, context_id: &str, generation: Generation) -> 
 }
 
 /// One send, whatever generation asked for it: the shape [`dispatch_send`] and the stream run on.
+#[derive(Clone)]
 pub(crate) struct SendRequest {
     pub task_id:    String,
     pub context_id: String,
@@ -1005,6 +1006,9 @@ fn handle_tasks_cancel(
 enum Step<'a> {
     Submitted,
     Working,
+    /// The agent serving this task is waiting for a grant (adopter-surface X3, third PR): the status carries the
+    /// pending request's id and nothing else, so an A2A client can be the supervisor's surface.
+    InputRequired(&'a str),
     Completed(&'a Task),
     /// `error` and `detail` are the pre-0.2 event's fields, each present where it always was; 0.3 and
     /// 1.0 carry the same text as the failed status's message.
@@ -1021,6 +1025,7 @@ fn stream_events(id: &Option<Value>, req: &SendRequest, step: Step<'_>) -> Vec<E
         let data = match step {
             Step::Submitted => json!({ "id": task_id, "status": { "state": "submitted" } }),
             Step::Working => json!({ "id": task_id, "status": { "state": "working" } }),
+            Step::InputRequired(request) => json!({ "id": task_id, "status": { "state": "input-required", "message": { "role": "agent", "parts": [{ "type": "text", "text": format!("grant request {request}") }] } } }),
             Step::Completed(task) => serde_json::to_value(task).unwrap_or(Value::Null),
             Step::Failed { error, detail } => {
                 let mut v = json!({ "id": task_id, "status": { "state": "failed" } });
@@ -1060,6 +1065,7 @@ fn stream_events(id: &Option<Value>, req: &SendRequest, step: Step<'_>) -> Vec<E
             vec![event(render_send_result(&task, context_id, generation))]
         }
         Step::Working => vec![event(status_update("working", None, false))],
+        Step::InputRequired(request) => vec![event(status_update("input-required", Some(&format!("grant request {request}")), false))],
         Step::Completed(task) => {
             let mut events: Vec<Event> = task.artifacts.iter().enumerate().map(|(i, a)| {
                 let update = json!({ "taskId": task_id, "contextId": context_id,
@@ -1136,6 +1142,40 @@ pub(crate) async fn tasks_send_subscribe(
                 let _ = tx2.try_send(Ok(e));
             }
         });
+        // Adopter-surface X3 (third PR): while the skill runs, a grant request the serving node's agent writes is
+        // reported as `input-required` with the request's id, and `working` again once it is answered — the records
+        // gossip, so the gateway sees them wherever the agent is. Aborted with `working` before every terminal event.
+        let grants = {
+            let (tx3, tc, id3, req3) = (tx.clone(), Arc::clone(&state.task_ctx), id.clone(), req.clone());
+            let prefix = format!("grant/{}/", gateway_caller::node_principal(&target));
+            tokio::spawn(async move {
+                let mut rx = mycelium_core::kv_handle::KvHandle::from_core(Arc::clone(&tc.core)).subscribe_prefix(prefix.clone());
+                let open = |tc: &TaskCtx| -> std::collections::BTreeSet<String> {
+                    let entries = crate::store::scan_kv_prefix(&tc.kv_state, &prefix);
+                    let answered: std::collections::HashSet<String> = entries.iter().filter_map(|(k, _)| k.strip_suffix("/issued").or_else(|| k.strip_suffix("/refused")).or_else(|| k.strip_suffix("/consumed")).map(str::to_string)).collect();
+                    entries.iter().filter(|(k, _)| k.matches('/').count() == 2 && !answered.contains(k.as_ref())).filter_map(|(k, _)| k.rsplit('/').next().map(str::to_string)).collect()
+                };
+                let before = open(&tc);
+                let mut reported: Option<String> = None;
+                loop {
+                    if rx.changed().await.is_err() { return; }
+                    let now = open(&tc);
+                    match &reported {
+                        None => {
+                            if let Some(r) = now.difference(&before).next() {
+                                for e in stream_events(&id3, &req3, Step::InputRequired(r)) { let _ = tx3.send(Ok(e)).await; }
+                                reported = Some(r.clone());
+                            }
+                        }
+                        Some(r) if !now.contains(r) => {
+                            for e in stream_events(&id3, &req3, Step::Working) { let _ = tx3.send(Ok(e)).await; }
+                            reported = None;
+                        }
+                        Some(_) => {}
+                    }
+                }
+            })
+        };
 
         #[cfg(all(feature = "gateway", feature = "tls"))]
         let preflight = super::http::ae_preflight(
@@ -1154,6 +1194,7 @@ pub(crate) async fn tasks_send_subscribe(
         #[cfg(all(feature = "gateway", feature = "tls"))]
         if let super::http::Preflight::Refuse(refusal) = &preflight {
             working.abort();
+            grants.abort();
             send_all(stream_events(&id, &req, Step::Failed { error: Some(refusal.to_string()), detail: None })).await;
             return;
         }
@@ -1174,8 +1215,9 @@ pub(crate) async fn tasks_send_subscribe(
             super::http::ae_record_execution(&state.task_ctx, &preflight, observed).await;
         }
 
-        // Whatever the outcome, it is terminal: no "working" may follow it.
+        // Whatever the outcome, it is terminal: no "working" or "input-required" may follow it.
         working.abort();
+        grants.abort();
 
         match dispatched {
             Ok(reply) => {

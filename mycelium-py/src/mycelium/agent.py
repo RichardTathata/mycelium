@@ -664,6 +664,24 @@ class MyceliumAgent:
             data = resp.json()
         return data if isinstance(data, dict) else {}
 
+    async def grants_stream(self) -> AsyncIterator[Dict[str, Any]]:
+        """``GET /gateway/grants/stream`` (``grant:read``): the open grant requests as they come, as an async
+        iterator of events. Each is a dict with ``event`` — ``"grant_request"`` (a request record: ``request``,
+        ``agent``, ``tool``, ``arguments`` or its withheld rendering, ``arguments_digest``, ``expires_at_ms``, ``key``)
+        or ``"grant_answered"`` (``request``, ``outcome`` ``issued`` · ``refused`` · ``revoked``, ``issuer``,
+        ``reason``) — and the record's fields. On connect the requests standing now come first; then each new one
+        as it lands; a request is reported once. Break the loop to stop.
+        """
+        import json as _json
+        url = f"{self._base_url}/gateway/grants/stream"
+        async with httpx.AsyncClient(timeout=None, headers=self._pool.headers, verify=self._pool.verify) as client:
+            async with aconnect_sse(client, "GET", url) as event_source:
+                async for event in event_source.aiter_sse():
+                    data = _json.loads(event.data) if event.data else {}
+                    if isinstance(data, dict):
+                        data["event"] = event.event or "grant_request"
+                        yield data
+
     def grant_revoke(self, agent: str, request: str, *, reason: Optional[str] = None) -> Dict[str, Any]:
         """``POST /gateway/grants/{agent}/{request}/revoke`` (``grant:issue``): revoke an issued grant, at the node
         that issued it (409 ``not_the_issuer`` elsewhere; 404 ``not_issued``; 409 ``already_revoked``). Revoking is an

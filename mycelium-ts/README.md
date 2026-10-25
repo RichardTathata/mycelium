@@ -466,7 +466,9 @@ protected kind — is thrown, never reported as `"timeout"`.
 `grantsPending()` reads `GET /gateway/grants/pending` (`grant:read`) and `grantDecide(agent, request, "issue" |
 "refuse", { ttlSecs, reason })` posts the answer to `POST /gateway/grants/{agent}/{request}` (`grant:issue`);
 issuing is itself an action the node's evaluator decides, so a refusal is the route's 403, and 409 `not_this_node`
-names an agent on another node. A grant a caller holds already rides as a presented mandate in `_meta.mandate`.
+names an agent on another node. A grant a caller holds already rides as a presented mandate in `_meta.mandate`. `grantRevoke(agent, request, {
+reason })` revokes at the issuing node, and `grantsStream()` is the requests as they come (an async generator of
+`grant_request` and `grant_answered` events).
 `A2aClient.getTask(id)` and `cancel(id)` are `tasks/get` and `tasks/cancel`: the task as the node holds it, readable
 and cancellable by the identity that created it; a cancel ends the task's record and stops no work — a task runs
 inside its request — and a terminal task throws (adopter-surface X7, the adapter contract).

@@ -32,6 +32,15 @@ class _Stub(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         _Stub.seen.append(("GET", self.path, {}, self.headers.get("Authorization")))
+        if self.path.endswith("/gateway/grants/stream"):
+            body = (b'event: grant_request\ndata: {"request":"r1","agent":"node:127.0.0.1:7946","tool":"deploy","key":"grant/node:127.0.0.1:7946/r1"}\n\n'
+                    b'event: grant_answered\ndata: {"request":"r1","outcome":"issued","issuer":"token:gw/alice"}\n\n')
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         self._json({"ok": True, "pending": PENDING, "now_ms": 1})
 
     def do_POST(self) -> None:  # noqa: N802
@@ -77,6 +86,22 @@ def test_grant_decide_posts_the_decision_and_returns_the_records_receipt(stub):
         ("POST", "/gateway/grants/node%3A127.0.0.1%3A7946/r2", {"decision": "refuse", "reason": "not today"}),
     ]
     assert all(auth == "Bearer super" for *_, auth in _Stub.seen)
+
+
+def test_grants_stream_yields_the_requests_and_answers_it_is_sent(stub):
+    import asyncio
+    async def first_two():
+        agent = MyceliumAgent("127.0.0.1", stub, token="super")
+        got = []
+        async for ev in agent.grants_stream():
+            got.append(ev)
+            if len(got) == 2:
+                break
+        return got
+    got = asyncio.run(first_two())
+    assert got[0]["event"] == "grant_request" and got[0]["request"] == "r1" and got[0]["tool"] == "deploy"
+    assert got[1]["event"] == "grant_answered" and got[1]["outcome"] == "issued"
+    assert _Stub.seen[0][:2] == ("GET", "/gateway/grants/stream") and _Stub.seen[0][3] == "Bearer super"
 
 
 def test_grant_revoke_posts_to_the_revoke_route_under_the_bearer(stub):

@@ -199,6 +199,51 @@ pub(super) async fn gw_grant_decide(
     }
 }
 
+/// `GET /gateway/grants/stream` (`grant:read`) — the open requests as they come (adopter-surface X3, third PR). On
+/// connect, every request standing now, one `grant_request` event each (a supervisor connecting late sees the
+/// backlog); then each new request as its record lands, and a `grant_answered` event when a request this stream
+/// reported is issued, refused or revoked — by anyone, at any node, since the records gossip. Woken by writes under
+/// `grant/` only; a request already reported is reported once. The stream ends when the client goes.
+pub(super) async fn gw_grants_stream(State(ctx): State<Arc<HttpCtx>>) -> axum::response::Response {
+    use std::collections::HashSet;
+    let tc = Arc::clone(&ctx.agent_ctx);
+    let mut rx = mycelium_core::kv_handle::KvHandle::from_core(Arc::clone(&tc.core)).subscribe_prefix("grant/");
+    let (tx, out) = tokio::sync::mpsc::channel::<Event>(256);
+    tokio::spawn(async move {
+        let (mut reported, mut answered): (HashSet<String>, HashSet<String>) = (HashSet::new(), HashSet::new());
+        loop {
+            let now_ms = tc.hlc.decision_now_ms();
+            for rec in pending(&tc, now_ms) {
+                let key = rec["key"].as_str().unwrap_or_default().to_string();
+                if reported.insert(key) && tx.send(Event::default().event("grant_request").data(rec.to_string())).await.is_err() {
+                    return;
+                }
+            }
+            // An answer to a request this stream reported: the record names the outcome and who answered.
+            for (k, v) in crate::store::scan_kv_prefix(&tc.kv_state, "grant/") {
+                let Some((base, outcome)) = k.rsplit_once('/').filter(|(_, o)| matches!(*o, "issued" | "refused" | "revoked")) else { continue };
+                if !reported.contains(base) || !answered.insert(k.to_string()) {
+                    continue;
+                }
+                let detail: serde_json::Value = serde_json::from_slice(&v).unwrap_or_default();
+                // An issued record is the signed grant, whose `purpose` names the issuer; a refusal or revocation names
+                // the issuer itself.
+                let issuer = detail["issuer"].as_str().map(str::to_string).or_else(|| {
+                    detail["mandate"]["purpose"].as_str().and_then(|p| p.strip_prefix("grant issued by ")).and_then(|p| p.split(" for request ").next()).map(str::to_string)
+                });
+                let data = json!({ "key": base, "request": base.rsplit('/').next().unwrap_or_default(), "outcome": outcome, "issuer": issuer, "reason": detail["reason"], "at_ms": detail["at_ms"].as_u64().or_else(|| detail["mandate"]["valid_from_ms"].as_u64()) });
+                if tx.send(Event::default().event("grant_answered").data(data.to_string())).await.is_err() {
+                    return;
+                }
+            }
+            if rx.changed().await.is_err() {
+                return;
+            }
+        }
+    });
+    Sse::new(tokio_stream::StreamExt::map(tokio_stream::wrappers::ReceiverStream::new(out), Ok::<_, std::convert::Infallible>)).keep_alive(KeepAlive::default()).into_response()
+}
+
 /// Is `agent` the principal (`node:{ip}:{port}`) of a fleet member whose identity key this node holds?
 fn is_member_agent(ctx: &TaskCtx, agent: &str) -> bool {
     agent
