@@ -16,7 +16,7 @@ PERMITTED`, and `reader set demo/greeting: REFUSED 403 — insufficient scope (t
 | Path | What it is |
 |---|---|
 | `node.toml` | the node's configuration: a gateway on loopback with two named tokens |
-| `units/purchaser.toml` | the unit file alice declares; its mandate and rule come back as `not_enforced` |
+| `units/purchaser.toml` | the unit file alice declares; its mandate and rules come back as `not_enforced` (one tool waits for the treasurer's grant — `mycelium test --faults grant units/` drives it) |
 | `main.py` | the program: starts the node, declares, writes, is refused, stops the node |
 | `data/node.log` | the node's log from the last run |
 

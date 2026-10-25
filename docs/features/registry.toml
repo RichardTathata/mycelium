@@ -87,7 +87,7 @@ page = "grants.md"
 example = "none"
 example_watch = ["grant", "grants", "default_deny_approval"]
 ids = ["concept:grant"]
-links = ["concept:mandate"]
+links = ["concept:mandate", "concept:test-faults", "guarantee:mesh.tls", "guarantee:persist.configured", "rule:ae.preflight"]
 
 [[feature]]
 name = "Causal records"
@@ -127,8 +127,8 @@ page = "test-faults.md"
 example = "none"
 example_watch = ["test_faults", "fault_classes"]
 ids = ["concept:test-faults"]
-links = ["concept:doctor", "concept:unit-file", "rule:membership.governed", "guarantee:persist.unreadable_refused",
-         "guarantee:id.revocation_authority", "cargo:mycelium/sim"]
+links = ["concept:doctor", "concept:unit-file", "concept:grant", "rule:membership.governed", "guarantee:persist.unreadable_refused",
+         "guarantee:id.revocation_authority", "guarantee:mesh.tls", "guarantee:persist.sync_mode", "cargo:mycelium/sim"]
 
 # ------------------------------------------------------------------------------- pages to write (row F3)
 

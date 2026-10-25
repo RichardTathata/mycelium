@@ -850,6 +850,8 @@ pub fn check(units: &[Unit], artifacts: &[(String, ArtifactDescription)], opts: 
                         continue;
                     }
                     match &r.requires_mandate {
+                        // A rule requiring a grant admits the edge under one: the grant is issued at run time, not
+                        // declared (adopter-surface X3); whether anyone may issue it is the pass below.
                         None => {
                             admitted = true;
                         }
@@ -882,6 +884,23 @@ pub fn check(units: &[Unit], artifacts: &[(String, ArtifactDescription)], opts: 
                         e.ns,
                         e.name,
                         nearest.unwrap_or_else(|| format!("no declared rule admits {principal:?} calling it as a skill or a tool"))
+                    ),
+                });
+            }
+        }
+        // A rule that requires a grant needs someone the rules admit to issue one (`grant.issue` on its resource,
+        // or on `*`); without that the call waits for a grant nobody may give and is refused on silence — the
+        // declaration says default-deny and nothing else (adopter-surface X3, fourth PR).
+        for (u, r) in units.iter().flat_map(|u| u.config.rules.iter().map(move |r| (u, r))).filter(|(_, r)| r.requires_grant) {
+            let issuable = rules.iter().any(|i| i.operation == "grant.issue" && (i.resource == "*" || i.resource == r.resource));
+            if !issuable {
+                findings.push(Finding {
+                    severity: Severity::Warning,
+                    kind:     "unissuable grant".into(),
+                    unit:     Some(u.name.clone()),
+                    message:  format!(
+                        "a rule admits {:?} {} on {} only under a grant, and no declared rule admits anyone to grant.issue on it: the call waits for a grant nobody may give and is refused on silence",
+                        r.actor, r.operation, r.resource
                     ),
                 });
             }
@@ -1252,6 +1271,30 @@ mod tests {
         // Off: nothing of the above.
         let r = check(&[provider, ok], &[], &CheckOptions { authority: false, ..Default::default() });
         assert!(r.findings.iter().all(|f| !f.kind.contains("edge")), "{}", r.render_text());
+    }
+
+    /// A rule requiring a grant is admitted at the edge — the grant is issued at run time — and warns when no rule
+    /// admits anyone to issue it (adopter-surface X3, fourth PR).
+    #[test]
+    fn a_grant_required_rule_admits_the_edge_and_warns_when_nobody_may_issue() {
+        let provider = unit("approver", "[[capability]]\nns=\"purchase\"\nname=\"approve\"\n");
+        let lone = unit("purchaser", concat!(
+            "principal=\"purchaser\"\n[[requirement]]\nns=\"purchase\"\nname=\"approve\"\n",
+            "[[rule]]\nactor=\"purchaser\"\noperation=\"tools/call\"\nresource=\"tool:approve\"\nrequires_grant=true\n",
+        ));
+        let r = check(&[provider.clone(), lone], &[], &CheckOptions::default());
+        let text = r.render_text();
+        assert_eq!(r.exit_code(), 0, "{text}");
+        assert!(r.findings.iter().all(|f| f.kind != "unauthorisable edge"), "{text}");
+        assert!(kinds(&r).contains(&("unissuable grant", Severity::Warning)), "{text}");
+        assert!(text.contains("no declared rule admits anyone to grant.issue on it"), "{text}");
+        let issued = unit("purchaser", concat!(
+            "principal=\"purchaser\"\n[[requirement]]\nns=\"purchase\"\nname=\"approve\"\n",
+            "[[rule]]\nactor=\"purchaser\"\noperation=\"tools/call\"\nresource=\"tool:approve\"\nrequires_grant=true\n",
+            "[[rule]]\nactor=\"treasurer\"\noperation=\"grant.issue\"\nresource=\"tool:approve\"\n",
+        ));
+        let r = check(&[provider, issued], &[], &CheckOptions::default());
+        assert!(r.findings.iter().all(|f| f.kind != "unissuable grant"), "{}", r.render_text());
     }
 
     /// The overlay's operation string is the gateway's own rule, pinned equal under the build

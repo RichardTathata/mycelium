@@ -5,7 +5,7 @@
 `mycelium test --faults [<class>,…] <units-dir> [--config <node.toml>]` builds a fleet of in-process nodes from a
 project's [unit files](../guide/00-concepts.md#unit-file) and a configuration, and runs the
 [fault classes](../guide/00-concepts.md#test-faults) the repository already proves against *that* fleet: `revoke`,
-`restart`, `partition`, `replay`, `policy-diff` and `recovery`. The report says, per class, which checks held, which guarantee and
+`restart`, `partition`, `replay`, `policy-diff`, `recovery` and `grant`. The report says, per class, which checks held, which guarantee and
 rule ids it exercised with each one's resolution on the fleet's node, and which it could not exercise and why — in the
 same vocabulary as the [readiness report](../guide/00-concepts.md#doctor): `not_configured`, `not_in_build`,
 `not_applicable`, `not_verifiable_here`. A finding is the fleet's: a revoked key still verifying at one door, a synced
@@ -26,13 +26,20 @@ This feature is turned on in code.
 - [`run`](../../src/faults.rs) — `wire-check` over the declaration first (an error refuses the run with the same
   findings), then one fleet per class, built from the configuration with loopback addresses, free ports, persistence
   and TLS material under a temporary directory, no gateway port, a one-second health check and governor cooldown.
-- [`Class`](../../src/faults.rs) — the six classes; `--faults` alone runs every one, a list runs those and fails the
-  run if one cannot run here. `recovery` is [selective recovery](selective-recovery.md)'s page.
+- [`Class`](../../src/faults.rs) — the seven classes; `--faults` alone runs every one, a list runs those and fails the
+  run if one cannot run here. `recovery` is [selective recovery](selective-recovery.md)'s page; `grant` (a
+  [grant](../guide/00-concepts.md#grant) that is default-deny and holds across a restart) is on the
+  [grants](grants.md) page — [`run`](../../src/faults/grant.rs) drives the declaration's first `[[rule]]` with
+  `requires_grant = true` on the agent's node of the fleet: default-deny, the declared issuer's grant, the restart over
+  the WAL, the binding, the record; it issues through the route's own decision
+  ([`decide_grant`](../../src/agent/http/grants.rs)), the fleet having no gateway port.
 - `replay` needs the binary built with the `sim` Cargo feature (`cargo build --bin mycelium --features cli,sim`); on
   any other it reads `not_in_build` naming `sim`. `revoke` needs `tls` and `compliance` in the build and a `[tls]`
   table; `restart` needs [`persistence`](../reference/configuration.md#the-fields); `policy-diff` needs `gateway` and
   `tls` and `--against <units-dir>`, the proposed revision; `recovery` needs `[persistence]` and a `gateway` + `tls`
-  build.
+  build; `grant` needs `[tls]`, `[persistence]`, a `compliance` build (the member keys a grant's checkpoint is verified
+  against) and a declaration with a grant-required rule and a rule admitting someone to `grant.issue` on it — without
+  the rules it reads `not_applicable`, naming which.
 - `a_declaration_wire_check_refuses_is_refused_with_the_same_findings`, in [`src/faults.rs`](../../src/faults.rs):
   the plant is a unit nobody can wire; `test` refuses with `wire-check`'s own report, word for word.
 
@@ -40,15 +47,18 @@ This feature is turned on in code.
 
 No runnable example exists: the [example index's capability matrix](../../examples/README.md#the-capability-matrix)
 has no row for this feature. The CI job `Scaffold` runs it against the Rust scaffold's declaration with every class
-the scaffold's build has (`revoke`, `restart`, `partition` pass; `replay` reads not-in-build; a planted widened
-`[[rule]]` is reported by `policy-diff`; a declaration `wire-check` refuses is refused with the same text), and the
-job `embedded` builds the `sim` binary and runs `replay` against the co-op fixture. The tests are in
-[`src/faults.rs`](../../src/faults.rs): `a_declaration_wire_check_refuses_is_refused_with_the_same_findings`,
+the scaffold's build has (`revoke`, `restart`, `partition`, `recovery` and `grant` pass; `replay` reads not-in-build; a
+planted widened `[[rule]]` is reported by `policy-diff`; a declaration `wire-check` refuses is refused with the same
+text), the `one-hour` job runs `grant` and `recovery` on the published binary against the Python scaffold's declaration
+(its steps 4 and 5), and the job `embedded` builds the `sim` binary and runs `replay` against the co-op fixture. The
+tests are in [`src/faults.rs`](../../src/faults.rs): `a_declaration_wire_check_refuses_is_refused_with_the_same_findings`,
 `an_activation_runs_no_command`, `a_class_that_cannot_run_fails_only_when_asked_by_name`,
 `the_restart_class_replays_a_synced_write_and_refuses_unreadable_state`,
 `the_revoke_class_sees_the_three_verifiers_and_the_mandate_refuse`,
-`the_partition_class_sees_a_dark_member_evicted_and_the_floor_refilled` and
-`a_planted_policy_regression_is_reported_by_policy_diff`; the `sim` half is
+`the_partition_class_sees_a_dark_member_evicted_and_the_floor_refilled`,
+`a_planted_policy_regression_is_reported_by_policy_diff`,
+`the_grant_class_refuses_on_silence_issues_by_the_declared_rule_and_holds_across_a_restart` and
+`the_grant_class_needs_a_grant_rule_tls_and_persistence_and_says_so`; the `sim` half is
 `the_replay_class_replays_the_fleet_decision_for_decision` in [`tests/faults_replay.rs`](../../tests/faults_replay.rs).
 
 ## What it guarantees, and what it does not
@@ -58,11 +68,12 @@ job `embedded` builds the `sim` binary and runs `replay` against the co-op fixtu
   [`persist.configured`](../reference/guarantee-catalogue.md) (`restart`), [`mesh.tls`](../reference/guarantee-catalogue.md)
   and [`mesh.signed_writes`](../reference/guarantee-catalogue.md) (`revoke`),
   [`id.revocation_authority`](../reference/guarantee-catalogue.md) (`revoke`; it reads `not_configured` under the
-  development posture, the CA key being on the node) — and the decision points in the rule catalogue:
+  development posture, the CA key being on the node), [`mesh.tls`](../reference/guarantee-catalogue.md) and
+  [`persist.sync_mode`](../reference/guarantee-catalogue.md) (`grant`, `recovery`) — and the decision points in the rule catalogue:
   [`membership.governed`](../reference/rule-catalogue.md) (`partition`, `replay`), [`kv.expiry`](../reference/rule-catalogue.md)
   and [`cap.match`](../reference/rule-catalogue.md) (`partition`), [`ae.preflight`](../reference/rule-catalogue.md)
-  (`policy-diff`). Each is reported with its resolution on the fleet's node; an id that does not resolve `enforced`
-  is listed as not exercised, with the reason the node gives.
+  (`policy-diff`, `grant` — who may issue, decided at `gateway:grants/issue`). Each is reported with its resolution on
+  the fleet's node; an id that does not resolve `enforced` is listed as not exercised, with the reason the node gives.
 - **It never runs an activation.** A unit's `[[activation]]` commands are counted and reported `not_applicable`;
   none is started, confined or not (D23).
 - The fleet is the configuration's with stated rewrites, not the deployment: loopback, free ports, temporary
@@ -91,6 +102,11 @@ job `embedded` builds the `sim` binary and runs `replay` against the co-op fixtu
   not have), which the report names with the first choice not reached rather than counting as a divergence. The schedule
   between nodes — frame arrival — is outside the seams (the inventory's §3.1.1), so a fleet recorded together
   diverges at its first cross-node channel choice; stated, not hidden.
+- `grant` (adopter-surface X3) drives the state machine's door and the issuing door, in one process: the gateway's
+  and the provider's doors on a declaration's fleet, and revocation with its drain bound, are the door tests' job
+  (`src/agent/http/grant_tests.rs`), not this class's; the stop before the restart is graceful; a declared
+  `tool:<name>` is also admitted at `tool:<name>@<the agent's node>` (the form the request record and the doors use),
+  and the report says so; the route's scope rule (`grant:issue`) is outside its view, the evaluator's rule inside.
 - `recovery` (adopter-surface X9) is its own page: [selective recovery](selective-recovery.md) — a lost
   acknowledgement probed before any retry, the closure of its record across the fleet's journals, each member
   recovered by its class as a new record, independent work untouched, explained from the records; its seamed form

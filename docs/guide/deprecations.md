@@ -1865,6 +1865,22 @@ heartbeat tick, while a live member's entry holds a forged time, until its owner
 has no heartbeat" is reading a member whose heartbeat has not reached it; it clears when the heartbeat arrives or the
 entry ages past the bound.
 
+## 65. A `[[rule]]` gained `requires_grant`; a `[[rule]]` or `[[mandate]]` with an unknown key is refused; `Class` gained `Grant` (unreleased, adopter-surface X3, fourth PR)
+
+The unit file's `[[rule]]` gained `requires_grant = true` — the rule applies only under a grant, `Rule::requiring_grant`'s
+shorthand (one of this and `requires_mandate`, never both) — and `mycelium test --faults` gained the `grant` class, which
+drives the declaration's first such rule on its own fleet: default-deny, the declared issuer's grant, the restart over
+the WAL. **Two readers change behaviour.** A `[[rule]]` or a `[[mandate]]` carrying a key it does not have is now
+refused by name, as the unit file's sections already were (§49): a misspelt `requires_grant` or `requires_mandate`
+loaded, until this release, as a rule that required nothing and admitted without a word. **Migration:** a rule or a
+mandate with a stray key is refused by `wire-check`, `test`, the stem and `POST /gateway/units/declare` (`400 invalid
+unit file`) — fix the key. A reader older than this release drops `requires_grant` silently and reads the rule as
+plain, so declare it only once every reader of the directory runs this release; the scaffolds ship it because they
+pin the release they came from. The other section tables (`[[capability]]`, `[[group]]`, `[[lane]]`, `[hosts]`,
+`[[presence]]`, `[[serve]]`) still accept an unknown key silently — stated, not changed here. `Class::ALL` is seven
+long and an exhaustive `match` on `Class` needs a `Grant` arm. `wire-check` gained one warning, `unissuable grant`: a
+rule that requires a grant with no rule admitting anyone to `grant.issue` on its resource.
+
 ## 64. `AgentPolicy` gained `grant_arguments_class` and `grant_renderable_classes`; a streamed A2A task can report `input-required`; `GET /gateway/grants/stream` (unreleased, adopter-surface X3, third PR)
 
 `AgentPolicy` gained two fields (an exhaustive struct literal breaks; `..Default::default()` is unaffected): the

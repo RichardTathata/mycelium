@@ -463,7 +463,7 @@ fn doctor_cli(args: Vec<String>) -> i32 {
 /// `mycelium test --faults [<class>[,<class>…]] <units-dir> [--config <node.toml>] [--against <units-dir>]
 /// [--library <dir>] [--schemas <dir>] [--format text|json]` — the existing proofs against an adopter's
 /// declaration (adopter-surface X6, `mycelium::faults`). `--faults` alone runs every class; a class list
-/// (`revoke`, `restart`, `partition`, `replay`, `policy-diff`, `recovery`) runs those and fails the run if one of them
+/// (`revoke`, `restart`, `partition`, `replay`, `policy-diff`, `recovery`, `grant`) runs those and fails the run if one of them
 /// cannot run here (`not_in_build`, `not_configured`, `not_applicable`). Exit 0 when every class that ran
 /// passed; 1 when a check did not hold, a named class could not run, a class's fleet refused to build or
 /// start (`refused`, asked or not), or `wire-check` refused the declaration (its findings printed, the same
@@ -472,7 +472,7 @@ fn test_cli(args: Vec<String>) -> i32 {
     use mycelium::faults::{self, Class, Options, Refused};
     use mycelium::wire_check::{ArtifactDescription, CheckOptions};
     const USAGE: &str = "Usage: mycelium test --faults [<class>[,<class>…]] <units-dir> [--config <node.toml>] [--against <units-dir>] [--decisions <evidence.log>]… [--library <dir>] [--schemas <dir>] [--seed <n>] [--keep] [--format text|json]\n\
-       classes: revoke · restart · partition · replay (needs a binary built with --features cli,sim) · policy-diff (needs --against) · recovery (needs [persistence])\n\
+       classes: revoke · restart · partition · replay (needs a binary built with --features cli,sim) · policy-diff (needs --against) · recovery (needs [persistence]) · grant (needs [tls], [persistence] and a [[rule]] with requires_grant)\n\
        a units directory named like a class is written ./<name>; --config replaces the environment (GOSSIP_*) as -c does; --keep leaves the run's directory in place";
     let (mut faults, mut dir, mut config, mut against, mut library, mut schemas) = (false, None::<String>, None::<PathBuf>, None::<String>, None::<String>, None::<String>);
     let (mut classes, mut format, mut seed, mut keep, mut decisions) = (Vec::<Class>::new(), "text".to_string(), 0x5eed_u64, false, Vec::<PathBuf>::new());

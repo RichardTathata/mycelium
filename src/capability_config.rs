@@ -823,6 +823,7 @@ pub struct LaneDecl {
 /// [`Mandate`](crate::mandate::Mandate). Epoch, term and validity are runtime facts a
 /// declaration does not carry.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct MandateDecl {
     pub holder: String,
     pub scope:  String,
@@ -842,8 +843,11 @@ impl MandateDecl {
 }
 
 /// A `[[rule]]` — the reference evaluator's [`Rule`](crate::Rule), as written: `*` is any;
-/// `requires_values` are compared for equality by name.
+/// `requires_values` are compared for equality by name. An unknown key is refused by name (adopter-surface X3,
+/// fourth PR): a misspelt `requires_grant` or `requires_mandate` would otherwise load as a rule that requires
+/// nothing, and admit without a word.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuleDecl {
     pub actor:     String,
     pub operation: String,
@@ -854,6 +858,11 @@ pub struct RuleDecl {
     pub requires_facts: Vec<String>,
     #[serde(default)]
     pub requires_mandate: Option<String>,
+    /// The rule applies only under a **grant** (adopter-surface X3) — a mandate in the `grant:` family a supervisor
+    /// issues for one call; `mycelium test --faults grant` drives the first such rule. One of this and
+    /// `requires_mandate`, never both: a grant is a mandate whose scope is its own.
+    #[serde(default)]
+    pub requires_grant: bool,
     #[serde(default)]
     pub requires_values: BTreeMap<String, toml::Value>,
 }
@@ -862,10 +871,16 @@ impl RuleDecl {
     /// The evaluator's own rule type, where the evaluator exists (a gateway that can attest).
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub fn to_rule(&self) -> Result<crate::Rule, String> {
+        if self.requires_grant && self.requires_mandate.is_some() {
+            return Err("requires_grant and requires_mandate are one or the other: a grant is a mandate in the grant: family".into());
+        }
         let mut rule = crate::Rule::new(self.actor.as_str(), self.operation.as_str(), self.resource.as_str());
         rule.requires_scopes = self.requires_scopes.clone();
         rule.requires_facts = self.requires_facts.clone();
         rule.requires_mandate = self.requires_mandate.clone();
+        if self.requires_grant {
+            rule = rule.requiring_grant();
+        }
         rule.requires_values = self
             .requires_values
             .iter()
@@ -1499,6 +1514,27 @@ max_providers = 4
             assert_eq!(rule.requires_mandate.as_deref(), Some("routers"));
             assert_eq!(rule.requires_values[0], ("region".to_string(), serde_json::json!("north")));
         }
+    }
+
+    /// `requires_grant = true` is the grant family's shorthand (adopter-surface X3, fourth PR); with
+    /// `requires_mandate` beside it the rule is refused; a key the rule does not have is refused by name, as a
+    /// `[[mandate]]`'s is — a misspelt requirement would otherwise admit without one.
+    #[test]
+    fn a_rule_requiring_a_grant_and_an_unknown_rule_key() {
+        let cfg: NodeCapabilityConfig = toml::from_str("[[rule]]\nactor = \"purchaser\"\noperation = \"tools/call\"\nresource = \"tool:purchase.approve\"\nrequires_grant = true\n").unwrap();
+        assert!(cfg.rules[0].requires_grant);
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        {
+            let rule = cfg.rules[0].to_rule().unwrap();
+            assert_eq!(rule.requires_mandate.as_deref(), Some("grant:*"));
+            let both: NodeCapabilityConfig = toml::from_str("[[rule]]\nactor = \"p\"\noperation = \"tools/call\"\nresource = \"tool:x\"\nrequires_grant = true\nrequires_mandate = \"petty-cash\"\n").unwrap();
+            let err = both.rules[0].to_rule().unwrap_err();
+            assert!(err.contains("one or the other"), "{err}");
+        }
+        let typo = toml::from_str::<NodeCapabilityConfig>("[[rule]]\nactor = \"p\"\noperation = \"tools/call\"\nresource = \"tool:x\"\nrequires_grnat = true\n").unwrap_err().to_string();
+        assert!(typo.contains("requires_grnat"), "{typo}");
+        let typo = toml::from_str::<NodeCapabilityConfig>("[[mandate]]\nholder = \"p\"\nscope = \"s\"\noperations = []\nholders = [\"q\"]\n").unwrap_err().to_string();
+        assert!(typo.contains("holders"), "{typo}");
     }
 
     /// The unit-file example in this module's doc is the one most readers copy, so it must be a

@@ -147,6 +147,26 @@ has no row for this feature. The tests: in [`src/mandate/grant.rs`](../../src/ma
   again for the same tool and digest while the request stands and is unconsumed waits on it rather than asking twice.
 - **Veto, not grant:** `require_approval_for` approves on silence and is labelled so in `strength_report()`; its
   `ApprovalTimedOut` variant was never produced and is deprecated (`deprecations.md` §59).
+- **The `grant` fault class** ([`run`](../../src/faults/grant.rs); `mycelium test --faults grant <units-dir> --config
+  <node.toml>`, one of the [fault classes](../guide/00-concepts.md#test-faults)) — adopter-surface X3's exit on the
+  declaration's own fleet, and the one-hour job's step 4. It exercises
+  [`persist.configured`](../reference/guarantee-catalogue.md) and [`mesh.tls`](../reference/guarantee-catalogue.md) (the
+  grant replayed from the WAL, the identity that signs it) and the decision point
+  [`ae.preflight`](../reference/rule-catalogue.md) (who may issue). The first
+  `[[rule]]` with `requires_grant = true` ([unit file](../reference/unit-file.md#rule)) names the tool and the agent,
+  the actor of a rule admitting `grant.issue` on it is the issuer the class plays. On the agent's node — an evaluator
+  built from every declared rule, a journal, an execution authority entitled to its own grants — a plain transition is
+  refused and silence refuses within the window; a principal no rule names is refused the issue by the evaluator and
+  the declared issuer's grant admits the waiting call once; the node is stopped before it reads an answer, the issuer
+  answers the standing request, and after the restart the request and the grant are back from the WAL, the agent
+  re-waits and does not ask twice, and the grant issued before the restart verifies; other arguments ask again; the
+  decisions are on the record. It needs `[tls]`, `[persistence]` and a `compliance` build, and reads `not_applicable`
+  naming the rule it lacks. It issues through the route's own decision ([`decide_grant`](../../src/agent/http/grants.rs)),
+  not over HTTP — the fleet has no gateway port — and admits a declared `tool:<name>` also at `tool:<name>@<the agent's
+  node>`, the form the request record and the doors use. Both scaffolds declare the tool and its issuer
+  ([`purchaser.toml`](../../templates/governed-call-py/units/purchaser.toml)); `wire-check` warns `unissuable grant`
+  for a grant-required rule nobody may issue. Tests: `the_grant_class_refuses_on_silence_issues_by_the_declared_rule_and_holds_across_a_restart`,
+  `the_grant_class_needs_a_grant_rule_tls_and_persistence_and_says_so` ([`src/faults.rs`](../../src/faults.rs)).
 - **The stream** reports each request once, each answer once (an issue followed by a revocation is two), and an
   expiry once (`grant_expired`, for a reported request that lapsed unanswered), by anyone at any node (the records
   gossip); it is woken by writes under `grant/` and by the soonest reported expiry, a late supervisor gets the
@@ -159,9 +179,10 @@ has no row for this feature. The tests: in [`src/mandate/grant.rs`](../../src/ma
   reported once, `working` again when none it reported still stands), because the request record carries no task id:
   a task served by a node whose agent asks for a grant for another reason reports that too — the status is a request
   id, not an attribution. **The class is the policy's**, one name per agent policy, not row R's per-call `DataClass`
-  (declared or principal-sourced): a first cut, stated. **Not built, by the plan row** ([`adopter-surface.md`](../plans/adopter-surface.md) X3, after the third
-  PR): the one-hour job's step 4 on the published binary (a `grant` fault class, the fourth PR); retention of `grant/`
-  records; a per-issuer entitlement finer than `entitle_grants_from_fleet`. **The doors a node-held grant reaches:** a grant's holder is the agent's node, so
+  (declared or principal-sourced): a first cut, stated. **Not built, by the plan row** ([`adopter-surface.md`](../plans/adopter-surface.md) X3, after the fourth
+  PR): retention of `grant/` records; a per-issuer entitlement finer than `entitle_grants_from_fleet`; a per-call class
+  for the rendering; the gateway and provider doors driven on a declaration's fleet (the `grant` class drives the state
+  machine's door and the issuing door — the door tests drive the rest). **The doors a node-held grant reaches:** a grant's holder is the agent's node, so
   it is presented on the node's own call (a member's direct call, the provider's door) — a bearer client presenting a
   node's grant at `/mcp` is refused as not the holder's. **The gateway's claim (`used/gateway`) is code with no
   reachable caller today:** only a `node:` principal can hold a grant, so no client presents one at `/mcp`; the claim
