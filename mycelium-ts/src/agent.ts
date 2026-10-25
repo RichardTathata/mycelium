@@ -423,6 +423,18 @@ export class MyceliumAgent {
   }
 
   /**
+   * `POST /gateway/grants/{agent}/{request}/revoke` (`grant:issue`): revoke an issued grant, at the node that issued
+   * it (409 `not_the_issuer` elsewhere; 404 `not_issued`; 409 `already_revoked`). Revoking is an action the node's
+   * evaluator decides (`grant.revoke`). The grant is refused at every door afterwards, and work running under it is
+   * stopped. Returns the route's answer: the revocation record's key, operation id and local durability.
+   */
+  async grantRevoke(agent: string, request: string, options: { reason?: string } = {}): Promise<GrantAnswer> {
+    return (await this._post(`/gateway/grants/${pathSegment(agent)}/${pathSegment(request)}/revoke`, {
+      ...(options.reason !== undefined ? { reason: options.reason } : {}),
+    })) as GrantAnswer;
+  }
+
+  /**
    * Returns all live providers matching `(ns, name)`.
    * Pass `callerId` to respect `authorized_callers` restrictions.
    */

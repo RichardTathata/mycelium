@@ -286,6 +286,7 @@ pub(super) fn required_scope(method: &axum::http::Method, matched_path: &str) ->
         // Adopter-surface X3: the supervisor's door.
         "/gateway/grants/pending"         => "grant:read",
         "/gateway/grants/{agent}/{request}" => "grant:issue",
+        "/gateway/grants/{agent}/{request}/revoke" => "grant:issue",
         "/gateway/shard/{ns}/{name}"      => "cap:read",
         // Layer II mesh messaging
         "/gateway/signal/emit"     => "mesh:write",
@@ -824,6 +825,10 @@ pub(crate) async fn ae_decide(
         Some(authority) => {
             let presented: Option<super::gateway_authority::PresentedMandate> =
                 serde_json::from_value(params["_meta"]["mandate"].clone()).ok();
+            // A presented grant's checkpoint, from the KV, before it is assessed (adopter-surface X3, second PR).
+            if let Some(p) = &presented {
+                super::gateway_authority::feed_grant_checkpoint(ctx, authority, &p.grant.mandate, now_ms);
+            }
             authority.assess(
                 &actor,
                 operation,
@@ -1091,6 +1096,39 @@ impl Settling {
                 }
                 outcome = Err(refusal);
             }
+        }
+        // Adopter-surface X3 (second PR): a grant admits **one call at each door**. Claimed here — once per call,
+        // after the permit's history and seats and before its record — not inside the history loop, whose retry would
+        // meet its own marker (#678's review, finding 2). The authority's map is the atomic half (two concurrent
+        // presentations meet there), the marker under the request (`…/used/{door}`, on the WAL) the durable half,
+        // read first so a restart does not forget a use. A used grant **denies**, naming the door, and gives back the
+        // history permit; a grant admitted here is spent at this door whether or not the work completes, as a nonce
+        // is — a refusal earlier in this settling (a full fleet counter) spends nothing.
+        let grant_use = match (&outcome, &envelope.mandate, ctx.execution_authority.get()) {
+            (Ok(Some(permit)), Some(b), Some(authority))
+                if b.scope.starts_with(crate::mandate::grant::GRANT_SCOPE_PREFIX) && b.state == ae::MandateState::Established =>
+            {
+                let marker = format!("grant/{}/{}/used/{point}", b.holder.as_str(), b.term.as_str());
+                let used = mycelium_core::ops::kv_get(ctx, &marker).is_some()
+                    || !authority.claim_grant_use(b.holder.as_str(), &b.scope, b.term.as_str(), &point, envelope.not_after_ms);
+                Some((marker, used, permit.policy_revision.clone()))
+            }
+            _ => None,
+        };
+        match grant_use {
+            Some((_, true, policy_revision)) => {
+                if admitted && let Some(index) = history_index {
+                    index.retract(&point, &envelope.actor, &envelope.attempt_id);
+                }
+                outcome = Err(ae::PreflightRefusal::Denied(
+                    ae::Decision::deny(crate::mandate::MandateRefusal::GrantUsed { door: point.clone() }.to_string(), policy_revision)
+                        .checking(["grant used once at each door"]),
+                ));
+            }
+            Some((marker, false, _)) => {
+                super::super::state_machine::write_owned_kv(ctx, &marker, ctx.hlc.decision_now_ms().to_string().into_bytes());
+            }
+            None => {}
         }
         let (decision, execution) = match &outcome {
             Ok(Some(d)) => (d.clone(), ae::Execution::Attempted),

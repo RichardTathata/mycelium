@@ -79,6 +79,14 @@ def test_grant_decide_posts_the_decision_and_returns_the_records_receipt(stub):
     assert all(auth == "Bearer super" for *_, auth in _Stub.seen)
 
 
+def test_grant_revoke_posts_to_the_revoke_route_under_the_bearer(stub):
+    agent = MyceliumAgent("127.0.0.1", stub, token="super")
+    answer = agent.grant_revoke("node:127.0.0.1:7946", "r1", reason="freeze")
+    assert answer["ok"] is True
+    assert [(m, p, b) for m, p, b, _ in _Stub.seen] == [("POST", "/gateway/grants/node%3A127.0.0.1%3A7946/r1/revoke", {"reason": "freeze"})]
+    assert _Stub.seen[0][3] == "Bearer super"
+
+
 def test_a_bad_decision_is_refused_before_it_is_sent_and_a_refusal_surfaces(stub):
     agent = MyceliumAgent("127.0.0.1", stub)
     with pytest.raises(ValueError):
@@ -88,4 +96,4 @@ def test_a_bad_decision_is_refused_before_it_is_sent_and_a_refusal_surfaces(stub
     with pytest.raises(httpx.HTTPStatusError) as e:
         agent.grant_decide("node:other", "r1", "issue")
     assert e.value.response.status_code == 409
-    assert e.value.response.json()["error"] == "not_this_node"
+    assert e.value.response.json()["error"] in ("not_this_node", "not_a_member")

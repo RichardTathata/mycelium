@@ -1215,6 +1215,8 @@ fn required_scope_table_maps_families_and_denies_by_default() {
     assert_eq!(required_scope(&Method::GET,  "/gateway/diagnose"), "fleet:read");
     // companion families (merged routes, 2026-09-04).
     assert_eq!(required_scope(&Method::POST, "/gateway/reason/route"), "llm:invoke");
+    // Adopter-surface X3 (second PR): the revoke route under the issue scope.
+    assert_eq!(required_scope(&Method::POST, "/gateway/grants/{agent}/{request}/revoke"), "grant:issue");
     // Node-level routes gated since 2026-09-05.
     assert_eq!(required_scope(&Method::POST, "/mcp"),              "mcp:invoke");
     assert_eq!(required_scope(&Method::GET,  "/signals/{kind}"),   "mesh:read");

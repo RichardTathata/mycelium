@@ -272,7 +272,15 @@ impl RevocationView {
         if policy.is_future_dated(clock, c.issued_at_ms, now_ms) {
             return CheckpointOffer::FutureDated;
         }
-        if let Some(t0) = self.started_at_ms
+        // A **grant's** checkpoint is exempt from the start rule (adopter-surface X3, second PR; #678's review,
+        // finding 1): the rule keeps a replayed old checkpoint from refreshing *freshness*, and a grant's standing
+        // reads no freshness — its issuer writes one checkpoint at issue and the next only to revoke, and the grant's
+        // own window bounds its life — so a view started after the grant was issued (a restarted node, a node that
+        // joined later) must still be able to hold it, or every grant issued before a restart is refused after it.
+        // Sequence and signature still apply.
+        let grant_scope = c.scope.starts_with(crate::mandate::grant::GRANT_SCOPE_PREFIX);
+        if !grant_scope
+            && let Some(t0) = self.started_at_ms
             && c.issued_at_ms.saturating_add(2 * clock.skew_ms) < t0
         {
             return CheckpointOffer::IssuedBeforeStart { started_at_ms: t0 };
@@ -284,6 +292,12 @@ impl RevocationView {
         }
         self.newest.insert(key, c.clone());
         CheckpointOffer::Accepted
+    }
+
+    /// Does the view hold a checkpoint of `authority` for `scope` at or past `seq`? A feeder asks before it verifies a
+    /// signature it has verified already (adopter-surface X3, second PR; #678's review, finding 4).
+    pub fn holds(&self, authority: &PrincipalId, scope: &str, seq: u64) -> bool {
+        self.newest.get(&(authority.clone(), scope.to_string())).is_some_and(|c| c.seq >= seq)
     }
 
     /// Where `term`, appointed by `authority` in `scope`, stands at `now_ms`.
@@ -837,6 +851,33 @@ mod tests {
         let mut forgetful = RevocationView::new();
         forgetful.offer(&replay, &policy(), clock(), 10_500, &w.members, &w.external);
         assert!(gate().check(&long_work(&w), &forgetful, 10_500).is_ok(), "without the rule the replay is believed");
+    }
+
+    /// **A grant's checkpoint is exempt from the start rule** (adopter-surface X3, second PR; #678's review, finding 1):
+    /// a grant's standing reads no freshness, so a view started after the grant was issued — a restarted node — holds
+    /// its checkpoint and reads the grant as not revoked; the same checkpoint over a resource scope is still refused
+    /// `IssuedBeforeStart`, and a grant's revoking checkpoint from before the start still revokes. Seen failing first:
+    /// the start rule refused the grant's checkpoint and `grant_standing` read `Unknown` for ever.
+    #[test]
+    fn a_grants_checkpoint_from_before_the_start_is_held_and_a_resources_is_not() {
+        let w = world();
+        let grant_checkpoint = |seq: u64, issued_at_ms: u64, revoked: &[&str]| {
+            let mut c = checkpoint(&w, seq, issued_at_ms, revoked).checkpoint;
+            c.scope = "grant:r1".into();
+            let signature = mycelium_core::tls::sign_bytes(&w.authority, &c.canonical_bytes()).to_vec();
+            SignedRevocationCheckpoint { checkpoint: c, signature }
+        };
+        let authority = PrincipalId::new("operator:acme").unwrap();
+        let mut v = RevocationView::started_at(10_000);
+        assert_eq!(v.offer(&grant_checkpoint(1, 5_000, &[]), &policy(), clock(), 10_500, &w.members, &w.external), CheckpointOffer::Accepted);
+        assert_eq!(v.grant_standing(&authority, "grant:r1", &TermId::new("r1").unwrap()), RevocationStanding::NotRevoked);
+        assert!(v.holds(&authority, "grant:r1", 1) && !v.holds(&authority, "grant:r1", 2));
+        // The resource scope keeps the rule.
+        assert!(matches!(v.offer(&checkpoint(&w, 1, 5_000, &[]), &policy(), clock(), 10_500, &w.members, &w.external), CheckpointOffer::IssuedBeforeStart { .. }));
+        // A grant's revocation from before the start revokes, and a replay of the issue checkpoint is a replay.
+        assert_eq!(v.offer(&grant_checkpoint(2, 6_000, &["r1"]), &policy(), clock(), 10_500, &w.members, &w.external), CheckpointOffer::Accepted);
+        assert_eq!(v.grant_standing(&authority, "grant:r1", &TermId::new("r1").unwrap()), RevocationStanding::Revoked);
+        assert!(matches!(v.offer(&grant_checkpoint(1, 5_000, &[]), &policy(), clock(), 10_500, &w.members, &w.external), CheckpointOffer::Replayed { .. }));
     }
 
     /// A pre-start checkpoint refreshes nothing, but an authentic revocation in it still counts.

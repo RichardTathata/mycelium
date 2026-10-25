@@ -26,21 +26,57 @@ const SUPERVISOR: &str = "token:gw/alice";
 /// named tokens: the supervisor's (`grant:read`, `grant:issue`) and a bystander's (`grant:read`, `grant:issue` too —
 /// the policy, not the scope, decides who may grant).
 async fn node(http_port: u16) -> (Arc<GossipAgent>, std::path::PathBuf, Arc<AtomicUsize>) {
-    let gossip_port = alloc_port();
+    node_with(http_port, Opts::default()).await
+}
+
+/// What a test node differs in (adopter-surface X3, second PR).
+#[derive(Default, Clone)]
+struct Opts {
+    /// Fixed ports (a restart over the same identity); fresh ones otherwise.
+    gossip_port: Option<u16>,
+    /// `[persistence]` under the node's directory, and the directory kept across a restart.
+    persist: bool,
+    /// The gate's freshness window: the sweep runs every twentieth of it (the drain bound).
+    freshness_ms: Option<u64>,
+    /// The tool sleeps this long before it counts — work that a revocation can stop.
+    slow_ms: u64,
+    /// A shared certificate directory, so two nodes trust one another; and the peers to bootstrap to.
+    cert_dir: Option<std::path::PathBuf>,
+    bootstrap: Vec<NodeId>,
+    /// Entitle grants from every fleet member, not only this node (the agent's node in the cross-node test).
+    fleet_grants: bool,
+    /// `/a2a` mounted.
+    #[cfg_attr(not(feature = "a2a"), allow(dead_code))]
+    a2a: bool,
+}
+
+async fn node_with(http_port: u16, opts: Opts) -> (Arc<GossipAgent>, std::path::PathBuf, Arc<AtomicUsize>) {
+    let gossip_port = opts.gossip_port.unwrap_or_else(alloc_port);
     let id = NodeId::new("127.0.0.1", gossip_port).unwrap();
     let dir = std::env::temp_dir().join(format!("x3-grant-{gossip_port}"));
-    let _ = std::fs::remove_dir_all(&dir);
+    if opts.gossip_port.is_none() {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     std::fs::create_dir_all(&dir).unwrap();
     let mut cfg = GossipConfig::default();
     cfg.bind_port = gossip_port;
     cfg.http_port = Some(http_port);
-    cfg.tls = Some(TlsConfig { auto_cert_dir: dir.join("tls"), ..Default::default() });
+    cfg.bootstrap_peers = opts.bootstrap.clone();
+    cfg.reconnect_backoff_secs = 1;
+    cfg.tls = Some(TlsConfig { auto_cert_dir: opts.cert_dir.clone().unwrap_or_else(|| dir.join("tls")), ..Default::default() });
+    if opts.persist {
+        use crate::config::{OnUnreadable, PersistenceConfig, SyncMode};
+        cfg.persistence = Some(PersistenceConfig { base_path: dir.join("persist"), sync_mode: SyncMode::Flush, snapshot_wal_threshold: 1_000, snapshot_interval_secs: 3_600, on_unreadable: OnUnreadable::Refuse });
+    }
     cfg.gateway_identity_issuer = Some("gw".into());
     cfg.gateway_named_tokens = vec![
         GatewayNamedToken { name: "alice".into(), token: "alice-secret".into(), scopes: vec!["grant:read".into(), "grant:issue".into(), "mcp:invoke".into()] },
         GatewayNamedToken { name: "bob".into(), token: "bob-secret".into(), scopes: vec!["grant:read".into(), "grant:issue".into(), "kv:write".into()] },
     ];
-    let a = Arc::new(GossipAgent::new(id.clone(), cfg));
+    let a = GossipAgent::new(id.clone(), cfg);
+    #[cfg(feature = "a2a")]
+    let a = if opts.a2a { a.with_a2a() } else { a };
+    let a = Arc::new(a);
     let me = id.to_string();
     let tool = format!("tool:deploy@{me}");
     let node_principal = crate::agent::gateway_caller::node_principal(&id);
@@ -56,25 +92,38 @@ async fn node(http_port: u16) -> (Arc<GossipAgent>, std::path::PathBuf, Arc<Atom
             // Only the supervisor may grant — or refuse — it.
             .map_action("grant.refuse", "*")
             .allow(Rule::new(SUPERVISOR, "grant.issue", &tool))
-            .allow(Rule::new(SUPERVISOR, "grant.refuse", &tool)),
+            .allow(Rule::new(SUPERVISOR, "grant.refuse", &tool))
+            // The supervisor may revoke what they issued — and, in the cross-node test, grant and revoke for the
+            // other node's tool (the reference evaluator matches a resource exactly or as `*`).
+            .map_action("grant.revoke", "*")
+            .allow(Rule::new(SUPERVISOR, "grant.revoke", &tool))
+            .allow(Rule::new(SUPERVISOR, "grant.issue", "*"))
+            .allow(Rule::new(SUPERVISOR, "grant.revoke", "*")),
     ));
     let mut entitlements = EntitlementTable::new();
     entitlements.entitle_grants(PrincipalId::new(&node_principal).unwrap());
+    if opts.fleet_grants {
+        entitlements.entitle_grants_from_fleet();
+    }
+    let freshness_ms = opts.freshness_ms.unwrap_or(120_000);
     let gate = ExecutionGate::strict(
         ResourceAuthority::new("unused", 1),
         ResourceTier::Serialised,
-        ClockModel { skew_ms: 500 },
-        FreshnessPolicy { freshness_ms: 120_000, interval_ms: 30_000, delivery_ms: 10_000 },
+        ClockModel { skew_ms: 100 },
+        FreshnessPolicy { freshness_ms, interval_ms: freshness_ms / 4, delivery_ms: freshness_ms / 12 },
     )
     .unwrap();
     a.with_execution_authority(Arc::new(ExecutionAuthority::new(gate, GrantVerifier::new(entitlements), TrustedExternalIssuers::new())));
     a.with_provider_enforcement();
     a.start().await.unwrap();
     let ran = Arc::new(AtomicUsize::new(0));
-    let ran2 = Arc::clone(&ran);
+    let (ran2, slow_ms) = (Arc::clone(&ran), opts.slow_ms);
     let handle = a.mcp().register_mcp_tool("deploy", serde_json::json!({"type": "object"}), move |_| {
         let ran = Arc::clone(&ran2);
         async move {
+            if slow_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(slow_ms)).await;
+            }
             ran.fetch_add(1, Ordering::SeqCst);
             Ok(serde_json::json!("deployed"))
         }
@@ -233,8 +282,10 @@ async fn issuing_is_an_action_the_evaluator_decides_and_the_namespace_is_route_o
     let (status, body) = supervisor(http_port, "bob-secret", reqwest::Method::POST, &format!("/gateway/grants/{agent_principal}/{request}"), Some(serde_json::json!({"decision": "refuse", "reason": "no"}))).await;
     assert_eq!(status, 403, "a bystander cannot refuse either: {body}");
     assert!(mycelium_core::ops::kv_get(&a.task_ctx, &format!("grant/{agent_principal}/{request}/refused")).is_none(), "nothing refused");
+    // An agent on a node this one holds no key of is no member's: refused by name (a member's agent is served since
+    // the second PR, `a_grant_is_issued_at_one_node_for_an_agent_on_another_and_revoked_there`).
     let (status, body) = supervisor(http_port, "alice-secret", reqwest::Method::POST, &format!("/gateway/grants/node:127.0.0.1:1/{request}"), Some(serde_json::json!({"decision": "issue"}))).await;
-    assert_eq!((status, body["error"].as_str()), (409, Some("not_this_node")), "{body}");
+    assert_eq!((status, body["error"].as_str()), (409, Some("not_a_member")), "{body}");
     // The raw KV route cannot forge an answer.
     let (status, body) = supervisor(http_port, "bob-secret", reqwest::Method::POST, "/gateway/kv", Some(serde_json::json!({"key": format!("grant/{agent_principal}/{request}/issued"), "value_b64": ""}))).await;
     assert_eq!(status, 403, "{body}");
@@ -247,6 +298,300 @@ async fn issuing_is_an_action_the_evaluator_decides_and_the_namespace_is_route_o
     assert_eq!(sm.state(), ExecutionState::Planning);
     assert_eq!(ran.load(Ordering::SeqCst), 0);
     a.shutdown().await;
+}
+
+/// The grant and its request for a tool call, as a test gets them: the agent asks in the background, the supervisor
+/// issues at `http_port`, the agent's wait returns the presented grant.
+async fn granted(a: &Arc<GossipAgent>, http_port: u16, sm: &Arc<crate::agent::state_machine::AgentStateMachine>, args: &serde_json::Value) -> (serde_json::Value, String) {
+    let agent_principal = crate::agent::gateway_caller::node_principal(a.node_id());
+    let (sm2, args2) = (Arc::clone(sm), args.clone());
+    let waiting = tokio::spawn(async move { sm2.transition_invoking("deploy", &args2).await });
+    let request = issue_pending(Arc::clone(a), http_port, agent_principal).await;
+    let mandate = waiting.await.unwrap().expect("the grant verified at the agent").expect("a grant-required tool returns its grant");
+    (mandate, request)
+}
+
+/// One `tools/call` under a presented grant at a door: a member's direct call (the provider alone) or `POST /mcp`
+/// (the gateway, then the provider). `Ok` is the tool's answer; `Err` the refusal's text.
+async fn call_deploy(a: &Arc<GossipAgent>, http_port: Option<u16>, mandate: &serde_json::Value, args: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let resource = format!("tool:deploy@{}", a.node_id());
+    match http_port {
+        None => {
+            let payload = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "deploy", "arguments": args}}).to_string();
+            let reply = a.service().rpc_call_with_mandate(a.node_id().clone(), "mcp.invoke", payload.into_bytes(), mandate, &resource, Duration::from_secs(10)).await.map_err(|e| e.to_string())?;
+            let reply: serde_json::Value = serde_json::from_slice(&reply).unwrap();
+            match reply.get("error") { Some(e) => Err(e.to_string()), None => Ok(reply["result"].clone()) }
+        }
+        Some(port) => {
+            let body = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "deploy", "arguments": args, "_meta": {"mandate": mandate}}});
+            let resp = reqwest::Client::new().post(format!("http://127.0.0.1:{port}/mcp")).bearer_auth("alice-secret").json(&body).send().await.map_err(|e| e.to_string())?;
+            let status = resp.status().as_u16();
+            let reply: serde_json::Value = resp.json().await.unwrap_or_default();
+            if status != 200 || reply.get("error").is_some() { Err(format!("{status} {reply}")) } else { Ok(reply["result"].clone()) }
+        }
+    }
+}
+
+/// **A grant admits one call at each door** (the second PR). The grant the agent's wait returned is presented twice
+/// on a member's direct call: the first runs the tool, the second is refused `GrantUsed` at the provider and the tool
+/// does not run again; the marker under the request names the door. The gateway's door is the same claim in the same
+/// preflight under its own tag (a node-held grant is presented by the node, so the provider is the door it reaches;
+/// a client-held grant at `/mcp` claims `used/gateway` the same way). Seen failing first: before the claim, the
+/// second direct call ran the tool a second time under one approval.
+#[tokio::test]
+async fn a_grant_admits_one_call_at_each_door() {
+    let http_port = alloc_port();
+    let (a, journal, ran) = node(http_port).await;
+    let sm = a.agent_state_machine(policy(10_000));
+    sm.transition(ExecutionState::Planning).await.unwrap();
+    let args = serde_json::json!({"env": "prod", "replicas": 3});
+    let (mandate, request) = granted(&a, http_port, &sm, &args).await;
+    let agent_principal = crate::agent::gateway_caller::node_principal(a.node_id());
+    assert!(call_deploy(&a, None, &mandate, &args).await.is_ok());
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+    let again = call_deploy(&a, None, &mandate, &args).await.unwrap_err();
+    assert!(again.contains("already used at provider"), "the second direct call is refused by name: {again}");
+    assert_eq!(ran.load(Ordering::SeqCst), 1, "the tool did not run twice under one grant");
+    assert!(mycelium_core::ops::kv_get(&a.task_ctx, &format!("grant/{agent_principal}/{request}/used/provider")).is_some(), "the provider's marker");
+    // The marker alone refuses too: a restart forgets the authority's set, not the WAL — the authority's set is cleared
+    // by a fresh authority in the restart test; here the marker is read first, as the preflight does.
+    let third = call_deploy(&a, None, &mandate, &args).await.unwrap_err();
+    assert!(third.contains("already used at provider"), "{third}");
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+    // The refusals are **denials**, sealed into the audit chain — exactly the records `prove_denials`
+    // (mycelium-guardrails) reconstructs a refused grant from: the sealed reference names the operation, and the
+    // evidence record it cites carries the reason.
+    #[cfg(feature = "compliance")]
+    {
+        let denied: Vec<String> = a.audit_stream(a.node_id()).into_iter()
+            .filter(|r| r.record.action == crate::AuditAction::Invoke && r.record.outcome == crate::AuditOutcome::Denied && r.record.principal == agent_principal)
+            .filter_map(|r| serde_json::from_str::<serde_json::Value>(r.record.detail.as_deref()?).ok()?["operation_id"].as_str().map(str::to_string))
+            .collect();
+        assert!(!denied.is_empty(), "a sealed denial for the agent");
+        let evidence = records(&journal);
+        assert!(denied.iter().any(|op| evidence.iter().any(|e| e.operation_id == *op && e.reason.contains("already used"))), "the sealed denial's evidence record names the used grant: {denied:?}");
+    }
+    a.shutdown().await;
+}
+
+/// **A revoked grant is refused at every door, and stops work already admitted under it** (the second PR). A slow
+/// tool is called under a grant; the supervisor revokes at the issuing node; the authority's sweep — judging a
+/// grant by its issuer's checkpoint, not the resource gate — cancels the running call within the drain bound, the
+/// tool never counts, a stop is recorded. A second grant, revoked before use, is refused `revoked` on a member's
+/// direct call (the door a node-held grant reaches; `/mcp` refuses a node's grant to a bearer client as not the
+/// holder's, before revocation is asked) and the raw RPC route refuses the protected kind; the tool count does not
+/// move. The provider's denials are sealed into the audit chain, which is what `prove_denials` reconstructs from.
+/// Seen failing first: the sweep cancelled granted work at its first tick, revoked or not (the resource gate's scope
+/// rule).
+#[tokio::test]
+async fn a_revoked_grant_is_refused_at_every_door_and_stops_admitted_work() {
+    let http_port = alloc_port();
+    let (a, journal, ran) = node_with(http_port, Opts { freshness_ms: Some(2_000), slow_ms: 3_000, ..Opts::default() }).await;
+    let sm = a.agent_state_machine(policy(10_000));
+    sm.transition(ExecutionState::Planning).await.unwrap();
+    let agent_principal = crate::agent::gateway_caller::node_principal(a.node_id());
+    let args = serde_json::json!({"env": "prod", "replicas": 3});
+    let (mandate, request) = granted(&a, http_port, &sm, &args).await;
+    // The slow call starts under the grant; the grant is revoked while it runs.
+    let (a2, m2, args2) = (Arc::clone(&a), mandate.clone(), args.clone());
+    let running = tokio::spawn(async move { call_deploy(&a2, None, &m2, &args2).await });
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    // Still running at the revocation: the sweep has ticked three or four times and left granted work alone (the
+    // defect this test found: the resource gate's scope rule cancelled it at the first tick).
+    assert!(!running.is_finished(), "the granted call was stopped before anything revoked it");
+    let started = std::time::Instant::now();
+    let (status, body) = supervisor(http_port, "alice-secret", reqwest::Method::POST, &format!("/gateway/grants/{agent_principal}/{request}/revoke"), Some(serde_json::json!({"reason": "freeze"}))).await;
+    assert_eq!(status, 200, "{body}");
+    let outcome = running.await.unwrap();
+    let stopped_after = started.elapsed();
+    assert!(outcome.is_err(), "the admitted call was stopped, not completed: {outcome:?}");
+    assert!(stopped_after < Duration::from_millis(1_500), "stopped within the drain bound (sweep every 100 ms, plus the handler's own stop): {stopped_after:?}");
+    assert_eq!(ran.load(Ordering::SeqCst), 0, "the tool never counted: it was cancelled before its sleep ended");
+    let authority = a.task_ctx.execution_authority.get().unwrap();
+    assert!(!authority.stop_records().is_empty(), "the stop is recorded for T_drain");
+    assert!(mycelium_core::ops::kv_get(&a.task_ctx, &format!("grant/{agent_principal}/{request}/revoked")).is_some());
+    let (status, body) = supervisor(http_port, "alice-secret", reqwest::Method::POST, &format!("/gateway/grants/{agent_principal}/{request}/revoke"), None).await;
+    assert_eq!((status, body["error"].as_str()), (409, Some("already_revoked")), "{body}");
+    // A second grant, revoked before it is used: every door refuses it as revoked.
+    sm.transition(ExecutionState::Planning).await.ok();
+    let (grant2, request2) = granted(&a, http_port, &sm, &args).await;
+    let (status, _) = supervisor(http_port, "alice-secret", reqwest::Method::POST, &format!("/gateway/grants/{agent_principal}/{request2}/revoke"), None).await;
+    assert_eq!(status, 200);
+    let direct = call_deploy(&a, None, &grant2, &args).await.unwrap_err();
+    assert!(direct.contains("revoked"), "the provider: {direct}");
+    // A bearer presenting the node's grant at /mcp is refused before revocation is asked: the grant is not theirs.
+    let gateway = call_deploy(&a, Some(http_port), &grant2, &args).await.unwrap_err();
+    assert!(!gateway.contains("deployed"), "{gateway}");
+    let raw = reqwest::Client::new().post(format!("http://127.0.0.1:{http_port}/gateway/rpc/call")).bearer_auth("bob-secret")
+        .json(&serde_json::json!({"target": a.node_id().to_string(), "method": "mcp.invoke", "payload_b64": "e30=", "timeout_secs": 2})).send().await.unwrap();
+    assert_eq!(raw.status().as_u16(), 403, "the raw route refuses the protected kind whatever is carried");
+    assert_eq!(ran.load(Ordering::SeqCst), 0, "no door ran the tool");
+    // A bystander may not revoke: the evaluator decides, as for issuing.
+    sm.transition(ExecutionState::Planning).await.ok();
+    let (_, request3) = granted(&a, http_port, &sm, &args).await;
+    let (status, body) = supervisor(http_port, "bob-secret", reqwest::Method::POST, &format!("/gateway/grants/{agent_principal}/{request3}/revoke"), None).await;
+    assert_eq!(status, 403, "{body}");
+    assert!(mycelium_core::ops::kv_get(&a.task_ctx, &format!("grant/{agent_principal}/{request3}/revoked")).is_none());
+    // A revoked grant is *authority not established* — the AE vocabulary for revocation, as for any revoked mandate —
+    // sealed into the audit chain as an error outcome, not a denial; `prove_denials` lists denials (a used or
+    // mis-bound grant, the test above), not this. Stated on the feature page.
+    #[cfg(feature = "compliance")]
+    {
+        let errored: Vec<String> = a.audit_stream(a.node_id()).into_iter()
+            .filter(|r| r.record.action == crate::AuditAction::Invoke && r.record.outcome == crate::AuditOutcome::Error && r.record.principal == agent_principal)
+            .filter_map(|r| serde_json::from_str::<serde_json::Value>(r.record.detail.as_deref()?).ok()?["operation_id"].as_str().map(str::to_string))
+            .collect();
+        let evidence = records(&journal);
+        // The record is *indeterminate* and names the grant (its hash); the standing's own words ("the grant is
+        // revoked") are in the door's answer (asserted above) and in the decision's missing facts, which the evidence
+        // record does not carry — a legibility gap recorded on the feature page and the plan row, not closed here.
+        let grant2_hash = crate::agent::action_evaluator::hex32(&serde_json::from_value::<crate::agent::gateway_authority::PresentedMandate>(grant2.clone()).unwrap().grant.mandate.digest());
+        let indeterminate = |e: &AeEvidence| e.decision == crate::agent::action_evaluator::DecisionKind::Indeterminate && e.mandate_digest.as_deref() == Some(grant2_hash.as_str());
+        assert!(errored.iter().any(|op| evidence.iter().any(|e| e.operation_id == *op && indeterminate(e))), "the revoked call sealed as not established, its record indeterminate with the grant's hash: {:?}", evidence.iter().filter(|e| errored.contains(&e.operation_id)).map(|e| (e.decision, e.reason.clone(), e.mandate_digest.clone())).collect::<Vec<_>>());
+    }
+    a.shutdown().await;
+}
+
+/// **A grant is issued at one node for an agent on another, and revoked there** (the second PR). Node A is the
+/// supervisor's gateway; node B runs the agent, entitles grants from the fleet, and trusts A's key as a member's.
+/// B's agent asks; A's pending list shows the request by gossip; the supervisor issues at A; B's wait reads A's
+/// grant and A's checkpoint from the KV, verifies both against A's member key, and runs the call at B. A second
+/// request, issued and then revoked at A: B's authority is fed the revoking checkpoint, and the agent's wait refuses
+/// `GrantRefused … revoked`. Revoking at B is refused `not_the_issuer`.
+#[tokio::test]
+async fn a_grant_is_issued_at_one_node_for_an_agent_on_another_and_revoked_there() {
+    let (http_a, http_b) = (alloc_port(), alloc_port());
+    let cert_dir = std::env::temp_dir().join(format!("x3-grant-fleet-{http_a}"));
+    let _ = std::fs::remove_dir_all(&cert_dir);
+    let (a, _ja, _ran_a) = node_with(http_a, Opts { cert_dir: Some(cert_dir.clone()), ..Opts::default() }).await;
+    let (b, _jb, ran_b) = node_with(http_b, Opts { cert_dir: Some(cert_dir.clone()), bootstrap: vec![a.node_id().clone()], fleet_grants: true, ..Opts::default() }).await;
+    let knows = |x: &GossipAgent, n: &NodeId| x.task_ctx.peer_keys.pin().get(n).is_some_and(|k| !k.is_empty());
+    assert!(until(|| knows(&a, b.node_id()) && knows(&b, a.node_id()), Duration::from_secs(15)).await, "the two nodes learned each other's keys");
+    let sm = b.agent_state_machine(policy(15_000));
+    sm.transition(ExecutionState::Planning).await.unwrap();
+    let agent_b = crate::agent::gateway_caller::node_principal(b.node_id());
+    let args = serde_json::json!({"env": "prod", "replicas": 3});
+    let (sm2, args2) = (Arc::clone(&sm), args.clone());
+    let waiting = tokio::spawn(async move { sm2.transition_invoking("deploy", &args2).await });
+    // The request reaches A by gossip; the supervisor issues at A.
+    let request = issue_pending(Arc::clone(&a), http_a, agent_b.clone()).await;
+    let mandate = waiting.await.unwrap().expect("B's agent verified A's grant").expect("a grant");
+    assert_eq!(sm.state(), ExecutionState::Invoking { tool: "deploy".into() });
+    assert!(call_deploy(&b, None, &mandate, &args).await.is_ok(), "the call runs at B under A's grant");
+    assert_eq!(ran_b.load(Ordering::SeqCst), 1);
+    // Revoking at B: not the issuer.
+    let (status, body) = supervisor(http_b, "alice-secret", reqwest::Method::POST, &format!("/gateway/grants/{agent_b}/{request}/revoke"), None).await;
+    assert_eq!((status, body["error"].as_str()), (409, Some("not_the_issuer")), "{body}");
+    // A second request: issued at A, revoked at A before B's wait reads it — B's authority is fed the revocation.
+    sm.transition(ExecutionState::Planning).await.ok();
+    let b_kv = Arc::clone(&b);
+    let (sm3, args3) = (Arc::clone(&sm), args.clone());
+    // Hold the agent's wait until the revocation has landed: the issue and the revoke are written at A back to back.
+    let waiting = tokio::spawn(async move { sm3.transition_invoking("deploy", &args3).await });
+    let prefix = format!("grant/{agent_b}/");
+    let a_kv = Arc::clone(&a);
+    let fresh = move || {
+        let entries = crate::store::scan_kv_prefix(&a_kv.task_ctx.kv_state, &prefix);
+        entries.iter().find_map(|(k, _)| {
+            let rest = k.strip_prefix(prefix.as_str())?;
+            if rest.contains('/') || rest == request.as_str() { return None; }
+            Some(rest.to_string())
+        })
+    };
+    assert!(until(|| fresh().is_some(), Duration::from_secs(10)).await, "B's second request reached A");
+    let request2 = fresh().unwrap();
+    // Issue and revoke at A in one breath: B's wait may see the grant first and the revocation a moment later, or
+    // both at once; either way the outcome below is a refusal, because B's door re-feeds the checkpoint on every
+    // assessment and the agent's wait checks the standing before it commits.
+    let (status, _) = supervisor(http_a, "alice-secret", reqwest::Method::POST, &format!("/gateway/grants/{agent_b}/{request2}"), Some(serde_json::json!({"decision": "issue", "ttl_secs": 60}))).await;
+    assert_eq!(status, 200);
+    let (status, body) = supervisor(http_a, "alice-secret", reqwest::Method::POST, &format!("/gateway/grants/{agent_b}/{request2}/revoke"), Some(serde_json::json!({"reason": "freeze"}))).await;
+    assert_eq!(status, 200, "{body}");
+    let outcome = waiting.await.unwrap();
+    match outcome {
+        Err(PolicyViolation::GrantRefused(why)) => assert!(why.contains("revoked"), "{why}"),
+        Ok(Some(m)) => {
+            // The wait read the grant before the revocation reached B: the doors refuse it once the checkpoint lands.
+            assert!(until(|| mycelium_core::ops::kv_get(&b_kv.task_ctx, &format!("grant/{agent_b}/{request2}/revoked")).is_some(), Duration::from_secs(10)).await);
+            let err = call_deploy(&b_kv, None, &m, &args).await.unwrap_err();
+            assert!(err.contains("revoked"), "the revocation reached B's authority: {err}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(ran_b.load(Ordering::SeqCst), 1, "the revoked grant ran nothing");
+    a.shutdown().await;
+    b.shutdown().await;
+    let _ = std::fs::remove_dir_all(&cert_dir);
+}
+
+/// **A restarted agent re-waits on its pending request; an expired one asks again** (the row's rev 0.4 exit). The
+/// request is on the WAL: the agent asks, the supervisor **issues**, the node is shut down before the agent read the
+/// grant and restarted over the same directory and identity; a new state machine asks for the same tool and arguments,
+/// finds the one request — it does not ask twice — reads the grant issued against it, feeds its authority the grant's
+/// checkpoint (issued before this authority started, which the start rule exempts a grant from — #678's review,
+/// finding 1: before, every grant issued before a restart was refused after it), and commits once. With the window
+/// past at the restart, the expired request is not re-waited: a second request is written, and silence refuses it.
+#[tokio::test]
+async fn a_restarted_agent_re_waits_on_its_pending_request_and_an_expired_one_asks_again() {
+    let (http_port, gossip_port) = (alloc_port(), alloc_port());
+    let opts = Opts { gossip_port: Some(gossip_port), persist: true, ..Opts::default() };
+    let dir = std::env::temp_dir().join(format!("x3-grant-{gossip_port}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (a, _j, _ran) = node_with(http_port, opts.clone()).await;
+    let agent_principal = crate::agent::gateway_caller::node_principal(a.node_id());
+    let prefix = format!("grant/{agent_principal}/");
+    let args = serde_json::json!({"env": "prod", "replicas": 3});
+    let requests = |a: &GossipAgent| crate::store::scan_kv_prefix(&a.task_ctx.kv_state, &prefix).into_iter().filter(|(k, _)| k.matches('/').count() == 2).count();
+    // Ask with a long window, then crash mid-wait.
+    let sm = a.agent_state_machine(policy(20_000));
+    sm.transition(ExecutionState::Planning).await.unwrap();
+    let (sm2, args2) = (Arc::clone(&sm), args.clone());
+    let waiting = tokio::spawn(async move { sm2.transition_invoking("deploy", &args2).await });
+    assert!(until(|| requests(&a) == 1, Duration::from_secs(5)).await);
+    // The agent is stopped before it can read the answer; the supervisor issues against the standing request.
+    waiting.abort();
+    let _ = waiting.await;
+    let request = issue_pending(Arc::clone(&a), http_port, agent_principal.clone()).await;
+    // The restart's authority must not see this checkpoint as "before its start": let the clock move past two skews.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    a.shutdown().await;
+    // Every handle on the node's context goes: the state machine holds one, and with it the journal's lock.
+    drop(sm);
+    drop(a);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // The restart: the same identity, the same directory; the request and the grant are back from the WAL.
+    let (a, _j, _ran) = node_with(http_port, opts.clone()).await;
+    assert_eq!(requests(&a), 1, "the request survived the restart");
+    assert!(mycelium_core::ops::kv_get(&a.task_ctx, &format!("{prefix}{request}/issued")).is_some(), "the grant survived the restart");
+    let sm = a.agent_state_machine(policy(20_000));
+    sm.transition(ExecutionState::Planning).await.unwrap();
+    let mandate = sm.transition_invoking("deploy", &args).await.expect("the grant issued before the restart verified after it").expect("a grant");
+    assert_eq!(requests(&a), 1, "the restarted agent did not ask twice");
+    assert_eq!(sm.state(), ExecutionState::Invoking { tool: "deploy".into() });
+    assert!(mycelium_core::ops::kv_get(&a.task_ctx, &format!("{prefix}{request}/consumed")).is_some(), "the one request, consumed once");
+    assert!(call_deploy(&a, None, &mandate, &args).await.is_ok(), "one execution");
+    drop(sm);
+    // Expired: a short window, a crash, a restart past it — a new request, and silence refuses.
+    let sm = a.agent_state_machine(policy(300));
+    sm.transition(ExecutionState::Planning).await.ok();
+    let other = serde_json::json!({"env": "staging"});
+    let (sm2, other2) = (Arc::clone(&sm), other.clone());
+    let waiting = tokio::spawn(async move { sm2.transition_invoking("deploy", &other2).await });
+    assert!(until(|| requests(&a) == 2, Duration::from_secs(5)).await);
+    waiting.abort();
+    let _ = waiting.await;
+    a.shutdown().await;
+    drop(sm);
+    drop(a);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let (a, _j, _ran) = node_with(http_port, opts).await;
+    let sm = a.agent_state_machine(policy(300));
+    sm.transition(ExecutionState::Planning).await.unwrap();
+    let err = sm.transition_invoking("deploy", &other).await.unwrap_err();
+    assert!(matches!(err, PolicyViolation::GrantNotPresented(_)), "{err}");
+    assert_eq!(requests(&a), 3, "the expired request was not re-waited: a new one was written");
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// An evaluator that decides `tools/call` under another policy revision than the one it issues grants under — the

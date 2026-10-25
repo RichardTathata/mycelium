@@ -334,6 +334,7 @@ fn admit_after(ctx: &Arc<TaskCtx>, principal: &str, call: Option<&AdmittedCall>)
     {
         let digest = super::action_evaluator::arguments_digest(&serde_json::to_vec(&call.arguments).unwrap_or_default());
         let now = ctx.hlc.decision_now_ms();
+        super::gateway_authority::feed_grant_checkpoint(ctx, authority, &presented.grant.mandate, now);
         let assessed = authority.assess(principal, &call.operation, &call.resource, &digest, Some(&presented), now, &super::gateway_member_keys(ctx));
         if assessed.binding.is_some_and(|b| b.state == super::action_evaluator::MandateState::Established) {
             let g = &presented.grant.mandate;

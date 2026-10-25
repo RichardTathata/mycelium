@@ -11,6 +11,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Grants, the second PR** (`docs/plans/adopter-surface.md` X3; `docs/features/grants.md`): the enforcement
+  remainder of the row. **One call at each door** — the gateway's preflight and the provider's each admit a grant once
+  (`ExecutionAuthority::claim_grant_use`, atomic across concurrent presentations; the marker `…/used/{door}` on the
+  WAL) and deny a second presentation `GrantUsed` naming the door. **Revocation** — `POST
+  /gateway/grants/{agent}/{request}/revoke` (`grant:issue`; `grant.revoke` decided by the evaluator, `409
+  not_the_issuer` elsewhere) publishes the next checkpoint for the grant's scope, offers it to the issuing node's
+  authority — whose sweep now judges work under a grant by that standing and the grant's window and stops it within
+  the drain bound — and writes it beside the grant (`mycelium_grants_revoked_total`). **Across nodes** — a supervisor at
+  any gateway issues for an agent on a member node the gateway holds the key of; the grant's checkpoints travel in
+  the KV and every node's authority is fed them (`feed_grant_checkpoint`, a watcher on `grant/`); the agent's node
+  decides whether a member may issue (`EntitlementTable::entitle_grants_from_fleet`); a principal no member's is `409
+  not_a_member`. **A restart re-waits** on the pending request from the WAL and does not ask twice; an expired one asks
+  again. The refusals are reconstructable: a used or mis-bound grant's is a denial sealed into the audit chain, which
+  `prove_denials` reads; a revoked grant's is *not established*, sealed as such. **Fixed on the way:** the authority's
+  sweep cancelled work running under a grant at its first tick, revoked or not (the resource gate's scope rule);
+  `deprecations.md` §63; and, from the PR's review, a grant's checkpoint exempt from the revocation view's start rule
+  (a grant issued before a restart was refused after it), the single-use claim moved out of the history loop, an unknown
+  standing waited out at the agent, the `grant/` watcher narrowed, the revoke route reading the signed grant, and the
+  SDKs' `grant_revoke` / `grantRevoke`. **Still not built:** an SSE stream of requests, the A2A `input-required` state,
+  the data-class policy over the argument rendering, the one-hour job's step 4, retention of `grant/` records — the
+  row's third PR.
 - **Selective recovery — the adopter-surface plan's decisive demonstration** (`docs/plans/adopter-surface.md` X9;
   `docs/features/selective-recovery.md`): the `recovery` class of `mycelium test --faults`. Three nodes of the
   declaration's fleet, each with a reconciler, an evidence journal and the evaluator, one mock destination in the

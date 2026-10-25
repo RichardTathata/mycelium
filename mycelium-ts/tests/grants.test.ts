@@ -50,6 +50,15 @@ test("grantDecide posts the decision and returns the record's receipt", async ()
   expect(calls.every((c) => c.auth === "Bearer super")).toBe(true);
 });
 
+test("grantRevoke posts to the revoke route under the bearer", async () => {
+  const agent = new MyceliumAgent("127.0.0.1", 8300, 5, { token: "super" });
+  await agent.grantRevoke("node:127.0.0.1:7946", "r1", { reason: "freeze" });
+  expect(calls.map((c) => [c.method, c.url.split("/gateway/")[1], c.body])).toEqual([
+    ["POST", "grants/node%3A127.0.0.1%3A7946/r1/revoke", { reason: "freeze" }],
+  ]);
+  expect(calls[0].auth).toBe("Bearer super");
+});
+
 test("a bad decision is refused before it is sent, and the gateway's refusal surfaces", async () => {
   const agent = new MyceliumAgent("127.0.0.1", 8300, 5);
   await expect(agent.grantDecide("a", "r", "maybe" as unknown as "issue")).rejects.toThrow(/issue.*refuse/);

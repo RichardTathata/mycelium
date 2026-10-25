@@ -1865,6 +1865,30 @@ heartbeat tick, while a live member's entry holds a forged time, until its owner
 has no heartbeat" is reading a member whose heartbeat has not reached it; it clears when the heartbeat arrives or the
 entry ages past the bound.
 
+## 63. A grant admits one call at each door; `MandateRefusal` gained `GrantUsed`; a grant is issued for a member's agent and revoked at its issuer; the authority's sweep judges a grant by its own standing (unreleased, adopter-surface X3, second PR)
+
+**Behaviour changes.** Every enforcement point (`gateway`, `provider`) now admits a grant **once**: a second presentation
+of the same grant at the same door is denied `GrantUsed { door }` (`MandateRefusal`, `#[non_exhaustive]` — a `_` arm fails
+closed) and the marker `grant/{agent}/{request}/used/{door}` is written beside the request; before, the doors accepted one
+grant for identical calls until its window ended. A grant admitted at a door is spent there whether or not the work
+completes. `POST /gateway/grants/{agent}/{request}` issues for an agent on **any fleet member** whose identity key the
+gateway holds (it answered `409 not_this_node` for every other node); the agent's node decides whether that issuer may
+with `EntitlementTable::entitle_grants_from_fleet` — a node that entitles only itself (`entitle_grants`) refuses a grant
+from another node as *not established*, as before — and a principal no member's is `409 not_a_member`. New route:
+`POST /gateway/grants/{agent}/{request}/revoke` (`grant:issue`; the evaluator decides `grant.revoke`), answered `409
+not_the_issuer` anywhere but the issuing node; new counter `mycelium_grants_revoked_total`; new KV rows under the
+route-owned `grant/` (`…/used/{door}`, `…/revoked`). **Fixed:** the authority's sweep judged work running under a grant
+by the resource gate, whose scope rule a grant's own scope fails, so such work was cancelled at the first sweep tick
+whether or not the grant was revoked (unobserved while no granted handler outlived a tick); it is judged by the grant's
+window and its issuer's checkpoint now, and stops on revocation within the drain bound. **Also:** a grant's checkpoint is
+exempt from the revocation view's start rule (`IssuedBeforeStart` is a freshness rule, and a grant reads no freshness) —
+before this, every grant issued before a node's restart was refused after it; the agent's wait no longer refuses an
+*unknown* standing but waits for the issuer's checkpoint to the expiry (a revoked standing is final); the SDKs gain
+`grant_revoke` / `grantRevoke`. **Migration:** a client that re-presented one grant for a repeated call now asks for a
+grant per call; a fleet whose supervisor sits at another gateway than the agent calls `entitle_grants_from_fleet()` on
+the agent nodes' entitlement tables — **and accepts that every member's evaluator may then grant there**; a fleet that
+wants one issuing node keeps `entitle_grants(that node)`.
+
 ## 62. The side-effect contract moved into the substrate; its ledger is a journal; `Class` gained `Recovery`; `ExternalRefusal` gained `LeaveOfObservable` (unreleased, adopter-surface X9)
 
 **The move.** `Reconciler`, `ExternalEffect`, `EffectClass`, `ProbeBudget`, `ExternalDestination`, `HttpDestination`,

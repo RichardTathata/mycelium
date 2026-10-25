@@ -220,6 +220,12 @@ pub enum MandateRefusal {
         bound: String,
         decided: String,
     },
+    /// The grant was already admitted once at this enforcement point (adopter-surface X3, second PR): a grant is
+    /// one call, and a second presentation at the same door — a replay, or a second call under one approval — is
+    /// refused. `door` is the enforcement point's tag (`gateway`, `provider`).
+    GrantUsed {
+        door: String,
+    },
 }
 
 impl std::fmt::Display for MandateRefusal {
@@ -240,6 +246,8 @@ impl std::fmt::Display for MandateRefusal {
                 write!(f, "the grant is bound to arguments {bound}, this call's are {presented}"),
             Self::BoundToOtherPolicy { bound, decided } =>
                 write!(f, "the grant is bound to policy revision {bound:?}, the call was decided under {decided:?}"),
+            Self::GrantUsed { door } =>
+                write!(f, "the grant was already used at {door}: a grant admits one call at each door"),
         }
     }
 }

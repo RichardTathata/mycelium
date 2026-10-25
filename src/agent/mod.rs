@@ -1684,6 +1684,24 @@ impl GossipAgent {
                 }
             });
         }
+        // Adopter-surface X3 (second PR): a grant's checkpoints travel in the KV (`grant/{agent}/{request}/checkpoint`);
+        // every one that lands here is offered to this authority, so a grant issued — or revoked — at another node is
+        // known to this node's verifier and to its sweep.
+        {
+            let (ctx, authority) = (Arc::clone(&self.task_ctx), Arc::clone(&authority));
+            let mut shutdown = self.task_ctx.shutdown_tx.subscribe();
+            self.task_ctx.spawn_task(async move {
+                // Woken by a checkpoint's write only, not by every key under the prefix (#678's review, finding 4).
+                let mut rx = mycelium_core::kv_handle::KvHandle::from_core(Arc::clone(&ctx.core)).subscribe_prefix_with_predicate("grant/", |k: &str| k.ends_with("/checkpoint"));
+                loop {
+                    tokio::select! {
+                        _ = capability_ops::await_shutdown(&mut shutdown) => break,
+                        changed = rx.changed() => { if changed.is_err() { break; } }
+                    }
+                    gateway_authority::feed_grant_checkpoints(&ctx, &authority);
+                }
+            });
+        }
         if self.task_ctx.execution_authority.set(authority).is_err() {
             tracing::warn!("with_execution_authority: an execution authority is already attached; ignoring");
         }

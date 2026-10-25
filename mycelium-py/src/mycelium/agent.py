@@ -647,7 +647,7 @@ class MyceliumAgent:
         ``decision`` is ``"issue"`` or ``"refuse"``; ``ttl_secs`` bounds an issued grant (default 300, at most
         3 600); ``reason`` is shown to the agent on a refusal. Issuing is itself an action the node's evaluator
         decides (D22), so a supervisor the policy does not permit is answered 403 — raised by ``raise_for_status``
-        as an :class:`httpx.HTTPStatusError`, as is 409 ``not_this_node`` for an agent on another node, 409
+        as an :class:`httpx.HTTPStatusError`, as is 409 ``not_a_member`` for an agent on a node this gateway holds no key of, 409
         ``already_answered``, 410 ``expired`` and 404 ``unknown_request``. Returns the route's answer: the record's
         ``key``, the write's ``operation_id`` and ``local_durability``.
         """
@@ -660,6 +660,22 @@ class MyceliumAgent:
             body["reason"] = reason
         with self._pool.sync() as c:
             resp = c.post(f"/gateway/grants/{path_segment(agent)}/{path_segment(request)}", json=body)
+            resp.raise_for_status()
+            data = resp.json()
+        return data if isinstance(data, dict) else {}
+
+    def grant_revoke(self, agent: str, request: str, *, reason: Optional[str] = None) -> Dict[str, Any]:
+        """``POST /gateway/grants/{agent}/{request}/revoke`` (``grant:issue``): revoke an issued grant, at the node
+        that issued it (409 ``not_the_issuer`` elsewhere; 404 ``not_issued``; 409 ``already_revoked``). Revoking is an
+        action the node's evaluator decides (``grant.revoke``), so a supervisor the policy does not permit is answered
+        403. The grant is refused at every door afterwards, and work running under it is stopped. Returns the route's
+        answer: the revocation record's ``key``, ``operation_id`` and ``local_durability``.
+        """
+        body: Dict[str, Any] = {}
+        if reason is not None:
+            body["reason"] = reason
+        with self._pool.sync() as c:
+            resp = c.post(f"/gateway/grants/{path_segment(agent)}/{path_segment(request)}/revoke", json=body)
             resp.raise_for_status()
             data = resp.json()
         return data if isinstance(data, dict) else {}
