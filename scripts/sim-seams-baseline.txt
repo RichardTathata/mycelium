@@ -63,6 +63,7 @@
 7 src/declare.rs
 2 src/doctor.rs
 8 src/faults.rs
+1 src/faults/recovery.rs
 1 src/federation/catalog.rs
 4 src/init.rs
 9 src/main.rs

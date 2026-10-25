@@ -358,14 +358,15 @@ an absent section.
   crate's `metrics` feature the same wrapper emits `mycelium_effects_refusals_total{kind, leg}`. A
   rising `unauthorised_attribution` is effects presented under someone else's mandate; a rising
   `conflict` is a retry that changed its content.
-- **Beyond the fleet (adopter-surface X5).** `Reconciler` owns a **second SQLite file, the ledger**
-  (`external_effects`): the prepared record — operation, dedup scope, declared class, content hash, probe
+- **Beyond the fleet (adopter-surface X5; in the substrate since X9, `mycelium::effects`, re-exported here).**
+  `Reconciler` owns a **ledger of its own — a node-local journal**, append-only, fsynced, folded at open, one
+  owner at a time (a SQLite file until X9): the prepared record — operation, dedup scope, declared class, content hash, probe
   budget, its hash — before the destination is reached (`prepared`), then the state (`unknown`, `not_done`,
   `committed`, `failed`, `unresolved`, `compensated`), probes and retries. A found record binds what may be
   presented under its operation (content, class, scope), and a record found `prepared` is unknown, never re-sent. Back it up with the dedup file: an `unresolved`
   row is an escalation a human owes an answer, and the ledger is where it is. The egress allow-list it is opened
   with gates the effect **and every probe**; a probe to an unlisted host never leaves. With an evidence journal
-  attached (`with_evidence`, `envelope` feature) every settled outcome, probe and compensation is an execution
+  attached (`with_evidence`, the `envelope` feature — a `gateway` + `tls` substrate) every settled outcome, probe and compensation is an execution
   record at enforcement point `destination`, the compensation's `parent` the compensated record's hash — so the
   journal exporter sees them, and `mycelium explain --closure <hash>` shows an effect with its compensation.
 - **See it:** `cargo run -p mycelium-effects --example destination_commit`, and

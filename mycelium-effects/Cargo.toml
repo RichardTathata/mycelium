@@ -12,8 +12,9 @@ categories = ["database", "asynchronous"]
 
 [features]
 default = []
-# The refusal counter also increments a Prometheus counter (`Counting<D>`, zero-gaps Z6).
-metrics = ["dep:metrics"]
+# The refusal counter also increments a Prometheus counter (`Counting<D>`, zero-gaps Z6). The counter is the
+# substrate's since adopter-surface X9, so this forwards to its `metrics`.
+metrics = ["mycelium/metrics"]
 # The tuple-space consumer with effect recovery (item 1 PR 6): a worker that commits each item's
 # effect at a destination *before* acknowledging it, so a worker that dies between the two is
 # re-delivered and the second apply is `Replayed`. Optional so the crate's core — the destination
@@ -23,7 +24,7 @@ tuple-space = ["dep:mycelium-tuple-space", "dep:bytes"]
 # composition from the `ActionEnvelope` the gateway assembled and the mandate the caller presented.
 # Needs the gateway's attesting build, so it pulls those features of the substrate in; optional so
 # a destination that assembles its own composition never does.
-envelope = ["mycelium/gateway", "mycelium/tls", "dep:serde_json"]
+envelope = ["mycelium/gateway", "mycelium/tls"]
 # The replay kernel's seams in the substrate (adopter-surface X5): with it, the reconciler's apply and
 # probe are `Input`-class choices a recording writes down and a replay returns without reaching the
 # destination. Off in every shipped build, as the substrate's own `sim` is.
@@ -35,19 +36,13 @@ sim = ["mycelium/sim"]
 mycelium = { path = "..", default-features = false }
 mycelium-tuple-space = { path = "../mycelium-tuple-space", optional = true }
 bytes = { version = "1", optional = true }
-# `Composition::from_caller` parses the carried mandate out of the caller context's JSON.
-serde_json = { version = "1", optional = true }
 
 # The reference destination. `bundled` compiles SQLite in, so CI and every developer get the same
 # engine and no system library is a hidden dependency. Quarantined to this crate: core carries no
 # database, and `-p` builds of the substrate never pay for it.
 rusqlite = { version = "0.32", features = ["bundled"] }
-# `Counting<D>` also emits `mycelium_effects_refusals_total{kind, leg}` under this feature (zero-gaps Z6).
-metrics  = { version = "0.24", optional = true }
 tokio    = { version = "1.35", features = ["rt", "time"] }
 tracing  = "0.1"
-# The prepared record's hash (`mycelium.effects/prepared/1`), fixed before the destination is reached.
-sha2     = "0.10"
 
 [dev-dependencies]
 tokio = { version = "1.35", features = ["full"] }
@@ -56,3 +51,7 @@ mycelium = { path = "..", default-features = false, features = ["test-util"] }
 bytes = "1"
 # The replay test records a run against the mock destination and replays it under a kernel.
 mycelium-sim = { path = "../mycelium-sim" }
+# The evidence tests read records back and hash a frame; the composed test builds a carried mandate. Both were
+# the crate's own dependencies until adopter-surface X9 moved the contract into the substrate.
+serde_json = "1"
+sha2 = "0.10"

@@ -113,6 +113,15 @@ ids = ["concept:adapter-contract", "unit:runtime"]
 links = ["concept:unit-file", "concept:causal-records", "concept:grant"]
 
 [[feature]]
+name = "Selective recovery"
+page = "selective-recovery.md"
+example = "none"
+example_watch = ["selective_recovery", "recovery_class", "lost_acknowledgement"]
+ids = ["concept:selective-recovery"]
+links = ["concept:test-faults", "concept:side-effect-contract", "concept:causal-records",
+         "guarantee:persist.configured", "guarantee:persist.sync_mode", "rule:ae.preflight"]
+
+[[feature]]
 name = "Fault classes against a declaration"
 page = "test-faults.md"
 example = "none"

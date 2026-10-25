@@ -63,15 +63,21 @@ the example with its own message — *"a rolled-back attempt left no dedup row"*
 `Fresh` was expected. It was written to close the [onboarding checklist](onboarding-checklist.md)'s
 sharpest finding: this crate had no runnable demonstration anywhere.
 
-## Beyond the fleet: the side-effect contract (adopter-surface X5, 2026-10-24)
+## Beyond the fleet: the side-effect contract (adopter-surface X5, 2026-10-24; moved into the substrate by X9, 2026-10-25)
 
-`src/external.rs` — a destination the fleet does not own gives no transaction to commit a dedup row in, so
-the contract moves the decision **before** the effect: the destination's class (`EffectClass`: idempotent ·
-compensatable · irreversible) and a `ProbeBudget` are declared on the `ExternalEffect` and recorded on the
-prepared record, which the `Reconciler` writes to its own SQLite ledger (`external_effects`) before the
-destination is reached. Key facts:
+**Where it lives now:** `src/effects/{mod,external,http,counting}.rs` of the root crate — X9's `recovery` class
+of `mycelium test --faults` needs the reconciler in the published binary, and a companion that depends on the
+crate cannot be depended on back; this crate re-exports every path unchanged (`mycelium_effects::external::*`,
+`::http::*`, `Effect`, `EffectRefusal`, `Composition`, `check_composition`, the counters). What stays this
+crate's: `SqliteDestination`, `Counting<D>`, the tuple-space consumer, and `rusqlite` (quarantined here) —
+which is why the reconciler's ledger is now the **node-local journal** (`agent::journal`), folded at open, one
+owner at a time, and no longer a SQLite file. The contract itself (`EffectClass`: idempotent · compensatable ·
+irreversible; a `ProbeBudget` declared on the `ExternalEffect` and recorded on the prepared record before the
+destination is reached) is unchanged; X9 added `apply_caused` (X4's fields on the record), `leave` (the
+irreversible class's recovery verb, `LeaveOfObservable` for the others) and `claim_retry` (the one retry claimed
+under the ledger's lock, so two concurrent retries cannot both send). Key facts:
 
-- **A found record binds.** `Ledger::prepare` under one `IMMEDIATE` transaction turns a found `Prepared` row into
+- **A found record binds.** `Ledger::prepare` under the map's lock (the journal append after it) turns a found `Prepared` row into
   `Unknown` (a crash or a concurrent sender — probed, never re-sent) and re-prepares a `Failed` one; `bind`
   compares dedup scope, content hash and class before any move (`DeclarationMismatch`, `Conflict`); a
   compensation's permit is bound to it (`bind_permit`: operation, resource, parent, validity, principal), and
@@ -101,8 +107,10 @@ destination is reached. Key facts:
 - **Reference destinations:** `SqliteDestination` (local; probe = the dedup row) and `HttpDestination`
   (`src/http.rs`, std TCP, no redirect followed, mock-grade); the test harness is `tests/mock_http/`.
 - **Decided:** no new `CompositionLeg`; reconciliation is a state of the record.
-- Tests: `tests/external.rs` (nine exits), `tests/external_evidence.rs` (`envelope`), `tests/external_replay.rs`
-  (`sim`, the zero-reach replay). Feature page: `docs/features/side-effects.md`.
+- Tests: `tests/external.rs` (nine exits — two of them now hand a ledger over by dropping the first owner, and
+  one asserts a second owner is refused by name), `tests/external_evidence.rs` (`envelope`), `tests/external_replay.rs`
+  (`sim`, the zero-reach replay) — all against the re-exports, which is the regression check for the move.
+  Feature page: `docs/features/side-effects.md`.
 
 ## What this crate is not
 

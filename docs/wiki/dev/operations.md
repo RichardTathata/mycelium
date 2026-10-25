@@ -155,7 +155,8 @@ the replay inventory. Entry page `docs/features/declare.md`; log `.log/2026-10-2
 dash, whose `pipefail` depends on the Debian release), no toolchain, the published artefacts only. Steps 1/2/3/6 timed
 from the first `curl`; apt on its own row outside the clock; the SDK's version checked against the tag's
 `pyproject.toml`; a red run prints no number; 3 600 s is the bound. Steps 4 and 5 and the records half of 3 are
-printed as not yet measured (X3, X4, X9). Log `.log/2026-10-23-one-hour.md`.
+printed as not yet measured (X3, X4, X9). Log `.log/2026-10-23-one-hour.md`. *(2026-10-25)* Step 5 is in the job
+(X9's `recovery` class on the published binary); it measures from the first release that carries the class.
 
 ## `mycelium init` (adopter-surface X2, 2026-10-23)
 
@@ -233,6 +234,34 @@ which now matches `python <file>::<test>[param]` and `typescript <file>::<title>
 **Cells worth knowing:** the checkpointer discards the receipt `/gateway/kv` returns (`raise_for_status()` only);
 the Strands store's bearer has no principal test; neither SDK cancels or carries a grant; an A2A task is lost with
 its node. Entry page `docs/features/adapter-contract.md`; log `.log/2026-10-24-x7-adapter-contract.md`.
+
+## Selective recovery — the `recovery` class (adopter-surface X9, 2026-10-25)
+
+`src/faults/recovery.rs`. The plan's decisive demonstration as a sixth class of `mycelium test --faults`: three
+nodes with a reconciler (`mycelium::effects::Reconciler`), an evidence journal and the evaluator each, one mock
+destination (`Lossy`, in process, losing an answer once per key: `lose:` applied-unanswered, `vanish:`
+neither); a lost acknowledgement, dependents carrying the parent (`apply_caused`), independents, node 0 cut and
+restarted over its WAL (ledger and journal re-opened from disk), node 2 dark; then ten checks. What to know:
+
+- **The move.** The side-effect contract is `mycelium::effects` now (`src/effects/{mod,external,http,counting}.rs`),
+  the companion re-exporting it unchanged — the published binary cannot depend on a companion that depends on it.
+  The ledger is the node-local journal (`Ledger { journal, records: Mutex<HashMap> }`, lock-order row 68), folded at
+  open, one owner at a time; `rusqlite` stays in the companion.
+- **Phases.** A (unseamed): fleet, effects, crash, restart, cut. B (seamed under `sim`): probe before retry, the
+  idempotent dependent's probe and two concurrent retries, the closure over two journals. C (unseamed): node 2 back.
+  D (seamed): the closure complete, the compensatable probe, the compensation under the permit, the leave,
+  independents, the destination's counts, the rendering. The kernel is installed around B and D only, so the
+  recording holds the reconcilers' `Input` and clock choices and nothing of the fleet's schedule.
+- **A hole hides what hangs below it.** With node 2's journal withheld, node 1's `notify-103` (parent: node 2's
+  `points-102`) is outside the closure too; the reader names the hole. The check expects exactly that.
+- **The compensation's record is under the evaluator's envelope**, so its operation is the class's declared one
+  (`notify-retract`), not `effect.compensate`; the rendering check looks for the declared name.
+- **The seamed form's checks on the destination's counts** read the recorded answers instead and say so
+  (`replaying`); the test asserts `destination_reached_in_recovery == 0` separately.
+- Corpus: `tests/replay-corpus/x9-selective-recovery/` (`MYCELIUM_RECORD_CORPUS=1 cargo test --features
+  sim,test-util,tls --test faults_recovery_replay record_the_recovery_into_the_corpus` re-records).
+- Pages: `docs/features/selective-recovery.md`, `what-is-proven.md`'s line, `deprecations.md` §62; the one-hour
+  job's step 5 runs the class on the published binary from the first release carrying it.
 
 ## Framing discipline
 

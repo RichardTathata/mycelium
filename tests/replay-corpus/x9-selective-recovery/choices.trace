@@ -1,0 +1,52 @@
+1	recovery	wall	-	now_ms()	1700000000000
+2	recovery	wall	-	now_ms()	1700000000001
+3	recovery	chan	effects/ledger	try_send	Sent
+4	recovery	input	effects/probe	mock-destination/order-100 probe 1	done
+5	recovery	chan	effects/ledger	try_send	Sent
+6	recovery	chan	ae/journal	try_send	Sent
+7	recovery	chan	effects/ledger	try_send	Sent
+8	recovery	mono	-	now()	31536000000000000
+9	recovery	wall	-	now_ms()	1700000000002
+10	recovery	chan	effects/ledger	try_send	Sent
+11	recovery	input	effects/probe	mock-destination/label-101 probe 1	not_done
+12	recovery	chan	effects/ledger	try_send	Sent
+13	recovery	chan	ae/journal	try_send	Sent
+14	recovery	chan	effects/ledger	try_send	Sent
+15	recovery	wall	-	now_ms()	1700000000003
+16	recovery	chan	effects/ledger	try_send	Sent
+17	recovery	input	effects/retry	mock-destination/label-101 379a13c75515d3b3 idempotent	ok fresh mock-destination
+18	recovery	wall	-	now_ms()	1700000000004
+19	recovery	chan	effects/ledger	try_send	Sent
+20	recovery	chan	ae/journal	try_send	Sent
+21	recovery	chan	effects/ledger	try_send	Sent
+22	recovery	mono	-	now()	31536000001000000
+23	recovery	mono	-	now()	31536000002000000
+24	recovery	mono	-	now()	31536000003000000
+25	recovery	wall	-	now_ms()	1700000000005
+26	recovery	chan	effects/ledger	try_send	Sent
+27	recovery	input	effects/probe	mock-destination/points-102 probe 1	not_done
+28	recovery	chan	effects/ledger	try_send	Sent
+29	recovery	chan	ae/journal	try_send	Sent
+30	recovery	chan	effects/ledger	try_send	Sent
+31	recovery	mono	-	now()	31536000004000000
+32	recovery	wall	-	now_ms()	1700000000006
+33	recovery	wall	-	now_ms()	1700000000007
+34	recovery	chan	effects/ledger	try_send	Sent
+35	recovery	chan	ae/journal	try_send	Sent
+36	recovery	chan	effects/ledger	try_send	Sent
+37	recovery	input	effects/compensate	mock-destination/notify-103-retract 63ff47e57c9e6130 idempotent	ok fresh mock-destination
+38	recovery	wall	-	now_ms()	1700000000008
+39	recovery	chan	effects/ledger	try_send	Sent
+40	recovery	chan	effects/ledger	try_send	Sent
+41	recovery	chan	ae/journal	try_send	Sent
+42	recovery	chan	effects/ledger	try_send	Sent
+43	recovery	chan	effects/ledger	try_send	Sent
+44	recovery	mono	-	now()	31536000005000000
+45	recovery	chan	effects/ledger	try_send	Sent
+46	recovery	wall	-	now_ms()	1700000000009
+47	recovery	chan	ae/journal	try_send	Sent
+48	recovery	chan	effects/ledger	try_send	Sent
+49	recovery	mono	-	now()	31536000006000000
+50	recovery	mono	-	now()	31536000007000000
+51	recovery	mono	-	now()	31536000008000000
+52	recovery	mono	-	now()	31536000009000000

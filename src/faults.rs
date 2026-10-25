@@ -56,10 +56,13 @@ pub enum Class {
     Partition,
     Replay,
     PolicyDiff,
+    /// Selective recovery (adopter-surface X9): a lost acknowledgement, the closure of its record across the
+    /// fleet's journals, each member recovered by its declared class.
+    Recovery,
 }
 
 impl Class {
-    pub const ALL: [Class; 5] = [Class::Revoke, Class::Restart, Class::Partition, Class::Replay, Class::PolicyDiff];
+    pub const ALL: [Class; 6] = [Class::Revoke, Class::Restart, Class::Partition, Class::Replay, Class::PolicyDiff, Class::Recovery];
 
     /// The class's name as the command line and the report spell it.
     pub fn name(self) -> &'static str {
@@ -69,6 +72,7 @@ impl Class {
             Class::Partition => "partition",
             Class::Replay => "replay",
             Class::PolicyDiff => "policy-diff",
+            Class::Recovery => "recovery",
         }
     }
 
@@ -90,7 +94,7 @@ impl Class {
             return Ok(None);
         }
         if let Some(i) = parsed.iter().position(|c| c.is_none()) {
-            return Err(format!("`{}` is not a class (revoke · restart · partition · replay · policy-diff)", tokens[i]));
+            return Err(format!("`{}` is not a class (revoke · restart · partition · replay · policy-diff · recovery)", tokens[i]));
         }
         Ok(Some(parsed.into_iter().flatten().collect()))
     }
@@ -348,6 +352,7 @@ pub fn run(units: &[Unit], artifacts: &[(String, ArtifactDescription)], check_op
             Class::Partition => partition::run(&mut rep, &base, units, &class_dir),
             Class::Replay => replay::run(&mut rep, &base, units, &class_dir, opts.seed),
             Class::PolicyDiff => policy_diff::run(&mut rep, &base, units, &checked, opts.against.as_deref(), &opts.decisions, &class_dir),
+            Class::Recovery => recovery::run(&mut rep, &base, units, &class_dir),
         }
         if matches!(rep.state, ClassState::Passed) && rep.checks.iter().any(|k| k.ok == Some(false)) {
             rep.state = ClassState::Failed;
@@ -814,6 +819,27 @@ mod restart {
         }
         rep.notes.push(format!("persistence relocated to {} (one directory per node) for the run; sync_mode {:?}; on_unreadable {:?}", dir.join("persist").display(), pcfg.sync_mode, pcfg.on_unreadable));
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────────── recovery ──
+
+mod recovery;
+#[cfg(feature = "sim")]
+pub use recovery::{Seamed, SeamedOutcome};
+
+/// The `recovery` class's **seamed form** (adopter-surface X9, `sim` only): the fleet is built and the effects
+/// land for real, then the two recovery phases run under `seamed.kernel` — recording what the reconcilers asked
+/// the destination and the clock, or replaying it with the destination **not reached**. The report is the
+/// class's, as `test --faults recovery` would print it; the outcome carries the trace. `tests/faults_recovery_replay.rs`
+/// records, compares with the corpus and replays.
+#[cfg(all(feature = "sim", feature = "gateway", feature = "tls"))]
+pub fn run_recovery_seamed(units: &[Unit], base: &GossipConfig, dir: &Path, seamed: Seamed) -> Result<(ClassReport, SeamedOutcome), String> {
+    let mut rep = ClassReport { class: Class::Recovery, asked: true, state: ClassState::Passed, checks: Vec::new(), exercised: Vec::new(), not_exercised: Vec::new(), notes: Vec::new(), elapsed_ms: 0 };
+    let out = recovery::run_seamed(&mut rep, base, units, dir, seamed)?;
+    if matches!(rep.state, ClassState::Passed) && rep.checks.iter().any(|k| k.ok == Some(false)) {
+        rep.state = ClassState::Failed;
+    }
+    Ok((rep, out))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────── partition ──
@@ -1723,6 +1749,53 @@ mod tests {
         assert!(all_held(&c), "{c:?}");
         assert!(c.checks.iter().any(|k| k.name.contains("re-filled by a survivor") && k.ok == Some(true)), "{c:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The recovery class against a persisted three-node fleet: the lost acknowledgement probed before any retry
+    /// and the destination holding one effect, the closure incomplete over two journals and complete over three,
+    /// every dependent recovered by its class as a new record, independent work untouched, and the recovery
+    /// explained from the records. Seen failing first under a plant that re-sent the root effect instead of probing:
+    /// the first check's detail read `SENT (…)` and `the destination reached 2 time(s) for it` (the destination
+    /// deduplicates, so the applications stay at one — the attempts are the number a re-send shows). And under a
+    /// plant that removed `retry`'s pre-check, the second check still held: the one retry is claimed under the
+    /// ledger's lock, so the concurrent second retry is refused there (#677's review, findings 4 and 8).
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    #[test]
+    fn the_recovery_class_recovers_the_closure_by_class_and_leaves_independent_work() {
+        let dir = scratch("recovery");
+        let units = vec![
+            unit("orders", "principal = \"orders\"\n[[capability]]\nns = \"shop\"\nname = \"orders\"\nttl_secs = 5\n"),
+            unit("fulfilment", "principal = \"fulfilment\"\n[[capability]]\nns = \"shop\"\nname = \"labels\"\nttl_secs = 5\n"),
+            unit("loyalty", "principal = \"loyalty\"\n[[capability]]\nns = \"shop\"\nname = \"points\"\nttl_secs = 5\n"),
+        ];
+        let c = run_class(Class::Recovery, &units, &persisted(&dir), &dir, None);
+        assert!(all_held(&c), "{c:?}");
+        assert_eq!(c.checks.len(), 10, "{c:?}");
+        assert!(c.checks[0].detail.contains("the synced write is back") && c.checks[0].detail.contains("probe before any retry") && c.checks[0].detail.contains("reached 1 time(s) for it"), "{}", c.checks[0].detail);
+        assert!(c.checks[2].detail.contains("INCOMPLETE") && c.checks[2].detail.contains("hole(s) cited elsewhere"), "{}", c.checks[2].detail);
+        assert!(c.checks[8].detail.contains("order-100 1/1 1/1") && c.checks[8].detail.contains("label-101 1/1 2/2") && c.checks[8].detail.contains("points-102 0/0 1/1"), "{}", c.checks[8].detail);
+        assert!(c.checks[9].detail.contains("effect.probe, effect.retry, notify-retract, effect.leave"), "{}", c.checks[9].detail);
+        assert!(c.exercised.iter().any(|e| e.id == "persist.configured" && e.state == "enforced"), "{:?}", c.exercised);
+        assert!(c.exercised.iter().any(|e| e.id == "persist.sync_mode"), "{:?}", c.exercised);
+        assert!(c.notes.iter().any(|n| n.contains("record_permit")), "{:?}", c.notes);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `recovery` without `[persistence]`: `not_configured`, naming the table; the ids it would drive listed as not
+    /// exercised with that reason.
+    #[test]
+    fn the_recovery_class_needs_persistence_and_says_so() {
+        let units = vec![unit("p", "principal = \"p\"\n")];
+        let r = run(&units, &[], &CheckOptions::default(), &Options { classes: vec![Class::Recovery], ..Default::default() }).expect("the run");
+        assert_eq!(r.classes.len(), 1);
+        #[cfg(all(feature = "gateway", feature = "tls"))]
+        assert_eq!(r.classes[0].state, ClassState::NotConfigured { missing: "[persistence]".into() });
+        #[cfg(all(feature = "gateway", not(feature = "tls")))]
+        assert_eq!(r.classes[0].state, ClassState::NotInBuild { feature: "tls" }, "the feature the build lacks, by name");
+        #[cfg(not(feature = "gateway"))]
+        assert_eq!(r.classes[0].state, ClassState::NotInBuild { feature: "gateway" });
+        assert_eq!(r.exit_code(), 1, "asked by name");
+        assert!(r.classes[0].not_exercised.iter().any(|e| e.id == "persist.configured"), "{:?}", r.classes[0].not_exercised);
     }
 
     /// A proposed revision that drops a rule's `requires_values` permits the call the declared one refused: the

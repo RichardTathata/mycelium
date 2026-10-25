@@ -5,7 +5,7 @@
 //! failed answer rather than a place to go.
 //!
 //! This is the *mock-grade* reference, the shape a real provider adapter takes, written over the
-//! standard library's TCP so the crate pulls no HTTP client in; its test harness loses responses on
+//! standard library's TCP so the contract pulls no HTTP client in; its test harness loses responses on
 //! demand, which is how the unknown path is exercised. It is not a production HTTP client:
 //! `docs/operations/what-is-proven.md` lists what stands where a provider would.
 //!
@@ -19,8 +19,9 @@ use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
-use crate::external::{ExternalDestination, IdempotencyKey, ProbeAnswer};
-use crate::{DedupOutcome, DestinationCommit, Effect, EffectRefusal};
+use super::external::{ExternalDestination, IdempotencyKey, ProbeAnswer};
+use super::{Effect, EffectRefusal};
+use crate::{DedupOutcome, DestinationCommit};
 
 /// The HTTP destination.
 pub struct HttpDestination {

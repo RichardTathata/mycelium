@@ -1,0 +1,3 @@
+{
+  "recovery": "node=recovery sources=seeded(9, 1700000000000); the fleet's three nodes and their gossip are outside the kernel"
+}

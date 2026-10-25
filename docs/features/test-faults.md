@@ -5,7 +5,7 @@
 `mycelium test --faults [<class>,…] <units-dir> [--config <node.toml>]` builds a fleet of in-process nodes from a
 project's [unit files](../guide/00-concepts.md#unit-file) and a configuration, and runs the
 [fault classes](../guide/00-concepts.md#test-faults) the repository already proves against *that* fleet: `revoke`,
-`restart`, `partition`, `replay` and `policy-diff`. The report says, per class, which checks held, which guarantee and
+`restart`, `partition`, `replay`, `policy-diff` and `recovery`. The report says, per class, which checks held, which guarantee and
 rule ids it exercised with each one's resolution on the fleet's node, and which it could not exercise and why — in the
 same vocabulary as the [readiness report](../guide/00-concepts.md#doctor): `not_configured`, `not_in_build`,
 `not_applicable`, `not_verifiable_here`. A finding is the fleet's: a revoked key still verifying at one door, a synced
@@ -26,12 +26,13 @@ This feature is turned on in code.
 - [`run`](../../src/faults.rs) — `wire-check` over the declaration first (an error refuses the run with the same
   findings), then one fleet per class, built from the configuration with loopback addresses, free ports, persistence
   and TLS material under a temporary directory, no gateway port, a one-second health check and governor cooldown.
-- [`Class`](../../src/faults.rs) — the five classes; `--faults` alone runs every one, a list runs those and fails the
-  run if one cannot run here.
+- [`Class`](../../src/faults.rs) — the six classes; `--faults` alone runs every one, a list runs those and fails the
+  run if one cannot run here. `recovery` is [selective recovery](selective-recovery.md)'s page.
 - `replay` needs the binary built with the `sim` Cargo feature (`cargo build --bin mycelium --features cli,sim`); on
   any other it reads `not_in_build` naming `sim`. `revoke` needs `tls` and `compliance` in the build and a `[tls]`
   table; `restart` needs [`persistence`](../reference/configuration.md#the-fields); `policy-diff` needs `gateway` and
-  `tls` and `--against <units-dir>`, the proposed revision.
+  `tls` and `--against <units-dir>`, the proposed revision; `recovery` needs `[persistence]` and a `gateway` + `tls`
+  build.
 - `a_declaration_wire_check_refuses_is_refused_with_the_same_findings`, in [`src/faults.rs`](../../src/faults.rs):
   the plant is a unit nobody can wire; `test` refuses with `wire-check`'s own report, word for word.
 
@@ -90,6 +91,10 @@ job `embedded` builds the `sim` binary and runs `replay` against the co-op fixtu
   not have), which the report names with the first choice not reached rather than counting as a divergence. The schedule
   between nodes — frame arrival — is outside the seams (the inventory's §3.1.1), so a fleet recorded together
   diverges at its first cross-node channel choice; stated, not hidden.
+- `recovery` (adopter-surface X9) is its own page: [selective recovery](selective-recovery.md) — a lost
+  acknowledgement probed before any retry, the closure of its record across the fleet's journals, each member
+  recovered by its class as a new record, independent work untouched, explained from the records; its seamed form
+  recorded into the corpus and replayed with the destination reached zero times.
 - **Found by it, and fixed:** a governed member that went dark held the floor — its group entry is written once
   and withdrawn only by a graceful shutdown, so no survivor rolled to re-fill; the governor now counts a member only
   if it is this node or in its peer table ([`membership.governed`](../reference/rule-catalogue.md) revision 2), and

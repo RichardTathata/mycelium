@@ -190,6 +190,10 @@ async fn a_probe_past_its_budget_is_unresolved_and_egress_gates_a_probe() {
     let open = Reconciler::open(&shared, destination(&mock), EgressPolicy::default()).unwrap();
     let lost = idempotent("pay-7", "lose:7");
     assert!(matches!(open.apply(&lost, None).await, Err(ExternalRefusal::Effect(EffectRefusal::DeliveryUnknown))));
+    // A ledger has one owner at a time (the journal's lock, realignment repairs R1): a second reconciler over it
+    // while the first is open is refused by name, so the hand-over below is a drop, then an open.
+    assert!(matches!(Reconciler::open(&shared, destination(&mock), EgressPolicy::default()), Err(ExternalRefusal::Ledger(why)) if why.contains("owned by another")));
+    drop(open);
     let denying = Reconciler::open(&shared, destination(&mock), EgressPolicy { allow_hosts: vec!["payments.internal".into()] }).unwrap();
     let reached = mock.reached();
     assert_eq!(denying.probe(&lost.effect.operation_id).await, Err(ExternalRefusal::EgressDenied { host: "127.0.0.1".into() }));
@@ -349,6 +353,7 @@ async fn a_found_record_binds_content_class_and_scope() {
     assert_eq!(mock.reached(), reached, "a retry with other content never leaves");
     // Another destination sharing the ledger: its scope is not the record's — refused, not answered from the ledger.
     let other_dest = Arc::new(HttpDestination::new("invoices", "127.0.0.1", mock.port, "", Duration::from_millis(700)));
+    drop(r);
     let shared_other = Reconciler::open(&shared, other_dest, EgressPolicy::default()).unwrap();
     assert!(matches!(shared_other.apply(&first, None).await, Err(ExternalRefusal::DeclarationMismatch { what: "dedup scope", .. })));
     assert_eq!(mock.reached(), reached);

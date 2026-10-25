@@ -11,6 +11,34 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Selective recovery — the adopter-surface plan's decisive demonstration** (`docs/plans/adopter-surface.md` X9;
+  `docs/features/selective-recovery.md`): the `recovery` class of `mycelium test --faults`. Three nodes of the
+  declaration's fleet, each with a reconciler, an evidence journal and the evaluator, one mock destination in the
+  process that loses answers once per key; one effect's acknowledgement lost, dependent effects on the other two nodes
+  carrying the parent (one two steps down), independent effects beside them; the losing node cut and restarted over
+  its WAL, a second node dark. The fleet **probes before it retries** (the restarted node finds its record unknown in
+  its own ledger, a retry without a probe is refused, the destination holds one effect); **reads the closure** over
+  the journals it can reach — *INCOMPLETE* while a node is dark, and a hole hides what hangs below it; every dependent
+  and no independent once the node is back; **recovers each member by its class as a new record** — an idempotent
+  dependent probed and resumed by one retry (of two concurrent retries one refused before anything is sent), a
+  compensatable one probed and never retried, a committed one whose premise did not happen compensated under the
+  evaluator's permit, an irreversible one *left* (unresolved, escalated); leaves independent work untouched; and
+  **explains** every decision with `mycelium explain --closure` (kept beside a `--keep` run). Ten checks, the ids
+  exercised (`persist.configured`, `persist.sync_mode`, `ae.preflight`). **The seamed form** (`sim`): the two
+  recovery phases recorded into the replay corpus (`tests/replay-corpus/x9-selective-recovery/`) and replayed in CI
+  against a fresh fleet with the destination reached **zero times in those phases** (the sends that set the scene are
+  live in both forms), every check made again on the replay. The
+  `Scaffold` job runs the class against the scaffold's declaration; the one-hour job runs it on the published binary
+  as its step 5 from the first release carrying it. **The side-effect contract moved into the substrate** to make this
+  possible (`mycelium::effects`; `mycelium-effects` re-exports every path unchanged — `deprecations.md` §62): the
+  reconciler's ledger is the node-local journal now, not a SQLite file (`rusqlite` stays quarantined to the
+  companion), one owner at a time, a frame it cannot read refusing the open; `Reconciler` gained `apply_caused`
+  (X4's fields on the record), `leave`, and claims under the ledger's lock for the retry, the probe, the compensation
+  and the leave (two moves racing on one record, one refused before anything is sent); a failed compensation's link
+  comes off so another may be issued, and a composed compensation is refused rather than sent unchecked;
+  `ExternalRefusal` gained `LeaveOfObservable`, `ExternalRefusalSnapshot` a field; `Class` gained `Recovery`. The philosophy's
+  *Rollback → compensation* bullet now reads the closure reader as built. **Not built, stated:** a real destination,
+  more than one, a closure read at runtime, a policy over the closure's size.
 - **The adapter contract, and a unit's `runtime`** (`docs/plans/adopter-surface.md` X7 and X8;
   `docs/features/adapter-contract.md`): `docs/reference/adapter-contract.md` — one row per runtime adapter (the native
   Rust embedding, `mycelium-py`, `mycelium-ts`, `langgraph-checkpoint-mycelium`, `strands-session-mycelium`,

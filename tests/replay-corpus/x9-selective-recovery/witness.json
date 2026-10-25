@@ -1,0 +1,4 @@
+{
+  "assertion": "faults_recovery_replay::the_checked_in_recovery_bundle_replays_here_and_matches_a_fresh_recording",
+  "toggle": ""
+}
