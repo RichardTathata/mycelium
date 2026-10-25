@@ -604,6 +604,9 @@ impl AgentStateMachine {
         let issued_key: Arc<str> = format!("{}/issued", self.grant_key(&request)).into();
         let refused_key: Arc<str> = format!("{}/refused", self.grant_key(&request)).into();
         let mut rx = mycelium_core::kv_handle::KvHandle::from_core(Arc::clone(&self.ctx.core)).subscribe_prefix(format!("{}/", self.grant_key(&request)));
+        // An unknown standing is waited out, not refused: the issuer's checkpoint may land after the grant (#678's
+        // review, finding 3); the revoked standing is final; the expiry names the last reason seen.
+        let mut last_unknown: Option<String> = None;
         loop {
             if let Some(bytes) = mycelium_core::ops::kv_get(&self.ctx, &refused_key) {
                 let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
@@ -629,24 +632,31 @@ impl AgentStateMachine {
                 // standing is known here before the grant is assessed (adopter-surface X3, second PR).
                 super::gateway_authority::feed_grant_checkpoint(&self.ctx, authority, &presented.grant.mandate, now);
                 let assessment = authority.assess(&agent, "tools/call", &resource, &digest, Some(&presented), now, &super::gateway_member_keys(&self.ctx));
-                return match assessment.binding.map(|b| b.state) {
+                match assessment.binding.map(|b| b.state) {
                     Some(super::action_evaluator::MandateState::Established) => {
                         #[cfg(feature = "metrics")]
                         metrics::counter!("mycelium_grants_verified_total").increment(1);
-                        serde_json::to_value(&presented)
+                        return serde_json::to_value(&presented)
                             .map(|v| (v, request.clone()))
-                            .map_err(|e| PolicyViolation::GrantRefused(format!("{tool}: the grant does not serialise: {e}")))
+                            .map_err(|e| PolicyViolation::GrantRefused(format!("{tool}: the grant does not serialise: {e}")));
                     }
-                    Some(super::action_evaluator::MandateState::Refused(r)) => Err(PolicyViolation::GrantRefused(format!("{tool}: {r}"))),
-                    Some(super::action_evaluator::MandateState::Unknown(why)) => Err(PolicyViolation::GrantRefused(format!("{tool}: not established — {why}"))),
-                    None => Err(PolicyViolation::GrantRefused(format!("{tool}: the grant was not established"))),
-                };
+                    Some(super::action_evaluator::MandateState::Refused(r)) => return Err(PolicyViolation::GrantRefused(format!("{tool}: {r}"))),
+                    Some(super::action_evaluator::MandateState::Unknown(why)) if why == super::gateway_authority::GRANT_REVOKED => {
+                        return Err(PolicyViolation::GrantRefused(format!("{tool}: not established — {why}")));
+                    }
+                    // Not established *yet*: the issuer's checkpoint may land after the grant did. Wait on, to the expiry.
+                    Some(super::action_evaluator::MandateState::Unknown(why)) => last_unknown = Some(why),
+                    None => last_unknown = Some("the grant was not established".into()),
+                }
             }
             let now = self.ctx.hlc.decision_now_ms();
             if now >= expires_at_ms {
                 #[cfg(feature = "metrics")]
                 metrics::counter!("mycelium_grants_expired_total").increment(1);
-                return Err(PolicyViolation::GrantNotPresented(format!("{tool}: no grant within {window_ms} ms (request {request})")));
+                return Err(PolicyViolation::GrantNotPresented(format!(
+                    "{tool}: no established grant within {window_ms} ms (request {request}){}",
+                    last_unknown.map(|w| format!("; the grant seen was not established — {w}")).unwrap_or_default()
+                )));
             }
             // Wake on a write under the request, or on the timer seam at the expiry — whichever first.
             let remaining = expires_at_ms - now;

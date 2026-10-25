@@ -525,10 +525,12 @@ async fn a_grant_is_issued_at_one_node_for_an_agent_on_another_and_revoked_there
 }
 
 /// **A restarted agent re-waits on its pending request; an expired one asks again** (the row's rev 0.4 exit). The
-/// request is on the WAL: the agent asks, the node is shut down mid-wait and restarted over the same directory and
-/// identity, a new state machine asks for the same tool and arguments and finds the one request — it does not ask
-/// twice — the supervisor issues it, and the transition commits once. With the window past at the restart, the
-/// expired request is not re-waited: a second request is written, and silence refuses it.
+/// request is on the WAL: the agent asks, the supervisor **issues**, the node is shut down before the agent read the
+/// grant and restarted over the same directory and identity; a new state machine asks for the same tool and arguments,
+/// finds the one request — it does not ask twice — reads the grant issued against it, feeds its authority the grant's
+/// checkpoint (issued before this authority started, which the start rule exempts a grant from — #678's review,
+/// finding 1: before, every grant issued before a restart was refused after it), and commits once. With the window
+/// past at the restart, the expired request is not re-waited: a second request is written, and silence refuses it.
 #[tokio::test]
 async fn a_restarted_agent_re_waits_on_its_pending_request_and_an_expired_one_asks_again() {
     let (http_port, gossip_port) = (alloc_port(), alloc_port());
@@ -546,24 +548,25 @@ async fn a_restarted_agent_re_waits_on_its_pending_request_and_an_expired_one_as
     let (sm2, args2) = (Arc::clone(&sm), args.clone());
     let waiting = tokio::spawn(async move { sm2.transition_invoking("deploy", &args2).await });
     assert!(until(|| requests(&a) == 1, Duration::from_secs(5)).await);
+    // The agent is stopped before it can read the answer; the supervisor issues against the standing request.
     waiting.abort();
     let _ = waiting.await;
+    let request = issue_pending(Arc::clone(&a), http_port, agent_principal.clone()).await;
+    // The restart's authority must not see this checkpoint as "before its start": let the clock move past two skews.
+    tokio::time::sleep(Duration::from_millis(300)).await;
     a.shutdown().await;
     // Every handle on the node's context goes: the state machine holds one, and with it the journal's lock.
     drop(sm);
     drop(a);
     tokio::time::sleep(Duration::from_millis(200)).await;
-    // The restart: the same identity, the same directory; the request is back from the WAL and still standing.
+    // The restart: the same identity, the same directory; the request and the grant are back from the WAL.
     let (a, _j, _ran) = node_with(http_port, opts.clone()).await;
     assert_eq!(requests(&a), 1, "the request survived the restart");
+    assert!(mycelium_core::ops::kv_get(&a.task_ctx, &format!("{prefix}{request}/issued")).is_some(), "the grant survived the restart");
     let sm = a.agent_state_machine(policy(20_000));
     sm.transition(ExecutionState::Planning).await.unwrap();
-    let (sm2, args2) = (Arc::clone(&sm), args.clone());
-    let waiting = tokio::spawn(async move { sm2.transition_invoking("deploy", &args2).await });
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mandate = sm.transition_invoking("deploy", &args).await.expect("the grant issued before the restart verified after it").expect("a grant");
     assert_eq!(requests(&a), 1, "the restarted agent did not ask twice");
-    let request = issue_pending(Arc::clone(&a), http_port, agent_principal.clone()).await;
-    let mandate = waiting.await.unwrap().expect("the grant verified after the restart").expect("a grant");
     assert_eq!(sm.state(), ExecutionState::Invoking { tool: "deploy".into() });
     assert!(mycelium_core::ops::kv_get(&a.task_ctx, &format!("{prefix}{request}/consumed")).is_some(), "the one request, consumed once");
     assert!(call_deploy(&a, None, &mandate, &args).await.is_ok(), "one execution");

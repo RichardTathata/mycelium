@@ -117,8 +117,12 @@ pub struct ExecutionAuthority {
     /// Adopter-surface X3 (second PR), lock-order row 70: the grants this authority has admitted once, by scope, term
     /// and door — the single-use claim's atomic half (the marker under the request in the KV is its durable half).
     /// Leaf, µs.
-    used_grants: Mutex<std::collections::HashSet<(String, String, String)>>,
+    used_grants: Mutex<std::collections::HashMap<(String, String, String, String), u64>>,
 }
+
+/// The words `assess` gives a revoked grant's standing — read by the agent's wait, which treats this one unknown
+/// standing as final (adopter-surface X3, second PR).
+pub(crate) const GRANT_REVOKED: &str = "the grant is revoked";
 
 /// The key a grant's checkpoints are written under by the issuing gateway: `grant/{agent}/{request}/checkpoint`.
 pub(crate) fn grant_checkpoint_key(grant: &crate::mandate::Mandate) -> String {
@@ -149,6 +153,8 @@ pub(crate) fn feed_grant_checkpoints(ctx: &super::TaskCtx, authority: &Execution
     for (key, bytes) in crate::store::scan_kv_prefix(&ctx.kv_state, "grant/") {
         if key.ends_with("/checkpoint")
             && let Ok(signed) = serde_json::from_slice::<crate::mandate::authority::SignedRevocationCheckpoint>(&bytes)
+            // A checkpoint the view holds already is not verified again (#678's review, finding 4).
+            && !authority.holds_checkpoint(&signed.checkpoint.authority, &signed.checkpoint.scope, signed.checkpoint.seq)
         {
             let _ = authority.offer_checkpoint(&signed, now_ms, &members);
         }
@@ -260,17 +266,29 @@ impl ExecutionAuthority {
             running: Mutex::new(std::collections::HashMap::new()),
             next_work: std::sync::atomic::AtomicU64::new(1),
             stops: Mutex::new(std::collections::VecDeque::new()),
-            used_grants: Mutex::new(std::collections::HashSet::new()),
+            used_grants: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
     /// **Claim one use of a grant at `door`** (adopter-surface X3, second PR): `true` the first time this authority
-    /// sees the grant's scope and term at that door, `false` afterwards. A grant admits one call at each enforcement
-    /// point; the gateway and the provider each claim their own use of the same call, and a second presentation at
-    /// either is refused `GrantUsed`. The in-memory set is the atomic half (two concurrent presentations meet here);
-    /// the door writes a marker under the request so a restart does not forget the use.
-    pub fn claim_grant_use(&self, scope: &str, term: &str, door: &str) -> bool {
-        self.used_grants.lock().unwrap_or_else(|e| e.into_inner()).insert((scope.to_string(), term.to_string(), door.to_string()))
+    /// sees the grant — its holder, scope and term — at that door, `false` afterwards. A grant admits one call at
+    /// each enforcement point; the gateway and the provider each claim their own use of the same call, and a second
+    /// presentation at either is refused `GrantUsed`. The in-memory map is the atomic half (two concurrent
+    /// presentations meet here) and is pruned by the sweep once `valid_until_ms` has passed; the door writes a marker
+    /// under the request so a restart — or the pruning — does not forget the use.
+    pub fn claim_grant_use(&self, holder: &str, scope: &str, term: &str, door: &str, valid_until_ms: u64) -> bool {
+        let mut used = self.used_grants.lock().unwrap_or_else(|e| e.into_inner());
+        let key = (holder.to_string(), scope.to_string(), term.to_string(), door.to_string());
+        if used.contains_key(&key) {
+            return false;
+        }
+        used.insert(key, valid_until_ms);
+        true
+    }
+
+    /// Does this authority already hold a checkpoint of `authority` for `scope` at or past `seq`?
+    pub fn holds_checkpoint(&self, authority: &crate::mandate::PrincipalId, scope: &str, seq: u64) -> bool {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).revocations.holds(authority, scope, seq)
     }
 
     /// **Admit running work under this authority** (closure plan C10). Until the returned guard is
@@ -305,6 +323,8 @@ impl ExecutionAuthority {
     /// every [`sweep_interval_ms`](Self::sweep_interval_ms).
     pub fn sweep(&self, now_ms: u64) -> usize {
         use std::sync::atomic::Ordering;
+        // The single-use claims of grants whose window has passed (the marker on the WAL keeps the durable half).
+        self.used_grants.lock().unwrap_or_else(|e| e.into_inner()).retain(|_, until| *until > now_ms);
         // Snapshot under row 48, check under row 43, cancel under row 48: never both at once.
         let snapshot: Vec<(u64, AuthorizedWork)> = self
             .running
@@ -500,7 +520,7 @@ impl ExecutionAuthority {
                     ),
                     valid_until_ms: Some(m.valid_until_ms),
                 },
-                RevocationStanding::Revoked => unknown("the grant is revoked".into()),
+                RevocationStanding::Revoked => unknown(GRANT_REVOKED.into()),
                 RevocationStanding::Unknown => unknown("the grant's issuer's checkpoint has not reached this verifier".into()),
             };
         }

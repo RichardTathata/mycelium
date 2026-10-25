@@ -248,8 +248,15 @@ pub(super) async fn gw_grant_revoke(
     if mycelium_core::ops::kv_get(&ctx.agent_ctx, &format!("{key}/revoked")).is_some() {
         return refused(StatusCode::CONFLICT, "already_revoked", format!("{key} was already revoked"));
     }
-    let rec: serde_json::Value = mycelium_core::ops::kv_get(&ctx.agent_ctx, &key).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-    let (tool, resource) = (rec["tool"].as_str().unwrap_or("?").to_string(), rec["resource"].as_str().unwrap_or("?").to_string());
+    // The tool and the resource come from the **signed** grant — its one enumerated operation and its holder — not
+    // from the request record, which any member can overwrite and which may be absent here (#678's review, finding 6).
+    let Some(tool) = grant.mandate.operations.iter().find_map(|op| op.strip_prefix("tools/call:tool:").map(str::to_string)) else {
+        return refused(StatusCode::CONFLICT, "unreadable_grant", "the grant enumerates no tool call");
+    };
+    let Some(agent_node) = grant.mandate.holder.as_str().strip_prefix("node:") else {
+        return refused(StatusCode::CONFLICT, "unreadable_grant", "the grant's holder is not a node principal");
+    };
+    let resource = format!("tool:{tool}@{agent_node}");
     let now_ms = ctx.agent_ctx.hlc.decision_now_ms();
     let arguments = json!({ "tool": tool, "agent": agent, "request": request });
     let preflight = ae_preflight(&ctx.agent_ctx, caller.as_ref(), "grant.revoke", &resource, &arguments, &json!({}), ENFORCEMENT_POINT_GRANT_ISSUE).await;

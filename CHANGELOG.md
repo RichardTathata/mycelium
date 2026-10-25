@@ -26,8 +26,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   again. The refusals are reconstructable: a used or mis-bound grant's is a denial sealed into the audit chain, which
   `prove_denials` reads; a revoked grant's is *not established*, sealed as such. **Fixed on the way:** the authority's
   sweep cancelled work running under a grant at its first tick, revoked or not (the resource gate's scope rule);
-  `deprecations.md` §63. **Still not built:** an SSE stream of requests, the A2A `input-required` state, the data-class
-  policy over the argument rendering, the one-hour job's step 4 — the row's third PR.
+  `deprecations.md` §63; and, from the PR's review, a grant's checkpoint exempt from the revocation view's start rule
+  (a grant issued before a restart was refused after it), the single-use claim moved out of the history loop, an unknown
+  standing waited out at the agent, the `grant/` watcher narrowed, the revoke route reading the signed grant, and the
+  SDKs' `grant_revoke` / `grantRevoke`. **Still not built:** an SSE stream of requests, the A2A `input-required` state,
+  the data-class policy over the argument rendering, the one-hour job's step 4, retention of `grant/` records — the
+  row's third PR.
 - **Selective recovery — the adopter-surface plan's decisive demonstration** (`docs/plans/adopter-surface.md` X9;
   `docs/features/selective-recovery.md`): the `recovery` class of `mycelium test --faults`. Three nodes of the
   declaration's fleet, each with a reconciler, an evidence journal and the evaluator, one mock destination in the

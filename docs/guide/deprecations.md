@@ -1880,9 +1880,14 @@ not_the_issuer` anywhere but the issuing node; new counter `mycelium_grants_revo
 route-owned `grant/` (`…/used/{door}`, `…/revoked`). **Fixed:** the authority's sweep judged work running under a grant
 by the resource gate, whose scope rule a grant's own scope fails, so such work was cancelled at the first sweep tick
 whether or not the grant was revoked (unobserved while no granted handler outlived a tick); it is judged by the grant's
-window and its issuer's checkpoint now, and stops on revocation within the drain bound. **Migration:** a client that
-re-presented one grant for a repeated call now asks for a grant per call; a fleet whose supervisor sits at another
-gateway than the agent calls `entitle_grants_from_fleet()` on the agent nodes' entitlement tables.
+window and its issuer's checkpoint now, and stops on revocation within the drain bound. **Also:** a grant's checkpoint is
+exempt from the revocation view's start rule (`IssuedBeforeStart` is a freshness rule, and a grant reads no freshness) —
+before this, every grant issued before a node's restart was refused after it; the agent's wait no longer refuses an
+*unknown* standing but waits for the issuer's checkpoint to the expiry (a revoked standing is final); the SDKs gain
+`grant_revoke` / `grantRevoke`. **Migration:** a client that re-presented one grant for a repeated call now asks for a
+grant per call; a fleet whose supervisor sits at another gateway than the agent calls `entitle_grants_from_fleet()` on
+the agent nodes' entitlement tables — **and accepts that every member's evaluator may then grant there**; a fleet that
+wants one issuing node keeps `entitle_grants(that node)`.
 
 ## 62. The side-effect contract moved into the substrate; its ledger is a journal; `Class` gained `Recovery`; `ExternalRefusal` gained `LeaveOfObservable` (unreleased, adopter-surface X9)
 

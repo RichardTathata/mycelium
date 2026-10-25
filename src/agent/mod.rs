@@ -1691,7 +1691,8 @@ impl GossipAgent {
             let (ctx, authority) = (Arc::clone(&self.task_ctx), Arc::clone(&authority));
             let mut shutdown = self.task_ctx.shutdown_tx.subscribe();
             self.task_ctx.spawn_task(async move {
-                let mut rx = mycelium_core::kv_handle::KvHandle::from_core(Arc::clone(&ctx.core)).subscribe_prefix("grant/");
+                // Woken by a checkpoint's write only, not by every key under the prefix (#678's review, finding 4).
+                let mut rx = mycelium_core::kv_handle::KvHandle::from_core(Arc::clone(&ctx.core)).subscribe_prefix_with_predicate("grant/", |k: &str| k.ends_with("/checkpoint"));
                 loop {
                     tokio::select! {
                         _ = capability_ops::await_shutdown(&mut shutdown) => break,

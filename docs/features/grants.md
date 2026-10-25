@@ -40,7 +40,7 @@ This feature is turned on in code.
   an approver of everything, and a gateway with no evaluator answers nothing. A grant is issued for an agent on this
   node or on a fleet member this node holds the key of; the agent's node decides whether that issuer may
   ([`entitle_grants_from_fleet`](../../src/mandate/grant.rs)). The SDKs' verbs are `grants_pending` / `grant_decide`
-  (`grantsPending` / `grantDecide`).
+  (`grantsPending` / `grantDecide`), and `grant_revoke` (`grantRevoke`) for the revoke route.
 - [`claim_grant_use`](../../src/agent/gateway_authority.rs) and [`feed_grant_checkpoint`](../../src/agent/gateway_authority.rs)
   — a grant admits **one call at each door** (the gateway's and the provider's preflight each claim their use, the
   marker `…/used/{door}` on the WAL), and a grant's checkpoints travel in the KV beside it, fed to every node's
@@ -90,20 +90,31 @@ has no row for this feature. The tests: in [`src/mandate/grant.rs`](../../src/ma
   the commit it admitted, so the same tool and arguments ask again; and each enforcement point — the gateway's
   preflight, the provider's — admits a grant **once**: the authority's claim is atomic across concurrent presentations,
   the marker under the request (`…/used/{door}`) is on the WAL, and a second presentation is **denied** `GrantUsed`
-  naming the door. A grant admitted at a door is spent there whether or not the work completes, as a nonce is.
-- **Revocation.** `POST …/revoke` at the issuing node publishes the next checkpoint for the grant's scope naming the
+  naming the door. A grant admitted at a door is spent there whether or not the work completes, as a nonce is; the claim is made once
+  per call at settling — after the permit's history and seats, before its record — so a refusal earlier in that
+  settling (a full fleet counter) spends nothing, and a retry of the history view cannot meet its own marker.
+- **Revocation.** `POST …/revoke` at the issuing node reads the tool and the agent from the **signed** grant (its one
+  enumerated operation and its holder), not from the request record, and publishes the next checkpoint for the grant's scope naming the
   term, offers it to its own authority — whose sweep judges work under a grant by that standing and its window, not by
   the resource gate, and stops it within the drain bound (sweep interval plus the handler's own stop) — and writes it
   beside the grant, where every node's authority is fed it; a revoked grant is refused at every door as
   *not established — revoked*, the AE vocabulary for revocation. Revoking is an action the evaluator decides
   (`grant.revoke`); a node that did not issue the grant answers `409 not_the_issuer`.
 - **Across nodes.** A supervisor at any gateway issues for an agent on a member node whose key the gateway holds; the
-  grant and its checkpoint travel in the KV, the agent's node feeds its authority the checkpoint before it assesses,
-  and its entitlement table decides whether a member may issue (`entitle_grants_from_fleet`; a node that entitles only
-  itself refuses the rest as *not established*). A principal no member's is `409 not_a_member`.
-- **A restart re-waits.** The request is on the WAL; an agent restarted mid-wait that asks for the same tool and
-  arguments finds the one request and waits on it, does not ask twice, and the grant issued against it is honoured
-  once; an expired request is not re-waited — a new one is written and silence refuses it.
+  grant and its checkpoint travel in the KV, the agent's node feeds its authority the checkpoint before it assesses —
+  and waits, not refuses, while the grant has landed and its checkpoint has not — and its entitlement table decides
+  whether a member may issue. **The trust this asks for:** `entitle_grants_from_fleet` entitles **every** member whose
+  key this node holds, so the issuing member's evaluator alone decides who may grant here — a member with a permissive
+  evaluator or a rogue token holder can issue for any agent in the fleet; the narrower tool is `entitle_grants` per
+  trusted gateway node, and a node that entitles only itself refuses the rest as *not established*. A principal no
+  member's is `409 not_a_member`. Member keys need the `compliance` feature (`gateway_member_keys` is empty without it),
+  as the grant mode has since the first PR. A grant's checkpoint is exempt from the revocation view's start rule — a
+  grant reads no freshness, its window bounds its life — so a grant issued before a node's restart is held after it.
+- **A restart re-waits.** The request and the grant are on the WAL at the **buffered** rung (the state machine's
+  writes are fire-and-forget appends; the test's "crash" is a graceful restart); an agent restarted mid-wait that asks
+  for the same tool and arguments finds the one request, does not ask twice, and the grant issued against it before
+  the restart is honoured once after it; an expired request is not re-waited — a new one is written and silence
+  refuses it.
 - **Reconstructable:** a used or mis-bound grant's refusal is a **denial**, sealed into the audit chain with the
   operation it refused; `prove_denials` (mycelium-guardrails) reads exactly those records, and the evidence record the
   reference cites carries the reason. A *revoked* grant's refusal is sealed as *not established* (an error outcome),
@@ -126,8 +137,10 @@ has no row for this feature. The tests: in [`src/mandate/grant.rs`](../../src/ma
   the request's argument rendering (rendered when under 16 KiB, else summarised with its size); the one-hour job's
   step 4 on the published binary. **The doors a node-held grant reaches:** a grant's holder is the agent's node, so
   it is presented on the node's own call (a member's direct call, the provider's door) — a bearer client presenting a
-  node's grant at `/mcp` is refused as not the holder's; a client-held grant at the gateway claims its use the same
-  way, in the same preflight. An operator UI is the adopter's.
+  node's grant at `/mcp` is refused as not the holder's. **The gateway's claim (`used/gateway`) is code with no
+  reachable caller today:** only a `node:` principal can hold a grant, so no client presents one at `/mcp`; the claim
+  runs in the one preflight both doors share and is exercised at the provider's tag. Grant records under `grant/` are
+  never reclaimed (no retention row yet). An operator UI is the adopter's.
 - Metrics: `mycelium_grants_requested_total`, `_verified_total`, `_expired_total`, `_issued_total`, `_refused_total`,
   `_revoked_total` and the gauge `mycelium_grants_pending` (moved on every request and answer, not only when polled).
 
