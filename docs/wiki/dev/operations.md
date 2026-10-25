@@ -156,7 +156,7 @@ dash, whose `pipefail` depends on the Debian release), no toolchain, the publish
 from the first `curl`; apt on its own row outside the clock; the SDK's version checked against the tag's
 `pyproject.toml`; a red run prints no number; 3 600 s is the bound. Steps 4 and 5 and the records half of 3 are
 printed as not yet measured (X3, X4, X9). Log `.log/2026-10-23-one-hour.md`. *(2026-10-25)* Step 5 is in the job
-(X9's `recovery` class on the published binary); it measures from the first release that carries the class.
+(X9's `recovery` class on the published binary); it measures from v2.38.0, the first release that carries the class.
 
 ## `mycelium init` (adopter-surface X2, 2026-10-23)
 

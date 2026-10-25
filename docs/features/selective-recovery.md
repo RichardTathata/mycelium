@@ -46,7 +46,7 @@ This feature is turned on in code.
 No runnable example exists: the [example index's capability matrix](../../examples/README.md#the-capability-matrix)
 has no row for this feature. The CI job `Scaffold` runs `mycelium test --faults` against the Rust scaffold's
 declaration with `[persistence]`, `recovery` among the classes (`recovery: passed`), and the one-hour job runs it on
-the published binary as its step 5 from the first release that carries the class. The seamed form is
+the published binary as its step 5 from v2.38.0, the first release that carries the class. The seamed form is
 `the_checked_in_recovery_bundle_replays_here_and_matches_a_fresh_recording` in
 [`tests/faults_recovery_replay.rs`](../../tests/faults_recovery_replay.rs): the recovery phases recorded under the
 replay kernel into the corpus bundle `tests/replay-corpus/x9-selective-recovery/`, replayed in CI with the destination

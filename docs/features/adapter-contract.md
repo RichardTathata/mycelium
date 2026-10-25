@@ -68,7 +68,7 @@ holds every companion README to its limits section.
 - **Upgrade note:** a unit carrying `runtime` is refused by every reader older than this release — a 2.37.0
   gateway answers `400 invalid unit file`, a 2.37.0 stem or `wire-check` refuses the directory (unknown keys are
   refused by name since 2.35.0) — so declare it only once every gateway and stem reading the directory runs this
-  release ([deprecations § 61](../guide/deprecations.md#61-a-units-runtime-key-is-refused-by-readers-before-this-release-unreleased-adopter-surface-x8)).
+  release ([deprecations § 61](../guide/deprecations.md#61-a-units-runtime-key-is-refused-by-readers-before-this-release-2380-adopter-surface-x8)).
 - The `runtime` key is a declaration of what will run the unit, read by `wire-check` only; the gateway accepts and
   ignores it, and no engine is selected by it (D4: a directory of unit files is the fleet file).
 - **Not built, stated:** the table does not make an adapter carry anything; no cell is measured at runtime — the

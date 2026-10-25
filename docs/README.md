@@ -5,7 +5,7 @@ connects what Mycelium can do to explanations, runnable examples, operating guid
 
 **New developer?** With no toolchain, start with [the first hour](guide/tutorials/07-the-first-hour.md) — the
 published node, a scaffold in your language, a refused call, a grant, a lost acknowledgement recovered, a readiness
-report (the grant and the recovery from the first release after 2.37.0). Then follow the
+report (the grant and the recovery from 2.38.0). Then follow the
 [seven practical tutorials](guide/tutorials/README.md) after the guide’s introductory gossip and capability examples.
 
 | Audience | Suggested route |

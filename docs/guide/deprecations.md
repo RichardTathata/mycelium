@@ -1865,7 +1865,7 @@ heartbeat tick, while a live member's entry holds a forged time, until its owner
 has no heartbeat" is reading a member whose heartbeat has not reached it; it clears when the heartbeat arrives or the
 entry ages past the bound.
 
-## 65. A `[[rule]]` gained `requires_grant`; a `[[rule]]` or `[[mandate]]` with an unknown key is refused; `Class` gained `Grant` (unreleased, adopter-surface X3, fourth PR)
+## 65. A `[[rule]]` gained `requires_grant`; a `[[rule]]` or `[[mandate]]` with an unknown key is refused; `Class` gained `Grant` (2.38.0, adopter-surface X3, fourth PR)
 
 The unit file's `[[rule]]` gained `requires_grant = true` — the rule applies only under a grant, `Rule::requiring_grant`'s
 shorthand (one of this and `requires_mandate`, never both: refused at load by every reader) — and `mycelium test --faults` gained the `grant` class, which
@@ -1882,7 +1882,7 @@ long and an exhaustive `match` on `Class` needs a `Grant` arm. `wire-check` gain
 rule that requires a grant with no rule admitting anyone to `grant.issue` on its resource (`*` for the operation or
 the resource counts; a `@<node>` suffix on either side is not matched — the reading `test --faults grant` shares).
 
-## 64. `AgentPolicy` gained `grant_arguments_class` and `grant_renderable_classes`; a streamed A2A task can report `input-required`; `GET /gateway/grants/stream` (unreleased, adopter-surface X3, third PR)
+## 64. `AgentPolicy` gained `grant_arguments_class` and `grant_renderable_classes`; a streamed A2A task can report `input-required`; `GET /gateway/grants/stream` (2.38.0, adopter-surface X3, third PR)
 
 `AgentPolicy` gained two fields (an exhaustive struct literal breaks; `..Default::default()` is unaffected): the
 arguments' data class and the classes a grant request may render. **Behaviour change for a policy that sets a class:**
@@ -1895,7 +1895,7 @@ The streamed A2A dispatch's bound is 120 s now (it was 30 s; the unary path's, a
 for a grant through this door). New route `GET /gateway/grants/stream` under `grant:read`, with `grant_request`,
 `grant_answered` and `grant_expired` events; the SDKs gain `grants_stream` / `grantsStream`.
 
-## 63. A grant admits one call at each door; `MandateRefusal` gained `GrantUsed`; a grant is issued for a member's agent and revoked at its issuer; the authority's sweep judges a grant by its own standing (unreleased, adopter-surface X3, second PR)
+## 63. A grant admits one call at each door; `MandateRefusal` gained `GrantUsed`; a grant is issued for a member's agent and revoked at its issuer; the authority's sweep judges a grant by its own standing (2.38.0, adopter-surface X3, second PR)
 
 **Behaviour changes.** Every enforcement point (`gateway`, `provider`) now admits a grant **once**: a second presentation
 of the same grant at the same door is denied `GrantUsed { door }` (`MandateRefusal`, `#[non_exhaustive]` — a `_` arm fails
@@ -1919,7 +1919,7 @@ grant per call; a fleet whose supervisor sits at another gateway than the agent 
 the agent nodes' entitlement tables — **and accepts that every member's evaluator may then grant there**; a fleet that
 wants one issuing node keeps `entitle_grants(that node)`.
 
-## 62. The side-effect contract moved into the substrate; its ledger is a journal; `Class` gained `Recovery`; `ExternalRefusal` gained `LeaveOfObservable` (unreleased, adopter-surface X9)
+## 62. The side-effect contract moved into the substrate; its ledger is a journal; `Class` gained `Recovery`; `ExternalRefusal` gained `LeaveOfObservable` (2.38.0, adopter-surface X9)
 
 **The move.** `Reconciler`, `ExternalEffect`, `EffectClass`, `ProbeBudget`, `ExternalDestination`, `HttpDestination`,
 `CompensationPermit`, the refusal counters, and the vocabulary they rest on (`Effect`, `EffectRefusal`, `Composition`,
@@ -1931,7 +1931,7 @@ substrate); its `metrics` feature now forwards to the substrate's. **Migration:*
 user of `mycelium::effects` needs `gateway` + `tls` for `CompensationPermit` and `with_evidence`, as the companion
 always did.
 
-**The ledger.** The reconciler's ledger was a SQLite file (unreleased: X5 shipped after 2.37.0); it is the
+**The ledger.** The reconciler's ledger was a SQLite file (never released: it was on `main` only, between 2.37.0 and 2.38.0); it is the
 **node-local journal** now — append-only, fsynced, folded at open, one owner at a time. A ledger file from an
 unreleased X5 build is not read; there is no released format to migrate. **Behaviour change:** a second reconciler
 opened on a ledger another still owns is refused by name (`ExternalRefusal::Ledger("… is owned by another …")`) —
@@ -1958,7 +1958,7 @@ refused *already in flight* for ever, while a bare `apply` of the failed compens
 permit; and a **composed compensation is refused** (`compensate` takes no resource authority to check it against)
 rather than sent unchecked — stated as not built.
 
-## 61. A unit's `runtime` key is refused by readers before this release (unreleased, adopter-surface X8)
+## 61. A unit's `runtime` key is refused by readers before this release (2.38.0, adopter-surface X8)
 
 The unit file gained an optional `runtime` key (`python` · `typescript` · `strands` · `langgraph`), read by
 `wire-check` to say what that runtime carries ([the adapter contract](../reference/adapter-contract.md)) and
@@ -1969,7 +1969,7 @@ release: the gateway answers `400 invalid unit file`, the others refuse the dire
 it because the scaffold pins the release it came from. Nothing else changed shape; a unit without the key is read
 as before.
 
-## 60. `Execution` gained `Unresolved`; `RefusalSnapshot` gained `external`; `mycelium-effects` gained features `sim` and the `external` module (unreleased, adopter-surface X5)
+## 60. `Execution` gained `Unresolved`; `RefusalSnapshot` gained `external`; `mycelium-effects` gained features `sim` and the `external` module (2.38.0, adopter-surface X5)
 
 **What changed.** `mycelium::Execution` (`#[non_exhaustive]` since 2.11.0) gained `Unresolved` — an effect whose
 fate was asked for within its declared probe budget and not established: escalated. `mycelium_effects::RefusalSnapshot`
@@ -1987,7 +1987,7 @@ contract's refusals.
 **Migration.** Add the field, or build the snapshot from the counter. A consumer that summarises `Execution` treats
 `Unresolved` as it treats `Unknown`, with the record's `reason` naming the budget.
 
-## 59. `PolicyViolation::ApprovalTimedOut` was never produced; the grant mode's refusals are `GrantNotPresented` and `GrantRefused`; `MandateRefusal` is `#[non_exhaustive]` (unreleased, adopter-surface X3)
+## 59. `PolicyViolation::ApprovalTimedOut` was never produced; the grant mode's refusals are `GrantNotPresented` and `GrantRefused`; `MandateRefusal` is `#[non_exhaustive]` (2.38.0, adopter-surface X3)
 
 **What changed.** `AgentPolicy` gained `require_grant_for` and `grant_window`, and `AgentStateMachine` gained
 `transition_invoking(tool, arguments)`: a tool listed there is invoked only under a **grant** — a scoped mandate a
@@ -2010,7 +2010,7 @@ door the bypass matrix enumerated rather than needing the matrix re-run for a ne
 `#[non_exhaustive]`; the deprecated arm compiles with a warning). An exhaustive `match` on `MandateRefusal` outside
 this crate adds a `_` arm that fails closed. Nothing changes for an agent whose policy lists no grant-required tool.
 
-## 58. The causal fields: a malformed `_meta.correlation` or `_meta.parent` is refused at every door; a tool's `params` may carry `_meta` (unreleased, adopter-surface X4)
+## 58. The causal fields: a malformed `_meta.correlation` or `_meta.parent` is refused at every door; a tool's `params` may carry `_meta` (2.38.0, adopter-surface X4)
 
 **What changed.** Every door the AE preflight runs — `/mcp`, `/a2a`, the LLM doors, the federation call, the provider
 check — now reads two keys under the request's `params._meta`: `correlation` (one key segment, at most 128 bytes) and
