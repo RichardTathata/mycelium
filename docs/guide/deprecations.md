@@ -1865,59 +1865,110 @@ heartbeat tick, while a live member's entry holds a forged time, until its owner
 has no heartbeat" is reading a member whose heartbeat has not reached it; it clears when the heartbeat arrives or the
 entry ages past the bound.
 
-## 65. A `[[rule]]` gained `requires_grant`; a `[[rule]]` or `[[mandate]]` with an unknown key is refused; `Class` gained `Grant` (2.38.0, adopter-surface X3, fourth PR)
+## 57. `validate()` no longer creates the persistence base path (2.37.0, adopter-surface X1)
 
-The unit file's `[[rule]]` gained `requires_grant = true` — the rule applies only under a grant, `Rule::requiring_grant`'s
-shorthand (one of this and `requires_mandate`, never both: refused at load by every reader) — and `mycelium test --faults` gained the `grant` class, which
-drives the declaration's first such rule on its own fleet: default-deny, the declared issuer's grant, the restart over
-the WAL. **Two readers change behaviour.** A `[[rule]]` or a `[[mandate]]` carrying a key it does not have is now
-refused by name, as the unit file's sections already were (§49): a misspelt `requires_grant` or `requires_mandate`
-loaded, until this release, as a rule that required nothing and admitted without a word. **Migration:** a rule or a
-mandate with a stray key is refused by `wire-check`, `test`, the stem and `POST /gateway/units/declare` (`400 invalid
-unit file`) — fix the key. A reader older than this release drops `requires_grant` silently and reads the rule as
-plain, so declare it only once every reader of the directory runs this release; the scaffolds ship it because they
-pin the release they came from. The other section tables (`[[capability]]`, `[[group]]`, `[[lane]]`, `[hosts]`,
-`[[presence]]`, `[[serve]]`) still accept an unknown key silently — stated, not changed here. `Class::ALL` is seven
-long and an exhaustive `match` on `Class` needs a `Grant` arm. `wire-check` gained one warning, `unissuable grant`: a
-rule that requires a grant with no rule admitting anyone to `grant.issue` on its resource (`*` for the operation or
-the resource counts; a `@<node>` suffix on either side is not matched — the reading `test --faults grant` shares).
+**What changed.** `GossipConfig::validate()`'s early check of `persistence.base_path` used to probe by
+`create_dir_all`, so a validator wrote to disk: loading a configuration (`load_from_file`, the binary's `-c`) created
+the data directory before the node id was known. It now reads only — the nearest existing ancestor of `base_path` must
+be a writable directory, or a warning names the problem — and creates nothing. `start()` creates the node's own
+directory under it and refuses by name if it cannot (R7, 2.24.0), exactly as before.
 
-## 64. `AgentPolicy` gained `grant_arguments_class` and `grant_renderable_classes`; a streamed A2A task can report `input-required`; `GET /gateway/grants/stream` (2.38.0, adopter-surface X3, third PR)
+**Why.** `mycelium doctor` runs `validate()` and must touch no disk (`docs/features/doctor.md`); and a validator with a
+side effect is a validator that lies about what it checked.
 
-`AgentPolicy` gained two fields (an exhaustive struct literal breaks; `..Default::default()` is unaffected): the
-arguments' data class and the classes a grant request may render. **Behaviour change for a policy that sets a class:**
-arguments of a class not listed are withheld from the gossiped request record — shown as withheld with the class and
-the size — while the grant binds their digest; with no class set, nothing changes. A streamed A2A send
-(`tasks/sendSubscribe`, `message/stream`, `SendStreamingMessage`) whose serving node's agent is waiting for a grant now
-emits a status update `input-required` (A2A 1.0: `TASK_STATE_INPUT_REQUIRED`) with the request's id in the message,
-then `working` once it is answered — a client that treated every non-terminal status as `working` sees a new one.
-The streamed A2A dispatch's bound is 120 s now (it was 30 s; the unary path's, and the longest a task can wait
-for a grant through this door). New route `GET /gateway/grants/stream` under `grant:read`, with `grant_request`,
-`grant_answered` and `grant_expired` events; the SDKs gain `grants_stream` / `grantsStream`.
+**Migration.** An embedder that relied on `validate()` or `load_from_file` having created `persistence.base_path` —
+say, to write its own files beside the node's before `start()` — creates it itself, or writes after `start()`. A
+configuration that validated before validates now; the warning's wording changed from *is not writable* to the problem
+found (*no ancestor of the path exists*, *the nearest existing path is not a directory*, *the nearest existing
+directory is read-only*).
 
-## 63. A grant admits one call at each door; `MandateRefusal` gained `GrantUsed`; a grant is issued for a member's agent and revoked at its issuer; the authority's sweep judges a grant by its own standing (2.38.0, adopter-surface X3, second PR)
+## 58. The causal fields: a malformed `_meta.correlation` or `_meta.parent` is refused at every door; a tool's `params` may carry `_meta` (2.38.0, adopter-surface X4)
 
-**Behaviour changes.** Every enforcement point (`gateway`, `provider`) now admits a grant **once**: a second presentation
-of the same grant at the same door is denied `GrantUsed { door }` (`MandateRefusal`, `#[non_exhaustive]` — a `_` arm fails
-closed) and the marker `grant/{agent}/{request}/used/{door}` is written beside the request; before, the doors accepted one
-grant for identical calls until its window ended. A grant admitted at a door is spent there whether or not the work
-completes. `POST /gateway/grants/{agent}/{request}` issues for an agent on **any fleet member** whose identity key the
-gateway holds (it answered `409 not_this_node` for every other node); the agent's node decides whether that issuer may
-with `EntitlementTable::entitle_grants_from_fleet` — a node that entitles only itself (`entitle_grants`) refuses a grant
-from another node as *not established*, as before — and a principal no member's is `409 not_a_member`. New route:
-`POST /gateway/grants/{agent}/{request}/revoke` (`grant:issue`; the evaluator decides `grant.revoke`), answered `409
-not_the_issuer` anywhere but the issuing node; new counter `mycelium_grants_revoked_total`; new KV rows under the
-route-owned `grant/` (`…/used/{door}`, `…/revoked`). **Fixed:** the authority's sweep judged work running under a grant
-by the resource gate, whose scope rule a grant's own scope fails, so such work was cancelled at the first sweep tick
-whether or not the grant was revoked (unobserved while no granted handler outlived a tick); it is judged by the grant's
-window and its issuer's checkpoint now, and stops on revocation within the drain bound. **Also:** a grant's checkpoint is
-exempt from the revocation view's start rule (`IssuedBeforeStart` is a freshness rule, and a grant reads no freshness) —
-before this, every grant issued before a node's restart was refused after it; the agent's wait no longer refuses an
-*unknown* standing but waits for the issuer's checkpoint to the expiry (a revoked standing is final); the SDKs gain
-`grant_revoke` / `grantRevoke`. **Migration:** a client that re-presented one grant for a repeated call now asks for a
-grant per call; a fleet whose supervisor sits at another gateway than the agent calls `entitle_grants_from_fleet()` on
-the agent nodes' entitlement tables — **and accepts that every member's evaluator may then grant there**; a fleet that
-wants one issuing node keeps `entitle_grants(that node)`.
+**What changed.** Every door the AE preflight runs — `/mcp`, `/a2a`, the LLM doors, the federation call, the provider
+check — now reads two keys under the request's `params._meta`: `correlation` (one key segment, at most 128 bytes) and
+`parent` (a 64-character lowercase hex content hash), and refuses a request whose value is present and malformed:
+`PreflightRefusal::Malformed`, reason `request_malformed`, JSON-RPC `-32602`. `POST /gateway/kv` reads the same two
+keys at the body's top level and answers `400`. Before, any value under `_meta` other than `operation_id` and
+`mandate` was ignored — **with or without an evaluator attached**: the check runs before the evaluator question, so an
+inert gateway refuses the malformed request too, and records nothing of it. `/mcp` now forwards those two keys to the
+provider inside the `tools/call` request it sends (`params._meta`); only the provider's enforcement check reads them
+there — a tool handler, in-process or bridged, still receives its `arguments` and never sees `_meta`. A caller envelope
+carrying an unknown `correlation` or `parent` field is admitted as before and counted once per request, after its
+signature held (`GET /stats` `causal_fields_misplaced`, a map by door). `AeEvidence` also gained `node`, the enforcing
+node as it names itself, absent on older records. **The provider's
+`parent` is the gateway's decision** (the second PR): `/mcp` forwards the content hash of its own decision record as
+the `parent` of the `tools/call` it sends, whatever `parent` the caller gave — the caller's stays on the gateway's
+record — so a provider's record under enforcement cites the gateway's decision; a provider that reads `parent` as the
+caller's own value reads the gateway's instead. Where the gateway's journal established no record — an inert gateway,
+no journal attached, a lenient journal that lost it — the caller's parent is forwarded unchanged, so the provider's
+`parent` has two possible meanings and the gateway's record, where one exists, is what tells them apart. The SDKs' A2A `send`, prompt-skill `call`, federation `call` and `set` verbs gained `correlation`/`parent`
+options and `KvReceipt` two fields (`mycelium-py` 0.2.13, `mycelium-ts` 0.2.7); `mycelium-reason` 0.11.0 puts a
+traced run's `run_id` on the route's records as `correlation`. `PreflightRefusal` gained the variant (the enum is `#[non_exhaustive]`; a `_` arm must
+already fail closed); `ActionEnvelope`, `AeEvidence`, `DecisionRecord` and `WriteReceipt` gained two optional fields
+(all four are `#[non_exhaustive]`, built through their builders); the evidence record's serialised form is unchanged
+when neither is set.
+
+**Why.** A record that cites the record it depends on, by hash, is what lets a reader compute the closure of a
+decision across nodes without a coordinator; a field placed outside the signed payload could be re-pointed under a
+signature that still verifies (2.12.0's lesson), so it is refused by placement; and a malformed value corrected or
+dropped would leave a record that reads as a root.
+
+**Migration.** A caller that put other data under `_meta.correlation` or `_meta.parent` renames it. An evaluator
+matching `PreflightRefusal` by name adds the arm or keeps its `_`. A reader of `/stats` that took
+`causal_fields_misplaced` as a number (it was never released as one) reads the map. Nothing else changes for a caller
+that sends neither key.
+
+## 59. `PolicyViolation::ApprovalTimedOut` was never produced; the grant mode's refusals are `GrantNotPresented` and `GrantRefused`; `MandateRefusal` is `#[non_exhaustive]` (2.38.0, adopter-surface X3)
+
+**What changed.** `AgentPolicy` gained `require_grant_for` and `grant_window`, and `AgentStateMachine` gained
+`transition_invoking(tool, arguments)`: a tool listed there is invoked only under a **grant** — a scoped mandate a
+supervisor issues for one call through `POST /gateway/grants/{agent}/{request}` (`grant:issue`; `GET
+/gateway/grants/pending` under `grant:read`) — and silence refuses with `PolicyViolation::GrantNotPresented`, a
+supervisor's refusal with `GrantRefused`. A plain `transition` to `Invoking` on a grant-required tool is refused the
+same way. `PolicyViolation::ApprovalTimedOut` is `#[deprecated]`: `await_approval` has always returned `Ok` on
+silence, so the variant was never produced and read as if a timeout refused. `MandateRefusal` gained
+`BoundToOtherArguments` and `BoundToOtherPolicy` and is now `#[non_exhaustive]`; `MandateBinding` gained `digest` and
+`bound_policy_revision`; `AeEvidence` gained `mandate_digest`; `Rule::requiring_grant()` and a trailing `*` in
+`requiring_mandate` name a scope family. The KV namespace `grant/` is route-owned: the raw KV routes refuse it 403
+`protected_key`. New scopes `grant:read`, `grant:issue`. `mycelium-guardrails` 1.1.0: `Policy::require_grant_for`,
+and `require_approval_for`'s strength label now says *veto, not grant*.
+
+**Why.** The veto mode's silence-approves is the opposite of what an approval gate is taken to mean; an enum variant
+that reads as a timeout refusal and is never produced misleads a `match`. A grant that is a mandate inherits every
+door the bypass matrix enumerated rather than needing the matrix re-run for a new signal.
+
+**Migration.** A `match` on `PolicyViolation` adds arms for `GrantNotPresented` and `GrantRefused` (the enum is not
+`#[non_exhaustive]`; the deprecated arm compiles with a warning). An exhaustive `match` on `MandateRefusal` outside
+this crate adds a `_` arm that fails closed. Nothing changes for an agent whose policy lists no grant-required tool.
+
+## 60. `Execution` gained `Unresolved`; `RefusalSnapshot` gained `external`; `mycelium-effects` gained features `sim` and the `external` module (2.38.0, adopter-surface X5)
+
+**What changed.** `mycelium::Execution` (`#[non_exhaustive]` since 2.11.0) gained `Unresolved` — an effect whose
+fate was asked for within its declared probe budget and not established: escalated. `mycelium_effects::RefusalSnapshot`
+gained the field `external: ExternalRefusalSnapshot`, the side-effect contract's refusals by reason.
+`mycelium-effects` gained the module `external` (`Reconciler`, `ExternalEffect`, `EffectClass`, `ProbeBudget`,
+`ExternalDestination`, `ExternalRefusal`, `CompensationPermit`), the module `http` (`HttpDestination`), the
+re-export `EgressPolicy`, a `sha2` dependency and the Cargo feature `sim` (forwards `mycelium/sim`; off in every
+shipped build). `mycelium::sim_seam::input` is new in both builds.
+
+**Who is affected.** A `match` on `Execution` already needs a `_` arm (2.11.0's note), and that arm **must fail
+safe**: `Unresolved` is *we looked and could not tell*, never *nothing ran*. An exhaustive struct literal of
+`RefusalSnapshot` breaks; `RefusalSnapshot::default()` and `.snapshot()` are unaffected. `refusals()` now includes the
+contract's refusals.
+
+**Migration.** Add the field, or build the snapshot from the counter. A consumer that summarises `Execution` treats
+`Unresolved` as it treats `Unknown`, with the record's `reason` naming the budget.
+
+## 61. A unit's `runtime` key is refused by readers before this release (2.38.0, adopter-surface X8)
+
+The unit file gained an optional `runtime` key (`python` · `typescript` · `strands` · `langgraph`), read by
+`wire-check` to say what that runtime carries ([the adapter contract](../reference/adapter-contract.md)) and
+accepted, not read, by `POST /gateway/units/declare` and the stem. Every reader refuses an unknown key by name
+(§49, 2.35.0), so a unit carrying `runtime` is refused by a gateway, a stem or a `wire-check` older than this
+release: the gateway answers `400 invalid unit file`, the others refuse the directory. **Migration:** declare
+`runtime` only once every gateway and stem that reads the directory runs this release; the Python scaffold ships
+it because the scaffold pins the release it came from. Nothing else changed shape; a unit without the key is read
+as before.
 
 ## 62. The side-effect contract moved into the substrate; its ledger is a journal; `Class` gained `Recovery`; `ExternalRefusal` gained `LeaveOfObservable` (2.38.0, adopter-surface X9)
 
@@ -1958,107 +2009,56 @@ refused *already in flight* for ever, while a bare `apply` of the failed compens
 permit; and a **composed compensation is refused** (`compensate` takes no resource authority to check it against)
 rather than sent unchecked — stated as not built.
 
-## 61. A unit's `runtime` key is refused by readers before this release (2.38.0, adopter-surface X8)
+## 63. A grant admits one call at each door; `MandateRefusal` gained `GrantUsed`; a grant is issued for a member's agent and revoked at its issuer; the authority's sweep judges a grant by its own standing (2.38.0, adopter-surface X3, second PR)
 
-The unit file gained an optional `runtime` key (`python` · `typescript` · `strands` · `langgraph`), read by
-`wire-check` to say what that runtime carries ([the adapter contract](../reference/adapter-contract.md)) and
-accepted, not read, by `POST /gateway/units/declare` and the stem. Every reader refuses an unknown key by name
-(§49, 2.35.0), so a unit carrying `runtime` is refused by a gateway, a stem or a `wire-check` older than this
-release: the gateway answers `400 invalid unit file`, the others refuse the directory. **Migration:** declare
-`runtime` only once every gateway and stem that reads the directory runs this release; the Python scaffold ships
-it because the scaffold pins the release it came from. Nothing else changed shape; a unit without the key is read
-as before.
+**Behaviour changes.** Every enforcement point (`gateway`, `provider`) now admits a grant **once**: a second presentation
+of the same grant at the same door is denied `GrantUsed { door }` (`MandateRefusal`, `#[non_exhaustive]` — a `_` arm fails
+closed) and the marker `grant/{agent}/{request}/used/{door}` is written beside the request; before, the doors accepted one
+grant for identical calls until its window ended. A grant admitted at a door is spent there whether or not the work
+completes. `POST /gateway/grants/{agent}/{request}` issues for an agent on **any fleet member** whose identity key the
+gateway holds (it answered `409 not_this_node` for every other node); the agent's node decides whether that issuer may
+with `EntitlementTable::entitle_grants_from_fleet` — a node that entitles only itself (`entitle_grants`) refuses a grant
+from another node as *not established*, as before — and a principal no member's is `409 not_a_member`. New route:
+`POST /gateway/grants/{agent}/{request}/revoke` (`grant:issue`; the evaluator decides `grant.revoke`), answered `409
+not_the_issuer` anywhere but the issuing node; new counter `mycelium_grants_revoked_total`; new KV rows under the
+route-owned `grant/` (`…/used/{door}`, `…/revoked`). **Fixed:** the authority's sweep judged work running under a grant
+by the resource gate, whose scope rule a grant's own scope fails, so such work was cancelled at the first sweep tick
+whether or not the grant was revoked (unobserved while no granted handler outlived a tick); it is judged by the grant's
+window and its issuer's checkpoint now, and stops on revocation within the drain bound. **Also:** a grant's checkpoint is
+exempt from the revocation view's start rule (`IssuedBeforeStart` is a freshness rule, and a grant reads no freshness) —
+before this, every grant issued before a node's restart was refused after it; the agent's wait no longer refuses an
+*unknown* standing but waits for the issuer's checkpoint to the expiry (a revoked standing is final); the SDKs gain
+`grant_revoke` / `grantRevoke`. **Migration:** a client that re-presented one grant for a repeated call now asks for a
+grant per call; a fleet whose supervisor sits at another gateway than the agent calls `entitle_grants_from_fleet()` on
+the agent nodes' entitlement tables — **and accepts that every member's evaluator may then grant there**; a fleet that
+wants one issuing node keeps `entitle_grants(that node)`.
 
-## 60. `Execution` gained `Unresolved`; `RefusalSnapshot` gained `external`; `mycelium-effects` gained features `sim` and the `external` module (2.38.0, adopter-surface X5)
+## 64. `AgentPolicy` gained `grant_arguments_class` and `grant_renderable_classes`; a streamed A2A task can report `input-required`; `GET /gateway/grants/stream` (2.38.0, adopter-surface X3, third PR)
 
-**What changed.** `mycelium::Execution` (`#[non_exhaustive]` since 2.11.0) gained `Unresolved` — an effect whose
-fate was asked for within its declared probe budget and not established: escalated. `mycelium_effects::RefusalSnapshot`
-gained the field `external: ExternalRefusalSnapshot`, the side-effect contract's refusals by reason.
-`mycelium-effects` gained the module `external` (`Reconciler`, `ExternalEffect`, `EffectClass`, `ProbeBudget`,
-`ExternalDestination`, `ExternalRefusal`, `CompensationPermit`), the module `http` (`HttpDestination`), the
-re-export `EgressPolicy`, a `sha2` dependency and the Cargo feature `sim` (forwards `mycelium/sim`; off in every
-shipped build). `mycelium::sim_seam::input` is new in both builds.
+`AgentPolicy` gained two fields (an exhaustive struct literal breaks; `..Default::default()` is unaffected): the
+arguments' data class and the classes a grant request may render. **Behaviour change for a policy that sets a class:**
+arguments of a class not listed are withheld from the gossiped request record — shown as withheld with the class and
+the size — while the grant binds their digest; with no class set, nothing changes. A streamed A2A send
+(`tasks/sendSubscribe`, `message/stream`, `SendStreamingMessage`) whose serving node's agent is waiting for a grant now
+emits a status update `input-required` (A2A 1.0: `TASK_STATE_INPUT_REQUIRED`) with the request's id in the message,
+then `working` once it is answered — a client that treated every non-terminal status as `working` sees a new one.
+The streamed A2A dispatch's bound is 120 s now (it was 30 s; the unary path's, and the longest a task can wait
+for a grant through this door). New route `GET /gateway/grants/stream` under `grant:read`, with `grant_request`,
+`grant_answered` and `grant_expired` events; the SDKs gain `grants_stream` / `grantsStream`.
 
-**Who is affected.** A `match` on `Execution` already needs a `_` arm (2.11.0's note), and that arm **must fail
-safe**: `Unresolved` is *we looked and could not tell*, never *nothing ran*. An exhaustive struct literal of
-`RefusalSnapshot` breaks; `RefusalSnapshot::default()` and `.snapshot()` are unaffected. `refusals()` now includes the
-contract's refusals.
+## 65. A `[[rule]]` gained `requires_grant`; a `[[rule]]` or `[[mandate]]` with an unknown key is refused; `Class` gained `Grant` (2.38.0, adopter-surface X3, fourth PR)
 
-**Migration.** Add the field, or build the snapshot from the counter. A consumer that summarises `Execution` treats
-`Unresolved` as it treats `Unknown`, with the record's `reason` naming the budget.
-
-## 59. `PolicyViolation::ApprovalTimedOut` was never produced; the grant mode's refusals are `GrantNotPresented` and `GrantRefused`; `MandateRefusal` is `#[non_exhaustive]` (2.38.0, adopter-surface X3)
-
-**What changed.** `AgentPolicy` gained `require_grant_for` and `grant_window`, and `AgentStateMachine` gained
-`transition_invoking(tool, arguments)`: a tool listed there is invoked only under a **grant** — a scoped mandate a
-supervisor issues for one call through `POST /gateway/grants/{agent}/{request}` (`grant:issue`; `GET
-/gateway/grants/pending` under `grant:read`) — and silence refuses with `PolicyViolation::GrantNotPresented`, a
-supervisor's refusal with `GrantRefused`. A plain `transition` to `Invoking` on a grant-required tool is refused the
-same way. `PolicyViolation::ApprovalTimedOut` is `#[deprecated]`: `await_approval` has always returned `Ok` on
-silence, so the variant was never produced and read as if a timeout refused. `MandateRefusal` gained
-`BoundToOtherArguments` and `BoundToOtherPolicy` and is now `#[non_exhaustive]`; `MandateBinding` gained `digest` and
-`bound_policy_revision`; `AeEvidence` gained `mandate_digest`; `Rule::requiring_grant()` and a trailing `*` in
-`requiring_mandate` name a scope family. The KV namespace `grant/` is route-owned: the raw KV routes refuse it 403
-`protected_key`. New scopes `grant:read`, `grant:issue`. `mycelium-guardrails` 1.1.0: `Policy::require_grant_for`,
-and `require_approval_for`'s strength label now says *veto, not grant*.
-
-**Why.** The veto mode's silence-approves is the opposite of what an approval gate is taken to mean; an enum variant
-that reads as a timeout refusal and is never produced misleads a `match`. A grant that is a mandate inherits every
-door the bypass matrix enumerated rather than needing the matrix re-run for a new signal.
-
-**Migration.** A `match` on `PolicyViolation` adds arms for `GrantNotPresented` and `GrantRefused` (the enum is not
-`#[non_exhaustive]`; the deprecated arm compiles with a warning). An exhaustive `match` on `MandateRefusal` outside
-this crate adds a `_` arm that fails closed. Nothing changes for an agent whose policy lists no grant-required tool.
-
-## 58. The causal fields: a malformed `_meta.correlation` or `_meta.parent` is refused at every door; a tool's `params` may carry `_meta` (2.38.0, adopter-surface X4)
-
-**What changed.** Every door the AE preflight runs — `/mcp`, `/a2a`, the LLM doors, the federation call, the provider
-check — now reads two keys under the request's `params._meta`: `correlation` (one key segment, at most 128 bytes) and
-`parent` (a 64-character lowercase hex content hash), and refuses a request whose value is present and malformed:
-`PreflightRefusal::Malformed`, reason `request_malformed`, JSON-RPC `-32602`. `POST /gateway/kv` reads the same two
-keys at the body's top level and answers `400`. Before, any value under `_meta` other than `operation_id` and
-`mandate` was ignored — **with or without an evaluator attached**: the check runs before the evaluator question, so an
-inert gateway refuses the malformed request too, and records nothing of it. `/mcp` now forwards those two keys to the
-provider inside the `tools/call` request it sends (`params._meta`); only the provider's enforcement check reads them
-there — a tool handler, in-process or bridged, still receives its `arguments` and never sees `_meta`. A caller envelope
-carrying an unknown `correlation` or `parent` field is admitted as before and counted once per request, after its
-signature held (`GET /stats` `causal_fields_misplaced`, a map by door). `AeEvidence` also gained `node`, the enforcing
-node as it names itself, absent on older records. **The provider's
-`parent` is the gateway's decision** (the second PR): `/mcp` forwards the content hash of its own decision record as
-the `parent` of the `tools/call` it sends, whatever `parent` the caller gave — the caller's stays on the gateway's
-record — so a provider's record under enforcement cites the gateway's decision; a provider that reads `parent` as the
-caller's own value reads the gateway's instead. Where the gateway's journal established no record — an inert gateway,
-no journal attached, a lenient journal that lost it — the caller's parent is forwarded unchanged, so the provider's
-`parent` has two possible meanings and the gateway's record, where one exists, is what tells them apart. The SDKs' A2A `send`, prompt-skill `call`, federation `call` and `set` verbs gained `correlation`/`parent`
-options and `KvReceipt` two fields (`mycelium-py` 0.2.13, `mycelium-ts` 0.2.7); `mycelium-reason` 0.11.0 puts a
-traced run's `run_id` on the route's records as `correlation`. `PreflightRefusal` gained the variant (the enum is `#[non_exhaustive]`; a `_` arm must
-already fail closed); `ActionEnvelope`, `AeEvidence`, `DecisionRecord` and `WriteReceipt` gained two optional fields
-(all four are `#[non_exhaustive]`, built through their builders); the evidence record's serialised form is unchanged
-when neither is set.
-
-**Why.** A record that cites the record it depends on, by hash, is what lets a reader compute the closure of a
-decision across nodes without a coordinator; a field placed outside the signed payload could be re-pointed under a
-signature that still verifies (2.12.0's lesson), so it is refused by placement; and a malformed value corrected or
-dropped would leave a record that reads as a root.
-
-**Migration.** A caller that put other data under `_meta.correlation` or `_meta.parent` renames it. An evaluator
-matching `PreflightRefusal` by name adds the arm or keeps its `_`. A reader of `/stats` that took
-`causal_fields_misplaced` as a number (it was never released as one) reads the map. Nothing else changes for a caller
-that sends neither key.
-
-## 57. `validate()` no longer creates the persistence base path (2.37.0, adopter-surface X1)
-
-**What changed.** `GossipConfig::validate()`'s early check of `persistence.base_path` used to probe by
-`create_dir_all`, so a validator wrote to disk: loading a configuration (`load_from_file`, the binary's `-c`) created
-the data directory before the node id was known. It now reads only — the nearest existing ancestor of `base_path` must
-be a writable directory, or a warning names the problem — and creates nothing. `start()` creates the node's own
-directory under it and refuses by name if it cannot (R7, 2.24.0), exactly as before.
-
-**Why.** `mycelium doctor` runs `validate()` and must touch no disk (`docs/features/doctor.md`); and a validator with a
-side effect is a validator that lies about what it checked.
-
-**Migration.** An embedder that relied on `validate()` or `load_from_file` having created `persistence.base_path` —
-say, to write its own files beside the node's before `start()` — creates it itself, or writes after `start()`. A
-configuration that validated before validates now; the warning's wording changed from *is not writable* to the problem
-found (*no ancestor of the path exists*, *the nearest existing path is not a directory*, *the nearest existing
-directory is read-only*).
+The unit file's `[[rule]]` gained `requires_grant = true` — the rule applies only under a grant, `Rule::requiring_grant`'s
+shorthand (one of this and `requires_mandate`, never both: refused at load by every reader) — and `mycelium test --faults` gained the `grant` class, which
+drives the declaration's first such rule on its own fleet: default-deny, the declared issuer's grant, the restart over
+the WAL. **Two readers change behaviour.** A `[[rule]]` or a `[[mandate]]` carrying a key it does not have is now
+refused by name, as the unit file's sections already were (§49): a misspelt `requires_grant` or `requires_mandate`
+loaded, until this release, as a rule that required nothing and admitted without a word. **Migration:** a rule or a
+mandate with a stray key is refused by `wire-check`, `test`, the stem and `POST /gateway/units/declare` (`400 invalid
+unit file`) — fix the key. A reader older than this release drops `requires_grant` silently and reads the rule as
+plain, so declare it only once every reader of the directory runs this release; the scaffolds ship it because they
+pin the release they came from. The other section tables (`[[capability]]`, `[[group]]`, `[[lane]]`, `[hosts]`,
+`[[presence]]`, `[[serve]]`) still accept an unknown key silently — stated, not changed here. `Class::ALL` is seven
+long and an exhaustive `match` on `Class` needs a `Grant` arm. `wire-check` gained one warning, `unissuable grant`: a
+rule that requires a grant with no rule admitting anyone to `grant.issue` on its resource (`*` for the operation or
+the resource counts; a `@<node>` suffix on either side is not matched — the reading `test --faults grant` shares).

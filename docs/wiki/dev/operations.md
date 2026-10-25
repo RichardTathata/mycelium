@@ -330,7 +330,7 @@ restarted over its WAL (ledger and journal re-opened from disk), node 2 dark; th
 - Corpus: `tests/replay-corpus/x9-selective-recovery/` (`MYCELIUM_RECORD_CORPUS=1 cargo test --features
   sim,test-util,tls --test faults_recovery_replay record_the_recovery_into_the_corpus` re-records).
 - Pages: `docs/features/selective-recovery.md`, `what-is-proven.md`'s line, `deprecations.md` §62; the one-hour
-  job's step 5 runs the class on the published binary from the first release carrying it.
+  job's step 5 runs the class on the published binary from v2.38.0, the first release carrying it.
 
 ## Framing discipline
 

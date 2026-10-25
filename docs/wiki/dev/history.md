@@ -35,7 +35,7 @@ from 2.33.x, not 2.32. Record: [`.log/2026-10-13-f2-refusal-unconditional.md`](.
 
 A **MINOR** cut on `release/v2.38.0`, tagged on the maintainer's word ("close first wave"). It carries the section
 below — X3, X4, X5, X6, X7, X8, X9 and X11, so with v2.37.0's X0, X1, X2 and X10 the plan's first wave is released
-whole. The companions move on their own tags: `mycelium-py` 0.2.13 and `mycelium-ts` 0.2.7 (the grant and A2A task
+whole. Also in the release: #669 (the Release workflow) and #670 (the `one-hour` job). The companions move on their own tags: `mycelium-py` 0.2.13 and `mycelium-ts` 0.2.7 (the grant and A2A task
 verbs, the grants stream), `mycelium-reason` 0.11.0, `mycelium-guardrails` 1.1.0, `langgraph-checkpoint-mycelium`
 0.3.4 (receipts); `strands-session-mycelium` stays 0.1.0 (a README section and a bearer test only). The `one-hour`
 job runs on this Release with all six steps in it. Wire **v12** unchanged; upgrade notes `deprecations.md` §58–§65.
@@ -54,7 +54,7 @@ under the data-class policy; the `grant` fault class and the one-hour job's step
 side-effect contract; **#675 X6** `mycelium test --faults` (found and fixed: a dark governed member held the floor —
 `membership.governed` rev 2); **#676 X7+X8** the adapter contract and a unit's `runtime`; **#677 X9** selective
 recovery as the `recovery` class, the contract moved into `mycelium::effects` with its ledger on the node-local
-journal; and **X11**, the documentation pass (tutorial 7, the first hour, diffed against the job by
+journal; and **#681 X11**, the documentation pass (tutorial 7, the first hour, diffed against the job by
 `tests/first_hour_tutorial.rs`). Wire **v12** unchanged. Records: the `.log/2026-10-2[3-5]-*.md` entries.
 
 ## v2.37.0 release — 2026-10-23 (tag `v2.37.0`) — the adopter surface's first track
