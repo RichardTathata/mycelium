@@ -57,8 +57,8 @@ holds every companion README to its limits section.
   and a planted cell naming a test that did not run fails CI's `test-coverage` job.
 - A *not carried* cell is a limit of today's code, stated in the adapter's *What this does not establish* section
   — one section under one name in every companion README (`check-materials.py`). The ones the plan's rows own:
-  the SDKs' grant verbs and pending-grants stream, the A2A `input-required` state (X3's second PR); the
-  checkpointer's and the Strands store's tracing fields; cancellation that reaches the node from an SDK.
+  the checkpointer's and the Strands store's tracing fields; cancellation that reaches the node from an SDK (the SDKs'
+  grant verbs, the pending-grants stream and the A2A `input-required` state are carried since X3's second and third PRs).
 - **What the doors do not establish** (the limits section the door rows cite): a task accepted at `/a2a` lives in
   that node and is lost with it, **by design** — the work it tracks is not durable either, and durable work is the
   tuple space's and the commitment net's; `tasks/cancel` ends a task's record and stops no work, and `tools/call`

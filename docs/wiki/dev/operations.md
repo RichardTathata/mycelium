@@ -242,7 +242,12 @@ reporting `pending()` records not yet reported and answers (`…/issued|refused|
 two sets per connection. A2A: `Step::InputRequired(&str)` in `src/agent/a2a.rs`, emitted by a watcher task spawned beside
 `working` on `grant/{serving node}/` — new open request → `input-required` with the id; answered → `working`; aborted
 with `working` before every terminal event. The watcher reads the serving node's prefix, not the task's: a request the
-node's agent writes for another reason is reported too (stated). Rendering: `render_arguments_under` in
+node's agent writes for another reason is reported too (stated); each new unexpired request is reported once, `working`
+when none this task reported still stands. The streamed dispatch's bound is the unary path's 120 s — the longest wait
+through this door, stated. The stream emits `grant_expired` on a timer (the soonest reported expiry) and selects on
+`tx.closed()`, so a gone client ends its task at once — `gw_overlay_log_subscribe` has the older shape (parked until
+the next write), not this PR's. The 1.0 state name replaces the hyphen (`TASK_STATE_INPUT_REQUIRED`), with a unit test.
+Rendering: `render_arguments_under` in
 `state_machine.rs`; `AgentPolicy` derives `Default`, so `grant_renderable_classes` defaults to empty — a classified
 argument set is withheld unless listed, unclassified ones render. `SendRequest` is `Clone` now (the watcher holds one).
 

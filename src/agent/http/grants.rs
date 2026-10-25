@@ -201,29 +201,55 @@ pub(super) async fn gw_grant_decide(
 
 /// `GET /gateway/grants/stream` (`grant:read`) — the open requests as they come (adopter-surface X3, third PR). On
 /// connect, every request standing now, one `grant_request` event each (a supervisor connecting late sees the
-/// backlog); then each new request as its record lands, and a `grant_answered` event when a request this stream
-/// reported is issued, refused or revoked — by anyone, at any node, since the records gossip. Woken by writes under
-/// `grant/` only; a request already reported is reported once. The stream ends when the client goes.
+/// backlog); then each new request as its record lands; a `grant_answered` event for each answer to a request this
+/// stream reported — issued, refused, revoked, by anyone at any node, since the records gossip; an issue followed by
+/// a revocation is two — and a `grant_expired` event once for one that lapses unanswered. Woken by writes under
+/// `grant/` and by the soonest reported expiry; a request already reported is reported once. The stream's task ends
+/// when the client goes.
 pub(super) async fn gw_grants_stream(State(ctx): State<Arc<HttpCtx>>) -> axum::response::Response {
     use std::collections::HashSet;
     let tc = Arc::clone(&ctx.agent_ctx);
     let mut rx = mycelium_core::kv_handle::KvHandle::from_core(Arc::clone(&tc.core)).subscribe_prefix("grant/");
     let (tx, out) = tokio::sync::mpsc::channel::<Event>(256);
     tokio::spawn(async move {
-        let (mut reported, mut answered): (HashSet<String>, HashSet<String>) = (HashSet::new(), HashSet::new());
+        // The requests this stream reported and not yet seen answered or expired, by key, with their expiry; the
+        // answers already sent.
+        let (mut reported, mut answered): (std::collections::HashMap<String, u64>, HashSet<String>) = (Default::default(), HashSet::new());
         loop {
             let now_ms = tc.hlc.decision_now_ms();
             for rec in pending(&tc, now_ms) {
                 let key = rec["key"].as_str().unwrap_or_default().to_string();
-                if reported.insert(key) && tx.send(Event::default().event("grant_request").data(rec.to_string())).await.is_err() {
-                    return;
+                let expires = rec["expires_at_ms"].as_u64().unwrap_or(u64::MAX);
+                if !reported.contains_key(&key) && !answered.iter().any(|a| a.starts_with(&format!("{key}/"))) {
+                    reported.insert(key, expires);
+                    if tx.send(Event::default().event("grant_request").data(rec.to_string())).await.is_err() {
+                        return;
+                    }
+                }
+            }
+            // A request this stream reported that expired unanswered: said once (#679's review, finding 6).
+            let expired: Vec<String> = reported.iter().filter(|(_, e)| **e <= now_ms).map(|(k, _)| k.clone()).collect();
+            for key in expired {
+                let answered_already = answered.iter().any(|a| a.starts_with(&format!("{key}/")));
+                reported.remove(&key);
+                if !answered_already {
+                    let data = json!({ "key": key, "request": key.rsplit('/').next().unwrap_or_default(), "outcome": "expired", "at_ms": now_ms });
+                    if tx.send(Event::default().event("grant_expired").data(data.to_string())).await.is_err() {
+                        return;
+                    }
                 }
             }
             // An answer to a request this stream reported: the record names the outcome and who answered.
             for (k, v) in crate::store::scan_kv_prefix(&tc.kv_state, "grant/") {
                 let Some((base, outcome)) = k.rsplit_once('/').filter(|(_, o)| matches!(*o, "issued" | "refused" | "revoked")) else { continue };
-                if !reported.contains(base) || !answered.insert(k.to_string()) {
+                // An answer of a request this stream reported — or one it reported and has since seen answered (an
+                // issue followed by a revocation is two answers, each once).
+                let known = reported.contains_key(base) || answered.iter().any(|a| a.starts_with(&format!("{base}/")));
+                if !known || !answered.insert(k.to_string()) {
                     continue;
+                }
+                if outcome != "revoked" {
+                    reported.remove(base);
                 }
                 let detail: serde_json::Value = serde_json::from_slice(&v).unwrap_or_default();
                 // An issued record is the signed grant, whose `purpose` names the issuer; a refusal or revocation names
@@ -236,8 +262,14 @@ pub(super) async fn gw_grants_stream(State(ctx): State<Arc<HttpCtx>>) -> axum::r
                     return;
                 }
             }
-            if rx.changed().await.is_err() {
-                return;
+            // A write under `grant/` wakes the scan; the client going ends the task at once, not at the next write
+            // (#679's review, finding 7); the expiry of a reported request is checked on a timer, since nothing writes
+            // when a request merely lapses.
+            let soonest = reported.values().copied().min().map(|e| e.saturating_sub(now_ms).max(50)).unwrap_or(60_000);
+            tokio::select! {
+                changed = rx.changed() => { if changed.is_err() { return; } }
+                _ = tx.closed() => return,
+                _ = mycelium_core::sim_seam::sleep_ms("grants/stream-expiry", soonest) => {}
             }
         }
     });

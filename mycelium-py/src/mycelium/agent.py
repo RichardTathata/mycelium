@@ -669,8 +669,9 @@ class MyceliumAgent:
         iterator of events. Each is a dict with ``event`` — ``"grant_request"`` (a request record: ``request``,
         ``agent``, ``tool``, ``arguments`` or its withheld rendering, ``arguments_digest``, ``expires_at_ms``, ``key``)
         or ``"grant_answered"`` (``request``, ``outcome`` ``issued`` · ``refused`` · ``revoked``, ``issuer``,
-        ``reason``) — and the record's fields. On connect the requests standing now come first; then each new one
-        as it lands; a request is reported once. Break the loop to stop.
+        ``reason``; an issue then a revocation is two) or ``"grant_expired"`` (a reported request that lapsed
+        unanswered) — and the record's fields. On connect the requests standing now come first; then each new one as
+        it lands; a request is reported once. Break the loop to stop.
         """
         import json as _json
         url = f"{self._base_url}/gateway/grants/stream"

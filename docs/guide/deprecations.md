@@ -1874,7 +1874,9 @@ the size — while the grant binds their digest; with no class set, nothing chan
 (`tasks/sendSubscribe`, `message/stream`, `SendStreamingMessage`) whose serving node's agent is waiting for a grant now
 emits a status update `input-required` (A2A 1.0: `TASK_STATE_INPUT_REQUIRED`) with the request's id in the message,
 then `working` once it is answered — a client that treated every non-terminal status as `working` sees a new one.
-New route `GET /gateway/grants/stream` under `grant:read`; the SDKs gain `grants_stream` / `grantsStream`.
+The streamed A2A dispatch's bound is 120 s now (it was 30 s; the unary path's, and the longest a task can wait
+for a grant through this door). New route `GET /gateway/grants/stream` under `grant:read`, with `grant_request`,
+`grant_answered` and `grant_expired` events; the SDKs gain `grants_stream` / `grantsStream`.
 
 ## 63. A grant admits one call at each door; `MandateRefusal` gained `GrantUsed`; a grant is issued for a member's agent and revoked at its issuer; the authority's sweep judges a grant by its own standing (unreleased, adopter-surface X3, second PR)
 

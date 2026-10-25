@@ -163,7 +163,8 @@ const PROTOCOL_VERSIONS: [&str; 2] = ["1.0", "0.3"];
 fn state_name(state: &str, generation: Generation) -> String {
     match generation {
         Generation::Legacy | Generation::V03 => state.to_string(),
-        Generation::V10 => format!("TASK_STATE_{}", state.to_ascii_uppercase()),
+        // `input-required` is `TASK_STATE_INPUT_REQUIRED` in 1.0: the hyphen becomes an underscore (#679's review).
+        Generation::V10 => format!("TASK_STATE_{}", state.to_ascii_uppercase().replace('-', "_")),
     }
 }
 
@@ -1150,28 +1151,34 @@ pub(crate) async fn tasks_send_subscribe(
             let prefix = format!("grant/{}/", gateway_caller::node_principal(&target));
             tokio::spawn(async move {
                 let mut rx = mycelium_core::kv_handle::KvHandle::from_core(Arc::clone(&tc.core)).subscribe_prefix(prefix.clone());
+                // The requests standing on the serving node: unanswered, unconsumed and unexpired — the same reading
+                // as the supervisor's list. The record carries no task id, so this is the node's open requests, not
+                // this task's: stated on the feature page (#679's review, finding 4).
                 let open = |tc: &TaskCtx| -> std::collections::BTreeSet<String> {
+                    let now_ms = tc.hlc.decision_now_ms();
                     let entries = crate::store::scan_kv_prefix(&tc.kv_state, &prefix);
                     let answered: std::collections::HashSet<String> = entries.iter().filter_map(|(k, _)| k.strip_suffix("/issued").or_else(|| k.strip_suffix("/refused")).or_else(|| k.strip_suffix("/consumed")).map(str::to_string)).collect();
-                    entries.iter().filter(|(k, _)| k.matches('/').count() == 2 && !answered.contains(k.as_ref())).filter_map(|(k, _)| k.rsplit('/').next().map(str::to_string)).collect()
+                    entries.iter()
+                        .filter(|(k, v)| k.matches('/').count() == 2 && !answered.contains(k.as_ref())
+                            && serde_json::from_slice::<Value>(v).ok().and_then(|r| r["expires_at_ms"].as_u64()).is_some_and(|e| e > now_ms))
+                        .filter_map(|(k, _)| k.rsplit('/').next().map(str::to_string))
+                        .collect()
                 };
                 let before = open(&tc);
-                let mut reported: Option<String> = None;
+                // Every new request is reported once; `working` returns when none this task reported still stands.
+                let mut reported: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+                let mut waiting = false;
                 loop {
                     if rx.changed().await.is_err() { return; }
                     let now = open(&tc);
-                    match &reported {
-                        None => {
-                            if let Some(r) = now.difference(&before).next() {
-                                for e in stream_events(&id3, &req3, Step::InputRequired(r)) { let _ = tx3.send(Ok(e)).await; }
-                                reported = Some(r.clone());
-                            }
-                        }
-                        Some(r) if !now.contains(r) => {
-                            for e in stream_events(&id3, &req3, Step::Working) { let _ = tx3.send(Ok(e)).await; }
-                            reported = None;
-                        }
-                        Some(_) => {}
+                    for r in now.difference(&before).filter(|r| !reported.contains(*r)).cloned().collect::<Vec<_>>() {
+                        for e in stream_events(&id3, &req3, Step::InputRequired(&r)) { let _ = tx3.send(Ok(e)).await; }
+                        reported.insert(r);
+                        waiting = true;
+                    }
+                    if waiting && reported.iter().all(|r| !now.contains(r)) {
+                        for e in stream_events(&id3, &req3, Step::Working) { let _ = tx3.send(Ok(e)).await; }
+                        waiting = false;
                     }
                 }
             })
@@ -1199,7 +1206,11 @@ pub(crate) async fn tasks_send_subscribe(
             return;
         }
 
-        let timeout = Duration::from_secs(30);
+        // The unary path's bound (its comment says why 30 s was too short for a multi-step skill); a streamed task
+        // whose agent is waiting for a grant needs it too — a supervisor who answers after the dispatch times out
+        // answers a task already reported failed (#679's review, finding 3). Stated on the feature page: the grant
+        // window an A2A task can wait is bounded by this, not by `grant_window`.
+        let timeout = Duration::from_secs(120);
         // Closure plan C2: the presented mandate travels to the provider, which verifies it itself.
         let mandate = gateway_caller::presented_mandate(&req.meta);
         let resource_claim = format!("skill:{skill_id}@{target}");
@@ -1380,6 +1391,16 @@ pub(crate) fn a2a_router_full(
 
 #[cfg(test)]
 mod tests {
+    /// The 1.0 state names: an uppercased hyphen is not an enum value an `a2a-sdk` client accepts (#679's review,
+    /// finding 1; seen failing first as `TASK_STATE_INPUT-REQUIRED`).
+    #[test]
+    fn a_hyphenated_state_is_an_underscored_1_0_name() {
+        assert_eq!(super::state_name("input-required", super::Generation::V10), "TASK_STATE_INPUT_REQUIRED");
+        assert_eq!(super::state_name("working", super::Generation::V10), "TASK_STATE_WORKING");
+        assert_eq!(super::state_name("input-required", super::Generation::V03), "input-required");
+        assert_eq!(super::state_name("input-required", super::Generation::Legacy), "input-required");
+    }
+
     use super::*;
     use crate::{GossipAgent, GossipConfig, NodeId};
 

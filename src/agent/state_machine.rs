@@ -130,10 +130,13 @@ pub struct AgentPolicy {
     /// Adopter-surface X3 (third PR): the data class of the arguments a grant request renders for a human — the
     /// class's name in the operator's vocabulary (`public`, `confidential`, …), as row R's `DataClass` names it.
     /// `None` is unclassified.
+    #[serde(default)]
     pub grant_arguments_class: Option<String>,
     /// The classes whose arguments **may be rendered** into the gossiped request record. Arguments of a class not
     /// listed are withheld — the record says so and carries the class and the size — while the grant still binds
-    /// their digest. Unclassified arguments are rendered. Default: `public` and `internal`.
+    /// their digest. Unclassified arguments are rendered. **Default: empty**, so a classified argument set is
+    /// withheld unless its class is listed here.
+    #[serde(default)]
     pub grant_renderable_classes: Vec<String>,
 
     /// Tools that require a **grant** before `Invoking` is committed (adopter-surface X3) — approval that is
@@ -512,8 +515,8 @@ impl AgentStateMachine {
         // taking the grant-required path, so the plain transition's refusal is bypassed here deliberately.
         self.commit_invoking_granted(tool).await?;
         // One grant, one commit at this agent: the request is marked consumed, so the same tool and arguments ask
-        // again rather than re-reading this grant (#673's review, finding 3). At the doors a grant is not yet
-        // single-use — stated on the feature page.
+        // again rather than re-reading this grant (#673's review, finding 3). At the doors a grant is single-use
+        // too, claimed by each door's preflight (the second PR).
         self.consume_grant(&request);
         Ok(Some(presented))
     }
@@ -848,8 +851,8 @@ pub(crate) fn pending_grants(ctx: &TaskCtx, now_ms: u64) -> usize {
 
 #[cfg(all(feature = "gateway", feature = "tls"))]
 /// A human reads arguments, not a digest: the request record carries the arguments as JSON when they fit the cap,
-/// else a summary naming the size (the digest is beside it either way). Bounded well under the KV write cap.
-/// Not yet applied: the data-class policy that would withhold a classified rendering (stated in the plan row).
+/// else a summary naming the size (the digest is beside it either way). Bounded well under the KV write cap. The
+/// data-class policy is applied by [`render_arguments_under`], which calls this for a class it renders.
 pub(crate) fn render_arguments(arguments: &serde_json::Value) -> serde_json::Value {
     const CAP: usize = 16 * 1024;
     let text = arguments.to_string();

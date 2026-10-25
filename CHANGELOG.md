@@ -18,9 +18,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   nothing else, then `working` once it is answered — the row's design question, decided. The request's arguments are
   rendered **under the data-class policy**: `AgentPolicy::grant_arguments_class` names their class (row R's
   `DataClass`), `grant_renderable_classes` the classes a request may render, and a class not listed is withheld — the
-  record says so, with the class and the size — while the grant binds the digest (`deprecations.md` §64). **Still not
-  built:** the one-hour job's step 4 on the published binary (a `grant` fault class, the fourth PR), retention of
-  `grant/` records, a per-issuer entitlement.
+  record says so, with the class and the size — while the grant binds the digest (`deprecations.md` §64). From the
+  PR's review: the 1.0 state name is `TASK_STATE_INPUT_REQUIRED` (it was built with the hyphen), the streamed A2A
+  dispatch's bound is the unary path's 120 s, the stream says `grant_expired` once for a reported request that lapses
+  and its task ends when the client goes, the adapter contract's A2A grants cell is carried. **Still not built:** the
+  one-hour job's step 4 on the published binary (a `grant` fault class, the fourth PR), retention of `grant/` records,
+  a per-issuer entitlement, a per-call class for the rendering.
 - **Grants, the second PR** (`docs/plans/adopter-surface.md` X3; `docs/features/grants.md`): the enforcement
   remainder of the row. **One call at each door** — the gateway's preflight and the provider's each admit a grant once
   (`ExecutionAuthority::claim_grant_use`, atomic across concurrent presentations; the marker `…/used/{door}` on the

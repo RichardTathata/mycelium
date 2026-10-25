@@ -660,6 +660,17 @@ async fn the_grants_stream_reports_a_request_once_and_then_its_answer() {
     assert_eq!(early[0].1["request"], request);
     assert_eq!(early[1].1["outcome"], "issued");
     assert_eq!(early[1].1["issuer"], SUPERVISOR);
+    // A request nobody answers lapses: the stream says so once, as `grant_expired` (#679's review, finding 6).
+    let watching = tokio::spawn(sse_events(url.clone(), 2, Duration::from_secs(10)));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let short = a.agent_state_machine(policy(600));
+    short.transition(ExecutionState::Planning).await.unwrap();
+    let other = serde_json::json!({"env": "staging"});
+    let err = short.transition_invoking("deploy", &other).await.unwrap_err();
+    assert!(matches!(err, PolicyViolation::GrantNotPresented(_)));
+    let seen = watching.await.unwrap();
+    assert_eq!(seen.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), vec!["grant_request", "grant_expired"], "{seen:?}");
+    assert_eq!(seen[1].1["outcome"], "expired");
     a.shutdown().await;
 }
 
@@ -707,6 +718,22 @@ async fn a_streamed_a2a_task_waiting_for_a_grant_reports_input_required_with_the
     let input_at = states.iter().position(|s| *s == "input-required").unwrap();
     assert!(states[input_at..].contains(&"working") && states.last() == Some(&"completed"), "working again after the answer, then completed: {states:?}");
     assert_eq!(ran.load(Ordering::SeqCst), 1, "the tool ran once, under the grant");
+    // The same wait on the 1.0 door: the state is `TASK_STATE_INPUT_REQUIRED`, an enum value a 1.0 client accepts
+    // (#679's review, finding 1: it was `TASK_STATE_INPUT-REQUIRED`).
+    sm.transition(ExecutionState::Planning).await.ok();
+    let (a2, principal2) = (Arc::clone(&a), agent_principal.clone());
+    let issuing = tokio::spawn(async move { issue_pending(a2, http_port, principal2).await });
+    let v10 = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{http_port}/a2a"))
+        .json(&serde_json::json!({"jsonrpc": "2.0", "id": 8, "method": "SendStreamingMessage", "params": {
+            "message": {"messageId": "m-8", "role": "ROLE_USER", "parts": [{"text": "deploy prod again"}]},
+            "metadata": {"skillId": "depot/dispatch"}}}))
+        .send().await.expect("SendStreamingMessage").text().await.unwrap();
+    let request2 = issuing.await.unwrap();
+    assert!(v10.contains("TASK_STATE_INPUT_REQUIRED") && !v10.contains("INPUT-REQUIRED"), "the 1.0 name: {v10}");
+    assert!(v10.contains(&format!("grant request {request2}")), "{v10}");
+    assert!(v10.contains("TASK_STATE_COMPLETED"), "{v10}");
+    assert_eq!(ran.load(Ordering::SeqCst), 2);
     a.shutdown().await;
 }
 

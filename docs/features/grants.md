@@ -147,12 +147,19 @@ has no row for this feature. The tests: in [`src/mandate/grant.rs`](../../src/ma
   again for the same tool and digest while the request stands and is unconsumed waits on it rather than asking twice.
 - **Veto, not grant:** `require_approval_for` approves on silence and is labelled so in `strength_report()`; its
   `ApprovalTimedOut` variant was never produced and is deprecated (`deprecations.md` §59).
-- **The stream** reports each request once and its answer once, by anyone at any node (the records gossip); it is
-  woken by writes under `grant/`, and a late supervisor gets the standing requests as a backlog. **`input-required`**
-  is reported on the streaming send only (`tasks/sendSubscribe`, `message/stream`, `SendStreamingMessage`): a unary
-  send answers at the end. The watcher reads the serving node's requests (`grant/{node}/`), so a task served by a
-  node whose agent asks for a grant for another reason would report that too — the status is a request id, not an
-  attribution. **Not built, by the plan row** ([`adopter-surface.md`](../plans/adopter-surface.md) X3, after the third
+- **The stream** reports each request once, each answer once (an issue followed by a revocation is two), and an
+  expiry once (`grant_expired`, for a reported request that lapsed unanswered), by anyone at any node (the records
+  gossip); it is woken by writes under `grant/` and by the soonest reported expiry, a late supervisor gets the
+  standing requests as a backlog, and its task ends when the client goes. **`input-required`** is reported on the
+  streaming send only (`tasks/sendSubscribe`, `message/stream`, `SendStreamingMessage`; A2A 1.0 names it
+  `TASK_STATE_INPUT_REQUIRED`): a unary send answers at the end, and `tasks/get` on a waiting task says `submitted`.
+  **The bound an A2A task can wait:** the streamed dispatch times out at 120 s (the unary path's bound), so a
+  supervisor who answers later answers a task already reported `failed` — a `grant_window` longer than that is not
+  honoured through this door. The watcher reads the serving node's requests (`grant/{node}/`, each new unexpired one
+  reported once, `working` again when none it reported still stands), because the request record carries no task id:
+  a task served by a node whose agent asks for a grant for another reason reports that too — the status is a request
+  id, not an attribution. **The class is the policy's**, one name per agent policy, not row R's per-call `DataClass`
+  (declared or principal-sourced): a first cut, stated. **Not built, by the plan row** ([`adopter-surface.md`](../plans/adopter-surface.md) X3, after the third
   PR): the one-hour job's step 4 on the published binary (a `grant` fault class, the fourth PR); retention of `grant/`
   records; a per-issuer entitlement finer than `entitle_grants_from_fleet`. **The doors a node-held grant reaches:** a grant's holder is the agent's node, so
   it is presented on the node's own call (a member's direct call, the provider's door) — a bearer client presenting a
