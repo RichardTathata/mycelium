@@ -1865,6 +1865,19 @@ heartbeat tick, while a live member's entry holds a forged time, until its owner
 has no heartbeat" is reading a member whose heartbeat has not reached it; it clears when the heartbeat arrives or the
 entry ages past the bound.
 
+## 64. `AgentPolicy` gained `grant_arguments_class` and `grant_renderable_classes`; a streamed A2A task can report `input-required`; `GET /gateway/grants/stream` (unreleased, adopter-surface X3, third PR)
+
+`AgentPolicy` gained two fields (an exhaustive struct literal breaks; `..Default::default()` is unaffected): the
+arguments' data class and the classes a grant request may render. **Behaviour change for a policy that sets a class:**
+arguments of a class not listed are withheld from the gossiped request record — shown as withheld with the class and
+the size — while the grant binds their digest; with no class set, nothing changes. A streamed A2A send
+(`tasks/sendSubscribe`, `message/stream`, `SendStreamingMessage`) whose serving node's agent is waiting for a grant now
+emits a status update `input-required` (A2A 1.0: `TASK_STATE_INPUT_REQUIRED`) with the request's id in the message,
+then `working` once it is answered — a client that treated every non-terminal status as `working` sees a new one.
+The streamed A2A dispatch's bound is 120 s now (it was 30 s; the unary path's, and the longest a task can wait
+for a grant through this door). New route `GET /gateway/grants/stream` under `grant:read`, with `grant_request`,
+`grant_answered` and `grant_expired` events; the SDKs gain `grants_stream` / `grantsStream`.
+
 ## 63. A grant admits one call at each door; `MandateRefusal` gained `GrantUsed`; a grant is issued for a member's agent and revoked at its issuer; the authority's sweep judges a grant by its own standing (unreleased, adopter-surface X3, second PR)
 
 **Behaviour changes.** Every enforcement point (`gateway`, `provider`) now admits a grant **once**: a second presentation

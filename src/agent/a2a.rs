@@ -163,7 +163,8 @@ const PROTOCOL_VERSIONS: [&str; 2] = ["1.0", "0.3"];
 fn state_name(state: &str, generation: Generation) -> String {
     match generation {
         Generation::Legacy | Generation::V03 => state.to_string(),
-        Generation::V10 => format!("TASK_STATE_{}", state.to_ascii_uppercase()),
+        // `input-required` is `TASK_STATE_INPUT_REQUIRED` in 1.0: the hyphen becomes an underscore (#679's review).
+        Generation::V10 => format!("TASK_STATE_{}", state.to_ascii_uppercase().replace('-', "_")),
     }
 }
 
@@ -221,6 +222,7 @@ fn render_send_result(task: &Task, context_id: &str, generation: Generation) -> 
 }
 
 /// One send, whatever generation asked for it: the shape [`dispatch_send`] and the stream run on.
+#[derive(Clone)]
 pub(crate) struct SendRequest {
     pub task_id:    String,
     pub context_id: String,
@@ -1005,6 +1007,9 @@ fn handle_tasks_cancel(
 enum Step<'a> {
     Submitted,
     Working,
+    /// The agent serving this task is waiting for a grant (adopter-surface X3, third PR): the status carries the
+    /// pending request's id and nothing else, so an A2A client can be the supervisor's surface.
+    InputRequired(&'a str),
     Completed(&'a Task),
     /// `error` and `detail` are the pre-0.2 event's fields, each present where it always was; 0.3 and
     /// 1.0 carry the same text as the failed status's message.
@@ -1021,6 +1026,7 @@ fn stream_events(id: &Option<Value>, req: &SendRequest, step: Step<'_>) -> Vec<E
         let data = match step {
             Step::Submitted => json!({ "id": task_id, "status": { "state": "submitted" } }),
             Step::Working => json!({ "id": task_id, "status": { "state": "working" } }),
+            Step::InputRequired(request) => json!({ "id": task_id, "status": { "state": "input-required", "message": { "role": "agent", "parts": [{ "type": "text", "text": format!("grant request {request}") }] } } }),
             Step::Completed(task) => serde_json::to_value(task).unwrap_or(Value::Null),
             Step::Failed { error, detail } => {
                 let mut v = json!({ "id": task_id, "status": { "state": "failed" } });
@@ -1060,6 +1066,7 @@ fn stream_events(id: &Option<Value>, req: &SendRequest, step: Step<'_>) -> Vec<E
             vec![event(render_send_result(&task, context_id, generation))]
         }
         Step::Working => vec![event(status_update("working", None, false))],
+        Step::InputRequired(request) => vec![event(status_update("input-required", Some(&format!("grant request {request}")), false))],
         Step::Completed(task) => {
             let mut events: Vec<Event> = task.artifacts.iter().enumerate().map(|(i, a)| {
                 let update = json!({ "taskId": task_id, "contextId": context_id,
@@ -1136,6 +1143,46 @@ pub(crate) async fn tasks_send_subscribe(
                 let _ = tx2.try_send(Ok(e));
             }
         });
+        // Adopter-surface X3 (third PR): while the skill runs, a grant request the serving node's agent writes is
+        // reported as `input-required` with the request's id, and `working` again once it is answered — the records
+        // gossip, so the gateway sees them wherever the agent is. Aborted with `working` before every terminal event.
+        let grants = {
+            let (tx3, tc, id3, req3) = (tx.clone(), Arc::clone(&state.task_ctx), id.clone(), req.clone());
+            let prefix = format!("grant/{}/", gateway_caller::node_principal(&target));
+            tokio::spawn(async move {
+                let mut rx = mycelium_core::kv_handle::KvHandle::from_core(Arc::clone(&tc.core)).subscribe_prefix(prefix.clone());
+                // The requests standing on the serving node: unanswered, unconsumed and unexpired — the same reading
+                // as the supervisor's list. The record carries no task id, so this is the node's open requests, not
+                // this task's: stated on the feature page (#679's review, finding 4).
+                let open = |tc: &TaskCtx| -> std::collections::BTreeSet<String> {
+                    let now_ms = tc.hlc.decision_now_ms();
+                    let entries = crate::store::scan_kv_prefix(&tc.kv_state, &prefix);
+                    let answered: std::collections::HashSet<String> = entries.iter().filter_map(|(k, _)| k.strip_suffix("/issued").or_else(|| k.strip_suffix("/refused")).or_else(|| k.strip_suffix("/consumed")).map(str::to_string)).collect();
+                    entries.iter()
+                        .filter(|(k, v)| k.matches('/').count() == 2 && !answered.contains(k.as_ref())
+                            && serde_json::from_slice::<Value>(v).ok().and_then(|r| r["expires_at_ms"].as_u64()).is_some_and(|e| e > now_ms))
+                        .filter_map(|(k, _)| k.rsplit('/').next().map(str::to_string))
+                        .collect()
+                };
+                let before = open(&tc);
+                // Every new request is reported once; `working` returns when none this task reported still stands.
+                let mut reported: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+                let mut waiting = false;
+                loop {
+                    if rx.changed().await.is_err() { return; }
+                    let now = open(&tc);
+                    for r in now.difference(&before).filter(|r| !reported.contains(*r)).cloned().collect::<Vec<_>>() {
+                        for e in stream_events(&id3, &req3, Step::InputRequired(&r)) { let _ = tx3.send(Ok(e)).await; }
+                        reported.insert(r);
+                        waiting = true;
+                    }
+                    if waiting && reported.iter().all(|r| !now.contains(r)) {
+                        for e in stream_events(&id3, &req3, Step::Working) { let _ = tx3.send(Ok(e)).await; }
+                        waiting = false;
+                    }
+                }
+            })
+        };
 
         #[cfg(all(feature = "gateway", feature = "tls"))]
         let preflight = super::http::ae_preflight(
@@ -1154,11 +1201,16 @@ pub(crate) async fn tasks_send_subscribe(
         #[cfg(all(feature = "gateway", feature = "tls"))]
         if let super::http::Preflight::Refuse(refusal) = &preflight {
             working.abort();
+            grants.abort();
             send_all(stream_events(&id, &req, Step::Failed { error: Some(refusal.to_string()), detail: None })).await;
             return;
         }
 
-        let timeout = Duration::from_secs(30);
+        // The unary path's bound (its comment says why 30 s was too short for a multi-step skill); a streamed task
+        // whose agent is waiting for a grant needs it too — a supervisor who answers after the dispatch times out
+        // answers a task already reported failed (#679's review, finding 3). Stated on the feature page: the grant
+        // window an A2A task can wait is bounded by this, not by `grant_window`.
+        let timeout = Duration::from_secs(120);
         // Closure plan C2: the presented mandate travels to the provider, which verifies it itself.
         let mandate = gateway_caller::presented_mandate(&req.meta);
         let resource_claim = format!("skill:{skill_id}@{target}");
@@ -1174,8 +1226,9 @@ pub(crate) async fn tasks_send_subscribe(
             super::http::ae_record_execution(&state.task_ctx, &preflight, observed).await;
         }
 
-        // Whatever the outcome, it is terminal: no "working" may follow it.
+        // Whatever the outcome, it is terminal: no "working" or "input-required" may follow it.
         working.abort();
+        grants.abort();
 
         match dispatched {
             Ok(reply) => {
@@ -1338,6 +1391,16 @@ pub(crate) fn a2a_router_full(
 
 #[cfg(test)]
 mod tests {
+    /// The 1.0 state names: an uppercased hyphen is not an enum value an `a2a-sdk` client accepts (#679's review,
+    /// finding 1; seen failing first as `TASK_STATE_INPUT-REQUIRED`).
+    #[test]
+    fn a_hyphenated_state_is_an_underscored_1_0_name() {
+        assert_eq!(super::state_name("input-required", super::Generation::V10), "TASK_STATE_INPUT_REQUIRED");
+        assert_eq!(super::state_name("working", super::Generation::V10), "TASK_STATE_WORKING");
+        assert_eq!(super::state_name("input-required", super::Generation::V03), "input-required");
+        assert_eq!(super::state_name("input-required", super::Generation::Legacy), "input-required");
+    }
+
     use super::*;
     use crate::{GossipAgent, GossipConfig, NodeId};
 

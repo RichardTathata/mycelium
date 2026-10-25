@@ -285,6 +285,7 @@ pub(super) fn required_scope(method: &axum::http::Method, matched_path: &str) ->
         "/gateway/units/declare"          => "cap:write",
         // Adopter-surface X3: the supervisor's door.
         "/gateway/grants/pending"         => "grant:read",
+        "/gateway/grants/stream"          => "grant:read",
         "/gateway/grants/{agent}/{request}" => "grant:issue",
         "/gateway/grants/{agent}/{request}/revoke" => "grant:issue",
         "/gateway/shard/{ns}/{name}"      => "cap:read",

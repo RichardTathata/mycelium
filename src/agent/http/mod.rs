@@ -353,6 +353,7 @@ pub(super) async fn run_http_server(
     #[cfg(feature = "tls")]
     let gateway = gateway
         .route("/grants/pending",           get(grants::gw_grants_pending))
+        .route("/grants/stream",            get(grants::gw_grants_stream))
         .route("/grants/{agent}/{request}", post(grants::gw_grant_decide))
         .route("/grants/{agent}/{request}/revoke", post(grants::gw_grant_revoke));
 

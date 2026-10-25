@@ -86,6 +86,8 @@ async fn node_with(http_port: u16, opts: Opts) -> (Arc<GossipAgent>, std::path::
         ReferenceEvaluator::new("rev-grant")
             .with_catalogue("cat-grant", "1")
             .map_action("tools/call", "*")
+            .map_action("skill.invoke", "*")
+            .allow(Rule::new("*", "skill.invoke", format!("skill:depot/dispatch@{me}")))
             .map_action("grant.issue", "*")
             // The agent (this node) may call the tool only under a grant.
             .allow(Rule::new(&node_principal, "tools/call", &tool).requiring_grant())
@@ -592,6 +594,181 @@ async fn a_restarted_agent_re_waits_on_its_pending_request_and_an_expired_one_as
     assert_eq!(requests(&a), 3, "the expired request was not re-waited: a new one was written");
     a.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Read SSE events from `url` under the supervisor's bearer until `want` events arrived or `within` passed: each as
+/// `(event name, data)`.
+async fn sse_events(url: String, want: usize, within: Duration) -> Vec<(String, serde_json::Value)> {
+    use futures_util::StreamExt as _;
+    let resp = reqwest::Client::new().get(url).bearer_auth("alice-secret").send().await.expect("stream");
+    assert_eq!(resp.status().as_u16(), 200);
+    let mut body = resp.bytes_stream();
+    let (mut buf, mut out) = (String::new(), Vec::new());
+    let deadline = tokio::time::Instant::now() + within;
+    while out.len() < want {
+        let chunk = tokio::select! {
+            c = body.next() => match c { Some(Ok(c)) => c, _ => break },
+            _ = tokio::time::sleep_until(deadline) => break,
+        };
+        buf.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(end) = buf.find("\n\n") {
+            let frame = buf[..end].to_string();
+            buf = buf[end + 2..].to_string();
+            let (mut name, mut data) = (String::new(), String::new());
+            for line in frame.lines() {
+                if let Some(e) = line.strip_prefix("event: ") { name = e.to_string(); }
+                if let Some(d) = line.strip_prefix("data: ") { data = d.to_string(); }
+            }
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
+                out.push((name, v));
+            }
+        }
+    }
+    out
+}
+
+/// **The stream reports a request once, then its answer** (the third PR). A supervisor on the stream before the
+/// agent asks sees the request as it lands, with the arguments a human reads; a supervisor connecting after sees the
+/// standing request as a backlog; the issue reaches both as `grant_answered`. Nothing is reported twice.
+#[tokio::test]
+async fn the_grants_stream_reports_a_request_once_and_then_its_answer() {
+    let http_port = alloc_port();
+    let (a, _journal, _ran) = node(http_port).await;
+    let sm = a.agent_state_machine(policy(10_000));
+    sm.transition(ExecutionState::Planning).await.unwrap();
+    let agent_principal = crate::agent::gateway_caller::node_principal(a.node_id());
+    let url = format!("http://127.0.0.1:{http_port}/gateway/grants/stream");
+    let early = tokio::spawn(sse_events(url.clone(), 2, Duration::from_secs(10)));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let args = serde_json::json!({"env": "prod", "replicas": 3});
+    let (sm2, args2) = (Arc::clone(&sm), args.clone());
+    let waiting = tokio::spawn(async move { sm2.transition_invoking("deploy", &args2).await });
+    let prefix = format!("grant/{agent_principal}/");
+    assert!(until(|| !crate::store::scan_kv_prefix(&a.task_ctx.kv_state, &prefix).is_empty(), Duration::from_secs(5)).await);
+    // A late supervisor: the standing request is the backlog.
+    let late = sse_events(url.clone(), 1, Duration::from_secs(5)).await;
+    assert_eq!(late.len(), 1, "{late:?}");
+    assert_eq!(late[0].0, "grant_request");
+    assert_eq!(late[0].1["tool"], "deploy");
+    assert_eq!(late[0].1["arguments"], args, "a human reads the arguments");
+    let request = late[0].1["request"].as_str().unwrap().to_string();
+    let (status, _) = supervisor(http_port, "alice-secret", reqwest::Method::POST, &format!("/gateway/grants/{agent_principal}/{request}"), Some(serde_json::json!({"decision": "issue"}))).await;
+    assert_eq!(status, 200);
+    waiting.await.unwrap().expect("granted");
+    let early = early.await.unwrap();
+    assert_eq!(early.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), vec!["grant_request", "grant_answered"], "{early:?}");
+    assert_eq!(early[0].1["request"], request);
+    assert_eq!(early[1].1["outcome"], "issued");
+    assert_eq!(early[1].1["issuer"], SUPERVISOR);
+    // A request nobody answers lapses: the stream says so once, as `grant_expired` (#679's review, finding 6).
+    let watching = tokio::spawn(sse_events(url.clone(), 2, Duration::from_secs(10)));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let short = a.agent_state_machine(policy(600));
+    short.transition(ExecutionState::Planning).await.unwrap();
+    let other = serde_json::json!({"env": "staging"});
+    let err = short.transition_invoking("deploy", &other).await.unwrap_err();
+    assert!(matches!(err, PolicyViolation::GrantNotPresented(_)));
+    let seen = watching.await.unwrap();
+    assert_eq!(seen.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), vec!["grant_request", "grant_expired"], "{seen:?}");
+    assert_eq!(seen[1].1["outcome"], "expired");
+    a.shutdown().await;
+}
+
+/// **A streamed A2A task waiting for a grant reports `input-required` with the request's id, and `working` once it is
+/// answered** (the row's design question, decided: yes, the id and nothing else). The skill's handler asks for a grant
+/// while serving the task; the supervisor, reading the status, issues it; the task completes.
+#[cfg(feature = "a2a")]
+#[tokio::test]
+async fn a_streamed_a2a_task_waiting_for_a_grant_reports_input_required_with_the_request_id() {
+    let http_port = alloc_port();
+    let (a, _journal, ran) = node_with(http_port, Opts { a2a: true, ..Opts::default() }).await;
+    let _reg = a.capabilities().advertise_capability(crate::capability::Capability::new("depot", "dispatch"), Duration::from_secs(30));
+    let sm = a.agent_state_machine(policy(10_000));
+    sm.transition(ExecutionState::Planning).await.unwrap();
+    let agent_principal = crate::agent::gateway_caller::node_principal(a.node_id());
+    // The skill's handler: ask for the grant, run the tool under it, answer.
+    {
+        let (agent, sm) = (Arc::clone(&a), Arc::clone(&sm));
+        let mut rx = agent.service().rpc_rx("skill.invoke");
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                let args = serde_json::json!({"env": "prod"});
+                let outcome = match sm.transition_invoking("deploy", &args).await {
+                    Ok(Some(mandate)) => match call_deploy(&agent, None, &mandate, &args).await { Ok(_) => "deployed".to_string(), Err(e) => format!("refused: {e}") },
+                    other => format!("no grant: {other:?}"),
+                };
+                agent.service().rpc_respond(&req, outcome.into_bytes());
+            }
+        });
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // The supervisor issues the first request that appears.
+    let (a2, principal2) = (Arc::clone(&a), agent_principal.clone());
+    let issuing = tokio::spawn(async move { issue_pending(a2, http_port, principal2).await });
+    let stream_body = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{http_port}/a2a"))
+        .json(&serde_json::json!({"jsonrpc": "2.0", "id": 7, "method": "tasks/sendSubscribe", "params": {
+            "id": "task-grant-1", "skillId": "depot/dispatch",
+            "message": {"role": "user", "parts": [{"type": "text", "text": "deploy prod"}]}}}))
+        .send().await.expect("tasks/sendSubscribe").text().await.unwrap();
+    let request = issuing.await.unwrap();
+    let states: Vec<&str> = stream_body.match_indices("\"state\":\"").map(|(i, _)| { let rest = &stream_body[i + 9..]; &rest[..rest.find('"').unwrap_or(0)] }).collect();
+    assert!(states.contains(&"input-required"), "the task reported the wait: {states:?}\n{stream_body}");
+    assert!(stream_body.contains(&format!("grant request {request}")), "the status names the request and nothing else: {stream_body}");
+    let input_at = states.iter().position(|s| *s == "input-required").unwrap();
+    assert!(states[input_at..].contains(&"working") && states.last() == Some(&"completed"), "working again after the answer, then completed: {states:?}");
+    assert_eq!(ran.load(Ordering::SeqCst), 1, "the tool ran once, under the grant");
+    // The same wait on the 1.0 door: the state is `TASK_STATE_INPUT_REQUIRED`, an enum value a 1.0 client accepts
+    // (#679's review, finding 1: it was `TASK_STATE_INPUT-REQUIRED`).
+    sm.transition(ExecutionState::Planning).await.ok();
+    let (a2, principal2) = (Arc::clone(&a), agent_principal.clone());
+    let issuing = tokio::spawn(async move { issue_pending(a2, http_port, principal2).await });
+    let v10 = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{http_port}/a2a"))
+        .json(&serde_json::json!({"jsonrpc": "2.0", "id": 8, "method": "SendStreamingMessage", "params": {
+            "message": {"messageId": "m-8", "role": "ROLE_USER", "parts": [{"text": "deploy prod again"}]},
+            "metadata": {"skillId": "depot/dispatch"}}}))
+        .send().await.expect("SendStreamingMessage").text().await.unwrap();
+    let request2 = issuing.await.unwrap();
+    assert!(v10.contains("TASK_STATE_INPUT_REQUIRED") && !v10.contains("INPUT-REQUIRED"), "the 1.0 name: {v10}");
+    assert!(v10.contains(&format!("grant request {request2}")), "{v10}");
+    assert!(v10.contains("TASK_STATE_COMPLETED"), "{v10}");
+    assert_eq!(ran.load(Ordering::SeqCst), 2);
+    a.shutdown().await;
+}
+
+/// **Arguments of a class the policy does not render are withheld, with the class and the size; the grant still binds
+/// their digest** (the third PR's rendering policy). Unclassified arguments are rendered as before.
+#[tokio::test]
+async fn a_request_withholds_arguments_of_a_class_the_policy_does_not_render() {
+    let http_port = alloc_port();
+    let (a, _journal, ran) = node(http_port).await;
+    let mut p = policy(10_000);
+    p.grant_arguments_class = Some("confidential".into());
+    p.grant_renderable_classes = vec!["public".into()];
+    let sm = a.agent_state_machine(p);
+    sm.transition(ExecutionState::Planning).await.unwrap();
+    let args = serde_json::json!({"env": "prod", "card": "4111-1111-1111-1111"});
+    let agent_principal = crate::agent::gateway_caller::node_principal(a.node_id());
+    let (sm2, args2) = (Arc::clone(&sm), args.clone());
+    let waiting = tokio::spawn(async move { sm2.transition_invoking("deploy", &args2).await });
+    let prefix = format!("grant/{agent_principal}/");
+    assert!(until(|| !crate::store::scan_kv_prefix(&a.task_ctx.kv_state, &prefix).is_empty(), Duration::from_secs(5)).await);
+    let (status, body) = supervisor(http_port, "alice-secret", reqwest::Method::GET, "/gateway/grants/pending", None).await;
+    assert_eq!(status, 200);
+    let rec = &body["pending"][0];
+    assert_eq!(rec["arguments_class"], "confidential");
+    assert_eq!(rec["arguments"]["class"], "confidential", "withheld, naming the class: {rec}");
+    assert!(rec["arguments"]["withheld"].as_str().unwrap().contains("not rendered"), "{rec}");
+    assert!(!rec.to_string().contains("4111-1111"), "the value never entered the gossiped record: {rec}");
+    assert_eq!(rec["arguments_digest"].as_str().unwrap().len(), 64, "the digest is there for the grant to bind");
+    let request = rec["request"].as_str().unwrap().to_string();
+    let (status, _) = supervisor(http_port, "alice-secret", reqwest::Method::POST, &format!("/gateway/grants/{agent_principal}/{request}"), Some(serde_json::json!({"decision": "issue"}))).await;
+    assert_eq!(status, 200);
+    let mandate = waiting.await.unwrap().unwrap().unwrap();
+    assert!(call_deploy(&a, None, &mandate, &args).await.is_ok(), "the grant binds the digest of the withheld arguments");
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+    a.shutdown().await;
 }
 
 /// An evaluator that decides `tools/call` under another policy revision than the one it issues grants under — the

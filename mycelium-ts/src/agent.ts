@@ -147,6 +147,21 @@ export interface PendingGrant {
   policy_revision?: string | null;
   requested_at_ms: number;
   expires_at_ms: number;
+  /** The arguments a human reads, or their withheld rendering (`{withheld, class, bytes}`) under the data-class policy. */
+  arguments?: unknown;
+  /** The arguments' class by name, when the agent's policy declares one. */
+  arguments_class?: string | null;
+  [field: string]: unknown;
+}
+
+/**
+ * One event of `grantsStream`: a request record (`event: "grant_request"`), an answer (`event: "grant_answered"`,
+ * with `outcome` issued · refused · revoked) or an expiry (`event: "grant_expired"`).
+ */
+export interface GrantEvent {
+  event: "grant_request" | "grant_answered" | "grant_expired";
+  request?: string;
+  key?: string;
   [field: string]: unknown;
 }
 
@@ -420,6 +435,21 @@ export class MyceliumAgent {
       ...(options.ttlSecs !== undefined ? { ttl_secs: options.ttlSecs } : {}),
       ...(options.reason !== undefined ? { reason: options.reason } : {}),
     })) as GrantAnswer;
+  }
+
+  /**
+   * `GET /gateway/grants/stream` (`grant:read`): the open grant requests as they come. Each event is a
+   * `grant_request` (a request record, with its `key`), a `grant_answered` (`request`, `outcome` issued · refused ·
+   * revoked, `issuer`, `reason`; an issue then a revocation is two) or a `grant_expired` (a reported request that
+   * lapsed unanswered); the `event` field names which. On connect the requests standing now come first,
+   * then each new one as it lands; a request is reported once. Return from the loop to stop.
+   */
+  async *grantsStream(): AsyncGenerator<GrantEvent> {
+    const url = this._sseUrl("/gateway/grants/stream");
+    yield* sseStream<GrantEvent>({ url, headers: this.auth }, (data, event) => {
+      const raw = parseLossless(data) as Record<string, unknown>;
+      return { ...raw, event: (typeof event === "string" && event) || "grant_request" } as GrantEvent;
+    });
   }
 
   /**
