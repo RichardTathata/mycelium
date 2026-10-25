@@ -673,14 +673,12 @@ fn explain_cli(args: Vec<String>) -> i32 {
             Err(e) => { eprintln!("{e}"); return 2; }
         };
         // A full hash, or the unique prefix `--correlation`'s chain prints (doc-coverage run 24, gap 1).
-        let closure = match closure.map(|h| corpus.resolve(&h)) {
-            Some(Err(e)) => { eprintln!("--closure: {e}"); return 2; }
-            Some(Ok(h)) => Some(h),
-            None => None,
-        };
         match (correlation, closure) {
             (Some(id), _) => print!("{}", corpus.chain(&id)),
-            (_, Some(h)) => print!("{}", corpus.closure(&h, fleet)),
+            (_, Some(h)) => match corpus.closure_for(&h, fleet) {
+                Ok(out) => print!("{out}"),
+                Err(e) => { eprintln!("--closure: {e}"); return 2; }
+            },
             _ => unreachable!(),
         }
         return 0;

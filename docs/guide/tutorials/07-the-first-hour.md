@@ -21,7 +21,7 @@ release, rounded up to the next ten minutes; the plan's rule is in
 **Before you start** — Linux x86_64 (the job's container; the release also ships Linux aarch64 and macOS aarch64,
 whose tarball names differ), `bash`, `curl`, `python3` 3.10 or later with `pip`, and a release tag. **Steps 4 and 5
 need a release that carries the `grant` and `recovery` classes** — the first release after 2.37.0; on 2.37.0 they fail
-with *not a class*, and steps 1, 2, 3 and 6 run:
+with `unknown argument: test` (that release has no `test` command), and steps 1, 2, 3 and 6 run:
 
 ```sh
 TAG=v2.37.0                       # the newest release; the job reads it from the Release that triggered it

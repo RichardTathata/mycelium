@@ -16,7 +16,7 @@ PERMITTED`, and `reader set demo/greeting: REFUSED 403 — insufficient scope (t
 | Path | What it is |
 |---|---|
 | `node.toml` | the node's configuration: a gateway on loopback with two named tokens |
-| `units/purchaser.toml` | the unit file alice declares; its mandate and rules come back as `not_enforced` (one tool waits for the treasurer's grant — `mycelium test --faults grant units/ --config grant.toml` drives it, with `[tls]` and `[persistence]` added to `node.toml` as [the first hour](../../docs/guide/tutorials/07-the-first-hour.md) step 4 does) |
+| `units/purchaser.toml` | the unit file alice declares; its mandate and rules come back as `not_enforced` (one tool waits for the treasurer's grant — `mycelium test --faults grant units/ --config grant.toml` drives it, where `grant.toml` is `node.toml` with `[tls]` and `[persistence]` added — `{ cat node.toml; printf '\n[persistence]\nbase_path = "data/grant-persist"\n\n[tls]\nauto_cert_dir = "data/grant-tls"\n'; } > grant.toml`, as [the first hour](https://github.com/RichardTathata/mycelium/blob/{{MYCELIUM_TAG}}/docs/guide/tutorials/07-the-first-hour.md) step 4 does) |
 | `main.py` | the program: starts the node, declares, writes, is refused, stops the node |
 | `data/node.log` | the node's log from the last run |
 

@@ -131,8 +131,9 @@ supervisor may say no, and silence proceeds) the agent policy has a grant mode (
 X3): for a tool it names, the `Invoking` transition **waits for a grant and is refused on silence** — a
 [grant](00-concepts.md#grant) is a scoped mandate a supervisor issues for one call, bound to the tool, a digest of the
 arguments, the agent's identity and the deployed policy revision, with an expiry, and verified where the action is
-enforced: at the agent's state machine, at the gateway's preflight and again at a provider with
-`with_provider_enforcement()`. Issuing is itself an action the evaluator decides (`grant.issue` with the issuer as the
+enforced: at the agent's state machine, and at a provider with `with_provider_enforcement()` when the agent's node
+presents it on its own call. Only the agent's node holds a grant, so a bearer client cannot present one at `/mcp`; the
+gateway's preflight checks a presented grant and refuses one whose holder is not the caller. Issuing is itself an action the evaluator decides (`grant.issue` with the issuer as the
 actor), so holding the route's scope is not being an approver. A declaration says which tool waits with
 `requires_grant = true` on a `[[rule]]`, and `mycelium test --faults grant` drives it on the declaration's own fleet —
 the [grants feature page](../features/grants.md) has the doors, the exits and what is stated rather than built.
@@ -872,7 +873,7 @@ producer has them, and the SDKs' A2A `send` and `set` verbs take them as options
 
 ```text
 mycelium explain --correlation run-1 data/evidence.log data/decisions.jsonl
-mycelium explain --closure <sha256> node-a/evidence.log node-b/evidence.log --fleet 3
+mycelium explain --closure <sha256 or a unique prefix> node-a/evidence.log node-b/evidence.log --fleet 3
 ```
 
 The first renders one run as one chain; the second, every record whose parent chain reaches the hash. Each line is

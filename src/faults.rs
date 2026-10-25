@@ -500,7 +500,6 @@ fn ms(d: Duration) -> u64 {
 /// node that goes dark looks like to its peers.
 struct Fleet<'u> {
     units: &'u [Unit],
-    dir: PathBuf,
     nodes: Vec<Node>,
 }
 
@@ -525,7 +524,7 @@ impl<'u> Fleet<'u> {
             cfg.validate().map_err(|e| format!("the fleet's configuration for node {i} does not validate: {e}"))?;
             nodes.push(Node { id: id.clone(), cfg, rt: None, agent: None, held: Vec::new(), sink: Arc::new(crate::decision::DecisionSink::default()) });
         }
-        Ok(Fleet { units, dir: dir.to_path_buf(), nodes })
+        Ok(Fleet { units, nodes })
     }
 
     fn len(&self) -> usize {
@@ -661,7 +660,8 @@ impl Drop for Fleet<'_> {
                 drop(rt);
             }
         }
-        let _ = std::fs::remove_dir_all(&self.dir);
+        // The directory is not removed here: `run` removes each class's directory unless `--keep` asked to keep it,
+        // and a fleet that removed its own made every kept run empty (#681's review, finding 1).
     }
 }
 
@@ -1923,6 +1923,26 @@ mod tests {
 
     /// Class names parse exactly and nothing else does; a list with a stranger in it is refused naming it; the
     /// partition this command does not run is answered by name.
+    /// `--keep` leaves a class's directory — its persistence and journals — in place and names it (#681's review,
+    /// finding 1: the fleet's own `Drop` removed the class directory whatever `--keep` said, so a kept run held
+    /// nothing; seen failing first).
+    #[test]
+    fn keep_leaves_the_class_directory_in_place() {
+        let dir = scratch("keep");
+        let units = vec![unit("p", "principal = \"p\"\n")];
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("node.toml");
+        std::fs::write(&path, toml::to_string(&persisted(&dir)).unwrap()).unwrap();
+        let opts = Options { classes: vec![Class::Restart], config: Some(path), keep: true, ..Default::default() };
+        let report = run(&units, &[], &CheckOptions::default(), &opts).expect("the run");
+        let kept = report.kept.clone().expect("--keep names the run's directory");
+        let persist = kept.join("restart").join("persist");
+        let held = std::fs::read_dir(&persist).map(|d| d.count()).unwrap_or(0);
+        assert!(held > 0, "the kept run holds the restart class's persistence under {}: {}", persist.display(), report.render());
+        let _ = std::fs::remove_dir_all(&kept);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn class_names_round_trip() {
         for c in Class::ALL {

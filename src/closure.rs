@@ -115,7 +115,7 @@ impl Corpus {
     pub fn load(paths: &[PathBuf]) -> std::io::Result<Corpus> {
         let mut corpus = Corpus::default();
         for p in paths {
-            let bytes = std::fs::read(p)?;
+            let bytes = std::fs::read(p).map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", p.display())))?;
             let given = p.display().to_string();
             if looks_like_journal(&bytes) {
                 // The journal mechanism is in every build (the rights ledger uses it); the evidence profile is not.
@@ -177,6 +177,13 @@ impl Corpus {
     /// The record with this hash, if any file holds it.
     pub fn get(&self, hash: &str) -> Option<&Record> {
         self.by_hash.get(hash).map(|&i| &self.records[i])
+    }
+
+    /// `mycelium explain --closure <given>` over this corpus: the argument resolved ([`resolve`](Self::resolve)), then
+    /// the closure rendered. The binary calls this and nothing else, so the prefix rule is tested where it is used
+    /// (#681's review, finding 5).
+    pub fn closure_for(&self, given: &str, fleet: Option<usize>) -> Result<String, String> {
+        self.resolve(given).map(|h| self.closure(&h, fleet))
     }
 
     /// The full hash a `--closure` argument names: a 64-character hash as given, or a prefix of at least
@@ -642,6 +649,9 @@ mod tests {
         let mut d = Corpus::default();
         d.records = vec![Record { hash: format!("abcdef01{}", "0".repeat(56)), ..c.records[0].clone() }, Record { hash: format!("abcdef01{}", "1".repeat(56)), ..c.records[1].clone() }];
         assert!(d.resolve("abcdef01").unwrap_err().contains("more than one"), "ambiguous");
+        // The binary's one entry point: the printed prefix renders the closure the full hash does.
+        assert_eq!(c.closure_for(printed, None).unwrap(), c.closure(&h1, None));
+        assert!(c.closure_for("0123", None).is_err());
     }
 
     /// The reader says when it has fewer journals than nodes, and names a root it does not hold.

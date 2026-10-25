@@ -474,7 +474,7 @@ from the evidence journals and decision traces you collect from the nodes:
 
 ```bash
 mycelium explain --correlation <id> node-a/evidence.log node-b/evidence.log node-b/decisions.jsonl
-mycelium explain --closure <64-hex hash> node-a/evidence.log node-b/evidence.log
+mycelium explain --closure <hash, or a unique prefix of 8+> node-a/evidence.log node-b/evidence.log
 ```
 
 The flag comes first and the files after it: a file given first is read as the single-trace form above, and the call
@@ -483,7 +483,8 @@ one record — every record that names it as its parent, or names one that does 
 reconstructed or unattributable, naming every hole, and saying first when it was given fewer journals than the fleet
 has nodes. `--closure` takes a record's full 64-character hash (its `journal_sha256`) or any prefix of at least 8 characters
 that exactly one record in the files has — so the 12 characters `--correlation`'s chain prints can be pasted in; a
-prefix no record has, or more than one shares, is refused by name.
+prefix no record has, or more than one shares, is refused by name. A parent the chain marks `(hole)` is in no file
+given, so its prefix resolves to nothing; give its full hash to render the hole.
 
 ## See it: the induce-and-diagnose demo
 

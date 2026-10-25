@@ -24,7 +24,7 @@ requires_values = { ledger = "petty-cash" }
 
 # A tool that waits for a grant (adopter-surface X3): the purchaser may call it only under a grant the treasurer
 # issues for that one call — approval that is default-deny. `mycelium test --faults grant units/ --config grant.toml`
-# (node.toml with [tls] and [persistence] added — tutorial 7, step 4) drives these two
+# (grant.toml: node.toml with [tls] and [persistence] tables appended — the README's grant.toml line) drives these two
 # rules on this declaration's fleet: silence refuses, a principal no rule names is refused the issue, the
 # treasurer's grant admits the call once, and the grant holds across a restart of the purchaser's node. The actor
 # names this unit; at a door the agent presents as its node (`node:<id>`), the one principal that can hold a grant.
