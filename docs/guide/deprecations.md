@@ -1865,6 +1865,34 @@ heartbeat tick, while a live member's entry holds a forged time, until its owner
 has no heartbeat" is reading a member whose heartbeat has not reached it; it clears when the heartbeat arrives or the
 entry ages past the bound.
 
+## 62. The side-effect contract moved into the substrate; its ledger is a journal; `Class` gained `Recovery`; `ExternalRefusal` gained `LeaveOfObservable` (unreleased, adopter-surface X9)
+
+**The move.** `Reconciler`, `ExternalEffect`, `EffectClass`, `ProbeBudget`, `ExternalDestination`, `HttpDestination`,
+`CompensationPermit`, the refusal counters, and the vocabulary they rest on (`Effect`, `EffectRefusal`, `Composition`,
+`CompositionLeg`, `check_composition`) are `mycelium::effects` now. `mycelium-effects` **re-exports every one of
+them at its old path** (`mycelium_effects::external::*`, `mycelium_effects::http::*`, `mycelium_effects::{Effect, …}`),
+so a companion user changes nothing; a user who wants the contract without the companion takes it from the
+substrate. The companion's `envelope` feature still selects the evidence half (it is a `gateway` + `tls` build of the
+substrate); its `metrics` feature now forwards to the substrate's. **Migration:** none for a companion user; a direct
+user of `mycelium::effects` needs `gateway` + `tls` for `CompensationPermit` and `with_evidence`, as the companion
+always did.
+
+**The ledger.** The reconciler's ledger was a SQLite file (unreleased: X5 shipped after 2.37.0); it is the
+**node-local journal** now — append-only, fsynced, folded at open, one owner at a time. A ledger file from an
+unreleased X5 build is not read; there is no released format to migrate. **Behaviour change:** a second reconciler
+opened on a ledger another still owns is refused by name (`ExternalRefusal::Ledger("… is owned by another …")`) —
+hand a ledger over by dropping the first; `rusqlite` is no longer a dependency of the contract.
+
+**`Class` gained `Recovery`** (`mycelium::faults::Class`, not `#[non_exhaustive]`): an exhaustive `match` over the
+fault classes needs an arm; `Class::ALL` is six. `mycelium test --faults` with no class list now runs `recovery`
+too — it reads `not_configured` without `[persistence]` and `not_in_build` without `gateway` + `tls`, and fails the
+run only when asked for by name, like the others.
+
+**`ExternalRefusal` gained `LeaveOfObservable { class }`** (`#[non_exhaustive]`, 2.10.0's note: a `_` arm fails
+closed); `Reconciler` gained `apply_caused`, `leave` and an atomic retry claim — a second concurrent retry is
+refused `SecondRetry` before anything is sent, where before both could reach the destination (the destination's own
+idempotency made the second `Replayed`; the refusal is now the reconciler's).
+
 ## 61. A unit's `runtime` key is refused by readers before this release (unreleased, adopter-surface X8)
 
 The unit file gained an optional `runtime` key (`python` · `typescript` · `strands` · `langgraph`), read by

@@ -4,9 +4,10 @@
 # lists, printing the seconds per step and the total to the job summary. The number the documentation prints is this
 # job's measured time on the most recent release, rounded up to the next ten minutes, never the aspiration.
 #
-# Today it measures steps 1, 2, 3 and 6 of the six; steps 4 (a grant that holds across a restart, X3) and 5 (a lost
-# acknowledgement recovered without a second effect, X9) are printed as *not yet measured* until those rows land and
-# extend this job. The Rust scaffold is not timed here — it needs a toolchain — and is run by CI's `Scaffold` job.
+# Today it measures steps 1, 2, 3, 5 and 6 of the six; step 4 (a grant that holds across a restart, X3) is printed as
+# *not yet measured* until that row lands and extends this job. Step 5 (adopter-surface X9) is `mycelium test --faults
+# recovery` over the scaffold's declaration on the published binary — a tag before the class fails the step, and a
+# red run prints no number. The Rust scaffold is not timed here — it needs a toolchain — and is run by CI's `Scaffold` job.
 #
 # Triggers: the completion of a successful Release workflow run for a tag push — not `release: published`, which a
 # Release created with the workflow's own GITHUB_TOKEN never fires (#670's review) — and by hand against any tag.
@@ -105,6 +106,22 @@ jobs:
           grep -q 'the route needs kv:write' run.log
           echo "3-refused-call,$(( $(date +%s) - t ))" >> /tmp/steps.csv
 
+      - name: "5 · A lost acknowledgement recovered without a second effect: selective recovery on the published binary"
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          [ -f /tmp/skip ] && exit 0
+          t=$(date +%s)
+          cd "$HOME/governed-call-py"
+          # The class needs [persistence]: the scaffold's node.toml with a persistence table under the project.
+          { cat node.toml; printf '\n[persistence]\nbase_path = "data/recovery-persist"\n'; } > recovery.toml
+          mycelium test --faults recovery units --config recovery.toml | tee recovery.log
+          grep -q '^recovery: passed' recovery.log
+          grep -q '✓ the restarted node finds its lost-acknowledgement record unknown in its own ledger, probes before any retry, and the destination holds one effect' recovery.log
+          grep -q '✓ the destination saw each effect once' recovery.log
+          grep -q 'mycelium explain --closure' recovery.log
+          echo "5-lost-ack-recovered,$(( $(date +%s) - t ))" >> /tmp/steps.csv
+
       - name: "6 · A readiness report naming what the fleet enforces"
         if: ${{ !cancelled() }}
         run: |
@@ -127,11 +144,11 @@ jobs:
           set -euo pipefail
           if [ -f /tmp/skip ]; then echo "## One hour — $TAG is not a release tag; not measured" | tee -a "$GITHUB_STEP_SUMMARY"; exit 0; fi
           rows=$( [ -f /tmp/steps.csv ] && tail -n +2 /tmp/steps.csv | wc -l | tr -d ' ' || echo 0 )
-          if [ "$JOB_STATUS" != "success" ] || [ "$rows" != 4 ]; then
+          if [ "$JOB_STATUS" != "success" ] || [ "$rows" != 5 ]; then
             {
               echo "## One hour to a governed fleet — $TAG: **not measured**"
               echo
-              echo "A step failed (job status: $JOB_STATUS; $rows of 4 steps completed). A red run prints no number."
+              echo "A step failed (job status: $JOB_STATUS; $rows of 5 steps completed). A red run prints no number."
             } | tee -a "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
@@ -144,12 +161,11 @@ jobs:
             echo "|---|---|"
             tail -n +2 /tmp/steps.csv | awk -F, '{printf "| %s | %s |\n", $1, $2}'
             echo "| 4 · a grant that holds across a restart | not yet measured (plan X3) |"
-            echo "| 5 · a lost acknowledgement recovered without a second effect | not yet measured (plan X9) |"
             echo "| **total, from the first curl to the last doctor** | **$total** |"
             echo "| the container's own setup (apt), before the clock | $setup |"
             echo
             units=$(( (total + 599) / 600 ))
             mins=$(( units * 10 ))
-            echo "Measured: **$total s** for steps 1, 2, 3 and 6 (one node from the published binary; the refusal is the gateway's scope rule — steps 4 and 5 and the records half of step 3 wait on X3, X4 and X9); printed as **${mins} minutes** (rounded up to the next ten). The claim's bound is 3600 s."
+            echo "Measured: **$total s** for steps 1, 2, 3, 5 and 6 (one node from the published binary; the refusal is the gateway's scope rule; step 5 is \`mycelium test --faults recovery\` over the scaffold's declaration — step 4 and the records half of step 3 wait on X3 and X4); printed as **${mins} minutes** (rounded up to the next ten). The claim's bound is 3600 s."
           } | tee -a "$GITHUB_STEP_SUMMARY"
           [ "$total" -le 3600 ] || { echo "::error::$total s exceeds the hour the claim allows"; exit 1; }

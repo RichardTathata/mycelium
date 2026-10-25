@@ -28,17 +28,21 @@ commit](../guide/00-concepts.md#destination-commit) one rung outward.
 
 This feature is turned on in code.
 
-- `Reconciler` in [`mycelium-effects/src/external.rs`](../../mycelium-effects/src/external.rs): one ledger (a
-  SQLite file, the rung-1 checkpoint), one destination, one egress policy.
+- `Reconciler` in [`src/effects/external.rs`](../../src/effects/external.rs): one ledger (a node-local journal of
+  its own — append-only, fsynced, folded at open — the rung-1 checkpoint), one destination, one egress policy. The
+  contract lives in the substrate since adopter-surface X9, so the published binary can run it
+  (`mycelium test --faults recovery`); `mycelium-effects` re-exports it unchanged.
 - `ExternalEffect` and `EffectClass` in the same file: the effect with its declared class, probe budget and, when
-  composed, its attribution and authority.
+  composed, its attribution and authority. `apply_caused` carries X4's two fields onto the record (a dependent
+  effect names the record it depends on); `leave` is the irreversible class's recovery verb.
 - `ExternalDestination` in the same file: the trait a destination outside the fleet implements — `send` and
   `observe`, the reconciliation probe — with `HttpDestination` in
-  [`mycelium-effects/src/http.rs`](../../mycelium-effects/src/http.rs) and `SqliteDestination` in
+  [`src/effects/http.rs`](../../src/effects/http.rs) and `SqliteDestination` in
   [`mycelium-effects/src/sqlite.rs`](../../mycelium-effects/src/sqlite.rs) as the reference shapes.
-- `CompensationPermit` in [`mycelium-effects/src/external.rs`](../../mycelium-effects/src/external.rs): the
-  evaluator's permit a compensation needs (Cargo feature [`envelope`](../../mycelium-effects/Cargo.toml)); without the
-  feature none can be constructed, and the reconciler refuses by name.
+- `CompensationPermit` in [`src/effects/external.rs`](../../src/effects/external.rs): the evaluator's permit a
+  compensation needs (a `gateway` + `tls` build; the companion's Cargo feature
+  [`envelope`](../../mycelium-effects/Cargo.toml) selects it); without them none can be constructed, and the
+  reconciler refuses by name.
 - `input` in [`mycelium-core/src/sim_seam.rs`](../../mycelium-core/src/sim_seam.rs): the `Input`-class seam the
   apply and the probe go through, so a recording replays without reaching the destination (Cargo feature
   [`sim`](../../mycelium-effects/Cargo.toml), off in every shipped build).
@@ -62,18 +66,21 @@ demonstration is `a_recorded_run_reaches_the_destination_once_and_its_replay_zer
 ## What it guarantees, and what it does not
 
 - **The class is declared before execution and recorded on the prepared record**, which is on disk before the
-  destination is reached (`prepared_record_hash`, `mycelium.effects/prepared/1`). **A found record binds what may be
+  destination is reached (`prepared_record_hash`, `mycelium.effects/prepared/1`; the ledger is the node-local journal,
+  one owner at a time — a second reconciler over an open ledger is refused by name). **A found record binds what may be
   presented under its operation:** other content is a `Conflict`, another class or dedup scope a
   `DeclarationMismatch`, at the apply, the retry and the compensation alike; a record found `Prepared` — a send whose
   answer no one has, after a crash or beside a concurrent applier — is *unknown*, probed and never re-sent.
-- **A lost answer is `DeliveryUnknown` and the record `Unknown`**; a retry without a probe, a second retry, and a
-  retry against a destination not declared idempotent are each refused by name and counted
+- **A lost answer is `DeliveryUnknown` and the record `Unknown`**; a retry without a probe, a second retry (the one
+  retry is claimed under the ledger's lock, so of two retries racing on a record one is refused before anything is
+  sent), and a retry against a destination not declared idempotent are each refused by name and counted
   (`RefusalSnapshot::external`; with the crate's `metrics` feature, `mycelium_effects_refusals_total{kind="external",
   leg=<reason>}`).
 - **A probe answering `Done` settles the record and produces no second effect**; `NotDone` opens one retry under
   the same key, so the destination sees one effect.
 - **An irreversible, unobservable effect is neither probed nor retried**; its record stays `Unknown` and its
-  evidence is kept.
+  evidence is kept — or, by the fleet's decision, it is **left** (`leave`): unresolved, escalated, as a new record
+  naming it; `leave` of a class that can be asked is refused by name (`LeaveOfObservable`).
 - **The probe budget bounds the unknown loop**: a probe is counted before it is made, and the moment the budget is
   spent — by this probe's `Unknown` answer, or found spent before it — the record is `Unresolved` and escalated,
   recorded as `Execution::Unresolved`; nothing further is attempted without a new authorisation. **Not built:** the
@@ -94,7 +101,7 @@ demonstration is `a_recorded_run_reaches_the_destination_once_and_its_replay_zer
   new composition leg — reconciliation is a *state of the record*, not a leg of the composed guarantee.
 - **A recorded run replays without reaching the destination**: the apply and the probe are `Input`-class choices
   (`ChoiceKind::Input`, first production use), written down by a recording kernel and returned by a replaying one. The
-  seam gate does not scan the companion; the inventory's §2.4 row is the record.
+  seam gate scans the substrate, where the seam calls now live; the inventory's §2.4 row is the record.
 - **The evidence record's decision is honest about who decided:** an uncomposed effect's is *indeterminate* (no policy
   saw it), a composed one the destination's own permit (the composition held), a compensation the evaluator's from its
   permit. **The receipt's rung is written where it is true:** a local destination's commit carries
@@ -106,7 +113,8 @@ demonstration is `a_recorded_run_reaches_the_destination_once_and_its_replay_zer
 - **Not built, stated** ([`adopter-surface.md`](../plans/adopter-surface.md) X5): a real provider (the mock stands
   where S3Mock stands for the object store); credential binding on the reference HTTP destination; a probe that is
   itself authorised by the evaluator (the probe is gated by egress and budget, not by policy); the exposure policy that
-  reads the unresolved age (deferred to X9 and §6 of the plan); an operator route over the ledger.
+  reads the unresolved age (§6 of the plan); an operator route over the ledger. **Since X9:** the recovery of a
+  record's closure across a fleet is [selective recovery](selective-recovery.md).
 
 ## Go deeper
 
@@ -116,6 +124,6 @@ demonstration is `a_recorded_run_reaches_the_destination_once_and_its_replay_zer
 - Design: the plan row is the record ([`adopter-surface.md` X5](../plans/adopter-surface.md)); the composed effect's
   record is [`composed-effect.md`](../design/composed-effect.md); the replay seam's inventory is
   [`replay-nondeterminism-inventory.md` §2.4](../design/replay-nondeterminism-inventory.md).
-- Code: [`mycelium-effects/src/external.rs`](../../mycelium-effects/src/external.rs),
-  [`mycelium-effects/src/http.rs`](../../mycelium-effects/src/http.rs), the seam in
-  [`mycelium-core/src/sim_seam.rs`](../../mycelium-core/src/sim_seam.rs).
+- Code: [`src/effects/external.rs`](../../src/effects/external.rs), [`src/effects/http.rs`](../../src/effects/http.rs),
+  the seam in [`mycelium-core/src/sim_seam.rs`](../../mycelium-core/src/sim_seam.rs); the companion's re-exports in
+  [`mycelium-effects/src/lib.rs`](../../mycelium-effects/src/lib.rs).

@@ -308,7 +308,7 @@ the effect is the double-delivery the crate exists to prevent. `cargo run -p myc
 
 Rung 4 assumes a destination that commits its dedup row *with* the effect. A payment provider, a cloud API or a
 ticket system does not — a lost answer there cannot be resolved by a retry that reads the row, because there is
-no row to read. `mycelium-effects`' `Reconciler` (adopter-surface X5; [feature page](../features/side-effects.md))
+no row to read. The `Reconciler` (adopter-surface X5, `mycelium::effects` — `mycelium-effects` re-exports it; [feature page](../features/side-effects.md))
 is the contract for that case, and its first rule is that the destination's **class is declared before the
 effect is sent** and recorded on the prepared record, so what may be done about a lost answer was decided before
 there was one:

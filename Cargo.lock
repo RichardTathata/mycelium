@@ -2582,7 +2582,6 @@ name = "mycelium-effects"
 version = "2.37.0"
 dependencies = [
  "bytes",
- "metrics",
  "mycelium",
  "mycelium-sim",
  "mycelium-tuple-space",

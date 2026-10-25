@@ -256,6 +256,8 @@ pub use agent::causal;
 pub mod declare;
 /// `mycelium test --faults` — the existing proofs against an adopter's declaration (adopter-surface X6).
 pub mod faults;
+/// The effects vocabulary and the side-effect contract (adopter-surface X5; in the substrate since X9).
+pub mod effects;
 /// The adapter contract — what each runtime adapter carries, by property, and the test that shows it
 /// (adopter-surface X7); a unit's `runtime` names a row (X8).
 pub mod adapter_contract;

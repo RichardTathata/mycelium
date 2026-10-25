@@ -299,6 +299,10 @@ jobs:
           grep -q '^partition: passed' partition.log
           grep -q '✓ the governed group `pool` is re-filled by a survivor after its member goes dark — no survivor held a seat at the cut' partition.log
       - run: cargo test --features sim,test-util --test faults_replay
+      # Adopter-surface X9's seamed form: the recovery class's two phases recorded into the corpus and replayed against
+      # a fresh fleet with the destination reached zero times; a fresh recording compared with the corpus choice for
+      # choice (re-record with MYCELIUM_RECORD_CORPUS=1 when a change is intended).
+      - run: cargo test --features sim,test-util,tls --test faults_recovery_replay
       # The claims `what-is-proven.md` rests on these two for: a recording carries its decisions into the
       # bundle and explains (the comparison's recording half), and the traced provisioner makes no extra
       # draw under the replay seams (draw-count equivalence) — hand-run only until doc-coverage run 19.
@@ -686,6 +690,11 @@ jobs:
           grep -q '^partition: passed' faults.log
           grep -q '^replay: not_in_build — sim' faults.log
           grep -q '^policy-diff: not_configured' faults.log
+          # Adopter-surface X9: selective recovery against the scaffold's declaration — the lost acknowledgement
+          # probed before any retry, the closure incomplete then complete, each member recovered by its class.
+          grep -q '^recovery: passed' faults.log
+          grep -q '✓ the restarted node finds its lost-acknowledgement record unknown in its own ledger, probes before any retry, and the destination holds one effect' faults.log
+          grep -q '✓ the destination saw each effect once' faults.log
           grep -q 'activation: not_applicable — 0 command(s) declared, 0 run' faults.log
           grep -q 'exercised:.*persist.unreadable_refused enforced' faults.log
           grep -q 'exercised:.*mesh.signed_writes enforced' faults.log
