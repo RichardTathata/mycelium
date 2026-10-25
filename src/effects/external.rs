@@ -41,7 +41,7 @@
 //! should. **The reconciler decides no policy:** an uncomposed effect's execution record carries an
 //! *indeterminate* decision (no evaluator saw it); a composed one the destination's own permit (the
 //! composition held); a compensation the evaluator's decision from its permit. **The calls block:** `send`,
-//! `observe` and the ledger's SQLite are synchronous inside these `async fn`s, on the caller's executor —
+//! `observe` and the ledger's journal appends are synchronous inside these `async fn`s, on the caller's executor —
 //! a destination with a long wait belongs on a blocking thread of the caller's choosing.
 
 use std::fmt;

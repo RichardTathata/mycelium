@@ -123,7 +123,7 @@ consensus-free node still *forwards* PROPOSE/VOTE/COMMIT) · `tls` · `metrics` 
 `llm` · `otel` (OTEL span export from `SkillRunner`) · `compliance` (= gateway+tls).
 `mycelium-core` builds standalone (≈48 deps vs ≈140). (`fuzz-internals` / `test-util` are
 test-only, and `sim` — the replay seams, `mycelium_core::sim_seam` routed through `mycelium-sim` — is for recording
-and replay, never a shipped build; all three deliberately not listed above.)
+and replay, never a shipped build; with `test-frame-filter` (the frame filter the lock-lifecycle tests drop frames through; CI's lib runs enable it), all four deliberately not listed above.)
 
 ## The published node (adopter-surface X0, 2026-10-23)
 
@@ -337,3 +337,18 @@ restarted over its WAL (ledger and journal re-opened from disk), node 2 dark; th
 Mycelium is a **library, not a platform** — no daemon, no control plane; a cluster is
 emergent from network reachability; fleet observability is the operator's stack aggregating
 per-node `/metrics` ([deployment-framing](../domain/strategy/deployment-framing.md)).
+
+## The documentation and examples pass (adopter-surface X11, 2026-10-25)
+
+The closing row. `tests/first_hour_tutorial.rs` holds tutorial 7 to the `one-hour` workflow: it hand-parses the
+YAML (`- name: "N · …"` then the `run: |` block, lines indented deeper than `run:`), strips the job's bookkeeping
+(`set -euo pipefail`, the skip marker, `t=$(date +%s)`, the CSV `echo`, comments) and compares with the tutorial's
+fences tagged `bash one-hour:N`; a step without a block or a block that drifts fails. Editing a step means editing
+both, which is the point. The front doors: the router keeps its four routes (the gate's structure) and the
+*Build a fleet* line gained the no-toolchain path's targets; the five steps are untouched — they are compared by
+`check-positioning.sh` against `positioning.md` and are the toolchain path by design. The compass gained a row; every
+compass row must link `docs/capabilities.md`. The glossary's multi-term rows carry one `<a id>` per term
+(`check-feature-pages.py` resolves `concept:x` to `id="x"`), and the registry's `ids` make the owning page link each.
+Guide 18 said the reconciler's ledger was SQLite — stale since X9 moved it onto the node-local journal; fixed here. `mycelium explain --closure` resolves its argument with `Corpus::resolve` (`src/closure.rs`) after the corpus loads: a full
+hash as given, or a unique prefix of at least `MIN_HASH_PREFIX` (8) lowercase hex — the 12 characters a `--correlation`
+chain line prints; an unknown or shared prefix is a usage error naming which (doc-coverage run 24, gap 1).

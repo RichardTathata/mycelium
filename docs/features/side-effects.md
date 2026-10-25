@@ -6,9 +6,10 @@
 
 A destination outside the fleet — a payment provider, a cloud API, a ticket system — gives no transaction to commit
 a dedup row in, so a lost answer cannot be resolved by a retry that reads it. The [side-effect
-contract](../guide/00-concepts.md#side-effect-contract) has the destination's class **declared before execution**
-and recorded on the prepared record: idempotent under the key, compensatable by a named effect, or irreversible.
-On a lost answer the record is unknown, a reconciliation probe is required before any retry, at most one retry is
+contract](../guide/00-concepts.md#side-effect-contract) has the destination's [class](../guide/00-concepts.md#effect-class)
+**declared before execution** and recorded on the prepared record: idempotent under the key, compensatable by a
+named effect, or irreversible. On a lost answer the record is unknown, a
+[reconciliation probe](../guide/00-concepts.md#reconciliation-probe) is required before any retry, at most one retry is
 made and only against a destination that declared itself idempotent, and a declared probe budget bounds the
 unknown loop — past it the record is unresolved and escalated. A compensation is a new effect, authorised like any
 other, whose record names the one it compensates. It extends the [destination

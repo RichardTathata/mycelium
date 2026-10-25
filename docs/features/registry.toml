@@ -72,7 +72,7 @@ name = "Doctor"
 page = "doctor.md"
 example = "none"
 example_watch = ["doctor", "readiness_report"]
-ids = ["concept:doctor"]
+ids = ["concept:doctor", "concept:effective-configuration"]
 
 [[feature]]
 name = "Init"
@@ -94,7 +94,7 @@ name = "Causal records"
 page = "causal-records.md"
 example = "none"
 example_watch = ["causal_records", "causal_closure", "correlation_chain"]
-ids = ["concept:causal-records"]
+ids = ["concept:causal-records", "concept:correlation", "concept:parent", "concept:closure"]
 links = ["guarantee:ae.recorded_before_dispatch"]
 
 [[feature]]
@@ -272,7 +272,7 @@ name = "The side-effect contract"
 page = "side-effects.md"
 example = "none"
 example_watch = ["side_effect", "side_effects", "external_effect", "reconciler"]
-ids = ["concept:side-effect-contract", "cargo:mycelium-effects/sim"]
+ids = ["concept:side-effect-contract", "concept:effect-class", "concept:reconciliation-probe", "cargo:mycelium-effects/sim"]
 links = ["concept:destination-commit", "concept:causal-records"]
 
 [[feature]]

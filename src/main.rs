@@ -472,7 +472,7 @@ fn test_cli(args: Vec<String>) -> i32 {
     use mycelium::faults::{self, Class, Options, Refused};
     use mycelium::wire_check::{ArtifactDescription, CheckOptions};
     const USAGE: &str = "Usage: mycelium test --faults [<class>[,<class>…]] <units-dir> [--config <node.toml>] [--against <units-dir>] [--decisions <evidence.log>]… [--library <dir>] [--schemas <dir>] [--seed <n>] [--keep] [--format text|json]\n\
-       classes: revoke · restart · partition · replay (needs a binary built with --features cli,sim) · policy-diff (needs --against) · recovery (needs [persistence]) · grant (needs [tls], [persistence] and a [[rule]] with requires_grant)\n\
+       classes: revoke · restart · partition · replay (needs a binary built with --features cli,sim) · policy-diff (needs --against) · recovery (needs [persistence] and a tls build) · grant (needs [tls], [persistence], a compliance build and a [[rule]] with requires_grant)\n\
        a units directory named like a class is written ./<name>; --config replaces the environment (GOSSIP_*) as -c does; --keep leaves the run's directory in place";
     let (mut faults, mut dir, mut config, mut against, mut library, mut schemas) = (false, None::<String>, None::<PathBuf>, None::<String>, None::<String>, None::<String>);
     let (mut classes, mut format, mut seed, mut keep, mut decisions) = (Vec::<Class>::new(), "text".to_string(), 0x5eed_u64, false, Vec::<PathBuf>::new());
@@ -639,7 +639,7 @@ fn rules_cli(args: Vec<String>) -> i32 {
 fn explain_cli(args: Vec<String>) -> i32 {
     const USAGE: &str = "Usage: mycelium explain <decisions.jsonl> [--catalogue <rule-catalogue.json>] [--target <target>]
        mycelium explain --correlation <id> <evidence.log|decisions.jsonl>…
-       mycelium explain --closure <sha256> <evidence.log|decisions.jsonl>… [--fleet <nodes>]";
+       mycelium explain --closure <sha256 or a unique prefix of 8+> <evidence.log|decisions.jsonl>… [--fleet <nodes>]";
     let (mut file, mut catalogue, mut target): (Option<String>, Option<String>, Option<String>) = (None, None, None);
     let (mut correlation, mut closure, mut fleet): (Option<String>, Option<String>, Option<String>) = (None, None, None);
     let mut files: Vec<String> = Vec::new();
@@ -667,14 +667,16 @@ fn explain_cli(args: Vec<String>) -> i32 {
             Some(Ok(n)) if n > 0 => Some(n),
             Some(_) => { eprintln!("--fleet takes a positive count of nodes"); return 2; }
         };
-        if let Some(h) = &closure && let Err(e) = mycelium::causal::validate_parent(h) {
-            eprintln!("--closure: {}", e.to_string().replace("_meta.parent", "the hash"));
-            return 2;
-        }
         let paths: Vec<std::path::PathBuf> = files.iter().map(std::path::PathBuf::from).collect();
         let corpus = match mycelium::closure::Corpus::load(&paths) {
             Ok(c) => c,
             Err(e) => { eprintln!("{e}"); return 2; }
+        };
+        // A full hash, or the unique prefix `--correlation`'s chain prints (doc-coverage run 24, gap 1).
+        let closure = match closure.map(|h| corpus.resolve(&h)) {
+            Some(Err(e)) => { eprintln!("--closure: {e}"); return 2; }
+            Some(Ok(h)) => Some(h),
+            None => None,
         };
         match (correlation, closure) {
             (Some(id), _) => print!("{}", corpus.chain(&id)),

@@ -17,11 +17,12 @@ release or when you have touched wasm-host / a feature-conditional path.
 `make check` expands to CI's clippy set; the full CI gate (for reference) is:
 
 ```bash
-cargo test --lib --features tls,metrics,a2a,llm
+cargo test --lib --features tls,metrics,a2a,llm,test-frame-filter   # CI's line (ci-retest.sh); test-frame-filter for the lock_lifecycle* tests
+cargo test --lib --features test-frame-filter                       # CI's default-feature lib run
 cargo clippy --lib --tests -- -D warnings                        # DEFAULT features — the middle of the matrix; an item live only under `tls` is dead here (2026-09-04)
 cargo clippy --lib --tests --features tls,metrics,a2a,llm -- -D warnings
 cargo clippy --lib --tests --features compliance -- -D warnings   # in make check since 2026-07-22 — WITHOUT this, compliance-gated code went un-linted locally (the guardrails CI job caught it)
-cargo test --lib --features compliance          # WS1 RBAC + WS2 audit + WS4 OIDC + WS5 rotation
+cargo test --lib --features compliance,a2a      # WS1 RBAC + WS2 audit + WS4 OIDC + WS5 rotation; CI runs it strict (CI_RETEST_STRICT=1)
 cargo test --lib --no-default-features --features gateway   # consensus-free embed
 cargo test -p mycelium-core                                 # the substrate suite (codec/framing/hlc/store/swim) — RUNS as of 2026-07-11
 cargo clippy -p mycelium-core --lib --tests -- -D warnings  # core's own tests are a separate lint scope

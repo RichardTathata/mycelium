@@ -11,6 +11,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The adopter surface's documentation and examples pass** (`docs/plans/adopter-surface.md` X11, the closing row):
+  the front doors route to the new pages — the README's *Build a fleet* line and a new compass row (*Adopt it
+  without a toolchain*), the docs index's Developer route starting at the published node and a scaffold, the capability map's rows
+  naming their feature pages with a new *Start from the published node* row; the glossary anchors every term the plan
+  introduced (`correlation`, `parent`, `closure`, `effect-class`, `reconciliation-probe`, `effective-configuration`),
+  each linked from the feature page that owns it; **tutorial 7, the first hour** (`docs/guide/tutorials/07-the-first-hour.md`)
+  — the `one-hour` job in prose, step for step, its fenced blocks diffed against the workflow's steps by
+  `tests/first_hour_tutorial.rs`; guide 20 gains the grant, guide 18 the effect classes, the probe and selective
+  recovery (and its ledger is a journal, not SQLite), guide 19 the correlation and closure reader; the readiness
+  checklist says per section what `doctor` answers; the SDK READMEs start from the published node and the scaffold.
+  **Stated:** the five steps stay the toolchain path (the no-toolchain path is tutorial 7, routed beside them); the
+  `authority_grant` and `selective_recovery` examples the plan named were delivered as the `grant` and `recovery`
+  fault classes against the scaffolds, not example binaries.
 - **Grants, the fourth PR — the `grant` fault class and the one-hour job's step 4** (`docs/plans/adopter-surface.md`
   X3; `docs/features/grants.md`, `docs/features/test-faults.md`): `mycelium test --faults grant` drives a declaration's
   first `[[rule]]` with **`requires_grant = true`** on its own fleet — the tool's agent node with an evaluator built

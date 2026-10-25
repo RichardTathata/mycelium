@@ -260,7 +260,7 @@ async fn an_issued_grant_lets_the_call_run_and_binds_it_to_its_arguments() {
 /// holding `grant:issue` is refused by policy (403, `authority_not_established`: no allowance names them) for issuing
 /// and for refusing, and nothing is written; a refusal by the supervisor reaches the agent as `GrantRefused` with the
 /// reason; the raw KV route refuses a write under `grant/` (403 `protected_key`); an agent on another node is
-/// refused `not_this_node` until the second PR carries grants across nodes.
+/// refused `not_this_node` until the second PR carried grants across nodes (now `not_a_member`, for a non-member only).
 #[tokio::test]
 async fn issuing_is_an_action_the_evaluator_decides_and_the_namespace_is_route_owned() {
     let http_port = alloc_port();

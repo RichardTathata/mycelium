@@ -10,8 +10,18 @@ Choose and pin your node and SDK together using [installation and integration mo
 
 ## Installation
 
+No toolchain is needed for the node: it is a [published release](../docs/guide/installation.md#the-published-node).
+The scaffolds `mycelium init` writes are Rust and Python today ([the first hour](../docs/guide/tutorials/07-the-first-hour.md)
+walks the Python one); a TypeScript agent starts from the Python scaffold's `node.toml` and this SDK:
+
 ```sh
-# From a checkout of the chosen release:
+mycelium init my-fleet --template governed-call-py      # node.toml with a named-token table, and a unit to declare
+mycelium -c my-fleet/node.toml &                         # the published node
+```
+
+The SDK, from a checkout of the chosen release (also the fallback for developing it):
+
+```sh
 cd mycelium-ts
 npm install
 npm run build
@@ -465,10 +475,10 @@ protected kind — is thrown, never reported as `"timeout"`.
 
 `grantsPending()` reads `GET /gateway/grants/pending` (`grant:read`) and `grantDecide(agent, request, "issue" |
 "refuse", { ttlSecs, reason })` posts the answer to `POST /gateway/grants/{agent}/{request}` (`grant:issue`);
-issuing is itself an action the node's evaluator decides, so a refusal is the route's 403, and 409 `not_this_node`
-names an agent on another node. A grant a caller holds already rides as a presented mandate in `_meta.mandate`. `grantRevoke(agent, request, {
+issuing is itself an action the node's evaluator decides, so a refusal is the route's 403, and 409 `not_a_member`
+names an agent on no member node this gateway knows. A grant is presented by its holder, the agent's node — not by this client. `grantRevoke(agent, request, {
 reason })` revokes at the issuing node, and `grantsStream()` is the requests as they come (an async generator of
-`grant_request` and `grant_answered` events).
+`grant_request`, `grant_answered` and `grant_expired` events).
 `A2aClient.getTask(id)` and `cancel(id)` are `tasks/get` and `tasks/cancel`: the task as the node holds it, readable
 and cancellable by the identity that created it; a cancel ends the task's record and stops no work — a task runs
 inside its request — and a terminal task throws (adopter-surface X7, the adapter contract).
@@ -692,8 +702,8 @@ The SDK is a client of one gateway; it carries what the doors it calls carry, an
 - **No cancellation of running work.** `A2aClient.cancel` reaches `tasks/cancel`, which ends a task's record and
   stops nothing (a task runs inside its request); `tools/call` has no cancel; ending an `sseStream` generator closes
   the client's side only, and a dropped stream is not resumed.
-- **No pending-grants stream.** A grant rides as a presented mandate, and `grantsPending` / `grantDecide` are the
-  supervisor's verbs; a supervisor polls, nothing pushes (adopter-surface X3's second PR).
+- **Presenting a grant.** A grant's holder is the agent's node, so this SDK's client — a bearer, not the node — cannot
+  present one: the supervisor's verbs are carried, the presenting side is the node's own (adopter-surface X3).
 - **Identity is the bearer's.** The principal the gateway resolves is the token's; this SDK signs nothing.
 - **A receipt names the gateway node's rung and nothing above it** — never replication, never a peer's state.
 - **64-bit values are exact and the shapes match the gateway's** (0.2.0); what the gateway does not return — a

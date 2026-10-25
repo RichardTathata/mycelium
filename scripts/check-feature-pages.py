@@ -129,7 +129,9 @@ def table_cells(line):
 
 
 def concept_ids(root, errors):
-    """Each quick-reference row's `<a id>`; a row without one is an error (a term no registry entry can name)."""
+    """Each quick-reference row's `<a id>`s — a row that defines several terms carries one anchor per term, so each
+    is a concept a registry entry can name (adopter-surface X11: `causal-records` · `correlation` · `parent` ·
+    `closure` on one row); a row without any is an error (a term no registry entry can name)."""
     text = read(root, GLOSSARY)
     m = re.search(r'^## Glossary quick-reference\n(.*?)(?=^## |\Z)', text, re.M | re.S)
     if not m:
@@ -144,9 +146,9 @@ def concept_ids(root, errors):
             continue  # the table's header
         if is_group_header(cells):
             continue
-        a = re.match(r'<a id="([^"]+)"></a>', cells[0])
-        if a:
-            out.add(f'concept:{a.group(1)}')
+        anchors = re.findall(r'<a id="([^"]+)"></a>', cells[0])
+        if anchors:
+            out.update(f'concept:{a}' for a in anchors)
         else:
             errors.append(f'{GLOSSARY}: the glossary row "{cells[0][:50]}" has no <a id>: anchor it, then map it in {REGISTRY}')
     return out

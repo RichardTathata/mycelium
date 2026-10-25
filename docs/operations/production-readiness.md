@@ -23,10 +23,15 @@ this page is the index + the gate.
 > **Then `mycelium test --faults <units-dir> --config <config.toml>`** ([diagnostics § Before the fleet carries
 > anything](diagnostics.md#before-the-fleet-carries-anything-mycelium-test---faults)): a fleet built from your
 > declaration and configuration, in process, under the faults the substrate claims to handle — a revoked key, a
-> restart, a node gone dark, a recorded run replayed, a widened policy — each guarantee and rule id reported with its
+> restart, a node gone dark, a recorded run replayed, a widened policy, a lost acknowledgement, a grant across a
+> restart — each guarantee and rule id reported with its
 > resolution on that fleet, and the classes this build or configuration cannot run named as such.
 
 ## 1 · Identity & transport security
+
+> `mycelium doctor` answers for this section: `mesh.tls`, `mesh.signed_writes`, `id.proofs_required`,
+> `id.ca_key_off_node`, `id.revocation_authority` — each `enforced` or the setting or feature it lacks. Rotation
+> rehearsed and what proofs do not give you stay yours.
 
 - ☐ **mTLS on** — build with `--features tls`; every node has an Ed25519 identity and peer connections
   are mutually authenticated. Without it the mesh is unauthenticated (fine for a trusted LAN, **not**
@@ -49,6 +54,12 @@ this page is the index + the gate.
   what close that. → [cert-rotation.md](cert-rotation.md)
 
 ## 2 · Authorization & the gateway edge
+
+> `mycelium doctor` answers for this section: `gw.not_open`, `gw.exposed_closed`, `gw.token_tables`, `gw.oidc`,
+> `gw.tls`, `gw.caller_profile`, `ae.authorised_at_seam`, `ae.recorded_before_dispatch`, `prov.enforcement`,
+> `a2a.admission`, `authz.execution_authority`, `authz.durable_epochs`, `egress.allow_list`, `egress.credentials`,
+> `cons.safety_profile`; an evaluator or an authority attached in code is outside its view and reads `not_configured`
+> until the node starts.
 
 - ☐ **Read the node's guarantee report first.** Every item in this section that is a *node setting* is
   one line of `GET /gateway/guarantees` (scope `fleet:read`), and of the block the node logs at start:
@@ -167,6 +178,11 @@ this page is the index + the gate.
 
 ## 3 · Persistence & restart
 
+> `mycelium doctor` answers for this section: `persist.configured`, `persist.sync_mode`, `persist.unreadable_refused`
+> (and `at_rest.cipher`, whose item is §2's data-at-rest line: it is attached in code, `with_data_at_rest_cipher`, so
+> over the `mycelium` binary it reads `not_configured`); `mycelium test --faults restart` replays your fleet's own WAL and refuses planted unreadable state,
+> and `--faults grant` shows a grant issued before a restart verifying after it.
+
 - ☐ **One agent per persistence directory, one owner per journal** — each node writes under its own
   `{base_path}/{node_id}`, and each node-local journal (`DurableEpochs`, the evidence journal, the rights
   ledger) has its own path. A second owner is refused at start or open by name (2.23.0); a node that
@@ -222,6 +238,9 @@ this page is the index + the gate.
   have decided what "overloaded" means for your kinds.
 
 ## 5 · Observability & diagnosis
+
+> `mycelium doctor` answers for this section: `audit.chain`, `audit.sink`; `net.confinement` and `clock.sync` it
+> lists as `not_verifiable_here` — the network and the clock are yours to evidence.
 
 - ☐ **Metrics scraped** — `--features metrics`, Prometheus at `/metrics`, the Grafana dashboard
   imported. → [observability.md](observability.md)

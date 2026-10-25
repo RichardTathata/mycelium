@@ -6,9 +6,10 @@ Start with `hello_mesh` and `hello_capability` in the guide's five-step path.
 Then use this sequence to learn the newer surfaces one question at a time.
 Keep [concepts and vocabulary](../00-concepts.md) and the
 [unit-file reference](../../reference/unit-file.md) beside you as references.
-Commands run from the repository root with the pinned Rust toolchain. The first
-build of the WASM host is substantial; subsequent runs reuse it. No model or API
-key is needed for these tutorials. Only tutorial 2's stem comparison needs Docker.
+Commands run from the repository root with the pinned Rust toolchain, except tutorial 7's, which
+need no toolchain at all — it starts from a published release. The first build of the WASM host is
+substantial; subsequent runs reuse it. No model or API key is needed for these tutorials. Only
+tutorial 2's stem comparison needs Docker.
 
 | Step | Question | Runnable evidence |
 |---|---|---|
@@ -18,6 +19,7 @@ key is needed for these tutorials. Only tutorial 2's stem comparison needs Docke
 | [4 · Authority at every boundary](04-authority-boundaries.md) | Does a gateway permit authorise the final effect? | Provider admission, revocation, destination refusal |
 | [5 · Replay a bundle](05-replay-a-decision.md) | What must be recorded for reproduction? | A replay bundle and a controlled divergence (the decision trace and `mycelium explain` are guide 19 § reading what a node decided) |
 | [6 · Declared versus observed](06-declared-versus-observed.md) | Does a live snapshot match the design? | Schema validation, explicit identity mapping, missing providers |
+| [7 · The first hour](07-the-first-hour.md) | How far does a machine with no toolchain get in an hour? | The published node, a Python scaffold, a refused call, a grant across a restart, a lost acknowledgement recovered, `doctor` — the `one-hour` job's own commands, diffed by a test |
 
 **Keep four distinctions visible.** Bootstrap addresses introduce peers; discovery
 finds providers. A declaration expresses intent; observation reports a node's view.

@@ -60,6 +60,10 @@ attaching; and unreadable persisted state, which only opening the directory find
 access check) — and never created.
 Feature page: [`docs/features/doctor.md`](../features/doctor.md).
 
+`doctor` reads the file and then the `GOSSIP_*` environment, as the node does; it takes none of the node's start
+flags (`-p`, `--host`, `--peers`), so a node started with them runs a configuration that differs from the one
+`doctor` printed by those fields.
+
 ## Before the fleet carries anything: `mycelium test --faults`
 
 `mycelium test --faults [<class>,…] <units-dir> [--config <node.toml>] [--against <units-dir>] [--format text|json]`
@@ -74,6 +78,8 @@ adopter-surface X6):
 | `partition` | the node offering something — a member of a governed group where there is one — has its runtime dropped (no departure, sockets closed); later it comes back under the same identity | evicted from every survivor's membership; its offers gone after 3 × `ttl_secs`; each declared `[[group]]`, governed to a band of one, re-filled by an eligible survivor (a survivor's own join decision after the cut); back, a peer again with its offers resolving |
 | `replay` | each unit's node, alone, recorded under the kernel then replayed with the clock paused (the schedule between nodes is outside the seams, inventory §3.1.1) | the recording consumed to its end, the decisions identical; else the first divergence, where the seam raised it. **The `sim` build only** (`cargo build --bin mycelium --features cli,sim`); any other reads `not_in_build` naming `sim` |
 | `policy-diff` | the declaration's call set decided under its `[[rule]]`s and recorded under one correlation id; each record re-decided under `--against`'s `[[rule]]`s; records from `--decisions` journals re-decided from what they carry | no call the declared revision refused is permitted by the proposed one; a record a proposed rule reads values for, which no evidence record carries, is *unattributable* |
+| `recovery` | three nodes, each with a reconciler, an evidence journal and the evaluator, send to one mock destination in the process that loses an answer; the node that lost it is restarted over its WAL, and a second node goes dark | the record is found `unknown`; a retry without a probe is refused; the probe finds it done and the destination holds one effect; the closure says INCOMPLETE while a journal is withheld, then holds every dependent and no independent; each member is recovered by its class as a new record. Needs `[persistence]` and a `gateway` + `tls` build ([selective recovery](../features/selective-recovery.md)) |
+| `grant` | the declaration's first `[[rule]]` with `requires_grant = true`, driven on the agent's node with an evaluator built from the declared rules; the node stopped before it reads an answer and restarted over its WAL | a plain transition and silence refuse; a principal no rule names is refused the issue; the declared issuer's grant admits the call once; after the restart the request and the grant replay and the agent does not ask twice. Needs `[tls]`, `[persistence]`, a `compliance` build and a rule admitting someone to `grant.issue`, else `not_applicable` naming which ([grants](../features/grants.md)) |
 
 Every class lists the guarantee and rule ids it exercised, each with its resolution on the fleet's node, and the
 ones it could not exercise and why, in the guarantee report's words (`enforced`, `not_configured`, `not_in_build`,
@@ -91,7 +97,7 @@ attachments the fleet has not, and `mycelium doctor` is what checks a profile. `
 (`GOSSIP_*`), as `-c` does. `--keep` leaves the run's directory (its journals and persistence) in place and the
 report names it; `--decisions <evidence.log>` hands `policy-diff` records written elsewhere. **It runs no
 activation**: a `[[activation]]` is counted and reported `not_applicable`. An attachment made in code is not in its view, as it is not
-in `doctor`'s. The scaffold's own configuration has no `[persistence]`, so `restart` reads `not_configured` against it
+in `doctor`'s. The scaffold's own configuration has no `[persistence]`, so `restart`, `recovery` and `grant` read `not_configured` against it (and `grant` without `[tls]` too)
 until one is added; CI runs the classes against the scaffold with one.
 Feature page: [`docs/features/test-faults.md`](../features/test-faults.md).
 
@@ -460,6 +466,25 @@ mycelium rules [--format md|json]     # the decision points *this binary* regist
 A bundle **without** `decisions.jsonl` means the trace was unavailable, never that nothing was decided.
 Records the sink dropped are counted in `decisions.stats.json`, not shown.
 
+### Reading one run across nodes: `--correlation` and `--closure`
+
+A request that carries the [causal fields](../features/causal-records.md) — `correlation` and `parent` under
+`params._meta` — leaves them on every record its work produces, at every node. Two reads put the pieces back together
+from the evidence journals and decision traces you collect from the nodes:
+
+```bash
+mycelium explain --correlation <id> node-a/evidence.log node-b/evidence.log node-b/decisions.jsonl
+mycelium explain --closure <64-hex hash> node-a/evidence.log node-b/evidence.log
+```
+
+The flag comes first and the files after it: a file given first is read as the single-trace form above, and the call
+is a usage error (exit 2). `--correlation` renders one run as one chain; `--closure` renders the dependency closure of
+one record — every record that names it as its parent, or names one that does — marking each line captured,
+reconstructed or unattributable, naming every hole, and saying first when it was given fewer journals than the fleet
+has nodes. `--closure` takes a record's full 64-character hash (its `journal_sha256`) or any prefix of at least 8 characters
+that exactly one record in the files has — so the 12 characters `--correlation`'s chain prints can be pasted in; a
+prefix no record has, or more than one shares, is refused by name.
+
 ## See it: the induce-and-diagnose demo
 
 `cargo run -p mycelium-coop-examples --bin diagnostics` stands up a two-depot mesh, induces a
@@ -530,7 +555,7 @@ A rising
 `mycelium_electorate_records_refused_total` means an electorate record arrived that did not come through consensus —
 a forgery, or a write by hand.
 
-**The acceptor's memory guard** (`GET /gateway/stats` → `electorate_persistence_refused`,
+**The acceptor's memory guard** (`GET /stats` → `electorate_persistence_refused`,
 `acceptor_memory_empty_for_electorate`, `acceptor_promises_forgotten`; `mycelium_acceptor_guard_total{event}`). A
 non-zero `acceptor_memory_empty_for_electorate` means this node is a member of a decided electorate and holds no
 acceptor record for its genesis — it is running over an **empty or older** store than the fleet's record of it: stop

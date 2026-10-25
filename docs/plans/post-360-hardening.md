@@ -1892,7 +1892,7 @@ suite's in `ae_contract.rs`.
   caller — the warning only; without `[tls]` a non-peer was ignored — `Indeterminate`; the unsigned-entry forgery
   residual — stated. Round 6: clear; merged after the rebase onto #644 (the tally lock renumbered to lock-order row 67).
 - *a fleet limit is bounded (after the release, from the review of the private Cedar adapter: a denial of service by
-  misconfiguration)* — **delivered on `main`, unreleased (`deprecations.md` §55).** `seats_state` read every seat, a slot
+  misconfiguration)* — **delivered in 2.37.0 (`deprecations.md` §55).** `seats_state` read every seat, a slot
   digest and a KV read each, on every request a rule covered, under the actor's history gate on an async worker, so a
   limit of `u32::MAX` pinned a worker for minutes; a fleet window had no horizon. Entry points enumerated (`git grep -n
   "FleetCounter::new\|fleet_counters(\|\.scoped(\|AllowAtMostAcross\|fleet_history::" -- src`): `Rule::at_most` /

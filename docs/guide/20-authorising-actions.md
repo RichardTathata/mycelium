@@ -126,6 +126,17 @@ and binds the result into the envelope, so `Rule::requiring_mandate` reads *esta
 also **travels to the provider**, carried not verified, so the provider can decide again where the
 work runs — chapter [21](21-mandates.md) § *Presenting and enforcing a mandate*.
 
+**The grant: approval that is default-deny.** Beside the veto mode (`require_approval_for`, a window in which a
+supervisor may say no, and silence proceeds) the agent policy has a grant mode (`require_grant_for`, adopter-surface
+X3): for a tool it names, the `Invoking` transition **waits for a grant and is refused on silence** — a
+[grant](00-concepts.md#grant) is a scoped mandate a supervisor issues for one call, bound to the tool, a digest of the
+arguments, the agent's identity and the deployed policy revision, with an expiry, and verified where the action is
+enforced: at the agent's state machine, at the gateway's preflight and again at a provider with
+`with_provider_enforcement()`. Issuing is itself an action the evaluator decides (`grant.issue` with the issuer as the
+actor), so holding the route's scope is not being an approver. A declaration says which tool waits with
+`requires_grant = true` on a `[[rule]]`, and `mycelium test --faults grant` drives it on the declaration's own fleet —
+the [grants feature page](../features/grants.md) has the doors, the exits and what is stated rather than built.
+
 ---
 
 ## Wiring it up

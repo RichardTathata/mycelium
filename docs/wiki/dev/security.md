@@ -689,7 +689,10 @@ substrate prevents (the guest is foreign code in the node's process — `myceliu
   `mycelium-wasm-host/src/confine.rs`, rule `host.emit_admission`. Why: a self-originated request reaches
   `rpc_rx` unframed and is treated as a plain member call (no mandate, no evaluator), so an unconfined emit
   of `mcp.invoke` walked past every door that checks authority for it. The protected-kind predicate is one
-  ungated function every door asks (`src/agent/mod.rs`); a new door must ask it too.
+  ungated function (`is_protected_kind`, `src/agent/mod.rs`) and every gateway door asks it through
+  `refuse_protected_kind`; a new door must ask it too. Two places do not: the wasm host's emit door (`confine_kind`)
+  re-implements the same disjunction over a list `with_protected_kinds` copies in — equivalent, a second copy to keep in
+  step — and `refuse_unservable_kind` (`src/agent/http/authz.rs`) checks the built-in kinds only, deliberately.
 - **A `[hosts]` table names its provenance policy.** Empty `trusted_publishers` is refused at load
   (`NodeCapabilityConfig::validate`) unless `accept_unsigned = true` says otherwise on purpose — the 2.18.1
   rule: a setting a node cannot be seen to mean is refused, not run silently. The provisioner's own

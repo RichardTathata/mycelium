@@ -31,6 +31,22 @@ window counters stay at zero; `kv_untagged_signatures_refused` is new; `mesh.sig
 residual is restated, not closed (a signed `SyncEntry` is a wire change). Upgrade note `deprecations.md` §40: upgrade
 from 2.33.x, not 2.32. Record: [`.log/2026-10-13-f2-refusal-unconditional.md`](.log/2026-10-13-f2-refusal-unconditional.md).
 
+## The adopter surface's second track — 2026-10-23 → 25 (on `main`, unreleased)
+
+After v2.37.0, the plan's remaining rows, each through an independent adversarial review and each review's findings
+fixed with a test seen failing first or answered in the thread: **#670** the `one-hour` job (the claim measured on the
+published release — v2.37.0: steps 1, 2, 3, 6 in 9 s); **#671/#672 X4** causal records — `correlation` and `parent`
+through every record, the door registry (`scripts/causal-doors.txt`), `mycelium explain --correlation/--closure`;
+**#673/#678/#679/#680 X3** grants in four PRs — default-deny approval as a scoped mandate verified at the state machine,
+the gateway and the provider; single use at each door, revocation with its drain bound, grants across nodes, the restart
+re-wait; the SSE stream, A2A `input-required` (the 1.0 name `TASK_STATE_INPUT_REQUIRED` found by review), the rendering
+under the data-class policy; the `grant` fault class and the one-hour job's step 4; **#674 X5** the external
+side-effect contract; **#675 X6** `mycelium test --faults` (found and fixed: a dark governed member held the floor —
+`membership.governed` rev 2); **#676 X7+X8** the adapter contract and a unit's `runtime`; **#677 X9** selective
+recovery as the `recovery` class, the contract moved into `mycelium::effects` with its ledger on the node-local
+journal; and **X11**, the documentation pass (tutorial 7, the first hour, diffed against the job by
+`tests/first_hour_tutorial.rs`). Wire **v12** unchanged. Records: the `.log/2026-10-2[3-5]-*.md` entries.
+
 ## v2.37.0 release — 2026-10-23 (tag `v2.37.0`) — the adopter surface's first track
 
 A **MINOR** cut on `release/v2.37.0`, tagged on the maintainer's word. The plan `docs/plans/adopter-surface.md`

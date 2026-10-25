@@ -9,7 +9,7 @@ For teams running fleets of AI agents: generic nodes find and install the capabi
 ## What do you want to do?
 
 <!-- router:start -->
-- **Build a fleet** → the [developer guide](docs/guide/README.md) and its [tutorials](docs/guide/tutorials/README.md), starting with the [five steps below](#build-a-fleet--five-steps).
+- **Build a fleet** → the [developer guide](docs/guide/README.md) and its [tutorials](docs/guide/tutorials/README.md), starting with the [five steps below](#build-a-fleet--five-steps); with no toolchain, [the first hour](docs/guide/tutorials/07-the-first-hour.md) — the [published node](docs/features/published-node.md), a [scaffold in your language](docs/features/init.md), a refused call and a [readiness report](docs/features/doctor.md) (in 2.37.0), a grant and a lost acknowledgement recovered (on `main`, the next release).
 - **Run a fleet** → the [operator journey](docs/operations/README.md#operator-journey): deploy, then the [production-readiness checklist](docs/operations/production-readiness.md), then [observability](docs/operations/observability.md).
 - **See it work** → [four examples](examples/README.md#what-do-you-want-to-see): the mesh ([`conway`](docs/guide/01-gossip-kv.md#the-example)) · self-provisioning ([`provisioning_viz`](examples/coop/README.md#browser-showcases)) · governed action ([`procurement_authority`](examples/coop/README.md#13--procurement_authority--the-governed-autonomy-flagship)) · operational insight ([`diagnostics`](examples/coop/README.md#12--diagnostics)).
 - **Check the evidence** → [`what-is-proven.md`](docs/operations/what-is-proven.md): what CI proves on every merge, what is demonstrated with its bound stated, and what is not yet shown.
@@ -25,6 +25,7 @@ For teams running fleets of AI agents: generic nodes find and install the capabi
 | [Adaptive capabilities](docs/capabilities.md) | [Stem hosts](docs/guide/00-concepts.md#fleet-growth) install signed components from a catalogue when demand goes unmet and restore the presence floors they declared. | [first stem fleet](docs/guide/tutorials/01-first-stem-fleet.md) |
 | [Authority](docs/capabilities.md) | Where an enforcement point is configured, mandates and an evaluator decide before work runs; with an evidence journal attached, the decision is recorded. | [guide 20](docs/guide/20-authorising-actions.md) · [21](docs/guide/21-mandates.md) |
 | [Federation](docs/capabilities.md) | Separately admitted meshes exchange explicitly exported services without merging, and trust does not pass through a partner. | [guide 17](docs/guide/17-federation.md) |
+| [Adopt it without a toolchain](docs/capabilities.md) | A published node needs no toolchain; `mycelium init` scaffolds a governed project in Rust or Python; `doctor` says what a node's configuration enforces before it starts; `declare` keeps a declaration current (all in 2.37.0); `test --faults` runs seven fault classes on an in-process fleet built from your declaration (on `main`, the next release). | [the first hour](docs/guide/tutorials/07-the-first-hour.md) · [published node](docs/features/published-node.md) · [init](docs/features/init.md) · [doctor](docs/features/doctor.md) · [test --faults](docs/features/test-faults.md) · [declare](docs/features/declare.md) |
 | [Replay and knowledge](docs/capabilities.md) | Receipts name how far a write got, a recorded run replays against its captured inputs, and knowledge keeps its provenance and disagreements. | [guide 18](docs/guide/18-contracts-and-receipts.md) · [19](docs/guide/19-replay-and-simulation.md) · [23](docs/guide/23-knowledge.md) |
 <!-- compass:end -->
 
@@ -40,8 +41,9 @@ Every row has a runnable starting point and its limits in the [capability map](d
 5. **[`what-is-proven.md`](docs/operations/what-is-proven.md)** — what CI proves on every merge, what is demonstrated with its bound stated, and what is not yet shown.
 <!-- path:end -->
 
-**Learn the newer surfaces:** [six developer tutorials](docs/guide/tutorials/README.md) — stem fleets,
-declarations, shadow acceptance, authority boundaries, replay, and declared versus observed.
+**Learn the newer surfaces:** [seven developer tutorials](docs/guide/tutorials/README.md) — stem fleets,
+declarations, shadow acceptance, authority boundaries, replay, declared versus observed, and the first hour from
+the published node.
 
 ## Is it for you?
 

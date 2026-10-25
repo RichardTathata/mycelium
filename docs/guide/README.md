@@ -35,8 +35,8 @@ The canonical developer path: the same five steps are the root README's
 5. **[`what-is-proven.md`](../operations/what-is-proven.md)** — what CI proves on every merge, what is demonstrated with its bound stated, and what is not yet shown.
 <!-- path:end -->
 
-**Learn the newer surfaces:** [six developer tutorials](tutorials/README.md) — stem fleets,
-declarations, shadow acceptance, authority boundaries, replay, and declared versus observed.
+**Learn the newer surfaces:** [seven developer tutorials](tutorials/README.md) — stem fleets,
+declarations, shadow acceptance, authority boundaries, replay, and declared versus observed, and the first hour from the published node.
 
 ## Design philosophy
 

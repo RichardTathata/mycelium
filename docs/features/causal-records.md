@@ -3,13 +3,13 @@
 ## What it is
 
 Two fields a request carries into every record its work produces, and that no record mints — the
-[causal fields](../guide/00-concepts.md#causal-records): `correlation`, one key segment that groups the records of one
-run, and `parent`, the content hash of the record this work depends on, the same hash an evidence record's
-`journal_sha256` cites. A caller puts both under `params._meta`, beside `operation_id` and `mandate` — inside the
+[causal fields](../guide/00-concepts.md#causal-records): [`correlation`](../guide/00-concepts.md#correlation), one key
+segment that groups the records of one run, and [`parent`](../guide/00-concepts.md#parent), the content hash of the
+record this work depends on, the same hash an evidence record's `journal_sha256` cites. A caller puts both under `params._meta`, beside `operation_id` and `mandate` — inside the
 application payload, which the caller envelope's signature digests — and the gateway's door, the provider's check and
 every execution record carry them as given. `mycelium explain --correlation <id> <files…>` renders one run's records
 as one chain across evidence journals and decision traces; `mycelium explain --closure <hash> <files…>` renders the
-dependency closure of one record, marking each line captured, reconstructed or unattributable, naming every hole and
+[dependency closure](../guide/00-concepts.md#closure) of one record, marking each line captured, reconstructed or unattributable, naming every hole and
 stopping at a federation edge.
 
 ## When to use it, and when not

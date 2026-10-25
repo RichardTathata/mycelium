@@ -419,7 +419,7 @@ export class MyceliumAgent {
    * `POST /gateway/grants/{agent}/{request}` (`grant:issue`): answer a pending request. `decision` is `"issue"` or
    * `"refuse"`; `ttlSecs` bounds an issued grant (default 300, at most 3 600); `reason` is shown to the agent on a
    * refusal. Issuing is itself an action the node's evaluator decides (D22), so a supervisor the policy does not
-   * permit is answered 403; 409 `not_this_node` for an agent on another node, 409 `already_answered`, 410 `expired`
+   * permit is answered 403; 409 `not_a_member` for an agent on no member node, 409 `already_answered`, 410 `expired`
    * and 404 `unknown_request` surface as thrown errors. Returns the route's answer: the record's `key`, the write's
    * `operation_id` and `local_durability`.
    */

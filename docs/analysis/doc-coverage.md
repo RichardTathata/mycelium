@@ -19,6 +19,33 @@ concern). WHY is usually shared Dev+Ops.
 
 ## Changelog
 
+- **2026-10-25 (run 24)** — diff-gated over the adopter surface (#664–#680, v2.37.0 and after, `git log 2026-10-10..`),
+  run inside X11's documentation pass on `feat/x11-docs-pass`. Eleven new concepts, three auditors (toolchain-free
+  surface · authority and records · effects, faults and the first hour), each opening the docs and checking every
+  instruction against the code. **Floor before: one ✗/✗ pair** (selective recovery had no Ops landing at all) and
+  **three Missing** (grants · HOW·Ops, the adapter contract · WHAT·Ops, selective recovery · HOW·Ops). **After: 0 ✗**;
+  the remaining `~` are stated below. Moves, all fixed in this branch:
+  - **Grants · HOW·Ops** (Missing → ✓): `rbac.md` § 2a *Answering grants — the supervisor's runbook* (build, who may
+    answer, the routes and their refusals, revoking at the issuer, the 120 s A2A bound, `grant/` never reclaimed).
+  - **The adapter contract overclaimed grants** at the `/mcp` door and in both SDKs (a bearer client cannot hold a grant;
+    the cited test was a member's direct call): the cells corrected, the page regenerated. Both SDK READMEs named a 409
+    code the route never returns (`not_this_node`) and said there was no stream; fixed, with the SDK test stubs.
+  - **Causal records · WHAT/HOW·Ops** (~ → ✓): `diagnostics.md` § *Reading one run across nodes* — the flag before the
+    files, and that `--closure` takes the prefix `--correlation`'s chain prints (code gap 1, fixed here).
+  - **Fault classes · WHAT·Ops** and **selective recovery · HOW·Ops** (Missing → ✓): `diagnostics.md`'s class table
+    gains `recovery` and `grant`; `production-readiness.md`'s *Then* line names both.
+  - **The published node · HOW·Ops** (calibration-class): `deployment.md` and the image's Dockerfile said a file's
+    `bind_address` wins over the image's `GOSSIP_BIND_ADDRESS`; `load_from_file` applies the environment **after** the
+    file, so inside the image the gossip listener binds every address whatever the file says. Corrected; the run command's
+    image tag `2.36.1` (never published — v2.37.0 is the first image) replaced by the pinned tag.
+  - **The first hour · HOW·Dev**: tutorial 7's `TAG=v2.38.0` named an unpublished tag and "every release" overstated what
+    the job has measured; the tag, the cadence, other platforms, a non-root install, PEP 668 and `libssl3` are stated.
+  - **`declare` · HOW·Dev** (~ → ✓): guide 05 § *Skills as files, kept current*; the unit-file reference names
+    `mycelium declare` as a reader; the feature page lists its flags and the refused `--poll-ms`.
+  - **Side-effect contract · HOW·Dev** (~ → ~, pointed): guide 18 names the end-to-end test as the shortest use, and its
+    torn-tail sentence now matches the journal (truncated at open; an undecodable frame refuses).
+  - **Standing `~`, stated:** the side-effect contract and selective recovery have no runnable example (the feature
+    pages say so); grants' HOW·Dev has no code sketch of `transition_invoking` → `rpc_call_with_mandate` outside the tests.
 - **2026-10-10 (run 23)** — diff-gated over **#579–#581** (`git log 953b4e9d..a1c545f5`: run 22's three code gaps
   closed — a stem that stops on SIGTERM, consensus timeouts labelled by who answered, the checkpointer's `refused`;
   `mycelium::shutdown::ShutdownSignal` with a second-signal exit in the node binary, the stem and the demo images;
@@ -691,6 +718,17 @@ closed it.
 | A2A interop — the agent card and `tasks/send` (#550) — new, run 21 | ✓ guide 08 § Concept; `00-concepts` | ✓ ᴿ²¹ (guide 08 § How it works; `00-concepts`, cookbook, `skillrunner.html`: the card lists what `/a2a` can call — not plumbing, not prompt skills) | ✓ ᴿ²¹ (guide 08's snippets were not JSON-RPC (`-32601`) and read `input_schema`; now `A2aClient` + the wire shape; guide 10's card is a dict) | ✓ `rbac.md` (public surface), `production-readiness.md` | ✓ ᴿ²¹ (the negative probe names a skill on the card; `confined-fleet.md`: prompt skills under `llm:invoke`) |
 | Presence ceiling and the ranked shed (`max_providers`, `prov-shed`, `election::rank`, `prov.shed` rev 2, #547) — new, run 21 | ✓ ᴿ²¹ (`capability-lifecycle.md` § Presence ceilings: why the draw was replaced) | ✓ `reference/unit-file.md` § `[[presence]]`; `rule-catalogue.md` rev 2 | ✓ ᴿ²² (`first_stem_fleet` — CI-run — declares a band of exactly two over three self-electing stems; the tutorial, `[[presence]]` and § Presence ceilings now say so) | ✓ ᴿ²¹ (`capability-lifecycle.md` § Presence ceilings — was ✗) | ✓ ᴿ²¹ (the bound, the rolling-upgrade dip, overlapping bands, and reading a withdrawal from the trace — was ✗) |
 | Stopping a node (`mycelium::shutdown::ShutdownSignal`, SIGTERM, a second signal, 2.31.0) — new, run 23 | ✓ `src/shutdown.rs` module doc (why SIGTERM, why install before the bind, why a second signal exits) · deprecations §22 | ✓ the module doc; `src/lib.rs` names the module | ✓ ᴿ²³ (`building-on-mycelium.md` §4: wait on `ShutdownSignal`, not `ctrl_c()`, installed before `start()` — was Missing: no guide named it; the snippet is the node binary's own sequence) | ✓ ᴿ²³ (`deployment.md` § Stopping a node — what the orderly shutdown does, its two 5 s bounds, the forced exit's cost — was Missing: only the stem's trace and §22 said anything) | ✓ ᴿ²³ (same section: `docker stop` / pod stop / `systemctl stop`, the grace period against Docker's 10 s and Kubernetes' 30 s, `-i` keeps Ctrl-C; the operations funnel row) |
+| Published node (X0) | ✓ | ✓ | ✓ | ✓ | ✓ ᴿ²⁴ (`deployment.md`: the bind order and the image tag) |
+| `doctor` · effective configuration (X1) | ✓ | ✓ | ✓ | ✓ | ✓ ᴿ²⁴ |
+| `init` · scaffolds (X2) | ✓ | ✓ | ✓ ᴿ²⁴ (the Python path's `$TAG`, `PATH` and the template's pinned SDK) | — | — |
+| `declare` (X10) | ✓ | ✓ | ✓ ᴿ²⁴ (guide 05) | — | — |
+| Grants (X3) | ✓ | ✓ | ~ (no code sketch outside the tests) | ✓ ᴿ²⁴ | ✓ ᴿ²⁴ (`rbac.md` § 2a) |
+| Causal records · `explain` (X4) | ✓ | ✓ | ✓ | ✓ ᴿ²⁴ | ✓ ᴿ²⁴ (`diagnostics.md`) |
+| Adapter contract · `runtime` (X7, X8) | ✓ | ✓ ᴿ²⁴ (grants cells corrected) | ✓ | ~ (`companions.md` does not link it) | ~ |
+| Side-effect contract (X5) | ✓ | ✓ | ~ (a test, no example) | ✓ | ~ (no route over the ledger — not built) |
+| Selective recovery (X9) | ✓ | ✓ | ~ (a test and the fault class) | ✓ ᴿ²⁴ | ✓ ᴿ²⁴ |
+| Fault classes · `test --faults` (X6) | ✓ | ✓ | ✓ | ✓ ᴿ²⁴ | ✓ ᴿ²⁴ |
+| The first hour (X11) | ✓ | ✓ | ✓ ᴿ²⁴ | — | — |
 
 ᴿ²³ closed in run 23 (2026-10-10) · ᴿ²² closed in run 22 (2026-10-09) · ᴿ²¹ closed in run 21 (2026-10-07) · ᴿ²⁰ closed in run 20 (2026-10-06) · ᴿ¹⁹ closed in run 19 (2026-10-03) · ᵀ¹ closed in Tier 1 · ᵀ² Tier 2 · ᵀ³ Tier 3 · ᴿ² closed in run 2 (2026-07-11) · ᴿ⁹ run-command fix + re-verified, run 9 (2026-07-15) · ᴿ¹³ SOC 2 arc: Dev security chapter gained the compliance-controls table + two must-work-if-followed bug fixes; new erasure row got its Dev landing (run 13, 2026-07-24) · ᴿ¹⁷ run 17 (2026-09-26): twelve new rows for the v3 axis and Boundary H; the compile-breaking literals in guides 02/04/09; the readiness checklist re-aligned with the retracted backup wording; `~` cells are recorded code gaps, not doc gaps · ᴿ¹⁸ run 18 (2026-10-02): five new rows for the design-time tooling and stem fleet; four literal failures fixed (non-TOML unit-file snippets, `verify`, guide 18's `generate()`); run 17's `~` cells re-audited — three closed by v2.16.0, one never a code gap; a token-table setting found to leave the gateway open, fixed in code · ᴿ¹⁶ run 16 (2026-09-05): persistence row split out and every cell given a landing (two non-compiling Dev literals fixed, `deployment.md § Persistence modes`, the concepts pair); consensus example fixed for `persisted`; reason companion gained its operations block.
 
@@ -842,6 +880,13 @@ cooling-off order; the four `with_egress` signatures; the Python tests run by di
    count in the result. **Closed (2.31.0):** `timeout_reason` labels a timeout by how many *other*
    acceptors answered — `no_voters`, `promise_short`, `contended`, `blocked`, `quorum_short` — so a partition is
    still `no_voters` (`a_proposer_nobody_answers_times_out_as_no_voters`); `votes_last_ballot` stays the vote count.
+
+### Run 24 (2026-10-25) — code gaps the audit surfaced
+
+1. **`mycelium explain --correlation` prints a 12-character hash prefix; `--closure` accepts only the full 64.** The
+   chain cannot be pasted into the closure read (`src/closure.rs`, the chain line's `&r.hash[..12]`;
+   `src/main.rs`'s `validate_parent`). **Fixed in the same branch:** `Corpus::resolve` takes a full hash or a unique
+   prefix of 8 or more (`a_closure_read_takes_the_prefix_a_chain_prints`), and `diagnostics.md` says so.
 
 ### Run 23 (2026-10-10) — code gaps the audit surfaced
 

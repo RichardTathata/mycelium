@@ -319,8 +319,11 @@ there was one:
 | compensatable | probe; never retry | the named compensating effect — a new record whose parent is the compensated one's hash |
 | irreversible, unobservable | the uncertainty is kept | preserve the evidence; escalate |
 
-The reconciler keeps a ledger (a SQLite file of its own — the record is on disk before the destination is
-reached) and refuses by name, counted (`RefusalSnapshot::external`), every move the class forbids: a retry
+The three [effect classes](00-concepts.md#effect-class) and the [reconciliation probe](00-concepts.md#reconciliation-probe)
+are the contract's vocabulary. The reconciler keeps a ledger (a node-local journal of its own since adopter-surface X9 —
+the record is on disk before the destination is reached; a torn tail is truncated at open, and a complete frame that
+does not decode refuses the open rather than being skipped) and refuses by
+name, counted (`RefusalSnapshot::external`), every move the class forbids: a retry
 without a probe, a second retry, a retry against a destination that did not declare itself idempotent, a probe
 or a retry on an irreversible effect, a compensation without the evaluator's permit (`CompensationPermit`, under
 the `envelope` feature — a compensation is an action, decided like any other). A **probe budget** — a count and
@@ -331,9 +334,21 @@ by the gate, not by the destination. And both the apply and the probe go through
 seam, so a recording of a run that reached the destination replays **without reaching it again** — the
 destination's own counter shows zero (`mycelium-effects/tests/external_replay.rs`).
 
+The shortest end-to-end use is a test: `a_probe_answering_not_done_permits_one_retry_and_the_destination_sees_one_effect`
+in [`mycelium-effects/tests/external.rs`](../../mycelium-effects/tests/external.rs) opens a `Reconciler` over a ledger
+path, a destination and an egress policy, applies an idempotent effect whose answer is lost, probes, and retries once.
+
 Two reference destinations: the SQLite one (local; its probe is the dedup row) and `HttpDestination`, an HTTP
 shape whose test harness loses responses on demand — not a real provider, which
 [what-is-proven.md](../operations/what-is-proven.md) says plainly.
+
+**When the lost answer has dependents.** [Selective recovery](../features/selective-recovery.md) (adopter-surface
+X9) is the contract applied across a fleet: the node that lost the answer finds its record unknown in its own ledger
+and probes before any retry; the [closure](00-concepts.md#closure) of that record — every record that names it as its
+parent, or names one that does — is read from the journals the reader can reach, and each member is recovered by its
+declared class as a new record that names what it recovers, while independent work is untouched. It is the `recovery`
+class of [`mycelium test --faults`](../features/test-faults.md), run against your own declaration; chapter 19 § reading
+a run across journals renders the closure it recovered.
 
 ## Where to go next
 

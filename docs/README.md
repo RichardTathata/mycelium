@@ -3,13 +3,15 @@
 Start with your task, then use the reference areas below. The [capability map](capabilities.md)
 connects what Mycelium can do to explanations, runnable examples, operating guidance and limits.
 
-**New developer?** Follow the [six practical tutorials](guide/tutorials/README.md)
-after the guide’s introductory gossip and capability examples.
+**New developer?** With no toolchain, start with [the first hour](guide/tutorials/07-the-first-hour.md) — the
+published node, a scaffold in your language, a refused call, a grant, a lost acknowledgement recovered, a readiness
+report (the grant and the recovery from the first release after 2.37.0). Then follow the
+[seven practical tutorials](guide/tutorials/README.md) after the guide’s introductory gossip and capability examples.
 
 | Audience | Suggested route |
 |---|---|
 | **Prospect** — does it fit our problem? | [Buyer deck](publications/customer-pitch.html) → [capabilities](capabilities.md) → [evidence and limits](operations/what-is-proven.md) → [bounded pilot](operations/customer-pilot.md) → [engagement kit](operations/engagement-kit.md) |
-| **Developer** — how do I build with it? | [Installation and integration mode](guide/installation.md) → [first examples](../examples/README.md) → [integrator contract](guide/building-on-mycelium.md) → [guide](guide/README.md) → [operational handover](operations/production-readiness.md) |
+| **Developer** — how do I build with it? | [The published node](features/published-node.md) and [a scaffold in your language](features/init.md) ([the first hour](guide/tutorials/07-the-first-hour.md)) → [installation and integration mode](guide/installation.md) → [first examples](../examples/README.md) → [integrator contract](guide/building-on-mycelium.md) → [guide](guide/README.md) → [operational handover](operations/production-readiness.md) |
 | **User/operator** — how do I run and understand it? | [Operations](operations/README.md) → [deployment](operations/deployment.md) → [readiness](operations/production-readiness.md) → [observability](operations/observability.md) → [diagnostics](operations/diagnostics.md) → [recovery](operations/deployment.md#backup--restore) |
 | **Researcher** — what is the contribution and evidence? | [Research guide](publications/research-guide.md) → [papers](publications/README.md) → [reproduction and limits](publications/research-guide.md#reproduce-a-result) → [open questions](publications/research-guide.md#open-questions) |
 
@@ -36,7 +38,7 @@ across the tree, deliberately at the root rather than filed under one area.
 | Area | Document *type* | What lives here |
 |---|---|---|
 | [`guide/`](guide/) | **Tutorial** — learn the system | The developer guide, chapters [00–24](guide/README.md) (concepts → gossip/KV → capabilities → … → stability & control → knowledge → commitments), plus the [cookbook](guide/cookbook.md) ("how do I…?"), [error-handling](guide/error-handling.md) and [deprecations](guide/deprecations.md) (the adopter-facing `3.0.0` removal ledger). Start at [00 · Concepts](guide/00-concepts.md). |
-| [`features/`](features/README.md) | **Entry page** — one feature, one short page | What a feature is, when to use it, how to turn it on and where to see it work, each section a link into the guide, reference, example index, catalogues and code. Three pilot pages so far ([plan](plans/feature-pages.md)); the [capability map](capabilities.md) links them. |
+| [`features/`](features/README.md) | **Entry page** — one feature, one short page | What a feature is, when to use it, how to turn it on and where to see it work, each section a link into the guide, reference, example index, catalogues and code. One per adopter-surface row and three pilots so far ([plan](plans/feature-pages.md), the [registry](features/registry.toml)); the [capability map](capabilities.md) lists them row by row. |
 | [`operations/`](operations/) | **Runbook** — operate the system | DevOps + Solution/Dev runbooks — **start at the [operations index](operations/README.md)** ("Start here" funnel): the [go-live checklist](operations/production-readiness.md), [deployment](operations/deployment.md), [observability](operations/observability.md) + the [metrics reference](operations/metrics.md), [diagnostics](operations/diagnostics.md), [dynamic-scaling](operations/dynamic-scaling.md), [tuning](operations/tuning.md), [artifacts](operations/artifacts.md), [companions](operations/companions.md), [rbac](operations/rbac.md), [sso](operations/sso.md), [audit](operations/audit.md), [cert-rotation](operations/cert-rotation.md), [crown-jewel](operations/crown-jewel.md). |
 | [`design/`](design/) | **Decision record / ADR** — why a design choice | Point-in-time decisions and binding contracts. Use the [capability map](capabilities.md) and linked guide chapters for current behaviour; consult an ADR for rationale and assumptions, and its implementation record for delivery status. |
 | [`plans/`](plans/) | **Plan** — proposed work and its implementation record | Status belongs to each plan; a plan is not evidence that a feature shipped. |

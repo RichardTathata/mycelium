@@ -11,7 +11,8 @@ blocks is a valid unit file. "Unit declaration" and "declaration" name the same 
 
 The loader is `NodeCapabilityConfig::from_toml_str` (or `load_from_file`): it parses the file and
 then runs `NodeCapabilityConfig::validate`, which refuses a bad value **by name**. The same loader
-is used by `mycelium wire-check`, by the stem, and by `POST /gateway/units/declare`. There is no
+is used by `mycelium wire-check`, by the stem, and by `POST /gateway/units/declare` — which
+`mycelium declare` posts each `units/*.toml` to (with a lease, heartbeated, only under `--watch`). There is no
 second parser.
 
 TOML needs one key per line. `ns = "a"; name = "b"` is not valid TOML.

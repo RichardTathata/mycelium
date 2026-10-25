@@ -20,7 +20,8 @@ Mycelium earns its keep when you have **many agents (or nodes) that must
 coordinate, and you don't want a coordinator** — no broker, no scheduler, no
 control plane to run or scale or fail. State converges by gossip; work is claimed,
 not dispatched; roles are discovered, not assigned. It embeds as a Rust library
-inside your process — there is no daemon.
+inside your process, or runs as the published node — one participant, not a service in the middle (what "no daemon"
+means: [positioning](../positioning.md#the-three-expansions)).
 
 It is **probably overkill** if you just want to chain a few LLM calls, run one
 orchestrator that fans out to workers, or coordinate through a database or queue

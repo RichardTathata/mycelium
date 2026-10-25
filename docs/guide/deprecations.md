@@ -248,7 +248,7 @@ Turn it on once every partner has upgraded. `BodyNotBound` means upgrade the par
 
 ## 11. `mesh:read` / `mesh:write` admitted on the serve routes — one release (2.15.0) — **removed in 2.18.2**
 
-**What changes.** Registering to serve an RPC kind — `POST /gateway/rpc/serve/{kind}` and
+**What changes.** Registering to serve an RPC kind — `GET /gateway/rpc/serve/{kind}` and
 `/gateway/rpc/respond` — requires the new scope **`mesh:serve`**. From 2.15.0 a token holding
 `mesh:read` or `mesh:write` was still admitted there, **with a warning in the gateway log**. The
 window was promised for one release and stayed open through 2.18.1; **2.18.2 closes it** — such a

@@ -50,7 +50,7 @@ has no row for this feature. The CI job `Scaffold` runs it against the Rust scaf
 the scaffold's build has (`revoke`, `restart`, `partition`, `recovery` and `grant` pass; `replay` reads not-in-build; a
 planted widened `[[rule]]` is reported by `policy-diff`; a declaration `wire-check` refuses is refused with the same
 text), the `one-hour` job runs `grant` and `recovery` on the published binary against the Python scaffold's declaration
-(its steps 4 and 5), and the job `embedded` builds the `sim` binary and runs `replay` against the co-op fixture. The
+(its steps 4 and 5, from the first release that carries both classes — v2.37.0 does not), and the job `embedded` builds the `sim` binary and runs `replay` against the co-op fixture. The
 tests are in [`src/faults.rs`](../../src/faults.rs): `a_declaration_wire_check_refuses_is_refused_with_the_same_findings`,
 `an_activation_runs_no_command`, `a_class_that_cannot_run_fails_only_when_asked_by_name`,
 `the_restart_class_replays_a_synced_write_and_refuses_unreadable_state`,

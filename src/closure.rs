@@ -98,6 +98,9 @@ pub struct FileInfo {
     pub dropped: Option<BTreeMap<String, u64>>,
 }
 
+/// The shortest hash prefix [`Corpus::resolve`] accepts — eight hex characters, 32 bits.
+pub const MIN_HASH_PREFIX: usize = 8;
+
 /// Every record the files given hold, joined.
 #[derive(Clone, Debug, Default)]
 pub struct Corpus {
@@ -174,6 +177,29 @@ impl Corpus {
     /// The record with this hash, if any file holds it.
     pub fn get(&self, hash: &str) -> Option<&Record> {
         self.by_hash.get(hash).map(|&i| &self.records[i])
+    }
+
+    /// The full hash a `--closure` argument names: a 64-character hash as given, or a prefix of at least
+    /// [`MIN_HASH_PREFIX`] lowercase hex characters that exactly one record's hash starts with — the form
+    /// [`chain`](Self::chain) prints, so a chain line can be pasted into a closure read (doc-coverage run 24, gap 1).
+    /// A prefix no record has, or more than one, is refused by name.
+    pub fn resolve(&self, given: &str) -> Result<String, String> {
+        let hex = given.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c));
+        if !hex {
+            return Err(format!("{given:?} is not a lowercase hex hash or hash prefix"));
+        }
+        if given.len() == 64 {
+            return Ok(given.to_string());
+        }
+        if given.len() < MIN_HASH_PREFIX || given.len() > 64 {
+            return Err(format!("a hash prefix is {MIN_HASH_PREFIX} to 64 hex characters; {given:?} is {}", given.len()));
+        }
+        let mut found = self.records.iter().map(|r| r.hash.as_str()).filter(|h| h.starts_with(given));
+        match (found.next(), found.next()) {
+            (Some(h), None) => Ok(h.to_string()),
+            (None, _) => Err(format!("no record in the files given has a hash starting {given}")),
+            (Some(_), Some(_)) => Err(format!("{given} is the start of more than one record's hash; give more of it")),
+        }
     }
 
     /// Journals that contributed at least one record of their own: a copy of another file is not one.
@@ -591,6 +617,31 @@ mod tests {
         let out = h.closure(&content_hash(a.as_bytes()), None);
         assert!(out.contains("1 record(s) in the closure"), "{out}");
         assert!(out.contains("the root's own parent not-even-a-hash is in none of the files given"), "{out}");
+    }
+
+    /// A closure read takes the prefix a chain prints: a unique prefix resolves to its record's full hash; one no
+    /// record has, one several share, one too short or not hex are refused by name; a full hash passes as given
+    /// (doc-coverage run 24, gap 1 — `--correlation` printed 12 characters that `--closure` refused).
+    #[test]
+    fn a_closure_read_takes_the_prefix_a_chain_prints() {
+        let mut c = Corpus::default();
+        let one = evidence(1, "op-1", "decided", Some("run-1"), None, "gateway:mcp/tools/call");
+        let two = evidence(2, "op-2", "decided", Some("run-1"), None, "provider");
+        let (h1, h2) = (content_hash(one.as_bytes()), content_hash(two.as_bytes()));
+        c.add_journal("a.log", &[one.into_bytes(), two.into_bytes()]);
+        let printed = &h1[..12];
+        assert!(c.chain("run-1").contains(printed), "the chain prints the 12-character prefix");
+        assert_eq!(c.resolve(printed).as_deref(), Ok(h1.as_str()), "the printed prefix resolves");
+        assert_eq!(c.resolve(&h2).as_deref(), Ok(h2.as_str()), "a full hash passes as given");
+        assert!(c.resolve("0123").unwrap_err().contains("8 to 64"), "too short");
+        assert!(c.resolve("ABCDEF0123").unwrap_err().contains("lowercase hex"), "not hex");
+        let none = if h1.starts_with('0') || h2.starts_with('0') { "ffffffffffff" } else { "000000000000" };
+        assert!(c.resolve(none).unwrap_err().contains("no record"), "no record has it");
+        // Two hashes sharing their first eight characters are vanishingly rare; the shared prefix is "" here only
+        // when built by hand, so ambiguity is shown on a corpus whose records share a prefix by construction.
+        let mut d = Corpus::default();
+        d.records = vec![Record { hash: format!("abcdef01{}", "0".repeat(56)), ..c.records[0].clone() }, Record { hash: format!("abcdef01{}", "1".repeat(56)), ..c.records[1].clone() }];
+        assert!(d.resolve("abcdef01").unwrap_err().contains("more than one"), "ambiguous");
     }
 
     /// The reader says when it has fewer journals than nodes, and names a root it does not hold.

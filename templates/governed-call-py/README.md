@@ -4,7 +4,7 @@ The published `mycelium` node, run from Python with no Rust toolchain. An SDK ag
 key, and a second agent — holding a token without `kv:write` — is refused by the gateway's own scope rule.
 
 ```sh
-pip install -e <checkout>/mycelium-py   # the SDK is installed from a checkout; it is not on PyPI
+pip install "https://github.com/RichardTathata/mycelium/archive/refs/tags/{{MYCELIUM_TAG}}.tar.gz#subdirectory=mycelium-py"   # the SDK from the same tag; not on PyPI
 python main.py                          # MYCELIUM_BIN=/path/to/mycelium if the published node is not on PATH
 ```
 
@@ -16,7 +16,7 @@ PERMITTED`, and `reader set demo/greeting: REFUSED 403 — insufficient scope (t
 | Path | What it is |
 |---|---|
 | `node.toml` | the node's configuration: a gateway on loopback with two named tokens |
-| `units/purchaser.toml` | the unit file alice declares; its mandate and rules come back as `not_enforced` (one tool waits for the treasurer's grant — `mycelium test --faults grant units/` drives it) |
+| `units/purchaser.toml` | the unit file alice declares; its mandate and rules come back as `not_enforced` (one tool waits for the treasurer's grant — `mycelium test --faults grant units/ --config grant.toml` drives it, with `[tls]` and `[persistence]` added to `node.toml` as [the first hour](../../docs/guide/tutorials/07-the-first-hour.md) step 4 does) |
 | `main.py` | the program: starts the node, declares, writes, is refused, stops the node |
 | `data/node.log` | the node's log from the last run |
 
