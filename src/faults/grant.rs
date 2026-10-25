@@ -63,11 +63,13 @@ fn start_agent_node(fleet: &mut Fleet<'_>, i: usize, journal: &Path, evaluator: 
     let failed: Arc<std::sync::Mutex<Option<String>>> = Arc::default();
     let (ev, slot, path, principal) = (Arc::clone(evaluator), Arc::clone(&failed), journal.to_path_buf(), principal.to_string());
     fleet.start_with(i, move |a| {
-        a.with_action_evaluator(ev);
+        // The journal before the evaluator: an evaluator attached first warns that its decisions will not be
+        // recorded, which this fleet then disproves (#680's review, finding 6).
         match crate::EvidenceJournal::open(&path, crate::EvidenceProfile::Strict) {
             Ok(j) => a.with_evidence_journal(j),
             Err(e) => *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!("opening {}: {e}", path.display())),
         }
+        a.with_action_evaluator(ev);
         let mut entitlements = EntitlementTable::new();
         match PrincipalId::new(&principal) {
             Some(p) => entitlements.entitle_grants(p),
@@ -127,13 +129,13 @@ pub(super) fn run(rep: &mut ClassReport, base: &GossipConfig, units: &[Unit], di
         not_applicable(rep, format!("the grant-required rule's resource {:?} is not a tool (tool:<name>): the grant mode guards tools/call", rule.resource));
         return;
     };
-    let names_resource = |r: &crate::capability_config::RuleDecl| r.resource == "*" || r.resource == rule.resource || r.resource == format!("tool:{tool}");
-    let Some(issuer_rule) = rules.iter().find(|r| r.operation == "grant.issue" && names_resource(r)) else {
+    let Some(issuer_rule) = rules.iter().find(|r| r.admits_grant_issue_for(&rule.resource)) else {
         not_applicable(rep, format!("no [[rule]] admits anyone to grant.issue on {}: the grant could never be issued, and the class would show only the refusal (wire-check's `unissuable grant`)", rule.resource));
         return;
     };
-    // `*` admits anyone to issue — the stranger too — so that half of check 2 cannot refuse and says so.
-    let anyone = rules.iter().any(|r| r.operation == "grant.issue" && r.actor == "*" && names_resource(r));
+    // `*` admits anyone to issue — the stranger too — so that half of check 2 is not run, and the report says so
+    // (#680's review, finding 1: the stranger's issue was written and the issuer's then refused `already_answered`).
+    let anyone = rules.iter().any(|r| r.actor == "*" && r.admits_grant_issue_for(&rule.resource));
     let issuer = if issuer_rule.actor == "*" { "test-faults-supervisor".to_string() } else { issuer_rule.actor.clone() };
     if base.tls.is_none() {
         not_configured(rep, "[tls] (the node signs the grant and proves possession with its identity)");
@@ -151,8 +153,10 @@ pub(super) fn run(rep: &mut ClassReport, base: &GossipConfig, units: &[Unit], di
     };
     let agent_node = fleet.nodes[unit_index].id.clone();
     let agent_principal = node_principal(&agent_node);
-    // Every declared rule as written — and a `tool:<name>` resource also at the agent's node, the form the request
-    // record and the doors use, so a declaration need not name the node it will run on.
+    // Every declared rule as written — and, for the forms the doors use, two more readings of each: a `tool:<name>`
+    // resource also at the agent's node (`tool:<name>@<node>`, the request record's resource), and the grant-required
+    // rule's actor also as the node's principal — at a door the agent presents as its node, the only principal that
+    // can hold a grant (#680's review, finding 4). The declaration names the unit; the fleet pins it to a node.
     let evaluator: Arc<dyn crate::ActionEvaluator> = {
         let mut ev = crate::ReferenceEvaluator::new("declared").with_catalogue("declaration", "declared");
         for u in units {
@@ -161,12 +165,32 @@ pub(super) fn run(rep: &mut ClassReport, base: &GossipConfig, units: &[Unit], di
                     Ok(b) => b,
                     Err(e) => { rep.state = ClassState::Refused { reason: format!("unit {}: [[rule]]: {e}", u.name) }; return; }
                 };
+                let mut forms = vec![built.clone()];
                 if r.resource.starts_with("tool:") && !r.resource.contains('@') {
                     let mut at_node = built.clone();
                     at_node.resource = format!("{}@{agent_node}", r.resource);
-                    ev = ev.map_action(built.operation.clone(), "*").allow(at_node);
+                    forms.push(at_node);
                 }
-                ev = ev.map_action(built.operation.clone(), "*").allow(built);
+                if r.requires_grant && u.config.principal.as_deref() == Some(r.actor.as_str()) {
+                    for f in forms.clone() {
+                        let mut as_node = f;
+                        as_node.actor = agent_principal.clone();
+                        forms.push(as_node);
+                    }
+                }
+                for f in forms {
+                    // A `*` operation admits any; the catalogue mapping is per operation, so the operations this class
+                    // drives are mapped for it — an unmapped operation is refused before any rule is read.
+                    let mapped: Vec<String> = if f.operation == "*" {
+                        ["grant.issue", "grant.refuse", "grant.revoke", "tools/call"].iter().map(|s| s.to_string()).collect()
+                    } else {
+                        vec![f.operation.clone()]
+                    };
+                    for op in mapped {
+                        ev = ev.map_action(op, "*");
+                    }
+                    ev = ev.allow(f);
+                }
             }
         }
         Arc::new(ev)
@@ -232,13 +256,19 @@ pub(super) fn run(rep: &mut ClassReport, base: &GossipConfig, units: &[Unit], di
         waiting.abort();
         return;
     };
-    let stranger = fleet.on(i, decide_grant(&a.task_ctx, Some(&supervisor(STRANGER)), &agent_principal, &request, GrantDecision::Issue { ttl_secs: Some(600) }));
-    let stranger_text = match &stranger {
-        Err(GrantRefusal::Policy { reason, detail, .. }) => format!("{STRANGER}'s issue refused by the evaluator ({reason}: {detail})"),
-        Err(other) => format!("{STRANGER}'s issue refused at the door, not by the evaluator ({other})"),
-        Ok(_) => format!("{STRANGER}'s issue was WRITTEN"),
+    // The stranger asks only where a rule could refuse them: under a `*` actor the declaration admits anyone, and the
+    // stranger's grant would be the one written.
+    let (stranger_refused, stranger_text) = if anyone {
+        (true, format!("the declaration admits anyone (`*`) to grant.issue on {}, so {STRANGER} is not refused — stated, not exercised", rule.resource))
+    } else {
+        let stranger = fleet.on(i, decide_grant(&a.task_ctx, Some(&supervisor(STRANGER)), &agent_principal, &request, GrantDecision::Issue { ttl_secs: Some(600) }));
+        let text = match &stranger {
+            Err(GrantRefusal::Policy { reason, detail, .. }) => format!("{STRANGER}'s issue refused by the evaluator ({reason}: {detail})"),
+            Err(other) => format!("{STRANGER}'s issue refused at the door, not by the evaluator ({other})"),
+            Ok(_) => format!("{STRANGER}'s issue was WRITTEN"),
+        };
+        (matches!(&stranger, Err(GrantRefusal::Policy { .. })) && !marker(&a, &request, "issued"), text)
     };
-    let stranger_refused = anyone || (matches!(&stranger, Err(GrantRefusal::Policy { .. })) && !marker(&a, &request, "issued"));
     let issued = fleet.on(i, decide_grant(&a.task_ctx, Some(&supervisor(&issuer)), &agent_principal, &request, GrantDecision::Issue { ttl_secs: Some(600) }));
     let issued_text = match &issued {
         Ok(o) => format!("written at {} ({})", o.receipt["key"].as_str().unwrap_or("?"), o.receipt["local_durability"].as_str().unwrap_or("?")),
@@ -255,8 +285,7 @@ pub(super) fn run(rep: &mut ClassReport, base: &GossipConfig, units: &[Unit], di
         "issuing is the declaration's rule: a principal no rule names is refused, the declared issuer's grant admits the call once",
         Some(ok),
         format!(
-            "{}; {issuer}'s issue: {issued_text}; the waiting call: {}; request {request} consumed: {consumed}; state {state:?}",
-            if anyone { format!("the declaration admits anyone (`*`) to grant.issue, so {STRANGER} is not refused — stated") } else { stranger_text },
+            "{stranger_text}; {issuer}'s issue: {issued_text}; the waiting call: {}; request {request} consumed: {consumed}; state {state:?}",
             match &admitted { Ok(Some(_)) => "admitted under the grant".to_string(), Ok(None) => "proceeded WITHOUT a grant".to_string(), Err(e) => format!("refused — {e}") },
         ),
     );
@@ -367,7 +396,7 @@ pub(super) fn run(rep: &mut ClassReport, base: &GossipConfig, units: &[Unit], di
         ),
     );
     rep.notes.push(format!(
-        "the evaluator is the declaration's {} [[rule]](s); a `tool:<name>` resource is also admitted at `tool:<name>@{agent_node}` (the form the request record and the doors use); the issuer is {issuer}, the actor of the declaration's grant.issue rule on {}; issued through the route's own decision (decide_grant), not over HTTP — the fleet has no gateway port, so the route's scope rule is outside this view; the agent is unit {} on node {agent_node}; persistence under {}",
+        "the evaluator is the declaration's {} [[rule]](s), the grant-required one read as a selector: its resource names the tool the agent's policy requires a grant for (the state machine's own check is the default-deny shown), and it is also admitted at `tool:<name>@{agent_node}` and with the node's principal as its actor (the forms the request record and the doors use); the issuer is {issuer}, the actor of the declaration's rule admitting grant.issue on {}; issued through the route's own decision (decide_grant), not over HTTP — the fleet has no gateway port, so the route's scope rule is outside this view; the agent is unit {} on node {agent_node}; persistence under {}",
         rules.len(),
         rule.resource,
         units[unit_index].name,

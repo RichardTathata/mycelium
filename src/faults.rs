@@ -1272,11 +1272,12 @@ mod policy_diff {
         let opened: Opened = Arc::new(std::sync::Mutex::new(None));
         let (ev, slot, path) = (Arc::clone(&eval_a), Arc::clone(&opened), journal_path.clone());
         if let Err(reason) = fleet.start_with(0, move |a| {
-            a.with_action_evaluator(ev);
+            // The journal before the evaluator (#680's review, finding 6: the other order warns of unrecorded decisions).
             let j = crate::EvidenceJournal::open(&path, crate::EvidenceProfile::Strict).map_err(|e| format!("opening {}: {e}", path.display()));
             if let Ok(j) = &j {
                 a.with_evidence_journal(Arc::clone(j));
             }
+            a.with_action_evaluator(ev);
             *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(j);
         }) {
             rep.state = ClassState::Refused { reason };
@@ -1827,6 +1828,27 @@ mod tests {
         assert!(c.exercised.iter().any(|e| e.id == "mesh.tls" && e.state == "enforced"), "{:?}", c.exercised);
         assert!(c.exercised.iter().any(|e| e.id == "persist.configured" && e.state == "enforced"), "{:?}", c.exercised);
         assert!(c.notes.iter().any(|n| n.contains("decide_grant") && n.contains("treasurer")), "{:?}", c.notes);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A declaration that admits anyone (`*`) to issue, through a `*` operation: the stranger's half is stated, not
+    /// run, and the class passes (#680's review, finding 1 — the stranger's grant was written and the issuer's
+    /// refused `already_answered`; seen failing first).
+    #[cfg(all(feature = "gateway", feature = "tls", feature = "compliance"))]
+    #[test]
+    fn the_grant_class_states_an_issuer_rule_that_admits_anyone() {
+        let dir = scratch("grant-anyone");
+        let mut cfg = persisted(&dir);
+        cfg.tls = Some(crate::config::TlsConfig { auto_cert_dir: dir.join("tls"), ..crate::config::TlsConfig::default() });
+        let units = vec![unit("purchaser", concat!(
+            "principal = \"purchaser\"\n",
+            "[[rule]]\nactor = \"purchaser\"\noperation = \"tools/call\"\nresource = \"tool:purchase.approve\"\nrequires_grant = true\n",
+            "[[rule]]\nactor = \"*\"\noperation = \"*\"\nresource = \"*\"\n",
+        ))];
+        let c = run_class(Class::Grant, &units, &cfg, &dir, None);
+        assert!(all_held(&c), "{c:?}");
+        assert!(c.checks[1].detail.contains("admits anyone (`*`) to grant.issue") && c.checks[1].detail.contains("test-faults-supervisor's issue: written"), "{}", c.checks[1].detail);
+        assert!(c.checks[4].detail.contains("2 permitted for test-faults-supervisor") && c.checks[4].detail.contains("anyone may issue here"), "{}", c.checks[4].detail);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

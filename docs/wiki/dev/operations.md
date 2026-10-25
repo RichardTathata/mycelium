@@ -251,7 +251,17 @@ node's own grants; the other nodes start plain. The class issues with `decide_gr
 route's decision factored out of `gw_grant_decide` — `revoke_grant` likewise out of `gw_grant_revoke`;
 `GrantRefusal::{Door, Policy}`; `write_record` returns `Result<Value, String>` now — re-exported `pub(crate)` from
 `agent` under `gateway + tls`. The stranger (`test-faults-stranger`) is refused by the evaluator (`GrantRefusal::Policy`)
-unless a `*` actor admits anyone, which the report states. The restart: the waiting `transition_invoking` task is
+unless a `*` actor admits anyone — then the stranger does not issue at all and the report says so (#680's review,
+finding 1: the stranger's grant was written and the issuer's refused `already_answered`; a test covers the `*` case).
+The grant-required rule is a *selector*: the default-deny shown is the state machine's `require_grant_for`, derived from
+the rule's resource; the rule is also admitted with the node's principal as actor (finding 4 — only a node holds a
+grant). `RuleDecl::admits_grant_issue_for` is the one reading of "may issue" for `wire-check` and the class (`*` for
+operation or resource, `@node` stripped; findings 2 and 3); a contradictory `requires_grant` + `requires_mandate` is
+refused by `validate()`, so every reader agrees (finding 5); the journal is attached before the evaluator here and in
+`policy-diff` (finding 6, the "decisions NOT recorded" warning). Found writing the `*` test: the reference evaluator's
+catalogue mapping is per operation, so a `*` rule maps the literal `*` and `grant.issue` reads *Unmapped* — the class maps
+the four operations it drives for a `*` rule. `policy-diff`'s `build` has the same shape (a wired edge's `tools/call` under
+only a `*` rule reads Unmapped there) — stated, not changed in this PR. The restart: the waiting `transition_invoking` task is
 aborted, the issuer answers, every handle on the node is dropped (the state machine holds the context and with it the
 journal), `fleet.stop(i)`, `start_agent_node` again. The timer and clock reads are `sim_seam::mono_instant`, `until`
 and `JoinHandle::is_finished` — no `tokio::time::timeout`, which the seam gate would flag. Scaffolds: both

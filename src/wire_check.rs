@@ -892,7 +892,7 @@ pub fn check(units: &[Unit], artifacts: &[(String, ArtifactDescription)], opts: 
         // or on `*`); without that the call waits for a grant nobody may give and is refused on silence — the
         // declaration says default-deny and nothing else (adopter-surface X3, fourth PR).
         for (u, r) in units.iter().flat_map(|u| u.config.rules.iter().map(move |r| (u, r))).filter(|(_, r)| r.requires_grant) {
-            let issuable = rules.iter().any(|i| i.operation == "grant.issue" && (i.resource == "*" || i.resource == r.resource));
+            let issuable = rules.iter().any(|i| i.admits_grant_issue_for(&r.resource));
             if !issuable {
                 findings.push(Finding {
                     severity: Severity::Warning,
@@ -1293,7 +1293,16 @@ mod tests {
             "[[rule]]\nactor=\"purchaser\"\noperation=\"tools/call\"\nresource=\"tool:approve\"\nrequires_grant=true\n",
             "[[rule]]\nactor=\"treasurer\"\noperation=\"grant.issue\"\nresource=\"tool:approve\"\n",
         ));
-        let r = check(&[provider, issued], &[], &CheckOptions::default());
+        let r = check(&[provider.clone(), issued], &[], &CheckOptions::default());
+        assert!(r.findings.iter().all(|f| f.kind != "unissuable grant"), "{}", r.render_text());
+        // The evaluator's `*` admits the issue too, and a `@node` suffix on the grant rule is not part of the match
+        // (#680's review, findings 2 and 3).
+        let star = unit("purchaser", concat!(
+            "principal=\"purchaser\"\n[[requirement]]\nns=\"purchase\"\nname=\"approve\"\n",
+            "[[rule]]\nactor=\"purchaser\"\noperation=\"tools/call\"\nresource=\"tool:approve@127.0.0.1:1\"\nrequires_grant=true\n",
+            "[[rule]]\nactor=\"treasurer\"\noperation=\"*\"\nresource=\"tool:approve\"\n",
+        ));
+        let r = check(&[provider, star], &[], &CheckOptions::default());
         assert!(r.findings.iter().all(|f| f.kind != "unissuable grant"), "{}", r.render_text());
     }
 

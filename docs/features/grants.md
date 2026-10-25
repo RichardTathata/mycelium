@@ -153,8 +153,14 @@ has no row for this feature. The tests: in [`src/mandate/grant.rs`](../../src/ma
   [`persist.configured`](../reference/guarantee-catalogue.md) and [`mesh.tls`](../reference/guarantee-catalogue.md) (the
   grant replayed from the WAL, the identity that signs it) and the decision point
   [`ae.preflight`](../reference/rule-catalogue.md) (who may issue). The first
-  `[[rule]]` with `requires_grant = true` ([unit file](../reference/unit-file.md#rule)) names the tool and the agent,
-  the actor of a rule admitting `grant.issue` on it is the issuer the class plays. On the agent's node — an evaluator
+  `[[rule]]` with `requires_grant = true` ([unit file](../reference/unit-file.md#rule)) is read as a **selector**: its
+  resource names the tool the agent's policy requires a grant for (the default-deny the class shows is the state
+  machine's own check, `require_grant_for`), its actor the agent's unit; the actor of a rule admitting `grant.issue` on
+  it (`*` for either, a `@<node>` suffix not matched — one reading shared with `wire-check`,
+  [`admits_grant_issue_for`](../../src/capability_config.rs)) is the issuer the class plays. Because only the agent's
+  node can hold a grant, the class also admits the rule with the node's principal as actor and the resource at
+  `tool:<name>@<node>`, the forms the request record and the doors use; a `*` issuer admits the stranger too, so that
+  half of the check is stated, not run. On the agent's node — an evaluator
   built from every declared rule, a journal, an execution authority entitled to its own grants — a plain transition is
   refused and silence refuses within the window; a principal no rule names is refused the issue by the evaluator and
   the declared issuer's grant admits the waiting call once; the node is stopped before it reads an answer, the issuer

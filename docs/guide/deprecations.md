@@ -1868,7 +1868,7 @@ entry ages past the bound.
 ## 65. A `[[rule]]` gained `requires_grant`; a `[[rule]]` or `[[mandate]]` with an unknown key is refused; `Class` gained `Grant` (unreleased, adopter-surface X3, fourth PR)
 
 The unit file's `[[rule]]` gained `requires_grant = true` — the rule applies only under a grant, `Rule::requiring_grant`'s
-shorthand (one of this and `requires_mandate`, never both) — and `mycelium test --faults` gained the `grant` class, which
+shorthand (one of this and `requires_mandate`, never both: refused at load by every reader) — and `mycelium test --faults` gained the `grant` class, which
 drives the declaration's first such rule on its own fleet: default-deny, the declared issuer's grant, the restart over
 the WAL. **Two readers change behaviour.** A `[[rule]]` or a `[[mandate]]` carrying a key it does not have is now
 refused by name, as the unit file's sections already were (§49): a misspelt `requires_grant` or `requires_mandate`
@@ -1879,7 +1879,8 @@ plain, so declare it only once every reader of the directory runs this release; 
 pin the release they came from. The other section tables (`[[capability]]`, `[[group]]`, `[[lane]]`, `[hosts]`,
 `[[presence]]`, `[[serve]]`) still accept an unknown key silently — stated, not changed here. `Class::ALL` is seven
 long and an exhaustive `match` on `Class` needs a `Grant` arm. `wire-check` gained one warning, `unissuable grant`: a
-rule that requires a grant with no rule admitting anyone to `grant.issue` on its resource.
+rule that requires a grant with no rule admitting anyone to `grant.issue` on its resource (`*` for the operation or
+the resource counts; a `@<node>` suffix on either side is not matched — the reading `test --faults grant` shares).
 
 ## 64. `AgentPolicy` gained `grant_arguments_class` and `grant_renderable_classes`; a streamed A2A task can report `input-required`; `GET /gateway/grants/stream` (unreleased, adopter-surface X3, third PR)
 

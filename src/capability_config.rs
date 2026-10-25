@@ -868,6 +868,15 @@ pub struct RuleDecl {
 }
 
 impl RuleDecl {
+    /// Does this rule admit someone to issue a grant for `resource` (adopter-surface X3)? The reference evaluator's
+    /// `*` is any operation and any resource, and a `tool:<name>` names the tool wherever it runs — a `@<node>`
+    /// suffix on either side is not part of the match. One reading for `wire-check` and `test --faults grant`, so the
+    /// two never disagree about whether a grant could be issued (#680's review, findings 2 and 3).
+    pub fn admits_grant_issue_for(&self, resource: &str) -> bool {
+        let bare = |r: &str| r.split('@').next().unwrap_or(r).to_string();
+        (self.operation == "grant.issue" || self.operation == "*") && (self.resource == "*" || bare(&self.resource) == bare(resource))
+    }
+
     /// The evaluator's own rule type, where the evaluator exists (a gateway that can attest).
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub fn to_rule(&self) -> Result<crate::Rule, String> {
@@ -1035,6 +1044,10 @@ impl NodeCapabilityConfig {
         for r in &self.rules {
             if r.actor.is_empty() || r.operation.is_empty() || r.resource.is_empty() {
                 return Err(invalid("rule", "actor, operation and resource must not be empty (use \"*\" for any)"));
+            }
+            // Refused where every reader loads the file, so `wire-check` and `test` agree (#680's review, finding 5).
+            if r.requires_grant && r.requires_mandate.is_some() {
+                return Err(invalid("rule", "requires_grant and requires_mandate are one or the other: a grant is a mandate in the grant: family"));
             }
         }
         if let Some(h) = &self.hosts {
@@ -1535,6 +1548,17 @@ max_providers = 4
         assert!(typo.contains("requires_grnat"), "{typo}");
         let typo = toml::from_str::<NodeCapabilityConfig>("[[mandate]]\nholder = \"p\"\nscope = \"s\"\noperations = []\nholders = [\"q\"]\n").unwrap_err().to_string();
         assert!(typo.contains("holders"), "{typo}");
+        // The one reading of "may issue": `*` is any operation and any resource; a `@node` suffix is not matched.
+        let rule = |op: &str, res: &str| RuleDecl { actor: "t".into(), operation: op.into(), resource: res.into(), requires_scopes: vec![], requires_facts: vec![], requires_mandate: None, requires_grant: false, requires_values: Default::default() };
+        assert!(rule("grant.issue", "tool:x").admits_grant_issue_for("tool:x"));
+        assert!(rule("*", "*").admits_grant_issue_for("tool:x"));
+        assert!(rule("grant.issue", "tool:x").admits_grant_issue_for("tool:x@127.0.0.1:1"));
+        assert!(rule("grant.issue", "tool:x@127.0.0.1:1").admits_grant_issue_for("tool:x"));
+        assert!(!rule("grant.issue", "tool:y").admits_grant_issue_for("tool:x"));
+        assert!(!rule("grant.revoke", "*").admits_grant_issue_for("tool:x"));
+        // A contradictory rule is refused at load, by every reader.
+        let both = NodeCapabilityConfig::from_toml_str("[[rule]]\nactor = \"p\"\noperation = \"tools/call\"\nresource = \"tool:x\"\nrequires_grant = true\nrequires_mandate = \"petty-cash\"\n").unwrap_err().to_string();
+        assert!(both.contains("one or the other"), "{both}");
     }
 
     /// The unit-file example in this module's doc is the one most readers copy, so it must be a
