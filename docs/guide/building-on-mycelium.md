@@ -51,8 +51,9 @@ Feature choice on the full crate:
 - add **`compliance`** (implies `gateway` + `tls`) for scoped and named gateway tokens, OIDC, the
   tamper-evident audit trail and identity roles — a build without it refuses those settings at start
   rather than ignoring them; **`llm`** for prompt skills over a node-local LLM backend; **`otel`** for
-  SkillRunner's OpenTelemetry span export. **`sim`** (the replay seams) and **`test-util`** are for
-  recording and tests, never a shipped build.
+  SkillRunner's OpenTelemetry span export. **`sim`** (the replay seams), **`test-util`** and
+  **`test-frame-filter`** (the frame filter the lock-lifecycle tests drop frames through) are for recording and tests,
+  never a shipped build.
 - Depend on **`mycelium-core`** directly only for a minimal embed that needs LWW-KV +
   the scoped event mesh but *not* RPC, consensus, capabilities, or the gateway.
 

@@ -319,3 +319,14 @@ signal for the `/publication-lint` skill (is it catching overclaims before human
   node turnover* — which read as safety under electorate churn — now says progress needs a live quorum and a
   safety-sensitive decision holds its electorate fixed. The buyer deck makes no consensus-membership claim. Major
   (a reviewer would be misled on a safety property; no buyer-facing claim).
+- 2026-10-25 (lint run 6, after v2.37.0, on the X11 docs pass): **one Critical — paper 1's consensus fault model
+  (`paper.md`, `main.tex`) claimed safety across electorate change ("nodes that join or leave … cannot cause two
+  conflicting values to commit"; "reduced quorum"), against `consensus-electorate.md` and the threat model §7; the
+  2026-10-10 deck fix never reached the papers.** Source fixed here (safety on a fixed electorate; membership change a
+  migration); the Zenodo record (DOI 10.5281/zenodo.20665238) needs a new version and a re-rendered PDF — the author's.
+  Fixed on the same pass: the X11 front doors now label grant, recovery and `test --faults` as on `main`, next release;
+  tutorial 7's tag and cadence (steps 4–5 need the next tag) and step 4's evaluator placed in the fault class's fleet;
+  the engineering deck's compliance card ("all detection-not-prevention, all opt-in", against S, F2, P1), both replay
+  sentences (closed in v2.22.0; the persisted-node divergence named), the GDPR qualifier; the philosophy's "is built".
+  **Left for the author:** "no daemon" in the gated expansion beside the published node; both proof slides at v2.21.0
+  (the run-4 class — `RELEASING.md` §6 by hand); the "Zero …" absolutes carried from run 5.

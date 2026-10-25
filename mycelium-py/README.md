@@ -10,8 +10,23 @@ Choose and pin your node and SDK together using [installation and integration mo
 
 ## Installation
 
+No toolchain is needed. The node is a [published release](../docs/guide/installation.md#the-published-node), and
+`mycelium init` writes a Python project that already runs an agent against it — the node, a declared unit, a write
+the gateway refuses by scope ([the first hour](../docs/guide/tutorials/07-the-first-hour.md)):
+
+With `mycelium` on your `PATH` (`install -m 0755 mycelium-<ver>-<arch>/mycelium /usr/local/bin/`, as the tutorial's
+step 1 does):
+
 ```sh
-# From a checkout of the chosen release:
+TAG="v$(mycelium --version | cut -d' ' -f2)"             # the release your binary came from; the SDK pins to it
+mycelium init my-fleet --template governed-call-py      # the project; pinned to the binary's release
+pip install "https://github.com/RichardTathata/mycelium/archive/refs/tags/$TAG.tar.gz#subdirectory=mycelium-py"
+cd my-fleet && MYCELIUM_BIN=mycelium python3 main.py
+```
+
+The fallback, for developing the SDK itself or pinning to an unreleased commit, is a checkout:
+
+```sh
 cd mycelium-py
 pip install -e ".[dev]"
 ```
@@ -211,11 +226,11 @@ client.send("depot/dispatch", message, mandate={"grant": grant, "possession": ba
 
 ### The supervisor's grants, and a task's lifecycle (0.2.13)
 
-`grants_pending()` reads `GET /gateway/grants/pending` (`grant:read`) — the agents' open requests on this node,
+`grants_pending()` reads `GET /gateway/grants/pending` (`grant:read`) — every unanswered request this node holds — the records gossip, so the fleet's, not only this node's agents' —
 oldest first — and `grant_decide(agent, request, "issue" | "refuse", ttl_secs=…, reason=…)` posts the answer to
 `POST /gateway/grants/{agent}/{request}` (`grant:issue`); issuing is itself an action the node's evaluator decides,
-so a refusal is the route's 403, and 409 `not_this_node` names an agent on another node. A grant a caller holds
-already rides as a presented mandate in `_meta.mandate`. `grant_revoke(agent, request, reason=…)` revokes at the issuing
+so a refusal is the route's 403, and 409 `not_a_member` names an agent on no member node this gateway knows. A grant is presented by
+its holder, the agent's node — not by this client. `grant_revoke(agent, request, reason=…)` revokes at the issuing
 node, and `grants_stream()` is the requests as they come (an async iterator of `grant_request` and `grant_answered`
 events). `A2aClient.get_task(id)` and `cancel(id)` are `tasks/get`
 and `tasks/cancel`: the task as the node holds it, readable and cancellable by the identity that created it; a
@@ -738,8 +753,8 @@ The SDK is a client of one gateway; it carries what the doors it calls carry, an
 - **No cancellation of running work.** `A2aClient.cancel` reaches `tasks/cancel`, which ends a task's record and
   stops nothing (a task runs inside its request); `tools/call` has no cancel; ending a stream closes the client's
   side only, and a dropped stream is not resumed (no resume point at the gateway).
-- **No pending-grants stream.** A grant rides as a presented mandate, and `grants_pending` / `grant_decide` are the
-  supervisor's verbs; a supervisor polls, nothing pushes (adopter-surface X3's second PR).
+- **Presenting a grant.** A grant's holder is the agent's node, so this SDK's client — a bearer, not the node — cannot
+  present one: the supervisor's verbs are carried, the presenting side is the node's own (adopter-surface X3).
 - **Identity is the bearer's.** The principal the gateway resolves is the token's; this SDK signs nothing, and
   computes a mandate's request bytes without being able to prove possession of a key it does not hold.
 - **A receipt names the gateway node's rung and nothing above it** — never replication, never a peer's state.

@@ -242,6 +242,20 @@ traces compare on the canonical tuple — rule and revision, trigger, target, ou
 divergence whose records read gossiped or sampled inputs is reported *unattributable*: the seams do
 not cover that input, so the trace cannot say whether the decision or its world changed.
 
+## Reading a run across journals: correlation and closure
+
+A decision trace is one node's. A run that crosses nodes is read by the two [causal fields](00-concepts.md#causal-records)
+a request carries into every record its work produces (adopter-surface X4): `correlation`, one key segment grouping
+the records of one run, and `parent`, the content hash of the record this work depends on — the hash a decision
+record's `journal_sha256` cites, which a door forwards as the parent of the work it starts. `mycelium explain
+--correlation <id> <journals and traces…>` renders one run as one chain across the files it is given; `mycelium
+explain --closure <hash> <files…>` renders the [dependency closure](00-concepts.md#closure) of one record — every
+record that names it, or names one that does — marking each line *captured*, *reconstructed* or *unattributable*,
+naming every hole (a journal it was not given, a record a lenient journal lost), stopping at a federation edge, and
+saying first when it was given fewer journals than the fleet has nodes. The [causal records feature
+page](../features/causal-records.md) has the doors that carry the fields; [selective recovery](../features/selective-recovery.md)
+is the closure read in anger, from a lost acknowledgement.
+
 ## What this does not establish
 
 - **Not a multi-node schedule.** The scheduler seam's first arm covers one node's waits.

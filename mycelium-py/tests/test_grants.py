@@ -47,7 +47,7 @@ class _Stub(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
         _Stub.seen.append(("POST", self.path, body, self.headers.get("Authorization")))
         if _Stub.status != 200:
-            self._json({"ok": False, "error": "not_this_node", "detail": "another node's agent"}, _Stub.status)
+            self._json({"ok": False, "error": "not_a_member", "detail": "no member's agent"}, _Stub.status)
             return
         self._json({"ok": True, "key": "grant/a/r1", "operation_id": "op-1", "local_durability": "on_disk"})
 
@@ -121,4 +121,4 @@ def test_a_bad_decision_is_refused_before_it_is_sent_and_a_refusal_surfaces(stub
     with pytest.raises(httpx.HTTPStatusError) as e:
         agent.grant_decide("node:other", "r1", "issue")
     assert e.value.response.status_code == 409
-    assert e.value.response.json()["error"] in ("not_this_node", "not_a_member")
+    assert e.value.response.json()["error"] in ("not_a_member",)

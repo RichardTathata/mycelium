@@ -31,7 +31,7 @@ the journal and overwrites the trace.
 mycelium wire-check units/            # the declaration: what would bind, and the authority overlay
 mycelium explain data/decisions.jsonl # the node's own decisions (admission, membership), in the catalogue's words
 mycelium doctor node.toml             # what start() would say about this configuration, and why
-mycelium test --faults units/ --config node.toml   # this declaration's fleet under a revoked key and a node gone dark; add [persistence] to node.toml for the restart and grant classes
+mycelium test --faults units/ --config node.toml   # this declaration's fleet under a revoked key and a node gone dark; add [persistence] to node.toml for the restart, recovery and grant classes
 ```
 
 The authority decisions — permit, deny — are in `data/evidence.log`, a length-prefixed journal (not lines: read it

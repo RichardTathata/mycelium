@@ -239,6 +239,17 @@ draws: tune prompts live in production without touching the serving binary.
 
 ---
 
+## Skills as files, kept current: `mycelium declare`
+
+A prompt skill's text can live in the project as a file, `skills/<ns>/<name>.md`, beside the project's `units/*.toml`.
+`mycelium declare [dir] [--watch]` ([feature page](../features/declare.md)) writes each skill file as a prompt
+template through `PUT /gateway/prompts/{ns}/{name}` (scope `llm:write`) and declares each unit through
+`POST /gateway/units/declare` (scope `cap:write`), after the same `wire-check` the subcommand runs; under `--watch` it
+re-declares whenever a file changes, and a removed skill file deletes its template. `--gateway` defaults to
+`http://127.0.0.1:8300`; the bearer is `--token` or `MYCELIUM_GATEWAY_TOKEN`, and it needs both scopes — the Python
+scaffold's `alice` token has `cap:write` but not `llm:write`, so add it before declaring a skill there. The template is
+live at once (§ Live prompt-template updates, above): no node restart.
+
 ## Reference — SkillRunner
 
 *Moved from the repo README (2026-07-10): how a skill works, the minimal manifest, composition, calling from any node. Full manual: [`docs/reference/skillrunner.html`](../reference/skillrunner.html).*

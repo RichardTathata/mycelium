@@ -46,6 +46,16 @@ The developer's five steps — the same five as the root README's *Build a fleet
 5. **[`what-is-proven.md`](../docs/operations/what-is-proven.md)** — what CI proves on every merge, what is demonstrated with its bound stated, and what is not yet shown.
 <!-- path:end -->
 
+**Without a toolchain,** the path is [the first hour](../docs/guide/tutorials/07-the-first-hour.md): the
+[published node](../docs/features/published-node.md) and the two scaffolds `mycelium init` writes
+([`governed-call`](../templates/governed-call/README.md) in Rust, [`governed-call-py`](../templates/governed-call-py/README.md)
+in Python; [feature page](../docs/features/init.md)). They are projects of their own, not rows of the matrix below:
+CI's `Scaffold` job builds and runs both, and the `one-hour` job times the Python one on the published binary. The
+grant and the selective-recovery demonstrations the adopter-surface plan named as examples are the `grant` and
+`recovery` classes of [`mycelium test --faults`](../docs/features/test-faults.md) run against those scaffolds, not
+example binaries — their feature pages say so ([grants](../docs/features/grants.md),
+[selective recovery](../docs/features/selective-recovery.md)).
+
 **Learn the newer surfaces:** [six developer tutorials](../docs/guide/tutorials/README.md) — stem fleets,
 declarations, shadow acceptance, authority boundaries, replay, and declared versus observed.
 

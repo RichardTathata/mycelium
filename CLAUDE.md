@@ -102,10 +102,11 @@ clippy is the catcher for the *feature-gated dead-code trap* (an item live only 
 check-full` adds the test suites + wasm-host clippy. The underlying set:
 
 ```bash
-cargo test --lib --features tls,metrics,a2a,llm
+cargo test --lib --features tls,metrics,a2a,llm,test-frame-filter   # CI's line; test-frame-filter for the lock_lifecycle* tests
+cargo test --lib --features test-frame-filter                       # CI's default-feature lib run
 cargo clippy --lib --tests -- -D warnings                 # default features — catches tls-only dead code
 cargo clippy --lib --tests --features tls,metrics,a2a,llm -- -D warnings
-cargo test --lib --features compliance
+cargo test --lib --features compliance,a2a                # CI runs it strict (CI_RETEST_STRICT=1)
 cargo test --lib --no-default-features --features gateway
 cargo clippy -p mycelium-core --lib --tests -- -D warnings
 cargo clippy --lib --bins --tests --no-default-features -- -D warnings   # CI's line; test-only items (not gateway-free: dev-deps re-enable it)

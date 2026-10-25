@@ -18,7 +18,7 @@ what it cannot yet, is [what-is-proven.md](what-is-proven.md).
 
 For a mechanism-level explanation or example, use the [capability map](../capabilities.md).
 
-**Learn the newer surfaces:** [six developer tutorials](../guide/tutorials/README.md) — stem fleets,
+**Learn the newer surfaces:** [seven developer tutorials](../guide/tutorials/README.md) — stem fleets,
 declarations, shadow acceptance, authority boundaries, replay, and declared versus observed.
 
 ## Start here

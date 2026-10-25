@@ -81,6 +81,12 @@ control-plane service to deploy or operate. The definition, used everywhere the 
 *Control decisions live in participating nodes: enabled governors and provisioners act locally, subject to configured consensus and resource-side authority checks. No separate Mycelium control-plane service is required.* "Enabled" is load-bearing: a minimal embed runs none of them, and a governor
 enforces only under the control profile its node is set to.
 
+**What "no daemon" means** (adopter-surface X11, decided 2026-10-25). Not that no process runs for long — the published
+`mycelium` binary is a long-running node, and it is the no-toolchain path. It means there is no *separate* service beside
+the participants: the published node is one participant, the library hosting one node, not a broker or registry the
+agents connect through, and an SDK agent reaches its own node's gateway. The definition, used everywhere the phrase
+appears: *Every running Mycelium process is a participant. No separate Mycelium service sits between participants.*
+
 **The buyer's** — both decks, the engagement kit, the pilot page — the hero and the sentence, then the order in
 the plan's §3: what an agent **may** do, checked where the work happens · what it **did**, as records
 a third party can audit · a fleet that **fills itself** · how: no coordinator · what is proven and what

@@ -177,6 +177,35 @@ which is why `mycelium-tuple-space`'s overview moved under `/gateway/`.
 `"*"`; a token scoped `llm:*` admits **nothing** — the runbooks' phrase *"the `llm:*` family"* is
 prose for `llm:read` · `llm:write` · `llm:invoke`, each listed by name.
 
+## 2a. Answering grants — the supervisor's runbook
+
+A [grant](../features/grants.md) is approval that is default-deny: for a tool in an agent's `require_grant_for`, the
+call waits for a supervisor's grant and is refused on silence. Running it needs:
+
+- **The build and the node.** A `compliance` build (the member keys a grant's checkpoint is verified against), `[tls]`
+  on the agent's node (it signs the grant and proves possession), and `[persistence]` if a pending request and its
+  grant must survive a restart.
+- **Who may answer.** `grant:issue` lets a token reach the route; it does not make the caller an approver. Issuing,
+  refusing and revoking are actions the node's evaluator decides with the caller as the actor — write rules admitting
+  the supervisor's principal to `grant.issue`, `grant.refuse` and `grant.revoke` on `tool:<name>@<agent node>`. With
+  no evaluator attached nothing can be answered (`403 no_evaluator`). In a declaration, `mycelium wire-check` warns
+  `unissuable grant` for a grant-required rule nobody may issue.
+- **Reading the requests.** `GET /gateway/grants/pending` (`grant:read`) lists every unanswered, unexpired request the
+  node holds — the `grant/` records gossip, so that is the fleet's, not only this node's. `GET /gateway/grants/stream`
+  pushes them as server-sent events: `grant_request` once each, `grant_answered` for each issue, refusal or
+  revocation, `grant_expired` for one that lapses unanswered.
+- **Answering.** `POST /gateway/grants/{agent}/{request}` with `{"decision": "issue" | "refuse", "ttl_secs": …,
+  "reason": …}`; `ttl_secs` defaults to 300 and is capped at 3 600. The door's own refusals: `404 unknown_request`,
+  `409 already_answered`, `409 not_a_member` (an agent on no member node this gateway knows), `410 expired`.
+- **Revoking.** `POST /gateway/grants/{agent}/{request}/revoke` (`grant:issue`), **at the node that issued it** —
+  elsewhere `409 not_the_issuer`. Work already admitted under the grant is stopped within the execution authority's
+  drain bound. Which nodes' grants an agent's node accepts is its entitlement table: its own (`entitle_grants`) or
+  every fleet member's (`entitle_grants_from_fleet`).
+- **Limits to plan for.** A streamed A2A task waits for a grant at most 120 s, whatever `grant_window` says. Records
+  under `grant/` are never reclaimed — watch KV growth. The counters and the pending gauge, with alert readings, are in
+  [metrics.md](metrics.md) (`mycelium_grants_*`). `mycelium test --faults grant` drives the declaration's own grant on
+  an in-process fleet before it carries work ([diagnostics](diagnostics.md#before-the-fleet-carries-anything-mycelium-test---faults)).
+
 ## 3. Advertise & verify roles
 
 ```rust

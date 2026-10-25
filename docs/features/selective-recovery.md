@@ -37,7 +37,7 @@ This feature is turned on in code.
   [`claim_compensation`](../../src/effects/external.rs) and [`claim_leave`](../../src/effects/external.rs) — each
   move's check and change in one step under the ledger's lock, so two moves racing on one record cannot both send.
 - [`persistence`](../reference/configuration.md#the-fields) — the class needs `[persistence]` and a `gateway` + `tls`
-  build; it reads `not_configured` or `not_in_build` otherwise, and fails the run only when asked for by name.
+  build (from a checkout, `cargo build --bin mycelium --features cli,tls`; the published binary has both); it reads `not_configured` or `not_in_build` otherwise, and fails the run only when asked for by name.
 - `the_recovery_class_recovers_the_closure_by_class_and_leaves_independent_work`, in
   [`src/faults.rs`](../../src/faults.rs): the live form against a persisted three-node fleet, every check held.
 

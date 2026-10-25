@@ -19,7 +19,7 @@ beforeAll(() => {
     const headers = new Headers(init?.headers ?? {});
     calls.push({ url, method: init?.method ?? "GET", body: init?.body ? JSON.parse(String(init.body)) : undefined, auth: headers.get("authorization") ?? undefined });
     if (status !== 200) {
-      return new Response(JSON.stringify({ ok: false, error: "not_this_node", detail: "another node's agent" }), { status, headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify({ ok: false, error: "not_a_member", detail: "no member's agent" }), { status, headers: { "content-type": "application/json" } });
     }
     if (url.endsWith("/gateway/grants/stream")) {
       return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
@@ -82,5 +82,5 @@ test("a bad decision is refused before it is sent, and the gateway's refusal sur
   await expect(agent.grantDecide("a", "r", "maybe" as unknown as "issue")).rejects.toThrow(/issue.*refuse/);
   expect(calls).toHaveLength(0);
   status = 409;
-  await expect(agent.grantDecide("node:other", "r1", "issue")).rejects.toThrow(/409|not_this_node/);
+  await expect(agent.grantDecide("node:other", "r1", "issue")).rejects.toThrow(/409|not_a_member/);
 });

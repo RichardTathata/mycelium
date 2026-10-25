@@ -58,8 +58,9 @@ USER mycelium
 WORKDIR /var/lib/mycelium
 # `GossipConfig::default()` binds loopback, which inside a container reaches nothing: a port mapping would
 # deliver to nobody (found by #664's review). The container's network namespace is its own, so the gossip
-# listener binds every address here. This applies to a node run without a configuration file; a file sets
-# `bind_address` itself. The gateway stays on loopback unless the configuration sets `http_addr`, and off
+# listener binds every address here. Environment overrides apply after a configuration file
+# (`GossipConfig::load_from_file`), so this wins over a file's `bind_address` too — pass `-e GOSSIP_BIND_ADDRESS=…` to
+# change it. The gateway stays on loopback unless the configuration sets `http_addr`, and off
 # loopback it refuses to start without a credential unless `gateway_allow_unauthenticated` (2.32.0).
 ENV GOSSIP_BIND_ADDRESS=0.0.0.0
 # The gossip port, `GossipConfig::default().bind_port`: TCP for the mesh and UDP for the SWIM failure detector

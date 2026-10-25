@@ -371,7 +371,7 @@ arguments' digest and a rendering a human reads, the policy revision, the expiry
 `grant_window` (30 s by default, on the wall clock) for `…/issued`. Silence refuses `GrantNotPresented`; a supervisor's
 refusal `GrantRefused`.
 
-What is issued is a mandate, so it inherits every door this chapter describes: its holder is the agent's principal,
+What is issued is a mandate, so it inherits every door this chapter describes: its holder is the agent's node (`node:<id>`, the agent's principal),
 its scope is its own — `grant:{request}`, so grants never conflict with each other or with a resource authority's
 appointments — and its binding rides **inside its signed operations** as `bound:args:{digest}` and
 `bound:policy:{revision}` beside the one operation it permits. The issuing node signs it; the supervisor is the actor
@@ -386,7 +386,7 @@ checkpoint from the issuer naming the term. The decision record carries the gran
 GET  /gateway/grants/pending                      grant:read   — the open requests, oldest first
 POST /gateway/grants/{agent}/{request}            grant:issue  — {"decision": "issue"|"refuse", "ttl_secs", "reason"}
 POST /gateway/grants/{agent}/{request}/revoke     grant:issue  — {"reason"}, at the node that issued
-GET  /gateway/grants/stream                       grant:read   — SSE: grant_request once each, grant_answered on issue · refuse · revoke
+GET  /gateway/grants/stream                       grant:read   — SSE: grant_request once each, grant_answered on issue · refuse · revoke, grant_expired on a lapse
 ```
 
 The raw KV routes refuse the `grant/` namespace: an answer is written through the door that decides it.

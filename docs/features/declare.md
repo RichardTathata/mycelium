@@ -27,6 +27,10 @@ This feature is turned on in code.
 - [`run`](../../src/declare.rs) — the command: once, or polled until Ctrl-C, which retracts.
 - The token is `--token` or `MYCELIUM_GATEWAY_TOKEN`; the routes need `cap:write` for units and `llm:write` for
   skills ([rbac](../operations/rbac.md)).
+- The flags: `--gateway <url>` (default `http://127.0.0.1:8300`), `--token <bearer>` (else `MYCELIUM_GATEWAY_TOKEN`),
+  `--watch`, `--poll-ms <n>` (how often the files are read), `--interval-secs <n>` (the heartbeat), `--lease-secs <n>`
+  (the lease a declaration is held under). `--poll-ms` at or above a third of the lease is refused: the declaration
+  would lapse between heartbeats.
 - `a_unit_edit_is_redeclared_and_the_old_handle_retracted`, in [`src/declare.rs`](../../src/declare.rs): a real
   gateway node, a unit declared, resolved over HTTP, renamed, re-declared, and the old capability gone.
 
@@ -47,7 +51,7 @@ edit reaching the fleet, a refused unit leaving the previous declaration, Ctrl-C
   changes nothing — a unit the gateway refuses after the check passed (a reserved namespace, a stem-only section)
   has its previous text declared again, and the refusal is printed once, not retried every poll.
 - Under `--watch` a declaration lives under a lease the watch heartbeats within; if the watch dies, the node
-  retracts it when the lease lapses, as for any SDK agent ([units/declare](../reference/unit-file.md#who-reads-which-section)).
+  retracts it when the lease lapses, as for any SDK agent ([the lease](../guide/10-language-bridges.md)).
   A handle the node no longer knows — after a node restart, or a lapsed lease — fails the heartbeat and is declared
   again at the next tick whether or not a file changed. Once, without `--watch`, no lease is sent: the declaration
   lives until the node stops or it is retracted, as an SDK agent's does.

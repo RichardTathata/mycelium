@@ -651,10 +651,12 @@ node that crashes mid-ballot simply stops voting; the ballot either reaches quor
 without it or times out. Under network partition, liveness is not guaranteed: a
 minority partition will not commit. Safety---no two nodes commit conflicting values
 for the same ballot---holds as long as quorum is not simultaneously satisfied by
-two disjoint subsets, which a majority quorum prevents. Quorum membership is
-evaluated against the live capability-group population at ballot time, not a fixed
-initial roster; nodes that join or leave between proposal and commit may affect
-whether quorum is reachable, but cannot cause two conflicting values to commit.
+two disjoint subsets, which a majority quorum prevents. Safety is a property of
+the electorate, not of discovery: a quorum is counted over a declared electorate whose
+members are fixed at genesis, so any two quorums intersect, and a node that is merely
+discovered does not vote. Crashed or departed members affect whether a quorum is
+reachable, not which value commits; changing an electorate's members is a migration,
+not a change the protocol absorbs mid-ballot.
 This is not a replacement for Raft, Paxos, or BFT consensus in high-assurance
 settings; it is a coordination primitive for capability-group decisions in
 homogeneous trusted clusters where crash-fault tolerance and leaderless operation
@@ -670,7 +672,8 @@ without a coordinator.
 coordination throughput is bounded by the coordinator's capacity, and coordinator
 failure stops coordination entirely. In Layer~III, there is no coordinator. No
 single node's failure prevents other ballots from proceeding. The system degrades
-gracefully to reduced quorum, not coordination failure.
+gracefully: while a live quorum of the electorate remains, coordination slows rather
+than stops.
 
 \subsection{Agentic Flow Networks}
 

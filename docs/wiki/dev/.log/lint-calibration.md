@@ -433,3 +433,12 @@ Entry format:
   *unreleased* two weeks after 2.15.0 shipped it; the 10-07 sharpening's grep named `docs/wiki docs/guide
   docs/operations docs/design`, although the 2026-09-24 entry had made `docs/plans/` a swept root for §2.
   Sharpening (folded into §2): the grep includes `docs/plans`.
+- 2026-10-25: **§1 lock-order — a task-local lock in a closure, missed by name.** The fault classes' hand-off slots
+  (`Opened` aliases, `failed` in `faults/grant.rs`) went unrowed; the field grep found the aliases only with the alias
+  sweep, and `failed` hid because the word occurs in another row's prose. Sharpening (folded into §1's practice): match
+  a lock site to a row by **name and file together**, never by name alone.
+- 2026-10-25: **§1 behavioural claims — "takes no lock of this table" on rows 61 and 67** held for two weeks while
+  `kv_set` reached `apply_and_notify` and row 7. Row 56 states the same shape correctly; the claim was copied, not read.
+  Sharpening: a row that says a call "takes no lock" is checked by following the call to its first lock, as the
+  behavioural-claim rule already says for *held across*.
+

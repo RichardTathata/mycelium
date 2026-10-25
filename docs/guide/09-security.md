@@ -223,7 +223,7 @@ edge (`/health`, `/ready`, `/stats`, `/metrics`, descriptor, and the nonce-capab
 (`mcp:invoke`), `/signals/{kind}` (`mesh:read`) and `/consensus/{slot}` (`consensus:read`),
 gated since 2026-09-05; before that they answered without a bearer.
 
-**Serving is not calling (2.15.0).** Registering to *serve* an RPC kind (`POST /gateway/rpc/serve/{kind}`,
+**Serving is not calling (2.15.0).** Registering to *serve* an RPC kind (`GET /gateway/rpc/serve/{kind}`,
 `/gateway/rpc/respond`) needs the scope **`mesh:serve`**; a `mesh:read`/`mesh:write` token is admitted
 there for one release with a warning; **since 2.18.2 it is refused** — `403 {"required_scope":
 "mesh:serve"}` — so reissue every serving client's token with `mesh:serve`. And the raw routes (`rpc/call`, `scatter`,
