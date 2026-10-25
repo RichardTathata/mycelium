@@ -625,6 +625,9 @@ impl AgentStateMachine {
                     return Err(PolicyViolation::GrantRefused(format!("{tool}: no execution authority is attached to verify the grant")));
                 };
                 let now = self.ctx.hlc.decision_now_ms();
+                // The grant's checkpoint, written beside it by the issuing node — this one or another — so the
+                // standing is known here before the grant is assessed (adopter-surface X3, second PR).
+                super::gateway_authority::feed_grant_checkpoint(&self.ctx, authority, &presented.grant.mandate, now);
                 let assessment = authority.assess(&agent, "tools/call", &resource, &digest, Some(&presented), now, &super::gateway_member_keys(&self.ctx));
                 return match assessment.binding.map(|b| b.state) {
                     Some(super::action_evaluator::MandateState::Established) => {
@@ -667,25 +670,7 @@ impl AgentStateMachine {
     /// survive this node's restart — #673's review, finding 4), then gossiped.
     #[cfg(all(feature = "gateway", feature = "tls"))]
     fn write_kv(&self, key: &str, value: Vec<u8>) {
-        let update = make_gossip_update(
-            &self.ctx.node_id,
-            self.ctx.default_ttl,
-            Arc::from(key),
-            Bytes::from(value),
-            false,
-            &self.ctx.hlc,
-        );
-        apply_and_notify(&self.ctx.kv_state, &update); // apply, then persist (persistence.rs invariant 1)
-        if let Some(wal) = self.ctx.wal.get() {
-            wal.append_try(crate::framing::sync_entry_from(&update));
-        }
-        dispatch_gossip_try_send(
-            &self.ctx.gossip_txs,
-            crate::framing::local_kv_wire_msg(&self.ctx, update),
-            self.ctx.node_id.id_hash(),
-            ForwardHint::All,
-            &self.ctx.kv_state.dropped_frames,
-        );
+        write_owned_kv(&self.ctx, key, value);
     }
 
     /// Emits `AGENT_APPROVE` and waits up to 30 s for a matching `AGENT_VETO`.
@@ -850,6 +835,25 @@ pub(crate) fn render_arguments(arguments: &serde_json::Value) -> serde_json::Val
     } else {
         serde_json::json!({ "withheld": "over the rendering cap", "bytes": text.len(), "cap": CAP })
     }
+}
+
+/// One KV write under a route-owned namespace, made synchronously: applied, **appended to the WAL** when the node
+/// persists (the record must survive this node's restart — #673's review, finding 4), then gossiped. The state
+/// machine's own writes and the doors' single-use markers (adopter-surface X3, second PR) go through it.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+pub(crate) fn write_owned_kv(ctx: &Arc<super::TaskCtx>, key: &str, value: Vec<u8>) {
+    let update = make_gossip_update(&ctx.node_id, ctx.default_ttl, Arc::from(key), Bytes::from(value), false, &ctx.hlc);
+    apply_and_notify(&ctx.kv_state, &update); // apply, then persist (persistence.rs invariant 1)
+    if let Some(wal) = ctx.wal.get() {
+        wal.append_try(crate::framing::sync_entry_from(&update));
+    }
+    dispatch_gossip_try_send(
+        &ctx.gossip_txs,
+        crate::framing::local_kv_wire_msg(ctx, update),
+        ctx.node_id.id_hash(),
+        ForwardHint::All,
+        &ctx.kv_state.dropped_frames,
+    );
 }
 
 /// Snapshot all `agent/{node}/state` entries from the local KV store.

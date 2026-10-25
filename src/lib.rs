@@ -133,7 +133,10 @@
 //! | `grant/{agent}/{request}`          | adopter-surface X3 — a grant request the agent's state machine wrote (tool, arguments digest and rendering, policy revision, expiry); route-owned: the raw KV routes refuse the prefix |
 //! | `grant/{agent}/{request}/issued`   | the signed grant (`SignedMandateGrant`, scope `grant:{request}`) written by `POST /gateway/grants/{agent}/{request}` (`grant:issue`) |
 //! | `grant/{agent}/{request}/refused`  | a supervisor's refusal, with the issuer and reason |
-//! | `grant/{agent}/{request}/checkpoint` | the issuing node's first revocation checkpoint for the grant's scope (nothing revoked), so a verifier's standing is known; a revocation is the next checkpoint naming the term |
+//! | `grant/{agent}/{request}/checkpoint` | the issuing node's revocation checkpoint for the grant's scope — sequence 1 at issue (nothing revoked), sequence 2 at revocation (the term named); every node's authority is fed it from the KV, so a grant issued or revoked at one node is known at every other |
+//! | `grant/{agent}/{request}/consumed` | written by the agent's commit: the request's grant admitted one transition, so the same tool and arguments ask again |
+//! | `grant/{agent}/{request}/used/{door}` | written by an enforcement point (`gateway`, `provider`) that admitted a call under the grant: a grant admits one call at each door, and a second presentation there is refused `GrantUsed` (adopter-surface X3, second PR) |
+//! | `grant/{agent}/{request}/revoked`  | the revocation, with the issuer, the reason and the checkpoint's sequence, written by `POST /gateway/grants/{agent}/{request}/revoke` (`grant:issue`) at the issuing node |
 //! | `faults/{class}/…`                 | adopter-surface X6 — the writes `mycelium test --faults` makes on the in-process fleet it builds for one run (a synced write per node, the revoke class's plant and forged write, a replay marker); never written on an adopter's node |
 //! | `agent/{node}/provision/{item}/error` | Last provisioning failure — written by the **application** provisioning handler, not the substrate |
 //! | `sys/identity/{node}`              | mTLS — 32-byte Ed25519 verifying key history (current‖retained); written at startup by TLS-enabled nodes |

@@ -82,10 +82,12 @@ pub(super) async fn gw_grant_decide(
     if agent.contains('/') || request.contains('/') || agent.is_empty() || request.is_empty() {
         return refused(StatusCode::BAD_REQUEST, "bad_request", "agent and request are each one key segment");
     }
-    // Until the second PR carries a grant and its checkpoint to another node's authority, a grant is issued only for an
-    // agent on this node: a grant signed here is one this node's verifier is entitled to, and no other's is.
-    if agent != gateway_caller::node_principal(&ctx.agent_ctx.node_id) {
-        return refused(StatusCode::CONFLICT, "not_this_node", format!("{agent} is not this node's agent; a grant is issued at the node the agent runs on (the second PR carries grants across nodes)"));
+    // A grant is issued for an agent on this node, or on a fleet member this node knows the identity key of (adopter-
+    // surface X3, second PR): the grant and its checkpoint travel to the agent's node in the KV, where its authority is
+    // fed them, and that node's entitlement table decides whether this node may issue (`entitle_grants_from_fleet`).
+    // A principal that is no member's is refused by name.
+    if agent != gateway_caller::node_principal(&ctx.agent_ctx.node_id) && !is_member_agent(&ctx.agent_ctx, &agent) {
+        return refused(StatusCode::CONFLICT, "not_a_member", format!("{agent} is neither this node's agent nor a fleet member whose identity key this node holds; a grant is issued for an agent on a member node"));
     }
     let key = format!("grant/{agent}/{request}");
     let Some(bytes) = mycelium_core::ops::kv_get(&ctx.agent_ctx, &key) else {
@@ -195,6 +197,103 @@ pub(super) async fn gw_grant_decide(
             receipt
         }
     }
+}
+
+/// Is `agent` the principal (`node:{ip}:{port}`) of a fleet member whose identity key this node holds?
+fn is_member_agent(ctx: &TaskCtx, agent: &str) -> bool {
+    agent
+        .strip_prefix("node:")
+        .and_then(|s| s.parse::<crate::node_id::NodeId>().ok())
+        .is_some_and(|n| gateway_member_keys(ctx).contains_key(&n))
+}
+
+#[derive(serde::Deserialize, Default)]
+pub(super) struct GrantRevokeBody {
+    /// Why, shown on the record.
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+/// `POST /gateway/grants/{agent}/{request}/revoke` (`grant:issue`) — revoke an issued grant (adopter-surface X3,
+/// second PR). Revoking is an action the evaluator decides (`grant.revoke` on the request's resource, the caller as
+/// the actor), as issuing is. The grant's authority is the node that signed it, so a grant is revoked **at the node
+/// that issued it** (`409 not_the_issuer` elsewhere): that node publishes the next checkpoint for the grant's scope
+/// naming the term, offers it to its own authority — whose sweep then stops work running under the grant — and
+/// writes it beside the grant (`…/checkpoint`), where every other node's authority is fed it; `…/revoked` names who
+/// and why. A revoked grant is refused at every door as `revoked`; revocation is monotonic.
+pub(super) async fn gw_grant_revoke(
+    State(ctx): State<Arc<HttpCtx>>,
+    caller: Option<Extension<ResolvedPrincipal>>,
+    Path((agent, request)): Path<(String, String)>,
+    body: Option<Json<GrantRevokeBody>>,
+) -> axum::response::Response {
+    let caller = caller.map(|Extension(c)| c);
+    let issuer = caller.as_ref().map(|c| c.principal.clone()).unwrap_or_else(|| gateway_caller::PRINCIPAL_ANONYMOUS.to_string());
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    if agent.contains('/') || request.contains('/') || agent.is_empty() || request.is_empty() {
+        return refused(StatusCode::BAD_REQUEST, "bad_request", "agent and request are each one key segment");
+    }
+    let key = format!("grant/{agent}/{request}");
+    let Some(bytes) = mycelium_core::ops::kv_get(&ctx.agent_ctx, &format!("{key}/issued")) else {
+        return refused(StatusCode::NOT_FOUND, "not_issued", format!("no grant was issued at {key}"));
+    };
+    let grant: SignedMandateGrant = match serde_json::from_slice(&bytes) {
+        Ok(g) => g,
+        Err(e) => return refused(StatusCode::CONFLICT, "unreadable_grant", format!("{key}/issued: {e}")),
+    };
+    let this_node = gateway_caller::node_principal(&ctx.agent_ctx.node_id);
+    if grant.mandate.established_by.as_str() != this_node {
+        return refused(StatusCode::CONFLICT, "not_the_issuer", format!("the grant was issued by {}; revoke it at that node — only the issuer's key signs the checkpoint that revokes it", grant.mandate.established_by.as_str()));
+    }
+    if mycelium_core::ops::kv_get(&ctx.agent_ctx, &format!("{key}/revoked")).is_some() {
+        return refused(StatusCode::CONFLICT, "already_revoked", format!("{key} was already revoked"));
+    }
+    let rec: serde_json::Value = mycelium_core::ops::kv_get(&ctx.agent_ctx, &key).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let (tool, resource) = (rec["tool"].as_str().unwrap_or("?").to_string(), rec["resource"].as_str().unwrap_or("?").to_string());
+    let now_ms = ctx.agent_ctx.hlc.decision_now_ms();
+    let arguments = json!({ "tool": tool, "agent": agent, "request": request });
+    let preflight = ae_preflight(&ctx.agent_ctx, caller.as_ref(), "grant.revoke", &resource, &arguments, &json!({}), ENFORCEMENT_POINT_GRANT_ISSUE).await;
+    match &preflight {
+        Preflight::Refuse(r) => {
+            return (StatusCode::FORBIDDEN, Json(json!({ "ok": false, "error": r.reason(), "detail": r.to_string(), "data": r.error_data() }))).into_response();
+        }
+        Preflight::Proceed { .. } => {}
+        Preflight::Inert => {
+            return refused(StatusCode::FORBIDDEN, "no_evaluator", "no action evaluator is attached: nothing can decide who may revoke, so no answer is written");
+        }
+    }
+    let Some(tls) = ctx.agent_ctx.tls.get() else {
+        return refused(StatusCode::FORBIDDEN, "no_identity", "revoking a grant needs this node's identity ([tls]) to sign the checkpoint");
+    };
+    // The next checkpoint for the grant's scope: the issue wrote sequence 1 with nothing revoked; this is 2, naming the
+    // term. A later revocation of the same grant is refused above, so the sequence is these two.
+    let checkpoint = crate::mandate::authority::RevocationCheckpoint {
+        authority: grant.mandate.established_by.clone(),
+        scope: grant.mandate.scope.clone(),
+        seq: 2,
+        issued_at_ms: now_ms,
+        revoked: std::iter::once(grant.mandate.term.clone()).collect(),
+    };
+    let signed_checkpoint = crate::mandate::authority::SignedRevocationCheckpoint {
+        signature: mycelium_core::tls::sign_bytes(&tls.signing_key(), &checkpoint.canonical_bytes()).to_vec(),
+        checkpoint,
+    };
+    if let Some(authority) = ctx.agent_ctx.execution_authority.get() {
+        let _ = authority.offer_checkpoint(&signed_checkpoint, now_ms, &gateway_member_keys(&ctx.agent_ctx));
+        // Work admitted under the grant and still running is stopped now, not at the next sweep.
+        authority.sweep(now_ms);
+    }
+    let cp = match serde_json::to_vec(&signed_checkpoint) {
+        Ok(b) => b,
+        Err(e) => return refused(StatusCode::INTERNAL_SERVER_ERROR, "serialise", e.to_string()),
+    };
+    let (cp_ok, _) = write_record(&ctx.agent_ctx, format!("{key}/checkpoint"), cp).await;
+    let record = json!({ "schema": "mycelium.grant-revocation/1", "request": request, "issuer": issuer, "reason": body.reason.unwrap_or_default(), "at_ms": now_ms, "checkpoint_seq": 2 });
+    let (ok, receipt) = write_record(&ctx.agent_ctx, format!("{key}/revoked"), record.to_string().into_bytes()).await;
+    ae_record_execution(&ctx.agent_ctx, &preflight, if ok && cp_ok { super::action_evaluator::Execution::Completed } else { super::action_evaluator::Execution::Failed }).await;
+    #[cfg(feature = "metrics")]
+    metrics::counter!("mycelium_grants_revoked_total").increment(1);
+    receipt
 }
 
 /// One owned-namespace write with its receipt — the shape `POST /gateway/kv` answers with — and whether it was made.

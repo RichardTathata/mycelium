@@ -353,7 +353,8 @@ pub(super) async fn run_http_server(
     #[cfg(feature = "tls")]
     let gateway = gateway
         .route("/grants/pending",           get(grants::gw_grants_pending))
-        .route("/grants/{agent}/{request}", post(grants::gw_grant_decide));
+        .route("/grants/{agent}/{request}", post(grants::gw_grant_decide))
+        .route("/grants/{agent}/{request}/revoke", post(grants::gw_grant_revoke));
 
     // ── Consensus + the consistency/lock/election overlays built on it ────────
     // (v2 M2 feature gate). The ordered-log and reliable-delivery overlays above

@@ -147,6 +147,10 @@ pub fn possession_message(grant: &Mandate, request: &[u8]) -> Vec<u8> {
 #[derive(Clone, Debug, Default)]
 pub struct EntitlementTable {
     scopes: BTreeMap<String, BTreeSet<PrincipalId>>,
+    /// Grants from **any fleet member** are entitled (adopter-surface X3, second PR): the verifier has already
+    /// established the signer is a member whose key this node holds, and issuing was decided by that member's
+    /// evaluator; a node that trusts only itself to issue leaves this unset and entitles its own principal.
+    fleet_grants: bool,
 }
 
 impl EntitlementTable {
@@ -164,13 +168,24 @@ impl EntitlementTable {
     pub fn is_entitled(&self, scope: &str, authority: &PrincipalId) -> bool {
         self.scopes.get(scope).is_some_and(|a| a.contains(authority))
             // A grant's scope is its own (`grant:{request}`); the authority entitled for every grant is entitled
-            // under the prefix (adopter-surface X3).
-            || (scope.starts_with(GRANT_SCOPE_PREFIX) && self.scopes.get(GRANT_SCOPE_PREFIX).is_some_and(|a| a.contains(authority)))
+            // under the prefix (adopter-surface X3), and with `entitle_grants_from_fleet` every member node is —
+            // for a `node:` principal only, which is what a member signs as.
+            || (scope.starts_with(GRANT_SCOPE_PREFIX)
+                && (self.scopes.get(GRANT_SCOPE_PREFIX).is_some_and(|a| a.contains(authority))
+                    || (self.fleet_grants && authority.as_str().starts_with("node:"))))
     }
 
     /// Entitle `authority` to issue grants (every scope under `grant:`) — the issuing gateway node, as a rule.
     pub fn entitle_grants(&mut self, authority: PrincipalId) {
         self.entitle(GRANT_SCOPE_PREFIX, authority);
+    }
+
+    /// Entitle **every fleet member** to issue grants (adopter-surface X3, second PR): a grant signed by a `node:`
+    /// principal whose identity key this node holds is entitled, so a supervisor at any gateway of the fleet can
+    /// answer an agent here. The signature is still verified against the member's key; this decides only whether a
+    /// verified member may issue.
+    pub fn entitle_grants_from_fleet(&mut self) {
+        self.fleet_grants = true;
     }
 }
 

@@ -235,6 +235,23 @@ which now matches `python <file>::<test>[param]` and `typescript <file>::<title>
 the Strands store's bearer has no principal test; neither SDK cancels or carries a grant; an A2A task is lost with
 its node. Entry page `docs/features/adapter-contract.md`; log `.log/2026-10-24-x7-adapter-contract.md`.
 
+## Grants, the second PR (adopter-surface X3, 2026-10-25)
+
+The enforcement remainder of X3. What to know: a grant's holder is the **agent's node** (`node:{id}`), so the door
+a grant reaches is the provider's, on the node's own call (`rpc_call_with_mandate`); a bearer presenting a node's
+grant at `/mcp` is refused as not the holder's before anything else. Single use is claimed in `ae_preflight` after the
+evaluator permits — `ExecutionAuthority::claim_grant_use` (lock-order row 70) plus the marker
+`grant/{agent}/{request}/used/{door}` read first (the WAL half) — so the gateway and the provider each spend their
+own use of one call. A grant's checkpoints (`…/checkpoint`, seq 1 at issue, seq 2 at revocation) travel in the KV:
+`feed_grant_checkpoint` offers one before every assessment, and a watcher on `grant/` (spawned in
+`with_execution_authority`) offers every one that lands, which is what carries a revocation to another node's sweep.
+**Found and fixed:** the sweep judged granted work by `ExecutionGate::check`, whose scope rule a grant's own scope
+fails — granted work was cancelled at the first tick; it is judged by `grant_standing` and the window now. The
+revoked refusal is *not established* (an error-outcome audit seal); the used refusal is a *denial* — the distinction
+`prove_denials` sees. Cross-node issuing needs the agent node's `EntitlementTable::entitle_grants_from_fleet()`.
+Tests: the four new ones in `src/agent/http/grant_tests.rs` (the restart one over `[persistence]`, dropping every
+handle on the context before the restart — the state machine holds one, and with it the journal's lock).
+
 ## Selective recovery — the `recovery` class (adopter-surface X9, 2026-10-25)
 
 `src/faults/recovery.rs`. The plan's decisive demonstration as a sixth class of `mycelium test --faults`: three

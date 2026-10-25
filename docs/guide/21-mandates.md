@@ -385,9 +385,19 @@ checkpoint from the issuer naming the term. The decision record carries the gran
 ```text
 GET  /gateway/grants/pending                      grant:read   — the open requests, oldest first
 POST /gateway/grants/{agent}/{request}            grant:issue  — {"decision": "issue"|"refuse", "ttl_secs", "reason"}
+POST /gateway/grants/{agent}/{request}/revoke     grant:issue  — {"reason"}, at the node that issued
 ```
 
 The raw KV routes refuse the `grant/` namespace: an answer is written through the door that decides it.
+
+Three things the second PR of the row added (2026-10-25). **One call at each door:** the gateway's preflight and
+the provider's each admit a grant once — the authority's claim is atomic, the marker `…/used/{door}` is on the WAL —
+and a second presentation is denied `GrantUsed`. **Revocation:** the issuing node publishes the next checkpoint for the
+grant's scope naming the term; its sweep judges work running under a grant by that standing and the grant's window
+and stops it within the drain bound; the checkpoint travels in the KV beside the grant, and every node's authority is
+fed it before it assesses. **Across nodes:** a supervisor at any gateway issues for an agent on a member node the
+gateway holds the key of; the agent's node's entitlement table decides whether a member may issue
+(`EntitlementTable::entitle_grants_from_fleet`). A restarted agent re-waits on its pending request, on the WAL.
 
 ## What this does not establish
 
