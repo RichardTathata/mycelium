@@ -1754,8 +1754,11 @@ mod tests {
     /// The recovery class against a persisted three-node fleet: the lost acknowledgement probed before any retry
     /// and the destination holding one effect, the closure incomplete over two journals and complete over three,
     /// every dependent recovered by its class as a new record, independent work untouched, and the recovery
-    /// explained from the records. Seen failing first under a plant that re-sent the root effect instead of probing
-    /// (the first check's detail read `SENT`, the destination's count 2).
+    /// explained from the records. Seen failing first under a plant that re-sent the root effect instead of probing:
+    /// the first check's detail read `SENT (…)` and `the destination reached 2 time(s) for it` (the destination
+    /// deduplicates, so the applications stay at one — the attempts are the number a re-send shows). And under a
+    /// plant that removed `retry`'s pre-check, the second check still held: the one retry is claimed under the
+    /// ledger's lock, so the concurrent second retry is refused there (#677's review, findings 4 and 8).
     #[cfg(all(feature = "gateway", feature = "tls"))]
     #[test]
     fn the_recovery_class_recovers_the_closure_by_class_and_leaves_independent_work() {
@@ -1768,12 +1771,13 @@ mod tests {
         let c = run_class(Class::Recovery, &units, &persisted(&dir), &dir, None);
         assert!(all_held(&c), "{c:?}");
         assert_eq!(c.checks.len(), 10, "{c:?}");
-        assert!(c.checks[0].detail.contains("probe before any retry") && c.checks[0].detail.contains("one application"), "{}", c.checks[0].detail);
+        assert!(c.checks[0].detail.contains("the synced write is back") && c.checks[0].detail.contains("probe before any retry") && c.checks[0].detail.contains("reached 1 time(s) for it"), "{}", c.checks[0].detail);
         assert!(c.checks[2].detail.contains("INCOMPLETE") && c.checks[2].detail.contains("hole(s) cited elsewhere"), "{}", c.checks[2].detail);
-        assert!(c.checks[8].detail.contains("order-100 1/1") && c.checks[8].detail.contains("label-101 1/1") && c.checks[8].detail.contains("points-102 0/0"), "{}", c.checks[8].detail);
+        assert!(c.checks[8].detail.contains("order-100 1/1 1/1") && c.checks[8].detail.contains("label-101 1/1 2/2") && c.checks[8].detail.contains("points-102 0/0 1/1"), "{}", c.checks[8].detail);
         assert!(c.checks[9].detail.contains("effect.probe, effect.retry, notify-retract, effect.leave"), "{}", c.checks[9].detail);
         assert!(c.exercised.iter().any(|e| e.id == "persist.configured" && e.state == "enforced"), "{:?}", c.exercised);
-        assert!(c.exercised.iter().any(|e| e.id == "ae.recorded_before_dispatch"), "{:?}", c.exercised);
+        assert!(c.exercised.iter().any(|e| e.id == "persist.sync_mode"), "{:?}", c.exercised);
+        assert!(c.notes.iter().any(|n| n.contains("record_permit")), "{:?}", c.notes);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1786,10 +1790,12 @@ mod tests {
         assert_eq!(r.classes.len(), 1);
         #[cfg(all(feature = "gateway", feature = "tls"))]
         assert_eq!(r.classes[0].state, ClassState::NotConfigured { missing: "[persistence]".into() });
-        #[cfg(not(all(feature = "gateway", feature = "tls")))]
+        #[cfg(all(feature = "gateway", not(feature = "tls")))]
+        assert_eq!(r.classes[0].state, ClassState::NotInBuild { feature: "tls" }, "the feature the build lacks, by name");
+        #[cfg(not(feature = "gateway"))]
         assert_eq!(r.classes[0].state, ClassState::NotInBuild { feature: "gateway" });
         assert_eq!(r.exit_code(), 1, "asked by name");
-        assert!(r.classes[0].not_exercised.iter().any(|e| e.id == "ae.recorded_before_dispatch"), "{:?}", r.classes[0].not_exercised);
+        assert!(r.classes[0].not_exercised.iter().any(|e| e.id == "persist.configured"), "{:?}", r.classes[0].not_exercised);
     }
 
     /// A proposed revision that drops a rule's `requires_values` permits the call the declared one refused: the

@@ -119,7 +119,7 @@ example = "none"
 example_watch = ["selective_recovery", "recovery_class", "lost_acknowledgement"]
 ids = ["concept:selective-recovery"]
 links = ["concept:test-faults", "concept:side-effect-contract", "concept:causal-records",
-         "guarantee:persist.configured", "guarantee:ae.recorded_before_dispatch", "rule:ae.preflight"]
+         "guarantee:persist.configured", "guarantee:persist.sync_mode", "rule:ae.preflight"]
 
 [[feature]]
 name = "Fault classes against a declaration"

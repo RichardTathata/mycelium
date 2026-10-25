@@ -487,10 +487,17 @@ impl Ledger {
     fn open(path: &Path) -> Result<Self, ExternalRefusal> {
         let journal = Journal::open(path, "effects/ledger").map_err(|e| ExternalRefusal::Ledger(format!("open {}: {e}", path.display())))?;
         let mut records = HashMap::new();
-        for frame in read_journal(path).map_err(|e| ExternalRefusal::Ledger(format!("read {}: {e}", path.display())))? {
-            // A frame that is not a record is not this ledger's; the journal's own integrity check is its framing.
-            if let Ok(s) = serde_json::from_slice::<Stored>(&frame) {
-                records.insert(s.operation_id.clone(), s);
+        for (i, frame) in read_journal(path).map_err(|e| ExternalRefusal::Ledger(format!("read {}: {e}", path.display())))?.iter().enumerate() {
+            // A frame this ledger cannot read is a record it would forget — and a forgotten record is an effect sent
+            // again. The fold fails closed by name, as the node's WAL does (`on_unreadable = refuse`); nothing else
+            // writes this journal (#677's review, finding 1).
+            match serde_json::from_slice::<Stored>(frame) {
+                Ok(s) => {
+                    records.insert(s.operation_id.clone(), s);
+                }
+                Err(e) => {
+                    return Err(ExternalRefusal::Ledger(format!("{}: frame {i} does not decode as a record ({e}); refusing to open — a record this ledger cannot read is an effect it would send again", path.display())));
+                }
             }
         }
         Ok(Self { journal, records: std::sync::Mutex::new(records) })
@@ -533,7 +540,21 @@ impl Ledger {
                     (s.clone(), false, true)
                 }
                 Some(s) if s.state == EffectState::Failed.tag() => {
-                    *s = Stored::prepared(ext, scope, now_ms, record_hash, correlation);
+                    // The declaration is this effect's; the history — probes, retries, the first unknown, the
+                    // evidence hash, the compensation link — stays, **never reset**: one operation's history is read
+                    // conservatively across its episodes, as the SQLite ledger read it (#677's review, finding 2).
+                    let fresh = Stored::prepared(ext, scope, now_ms, record_hash, correlation.or_else(|| s.correlation.clone()));
+                    s.dedup_scope = fresh.dedup_scope;
+                    s.class = fresh.class;
+                    s.compensation = fresh.compensation;
+                    s.content_hash = fresh.content_hash;
+                    s.attempt_id = fresh.attempt_id;
+                    s.state = fresh.state;
+                    s.prepared_at_ms = fresh.prepared_at_ms;
+                    s.max_probes = fresh.max_probes;
+                    s.max_age_ms = fresh.max_age_ms;
+                    s.record_hash = fresh.record_hash;
+                    s.correlation = fresh.correlation;
                     (s.clone(), true, true)
                 }
                 Some(s) => (s.clone(), false, false),
@@ -574,7 +595,100 @@ impl Ledger {
             s.retries += 1;
             s.clone()
         };
-        self.write(&row).await
+        // A claim the journal did not take is given back, as `prepare` gives back its insert (#677's review, 12).
+        if let Err(e) = self.write(&row).await {
+            if let Some(s) = self.map().get_mut(op.as_str()) {
+                s.retries -= 1;
+            }
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Claim one probe under the lock: the budget's count and age are checked and the count taken in one step, so two
+    /// probes racing on a record cannot both pass a budget of one (#677's review, finding 3). `Ok` carries the probe
+    /// number; `Err(ProbeBudgetExhausted)` carries what the record holds, for the caller to escalate.
+    async fn claim_probe(&self, op: &OperationId, age_ms: u64) -> Result<u32, ExternalRefusal> {
+        let (row, probes) = {
+            let mut map = self.map();
+            let s = map.get_mut(op.as_str()).ok_or(ExternalRefusal::NotRecorded)?;
+            if s.probes >= s.max_probes || age_ms >= s.max_age_ms {
+                return Err(ExternalRefusal::ProbeBudgetExhausted { probes: s.probes, age_ms });
+            }
+            s.probes += 1;
+            (s.clone(), s.probes)
+        };
+        if let Err(e) = self.write(&row).await {
+            if let Some(s) = self.map().get_mut(op.as_str()) {
+                s.probes -= 1;
+            }
+            return Err(e);
+        }
+        Ok(probes)
+    }
+
+    /// Claim the compensation of `op` by `by` under the lock: the record must be committed with no compensation in
+    /// flight, and the link is written in the same step, so two compensations racing under distinct ids cannot both
+    /// pass (#677's review, finding 3). `Ok` carries the record as it stood.
+    async fn claim_compensation(&self, op: &OperationId, by: &OperationId) -> Result<LedgerRecord, ExternalRefusal> {
+        let (row, before) = {
+            let mut map = self.map();
+            let s = map.get_mut(op.as_str()).ok_or(ExternalRefusal::NotRecorded)?;
+            let before = s.record();
+            if before.state != EffectState::Committed {
+                return Err(ExternalRefusal::State { state: before.state, needed: "a committed effect" });
+            }
+            if s.compensated_by.is_some() {
+                return Err(ExternalRefusal::State { state: before.state, needed: "an effect whose compensation is not already in flight" });
+            }
+            s.compensated_by = Some(by.to_string());
+            (s.clone(), before)
+        };
+        if let Err(e) = self.write(&row).await {
+            if let Some(s) = self.map().get_mut(op.as_str()) {
+                s.compensated_by = None;
+            }
+            return Err(e);
+        }
+        Ok(before)
+    }
+
+    /// Take a compensation's link off `op` again — a compensation that failed, or never got as far as the
+    /// destination, leaves the record open to another (#677's review, finding 9).
+    async fn unlink_compensation(&self, op: &OperationId, by: &OperationId) -> Result<(), ExternalRefusal> {
+        let row = self.change(op.as_str(), |s| {
+            if s.compensated_by.as_deref() == Some(by.as_str()) {
+                s.compensated_by = None;
+            }
+        });
+        match row { Some(r) => self.write(&r).await, None => Ok(()) }
+    }
+
+    /// Claim the leave of `op` under the lock: irreversible, unknown, and made `Unresolved` in the same step, so two
+    /// leaves racing on a record write one record (#677's review, finding 3). `Ok` carries the record as it stood.
+    async fn claim_leave(&self, op: &OperationId) -> Result<LedgerRecord, ExternalRefusal> {
+        let (row, before) = {
+            let mut map = self.map();
+            let s = map.get_mut(op.as_str()).ok_or(ExternalRefusal::NotRecorded)?;
+            let before = s.record();
+            if before.class != EffectClass::Irreversible {
+                return Err(ExternalRefusal::LeaveOfObservable { class: before.class.tag() });
+            }
+            match before.state {
+                EffectState::Unknown => {}
+                EffectState::Unresolved => return Err(ExternalRefusal::Unresolved),
+                state => return Err(ExternalRefusal::State { state, needed: "an unknown fate" }),
+            }
+            s.state = EffectState::Unresolved.tag().to_string();
+            (s.clone(), before)
+        };
+        if let Err(e) = self.write(&row).await {
+            if let Some(s) = self.map().get_mut(op.as_str()) {
+                s.state = EffectState::Unknown.tag().to_string();
+            }
+            return Err(e);
+        }
+        Ok(before)
     }
 
     fn budget(&self, op: &OperationId) -> Result<ProbeBudget, ExternalRefusal> {
@@ -591,20 +705,9 @@ impl Ledger {
         match row { Some(r) => self.write(&r).await, None => Ok(()) }
     }
 
-    async fn bump(&self, op: &OperationId, column: &str) -> Result<(), ExternalRefusal> {
-        let row = self.change(op.as_str(), |s| if column == "probes" { s.probes += 1 } else { s.retries += 1 });
-        match row { Some(r) => self.write(&r).await, None => Ok(()) }
-    }
-
     #[cfg(all(feature = "gateway", feature = "tls"))]
     async fn set_evidence_hash(&self, op: &OperationId, hash: &str) -> Result<(), ExternalRefusal> {
         let row = self.change(op.as_str(), |s| s.evidence_hash = Some(hash.to_string()));
-        match row { Some(r) => self.write(&r).await, None => Ok(()) }
-    }
-
-    /// Link a compensation in flight to the record it compensates; the state changes only when it commits.
-    async fn link_compensation(&self, op: &OperationId, by: &OperationId) -> Result<(), ExternalRefusal> {
-        let row = self.change(op.as_str(), |s| s.compensated_by = Some(by.to_string()));
         match row { Some(r) => self.write(&r).await, None => Ok(()) }
     }
 
@@ -730,9 +833,9 @@ pub struct Reconciler<D> {
 impl<D: ExternalDestination> Reconciler<D> {
     /// Open (or create) the ledger at `ledger_path` for `destination`, under `egress`.
     /// Open a reconciler over the ledger at `ledger_path` (a journal file of this reconciler's own; a second
-    /// owner is refused by name), for one destination, under one egress policy. Opened on a tokio runtime: the
-    /// ledger's writer is spawned there, so a reconciler is opened where it will run — and re-opened after that
-    /// runtime is gone, as a restarted node re-opens its WAL.
+    /// owner is refused by name, and a frame the ledger cannot read refuses the open), for one destination,
+    /// under one egress policy. **Needs a tokio runtime**: the ledger's writer is spawned there, so a reconciler is
+    /// opened where it will run — and re-opened after that runtime is gone, as a restarted node re-opens its WAL.
     pub fn open(ledger_path: impl AsRef<Path>, destination: Arc<D>, egress: EgressPolicy) -> Result<Self, ExternalRefusal> {
         Ok(Self {
             destination,
@@ -937,9 +1040,17 @@ impl<D: ExternalDestination> Reconciler<D> {
             return Err(self.refuse(ExternalRefusal::ProbeBudgetExhausted { probes: record.probes, age_ms }));
         }
         self.gate_egress()?;
-        // Counted before it is made: a process that dies between the probe and its answer has still spent one.
-        self.ledger.bump(op, "probes").await?;
-        let probes = record.probes + 1;
+        // Counted before it is made: a process that dies between the probe and its answer has still spent one. The
+        // claim is the budget check and the count in one step under the ledger's lock: of two probes racing on a
+        // budget of one, the second is refused here and escalates (#677's review, finding 3).
+        let probes = match self.ledger.claim_probe(op, age_ms).await {
+            Ok(p) => p,
+            Err(ExternalRefusal::ProbeBudgetExhausted { probes, age_ms }) => {
+                self.escalate(op, &ext, probes, age_ms, parent, now_ms).await?;
+                return Err(self.refuse(ExternalRefusal::ProbeBudgetExhausted { probes, age_ms }));
+            }
+            Err(e) => return Err(e),
+        };
         let key = self.key(op);
         let request = format!("{key} probe {probes}");
         let answer = ProbeAnswer::parse(&crate::sim_seam::input("effects/probe", &request, || self.destination.observe(&key).tag().to_string()));
@@ -1020,19 +1131,14 @@ impl<D: ExternalDestination> Reconciler<D> {
     /// the decision beside the effect. Refused for a class that can be asked (`LeaveOfObservable`: a probe is
     /// that class's move), for a record whose fate is known, and for one already unresolved.
     pub async fn leave(&self, op: &OperationId) -> Result<(), ExternalRefusal> {
-        let record = self.ledger.get(op)?.ok_or(ExternalRefusal::NotRecorded)?;
-        if record.class != EffectClass::Irreversible {
-            return Err(self.refuse(ExternalRefusal::LeaveOfObservable { class: record.class.tag() }));
-        }
-        match record.state {
-            EffectState::Unknown => {}
-            EffectState::Unresolved => return Err(self.refuse(ExternalRefusal::Unresolved)),
-            state => return Err(self.refuse(ExternalRefusal::State { state, needed: "an unknown fate" })),
-        }
+        // The class, the state and the change are one step under the ledger's lock (`claim_leave`).
+        let record = match self.ledger.claim_leave(op).await {
+            Ok(r) => r,
+            Err(e) => return Err(self.refuse(e)),
+        };
         let now_ms = Self::now_ms();
         let ext = self.ext_of(&record);
         let parent = Some(record.evidence_hash.clone().unwrap_or(record.record_hash.clone()));
-        self.ledger.set_state(op, EffectState::Unresolved, None).await?;
         self.evidence(&ext, Note { operation: "effect.leave", reason: "left: irreversible and unobservable — the destination can neither be asked nor undone; the uncertainty is kept and escalated", execution: Exec::Unresolved, parent, now_ms, permit: None }).await
     }
 
@@ -1061,7 +1167,28 @@ impl<D: ExternalDestination> Reconciler<D> {
         let now_ms = Self::now_ms();
         let parent = record.evidence_hash.clone().unwrap_or(record.record_hash.clone());
         self.bind_permit(permit, declared, &parent, compensation, now_ms)?;
+        // A composed compensation would need the resource authority to check against, and this door takes none: it
+        // is refused by the composed check rather than sent unchecked, as `apply` and `retry` check theirs (#677's
+        // review, finding 9).
+        self.check_composed(compensation, None, now_ms)?;
         self.gate_egress()?;
+        // The in-flight check and the link are one step under the ledger's lock: of two compensations racing under
+        // distinct ids, the second is refused here (finding 3). Everything after it that fails before the destination
+        // is reached — or fails there — takes the link off again, so the record stays open to another compensation.
+        let by = compensation.effect.operation_id.clone();
+        self.ledger.claim_compensation(op, &by).await.map_err(|e| self.refuse(e))?;
+        let outcome = self.compensate_linked(op, compensation, permit, parent, now_ms).await;
+        match &outcome {
+            Ok(_) | Err(ExternalRefusal::Effect(EffectRefusal::DeliveryUnknown)) => {}
+            // Nothing is at the destination (a failed answer, a conflict, a composition that did not hold, a refusal
+            // before the send): the link comes off, and a later compensation may be issued.
+            Err(_) => self.ledger.unlink_compensation(op, &by).await?,
+        }
+        outcome
+    }
+
+    /// The compensation's record, its permit's record and its send, after the link is claimed.
+    async fn compensate_linked(&self, op: &OperationId, compensation: &ExternalEffect, permit: &CompensationPermit, parent: String, now_ms: u64) -> Result<DestinationCommit, ExternalRefusal> {
         self.record_permit(permit).await?;
         let scope = self.destination.dedup_scope().to_string();
         let record_hash = prepared_record_hash(compensation, &scope);
@@ -1071,7 +1198,6 @@ impl<D: ExternalDestination> Reconciler<D> {
             self.bind(&existing, compensation)?;
             return Err(self.refuse(ExternalRefusal::State { state: existing.state, needed: "a compensation not yet sent" }));
         }
-        self.ledger.link_compensation(op, &compensation.effect.operation_id).await?;
         let commit = self.send_and_settle("effects/compensate", compensation, Some(parent), Some(permit)).await?;
         self.ledger.set_compensated(op, &compensation.effect.operation_id).await?;
         Ok(commit)
@@ -1257,6 +1383,69 @@ mod tests {
         for p in [ProbeAnswer::Done, ProbeAnswer::NotDone, ProbeAnswer::Unknown] {
             assert_eq!(ProbeAnswer::parse(p.tag()), p);
         }
+    }
+
+    /// A destination that is never reached: the ledger tests need a reconciler, not a destination.
+    struct Nowhere;
+    impl ExternalDestination for Nowhere {
+        fn identity(&self) -> &str { "nowhere" }
+        fn dedup_scope(&self) -> &str { "nowhere" }
+        fn host(&self) -> Option<&str> { None }
+        fn send(&self, _: &IdempotencyKey, _: &Effect) -> Result<DestinationCommit, EffectRefusal> { Err(EffectRefusal::Failed("never reached".into())) }
+        fn observe(&self, _: &IdempotencyKey) -> ProbeAnswer { ProbeAnswer::Unknown }
+    }
+
+    fn ledger_file(tag: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("mycelium-effects-ledger-{tag}-{}.journal", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        let _ = std::fs::remove_file(format!("{}.lock", p.display()));
+        p
+    }
+
+    fn an_effect(op: &str, class: EffectClass) -> ExternalEffect {
+        let op = OperationId::new(op);
+        ExternalEffect { effect: Effect::new(op.clone(), crate::AttemptId::of(&op, 1), b"x".to_vec()), class, probe_budget: ProbeBudget { max_probes: 2, max_age_ms: 60_000 }, composition: None }
+    }
+
+    /// **A ledger frame that does not decode refuses the open** (#677's review, finding 1): a record the ledger
+    /// cannot read is an effect it would send again, so the fold fails closed by name, as the node's WAL does.
+    /// Seen failing first: the fold skipped the frame and the operation read as not recorded.
+    #[tokio::test]
+    async fn a_ledger_frame_that_does_not_decode_refuses_the_open_instead_of_forgetting_the_record() {
+        let path = ledger_file("undecodable");
+        {
+            let j = Journal::open(&path, "effects/ledger").unwrap();
+            j.append(b"{\"not\": \"a record\"}".to_vec()).await.unwrap();
+        }
+        match Reconciler::open(&path, Arc::new(Nowhere), EgressPolicy::default()) {
+            Err(ExternalRefusal::Ledger(why)) => assert!(why.contains("does not decode") && why.contains("frame 0"), "{why}"),
+            Ok(_) => panic!("a ledger with a frame it cannot read opened, and would re-send the record's effect"),
+            Err(e) => panic!("refused for another reason: {e}"),
+        }
+    }
+
+    /// **A failed record re-prepared keeps its history** (#677's review, finding 2): the declaration columns are
+    /// the new effect's, the probes, retries, first unknown, evidence hash and compensation link stay — `never
+    /// reset`, as the field's doc says and the SQLite ledger did. Seen failing first: the row was replaced whole and
+    /// a second retry would have been accepted.
+    #[tokio::test]
+    async fn a_failed_record_re_prepared_keeps_its_probes_retries_and_first_unknown() {
+        let ledger = Ledger::open(&ledger_file("failed-history")).unwrap();
+        let ext = an_effect("op-7", EffectClass::Idempotent { compensation: None });
+        let (_, fresh) = ledger.prepare(&ext, "nowhere", 1_000, "h1", Some("run-7".into())).await.unwrap();
+        assert!(fresh);
+        ledger.set_state(&ext.effect.operation_id, EffectState::Unknown, Some(1_000)).await.unwrap();
+        ledger.claim_probe(&ext.effect.operation_id, 0).await.unwrap();
+        ledger.claim_retry(&ext.effect.operation_id).await.unwrap();
+        ledger.set_state(&ext.effect.operation_id, EffectState::Failed, None).await.unwrap();
+        let (again, fresh) = ledger.prepare(&ext, "nowhere", 2_000, "h2", None).await.unwrap();
+        assert!(fresh, "a failed record is re-prepared");
+        assert_eq!(again.state, EffectState::Prepared);
+        assert_eq!(again.prepared_at_ms, 2_000, "the declaration is this effect's");
+        assert_eq!(again.record_hash, "h2");
+        assert_eq!((again.probes, again.retries, again.first_unknown_at_ms), (1, 1, Some(1_000)), "the history is kept: {again:?}");
+        assert_eq!(ledger.correlation(&ext.effect.operation_id).as_deref(), Some("run-7"), "the correlation is kept when the new effect carries none");
+        assert!(matches!(ledger.claim_retry(&ext.effect.operation_id).await, Err(ExternalRefusal::SecondRetry)), "the one retry was spent in the first episode");
     }
 
     #[test]

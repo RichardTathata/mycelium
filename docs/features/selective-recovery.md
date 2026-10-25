@@ -33,7 +33,9 @@ This feature is turned on in code.
   answered on its first send, `vanish:` neither applied nor answered; every send and probe counted.
 - [`apply_caused`](../../src/effects/external.rs) — an effect applied with X4's fields, so a dependent's record names
   the record it depends on; [`leave`](../../src/effects/external.rs) — the irreversible class's recovery verb;
-  [`claim_retry`](../../src/effects/external.rs) — the one retry claimed under the ledger's lock.
+  [`claim_retry`](../../src/effects/external.rs), [`claim_probe`](../../src/effects/external.rs),
+  [`claim_compensation`](../../src/effects/external.rs) and [`claim_leave`](../../src/effects/external.rs) — each
+  move's check and change in one step under the ledger's lock, so two moves racing on one record cannot both send.
 - [`persistence`](../reference/configuration.md#the-fields) — the class needs `[persistence]` and a `gateway` + `tls`
   build; it reads `not_configured` or `not_in_build` otherwise, and fails the run only when asked for by name.
 - `the_recovery_class_recovers_the_closure_by_class_and_leaves_independent_work`, in
@@ -48,14 +50,16 @@ the published binary as its step 5 from the first release that carries the class
 `the_checked_in_recovery_bundle_replays_here_and_matches_a_fresh_recording` in
 [`tests/faults_recovery_replay.rs`](../../tests/faults_recovery_replay.rs): the recovery phases recorded under the
 replay kernel into the corpus bundle `tests/replay-corpus/x9-selective-recovery/`, replayed in CI with the destination
-reached **zero** times and every check made again on the replay.
+reached **zero times in those phases** (the seven sends that set the scene are made live in both forms) and every
+check made again on the replay.
 
 ## What it guarantees, and what it does not
 
-- **Probe before retry, one effect.** The restarted node finds its record *unknown* in its own ledger (the ledger is
-  a journal, folded at open), a retry without a probe is refused by name, the probe finds the effect done, and the
-  destination holds one — the contract's own rule, run after a crash
-  ([`persist.configured`](../reference/guarantee-catalogue.md)).
+- **Probe before retry, one effect.** The restarted node's WAL replays a write made before the crash
+  ([`persist.configured`](../reference/guarantee-catalogue.md), [`persist.sync_mode`](../reference/guarantee-catalogue.md)),
+  its ledger — a journal, folded at open — finds the record *unknown*, a retry without a probe is refused by name, the
+  probe finds the effect done, and the destination was **reached once** for it (it deduplicates, so the class counts
+  the sends that reached it, not only the applications) — the contract's own rule, run after a crash.
 - **The closure, and what it cannot see.** Over the journals the fleet can reach the reader names every record whose
   parent chain reaches the unknown one, and no independent one. With a node dark its journal is withheld, the reader
   says *INCOMPLETE* and names the hole — and **a hole hides what hangs below it**: a record two steps down through
@@ -63,11 +67,13 @@ reached **zero** times and every check made again on the replay.
 - **Recovery by class, each as a new record:** an idempotent dependent is probed and *resumed* by one retry (of two
   concurrent retries one is refused before anything is sent); a compensatable dependent is probed and never retried;
   a committed dependent whose premise did not happen is *compensated* under the evaluator's permit
-  ([`ae.preflight`](../reference/rule-catalogue.md), the decision recorded before the compensation is sent —
-  [`ae.recorded_before_dispatch`](../reference/guarantee-catalogue.md)); an irreversible dependent is *left*,
-  unresolved and escalated. The rule is the contract's: *unknown + idempotent → probe, then retry if not done;
-  unknown + compensatable → probe, never retry; committed on a premise that did not happen → compensate; unknown +
-  irreversible → leave.*
+  ([`ae.preflight`](../reference/rule-catalogue.md); the reconciler records the permit's decision before the
+  compensation is sent — its own ordering, not the gateway's guarantee, which a fleet with no gateway resolves
+  `not_applicable` and the class does not list); an irreversible dependent is *left*, unresolved and escalated. The
+  rule is the contract's: *unknown + idempotent → probe, then retry if not done; unknown + compensatable → probe,
+  never retry (found not done it ends `not_done`: nothing at the destination, a new operation is the caller's);
+  committed on a premise that did not happen → compensate; unknown + irreversible → leave.* Each move's check and
+  change are one step under the ledger's lock, so two moves racing on one record cannot both send.
 - **Independent work is untouched**: outside the closure, its ledger states unchanged, no new record citing it.
 - **Explained from the records**: `mycelium explain --closure <hash> <journals> --fleet 3` renders every recovery
   decision; the class keeps the rendering beside a kept run (`--keep`, `closure.txt`).
@@ -77,7 +83,9 @@ reached **zero** times and every check made again on the replay.
   the recovery's decisions, not the fleet's schedule.
 - **Not built, stated** ([`adopter-surface.md`](../plans/adopter-surface.md) X9): a real destination; more than one
   destination; a closure read at runtime (it is read from files, after the fact); any policy over the closure's size
-  or age (the plan's §6, Y5). The partition is one node gone dark, in process (D6).
+  or age (the plan's §6, Y5); a composed compensation (`compensate` takes no resource authority, so one is refused
+  rather than sent unchecked). The partition is one node gone dark, in process (D6); the seamed form's kernel sees the
+  recovery phases only — the fleet's three nodes and their gossip are outside it.
 
 ## Go deeper
 

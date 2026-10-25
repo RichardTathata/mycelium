@@ -1889,9 +1889,20 @@ too — it reads `not_configured` without `[persistence]` and `not_in_build` wit
 run only when asked for by name, like the others.
 
 **`ExternalRefusal` gained `LeaveOfObservable { class }`** (`#[non_exhaustive]`, 2.10.0's note: a `_` arm fails
-closed); `Reconciler` gained `apply_caused`, `leave` and an atomic retry claim — a second concurrent retry is
-refused `SecondRetry` before anything is sent, where before both could reach the destination (the destination's own
-idempotency made the second `Replayed`; the refusal is now the reconciler's).
+closed) and **`ExternalRefusalSnapshot` gained `leave_of_observable`** (an exhaustive struct literal breaks;
+`..Default::default()` is unaffected); `Reconciler` gained `apply_caused`, `leave` and **claims under the ledger's
+lock** for the retry, the probe, the compensation and the leave — of two moves racing on one record, the second is
+refused before anything is sent (`SecondRetry`, `ProbeBudgetExhausted`, *already in flight*, `Unresolved`), where
+before both could reach the destination (#677's review, finding 3). **Three more behaviour changes of the move**
+(#677's review): `Reconciler::open` needs a tokio runtime (the ledger's writer is spawned there; the SQLite
+constructor needed none); a ledger frame the fold cannot decode **refuses the open by name** rather than forgetting
+the record (a forgotten record is an effect sent again); a `Failed` record re-prepared **keeps its probes, retries,
+first unknown, evidence hash and compensation link** — *never reset*, as the field's doc says and the SQLite ledger
+did. And two of X5's own, fixed on the way: a compensation whose send **fails** (a failed answer, a conflict, a
+composition that did not hold) has its link taken off, so another compensation may be issued — before, the record was
+refused *already in flight* for ever, while a bare `apply` of the failed compensation's id completed it without a
+permit; and a **composed compensation is refused** (`compensate` takes no resource authority to check it against)
+rather than sent unchecked — stated as not built.
 
 ## 61. A unit's `runtime` key is refused by readers before this release (unreleased, adopter-surface X8)
 

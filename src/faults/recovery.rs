@@ -24,7 +24,8 @@
 //! **Two forms, one set of assertions** (rev 0.8). This is the live form: the published binary, no seams, the
 //! destination reached for real. Under the `sim` build the same run records its recovery phases under the
 //! replay kernel — the reconcilers' sends and probes are `Input`-class choices — and replays them with the
-//! destination **reached zero times** (`tests/faults_recovery_replay.rs`, and the recording in the corpus).
+//! destination **reached zero times in those phases** — the seven sends that set the scene are made live in both
+//! forms (`tests/faults_recovery_replay.rs`, and the recording in the corpus).
 //!
 //! **What it is not.** One destination, mocked, in this process; a closure read offline from files, not at
 //! runtime; no policy over the closure's size (the plan's §6). The recovery rule the class applies is the
@@ -42,7 +43,11 @@ use crate::effects::{
 #[cfg(all(feature = "gateway", feature = "tls"))]
 use crate::{AttemptId, DedupOutcome, DestinationCommit, OperationId};
 
-pub(super) const GUARANTEES: &[&str] = &["persist.configured", "ae.recorded_before_dispatch"];
+/// The guarantees the class drives: the crash and restart over the node's own WAL. The compensation's permit is
+/// recorded before the compensation is sent — the reconciler's own ordering (`record_permit`), noted in the report —
+/// and `ae.recorded_before_dispatch` is the gateway's guarantee, which a fleet with no gateway resolves
+/// `not_applicable`, so it is not listed (#677's review, finding 7).
+pub(super) const GUARANTEES: &[&str] = &["persist.configured", "persist.sync_mode"];
 pub(super) const RULES: &[&str] = &["ae.preflight"];
 
 /// The seamed form's inputs: a kernel (recording or replaying) and the seed its sources take.
@@ -68,7 +73,9 @@ pub struct SeamedOutcome {
 
 #[cfg(not(all(feature = "gateway", feature = "tls")))]
 pub(super) fn run(rep: &mut ClassReport, base: &GossipConfig, _units: &[Unit], _dir: &Path) {
-    rep.state = ClassState::NotInBuild { feature: "gateway" };
+    // The feature the build lacks, by name: `tls` when the gateway is in, `gateway` otherwise (the sibling
+    // `policy-diff` does the same; #677's review, finding 6).
+    rep.state = ClassState::NotInBuild { feature: if cfg!(feature = "gateway") { "tls" } else { "gateway" } };
     let why = class_reason(&rep.state);
     not_exercised(rep, unstarted_report(base).as_ref(), GUARANTEES, RULES, &why);
 }
@@ -129,6 +136,12 @@ impl Lossy {
 
     fn applications(&self, key: &IdempotencyKey) -> u32 {
         self.entries.lock().unwrap_or_else(|e| e.into_inner()).get(&key.to_string()).map(|e| e.applications).unwrap_or(0)
+    }
+
+    /// How many sends reached the destination under `key` — the number a re-send shows, where `applications` stays
+    /// at one because the destination deduplicates (#677's review, finding 4).
+    fn attempts(&self, key: &IdempotencyKey) -> u32 {
+        self.entries.lock().unwrap_or_else(|e| e.into_inner()).get(&key.to_string()).map(|e| e.attempts).unwrap_or(0)
     }
 
     fn total_applications(&self) -> u32 {
@@ -347,6 +360,17 @@ fn run_inner(
     };
     let applied_before = dest.total_applications();
 
+    // A synced write on node 0 before the crash: the restart's WAL replay is asserted, not assumed (#677's review).
+    let marker_key = "faults/recovery/marker".to_string();
+    let marker = {
+        let (agent, key) = (fleet.agent(0), marker_key.clone());
+        fleet.on(0, async move { agent.kv().set_requiring_sync(&OperationId::new("test-faults-recovery-marker"), key, b"before-crash".to_vec()).await })
+    };
+    if let Err(e) = marker {
+        refused(rep, format!("node 0's synced write before the crash: {e}"));
+        return None;
+    }
+
     // The crash: node 0's runtime dropped with its reconciler's writer and its journal's; restarted over its own
     // directory, its WAL, its journal and its ledger re-opened from disk.
     recs[0] = None;
@@ -366,7 +390,8 @@ fn run_inner(
     journals[2] = None;
     fleet.cut(2);
     let evicted = fleet.wait(0, Duration::from_secs(30), || !fleet.agent(0).peers().contains(&id2));
-    rep.notes.push(format!("root record {h0} (`mycelium explain --closure {h0} <dir>/journal-*/evidence.log --fleet 3` over a kept run); node 2 {} dark before the first closure read", if evicted { "seen leaving node 0's peer table" } else { "cut, not yet evicted at node 0 after 30 s" }));
+    let wal_back = fleet.agent(0).kv().get(&marker_key).is_some_and(|v| v.as_ref() == b"before-crash");
+    rep.notes.push(format!("root record {h0} (`mycelium explain --closure {h0} <dir>/journal-*/evidence.log --fleet 3` over a kept run); the compensation's permit is recorded before the compensation is sent (the reconciler's `record_permit`), which is this class's ordering and not the gateway's `ae.recorded_before_dispatch`"));
 
     // ── Phase B, seamed: recovery over the journals the fleet can reach ──
     // The kernel, when one was given, sees the recovery phases only: the fleet's own waits and the nodes'
@@ -396,10 +421,15 @@ fn run_inner(
     let retry_refused = fleet.on(0, r0.apply(&root, None));
     let probe = fleet.on(0, r0.probe(&root.effect.operation_id));
     let settled = state_of(r0, &root);
-    let one = if replaying { true } else { dest.applications(&IdempotencyKey { scope: Lossy::IDENTITY.into(), operation_id: root.effect.operation_id.clone() }) == 1 };
-    let ok = found == "unknown" && matches!(retry_refused, Err(ExternalRefusal::RetryWithoutProbe)) && probe == Ok(ProbeAnswer::Done) && settled == "committed" && one;
+    // The destination deduplicates, so `applications` stays at one whatever the reconciler does; `attempts` is the
+    // number a re-send shows (#677's review, finding 4).
+    let root_key = IdempotencyKey { scope: Lossy::IDENTITY.into(), operation_id: root.effect.operation_id.clone() };
+    let (root_attempts, root_applications) = (dest.attempts(&root_key), dest.applications(&root_key));
+    let one = replaying || (root_attempts == 1 && root_applications == 1);
+    let ok = wal_back && found == "unknown" && matches!(retry_refused, Err(ExternalRefusal::RetryWithoutProbe)) && probe == Ok(ProbeAnswer::Done) && settled == "committed" && one;
     check(rep, &t, "the restarted node finds its lost-acknowledgement record unknown in its own ledger, probes before any retry, and the destination holds one effect", Some(ok),
-        format!("found {found}; a retry without a probe: {}; probe: {probe:?}; then {settled}; {}", match &retry_refused { Err(e) => e.to_string(), Ok(c) => format!("SENT ({c:?})") }, if replaying { "replay: the destination was not reached, the recorded answers stand" } else { "one application at the destination" }));
+        format!("restarted over its WAL: the synced write is {}; found {found}; a retry without a probe: {}; probe: {probe:?}; then {settled}; {}", if wal_back { "back" } else { "MISSING" }, match &retry_refused { Err(e) => e.to_string(), Ok(c) => format!("SENT ({c:?})") },
+            if replaying { "replay: the destination was not reached in this phase; the recorded answers stand".to_string() } else { format!("the destination reached {root_attempts} time(s) for it, one application") }));
 
     // 2. The idempotent dependent: probed, resumed by one retry; of two concurrent retries one is refused.
     let t = crate::sim_seam::mono_instant();
@@ -407,7 +437,8 @@ fn run_inner(
     let (ra, rb) = fleet.on(1, async { tokio::join!(r1.retry(&d1, None), r1.retry(&d1, None)) });
     let fresh = [&ra, &rb].iter().filter(|r| matches!(r, Ok(c) if c.dedup == DedupOutcome::Fresh)).count();
     let second = [&ra, &rb].iter().filter(|r| matches!(r, Err(ExternalRefusal::SecondRetry))).count();
-    let one_d1 = if replaying { true } else { dest.applications(&IdempotencyKey { scope: Lossy::IDENTITY.into(), operation_id: d1.effect.operation_id.clone() }) == 1 };
+    let d1_key = IdempotencyKey { scope: Lossy::IDENTITY.into(), operation_id: d1.effect.operation_id.clone() };
+    let one_d1 = replaying || (dest.applications(&d1_key) == 1 && dest.attempts(&d1_key) == 2);
     let ok = p1 == Ok(ProbeAnswer::NotDone) && fresh == 1 && second == 1 && state_of(r1, &d1) == "committed" && one_d1;
     check(rep, &t, "an idempotent dependent whose fate was unknown is probed, found not done, and resumed by one retry — of two concurrent retries one is refused before anything is sent", Some(ok),
         format!("probe: {p1:?}; retries: {} fresh, {} refused as a second retry; then {}", fresh, second, state_of(r1, &d1)));
@@ -424,9 +455,9 @@ fn run_inner(
     // journal withheld it is outside the closure too, and the reader names its parent as a hole.
     let fleet_line = partial_text.lines().find(|l| l.starts_with("INCOMPLETE") || l.contains("journal(s) given")).unwrap_or("").trim().to_string();
     let hole_line = partial_text.lines().find(|l| l.contains("hole(s) cited elsewhere")).unwrap_or("").trim().to_string();
-    let ok = partial_text.contains("INCOMPLETE") && has(&partial_members, &h_d1) && !has(&partial_members, &h_d2) && !has(&partial_members, &h_d3) && !has(&partial_members, &h_d4) && partial_text.contains(&h_d2);
-    check(rep, &t, "the closure read over two of three journals says it is incomplete: node 1's dependent is in it, node 2's are not, nor the record two steps down through them — its parent is named as a hole", Some(ok),
-        format!("{} member(s); {} present: {}; {} absent: {}; {} absent: {} (its parent {} is in the withheld journal); {fleet_line}; {hole_line}", partial_members.len(),
+    let ok = evicted && partial_text.contains("INCOMPLETE") && has(&partial_members, &h_d1) && !has(&partial_members, &h_d2) && !has(&partial_members, &h_d3) && !has(&partial_members, &h_d4) && partial_text.contains(&h_d2);
+    check(rep, &t, "with a node dark — evicted from the restarted node's peer table — the closure read over two of three journals says it is incomplete: node 1's dependent is in it, node 2's are not, nor the record two steps down through them — its parent is named as a hole", Some(ok),
+        format!("node 2 {}; {} member(s); {} present: {}; {} absent: {}; {} absent: {} (its parent {} is in the withheld journal); {fleet_line}; {hole_line}", if evicted { "evicted at node 0" } else { "NOT evicted at node 0 after 30 s" }, partial_members.len(),
             short(&h_d1), has(&partial_members, &h_d1), short(&h_d2), !has(&partial_members, &h_d2), short(&h_d3), !has(&partial_members, &h_d3), short(&h_d2)));
 
     #[cfg(feature = "sim")]
@@ -513,10 +544,13 @@ fn run_inner(
             check(rep, &t, "the destination was reached zero times during the recovery's replay: every send and probe answered from the recording", Some(delta == 0), format!("{delta} call(s) reached the destination during the two recovery phases; {applied_before} application(s) stood from before them"));
         }
     } else {
-        let counts = [(&root, 1u32), (&d1, 1), (&d2, 0), (&d3, 1), (&d4, 0), (&i1, 1), (&i2, 1), (&retract, 1)].map(|(e, want)| (e.effect.operation_id.to_string(), dest.applications(&key(e)), want));
-        let ok = counts.iter().all(|(_, got, want)| got == want) && dest.total_applications() == applied_before + 2;
+        // Applications and attempts, per key: the root reached once (the lost answer never re-sent), the resumed
+        // dependent twice (the vanished send, then the one retry), everything else once.
+        let counts = [(&root, 1u32, 1u32), (&d1, 1, 2), (&d2, 0, 1), (&d3, 1, 1), (&d4, 0, 1), (&i1, 1, 1), (&i2, 1, 1), (&retract, 1, 1)]
+            .map(|(e, want_applied, want_attempts)| (e.effect.operation_id.to_string(), dest.applications(&key(e)), want_applied, dest.attempts(&key(e)), want_attempts));
+        let ok = counts.iter().all(|(_, got, want, got_a, want_a)| got == want && got_a == want_a) && dest.total_applications() == applied_before + 2;
         check(rep, &t, "the destination saw each effect once: the lost acknowledgement never re-sent, the one retry landed once, the compensation once, nothing vanished twice", Some(ok),
-            format!("applications: {}; {} in all, {applied_before} before the recovery", counts.iter().map(|(op, got, want)| format!("{op} {got}/{want}")).collect::<Vec<_>>().join(", "), dest.total_applications()));
+            format!("per key, applications then attempts: {}; {} application(s) in all, {applied_before} before the recovery", counts.iter().map(|(op, got, want, got_a, want_a)| format!("{op} {got}/{want} {got_a}/{want_a}")).collect::<Vec<_>>().join(", "), dest.total_applications()));
     }
 
     // 10. Explained from the records.
@@ -529,7 +563,7 @@ fn run_inner(
     let ok = seen.len() == verbs.len() && !rendering.contains("INCOMPLETE") && rendering.contains(&format!("{} journal(s) given for a fleet of {} nodes", 3, fleet.len()));
     check(rep, &t, "`mycelium explain --closure` renders every recovery decision from the three journals, complete", Some(ok),
         format!("{} record(s) rendered; the probe, the retry, the compensation (under its declared operation) and the leave seen: {}; kept as <dir>/closure.txt", rendering.lines().filter(|l| l.contains("[captured")).count(), if seen.is_empty() { "none".to_string() } else { seen.join(", ") }));
-    rep.notes.push("the rule applied, per member: unknown + idempotent → probe, then one retry if not done; unknown + compensatable → probe, never retry; committed on a premise that did not happen → compensate under the evaluator's permit; unknown + irreversible → leave (unresolved, escalated); independent work → nothing".into());
+    rep.notes.push("the rule applied, per member: unknown + idempotent → probe, then one retry if not done; unknown + compensatable → probe, never retry (found not done it ends `not_done`: nothing at the destination, a new operation is the caller's); committed on a premise that did not happen → compensate under the evaluator's permit; unknown + irreversible → leave (unresolved, escalated); independent work → nothing".into());
 
     #[cfg(feature = "sim")]
     let out = crate::sim_seam::take().map(|c| SeamedOutcome { trace: c.kernel.trace().clone(), exhausted: c.kernel.is_exhausted(), position: c.kernel.position(), destination_reached_in_recovery: dest.reached() - reached_before_recovery });

@@ -31,8 +31,8 @@
 31	recovery	mono	-	now()	31536000004000000
 32	recovery	wall	-	now_ms()	1700000000006
 33	recovery	wall	-	now_ms()	1700000000007
-34	recovery	chan	ae/journal	try_send	Sent
-35	recovery	chan	effects/ledger	try_send	Sent
+34	recovery	chan	effects/ledger	try_send	Sent
+35	recovery	chan	ae/journal	try_send	Sent
 36	recovery	chan	effects/ledger	try_send	Sent
 37	recovery	input	effects/compensate	mock-destination/notify-103-retract 63ff47e57c9e6130 idempotent	ok fresh mock-destination
 38	recovery	wall	-	now_ms()	1700000000008
@@ -42,8 +42,8 @@
 42	recovery	chan	effects/ledger	try_send	Sent
 43	recovery	chan	effects/ledger	try_send	Sent
 44	recovery	mono	-	now()	31536000005000000
-45	recovery	wall	-	now_ms()	1700000000009
-46	recovery	chan	effects/ledger	try_send	Sent
+45	recovery	chan	effects/ledger	try_send	Sent
+46	recovery	wall	-	now_ms()	1700000000009
 47	recovery	chan	ae/journal	try_send	Sent
 48	recovery	chan	effects/ledger	try_send	Sent
 49	recovery	mono	-	now()	31536000006000000

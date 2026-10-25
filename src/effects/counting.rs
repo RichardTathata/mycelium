@@ -37,6 +37,7 @@ pub struct ExternalRefusalCounts {
     probe_budget_exhausted:     AtomicU64,
     unresolved:                 AtomicU64,
     irreversible_unobservable:  AtomicU64,
+    leave_of_observable:        AtomicU64,
     wrong_state:                AtomicU64,
     no_compensation:            AtomicU64,
     compensation_not_permitted: AtomicU64,
@@ -54,6 +55,8 @@ pub struct ExternalRefusalSnapshot {
     pub probe_budget_exhausted:     u64,
     pub unresolved:                 u64,
     pub irreversible_unobservable:  u64,
+    /// `leave` asked of a class that can be asked (adopter-surface X9).
+    pub leave_of_observable:        u64,
     pub wrong_state:                u64,
     pub no_compensation:            u64,
     pub compensation_not_permitted: u64,
@@ -66,7 +69,7 @@ impl ExternalRefusalSnapshot {
     /// Every contract refusal.
     pub fn total(&self) -> u64 {
         self.egress_denied + self.retry_without_probe + self.second_retry + self.retry_not_idempotent + self.probe_budget_exhausted
-            + self.unresolved + self.irreversible_unobservable + self.wrong_state + self.no_compensation + self.compensation_not_permitted
+            + self.unresolved + self.irreversible_unobservable + self.leave_of_observable + self.wrong_state + self.no_compensation + self.compensation_not_permitted
             + self.declaration_mismatch + self.other
     }
 }
@@ -122,7 +125,8 @@ impl RefusalCounts {
             ExternalRefusal::RetryNotIdempotent { .. } => &x.retry_not_idempotent,
             ExternalRefusal::ProbeBudgetExhausted { .. } => &x.probe_budget_exhausted,
             ExternalRefusal::Unresolved => &x.unresolved,
-            ExternalRefusal::IrreversibleUnobservable | ExternalRefusal::LeaveOfObservable { .. } => &x.irreversible_unobservable,
+            ExternalRefusal::IrreversibleUnobservable => &x.irreversible_unobservable,
+            ExternalRefusal::LeaveOfObservable { .. } => &x.leave_of_observable,
             ExternalRefusal::State { .. } => &x.wrong_state,
             ExternalRefusal::NoCompensation { .. } => &x.no_compensation,
             ExternalRefusal::CompensationNotPermitted(_) => &x.compensation_not_permitted,
@@ -157,6 +161,7 @@ impl RefusalCounts {
                 probe_budget_exhausted:     self.external.probe_budget_exhausted.load(Ordering::Relaxed),
                 unresolved:                 self.external.unresolved.load(Ordering::Relaxed),
                 irreversible_unobservable:  self.external.irreversible_unobservable.load(Ordering::Relaxed),
+                leave_of_observable:        self.external.leave_of_observable.load(Ordering::Relaxed),
                 wrong_state:                self.external.wrong_state.load(Ordering::Relaxed),
                 no_compensation:            self.external.no_compensation.load(Ordering::Relaxed),
                 compensation_not_permitted: self.external.compensation_not_permitted.load(Ordering::Relaxed),

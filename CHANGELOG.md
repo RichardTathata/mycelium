@@ -24,15 +24,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   compensatable one probed and never retried, a committed one whose premise did not happen compensated under the
   evaluator's permit, an irreversible one *left* (unresolved, escalated); leaves independent work untouched; and
   **explains** every decision with `mycelium explain --closure` (kept beside a `--keep` run). Ten checks, the ids
-  exercised (`persist.configured`, `ae.recorded_before_dispatch`, `ae.preflight`). **The seamed form** (`sim`): the
+  exercised (`persist.configured`, `persist.sync_mode`, `ae.preflight`). **The seamed form** (`sim`): the two
   recovery phases recorded into the replay corpus (`tests/replay-corpus/x9-selective-recovery/`) and replayed in CI
-  against a fresh fleet with the destination reached **zero** times, every check made again on the replay. The
+  against a fresh fleet with the destination reached **zero times in those phases** (the sends that set the scene are
+  live in both forms), every check made again on the replay. The
   `Scaffold` job runs the class against the scaffold's declaration; the one-hour job runs it on the published binary
   as its step 5 from the first release carrying it. **The side-effect contract moved into the substrate** to make this
   possible (`mycelium::effects`; `mycelium-effects` re-exports every path unchanged — `deprecations.md` §62): the
   reconciler's ledger is the node-local journal now, not a SQLite file (`rusqlite` stays quarantined to the
-  companion), one owner at a time; `Reconciler` gained `apply_caused` (X4's fields on the record), `leave` and an
-  atomic retry claim; `ExternalRefusal` gained `LeaveOfObservable`; `Class` gained `Recovery`. The philosophy's
+  companion), one owner at a time, a frame it cannot read refusing the open; `Reconciler` gained `apply_caused`
+  (X4's fields on the record), `leave`, and claims under the ledger's lock for the retry, the probe, the compensation
+  and the leave (two moves racing on one record, one refused before anything is sent); a failed compensation's link
+  comes off so another may be issued, and a composed compensation is refused rather than sent unchecked;
+  `ExternalRefusal` gained `LeaveOfObservable`, `ExternalRefusalSnapshot` a field; `Class` gained `Recovery`. The philosophy's
   *Rollback → compensation* bullet now reads the closure reader as built. **Not built, stated:** a real destination,
   more than one, a closure read at runtime, a policy over the closure's size.
 - **The adapter contract, and a unit's `runtime`** (`docs/plans/adopter-surface.md` X7 and X8;
