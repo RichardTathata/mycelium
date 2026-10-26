@@ -1828,18 +1828,21 @@ impl GossipAgent {
     }
 
     /// Whether a federation attachment arriving now must be ignored (adopter-surface Y7, review
-    /// finding 1). After `start()` under any profile but `dev`, an edge or clients are **inert**: the
-    /// profile check ran at the boundary over what was attached then, and the `fed.*` guarantees read a
+    /// finding 1). After `start()` under `secure-multi-domain`, an edge or clients are **inert**: that
+    /// profile's check ran at the boundary over what was attached then, and its `fed.*` guarantees read a
     /// node with no edge or client as facing no partner — so an edge attached later, unchecked, would
-    /// admit federated credentials the check never saw. Counted as late either way (G13); under `dev`,
-    /// which requires nothing, the attachment takes effect as before.
+    /// admit federated credentials the check never saw. Only that profile requires anything of an edge
+    /// or a client, so only it is narrowed (the confirmation round's decision): under `dev` and
+    /// `secure-single-domain` the attachment takes effect as before. Counted as late either way (G13).
+    /// The caller is told by a warning, not an error — the builders return `Self`, and the fail-safe
+    /// outcome is the node as it was checked.
     #[cfg(all(feature = "gateway", feature = "tls"))]
     fn federation_attachment_is_inert(&self, what: &'static str) -> bool {
         if !self.task_ctx.started.load(Ordering::Acquire) {
             return false;
         }
         let (profile, _) = guarantee::selected_profile(&self.config);
-        if profile.name == guarantee::DEV.name {
+        if profile.name != guarantee::SECURE_MULTI_DOMAIN.name {
             return false;
         }
         tracing::warn!(

@@ -21,7 +21,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unmet, shown for each of the seven, and `doctor` prints the family. A node with neither an edge nor a client reads
   the side-specific ones `not_applicable`. `FederationClient` gained `tls_pinned` and `verifies_catalogue`.
   **Changed:** `GuaranteeReport::unresolved()` leaves out an external prerequisite that does not apply;
-  a federation edge or clients attached after `start()` are ignored under any profile but `dev`, and the edge,
+  a federation edge or clients attached after `start()` are ignored under `secure-multi-domain` (only), and the edge,
   the clients and `with_cohort_budget` count as late attachments under their own names; a node facing no partner is
   said so in one line (`deprecations.md` §66). **Open:** the
   two-mesh Docker suite under the profile, to be closed by the Y8-track precursor PR (the two-mesh suite under the profile). **Not built:** `doctor` reporting an edge or clients

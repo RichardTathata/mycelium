@@ -15155,6 +15155,12 @@ async fn a_node_providing_every_requirement_starts_under_the_secure_profile() {
 /// the federation runbook's table says (adopter-surface Y7, review finding 6).
 #[cfg(all(feature = "compliance", feature = "a2a"))]
 async fn secure_multi_domain_node(tag: &str, federated: bool) -> (GossipAgent, u16, std::path::PathBuf) {
+    secure_node_under("secure-multi-domain", tag, federated).await
+}
+
+/// [`secure_multi_domain_node`] under `profile`: the same node, so a test can compare the profiles.
+#[cfg(all(feature = "compliance", feature = "a2a"))]
+async fn secure_node_under(profile: &str, tag: &str, federated: bool) -> (GossipAgent, u16, std::path::PathBuf) {
     use crate::agent::gateway_authority::ExecutionAuthority;
     use crate::federation::{call::CallPolicy, client::{FederationClient, GatewayEndpoint}, edge::FederationEdge, DomainId, DomainPolicy, TrustBundle};
     use crate::knowledge::issuer::TrustedExternalIssuers;
@@ -15199,7 +15205,7 @@ async fn secure_multi_domain_node(tag: &str, federated: bool) -> (GossipAgent, u
         snapshot_interval_secs: 3_600, on_unreadable: Default::default(),
     });
     cfg.consensus_require_electorate = true;
-    cfg.profile = Some("secure-multi-domain".into());
+    cfg.profile = Some(profile.into());
     cfg.domain_profile = crate::config::DomainProfile::Enforced;
     cfg.swim_failure_detector = false;
 
@@ -15331,8 +15337,28 @@ async fn a_federation_attachment_after_start_is_inert_under_the_multi_domain_pro
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Under `secure-single-domain`, which requires nothing of an edge or a client, a late federation
+/// attachment takes effect as before and is counted — the inert rule is `secure-multi-domain`'s alone
+/// (the confirmation round's narrowing, so §66's "no node changes behaviour unless it selects the new
+/// profile" holds). Seen failing first: under the rule as first written, any non-`dev` profile, the
+/// edge stayed unset here.
+#[cfg(all(feature = "compliance", feature = "a2a"))]
+#[tokio::test]
+async fn a_federation_attachment_after_start_takes_effect_under_the_single_domain_profile() {
+    use crate::federation::{call::CallPolicy, edge::FederationEdge, DomainId, DomainPolicy, TrustBundle};
+    let (a, _http, root) = secure_node_under("secure-single-domain", "late-single", false).await;
+    a.start().await.expect("the single-domain profile admits the node");
+    let alpha = DomainId::new("alpha.example").unwrap();
+    let a = a.with_federation_edge(Arc::new(FederationEdge::new(alpha.clone(), ["x"],
+        DomainPolicy { domain: alpha, revision: 1, grants: vec![] }, TrustBundle::default(), CallPolicy::default())));
+    assert_eq!(a.late_attachments(), 1, "counted");
+    assert!(a.task_ctx.federation_edge.get().is_some(), "and applied: this profile requires nothing of an edge");
+    a.shutdown().await;
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Under `dev`, which requires nothing, a late federation attachment takes effect as before, and is
-/// counted — the inert rule is the profile's, not a new lifecycle rule for every node.
+/// counted — the inert rule is `secure-multi-domain`'s, not a new lifecycle rule for every node.
 #[cfg(all(feature = "compliance", feature = "a2a"))]
 #[tokio::test]
 async fn a_federation_attachment_after_start_takes_effect_under_dev() {

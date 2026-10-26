@@ -2079,8 +2079,9 @@ three federation ones on a node that faces no partner); before, it listed every 
 "external prerequisites are not verifiable here" count follows it. `PROFILE_NAMES` gained the name, so a reader
 older than this release refuses `profile = "secure-multi-domain"` at `validate()` as an unknown profile.
 `with_federation_clients`, `with_federation_edge` and `with_cohort_budget` after `start()` are counted in
-`late_attachments` under their own names, and under any profile but `dev` a federation edge or clients attached after
-`start()` are **ignored** — the profile's check at start never saw them; attach them before `start()`.
+`late_attachments` under their own names. Under `secure-multi-domain` — and only there — a federation edge or
+clients attached after `start()` are **ignored** (a warning, not an error): that profile's check at start never saw
+them; attach them before `start()`. Under `dev` and `secure-single-domain` a late attachment applies as before.
 **Migration:** none is required. To adopt the profile, set what the runbook's table names on every node of every
 federating domain, then select it; read each node's `GET /gateway/guarantees` after attaching its edge and clients,
 because `mycelium doctor` builds a node from a file and cannot see them.

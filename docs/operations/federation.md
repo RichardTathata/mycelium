@@ -312,8 +312,8 @@ its side of the edge is set the way this runbook describes (adopter-surface Y7).
 
 A member that attaches neither an edge nor a client reads the six side-specific ones `not_applicable` and starts on
 the rest; the start log and `doctor` say in one line that it faces no partner. **Attach the edge and the clients
-before `start()`:** under this profile one attached after it is ignored (counted in `late_attachments`), because the
-check at start never saw it. Three more are listed `not_verifiable_here` and never counted: `fed.partner_posture` (the partner's
+before `start()`:** under this profile one attached after it is ignored with a warning (counted in `late_attachments`),
+because the check at start never saw it. Under `dev` and `secure-single-domain` a late attachment applies as before. Three more are listed `not_verifiable_here` and never counted: `fed.partner_posture` (the partner's
 own report, under the same profile, exchanged out of band), `fed.non_merger` (a fact about both domains) and
 `fed.clock_agreement` (a credential's window is wall-clock across the edge). Nothing this node checks makes the
 partner honest.

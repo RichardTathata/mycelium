@@ -33,7 +33,8 @@ This feature is turned on in code.
 - [`with_partner_key`](../../src/federation/client.rs): a catalogue is relied on only once it verifies under it.
 - [`egress`](../reference/configuration.md#the-fields): `allow_hosts` names every partner endpoint's host.
 - [`SECURE_MULTI_DOMAIN`](../../src/agent/guarantee.rs): the required set, rev 1. Attach the edge and the clients
-  **before** `start()`: under this profile one attached after it is ignored, and counted.
+  **before** `start()`: under this profile — and only this one — one attached after it is ignored with a warning, and
+  counted.
 - `a_node_providing_every_requirement_starts_under_the_multi_domain_profile`, in
   [`src/lib_tests.rs`](../../src/lib_tests.rs): attaches an edge and a client set as above to a node meeting every
   other requirement, and the node starts under the profile with every `fed.*` node fact enforced.
