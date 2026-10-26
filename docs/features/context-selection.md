@@ -66,6 +66,12 @@ has no row for this feature. The tests, in [`src/knowledge/selection.rs`](../../
   `Rejected` (two subjects' verdicts) never meet in one; a `BasisWithdrawn` record is never in a live one's class.
   Withdrawn records collapse into one class whatever verdict they were about. **Not built:** a condensation across
   subjects — a summary over several subjects is a selection.
+- A selected record's verdict is the **selection's**: computed over the records it admits whose standing is current,
+  so it can differ from a whole-store `classify_eligible`, where a withheld, withdrawn, expired or unchecked record
+  still counts.
+- Carrying expiry down `DerivedFrom` walks each record's ancestry, so a selection over a derivation chain is quadratic
+  in the chain's depth: measured in review, a 2000-record chain took 1.34 s to select and 664 ms to write; 8000 flat
+  records took 16 ms.
 - A selected record is returned unchanged: a `Supports`, `Challenges` or `Retracts` link names its target's id even
   where the target is not readable (the id, not the content).
 - **Not built** ([plan row Y1](../plans/adopter-surface.md#y1--a-provenance-aware-context-selector-d14)): the wiki

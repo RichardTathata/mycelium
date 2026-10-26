@@ -373,7 +373,9 @@ pub struct Selected {
     pub attribution: Attribution,
     /// Where it stands now.
     pub standing: Standing,
-    /// The reader's verdict for its subject, if any, computed over the readable records only.
+    /// The **selection's** verdict for its subject, if any: computed over the records this selection
+    /// admits whose standing is current, so it can differ from a whole-store `classify_eligible` — a
+    /// withheld, withdrawn, expired or (verified-only) unchecked record counts there and not here.
     pub verdict: Option<Verdict>,
     /// Its class.
     pub class: VerdictClass,
@@ -569,6 +571,10 @@ impl<'v> Selector<'v> {
     /// A record's standing, with expiry carried down `DerivedFrom`: a derivation is no fresher than its
     /// basis. Its own `at_ms` is the issuer's claim; its sources' are the only times it can be bound to,
     /// so once any record it derives from (transitively, held in the store) is past the window, so is it.
+    ///
+    /// **Cost:** a walk of the record's `DerivedFrom` ancestry per call, so a selection over a derivation
+    /// chain is quadratic in the chain's depth. Measured in review: a 2000-record chain takes 1.34 s to
+    /// select and 664 ms to write a condensation; 8000 flat records, 16 ms.
     fn standing_of(&self, store: &KnowledgeStore, index: &DependencyIndex, id: &RecordId) -> Option<Standing> {
         let st = standing(store, index, id, self.now_ms, self.max_age_ms)?;
         if st != Standing::Current {
