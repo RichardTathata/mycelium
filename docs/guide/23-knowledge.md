@@ -179,19 +179,23 @@ An agent about to run wants what is known about its subject. The layer's answer 
 summary** (decision D14): `Selector::select` in [`src/knowledge/selection.rs`](../../src/knowledge/selection.rs)
 returns the records themselves, each with its issuer, its attribution, its standing and your verdict for its
 subject, placed in one `VerdictClass` — standing first, so a retracted record is `Retracted` whatever its
-subject's verdict. You rank them (a closure that scores a candidate, or says it is not relevant); the selector only
-orders and cuts.
+subject's verdict. Your verdict source is called with a store holding only the records you can read, so a withheld
+record never reaches a verdict. You rank them (a closure that scores a candidate, or says it is not relevant); the
+selector only orders and cuts. It selects verified records by default (`admit_unchecked` widens it).
 
-It reads through a `ReadScope` built from the caller's mandate — current, and enumerating `knowledge.read`. A record
-is readable when its subject is the scope or lies beneath it by path segment, **and** every record it was derived
+It reads through a `ReadScope` built from the caller's mandate — enumerating `knowledge.read`, and only inside the
+mandate's window, checked at every use. A record is readable when its subject is the scope or lies beneath it by path
+segment (a rule for selection only; a mandate's scope is exact everywhere else), **and** every record it was derived
 from is held and readable: a record derived from something you cannot read is withheld, because its text may be
 that something.
 
 If you condense a selection, the condensed text is a statement someone made, so it goes back as one:
-`write_condensed` takes a claim **signed by its own issuer**, linked by `DerivedFrom` to every source, with every
-source in **one class** — `Rejected` and `InsufficientEvidence` are two, and a `Retracted`, `BasisWithdrawn` or
-`Expired` record never sits with live ones. The class is re-derived when you write, and a later retraction of a source
-reaches the condensation as `BasisWithdrawn`, as it reaches anything derived. The feature page is
+`write_condensed` takes a claim **signed by its own issuer** under a key not revoked, linked by `DerivedFrom` to every
+source, with every source in **one class** — `Rejected` and `InsufficientEvidence` are two, and a `Retracted` or
+`BasisWithdrawn` record never sits with live ones — and the condensation's **own class, under the subject you file it
+under, the same**, so a summary cannot cross a boundary by changing subject. An expired source is refused: a summary
+does not refresh it. The class is re-derived when you write, and a later retraction of a source reaches the
+condensation as `BasisWithdrawn`, as it reaches anything derived. The feature page is
 [context selection](../features/context-selection.md).
 
 ## Run it
