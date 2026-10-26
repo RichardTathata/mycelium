@@ -26,6 +26,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   said so in one line (`deprecations.md` §66). **Open:** the
   two-mesh Docker suite under the profile, to be closed by the Y8-track precursor PR (the two-mesh suite under the profile). **Not built:** `doctor` reporting an edge or clients
   attached in code.
+- **Context selection** (`docs/plans/adopter-surface.md` Y1, decision D14): `mycelium::knowledge::selection` returns
+  knowledge records for a run without blending them — each with its issuer, its attribution, its standing and the
+  reader's verdict for its subject, in one `VerdictClass` — ranked by the adopter's closure, and read through a
+  `ReadScope` built from a current mandate that enumerates `knowledge.read`: a record is readable when its subject lies
+  under the mandate's scope and every record it was derived from is held and readable, so a record derived from one the
+  caller cannot read is withheld. A condensation is written back (`Selector::write_condensed`) only as a claim signed
+  by its own issuer, linked by `DerivedFrom` to every source, its sources in one class re-derived at write time —
+  `InsufficientEvidence` and `Rejected` apart, a `Retracted`, `BasisWithdrawn` or `Expired` record never folded into a
+  live one. Feature page `docs/features/context-selection.md`. **Not built:** the wiki side (pages carry no issuer or
+  verdict); a read mandate's epoch and revocation standing; re-verifying a selected record against the reader's current
+  key view; scoping `KnowledgeStore`'s own methods (no route or SDK verb reads knowledge records).
 
 ## [2.38.0] — 2026-10-26
 

@@ -411,6 +411,14 @@ ids = ["cargo:mycelium-reason/llm", "cargo:mycelium-reason/gateway", "cargo:myce
        "cargo:mycelium-reason/ollama", "crate:mycelium-reason"]
 
 [[feature]]
+name = "Context selection"
+page = "context-selection.md"
+example = "none"
+example_watch = ["context_selection", "condensation"]
+ids = ["concept:context-selection"]
+links = ["concept:assessment"]
+
+[[feature]]
 name = "Knowledge layer"
 page = "todo"
 planned = "knowledge-layer"

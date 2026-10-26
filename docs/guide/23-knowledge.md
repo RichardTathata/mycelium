@@ -173,6 +173,27 @@ watch `cohort_budget_refusals()`. Design record: [`knowledge-cohorts.md`](../des
 node-local journal — **persist, then apply** — so a restart does not forget a verified record or a
 signed stream head. Both are files an operator backs up beside `auto_cert_dir`; neither is gossiped.
 
+## Selecting context for a run (adopter-surface Y1)
+
+An agent about to run wants what is known about its subject. The layer's answer is a **selection, not a
+summary** (decision D14): `Selector::select` in [`src/knowledge/selection.rs`](../../src/knowledge/selection.rs)
+returns the records themselves, each with its issuer, its attribution, its standing and your verdict for its
+subject, placed in one `VerdictClass` — standing first, so a retracted record is `Retracted` whatever its
+subject's verdict. You rank them (a closure that scores a candidate, or says it is not relevant); the selector only
+orders and cuts.
+
+It reads through a `ReadScope` built from the caller's mandate — current, and enumerating `knowledge.read`. A record
+is readable when its subject is the scope or lies beneath it by path segment, **and** every record it was derived
+from is held and readable: a record derived from something you cannot read is withheld, because its text may be
+that something.
+
+If you condense a selection, the condensed text is a statement someone made, so it goes back as one:
+`write_condensed` takes a claim **signed by its own issuer**, linked by `DerivedFrom` to every source, with every
+source in **one class** — `Rejected` and `InsufficientEvidence` are two, and a `Retracted`, `BasisWithdrawn` or
+`Expired` record never sits with live ones. The class is re-derived when you write, and a later retraction of a source
+reaches the condensation as `BasisWithdrawn`, as it reaches anything derived. The feature page is
+[context selection](../features/context-selection.md).
+
 ## Run it
 
 ```bash
