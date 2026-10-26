@@ -259,21 +259,28 @@ is the closure read in anger, from a lost acknowledgement.
 ## Sending the records to a collector: spans, not evidence
 
 A fleet that already runs an OpenTelemetry collector can see its records there, as spans (adopter-surface Y4). A
-[`SpanCollector`](../../src/span_export.rs) reads the decision sink by sequence number and the evidence journal by
-cursor, without draining either, and returns a span per record it has not returned before; `span_export::otlp`
-(feature `otel`) sends them. The embedder decides when to collect — nothing here runs a loop:
+[`SpanCollector`](../../src/span_export.rs) reads the decision sink through its tap — a bounded copy the sink sends
+after releasing its own lock, so collecting never makes a decision point drop a record — and the evidence journal by
+cursor, draining neither; `span_export::otlp` (feature `otel`) sends the spans through a batch processor on a thread
+of its own, so a slow or unreachable collector drops spans and never stalls the caller. The embedder decides when to
+collect — nothing here runs a loop:
 
 ```rust,ignore
 use mycelium::span_export::{otlp, SpanCollector};
 
-let provider = otlp::provider("http://collector:4317")?;          // OTLP/gRPC, inside a Tokio runtime
+let provider = otlp::provider("http://collector:4317", otlp::EXPORT_TIMEOUT)?;  // OTLP/gRPC, inside a Tokio runtime
 let mut spans = SpanCollector::new()
-    .with_decision_sink(sink.clone())                              // the Arc<DecisionSink> the decision points hold
+    .with_decision_sink(sink.clone(), 4096)?                       // the Arc<DecisionSink> the decision points hold
     .with_evidence_journal("/var/lib/node/evidence.log");          // the path `with_evidence_journal` opened (`gateway` + `tls`)
 // on the embedder's own schedule:
 let got = spans.collect()?;
-otlp::export(&provider, &got.spans);
+otlp::export(&provider, &got.spans);                               // enqueues; never waits on the collector
+// got.dropped_full: decisions the full sink dropped since the last call — they have no span
 ```
+
+A sink nothing drains is full after `max_records` decisions (4096 by default); later decisions are dropped and have
+no span, and `collect` says how many. The correlation is the caller's id, sent as given — keep personal data out of
+it.
 
 A span carries the record's identity and outcome and nothing else: `correlation`, `parent`, the rule and its
 revision (an evidence record's enforcement point and policy revision), the outcome, a decision's typed reason, and

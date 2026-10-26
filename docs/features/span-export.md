@@ -8,7 +8,10 @@ A record's identity and outcome sent to an OpenTelemetry collector, as a span �
 carrying the [causal fields](../guide/00-concepts.md#causal-records), the rule and its revision, the outcome, a
 typed reason where the record has one, and the record's own content hash as an opaque reference. It never carries a
 record's inputs, target, effect, subject, resource, arguments, mandate or the audit chain's links: the span's type
-has no field for them. A holder of a span reads the record itself by that hash on the node that wrote it.
+has no field for them. A holder of a span reads the record itself by that hash on the node that wrote it: an
+evidence record from that node's journal, always; a decision record only where a trace is written — a `sim`
+bundle's `decisions.jsonl`, or an embedder that drains its own sink to a file — since the `mycelium` binary writes
+none otherwise.
 
 ## When to use it, and when not
 
@@ -22,13 +25,15 @@ has no field for them. A holder of a span reads the record itself by that hash o
 
 This feature is turned on in code.
 
-- [`SpanCollector`](../../src/span_export.rs) — reads a decision sink by sequence number and an evidence journal by
-  cursor, never draining either, and returns the spans it has not returned before; the embedder calls `collect` on
-  its own schedule.
+- [`SpanCollector`](../../src/span_export.rs) — reads a decision sink through its tap (a bounded channel the sink
+  feeds after releasing its lock, so a collector never makes a decision point drop a record) and an evidence journal
+  by cursor, never draining either; the embedder calls `collect` on its own schedule.
 - [`RecordSpan`](../../src/span_export.rs) — one record's span; `attributes` is the one rendering, pinned by a golden.
 - [`emit`](../../src/span_export.rs) — `span_export::otlp`, feature `otel` (as the skill runner's export is): sends a
   span through an OpenTelemetry `TracerProvider`, its trace id derived from the correlation and its span id from the
-  record's hash, at the record's own time; `otlp::provider(endpoint)` builds an OTLP/gRPC one.
+  record's hash, at the record's own time. `otlp::provider(endpoint, timeout)` builds an OTLP/gRPC one whose batch
+  processor runs on a thread of its own, so `emit` only enqueues: an unreachable collector costs dropped spans, never
+  a stalled caller (`exporting_to_an_unreachable_collector_never_stalls_the_caller`).
 - `what_reaches_the_exporter_is_the_pinned_set_and_no_input`, in [`src/span_export.rs`](../../src/span_export.rs):
   a real `TracerProvider` with a capturing exporter receives exactly the pinned attributes, the derived ids and the
   record's time, and no input, subject or prose reason.
@@ -55,11 +60,22 @@ is a hand-kept copy; no test reads it.
 - The hash is the record's content hash — a journal frame's body, a trace line without its newline — the one a
   `parent` names and `mycelium explain --closure` resolves. The same record always exports as the same span, ids
   included: a restarted collector re-sends spans with the ids they had.
-- Best-effort: a record the sink dropped, or that another reader drained before a collection, has no span. The
-  journal loses nothing, and each evidence record is returned once per collector. A collector's place is in memory.
-- **Not built** (the plan row is [`adopter-surface.md`](../plans/adopter-surface.md) Y4): a gateway route that serves
-  a record by its hash under `audit:read` — today the holder reads it on the node with `mycelium explain --closure`
-  over the files; an export loop in the `mycelium` binary or a configuration section for an endpoint — the embedder
+- Best-effort: a record the sink dropped has no span. **A sink nothing drains is full after `max_records` decisions**
+  (4096 by default), and every later decision is dropped `Full` and has no span; each `collect` reports how many
+  since the last call (`dropped_full`), and copies the tap could not hold because the collector fell behind
+  (`tap_dropped`). An embedder that wants spans for as long as the node runs also drains its sink, writing the trace.
+  Records kept before the collector tapped the sink have no span; one collector per sink. The journal loses nothing,
+  and each evidence record is returned once per collector. A collector's place is in memory.
+- **The correlation is the caller's.** `mycelium.correlation` is the id the request carried, sent as given — the
+  substrate checks only its shape. One holding personal data puts it in every span of the run: choose an opaque id.
+- A decision's `reason` is one of its rule's typed codes by convention — every shipped decision point passes a code
+  from its descriptor — not by the type, which is a `String`. A parent named across runs is an attribute, not a link;
+  two byte-identical evidence records are one record by content, so they share a span id.
+- The skill runner's own spans (`skillrunner`, also under `otel`) are **outside** `trace.spans_not_evidence`: they
+  carry the caller.
+- **Not built** (the plan row is [`adopter-surface.md`](../plans/adopter-surface.md) Y4, open on this point): a
+  gateway route that serves a record by its hash under `audit:read` — today the holder reads it on the node with
+  `mycelium explain --closure` over the files; an export loop in the `mycelium` binary or a configuration section for an endpoint — the embedder
   drives the collector; a durable collector cursor; the collector's OTLP client is not the node's egress-gated one,
   so the endpoint is the embedder's to allow. No span store is read by anything in this repository.
 

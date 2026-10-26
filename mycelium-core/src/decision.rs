@@ -36,7 +36,9 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
+
+use tokio::sync::mpsc::{Receiver, Sender};
 
 use serde::Serialize;
 
@@ -303,7 +305,20 @@ pub struct DecisionSink {
     dropped_contended: AtomicU64,
     dropped_oversized: AtomicU64,
     inputs_truncated: AtomicU64,
+    /// A copy of every record kept, for one reader that must never take the ring's lock (adopter-surface Y4's span
+    /// collector). Set once; a bounded channel sent through the channel-readiness seam (`sim_seam::chan_try_send`), so
+    /// whether it was full is a recorded choice and the send never waits — a full one drops the copy and counts it, the
+    /// ring keeps the record either way.
+    tap: OnceLock<Sender<DecisionRecord>>,
+    tap_dropped: AtomicU64,
 }
+
+/// The channel-readiness seam's stream for the tap: fixed, so a recording replays it by name.
+const TAP_STREAM: &str = "decision/tap";
+
+/// [`DecisionSink::tap`] was already taken by another reader.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AlreadyTapped;
 
 impl std::fmt::Debug for DecisionSink {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -327,6 +342,8 @@ impl DecisionSink {
             dropped_contended: AtomicU64::new(0),
             dropped_oversized: AtomicU64::new(0),
             inputs_truncated: AtomicU64::new(0),
+            tap: OnceLock::new(),
+            tap_dropped: AtomicU64::new(0),
         }
     }
 
@@ -348,6 +365,8 @@ impl DecisionSink {
         }
         if cut > 0 { rec.completeness.inputs_truncated = true; }
         let size = rec.approx_bytes();
+        // The tap's copy is made before the lock, so a tapped sink holds its lock no longer than an untapped one.
+        let mut copy = self.tap.get().map(|_| rec.clone());
         if size > self.cfg.max_bytes {
             self.dropped_oversized.fetch_add(1, Ordering::Relaxed);
             return Err(Dropped::Oversized);
@@ -371,6 +390,12 @@ impl DecisionSink {
         drop(ring);
         self.recorded.fetch_add(1, Ordering::Relaxed);
         self.inputs_truncated.fetch_add(cut, Ordering::Relaxed);
+        if let (Some(tap), Some(mut c)) = (self.tap.get(), copy.take()) {
+            c.seq = seq;
+            if crate::sim_seam::chan_try_send(TAP_STREAM, tap, c) != crate::sim_seam::ChanVerdict::Sent {
+                self.tap_dropped.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         Ok(seq)
     }
 
@@ -387,6 +412,27 @@ impl DecisionSink {
     pub fn snapshot(&self) -> Vec<DecisionRecord> {
         let ring = self.ring.lock().unwrap_or_else(|p| p.into_inner());
         ring.records.iter().cloned().collect()
+    }
+
+    /// A copy of every record this sink keeps from now on, for **one** reader that must never take the ring's lock — a
+    /// reader that did (`snapshot`, `drain`) would make a concurrent decision point drop its record `Contended`. At
+    /// most `capacity` copies wait; past that a copy is dropped and counted ([`tap_dropped`](Self::tap_dropped)), and
+    /// the ring keeps the record regardless. Records kept before the tap was taken are not sent. A second call is
+    /// refused: one reader, one cursor.
+    pub fn tap(&self, capacity: usize) -> Result<Receiver<DecisionRecord>, AlreadyTapped> {
+        let (tx, rx) = tokio::sync::mpsc::channel(capacity.max(1));
+        self.tap.set(tx).map_err(|_| AlreadyTapped)?;
+        Ok(rx)
+    }
+
+    /// Copies the tap dropped because its reader had not kept up (or had gone).
+    pub fn tap_dropped(&self) -> u64 {
+        self.tap_dropped.load(Ordering::Relaxed)
+    }
+
+    /// Records dropped because the ring held `max_records` — read from the counter alone, without the ring's lock.
+    pub fn dropped_full(&self) -> u64 {
+        self.dropped_full.load(Ordering::Relaxed)
     }
 
     pub fn stats(&self) -> SinkStats {

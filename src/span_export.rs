@@ -21,17 +21,27 @@
 //! absent. Its outcome is the verdict (`permit` / `deny` / `indeterminate`) or, for an execution record, what became
 //! of the dispatch (`completed`, `failed`, …).
 //!
-//! **Pull, from what the node already keeps.** A [`SpanCollector`] reads a [`DecisionSink`] by sequence number and an
-//! evidence journal by cursor — the exporter shape the journal already has — and returns the spans it has not
-//! returned before. It never drains the sink (a replay bundle still gets every record) and holds no lock across a
-//! read. The embedder decides when to collect; this module runs no loop, reads no clock and draws no random number:
+//! **Pull, from what the node already keeps, without taking its locks.** A [`SpanCollector`] reads a [`DecisionSink`]
+//! through the sink's tap ([`DecisionSink::tap`]) — a bounded channel the sink feeds, after releasing its own lock,
+//! with a copy of each record it keeps — and an evidence journal by cursor, the exporter shape the journal already
+//! has. It never takes the ring's lock (a reader that did would make a concurrent decision point drop its record
+//! `Contended`, since a decision point never waits), and never drains the ring, so a replay bundle still gets every
+//! record. The embedder decides when to collect; this module runs no loop, reads no clock and draws no random number:
 //! a span's time is the record's own event time, and its trace and span ids are derived from the correlation and the
 //! hashes ([`RecordSpan::trace_id`], [`RecordSpan::span_id`]), so the same record always exports as the same span.
 //!
-//! **Best-effort, as the trace is.** The decision sink is lossy by design and a record it dropped has no span; a
-//! record another reader drained before a collection is not seen. The journal is not lossy, and every evidence
-//! record is returned once per collector. A collector is not durable: a new one starts from the beginning, so a
-//! restarted exporter re-sends spans a collector already accepted — the same span, with the same ids.
+//! **Best-effort, as the trace is.** The decision sink is lossy by design and a record it dropped has no span. **A
+//! sink nothing drains fills**: after `max_records` kept decisions (4096 by default) every later one is dropped
+//! `Full`, and has no span either — [`Collected::dropped_full`] says how many since the last call; an embedder that
+//! wants spans for as long as the node runs drains its sink (writing the trace) as well. A copy the tap could not hold
+//! because the collector fell behind is counted ([`Collected::tap_dropped`]). Records kept before the collector
+//! tapped the sink have no span. The journal is not lossy, and every evidence record is returned once per collector.
+//! A collector is not durable: a new one reads the journal from the beginning, so a restarted exporter re-sends spans
+//! a collector already accepted — the same span, with the same ids.
+//!
+//! **The correlation is the caller's.** `mycelium.correlation` is the id the request carried, sent as given; the
+//! substrate checks only its shape. A caller that puts personal data in it puts personal data in every span of the
+//! run — choose an opaque id.
 //!
 //! The OTLP side (`otlp`) is under the `otel` feature, as the skill runner's export is; the mapping is in every
 //! build so its field set is tested in every build.
@@ -47,7 +57,7 @@ use crate::agent::action_evaluator::{AeEvidence, RecordKind};
 use crate::agent::causal::content_hash;
 #[cfg(all(feature = "gateway", feature = "tls"))]
 use crate::agent::evidence_journal::{read_evidence_journal_from, EvidenceCursor, JournalEntry};
-use crate::decision::{DecisionRecord, DecisionSink};
+use crate::decision::{AlreadyTapped, DecisionRecord, DecisionSink};
 
 /// The schema id a span carries as `mycelium.schema`; a change to its attribute set is a new one.
 pub const SPAN_SCHEMA: &str = "mycelium.span/1";
@@ -232,9 +242,15 @@ impl RecordSpan {
 }
 
 /// What one [`SpanCollector::collect`] read.
+#[non_exhaustive]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Collected {
     pub spans: Vec<RecordSpan>,
+    /// Decisions the sink dropped since the last collection because it held `max_records` (`Full`): they have no
+    /// span, and nothing here can give them one — a sink nothing drains is full after `max_records` decisions.
+    pub dropped_full: u64,
+    /// Decision copies the tap dropped since the last collection because the collector had not kept up.
+    pub tap_dropped: u64,
     /// Journal frames that were not evidence JSON — skipped, counted. Always 0 in a build without the journal.
     pub unparsed: u64,
     /// Whether the journal read stopped at its page bound rather than the end, so a caller collects again.
@@ -245,8 +261,9 @@ pub struct Collected {
 /// [`collect`](Self::collect) on its own schedule.
 #[derive(Debug)]
 pub struct SpanCollector {
-    sink: Option<Arc<DecisionSink>>,
-    last_seq: u64,
+    sink: Option<(Arc<DecisionSink>, tokio::sync::mpsc::Receiver<DecisionRecord>)>,
+    seen_full: u64,
+    seen_tap_dropped: u64,
     #[cfg(all(feature = "gateway", feature = "tls"))]
     journal: Option<PathBuf>,
     #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -268,7 +285,8 @@ impl SpanCollector {
     pub fn new() -> Self {
         SpanCollector {
             sink: None,
-            last_seq: 0,
+            seen_full: 0,
+            seen_tap_dropped: 0,
             #[cfg(all(feature = "gateway", feature = "tls"))]
             journal: None,
             #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -280,10 +298,16 @@ impl SpanCollector {
         }
     }
 
-    /// Read this decision sink — the one handed to the node's decision points — by sequence number, never draining it.
-    pub fn with_decision_sink(mut self, sink: Arc<DecisionSink>) -> Self {
-        self.sink = Some(sink);
-        self
+    /// Read this decision sink — the one handed to the node's decision points — through its tap
+    /// ([`DecisionSink::tap`]): a copy of each record it keeps from now on, `capacity` waiting at most. The collector
+    /// never takes the ring's lock, so it never makes a decision point drop a record, and never drains the ring. A
+    /// sink already tapped by another reader is refused.
+    pub fn with_decision_sink(mut self, sink: Arc<DecisionSink>, capacity: usize) -> Result<Self, AlreadyTapped> {
+        let rx = sink.tap(capacity)?;
+        self.seen_full = sink.dropped_full();
+        self.seen_tap_dropped = sink.tap_dropped();
+        self.sink = Some((sink, rx));
+        Ok(self)
     }
 
     /// Read the evidence journal at this path — the one `with_evidence_journal` opened — by cursor. The journal exists
@@ -302,17 +326,19 @@ impl SpanCollector {
         self
     }
 
-    /// The spans for every record kept since the last collection: the sink's records above the last sequence number
-    /// returned, then one journal page from the cursor. A journal that does not exist yet reads as empty.
+    /// The spans for every record kept since the last collection: the copies the sink's tap holds, then one journal
+    /// page from the cursor, with what the sink dropped since the last call. A journal that does not exist yet reads as
+    /// empty.
     pub fn collect(&mut self) -> std::io::Result<Collected> {
         let mut out = Collected::default();
-        if let Some(sink) = &self.sink {
-            for r in sink.snapshot() {
-                if r.seq > self.last_seq {
-                    self.last_seq = r.seq;
-                    out.spans.push(RecordSpan::from_decision(&r));
-                }
+        if let Some((sink, rx)) = &mut self.sink {
+            while let Ok(r) = rx.try_recv() {
+                out.spans.push(RecordSpan::from_decision(&r));
             }
+            let (full, tap) = (sink.dropped_full(), sink.tap_dropped());
+            out.dropped_full = full - self.seen_full;
+            out.tap_dropped = tap - self.seen_tap_dropped;
+            (self.seen_full, self.seen_tap_dropped) = (full, tap);
         }
         #[cfg(all(feature = "gateway", feature = "tls"))]
         if let Some(path) = &self.journal {
@@ -391,13 +417,32 @@ pub mod otlp {
         }
     }
 
-    /// A provider that sends to an OTLP/gRPC collector at `endpoint`, one span at a time — the skill runner's shape.
-    /// The call needs a Tokio runtime (tonic's). Egress: the endpoint is the embedder's to put on the allow-list;
-    /// this client is not the node's gated one.
-    pub fn provider(endpoint: &str) -> Result<TracerProvider, opentelemetry::trace::TraceError> {
+    /// The longest one export to the collector may take before it is abandoned (and its spans dropped).
+    pub const EXPORT_TIMEOUT: Duration = Duration::from_secs(5);
+    /// Spans waiting to be sent, at most; past that a span is dropped by the processor, never waited for.
+    pub const MAX_QUEUE: usize = 2048;
+
+    /// A provider that sends to an OTLP/gRPC collector at `endpoint` **without blocking the caller**: a batch processor
+    /// on a thread of its own ([`TokioCurrentThread`](opentelemetry_sdk::runtime::TokioCurrentThread)), at most
+    /// [`MAX_QUEUE`] spans waiting and each export abandoned after `export_timeout` (use [`EXPORT_TIMEOUT`]). `emit`
+    /// only enqueues, so an unreachable or slow collector costs a dropped span, never a stalled decision loop — on a
+    /// current-thread runtime as on a multi-thread one. Call it inside a Tokio runtime (tonic's channel is built on
+    /// it). `shutdown()` flushes, waiting at most the timeout. Egress: the endpoint is the embedder's to put on the
+    /// allow-list; this client is not the node's gated one.
+    pub fn provider(endpoint: &str, export_timeout: Duration) -> Result<TracerProvider, opentelemetry::trace::TraceError> {
         use opentelemetry_otlp::WithExportConfig as _;
-        let exporter = opentelemetry_otlp::SpanExporter::builder().with_tonic().with_endpoint(endpoint).build()?;
-        Ok(TracerProvider::builder().with_simple_exporter(exporter).build())
+        use opentelemetry_sdk::trace::{BatchConfigBuilder, BatchSpanProcessor};
+        let exporter = opentelemetry_otlp::SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(endpoint)
+            .with_timeout(export_timeout)
+            .build()?;
+        let processor = BatchSpanProcessor::builder(exporter, opentelemetry_sdk::runtime::TokioCurrentThread)
+            .with_batch_config(
+                BatchConfigBuilder::default().with_max_queue_size(MAX_QUEUE).with_max_export_timeout(export_timeout).build(),
+            )
+            .build();
+        Ok(TracerProvider::builder().with_span_processor(processor).build())
     }
 }
 
@@ -428,6 +473,15 @@ mod tests {
         "SECRET-ATTEMPT-ID",
         "SECRET-CATALOGUE",
         "SECRET-NODE",
+        "SECRET-ROUTE-DESTINATION",
+        "SECRET-DATA-CLASS",
+        "SECRET-REFUSED-DESTINATION",
+        "SECRET-REFUSAL-REASON",
+        "SECRET-HISTORY-ATTEMPT",
+        "SECRET-HISTORY-UNAVAILABLE",
+        "SECRET-ORIGIN-DOMAIN",
+        "SECRET-SUPERSEDES",
+        "SECRET-DURABILITY-FAILURE",
     ];
 
     pub(super) fn decision() -> DecisionRecord {
@@ -469,6 +523,18 @@ mod tests {
             "parent": "cd".repeat(32),
             "node": "SECRET-NODE",
             "mandate_digest": "SECRET-MANDATE",
+            "route": {
+                "destination": { "name": "SECRET-ROUTE-DESTINATION", "locality": "external" },
+                "data_class": { "class": "SECRET-DATA-CLASS", "source": "declared" },
+                "refused": [{ "destination": { "name": "SECRET-REFUSED-DESTINATION", "locality": "in_domain" }, "reason": "SECRET-REFUSAL-REASON" }],
+            },
+            "history": {
+                "scope": "enforcement_point", "window_ms": 1000, "as_of_ms": 5,
+                "attempts": ["SECRET-HISTORY-ATTEMPT"], "complete": false, "unavailable": "SECRET-HISTORY-UNAVAILABLE",
+            },
+            "origin_domain": "SECRET-ORIGIN-DOMAIN",
+            "supersedes": "SECRET-SUPERSEDES",
+            "effect_durability": { "failed": "SECRET-DURABILITY-FAILURE" },
         }))
         .unwrap()
     }
@@ -537,6 +603,12 @@ mod tests {
         #[cfg(all(feature = "gateway", feature = "tls"))]
         for (kind, execution, outcome) in [("decided", "none", "deny"), ("execution", "failed", "failed")] {
             let bytes = evidence_bytes(kind, execution);
+            let parsed: AeEvidence = serde_json::from_slice(&bytes).expect("the fixture is an evidence record");
+            assert!(
+                parsed.route.is_some() && parsed.history.is_some() && parsed.origin_domain.is_some()
+                    && parsed.supersedes.is_some() && parsed.effect_durability.is_some() && parsed.mandate_digest.is_some(),
+                "every kept-off field is set on the fixture, so its sentinel is tested"
+            );
             let e = RecordSpan::from_evidence(&entry(bytes.clone())).unwrap();
             let text = sent(&e);
             for secret in SECRET {
@@ -583,7 +655,7 @@ mod tests {
     #[test]
     fn the_collector_reads_the_sink_by_sequence_number_and_never_drains_it() {
         let sink = Arc::new(DecisionSink::default());
-        let mut c = SpanCollector::new().with_decision_sink(Arc::clone(&sink));
+        let mut c = SpanCollector::new().with_decision_sink(Arc::clone(&sink), 64).unwrap();
         assert!(c.collect().unwrap().spans.is_empty());
         sink.record(decision()).unwrap();
         sink.record(decision().correlation("run-2")).unwrap();
@@ -599,6 +671,68 @@ mod tests {
         assert_eq!(again.unparsed, 0);
     }
 
+    /// #684's review, finding 1: a collector that took the ring's lock (a blocking `snapshot`) made a concurrent
+    /// decision point drop its record `Contended` — 1,250 in the reviewer's probe. Through the tap, none.
+    #[test]
+    fn a_collector_never_makes_a_decision_point_drop_a_record() {
+        let sink = Arc::new(DecisionSink::new(crate::decision::SinkConfig { max_records: 1 << 20, max_bytes: 1 << 30, max_input_bytes: 256 }));
+        // A ring already holding ten thousand records, as a node's would: a reader that took its lock would hold it for
+        // as long as a copy of all of them takes, and every decision meanwhile would drop.
+        for _ in 0..10_000 {
+            sink.record(decision()).unwrap();
+        }
+        let mut c = SpanCollector::new().with_decision_sink(Arc::clone(&sink), 1 << 16).unwrap();
+        let writer = {
+            let sink = Arc::clone(&sink);
+            std::thread::spawn(move || {
+                for _ in 0..20_000 {
+                    let _ = sink.record(decision());
+                }
+            })
+        };
+        let mut spans = 0usize;
+        let mut collections = 0usize;
+        while !writer.is_finished() {
+            spans += c.collect().unwrap().spans.len();
+            collections += 1;
+        }
+        writer.join().unwrap();
+        spans += c.collect().unwrap().spans.len();
+        let st = sink.stats();
+        assert_eq!(st.dropped_contended, 0, "a collector caused {} contended drops over {collections} collections", st.dropped_contended);
+        assert_eq!(st.recorded, 30_000);
+        assert_eq!(spans as u64 + sink.tap_dropped(), 20_000, "every kept record is a span or a counted tap drop");
+    }
+
+    /// #684's review, finding 3: a sink nothing drains is full after `max_records`, and later decisions have no span —
+    /// the collector says how many, per call.
+    #[test]
+    fn a_full_sink_is_reported_not_silent() {
+        let sink = Arc::new(DecisionSink::new(crate::decision::SinkConfig { max_records: 2, ..Default::default() }));
+        let mut c = SpanCollector::new().with_decision_sink(Arc::clone(&sink), 8).unwrap();
+        for _ in 0..5 {
+            let _ = sink.record(decision());
+        }
+        let got = c.collect().unwrap();
+        assert_eq!((got.spans.len(), got.dropped_full), (2, 3));
+        let _ = sink.record(decision());
+        let again = c.collect().unwrap();
+        assert_eq!((again.spans.len(), again.dropped_full), (0, 1), "since the last call, not cumulative");
+    }
+
+    #[test]
+    fn one_reader_per_tap_and_a_full_tap_is_counted() {
+        let sink = Arc::new(DecisionSink::default());
+        let mut c = SpanCollector::new().with_decision_sink(Arc::clone(&sink), 2).unwrap();
+        assert!(SpanCollector::new().with_decision_sink(Arc::clone(&sink), 2).is_err(), "a second collector is refused");
+        for _ in 0..5 {
+            sink.record(decision()).unwrap();
+        }
+        let got = c.collect().unwrap();
+        assert_eq!((got.spans.len(), got.tap_dropped), (2, 3));
+        assert_eq!(sink.snapshot().len(), 5, "the ring kept every record the tap could not");
+    }
+
     #[cfg(all(feature = "gateway", feature = "tls"))]
     #[tokio::test]
     async fn the_collector_returns_each_record_once_and_never_drains_the_sink() {
@@ -607,7 +741,7 @@ mod tests {
         let path = dir.join("evidence.log");
         let _ = std::fs::remove_file(&path);
         let sink = Arc::new(DecisionSink::default());
-        let mut c = SpanCollector::new().with_decision_sink(Arc::clone(&sink)).with_evidence_journal(&path);
+        let mut c = SpanCollector::new().with_decision_sink(Arc::clone(&sink), 64).unwrap().with_evidence_journal(&path);
         // Nothing yet, and no journal file: empty, not an error.
         let first = c.collect().unwrap();
         assert!(first.spans.is_empty());
@@ -697,6 +831,33 @@ mod otlp_tests {
             assert_eq!(got[0].span_context.trace_id(), got[1].span_context.trace_id());
             assert_eq!(got[1].parent_span_id, SpanId::from_bytes([0xcd; 8]));
         }
+    }
+    /// #684's review, finding 2: with the simple exporter, `emit` blocked the calling thread on every span — on a
+    /// current-thread runtime against a refused port it never returned. Through the batch processor, a thousand spans
+    /// and the provider's shutdown return within a bound.
+    #[test]
+    fn exporting_to_an_unreachable_collector_never_stalls_the_caller() {
+        let port = crate::test_util::alloc_port();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            rt.block_on(async move {
+                let provider = otlp::provider(&format!("http://127.0.0.1:{port}"), std::time::Duration::from_millis(500)).unwrap();
+                let span = RecordSpan::from_decision(&decision());
+                let started = std::time::Instant::now();
+                for _ in 0..1000 {
+                    otlp::emit(&provider, &span);
+                }
+                let emitted = started.elapsed();
+                let _ = provider.shutdown();
+                let _ = done_tx.send((emitted, started.elapsed()));
+            });
+        });
+        let (emitted, total) = done_rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("emit or shutdown stalled the caller against a refused port");
+        assert!(emitted < std::time::Duration::from_secs(2), "a thousand emits took {emitted:?}");
+        assert!(total < std::time::Duration::from_secs(10), "emit and shutdown took {total:?}");
     }
 }
 
