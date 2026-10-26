@@ -38,7 +38,7 @@ A **security PATCH** cut from the v2.38.0 tag on `release-2.38.x`, not from `mai
 -0410 (dated 2026-10-16, in the database 2026-10-26), unfixed upstream: wasmtime 50.0.0's `wasmtime-internal-cache` still
 requires `zstd ^0.13`. `zstd` entered only through that cache, a default wasmtime feature `mycelium-wasm-host` never
 configures, so the code was compiled in and never run. The fix (#686 on `main`) depends on `wasmtime` with every default
-feature but `cache`; `Cargo.lock` loses 14 crates and moves no version. Wire v12 unchanged; no API change.
+feature but `cache`; `Cargo.lock` loses 14 crates and moves no version besides the train's. Wire v12 unchanged; no API change.
 Log: `.log/2026-10-26-release-v2.38.1.md`.
 
 ## v2.38.0 release — 2026-10-26 (tag `v2.38.0`) — the adopter surface's second track

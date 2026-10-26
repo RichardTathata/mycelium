@@ -21,9 +21,11 @@ A security PATCH cut from the v2.38.0 tag. Wire **v12** unchanged (`PREV = 11`);
   configures that cache (no `cache_config` or `Config::cache` call), so the vulnerable code was compiled in and never
   run. `mycelium-wasm-host` now depends on `wasmtime` with every default feature but `cache`, which takes `zstd`,
   `zstd-safe`, `zstd-sys`, `wasmtime-internal-cache` and ten crates beneath them out of `Cargo.lock`; nothing else
-  changes. It clears the ten `zstd-safe` *unsound* warnings beside them too (RUSTSEC-2026-0395 to -0397 and -0399 to
-  -0406). **Check:** an application that turns wasmtime's `cache` feature on itself still carries `zstd` until
-  wasmtime requires `zstd` 0.14.3 (`zstd-safe` 8.2.0, `zstd-sys` 2.1.2); `cargo audit -f Cargo.lock` names it.
+  changes. It clears the ten `zstd-safe` *unsound* warnings beside them too (RUSTSEC-2026-0395 to -0397, -0399 to -0402
+  and -0404 to -0406). **Check:** an application that turns wasmtime's `cache` feature on itself still carries `zstd` until
+  wasmtime requires `zstd` 0.14.3 (`zstd-safe` 8.2.0, `zstd-sys` 2.1.2); one that depends on wasmtime with
+  `default-features = false` and calls its `Config::cache*` API compiled only because this crate's `cache` was unified
+  into its build, and must now enable `cache` itself; `cargo audit -f Cargo.lock` names it.
 
 ## [2.38.0] — 2026-10-26
 
