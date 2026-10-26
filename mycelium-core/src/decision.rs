@@ -36,7 +36,9 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock, TryLockError};
+
+use tokio::sync::mpsc::{Receiver, Sender};
 
 use serde::Serialize;
 
@@ -303,7 +305,53 @@ pub struct DecisionSink {
     dropped_contended: AtomicU64,
     dropped_oversized: AtomicU64,
     inputs_truncated: AtomicU64,
+    /// A copy of every record kept, for one reader that must never take the ring's lock (adopter-surface Y4's span
+    /// collector). Lock-order row 72: read by `record` with `try_read` **before** the ring's lock and released before
+    /// it, written only by [`tap`](Self::tap); never taken under the ring's lock. The send is a plain `try_send`, not a
+    /// seam choice: whether the reader kept up changes no decision (the ring keeps the record either way), so a
+    /// recording made with a collector replays identically without one (`scripts/sim-seams-baseline.txt`).
+    tap: RwLock<Option<Sender<DecisionRecord>>>,
+    tap_dropped: AtomicU64,
 }
+
+/// The most copies a tap can hold waiting — [`DecisionSink::tap`] clamps its capacity to `1..=MAX_TAP_CAPACITY`.
+pub const MAX_TAP_CAPACITY: usize = 1 << 16;
+
+/// Every record a sink has dropped, by reason — read from its counters alone, never under the ring's lock.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct DropCounts {
+    pub full: u64,
+    pub bytes: u64,
+    pub contended: u64,
+    pub oversized: u64,
+}
+
+impl DropCounts {
+    /// What was dropped after `earlier`.
+    pub fn since(&self, earlier: &DropCounts) -> DropCounts {
+        DropCounts {
+            full: self.full.saturating_sub(earlier.full),
+            bytes: self.bytes.saturating_sub(earlier.bytes),
+            contended: self.contended.saturating_sub(earlier.contended),
+            oversized: self.oversized.saturating_sub(earlier.oversized),
+        }
+    }
+    pub fn total(&self) -> u64 {
+        self.full + self.bytes + self.contended + self.oversized
+    }
+}
+
+/// [`DecisionSink::tap`] is held by a reader that is still there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AlreadyTapped;
+
+impl std::fmt::Display for AlreadyTapped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the decision sink is already tapped by a live reader")
+    }
+}
+
+impl std::error::Error for AlreadyTapped {}
 
 impl std::fmt::Debug for DecisionSink {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -327,6 +375,8 @@ impl DecisionSink {
             dropped_contended: AtomicU64::new(0),
             dropped_oversized: AtomicU64::new(0),
             inputs_truncated: AtomicU64::new(0),
+            tap: RwLock::new(None),
+            tap_dropped: AtomicU64::new(0),
         }
     }
 
@@ -348,6 +398,16 @@ impl DecisionSink {
         }
         if cut > 0 { rec.completeness.inputs_truncated = true; }
         let size = rec.approx_bytes();
+        // The tap is read, and its copy made, before the ring's lock, so a tapped sink holds its lock no longer than an
+        // untapped one; a tap whose reader has gone costs no copy. A tap being installed (`try_read` would block) skips
+        // the copy, counted below once the record is kept, so a skipped copy is never silent. A poisoned lock is
+        // recovered, as `tap()` recovers it: the slot holds a sender, which a panic cannot leave half-written.
+        let (tap, tap_busy) = match self.tap.try_read() {
+            Ok(t) => (t.as_ref().filter(|tx| !tx.is_closed()).cloned(), false),
+            Err(TryLockError::Poisoned(p)) => (p.into_inner().as_ref().filter(|tx| !tx.is_closed()).cloned(), false),
+            Err(TryLockError::WouldBlock) => (None, true),
+        };
+        let mut copy = tap.as_ref().map(|_| rec.clone());
         if size > self.cfg.max_bytes {
             self.dropped_oversized.fetch_add(1, Ordering::Relaxed);
             return Err(Dropped::Oversized);
@@ -371,6 +431,17 @@ impl DecisionSink {
         drop(ring);
         self.recorded.fetch_add(1, Ordering::Relaxed);
         self.inputs_truncated.fetch_add(cut, Ordering::Relaxed);
+        if tap_busy {
+            self.tap_dropped.fetch_add(1, Ordering::Relaxed);
+        }
+        if let (Some(tap), Some(mut c)) = (tap, copy.take()) {
+            c.seq = seq;
+            // Not `sim_seam::chan_try_send`: this verdict changes no decision, and recording it would make a replay
+            // depend on whether a collector ran (baseline entry, with the reason).
+            if tap.try_send(c).is_err() {
+                self.tap_dropped.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         Ok(seq)
     }
 
@@ -387,6 +458,43 @@ impl DecisionSink {
     pub fn snapshot(&self) -> Vec<DecisionRecord> {
         let ring = self.ring.lock().unwrap_or_else(|p| p.into_inner());
         ring.records.iter().cloned().collect()
+    }
+
+    /// A copy of every record this sink keeps from now on, for **one** reader that must never take the ring's lock — a
+    /// reader that did (`snapshot`, `drain`) would make a concurrent decision point drop its record `Contended`. At
+    /// most `capacity` copies wait (clamped to `1..=`[`MAX_TAP_CAPACITY`]); past that a copy is dropped and counted
+    /// ([`tap_dropped`](Self::tap_dropped)), and the ring keeps the record regardless. Records kept before the tap was
+    /// taken are not sent. Refused while another reader holds a live tap; once that reader's receiver is dropped the
+    /// tap can be taken again. Not a decision point: it may wait for the tap's own lock, never for the ring's.
+    pub fn tap(&self, capacity: usize) -> Result<Receiver<DecisionRecord>, AlreadyTapped> {
+        let live = |slot: &Option<Sender<DecisionRecord>>| slot.as_ref().is_some_and(|tx| !tx.is_closed());
+        // A refusal is decided under the read lock and never takes the write lock, so a reader retrying against a live
+        // tap cannot make `record` skip copies; the write lock is taken only to install, and liveness is checked again.
+        if live(&self.tap.read().unwrap_or_else(|p| p.into_inner())) {
+            return Err(AlreadyTapped);
+        }
+        let mut slot = self.tap.write().unwrap_or_else(|p| p.into_inner());
+        if live(&slot) {
+            return Err(AlreadyTapped);
+        }
+        let (tx, rx) = tokio::sync::mpsc::channel(capacity.clamp(1, MAX_TAP_CAPACITY));
+        *slot = Some(tx);
+        Ok(rx)
+    }
+
+    /// Copies the tap dropped because its reader had not kept up.
+    pub fn tap_dropped(&self) -> u64 {
+        self.tap_dropped.load(Ordering::Relaxed)
+    }
+
+    /// Every record dropped so far, by reason, from the counters alone (no lock).
+    pub fn drop_counts(&self) -> DropCounts {
+        DropCounts {
+            full: self.dropped_full.load(Ordering::Relaxed),
+            bytes: self.dropped_bytes.load(Ordering::Relaxed),
+            contended: self.dropped_contended.load(Ordering::Relaxed),
+            oversized: self.dropped_oversized.load(Ordering::Relaxed),
+        }
     }
 
     pub fn stats(&self) -> SinkStats {
@@ -753,5 +861,47 @@ mod tests {
         assert!(text.contains("3 record(s) over 2 target(s); 1 read gossiped or sampled inputs") && text.contains("1 line(s) did not parse"), "{text}");
         let only = explain(&jsonl, None, Some("route/optimize"));
         assert!(only.starts_with("route/optimize\n") && !only.contains("text/echo"));
+    }
+}
+
+/// The tap (adopter-surface Y4) changes no decision and must not change a recording: #684's confirmation round found
+/// it routed through the channel-readiness seam, so a recording made with a collector replayed differently without
+/// one, and a replay with a collector attached panicked inside `record`. A plain send records nothing.
+#[cfg(all(test, feature = "sim"))]
+mod tap_replay_tests {
+    use super::*;
+    use crate::sim_seam::{install, take, SimContext};
+    use mycelium_sim::{Kernel, Sources};
+
+    fn ctx(kernel: Kernel) -> SimContext {
+        SimContext { kernel, sources: Sources::seeded(9, 1_789_000_000_000), node: "n1".into(), offsets: Default::default() }
+    }
+
+    /// Ten decisions into a sink, with a tap that is never read (capacity 1: one sent, nine dropped) or without one.
+    fn run(tapped: bool) -> (Vec<String>, Option<Receiver<DecisionRecord>>) {
+        let sink = DecisionSink::default();
+        let rx = tapped.then(|| sink.tap(1).unwrap());
+        for i in 0..10 {
+            sink.record(DecisionRecord::new("r", 1, format!("t{i}"), OutcomeKind::Action, "x")).unwrap();
+        }
+        (sink.snapshot().iter().map(canonical).collect(), rx)
+    }
+
+    #[test]
+    fn a_tap_records_nothing_so_a_recording_replays_with_or_without_one() {
+        install(ctx(Kernel::recording()));
+        let (with_tap, _rx) = run(true);
+        let tapped = take().expect("installed").kernel.trace().to_text();
+        install(ctx(Kernel::recording()));
+        let (without, _) = run(false);
+        let plain = take().expect("installed").kernel.trace().to_text();
+        assert_eq!(tapped, plain, "a collector being there changed the recording");
+        assert_eq!(with_tap, without, "the same decisions");
+
+        // A recording made without a collector, replayed with a stalled one attached: completes, the same decisions.
+        install(ctx(Kernel::replaying(mycelium_sim::Trace::parse(&plain).unwrap())));
+        let replayed = std::panic::catch_unwind(|| run(true).0);
+        take();
+        assert_eq!(replayed.expect("a replay with a collector attached panicked in `record`"), without);
     }
 }

@@ -38,6 +38,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   said so in one line (`deprecations.md` §66). **Open:** the
   two-mesh Docker suite under the profile, to be closed by the Y8-track precursor PR (the two-mesh suite under the profile). **Not built:** `doctor` reporting an edge or clients
   attached in code.
+- **Trace export as spans** (`docs/plans/adopter-surface.md` Y4, D17): `mycelium::span_export` turns a decision record
+  or an evidence record into a span carrying its identity and outcome — `correlation`, `parent`, the rule and its
+  revision, the outcome, a decision's typed reason and the record's content hash — and never its inputs, target,
+  effect, subject, resource, arguments, prose reason, mandate or the audit chain's links (the type has no field for
+  them; schema `mycelium.span/1`, the attribute set pinned by a golden). `SpanCollector` reads the decision sink
+  through `DecisionSink::tap` — a bounded channel the sink feeds after releasing its lock, so a collector never makes
+  a decision point drop a record — and the evidence journal by cursor, draining neither, and reports the decisions a
+  full sink dropped; `span_export::otlp` (feature `otel`) sends through a batch processor on a thread of its own, so
+  an unreachable collector drops spans and never stalls the caller, the trace id from the correlation so one run is
+  one trace. The
+  guarantee report gains `trace.spans_not_evidence`: a span is not an evidence path — read the record by its hash on
+  the node (`mycelium explain --closure`). Not built: an export loop in the `mycelium` binary; the route serving a
+  record by hash under `audit:read` follows in its own PR (decided 2026-10-26).
 - **Context selection** (`docs/plans/adopter-surface.md` Y1, decision D14): `mycelium::knowledge::selection` returns
   knowledge records for a run without blending them — each with its issuer, its attribution, its standing and the
   reader's verdict for its subject (computed over the admitted records whose standing is current), in one `VerdictClass` — ranked by the

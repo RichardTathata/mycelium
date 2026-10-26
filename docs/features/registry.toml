@@ -130,6 +130,14 @@ ids = ["concept:test-faults"]
 links = ["concept:doctor", "concept:unit-file", "concept:grant", "rule:membership.governed", "guarantee:persist.unreadable_refused",
          "guarantee:id.revocation_authority", "guarantee:mesh.tls", "guarantee:persist.sync_mode", "cargo:mycelium/sim"]
 
+[[feature]]
+name = "Span export"
+page = "span-export.md"
+example = "none"
+example_watch = ["span_export", "otel_spans", "trace_export"]
+ids = ["concept:span-export", "guarantee:trace.spans_not_evidence"]
+links = ["concept:decision-trace", "concept:causal-records", "cargo:mycelium/otel"]
+
 # ------------------------------------------------------------------------------- pages to write (row F3)
 
 # Authority and evidence

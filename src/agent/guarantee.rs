@@ -579,6 +579,7 @@ pub(crate) fn compiled_features() -> Vec<&'static str> {
     if cfg!(feature = "a2a") { v.push("a2a"); }
     if cfg!(feature = "consensus") { v.push("consensus"); }
     if cfg!(feature = "metrics") { v.push("metrics"); }
+    if cfg!(feature = "otel") { v.push("otel"); }
     v
 }
 
@@ -1240,6 +1241,15 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
               #[cfg(not(all(feature = "gateway", feature = "tls")))]
               { let _ = c; Resolution::NotInBuild { feature: "gateway + tls" } }
           }),
+        // Adopter-surface Y4 (D17). A label as much as a guarantee: a span store must not be read as what was
+        // enforced. Enforced by the span's type — it has no field for an input, a subject or a mandate — so it holds
+        // for every span this build can send; whether anything is sent is the embedder's (`SpanCollector`).
+        g("trace.spans_not_evidence", 1, "trace", Node,
+          "a span built by `span_export` is not an evidence path: it carries a record's identity and outcome — its correlation, parent, rule and revision, outcome, a decision's typed reason, and its content hash as an opaque reference — never its inputs, target, effect, subject, resource, arguments, mandate or the audit chain's links; what was enforced is the record itself, read by that hash on the node that wrote it (`mycelium explain --closure` over its evidence journal, or over a decision trace where one is written) and verified there. The correlation is the caller's id, sent as given: one holding personal data puts it in every span of the run. **Outside this guarantee:** the skill runner's own spans (`skillrunner`, also under `otel`), which carry the caller",
+          "`otel`; a `span_export::SpanCollector` over the decision sink's tap and the evidence journal, sent through `span_export::otlp` — driven by the embedder",
+          &["span_export::RecordSpan::attributes", "span_export::otlp::emit"], "docs/features/span-export.md",
+          always,
+          |_| if cfg!(feature = "otel") { Resolution::Enforced } else { Resolution::NotInBuild { feature: "otel" } }),
         g("net.confinement", 1, "deployment", Ext,
           "agent pods reach nothing but their gateway",
           "the network: separate pods, an enforcing CNI, a NetworkPolicy",
