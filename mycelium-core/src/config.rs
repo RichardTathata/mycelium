@@ -214,7 +214,7 @@ pub enum DomainProfile {
 
 /// The guarantee profiles a node can start under (`GossipConfig::profile`); the sets they require are
 /// defined beside the registry, `mycelium::guarantee`.
-pub const PROFILE_NAMES: &[&str] = &["dev", "secure-single-domain"];
+pub const PROFILE_NAMES: &[&str] = &["dev", "secure-single-domain", "secure-multi-domain"];
 
 impl std::str::FromStr for DomainProfile {
     type Err = String;
@@ -1580,7 +1580,9 @@ pub struct GossipConfig {
     /// The **guarantee profile** this node starts under (`docs/plans/guarantees-and-rule-catalogue.md`
     /// I3). `None` is `dev`: nothing required, said loudly in the startup report. `secure-single-domain`
     /// makes `GossipAgent::start()` refuse unless every node-enforced guarantee it requires resolves
-    /// `enforced` on this node — see `mycelium::SECURE_SINGLE_DOMAIN_PROFILE` for the set. Env
+    /// `enforced` on this node — see `mycelium::SECURE_SINGLE_DOMAIN_PROFILE` for the set.
+    /// `secure-multi-domain` (adopter-surface Y7) requires that set and the `fed.*` family —
+    /// `mycelium::SECURE_MULTI_DOMAIN_PROFILE`. Env
     /// `GOSSIP_PROFILE`. An unknown name is refused by `validate()` ([`PROFILE_NAMES`]).
     #[serde(default)]
     pub profile: Option<String>,

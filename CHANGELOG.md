@@ -9,6 +9,24 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`secure-multi-domain` — the profile, and the federation guarantee family it needs** (`docs/plans/adopter-surface.md`
+  Y7, D25; `docs/features/multi-domain-profile.md`): ten `fed.*` guarantees in the catalogue, resolved by the same
+  report as the rest — on this node `fed.domain_enforced` (the enforced domain profile: TLS, SWIM off), and on a node
+  with a federation edge or clients `fed.pinned`, `fed.body_bound`, `fed.partner_slots`, `fed.caller_named`,
+  `fed.catalogue_signed`, `fed.partner_egress`; and `fed.partner_posture`, `fed.non_merger`, `fed.clock_agreement`,
+  which only the partner could show, listed `not_verifiable_here` and never counted. `profile = "secure-multi-domain"`
+  rev 1 requires `secure-single-domain` rev 5's twenty and the seven node facts (`fed.domain_enforced` the seventh, agreed with the maintainer); `start()` refuses naming each one
+  unmet, shown for each of the seven, and `doctor` prints the family. A node with neither an edge nor a client reads
+  the side-specific ones `not_applicable`. `FederationClient` gained `tls_pinned` and `verifies_catalogue`.
+  **Changed:** `GuaranteeReport::unresolved()` leaves out an external prerequisite that does not apply;
+  a federation edge or clients attached after `start()` are ignored under `secure-multi-domain` (only), and the edge,
+  the clients and `with_cohort_budget` count as late attachments under their own names; a node facing no partner is
+  said so in one line (`deprecations.md` §66). **Open:** the
+  two-mesh Docker suite under the profile, to be closed by the Y8-track precursor PR (the two-mesh suite under the profile). **Not built:** `doctor` reporting an edge or clients
+  attached in code.
+
 ## [2.38.0] — 2026-10-26
 
 Wire **v12** unchanged (`PREV = 11`). Upgrade notes: `docs/guide/deprecations.md` §58–§65.

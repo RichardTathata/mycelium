@@ -397,6 +397,33 @@ impl FederationClient {
         &self.partner
     }
 
+    /// Whether this client dials its partner only over TLS terminated by a pinned key
+    /// ([`Self::with_tls_pins`]) — what the guarantee `fed.pinned` reads (adopter-surface Y7).
+    pub fn tls_pinned(&self) -> bool {
+        !self.tls_pins.is_empty()
+    }
+
+    /// Whether this client relies on a catalogue only once it verifies under the partner's key
+    /// ([`Self::with_partner_key`]) — half of what `fed.catalogue_signed` reads (Y7).
+    pub fn verifies_catalogue(&self) -> bool {
+        self.partner_key.is_some()
+    }
+
+    /// Whether the outbound allow-list this client is held to is non-empty and permits every one of
+    /// its partner's endpoints — what `fed.partner_egress` reads (Y7). `Err` names what is missing.
+    pub(crate) fn egress_names_every_endpoint(&self) -> Result<(), &'static str> {
+        match self.egress.get() {
+            Some(p) if !p.allow_hosts.is_empty() => {
+                if self.endpoints.iter().all(|e| p.permits_url(&e.base_url)) {
+                    Ok(())
+                } else {
+                    Err("every partner endpoint's host on `egress.allow_hosts` (a call to one it omits is refused before it is sent)")
+                }
+            }
+            _ => Err("`egress.allow_hosts` naming the partner's endpoints (empty allows every host, partners included)"),
+        }
+    }
+
     pub fn link_state(&self) -> LinkState {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).link.state()
     }

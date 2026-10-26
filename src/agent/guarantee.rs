@@ -312,11 +312,61 @@ pub const SECURE_SINGLE_DOMAIN: Profile = Profile {
             outcomes decided only by an electorate group",
 };
 
+/// The production set for a node in one of several trust domains that federate (adopter-surface
+/// Y7, D25): everything [`SECURE_SINGLE_DOMAIN`] requires, at its revision, and the federation family
+/// this node can check — its domain profile enforced, and on each side it has, the partner pinned,
+/// bodies bound, partner slots metered, the local caller named, catalogues signed and partner hosts on
+/// the egress list. What only the partner could show — its posture, non-merger, clock agreement — is
+/// listed by the report as `not_verifiable_here`, never required. A node that attaches neither an edge
+/// nor a client reads the side-specific ones `not_applicable` (G10: a member that faces no partner).
+///
+/// Rev 1 (2026-10-26). It copies the single-domain set rather than naming it, so a change there is a
+/// change here in the open: `the_multi_domain_profile_is_the_single_domain_set_and_the_family` fails
+/// until this list and its revision move with it.
+pub const SECURE_MULTI_DOMAIN: Profile = Profile {
+    name: "secure-multi-domain",
+    revision: 1,
+    required: &[
+        "mesh.tls",
+        "mesh.signed_writes",
+        "id.proofs_required",
+        "gw.not_open",
+        "gw.exposed_closed",
+        "gw.tls",
+        "gw.caller_profile",
+        "ae.authorised_at_seam",
+        "ae.recorded_before_dispatch",
+        "prov.enforcement",
+        "a2a.admission",
+        "authz.execution_authority",
+        "authz.durable_epochs",
+        "audit.chain",
+        "egress.allow_list",
+        "persist.configured",
+        "persist.sync_mode",
+        "persist.unreadable_refused",
+        "id.ca_key_off_node",
+        "cons.safety_profile",
+        "fed.domain_enforced",
+        "fed.pinned",
+        "fed.body_bound",
+        "fed.partner_slots",
+        "fed.caller_named",
+        "fed.catalogue_signed",
+        "fed.partner_egress",
+    ],
+    about: "a node of one of several federating trust domains: everything `secure-single-domain` requires, and the \
+            federation edge as this node can check it — the enforced domain profile, partners pinned, bodies bound, \
+            partner slots metered, the local caller named, catalogues signed, partner hosts on the egress list; \
+            nothing here makes the partner honest",
+};
+
 /// The profile named `name`, if it is one of [`crate::config::PROFILE_NAMES`].
 pub fn profile_named(name: &str) -> Option<&'static Profile> {
     match name {
         "dev" => Some(&DEV),
         "secure-single-domain" => Some(&SECURE_SINGLE_DOMAIN),
+        "secure-multi-domain" => Some(&SECURE_MULTI_DOMAIN),
         _ => None,
     }
 }
@@ -386,9 +436,16 @@ impl GuaranteeReport {
             .map(|e| e.id)
             .collect()
     }
-    /// External prerequisites — listed, never counted as met.
+    /// External prerequisites that apply to this node — listed, never counted as met. One whose
+    /// role predicate makes it moot (the federation family's on a node that faces no partner) is
+    /// under [`Self::not_applicable`] instead.
     pub fn unresolved(&self) -> Vec<GuaranteeId> {
-        self.entries.iter().filter(|e| e.kind == GuaranteeKind::ExternalPrerequisite).map(|e| e.id).collect()
+        self.entries
+            .iter()
+            .filter(|e| e.kind == GuaranteeKind::ExternalPrerequisite)
+            .filter(|e| !matches!(e.resolution, Resolution::NotApplicable { .. }))
+            .map(|e| e.id)
+            .collect()
     }
     /// Guarantees that do not apply to this node's role, with the role fact.
     pub fn not_applicable(&self) -> Vec<(GuaranteeId, &'static str)> {
@@ -412,6 +469,12 @@ impl GuaranteeReport {
     /// see, and [`Self::unmet`] is everything else the node could enforce and does not.
     pub fn node_requirements_satisfied(&self) -> bool {
         self.required_unmet().is_empty()
+    }
+    /// Whether this node faces no federation partner — no edge and no client attached, so the
+    /// side-specific `fed.*` guarantees do not apply (adopter-surface Y7). Under `secure-multi-domain`
+    /// such a node starts on `fed.domain_enforced` alone, and the log and `doctor` say so in one line.
+    pub fn faces_no_partner(&self) -> bool {
+        self.entry("fed.catalogue_signed").is_some_and(|e| matches!(e.resolution, Resolution::NotApplicable { .. }))
     }
     /// The entry for `id`, if registered.
     pub fn entry(&self, id: &str) -> Option<&GuaranteeEntry> {
@@ -546,6 +609,11 @@ pub(crate) fn ca_key_on_node_warning(r: &GuaranteeReport) -> Option<&'static str
     (on_node && !explicit_dev).then_some(CA_KEY_ON_NODE_WARNING)
 }
 
+/// What the log and `doctor` say of a node under `secure-multi-domain` that faces no partner.
+pub(crate) const FACES_NO_PARTNER: &str = "this node faces no federation partner — no edge and no client attached, so \
+    the profile's side-specific `fed.*` guarantees do not apply and it is checked as a member on `fed.domain_enforced`; \
+    an edge or clients attached after start() are ignored under this profile";
+
 /// Log the report as one block — one line per entry, then the summary.
 pub(crate) fn log_report(r: &GuaranteeReport) {
     if let Some(w) = ca_key_on_node_warning(r) {
@@ -563,6 +631,9 @@ pub(crate) fn log_report(r: &GuaranteeReport) {
         } else {
             tracing::info!(profile = p.name, revision = p.revision, required = ?p.required, "guarantees: profile");
         }
+    }
+    if r.profile.as_ref().is_some_and(|p| p.name == SECURE_MULTI_DOMAIN.name) && r.faces_no_partner() {
+        tracing::info!(profile = SECURE_MULTI_DOMAIN.name, "guarantees: {FACES_NO_PARTNER}");
     }
     let unmet = r.unmet();
     let required_unmet = r.required_unmet();
@@ -637,6 +708,50 @@ fn in_gateway_build(
 fn always(_: &TaskCtx) -> Option<&'static str> { None }
 fn external(evidence: &'static str) -> impl Fn(&TaskCtx) -> Resolution + Send + Sync + 'static {
     move |_| Resolution::NotVerifiableHere { evidence }
+}
+
+// ── The federation family (adopter-surface Y7, D25) ───────────────────────────────────────────
+//
+// A federation edge (`with_federation_edge`) and federation clients (`with_federation_clients`) are
+// code attachments, not configuration, and both exist only in a `gateway` + `tls` build. The role
+// facts below say which side a node has: an edge serves partners, a client calls them. A node with
+// neither faces no partner, and the guarantees that read a side do not apply to it (G10).
+
+/// The role fact for a guarantee about the edge: `None` when an edge is attached.
+fn fed_edge_role(ctx: &TaskCtx) -> Option<&'static str> {
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    { if ctx.federation_edge.get().is_some() { None } else { Some("no federation edge attached: this node serves no partner") } }
+    #[cfg(not(all(feature = "gateway", feature = "tls")))]
+    { let _ = ctx; Some("built without `gateway` + `tls`: no federation edge or client can be attached") }
+}
+
+/// The role fact for a guarantee about the clients: `None` when at least one is attached.
+fn fed_client_role(ctx: &TaskCtx) -> Option<&'static str> {
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    { if ctx.federation_clients.get().is_some_and(|c| !c.is_empty()) { None } else { Some("no federation client attached: this node calls no partner") } }
+    #[cfg(not(all(feature = "gateway", feature = "tls")))]
+    { let _ = ctx; Some("built without `gateway` + `tls`: no federation edge or client can be attached") }
+}
+
+/// The role fact for a guarantee about either side: `None` when an edge or a client is attached.
+fn fed_role(ctx: &TaskCtx) -> Option<&'static str> {
+    match (fed_edge_role(ctx), fed_client_role(ctx)) {
+        (Some(_), Some(because)) => Some(if cfg!(all(feature = "gateway", feature = "tls")) {
+            "no federation edge or client attached: this node faces no partner"
+        } else {
+            because
+        }),
+        _ => None,
+    }
+}
+
+/// The first attached client for which `unmet` returns what is missing, if any.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+fn first_client_missing(
+    ctx: &TaskCtx,
+    unmet: impl Fn(&crate::federation::client::FederationClient) -> Option<&'static str>,
+) -> Option<&'static str> {
+    ctx.federation_clients.get().into_iter().flatten().find_map(|c| unmet(c))
 }
 
 /// Whether this configuration names a gateway **credential model** — the same set `gateway_auth`
@@ -1032,6 +1147,99 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
           |c| if c.config.consensus_require_electorate { Resolution::Enforced } else {
               Resolution::NotConfigured { missing: "consensus_require_electorate (off: a lock or an election on the whole cluster or an undeclared group runs as before, counted)" }
           }),
+        // The federation family (adopter-surface Y7). `secure-multi-domain` requires the seven node
+        // facts; the three external prerequisites are about the partner and the edge between, listed
+        // and never counted. `fed.domain_enforced` is a node posture every member of a federating
+        // domain holds, so it applies with or without an edge or a client.
+        g("fed.domain_enforced", 1, "federation", Node,
+          "this node runs the enforced domain profile: TLS required and SWIM off, so membership at a federation boundary is never decided by unauthenticated UDP",
+          "`domain_profile = \"enforced\"` (`GOSSIP_DOMAIN_PROFILE`), with `swim_failure_detector = false` and `[tls]`, which `validate()` requires of it",
+          &["GossipConfig::validate (domain_profile)"], "docs/design/federated-domains.md",
+          always,
+          |c| if c.config.domain_profile == crate::config::DomainProfile::Enforced { Resolution::Enforced } else {
+              Resolution::NotConfigured { missing: "domain_profile = \"enforced\" (open: SWIM may run, and its datagrams are unauthenticated UDP)" }
+          }),
+        g("fed.pinned", 1, "federation", Node,
+          "every federation client dials its partner only over TLS terminated by a key the trust bundle pins (an `http://` endpoint is then refused, never called in the clear)",
+          "`FederationClient::with_tls_pins` on every client, from `TrustBundle::tls_pins_for`",
+          &["federation::client::FederationClient::call_as (insecure_endpoint)", "federation::pinning::PinnedServerVerifier"], "docs/operations/federation.md",
+          fed_client_role,
+          |c| {
+              #[cfg(all(feature = "gateway", feature = "tls"))]
+              { match first_client_missing(c, |cl| (!cl.tls_pinned()).then_some("`with_tls_pins` on a federation client (empty: no pinning, and an `http://` endpoint is read by anyone on the path)")) {
+                  None => Resolution::Enforced,
+                  Some(missing) => Resolution::NotConfigured { missing },
+              } }
+              #[cfg(not(all(feature = "gateway", feature = "tls")))]
+              { let _ = c; Resolution::NotInBuild { feature: "gateway + tls" } }
+          }),
+        g("fed.body_bound", 1, "federation", Node,
+          "the edge refuses a federated credential that does not bind the request body, so a payload rewritten between domains does not verify",
+          "`CallPolicy::require_body_binding = true` on the attached `FederationEdge` (the 2.12.0 rolling-upgrade window closed)",
+          &["federation::call::verify_federated_call", "federation::edge::FederationEdge::authorize"], "docs/operations/federation.md",
+          fed_edge_role,
+          |c| {
+              #[cfg(all(feature = "gateway", feature = "tls"))]
+              { if c.federation_edge.get().is_some_and(|e| e.call_policy().require_body_binding) { Resolution::Enforced } else {
+                  Resolution::NotConfigured { missing: "`CallPolicy::require_body_binding` (false: an attacker on the path can rewrite a body and strip its binding)" }
+              } }
+              #[cfg(not(all(feature = "gateway", feature = "tls")))]
+              { let _ = c; Resolution::NotInBuild { feature: "gateway + tls" } }
+          }),
+        g("fed.partner_slots", 1, "federation", Node,
+          "the edge carries at most a fixed number of calls from one partner at once, refusing the next rather than queuing it — per gateway, so N gateways admit N times the cap",
+          "`CallPolicy::max_in_flight_per_partner > 0` on the attached `FederationEdge`",
+          &["federation::edge::FederationEdge::admit"], "docs/operations/federation.md",
+          fed_edge_role,
+          |c| {
+              #[cfg(all(feature = "gateway", feature = "tls"))]
+              { if c.federation_edge.get().is_some_and(|e| e.call_policy().max_in_flight_per_partner > 0) { Resolution::Enforced } else {
+                  Resolution::NotConfigured { missing: "`CallPolicy::max_in_flight_per_partner` (0: one partner may hold every slot)" }
+              } }
+              #[cfg(not(all(feature = "gateway", feature = "tls")))]
+              { let _ = c; Resolution::NotInBuild { feature: "gateway + tls" } }
+          }),
+        g("fed.caller_named", 1, "federation", Node,
+          "on a gateway with federation clients, a credential is required, so a call made through `/gateway/federation/*` names an authenticated local caller rather than `anonymous` — the check `gw.not_open` makes, restated for the federation routes so the family says it; that the route mints under the resolved caller and never the node is by construction (`call_as`), not checked here",
+          "a gateway credential model (`gateway_auth_token`, or with `compliance` a token table or `[oidc]`) — the same predicate as `gw.not_open`; on an open gateway every call names `anonymous`",
+          &["agent::http::federation_routes (call_as with the resolved principal)"], "docs/operations/federation.md",
+          |c| fed_client_role(c).or_else(|| gateway_role(c).map(|_| "no `http_port`: no `/gateway/federation/*` route mints a credential here")),
+          in_gateway_build(|c| if gateway_credential_model(&c.config) { Resolution::Enforced } else {
+              Resolution::NotConfigured { missing: "a gateway credential model (open: every outbound federated call names `anonymous`)" }
+          })),
+        g("fed.catalogue_signed", 1, "federation", Node,
+          "a catalogue is relied on only once it verifies under the partner's key, and the edge signs the catalogue it serves, so neither side acts on an export list a third party wrote",
+          "`FederationEdge::with_signing_key` on the edge; `FederationClient::with_partner_key` on every client",
+          &["federation::edge::CatalogReply::verify", "federation::edge::FederationEdge::catalog_for"], "docs/operations/federation.md",
+          fed_role,
+          |c| {
+              #[cfg(all(feature = "gateway", feature = "tls"))]
+              {
+                  if c.federation_edge.get().is_some_and(|e| !e.signs_catalogue()) {
+                      return Resolution::NotConfigured { missing: "`FederationEdge::with_signing_key` (the edge serves an unsigned catalogue, which a partner that verifies refuses)" };
+                  }
+                  match first_client_missing(c, |cl| (!cl.verifies_catalogue()).then_some("`with_partner_key` on a federation client (absent: a catalogue is an observation of the gateway asked, nothing more)")) {
+                      None => Resolution::Enforced,
+                      Some(missing) => Resolution::NotConfigured { missing },
+                  }
+              }
+              #[cfg(not(all(feature = "gateway", feature = "tls")))]
+              { let _ = c; Resolution::NotInBuild { feature: "gateway + tls" } }
+          }),
+        g("fed.partner_egress", 1, "federation", Node,
+          "every partner endpoint a federation client dials is permitted by a non-empty egress allow-list the client is held to — by its exact host or by a `.suffix` entry, which admits every host under it, so a suffix entry covers more than the partner",
+          "`egress.allow_hosts` permitting each partner endpoint's host (the node's list reaches a client built without one), or `FederationClient::with_egress`; name the partner's host exactly to confine calls to it",
+          &["federation::client::FederationClient::call_as (egress_permits)", "config::EgressPolicy::permits_url"], "docs/operations/federation.md",
+          fed_client_role,
+          |c| {
+              #[cfg(all(feature = "gateway", feature = "tls"))]
+              { match first_client_missing(c, |cl| cl.egress_names_every_endpoint().err()) {
+                  None => Resolution::Enforced,
+                  Some(missing) => Resolution::NotConfigured { missing },
+              } }
+              #[cfg(not(all(feature = "gateway", feature = "tls")))]
+              { let _ = c; Resolution::NotInBuild { feature: "gateway + tls" } }
+          }),
         g("net.confinement", 1, "deployment", Ext,
           "agent pods reach nothing but their gateway",
           "the network: separate pods, an enforcing CNI, a NetworkPolicy",
@@ -1044,6 +1252,24 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
             &[], "docs/threat-model.md",
           always,
           external("the deployment's time-sync monitoring; a node cannot verify its own clock against real time (closure plan C11)")),
+        g("fed.partner_posture", 1, "federation", Ext,
+          "the partner domain runs its side of the edge as this one does: pinned, body-bound, metered, signing its catalogue",
+          "the partner's own report — its `GET /gateway/guarantees` under `secure-multi-domain`, exchanged out of band",
+          &[], "docs/operations/federation.md",
+          fed_role,
+          external("the partner's guarantee report; nothing this node checks makes the partner honest")),
+        g("fed.non_merger", 1, "federation", Ext,
+          "the two domains stay two meshes: no node of one is admitted to the other's gossip",
+          "separate CAs and networks per domain; the edge the only path between them",
+          &[], "docs/design/federated-domains.md",
+          fed_role,
+          external("a fact about both domains — the two-mesh suite (`make test-federation`) shows it for its topology; a node sees only its own admissions")),
+        g("fed.clock_agreement", 1, "federation", Ext,
+          "the partner's clock agrees with this node's within `CallPolicy::skew_tolerance`, which every credential window across the edge assumes",
+          "time-sync on both sides of the edge",
+          &[], "docs/operations/federation.md",
+          fed_role,
+          external("both domains' time-sync monitoring; a credential's window is wall-clock across the edge (`federation::edge` module doc)")),
     ]
 }
 
@@ -1355,6 +1581,168 @@ mod tests {
         }
     }
 
+    /// Y7: `secure-multi-domain` rev 1 is the single-domain set, at its revision, and the seven
+    /// federation node facts. Copied rather than named (a `const` slice cannot be concatenated), so a
+    /// change to the single-domain set fails here until this profile moves with it, in the open.
+    #[test]
+    fn the_multi_domain_profile_is_the_single_domain_set_and_the_family() {
+        assert_eq!(SECURE_MULTI_DOMAIN.revision, 1);
+        let (single, family) = SECURE_MULTI_DOMAIN.required.split_at(SECURE_SINGLE_DOMAIN.required.len());
+        assert_eq!(single, SECURE_SINGLE_DOMAIN.required, "the single-domain set, in its order — move rev 1 with rev {}", SECURE_SINGLE_DOMAIN.revision);
+        assert_eq!(family, FED_NODE_IDS, "and the federation family's node facts");
+        let r = agent(GossipConfig::default()).guarantee_report();
+        for id in SECURE_MULTI_DOMAIN.required {
+            assert!(core_ids().contains(id), "{id} is a core guarantee");
+            assert_eq!(r.entry(id).unwrap().kind, GuaranteeKind::NodeEnforced, "{id}: an external prerequisite can never be met from inside the node");
+        }
+        for id in FED_EXTERNAL_IDS {
+            assert_eq!(r.entry(id).unwrap().kind, GuaranteeKind::ExternalPrerequisite, "{id} is listed, never required");
+            assert!(!SECURE_MULTI_DOMAIN.required.contains(id), "{id}: only the partner could show it");
+        }
+        assert_eq!(profile_named("secure-multi-domain").map(|p| p.name), Some("secure-multi-domain"));
+        assert!(crate::config::PROFILE_NAMES.contains(&"secure-multi-domain"), "validate() accepts the name");
+        let every_fed: Vec<_> = core_ids().into_iter().filter(|id| id.starts_with("fed.")).collect();
+        let named: Vec<_> = FED_NODE_IDS.iter().chain(FED_EXTERNAL_IDS).copied().collect();
+        assert_eq!(every_fed, named, "the family is exactly these ten, in the catalogue's order");
+    }
+
+    const FED_NODE_IDS: &[&str] = &["fed.domain_enforced", "fed.pinned", "fed.body_bound", "fed.partner_slots", "fed.caller_named", "fed.catalogue_signed", "fed.partner_egress"];
+    const FED_EXTERNAL_IDS: &[&str] = &["fed.partner_posture", "fed.non_merger", "fed.clock_agreement"];
+
+    /// Y7, G10: a node that attaches neither an edge nor a client faces no partner — every side-specific
+    /// guarantee and the three external prerequisites read `not_applicable` and are not listed as
+    /// unresolved, while `fed.domain_enforced`, a posture every member of a federating domain holds,
+    /// still applies.
+    #[test]
+    fn the_federation_family_does_not_apply_to_a_node_that_faces_no_partner() {
+        let r = agent(GossipConfig::default()).guarantee_report();
+        assert_eq!(state(&r, "fed.domain_enforced"), "not_configured");
+        for id in FED_NODE_IDS.iter().skip(1).chain(FED_EXTERNAL_IDS) {
+            assert_eq!(state(&r, id), "not_applicable", "{id}");
+        }
+        let unresolved = r.unresolved();
+        for id in FED_EXTERNAL_IDS {
+            assert!(!unresolved.contains(id), "{id} is moot here, not unresolved");
+        }
+        assert!(unresolved.contains(&"net.confinement") && unresolved.contains(&"clock.sync"), "the others still listed: {unresolved:?}");
+    }
+
+    /// Which one federation setting a fully-configured node drops, for the per-guarantee refusals.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    #[derive(Clone, Copy, PartialEq)]
+    enum FedDrop { Nothing, DomainOpen, Pins, BodyBinding, Slots, Credential, EdgeKey, PartnerKey, EgressEmpty, EgressOmitsPartner }
+
+    /// A node under `secure-multi-domain` with an edge and a client, every federation setting met
+    /// but `drop`. Returns the refusal and the live report.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    async fn under_multi_domain_dropping(drop: FedDrop) -> (String, GuaranteeReport) {
+        use crate::federation::{call::CallPolicy, client::{FederationClient, GatewayEndpoint}, edge::FederationEdge, DomainId, DomainPolicy, TrustBundle};
+        use std::time::Duration;
+        let port = crate::test_util::alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        cfg.http_port = Some(crate::test_util::alloc_port());
+        cfg.profile = Some("secure-multi-domain".into());
+        if drop != FedDrop::DomainOpen {
+            cfg.domain_profile = crate::config::DomainProfile::Enforced;
+            cfg.swim_failure_detector = false;
+            cfg.tls = Some(crate::config::TlsConfig { auto_cert_dir: std::env::temp_dir().join(format!("mycelium-y7-{port}")), ..Default::default() });
+        }
+        if drop != FedDrop::Credential { cfg.gateway_auth_token = Some("a-real-secret".into()); }
+        cfg.egress.allow_hosts = match drop {
+            FedDrop::EgressEmpty => vec![],
+            FedDrop::EgressOmitsPartner => vec!["elsewhere.example".into()],
+            _ => vec!["beta.example".into()],
+        };
+        let alpha = DomainId::new("alpha.example").unwrap();
+        let beta = DomainId::new("beta.example").unwrap();
+        let key = |b: u8| ed25519_dalek::SigningKey::from_bytes(&[b; 32]);
+        let edge = FederationEdge::new(
+            alpha.clone(), ["demo/whoami"],
+            DomainPolicy { domain: alpha.clone(), revision: 1, grants: vec![(beta.clone(), "demo/whoami".into())] },
+            TrustBundle::trusting([(beta.clone(), key(2).verifying_key().to_bytes())]),
+            CallPolicy {
+                require_body_binding: drop != FedDrop::BodyBinding,
+                max_in_flight_per_partner: if drop == FedDrop::Slots { 0 } else { 4 },
+                ..CallPolicy::default()
+            },
+        );
+        let edge = if drop == FedDrop::EdgeKey { edge } else { edge.with_signing_key(key(1)) };
+        let mut client = FederationClient::new(
+            alpha, "alpha-gw", key(1), beta.clone(),
+            vec![GatewayEndpoint { id: "b1".into(), base_url: "https://beta.example:8443".into() }],
+            4, Duration::from_secs(30),
+        );
+        if drop != FedDrop::Pins { client = client.with_tls_pins(vec![[7; 32]]); }
+        if drop != FedDrop::PartnerKey { client = client.with_partner_key(key(2).verifying_key().to_bytes()); }
+        let a = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg)
+            .with_federation_edge(Arc::new(edge))
+            .with_federation_clients([Arc::new(client)]);
+        let e = a.start().await.expect_err("the rest of the single-domain set is unmet, so start() refuses").to_string();
+        assert!(e.contains("profile `secure-multi-domain` rev 1"), "{e}");
+        assert!(!a.guarantee_report().started, "the boundary was not passed");
+        (e, a.guarantee_report())
+    }
+
+    /// The one federation id `drop` should leave unmet.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    async fn refuses_naming_only(drop: FedDrop, id: &str) {
+        let (e, r) = under_multi_domain_dropping(drop).await;
+        assert!(e.contains(&format!("[{id}: not_configured")), "{id} is named as unmet: {e}");
+        for other in FED_NODE_IDS.iter().filter(|o| **o != id) {
+            assert!(!e.contains(&format!("[{other}:")), "only {id} of the family is unmet, not {other}: {e}");
+            assert_eq!(state(&r, other), "enforced", "{other} with {id} dropped");
+        }
+    }
+
+    /// Y7's exit, shown for each of the seven: a node under `secure-multi-domain` with one required
+    /// federation guarantee unmet refuses `start()`, naming it and none of the others. Seen failing
+    /// first with each resolver planted to answer `enforced` (no id named), then with the family
+    /// planted out of the profile's required set (no id named).
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    #[tokio::test]
+    async fn multi_domain_refuses_naming_fed_domain_enforced() { refuses_naming_only(FedDrop::DomainOpen, "fed.domain_enforced").await; }
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    #[tokio::test]
+    async fn multi_domain_refuses_naming_fed_pinned() { refuses_naming_only(FedDrop::Pins, "fed.pinned").await; }
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    #[tokio::test]
+    async fn multi_domain_refuses_naming_fed_body_bound() { refuses_naming_only(FedDrop::BodyBinding, "fed.body_bound").await; }
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    #[tokio::test]
+    async fn multi_domain_refuses_naming_fed_partner_slots() { refuses_naming_only(FedDrop::Slots, "fed.partner_slots").await; }
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    #[tokio::test]
+    async fn multi_domain_refuses_naming_fed_caller_named() { refuses_naming_only(FedDrop::Credential, "fed.caller_named").await; }
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    #[tokio::test]
+    async fn multi_domain_refuses_naming_fed_catalogue_signed() {
+        refuses_naming_only(FedDrop::EdgeKey, "fed.catalogue_signed").await;
+        refuses_naming_only(FedDrop::PartnerKey, "fed.catalogue_signed").await;
+    }
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    #[tokio::test]
+    async fn multi_domain_refuses_naming_fed_partner_egress() {
+        refuses_naming_only(FedDrop::EgressEmpty, "fed.partner_egress").await;
+        refuses_naming_only(FedDrop::EgressOmitsPartner, "fed.partner_egress").await;
+    }
+
+    /// The contrast the seven rest on: with every federation setting met, the refusal names no `fed.*`
+    /// id (what it names is the rest of the single-domain set), and the externals are listed as
+    /// unresolved because this node now faces a partner.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    #[tokio::test]
+    async fn multi_domain_with_every_federation_setting_names_no_fed_id() {
+        let (e, r) = under_multi_domain_dropping(FedDrop::Nothing).await;
+        assert!(!e.contains("[fed."), "no federation id unmet: {e}");
+        for id in FED_NODE_IDS { assert_eq!(state(&r, id), "enforced", "{id}"); }
+        let unresolved = r.unresolved();
+        for id in FED_EXTERNAL_IDS {
+            assert!(unresolved.contains(id), "{id} is listed now that a partner is faced: {unresolved:?}");
+            assert_eq!(state(&r, id), "not_verifiable_here", "{id}");
+        }
+    }
+
     /// What counts as loopback for P1's refusal: `127.0.0.0/8`, `::1` and an IPv4-mapped loopback;
     /// never the unspecified addresses, a routable address, a hostname (which `validate()` refuses
     /// before the bind) or anything unparseable — those read as exposed, so the check fails closed.
@@ -1464,6 +1852,24 @@ mod tests {
         a.with_provider_enforcement(); // a second call is ignored by the attacher, but it is still late
         assert_eq!(a.late_attachments(), 1);
         assert_eq!(a.guarantee_report().late_attachments, 1, "the live report carries the count");
+        a.shutdown().await;
+    }
+
+    /// Y7: the `fed.*` guarantees read the attached clients, so a set attached after `start()` is one
+    /// the logged report never saw — counted like every other late attachment (G13). Seen failing
+    /// first: `with_federation_clients` noted nothing, and the count stayed 0.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    #[tokio::test]
+    async fn federation_clients_attached_after_start_are_counted_as_late() {
+        let port = crate::test_util::alloc_port();
+        let mut cfg = GossipConfig::default();
+        cfg.bind_port = port;
+        let a = GossipAgent::new(NodeId::new("127.0.0.1", port).unwrap(), cfg);
+        let a = a.with_federation_clients(std::iter::empty());
+        assert_eq!(a.late_attachments(), 0, "before the boundary nothing is late");
+        a.start().await.expect("start");
+        let a = a.with_federation_clients(std::iter::empty());
+        assert_eq!(a.late_attachments(), 1, "after it, the attachment is counted");
         a.shutdown().await;
     }
 
