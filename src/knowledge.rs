@@ -42,6 +42,7 @@ pub mod gate;
 pub mod heads;
 pub mod issuer;
 pub mod resolution;
+pub mod selection;
 pub mod store;
 
 use serde::{Deserialize, Serialize};

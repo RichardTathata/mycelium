@@ -22,6 +22,16 @@ As of 2026-06-21 all v1.x/v2.0 engineering plans were shipped. Since then, **Leg
 The three-verb operator spine — **localize** (`/fleet`) · **explain** (`/explain`) · **diagnose**
 (`/diagnose`) — is shipped, tested, and documented for both audiences.
 
+## Adopter-surface Y1: context selection — 2026-10-26 (unreleased)
+
+The second wave's first row (D14): `mycelium::knowledge::selection` returns records for a run with issuer,
+attribution, standing and the reader's verdict intact, one `VerdictClass` each (standing before verdict), ranked by the
+adopter's closure; reads go through a `ReadScope` from a mandate enumerating `knowledge.read` — a record readable when
+its subject lies under the scope and every `DerivedFrom` source is held and readable, the first reader authorisation the
+knowledge layer has. A condensation is a claim signed by its own issuer, `DerivedFrom` every source, one class re-derived
+at write. Not built: the wiki side, a read mandate's epoch and revocation, re-verification against the current key
+view. Record: [`.log/2026-10-26-y1-context-selection.md`](.log/2026-10-26-y1-context-selection.md).
+
 ## Post-360 row F2: the refusal unconditional — 2026-10-13 (#624, released in 2.34.0)
 
 A TLS node refuses an unsigned KV `Data` frame and a bare (pre-2.33) KV `SignedData` signature whatever
