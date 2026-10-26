@@ -143,10 +143,20 @@ list.
 ## 7. Commit, tag, push
 
 ```bash
-git add -A && git commit -m "release: vNEW"
+git add -u && git add <each new file by path>    # never -A: another session's uncommitted files ship with it
+git commit -m "release: vNEW"
 git tag -a vNEW -m "vNEW — YYYY-MM-DD ..."      # annotated; summarize the highlights + wire status
-git push origin main && git push origin vNEW
+git push origin main && git push origin vNEW     # the v* tag alone, before any companion tag
+git push origin <companion-tag> …                # then the companions' tags, in a separate push
 ```
+
+**Push the `v*` tag on its own.** GitHub creates no push event when more than three tags are pushed at once, so a
+`git push --tags` (or one push naming the release tag beside the companions') starts no workflow, and nothing fails to
+say so: v2.38.0's six tags went in one push and the Release did not run. If that happens, do not delete and re-push the
+tag: `gh workflow run release.yml --ref vNEW` runs the same workflow on the tag, and it publishes, because the
+`version` job reads `GITHUB_REF_TYPE` (a dispatch on a branch is a dry run; on a tag it is not). The `one-hour` job
+follows a Release only when that Release was started by a tag push, so after a dispatched Release start it by hand:
+`gh workflow run one-hour.yml -f tag=vNEW`.
 
 The tag must be **annotated** (`-a`): the Release workflow fetches the tag object and refuses a lightweight one after
 every build has run. If that happens, `git tag -d vNEW && git tag -a vNEW -m "…" && git push --force origin vNEW`
