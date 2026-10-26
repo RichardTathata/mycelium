@@ -93,8 +93,8 @@ created with the workflow's own token fires no `release` event) and by dispatch 
 the first `curl` to the last `doctor`, to the job summary, prints no number on a red run, and fails past 3 600 s.
 **What it measures today, exactly:** step 1 as one node from the published binary (not a fleet), step 2 as the Python
 scaffold and its SDK from the tag, step 3 as a declared unit, a permitted write and a write the gateway refuses by its
-scope rule (the "explained from the records" half waits on X4 and on a node that can attach an evaluator from
-configuration — the X3 question), step 6 as `doctor`. **Measurements, by release:** `v2.37.0` (run 40011730290,
+scope rule (the "explained from the records" half waits on a node that can attach an evaluator from configuration — the X3
+question; X4's reader shipped in v2.38.0), step 6 as `doctor`. **Measurements, by release:** `v2.37.0` (run 40011730290,
 2026-10-23, dispatched by hand after #670 merged; Debian 12 bookworm, Python 3.12, no toolchain): step 1 **1 s**, step
 2 **6 s**, step 3 **1 s**, step 6 **0 s**, total **9 s** from the first `curl` to the last `doctor`, the container's
 own setup 3 s outside the clock — printed as **10 minutes** by the rule above. The sentence still does not enter
@@ -109,7 +109,12 @@ job's **measured** time on the most recent release, rounded up to the next ten m
 measurement comes in above an hour, the page says what it measured. *Two hours* was the earlier estimate for a
 developer building the path by hand with their own agent; one hour is the target for running it from the scaffold.
 The sentence enters `docs/positioning.md` (gated by `check-positioning.sh`) only once the job has measured it on a
-tagged release, and `/publication-lint` reads it like any other claim on the persuasion surface.
+tagged release, and `/publication-lint` reads it like any other claim on the persuasion surface. *(2026-10-26)* **All
+six steps measured:** `v2.38.0` (run 40269648703, dispatched by hand — the tag went in one push with five companion
+tags, which fires no workflow; `RELEASING.md` § 7 now says to push the `v*` tag alone): steps 1–6 **2 · 5 · 1 · 3 · 1 ·
+0 s**, total **12 s**; `v2.38.1` (run 40368580893, started by the Release): **2 · 6 · 1 · 4 · 0 · 0 s**, total **13 s**;
+both printed as **10 minutes**. The sentence may now enter `docs/positioning.md`; that is the maintainer's decision, not
+yet taken.
 
 ## 2 · What binds every row
 

@@ -183,6 +183,6 @@ jobs:
             echo
             units=$(( (total + 599) / 600 ))
             mins=$(( units * 10 ))
-            echo "Measured: **$total s** for all six steps (one node from the published binary; the refusal is the gateway's scope rule; step 4 is \`mycelium test --faults grant\` and step 5 \`mycelium test --faults recovery\`, each over the scaffold's declaration — the records half of step 3 waits on X4); printed as **${mins} minutes** (rounded up to the next ten). The claim's bound is 3600 s."
+            echo "Measured: **$total s** for all six steps (one node from the published binary; the refusal is the gateway's scope rule; step 4 is \`mycelium test --faults grant\` and step 5 \`mycelium test --faults recovery\`, each over the scaffold's declaration — the records half of step 3 waits on a node that attaches an evaluator from configuration, as tutorial 7 says); printed as **${mins} minutes** (rounded up to the next ten). The claim's bound is 3600 s."
           } | tee -a "$GITHUB_STEP_SUMMARY"
           [ "$total" -le 3600 ] || { echo "::error::$total s exceeds the hour the claim allows"; exit 1; }
