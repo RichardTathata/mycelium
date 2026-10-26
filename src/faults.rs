@@ -13,8 +13,8 @@
 //! exercise and why, in the guarantee report's own vocabulary (`not_configured`, `not_in_build`,
 //! `not_applicable`, `not_verifiable_here`).
 //!
-//! **What the fleet is, and is not.** Its nodes carry the adopter's configuration — profile, TLS,
-//! persistence, every setting — with these rewritten: loopback addresses and free ports; persistence and
+//! **What the fleet is, and is not.** Its nodes carry the adopter's configuration — TLS, persistence,
+//! every setting but the profile, which is reported as declared and not applied — with these rewritten: loopback addresses and free ports; persistence and
 //! the TLS material under a temporary directory the run removes, so no adopter directory is written;
 //! no gateway port (the classes drive the nodes in process); a one-second health check and a one-second
 //! governor cooldown, so a cut is seen in seconds. Each unit's node advertises the unit's
@@ -271,6 +271,31 @@ impl Report {
         if let Some(k) = &self.kept {
             s.push_str(&format!("kept: {} (journals under <class>/, persistence under <class>/persist/)\n", k.display()));
         }
+        // Said once, and only of what this run had: a fleet when a class ran, a CA when it had TLS, listener errors
+        // when a class cut a node (dropped its runtime without a shutdown).
+        let ran = |c: &ClassReport| matches!(c.state, ClassState::Passed | ClassState::Failed);
+        if self.classes.iter().any(ran) {
+            let mut logs = vec!["the dev profile"];
+            if f.tls {
+                logs.push("a CA minted for the run");
+            }
+            logs.push("the one-second timers set here");
+            if self.classes.iter().any(|c| ran(c) && matches!(c.class, Class::Partition | Class::Recovery)) {
+                logs.push("a cut node's listener errors");
+            }
+            // Name only the tables this run had (#690's confirmation round, finding 4).
+            let dirs = match (f.persistence, f.tls) {
+                (true, true) => " — the configuration's `[persistence]` and `[tls]` turn them on, and their `base_path` and `auto_cert_dir` are replaced",
+                (true, false) => " — the configuration's `[persistence]` turns them on, and its `base_path` is replaced",
+                (false, true) => " — the configuration's `[tls]` turns them on, and its `auto_cert_dir` is replaced",
+                (false, false) => "",
+            };
+            s.push_str(&format!(
+                "fleet: its directories are the run's own, under a temporary directory removed at the end unless --keep{dirs}; \
+                 the nodes' log lines on stderr are the fleet's own ({}) and the verdict is this report\n",
+                logs.join(", ")
+            ));
+        }
         for c in &self.classes {
             s.push('\n');
             let state = match &c.state {
@@ -451,8 +476,9 @@ fn fleet_config(base: &GossipConfig, dir: &Path, index: usize, ids: &[NodeId]) -
     cfg.bind_address = "127.0.0.1".into();
     // The declared profile is not applied: its requirements include a gateway and code attachments this fleet does
     // not have, and the command clears the certificate paths it would need — `doctor` checks the profile, this
-    // checks the fleet under it (#675's review, finding 4). Reported as declared and not applied.
-    cfg.profile = None;
+    // checks the fleet under it (#675's review, finding 4). Reported as declared and not applied. The fleet runs
+    // under `dev`, selected, so its nodes do not warn of the CA key the run mints for them (#690's review, finding 3).
+    cfg.profile = Some("dev".into());
     cfg.bind_port = ids[index].to_socket_addr().port();
     cfg.bootstrap_peers = ids.iter().enumerate().filter(|(i, _)| *i != index).map(|(_, id)| id.clone()).collect();
     cfg.http_port = None;
@@ -1883,6 +1909,52 @@ mod tests {
         assert_eq!(r.classes[0].state, ClassState::NotInBuild { feature: "tls" });
         #[cfg(not(feature = "gateway"))]
         assert_eq!(r.classes[0].state, ClassState::NotInBuild { feature: "gateway" });
+    }
+
+    /// The report says where the fleet's directories are and what its nodes' log lines are, once, and only what this
+    /// run had (a walk-through of tutorial 7 found the appended `base_path` and `auto_cert_dir` unused, which is by
+    /// design, and ~30 WARN/ERROR lines on stderr read as a failure, which they are not; #690's review, finding 5).
+    #[test]
+    fn the_report_says_where_the_fleet_lives_and_what_its_log_lines_are() {
+        let units = vec![unit("p", "principal = \"p\"\n")];
+        let mut r = run(&units, &[], &CheckOptions::default(), &Options { classes: vec![Class::Recovery], ..Default::default() }).expect("the run");
+        // Nothing ran: no fleet, no line.
+        assert!(!matches!(r.classes[0].state, ClassState::Passed | ClassState::Failed), "{:?}", r.classes[0].state);
+        assert!(!r.render().contains("fleet: "), "{}", r.render());
+        // A run with persistence and no TLS whose class stops nodes gracefully: no CA, no cut.
+        r.fleet.persistence = true;
+        r.fleet.tls = false;
+        r.classes[0].class = Class::Restart;
+        r.classes[0].state = ClassState::Passed;
+        let text = r.render();
+        assert!(text.contains("fleet: its directories are the run's own"), "{text}");
+        assert!(text.contains("`[persistence]` turns them on, and its `base_path` is replaced"), "{text}");
+        assert!(!text.contains("[tls]") && !text.contains("auto_cert_dir"), "no TLS in this run: {text}");
+        assert!(text.contains("the nodes' log lines on stderr are the fleet's own"), "{text}");
+        assert!(!text.contains("a CA minted for the run"), "{text}");
+        assert!(!text.contains("listener errors"), "{text}");
+        // TLS, and a class that cuts a node.
+        r.fleet.tls = true;
+        r.classes[0].class = Class::Recovery;
+        let text = r.render();
+        assert!(text.contains("`[persistence]` and `[tls]` turn them on, and their `base_path` and `auto_cert_dir` are replaced"), "{text}");
+        assert!(text.contains("a CA minted for the run"), "{text}");
+        assert!(text.contains("a cut node's listener errors"), "{text}");
+    }
+
+    /// The fleet runs under `dev`, selected: the CA-key warning, right for a real node, does not tell a `dev` user to
+    /// set `profile = "dev"` (#690's review, finding 3).
+    #[cfg(feature = "tls")]
+    #[test]
+    fn the_fleet_runs_under_dev_selected_so_no_ca_key_warning() {
+        let dir = scratch("fleet-dev");
+        let mut base = GossipConfig::default();
+        base.tls = Some(crate::config::TlsConfig { auto_cert_dir: dir.join("adopter-tls"), ..crate::config::TlsConfig::default() });
+        let ids = vec![NodeId::new("127.0.0.1", crate::test_util::alloc_port()).expect("id")];
+        let cfg = fleet_config(&base, &dir, 0, &ids);
+        let a = crate::GossipAgent::new(ids[0].clone(), cfg);
+        assert!(crate::agent::guarantee::ca_key_on_node_warning(&a.guarantee_report()).is_none(), "the fleet's node warns of its own CA");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `recovery` without `[persistence]`: `not_configured`, naming the table; the ids it would drive listed as not

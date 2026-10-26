@@ -299,6 +299,9 @@ impl Doctor {
             }
             let summary: Vec<String> = counts.iter().map(|(k, v)| format!("{k} {v}")).collect();
             let _ = writeln!(s, "guarantees: {}", summary.join(" · "));
+            // What is met is named too, not only counted: a count says how many, not which.
+            let enforced: Vec<&str> = r.entries.iter().filter(|e| state_of(&e.resolution).0 == "enforced").map(|e| e.id).collect();
+            let _ = writeln!(s, "enforced: {}", if enforced.is_empty() { "none".to_string() } else { enforced.join(", ") });
             if r.profile.as_ref().is_some_and(|p| p.name == "secure-multi-domain") && r.faces_no_partner() {
                 // `doctor` builds a node from a file, which never has an edge or a client attached: say what
                 // that means here rather than leave six `not_applicable` lines to be read as a pass.
@@ -456,6 +459,25 @@ mod tests {
         assert_eq!(f.value, serde_json::json!("set"));
         assert!(!serde_json::to_string(&fields).unwrap().contains("MY_SECRET_VAR"));
         assert!(!fields.iter().map(|f| render_value(&f.key, &f.value)).collect::<String>().contains("MY_SECRET_VAR"));
+    }
+
+    /// The guarantees a configuration enforces are named, not only counted (a walk-through of tutorial 7: the reader
+    /// could not see which were met; the summary prints only the states it holds, so `enforced 0` never appears).
+    #[tokio::test]
+    async fn doctor_names_what_it_enforces() {
+        let port = crate::test_util::alloc_port();
+        let http = crate::test_util::alloc_port();
+        let path = write_cfg("named-enforced", &format!(
+            "bind_port = {port}\nhttp_port = {http}\n[[gateway_named_tokens]]\nname = \"a\"\ntoken = \"a-token\"\nscopes = [\"kv:read\"]\n"));
+        let d = run(Some(&path));
+        let text = d.render();
+        let line = text.lines().find(|l| l.starts_with("enforced: ")).unwrap_or_else(|| panic!("an `enforced:` line: {text}"));
+        let named: Vec<&str> = line["enforced: ".len()..].split(", ").filter(|id| *id != "none").collect();
+        let counted = d.report.as_ref().expect("a report").entries.iter().filter(|e| state_of(&e.resolution).0 == "enforced").count();
+        assert_eq!(named.len(), counted, "every enforced guarantee is named, and only those: {line}");
+        // A named-token table is enforced only where `compliance` is built (v2.18.1).
+        #[cfg(feature = "compliance")]
+        assert!(named.contains(&"gw.token_tables"), "{line}");
     }
 
     /// A secret is shown as `set`, never its value — in the text and in the JSON form.
