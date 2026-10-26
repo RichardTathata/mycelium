@@ -299,7 +299,7 @@ impl Doctor {
             }
             let summary: Vec<String> = counts.iter().map(|(k, v)| format!("{k} {v}")).collect();
             let _ = writeln!(s, "guarantees: {}", summary.join(" · "));
-            // What is met is named too, not only counted: a count of 0 reads like a count of 3 to a grep.
+            // What is met is named too, not only counted: a count says how many, not which.
             let enforced: Vec<&str> = r.entries.iter().filter(|e| state_of(&e.resolution).0 == "enforced").map(|e| e.id).collect();
             let _ = writeln!(s, "enforced: {}", if enforced.is_empty() { "none".to_string() } else { enforced.join(", ") });
             if r.profile.as_ref().is_some_and(|p| p.name == "secure-multi-domain") && r.faces_no_partner() {
@@ -461,8 +461,8 @@ mod tests {
         assert!(!fields.iter().map(|f| render_value(&f.key, &f.value)).collect::<String>().contains("MY_SECRET_VAR"));
     }
 
-    /// The guarantees a configuration enforces are named, not only counted (a walk-through of tutorial 7: step 6's
-    /// `grep 'guarantees: enforced'` could not fail on `enforced 0`, and the reader could not see which were met).
+    /// The guarantees a configuration enforces are named, not only counted (a walk-through of tutorial 7: the reader
+    /// could not see which were met; the summary prints only the states it holds, so `enforced 0` never appears).
     #[tokio::test]
     async fn doctor_names_what_it_enforces() {
         let port = crate::test_util::alloc_port();

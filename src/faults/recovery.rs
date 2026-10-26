@@ -206,18 +206,27 @@ fn start_node(fleet: &mut Fleet<'_>, i: usize, dir: &Path, evaluator: &Arc<dyn c
     let opened: Opened = Arc::new(std::sync::Mutex::new(None));
     let (ev, slot, path) = (Arc::clone(evaluator), Arc::clone(&opened), journal_path(dir, i));
     fleet.start_with(i, move |a| {
-        a.with_action_evaluator(ev);
-        let j = crate::EvidenceJournal::open(&path, crate::EvidenceProfile::Strict).map_err(|e| format!("opening {}: {e}", path.display()));
-        if let Ok(j) = &j {
-            a.with_evidence_journal(Arc::clone(j));
-        }
-        *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(j);
+        *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(attach(a, ev, &path));
     })?;
     match opened.lock().unwrap_or_else(|e| e.into_inner()).take() {
         Some(Ok(j)) => Ok(j),
         Some(Err(reason)) => Err(reason),
         None => Err("the journal was not opened".into()),
     }
+}
+
+/// Open node `i`'s journal and attach it, then the evaluator, to `a`. The journal first, as `grant.rs` and the restart
+/// class do: an evaluator attached first warns that its decisions will not be recorded (#680's review, finding 6;
+/// #690's, finding 2). The evaluator is attached even when the journal does not open, so the node is as the class
+/// declared it and the caller reports the journal's error.
+#[cfg(all(feature = "gateway", feature = "tls"))]
+fn attach(a: &crate::GossipAgent, ev: Arc<dyn crate::ActionEvaluator>, path: &Path) -> Result<Arc<crate::EvidenceJournal>, String> {
+    let j = crate::EvidenceJournal::open(path, crate::EvidenceProfile::Strict).map_err(|e| format!("opening {}: {e}", path.display()));
+    if let Ok(j) = &j {
+        a.with_evidence_journal(Arc::clone(j));
+    }
+    a.with_action_evaluator(ev);
+    j
 }
 
 #[cfg(all(feature = "gateway", feature = "tls"))]
@@ -579,3 +588,47 @@ fn run_inner(
 type SeamedOutcomeOrUnit = SeamedOutcome;
 #[cfg(all(feature = "gateway", feature = "tls", not(feature = "sim")))]
 type SeamedOutcomeOrUnit = ();
+
+#[cfg(all(test, feature = "gateway", feature = "tls"))]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Every event's message, on this thread, while it is the default subscriber.
+    struct Capture(Arc<Mutex<Vec<String>>>);
+    impl tracing::Subscriber for Capture {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool { true }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id { tracing::span::Id::from_u64(1) }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, e: &tracing::Event<'_>) {
+            struct Message(String);
+            impl tracing::field::Visit for Message {
+                fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+                    if f.name() == "message" { self.0 = format!("{v:?}"); }
+                }
+            }
+            let mut m = Message(String::new());
+            e.record(&mut m);
+            self.0.lock().unwrap_or_else(|e| e.into_inner()).push(m.0);
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// The journal goes on before the evaluator, as in `grant.rs` and the restart class: the other order logs
+    /// "decisions … NOT recorded" at every node start, which the class then disproves (#690's review, finding 2).
+    #[tokio::test]
+    async fn the_journal_is_attached_before_the_evaluator_so_no_unrecorded_warning() {
+        let dir = std::env::temp_dir().join(format!("mycelium-recovery-attach-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let a = crate::GossipAgent::new(crate::NodeId::new("127.0.0.1", crate::test_util::alloc_port()).expect("id"), crate::config::GossipConfig::default());
+        let ev: Arc<dyn crate::ActionEvaluator> = Arc::new(crate::ReferenceEvaluator::new("t"));
+        let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+        let attached = tracing::subscriber::with_default(Capture(Arc::clone(&seen)), || attach(&a, ev, &journal_path(&dir, 0)));
+        assert!(attached.is_ok(), "{:?}", attached.err());
+        let seen = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert!(!seen.iter().any(|m| m.contains("NOT recorded") && m.contains("no evidence journal")), "{seen:#?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

@@ -13,8 +13,7 @@ release it is run against, in a plain Python container, from the first `curl` to
 seconds per step to the job summary: all six steps took **12 s** on v2.38.0 and **13 s** on v2.38.1 (on v2.37.0,
 before steps 4 and 5 had their fault classes, steps 1, 2, 3 and 6 took 9 s). That is the commands' time, not a
 reader's: **how long a person takes is not measured.** One walk-through by an agent that had not seen Mycelium
-before, reading only this page, took 121 s on macOS (v2.38.1) — not a human figure; its estimate for a developer
-comfortable with a shell and Python was 20–35 minutes, an estimate, not a measurement. The commands below are the job's — a test
+before, reading only this page, took 121 s on macOS (v2.38.1) — not a human figure. The commands below are the job's — a test
 ([`tests/first_hour_tutorial.rs`](../../../tests/first_hour_tutorial.rs)) diffs each fenced block here against the
 workflow's step, so a reader and the job walk one path and the job's green run is the proof that the commands do not
 fail as written. The number the documentation prints for *one hour* is what that job measured on the most recent
@@ -113,14 +112,15 @@ enforces none of this. The class needs `[tls]` (the node signs the grant) and `[
 restart), so the step appends both tables to the scaffold's configuration. Their presence turns them on; their paths
 do not matter: each node of the class's fleet gets its directories under a temporary directory of the run's own,
 removed at the end (`--keep` leaves it and the report names it). The fleet's nodes log as nodes do — the dev profile,
-a CA minted for the run, the one-second timers the class sets, a crashed node's listener errors — so the step sends
-stderr to `grant.err`; the verdict is the report.
+a CA minted for the run, the one-second timers the class sets — so the step sends stderr to `grant.err`, prints its
+last lines if the class did not pass (an unknown argument, a configuration the node refuses), and the verdict is the
+report.
 
 ```bash one-hour:4
 cd "$HOME/governed-call-py"
 { cat node.toml; printf '\n[persistence]\nbase_path = "data/grant-persist"\n\n[tls]\nauto_cert_dir = "data/grant-tls"\n'; } > grant.toml
-mycelium test --faults grant units --config grant.toml 2> grant.err | tee grant.log
-grep -q '^grant: passed' grant.log
+mycelium test --faults grant units --config grant.toml 2> grant.err | tee grant.log || true
+grep -q '^grant: passed' grant.log || { tail -n 50 grant.err; exit 1; }
 grep -q '✓ a grant-required tool is default-deny' grant.log
 grep -q '✓ issuing is the declaration'"'"'s rule' grant.log
 grep -q '✓ the grant holds across a restart' grant.log
@@ -132,13 +132,14 @@ The `recovery` class ([selective recovery](../../features/selective-recovery.md)
 fleet send effects to one mock destination that loses an answer; the node that lost it is restarted over its WAL,
 finds its record *unknown*, probes before any retry, and the destination holds one effect; dependent work elsewhere is
 recovered by its declared class, independent work untouched, and `mycelium explain --closure` renders why from the
-records. Over the same configuration with `[persistence]`, and stderr to `recovery.err` as in step 4.
+records. Over the same configuration with `[persistence]`, and stderr to `recovery.err` as in step 4 — here it also
+holds the listener errors of the node the class cuts.
 
 ```bash one-hour:5
 cd "$HOME/governed-call-py"
 { cat node.toml; printf '\n[persistence]\nbase_path = "data/recovery-persist"\n'; } > recovery.toml
-mycelium test --faults recovery units --config recovery.toml 2> recovery.err | tee recovery.log
-grep -q '^recovery: passed' recovery.log
+mycelium test --faults recovery units --config recovery.toml 2> recovery.err | tee recovery.log || true
+grep -q '^recovery: passed' recovery.log || { tail -n 50 recovery.err; exit 1; }
 grep -q '✓ the restarted node finds its lost-acknowledgement record unknown in its own ledger, probes before any retry, and the destination holds one effect' recovery.log
 grep -q '✓ the destination saw each effect once' recovery.log
 grep -q 'mycelium explain --closure' recovery.log
@@ -147,15 +148,15 @@ grep -q 'mycelium explain --closure' recovery.log
 ## Step 6 · A readiness report naming what the fleet enforces
 
 `mycelium doctor` ([feature page](../../features/doctor.md)) runs `start()`'s own refusal chain and profile check
-over a node built and never started, counts the guarantees by state, and lists what the configuration does **not**
-enforce — so the token table, which it does, must not appear as unmet, and the count of enforced guarantees must not
-be zero. From the release after v2.38.1, a line `enforced: …` names the enforced ones too.
+over a node built and never started, counts the guarantees by state (a state with none is not printed), and lists
+what the configuration does **not** enforce — so the token table, which it does, must not appear as unmet, and some
+guarantee must be enforced. From the release after v2.38.1, a line `enforced: …` names the enforced ones too.
 
 ```bash one-hour:6
 cd "$HOME/governed-call-py"
 mycelium doctor node.toml | tee doctor.log
 grep -q 'start(): would start' doctor.log
-grep -Eq 'guarantees: enforced [1-9]' doctor.log
+grep -q 'guarantees: enforced' doctor.log
 if grep -q 'gw.token_tables:' doctor.log; then echo '::error::gw.token_tables is listed as unmet'; exit 1; fi
 ```
 

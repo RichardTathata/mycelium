@@ -17,14 +17,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   downloaded); `mkdir -p ~/.local/bin` and the `PATH` before a non-root install; the virtual environment kept active for
   steps 2–6; ports 7950 and 8300; steps 4 and 5 send stderr to a file, the fleet's own node logs; step 4 says its
   `[persistence]` and `[tls]` paths are replaced by the run's own directory (by design — the module doc), and names all
-  five of the grant class's checks; step 6's check is `guarantees: enforced [1-9]`, which cannot pass on a count of 0;
+  five of the grant class's checks; steps 4 and 5 print the last lines of their stderr when the class does not pass;
   the page states the job's measured times (12 s on v2.38.0, 13 s on v2.38.1) and that a person's time is not measured.
 - **`mycelium doctor` names the enforced guarantees** on an `enforced:` line, beside the count, so a reader sees which
   are met, not only how many.
-- **`mycelium test --faults` says, once in its report, where its fleet lives and what its nodes' log lines are**: the
-  run's own temporary directory (the configuration's `base_path` and `auto_cert_dir` replaced), and stderr from the
-  in-process fleet — the dev profile, a CA minted for the run, the class's one-second timers, a crashed node's listener
-  errors — not the verdict.
+- **`mycelium test --faults` says, once in its report, where its fleet lives and what its nodes' log lines are**, of
+  what the run had: the run's own temporary directory (the configuration's `base_path` and `auto_cert_dir` replaced),
+  and stderr from the in-process fleet — the dev profile, a CA minted for the run when it has TLS, the class's
+  one-second timers, a cut node's listener errors when a class cut one — not the verdict. The fleet now runs under
+  `dev` selected, so its nodes no longer tell a `dev` user to set `profile = "dev"` for the CA key the run mints; and
+  the `recovery` class attaches each node's evidence journal before its evaluator, so it no longer logs that decisions
+  will not be recorded.
 
 ### Added
 
