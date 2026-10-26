@@ -9,6 +9,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- **`zstd` removed from the tree: RUSTSEC-2026-0391, -0398, -0403, -0410** (published 2026-10-26, unfixed upstream
+  as of wasmtime 50.0.0, whose `wasmtime-internal-cache` still requires `zstd ^0.13`). `zstd` reached the workspace
+  only through wasmtime's on-disk compilation cache, a default feature of `wasmtime`; `mycelium-wasm-host` never
+  configures that cache (no `cache_config` or `Config::cache` call), so the vulnerable code was compiled in and never
+  run. `mycelium-wasm-host` now depends on `wasmtime` with every default feature but `cache`, which takes `zstd`,
+  `zstd-safe`, `zstd-sys`, `wasmtime-internal-cache` and ten crates beneath them out of `Cargo.lock`; nothing else
+  changes. **Check:** an application that turns wasmtime's `cache` feature on itself still carries `zstd` until
+  wasmtime moves to `zstd` 0.14; `cargo audit -f Cargo.lock` names it.
+
 ### Added
 
 - **`secure-multi-domain` — the profile, and the federation guarantee family it needs** (`docs/plans/adopter-surface.md`

@@ -18,7 +18,15 @@ mycelium = { path = "..", default-features = false }
 mycelium-sim = { path = "../mycelium-sim", optional = true }
 
 # WASM Component Model runtime. component-model is the WIT/canonical-ABI half.
-wasmtime = "49"
+# Every default feature but `cache`: the on-disk compilation cache is never configured here (no
+# `cache_config` / `Config::cache` call in the crate), and it is the only path by which `zstd` enters the
+# tree — RUSTSEC-2026-0391, -0398, -0403, -0410, unfixed upstream as of wasmtime 50.0.0.
+wasmtime = { version = "49", default-features = false, features = [
+    "anyhow", "async", "backtrace", "gc", "gc-copying", "gc-drc", "gc-null", "wat", "profiling",
+    "parallel-compilation", "cranelift", "pooling-allocator", "demangle", "addr2line", "coredump",
+    "debug-builtins", "runtime", "component-model", "component-model-async", "threads",
+    "stack-switching", "std", "debug", "compile-time-builtins", "wit-parser",
+] }
 # WASI host implementation. Real components (std-based guests) import wasi:* from libc
 # init; the host provides a *restricted, deny-by-default* WASI context (no fs/net/env/stdio)
 # as part of the sandbox — a component's only doors are our scoped imports + minimal WASI.
