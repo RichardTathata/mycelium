@@ -63,8 +63,9 @@ rendering of the family is `doctor_prints_the_federation_family_under_the_multi_
   `.suffix` entry, which admits every host under it, so name the partner's host exactly to confine calls to it.
 - `fed.partner_slots` bounds what one gateway carries: a domain running N gateways admits N times the cap
   ([federation § Bounding what a partner can send you](../operations/federation.md#bounding-what-a-partner-can-send-you)).
-- **Not built:** the two-mesh Docker suite does not run under this profile, and `doctor` cannot report the edge's or
-  the clients' facts — both stated in row Y7 of [`adopter-surface.md`](../plans/adopter-surface.md) §8. The upgrade
+- **Open:** the two-mesh Docker suite does not run under this profile yet, the one promise row Y7 of
+  [`adopter-surface.md`](../plans/adopter-surface.md) §8 stays open on, to be closed by the Y8-track precursor PR (the two-mesh suite under the profile).
+- **Not built:** `doctor` cannot report the edge's or the clients' facts (stated in the same row). The upgrade
   notes are [deprecations § 66](../guide/deprecations.md#66-a-third-guarantee-profile-secure-multi-domain-ten-fed-guarantees-in-every-report-guaranteereportunresolved-lists-only-what-applies-unreleased-adopter-surface-y7).
 
 ## Go deeper

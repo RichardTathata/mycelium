@@ -11,4 +11,5 @@ Ingest of adopter-surface row Y7 (`docs/plans/adopter-surface.md` §6, evidence 
   side-specific facts `not_applicable` (G10), and `GuaranteeReport::unresolved` now lists only external
   prerequisites that apply.
 - **Found on the way:** `with_federation_clients` did not count a post-`start()` attachment (G13); fixed.
-- **Stated, not built:** the two-mesh Docker suite under the profile; `doctor` seeing code attachments.
+- **Open:** the two-mesh Docker suite under the profile — the row stays open on that one promise, to be closed by the Y8-track precursor PR (the two-mesh suite under the profile) (decided by the maintainer 2026-10-26; Y8 reuses the suite).
+- **Stated, not built:** `doctor` seeing code attachments.

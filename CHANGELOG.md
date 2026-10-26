@@ -23,8 +23,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **Changed:** `GuaranteeReport::unresolved()` leaves out an external prerequisite that does not apply;
   a federation edge or clients attached after `start()` are ignored under any profile but `dev`, and the edge,
   the clients and `with_cohort_budget` count as late attachments under their own names; a node facing no partner is
-  said so in one line (`deprecations.md` §66). **Not built:** the
-  two-mesh Docker suite under the profile; `doctor` reporting an edge or clients attached in code.
+  said so in one line (`deprecations.md` §66). **Open:** the
+  two-mesh Docker suite under the profile, to be closed by the Y8-track precursor PR (the two-mesh suite under the profile). **Not built:** `doctor` reporting an edge or clients
+  attached in code.
 
 ## [2.38.0] — 2026-10-26
 
