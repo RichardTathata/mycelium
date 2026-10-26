@@ -60,12 +60,20 @@ is a hand-kept copy; no test reads it.
 - The hash is the record's content hash — a journal frame's body, a trace line without its newline — the one a
   `parent` names and `mycelium explain --closure` resolves. The same record always exports as the same span, ids
   included: a restarted collector re-sends spans with the ids they had.
-- Best-effort: a record the sink dropped has no span. **A sink nothing drains is full after `max_records` decisions**
-  (4096 by default), and every later decision is dropped `Full` and has no span; each `collect` reports how many
-  since the last call (`dropped_full`), and copies the tap could not hold because the collector fell behind
-  (`tap_dropped`). An embedder that wants spans for as long as the node runs also drains its sink, writing the trace.
-  Records kept before the collector tapped the sink have no span; one collector per sink. The journal loses nothing,
-  and each evidence record is returned once per collector. A collector's place is in memory.
+- Best-effort: a record the sink dropped has no span. **A sink nothing drains stops keeping records** at whichever
+  bound it reaches first — `max_records` (4096 by default) or `max_bytes` by its estimate (1 MiB by default; records
+  of a few hundred bytes reach it after a few thousand) — and every later decision is dropped and has no span; each
+  `collect` reports how many since the last call, by reason (`dropped`: `full`, `bytes`, `contended`, `oversized`),
+  and copies the tap could not hold because the collector fell behind (`tap_dropped`). An embedder that wants spans
+  for as long as the node runs also drains its sink, writing the trace. Records kept before the collector tapped the
+  sink have no span; one live collector per sink, and a dropped one frees it. The journal loses nothing, and each
+  evidence record is returned once per collector. A collector's place is in memory: its journal cursor is a byte
+  offset taken after the node opened (and repaired) the journal, so make a new collector after a restart — one that
+  outlived a reopen which truncated a torn tail would read misaligned frames, counted as `unparsed`.
+- The tap changes no recording: it is not a seam choice, so a recording made with a collector replays identically
+  without one (`a_tap_records_nothing_so_a_recording_replays_with_or_without_one`).
+- The provider's `shutdown()` flushes within the export timeout, **but not when its queue is full**; a span dropped
+  because the queue was full (2048) is counted nowhere this crate can read — the SDK exposes no counter.
 - **The correlation is the caller's.** `mycelium.correlation` is the id the request carried, sent as given — the
   substrate checks only its shape. One holding personal data puts it in every span of the run: choose an opaque id.
 - A decision's `reason` is one of its rule's typed codes by convention — every shipped decision point passes a code

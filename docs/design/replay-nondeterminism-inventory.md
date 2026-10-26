@@ -165,6 +165,13 @@ tokio scheduler, which is precisely what the kernel exists to remove. These are 
 debt; they stay in the baseline as counted sites so that a *new* send in that file still fails the
 check.
 
+**Deliberately outside the seam: the decision sink's tap** (`mycelium-core/src/decision.rs` `record`, adopter-surface
+Y4). Whether the span collector kept up decides nothing: the ring keeps the record either way and the trace changes
+no decision (G7). Routing the send through `chan_try_send` (as #684 first did) made a recording depend on whether a
+collector ran — a recording made with one diverged when replayed without it, and a replay with one attached
+panicked in `record` on a `Sent` the collector's wall-clock drain did not reproduce. So it is a plain `try_send`,
+one counted baseline site, shown by `tap_replay_tests::a_tap_records_nothing_so_a_recording_replays_with_or_without_one`.
+
 ### 2.4 Storage
 
 | Site | Depends on it | Owner |

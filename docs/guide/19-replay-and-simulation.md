@@ -266,21 +266,25 @@ of its own, so a slow or unreachable collector drops spans and never stalls the 
 collect — nothing here runs a loop:
 
 ```rust,ignore
+use std::sync::Arc;
 use mycelium::span_export::{otlp, SpanCollector};
 
 let provider = otlp::provider("http://collector:4317", otlp::EXPORT_TIMEOUT)?;  // OTLP/gRPC, inside a Tokio runtime
 let mut spans = SpanCollector::new()
-    .with_decision_sink(sink.clone(), 4096)?                       // the Arc<DecisionSink> the decision points hold
+    .with_decision_sink(Arc::clone(&sink), 4096)?                  // the Arc<DecisionSink> the decision points hold
     .with_evidence_journal("/var/lib/node/evidence.log");          // the path `with_evidence_journal` opened (`gateway` + `tls`)
 // on the embedder's own schedule:
 let got = spans.collect()?;
 otlp::export(&provider, &got.spans);                               // enqueues; never waits on the collector
-// got.dropped_full: decisions the full sink dropped since the last call — they have no span
+// got.dropped: decisions the sink dropped since the last call, by reason — they have no span
 ```
 
-A sink nothing drains is full after `max_records` decisions (4096 by default); later decisions are dropped and have
-no span, and `collect` says how many. The correlation is the caller's id, sent as given — keep personal data out of
-it.
+A sink nothing drains stops keeping records at whichever bound it reaches first — `max_records` (4096 by default)
+or `max_bytes` by its estimate (1 MiB by default; with records of a few hundred bytes, after a few thousand) — and
+later decisions are dropped and have no span; `collect` says how many, by reason. The provider's `shutdown()` flushes
+within the timeout, but not when its queue is full, and a span the full queue dropped is counted nowhere this crate
+can read. The correlation is the caller's id, sent as given — keep personal data out of it. The snippet is compiled
+as a test (`the_guide_19_snippet_is_this_code` keeps the two the same).
 
 A span carries the record's identity and outcome and nothing else: `correlation`, `parent`, the rule and its
 revision (an evidence record's enforcement point and policy revision), the outcome, a decision's typed reason, and
