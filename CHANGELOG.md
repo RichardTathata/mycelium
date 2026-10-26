@@ -17,7 +17,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with a federation edge or clients `fed.pinned`, `fed.body_bound`, `fed.partner_slots`, `fed.caller_named`,
   `fed.catalogue_signed`, `fed.partner_egress`; and `fed.partner_posture`, `fed.non_merger`, `fed.clock_agreement`,
   which only the partner could show, listed `not_verifiable_here` and never counted. `profile = "secure-multi-domain"`
-  rev 1 requires `secure-single-domain` rev 5's twenty and the seven node facts; `start()` refuses naming each one
+  rev 1 requires `secure-single-domain` rev 5's twenty and the seven node facts (`fed.domain_enforced` the seventh, agreed with the maintainer); `start()` refuses naming each one
   unmet, shown for each of the seven, and `doctor` prints the family. A node with neither an edge nor a client reads
   the side-specific ones `not_applicable`. `FederationClient` gained `tls_pinned` and `verifies_catalogue`.
   **Changed:** `GuaranteeReport::unresolved()` leaves out an external prerequisite that does not apply;

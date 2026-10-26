@@ -73,4 +73,4 @@ rendering of the family is `doctor_prints_the_federation_family_under_the_multi_
   and the [readiness checklist](../operations/production-readiness.md).
 - **Guide:** [17 · Federation](../guide/17-federation.md).
 - **Design:** [`federated-domains.md`](../design/federated-domains.md); the plan row is Y7 of
-  [`adopter-surface.md`](../plans/adopter-surface.md), decision D25.
+  [`adopter-surface.md`](../plans/adopter-surface.md), decision D25 (rev 0.13 adds `fed.domain_enforced` as the seventh required guarantee, agreed with the maintainer 2026-10-26).
