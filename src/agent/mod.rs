@@ -1636,6 +1636,7 @@ impl GossipAgent {
         view: crate::knowledge::cohort::CohortView,
         external: crate::knowledge::issuer::TrustedExternalIssuers,
     ) {
+        self.note_attachment("with_cohort_budget");
         let b = Arc::new(provider_enforcement::ProviderBudget::new(budget, view, external));
         if self.task_ctx.cohort_budget.set(b).is_err() {
             tracing::warn!("with_cohort_budget: a cohort budget is already attached; ignoring");
@@ -1790,6 +1791,12 @@ impl GossipAgent {
     /// ```
     pub fn with_http_routes(&self, routes: axum::Router) {
         self.note_attachment("with_http_routes");
+        self.merge_http_routes(routes);
+    }
+
+    /// The merge [`with_http_routes`](Self::with_http_routes) performs, without counting — for an
+    /// attacher that has already counted itself under its own name.
+    fn merge_http_routes(&self, routes: axum::Router) {
         // Merge, don't replace: callers compose routers (`with_a2a()` +
         // application routes) and a last-caller-wins slot silently dropped
         // every earlier registration — skillrunner's management dashboard
@@ -1808,12 +1815,40 @@ impl GossipAgent {
     /// first edge and warns.
     #[cfg(all(feature = "gateway", feature = "tls"))]
     pub fn with_federation_edge(self, edge: Arc<crate::federation::edge::FederationEdge>) -> Self {
+        self.note_attachment("with_federation_edge");
+        if self.federation_attachment_is_inert("with_federation_edge") {
+            return self;
+        }
         if self.task_ctx.federation_edge.set(Arc::clone(&edge)).is_err() {
             tracing::warn!("with_federation_edge: an edge is already attached; keeping the first");
             return self;
         }
-        self.with_http_routes(federation_http::federation_router(edge));
+        self.merge_http_routes(federation_http::federation_router(edge));
         self
+    }
+
+    /// Whether a federation attachment arriving now must be ignored (adopter-surface Y7, review
+    /// finding 1). After `start()` under any profile but `dev`, an edge or clients are **inert**: the
+    /// profile check ran at the boundary over what was attached then, and the `fed.*` guarantees read a
+    /// node with no edge or client as facing no partner — so an edge attached later, unchecked, would
+    /// admit federated credentials the check never saw. Counted as late either way (G13); under `dev`,
+    /// which requires nothing, the attachment takes effect as before.
+    #[cfg(all(feature = "gateway", feature = "tls"))]
+    fn federation_attachment_is_inert(&self, what: &'static str) -> bool {
+        if !self.task_ctx.started.load(Ordering::Acquire) {
+            return false;
+        }
+        let (profile, _) = guarantee::selected_profile(&self.config);
+        if profile.name == guarantee::DEV.name {
+            return false;
+        }
+        tracing::warn!(
+            profile = profile.name,
+            "{what}: ignored — attached after start() under profile `{}`, whose check at start did not see it; \
+             attach federation before start()",
+            profile.name
+        );
+        true
     }
 
     /// Attach this node's **consumer** side of federation (item 2 row 11): one
@@ -1842,6 +1877,9 @@ impl GossipAgent {
         // Counted like every other attachment after the boundary (G13): the `fed.*` guarantees read
         // these clients, so a set attached after `start()` is one the logged report never saw.
         self.note_attachment("with_federation_clients");
+        if self.federation_attachment_is_inert("with_federation_clients") {
+            return self;
+        }
         let mut kept: Vec<Arc<crate::federation::client::FederationClient>> = Vec::new();
         for c in clients {
             // The node's outbound allow-list reaches a client built without one (`report.egress`,

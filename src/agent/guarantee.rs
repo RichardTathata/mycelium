@@ -470,6 +470,12 @@ impl GuaranteeReport {
     pub fn node_requirements_satisfied(&self) -> bool {
         self.required_unmet().is_empty()
     }
+    /// Whether this node faces no federation partner — no edge and no client attached, so the
+    /// side-specific `fed.*` guarantees do not apply (adopter-surface Y7). Under `secure-multi-domain`
+    /// such a node starts on `fed.domain_enforced` alone, and the log and `doctor` say so in one line.
+    pub fn faces_no_partner(&self) -> bool {
+        self.entry("fed.catalogue_signed").is_some_and(|e| matches!(e.resolution, Resolution::NotApplicable { .. }))
+    }
     /// The entry for `id`, if registered.
     pub fn entry(&self, id: &str) -> Option<&GuaranteeEntry> {
         self.entries.iter().find(|e| e.id == id)
@@ -603,6 +609,11 @@ pub(crate) fn ca_key_on_node_warning(r: &GuaranteeReport) -> Option<&'static str
     (on_node && !explicit_dev).then_some(CA_KEY_ON_NODE_WARNING)
 }
 
+/// What the log and `doctor` say of a node under `secure-multi-domain` that faces no partner.
+pub(crate) const FACES_NO_PARTNER: &str = "this node faces no federation partner — no edge and no client attached, so \
+    the profile's side-specific `fed.*` guarantees do not apply and it is checked as a member on `fed.domain_enforced`; \
+    an edge or clients attached after start() are ignored under this profile";
+
 /// Log the report as one block — one line per entry, then the summary.
 pub(crate) fn log_report(r: &GuaranteeReport) {
     if let Some(w) = ca_key_on_node_warning(r) {
@@ -620,6 +631,9 @@ pub(crate) fn log_report(r: &GuaranteeReport) {
         } else {
             tracing::info!(profile = p.name, revision = p.revision, required = ?p.required, "guarantees: profile");
         }
+    }
+    if r.profile.as_ref().is_some_and(|p| p.name == SECURE_MULTI_DOMAIN.name) && r.faces_no_partner() {
+        tracing::info!(profile = SECURE_MULTI_DOMAIN.name, "guarantees: {FACES_NO_PARTNER}");
     }
     let unmet = r.unmet();
     let required_unmet = r.required_unmet();
@@ -1186,8 +1200,8 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
               { let _ = c; Resolution::NotInBuild { feature: "gateway + tls" } }
           }),
         g("fed.caller_named", 1, "federation", Node,
-          "a federated call made through this gateway carries the authenticated local caller's principal, never the node's and never one taken from the request",
-          "a gateway credential model (`gateway_auth_token`, or with `compliance` a token table or `[oidc]`) in front of `/gateway/federation/*`; on an open gateway every call names `anonymous`",
+          "on a gateway with federation clients, a credential is required, so a call made through `/gateway/federation/*` names an authenticated local caller rather than `anonymous` — the check `gw.not_open` makes, restated for the federation routes so the family says it; that the route mints under the resolved caller and never the node is by construction (`call_as`), not checked here",
+          "a gateway credential model (`gateway_auth_token`, or with `compliance` a token table or `[oidc]`) — the same predicate as `gw.not_open`; on an open gateway every call names `anonymous`",
           &["agent::http::federation_routes (call_as with the resolved principal)"], "docs/operations/federation.md",
           |c| fed_client_role(c).or_else(|| gateway_role(c).map(|_| "no `http_port`: no `/gateway/federation/*` route mints a credential here")),
           in_gateway_build(|c| if gateway_credential_model(&c.config) { Resolution::Enforced } else {
@@ -1213,8 +1227,8 @@ pub(crate) fn core_guarantees() -> Vec<GuaranteeDescriptor> {
               { let _ = c; Resolution::NotInBuild { feature: "gateway + tls" } }
           }),
         g("fed.partner_egress", 1, "federation", Node,
-          "every partner endpoint a federation client dials is on the egress allow-list the client is held to, so a federated call reaches only a host the operator named",
-          "`egress.allow_hosts` naming each partner endpoint's host (the node's list reaches a client built without one), or `FederationClient::with_egress`",
+          "every partner endpoint a federation client dials is permitted by a non-empty egress allow-list the client is held to — by its exact host or by a `.suffix` entry, which admits every host under it, so a suffix entry covers more than the partner",
+          "`egress.allow_hosts` permitting each partner endpoint's host (the node's list reaches a client built without one), or `FederationClient::with_egress`; name the partner's host exactly to confine calls to it",
           &["federation::client::FederationClient::call_as (egress_permits)", "config::EgressPolicy::permits_url"], "docs/operations/federation.md",
           fed_client_role,
           |c| {

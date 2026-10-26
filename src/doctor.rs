@@ -299,6 +299,11 @@ impl Doctor {
             }
             let summary: Vec<String> = counts.iter().map(|(k, v)| format!("{k} {v}")).collect();
             let _ = writeln!(s, "guarantees: {}", summary.join(" · "));
+            if r.profile.as_ref().is_some_and(|p| p.name == "secure-multi-domain") && r.faces_no_partner() {
+                // `doctor` builds a node from a file, which never has an edge or a client attached: say what
+                // that means here rather than leave six `not_applicable` lines to be read as a pass.
+                let _ = writeln!(s, "federation: {} (doctor cannot see an edge or clients attached in code)", crate::agent::guarantee::FACES_NO_PARTNER);
+            }
             for e in &r.entries {
                 let (state, detail) = state_of(&e.resolution);
                 if state != "enforced" {
@@ -378,6 +383,7 @@ mod tests {
             assert!(text.contains(&format!("  {id}: ")), "{id} is printed: {text}");
         }
         assert!(text.contains("fed.pinned: not_applicable"), "{text}");
+        assert!(text.contains("federation: this node faces no federation partner"), "said in one line: {text}");
         let cfg = GossipConfig::load_from_file(&path).expect("loads");
         let agent = GossipAgent::new(NodeId::new(&cfg.bind_address, cfg.bind_port).expect("node"), cfg);
         let err = agent.start().await.expect_err("start refuses under the profile");

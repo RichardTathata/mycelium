@@ -7,7 +7,8 @@ several federating [domains](../guide/00-concepts.md#domain): `start()` refuses 
 `secure-single-domain` requires holds, and the federation family too. The family is ten guarantees. Seven are facts this
 node can check, and three only the partner could show, so the report lists those three and never counts them. A node
 that faces no partner, with no federation edge and no client attached, reads the side-specific ones `not_applicable`,
-as a node with no gateway reads the gateway's.
+as a node with no gateway reads the gateway's, and the start log and `doctor` say in one line that the node faces no
+partner. No side is required: a member of a federating domain need not face a partner itself.
 
 ## When to use it, and when not
 
@@ -31,10 +32,11 @@ This feature is turned on in code.
 - [`with_tls_pins`](../../src/federation/client.rs): the partner's TLS key pinned from the trust bundle.
 - [`with_partner_key`](../../src/federation/client.rs): a catalogue is relied on only once it verifies under it.
 - [`egress`](../reference/configuration.md#the-fields): `allow_hosts` names every partner endpoint's host.
-- [`SECURE_MULTI_DOMAIN`](../../src/agent/guarantee.rs): the required set, rev 1.
-- `multi_domain_with_every_federation_setting_names_no_fed_id`, in
-  [`src/agent/guarantee.rs`](../../src/agent/guarantee.rs): attaches an edge and a client set as above and starts the
-  node under the profile; no `fed.*` id is unmet.
+- [`SECURE_MULTI_DOMAIN`](../../src/agent/guarantee.rs): the required set, rev 1. Attach the edge and the clients
+  **before** `start()`: under this profile one attached after it is ignored, and counted.
+- `a_node_providing_every_requirement_starts_under_the_multi_domain_profile`, in
+  [`src/lib_tests.rs`](../../src/lib_tests.rs): attaches an edge and a client set as above to a node meeting every
+  other requirement, and the node starts under the profile with every `fed.*` node fact enforced.
 
 ## See it work
 
@@ -44,7 +46,9 @@ one per required federation guarantee, each dropping one setting from a node tha
 refuses naming that guarantee and no other in the family: `multi_domain_refuses_naming_fed_domain_enforced`,
 `multi_domain_refuses_naming_fed_pinned`, `multi_domain_refuses_naming_fed_body_bound`,
 `multi_domain_refuses_naming_fed_partner_slots`, `multi_domain_refuses_naming_fed_caller_named`,
-`multi_domain_refuses_naming_fed_catalogue_signed` and `multi_domain_refuses_naming_fed_partner_egress`. `doctor`'s
+`multi_domain_refuses_naming_fed_catalogue_signed` and `multi_domain_refuses_naming_fed_partner_egress`. A late attachment left inert is
+`a_federation_attachment_after_start_is_inert_under_the_multi_domain_profile`, in
+[`src/lib_tests.rs`](../../src/lib_tests.rs). `doctor`'s
 rendering of the family is `doctor_prints_the_federation_family_under_the_multi_domain_profile`, in
 [`src/doctor.rs`](../../src/doctor.rs).
 
@@ -55,6 +59,8 @@ rendering of the family is `doctor_prints_the_federation_family_under_the_multi_
   with the twenty of `secure-single-domain` rev 5.
 - **Listed, never counted:** [`fed.partner_posture`, `fed.non_merger` and `fed.clock_agreement`](../reference/guarantee-catalogue.md#the-descriptors).
   Nothing this node checks makes the partner honest.
+- `fed.caller_named` is `gw.not_open`'s check restated for the federation routes; `fed.partner_egress` holds for a
+  `.suffix` entry, which admits every host under it, so name the partner's host exactly to confine calls to it.
 - `fed.partner_slots` bounds what one gateway carries: a domain running N gateways admits N times the cap
   ([federation § Bounding what a partner can send you](../operations/federation.md#bounding-what-a-partner-can-send-you)).
 - **Not built:** the two-mesh Docker suite does not run under this profile, and `doctor` cannot report the edge's or

@@ -380,8 +380,8 @@
       "revision": 1,
       "subsystem": "federation",
       "kind": "node_enforced",
-      "promise": "a federated call made through this gateway carries the authenticated local caller's principal, never the node's and never one taken from the request",
-      "needs": "a gateway credential model (`gateway_auth_token`, or with `compliance` a token table or `[oidc]`) in front of `/gateway/federation/*`; on an open gateway every call names `anonymous`",
+      "promise": "on a gateway with federation clients, a credential is required, so a call made through `/gateway/federation/*` names an authenticated local caller rather than `anonymous` — the check `gw.not_open` makes, restated for the federation routes so the family says it; that the route mints under the resolved caller and never the node is by construction (`call_as`), not checked here",
+      "needs": "a gateway credential model (`gateway_auth_token`, or with `compliance` a token table or `[oidc]`) — the same predicate as `gw.not_open`; on an open gateway every call names `anonymous`",
       "enforcement_points": [
         "agent::http::federation_routes (call_as with the resolved principal)"
       ],
@@ -405,8 +405,8 @@
       "revision": 1,
       "subsystem": "federation",
       "kind": "node_enforced",
-      "promise": "every partner endpoint a federation client dials is on the egress allow-list the client is held to, so a federated call reaches only a host the operator named",
-      "needs": "`egress.allow_hosts` naming each partner endpoint's host (the node's list reaches a client built without one), or `FederationClient::with_egress`",
+      "promise": "every partner endpoint a federation client dials is permitted by a non-empty egress allow-list the client is held to — by its exact host or by a `.suffix` entry, which admits every host under it, so a suffix entry covers more than the partner",
+      "needs": "`egress.allow_hosts` permitting each partner endpoint's host (the node's list reaches a client built without one), or `FederationClient::with_egress`; name the partner's host exactly to confine calls to it",
       "enforcement_points": [
         "federation::client::FederationClient::call_as (egress_permits)",
         "config::EgressPolicy::permits_url"

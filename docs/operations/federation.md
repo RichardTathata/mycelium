@@ -306,12 +306,14 @@ its side of the edge is set the way this runbook describes (adopter-surface Y7).
 | `fed.pinned` | a node with clients | `FederationClient::with_tls_pins` on every client — [Encrypting the link](#encrypting-the-link-tls-pinning) |
 | `fed.body_bound` | a node with an edge | `CallPolicy::require_body_binding = true` |
 | `fed.partner_slots` | a node with an edge | `CallPolicy::max_in_flight_per_partner > 0` — [Bounding what a partner can send you](#bounding-what-a-partner-can-send-you) |
-| `fed.caller_named` | a gateway with clients | a gateway credential model, so a call names the local caller, not `anonymous` |
+| `fed.caller_named` | a gateway with clients | a gateway credential model, so a call names the local caller, not `anonymous` (`gw.not_open`'s check, restated) |
 | `fed.catalogue_signed` | either side | `FederationEdge::with_signing_key` on the edge; `FederationClient::with_partner_key` on every client |
-| `fed.partner_egress` | a node with clients | `egress.allow_hosts` naming every partner endpoint's host |
+| `fed.partner_egress` | a node with clients | `egress.allow_hosts` permitting every partner endpoint's host — name it exactly; a `.suffix` entry admits every host under it |
 
 A member that attaches neither an edge nor a client reads the six side-specific ones `not_applicable` and starts on
-the rest. Three more are listed `not_verifiable_here` and never counted: `fed.partner_posture` (the partner's
+the rest; the start log and `doctor` say in one line that it faces no partner. **Attach the edge and the clients
+before `start()`:** under this profile one attached after it is ignored (counted in `late_attachments`), because the
+check at start never saw it. Three more are listed `not_verifiable_here` and never counted: `fed.partner_posture` (the partner's
 own report, under the same profile, exchanged out of band), `fed.non_merger` (a fact about both domains) and
 `fed.clock_agreement` (a credential's window is wall-clock across the edge). Nothing this node checks makes the
 partner honest.
