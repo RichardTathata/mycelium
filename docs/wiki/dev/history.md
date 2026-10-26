@@ -31,6 +31,16 @@ window counters stay at zero; `kv_untagged_signatures_refused` is new; `mesh.sig
 residual is restated, not closed (a signed `SyncEntry` is a wire change). Upgrade note `deprecations.md` §40: upgrade
 from 2.33.x, not 2.32. Record: [`.log/2026-10-13-f2-refusal-unconditional.md`](.log/2026-10-13-f2-refusal-unconditional.md).
 
+## v2.38.1 release — 2026-10-26 (tag `v2.38.1`) — zstd out of the tree
+
+A **security PATCH** cut from the v2.38.0 tag on `release-2.38.x`, not from `main`, which carries unreleased Y1 and Y7
+(MINOR material). `zstd` 0.13.3, `zstd-safe` 7.2.4 and `zstd-sys` 2.0.16 carried RUSTSEC-2026-0391, -0398, -0403 and
+-0410 (dated 2026-10-16, in the database 2026-10-26), unfixed upstream: wasmtime 50.0.0's `wasmtime-internal-cache` still
+requires `zstd ^0.13`. `zstd` entered only through that cache, a default wasmtime feature `mycelium-wasm-host` never
+configures, so the code was compiled in and never run. The fix (#686 on `main`) depends on `wasmtime` with every default
+feature but `cache`; `Cargo.lock` loses 14 crates and moves no version besides the train's. Wire v12 unchanged; no API change.
+Log: `.log/2026-10-26-release-v2.38.1.md`.
+
 ## v2.38.0 release — 2026-10-26 (tag `v2.38.0`) — the adopter surface's second track
 
 A **MINOR** cut on `release/v2.38.0`, tagged on the maintainer's word ("close first wave"). It carries the section
