@@ -81,9 +81,11 @@ is a hand-kept copy; no test reads it.
   two byte-identical evidence records are one record by content, so they share a span id.
 - The skill runner's own spans (`skillrunner`, also under `otel`) are **outside** `trace.spans_not_evidence`: they
   carry the caller.
-- **Not built** (the plan row is [`adopter-surface.md`](../plans/adopter-surface.md) Y4, open on this point): a
-  gateway route that serves a record by its hash under `audit:read` — today the holder reads it on the node with
-  `mycelium explain --closure` over the files; an export loop in the `mycelium` binary or a configuration section for an endpoint — the embedder
+- **Not built** (the plan row is [`adopter-surface.md`](../plans/adopter-surface.md) Y4, open on this one promise, to
+  be closed by the Y4 follow-up PR): a gateway route that serves a record by its hash under `audit:read` — decision
+  records from the sink or a written trace, with *not found* said as never existed, evicted or not written, and
+  evidence records from the journal — today the holder reads it on the node with `mycelium explain --closure` over
+  the files; an export loop in the `mycelium` binary or a configuration section for an endpoint — the embedder
   drives the collector; a durable collector cursor; the collector's OTLP client is not the node's egress-gated one,
   so the endpoint is the embedder's to allow. No span store is read by anything in this repository.
 

@@ -37,8 +37,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an unreachable collector drops spans and never stalls the caller, the trace id from the correlation so one run is
   one trace. The
   guarantee report gains `trace.spans_not_evidence`: a span is not an evidence path — read the record by its hash on
-  the node (`mycelium explain --closure`). Not built: a route serving a record by hash, an export loop in the
-  `mycelium` binary.
+  the node (`mycelium explain --closure`). Not built: an export loop in the `mycelium` binary; the route serving a
+  record by hash under `audit:read` follows in its own PR (decided 2026-10-26).
+- **Context selection** (`docs/plans/adopter-surface.md` Y1, decision D14): `mycelium::knowledge::selection` returns
+  knowledge records for a run without blending them — each with its issuer, its attribution, its standing and the
+  reader's verdict for its subject (computed over the admitted records whose standing is current), in one `VerdictClass` — ranked by the
+  adopter's closure, verified records only by default, and read through a `ReadScope` built from a mandate that
+  enumerates `knowledge.read`, used only inside its window: a record is readable when its subject lies under the
+  mandate's scope by path segment and every record it was derived from is held and readable, so a record derived from
+  one the caller cannot read is withheld. A condensation is written back (`Selector::write_condensed`) only as a claim
+  signed by its own issuer under a key not revoked and dated no later than the drift bound, linked by `DerivedFrom` to
+  every source, filed under the one subject all its sources are about, its sources in one class re-derived at write
+  time — `InsufficientEvidence` and `Rejected` apart, a `BasisWithdrawn` record never folded into a live one, a
+  retracted or expired source refused; a record derived from an expired one is expired. A condensation across subjects
+  is not built. Feature page `docs/features/context-selection.md`. **Not built:** the wiki side (pages carry no issuer or
+  verdict); a read mandate's epoch and revocation standing; re-verifying a selected record against the reader's current
+  key view; scoping `KnowledgeStore`'s own methods (no route or SDK verb reads knowledge records).
 
 ## [2.38.0] — 2026-10-26
 

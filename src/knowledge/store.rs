@@ -275,9 +275,10 @@ fn check_integrity(record: &KnowledgeRecord) -> Result<(), PutRefusal> {
 
 /// Records, and the heads that point into them.
 ///
-/// In-memory here. Durability, authorisation of *readers*, and the transport that carries heads are
-/// later PRs; what this settles is the shape, and the shape is the part that decides whether a
-/// competing statement can be erased.
+/// In-memory here. Durability is [`DurableKnowledgeStore`](super::durable::DurableKnowledgeStore); a
+/// mandate-scoped read is [`ScopedView`](super::selection::ScopedView), which the context selector reads
+/// through — this store's own methods are unscoped, its holder's. What this settles is the shape, and
+/// the shape is the part that decides whether a competing statement can be erased.
 #[derive(Debug, Default)]
 pub struct KnowledgeStore {
     records: HashMap<RecordId, KnowledgeRecord>,
