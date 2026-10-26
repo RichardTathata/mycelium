@@ -156,7 +156,7 @@ dash, whose `pipefail` depends on the Debian release), no toolchain, the publish
 from the first `curl`; apt on its own row outside the clock; the SDK's version checked against the tag's
 `pyproject.toml`; a red run prints no number; 3 600 s is the bound. Steps 4 and 5 and the records half of 3 are
 printed as not yet measured (X3, X4, X9). Log `.log/2026-10-23-one-hour.md`. *(2026-10-25)* Step 5 is in the job
-(X9's `recovery` class on the published binary); it measures from the first release that carries the class.
+(X9's `recovery` class on the published binary); it measures from v2.38.0, the first release that carries the class.
 
 ## `mycelium init` (adopter-surface X2, 2026-10-23)
 
@@ -330,7 +330,7 @@ restarted over its WAL (ledger and journal re-opened from disk), node 2 dark; th
 - Corpus: `tests/replay-corpus/x9-selective-recovery/` (`MYCELIUM_RECORD_CORPUS=1 cargo test --features
   sim,test-util,tls --test faults_recovery_replay record_the_recovery_into_the_corpus` re-records).
 - Pages: `docs/features/selective-recovery.md`, `what-is-proven.md`'s line, `deprecations.md` §62; the one-hour
-  job's step 5 runs the class on the published binary from the first release carrying it.
+  job's step 5 runs the class on the published binary from v2.38.0, the first release carrying it.
 
 ## Framing discipline
 

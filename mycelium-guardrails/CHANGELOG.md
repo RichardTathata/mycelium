@@ -6,7 +6,7 @@ All notable changes to this crate. It versions **independently** of the Mycelium
 
 ---
 
-## [1.1.0] — unreleased
+## [1.1.0] — 2026-10-26
 
 **The grant clause** (adopter-surface X3, additive). `Policy::require_grant_for(tools)` lists the tools that need a
 **grant** — approval that is default-deny — before the agent's `Invoking` transition commits; it maps to

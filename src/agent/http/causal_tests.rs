@@ -167,7 +167,7 @@ async fn an_inert_gateway_refuses_a_malformed_field_before_the_evaluator_questio
 }
 
 /// **`POST /gateway/kv` reads the two keys at the body's top level and echoes them on the receipt**; a malformed one
-/// is `400`; a header there is counted against the `kv` door. The SDKs' `set` carries them from their next release.
+/// is `400`; a header there is counted against the `kv` door. The SDKs' `set` carries them (`mycelium-py` 0.2.13, `mycelium-ts` 0.2.7).
 #[tokio::test]
 async fn the_kv_route_echoes_the_causal_fields_and_refuses_a_malformed_one() {
     let http_port = alloc_port();

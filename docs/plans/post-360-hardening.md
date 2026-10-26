@@ -2208,6 +2208,12 @@ descriptors its share needs.
   over 4.5 s, got 2"*, once in 60 `agent::fleet_history` module runs at 6 parallel processes (2026-10-20, during #656);
   0 in 240 alone at 16 processes, on #656's branch and on `main` at 23fd7bfe alike. A throughput floor under CPU
   contention, on a path #656 does not touch.
+- `lib_tests::test_ballot_reacts_to_opacity_change` — *"should commit once B goes opaque and quorum drops to 1; got
+  Timeout { … votes_last_ballot: 0, quorum_required: 2 }"*, once on the v2.38.0 release PR's CI (#682, run
+  40246229265, the strict `compliance,a2a` lib run, 2026-10-26), a branch whose only code change is a test comment;
+  not seen in the 39 CI runs before it. The test's spawned task sleeps 100 ms before writing B's opaque pheromone and
+  emitting `BOUNDARY_OPAQUE`; if `group_propose` has not reached its opacity subscription by then, it waits its 2 s
+  phase 1 at quorum 2 — the shape of a fixed sleep standing in for a readiness poll (CLAUDE.md's consensus-test rule).
 
 **Open next:**
 - each delivered row's *not built* list, in its §3.5 block and below — for K2: signed tally entries (a forgery under a

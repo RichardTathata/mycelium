@@ -9,7 +9,7 @@ report naming what the fleet enforces?
 
 **The claim is measured, or it is not made.** CI's `one-hour` job
 ([`.github/workflows/one-hour.yml`](../../../.github/workflows/one-hour.yml)) walks exactly this path on each
-release it is run against — on v2.37.0 it measured steps 1, 2, 3 and 6; steps 4 and 5 join from the first release
+release it is run against — on v2.37.0 it measured steps 1, 2, 3 and 6; steps 4 and 5 join from v2.38.0, the first release
 that carries their fault classes — in a plain Python container, from the first `curl` to the last `doctor`, and prints the seconds per step to
 the job summary. The commands below are the job's — a test
 ([`tests/first_hour_tutorial.rs`](../../../tests/first_hour_tutorial.rs)) diffs each fenced block here against the
@@ -20,11 +20,11 @@ release, rounded up to the next ten minutes; the plan's rule is in
 
 **Before you start** — Linux x86_64 (the job's container; the release also ships Linux aarch64 and macOS aarch64,
 whose tarball names differ), `bash`, `curl`, `python3` 3.10 or later with `pip`, and a release tag. **Steps 4 and 5
-need a release that carries the `grant` and `recovery` classes** — the first release after 2.37.0; on 2.37.0 they fail
+need a release that carries the `grant` and `recovery` classes** — 2.38.0 or later; on 2.37.0 they fail
 with `unknown argument: test` (that release has no `test` command), and steps 1, 2, 3 and 6 run:
 
 ```sh
-TAG=v2.37.0                       # the newest release; the job reads it from the Release that triggered it
+TAG=v2.38.0                       # the newest release; the job reads it from the Release that triggered it
 REPO=RichardTathata/mycelium
 ```
 
